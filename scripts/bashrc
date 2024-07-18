@@ -100,5 +100,3 @@ fi
 alias runapp=/isaac-sim/runapp.sh
 alias runheadless.native=/isaac-sim/runheadless.native.sh
 alias runheadless.webrtc=/isaac-sim/runheadless.webrtc.sh
-
-export TERM=xterm-color
