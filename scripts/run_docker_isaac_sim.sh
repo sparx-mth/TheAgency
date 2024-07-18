@@ -42,6 +42,7 @@ run_docker_cmd+="  --rm \
     -v ./isaac_sim/logs:/root/.nvidia-omniverse/logs:rw \
     -v ./isaac_sim/data:/root/.local/share/ov/data:rw \
     -v ./isaac_sim/documents:/root/Documents:rw \
+    -v $(dirname -- "$( readlink -f -- "$0"; )")/../scripts/bashrc:/root/.bashrc:ro \
     -v $(dirname -- "$( readlink -f -- "$0"; )")/..:/workspace"
 
 run_docker_cmd+=" $docker_image"
