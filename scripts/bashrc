@@ -97,8 +97,13 @@ alias runapp=/isaac-sim/runapp.sh
 alias runheadless.native=/isaac-sim/runheadless.native.sh
 alias runheadless.webrtc=/isaac-sim/runheadless.webrtc.sh
 
-alias src='source ~/.bashrc'
 source /opt/ros/humble/setup.bash
+
+export FASTRTPS_DEFAULT_PROFILES_FILE=~/.ros/fastdds.xml
+export OMNI_KIT_ALLOW_ROOT=1
+
+alias src='source ~/.bashrc'
+
 source /isaac-sim/IsaacSim-ros_workspaces/humble_ws/install/local_setup.bash
 
 export FASTRTPS_DEFAULT_PROFILES_FILE=/isaac-sim/IsaacSim-ros_workspaces/humble_ws/fastdds.xml
