@@ -2,7 +2,6 @@
 
 docker_image=nvidia/isaac-sim-4.0.0-matrix:1.0
 
-
 RED='\033[0;31m'
 RED_BOLD='\033[1;31m'
 GREEN='\033[0;32m'
