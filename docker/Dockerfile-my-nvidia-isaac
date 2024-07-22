@@ -1,0 +1,11 @@
+FROM nvcr.io/nvidia/isaac-sim:4.0.0
+
+RUN apt-get update && apt-get install -y \
+    lsb-release \
+    gnupg2 \
+    curl
+
+ENV TERM=xterm-color
+ENV ROS_DISTRO=humble
+
+CMD ["bash"]

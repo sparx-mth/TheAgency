@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-docker_image=nvcr.io/nvidia/isaac-sim:4.0.0
+docker_image=nvidia/isaac-sim-4.0.0-matrix:1.0
 
 
 RED='\033[0;31m'
@@ -34,6 +34,8 @@ run_docker_cmd+="  --rm \
     --runtime=nvidia \
     --gpus all \
     -e ACCEPT_EULA=Y\
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix/:/tmp/.X11-unix/ \
     -v ./isaac_sim/cache/kit:/isaac-sim/kit/cache:rw \
     -v ./isaac_sim/cache/ov:/root/.cache/ov:rw \
     -v ./isaac_sim/cache/pip:/root/.cache/pip:rw \
@@ -42,6 +44,7 @@ run_docker_cmd+="  --rm \
     -v ./isaac_sim/logs:/root/.nvidia-omniverse/logs:rw \
     -v ./isaac_sim/data:/root/.local/share/ov/data:rw \
     -v ./isaac_sim/documents:/root/Documents:rw \
+    -v $(dirname -- "$( readlink -f -- "$0"; )")/../scripts/bashrc:/root/.bashrc:ro \
     -v $(dirname -- "$( readlink -f -- "$0"; )")/..:/workspace"
 
 run_docker_cmd+=" $docker_image"
