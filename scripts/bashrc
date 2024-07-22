@@ -104,4 +104,5 @@ alias runheadless.webrtc=/isaac-sim/runheadless.webrtc.sh
 alias src='source ~/.bashrc'
 source /opt/ros/humble/setup.bash
 source /isaac-sim/IsaacSim-ros_workspaces/humble_ws/install/local_setup.bash
+
 export FASTRTPS_DEFAULT_PROFILES_FILE=/isaac-sim/IsaacSim-ros_workspaces/humble_ws/fastdds.xml

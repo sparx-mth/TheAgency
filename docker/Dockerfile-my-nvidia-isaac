@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null && \
     apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt install -y ros-humble-vision-msgs ros-humble-ackermann-msgs
+    DEBIAN_FRONTEND=noninteractive apt install -y ros-humble-ros-base ros-humble-vision-msgs ros-humble-ackermann-msgs
 
 WORKDIR /isaac-sim
 RUN git clone https://github.com/isaac-sim/IsaacSim-ros_workspaces
@@ -26,8 +26,11 @@ RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
     rosdep install -i --from-path src --rosdistro humble -y && \
     colcon build"
 
+RUN apt-get install -y ros-humble-rqt-tf-tree
 
 ENV TERM=xterm-color
 ENV ROS_DISTRO=humble
+
+WORKDIR /isaac-sim
 
 CMD ["bash"]
