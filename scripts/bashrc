@@ -81,11 +81,7 @@ fi
 alias ll='ls -alF'
 alias la='ls -A'
 alias l='ls -CF'
-
-# Alias definitions.
-# You may want to put all your additions into a separate file like
-# ~/.bash_aliases, instead of adding them here directly.
-# See /usr/share/doc/bash-doc/examples in the bash-doc package.
+alias lt='ls -ltrh'
 
 if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
@@ -106,3 +102,4 @@ source /opt/ros/humble/setup.bash
 source /isaac-sim/IsaacSim-ros_workspaces/humble_ws/install/local_setup.bash
 
 export FASTRTPS_DEFAULT_PROFILES_FILE=/isaac-sim/IsaacSim-ros_workspaces/humble_ws/fastdds.xml
+export ISAAC_ROS_WS=/workspace/isaac_ros-dev/
