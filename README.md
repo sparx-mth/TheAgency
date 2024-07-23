@@ -16,8 +16,14 @@ Exectue installation according to this order:
     Go to https://catalog.ngc.nvidia.com/orgs/nvidia/containers/isaac-sim
     Sign-in
     On right-top corner, click your username -> setup -> API keys -> Generate API Key
-% NO! that is done in step 4! 2. Go to this repo base folder and JUST clone: git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common.git
-3. Set up the developer environment - https://nvidia-isaac-ros.github.io/getting_started/dev_env_setup.html
-3. Follow this link to 'Download Quickstart Assets', dont build yet - https://nvidia-isaac-ros.github.io/repositories_and_packages/isaac_ros_visual_slam/isaac_ros_visual_slam/index.html#quickstart
-4. Build the dev-container: ./isaac_ros_common/scripts/run_dev.sh
-4. https://nvidia-isaac-ros.github.io/concepts/docker_devenv/index.html#development-environment
+2. Set up the developer environment - https://nvidia-isaac-ros.github.io/getting_started/dev_env_setup.html
+% 3. Follow this link to 'Download Quickstart Assets', dont build yet - https://nvidia-isaac-ros.github.io/repositories_and_packages/isaac_ros_visual_slam/isaac_ros_visual_slam/index.html#quickstart
+3. Fix the Dev Container according to https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common/pull/136/files
+4. Build the dev-container: cd isaac_ros_common/scripts && ./run_dev.sh
+% 4. https://nvidia-isaac-ros.github.io/concepts/docker_devenv/index.html#development-environment
+5. cd ${ISAAC_ROS_WS}/isaac_ros_assets && git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam.git 
+6. Then ./run_dev.sh -d $ISAAC_ROS_WS/isaac_ros_assets/isaac_ros_visual_slam
+7. Inside the docker:   /workspaces/isaac_ros-dev$ rosdep install --from-paths ${ISAAC_ROS_WS}/isaac_ros_visual_slam --ignore-src -y
+                        cd ${ISAAC_ROS_WS}/ &&    colcon build --symlink-install --packages-up-to isaac_ros_visual_slam
+
+
