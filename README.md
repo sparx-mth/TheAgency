@@ -23,7 +23,8 @@ Exectue installation according to this order:
 % 4. https://nvidia-isaac-ros.github.io/concepts/docker_devenv/index.html#development-environment
 5. cd ${ISAAC_ROS_WS}/isaac_ros_assets && git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam.git 
 6. Then ./run_dev.sh -d $ISAAC_ROS_WS/isaac_ros_assets/isaac_ros_visual_slam
-7. Inside the docker:   /workspaces/isaac_ros-dev$ rosdep install --from-paths ${ISAAC_ROS_WS}/isaac_ros_visual_slam --ignore-src -y
-                        cd ${ISAAC_ROS_WS}/ &&    colcon build --symlink-install --packages-up-to isaac_ros_visual_slam
+7. Inside the docker:   
+            /workspaces/isaac_ros-dev$  rosdep install --from-paths ${ISAAC_ROS_WS}/isaac_ros_visual_slam --ignore-src -y
+                                        cd ${ISAAC_ROS_WS}/ &&    colcon build --symlink-install --packages-up-to isaac_ros_visual_slam
 
 
