@@ -24,13 +24,13 @@
         Username: $oauthtoken
         Password: 
         $ docker pull nvcr.io/nvidia/isaac-sim:4.0.0
-2.1.3 Build the second layer in order to add ROS bridge using scripts/build_docker_nvidia_isaac_ros.sh. That builds docker/Dockerfile-nvidia-isaac-ros.
+2.1.3 Build the second layer in order to add ROS bridge using `scripts/build_docker_nvidia_isaac_ros.sh`. That builds docker/Dockerfile-nvidia-isaac-ros.
 
 ### 2.2 Isaac ROS Dev Docker:
 2.2.1. Set up the developer environment - https://nvidia-isaac-ros.github.io/getting_started/dev_env_setup.html
-2.2.2 Clone isaac_ros_common under `${ISAAC_ROS_WS}/src`: `cd ${ISAAC_ROS_WS}/src && git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common.git`
+2.2.2 Clone isaac_ros_common under ${ISAAC_ROS_WS}/src: `cd ${ISAAC_ROS_WS}/src && git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common.git`
 2.2.3. Fix the Dev Container according to https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common/pull/136/files
-2.2.4. Build the dev-container: `cd isaac_ros_common/scripts && ./run_dev.sh`
+2.2.4. Build the dev-container: `cd ${ISAAC_ROS_WS}/src/isaac_ros_common/scripts && ./run_dev.sh`
 <!-- The following is from https://nvidia-isaac-ros.github.io/repositories_and_packages/isaac_ros_visual_slam/isaac_ros_visual_slam/index.html#quickstart -->
 2.2.5. Clone visual slam:
     `cd ${ISAAC_ROS_WS}/isaac_ros_assets && git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam.git `
