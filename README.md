@@ -13,6 +13,12 @@
 
 ========================
 
+## AerialGym
+IssacGym - https://developer.nvidia.com/isaac-gym/download
+AerialGym - https://ntnu-arl.github.io/aerial_gym_simulator/2_getting_started/#installation
+
+
+========================
 ## Documnetation for building the dockers:
 ### 2.1 Isaac Sim (Following https://docs.omniverse.nvidia.com/isaacsim/latest/installation/install_container.html)
 2.1.1. Login to nvidia docker-hub: 
