@@ -33,9 +33,9 @@ RUN pip3 install "git+https://github.com/facebookresearch/pytorch3d.git"
 
 
 # Download and install Isaac Gym
-RUN https://developer.nvidia.com/isaac-gym-preview-4 && \
-    tar -xzf IsaacGym_Preview_4_Package.tar.gz -C /root && \
-    rm IsaacGym_Preview_4_Package.tar.gz
+COPY IsaacGym_Preview_4_Package.tar.gz /root
+RUN tar -xzf /root/IsaacGym_Preview_4_Package.tar.gz -C /root && \
+    rm /root/IsaacGym_Preview_4_Package.tar.gz
 WORKDIR /root/isaacgym/python
 RUN pip3 install -e .
 
