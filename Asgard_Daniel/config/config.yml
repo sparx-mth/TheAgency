@@ -1,0 +1,29 @@
+{
+    'ip': 'http://127.0.0.1',
+    'port': '8081',
+    'debug': False,
+    'network': False,
+    'smart': True,
+    'flying_height': 50,
+    'speed': 10,
+    'scan_degrees': 60,
+    'drones_speed': 4,
+    'threshold': 8,
+    't_go_to_target': 4,
+    'sleep_factor': 2.2,
+    'r1': 10,
+    'r2': 30,
+    'pest_idx_to_attack': 0,
+    'pest_id_to_ignore': '2',
+    'trigger_time': 20,
+    'min_deg_diff': 60,
+    'run_speed_factor': 1,
+
+    # daniel paths:
+    'config_path': 'C:/Users/Danielco/AppData/LocalLow/AsgardSystems/SwarmUI/ConfigFiles/finalCurrent.json',
+    'results_path': 'C:/Users/Danielco/AppData/LocalLow/AsgardSystems/SwarmUI/Results/'
+
+    # moshe paths:
+#    'config_path': '/home/user1/.config/unity3d/AsgardSystems/SwarmUI/ConfigFiles/new_testCurrent.json',
+#    'results_path': '/home/user1/.config/unity3d/AsgardSystems/SwarmUI/Results/'
+}

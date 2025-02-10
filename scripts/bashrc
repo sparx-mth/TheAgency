@@ -97,14 +97,32 @@ alias runapp=/isaac-sim/runapp.sh
 alias runheadless.native=/isaac-sim/runheadless.native.sh
 alias runheadless.webrtc=/isaac-sim/runheadless.webrtc.sh
 
-source /opt/ros/humble/setup.bash
+if [ -d "/isaac-sim/IsaacSim-ros_workspaces/humble_ws" ]; then
+    source /opt/ros/humble/setup.bash
+fi
 
-export FASTRTPS_DEFAULT_PROFILES_FILE=~/.ros/fastdds.xml
-export OMNI_KIT_ALLOW_ROOT=1
+if [ -d "~/.ros" ]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE=~/.ros/fastdds.xml
+    export OMNI_KIT_ALLOW_ROOT=1
+fi
 
 alias src='source ~/.bashrc'
 
-source /isaac-sim/IsaacSim-ros_workspaces/humble_ws/install/local_setup.bash
+if [ -d "/isaac-sim/IsaacSim-ros_workspaces/humble_ws" ]; then
+    source /isaac-sim/IsaacSim-ros_workspaces/humble_ws/install/local_setup.bash
+fi
 
-export FASTRTPS_DEFAULT_PROFILES_FILE=/isaac-sim/IsaacSim-ros_workspaces/humble_ws/fastdds.xml
-export ISAAC_ROS_WS=/workspace/isaac_ros-dev/
+if [ -d "/isaac-sim/IsaacSim-ros_workspaces/humble_ws" ]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/isaac-sim/IsaacSim-ros_workspaces/humble_ws/fastdds.xml
+fi
+if [ -d "/isaac-sim/IsaacSim-ros_workspaces/humble_ws" ]; then
+    export ISAAC_ROS_WS=/workspace/isaac_ros-dev/
+fi
+
+if command -v conda &> /dev/null; then
+    alias exitc='conda deactivate'
+    if conda env list | grep -q 'aerialgym'; then
+        source activate aerialgym
+    fi
+fi
+

@@ -1,0 +1,25 @@
+FROM nvidia/cuda:11.7.1-cudnn8-devel-ubuntu22.04
+
+# Set environment variables
+ENV LD_LIBRARY_PATH /opt/conda/envs/aerialgym/lib
+ENV VK_ICD_FILENAMES /usr/share/vulkan/icd.d/nvidia_icd.json
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    lsb-release \
+    build-essential \
+    python3-pip \
+    gnupg2 \
+    curl \
+    tmux \
+    git \
+    tree \
+    nano
+
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+ENV TERM=xterm-color
+
+WORKDIR /root
+
+CMD ["bash"]
