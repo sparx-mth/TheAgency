@@ -1,3 +1,6 @@
 [submodule "ORB-SLAM3-ROS2-Docker"]
 	path = ORB-SLAM3-ROS2-Docker
 	url = https://github.com/moshebeutel/ORB-SLAM3-ROS2-Docker.git
+[submodule "gz-sim-environment"]
+	path = gz-sim-environment
+	url = https://github.com/daphnaa/gz-sim-environment.git
