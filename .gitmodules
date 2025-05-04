@@ -4,3 +4,6 @@
 [submodule "gz-sim-environment"]
 	path = gz-sim-environment
 	url = https://github.com/daphnaa/gz-sim-environment.git
+[submodule "covins"]
+	path = covins
+	url = https://github.com/shirbenami/covins.git
