@@ -28,10 +28,21 @@ by a centralized planner or controller.
 import numpy as np
 import random
 from src.planner.simulation.simulation_constants import *
+from src.planner.simulation.sensors.sensor_manager import SensorManager
+
+
+
+def turn(facing, action):
+    idx = FACING_DIRECTIONS.index(facing)
+    if action == 'TURN_LEFT':
+        return FACING_DIRECTIONS[(idx - 1) % 4]
+    elif action == 'TURN_RIGHT':
+        return FACING_DIRECTIONS[(idx + 1) % 4]
+    return facing
 
 
 class Drone:
-    def __init__(self, drone_id, start_pos, comm_interface, fov_radius=5, entry_time=0):
+    def __init__(self, drone_id, start_pos, comm_interface, fov_radius=5, entry_time=0, facing_direction='NORTH', sensors=None):
         self.id = drone_id
         self.pos = start_pos  # (x, y)
         self.fov_radius = fov_radius
@@ -41,7 +52,11 @@ class Drone:
         self.path_history = [start_pos]
         self.collided = False
         self.comm = comm_interface
-
+        self.facing_direction = facing_direction
+        self.sensor_manager = SensorManager()
+        if sensors:
+            for sensor in sensors:
+                self.sensor_manager.add_sensor(sensor)
 
     def initialize_map(self, map_shape):
         self.local_map = np.full(map_shape, -1, dtype=np.int8)  # -1 = unknown
@@ -49,91 +64,64 @@ class Drone:
     def activate(self, current_time):
         if not self.active and current_time >= self.entry_time:
             self.active = True
-            self.comm.broadcast_state(self.id, {
-                'pos': self.pos,
-                'entry_time': self.entry_time,
-                'active': self.active,
-                'new_discoveries': []
-            })
+            self.comm.broadcast_state(self.id, self._make_state([]))
 
-    def move(self, direction, env):
+    def move(self, action, env):
         if not self.active:
-            # print("drone", self.id, "is not active")
             return []
 
-        dx, dy = DIRECTIONS[direction]
-        new_x = self.pos[0] + dx
-        new_y = self.pos[1] + dy
+        if action in ['TURN_LEFT', 'TURN_RIGHT']:
+            self.facing_direction = turn(self.facing_direction, action)
+            new_discoveries = self.sense(env)
+            self.comm.broadcast_state(self.id, self._make_state(new_discoveries))
+            return new_discoveries
 
-        if env.is_collision(new_x, new_y):
-            # print("drone", self.id, "collided")
-            self.collided = True
-            return []  # No move or discoveries due to collision
+        elif action == 'FORWARD':
+            dx, dy = FACING_TO_DELTA[self.facing_direction]
+            new_x, new_y = self.pos[0] + dx, self.pos[1] + dy
 
-        self.pos = (new_x, new_y)
-        self.path_history.append(self.pos)
-        self.collided = False
+            if env.is_collision(new_x, new_y):
+                self.collided = True
+                return []
 
-        # Sense environment and broadcast new state
-        new_discoveries = self.sense(env)
+            self.pos = (new_x, new_y)
+            self.path_history.append(self.pos)
+            self.collided = False
 
+            new_discoveries = self.sense(env)
+            self.comm.broadcast_state(self.id, self._make_state(new_discoveries))
+            return new_discoveries
 
-        self.comm.broadcast_state(self.id, {
-            'pos': self.pos,
-            'entry_time': self.entry_time,
-            'active': self.active,
-            'new_discoveries': new_discoveries
-        })
-        # print(f"[Drone {self.id}] Moved to {self.pos}, discovered {len(new_discoveries)} cells")
+        elif action == 'STAY':
+            new_discoveries = self.sense(env)
+            self.comm.broadcast_state(self.id, self._make_state(new_discoveries))
+            return new_discoveries
 
-        return new_discoveries
+        else:
+            raise ValueError(f"Invalid action for constrained drone: {action}")
 
     def sense(self, env):
         if not self.active:
             return []
 
-        def bresenham(x0, y0, x1, y1):
-            """Yield integer coordinates on the line from (x0, y0) to (x1, y1)."""
-            dx = abs(x1 - x0)
-            dy = -abs(y1 - y0)
-            sx = 1 if x0 < x1 else -1
-            sy = 1 if y0 < y1 else -1
-            err = dx + dy
-            while True:
-                yield x0, y0
-                if x0 == x1 and y0 == y1:
-                    break
-                e2 = 2 * err
-                if e2 >= dy:
-                    err += dy
-                    x0 += sx
-                if e2 <= dx:
-                    err += dx
-                    y0 += sy
-
-        cx, cy = self.pos
+        observations = self.sensor_manager.sense_all(self.pos, self.facing_direction, env)
         new_discoveries = []
 
-        for offset_y in range(-self.fov_radius, self.fov_radius + 1):
-            for offset_x in range(-self.fov_radius, self.fov_radius + 1):
-                x = cx + offset_x
-                y = cy + offset_y
-                if not (0 <= x < env.width and 0 <= y < env.height):
-                    continue
-                if offset_x ** 2 + offset_y ** 2 > self.fov_radius ** 2:
-                    continue
-
-                for lx, ly in bresenham(cx, cy, x, y):
-                    if not (0 <= lx < env.width and 0 <= ly < env.height):
-                        break
-                    val = env.get_tile(lx, ly)
-                    if self.local_map[ly, lx] != val:
-                        self.local_map[ly, lx] = val
-                        new_discoveries.append((lx, ly, val))
-                    if val in {WALL, DOOR_CLOSED}:
-                        break
+        for x, y, val in observations:
+            if self.local_map[y, x] != val:
+                self.local_map[y, x] = val
+                new_discoveries.append((x, y, val))
 
         return new_discoveries
+
+    def _make_state(self, new_discoveries):
+        return {
+            'pos': self.pos,
+            'facing_direction': self.facing_direction,
+            'entry_time': self.entry_time,
+            'active': self.active,
+            'new_discoveries': new_discoveries
+        }
 
     def get_observed_map(self):
         return self.local_map
@@ -143,3 +131,8 @@ class Drone:
 
     def get_history(self):
         return self.path_history
+
+    def get_facing_arrow_vector(self):
+        """Returns the direction vector the drone is facing, for rendering."""
+        dx, dy = FACING_TO_DELTA[self.facing_direction]
+        return dx, dy

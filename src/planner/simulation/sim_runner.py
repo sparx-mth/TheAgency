@@ -186,6 +186,12 @@ def run_simulation(comm, map_path=None, width=32, height=32, num_drones=3, num_e
                     dx, dy = drone.get_position()
                     pygame.draw.circle(screen, (255, 255, 0),
                                        (dx * TILE_SIZE + TILE_SIZE // 2, dy * TILE_SIZE + TILE_SIZE // 2), 5)
+                    # Draw arrow showing drone's facing direction
+                    fx, fy = drone.get_facing_arrow_vector()
+                    arrow_start = (dx * TILE_SIZE + TILE_SIZE // 2, dy * TILE_SIZE + TILE_SIZE // 2)
+                    arrow_end = (arrow_start[0] + fx * TILE_SIZE // 2, arrow_start[1] + fy * TILE_SIZE // 2)
+                    pygame.draw.line(screen, (255, 0, 0), arrow_start, arrow_end, 2)
+
                     drone_id_text = font.render(str(drone.id), True, (0, 0, 0))
                     screen.blit(drone_id_text, (MAP_WIDTH * TILE_SIZE + 50 + dx * TILE_SIZE + 5, dy * TILE_SIZE))
 
@@ -223,6 +229,7 @@ def run_simulation(comm, map_path=None, width=32, height=32, num_drones=3, num_e
                 ("Window", (0, 0, 255)),
                 ("Out of Bounds", (0, 0, 0)),
                 ("Drone", (255, 255, 0)),
+                ("Facing Dir", (255, 0, 0)),
             ]
 
             legend_y = screen_height - 36

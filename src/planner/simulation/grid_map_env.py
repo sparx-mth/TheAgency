@@ -33,10 +33,13 @@ import numpy as np
 import random
 from src.planner.simulation.drone import Drone
 from src.planner.simulation.simulation_constants import *
+from src.planner.simulation.sensors.bresenham_fov import *
+from src.planner.simulation.sensors.camera_sensor import *
 
 
 class GridMapEnv:
-    def __init__(self, comm_interface, width=32, height=32, randomize=False, map_path=None, num_entry_points=2, num_drones=3, fov=0):
+    def __init__(self, comm_interface, width=32, height=32, randomize=False, map_path=None, num_entry_points=2,
+                 num_drones=3, fov=0):
         if map_path:
             self.grid = self.load_map(map_path)
         elif randomize:
@@ -52,7 +55,13 @@ class GridMapEnv:
         for i in range(num_drones):
             y, x = self.entry_points[i % len(self.entry_points)]
             entry_time = i * 2
-            drone = Drone(drone_id=i, start_pos=(x, y), fov_radius=fov, entry_time=entry_time, comm_interface=self.comm)
+            drone = Drone(
+                drone_id=i,
+                start_pos=(x, y),
+                entry_time=entry_time,
+                comm_interface=self.comm,
+                sensors=[CameraSensor(fov)]
+            )
             drone.initialize_map(self.grid.shape)
             self.drones.append(drone)
 
@@ -159,9 +168,6 @@ class GridMapEnv:
 
             if candidates:
                 y, x = random.choice(candidates)
-                original = self.grid[y, x]
-                # Invert value cyclically: 0 → 2, 1 → 0, 2 → 1
-                inverted = {0: 2, 1: 0, 2: 1}[original]
                 self.grid[y, x] = ENTRY_POINT
                 entry_points = [(y, x)]
 

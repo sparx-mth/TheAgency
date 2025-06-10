@@ -77,7 +77,7 @@ with tqdm(total=total_runs, desc="Running Simulations", ncols=100) as pbar:
                         height=32,
                         num_drones=num_drones,
                         num_entry_points=1,
-                        fov=1,
+                        fov=2,
                         render=True
                     )
                     elapsed = time.time() - start
