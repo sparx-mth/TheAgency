@@ -18,17 +18,25 @@ import random
 import numpy as np
 import heapq
 from src.planner.simulation.simulation_constants import *
+from src.planner.simulation.drone import turn
 
 
-def plan_random_walk(pos, env):
-    directions = random.sample(DIRECTION_LIST, len(DIRECTION_LIST))
-    for direction in directions:
-        dx, dy = DIRECTIONS[direction]
-        new_x, new_y = pos[0] + dx, pos[1] + dy
-        if 0 <= new_x < env.width and 0 <= new_y < env.height:
-            if not env.is_collision(new_x, new_y):
-                return direction
-    return 'STAY'
+def plan_random_walk(pos, facing, env):
+    print("plan_random_walk")
+    # 25% chance to rotate instead of moving forward
+    if random.random() < 0.25:
+        return random.choice(['TURN_LEFT', 'TURN_RIGHT'])
+
+    # Attempt to move forward if no rotation is chosen
+    dx, dy = FACING_TO_DELTA[facing]
+    new_x, new_y = pos[0] + dx, pos[1] + dy
+
+    if 0 <= new_x < env.width and 0 <= new_y < env.height:
+        if not env.is_collision(new_x, new_y):
+            return 'FORWARD'
+
+    # If forward is blocked, rotate instead
+    return random.choice(['TURN_LEFT', 'TURN_RIGHT', 'STAY'])
 
 
 def a_star(start, goal, grid):
@@ -65,14 +73,14 @@ def a_star(start, goal, grid):
     return path
 
 
-def plan_frontier(drone_id, current_pos, goal, path, frontiers, assigned_goals, all_states,
+def plan_frontier(drone_id, current_pos, facing, goal, path, frontiers, assigned_goals, all_states,
                   global_map, wait_counter, max_wait, env):
 
     if not goal or global_map[goal[1], goal[0]] != -1 or not path:
         available_frontiers = [f for f in frontiers if f not in assigned_goals]
 
         if not available_frontiers:
-            return plan_random_walk(current_pos, env), None, [], wait_counter
+            return plan_random_walk(current_pos, facing, env), None, [], wait_counter
 
         min_dist = float('inf')
         closest_frontiers = []
@@ -99,17 +107,16 @@ def plan_frontier(drone_id, current_pos, goal, path, frontiers, assigned_goals, 
 
         if best_goal:
             assigned_goals.add(best_goal)
-            return _follow_path(drone_id, current_pos, best_goal, best_path, all_states,
-                                wait_counter, max_wait), best_goal, best_path, 0
+            return _follow_path(drone_id, current_pos, facing, best_goal, best_path, all_states, wait_counter, max_wait, env)
         else:
-            return plan_random_walk(current_pos, env), None, [], wait_counter
+            return plan_random_walk(current_pos, facing, env), None, [], wait_counter
 
-    return _follow_path(drone_id, current_pos, goal, path, all_states, wait_counter, max_wait), goal, path, wait_counter
+    return _follow_path(drone_id, current_pos, facing, goal, path, all_states, wait_counter, max_wait, env)
 
 
-def _follow_path(drone_id, current_pos, goal, path, all_states, wait_counter, max_wait):
+def _follow_path(drone_id, current_pos, facing, goal, path, all_states, wait_counter, max_wait, env):
     if not path:
-        return 'STAY'
+        return 'STAY', goal, path, wait_counter
 
     next_pos = path[0]
     blocked = any(other_id != drone_id and other.get("pos") == next_pos
@@ -118,15 +125,26 @@ def _follow_path(drone_id, current_pos, goal, path, all_states, wait_counter, ma
     if blocked:
         wait_counter += 1
         if wait_counter >= max_wait:
-            return plan_random_walk(current_pos, env), None, [], 0
-        return 'STAY'
+            direction = plan_random_walk(current_pos, facing, env)
+            return direction, None, [], 0
+        else:
+            return 'STAY', goal, path, wait_counter
 
-    wait_counter = 0
-    path.pop(0)
     dx, dy = next_pos[0] - current_pos[0], next_pos[1] - current_pos[1]
-    direction = None
-    for k, v in DIRECTIONS.items():
-        if v == (dx, dy):
-            direction = k
-            break
-    return direction or 'STAY'
+    fdx, fdy = FACING_TO_DELTA[facing]
+
+    if (dx, dy) == (fdx, fdy):
+        path.pop(0)
+        return 'FORWARD', goal, path, 0
+
+    # Try to rotate toward the desired direction
+    left_facing = turn(facing, 'TURN_LEFT')
+    right_facing = turn(facing, 'TURN_RIGHT')
+
+    if FACING_TO_DELTA[left_facing] == (dx, dy):
+        return 'TURN_LEFT', goal, path, wait_counter
+    elif FACING_TO_DELTA[right_facing] == (dx, dy):
+        return 'TURN_RIGHT', goal, path, wait_counter
+    else:
+        # If neither single turn gets us there, turn right (arbitrary choice)
+        return 'TURN_RIGHT', goal, path, wait_counter

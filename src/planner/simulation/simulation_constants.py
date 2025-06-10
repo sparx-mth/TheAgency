@@ -55,17 +55,18 @@ TILE_NAME = {
 }
 
 # === Movement Directions ===
-DIRECTIONS = {
-    'UP': (0, -1),
-    'DOWN': (0, 1),
-    'LEFT': (-1, 0),
-    'RIGHT': (1, 0),
-    'STAY': (0, 0)
+FACING_DIRECTIONS = ['NORTH', 'EAST', 'SOUTH', 'WEST']
+
+FACING_TO_DELTA = {
+    'NORTH': (0, -1),
+    'EAST': (1, 0),
+    'SOUTH': (0, 1),
+    'WEST': (-1, 0),
 }
 
-DIRECTION_LIST = list(DIRECTIONS.keys())
+DIRECTIONS = ['FORWARD', 'TURN_LEFT', 'TURN_RIGHT', 'STAY']
 
 # === Simulation Parameters ===
 TILE_SIZE = 20
-FPS = 180
+FPS = 1
 MAX_TIME = 50

@@ -56,7 +56,6 @@ class MasterController:
     def step(self, current_time):
         all_states = self.comm.get_all_drones_state()
 
-        # Update global map with new discoveries
         for state in all_states.values():
             for x, y, val in state.get("new_discoveries", []):
                 if 0 <= y < self.global_map.shape[0] and 0 <= x < self.global_map.shape[1]:
@@ -71,6 +70,7 @@ class MasterController:
                 continue
 
             current_pos = state["pos"]
+            facing = state["facing_direction"]
             if drone_id not in self.goals:
                 self.goals[drone_id] = None
             if drone_id not in self.paths:
@@ -79,13 +79,26 @@ class MasterController:
                 self.wait_counters[drone_id] = 0
 
             if self.mode == "random":
-                direction = plan_random_walk(current_pos, self.env)
+                direction = plan_random_walk(
+                    pos=current_pos,
+                    facing=facing,
+                    env=self.env
+                )
 
             elif self.mode == "frontier":
                 direction, new_goal, new_path, new_wait_counter = plan_frontier(
-                    drone_id, current_pos, self.goals[drone_id], self.paths[drone_id],
-                    self.frontiers, assigned_goals, all_states,
-                    self.global_map, self.wait_counters[drone_id], self.max_wait, self.env
+                    drone_id=drone_id,
+                    current_pos=current_pos,
+                    facing=facing,
+                    goal=self.goals[drone_id],
+                    path=self.paths[drone_id],
+                    frontiers=self.frontiers,
+                    assigned_goals=assigned_goals,
+                    all_states=all_states,
+                    global_map=self.global_map,
+                    wait_counter=self.wait_counters[drone_id],
+                    max_wait=self.max_wait,
+                    env=self.env
                 )
                 self.goals[drone_id] = new_goal
                 self.paths[drone_id] = new_path
