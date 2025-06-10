@@ -10,7 +10,7 @@ This class adheres to the `CommunicationInterface` and provides:
 This implementation is suitable for simulation and testing environments where
 communication can be simulated via shared memory.
 """
-from src.planner.communication.interface import CommunicationInterface
+from src.planner.communication.comm_interface import CommunicationInterface
 
 
 class LocalCommBus(CommunicationInterface):
@@ -26,8 +26,6 @@ class LocalCommBus(CommunicationInterface):
         return self.instructions.get(drone_id, {})
 
     def send_instruction(self, drone_id, instruction):
-        # print(f"[DEBUG] Drone {drone_id} gets instruction: {instruction}")
-
         self.instructions[drone_id] = instruction
 
     def send_global_map(self, global_map):
