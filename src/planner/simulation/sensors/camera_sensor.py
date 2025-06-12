@@ -1,23 +1,49 @@
+"""
+Implements a directional CameraSensor for SLAM drones.
+
+This sensor casts a ray in the drone's current facing direction and returns all
+cells in a straight line—up to a maximum distance—stopping at obstacles like walls or doors.
+
+Used in directional vision-based SLAM simulations to mimic a camera's forward view.
+"""
+
+from typing import Tuple, List, TYPE_CHECKING
 from src.planner.simulation.sensors.base_sensor import BaseSensor
-from src.planner.simulation.simulation_constants import FACING_TO_DELTA, WALL, DOOR_CLOSED
+from src.planner.simulation.simulation_constants import FACING_TO_DELTA, WALL, DOOR_CLOSED, FACING_DIRECTION
+if TYPE_CHECKING:
+    from src.planner.simulation.grid_map_env import GridMapEnv
 
 
 class CameraSensor(BaseSensor):
-    def __init__(self, max_distance):
-        self.max_distance = max_distance
+    """
+    A sensor that simulates a directional camera mounted on a SLAM drone.
 
-    def sense(self, pos, facing, env):
+    The camera casts a ray from the drone’s position in its current facing direction
+    and returns all visible cells in a straight line up to a specified distance.
+    Visibility is blocked by obstacles such as walls or closed doors.
+    """
+    def __init__(self, max_distance: int):
+        """
+        Initializes the sensor.
+
+        Args:
+            max_distance (int): Maximum range of the camera in tiles.
+        """
+        self.max_distance: int = max_distance
+
+    def sense(self, pos: Tuple[int, int], facing: FACING_DIRECTION, env: "GridMapEnv") -> List[Tuple[int, int, int]]:
         """
         Simulates a forward-looking camera sensor that returns all tiles
         in a straight line in the current facing direction up to max_distance.
 
         Args:
-            pos (tuple): Current (x, y) position.
+            pos (Tuple[int, int]): Current (x, y) position of the drone.
             facing (str): Facing direction ('NORTH', 'EAST', etc.).
-            env (object): Environment object with get_tile(x, y) method.
+            env (GridMapEnv): The environment object with map access.
 
         Returns:
-            list of (x, y, val): Cells directly ahead with their tile values.
+            List[Tuple[int, int, int]]: List of (x, y, value) tuples for each
+            visible tile ahead, stopping at obstacles or max range.
         """
         dx, dy = FACING_TO_DELTA[facing]
         x, y = pos

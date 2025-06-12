@@ -36,24 +36,72 @@ This module should be instantiated once per simulation and called regularly via 
 
 import numpy as np
 from src.planner.algorithm.naive_planner import plan_random_walk, plan_frontier
-from src.planner.simulation.simulation_constants import *
-
+from src.planner.simulation.simulation_constants import WALL, DOOR_CLOSED, DIRECTIONS, OUT_OF_BOUNDS, FACING_DIRECTION
+from typing import Dict, Tuple, List, Set, Optional, TYPE_CHECKING, Literal
+if TYPE_CHECKING:
+    from src.planner.simulation.grid_map_env import GridMapEnv
+    from src.planner.communication.comm_interface import CommunicationInterface
 
 
 class MasterController:
-    def __init__(self, env, discoverable_mask, comm_interface, mode="frontier"):
-        self.env = env
-        self.comm = comm_interface
-        self.global_map = np.full(self.env.grid.shape, -1, dtype=np.int8)
-        self.frontiers = set()
-        self.discoverable_mask = discoverable_mask
-        self.mode = mode  # "random" or "frontier"
-        self.goals = {}
-        self.paths = {}
-        self.wait_counters = {}
-        self.max_wait = 3
+    """
+    Centralized SLAM controller that coordinates multiple drones in a grid environment.
 
-    def step(self, current_time):
+    This class manages drone coordination, global map aggregation, and exploration planning.
+    It supports both random-walk and frontier-based planning strategies and uses a shared
+    communication interface to interact with drones.
+
+    Attributes:
+        env (GridMapEnv): The simulation environment.
+        comm (CommunicationInterface): Interface for drone communication.
+        discoverable_mask (np.ndarray): Mask indicating discoverable tiles.
+        mode (str): Planning strategy ("random" or "frontier").
+        global_map (np.ndarray): Shared map updated from drone observations.
+        frontiers (Set[Tuple[int, int]]): Current frontier tiles to explore.
+        goals (Dict[int, Optional[Tuple[int, int]]]): Current goals per drone.
+        paths (Dict[int, List[Tuple[int, int]]]): Paths to goals per drone.
+        wait_counters (Dict[int, int]): Consecutive wait times per drone.
+        max_wait (int): Threshold for reassigning goals when drones are blocked.
+
+    Use `step(current_time)` to update the system state at each simulation tick.
+    """
+    def __init__(
+        self,
+        env: "GridMapEnv",
+        discoverable_mask: np.ndarray,
+        comm_interface: "CommunicationInterface",
+        mode: Literal["random", "frontier"] = "frontier"
+    ):
+        """
+        Initialize the MasterController for coordinating multiple SLAM drones.
+
+        Args:
+            env (GridMapEnv): The simulation environment containing map data and drones.
+            comm_interface (CommunicationInterface): Communication interface for sending/receiving data.
+            discoverable_mask (np.ndarray): A boolean mask indicating which tiles can be discovered.
+            mode (Literal['random', 'frontier'], optional):
+                Planning strategy for drones.
+                'random' uses random walk, 'frontier' uses a goal-based frontier strategy.
+                Defaults to 'frontier'.
+        """
+        self.env: GridMapEnv = env
+        self.comm: CommunicationInterface = comm_interface
+        self.discoverable_mask: np.ndarray = discoverable_mask
+        self.mode: Literal["random", "frontier"] = mode  # Planning strategy
+        self.global_map: np.ndarray = np.full(self.env.grid.shape, -1, dtype=np.int8)
+        self.frontiers: Set[Tuple[int, int]] = set()
+        self.goals: Dict[int, Optional[Tuple[int, int]]] = {}
+        self.paths: Dict[int, List[Tuple[int, int]]] = {}
+        self.wait_counters: Dict[int, int] = {}
+        self.max_wait: int = 3
+
+    def step(self, current_time: int) -> None:
+        """
+        Perform one control step: collect drone discoveries, update global map, assign new actions.
+
+        Args:
+            current_time (int): The current simulation tick.
+        """
         all_states = self.comm.get_all_drones_state()
 
         for state in all_states.values():
@@ -107,13 +155,10 @@ class MasterController:
             else:
                 raise ValueError("Unknown mode")
 
-            if direction not in DIRECTIONS:
-                print(f"[ERROR] Invalid direction sent: {direction} for Drone {drone_id}")
-                direction = 'STAY'
-
             self.comm.send_instruction(drone_id, direction)
 
-    def _update_frontiers(self):
+    def _update_frontiers(self) -> None:
+        """Scan the map for frontiers — known free cells that border unexplored, discoverable areas."""
         self.frontiers = set()
         for y in range(self.env.grid.shape[0]):
             for x in range(self.env.grid.shape[1]):

@@ -18,16 +18,26 @@ The dictionary `TILE_NAME` provides human-readable names for UI and debugging.
 
 Movement Directions:
 --------------------
-Defines drone movement commands and their corresponding (dx, dy) offsets:
+Defines **drone facing directions** and their corresponding (dx, dy) offsets:
 
-- 'UP':    (0, -1)
-- 'DOWN':  (0, 1)
-- 'LEFT':  (-1, 0)
-- 'RIGHT': (1, 0)
-- 'STAY':  (0, 0)
+- 'NORTH': (0, -1)
+- 'EAST':  (1, 0)
+- 'SOUTH': (0, 1)
+- 'WEST':  (-1, 0)
 
-The `DIRECTIONS` dictionary is used by the planner and controller to determine how drones move.
-`DIRECTION_LIST` provides a list of all movement keys for random choice or iteration.
+These are used to determine which way a drone is facing and how it moves forward.
+
+Control Commands:
+-----------------
+Drones are controlled using one of the following actions:
+
+- 'FORWARD': Move one step forward in the current facing direction
+- 'TURN_LEFT': Rotate 90° left (counter-clockwise)
+- 'TURN_RIGHT': Rotate 90° right (clockwise)
+- 'STAY': Remain in place and sense surroundings
+
+The list `FACING_DIRECTIONS` is used in orientation logic and turning behavior.
+The list `DIRECTION_COMMANDS` is used by the planner and controller to determine drone actions.
 
 Usage:
 ------
@@ -35,16 +45,18 @@ These constants are imported across modules (e.g., drone, environment, planner)
 to ensure consistent handling of tile values and movements.
 """
 
-# === Tile Types ===
-FREE_SPACE = 0
-WALL = 1
-ENTRY_POINT = 2
-DOOR_CLOSED = 3
-DOOR_OPEN = 4
-WINDOW = 5
-OUT_OF_BOUNDS = 6
+from typing import Literal, Tuple, Dict
 
-TILE_NAME = {
+# === Tile Types ===
+FREE_SPACE: int = 0
+WALL: int = 1
+ENTRY_POINT: int = 2
+DOOR_CLOSED: int = 3
+DOOR_OPEN: int = 4
+WINDOW: int = 5
+OUT_OF_BOUNDS: int = 6
+
+TILE_NAME: Dict[int, str] = {
     FREE_SPACE: "Free",
     WALL: "Wall",
     ENTRY_POINT: "Entry Point",
@@ -55,18 +67,21 @@ TILE_NAME = {
 }
 
 # === Movement Directions ===
+FACING_DIRECTION = Literal['NORTH', 'EAST', 'SOUTH', 'WEST']
 FACING_DIRECTIONS = ['NORTH', 'EAST', 'SOUTH', 'WEST']
 
-FACING_TO_DELTA = {
+FACING_TO_DELTA: Dict[FACING_DIRECTION, Tuple[int, int]] = {
     'NORTH': (0, -1),
     'EAST': (1, 0),
     'SOUTH': (0, 1),
     'WEST': (-1, 0),
 }
 
-DIRECTIONS = ['FORWARD', 'TURN_LEFT', 'TURN_RIGHT', 'STAY']
+DIRECTIONS = Literal['FORWARD', 'TURN_LEFT', 'TURN_RIGHT', 'STAY']
+DIRECTION_COMMANDS = ['FORWARD', 'TURN_LEFT', 'TURN_RIGHT', 'STAY']
 
 # === Simulation Parameters ===
-TILE_SIZE = 20
-FPS = 1
-MAX_TIME = 50
+TILE_SIZE: int = 20
+FPS: int = 180
+MAX_TIME: int = 90
+CAMERA_RANGE: int = 1

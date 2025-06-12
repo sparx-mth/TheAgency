@@ -9,13 +9,10 @@ Each simulation is executed with the following parameters:
 - Each map and drone setup is run for 30 iterations
 
 Logs are written to: ../logs/slam_run1.log
-CSV is written to:  ../logs/slam_results.csv
+CSV is written to:  ../logs/slam_results1.csv
 
 Expected log format:
 Map: <index> | Iteration: <i> | Drones: <count> | Time: <seconds or 'not solved'>
-
-Usage:
-> python run_all_simulations.py
 
 Requirements:
 - The `src/` folder should be in the Python path
@@ -31,10 +28,10 @@ import csv
 from tqdm import tqdm
 from src.planner.simulation.sim_runner import run_simulation
 from src.planner.communication.local_bus import LocalCommBus
+from src.planner.simulation.simulation_constants import CAMERA_RANGE, MAX_TIME
 
 # === Configuration ===
 MAX_ITERATIONS = 30
-MAX_TIME = 50  # seconds
 MAP_COUNT = 10
 DRONE_COUNTS = [1, 2, 3]
 
@@ -77,7 +74,7 @@ with tqdm(total=total_runs, desc="Running Simulations", ncols=100) as pbar:
                         height=32,
                         num_drones=num_drones,
                         num_entry_points=1,
-                        fov=2,
+                        fov=CAMERA_RANGE,
                         render=True
                     )
                     elapsed = time.time() - start
