@@ -29,17 +29,74 @@ Each drone queries the environment for tile types and attempts to explore withou
 The map can either be loaded from a `.txt` file or generated on the fly for experimentation.
 """
 
+from typing import List, Tuple, Optional, TYPE_CHECKING
 import numpy as np
 import random
-from src.planner.simulation.drone import Drone
-from src.planner.simulation.simulation_constants import *
+
+from src.planner.simulation.simulation_constants import (
+    FREE_SPACE, WALL, DOOR_CLOSED, DOOR_OPEN, WINDOW, OUT_OF_BOUNDS, ENTRY_POINT, TILE_NAME
+)
+from src.planner.simulation.sensors.camera_sensor import CameraSensor
 from src.planner.simulation.sensors.bresenham_fov import *
-from src.planner.simulation.sensors.camera_sensor import *
+from src.planner.simulation.drone import Drone
+
+if TYPE_CHECKING:
+    from src.planner.communication.comm_interface import CommunicationInterface
 
 
 class GridMapEnv:
-    def __init__(self, comm_interface, width=32, height=32, randomize=False, map_path=None, num_entry_points=2,
-                 num_drones=3, fov=0):
+    """
+    Simulates a 2D grid-based environment for multi-agent SLAM experiments.
+
+    The environment supports static or randomly generated maps and manages drone
+    placement, movement validation, and tile querying for sensing. It tracks entry
+    points and instantiates drones with preconfigured sensors and communication interfaces.
+
+    Attributes:
+    -----------
+    grid (np.ndarray): 2D grid map of the environment with tile types.
+    width (int): Width of the map.
+    height (int): Height of the map.
+    entry_points (List[Tuple[int, int]]): Coordinates where drones enter.
+    comm (CommunicationInterface): Interface for sending/receiving drone data.
+    drones (List[Drone]): List of active drones within the environment.
+
+    Key Tile Types:
+    ---------------
+    - FREE_SPACE: Traversable
+    - WALL / DOOR_CLOSED / OUT_OF_BOUNDS: Non-traversable
+    - ENTRY_POINT: Spawn location
+    - DOOR_OPEN / WINDOW: Traversable special tiles
+
+    Typical Usage:
+    --------------
+    The environment is initialized once per simulation and provides utility
+    methods for sensing (`get_tile`) and collision checking (`is_collision`).
+    """
+    def __init__(
+        self,
+        comm_interface: "CommunicationInterface",
+        width: int = 32,
+        height: int = 32,
+        randomize: bool = False,
+        map_path: Optional[str] = None,
+        num_entry_points: int = 2,
+        num_drones: int = 3,
+        fov: int = 0
+    ):
+        """
+        Initialize the environment by loading or generating a map and placing drones.
+
+        Args:
+            comm_interface (CommunicationInterface): Communication interface for drones.
+            width (int): Width of the grid if generating a map.
+            height (int): Height of the grid if generating a map.
+            randomize (bool): Whether to generate a random map.
+            map_path (Optional[str]): Path to map file if loading a static map.
+            num_entry_points (int): Number of entry points to place.
+            num_drones (int): Number of drones to initialize.
+            fov (int): Field of view for the drone camera sensor.
+        """
         if map_path:
             self.grid = self.load_map(map_path)
         elif randomize:
@@ -48,9 +105,9 @@ class GridMapEnv:
             self.grid = np.zeros((height, width), dtype=np.int8)
 
         self.height, self.width = self.grid.shape
-        self.entry_points = self.find_entry_points()
-        self.comm = comm_interface
-        self.drones = []
+        self.entry_points: List[Tuple[int, int]] = self.find_entry_points()
+        self.comm: "CommunicationInterface" = comm_interface
+        self.drones: List["Drone"] = []
 
         for i in range(num_drones):
             y, x = self.entry_points[i % len(self.entry_points)]
@@ -65,16 +122,32 @@ class GridMapEnv:
             drone.initialize_map(self.grid.shape)
             self.drones.append(drone)
 
-
     @staticmethod
-    def load_map(path):
+    def load_map(path: str) -> np.ndarray:
+        """
+        Load a map from a file into a numpy array.
+
+        Args:
+            path (str): Path to the map file.
+
+        Returns:
+            np.ndarray: Loaded map as a 2D integer array.
+        """
         grid = np.loadtxt(path, dtype=np.int8)
         return grid
 
     @staticmethod
-    def generate_random_map(width, height, num_entry_points=2):
+    def generate_random_map(width: int, height: int, num_entry_points: int = 2) -> np.ndarray:
         """
-        Generates a random map with guaranteed entry points and includes all tile types.
+        Generates a randomized map containing walls, doors, windows, and entry points.
+
+        Args:
+            width (int): Width of the map.
+            height (int): Height of the map.
+            num_entry_points (int): Number of entry points to place.
+
+        Returns:
+            np.ndarray: The generated map as a 2D grid.
         """
         grid = np.zeros((height, width), dtype=np.int8)
 
@@ -140,7 +213,17 @@ class GridMapEnv:
             entries.add((y, x))
         return grid
 
-    def is_collision(self, x, y):
+    def is_collision(self, x: int, y: int) -> bool:
+        """
+        Check if the given coordinate causes a collision (wall, door, drone, etc.).
+
+        Args:
+            x (int): X coordinate.
+            y (int): Y coordinate.
+
+        Returns:
+            bool: True if collision detected, else False.
+        """
         if not (0 <= x < self.width and 0 <= y < self.height):
             return True
         if self.grid[y, x] in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}:
@@ -150,12 +233,28 @@ class GridMapEnv:
                 return True
         return False
 
-    def get_tile(self, x, y):
+    def get_tile(self, x: int, y: int) -> int:
+        """
+        Retrieve the tile value at the given position, or OUT_OF_BOUNDS if invalid.
+
+        Args:
+            x (int): X coordinate.
+            y (int): Y coordinate.
+
+        Returns:
+            int: Tile value at the location.
+        """
         if 0 <= x < self.width and 0 <= y < self.height:
-            return self.grid[y, x]
+            return int(self.grid[y, x])
         return OUT_OF_BOUNDS
 
-    def find_entry_points(self):
+    def find_entry_points(self) -> List[Tuple[int, int]]:
+        """
+        Locate all entry points in the map. If none exist, create one at a valid cell.
+
+        Returns:
+            List[Tuple[int, int]]: List of (y, x) entry point coordinates.
+        """
         entry_points = [(y, x) for y in range(self.height)
                         for x in range(self.width)
                         if self.grid[y, x] == ENTRY_POINT]
@@ -174,6 +273,9 @@ class GridMapEnv:
         return entry_points
 
     @staticmethod
-    def print_legend():
+    def print_legend() -> None:
+        """
+        Print the legend showing tile values and their meanings.
+        """
         for k, v in TILE_NAME.items():
             print(f"{k}: {v}")

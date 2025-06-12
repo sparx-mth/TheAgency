@@ -46,11 +46,26 @@ import numpy as np
 from src.planner.simulation.grid_map_env import GridMapEnv
 from src.planner.simulation.master_controller import MasterController
 from src.planner.simulation.simulation_constants import *
+from typing import Optional, TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.planner.communication.comm_interface import CommunicationInterface
+    from src.planner.simulation.grid_map_env import GridMapEnv
 
 
-def compute_reachable_mask(env):
+def compute_reachable_mask(env: "GridMapEnv") -> np.ndarray:
     """
-    Discover all physically reachable tiles + directly adjacent walls/doors/out-of-bounds.
+    Computes a boolean mask indicating which tiles in the map are discoverable.
+
+    The mask includes:
+    - All walkable tiles reachable from the drone entry points (via BFS)
+    - Adjacent non-walkable tiles such as walls, doors, and out-of-bounds that
+      border reachable walkable space (for rendering or completion checks)
+
+    Args:
+        env (GridMapEnv): The simulation environment containing the map and entry points.
+
+    Returns:
+        np.ndarray: A 2D boolean array (height x width) where True indicates a discoverable tile.
     """
     height, width = env.grid.shape
     walkable_reachable = np.zeros((height, width), dtype=bool)
@@ -88,7 +103,16 @@ def compute_reachable_mask(env):
     return final_reachable
 
 
-def run_simulation(comm, map_path=None, width=32, height=32, num_drones=3, num_entry_points=1, fov=1, render=True):
+def run_simulation(
+    comm: "CommunicationInterface",
+    map_path: Optional[str] = None,
+    width: int = 32,
+    height: int = 32,
+    num_drones: int = 3,
+    num_entry_points: int = 1,
+    fov: int = 1,
+    render: bool = True
+) -> Optional[float]:
     if map_path is None:
         env = GridMapEnv(comm_interface=comm, width=width, height=height, randomize=True,
                          num_entry_points=num_entry_points, num_drones=num_drones, fov=fov)

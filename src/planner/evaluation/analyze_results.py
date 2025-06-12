@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # === Load and clean data ===
-df = pd.read_csv("outputs/slam_results.csv")
+df = pd.read_csv("../logs/slam_results1.csv")
 
 # Remove maps where all runs failed
 valid_maps = df.groupby("map")["time"].apply(lambda x: x.notnull().any())
@@ -78,6 +78,6 @@ axes[1, 1].set_ylabel("Average Time (seconds)")
 
 # Final layout
 plt.tight_layout(rect=[0, 0, 1, 0.96])
-plt.savefig("outputs/slam_visualization_grid.png")
-print("Saved: slam_visualization_grid.png")
+plt.savefig("slam_visualization_grid1.png")
+print("Saved: slam_visualization_grid1.png")
 # plt.show()  # <-- Optional: use only if not using PyCharm backend
