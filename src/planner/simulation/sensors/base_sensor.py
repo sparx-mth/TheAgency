@@ -14,10 +14,10 @@ Concrete implementations of this class must define how sensing is performed
 
 from abc import ABC, abstractmethod
 from typing import Tuple, List, TYPE_CHECKING
-from src.planner.simulation.simulation_constants import FACING_DIRECTION
+from planner.simulation.simulation_constants import FACING_DIRECTION
 
 if TYPE_CHECKING:
-    from src.planner.simulation.grid_map_env import GridMapEnv
+    from planner.simulation.grid_map_env import GridMapEnv
 
 
 class BaseSensor(ABC):

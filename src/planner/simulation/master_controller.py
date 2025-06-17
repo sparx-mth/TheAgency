@@ -35,12 +35,12 @@ This module should be instantiated once per simulation and called regularly via 
 """
 
 import numpy as np
-from src.planner.algorithm.naive_planner import plan_random_walk, plan_frontier
-from src.planner.simulation.simulation_constants import WALL, DOOR_CLOSED, DIRECTIONS, OUT_OF_BOUNDS, FACING_DIRECTION
+from planner.algorithm.naive_planner import plan_random_walk, plan_frontier
+from planner.simulation.simulation_constants import WALL, DOOR_CLOSED, DIRECTIONS, OUT_OF_BOUNDS, FACING_DIRECTION
 from typing import Dict, Tuple, List, Set, Optional, TYPE_CHECKING, Literal
 if TYPE_CHECKING:
-    from src.planner.simulation.grid_map_env import GridMapEnv
-    from src.planner.communication.comm_interface import CommunicationInterface
+    from planner.simulation.grid_map_env import GridMapEnv
+    from planner.communication.comm_interface import CommunicationInterface
 
 
 class MasterController:

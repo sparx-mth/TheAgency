@@ -11,10 +11,10 @@ This sensor is intended for use in multi-agent SLAM simulations.
 
 import math
 from typing import Tuple, List, TYPE_CHECKING
-from src.planner.simulation.sensors.base_sensor import BaseSensor
-from src.planner.simulation.simulation_constants import WALL, DOOR_CLOSED, FACING_DIRECTION
+from planner.simulation.sensors.base_sensor import BaseSensor
+from planner.simulation.simulation_constants import WALL, DOOR_CLOSED, FACING_DIRECTION
 if TYPE_CHECKING:
-    from src.planner.simulation.grid_map_env import GridMapEnv
+    from planner.simulation.grid_map_env import GridMapEnv
 
 
 class BresenhamFOVSensor(BaseSensor):

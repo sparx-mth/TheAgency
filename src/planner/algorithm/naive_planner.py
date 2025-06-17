@@ -17,11 +17,11 @@ Constants like `DIRECTIONS` and `DIRECTION_LIST` are imported from `simulation_c
 import random
 import numpy as np
 import heapq
-from src.planner.simulation.simulation_constants import *
-from src.planner.simulation.drone import turn
+from planner.simulation.simulation_constants import *
+from planner.simulation.drone import turn
 from typing import Optional, Tuple, List, Dict, Set, Any, TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.planner.simulation.grid_map_env import GridMapEnv
+    from planner.simulation.grid_map_env import GridMapEnv
 
 
 def plan_random_walk(

@@ -1,0 +1,4 @@
+-e git+https://github.com/sparx-mth/TheAgency.git@27cb4c4406d6c7aeefca7f10b5ba97fa835672c1#egg=agency_planner
+numpy==2.3.0
+pygame==2.6.1
+tqdm==4.67.1

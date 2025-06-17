@@ -8,10 +8,10 @@ Used in directional vision-based SLAM simulations to mimic a camera's forward vi
 """
 
 from typing import Tuple, List, TYPE_CHECKING
-from src.planner.simulation.sensors.base_sensor import BaseSensor
-from src.planner.simulation.simulation_constants import FACING_TO_DELTA, WALL, DOOR_CLOSED, FACING_DIRECTION
+from planner.simulation.sensors.base_sensor import BaseSensor
+from planner.simulation.simulation_constants import FACING_TO_DELTA, WALL, DOOR_CLOSED, FACING_DIRECTION
 if TYPE_CHECKING:
-    from src.planner.simulation.grid_map_env import GridMapEnv
+    from planner.simulation.grid_map_env import GridMapEnv
 
 
 class CameraSensor(BaseSensor):

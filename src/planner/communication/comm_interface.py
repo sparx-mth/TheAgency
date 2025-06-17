@@ -10,7 +10,7 @@ Concrete implementations (e.g., `LocalCommBus`) must implement all abstract meth
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Literal
 import numpy as np
-from src.planner.simulation.simulation_constants import DIRECTIONS
+from planner.simulation.simulation_constants import DIRECTIONS
 
 
 class CommunicationInterface(ABC):

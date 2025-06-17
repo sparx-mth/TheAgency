@@ -43,13 +43,14 @@ run_simulation(comm, width=32, height=32, num_drones=3, render=True)
 import pygame
 import time
 import numpy as np
-from src.planner.simulation.grid_map_env import GridMapEnv
-from src.planner.simulation.master_controller import MasterController
-from src.planner.simulation.simulation_constants import *
+
+from planner.simulation.grid_map_env import GridMapEnv
+from planner.simulation.master_controller import MasterController
+from planner.simulation.simulation_constants import *
 from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.planner.communication.comm_interface import CommunicationInterface
-    from src.planner.simulation.grid_map_env import GridMapEnv
+    from planner.communication.comm_interface import CommunicationInterface
+    from planner.simulation.grid_map_env import GridMapEnv
 
 
 def compute_reachable_mask(env: "GridMapEnv") -> np.ndarray:
@@ -281,3 +282,8 @@ def run_simulation(
         pygame.quit()
 
     return completion_time
+
+if __name__ == "__main__":
+    from planner.communication.local_bus import LocalCommBus
+    run_simulation(comm=LocalCommBus())
+

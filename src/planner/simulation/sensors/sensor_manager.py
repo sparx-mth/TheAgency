@@ -6,10 +6,10 @@ to collect combined observations at a given position and facing direction.
 """
 
 from typing import List, Tuple, TYPE_CHECKING
-from src.planner.simulation.sensors.base_sensor import BaseSensor
-from src.planner.simulation.simulation_constants import FACING_DIRECTION
+from planner.simulation.sensors.base_sensor import BaseSensor
+from planner.simulation.simulation_constants import FACING_DIRECTION
 if TYPE_CHECKING:
-    from src.planner.simulation.grid_map_env import GridMapEnv
+    from planner.simulation.grid_map_env import GridMapEnv
 
 
 class SensorManager:
