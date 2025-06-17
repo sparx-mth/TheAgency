@@ -33,15 +33,15 @@ from typing import List, Tuple, Optional, TYPE_CHECKING
 import numpy as np
 import random
 
-from src.planner.simulation.simulation_constants import (
+from planner.simulation.simulation_constants import (
     FREE_SPACE, WALL, DOOR_CLOSED, DOOR_OPEN, WINDOW, OUT_OF_BOUNDS, ENTRY_POINT, TILE_NAME
 )
-from src.planner.simulation.sensors.camera_sensor import CameraSensor
-from src.planner.simulation.sensors.bresenham_fov import *
-from src.planner.simulation.drone import Drone
+from planner.simulation.sensors.camera_sensor import CameraSensor
+from planner.simulation.sensors.bresenham_fov import *
+from planner.simulation.drone import Drone
 
 if TYPE_CHECKING:
-    from src.planner.communication.comm_interface import CommunicationInterface
+    from planner.communication.comm_interface import CommunicationInterface
 
 
 class GridMapEnv:

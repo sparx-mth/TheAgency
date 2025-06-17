@@ -10,10 +10,10 @@ This class adheres to the `CommunicationInterface` and provides:
 This implementation is suitable for simulation and testing environments where
 communication can be simulated via shared memory.
 """
-from src.planner.communication.comm_interface import CommunicationInterface
+from planner.communication.comm_interface import CommunicationInterface
 from typing import Dict, Any, Optional, Literal
 import numpy as np
-from src.planner.simulation.simulation_constants import DIRECTIONS
+from planner.simulation.simulation_constants import DIRECTIONS
 
 
 class LocalCommBus(CommunicationInterface):

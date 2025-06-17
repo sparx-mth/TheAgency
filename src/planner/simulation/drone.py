@@ -28,9 +28,9 @@ by a centralized planner or controller.
 import numpy as np
 import random
 from typing import List, Tuple, Optional, Dict, Literal, TYPE_CHECKING
-from src.planner.simulation.simulation_constants import DIRECTIONS, FACING_DIRECTION, FACING_TO_DELTA, FACING_DIRECTIONS, DIRECTION_COMMANDS
-from src.planner.simulation.sensors.sensor_manager import SensorManager
-from src.planner.communication.comm_interface import CommunicationInterface
+from planner.simulation.simulation_constants import DIRECTIONS, FACING_DIRECTION, FACING_TO_DELTA, FACING_DIRECTIONS, DIRECTION_COMMANDS
+from planner.simulation.sensors.sensor_manager import SensorManager
+from planner.communication.comm_interface import CommunicationInterface
 if TYPE_CHECKING:
     from src.planner.simulation.grid_map_env import GridMapEnv
 

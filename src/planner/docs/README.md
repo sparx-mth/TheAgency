@@ -89,6 +89,26 @@ src/
 
 ---
 
+## Installation
+Clone the repo:
+```bash
+git clone https://github.com/sparx-mth/TheAgency.git
+cd TheAgency
+```
+and install using `virtualenv` or better using [poetry](https://python-poetry.org/docs/)
+### Using `virtualenv`
+Create a virtual environment and install the requirements listed in requirements.txt 
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+### Using `poetry`
+Assuming you have poetry installed on your computer, install the enviornment defined in project.toml
+```bash
+poetry lock
+poetry install
+```
 
 ## 🧪 Run Instructions
 
@@ -98,6 +118,10 @@ src/
 python src/planner/evaluation/benchmark_runner.py
 ```
 
+or using poetry:
+```bash
+poetry run benchmark
+```
 ---
 
 ### 📊 SLAM Performance Visualization
