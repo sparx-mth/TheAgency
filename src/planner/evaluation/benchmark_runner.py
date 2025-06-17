@@ -15,9 +15,10 @@ def parse_args():
     parser.add_argument('--map_count', type=int, default=10, help='Number of maps to run')
     parser.add_argument('--drone_counts', nargs='+', type=int, default=[1, 2, 3], help='Number of drones to run')
     parser.add_argument('--iterations', type=int, default=30, help='Number of iterations to run')
-    parser.add_argument('--log_dir', type=str, default='src/planner/logs', help='Directory to save logs')
-    parser.add_argument('--maps_dir', type=str, default='src/planner/resources/maps', help='Directory to save logs')
-    parser.add_argument('--csv_path', type=str, default='src/planner/logs/slam_results.csv', help='Path to save CSV')
+    parser.add_argument('--log_dir', type=str, default='logs', help='Directory to save logs')
+    parser.add_argument('--maps_dir', type=str, default='resources/planner/maps', help='Directory to save logs')
+    parser.add_argument('--csv_name', type=str, default='agency_planner_slam_results1.csv', help='Name of CSV results file')
+    parser.add_argument('--log_name', type=str, default='agency_planner_slam_run1.log', help='Name of log file')
     parser.add_argument('--write_header', action='store_true', help='Whether to write header to CSV')
     parser.add_argument('--render', type=bool, default=True, help='Whether to render the simulation')
 
@@ -58,8 +59,9 @@ def main():
     # === Logging setup ===
     log_dir = args.log_dir
     os.makedirs(log_dir, exist_ok=True)
+    log_dir = Path(log_dir)
 
-    log_file = os.path.join(log_dir, "agency_planner_slam_run1.log")
+    log_file = log_dir / args.log_name
     logging.basicConfig(
         filename=log_file,
         filemode='a',
@@ -69,8 +71,8 @@ def main():
     )
 
     # === CSV setup ===
-    csv_path = os.path.join(log_dir, "agency_planner_slam_results1.csv")
-    write_header = not os.path.exists(csv_path)
+    csv_path = log_dir/ args.csv_name
+    write_header = not csv_path.exists()
     csv_file = open(csv_path, mode='a', newline='')
     csv_writer = csv.writer(csv_file)
     if write_header:

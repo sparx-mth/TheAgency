@@ -131,12 +131,12 @@ The following images summarize the SLAM performance across different maps and dr
 #### 🔄 360° FOV Sensor Results  
 Drones use a 360-degree Bresenham-style sensor to reveal all directions within range.
 
-![SLAM Results – 360° Sensor](../resources/outputs/slam_visualization_grid.png)
+![SLAM Results – 360° Sensor](../../outputs/slam_visualization_grid.png)
 
 #### 🎯 Directional Camera Sensor Results  
 Drones are equipped with a forward-facing camera that simulates real-world field-of-view constraints.
 
-![SLAM Results – Camera Sensor](../resources/outputs/slam_visualization_grid_camera.png)
+![SLAM Results – Camera Sensor](../../outputs/slam_visualization_grid_camera.png)
 
 **Figure Overview:**
 
