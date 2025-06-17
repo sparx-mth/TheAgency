@@ -1,6 +1,15 @@
 # The Agency
-This repo hosts code gatthered and developed for The Agency Project in SPARX. The aim of this project is to develope group capabilities using drones
-## Multi SLAM
+This repo hosts code gatthered and developed for The Agency Project in SPARX.
+
+The aim of this project is to develope group capabilities using drones.
+
+1. [Multi Planner](#Multi-Planner)
+2. [Multi SLAM](#Multi-SLAM)
+
+## Multi-Planner
+See `agency-planner` [documentation](docs/planner/README.md).
+
+## Multi-SLAM
 
 ![Multi-SLAM](docs/images/covins_demo.png)
 
@@ -18,3 +27,4 @@ The SLAM problem will be solved by multiple agents and this mulkti SLAM shall be
 COVINS algorithm acts as a server for several clients preforming ORB-SLAM in the same environment.
 
 An overview of ORB-SLAM3 is given [here](docs/orb_slam_components.md).
+

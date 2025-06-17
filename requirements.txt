@@ -2,3 +2,6 @@
 numpy==2.3.0
 pygame==2.6.1
 tqdm==4.67.1
+pandas~=2.3.0
+matplotlib~=3.10.3
+seaborn~=0.13.2
