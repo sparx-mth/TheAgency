@@ -82,7 +82,8 @@ class GridMapEnv:
         map_path: Optional[str] = None,
         num_entry_points: int = 2,
         num_drones: int = 3,
-        fov: int = 0
+        camera_range: int = 10,
+        fov: int = 45
     ):
         """
         Initialize the environment by loading or generating a map and placing drones.
@@ -95,7 +96,8 @@ class GridMapEnv:
             map_path (Optional[str]): Path to map file if loading a static map.
             num_entry_points (int): Number of entry points to place.
             num_drones (int): Number of drones to initialize.
-            fov (int): Field of view for the drone camera sensor.
+            camera_range (int): Maximum sensing range of the drone's camera.
+            fov (float): Field of view for the drone camera sensor (in degrees).
         """
         if map_path:
             self.grid = self.load_map(map_path)
@@ -117,7 +119,7 @@ class GridMapEnv:
                 start_pos=(x, y),
                 entry_time=entry_time,
                 comm_interface=self.comm,
-                sensors=[CameraSensor(fov)]
+                sensors=[CameraSensor(camera_range, fov)]
             )
             drone.initialize_map(self.grid.shape)
             self.drones.append(drone)
