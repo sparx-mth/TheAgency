@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument('--drone_counts', nargs='+', type=int, default=[1, 2, 3], help='Number of drones to run')
     parser.add_argument('--iterations', type=int, default=30, help='Number of iterations to run')
     parser.add_argument('--log_dir', type=str, default='logs', help='Directory to save logs')
-    parser.add_argument('--maps_dir', type=str, default='resources/planner/maps', help='Directory to save logs')
+    parser.add_argument('--maps_dir', type=str, default='../../../resources/planner/maps', help='Directory to save logs')
     parser.add_argument('--csv_name', type=str, default='agency_planner_slam_results1.csv', help='Name of CSV results file')
     parser.add_argument('--log_name', type=str, default='agency_planner_slam_run1.log', help='Name of log file')
     parser.add_argument('--write_header', action='store_true', help='Whether to write header to CSV')

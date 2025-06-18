@@ -6,7 +6,7 @@ import seaborn as sns
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Analyze SLAM Simulation Results')
-    parser.add_argument('--log_dir', type=str, default='outputs', help='Directory to save logs')
+    parser.add_argument('--log_dir', type=str, default='logs', help='Directory to save logs')
     parser.add_argument('--csv_name', type=str, default='agency_planner_slam_results1.csv', help='Name of CSV results file')
     parser.add_argument('--png_name', type=str, default='slam_visualization_grid1.png', help='Name of PNG output file')
     args = parser.parse_args()
@@ -23,7 +23,7 @@ def main():
     3. Relative improvement in completion time as more drones are added.
     4. Mean and standard deviation of completion times per drone count.
 
-    The script saves the output as a single image file: `outputs/slam_visualization_grid.png`.
+    The script saves the output as a single image file: `outputs/slam_visualization_grid_camera.png`.
 
     Intended usage:
     > python analyze_results.py
