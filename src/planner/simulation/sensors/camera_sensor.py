@@ -8,6 +8,7 @@ and can see through windows and open doors.
 Used in directional vision-based SLAM simulations to mimic a real camera's behavior.
 """
 
+import math
 from typing import Tuple, List, TYPE_CHECKING
 from planner.simulation.sensors.base_sensor import BaseSensor
 from planner.simulation.simulation_constants import FACING_TO_DELTA, WALL, DOOR_CLOSED, FACING_DIRECTION
