@@ -123,6 +123,47 @@ class GridMapEnv:
             )
             drone.initialize_map(self.grid.shape)
             self.drones.append(drone)
+            self.discoverable_mask = self._compute_discoverable_mask()
+
+    def _compute_discoverable_mask(self) -> np.ndarray:
+        """
+        Return a boolean array where True means the tile can *eventually*
+        be discovered (reachable walkable cell OR obstacle adjacent to one).
+
+        Uses BFS from entry points, treating walls/closed doors as obstacles.
+        """
+        height, width = self.grid.shape
+        walkable_reach = np.zeros((height, width), dtype=bool)
+        visited = np.zeros((height, width), dtype=bool)
+        queue = list(self.entry_points)
+
+        # Phase 1: BFS on walkable tiles
+        while queue:
+            y, x = queue.pop(0)
+            if visited[y, x]:
+                continue
+            visited[y, x] = True
+            walkable_reach[y, x] = True
+
+            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < height and 0 <= nx < width:
+                    if (not visited[ny, nx] and
+                        self.grid[ny, nx] not in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}):
+                        queue.append((ny, nx))
+
+        # Phase 2: add bordering obstacles
+        reachable = walkable_reach.copy()
+        for y in range(height):
+            for x in range(width):
+                if self.grid[y, x] in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}:
+                    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < height and 0 <= nx < width:
+                            if walkable_reach[ny, nx]:
+                                reachable[y, x] = True
+                                break
+        return reachable
 
     @staticmethod
     def load_map(path: str) -> np.ndarray:

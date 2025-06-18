@@ -43,7 +43,6 @@ run_simulation(comm, width=32, height=32, num_drones=3, render=True)
 import pygame
 import time
 import numpy as np
-
 from planner.simulation.grid_map_env import GridMapEnv
 from planner.simulation.master_controller import MasterController
 from planner.simulation.simulation_constants import *
@@ -51,57 +50,6 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from planner.communication.comm_interface import CommunicationInterface
     from planner.simulation.grid_map_env import GridMapEnv
-
-
-def compute_reachable_mask(env: "GridMapEnv") -> np.ndarray:
-    """
-    Computes a boolean mask indicating which tiles in the map are discoverable.
-
-    The mask includes:
-    - All walkable tiles reachable from the drone entry points (via BFS)
-    - Adjacent non-walkable tiles such as walls, doors, and out-of-bounds that
-      border reachable walkable space (for rendering or completion checks)
-
-    Args:
-        env (GridMapEnv): The simulation environment containing the map and entry points.
-
-    Returns:
-        np.ndarray: A 2D boolean array (height x width) where True indicates a discoverable tile.
-    """
-    height, width = env.grid.shape
-    walkable_reachable = np.zeros((height, width), dtype=bool)
-    visited = np.zeros((height, width), dtype=bool)
-    queue = list(env.entry_points)
-
-    # Phase 1: BFS over walkable tiles only
-    while queue:
-        y, x = queue.pop(0)
-        if visited[y, x]:
-            continue
-        visited[y, x] = True
-        walkable_reachable[y, x] = True
-
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < height and 0 <= nx < width:
-                if not visited[ny, nx] and env.grid[ny, nx] not in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}:
-                    queue.append((ny, nx))
-
-    # Phase 2: Build final reachable mask:
-    # - All walkable_reachable cells
-    # - Plus walls/doors that are adjacent to walkable_reachable cells
-    final_reachable = walkable_reachable.copy()
-    for y in range(height):
-        for x in range(width):
-            if env.grid[y, x] in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}:
-                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < height and 0 <= nx < width:
-                        if walkable_reachable[ny, nx]:
-                            final_reachable[y, x] = True
-                            break
-
-    return final_reachable
 
 
 def run_simulation(
@@ -133,7 +81,7 @@ def run_simulation(
         pygame.display.set_caption("Multi-Agent SLAM Simulation")
 
     clock = pygame.time.Clock()
-    reachable_mask = compute_reachable_mask(env)
+    reachable_mask = env.discoverable_mask
     master = MasterController(env, reachable_mask, comm)
     start_time = time.time()
     tick = 0
