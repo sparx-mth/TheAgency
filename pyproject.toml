@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "agency-planner"
+version = "0.1.0"
+description = ""
+authors = ["NadavCherry"]
+readme = ["README.md", "docs/planner/README.md"]
+
+packages = [
+    { include = "planner", from="src"}
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+tqdm = "^4.67.1"
+pygame = "^2.6.1"
+numpy = "^2.3.0"
+pandas = "^2.3.0"
+matplotlib = "^3.10.3"
+seaborn = "^0.13.2"
+
+[tool.poetry.scripts]
+benchmark = "planner.evaluation.benchmark_runner:main"
+analyze = "planner.evaluation.analyze_results:main"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
