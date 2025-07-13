@@ -82,6 +82,7 @@ DIRECTION_COMMANDS = ['FORWARD', 'TURN_LEFT', 'TURN_RIGHT', 'STAY']
 
 # === Simulation Parameters ===
 TILE_SIZE: int = 20
-FPS: int = 180
+FPS: int = 90
 MAX_TIME: int = 90
-CAMERA_RANGE: int = 1
+CAMERA_RANGE: int = 10
+FOV: int = 45

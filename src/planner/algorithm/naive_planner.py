@@ -147,6 +147,8 @@ def plan_frontier(
             - Updated path to goal
             - Updated wait counter
     """
+    # Make a copy of the path to avoid reference issues
+    path_copy = path.copy() if path else []
     for direction in FACING_DIRECTIONS:
         ddx, ddy = FACING_TO_DELTA[direction]
         for step in range(1, CAMERA_RANGE + 1):
@@ -164,15 +166,20 @@ def plan_frontier(
                 if direction != facing:
                     # Turn toward that direction
                     if turn(facing, 'TURN_LEFT') == direction:
-                        return 'TURN_LEFT', goal, path, wait_counter
+                        return 'TURN_LEFT', goal, path_copy, wait_counter
                     elif turn(facing, 'TURN_RIGHT') == direction:
-                        return 'TURN_RIGHT', goal, path, wait_counter
+                        return 'TURN_RIGHT', goal, path_copy, wait_counter
                     else:
-                        return 'TURN_RIGHT', goal, path, wait_counter
+                        return 'TURN_RIGHT', goal, path_copy, wait_counter
                 else:
-                    return 'STAY', goal, path, wait_counter
+                    return 'STAY', goal, path_copy, wait_counter
 
-    if not goal or global_map[goal[1], goal[0]] != -1 or not path:
+    goal_still_valid = (goal and path_copy and
+                        (goal in frontiers or
+                         abs(goal[0] - current_pos[0]) + abs(goal[1] - current_pos[1]) <= 2))
+
+    need_new_goal = not goal_still_valid
+    if need_new_goal:
         available_frontiers = [f for f in frontiers if f not in assigned_goals]
 
         if not available_frontiers:
@@ -202,24 +209,27 @@ def plan_frontier(
                 max_spacing = spacing
 
         if best_goal:
+            if goal and goal != best_goal and goal in assigned_goals:
+                assigned_goals.remove(goal)
             assigned_goals.add(best_goal)
-            return _follow_path(drone_id, current_pos, facing, best_goal, best_path, all_states, wait_counter, max_wait, env)
+            return _follow_path(drone_id, current_pos, facing, best_goal, best_path.copy(), all_states, wait_counter,
+                                max_wait, env)
         else:
             return plan_random_walk(current_pos, facing, env), None, [], wait_counter
 
-    return _follow_path(drone_id, current_pos, facing, goal, path, all_states, wait_counter, max_wait, env)
+    return _follow_path(drone_id, current_pos, facing, goal, path_copy, all_states, wait_counter, max_wait, env)
 
 
 def _follow_path(
-        drone_id: int,
-        current_pos: Tuple[int, int],
-        facing: FACING_DIRECTION,
-        goal: Optional[Tuple[int, int]],
-        path: List[Tuple[int, int]],
-        all_states: Dict[int, Dict[str, Any]],
-        wait_counter: int,
-        max_wait: int,
-        env: "GridMapEnv"
+    drone_id: int,
+    current_pos: Tuple[int, int],
+    facing: FACING_DIRECTION,
+    goal: Optional[Tuple[int, int]],
+    path: List[Tuple[int, int]],
+    all_states: Dict[int, Dict[str, Any]],
+    wait_counter: int,
+    max_wait: int,
+    env: "GridMapEnv"
 ) -> Tuple[DIRECTIONS, Optional[Tuple[int, int]], List[Tuple[int, int]], int]:
     """
     Follows the given path toward a goal using directional steps.
@@ -248,7 +258,8 @@ def _follow_path(
             - Updated wait counter
     """
     if not path:
-        return 'STAY', goal, path, wait_counter
+        direction = plan_random_walk(current_pos, facing, env)
+        return direction, None, [], 0
 
     next_pos = path[0]
     blocked = any(other_id != drone_id and other.get("pos") == next_pos
