@@ -165,3 +165,5 @@ isaac_sim/cache/*
 isaac_sim/data/*
 isaac_sim/documents/*  
 isaac_sim/logs/*
+
+orb_slam_module
