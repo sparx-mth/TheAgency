@@ -2,7 +2,7 @@
 
 command="docker run -it --rm --privileged --network host \\
     -v /tmp/.X11-unix:/tmp/.X11-unix \\
-    -v /home/oded/.Xauthority:/home/admin/.Xauthority:rw \\
+    -v /home/daphnaa/.Xauthority:/home/admin/.Xauthority:rw \\
     -e DISPLAY \\
     -e NVIDIA_VISIBLE_DEVICES=all \\
     -e NVIDIA_DRIVER_CAPABILITIES=all \\
@@ -10,7 +10,7 @@ command="docker run -it --rm --privileged --network host \\
     -e ROS_DOMAIN_ID \\
     -e USER \\
     -e ISAAC_ROS_WS=/workspaces/isaac_ros-dev \\
-    -v /home/oded/GIT/TheAgency/isaac_ros-dev/:/workspaces/isaac_ros-dev \\
+    -v /home/daphnaa/GIT/TheAgency/isaac_ros-dev/:/workspaces/isaac_ros-dev \\
     -v /etc/localtime:/etc/localtime:ro \\
     --name isaac_ros_dev-x86_64-container \\
     --runtime nvidia \\

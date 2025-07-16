@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 
 # run main
-echo 
+echo "running"
 python ../src/main.py

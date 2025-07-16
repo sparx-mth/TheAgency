@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-docker_image=nvidia-base-cuda-11.7.1-ubuntu-22.04:1.0
+docker_image=nvidia-base-cuda-12.4.1-ubuntu-22.04:1.0
 
 RED='\033[0;31m'
 RED_BOLD='\033[1;31m'
