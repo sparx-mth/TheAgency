@@ -4,8 +4,8 @@
 [submodule "gz-sim-environment"]
 	path = gz-sim-environment
 	url = https://github.com/sparx-mth/gz-sim-environment.git
-	branch = jazzy_vehicle
+	branch = robot_coloring_shir 
 [submodule "ORB-SLAM3-ROS2-Docker"]
 	path = ORB-SLAM3-ROS2-Docker
 	url = https://github.com/sparx-mth/ORB-SLAM3-ROS2-Docker.git
-	branch = map_merger_daphna
+	branch = robot_coloring_shir 
