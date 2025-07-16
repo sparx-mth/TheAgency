@@ -1,10 +1,11 @@
 [submodule "covins"]
 	path = covins
-	url = https://github.com/shirbenami/covins.git
-[submodule "gz-sim-environment_fork"]
-	path = gz-sim-environment_fork
-	url = https://github.com/daphnaa/gz-sim-environment_fork.git
+	url = https://github.com/sparx-mth/covins.git
+[submodule "gz-sim-environment"]
+	path = gz-sim-environment
+	url = https://github.com/sparx-mth/gz-sim-environment.git
 	branch = jazzy_vehicle
-[submodule "orb_slam_module"]
-	path = orb_slam_module
-	url = https://github.com/NadavCherry/ORB-SLAM3-ROS2-Docker.git
+[submodule "ORB-SLAM3-ROS2-Docker"]
+	path = ORB-SLAM3-ROS2-Docker
+	url = https://github.com/sparx-mth/ORB-SLAM3-ROS2-Docker.git
+	branch = map_merger_daphna

@@ -3,6 +3,7 @@ This repo hosts code gatthered and developed for The Agency Project in SPARX.
 
 The aim of this project is to develope group capabilities using drones.
 
+Contents:
 1. [Multi Planner](#Multi-Planner)
 2. [Multi SLAM](#Multi-SLAM)
 
