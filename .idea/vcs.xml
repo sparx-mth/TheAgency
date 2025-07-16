@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project version="4">
-  <component name="VcsDirectoryMappings">
-    <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/covins" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/gz-sim-environment_fork" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/orb_slam_module" vcs="Git" />
-  </component>
-</project>
