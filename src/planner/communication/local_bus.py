@@ -82,3 +82,14 @@ class LocalCommBus(CommunicationInterface):
             Dict[int, Dict[str, Any]]: A snapshot of all drone states.
         """
         return self.states.copy()
+
+    def clear(self) -> None:
+        """
+        Reset all communication state — drone states, instructions, and global map.
+
+        Used typically during environment reset to clear shared memory between agents.
+        """
+        self.states.clear()
+        self.instructions.clear()
+        self.global_map = None
+

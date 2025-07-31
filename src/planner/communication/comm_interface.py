@@ -80,3 +80,10 @@ class CommunicationInterface(ABC):
             dict: A dictionary mapping drone IDs to their current states.
         """
         pass
+
+    @abstractmethod
+    def clear(self) -> None:
+        """
+        Clear all communication data.
+        """
+        pass
