@@ -6,6 +6,7 @@ import csv
 from tqdm import tqdm
 from planner.simulation.multi_agent_slam_gym_env import MultiAgentSLAMGymEnv
 from planner.simulation.simulation_constants import CAMERA_RANGE, MAX_TIME
+from planner.agents import RandomAgent, FrontierAgent
 import argparse
 from pathlib import Path
 
@@ -16,33 +17,36 @@ def parse_args():
     parser.add_argument('--drone_counts', nargs='+', type=int, default=[1, 2, 3], help='Number of drones to run')
     parser.add_argument('--iterations', type=int, default=30, help='Number of iterations to run')
     parser.add_argument('--log_dir', type=str, default='logs', help='Directory to save logs')
-    parser.add_argument('--maps_dir', type=str, default='../../../resources/planner/maps', help='Directory to save logs')
-    parser.add_argument('--csv_name', type=str, default='agency_planner_slam_results11.csv', help='Name of CSV results file')
+    parser.add_argument('--maps_dir', type=str, default='../../../resources/planner/maps',
+                        help='Directory to save logs')
+    parser.add_argument('--csv_name', type=str, default='agency_planner_slam_results11.csv',
+                        help='Name of CSV results file')
     parser.add_argument('--log_name', type=str, default='agency_planner_slam_run11.log', help='Name of log file')
     parser.add_argument('--write_header', action='store_true', help='Whether to write header to CSV')
     parser.add_argument('--render', type=bool, default=True, help='Whether to render the simulation')
-    parser.add_argument('--use_controller', type=bool, default=True, help='Whether to use MasterController')
-    parser.add_argument('--controller_mode', type=str, default='frontier', help='Controller mode: random or frontier')
+    parser.add_argument('--agent_type', type=str, default='frontier', help='Agent type: random or frontier')
 
     args = parser.parse_args()
     return args
 
-def run_gym_simulation(env, render=True):
+
+def run_gym_simulation(env, agent, render=True):
     """
-    Run a single simulation episode using the Gym environment.
+    Run a single simulation episode using the Gym environment with separate agent.
 
     Returns:
         float: Completion time in seconds, or None if failed/timeout
     """
     obs, info = env.reset()
+    agent.reset()
+
     done = False
     truncated = False
     start_time = time.time()
 
     while not done and not truncated:
-        # Since we're using the controller, we can pass empty actions
-        # The controller will handle the movement decisions
-        actions = {}
+        # Get actions from the agent
+        actions = agent.get_actions(obs, info)
 
         obs, rewards, dones, truncateds, info = env.step(actions)
 
@@ -89,7 +93,6 @@ def main():
     - Dependencies: pygame, tqdm, logging, csv
     """
 
-
     args = parse_args()
 
     # === Configuration ===
@@ -112,12 +115,12 @@ def main():
     )
 
     # === CSV setup ===
-    csv_path = log_dir/ args.csv_name
+    csv_path = log_dir / args.csv_name
     write_header = not csv_path.exists() or args.write_header
     csv_file = open(csv_path, mode='a', newline='')
     csv_writer = csv.writer(csv_file)
     if write_header:
-        csv_writer.writerow(["map", "iteration", "drones", "time"])
+        csv_writer.writerow(["map", "iteration", "drones", "time", "agent_type"])
 
     # === Simulation ===
     total_runs = map_count * len(drone_counts) * max_iterations
@@ -132,7 +135,7 @@ def main():
             for num_drones in drone_counts:
                 for iteration in range(1, max_iterations + 1):
                     try:
-                        # Create Gym environment
+                        # Create Gym environment (without controller parameters)
                         env = MultiAgentSLAMGymEnv(
                             width=32,
                             height=32,
@@ -144,30 +147,34 @@ def main():
                             max_steps=int(MAX_TIME * 10),  # Convert time to steps
                             map_path=map_path.as_posix(),
                             randomize=False,  # We're using pre-defined maps
-                            render_mode='human' if args.render else None,
-                            use_controller=args.use_controller,
-                            controller_mode=args.controller_mode
+                            render_mode='human' if args.render else None
                         )
 
+                        # Create agent based on type
+                        if args.agent_type == 'frontier':
+                            agent = FrontierAgent(num_agents=num_drones, camera_range=CAMERA_RANGE)
+                        else:
+                            agent = RandomAgent(num_agents=num_drones)
+
                         # Run simulation
-                        result = run_gym_simulation(env, render=args.render)
+                        result = run_gym_simulation(env, agent, render=args.render)
 
                         if result is None:
                             logging.info(
-                                f"Map: {map_idx} | Iteration: {iteration} | Drones: {num_drones} | Time: not solved")
-                            csv_writer.writerow([map_idx, iteration, num_drones, None])
+                                f"Map: {map_idx} | Iteration: {iteration} | Drones: {num_drones} | Agent: {args.agent_type} | Time: not solved")
+                            csv_writer.writerow([map_idx, iteration, num_drones, None, args.agent_type])
                         else:
                             logging.info(
-                                f"Map: {map_idx} | Iteration: {iteration} | Drones: {num_drones} | Time: {result:.2f} seconds")
-                            csv_writer.writerow([map_idx, iteration, num_drones, round(result, 2)])
+                                f"Map: {map_idx} | Iteration: {iteration} | Drones: {num_drones} | Agent: {args.agent_type} | Time: {result:.2f} seconds")
+                            csv_writer.writerow([map_idx, iteration, num_drones, round(result, 2), args.agent_type])
 
                         # Clean up
                         env.close()
 
                     except Exception as e:
                         logging.error(
-                            f"Map: {map_idx} | Iteration: {iteration} | Drones: {num_drones} | Time: not solved | Error: {e}")
-                        csv_writer.writerow([map_idx, iteration, num_drones, None])
+                            f"Map: {map_idx} | Iteration: {iteration} | Drones: {num_drones} | Agent: {args.agent_type} | Time: not solved | Error: {e}")
+                        csv_writer.writerow([map_idx, iteration, num_drones, None, args.agent_type])
 
                     # Free memory
                     gc.collect()
