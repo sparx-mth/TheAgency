@@ -1,8 +1,8 @@
 """
-Multi-Agent SLAM Gym Environment
+Multi-Agent SLAM Gym Environment - Refactored for Clean Separation
 
-This module provides a Gym-compatible multi-agent environment for SLAM simulation.
-It maintains the original simulation logic while following OpenAI Gym conventions.
+This module provides a Gym-compatible multi-agent environment for SLAM simulation
+with complete separation between environment and agent logic.
 """
 
 import gym
@@ -17,7 +17,6 @@ try:
     # Absolute imports (when installed as package)
     from planner.simulation.grid_map_env import GridMapEnv
     from planner.simulation.drone import Drone
-    from planner.simulation.master_controller import MasterController
     from planner.simulation.simulation_constants import (
         DIRECTIONS, DIRECTION_COMMANDS, FACING_DIRECTIONS, FACING_TO_DELTA,
         WALL, DOOR_CLOSED, OUT_OF_BOUNDS, FREE_SPACE, ENTRY_POINT,
@@ -30,7 +29,6 @@ except ImportError:
     # Relative imports (when running from within the package)
     from .grid_map_env import GridMapEnv
     from .drone import Drone
-    from .master_controller import MasterController
     from .simulation_constants import (
         DIRECTIONS, DIRECTION_COMMANDS, FACING_DIRECTIONS, FACING_TO_DELTA,
         WALL, DOOR_CLOSED, OUT_OF_BOUNDS, FREE_SPACE, ENTRY_POINT,
@@ -45,14 +43,9 @@ class MultiAgentSLAMGymEnv(gym.Env):
     """
     Multi-Agent SLAM Environment following Gym conventions.
 
-    This environment wraps the original SLAM simulation components while
-    providing a standard Gym interface for multi-agent reinforcement learning.
-
-    The environment maintains the original logic:
-    - GridMapEnv for the world representation
-    - Drone objects with sensors and local maps
-    - MasterController for coordination (optional)
-    - Communication bus for message passing
+    This environment provides a pure simulation without any agent logic.
+    Agents should be implemented separately and interact with the environment
+    through the standard Gym interface.
     """
 
     metadata = {'render.modes': ['human', 'rgb_array']}
@@ -69,9 +62,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
         max_steps: int = 1000,
         map_path: Optional[str] = None,
         randomize: bool = True,
-        render_mode: Optional[str] = None,
-        use_controller: bool = False,
-        controller_mode: str = 'frontier'
+        render_mode: Optional[str] = None
     ):
         """
         Initialize the multi-agent SLAM environment.
@@ -88,8 +79,6 @@ class MultiAgentSLAMGymEnv(gym.Env):
             map_path: Path to load a pre-defined map
             randomize: Whether to generate random maps
             render_mode: Rendering mode ('human' or 'rgb_array')
-            use_controller: Whether to use MasterController
-            controller_mode: Controller planning mode ('random' or 'frontier')
         """
         super().__init__()
 
@@ -105,8 +94,6 @@ class MultiAgentSLAMGymEnv(gym.Env):
         self.map_path = map_path
         self.randomize = randomize
         self.render_mode = render_mode
-        self.use_controller = use_controller
-        self.controller_mode = controller_mode
 
         # Communication bus
         self.comm = LocalCommBus()
@@ -151,17 +138,6 @@ class MultiAgentSLAMGymEnv(gym.Env):
         self.reachable_mask = self._compute_reachable_mask()
         self.total_reachable = np.sum(self.reachable_mask)
 
-        # Initialize master controller if requested
-        if self.use_controller:
-            self.master = MasterController(
-                env=self.env,
-                discoverable_mask=self.reachable_mask,
-                comm_interface=self.comm,
-                mode=self.controller_mode
-            )
-        else:
-            self.master = None
-
     def _init_spaces(self):
         """Define action and observation spaces for all agents."""
         # Agent IDs
@@ -199,11 +175,16 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 'entry_time': spaces.Box(
                     low=0, high=self.max_steps,
                     shape=(1,), dtype=np.int32
+                ),
+                # New discoveries from last action
+                'new_discoveries': spaces.Box(
+                    low=-1, high=max(self.width * self.height, 100),
+                    shape=(1,), dtype=np.int32
                 )
             })
 
     def _compute_reachable_mask(self) -> np.ndarray:
-        """Compute reachable/discoverable tiles (from original sim_runner.py)."""
+        """Compute reachable/discoverable tiles."""
         height, width = self.env.grid.shape
         walkable_reachable = np.zeros((height, width), dtype=bool)
         visited = np.zeros((height, width), dtype=bool)
@@ -257,6 +238,12 @@ class MultiAgentSLAMGymEnv(gym.Env):
         # Clear communication bus
         self.comm.clear()
 
+        # Store new discoveries for each drone
+        self.last_discoveries = {agent_id: [] for agent_id in self.agents}
+
+        # Store reward components for debugging
+        self.last_reward_components = {agent_id: {} for agent_id in self.agents}
+
         # Get initial observations
         observations = {}
         for agent_id, drone in enumerate(self.env.drones):
@@ -268,56 +255,66 @@ class MultiAgentSLAMGymEnv(gym.Env):
 
     def step(self, actions: Dict[int, int]) -> Tuple[Dict[int, Any], Dict[int, float], Dict[int, bool], Dict[int, bool], Dict]:
         """
-        Execute actions for all agents following the original simulation logic.
+        Execute actions for all agents.
 
         Args:
-            actions: Dict mapping agent_id to action index
+            actions: Dict mapping agent_id to action index (required for all active agents)
 
         Returns:
             observations: New observations for each agent
-            rewards: Rewards for each agent (empty dict as original has no rewards)
+            rewards: Rewards for each agent
             dones: Whether each agent is done
             truncated: Whether episode was truncated
             info: Additional information
         """
         self.current_step += 1
 
-        # If using controller, let it update first (as in original sim_runner.py)
-        if self.master:
-            self.master.step(self.current_step)
-
         observations = {}
         rewards = {}
         dones = {}
         truncated = {}
 
-        # Process each drone (following original simulation loop)
+        # Process each drone
         for agent_id, drone in enumerate(self.env.drones):
             # 1. Activate drone if it's time
             drone.activate(self.current_step)
 
             # 2. Move if active
             if drone.active:
-                if agent_id in actions:
-                    # Use provided action
-                    action = DIRECTION_COMMANDS[actions[agent_id]]
-                else:
-                    # Get instruction from controller if available
-                    instruction = self.comm.receive_instructions(drone.id)
-                    action = instruction if instruction else 'STAY'
+                if agent_id not in actions:
+                    raise ValueError(f"No action provided for active agent {agent_id}")
+
+                # Use provided action
+                action = DIRECTION_COMMANDS[actions[agent_id]]
 
                 # Execute movement
                 new_discoveries = drone.move(action, self.env)
+                self.last_discoveries[agent_id] = new_discoveries
 
                 # Calculate reward (exploration-based)
-                reward = len(new_discoveries) * 0.1  # Small reward per discovery
-                reward -= 0.001  # Small time penalty
+                discovery_reward = len(new_discoveries) * 0.1  # Small reward per discovery
+                time_penalty = -0.001  # Small time penalty
+                collision_penalty = -0.5 if drone.collided else 0.0  # Collision penalty
 
-                if drone.collided:
-                    reward -= 0.5  # Collision penalty
+                reward = discovery_reward + time_penalty + collision_penalty
+
+                # Store reward components
+                self.last_reward_components[agent_id] = {
+                    'discovery_reward': discovery_reward,
+                    'time_penalty': time_penalty,
+                    'collision_penalty': collision_penalty,
+                    'total': reward
+                }
 
             else:
                 reward = 0.0
+                self.last_discoveries[agent_id] = []
+                self.last_reward_components[agent_id] = {
+                    'discovery_reward': 0.0,
+                    'time_penalty': 0.0,
+                    'collision_penalty': 0.0,
+                    'total': 0.0
+                }
 
             # Get observation
             observations[agent_id] = self._get_observation(drone, agent_id)
@@ -337,8 +334,11 @@ class MultiAgentSLAMGymEnv(gym.Env):
             progress = self._get_exploration_progress()
             if progress >= 1.0:
                 done = True
-                reward += 10.0  # Completion bonus
+                completion_bonus = 10.0  # Completion bonus
+                reward += completion_bonus
                 rewards[agent_id] = reward
+                self.last_reward_components[agent_id]['completion_bonus'] = completion_bonus
+                self.last_reward_components[agent_id]['total'] = reward
 
             dones[agent_id] = done
             truncated[agent_id] = trunc
@@ -357,7 +357,8 @@ class MultiAgentSLAMGymEnv(gym.Env):
             'facing_direction': facing_idx,
             'active': int(drone.active),
             'collided': int(drone.collided),
-            'entry_time': np.array([drone.entry_time], dtype=np.int32)
+            'entry_time': np.array([drone.entry_time], dtype=np.int32),
+            'new_discoveries': np.array([len(self.last_discoveries.get(agent_id, []))], dtype=np.int32)
         }
 
     def _get_exploration_progress(self) -> float:
@@ -390,17 +391,24 @@ class MultiAgentSLAMGymEnv(gym.Env):
             else:
                 drone_discoveries[i] = 0
 
+        # Get all drone states from communication bus
+        all_drone_states = self.comm.get_all_drones_state()
+
         return {
             'step': self.current_step,
             'elapsed_time': time.time() - self.start_time,
             'exploration_progress': self._get_exploration_progress(),
             'global_map': global_map,
             'drone_discoveries': drone_discoveries,
-            'using_controller': self.use_controller
+            'all_drone_states': all_drone_states,
+            'reachable_mask': self.reachable_mask,
+            'entry_points': self.env.entry_points,
+            'true_map': self.env.grid.copy(),
+            'reward_components': self.last_reward_components.copy()
         }
 
     def render(self):
-        """Render the environment following the original visualization."""
+        """Render the environment."""
         if self.render_mode is None:
             return None
 
