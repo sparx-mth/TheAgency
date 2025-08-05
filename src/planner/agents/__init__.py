@@ -16,12 +16,14 @@ from .base_slam_agent import BaseSLAMAgent
 from .random_agent import RandomAgent
 from .frontier_agent import FrontierAgent
 from .hybrid_agent import HybridAgent
+from .dqn_slam_agent import CustomDQNAgent
 
 __all__ = [
     'BaseSLAMAgent',
     'RandomAgent',
     'FrontierAgent',
-    'HybridAgent'
+    'HybridAgent',
+    'CustomDQNAgent'
 ]
 
 # Version information
