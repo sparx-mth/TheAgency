@@ -65,8 +65,8 @@ class DQNTrainer:
             height=height,
             num_drones=self.num_agents,
             num_entry_points=self.num_agents,
-            camera_range=3,
-            fov=30,
+            camera_range=5,
+            fov=45,
             max_steps=1000,
             render_mode=render_mode,
             randomize=False,  # Use fixed map
@@ -84,7 +84,8 @@ class DQNTrainer:
         render_eval: bool = True,
         render_training: bool = False,
         batch_size: int = 64,
-        learning_rate: float = 1e-4
+        learning_rate: float = 1e-4,
+        never_render: bool = False
     ):
         """Train the Custom DQN agent."""
         print("=" * 80)
@@ -94,8 +95,9 @@ class DQNTrainer:
         print(f"Test map: {self.test_map_path}")
         print(f"Number of agents: {self.num_agents}")
         print(f"Number of episodes: {num_episodes}")
-        print(f"Render training: {render_training}")
-        print(f"Render evaluation: {render_eval}")
+        print(f"Never render: {never_render}")
+        print(f"Render training: {render_training if not never_render else False}")
+        print(f"Render evaluation: {render_eval if not never_render else False}")
         print(f"Timestamp: {self.timestamp}")
         print("=" * 80)
 
@@ -123,15 +125,16 @@ class DQNTrainer:
             # Determine if we should render this episode
             should_render = False
 
-            # Always render first and last episodes
-            if episode == 0 or episode == num_episodes - 1:
-                should_render = True
-            # Render at specified frequency
-            elif episode % render_frequency == 0 and episode > 0:
-                should_render = True
-            # Render during training if enabled
-            elif render_training:
-                should_render = True
+            if not never_render:
+                # Always render first and last episodes
+                if episode == 0 or episode == num_episodes - 1:
+                    should_render = True
+                # Render at specified frequency
+                elif episode % render_frequency == 0 and episode > 0:
+                    should_render = True
+                # Render during training if enabled
+                elif render_training:
+                    should_render = True
 
             if should_render:
                 train_env.render_mode = 'human'
@@ -164,7 +167,7 @@ class DQNTrainer:
                 eval_reward, eval_steps, eval_progress = self.evaluate(
                     agent,
                     num_episodes=3,
-                    render=render_eval
+                    render=render_eval and not never_render
                 )
 
                 self.eval_rewards.append(eval_reward)
@@ -210,24 +213,27 @@ class DQNTrainer:
         # Plot training curves
         self.plot_training_curves()
 
-        # Final evaluation with rendering
-        print("\nFinal evaluation on test map with rendering...")
-        test_env = self.create_env(self.test_map_path, render_mode='human')
-        final_reward, final_steps, final_progress = self.run_episode(
-            test_env, agent, training=False
-        )
-        print(f"Final test performance - "
-              f"Reward: {final_reward:.2f} | "
-              f"Progress: {final_progress:.1%} | "
-              f"Steps: {final_steps}")
+        # Final evaluation with rendering (unless never_render)
+        if not never_render:
+            print("\nFinal evaluation on test map with rendering...")
+            test_env = self.create_env(self.test_map_path, render_mode='human')
+            final_reward, final_steps, final_progress = self.run_episode(
+                test_env, agent, training=False
+            )
+            print(f"Final test performance - "
+                  f"Reward: {final_reward:.2f} | "
+                  f"Progress: {final_progress:.1%} | "
+                  f"Steps: {final_steps}")
 
-        # Keep window open
-        # for _ in range(50):
-        #     test_env.render()
-        #     time.sleep(0.1)
+            # Keep window open
+            for _ in range(50):
+                test_env.render()
+                time.sleep(0.1)
+            test_env.close()
+        else:
+            print("\nSkipping final visualization (never_render mode)")
 
         train_env.close()
-        test_env.close()
 
         return agent
 
@@ -264,9 +270,9 @@ class DQNTrainer:
             # Accumulate rewards
             total_reward += sum(rewards.values())
 
-            # # Render if enabled
-            # if env.render_mode == 'human':
-            #     env.render()
+            # Render if enabled
+            if env.render_mode == 'human':
+                env.render()
 
             # Update state
             observations = next_observations
@@ -411,7 +417,7 @@ def compare_with_baselines(
         width=width,
         height=height,
         num_drones=3,
-        num_entry_points=3,
+        num_entry_points=2,
         camera_range=10,
         fov=60,
         max_steps=1000,
@@ -557,7 +563,7 @@ def visualize_single_episode(
         width=width,
         height=height,
         num_drones=3,
-        num_entry_points=3,
+        num_entry_points=2,
         camera_range=10,
         fov=60,
         max_steps=1000,
@@ -612,8 +618,8 @@ def visualize_single_episode(
         # Update metrics
         total_reward += sum(rewards.values())
 
-        # # Render
-        # env.render()
+        # Render
+        env.render()
 
         # Check for window close
         import pygame
@@ -655,10 +661,10 @@ def visualize_single_episode(
         print(f"  Drone {drone_id}: {count} tiles")
 
     # Keep window open for a bit
-    # print("\nKeeping window open for 5 seconds...")
-    # for _ in range(50):
-    #     env.render()
-    #     time.sleep(0.1)
+    print("\nKeeping window open for 5 seconds...")
+    for _ in range(50):
+        env.render()
+        time.sleep(0.1)
 
     env.close()
 
@@ -687,22 +693,29 @@ def main():
         'render_eval': True,      # Render evaluation episodes
         'render_training': False,  # Render all training episodes (slow!)
         'batch_size': 64,
-        'learning_rate': 1e-4
+        'learning_rate': 1e-4,
+        'never_render': False     # Never render flag
     }
 
     # Ask user about rendering preferences
     print("\n" + "=" * 80)
     print("RENDERING OPTIONS")
     print("=" * 80)
-    print("1. Minimal rendering (fastest) - only key episodes")
-    print("2. Regular rendering - every 100 episodes + evaluations")
+    print("0. Never render (maximum speed) - no rendering at all")
+    print("1. Minimal rendering - only first and last episodes")
+    print("2. Regular rendering - every 100 episodes")
     print("3. Evaluation rendering - all evaluation episodes")
     print("4. Full rendering (slowest) - all episodes")
 
-    choice = input("\nSelect rendering option (1-4) [default: 2]: ").strip() or "2"
+    choice = input("\nSelect rendering option (0-4) [default: 2]: ").strip() or "2"
 
-    if choice == "1":
-        config['render_frequency'] = 1000  # Almost never
+    if choice == "0":
+        config['never_render'] = True
+        config['render_frequency'] = float('inf')  # Never render
+        config['render_eval'] = False
+        config['render_training'] = False
+    elif choice == "1":
+        config['render_frequency'] = float('inf')  # Only first/last are hardcoded
         config['render_eval'] = False
         config['render_training'] = False
     elif choice == "2":
@@ -751,9 +764,10 @@ def main():
     print(f"Best model: {best_model_path}")
 
     # Ask if user wants to see final visualization
-    visualize = input("\nVisualize trained agent? (y/n) [default: y]: ").strip().lower()
-    if visualize != 'n':
-        visualize_single_episode(train_map, test_map, best_model_path, use_test_map=True)
+    if not config.get('never_render', False):
+        visualize = input("\nVisualize trained agent? (y/n) [default: y]: ").strip().lower()
+        if visualize != 'n':
+            visualize_single_episode(train_map, test_map, best_model_path, use_test_map=True)
 
 
 if __name__ == "__main__":
