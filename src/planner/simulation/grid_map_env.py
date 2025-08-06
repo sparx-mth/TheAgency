@@ -107,7 +107,10 @@ class GridMapEnv:
             self.grid = np.zeros((height, width), dtype=np.int8)
 
         self.height, self.width = self.grid.shape
-        self.entry_points: List[Tuple[int, int]] = self.find_entry_points()
+
+        # Ensure we have enough entry points for the requested number
+        self.entry_points: List[Tuple[int, int]] = self.find_or_create_entry_points(num_entry_points)
+
         self.comm: "CommunicationInterface" = comm_interface
         self.drones: List["Drone"] = []
 
@@ -249,6 +252,84 @@ class GridMapEnv:
         if 0 <= x < self.width and 0 <= y < self.height:
             return int(self.grid[y, x])
         return OUT_OF_BOUNDS
+
+    def find_or_create_entry_points(self, num_requested: int) -> List[Tuple[int, int]]:
+        """
+        Find existing entry points and create additional ones if needed.
+
+        Args:
+            num_requested (int): Minimum number of entry points needed.
+
+        Returns:
+            List[Tuple[int, int]]: List of (y, x) entry point coordinates.
+        """
+        # First, find all existing entry points
+        entry_points = [(y, x) for y in range(self.height)
+                        for x in range(self.width)
+                        if self.grid[y, x] == ENTRY_POINT]
+
+        # If we have enough, return them
+        if len(entry_points) >= num_requested:
+            return entry_points[:num_requested]
+
+        # Otherwise, we need to create more entry points
+        existing_count = len(entry_points)
+        needed = num_requested - existing_count
+
+        # print(f"Found {existing_count} entry points, creating {needed} more...")
+
+        # Strategy 1: Try to add entry points on borders (only on free spaces)
+        border_candidates = []
+
+        # Top and bottom borders
+        for x in range(1, self.width - 1):
+            if self.grid[0, x] == FREE_SPACE:
+                border_candidates.append((0, x, 'top'))
+            if self.grid[self.height - 1, x] == FREE_SPACE:
+                border_candidates.append((self.height - 1, x, 'bottom'))
+
+        # Left and right borders
+        for y in range(1, self.height - 1):
+            if self.grid[y, 0] == FREE_SPACE:
+                border_candidates.append((y, 0, 'left'))
+            if self.grid[y, self.width - 1] == FREE_SPACE:
+                border_candidates.append((y, self.width - 1, 'right'))
+
+        # Shuffle to get random distribution
+        random.shuffle(border_candidates)
+
+        # Add new entry points from border candidates
+        for y, x, side in border_candidates:
+            if needed <= 0:
+                break
+            if (y, x) not in entry_points:
+                self.grid[y, x] = ENTRY_POINT
+                entry_points.append((y, x))
+                needed -= 1
+                # print(f"  Added entry point at ({x}, {y}) on {side} border")
+
+        # Strategy 2: If still need more, use any free space
+        if needed > 0:
+            free_spaces = [(y, x) for y in range(self.height)
+                          for x in range(self.width)
+                          if self.grid[y, x] in [FREE_SPACE, DOOR_OPEN, WINDOW]
+                          and (y, x) not in entry_points]
+
+            random.shuffle(free_spaces)
+
+            for y, x in free_spaces:
+                if needed <= 0:
+                    break
+                self.grid[y, x] = ENTRY_POINT
+                entry_points.append((y, x))
+                needed -= 1
+                # print(f"  Added entry point at ({x}, {y}) in free space")
+
+        # Final check
+        # if len(entry_points) < num_requested:
+        #     print(f"Warning: Could only create {len(entry_points)} entry points out of {num_requested} requested")
+
+        return entry_points
 
     def find_entry_points(self) -> List[Tuple[int, int]]:
         """

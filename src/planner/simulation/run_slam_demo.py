@@ -386,7 +386,7 @@ def run_with_loaded_map():
     import glob
 
     # Map directory
-    map_dir = "/home/user/nadav/TheAgency/resources/planner/maps"
+    map_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps"
 
     # Check if directory exists
     if not os.path.exists(map_dir):

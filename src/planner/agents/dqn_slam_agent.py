@@ -1,11 +1,10 @@
 """
-Custom DQN Agent with Fixed 44x44 Input
+Custom DQN Agent with Fixed 44x44 Input - Single Network for All Drones
 
 This agent uses:
-- 44x44 input matrix (with padding for smaller maps)
-- 2 other robots' poses
-- Current robot's pose
-- Standard DQN output (Q-values for actions)
+- 44x44 global map input (what all drones have discovered)
+- Current drone's pose (x, y, orientation)
+- Single shared network for all drones
 """
 
 import numpy as np
@@ -26,8 +25,7 @@ class FixedSizeDQNetwork(nn.Module):
     DQN Network with fixed 44x44 input size.
 
     Input:
-    - 44x44 map (padded if necessary)
-    - 2 other robots' poses (x, y, orientation for each)
+    - 44x44 global map (padded if necessary)
     - Current robot's pose (x, y, orientation)
 
     Output:
@@ -46,8 +44,8 @@ class FixedSizeDQNetwork(nn.Module):
         # Calculate flattened size: 11 * 11 * 128 = 15,488
         conv_output_size = 11 * 11 * 128
 
-        # Pose features: 2 other robots (x,y,θ each) + current robot (x,y,θ) = 9 features
-        pose_features_size = 9
+        # Pose features: current robot (x,y,θ) = 3 features
+        pose_features_size = 3
 
         # Fully connected layers
         self.fc1 = nn.Linear(conv_output_size + pose_features_size, 512)
@@ -64,10 +62,8 @@ class FixedSizeDQNetwork(nn.Module):
 
         Args:
             map_input: Tensor of shape (batch, 1, 44, 44)
-            pose_input: Tensor of shape (batch, 9) containing:
-                       [other_robot1_x, other_robot1_y, other_robot1_theta,
-                        other_robot2_x, other_robot2_y, other_robot2_theta,
-                        current_robot_x, current_robot_y, current_robot_theta]
+            pose_input: Tensor of shape (batch, 3) containing:
+                       [current_robot_x, current_robot_y, current_robot_theta]
 
         Returns:
             Q-values of shape (batch, num_actions)
@@ -97,18 +93,17 @@ class FixedSizeDQNetwork(nn.Module):
 
 class CustomDQNAgent(BaseSLAMAgent):
     """
-    Custom DQN Agent with fixed 44x44 input and robot pose information.
+    Custom DQN Agent with fixed 44x44 input using a single shared network.
 
     This agent:
-    - Pads maps smaller than 44x44 to fit the fixed input size
-    - Tracks poses of 2 other robots
-    - Uses current robot's pose
-    - Outputs standard DQN actions
+    - Uses global map (what all drones have discovered)
+    - Uses current drone's pose only
+    - Shares a single network across all drones
     """
 
     def __init__(
         self,
-        num_agents: int = 3,  # Total number of robots (including this one)
+        num_agents: int = 3,
         learning_rate: float = 1e-4,
         gamma: float = 0.99,
         epsilon_start: float = 1.0,
@@ -120,8 +115,6 @@ class CustomDQNAgent(BaseSLAMAgent):
         target_update_frequency: int = 100
     ):
         super().__init__(num_agents)
-
-        assert num_agents >= 3, "This agent requires at least 3 robots (current + 2 others)"
 
         self.num_agents = num_agents
         self.gamma = gamma
@@ -135,42 +128,28 @@ class CustomDQNAgent(BaseSLAMAgent):
         # Fixed input size
         self.input_size = 44
 
-        # Networks for each robot
-        self.q_networks = {}
-        self.target_networks = {}
-        self.optimizers = {}
+        # Single shared network for all drones
+        self.q_network = FixedSizeDQNetwork().to(device)
+        self.target_network = FixedSizeDQNetwork().to(device)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=learning_rate)
 
-        for i in range(num_agents):
-            self.q_networks[i] = FixedSizeDQNetwork().to(device)
-            self.target_networks[i] = FixedSizeDQNetwork().to(device)
-            self.target_networks[i].load_state_dict(self.q_networks[i].state_dict())
-            self.optimizers[i] = optim.Adam(self.q_networks[i].parameters(), lr=learning_rate)
-
-        # Replay buffer
+        # Replay buffer - now stores all experiences together
         self.replay_buffer = deque(maxlen=buffer_size)
 
         # Tracking
         self.steps = 0
-        self.robot_poses = {}  # Store all robot poses
 
     def reset(self):
         """Reset agent state for new episode."""
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        self.robot_poses = {}
 
     def get_actions(self, observations: Dict[int, Any], info: Dict[str, Any]) -> Dict[int, int]:
-        """Get actions for all agents."""
-        # Update robot poses from observations
-        for agent_id, obs in observations.items():
-            if obs['active']:
-                # Store pose as (x, y, theta)
-                # Normalize positions to [0, 1] assuming max map size of 100
-                x_norm = obs['position'][0] / 100.0
-                y_norm = obs['position'][1] / 100.0
-                theta_norm = obs['facing_direction'] / 3.0  # Normalize to [0, 1]
-                self.robot_poses[agent_id] = (x_norm, y_norm, theta_norm)
-
+        """Get actions for all agents using the shared network."""
         actions = {}
+
+        # Get global map from info
+        global_map = info.get('global_map', None)
 
         for agent_id, obs in observations.items():
             if not obs['active']:
@@ -181,12 +160,12 @@ class CustomDQNAgent(BaseSLAMAgent):
             if random.random() < self.epsilon:
                 actions[agent_id] = random.randint(0, 3)
             else:
-                # Prepare input
-                state = self._prepare_input(agent_id, obs, info)
+                # Prepare input using global map and current drone's pose
+                state = self._prepare_input(agent_id, obs, global_map)
                 map_tensor, pose_tensor = state
 
                 with torch.no_grad():
-                    q_values = self.q_networks[agent_id](
+                    q_values = self.q_network(
                         map_tensor.unsqueeze(0).to(device),
                         pose_tensor.unsqueeze(0).to(device)
                     )
@@ -199,21 +178,23 @@ class CustomDQNAgent(BaseSLAMAgent):
         self,
         agent_id: int,
         obs: Dict[str, Any],
-        info: Dict[str, Any]
+        global_map: Optional[np.ndarray]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Prepare the fixed-size input for the network.
 
         Returns:
-            map_tensor: 44x44 padded map
-            pose_tensor: 9-element tensor with robot poses
+            map_tensor: 44x44 padded global map
+            pose_tensor: 3-element tensor with current drone's pose
         """
-        # Get the global map from info (unified view)
-        global_map = info.get('global_map', obs['local_map'])
+        # Use global map if available, otherwise use local map
+        if global_map is not None:
+            map_array = global_map.astype(np.float32)
+        else:
+            map_array = obs['local_map'].astype(np.float32)
 
-        # Convert to float and normalize
-        map_array = global_map.astype(np.float32)
-        map_array = (map_array + 1) / 7.0  # Normalize to [0, 1]
+        # Normalize to [0, 1]
+        map_array = (map_array + 1) / 7.0  # Normalize from [-1, 6] to [0, 1]
 
         # Pad to 44x44 if necessary
         h, w = map_array.shape
@@ -250,31 +231,13 @@ class CustomDQNAgent(BaseSLAMAgent):
         # Create map tensor with channel dimension
         map_tensor = torch.tensor(map_array, dtype=torch.float32).unsqueeze(0)  # (1, 44, 44)
 
-        # Prepare pose features
-        pose_features = []
+        # Prepare pose features for current drone only
+        # Normalize positions to [0, 1] assuming max map size of 100
+        x_norm = obs['position'][0] / 100.0
+        y_norm = obs['position'][1] / 100.0
+        theta_norm = obs['facing_direction'] / 3.0  # Normalize to [0, 1]
 
-        # Get 2 other robots' poses
-        other_robot_ids = [i for i in self.robot_poses.keys() if i != agent_id]
-
-        # Add first 2 other robots' poses
-        for i in range(2):
-            if i < len(other_robot_ids):
-                other_id = other_robot_ids[i]
-                x, y, theta = self.robot_poses[other_id]
-                pose_features.extend([x, y, theta])
-            else:
-                # If less than 2 other robots, use default values
-                pose_features.extend([0.5, 0.5, 0.0])
-
-        # Add current robot's pose
-        if agent_id in self.robot_poses:
-            x, y, theta = self.robot_poses[agent_id]
-            pose_features.extend([x, y, theta])
-        else:
-            # Default if pose not available
-            pose_features.extend([0.5, 0.5, 0.0])
-
-        pose_tensor = torch.tensor(pose_features, dtype=torch.float32)
+        pose_tensor = torch.tensor([x_norm, y_norm, theta_norm], dtype=torch.float32)
 
         return map_tensor, pose_tensor
 
@@ -288,15 +251,18 @@ class CustomDQNAgent(BaseSLAMAgent):
         info: Dict[str, Any],
         next_info: Dict[str, Any]
     ):
-        """Update the Q-networks using experience replay."""
-        # Store transitions
+        """Update the Q-network using experience replay."""
+        # Get global maps
+        global_map = info.get('global_map', None)
+        next_global_map = next_info.get('global_map', None)
+
+        # Store transitions for all active drones
         for agent_id in observations:
             if observations[agent_id]['active']:
-                state = self._prepare_input(agent_id, observations[agent_id], info)
-                next_state = self._prepare_input(agent_id, next_observations[agent_id], next_info)
+                state = self._prepare_input(agent_id, observations[agent_id], global_map)
+                next_state = self._prepare_input(agent_id, next_observations[agent_id], next_global_map)
 
                 self.replay_buffer.append((
-                    agent_id,
                     state,
                     actions[agent_id],
                     rewards[agent_id],
@@ -308,13 +274,12 @@ class CustomDQNAgent(BaseSLAMAgent):
         if len(self.replay_buffer) >= self.batch_size and self.steps % self.update_frequency == 0:
             self._train_step()
 
-        # Update target networks
+        # Update target network
         if self.steps % self.target_update_frequency == 0:
-            for agent_id in range(self.num_agents):
-                self.target_networks[agent_id].load_state_dict(self.q_networks[agent_id].state_dict())
+            self.target_network.load_state_dict(self.q_network.state_dict())
 
     def _train_step(self):
-        """Train all agents using the full batch of experiences."""
+        """Train the shared network using experiences from all agents."""
         # Sample batch from replay buffer
         batch = random.sample(self.replay_buffer, self.batch_size)
 
@@ -327,7 +292,7 @@ class CustomDQNAgent(BaseSLAMAgent):
         rewards_batch = []
         dones_batch = []
 
-        for _, state, action, reward, next_state, done in batch:
+        for state, action, reward, next_state, done in batch:
             map_tensor, pose_tensor = state
             next_map_tensor, next_pose_tensor = next_state
 
@@ -348,34 +313,31 @@ class CustomDQNAgent(BaseSLAMAgent):
         rewards_batch = torch.tensor(rewards_batch, dtype=torch.float32).to(device)
         dones_batch = torch.tensor(dones_batch, dtype=torch.float32).to(device)
 
-        # Train each agent on the same batch
-        for agent_id in self.q_networks.keys():
-            # Current Q values
-            current_q_values = self.q_networks[agent_id](map_batch, pose_batch)
-            current_q_values = current_q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
+        # Current Q values
+        current_q_values = self.q_network(map_batch, pose_batch)
+        current_q_values = current_q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
 
-            # Target Q values
-            with torch.no_grad():
-                next_q_values = self.target_networks[agent_id](next_map_batch, next_pose_batch)
-                max_next_q_values = next_q_values.max(1)[0]
-                target_q_values = rewards_batch + (1 - dones_batch) * self.gamma * max_next_q_values
+        # Target Q values
+        with torch.no_grad():
+            next_q_values = self.target_network(next_map_batch, next_pose_batch)
+            max_next_q_values = next_q_values.max(1)[0]
+            target_q_values = rewards_batch + (1 - dones_batch) * self.gamma * max_next_q_values
 
-            # Loss and optimization
-            loss = F.mse_loss(current_q_values, target_q_values)
-            self.optimizers[agent_id].zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.q_networks[agent_id].parameters(), 1.0)
-            self.optimizers[agent_id].step()
+        # Loss and optimization
+        loss = F.mse_loss(current_q_values, target_q_values)
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+        self.optimizer.step()
 
     def save(self, path: str):
         """Save model."""
         save_dict = {
             'epsilon': self.epsilon,
-            'steps': self.steps
+            'steps': self.steps,
+            'q_network': self.q_network.state_dict(),
+            'optimizer': self.optimizer.state_dict()
         }
-        for agent_id in range(self.num_agents):
-            save_dict[f'q_network_{agent_id}'] = self.q_networks[agent_id].state_dict()
-            save_dict[f'optimizer_{agent_id}'] = self.optimizers[agent_id].state_dict()
         torch.save(save_dict, path)
 
     def load(self, path: str):
@@ -383,8 +345,6 @@ class CustomDQNAgent(BaseSLAMAgent):
         checkpoint = torch.load(path, map_location=device)
         self.epsilon = checkpoint['epsilon']
         self.steps = checkpoint['steps']
-
-        for agent_id in range(self.num_agents):
-            self.q_networks[agent_id].load_state_dict(checkpoint[f'q_network_{agent_id}'])
-            self.target_networks[agent_id].load_state_dict(checkpoint[f'q_network_{agent_id}'])
-            self.optimizers[agent_id].load_state_dict(checkpoint[f'optimizer_{agent_id}'])
+        self.q_network.load_state_dict(checkpoint['q_network'])
+        self.target_network.load_state_dict(checkpoint['q_network'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])

@@ -55,7 +55,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
         width: int = 32,
         height: int = 32,
         num_drones: int = 3,
-        num_entry_points: int = 1,
+        num_entry_points: int = 3,
         camera_range: int = 10,
         fov: int = 45,
         sensor_type: str = 'camera',

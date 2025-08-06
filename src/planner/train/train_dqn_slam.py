@@ -64,9 +64,9 @@ class DQNTrainer:
             width=width,
             height=height,
             num_drones=self.num_agents,
-            num_entry_points=2,
-            camera_range=5,
-            fov=45,
+            num_entry_points=self.num_agents,
+            camera_range=3,
+            fov=30,
             max_steps=1000,
             render_mode=render_mode,
             randomize=False,  # Use fixed map
@@ -222,9 +222,9 @@ class DQNTrainer:
               f"Steps: {final_steps}")
 
         # Keep window open
-        for _ in range(50):
-            test_env.render()
-            time.sleep(0.1)
+        # for _ in range(50):
+        #     test_env.render()
+        #     time.sleep(0.1)
 
         train_env.close()
         test_env.close()
@@ -264,9 +264,9 @@ class DQNTrainer:
             # Accumulate rewards
             total_reward += sum(rewards.values())
 
-            # Render if enabled
-            if env.render_mode == 'human':
-                env.render()
+            # # Render if enabled
+            # if env.render_mode == 'human':
+            #     env.render()
 
             # Update state
             observations = next_observations
@@ -411,7 +411,7 @@ def compare_with_baselines(
         width=width,
         height=height,
         num_drones=3,
-        num_entry_points=2,
+        num_entry_points=3,
         camera_range=10,
         fov=60,
         max_steps=1000,
@@ -557,7 +557,7 @@ def visualize_single_episode(
         width=width,
         height=height,
         num_drones=3,
-        num_entry_points=2,
+        num_entry_points=3,
         camera_range=10,
         fov=60,
         max_steps=1000,
@@ -612,8 +612,8 @@ def visualize_single_episode(
         # Update metrics
         total_reward += sum(rewards.values())
 
-        # Render
-        env.render()
+        # # Render
+        # env.render()
 
         # Check for window close
         import pygame
@@ -655,10 +655,10 @@ def visualize_single_episode(
         print(f"  Drone {drone_id}: {count} tiles")
 
     # Keep window open for a bit
-    print("\nKeeping window open for 5 seconds...")
-    for _ in range(50):
-        env.render()
-        time.sleep(0.1)
+    # print("\nKeeping window open for 5 seconds...")
+    # for _ in range(50):
+    #     env.render()
+    #     time.sleep(0.1)
 
     env.close()
 
@@ -666,8 +666,8 @@ def visualize_single_episode(
 def main():
     """Main training script."""
     # Map paths
-    train_map = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_0.txt"
-    test_map = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_0.txt"
+    train_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_0.txt"
+    test_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_0.txt"
 
     # Check if we should just visualize
     import sys
@@ -680,7 +680,7 @@ def main():
 
     # Training configuration
     config = {
-        'num_episodes': 500,
+        'num_episodes': 20_000,
         'eval_frequency': 20,
         'save_frequency': 50,
         'render_frequency': 100,
@@ -722,7 +722,7 @@ def main():
     trainer = DQNTrainer(
         train_map_path=train_map,
         test_map_path=test_map,
-        num_agents=3,
+        num_agents=8,
         save_dir="./models/custom_dqn",
         log_dir="./logs/custom_dqn"
     )
