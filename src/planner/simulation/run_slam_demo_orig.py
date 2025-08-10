@@ -15,17 +15,16 @@ def run_random_agent_demo():
 
     # Create environment (no controller parameters!)
     env = MultiAgentSLAMGymEnv(
-        width=32, height=32, num_drones=4, num_entry_points=2,
-        camera_range=1, fov=45, max_steps=3000,
-        render_mode='human', randomize=True,
-        save_interval=50,                
-        save_dir="runs/frontier_002",     
-        save_format="png",              
-        save_true_map=True,
-        save_global_map=True,
-        save_per_drone=False             
+        width=25,
+        height=25,
+        num_drones=3,
+        num_entry_points=2,
+        camera_range=10,
+        fov=60,
+        max_steps=3000,
+        render_mode='human',
+        randomize=True
     )
-
 
     # Create agent separately
     agent = RandomAgent(num_agents=env.num_drones)
@@ -105,18 +104,16 @@ def run_frontier_agent_demo():
 
     # Create environment (no controller parameters!)
     env = MultiAgentSLAMGymEnv(
-        width=32, height=32, num_drones=4, num_entry_points=2,
-        camera_range=1, fov=45, max_steps=3000,
-        render_mode='human', randomize=True,
-        save_interval=50,                
-        save_dir="runs/frontier_002",     
-        save_format="png",              
-        save_true_map=True,
-        save_global_map=True,
-        save_per_drone=False             
+        width=32,
+        height=32,
+        num_drones=4,
+        num_entry_points=2,
+        camera_range=10,
+        fov=45,
+        max_steps=3000,
+        render_mode='human',
+        randomize=True
     )
-
-
 
     # Create frontier agent separately
     agent = FrontierAgent(num_agents=env.num_drones, camera_range=env.camera_range)
@@ -193,20 +190,18 @@ def run_hybrid_agent_demo():
     """Run a demo with hybrid agent (mix of frontier and random)."""
     print("\n=== Hybrid Agent Demo ===\n")
 
-    # Create environment (no controller parameters!)
+    # Create environment
     env = MultiAgentSLAMGymEnv(
-        width=32, height=32, num_drones=4, num_entry_points=2,
-        camera_range=1, fov=45, max_steps=3000,
-        render_mode='human', randomize=True,
-        save_interval=50,                
-        save_dir="runs/frontier_002",     
-        save_format="png",              
-        save_true_map=True,
-        save_global_map=True,
-        save_per_drone=False             
+        width=30,
+        height=30,
+        num_drones=4,
+        num_entry_points=2,
+        camera_range=10,
+        fov=60,
+        max_steps=3000,
+        render_mode='human',
+        randomize=True
     )
-
-
 
     # Create hybrid agent (50% frontier, 50% random)
     agent = HybridAgent(
@@ -299,20 +294,18 @@ def run_custom_scenario():
     print("3. Hybrid agent")
     agent_type = input("Select agent (1-3): ") or "2"
 
-    # Create environment (no controller parameters!)
+    # Create environment
     env = MultiAgentSLAMGymEnv(
-        width=32, height=32, num_drones=4, num_entry_points=2,
-        camera_range=1, fov=45, max_steps=3000,
-        render_mode='human', randomize=True,
-        save_interval=50,                
-        save_dir="runs/frontier_002",     
-        save_format="png",              
-        save_true_map=True,
-        save_global_map=True,
-        save_per_drone=False             
+        width=width,
+        height=height,
+        num_drones=num_drones,
+        num_entry_points=max(1, num_drones // 2),
+        camera_range=8,
+        fov=60,
+        max_steps=5000,
+        render_mode='human',
+        randomize=True
     )
-
-
 
     # Create agent based on selection
     if agent_type == "1":
@@ -449,7 +442,7 @@ def run_with_loaded_map():
     print("3. Hybrid agent")
     agent_type = input("Select agent (1-3): ") or "2"
 
-    # Create environment (no controller parameters!)
+    # Create environment with loaded map
     env = MultiAgentSLAMGymEnv(
         width=width,
         height=height,
@@ -460,16 +453,8 @@ def run_with_loaded_map():
         max_steps=5000,
         render_mode='human',
         randomize=False,
-        map_path=selected_map,
-        save_interval=30,                
-        save_dir="runs/frontier_002",     
-        save_format="png",              
-        save_true_map=True,
-        save_global_map=True,
-        save_per_drone=False             
+        map_path=selected_map
     )
-
-
 
     # Create agent
     if agent_type == "1":

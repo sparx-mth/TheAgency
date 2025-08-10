@@ -11,6 +11,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Set
 import pygame
 import time
+import os
 
 # Import original modules - try different import methods for compatibility
 try:
@@ -62,7 +63,14 @@ class MultiAgentSLAMGymEnv(gym.Env):
         max_steps: int = 1000,
         map_path: Optional[str] = None,
         randomize: bool = True,
-        render_mode: Optional[str] = None
+        render_mode: Optional[str] = None,
+        save_interval: int = 0,             
+        save_dir: Optional[str] = None,      
+        save_format: str = "png",            
+        save_true_map: bool = True,        
+        save_global_map: bool = True,      
+        save_per_drone: bool = False  
+        
     ):
         """
         Initialize the multi-agent SLAM environment.
@@ -94,6 +102,12 @@ class MultiAgentSLAMGymEnv(gym.Env):
         self.map_path = map_path
         self.randomize = randomize
         self.render_mode = render_mode
+        self.save_interval = int(save_interval or 0)
+        self.save_dir = save_dir
+        self.save_format = save_format
+        self.save_true_map = save_true_map
+        self.save_global_map = save_global_map
+        self.save_per_drone = save_per_drone
 
         # Communication bus
         self.comm = LocalCommBus()
@@ -182,6 +196,39 @@ class MultiAgentSLAMGymEnv(gym.Env):
                     shape=(1,), dtype=np.int32
                 )
             })
+
+    def _maybe_save_snapshot(self, info: Dict[str, Any]) -> None:
+        """Save maps every save_interval steps according to config."""
+        if not self.save_interval or self.current_step % self.save_interval != 0:
+            return
+
+        save_dir = self.save_dir or f"saved_maps/{int(self.start_time)}"
+        os.makedirs(save_dir, exist_ok=True)
+        stamp = f"{self.current_step:06d}"
+
+        if self.save_format == "png":
+            def _save(arr, path):
+                import matplotlib.pyplot as plt
+                plt.imshow(arr, cmap="gray", vmin=-1, vmax=6)
+                plt.axis("off")
+                plt.savefig(path, bbox_inches="tight", pad_inches=0)
+                plt.close()
+        else:
+            def _save(arr, path):
+                np.save(path, arr)
+
+        if self.save_true_map and "true_map" in info:
+            _save(info["true_map"], os.path.join(save_dir, f"true_map_{stamp}.{self.save_format}"))
+
+        if self.save_global_map and "global_map" in info:
+            _save(info["global_map"], os.path.join(save_dir, f"global_map_{stamp}.{self.save_format}"))
+
+        if self.save_per_drone:
+            for i, drone in enumerate(self.env.drones):
+                if getattr(drone, "local_map", None) is not None:
+                    _save(drone.local_map, os.path.join(save_dir, f"drone{i}_local_{stamp}.{self.save_format}"))
+
+
 
     def _compute_reachable_mask(self) -> np.ndarray:
         """Compute reachable/discoverable tiles."""
@@ -344,6 +391,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
             truncated[agent_id] = trunc
 
         info = self._get_info()
+        self._maybe_save_snapshot(info)
 
         return observations, rewards, dones, truncated, info
 
