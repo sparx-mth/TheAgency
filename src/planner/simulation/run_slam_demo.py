@@ -15,12 +15,12 @@ def run_random_agent_demo():
 
     # Create environment (no controller parameters!)
     env = MultiAgentSLAMGymEnv(
-        width=25,
-        height=25,
-        num_drones=3,
-        num_entry_points=2,
+        width=10,
+        height=10,
+        num_drones=1,
+        num_entry_points=1,
         camera_range=10,
-        fov=60,
+        fov=90,
         max_steps=3000,
         render_mode='human',
         randomize=True
@@ -107,9 +107,9 @@ def run_frontier_agent_demo():
         width=32,
         height=32,
         num_drones=4,
-        num_entry_points=2,
+        num_entry_points=1,
         camera_range=10,
-        fov=45,
+        fov=90,
         max_steps=3000,
         render_mode='human',
         randomize=True
@@ -197,7 +197,7 @@ def run_hybrid_agent_demo():
         num_drones=4,
         num_entry_points=2,
         camera_range=10,
-        fov=60,
+        fov=90,
         max_steps=3000,
         render_mode='human',
         randomize=True
@@ -300,8 +300,8 @@ def run_custom_scenario():
         height=height,
         num_drones=num_drones,
         num_entry_points=max(1, num_drones // 2),
-        camera_range=8,
-        fov=60,
+        camera_range=10,
+        fov=90,
         max_steps=5000,
         render_mode='human',
         randomize=True
@@ -386,7 +386,7 @@ def run_with_loaded_map():
     import glob
 
     # Map directory
-    map_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps"
+    map_dir = "/home/user/nadav/TheAgency/resources/planner/maps"
 
     # Check if directory exists
     if not os.path.exists(map_dir):
@@ -449,7 +449,7 @@ def run_with_loaded_map():
         num_drones=num_drones,
         num_entry_points=2,
         camera_range=10,
-        fov=60,
+        fov=90,
         max_steps=5000,
         render_mode='human',
         randomize=False,

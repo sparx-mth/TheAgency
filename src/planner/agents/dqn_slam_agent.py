@@ -1,8 +1,8 @@
 """
-Custom DQN Agent with Fixed 44x44 Input - Single Network for All Drones
+Custom DQN Agent with Fixed 10x19 Input - Single Network for All Drones
 
 This agent uses:
-- 44x44 global map input (what all drones have discovered)
+- 10x19 global map input (what all drones have discovered)
 - Current drone's pose (x, y, orientation)
 - Single shared network for all drones
 """
@@ -22,10 +22,10 @@ print(device)
 
 class FixedSizeDQNetwork(nn.Module):
     """
-    DQN Network with fixed 44x44 input size.
+    DQN Network with fixed 10x19 input size.
 
     Input:
-    - 44x44 global map (padded if necessary)
+    - 10x19 global map (padded if necessary)
     - Current robot's pose (x, y, orientation)
 
     Output:
@@ -35,14 +35,14 @@ class FixedSizeDQNetwork(nn.Module):
     def __init__(self, num_actions: int = 4):
         super(FixedSizeDQNetwork, self).__init__()
 
-        # CNN for 44x44 map processing
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=5, stride=2, padding=2)  # 44x44 -> 22x22
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)  # 22x22 -> 11x11
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1) # 11x11 -> 11x11
-        self.conv4 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1) # 11x11 -> 11x11
+        # Modified CNN for 10x19 map processing
+        # Note: Using smaller kernels and strides due to smaller input
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)  # 10x10 -> 10x10
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)  # 10x10 -> 10x10
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=0) # 10x10 -> 8x8
 
-        # Calculate flattened size: 11 * 11 * 128 = 15,488
-        conv_output_size = 11 * 11 * 128
+        # Calculate flattened size: 8 * 17 * 128 = 17,408
+        conv_output_size = 8 * 8 * 128
 
         # Pose features: current robot (x,y,θ) = 3 features
         pose_features_size = 3
@@ -61,7 +61,7 @@ class FixedSizeDQNetwork(nn.Module):
         Forward pass.
 
         Args:
-            map_input: Tensor of shape (batch, 1, 44, 44)
+            map_input: Tensor of shape (batch, 1, 10, 19)
             pose_input: Tensor of shape (batch, 3) containing:
                        [current_robot_x, current_robot_y, current_robot_theta]
 
@@ -72,7 +72,6 @@ class FixedSizeDQNetwork(nn.Module):
         x = F.relu(self.conv1(map_input))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
 
         # Flatten CNN output
         x = x.view(x.size(0), -1)
@@ -93,7 +92,7 @@ class FixedSizeDQNetwork(nn.Module):
 
 class CustomDQNAgent(BaseSLAMAgent):
     """
-    Custom DQN Agent with fixed 44x44 input using a single shared network.
+    Custom DQN Agent with fixed 10x19 input using a single shared network.
 
     This agent:
     - Uses global map (what all drones have discovered)
@@ -105,14 +104,14 @@ class CustomDQNAgent(BaseSLAMAgent):
         self,
         num_agents: int = 3,
         learning_rate: float = 1e-4,
-        gamma: float = 0.99,
+        gamma: float = 0.9,
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.01,
         epsilon_decay: float = 0.995,
-        buffer_size: int = 10000,
+        buffer_size: int = 10_000,
         batch_size: int = 64,
         update_frequency: int = 4,
-        target_update_frequency: int = 100
+        target_update_frequency: int = 2000
     ):
         super().__init__(num_agents)
 
@@ -125,8 +124,9 @@ class CustomDQNAgent(BaseSLAMAgent):
         self.update_frequency = update_frequency
         self.target_update_frequency = target_update_frequency
 
-        # Fixed input size
-        self.input_size = 44
+        # Fixed input size - changed to 10x19
+        self.input_height = 10
+        self.input_width = 10
 
         # Single shared network for all drones
         self.q_network = FixedSizeDQNetwork().to(device)
@@ -184,7 +184,7 @@ class CustomDQNAgent(BaseSLAMAgent):
         Prepare the fixed-size input for the network.
 
         Returns:
-            map_tensor: 44x44 padded global map
+            map_tensor: 10x19 padded global map
             pose_tensor: 3-element tensor with current drone's pose
         """
         # Use global map if available, otherwise use local map
@@ -193,15 +193,17 @@ class CustomDQNAgent(BaseSLAMAgent):
         else:
             map_array = obs['local_map'].astype(np.float32)
 
-        # Normalize to [0, 1]
-        map_array = (map_array + 1) / 7.0  # Normalize from [-1, 6] to [0, 1]
+        map_array = np.where(map_array == 2, 0, map_array)
 
-        # Pad to 44x44 if necessary
+        # Normalize to [0, 1]
+        map_array = (map_array + 1) / 2.0  # Normalize from [-1, 1] to [0, 1]
+
+        # Pad to 10x19 if necessary
         h, w = map_array.shape
-        if h < self.input_size or w < self.input_size:
+        if h < self.input_height or w < self.input_width:
             # Calculate padding
-            pad_h = max(0, self.input_size - h)
-            pad_w = max(0, self.input_size - w)
+            pad_h = max(0, self.input_height - h)
+            pad_w = max(0, self.input_width - w)
 
             # Pad symmetrically
             pad_top = pad_h // 2
@@ -216,20 +218,21 @@ class CustomDQNAgent(BaseSLAMAgent):
                 mode='constant',
                 constant_values=0
             )
-        elif h > self.input_size or w > self.input_size:
+        elif h > self.input_height or w > self.input_width:
             # If larger, take center crop
-            start_h = (h - self.input_size) // 2
-            start_w = (w - self.input_size) // 2
+            start_h = max(0, (h - self.input_height) // 2)
+            start_w = max(0, (w - self.input_width) // 2)
             map_array = map_array[
-                start_h:start_h + self.input_size,
-                start_w:start_w + self.input_size
+                start_h:start_h + self.input_height,
+                start_w:start_w + self.input_width
             ]
 
-        # Ensure exactly 44x44
-        assert map_array.shape == (self.input_size, self.input_size), f"Map shape {map_array.shape} != 44x44"
+        # Ensure exactly 10x19
+        assert map_array.shape == (self.input_height, self.input_width), \
+            f"Map shape {map_array.shape} != {self.input_height}x{self.input_width}"
 
         # Create map tensor with channel dimension
-        map_tensor = torch.tensor(map_array, dtype=torch.float32).unsqueeze(0)  # (1, 44, 44)
+        map_tensor = torch.tensor(map_array, dtype=torch.float32).unsqueeze(0)  # (1, 10, 19)
 
         # Prepare pose features for current drone only
         # Normalize positions to [0, 1] assuming max map size of 100
@@ -276,6 +279,7 @@ class CustomDQNAgent(BaseSLAMAgent):
 
         # Update target network
         if self.steps % self.target_update_frequency == 0:
+            print('target network update')
             self.target_network.load_state_dict(self.q_network.state_dict())
 
     def _train_step(self):

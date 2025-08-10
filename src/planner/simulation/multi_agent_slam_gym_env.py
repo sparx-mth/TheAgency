@@ -23,7 +23,7 @@ try:
         TILE_SIZE, FPS, MAX_TIME, TILE_NAME
     )
     from planner.simulation.sensors.camera_sensor import CameraSensor
-    from planner.simulation.sensors.bresenham_fov import BresenhamFOVSensor
+    # from planner.simulation.sensors.bresenham_fov import BresenhamFOVSensor
     from planner.communication.local_bus import LocalCommBus
 except ImportError:
     # Relative imports (when running from within the package)
@@ -35,7 +35,7 @@ except ImportError:
         TILE_SIZE, FPS, MAX_TIME, TILE_NAME
     )
     from .sensors.camera_sensor import CameraSensor
-    from .sensors.bresenham_fov import BresenhamFOVSensor
+    # from .sensors.bresenham_fov import BresenhamFOVSensor
     from ..communication.local_bus import LocalCommBus
 
 
@@ -129,10 +129,10 @@ class MultiAgentSLAMGymEnv(gym.Env):
         )
 
         # Override sensor type if needed
-        if self.sensor_type == 'bresenham':
-            for drone in self.env.drones:
-                drone.sensor_manager.sensors.clear()
-                drone.sensor_manager.add_sensor(BresenhamFOVSensor(self.camera_range))
+        # if self.sensor_type == 'bresenham':
+        for drone in self.env.drones:
+            drone.sensor_manager.sensors.clear()
+            drone.sensor_manager.add_sensor(CameraSensor(self.camera_range, self.fov))
 
         # Compute reachable mask for progress tracking
         self.reachable_mask = self._compute_reachable_mask()
@@ -296,7 +296,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 time_penalty = -0.001  # Small time penalty
                 collision_penalty = -0.5 if drone.collided else 0.0  # Collision penalty
 
-                reward = discovery_reward + time_penalty + collision_penalty
+                reward = discovery_reward # + time_penalty + collision_penalty
 
                 # Store reward components
                 self.last_reward_components[agent_id] = {

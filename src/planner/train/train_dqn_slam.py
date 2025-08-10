@@ -65,8 +65,8 @@ class DQNTrainer:
             height=height,
             num_drones=self.num_agents,
             num_entry_points=self.num_agents,
-            camera_range=5,
-            fov=45,
+            camera_range=3,
+            fov=90,
             max_steps=1000,
             render_mode=render_mode,
             randomize=False,  # Use fixed map
@@ -77,7 +77,7 @@ class DQNTrainer:
 
     def train(
         self,
-        num_episodes: int = 10_000,
+        num_episodes: int = 3,
         eval_frequency: int = 20,
         save_frequency: int = 50,
         render_frequency: int = 100,
@@ -108,14 +108,14 @@ class DQNTrainer:
         agent = CustomDQNAgent(
             num_agents=self.num_agents,
             learning_rate=learning_rate,
-            gamma=0.99,
+            gamma=0.95,
             epsilon_start=1.0,
             epsilon_end=0.05,
             epsilon_decay=0.995,
             buffer_size=20000,
             batch_size=batch_size,
             update_frequency=4,
-            target_update_frequency=100
+            target_update_frequency=2500
         )
 
         print("\nStarting training...")
@@ -416,10 +416,10 @@ def compare_with_baselines(
     env = MultiAgentSLAMGymEnv(
         width=width,
         height=height,
-        num_drones=3,
-        num_entry_points=2,
-        camera_range=10,
-        fov=60,
+        num_drones=1,
+        num_entry_points=1,
+        camera_range=3,
+        fov=90,
         max_steps=1000,
         render_mode=None,
         randomize=False,
@@ -428,14 +428,14 @@ def compare_with_baselines(
 
     # Initialize agents
     agents = {
-        'Random': RandomAgent(num_agents=3),
-        'Frontier': FrontierAgent(num_agents=3, camera_range=10),
-        'DQN (Untrained)': CustomDQNAgent(num_agents=3, epsilon_start=0.0),
+        'Random': RandomAgent(num_agents=1),
+        'Frontier': FrontierAgent(num_agents=1, camera_range=3),
+        'DQN (Untrained)': CustomDQNAgent(num_agents=1, epsilon_start=0.0),
     }
 
     # Load trained DQN if available
     if trained_model_path and os.path.exists(trained_model_path):
-        trained_dqn = CustomDQNAgent(num_agents=3, epsilon_start=0.0)
+        trained_dqn = CustomDQNAgent(num_agents=1, epsilon_start=0.0)
         trained_dqn.load(trained_model_path)
         agents['DQN (Trained)'] = trained_dqn
         print(f"Loaded trained model from {trained_model_path}")
@@ -562,10 +562,10 @@ def visualize_single_episode(
     env = MultiAgentSLAMGymEnv(
         width=width,
         height=height,
-        num_drones=3,
-        num_entry_points=2,
-        camera_range=10,
-        fov=60,
+        num_drones=1,
+        num_entry_points=1,
+        camera_range=3,
+        fov=90,
         max_steps=1000,
         render_mode='human',
         randomize=False,
@@ -573,7 +573,7 @@ def visualize_single_episode(
     )
 
     # Create agent
-    agent = CustomDQNAgent(num_agents=3, epsilon_start=0.0)  # No exploration
+    agent = CustomDQNAgent(num_agents=1, epsilon_start=0.0)  # No exploration
 
     # Load trained model if provided
     if model_path and os.path.exists(model_path):
@@ -672,8 +672,8 @@ def visualize_single_episode(
 def main():
     """Main training script."""
     # Map paths
-    train_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_0.txt"
-    test_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_0.txt"
+    train_map = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_10.txt"
+    test_map = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_10.txt"
 
     # Check if we should just visualize
     import sys
@@ -735,7 +735,7 @@ def main():
     trainer = DQNTrainer(
         train_map_path=train_map,
         test_map_path=test_map,
-        num_agents=8,
+        num_agents=1,
         save_dir="./models/custom_dqn",
         log_dir="./logs/custom_dqn"
     )
