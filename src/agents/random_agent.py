@@ -1,63 +1,154 @@
 """
-Random SLAM Agent - Simple random exploration strategy
+agents/random_agent.py
 
-This agent implements a basic random walk strategy with a bias towards
-forward movement. It serves as a baseline for comparison with more
-sophisticated agents.
+This file implements a simple random exploration agent for the SLAM environment.
+The random agent serves as a baseline for comparison and testing, making decisions
+through random action selection with a configurable bias toward forward movement.
+
+This agent is useful for:
+- Baseline performance comparison
+- Testing environment stability
+- Generating diverse exploration patterns
+- Simple exploration when computation is limited
 """
 
 import random
-from typing import Dict, Any
-from .base_slam_agent import BaseSLAMAgent
+from typing import Any, Dict, Union
+
+from .base_agent import BaseSLAMAgent
+from core.constants import Action
 
 
 class RandomAgent(BaseSLAMAgent):
     """
-    Simple random agent for baseline comparison.
+    Random exploration agent with configurable forward bias.
 
-    This agent chooses actions randomly with a preference for forward movement.
-    It's useful as a baseline to compare against more intelligent agents.
+    This agent selects actions randomly but with a preference for forward
+    movement to encourage exploration rather than spinning in place.
+
+    Attributes:
+        forward_bias: Probability of choosing forward movement (0-1)
+        action_history: List tracking recent actions for analysis
     """
 
-    def __init__(self, num_agents: int, forward_bias: float = 0.6):
+    def __init__(
+        self,
+        num_agents: int = 1,
+        forward_bias: float = 0.6,
+        seed: int = None
+    ):
         """
         Initialize the random agent.
 
         Args:
-            num_agents: Number of agents in the environment
-            forward_bias: Probability of choosing forward movement (0-1)
+            num_agents: Number of agents to control
+            forward_bias: Probability of moving forward (0-1)
+                         Higher values lead to more exploration
+                         Lower values lead to more turning
+            seed: Random seed for reproducibility
         """
         super().__init__(num_agents)
         self.forward_bias = forward_bias
+        self.action_history = []
 
-    def get_actions(self, observations: Dict[int, Any], info: Dict[str, Any]) -> Dict[int, int]:
+        if seed is not None:
+            random.seed(seed)
+
+    def get_actions(
+        self,
+        observations: Union[Dict, Any],
+        info: Dict[str, Any]
+    ) -> Union[int, Dict[int, int]]:
         """
-        Get random actions for all agents.
+        Get random actions with forward bias.
 
-        The agent has a bias towards forward movement to encourage exploration
-        rather than just spinning in place.
+        Args:
+            observations: Current observations from environment
+            info: Additional environment information
 
-        Action indices:
-        - 0: FORWARD
-        - 1: TURN_LEFT
-        - 2: TURN_RIGHT
-        - 3: STAY
+        Returns:
+            Random actions for all controlled agents
         """
-        actions = {}
+        if self.is_single_agent:
+            # Single agent case
+            action = self._get_single_action(observations)
+            self.action_history.append(action)
+            return action
+        else:
+            # Multi-agent case
+            actions = {}
+            for agent_id in range(self.num_agents):
+                obs = observations[agent_id]
+                action = self._get_single_action(obs)
+                actions[agent_id] = action
+                self.action_history.append((agent_id, action))
+            return actions
 
-        for agent_id, obs in observations.items():
-            # Get the active status for this specific drone
-            drone_active = obs['drone_active'][agent_id]
+    def _get_single_action(self, obs: Dict) -> int:
+        """
+        Get a random action for a single agent.
 
-            if drone_active:
-                # Bias towards forward movement
-                if random.random() < self.forward_bias:
-                    actions[agent_id] = 0  # FORWARD
-                else:
-                    # Randomly choose between turning and staying
-                    actions[agent_id] = random.choice([1, 2, 3])  # TURN_LEFT, TURN_RIGHT, STAY
-            else:
-                # Inactive agents must stay
-                actions[agent_id] = 3  # STAY
+        Args:
+            obs: Observation dictionary for one agent
 
-        return actions
+        Returns:
+            Random action integer
+        """
+        # Check if agent is active
+        if not obs.get('active', 1):  # Default to active if not present
+            return Action.STAY
+
+        # Random action with forward bias
+        if random.random() < self.forward_bias:
+            return Action.FORWARD
+        else:
+            # Randomly choose between turning and staying
+            return random.choice([
+                Action.TURN_LEFT,
+                Action.TURN_RIGHT,
+                Action.STAY
+            ])
+
+    def reset(self) -> None:
+        """Reset the agent's internal state."""
+        self.action_history.clear()
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """
+        Get agent metrics.
+
+        Returns:
+            Dictionary with action distribution statistics
+        """
+        if not self.action_history:
+            return {}
+
+        # Calculate action distribution
+        action_counts = {
+            'forward': 0,
+            'turn_left': 0,
+            'turn_right': 0,
+            'stay': 0
+        }
+
+        for action in self.action_history:
+            if isinstance(action, tuple):
+                action = action[1]  # Multi-agent case
+
+            if action == Action.FORWARD:
+                action_counts['forward'] += 1
+            elif action == Action.TURN_LEFT:
+                action_counts['turn_left'] += 1
+            elif action == Action.TURN_RIGHT:
+                action_counts['turn_right'] += 1
+            elif action == Action.STAY:
+                action_counts['stay'] += 1
+
+        total_actions = len(self.action_history)
+
+        return {
+            'total_actions': total_actions,
+            'forward_ratio': action_counts['forward'] / total_actions if total_actions > 0 else 0,
+            'turn_ratio': (action_counts['turn_left'] + action_counts['turn_right']) / total_actions if total_actions > 0 else 0,
+            'stay_ratio': action_counts['stay'] / total_actions if total_actions > 0 else 0,
+        }

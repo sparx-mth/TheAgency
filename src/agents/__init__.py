@@ -1,6 +1,12 @@
+"""
+agents/__init__.py
+
+Agents package initialization. Exports all agent classes.
+"""
+
+from .base_agent import BaseSLAMAgent
 from .random_agent import RandomAgent
 from .frontier_agent import FrontierAgent
-from .hybrid_agent import HybridAgent
-from .dqn_slam_agent import CustomDQNAgent
+# Note: spiral_agent and hybrid_agent can be added when implemented
 
-__all__ = ["RandomAgent", "FrontierAgent", "HybridAgent", "CustomDQNAgent"]
+__all__ = ['BaseSLAMAgent', 'RandomAgent', 'FrontierAgent']
