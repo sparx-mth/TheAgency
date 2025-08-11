@@ -28,16 +28,18 @@ by a centralized planner or controller.
 import numpy as np
 import random
 from typing import List, Tuple, Optional, Dict, Literal, TYPE_CHECKING
-from simulation.world.simulation_constants import DIRECTIONS, FACING_DIRECTION, FACING_TO_DELTA, FACING_DIRECTIONS, DIRECTION_COMMANDS
+from simulation.world.simulation_constants import DIRECTIONS, FACING_DIRECTION, FACING_TO_DELTA, FACING_DIRECTIONS, \
+    DIRECTION_COMMANDS
 from simulation.sensors.sensor_manager import SensorManager
 from communication.comm_interface import CommunicationInterface
+
 if TYPE_CHECKING:
     from envs.grid_map_env import GridMapEnv
 
 
 def turn(
-    facing: FACING_DIRECTION,
-    action: Literal['TURN_LEFT', 'TURN_RIGHT']
+        facing: FACING_DIRECTION,
+        action: Literal['TURN_LEFT', 'TURN_RIGHT']
 ) -> FACING_DIRECTION:
     """
     Computes the new facing direction after applying a turn action.
@@ -61,9 +63,8 @@ class Drone:
     """
     Represents a mobile SLAM drone operating within a 2D grid environment.
 
-    Each drone is responsible for navigating the environment, maintaining a local
-    map based on its sensors, and reporting its state and discoveries to a central
-    controller via a communication interface.
+    Modified version that doesn't maintain a local map - just reports
+    what it can sense to be added to the global map.
 
     Key Attributes:
     - id: Unique identifier.
@@ -72,20 +73,18 @@ class Drone:
     - entry_time: Simulation tick when the drone becomes active.
     - active: Whether the drone is currently active.
     - path_history: List of visited positions.
-    - local_map: The internal map built from the drone’s observations.
     - sensor_manager: Manages one or more attached sensors.
     - comm: Interface to send/receive state and instructions.
-
-    This class is used in multi-agent SLAM simulations to explore and map unknown environments.
     """
+
     def __init__(
-        self,
-        drone_id: int,
-        start_pos: Tuple[int, int],
-        comm_interface: CommunicationInterface,
-        entry_time: int = 0,
-        facing_direction: FACING_DIRECTION = 'NORTH',
-        sensors: Optional[List] = None
+            self,
+            drone_id: int,
+            start_pos: Tuple[int, int],
+            comm_interface: CommunicationInterface,
+            entry_time: int = 0,
+            facing_direction: FACING_DIRECTION = 'NORTH',
+            sensors: Optional[List] = None
     ):
         """
         Initialize a new drone.
@@ -102,7 +101,7 @@ class Drone:
         self.pos: Tuple[int, int] = start_pos
         self.entry_time: int = entry_time
         self.active: bool = False
-        self.local_map: Optional[np.ndarray] = None
+        self.local_map: Optional[np.ndarray] = None  # Not used in shared map version
         self.path_history: List[Tuple[int, int]] = [start_pos]
         self.collided: bool = False
         self.comm: CommunicationInterface = comm_interface
@@ -114,8 +113,9 @@ class Drone:
                 self.sensor_manager.add_sensor(sensor)
 
     def initialize_map(self, map_shape: Tuple[int, int]) -> None:
-        """Initialize the local map with unknown (-1) values."""
-        self.local_map = np.full(map_shape, -1, dtype=np.int8)  # -1 = unknown
+        """Initialize the local map - not used in shared map version."""
+        # In the shared map version, we don't maintain individual maps
+        self.local_map = None
 
     def activate(self, current_time: int) -> None:
         """Activate the drone if current_time ≥ entry_time."""
@@ -125,14 +125,14 @@ class Drone:
 
     def move(self, action: DIRECTIONS, env: "GridMapEnv") -> List[Tuple[int, int, int]]:
         """
-        Move the drone based on an action and update discoveries.
+        Move the drone based on an action and return discoveries.
 
         Args:
             action (DIRECTIONS): Movement or rotation command.
             env (GridMapEnv): The environment for movement and sensing.
 
         Returns:
-            List[Tuple[int, int, int]]: List of newly discovered (x, y, val) tiles.
+            List[Tuple[int, int, int]]: List of sensed (x, y, val) tiles.
         """
         if not self.active:
             return []
@@ -147,15 +147,21 @@ class Drone:
             dx, dy = FACING_TO_DELTA[self.facing_direction]
             new_x, new_y = self.pos[0] + dx, self.pos[1] + dy
 
+            # Note: In the modified environment, collision checking happens
+            # at the environment level, not here. The drone just attempts to move.
+
+            # Check if it would be a collision (for internal state tracking)
             if env.is_collision(new_x, new_y):
                 self.collided = True
-                return []
+                # Don't actually move, but still sense from current position
+                new_discoveries = self.sense(env)
+            else:
+                # Move to new position
+                self.pos = (new_x, new_y)
+                self.path_history.append(self.pos)
+                self.collided = False
+                new_discoveries = self.sense(env)
 
-            self.pos = (new_x, new_y)
-            self.path_history.append(self.pos)
-            self.collided = False
-
-            new_discoveries = self.sense(env)
             self.comm.broadcast_state(self.id, self._make_state(new_discoveries))
             return new_discoveries
 
@@ -165,31 +171,30 @@ class Drone:
             return new_discoveries
 
         else:
-            raise ValueError(f"Invalid action for constrained drone: {action}")
+            raise ValueError(f"Invalid action for drone: {action}")
 
     def sense(self, env: "GridMapEnv") -> List[Tuple[int, int, int]]:
         """
-        Use the drone's sensors to scan and update the local map.
+        Use the drone's sensors to scan the environment.
+
+        In the shared map version, we just return what we can see,
+        not tracking what's new locally.
 
         Returns:
-            List of newly discovered (x, y, val) tiles.
+            List of all sensed (x, y, val) tiles.
         """
         if not self.active:
             return []
 
+        # Get all observations from sensors
         observations = self.sensor_manager.sense_all(self.pos, self.facing_direction, env)
-        new_discoveries = []
 
-        for x, y, val in observations:
-            if self.local_map[y, x] != val:
-                self.local_map[y, x] = val
-                new_discoveries.append((x, y, val))
-
-        return new_discoveries
+        # Return all observations (environment will handle what's new)
+        return observations
 
     def _make_state(self, new_discoveries: List[Tuple[int, int, int]]) -> Dict:
         """
-        Package the drone’s current state for broadcasting to the controller.
+        Package the drone's current state for broadcasting to the controller.
 
         Args:
             new_discoveries (List[Tuple[int, int, int]]):
@@ -208,8 +213,8 @@ class Drone:
         }
 
     def get_observed_map(self) -> Optional[np.ndarray]:
-        """Returns the current local map observed by the drone."""
-        return self.local_map
+        """Returns None in shared map version."""
+        return None
 
     def get_position(self) -> Tuple[int, int]:
         """Returns the drone's current position on the map."""

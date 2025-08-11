@@ -1,8 +1,8 @@
 """
-Multi-Agent SLAM Gym Environment - Refactored for Clean Separation
+Multi-Agent SLAM Gym Environment - Modified for Shared Global Map
 
 This module provides a Gym-compatible multi-agent environment for SLAM simulation
-with complete separation between environment and agent logic.
+with a single shared global map and simplified observations.
 """
 
 import gymnasium as gym
@@ -20,17 +20,18 @@ from simulation.world.simulation_constants import (
     TILE_SIZE, FPS, MAX_TIME, TILE_NAME
 )
 from simulation.sensors.camera_sensor import CameraSensor
-# from simulation.sensors.bresenham_fov import BresenhamFOVSensor
 from communication.local_bus import LocalCommBus
 
 
 class MultiAgentSLAMGymEnv(gym.Env):
     """
-    Multi-Agent SLAM Environment following Gym conventions.
+    Multi-Agent SLAM Environment with shared global map.
 
-    This environment provides a pure simulation without any agent logic.
-    Agents should be implemented separately and interact with the environment
-    through the standard Gym interface.
+    All agents share a single global map and the observation includes:
+    - The global map (what has been discovered so far)
+    - Positions of all drones
+    - Facing directions of all drones
+    - Active status of all drones
     """
 
     metadata = {'render.modes': ['human', 'rgb_array']}
@@ -98,6 +99,9 @@ class MultiAgentSLAMGymEnv(gym.Env):
         self.current_step = 0
         self.start_time = None
 
+        # Global map shared by all drones (initially unknown)
+        self.global_map = None
+
     def _init_environment(self):
         """Initialize the grid environment and drones."""
         # Create grid environment with drones
@@ -113,11 +117,12 @@ class MultiAgentSLAMGymEnv(gym.Env):
             fov=self.fov
         )
 
-        # Override sensor type if needed
-        # if self.sensor_type == 'bresenham':
+        # Configure sensors for all drones
         for drone in self.env.drones:
             drone.sensor_manager.sensors.clear()
             drone.sensor_manager.add_sensor(CameraSensor(self.camera_range, self.fov))
+            # Remove individual drone maps since we'll use a global one
+            drone.local_map = None
 
         # Compute reachable mask for progress tracking
         self.reachable_mask = self._compute_reachable_mask()
@@ -135,35 +140,34 @@ class MultiAgentSLAMGymEnv(gym.Env):
             for agent_id in self.agents
         }
 
-        # Observation space
+        # Simplified observation space - same for all agents
         self.observation_spaces = {}
         for agent_id in self.agents:
             self.observation_spaces[agent_id] = spaces.Dict({
-                # Drone's local map
-                'local_map': spaces.Box(
+                # Shared global map
+                'global_map': spaces.Box(
                     low=-1, high=6,
                     shape=(self.height, self.width),
                     dtype=np.int8
                 ),
-                # Current position
-                'position': spaces.Box(
+                # All drone positions (num_drones, 2)
+                'drone_positions': spaces.Box(
                     low=0, high=max(self.width, self.height),
-                    shape=(2,), dtype=np.int32
+                    shape=(self.num_drones, 2), dtype=np.int32
                 ),
-                # Facing direction (0-3)
-                'facing_direction': spaces.Discrete(4),
-                # Whether drone is active
-                'active': spaces.Discrete(2),
-                # Last collision status
-                'collided': spaces.Discrete(2),
-                # Entry time
-                'entry_time': spaces.Box(
-                    low=0, high=self.max_steps,
-                    shape=(1,), dtype=np.int32
+                # All drone facing directions (0-3 for NORTH, EAST, SOUTH, WEST)
+                'drone_directions': spaces.Box(
+                    low=0, high=3,
+                    shape=(self.num_drones,), dtype=np.int32
                 ),
-                # New discoveries from last action
-                'new_discoveries': spaces.Box(
-                    low=-1, high=max(self.width * self.height, 100),
+                # Whether each drone is active
+                'drone_active': spaces.Box(
+                    low=0, high=1,
+                    shape=(self.num_drones,), dtype=np.int32
+                ),
+                # Current agent's ID for reference
+                'agent_id': spaces.Box(
+                    low=0, high=self.num_drones-1,
                     shape=(1,), dtype=np.int32
                 )
             })
@@ -189,7 +193,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
                     if not visited[ny, nx] and self.env.grid[ny, nx] not in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}:
                         queue.append((ny, nx))
 
-        # Phase 2: Build final reachable mask
+        # Phase 2: Build final reachable mask (including walls adjacent to walkable areas)
         final_reachable = walkable_reachable.copy()
         for y in range(height):
             for x in range(width):
@@ -223,16 +227,16 @@ class MultiAgentSLAMGymEnv(gym.Env):
         # Clear communication bus
         self.comm.clear()
 
-        # Store new discoveries for each drone
-        self.last_discoveries = {agent_id: [] for agent_id in self.agents}
+        # Initialize global map as unknown
+        self.global_map = np.full((self.height, self.width), -1, dtype=np.int8)
 
-        # Store reward components for debugging
-        self.last_reward_components = {agent_id: {} for agent_id in self.agents}
+        # Store collision flags for each drone
+        self.collision_flags = {agent_id: False for agent_id in self.agents}
 
         # Get initial observations
         observations = {}
-        for agent_id, drone in enumerate(self.env.drones):
-            observations[agent_id] = self._get_observation(drone, agent_id)
+        for agent_id in self.agents:
+            observations[agent_id] = self._get_observation(agent_id)
 
         info = self._get_info()
 
@@ -269,40 +273,59 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 if agent_id not in actions:
                     raise ValueError(f"No action provided for active agent {agent_id}")
 
-                # Use provided action
+                # Get action
                 action = DIRECTION_COMMANDS[actions[agent_id]]
 
-                # Execute movement
-                new_discoveries = drone.move(action, self.env)
-                self.last_discoveries[agent_id] = new_discoveries
+                # Check for collision BEFORE moving
+                collision_occurred = False
+                if action == 'FORWARD':
+                    dx, dy = FACING_TO_DELTA[drone.facing_direction]
+                    new_x, new_y = drone.pos[0] + dx, drone.pos[1] + dy
 
-                # Calculate reward (exploration-based)
-                discovery_reward = len(new_discoveries) * 0.1  # Small reward per discovery
+                    # Check if the new position would cause a collision
+                    if not (0 <= new_x < self.env.width and 0 <= new_y < self.env.height):
+                        collision_occurred = True
+                    elif self.env.grid[new_y, new_x] in {WALL, DOOR_CLOSED, OUT_OF_BOUNDS}:
+                        collision_occurred = True
+                    else:
+                        # Check collision with other drones
+                        for other_id, other_drone in enumerate(self.env.drones):
+                            if other_id != agent_id and other_drone.active:
+                                if other_drone.pos == (new_x, new_y):
+                                    collision_occurred = True
+                                    break
+
+                self.collision_flags[agent_id] = collision_occurred
+
+                # Execute movement (even if collision - drone stays in place)
+                if collision_occurred and action == 'FORWARD':
+                    # Don't actually move, but still sense
+                    sensed_tiles = drone.sense(self.env)
+                else:
+                    # Normal movement
+                    sensed_tiles = drone.move(action, self.env)
+
+                # Update global map with sensed tiles (only update unknown cells)
+                new_discoveries = []
+                for x, y, val in sensed_tiles:
+                    if 0 <= y < self.height and 0 <= x < self.width:
+                        if self.global_map[y, x] == -1:
+                            self.global_map[y, x] = val
+                            new_discoveries.append((x, y, val))
+
+                # Calculate reward
+                discovery_reward = len(new_discoveries) * 0.1  # Reward for discovery
+                collision_penalty = -1.0 if collision_occurred else 0.0  # Penalty for collision
                 time_penalty = -0.001  # Small time penalty
-                collision_penalty = -0.5 if drone.collided else 0.0  # Collision penalty
 
-                reward = discovery_reward # + time_penalty + collision_penalty
-
-                # Store reward components
-                self.last_reward_components[agent_id] = {
-                    'discovery_reward': discovery_reward,
-                    'time_penalty': time_penalty,
-                    'collision_penalty': collision_penalty,
-                    'total': reward
-                }
+                reward = discovery_reward + collision_penalty + time_penalty
 
             else:
                 reward = 0.0
-                self.last_discoveries[agent_id] = []
-                self.last_reward_components[agent_id] = {
-                    'discovery_reward': 0.0,
-                    'time_penalty': 0.0,
-                    'collision_penalty': 0.0,
-                    'total': 0.0
-                }
+                self.collision_flags[agent_id] = False
 
             # Get observation
-            observations[agent_id] = self._get_observation(drone, agent_id)
+            observations[agent_id] = self._get_observation(agent_id)
             rewards[agent_id] = reward
 
             # Check termination
@@ -322,8 +345,6 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 completion_bonus = 10.0  # Completion bonus
                 reward += completion_bonus
                 rewards[agent_id] = reward
-                self.last_reward_components[agent_id]['completion_bonus'] = completion_bonus
-                self.last_reward_components[agent_id]['total'] = reward
 
             dones[agent_id] = done
             truncated[agent_id] = trunc
@@ -332,64 +353,49 @@ class MultiAgentSLAMGymEnv(gym.Env):
 
         return observations, rewards, dones, truncated, info
 
-    def _get_observation(self, drone: Drone, agent_id: int) -> Dict[str, Any]:
-        """Get observation for a specific drone."""
-        facing_idx = FACING_DIRECTIONS.index(drone.facing_direction)
+    def _get_observation(self, agent_id: int) -> Dict[str, Any]:
+        """Get observation for a specific agent."""
+        # Collect all drone positions and directions
+        drone_positions = np.zeros((self.num_drones, 2), dtype=np.int32)
+        drone_directions = np.zeros(self.num_drones, dtype=np.int32)
+        drone_active = np.zeros(self.num_drones, dtype=np.int32)
+
+        for i, drone in enumerate(self.env.drones):
+            drone_positions[i] = drone.pos
+            drone_directions[i] = FACING_DIRECTIONS.index(drone.facing_direction)
+            drone_active[i] = int(drone.active)
 
         return {
-            'local_map': drone.local_map.copy() if drone.local_map is not None else np.full((self.height, self.width), -1, dtype=np.int8),
-            'position': np.array(drone.pos, dtype=np.int32),
-            'facing_direction': facing_idx,
-            'active': int(drone.active),
-            'collided': int(drone.collided),
-            'entry_time': np.array([drone.entry_time], dtype=np.int32),
-            'new_discoveries': np.array([len(self.last_discoveries.get(agent_id, []))], dtype=np.int32)
+            'global_map': self.global_map.copy(),
+            'drone_positions': drone_positions,
+            'drone_directions': drone_directions,
+            'drone_active': drone_active,
+            'agent_id': np.array([agent_id], dtype=np.int32)
         }
 
     def _get_exploration_progress(self) -> float:
-        """Calculate exploration progress across all drones."""
-        # Merge all drone observations
-        global_map = np.full(self.env.grid.shape, -1, dtype=np.int8)
-        for drone in self.env.drones:
-            if drone.local_map is not None:
-                mask = drone.local_map != -1
-                global_map[mask] = drone.local_map[mask]
-
-        # Calculate progress
-        known_cells = np.count_nonzero((global_map != -1) & self.reachable_mask)
+        """Calculate exploration progress based on the global map."""
+        known_cells = np.count_nonzero((self.global_map != -1) & self.reachable_mask)
         return known_cells / self.total_reachable if self.total_reachable > 0 else 0.0
 
     def _get_info(self) -> Dict[str, Any]:
         """Get environment information."""
-        # Get global observed map
-        global_map = np.full(self.env.grid.shape, -1, dtype=np.int8)
-        for drone in self.env.drones:
-            if drone.local_map is not None:
-                mask = drone.local_map != -1
-                global_map[mask] = drone.local_map[mask]
-
-        # Individual drone discoveries
+        # Individual drone discoveries (cells each drone has personally discovered)
         drone_discoveries = {}
-        for i, drone in enumerate(self.env.drones):
-            if drone.local_map is not None:
-                drone_discoveries[i] = np.count_nonzero(drone.local_map != -1)
-            else:
-                drone_discoveries[i] = 0
-
-        # Get all drone states from communication bus
-        all_drone_states = self.comm.get_all_drones_state()
+        for i in range(self.num_drones):
+            # Count would need to be tracked separately if needed
+            drone_discoveries[i] = 0  # Placeholder
 
         return {
             'step': self.current_step,
             'elapsed_time': time.time() - self.start_time,
             'exploration_progress': self._get_exploration_progress(),
-            'global_map': global_map,
+            'global_map': self.global_map.copy(),
             'drone_discoveries': drone_discoveries,
-            'all_drone_states': all_drone_states,
             'reachable_mask': self.reachable_mask,
             'entry_points': self.env.entry_points,
             'true_map': self.env.grid.copy(),
-            'reward_components': self.last_reward_components.copy()
+            'collision_flags': self.collision_flags.copy()
         }
 
     def render(self):
@@ -409,10 +415,6 @@ class MultiAgentSLAMGymEnv(gym.Env):
         # Clear screen
         self.screen.fill((20, 20, 20))
 
-        # Get global observed map
-        info = self._get_info()
-        observed_map = info['global_map']
-
         # Draw true map (left side)
         for y in range(self.env.height):
             for x in range(self.env.width):
@@ -426,7 +428,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
         # Draw observed map (right side)
         for y in range(self.env.height):
             for x in range(self.env.width):
-                tile = observed_map[y, x]
+                tile = self.global_map[y, x]
                 color = self._get_tile_color(tile, unknown_color=(20, 20, 20))
                 pygame.draw.rect(
                     self.screen, color,
@@ -435,13 +437,17 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 )
 
         # Draw drones
-        for drone in self.env.drones:
+        for i, drone in enumerate(self.env.drones):
             if drone.active:
                 dx, dy = drone.get_position()
 
+                # Use different colors for each drone
+                drone_colors = [(255, 255, 0), (0, 255, 255), (255, 0, 255), (0, 255, 0)]
+                drone_color = drone_colors[i % len(drone_colors)]
+
                 # Draw on true map
                 pygame.draw.circle(
-                    self.screen, (255, 255, 0),
+                    self.screen, drone_color,
                     (dx * TILE_SIZE + TILE_SIZE // 2, dy * TILE_SIZE + TILE_SIZE // 2), 5
                 )
 
@@ -451,8 +457,22 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 arrow_end = (arrow_start[0] + fx * TILE_SIZE // 2, arrow_start[1] + fy * TILE_SIZE // 2)
                 pygame.draw.line(self.screen, (255, 0, 0), arrow_start, arrow_end, 2)
 
-                # Draw ID on observed map
-                drone_id_text = self.font.render(str(drone.id), True, (0, 0, 0))
+                # Draw collision indicator if collided
+                if self.collision_flags.get(i, False):
+                    pygame.draw.circle(
+                        self.screen, (255, 0, 0),
+                        (dx * TILE_SIZE + TILE_SIZE // 2, dy * TILE_SIZE + TILE_SIZE // 2), 8, 2
+                    )
+
+                # Draw on observed map
+                pygame.draw.circle(
+                    self.screen, drone_color,
+                    (self.width * TILE_SIZE + 50 + dx * TILE_SIZE + TILE_SIZE // 2,
+                     dy * TILE_SIZE + TILE_SIZE // 2), 5
+                )
+
+                # Draw ID
+                drone_id_text = self.font.render(str(i), True, (255, 255, 255))
                 self.screen.blit(
                     drone_id_text,
                     (self.width * TILE_SIZE + 50 + dx * TILE_SIZE + 5, dy * TILE_SIZE)
@@ -509,23 +529,28 @@ class MultiAgentSLAMGymEnv(gym.Env):
             ("Free", (200, 200, 200)),
             ("Wall", (100, 100, 100)),
             ("Entry", (0, 255, 255)),
-            ("Door (Closed)", (255, 0, 0)),
-            ("Door (Open)", (0, 200, 0)),
+            ("Door (C)", (255, 0, 0)),
+            ("Door (O)", (0, 200, 0)),
             ("Window", (0, 0, 255)),
-            ("Out of Bounds", (0, 0, 0)),
+            ("Out", (0, 0, 0)),
             ("Drone", (255, 255, 0)),
-            ("Facing Dir", (255, 0, 0)),
+            ("Facing", (255, 0, 0)),
+            ("Collision", (255, 0, 0))
         ]
 
         legend_y = self.screen.get_height() - 36
         box_size = 14
-        spacing_x = 140
+        spacing_x = 110
         total_width = len(legend_items) * spacing_x
         start_x = (self.screen.get_width() - total_width) // 2
 
         for i, (label, color) in enumerate(legend_items):
             x = start_x + i * spacing_x
-            pygame.draw.rect(self.screen, color, (x, legend_y, box_size, box_size))
+            if label == "Collision":
+                # Draw circle outline for collision indicator
+                pygame.draw.circle(self.screen, color, (x + box_size // 2, legend_y + box_size // 2), box_size // 2, 2)
+            else:
+                pygame.draw.rect(self.screen, color, (x, legend_y, box_size, box_size))
             label_text = self.font.render(label, True, (255, 255, 255))
             self.screen.blit(label_text, (x + box_size + 6, legend_y - 2))
 
@@ -545,8 +570,7 @@ class MultiAgentSLAMGymEnv(gym.Env):
                 'position': drone.pos,
                 'facing': drone.facing_direction,
                 'active': drone.active,
-                'collided': drone.collided,
-                'path_history': drone.path_history,
-                'local_map_coverage': np.count_nonzero(drone.local_map != -1) if drone.local_map is not None else 0
+                'collided': self.collision_flags.get(i, False),
+                'path_history': drone.path_history
             }
         return states

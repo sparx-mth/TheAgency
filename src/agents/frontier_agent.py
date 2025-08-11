@@ -74,19 +74,14 @@ class FrontierAgent(BaseSLAMAgent):
 
     def get_actions(self, observations: Dict[int, Any], info: Dict[str, Any]) -> Dict[int, int]:
         """Get actions using frontier-based exploration strategy."""
-        # Initialize global map if needed
-        if self.global_map is None:
+        # Use the shared global map from observations
+        if self.global_map is None and observations:
             first_obs = next(iter(observations.values()))
-            map_shape = first_obs['local_map'].shape
-            self.global_map = np.full(map_shape, -1, dtype=np.int8)
-
-        # Update global map from all drone observations
-        all_drone_states = info.get('all_drone_states', {})
-        for drone_id, state in all_drone_states.items():
-            for x, y, val in state.get("new_discoveries", []):
-                if 0 <= y < self.global_map.shape[0] and 0 <= x < self.global_map.shape[1]:
-                    if self.global_map[y, x] == -1:
-                        self.global_map[y, x] = val
+            self.global_map = first_obs['global_map'].copy()
+        elif observations:
+            # Update our copy of the global map
+            first_obs = next(iter(observations.values()))
+            self.global_map = first_obs['global_map'].copy()
 
         # Update frontiers
         self._update_frontiers(info.get('reachable_mask', np.ones_like(self.global_map, dtype=bool)))
@@ -94,13 +89,16 @@ class FrontierAgent(BaseSLAMAgent):
         actions = {}
 
         for agent_id, obs in observations.items():
-            if not obs['active']:
+            # Check if this drone is active
+            drone_active = obs['drone_active'][agent_id]
+
+            if not drone_active:
                 actions[agent_id] = 3  # STAY
                 continue
 
-            # Get drone state
-            current_pos = tuple(obs['position'])
-            facing_idx = obs['facing_direction']
+            # Get drone state from the new observation format
+            current_pos = tuple(obs['drone_positions'][agent_id])
+            facing_idx = obs['drone_directions'][agent_id]
             facing = FACING_DIRECTIONS[facing_idx]
 
             # Initialize agent tracking if needed
@@ -113,8 +111,7 @@ class FrontierAgent(BaseSLAMAgent):
 
             # Plan action
             action = self._plan_frontier_action(
-                agent_id, current_pos, facing, obs,
-                all_drone_states, info
+                agent_id, current_pos, facing, obs, info
             )
 
             # Convert action string to index
@@ -145,8 +142,7 @@ class FrontierAgent(BaseSLAMAgent):
 
     def _plan_frontier_action(
             self, agent_id: int, current_pos: Tuple[int, int],
-            facing: str, obs: Dict[str, Any],
-            all_drone_states: Dict[int, Any], info: Dict[str, Any]
+            facing: str, obs: Dict[str, Any], info: Dict[str, Any]
     ) -> str:
         """Plan action for a single agent using frontier strategy."""
         # First check if we can discover new cells by rotating
@@ -194,7 +190,7 @@ class FrontierAgent(BaseSLAMAgent):
                 return self._random_walk_action(current_pos, facing)
 
         # Follow path to goal
-        return self._follow_path(agent_id, current_pos, facing, all_drone_states)
+        return self._follow_path(agent_id, current_pos, facing, obs)
 
     def _assign_new_goal(
             self, agent_id: int, current_pos: Tuple[int, int]
@@ -232,7 +228,7 @@ class FrontierAgent(BaseSLAMAgent):
 
     def _follow_path(
             self, agent_id: int, current_pos: Tuple[int, int],
-            facing: str, all_drone_states: Dict[int, Any]
+            facing: str, obs: Dict[str, Any]
     ) -> str:
         """Follow the planned path."""
         path = self.paths[agent_id]
@@ -244,10 +240,13 @@ class FrontierAgent(BaseSLAMAgent):
 
         # Check if next position is blocked by another drone
         blocked = False
-        for other_id, state in all_drone_states.items():
-            if other_id != agent_id and state.get('pos') == next_pos:
-                blocked = True
-                break
+        drone_positions = obs['drone_positions']
+        for other_id in range(len(drone_positions)):
+            if other_id != agent_id:
+                other_pos = tuple(drone_positions[other_id])
+                if other_pos == next_pos and obs['drone_active'][other_id]:
+                    blocked = True
+                    break
 
         if blocked:
             self.wait_counters[agent_id] += 1

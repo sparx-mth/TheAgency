@@ -46,7 +46,10 @@ class RandomAgent(BaseSLAMAgent):
         actions = {}
 
         for agent_id, obs in observations.items():
-            if obs['active']:
+            # Get the active status for this specific drone
+            drone_active = obs['drone_active'][agent_id]
+
+            if drone_active:
                 # Bias towards forward movement
                 if random.random() < self.forward_bias:
                     actions[agent_id] = 0  # FORWARD

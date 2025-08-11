@@ -847,7 +847,7 @@ def main():
                        choices=["PPO", "A2C", "DQN", "SAC"],
                        help="RL algorithm to use")
     parser.add_argument("--train-map", type=str,
-                       default="/home/user/nadav/TheAgency/resources/planner/maps/house_map_10.txt",
+                       default="/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_10.txt",
                        help="Path to training map (relative to resources/ or absolute)")
     parser.add_argument("--eval-map", type=str,
                        default=None,

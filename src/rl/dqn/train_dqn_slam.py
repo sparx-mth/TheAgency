@@ -674,8 +674,8 @@ def visualize_single_episode(
 def main():
     """Main training script."""
     # Map paths
-    train_map = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_10.txt"
-    test_map = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_10.txt"
+    train_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_10.txt"
+    test_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_10.txt"
 
     # Check if we should just visualize
     import sys

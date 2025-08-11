@@ -15,7 +15,7 @@ def run_random_agent_demo():
     """Run a demo with random agent."""
     print("=== Random Agent Demo ===\n")
 
-    # Create environment (no controller parameters!)
+    # Create environment
     env = MultiAgentSLAMGymEnv(
         width=10,
         height=10,
@@ -68,7 +68,7 @@ def run_random_agent_demo():
         if step % 50 == 0:
             elapsed = time.time() - start_time
             print(f"Step {step:4d} | Time: {elapsed:6.1f}s | Progress: {info['exploration_progress']:6.1%} | "
-                  f"Discoveries: {list(info['drone_discoveries'].values())}")
+                  f"Collisions: {sum(info['collision_flags'].values())}")
 
         step += 1
 
@@ -90,7 +90,6 @@ def run_random_agent_demo():
     print(f"\nRewards by drone:")
     for i, total in enumerate(total_rewards.values()):
         print(f"  Drone {i}: {total:.2f}")
-    print(f"\nDiscoveries by drone: {list(info['drone_discoveries'].values())}")
 
     # Keep window open for a moment
     for _ in range(30):
@@ -104,7 +103,7 @@ def run_frontier_agent_demo():
     """Run a demo with the intelligent frontier-based agent."""
     print("\n=== Frontier-Based Agent Demo ===\n")
 
-    # Create environment (no controller parameters!)
+    # Create environment
     env = MultiAgentSLAMGymEnv(
         width=32,
         height=32,
@@ -134,6 +133,7 @@ def run_frontier_agent_demo():
     step = 0
     start_time = time.time()
     total_rewards = {i: 0.0 for i in env.agents}
+    total_collisions = {i: 0 for i in env.agents}
 
     # Main loop
     running = True
@@ -144,9 +144,11 @@ def run_frontier_agent_demo():
         # Step environment
         observations, rewards, dones, truncated, info = env.step(actions)
 
-        # Update total rewards
+        # Update total rewards and track collisions
         for agent_id, reward in rewards.items():
             total_rewards[agent_id] += reward
+            if info['collision_flags'].get(agent_id, False):
+                total_collisions[agent_id] += 1
 
         # Render
         env.render()
@@ -155,7 +157,7 @@ def run_frontier_agent_demo():
         if step % 50 == 0:
             elapsed = time.time() - start_time
             print(f"Step {step:4d} | Time: {elapsed:6.1f}s | Progress: {info['exploration_progress']:6.1%} | "
-                  f"Discoveries: {list(info['drone_discoveries'].values())}")
+                  f"Collisions: {sum(total_collisions.values())}")
 
         step += 1
 
@@ -177,7 +179,9 @@ def run_frontier_agent_demo():
     print(f"\nRewards by drone:")
     for i, total in enumerate(total_rewards.values()):
         print(f"  Drone {i}: {total:.2f}")
-    print(f"\nDiscoveries by drone: {list(info['drone_discoveries'].values())}")
+    print(f"\nCollisions by drone:")
+    for i, count in enumerate(total_collisions.values()):
+        print(f"  Drone {i}: {count}")
     print(f"Efficiency: {step / (info['exploration_progress'] * env.width * env.height):.2f} steps per cell explored")
 
     # Keep window open for a moment
@@ -227,6 +231,7 @@ def run_hybrid_agent_demo():
     step = 0
     start_time = time.time()
     total_rewards = {i: 0.0 for i in env.agents}
+    total_collisions = {i: 0 for i in env.agents}
 
     # Main loop
     running = True
@@ -237,9 +242,11 @@ def run_hybrid_agent_demo():
         # Step environment
         observations, rewards, dones, truncated, info = env.step(actions)
 
-        # Update rewards
+        # Update rewards and track collisions
         for agent_id, reward in rewards.items():
             total_rewards[agent_id] += reward
+            if info['collision_flags'].get(agent_id, False):
+                total_collisions[agent_id] += 1
 
         # Render
         env.render()
@@ -269,7 +276,9 @@ def run_hybrid_agent_demo():
     print(f"\nRewards by drone:")
     for i, total in enumerate(total_rewards.values()):
         print(f"  Drone {i}: {total:.2f}")
-    print(f"\nDiscoveries by drone: {list(info['drone_discoveries'].values())}")
+    print(f"\nCollisions by drone:")
+    for i, count in enumerate(total_collisions.values()):
+        print(f"  Drone {i}: {count}")
 
     # Keep window open
     for _ in range(30):
@@ -333,6 +342,7 @@ def run_custom_scenario():
     running = True
     start_time = time.time()
     total_rewards = {i: 0.0 for i in env.agents}
+    total_collisions = {i: 0 for i in env.agents}
 
     while running and step < env.max_steps:
         # Get actions from agent
@@ -341,9 +351,11 @@ def run_custom_scenario():
         # Step environment
         observations, rewards, dones, truncated, info = env.step(actions)
 
-        # Update rewards
+        # Update rewards and track collisions
         for agent_id, reward in rewards.items():
             total_rewards[agent_id] += reward
+            if info['collision_flags'].get(agent_id, False):
+                total_collisions[agent_id] += 1
 
         # Render
         env.render()
@@ -375,7 +387,9 @@ def run_custom_scenario():
     print(f"\nRewards by drone:")
     for i, total in enumerate(total_rewards.values()):
         print(f"  Drone {i}: {total:.2f}")
-    print(f"\nDiscoveries by drone: {list(info['drone_discoveries'].values())}")
+    print(f"\nCollisions by drone:")
+    for i, count in enumerate(total_collisions.values()):
+        print(f"  Drone {i}: {count}")
 
     env.close()
 
@@ -388,7 +402,7 @@ def run_with_loaded_map():
     import glob
 
     # Map directory
-    map_dir = "/home/user/nadav/TheAgency/resources/planner/maps"
+    map_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps"
 
     # Check if directory exists
     if not os.path.exists(map_dir):
@@ -482,6 +496,7 @@ def run_with_loaded_map():
     step = 0
     start_time = time.time()
     total_rewards = {i: 0.0 for i in env.agents}
+    total_collisions = {i: 0 for i in env.agents}
 
     # Main loop
     running = True
@@ -492,9 +507,11 @@ def run_with_loaded_map():
         # Step environment
         observations, rewards, dones, truncated, info = env.step(actions)
 
-        # Update rewards
+        # Update rewards and track collisions
         for agent_id, reward in rewards.items():
             total_rewards[agent_id] += reward
+            if info['collision_flags'].get(agent_id, False):
+                total_collisions[agent_id] += 1
 
         # Render
         env.render()
@@ -531,7 +548,9 @@ def run_with_loaded_map():
     print(f"\nRewards by drone:")
     for i, total in enumerate(total_rewards.values()):
         print(f"  Drone {i}: {total:.2f}")
-    print(f"\nDiscoveries by drone: {list(info['drone_discoveries'].values())}")
+    print(f"\nCollisions by drone:")
+    for i, count in enumerate(total_collisions.values()):
+        print(f"  Drone {i}: {count}")
 
     # Keep window open briefly
     for _ in range(30):
