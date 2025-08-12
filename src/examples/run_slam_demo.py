@@ -1,14 +1,5 @@
 """
-Demo script to run and visualize the Multi-Agent SLAM Environment
-with complete separation between environment and agents.
-
-This demo showcases:
-- Single and multi-agent scenarios
-- Different agent strategies (Random, Frontier, Hybrid)
-- Custom map loading
-- Real-time visualization
-- Performance metrics
-- Configurable camera parameters (range and FOV)
+run_slam_demo.py - Updated for new unified state/action space
 """
 
 import os
@@ -26,9 +17,8 @@ src_path = os.path.join(os.path.dirname(__file__), 'src')
 if os.path.exists(src_path):
     sys.path.insert(0, src_path)
 
-# Import environment
+# Import environment - NO LONGER NEED SingleAgentWrapper
 from environments.slam_env import MultiAgentSLAMEnv
-from environments.single_agent_wrapper import SingleAgentSLAMEnv
 
 # Import agents
 from agents.random_agent import RandomAgent
@@ -72,12 +62,13 @@ def run_single_agent_demo():
     # Get camera parameters
     camera_range, fov_deg = get_camera_parameters()
 
-    # Create single-agent environment
-    env = SingleAgentSLAMEnv(
+    # Create environment with num_agents=1
+    env = MultiAgentSLAMEnv(
         width=20,
         height=20,
+        num_agents=1,  # Single agent
         max_steps=500,
-        sensor_params={'max_range': camera_range, 'fov_deg': fov_deg},
+        sensor_config={0: CameraSensor(max_range=camera_range, fov_deg=fov_deg)},
         randomize=True,
         render_mode='human',
         discovery_reward=0.1,
@@ -106,10 +97,10 @@ def run_single_agent_demo():
     done = False
     truncated = False
     while not done and not truncated and step < env.max_steps:
-        # Get action from agent
+        # Get action from agent (now expects array)
         action = agent.get_actions(obs, info)
 
-        # Step environment
+        # Step environment (now returns single reward)
         obs, reward, done, truncated, info = env.step(action)
         total_reward += reward
 
@@ -183,23 +174,17 @@ def run_multi_agent_demo():
     # Initialize metrics
     step = 0
     start_time = time.time()
-    total_rewards = {i: 0.0 for i in range(env.num_agents)}
+    total_reward = 0.0
 
     # Main loop
     done = False
     while not done and step < env.max_steps:
-        # Get actions from agent
+        # Get actions from agent (array of actions)
         actions = agent.get_actions(obs, info)
 
-        # Step environment
-        obs, rewards, dones, truncateds, info = env.step(actions)
-
-        # Update rewards
-        for agent_id, reward in rewards.items():
-            total_rewards[agent_id] += reward
-
-        # Check termination
-        done = any(dones.values())
+        # Step environment (now returns single reward)
+        obs, reward, done, truncated, info = env.step(actions)
+        total_reward += reward
 
         # Render
         env.render()
@@ -207,7 +192,7 @@ def run_multi_agent_demo():
         # Progress update
         if step % 50 == 0:
             elapsed = time.time() - start_time
-            print(f"Step {step:4d} | Time: {elapsed:6.1f}s | Progress: {info['progress']:6.1%}")
+            print(f"Step {step:4d} | Time: {elapsed:6.1f}s | Progress: {info['progress']:6.1%} | Reward: {total_reward:7.2f}")
 
         step += 1
 
@@ -218,9 +203,10 @@ def run_multi_agent_demo():
     print(f"Total steps: {step}")
     print(f"Total time: {elapsed:.1f}s")
     print(f"Final progress: {info['progress']:.1%}")
-    print(f"\nRewards by agent:")
+    print(f"Total reward: {total_reward:.2f}")
+    print(f"\nCollisions by agent:")
     for i in range(env.num_agents):
-        print(f"  Agent {i}: {total_rewards[i]:.2f} (Collisions: {info['collision_counts'][i]})")
+        print(f"  Agent {i}: {info['collision_counts'][i]} collisions")
 
     # Keep window open
     for _ in range(30):
@@ -305,23 +291,17 @@ def run_mixed_sensors_demo():
     # Initialize metrics
     step = 0
     start_time = time.time()
-    total_rewards = {i: 0.0 for i in range(env.num_agents)}
+    total_reward = 0.0
 
     # Main loop
     done = False
     while not done and step < env.max_steps:
-        # Get actions
+        # Get actions (array)
         actions = agent.get_actions(obs, info)
 
-        # Step environment
-        obs, rewards, dones, truncateds, info = env.step(actions)
-
-        # Update rewards
-        for agent_id, reward in rewards.items():
-            total_rewards[agent_id] += reward
-
-        # Check termination
-        done = any(dones.values())
+        # Step environment (single reward)
+        obs, reward, done, truncated, info = env.step(actions)
+        total_reward += reward
 
         # Render
         env.render()
@@ -329,11 +309,11 @@ def run_mixed_sensors_demo():
         # Progress update
         if step % 50 == 0:
             elapsed = time.time() - start_time
-            print(f"Step {step:4d} | Progress: {info['progress']:6.1%}")
+            print(f"Step {step:4d} | Progress: {info['progress']:6.1%} | Reward: {total_reward:7.2f}")
             if step % 200 == 0:  # Detailed update less frequently
                 for i in range(env.num_agents):
                     print(f"    Agent {i} ({info['sensor_types'][i]}): "
-                          f"Reward={total_rewards[i]:.1f}, Collisions={info['collision_counts'][i]}")
+                          f"Collisions={info['collision_counts'][i]}")
 
         step += 1
 
@@ -343,221 +323,16 @@ def run_mixed_sensors_demo():
     print(f"Total steps: {step}")
     print(f"Total time: {elapsed:.1f}s")
     print(f"Final progress: {info['progress']:.1%}")
+    print(f"Total reward: {total_reward:.2f}")
     print(f"\nPerformance by sensor type:")
     for i in range(env.num_agents):
         print(f"  Agent {i} ({info['sensor_types'][i]}): "
-              f"Reward={total_rewards[i]:.2f}, Collisions={info['collision_counts'][i]}")
+              f"Collisions={info['collision_counts'][i]}")
 
     # Keep window open
     for _ in range(30):
         env.render()
         time.sleep(0.1)
-
-    env.close()
-
-
-def run_custom_scenario():
-    """Run a custom scenario with user-selected parameters."""
-    print("\n=== Custom Scenario ===\n")
-
-    # Get user preferences
-    print("Configure your scenario:")
-
-    try:
-        width = int(input("Map width (10-50) [default=25]: ") or "25")
-        width = max(10, min(50, width))
-
-        height = int(input("Map height (10-50) [default=25]: ") or "25")
-        height = max(10, min(50, height))
-
-        num_agents = int(input("Number of agents (1-6) [default=2]: ") or "2")
-        num_agents = max(1, min(6, num_agents))
-    except ValueError:
-        print("Invalid input, using defaults")
-        width, height, num_agents = 25, 25, 2
-
-    # Ask for agent type
-    print("\nAgent strategy:")
-    print("1. Random exploration")
-    print("2. Frontier-based (intelligent)")
-    print("3. Mixed (different strategies per agent)")
-    agent_type = input("Select strategy (1-3) [default=2]: ") or "2"
-
-    # Ask for sensor configuration
-    print("\nSensor configuration:")
-    print("1. All cameras (configurable)")
-    print("2. All LIDAR")
-    print("3. Mixed sensors")
-    print("4. Custom per agent")
-    sensor_type = input("Select sensors (1-4) [default=1]: ") or "1"
-
-    # Configure sensors
-    sensor_config = None
-    camera_range = 10  # default for agent
-
-    if sensor_type == "1":
-        # All cameras with custom parameters
-        camera_range, fov_deg = get_camera_parameters()
-        sensor_config = {i: CameraSensor(max_range=camera_range, fov_deg=fov_deg) for i in range(num_agents)}
-        sensor_desc = f"All cameras (range={camera_range}, FOV={fov_deg}°)"
-    elif sensor_type == "2":
-        print("\nLIDAR Configuration:")
-        try:
-            lidar_range = int(input("LIDAR range (5-20) [default=15]: ") or "15")
-            lidar_range = max(5, min(20, lidar_range))
-            num_rays = int(input("Number of rays (60-360) [default=360]: ") or "360")
-            num_rays = max(60, min(360, num_rays))
-        except ValueError:
-            lidar_range, num_rays = 15, 360
-        sensor_config = {i: LidarSensor(max_range=lidar_range, num_rays=num_rays) for i in range(num_agents)}
-        sensor_desc = f"All LIDAR (range={lidar_range}, {num_rays} rays)"
-        camera_range = lidar_range
-    elif sensor_type == "3":
-        # Mixed sensors with default parameters
-        print("\nUsing mixed sensors with default parameters...")
-        sensor_config = {}
-        for i in range(num_agents):
-            if i % 2 == 0:
-                sensor_config[i] = CameraSensor(max_range=10, fov_deg=60)
-            else:
-                sensor_config[i] = LidarSensor(max_range=12, num_rays=180)
-        sensor_desc = "Mixed sensors (default)"
-        camera_range = 12
-    elif sensor_type == "4":
-        # Custom per agent
-        sensor_config = {}
-        max_range_overall = 0
-        for i in range(num_agents):
-            print(f"\nAgent {i} sensor:")
-            print("1. Camera")
-            print("2. LIDAR")
-            sensor_choice = input("Select (1-2) [default=1]: ") or "1"
-
-            if sensor_choice == "2":
-                try:
-                    lidar_range = int(input("  LIDAR range (5-20) [default=12]: ") or "12")
-                    lidar_range = max(5, min(20, lidar_range))
-                    num_rays = int(input("  Number of rays (60-360) [default=180]: ") or "180")
-                    num_rays = max(60, min(360, num_rays))
-                except ValueError:
-                    lidar_range, num_rays = 12, 180
-                sensor_config[i] = LidarSensor(max_range=lidar_range, num_rays=num_rays)
-                max_range_overall = max(max_range_overall, lidar_range)
-            else:
-                try:
-                    cam_range = int(input("  Camera range (3-20) [default=10]: ") or "10")
-                    cam_range = max(3, min(20, cam_range))
-                    cam_fov = int(input("  FOV (15-120) [default=60]: ") or "60")
-                    cam_fov = max(15, min(120, cam_fov))
-                except ValueError:
-                    cam_range, cam_fov = 10, 60
-                sensor_config[i] = CameraSensor(max_range=cam_range, fov_deg=cam_fov)
-                max_range_overall = max(max_range_overall, cam_range)
-        sensor_desc = "Custom per agent"
-        camera_range = max_range_overall
-    else:
-        sensor_desc = "Default cameras"
-
-    # Create environment
-    if num_agents == 1:
-        env = SingleAgentSLAMEnv(
-            width=width,
-            height=height,
-            max_steps=width * height * 2,
-            sensor=sensor_config[0] if sensor_config else None,
-            randomize=True,
-            render_mode='human',
-        )
-    else:
-        env = MultiAgentSLAMEnv(
-            width=width,
-            height=height,
-            num_agents=num_agents,
-            max_steps=width * height * 2,
-            sensor_config=sensor_config,
-            randomize=True,
-            render_mode='human',
-        )
-
-    # Create agent based on selection
-    if agent_type == "1":
-        agent = RandomAgent(num_agents=num_agents, forward_bias=0.7)
-        agent_name = "Random"
-    else:  # Default to frontier
-        agent = FrontierAgent(num_agents=num_agents, camera_range=camera_range)
-        agent_name = "Frontier-based"
-
-    print(f"\n=== Custom Environment Created ===")
-    print(f"Map: {width}x{height}")
-    print(f"Agents: {num_agents}")
-    print(f"Strategy: {agent_name}")
-    print(f"Sensors: {sensor_desc}")
-    print("\nStarting simulation (close window to stop)...")
-
-    # Reset
-    obs, info = env.reset()
-    agent.reset()
-
-    # Initialize metrics
-    step = 0
-    start_time = time.time()
-
-    if num_agents == 1:
-        total_reward = 0.0
-        done = False
-        truncated = False
-
-        while not done and not truncated and step < env.max_steps:
-            action = agent.get_actions(obs, info)
-            obs, reward, done, truncated, info = env.step(action)
-            total_reward += reward
-            env.render()
-
-            if step % 50 == 0:
-                print(f"Step {step:4d} | Progress: {info['progress']:6.1%} | Reward: {total_reward:7.2f}")
-
-            step += 1
-
-            # Check for window close
-            import pygame
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    done = True
-
-        print(f"\n=== Summary ===")
-        print(f"Total reward: {total_reward:.2f}")
-        print(f"Collisions: {info['collision_counts'][0]}")
-    else:
-        total_rewards = {i: 0.0 for i in range(num_agents)}
-        done = False
-
-        while not done and step < env.max_steps:
-            actions = agent.get_actions(obs, info)
-            obs, rewards, dones, truncateds, info = env.step(actions)
-
-            for agent_id, reward in rewards.items():
-                total_rewards[agent_id] += reward
-
-            done = any(dones.values())
-            env.render()
-
-            if step % 50 == 0:
-                print(f"Step {step:4d} | Progress: {info['progress']:6.1%}")
-
-            step += 1
-
-            # Check for window close
-            import pygame
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    done = True
-
-        print(f"\n=== Summary ===")
-        for i in range(num_agents):
-            print(f"Agent {i}: Reward={total_rewards[i]:.2f}, Collisions={info['collision_counts'][i]}")
-
-    print(f"Total steps: {step}")
-    print(f"Final progress: {info['progress']:.1%}")
 
     env.close()
 
@@ -574,8 +349,9 @@ def run_benchmark():
     env_config = {
         'width': 20,
         'height': 20,
+        'num_agents': 1,  # Single agent for benchmark
         'max_steps': 400,
-        'sensor_params': {'max_range': camera_range, 'fov_deg': fov_deg},
+        'sensor_config': {0: CameraSensor(max_range=camera_range, fov_deg=fov_deg)},
         'randomize': True,
         'render_mode': None,  # No rendering for speed
     }
@@ -603,7 +379,7 @@ def run_benchmark():
         episode_metrics = []
 
         for episode in range(num_episodes):
-            env = SingleAgentSLAMEnv(**env_config)
+            env = MultiAgentSLAMEnv(**env_config)
             obs, info = env.reset()
             agent.reset()
 
@@ -787,102 +563,28 @@ def run_with_loaded_map():
     print("2. Frontier-based (intelligent)")
     agent_type = input("Select strategy (1-2) [default=2]: ") or "2"
 
-    # Sensor configuration
-    print("\nSensor configuration:")
-    print("1. All cameras (configurable)")
-    print("2. All LIDAR (configurable)")
-    print("3. Mixed sensors")
-    print("4. Custom per agent")
-    sensor_type = input("Select sensors (1-4) [default=1]: ") or "1"
+    # Get camera parameters
+    camera_range, fov_deg = get_camera_parameters()
 
-    # Configure sensors
-    sensor_config = None
-    camera_range = 10  # default for agent
-
-    if sensor_type == "1":
-        # All cameras with custom parameters
-        camera_range, fov_deg = get_camera_parameters()
-        sensor_config = {i: CameraSensor(max_range=camera_range, fov_deg=fov_deg) for i in range(num_agents)}
-        sensor_desc = f"Cameras (range={camera_range}, FOV={fov_deg}°)"
-    elif sensor_type == "2":
-        print("\nLIDAR Configuration:")
-        try:
-            lidar_range = int(input("LIDAR range (5-20) [default=12]: ") or "12")
-            lidar_range = max(5, min(20, lidar_range))
-            num_rays = int(input("Number of rays (60-360) [default=360]: ") or "360")
-            num_rays = max(60, min(360, num_rays))
-        except ValueError:
-            lidar_range, num_rays = 12, 360
-        sensor_config = {i: LidarSensor(max_range=lidar_range, num_rays=num_rays) for i in range(num_agents)}
-        sensor_desc = f"LIDAR (range={lidar_range}, {num_rays} rays)"
-        camera_range = lidar_range
-    elif sensor_type == "3":
-        print("\nUsing default mixed sensors...")
-        sensor_config = {}
-        for i in range(num_agents):
-            if i % 2 == 0:
-                sensor_config[i] = CameraSensor(max_range=10, fov_deg=60)
-            else:
-                sensor_config[i] = LidarSensor(max_range=12, num_rays=180)
-        sensor_desc = "Mixed"
-        camera_range = 12
-    else:
-        # Custom per agent
-        sensor_config = {}
-        max_range_overall = 0
-        for i in range(num_agents):
-            print(f"\nAgent {i} sensor:")
-            print("1. Camera")
-            print("2. LIDAR")
-            sensor_choice = input("Select (1-2) [default=1]: ") or "1"
-
-            if sensor_choice == "2":
-                try:
-                    lidar_range = int(input("  LIDAR range (5-20) [default=12]: ") or "12")
-                    lidar_range = max(5, min(20, lidar_range))
-                    num_rays = int(input("  Number of rays (60-360) [default=180]: ") or "180")
-                    num_rays = max(60, min(360, num_rays))
-                except ValueError:
-                    lidar_range, num_rays = 12, 180
-                sensor_config[i] = LidarSensor(max_range=lidar_range, num_rays=num_rays)
-                max_range_overall = max(max_range_overall, lidar_range)
-            else:
-                try:
-                    cam_range = int(input("  Camera range (3-20) [default=10]: ") or "10")
-                    cam_range = max(3, min(20, cam_range))
-                    cam_fov = int(input("  FOV (15-120) [default=60]: ") or "60")
-                    cam_fov = max(15, min(120, cam_fov))
-                except ValueError:
-                    cam_range, cam_fov = 10, 60
-                sensor_config[i] = CameraSensor(max_range=cam_range, fov_deg=cam_fov)
-                max_range_overall = max(max_range_overall, cam_range)
-        sensor_desc = "Custom"
-        camera_range = max_range_overall
+    # Configure sensors for all agents
+    sensor_config = {
+        i: CameraSensor(max_range=camera_range, fov_deg=fov_deg)
+        for i in range(num_agents)
+    }
 
     # Create environment with loaded map
     print(f"\n🚁 Creating environment with loaded map...")
 
-    if num_agents == 1:
-        env = SingleAgentSLAMEnv(
-            width=width,
-            height=height,
-            max_steps=width * height * 3,
-            map_path=selected_map,
-            sensor=sensor_config[0] if sensor_config else None,
-            randomize=False,  # Don't randomize when loading a map
-            render_mode='human',
-        )
-    else:
-        env = MultiAgentSLAMEnv(
-            width=width,
-            height=height,
-            num_agents=num_agents,
-            max_steps=width * height * 3,
-            map_path=selected_map,
-            sensor_config=sensor_config,
-            randomize=False,  # Don't randomize when loading a map
-            render_mode='human',
-        )
+    env = MultiAgentSLAMEnv(
+        width=width,  # Will be overridden by map file
+        height=height,  # Will be overridden by map file
+        num_agents=num_agents,
+        max_steps=width * height * 3,
+        map_path=selected_map,
+        sensor_config=sensor_config,
+        randomize=False,  # Don't randomize when loading a map
+        render_mode='human',
+    )
 
     # Create agent
     if agent_type == "1":
@@ -897,7 +599,7 @@ def run_with_loaded_map():
     print(f"Size: {width}x{height}")
     print(f"Agents: {num_agents}")
     print(f"Strategy: {agent_name}")
-    print(f"Sensors: {sensor_desc}")
+    print(f"Sensors: Camera (range={camera_range}, FOV={fov_deg}°)")
     print("\nStarting in 2 seconds...")
     time.sleep(2)
 
@@ -908,57 +610,34 @@ def run_with_loaded_map():
     # Initialize metrics
     step = 0
     start_time = time.time()
+    total_reward = 0.0
 
-    if num_agents == 1:
-        # Single agent
-        total_reward = 0.0
-        done = False
-        truncated = False
+    # Main loop
+    done = False
+    truncated = False
+    while not done and not truncated and step < env.max_steps:
+        # Get actions
+        actions = agent.get_actions(obs, info)
 
-        while not done and not truncated and step < env.max_steps:
-            action = agent.get_actions(obs, info)
-            obs, reward, done, truncated, info = env.step(action)
-            total_reward += reward
-            env.render()
+        # Step environment
+        obs, reward, done, truncated, info = env.step(actions)
+        total_reward += reward
 
-            if step % 50 == 0:
-                elapsed = time.time() - start_time
-                print(f"Step {step:4d} | Time: {elapsed:5.1f}s | Progress: {info['progress']:6.1%} | "
-                      f"Reward: {total_reward:7.2f}")
+        # Render
+        env.render()
 
-            step += 1
+        if step % 50 == 0:
+            elapsed = time.time() - start_time
+            print(f"Step {step:4d} | Time: {elapsed:5.1f}s | Progress: {info['progress']:6.1%} | "
+                  f"Reward: {total_reward:7.2f}")
 
-            # Allow window close
-            import pygame
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    done = True
-    else:
-        # Multi-agent
-        total_rewards = {i: 0.0 for i in range(num_agents)}
-        done = False
+        step += 1
 
-        while not done and step < env.max_steps:
-            actions = agent.get_actions(obs, info)
-            obs, rewards, dones, truncateds, info = env.step(actions)
-
-            for agent_id, reward in rewards.items():
-                total_rewards[agent_id] += reward
-
-            done = any(dones.values())
-            env.render()
-
-            if step % 50 == 0:
-                elapsed = time.time() - start_time
-                print(f"Step {step:4d} | Time: {elapsed:5.1f}s | Progress: {info['progress']:6.1%}")
-
-            step += 1
-
-            # Allow window close
-            import pygame
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    done = True
+        # Allow window close
+        import pygame
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                done = True
 
     # Summary
     elapsed = time.time() - start_time
@@ -970,19 +649,12 @@ def run_with_loaded_map():
     print(f"Total time: {elapsed:.1f}s")
     print(f"Final progress: {info['progress']:.1%}")
     print(f"Discovered cells: {info['discovered_cells']}/{info['total_reachable']}")
+    print(f"Total reward: {total_reward:.2f}")
 
-    if num_agents == 1:
-        print(f"\nPerformance:")
-        print(f"  Total reward: {total_reward:.2f}")
-        print(f"  Collisions: {info['collision_counts'][0]}")
-        print(f"  Efficiency: {info['discovered_cells']/max(1, step):.3f} cells/step")
-    else:
-        print(f"\nPerformance by agent:")
-        for i in range(num_agents):
-            sensor_info = info['sensor_types'][i] if 'sensor_types' in info else "camera"
-            print(f"  Agent {i} ({sensor_info}):")
-            print(f"    Reward: {total_rewards[i]:.2f}")
-            print(f"    Collisions: {info['collision_counts'][i]}")
+    print(f"\nPerformance by agent:")
+    for i in range(num_agents):
+        sensor_info = info['sensor_types'][i] if 'sensor_types' in info else "camera"
+        print(f"  Agent {i} ({sensor_info}): Collisions: {info['collision_counts'][i]}")
 
     # Keep window open
     print("\nPress Enter to close...")
@@ -1010,12 +682,11 @@ def main_menu():
         print("1. Single agent exploration")
         print("2. Multi-agent coordination")
         print("3. Mixed sensors demonstration")
-        print("4. Custom scenario")
-        print("5. Load custom map")
-        print("6. Benchmark agents")
-        print("7. Exit")
+        print("4. Load custom map")
+        print("5. Benchmark agents")
+        print("6. Exit")
 
-        choice = input("\nEnter choice (1-7): ").strip()
+        choice = input("\nEnter choice (1-6): ").strip()
 
         if choice == '1':
             run_single_agent_demo()
@@ -1024,18 +695,16 @@ def main_menu():
         elif choice == '3':
             run_mixed_sensors_demo()
         elif choice == '4':
-            run_custom_scenario()
-        elif choice == '5':
             run_with_loaded_map()
-        elif choice == '6':
+        elif choice == '5':
             run_benchmark()
-        elif choice == '7':
+        elif choice == '6':
             print("Goodbye!")
             break
         else:
             print("Invalid choice, please try again.")
 
-        if choice in ['1', '2', '3', '4', '5', '6']:
+        if choice in ['1', '2', '3', '4', '5']:
             input("\nPress Enter to continue...")
 
 

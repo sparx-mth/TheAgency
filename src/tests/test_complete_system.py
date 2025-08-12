@@ -1,5 +1,5 @@
 """
-examples/run_complete_system.py
+examples/test_complete_system.py - Updated for new unified state/action space
 
 This file demonstrates the complete SLAM system with all its features:
 - Single and multi-agent scenarios
@@ -8,22 +8,14 @@ This file demonstrates the complete SLAM system with all its features:
 - Agent strategies
 - Gymnasium compatibility
 - Stable Baselines3 integration
-
-Run different demos:
-    python run_complete_system.py single      # Single agent with frontier strategy
-    python run_complete_system.py multi       # Multi-agent with mixed sensors
-    python run_complete_system.py hetero      # Heterogeneous sensor demo
-    python run_complete_system.py gym         # Gymnasium compatibility test
-    python run_complete_system.py sb3         # Stable Baselines3 training
 """
 
 import sys
 import numpy as np
 from typing import Dict, Any
 
-# Environment imports
+# Environment imports - NO LONGER NEED SingleAgentWrapper
 from environments.slam_env import MultiAgentSLAMEnv
-from environments.single_agent_wrapper import SingleAgentSLAMEnv
 
 # Sensor imports
 from sensors.camera_sensor import CameraSensor
@@ -43,12 +35,13 @@ def test_single_agent_frontier():
     print("Testing Single Agent with Frontier Strategy")
     print("=" * 60)
 
-    # Create environment
-    env = SingleAgentSLAMEnv(
+    # Create environment with num_agents=1
+    env = MultiAgentSLAMEnv(
         width=25,
         height=25,
+        num_agents=1,  # Single agent
         max_steps=500,
-        sensor_params={'max_range': 8, 'fov_deg': 60},
+        sensor_config={0: CameraSensor(max_range=8, fov_deg=60)},
         randomize=True,
         render_mode="human",
         discovery_reward=0.1,
@@ -60,7 +53,7 @@ def test_single_agent_frontier():
 
     # Run episode
     obs, info = env.reset()
-    print(f"Starting position: {obs['position']}")
+    print(f"Starting position: {obs['positions'][0]}")
     print(f"Sensor type: {info['sensor_types'][0]}")
 
     total_reward = 0
@@ -68,10 +61,10 @@ def test_single_agent_frontier():
     truncated = False
 
     while not done and not truncated:
-        # Get action from agent
+        # Get action from agent (now as array)
         action = agent.get_actions(obs, info)
 
-        # Step environment
+        # Step environment (single reward)
         obs, reward, done, truncated, info = env.step(action)
         total_reward += reward
 
@@ -124,42 +117,34 @@ def test_multi_agent_mixed_sensors():
     obs, info = env.reset()
     print("Drone sensor types:", info['sensor_types'])
 
-    total_rewards = {i: 0 for i in range(3)}
+    total_reward = 0.0
     done = False
     truncated = False
 
     while not done and not truncated:
-        # Get actions
+        # Get actions (array)
         actions = agent.get_actions(obs, info)
 
-        # Step environment
-        obs, rewards, dones, truncateds, info = env.step(actions)
-
-        # Accumulate rewards
-        for i in range(3):
-            total_rewards[i] += rewards[i]
-
-        # Check termination
-        done = any(dones.values())
-        truncated = any(truncateds.values())
+        # Step environment (single reward)
+        obs, reward, done, truncated, info = env.step(actions)
+        total_reward += reward
 
         # Render
         env.render()
 
         # Print progress
         if info['step'] % 100 == 0:
-            print(f"Step {info['step']}: Progress {info['progress']*100:.1f}%")
+            print(f"Step {info['step']}: Progress {info['progress']*100:.1f}%, Total Reward: {total_reward:.2f}")
             for i in range(3):
                 print(f"  Drone {i} ({info['sensor_types'][i]}): "
-                      f"Reward {total_rewards[i]:.2f}, "
                       f"Collisions: {info['collision_counts'][i]}")
 
     print(f"\nEpisode Complete!")
     print(f"Total steps: {info['step']}")
     print(f"Final progress: {info['progress']*100:.1f}%")
+    print(f"Total reward: {total_reward:.2f}")
     for i in range(3):
-        print(f"Drone {i}: Total reward: {total_rewards[i]:.2f}, "
-              f"Collisions: {info['collision_counts'][i]}")
+        print(f"Drone {i}: Collisions: {info['collision_counts'][i]}")
 
     env.close()
 
@@ -185,11 +170,12 @@ def test_heterogeneous_sensors():
         print(f"  Parameters: {sensor.get_sensor_params()}")
 
         # Create single-agent env with this sensor
-        env = SingleAgentSLAMEnv(
+        env = MultiAgentSLAMEnv(
             width=20,
             height=20,
+            num_agents=1,
             max_steps=200,
-            sensor=sensor,
+            sensor_config={0: sensor},
             randomize=False,
             render_mode=None,
         )
@@ -216,10 +202,11 @@ def test_gymnasium_compatibility():
     print("Testing Gymnasium Compatibility")
     print("=" * 60)
 
-    # Test single-agent environment
-    env = SingleAgentSLAMEnv(
+    # Test environment with single agent
+    env = MultiAgentSLAMEnv(
         width=16,
         height=16,
+        num_agents=1,
         max_steps=200,
         randomize=False,
     )
@@ -258,10 +245,11 @@ def test_stable_baselines3_training():
         from stable_baselines3 import PPO
         from stable_baselines3.common.env_checker import check_env
 
-        # Create environment
-        env = SingleAgentSLAMEnv(
+        # Create environment with single agent
+        env = MultiAgentSLAMEnv(
             width=16,
             height=16,
+            num_agents=1,
             max_steps=200,
             randomize=True,
         )
@@ -325,6 +313,7 @@ def benchmark_agents():
     env_config = {
         'width': 20,
         'height': 20,
+        'num_agents': 1,
         'max_steps': 300,
         'randomize': True,
         'render_mode': None,
@@ -338,7 +327,7 @@ def benchmark_agents():
         episode_metrics = []
 
         for episode in range(num_episodes):
-            env = SingleAgentSLAMEnv(**env_config)
+            env = MultiAgentSLAMEnv(**env_config)
             obs, info = env.reset()
             agent.reset()
 

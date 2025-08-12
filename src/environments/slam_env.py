@@ -8,27 +8,23 @@ The environment supports:
 - Configurable number of agents (1 to N)
 - Heterogeneous sensor configurations per drone
 - Abstract communication interface for future ROS2 integration
-- Collision penalties (not prevention)
+- Collision penalties
 - Shared global map discovery
 - Full Gymnasium compatibility for RL training
-
-This environment maintains clean separation from agent logic while supporting
-the necessary abstractions for sensors and communication.
 """
 
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pygame
-from typing import Dict, List, Tuple, Optional, Any, Union
-import time
+from typing import Dict, List, Tuple, Optional, Any
 
-from core.constants import (
+from environments.constants import (
     TileType, Action, DIRECTIONS, DIRECTION_DELTAS,
     TILE_SIZE, FPS, TILE_COLORS, DRONE_COLORS,
-    DEFAULT_ENV_PARAMS, DEFAULT_REWARD_PARAMS
+    DEFAULT_REWARD_PARAMS
 )
-from core.drone_state import DroneState
+from environments.drone_state import DroneState
 from sensors.base_sensor import BaseSensor
 from sensors.camera_sensor import CameraSensor
 from communication.comm_interface import CommunicationInterface
@@ -78,8 +74,8 @@ class MultiAgentSLAMEnv(gym.Env):
         Initialize the multi-agent SLAM environment.
 
         Args:
-            width: Width of the grid map
-            height: Height of the grid map
+            width: Width of the grid map (ignored if map_path is provided)
+            height: Height of the grid map (ignored if map_path is provided)
             num_agents: Number of drone agents
             max_steps: Maximum steps per episode
             map_path: Path to load a pre-defined map
@@ -95,15 +91,21 @@ class MultiAgentSLAMEnv(gym.Env):
         """
         super().__init__()
 
-        # Environment dimensions
-        self.width = width
-        self.height = height
-        self.num_agents = num_agents
-        self.max_steps = max_steps
-
         # Map configuration
         self.map_path = map_path
         self.randomize = randomize
+
+        # If map_path is provided, load it to get dimensions
+        if self.map_path:
+            temp_map = self._load_map(self.map_path)
+            self.height, self.width = temp_map.shape
+        else:
+            # Use provided dimensions for generated maps
+            self.width = width
+            self.height = height
+
+        self.num_agents = num_agents
+        self.max_steps = max_steps
 
         # Rendering
         self.render_mode = render_mode
@@ -140,43 +142,29 @@ class MultiAgentSLAMEnv(gym.Env):
 
     def _define_spaces(self):
         """Define Gymnasium action and observation spaces."""
-        # Action space
-        if self.num_agents > 1:
-            self.action_space = spaces.Dict({
-                i: spaces.Discrete(len(Action))
-                for i in range(self.num_agents)
-            })
-        else:
-            self.action_space = spaces.Discrete(len(Action))
+        # Action space: 4N actions (4 actions per drone)
+        self.action_space = spaces.MultiDiscrete([len(Action)] * self.num_agents)
 
-        # Observation space (same structure for all agents)
-        single_obs_space = spaces.Dict({
+        # Observation space: unified state representation
+        self.observation_space = spaces.Dict({
             'global_map': spaces.Box(
                 low=-1, high=6,
                 shape=(self.height, self.width),
                 dtype=np.int8
             ),
-            'position': spaces.Box(
+            'positions': spaces.Box(
                 low=0, high=max(self.width, self.height),
-                shape=(2,), dtype=np.int32
+                shape=(self.num_agents, 2), dtype=np.int32
             ),
-            'facing': spaces.Discrete(4),
-            'active': spaces.Discrete(2),
+            'facings': spaces.Box(
+                low=0, high=3,
+                shape=(self.num_agents,), dtype=np.int32
+            ),
+            'active': spaces.Box(
+                low=0, high=1,
+                shape=(self.num_agents,), dtype=np.int8
+            ),
         })
-
-        # Only add other_positions if there are multiple agents
-        if self.num_agents > 1:
-            single_obs_space['other_positions'] = spaces.Box(
-                low=0, high=max(self.width, self.height),
-                shape=(self.num_agents - 1, 2), dtype=np.int32
-            )
-
-        if self.num_agents > 1:
-            self.observation_space = spaces.Dict({
-                i: single_obs_space for i in range(self.num_agents)
-            })
-        else:
-            self.observation_space = single_obs_space
 
     def _create_sensor(self, drone_id: int) -> BaseSensor:
         """
@@ -325,7 +313,7 @@ class MultiAgentSLAMEnv(gym.Env):
         self,
         seed: Optional[int] = None,
         options: Optional[Dict] = None
-    ) -> Tuple[Union[Dict, Any], Dict]:
+    ) -> Tuple[Dict, Dict]:
         """
         Reset the environment to initial state.
 
@@ -344,6 +332,10 @@ class MultiAgentSLAMEnv(gym.Env):
         # Generate or load map
         if self.map_path:
             self.true_map = self._load_map(self.map_path)
+            # Update dimensions based on loaded map
+            self.height, self.width = self.true_map.shape
+            # Redefine spaces if dimensions changed
+            self._define_spaces()
         elif self.randomize:
             self.true_map = self._generate_map()
         else:
@@ -402,45 +394,38 @@ class MultiAgentSLAMEnv(gym.Env):
 
     def step(
         self,
-        actions: Union[int, Dict[int, int]]
-    ) -> Tuple[Any, Any, Any, Any, Dict]:
+        actions: np.ndarray
+    ) -> Tuple[Dict, float, bool, bool, Dict]:
         """
         Execute actions and step the environment.
 
         Args:
-            actions: Single action (single-agent) or dict of actions (multi-agent)
+            actions: Array of N actions, one for each drone
 
         Returns:
-            Tuple of (observations, rewards, terminated, truncated, info)
+            Tuple of (observations, reward, terminated, truncated, info)
         """
         self.current_step += 1
 
-        # Convert single-agent action to dict format
-        if self.num_agents == 1:
-            # Handle both int and numpy scalar types
-            if not isinstance(actions, dict):
-                # Convert numpy scalars to int
-                actions = {0: int(actions)}
-
-        rewards = {}
+        # Initialize total reward for the entire environment
+        total_reward = 0.0
+        total_discoveries = 0
+        total_collisions = 0
 
         # Process each drone
-        for drone in self.drones:
-            i = drone.drone_id
-
+        for i, drone in enumerate(self.drones):
             # Activate drone if it's time
             if not drone.active and self.current_step >= drone.entry_time:
                 drone.active = True
 
             if not drone.active:
-                rewards[i] = 0.0
                 continue
 
-            # Get action
+            # Get action for this drone
             action = Action(actions[i])
 
-            # Initialize reward with step penalty
-            reward = self.step_penalty
+            # Add step penalty
+            total_reward += self.step_penalty / self.num_agents  # Distribute step penalty
 
             # Execute action
             if action == Action.TURN_LEFT:
@@ -471,8 +456,9 @@ class MultiAgentSLAMEnv(gym.Env):
                                 break
 
                 if collision:
-                    # Apply collision penalty but don't move
-                    reward += self.collision_penalty
+                    # Apply collision penalty to total reward
+                    total_reward += self.collision_penalty
+                    total_collisions += 1
                     drone.add_collision()
                 else:
                     # Move to new position
@@ -482,13 +468,12 @@ class MultiAgentSLAMEnv(gym.Env):
             observations = drone.sensor.sense(drone.pos, drone.facing, self.true_map)
 
             # Update global map and count discoveries
-            discoveries = 0
             new_discoveries = []
             for x, y, value in observations:
                 if 0 <= x < self.width and 0 <= y < self.height:
                     if self.global_map[y, x] == TileType.UNKNOWN:
                         self.global_map[y, x] = value
-                        discoveries += 1
+                        total_discoveries += 1
                         new_discoveries.append((x, y, value))
 
             # Update drone discoveries
@@ -498,13 +483,11 @@ class MultiAgentSLAMEnv(gym.Env):
             if new_discoveries:
                 self.comm.broadcast_map_update(new_discoveries)
 
-            # Add discovery reward
-            reward += discoveries * self.discovery_reward
-
             # Broadcast drone state through communication
             self.comm.broadcast_state(i, drone.to_dict())
 
-            rewards[i] = reward
+        # Add discovery reward to total
+        total_reward += total_discoveries * self.discovery_reward
 
         # Update global map in communication
         self.comm.set_global_map(self.global_map)
@@ -517,10 +500,8 @@ class MultiAgentSLAMEnv(gym.Env):
         discovered = np.sum((self.global_map != TileType.UNKNOWN) & self.reachable_mask)
         if discovered >= self.total_reachable * 0.99:  # 99% to account for edge cases
             terminated = True
-            # Add completion bonus to all active drones
-            for drone in self.drones:
-                if drone.active:
-                    rewards[drone.drone_id] += self.completion_bonus
+            # Add completion bonus to total reward
+            total_reward += self.completion_bonus
 
         # Check step limit
         if self.current_step >= self.max_steps:
@@ -530,54 +511,32 @@ class MultiAgentSLAMEnv(gym.Env):
         observations = self._get_observations()
         info = self._get_info()
 
-        # Return based on single vs multi-agent
-        if self.num_agents == 1:
-            return observations, rewards[0], terminated, truncated, info
-        else:
-            dones = {i: terminated for i in range(self.num_agents)}
-            truncateds = {i: truncated for i in range(self.num_agents)}
-            return observations, rewards, dones, truncateds, info
+        return observations, total_reward, terminated, truncated, info
 
-    def _get_observations(self) -> Union[Dict, Any]:
+    def _get_observations(self) -> Dict:
         """
-        Get observations for all agents.
+        Get unified observation for all agents.
 
         Returns:
-            Single observation dict (single-agent) or dict of observations (multi-agent)
+            Dictionary with global map, positions array, facings array, and active array
         """
-        observations = {}
+        # Collect positions, facings, and active states
+        positions = np.zeros((self.num_agents, 2), dtype=np.int32)
+        facings = np.zeros(self.num_agents, dtype=np.int32)
+        active = np.zeros(self.num_agents, dtype=np.int8)
 
         for drone in self.drones:
             i = drone.drone_id
+            positions[i] = drone.pos
+            facings[i] = drone.get_facing_idx()
+            active[i] = int(drone.active)
 
-            obs = {
-                'global_map': self.global_map.copy(),
-                'position': np.array(drone.pos, dtype=np.int32),
-                'facing': drone.get_facing_idx(),
-                'active': int(drone.active),
-            }
-
-            # Only add other_positions for multi-agent environments
-            if self.num_agents > 1:
-                # Get other drones' positions
-                other_positions = []
-                for other_drone in self.drones:
-                    if drone.drone_id != other_drone.drone_id:
-                        other_positions.append(other_drone.pos)
-
-                # Pad if needed
-                while len(other_positions) < self.num_agents - 1:
-                    other_positions.append((0, 0))
-
-                obs['other_positions'] = np.array(other_positions[:self.num_agents-1], dtype=np.int32)
-
-            observations[i] = obs
-
-        # Return format based on single vs multi-agent
-        if self.num_agents == 1:
-            return observations[0]
-        else:
-            return observations
+        return {
+            'global_map': self.global_map.copy(),
+            'positions': positions,
+            'facings': facings,
+            'active': active,
+        }
 
     def _get_info(self) -> Dict[str, Any]:
         """

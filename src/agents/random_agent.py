@@ -5,18 +5,15 @@ This file implements a simple random exploration agent for the SLAM environment.
 The random agent serves as a baseline for comparison and testing, making decisions
 through random action selection with a configurable bias toward forward movement.
 
-This agent is useful for:
-- Baseline performance comparison
-- Testing environment stability
-- Generating diverse exploration patterns
-- Simple exploration when computation is limited
+Updated to work with the new unified state format.
 """
 
 import random
-from typing import Any, Dict, Union
+from typing import Any, Dict
+import numpy as np
 
 from .base_agent import BaseSLAMAgent
-from core.constants import Action
+from environments.constants import Action
 
 
 class RandomAgent(BaseSLAMAgent):
@@ -56,58 +53,51 @@ class RandomAgent(BaseSLAMAgent):
 
     def get_actions(
         self,
-        observations: Union[Dict, Any],
+        observations: Dict[str, Any],
         info: Dict[str, Any]
-    ) -> Union[int, Dict[int, int]]:
+    ) -> np.ndarray:
         """
         Get random actions with forward bias.
 
+        Now works with unified state format where all agent data is in arrays.
+
         Args:
-            observations: Current observations from environment
+            observations: Current observations with unified format:
+                - global_map: Shared map
+                - positions: Array of positions [num_agents, 2]
+                - facings: Array of facing directions [num_agents]
+                - active: Array of active states [num_agents]
             info: Additional environment information
 
         Returns:
-            Random actions for all controlled agents
+            Array of random actions for all controlled agents
         """
-        if self.is_single_agent:
-            # Single agent case
-            action = self._get_single_action(observations)
-            self.action_history.append(action)
-            return action
-        else:
-            # Multi-agent case
-            actions = {}
-            for agent_id in range(self.num_agents):
-                obs = observations[agent_id]
-                action = self._get_single_action(obs)
-                actions[agent_id] = action
-                self.action_history.append((agent_id, action))
-            return actions
+        # Extract active states from unified format
+        active = observations['active']
 
-    def _get_single_action(self, obs: Dict) -> int:
-        """
-        Get a random action for a single agent.
+        # Create actions array
+        actions = np.zeros(self.num_agents, dtype=np.int32)
 
-        Args:
-            obs: Observation dictionary for one agent
+        # Generate random action for each agent
+        for agent_id in range(self.num_agents):
+            if not active[agent_id]:
+                action = Action.STAY
+            else:
+                # Random action with forward bias
+                if random.random() < self.forward_bias:
+                    action = Action.FORWARD
+                else:
+                    # Randomly choose between turning and staying
+                    action = random.choice([
+                        Action.TURN_LEFT,
+                        Action.TURN_RIGHT,
+                        Action.STAY
+                    ])
 
-        Returns:
-            Random action integer
-        """
-        # Check if agent is active
-        if not obs.get('active', 1):  # Default to active if not present
-            return Action.STAY
+            actions[agent_id] = action
+            self.action_history.append((agent_id, action))
 
-        # Random action with forward bias
-        if random.random() < self.forward_bias:
-            return Action.FORWARD
-        else:
-            # Randomly choose between turning and staying
-            return random.choice([
-                Action.TURN_LEFT,
-                Action.TURN_RIGHT,
-                Action.STAY
-            ])
+        return actions
 
     def reset(self) -> None:
         """Reset the agent's internal state."""
@@ -131,10 +121,7 @@ class RandomAgent(BaseSLAMAgent):
             'stay': 0
         }
 
-        for action in self.action_history:
-            if isinstance(action, tuple):
-                action = action[1]  # Multi-agent case
-
+        for agent_id, action in self.action_history:
             if action == Action.FORWARD:
                 action_counts['forward'] += 1
             elif action == Action.TURN_LEFT:

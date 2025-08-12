@@ -5,19 +5,20 @@ This file implements a frontier-based exploration agent for SLAM. The frontier
 agent uses the concept of frontiers (boundaries between known and unknown areas)
 to systematically explore the environment.
 
-This is a classic approach in robotic exploration that balances between:
-- Exploring new areas (frontiers)
-- Efficient path planning to reach frontiers
-- Coordination between multiple agents to avoid redundant exploration
+Updated to work with the new unified state format where observations contain:
+- global_map: Single shared map
+- positions: Array of all agent positions
+- facings: Array of all agent facing directions
+- active: Array of agent active states
 """
 
 import random
-from typing import Any, Dict, Union, List, Tuple, Set, Optional
+from typing import Any, Dict, List, Tuple, Set, Optional
 from heapq import heappush, heappop
 import numpy as np
 
 from .base_agent import BaseSLAMAgent
-from core.constants import Action, TileType, DIRECTIONS, DIRECTION_DELTAS
+from environments.constants import Action, TileType
 
 
 class FrontierAgent(BaseSLAMAgent):
@@ -30,16 +31,6 @@ class FrontierAgent(BaseSLAMAgent):
 
     For multi-agent scenarios, it coordinates frontier assignments to minimize
     overlap and redundant exploration.
-
-    Attributes:
-        goals: Current goal positions for each agent
-        paths: Planned paths to goals for each agent
-        assigned_frontiers: Set of frontiers currently assigned to agents
-        stuck_counters: Counters to detect when agents are stuck
-        last_positions: Previous positions to detect lack of progress
-        wait_counters: Counters for waiting when path is blocked
-        max_wait: Maximum wait time before replanning
-        camera_range: Range of the camera sensor (default 10)
     """
 
     def __init__(self, num_agents: int = 1, camera_range: int = 10):
@@ -63,53 +54,56 @@ class FrontierAgent(BaseSLAMAgent):
 
     def get_actions(
         self,
-        observations: Union[Dict, Any],
+        observations: Dict[str, Any],
         info: Dict[str, Any]
-    ) -> Union[int, Dict[int, int]]:
+    ) -> np.ndarray:
         """
         Get actions using frontier-based strategy with sensor-aware exploration.
 
+        Now works with unified state format where all agent data is in arrays.
+
         Args:
-            observations: Current observations from environment
+            observations: Current observations with unified format:
+                - global_map: Shared map
+                - positions: Array of positions [num_agents, 2]
+                - facings: Array of facing directions [num_agents]
+                - active: Array of active states [num_agents]
             info: Additional environment information
 
         Returns:
-            Actions targeting frontier exploration
+            Array of actions for all agents
         """
-        if self.is_single_agent:
-            return self._get_single_action(observations, info)
-        else:
-            return self._get_multi_actions(observations, info)
+        # Extract unified state components
+        global_map = observations['global_map']
+        positions = observations['positions']
+        facings = observations['facings']
+        active = observations['active']
 
-    def _get_single_action(self, obs: Dict, info: Dict) -> int:
-        """Get action for single agent."""
-        if not obs.get('active', 1):  # Default to active if not present
-            return Action.STAY
-
-        return self._compute_action(0, obs, self.assigned_frontiers, {})
-
-    def _get_multi_actions(self, observations: Dict, info: Dict) -> Dict[int, int]:
-        """Get actions for multiple agents."""
-        actions = {}
+        # Create actions array
+        actions = np.zeros(self.num_agents, dtype=np.int32)
 
         # Build all_states dict for coordination
         all_states = {}
         for agent_id in range(self.num_agents):
-            obs = observations[agent_id]
             all_states[agent_id] = {
-                'pos': tuple(obs['position']),
-                'facing': obs['facing'],
-                'active': obs.get('active', True)
+                'pos': tuple(positions[agent_id]),
+                'facing': facings[agent_id],
+                'active': bool(active[agent_id])
             }
 
-        # Don't clear assigned frontiers here - manage them individually per agent
-
+        # Compute action for each agent
         for agent_id in range(self.num_agents):
-            obs = observations[agent_id]
-
-            if not obs.get('active', True):
+            if not active[agent_id]:
                 actions[agent_id] = Action.STAY
             else:
+                # Create observation dict in old format for compatibility
+                obs = {
+                    'global_map': global_map,
+                    'position': positions[agent_id],
+                    'facing': facings[agent_id],
+                    'active': active[agent_id]
+                }
+
                 actions[agent_id] = self._compute_action(
                     agent_id, obs, self.assigned_frontiers, all_states
                 )
@@ -281,10 +275,6 @@ class FrontierAgent(BaseSLAMAgent):
     ) -> Optional[int]:
         """
         Check if unexplored cells can be discovered by rotating in place.
-
-        This implements the sensor-aware exploration from the old algorithm:
-        First checks all four directions to see if any unexplored cells (-1/UNKNOWN)
-        are within camera range. If found, either turns toward them or stays to sense.
 
         Args:
             pos: Current position

@@ -1,5 +1,5 @@
 """
-train_dqn_interactive.py
+train_dqn_interactive.py - Updated for new unified state/action space
 
 Interactive DQN training script for the SLAM environment using Stable Baselines3.
 This script provides an interactive interface to configure and train/test DQN agents.
@@ -12,17 +12,17 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
-from environments.single_agent_wrapper import SingleAgentSLAMEnv
+# NO LONGER NEED SingleAgentWrapper
 from environments.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
 
 
 class InteractiveTrainer:
     """Interactive trainer for DQN SLAM agents."""
-    
+
     def __init__(self):
         self.config = {}
-        
+
     def get_user_input(self, prompt, default=None, input_type=str, options=None):
         """Get user input with default value and type conversion."""
         if default is not None:
@@ -30,12 +30,12 @@ class InteractiveTrainer:
         if options:
             prompt += f" {options}"
         prompt += ": "
-        
+
         user_input = input(prompt).strip()
-        
+
         if not user_input and default is not None:
             return default
-        
+
         if input_type == bool:
             return user_input.lower() in ['y', 'yes', 'true', '1']
         elif input_type == int:
@@ -51,7 +51,7 @@ class InteractiveTrainer:
                 print(f"Invalid input. Using default: {default}")
                 return default
         return user_input
-    
+
     def get_available_maps(self):
         """Get list of available map files."""
         maps = {}
@@ -63,31 +63,31 @@ class InteractiveTrainer:
             '../maps',
             './'
         ]
-        
+
         for map_dir in map_dirs:
             if os.path.exists(map_dir):
                 for file in os.listdir(map_dir):
                     if file.endswith(('.txt', '.npy', '.map', '.csv')):
                         maps[file] = os.path.join(map_dir, file)
-        
+
         return maps
-    
+
     def configure_training(self):
         """Interactively configure training parameters."""
         print("\n" + "="*60)
         print("TRAINING CONFIGURATION")
         print("="*60)
-        
+
         # Map selection
         print("\n--- Map Configuration ---")
         map_choice = self.get_user_input(
             "Map type (1=random, 2=fixed)", "1", str
         )
-        
+
         if map_choice == "2":
             # Fixed map mode
             self.config['randomize_maps'] = False
-            
+
             # Show available maps
             available_maps = self.get_available_maps()
             if available_maps:
@@ -97,11 +97,11 @@ class InteractiveTrainer:
                     print(f"  {i}. {name}")
                 print(f"  {len(map_list)+1}. Create a simple test map")
                 print(f"  {len(map_list)+2}. Enter custom path")
-                
+
                 map_selection = self.get_user_input(
                     f"Select map (1-{len(map_list)+2})", "1", int
                 )
-                
+
                 if 1 <= map_selection <= len(map_list):
                     self.config['map_path'] = map_list[map_selection-1][1]
                     print(f"Selected map: {map_list[map_selection-1][0]}")
@@ -118,34 +118,16 @@ class InteractiveTrainer:
                         print("File not found. Will use random maps instead.")
                         self.config['randomize_maps'] = True
             else:
-                print("No map files found. Options:")
-                print("  1. Create a simple test map")
-                print("  2. Enter custom path")
-                print("  3. Use random maps")
-                
-                choice = self.get_user_input("Select option (1-3)", "3", str)
-                if choice == "1":
-                    self.config['map_path'] = None
-                    self.config['use_simple_map'] = True
-                    self.config['randomize_maps'] = False
-                elif choice == "2":
-                    custom_path = self.get_user_input("Enter map file path", "", str)
-                    if os.path.exists(custom_path):
-                        self.config['map_path'] = custom_path
-                        self.config['randomize_maps'] = False
-                    else:
-                        print("File not found. Will use random maps.")
-                        self.config['randomize_maps'] = True
-                else:
-                    self.config['randomize_maps'] = True
+                print("No map files found. Using random maps.")
+                self.config['randomize_maps'] = True
         else:
             # Random map mode
             self.config['randomize_maps'] = True
             self.config['map_path'] = None
-        
+
         # Environment configuration
         print("\n--- Environment Configuration ---")
-        
+
         # Only ask for dimensions if using random maps or simple test map
         if self.config.get('randomize_maps', True) or self.config.get('use_simple_map', False):
             self.config['grid_width'] = self.get_user_input(
@@ -167,7 +149,7 @@ class InteractiveTrainer:
                         map_data = np.loadtxt(map_path, delimiter=',', dtype=np.int8)
                     else:
                         map_data = np.loadtxt(map_path, dtype=np.int8)
-                    
+
                     height, width = map_data.shape
                     self.config['grid_width'] = width
                     self.config['grid_height'] = height
@@ -181,17 +163,11 @@ class InteractiveTrainer:
                 # Fallback to defaults
                 self.config['grid_width'] = 20
                 self.config['grid_height'] = 20
-        
+
         self.config['max_steps'] = self.get_user_input(
             "Max steps per episode", 500, int
         )
-        
-        # Only ask about randomization if not already set by map selection
-        if 'randomize_maps' not in self.config:
-            self.config['randomize_maps'] = self.get_user_input(
-                "Randomize maps each episode? (y/n)", True, bool
-            )
-        
+
         # Sensor configuration
         print("\n--- Sensor Configuration ---")
         self.config['sensor_range'] = self.get_user_input(
@@ -203,7 +179,7 @@ class InteractiveTrainer:
         self.config['sensor_rays'] = self.get_user_input(
             "Number of sensor rays", 20, int
         )
-        
+
         # Reward configuration
         print("\n--- Reward Configuration ---")
         self.config['discovery_reward'] = self.get_user_input(
@@ -218,7 +194,7 @@ class InteractiveTrainer:
         self.config['completion_bonus'] = self.get_user_input(
             "Completion bonus", 10.0, float
         )
-        
+
         # Training configuration
         print("\n--- Training Configuration ---")
         self.config['total_timesteps'] = self.get_user_input(
@@ -236,12 +212,12 @@ class InteractiveTrainer:
         self.config['exploration_fraction'] = self.get_user_input(
             "Exploration fraction (0-1)", 0.1, float
         )
-        
+
         # Parallel environments
         self.config['n_envs'] = self.get_user_input(
             "Number of parallel environments for training", 4, int
         )
-        
+
         # Evaluation
         self.config['eval_freq'] = self.get_user_input(
             "Evaluation frequency (steps)", 5000, int
@@ -249,26 +225,26 @@ class InteractiveTrainer:
         self.config['n_eval_episodes'] = self.get_user_input(
             "Number of evaluation episodes", 10, int
         )
-        
+
         # Rendering during training
         self.config['render_training'] = self.get_user_input(
             "Show visualization during training? (y/n)", False, bool
         )
-        
+
         if self.config['render_training']:
             print("  Note: Visualization will slow down training and disable parallel environments")
-        
+
         # Save configuration
         self.config['save_path'] = self.get_user_input(
             "Model save path", "models/interactive", str
         )
-        
+
     def configure_testing(self):
         """Interactively configure testing parameters."""
         print("\n" + "="*60)
         print("TESTING CONFIGURATION")
         print("="*60)
-        
+
         # Model selection
         print("\nAvailable models:")
         model_files = []
@@ -279,21 +255,21 @@ class InteractiveTrainer:
                         model_path = os.path.join(root, file[:-4])
                         model_files.append(model_path)
                         print(f"  - {model_path}")
-        
+
         if not model_files:
             print("  No models found. Please train a model first.")
             return False
-        
+
         self.config['model_path'] = self.get_user_input(
             "\nModel path", "models/best/best_model", str
         )
-        
+
         # Check if model exists
         model_file = self.config['model_path'] if self.config['model_path'].endswith('.zip') else f"{self.config['model_path']}.zip"
         if not os.path.exists(model_file):
             print(f"Error: Model not found at {model_file}")
             return False
-        
+
         # Test configuration
         self.config['test_episodes'] = self.get_user_input(
             "Number of test episodes", 5, int
@@ -301,52 +277,33 @@ class InteractiveTrainer:
         self.config['render_test'] = self.get_user_input(
             "Show visualization? (y/n)", True, bool
         )
-        
+
         # Environment configuration for testing
         print("\n--- Test Environment Configuration ---")
-        
+
         # Map selection for testing
         map_choice = self.get_user_input(
             "Map type (1=random, 2=fixed, 3=same as training)", "3", str
         )
-        
+
         if map_choice == "2":
             # Fixed map mode
             self.config['randomize_maps'] = False
             available_maps = self.get_available_maps()
-            
+
             if available_maps:
                 print("\nAvailable maps:")
                 map_list = list(available_maps.items())
                 for i, (name, path) in enumerate(map_list, 1):
                     print(f"  {i}. {name}")
-                
+
                 map_selection = self.get_user_input(
                     f"Select map (1-{len(map_list)})", "1", int
                 )
-                
+
                 if 1 <= map_selection <= len(map_list):
                     self.config['map_path'] = map_list[map_selection-1][1]
                     print(f"Selected map: {map_list[map_selection-1][0]}")
-                    
-                    # Get dimensions from the selected map
-                    try:
-                        import numpy as np
-                        map_path = self.config['map_path']
-                        if map_path.endswith('.npy'):
-                            map_data = np.load(map_path)
-                        elif map_path.endswith('.csv'):
-                            map_data = np.loadtxt(map_path, delimiter=',', dtype=np.int8)
-                        else:
-                            map_data = np.loadtxt(map_path, dtype=np.int8)
-                        
-                        height, width = map_data.shape
-                        self.config['grid_width'] = width
-                        self.config['grid_height'] = height
-                        print(f"Map dimensions: {width}x{height}")
-                    except:
-                        self.config['grid_width'] = 20
-                        self.config['grid_height'] = 20
             else:
                 print("No maps found. Using random maps.")
                 self.config['randomize_maps'] = True
@@ -363,13 +320,13 @@ class InteractiveTrainer:
             self.config['map_path'] = None
             self.config['grid_width'] = self.get_user_input("Grid width", 20, int)
             self.config['grid_height'] = self.get_user_input("Grid height", 20, int)
-        
+
         self.config['max_steps'] = self.get_user_input(
             "Max steps per episode", 500, int
         )
-        
+
         return True
-    
+
     def make_env(self, render=False):
         """Create environment based on configuration."""
         sensor = CameraSensor(
@@ -377,25 +334,27 @@ class InteractiveTrainer:
             fov_deg=self.config.get('sensor_fov', 60),
             num_rays=self.config.get('sensor_rays', 20)
         )
-        
+
         # Handle map configuration
         map_path = self.config.get('map_path', None)
         randomize = self.config.get('randomize_maps', True)
-        
+
         # If using a simple test map and no path specified
         if self.config.get('use_simple_map', False) and not map_path:
             # Environment will create a simple default map when randomize=False and no path
             map_path = None
             randomize = False
-        
-        env = SingleAgentSLAMEnv(
+
+        # Use MultiAgentSLAMEnv with num_agents=1 for single agent
+        env = MultiAgentSLAMEnv(
             width=self.config.get('grid_width', 20),
             height=self.config.get('grid_height', 20),
+            num_agents=1,  # Single agent for DQN training
             max_steps=self.config.get('max_steps', 500),
             map_path=map_path,
             randomize=randomize,
             render_mode='human' if render else None,
-            sensor=sensor,
+            sensor_config={0: sensor},
             discovery_reward=self.config.get('discovery_reward', 0.1),
             collision_penalty=self.config.get('collision_penalty', -0.5),
             step_penalty=self.config.get('step_penalty', -0.001),

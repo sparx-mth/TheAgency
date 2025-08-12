@@ -1,10 +1,9 @@
+# environments/__init__.py
 """
-environments/__init__.py
+Environments package initialization.
 
-Environments package initialization. Exports environment classes.
+Kept minimal to avoid circular imports.
+Import concrete envs directly, e.g.:
+from environments.slam_env import MultiAgentSLAMEnv
 """
-
-from .slam_env import MultiAgentSLAMEnv
-from .single_agent_wrapper import SingleAgentSLAMEnv
-
-__all__ = ['MultiAgentSLAMEnv', 'SingleAgentSLAMEnv']
+__all__: list[str] = []
