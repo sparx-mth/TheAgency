@@ -169,3 +169,4 @@ isaac_sim/logs/*
 orb_slam_module
 
 runs/
+data/

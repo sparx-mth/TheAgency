@@ -461,7 +461,7 @@ def run_with_loaded_map():
         render_mode='human',
         randomize=False,
         map_path=selected_map,
-        save_interval=30,                
+        save_interval=20,                
         save_dir="runs/frontier_002",     
         save_format="png",              
         save_true_map=True,
