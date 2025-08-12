@@ -82,6 +82,12 @@ class CameraSensor(BaseSensor):
         # Collect observations from all rays
         observations = set()
 
+        # IMPORTANT: Always include the drone's current position
+        # The drone can always see where it currently is!
+        x0, y0 = pos
+        if 0 <= x0 < grid.shape[1] and 0 <= y0 < grid.shape[0]:
+            observations.add((x0, y0, int(grid[y0, x0])))
+
         for i in range(self.num_rays):
             # Calculate angle for this ray
             if self.num_rays == 1:
@@ -143,7 +149,8 @@ class CameraSensor(BaseSensor):
             if (tile_x, tile_y) not in visited:
                 visited.add((tile_x, tile_y))
 
-                # Skip the drone's own position
+                # Don't add the drone's position here (already added in sense())
+                # This avoids duplicates since we always add it in the main sense() method
                 if tile_x != x0 or tile_y != y0:
                     cell_value = grid[tile_y, tile_x]
                     observations.append((tile_x, tile_y, int(cell_value)))
