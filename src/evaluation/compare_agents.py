@@ -1,8 +1,8 @@
 """
-compare_agents.py - FIXED VERSION
+compare_agents.py - UPDATED FOR DQN
 
-Comprehensive benchmark to compare Random, Frontier, and PPO agents on house_map_10.
-Uses the exact same environment configuration as PPO training for fair comparison.
+Comprehensive benchmark to compare Random, Frontier, and DQN agents on house_map_10.
+Uses the exact same environment configuration as DQN training for fair comparison.
 """
 
 import os
@@ -21,74 +21,120 @@ warnings.filterwarnings("ignore")
 # Import environment and agents
 from environments.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
-from agents.random_agent import RandomAgent
+# from agents.random_agent import RandomAgent
 from agents.frontier_agent import FrontierAgent
 
-# Import for PPO
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+# Import for DQN
+from stable_baselines3 import DQN
 from stable_baselines3.common.monitor import Monitor
+from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+
+# Import the custom feature extractor (needed for loading the model)
+# Try multiple possible import paths
+SLAMCNNExtractor = None
+try:
+    from cnn_feature_extractor import SLAMCNNExtractor
+    print("  Imported SLAMCNNExtractor from cnn_feature_extractor")
+except ImportError:
+    try:
+        import sys
+        import os
+        # Add the src/rl directory to path
+        rl_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'rl')
+        if rl_path not in sys.path:
+            sys.path.append(rl_path)
+        from cnn_feature_extractor import SLAMCNNExtractor
+        print("  Imported SLAMCNNExtractor from rl directory")
+    except ImportError:
+        print("  Warning: Could not import cnn_feature_extractor from any location.")
+        print("  Creating a local copy for model loading...")
+
+        # Create local copy inline
+        import torch
+        import torch.nn as nn
+        from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+        from gymnasium import spaces
+
+        class SLAMCNNExtractor(BaseFeaturesExtractor):
+            def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
+                cnn_output_dim = 64
+                other_features_dim = observation_space['positions'].shape[0] * 2 + \
+                                     observation_space['facings'].shape[0] + \
+                                     observation_space['active'].shape[0]
+
+                super().__init__(observation_space, features_dim)
+
+                self.cnn = nn.Sequential(
+                    nn.Conv2d(1, 16, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.AdaptiveAvgPool2d((4, 4)),
+                    nn.Flatten(),
+                    nn.Linear(32 * 4 * 4, cnn_output_dim),
+                    nn.ReLU()
+                )
+
+                combined_dim = cnn_output_dim + other_features_dim
+                self.mlp = nn.Sequential(
+                    nn.Linear(combined_dim, features_dim),
+                    nn.ReLU(),
+                    nn.Linear(features_dim, features_dim),
+                    nn.ReLU()
+                )
+
+            def forward(self, observations):
+                map_data = observations['global_map'].float()
+                map_data = map_data.unsqueeze(1)
+                cnn_features = self.cnn(map_data)
+
+                positions = observations['positions'].float().flatten(start_dim=1)
+                facings = observations['facings'].float()
+                active = observations['active'].float()
+
+                other_features = torch.cat([positions, facings, active], dim=1)
+                combined = torch.cat([cnn_features, other_features], dim=1)
+
+                return self.mlp(combined)
+
+        print("  Created local SLAMCNNExtractor class")
 
 
-class PPOAgentWrapper:
-    """Wrapper to make PPO agent compatible with our benchmark interface."""
+class DQNAgentWrapper:
+    """Wrapper to make DQN agent compatible with our benchmark interface."""
 
-    def __init__(self, model_path: str, norm_path: str = None):
+    def __init__(self, model_path: str):
         """
-        Initialize PPO agent wrapper.
+        Initialize DQN agent wrapper.
 
         Args:
-            model_path: Path to trained PPO model
-            norm_path: Path to normalization statistics
+            model_path: Path to trained DQN model
         """
-        self.model = PPO.load(model_path)
-        self.norm_path = norm_path
-        self.vec_env = None
+        self.model = DQN.load(model_path)
         self.num_agents = 1
-        self.last_obs = None
 
     def setup_env(self, env):
-        """Setup vectorized environment for PPO."""
-        # Wrap in Monitor
-        monitored_env = Monitor(env)
-
-        # Create vectorized environment
-        self.vec_env = DummyVecEnv([lambda: monitored_env])
-
-        # Load normalization if available
-        if self.norm_path and os.path.exists(self.norm_path):
-            print(f"  Loading normalization from: {self.norm_path}")
-            self.vec_env = VecNormalize.load(self.norm_path, self.vec_env)
-            self.vec_env.training = False
-            self.vec_env.norm_reward = False
-            print("  Normalization loaded successfully")
-        else:
-            print(f"  Warning: Normalization file not found at {self.norm_path}")
-            print("  PPO performance may be degraded without normalization")
+        """Setup wrapped environment for DQN."""
+        # Don't need to setup here, we'll handle wrapping in the trial
+        pass
 
     def get_actions(self, observations, info):
-        """Get actions from PPO model."""
-        if self.vec_env is None:
-            raise RuntimeError("Environment not setup. Call setup_env first.")
+        """Get actions from DQN model using wrapped environment."""
+        # DQN expects single discrete action, predict it
+        action, _ = self.model.predict(observations, deterministic=True)
 
-        # PPO expects vectorized observations
-        # The vec_env handles this internally, so we just need the last obs
-        action, _ = self.model.predict(self.last_obs, deterministic=True)
+        # Convert discrete action back to multi-agent format
+        # This will be handled by the wrapper in the trial logic
         return action
 
     def reset(self):
         """Reset the agent."""
-        if self.vec_env is not None:
-            self.last_obs = self.vec_env.reset()
-
-    def step_update(self, obs):
-        """Update last observation after environment step."""
-        self.last_obs = obs
+        pass  # DQN doesn't need state reset
 
 
-def create_environment_exact_ppo_config(render=False):
+def create_environment_exact_dqn_config(render=False):
     """
-    Create environment with EXACT same configuration as PPO training.
+    Create environment with EXACT same configuration as DQN training.
 
     Args:
         render: Whether to render the environment
@@ -96,20 +142,20 @@ def create_environment_exact_ppo_config(render=False):
     Returns:
         Environment instance
     """
-    # EXACT same sensor configuration as PPO training
+    # EXACT same sensor configuration as DQN training
     sensor = CameraSensor(
         max_range=5,  # Same as training
         fov_deg=90,  # Same as training
         num_rays=20  # Same as training
     )
 
-    # EXACT same environment parameters as PPO training
+    # EXACT same environment parameters as DQN training
     env = MultiAgentSLAMEnv(
         width=10,
         height=10,
         num_agents=1,
         max_steps=500,  # Same as training
-        map_path="/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_10.txt",
+        map_path="/home/user/nadav/TheAgency/resources/planner/maps/house_map_10.txt",
         randomize=False,  # Always use the same map
         render_mode='human' if render else None,
         sensor_config={0: sensor},
@@ -129,7 +175,7 @@ def run_single_trial(agent, agent_type, trial_num, render=False, render_delay=0.
 
     Args:
         agent: The agent to test
-        agent_type: Type of agent ('random', 'frontier', 'ppo')
+        agent_type: Type of agent ('random', 'frontier', 'dqn')
         trial_num: Trial number
         render: Whether to render
         render_delay: Delay between frames when rendering
@@ -138,18 +184,17 @@ def run_single_trial(agent, agent_type, trial_num, render=False, render_delay=0.
         Dictionary with trial results
     """
     # Create environment
-    env = create_environment_exact_ppo_config(render=render)
+    env = create_environment_exact_dqn_config(render=render)
 
-    # Special handling for PPO agent
-    if agent_type == 'ppo':
-        agent.setup_env(env)
-        obs = agent.vec_env.reset()
-        agent.last_obs = obs
+    # Special handling for DQN agent - wrap the environment
+    if agent_type == 'dqn':
+        # Wrap environment for DQN (same as training)
+        monitored_env = Monitor(env)
+        wrapped_env = MultiDiscreteToDiscreteWrapper(monitored_env)
 
-        # Get actual environment for metrics
-        actual_env = agent.vec_env.envs[0]
-        if hasattr(actual_env, 'env'):
-            actual_env = actual_env.env
+        obs, info = wrapped_env.reset()
+        agent.reset()
+        actual_env = env  # Keep reference to original for metrics
     else:
         obs, info = env.reset()
         agent.reset()
@@ -170,15 +215,11 @@ def run_single_trial(agent, agent_type, trial_num, render=False, render_delay=0.
 
     while not done and not truncated:
         # Get action based on agent type
-        if agent_type == 'ppo':
-            action, _ = agent.model.predict(agent.last_obs, deterministic=True)
-            obs, reward, done, info = agent.vec_env.step(action)
-            agent.last_obs = obs
-
-            # Extract scalar values
-            reward = reward[0]
-            done = done[0]
-            info = info[0]
+        if agent_type == 'dqn':
+            # Get discrete action from DQN
+            discrete_action = agent.get_actions(obs, info)
+            # Step the wrapped environment
+            obs, reward, done, truncated, info = wrapped_env.step(discrete_action)
         else:
             actions = agent.get_actions(obs, info)
             obs, reward, done, truncated, info = env.step(actions)
@@ -221,8 +262,8 @@ def run_single_trial(agent, agent_type, trial_num, render=False, render_delay=0.
         discovery_rate = 0
 
     # Close environment
-    if agent_type == 'ppo':
-        agent.vec_env.close()
+    if agent_type == 'dqn':
+        wrapped_env.close()
     else:
         env.close()
 
@@ -269,57 +310,28 @@ def run_benchmark(num_trials=10, render_first=False, render_all=False, save_resu
     # Initialize agents
     agents = []
 
-    # 1. Random Agent
-    print("\nInitializing Random Agent...")
-    random_agent = RandomAgent(num_agents=1, forward_bias=0.7, seed=42)
-    agents.append(('random', random_agent))
+    # # 1. Random Agent
+    # print("\nInitializing Random Agent...")
+    # random_agent = RandomAgent(num_agents=1, forward_bias=0.7, seed=42)
+    # agents.append(('random', random_agent))
 
     # 2. Frontier Agent
     print("Initializing Frontier Agent...")
     frontier_agent = FrontierAgent(num_agents=1, camera_range=5)
     agents.append(('frontier', frontier_agent))
 
-    # 3. PPO Agent - FIX THE PATHS
-    # Try multiple possible locations for the model
-    ppo_model_paths = [
-        "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/models/simple/final_model",
-        "./models/simple/final_model",
-        "models/simple/final_model"
-    ]
+    # 3. DQN Agent - Updated path
+    dqn_model_path = "/home/user/nadav/TheAgency/src/rl/models/dqn/interrupted_model"
 
-    ppo_norm_paths = [
-        "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/models/simple/vec_normalize.pkl",
-        "./models/simple/vec_normalize.pkl",
-        "models/simple/vec_normalize.pkl"
-    ]
-
-    ppo_model_path = None
-    ppo_norm_path = None
-
-    # Find the model
-    for path in ppo_model_paths:
-        if os.path.exists(f"{path}.zip"):
-            ppo_model_path = path
-            print(f"Found PPO model at: {path}.zip")
-            break
-
-    # Find the normalization file
-    for path in ppo_norm_paths:
-        if os.path.exists(path):
-            ppo_norm_path = path
-            print(f"Found normalization at: {path}")
-            break
-
-    if ppo_model_path:
-        print("Initializing PPO Agent...")
-        ppo_agent = PPOAgentWrapper(ppo_model_path, ppo_norm_path)
-        agents.append(('ppo', ppo_agent))
+    if os.path.exists(f"{dqn_model_path}.zip"):
+        print("Initializing DQN Agent...")
+        print(f"Found DQN model at: {dqn_model_path}.zip")
+        dqn_agent = DQNAgentWrapper(dqn_model_path)
+        agents.append(('dqn', dqn_agent))
     else:
-        print("WARNING: PPO model not found in any expected location")
-        print("         Skipping PPO agent. Run train_simple.py first to train it.")
-        print("         Searched locations:")
-        for path in ppo_model_paths:
-            print(f"           - {path}.zip")
+        print("WARNING: DQN model not found!")
+        print(f"         Searched: {dqn_model_path}.zip")
+        print("         Skipping DQN agent.")
 
     # Run trials
     all_results = []
@@ -405,8 +417,8 @@ def create_comprehensive_visualization(df, save_path="results/comparison_plots.p
     fig = plt.figure(figsize=(20, 14))
     gs = fig.add_gridspec(3, 4, hspace=0.3, wspace=0.3)
 
-    # Color palette for agents
-    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'ppo': '#45B7D1'}
+    # Color palette for agents (updated for DQN)
+    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'dqn': '#45B7D1'}
 
     # 1. Success Rate Comparison
     ax1 = fig.add_subplot(gs[0, 0])
@@ -555,7 +567,7 @@ def create_learning_curves(df, save_path="results/learning_curves.png"):
         save_path: Path to save the figure
     """
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'ppo': '#45B7D1'}
+    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'dqn': '#45B7D1'}
 
     for idx, agent_type in enumerate(df['agent_type'].unique()):
         ax = axes[idx]
@@ -679,7 +691,7 @@ def main():
     """Main function to run the complete benchmark."""
     print("\n" + "=" * 70)
     print("SLAM AGENT COMPARISON BENCHMARK")
-    print("Comparing: Random vs Frontier vs PPO")
+    print("Comparing: Random vs Frontier vs DQN")
     print("=" * 70)
 
     # Configuration

@@ -437,7 +437,7 @@ def run_with_loaded_map():
 
     # Ask for map directory or use default
     default_dir = os.path.join(os.getcwd(), "maps")
-    alt_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps"
+    alt_dir = "/home/user/nadav/TheAgency/resources/planner/maps"
 
     print("Map directories to search:")
     print(f"1. Current directory/maps: {default_dir}")

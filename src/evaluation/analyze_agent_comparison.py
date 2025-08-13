@@ -1,5 +1,5 @@
 """
-analyze_agent_comparison.py
+analyze_agent_comparison.py - UPDATED FOR DQN
 
 Enhanced analysis script for comparing agent performance with advanced visualizations.
 """
@@ -116,8 +116,8 @@ def create_radar_chart(df, save_path="results/radar_comparison.png"):
     # Create figure
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
 
-    # Colors for each agent
-    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'ppo': '#45B7D1'}
+    # Colors for each agent (updated for DQN)
+    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'dqn': '#45B7D1'}
 
     # Plot data for each agent
     for agent_type, values in metrics_dict.items():
@@ -159,7 +159,7 @@ def create_statistical_analysis(df, save_path="results/statistical_analysis.png"
         save_path: Path to save figure
     """
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'ppo': '#45B7D1'}
+    colors = {'random': '#FF6B6B', 'frontier': '#4ECDC4', 'dqn': '#45B7D1'}
 
     # 1. Confidence Intervals for Success Rate
     ax = axes[0, 0]

@@ -1,0 +1,75 @@
+================================================================================
+SLAM AGENT COMPARISON - COMPREHENSIVE REPORT
+================================================================================
+
+EXPERIMENT CONFIGURATION
+----------------------------------------
+Map: house_map_10.txt (10x10 grid)
+Trials per agent: 10
+Camera configuration: range=5, FOV=90°, rays=20
+Max steps: 500
+Agents tested: FRONTIER, DQN
+
+PERFORMANCE SUMMARY
+----------------------------------------
+
+FRONTIER AGENT:
+  • Success Rate: 100.0% (10/10 trials)
+  • Average Progress: 100.0% ± 0.0%
+  • Average Steps: 46 ± 7
+  • Average Reward: 145.80 ± 0.63
+  • Completion Time: 0.38s ± 0.84s
+  • Average Collisions: 0.0 ± 0.0
+  • Discovery Rate: 2.042 cells/step
+  • Reward Efficiency: 3.235 reward/step
+
+DQN AGENT:
+  • Success Rate: 100.0% (10/10 trials)
+  • Average Progress: 100.0% ± 0.0%
+  • Average Steps: 29 ± 2
+  • Average Reward: 146.09 ± 0.72
+  • Completion Time: 0.28s ± 0.62s
+  • Average Collisions: 0.1 ± 0.3
+  • Discovery Rate: 3.170 cells/step
+  • Reward Efficiency: 5.033 reward/step
+
+================================================================================
+RANKINGS
+----------------------------------------
+
+Success Rate:
+  1. DQN: 100.0%
+  2. FRONTIER: 100.0%
+
+Average Progress:
+  1. DQN: 100.0%
+  2. FRONTIER: 100.0%
+
+Average Reward:
+  1. DQN: 146.09
+  2. FRONTIER: 145.80
+
+Fewest Steps:
+  1. DQN: 29.1
+  2. FRONTIER: 45.8
+
+Discovery Rate:
+  1. DQN: 317.0%
+  2. FRONTIER: 204.2%
+
+Fewest Collisions:
+  1. FRONTIER: 0.0
+  2. DQN: 0.1
+
+================================================================================
+CONCLUSIONS
+----------------------------------------
+
+Overall Performance Winner: DQN
+(Based on combined rankings across all metrics)
+
+Point Breakdown:
+  • DQN: 17 points
+  • FRONTIER: 13 points
+
+================================================================================

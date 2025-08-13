@@ -1,5 +1,5 @@
 """
-train_simple.py - Simplified PPO training for house_map_10.txt
+train_simple_a2c.py - Simplified A2C training for house_map_10.txt
 Focuses on single agent with optimized parameters for the specific map.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
 
-from stable_baselines3 import PPO
+from stable_baselines3 import A2C
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -76,10 +76,10 @@ def create_env():
 
 
 def train():
-    """Train PPO agent on house_map_10."""
+    """Train A2C agent on house_map_10."""
 
     print("="*60)
-    print("SIMPLE PPO TRAINING FOR HOUSE MAP 10")
+    print("SIMPLE A2C TRAINING FOR HOUSE MAP 10")
     print("="*60)
 
     # Create environment
@@ -94,33 +94,32 @@ def train():
     print(f"Observation space: {env.observation_space}")
     print(f"Action space: {env.action_space}")
 
-    # Create PPO model with CNN feature extractor
-    print("\nCreating PPO model...")
-    model = PPO(
+    # Create A2C model with optimized parameters
+    print("\nCreating A2C model...")
+    model = A2C(
         "MultiInputPolicy",
         vec_env,
         policy_kwargs=dict(
             features_extractor_class=SLAMCNNExtractor,
             features_extractor_kwargs=dict(features_dim=256),
         ),
-        # Core parameters - mostly defaults
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
+        # Core parameters
+        learning_rate=7e-4,
+        n_steps=5,
         gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        clip_range_vf=None,
-        # Exploration
-        ent_coef=0.01,        # Some exploration
-        vf_coef=0.5,
+        gae_lambda=1.0,
+        # Entropy regularization
+        ent_coef=0.01,
+        vf_coef=0.25,
         max_grad_norm=0.5,
+        # RMS prop optimizer settings
+        rms_prop_eps=1e-5,
+        use_rms_prop=True,
         # Other
         use_sde=False,
         sde_sample_freq=-1,
-        target_kl=None,
-        tensorboard_log="./logs/simple_tensorboard/",
+        normalize_advantage=False,
+        tensorboard_log="./logs/simple_a2c_tensorboard/",
         verbose=1,
         seed=42,
         device='auto',
@@ -132,8 +131,8 @@ def train():
     # Setup callbacks
     checkpoint_callback = CheckpointCallback(
         save_freq=50000,
-        save_path="./models/simple/checkpoints/",
-        name_prefix="ppo_house10"
+        save_path="./models/simple_a2c/checkpoints/",
+        name_prefix="a2c_house10"
     )
 
     progress_callback = ProgressCallback()
@@ -146,10 +145,10 @@ def train():
 
     try:
         model.learn(
-            total_timesteps=2_000_000,
+            total_timesteps=20_000_000,
             callback=[checkpoint_callback, progress_callback],
             log_interval=10,
-            tb_log_name="PPO_house10",
+            tb_log_name="A2C_house10",
             reset_num_timesteps=True,
             progress_bar=False
         )
@@ -157,17 +156,17 @@ def train():
         # Save final model
         print("\n" + "="*60)
         print("Training completed!")
-        model.save("./models/simple/final_model")
-        vec_env.save("./models/simple/vec_normalize.pkl")
-        print("Model saved to ./models/simple/final_model.zip")
-        print("Normalizer saved to ./models/simple/vec_normalize.pkl")
+        model.save("./models/simple_a2c/final_model")
+        vec_env.save("./models/simple_a2c/vec_normalize.pkl")
+        print("Model saved to ./models/simple_a2c/final_model.zip")
+        print("Normalizer saved to ./models/simple_a2c/vec_normalize.pkl")
         print("="*60)
 
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user")
-        model.save("./models/simple/interrupted_model")
-        vec_env.save("./models/simple/vec_normalize.pkl")
-        print("Model saved to ./models/simple/interrupted_model.zip")
+        model.save("./models/simple_a2c/interrupted_model")
+        vec_env.save("./models/simple_a2c/vec_normalize.pkl")
+        print("Model saved to ./models/simple_a2c/interrupted_model.zip")
 
     finally:
         vec_env.close()
@@ -175,8 +174,8 @@ def train():
 
 if __name__ == "__main__":
     # Create directories
-    os.makedirs("./models/simple/checkpoints", exist_ok=True)
-    os.makedirs("./logs/simple_tensorboard", exist_ok=True)
+    os.makedirs("./models/simple_a2c/checkpoints", exist_ok=True)
+    os.makedirs("./logs/simple_a2c_tensorboard", exist_ok=True)
 
     # Run training
     train()

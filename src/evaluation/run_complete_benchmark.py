@@ -1,5 +1,5 @@
 """
-run_complete_benchmark.py
+run_complete_benchmark.py - UPDATED FOR DQN
 
 Complete benchmark runner that executes the comparison and analysis in order.
 """
@@ -10,27 +10,27 @@ import os
 from pathlib import Path
 
 
-def check_ppo_model():
-    """Check if PPO model exists."""
-    model_path = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/models/simple/final_model.zip"
+def check_dqn_model():
+    """Check if DQN model exists."""
+    model_path = "/home/user/nadav/TheAgency/src/rl/models/dqn/interrupted_model.zip"
     if not os.path.exists(model_path):
         print("\n" + "=" * 70)
-        print("WARNING: PPO MODEL NOT FOUND")
+        print("WARNING: DQN MODEL NOT FOUND")
         print("=" * 70)
-        print(f"\nThe trained PPO model was not found at: {model_path}")
+        print(f"\nThe trained DQN model was not found at: {model_path}")
         print("\nYou have two options:")
-        print("1. Train the PPO model first by running: python train_simple.py")
-        print("2. Continue without PPO (only Random vs Frontier comparison)")
-        print("\nNote: Training PPO takes about 20-30 minutes.")
+        print("1. Train the DQN model first by running: python train_dqn_wrapper.py")
+        print("2. Continue without DQN (only Random vs Frontier comparison)")
+        print("\nNote: Training DQN takes significant time depending on your settings.")
 
-        choice = input("\nContinue without PPO? (y/n): ").strip().lower()
+        choice = input("\nContinue without DQN? (y/n): ").strip().lower()
         if choice != 'y':
-            print("\nExiting. Please train PPO first with: python train_simple.py")
+            print("\nExiting. Please train DQN first with: python train_dqn_wrapper.py")
             return False
         else:
             print("\nContinuing with Random and Frontier agents only...")
     else:
-        print("\n✓ PPO model found!")
+        print("\n✓ DQN model found!")
 
     return True
 
@@ -117,8 +117,8 @@ def main():
     print("COMPLETE SLAM AGENT BENCHMARK SUITE")
     print("=" * 70)
     print("\nThis will:")
-    print("1. Check for trained PPO model")
-    print("2. Run comparison benchmark (Random vs Frontier vs PPO)")
+    print("1. Check for trained DQN model")
+    print("2. Run comparison benchmark (Random vs Frontier vs DQN)")
     print("3. Generate comprehensive analysis and visualizations")
     print("4. Perform statistical significance tests")
 
@@ -127,8 +127,8 @@ def main():
     # Create results directory
     os.makedirs("results", exist_ok=True)
 
-    # Step 1: Check for PPO model
-    if not check_ppo_model():
+    # Step 1: Check for DQN model
+    if not check_dqn_model():
         return
 
     # Step 2: Run comparison

@@ -74,7 +74,7 @@ class InteractivePPOTrainer:
         """Get list of available map files."""
         maps = {}
         map_dirs = [
-            '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps',
+            '/home/user/nadav/TheAgency/resources/planner/maps',
             'resources/planner/maps',
             'maps',
             'environments/maps',

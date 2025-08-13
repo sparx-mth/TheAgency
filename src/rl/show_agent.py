@@ -33,8 +33,8 @@ def create_env_exact_same():
         width=10,
         height=10,
         num_agents=1,
-        max_steps=500,    # Same as training
-        map_path="/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_10.txt",
+        max_steps=5000,    # Same as training
+        map_path="/home/user/nadav/TheAgency/resources/planner/maps/house_map_13.txt",
         randomize=False,  # Same as training - always use the same map
         render_mode='human',  # ONLY DIFFERENCE: render mode for visualization
         sensor_config={0: sensor},
