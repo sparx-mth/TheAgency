@@ -15,7 +15,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from environments.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
-from cnn_feature_extractor import SLAMCNNExtractor
+from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 
 

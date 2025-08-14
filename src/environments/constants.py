@@ -1,5 +1,5 @@
 """
-core/constants.py
+environments/constants.py
 
 This file contains all shared constants, enums, and configuration values used throughout
 the SLAM simulation. It centralizes all magic numbers and provides type-safe enums for

@@ -13,7 +13,7 @@ Usage:
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 
 
 class MultiDiscreteToDiscreteWrapper(gym.Wrapper):
@@ -54,7 +54,7 @@ class MultiDiscreteToDiscreteWrapper(gym.Wrapper):
         if not all(n == self.original_nvec[0] for n in self.original_nvec):
             raise ValueError(f"All agents must have the same number of actions. Got: {self.original_nvec}")
 
-        self.actions_per_agent = self.original_nvec[0]
+        self.actions_per_agent = int(self.original_nvec[0])
 
         # Calculate total number of action combinations
         self.total_actions = self.actions_per_agent ** self.num_agents
@@ -148,6 +148,28 @@ class MultiDiscreteToDiscreteWrapper(gym.Wrapper):
         # Execute in original environment
         return self.env.step(multi_action)
 
+    def reset(self, **kwargs) -> Tuple[Any, Dict]:
+        """
+        Reset the environment.
+
+        Returns:
+            Standard gymnasium reset return tuple
+        """
+        return self.env.reset(**kwargs)
+
+    def render(self) -> Optional[np.ndarray]:
+        """
+        Render the environment.
+
+        Returns:
+            Rendering output from the base environment
+        """
+        return self.env.render()
+
+    def close(self):
+        """Close the environment."""
+        return self.env.close()
+
     def get_action_meanings(self) -> Dict[int, str]:
         """
         Get human-readable meanings for all actions.
@@ -186,63 +208,3 @@ class MultiDiscreteToDiscreteWrapper(gym.Wrapper):
             Original MultiDiscrete action space
         """
         return spaces.MultiDiscrete(self.original_nvec)
-
-
-def test_wrapper():
-    """Test the wrapper with a simple example."""
-
-    # Create a simple test environment
-    class TestEnv(gym.Env):
-        def __init__(self):
-            self.action_space = spaces.MultiDiscrete([4, 4, 4])  # 3 agents, 4 actions each
-            self.observation_space = spaces.Box(low=0, high=1, shape=(10, 10))
-
-        def step(self, action):
-            print(f"Environment received action: {action}")
-            return np.zeros((10, 10)), 0.0, False, False, {}
-
-        def reset(self, **kwargs):
-            return np.zeros((10, 10)), {}
-
-    # Test the wrapper
-    print("Testing MultiDiscreteToDiscreteWrapper:")
-    print("-" * 50)
-
-    env = TestEnv()
-    wrapped_env = MultiDiscreteToDiscreteWrapper(env)
-
-    print(f"Original action space: {env.action_space}")
-    print(f"Wrapped action space: {wrapped_env.action_space}")
-    print()
-
-    # Test a few action conversions
-    test_actions = [0, 1, 5, 21, 63]  # Some example actions
-    print("Action conversion examples:")
-    for action in test_actions:
-        if action < wrapped_env.total_actions:
-            multi_action = wrapped_env._action_combinations[action]
-            print(f"  Action {action:2d} -> {multi_action}")
-
-    print()
-
-    # Test round-trip conversion
-    print("Round-trip conversion test:")
-    original_multi = np.array([2, 1, 3])
-    encoded = wrapped_env._encode_action(original_multi)
-    decoded = wrapped_env._decode_action(encoded)
-    print(f"  Original: {original_multi}")
-    print(f"  Encoded:  {encoded}")
-    print(f"  Decoded:  {decoded}")
-    print(f"  Match:    {np.array_equal(original_multi, decoded)}")
-
-    print()
-
-    # Show some action meanings
-    meanings = wrapped_env.get_action_meanings()
-    print("First 10 action meanings:")
-    for i in range(min(10, len(meanings))):
-        print(f"  {i:2d}: {meanings[i]}")
-
-
-if __name__ == "__main__":
-    test_wrapper()

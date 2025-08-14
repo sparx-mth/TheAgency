@@ -1,5 +1,5 @@
 """
-core/drone_state.py
+environments/drone_state.py
 
 This file defines the DroneState dataclass which represents the complete state
 of a single drone in the simulation. It encapsulates position, orientation,

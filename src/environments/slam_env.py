@@ -425,9 +425,10 @@ class MultiAgentSLAMEnv(gym.Env):
             action = Action(actions[i])
 
             # Add step penalty
-            total_reward += self.step_penalty / self.num_agents  # Distribute step penalty
+            total_reward += self.step_penalty
 
             # Execute action
+            collision_occurred = False
             if action == Action.TURN_LEFT:
                 drone.turn('TURN_LEFT')
             elif action == Action.TURN_RIGHT:
@@ -460,11 +461,12 @@ class MultiAgentSLAMEnv(gym.Env):
                     total_reward += self.collision_penalty
                     total_collisions += 1
                     drone.add_collision()
+                    collision_occurred = True
                 else:
                     # Move to new position
                     drone.update_position((new_x, new_y))
 
-            # Perform sensing (regardless of action)
+            # Perform sensing (regardless of action, but limited discoveries on collision)
             observations = drone.sensor.sense(drone.pos, drone.facing, self.true_map)
 
             # Update global map and count discoveries
@@ -473,7 +475,9 @@ class MultiAgentSLAMEnv(gym.Env):
                 if 0 <= x < self.width and 0 <= y < self.height:
                     if self.global_map[y, x] == TileType.UNKNOWN:
                         self.global_map[y, x] = value
-                        total_discoveries += 1
+                        # Reduce discovery reward if collision just occurred (sensor disruption)
+                        if not collision_occurred:
+                            total_discoveries += 1
                         new_discoveries.append((x, y, value))
 
             # Update drone discoveries

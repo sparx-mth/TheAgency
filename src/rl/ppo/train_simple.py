@@ -132,7 +132,7 @@ def train():
     # Setup callbacks
     checkpoint_callback = CheckpointCallback(
         save_freq=50000,
-        save_path="./models/simple/checkpoints/",
+        save_path="../dqn/models/simple/checkpoints/",
         name_prefix="ppo_house10"
     )
 
@@ -175,8 +175,8 @@ def train():
 
 if __name__ == "__main__":
     # Create directories
-    os.makedirs("./models/simple/checkpoints", exist_ok=True)
-    os.makedirs("./logs/simple_tensorboard", exist_ok=True)
+    os.makedirs("../dqn/models/simple/checkpoints", exist_ok=True)
+    os.makedirs("../logs/simple_tensorboard", exist_ok=True)
 
     # Run training
     train()
