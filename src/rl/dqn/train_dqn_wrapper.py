@@ -15,7 +15,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from environments.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
+from rl.feature_extractors.enhanced_cnn_extractor import EnhancedSLAMCNNExtractor
 from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 
 
@@ -113,7 +113,7 @@ def train():
         "MultiInputPolicy",
         vec_env,
         policy_kwargs=dict(
-            features_extractor_class=SLAMCNNExtractor,
+            features_extractor_class=EnhancedSLAMCNNExtractor,
             features_extractor_kwargs=dict(features_dim=256),
             net_arch=[512, 512],  # Hidden layers for Q-network
         ),
