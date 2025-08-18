@@ -15,14 +15,14 @@ from environments.slam_env import MultiAgentSLAMEnv
 from environments.curriculum_wrapper import CurriculumWrapper
 from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
+from rl.feature_extractors.enhanced_cnn_extractor import UltraEnhancedSLAMCNNExtractor
 
 
 # FIXED MAP PATH
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 4  # Use 4 environments for ~2x speedup without overhead
+N_ENVS = 24  # Use 4 environments for ~2x speedup without overhead
 STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage (increased for better convergence)
 
 
@@ -268,8 +268,8 @@ def train():
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=SLAMCNNExtractor,
-                    features_extractor_kwargs=dict(features_dim=256),
+                    features_extractor_class=UltraEnhancedSLAMCNNExtractor,
+                    features_extractor_kwargs=dict(features_dim=768),  # Changed from 256 to 768 (UltraEnhanced default)
                     net_arch=[512, 512],
                 ),
                 # IMPROVED DQN PARAMETERS
@@ -325,7 +325,7 @@ def train():
         print(f"Target: {STEPS_PER_STAGE:,} steps")
 
         model.learn(
-            total_timesteps=STEPS_PER_STAGE,
+            total_timesteps=STEPS_PER_STAGE * (stage_idx + 1),
             callback=callback,
             reset_num_timesteps=False,
             progress_bar=False
