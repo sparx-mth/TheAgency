@@ -1,11 +1,13 @@
 """
 train_dqn_curriculum_improved.py - Improved DQN training with better hyperparameters
 Minimal changes focused on fixing exploration and learning issues.
+Enhanced with proper success history tracking.
 """
 
 import os
 import time
 import numpy as np
+from collections import deque
 from stable_baselines3 import DQN
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
@@ -15,19 +17,19 @@ from environments.slam_env import MultiAgentSLAMEnv
 from environments.curriculum_wrapper import CurriculumWrapper
 from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.enhanced_cnn_extractor import UltraEnhancedSLAMCNNExtractor
+from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 
 # FIXED MAP PATH
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 24  # Use 4 environments for ~2x speedup without overhead
+N_ENVS = 4  # Use 4 environments for ~2x speedup without overhead
 STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage (increased for better convergence)
 
 
 class OptimizedProgressCallback(BaseCallback):
-    """Optimized callback for multi-environment training."""
+    """Optimized callback for multi-environment training with enhanced success tracking."""
 
     def __init__(self, render_freq=2000, n_envs=1):
         super().__init__()
@@ -41,7 +43,10 @@ class OptimizedProgressCallback(BaseCallback):
         self.episode_rewards = []
         self.episode_lengths = []
         self.recent_discoveries = []
-        self.recent_completions = 0  # Track successful completions
+
+        # Enhanced success tracking
+        self.success_history = deque(maxlen=100)  # Track last 100 episodes
+        self.recent_completions = 0  # Track successful completions for display
 
     def _on_training_start(self) -> None:
         """Called at the beginning of training."""
@@ -74,8 +79,12 @@ class OptimizedProgressCallback(BaseCallback):
 
                 self.recent_discoveries.append(discovered)
 
-                # Check if episode was completed successfully
-                if discovered >= total * 1.0:
+                # Determine if episode was successful
+                # Success criteria: discovered >= 99% of reachable cells
+                success = discovered >= total * 0.99 if total > 0 else False
+                self.success_history.append(success)
+
+                if success:
                     self.recent_completions += 1
 
                 # Print progress every 100 episodes
@@ -88,7 +97,10 @@ class OptimizedProgressCallback(BaseCallback):
                     avg_reward = np.mean(recent_rewards) if recent_rewards else 0
                     avg_length = np.mean(recent_lengths) if recent_lengths else 0
                     avg_disc = np.mean(recent_disc) if recent_disc else 0
-                    completion_rate = self.recent_completions  # Out of last 100 episodes
+
+                    # Calculate success metrics
+                    success_count = sum(self.success_history)
+                    success_rate = (success_count / len(self.success_history)) * 100 if self.success_history else 0
 
                     # Calculate FPS
                     elapsed = time.time() - self.start_time
@@ -102,7 +114,7 @@ class OptimizedProgressCallback(BaseCallback):
                           f"Reward: {avg_reward:7.1f} | "
                           f"Length: {avg_length:5.0f} | "
                           f"Disc: {avg_disc:3.0f}/{total:3d} | "
-                          f"Complete: {completion_rate:3d}% | "
+                          f"Success: {success_count:2d}/100 ({success_rate:5.1f}%) | "
                           f"Collision: {collisions:3d} | "
                           f"Hidden: {hidden_size:>3} | "
                           f"ε: {epsilon:.3f} | "
@@ -159,10 +171,12 @@ class OptimizedProgressCallback(BaseCallback):
         # Show final state
         discovered = info.get('discovered_cells', 0)
         total = info.get('total_reachable', 0)
+        success = discovered >= total * 0.99 if total > 0 else False
         test_env.render()
         time.sleep(0.5)
         test_env.close()
-        print(f">>> Rendering complete: {steps} steps, reward: {total_reward:.1f}, discovered: {discovered}/{total}")
+        print(f">>> Rendering complete: {steps} steps, reward: {total_reward:.1f}, "
+              f"discovered: {discovered}/{total}, success: {success}")
 
 
 def create_env(hidden_size: int, env_id: int = 0):
@@ -237,7 +251,7 @@ def train():
     estimated_fps = N_ENVS * 400  # Conservative estimate
     total_steps = len(CURRICULUM) * STEPS_PER_STAGE
     estimated_hours = total_steps / estimated_fps / 3600
-    print(f"📊 Estimated total training time: {estimated_hours:.1f} hours")
+    print(f"Estimated total training time: {estimated_hours:.1f} hours")
     print(f"   ({len(CURRICULUM)} stages × {STEPS_PER_STAGE/1e6:.0f}M steps ÷ ~{estimated_fps} FPS)\n")
 
     model = None
@@ -268,8 +282,8 @@ def train():
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=UltraEnhancedSLAMCNNExtractor,
-                    features_extractor_kwargs=dict(features_dim=768),  # Changed from 256 to 768 (UltraEnhanced default)
+                    features_extractor_class=SLAMCNNExtractor,
+                    features_extractor_kwargs=dict(features_dim=256),
                     net_arch=[512, 512],
                 ),
                 # IMPROVED DQN PARAMETERS
@@ -325,7 +339,7 @@ def train():
         print(f"Target: {STEPS_PER_STAGE:,} steps")
 
         model.learn(
-            total_timesteps=STEPS_PER_STAGE * (stage_idx + 1),
+            total_timesteps=STEPS_PER_STAGE * (1 + stage_idx),
             callback=callback,
             reset_num_timesteps=False,
             progress_bar=False

@@ -27,10 +27,10 @@ from sensors.camera_sensor import CameraSensor
 from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 # CONFIGURATION
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
-MEMORY_LIMIT_PERCENT = 70  # Stop if memory usage exceeds this
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt"
+MEMORY_LIMIT_PERCENT = 70  # Stop if memory usage exceeds this0
 STEPS_PER_TEST = 1000  # Steps to run for each configuration
-TEST_CONFIGS = [4,8,16,24,32, 48, 64]  # Number of environments to test
+TEST_CONFIGS = [1,2,4,8,16,24,32, 48, 64, 128]  # Number of environments to test
 USE_SUBPROCESS = False  # Set to True to test SubprocVecEnv (usually slower for small envs)
 
 

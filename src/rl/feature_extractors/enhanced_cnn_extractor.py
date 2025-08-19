@@ -17,7 +17,7 @@ class EnhancedSLAMCNNExtractor(BaseFeaturesExtractor):
     Uses deeper CNN with more channels and spatial attention.
     """
 
-    def __init__(self, observation_space: spaces.Dict, features_dim: int = 512):
+    def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
         # Calculate feature dimensions
         cnn_output_dim = 256  # Larger CNN output for complex maps
         other_features_dim = observation_space['positions'].shape[0] * 2 + \
@@ -102,7 +102,7 @@ class UltraEnhancedSLAMCNNExtractor(BaseFeaturesExtractor):
     Use this if the enhanced version isn't enough.
     """
 
-    def __init__(self, observation_space: spaces.Dict, features_dim: int = 768):
+    def __init__(self, observation_space: spaces.Dict, features_dim: int = 512):
         # Even larger feature dimensions
         cnn_output_dim = 512
         other_features_dim = observation_space['positions'].shape[0] * 2 + \

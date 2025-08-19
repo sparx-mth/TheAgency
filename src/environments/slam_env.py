@@ -502,7 +502,7 @@ class MultiAgentSLAMEnv(gym.Env):
 
         # Check if exploration is complete
         discovered = np.sum((self.global_map != TileType.UNKNOWN) & self.reachable_mask)
-        if discovered >= self.total_reachable * 1.0:  # 99% to account for edge cases
+        if discovered >= self.total_reachable * 0.99:  # 99% to account for edge cases
             terminated = True
             # Add completion bonus to total reward
             total_reward += self.completion_bonus
