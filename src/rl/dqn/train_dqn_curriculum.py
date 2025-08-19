@@ -1,7 +1,6 @@
 """
-train_dqn_curriculum_improved.py - Improved DQN training with better hyperparameters
-Minimal changes focused on fixing exploration and learning issues.
-Enhanced with proper success history tracking.
+train_dqn_efficientnet.py - DQN training with EfficientNet feature extractor
+Enhanced version using more powerful feature extraction.
 """
 
 import os
@@ -17,15 +16,22 @@ from environments.slam_env import MultiAgentSLAMEnv
 from environments.curriculum_wrapper import CurriculumWrapper
 from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
+# Import the new EfficientNet feature extractor
+from rl.feature_extractors.efficientnet_feature_extractor import (
+    SLAMEfficientNetExtractor,
+    SLAMLightweightEfficientNetExtractor
+)
 
 # FIXED MAP PATH
 MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 4  # Use 4 environments for ~2x speedup without overhead
-STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage (increased for better convergence)
+N_ENVS = 1  # Use 4 environments for ~2x speedup without overhead
+STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage
+
+# Choose which EfficientNet variant to use
+USE_LIGHTWEIGHT = False  # Set to False to use full pretrained EfficientNet
 
 
 class OptimizedProgressCallback(BaseCallback):
@@ -45,13 +51,13 @@ class OptimizedProgressCallback(BaseCallback):
         self.recent_discoveries = []
 
         # Enhanced success tracking
-        self.success_history = deque(maxlen=100)  # Track last 100 episodes
-        self.recent_completions = 0  # Track successful completions for display
+        self.success_history = deque(maxlen=100)
+        self.recent_completions = 0
 
     def _on_training_start(self) -> None:
         """Called at the beginning of training."""
         self.start_time = time.time()
-        print(f" Training started with {self.n_envs} environments")
+        print(f"📊 Training started with {self.n_envs} environments")
         print("-" * 60)
 
     def _on_step(self) -> bool:
@@ -80,7 +86,6 @@ class OptimizedProgressCallback(BaseCallback):
                 self.recent_discoveries.append(discovered)
 
                 # Determine if episode was successful
-                # Success criteria: discovered >= 99% of reachable cells
                 success = discovered >= total * 0.99 if total > 0 else False
                 self.success_history.append(success)
 
@@ -88,7 +93,7 @@ class OptimizedProgressCallback(BaseCallback):
                     self.recent_completions += 1
 
                 # Print progress every 100 episodes
-                if self.episode_count % 100 == 0:
+                if self.episode_count % 1 == 0:
                     # Calculate averages
                     recent_rewards = self.episode_rewards[-100:] if len(self.episode_rewards) >= 100 else self.episode_rewards
                     recent_lengths = self.episode_lengths[-100:] if len(self.episode_lengths) >= 100 else self.episode_lengths
@@ -190,7 +195,7 @@ def create_env(hidden_size: int, env_id: int = 0):
         # Create sensor
         sensor = CameraSensor(max_range=8, fov_deg=60, num_rays=24)
 
-        # IMPROVED REWARD STRUCTURE
+        # Create base environment
         base_env = MultiAgentSLAMEnv(
             width=actual_width,
             height=actual_height,
@@ -224,20 +229,25 @@ def create_env(hidden_size: int, env_id: int = 0):
 
 
 def train():
-    """Train DQN with curriculum learning using multiple environments."""
+    """Train DQN with EfficientNet feature extractor and curriculum learning."""
 
     # Load map once to verify
     loaded_map = np.loadtxt(MAP_PATH, dtype=np.int8)
     map_height, map_width = loaded_map.shape
 
     print("="*60)
-    print(" IMPROVED DQN CURRICULUM TRAINING")
+    print(" EFFICIENTNET DQN CURRICULUM TRAINING")
     print(f"Map: {MAP_PATH}")
     print(f"Map size: {map_width}x{map_height}")
     print(f"Parallel environments: {N_ENVS}")
     print(f"Steps per stage: {STEPS_PER_STAGE:,}")
 
-    # Curriculum stages - start with easier stages
+    if USE_LIGHTWEIGHT:
+        print("Feature Extractor: Lightweight EfficientNet (custom)")
+    else:
+        print("Feature Extractor: Full EfficientNet-B0 (pretrained)")
+
+    # Curriculum stages
     if map_width == 32 and map_height == 32:
         CURRICULUM = [8, 10, 12, 14, 16, 20, 24, 28, 32]
         print(f"Curriculum stages: {CURRICULUM}")
@@ -248,7 +258,7 @@ def train():
     print("="*60 + "\n")
 
     # Estimate training time
-    estimated_fps = N_ENVS * 400  # Conservative estimate
+    estimated_fps = N_ENVS * 300  # Conservative estimate (EfficientNet is heavier)
     total_steps = len(CURRICULUM) * STEPS_PER_STAGE
     estimated_hours = total_steps / estimated_fps / 3600
     print(f"Estimated total training time: {estimated_hours:.1f} hours")
@@ -272,42 +282,56 @@ def train():
 
         env_fns = [create_env(hidden_size if hidden_size else 0, i) for i in range(N_ENVS)]
         vec_env = DummyVecEnv(env_fns)
-        vec_env = VecMonitor(vec_env)  # Add monitoring wrapper
+        vec_env = VecMonitor(vec_env)
 
         if model is None:
-            # Create new model with IMPROVED hyperparameters
-            print("Creating new DQN model with improved hyperparameters...")
+            # Create new model with EfficientNet feature extractor
+            print("Creating new DQN model with EfficientNet feature extractor...")
+
+            # Choose feature extractor
+            if USE_LIGHTWEIGHT:
+                feature_extractor_class = SLAMLightweightEfficientNetExtractor
+                feature_extractor_kwargs = dict(features_dim=256)
+                print("Using lightweight EfficientNet variant")
+            else:
+                feature_extractor_class = SLAMEfficientNetExtractor
+                feature_extractor_kwargs = dict(
+                    features_dim=256,
+                    efficientnet_variant='b0',
+                    pretrained=True,
+                    freeze_backbone=False  # Allow fine-tuning
+                )
+                print("Using full EfficientNet-B0 with pretrained weights")
 
             model = DQN(
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=SLAMCNNExtractor,
-                    features_extractor_kwargs=dict(features_dim=256),
-                    net_arch=[512, 512],
+                    features_extractor_class=feature_extractor_class,
+                    features_extractor_kwargs=feature_extractor_kwargs,
+                    net_arch=[512, 512],  # Policy/value networks
                 ),
-                # IMPROVED DQN PARAMETERS
-                learning_rate=1e-4,
-                buffer_size=1_000_000,  # Replay buffer size
-                learning_starts=1000,  # Start training after 1000 steps
-                batch_size=32,  # Batch size for training
-                tau=1.0,  # Hard update (target network update frequency)
-                gamma=0.99,  # Discount factor
-                train_freq=4,  # Train every 4 steps
-                gradient_steps=1,  # Gradient steps per training
-                target_update_interval=10000,  # Update target network every 1000 steps
-                # IMPROVED EXPLORATION
-                exploration_fraction=0.7,  # INCREASED from 0.3 - explore for 70% of training
-                exploration_initial_eps=1.0,  # Keep full random start
-                exploration_final_eps=0.05,  # Keep same minimum
-
+                # DQN hyperparameters
+                learning_rate=5e-5,  # Slightly lower LR for EfficientNet
+                buffer_size=1_000_000,
+                learning_starts=1000,
+                batch_size=32,
+                tau=1.0,
+                gamma=0.99,
+                train_freq=4,
+                gradient_steps=1,
+                target_update_interval=10000,
+                # Exploration
+                exploration_fraction=0.7,
+                exploration_initial_eps=1.0,
+                exploration_final_eps=0.05,
                 # Other
                 max_grad_norm=10,
                 seed=42,
                 device='auto',
             )
 
-            print(f" Model created on {model.device}")
+            print(f"✅ Model created on {model.device}")
         else:
             # Reuse existing model with new environment
             model.set_env(vec_env)
@@ -318,15 +342,15 @@ def train():
 
         # Progress callback
         progress_callback = OptimizedProgressCallback(
-            render_freq=2000,  # Render less frequently
+            render_freq=2000,
             n_envs=N_ENVS
         )
         callbacks.append(progress_callback)
 
         # Checkpoint callback
         checkpoint_callback = CheckpointCallback(
-            save_freq=500000 // N_ENVS,  # Save every 100k steps
-            save_path="./models/checkpoints/",
+            save_freq=500000 // N_ENVS,
+            save_path="./models/efficientnet_checkpoints/",
             name_prefix=f"stage_{stage_idx+1}_hidden_{hidden_size}"
         )
         callbacks.append(checkpoint_callback)
@@ -339,7 +363,7 @@ def train():
         print(f"Target: {STEPS_PER_STAGE:,} steps")
 
         model.learn(
-            total_timesteps=STEPS_PER_STAGE * (1 + stage_idx),
+            total_timesteps=STEPS_PER_STAGE,
             callback=callback,
             reset_num_timesteps=False,
             progress_bar=False
@@ -351,13 +375,13 @@ def train():
 
         # Save stage model
         if hidden_size is not None:
-            model_path = f"./models/improved_stage_{stage_idx+1}_hidden_{hidden_size}"
+            model_path = f"./models/efficientnet_stage_{stage_idx+1}_hidden_{hidden_size}"
         else:
-            model_path = f"./models/improved_checkpoint_{stage_idx+1}"
+            model_path = f"./models/efficientnet_checkpoint_{stage_idx+1}"
 
         model.save(model_path)
 
-        print(f"\n Stage {stage_idx+1} complete!")
+        print(f"\n✅ Stage {stage_idx+1} complete!")
         print(f"   Time: {stage_time/60:.1f} minutes")
         print(f"   Average FPS: {stage_fps:.0f}")
         print(f"   Model saved to: {model_path}.zip")
@@ -372,11 +396,11 @@ def train():
         vec_env.close()
 
     # Save final model
-    model.save("./models/dqn_curriculum_improved_final")
+    model.save("./models/dqn_efficientnet_final")
 
     print("\n" + "="*60)
-    print(" TRAINING COMPLETE!")
-    print(f"Final model saved to ./models/dqn_curriculum_improved_final.zip")
+    print("TRAINING COMPLETE!")
+    print(f"Final model saved to ./models/dqn_efficientnet_final.zip")
     print("="*60)
 
 
@@ -385,11 +409,11 @@ if __name__ == "__main__":
     if not os.path.exists(MAP_PATH):
         raise FileNotFoundError(f"MAP FILE NOT FOUND: {MAP_PATH}")
 
-    print(f" Map file verified: {MAP_PATH}")
+    print(f"✅ Map file verified: {MAP_PATH}")
 
     # Create directories
     os.makedirs("./models", exist_ok=True)
-    os.makedirs("./models/checkpoints", exist_ok=True)
+    os.makedirs("./models/efficientnet_checkpoints", exist_ok=True)
 
     # Start training
     train()
