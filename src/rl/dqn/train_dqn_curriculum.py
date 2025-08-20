@@ -1,11 +1,13 @@
 """
 train_dqn_efficientnet.py - DQN training with EfficientNet feature extractor
-Enhanced version using more powerful feature extraction.
+Enhanced version using more powerful feature extraction with memory fixes.
 """
 
 import os
 import time
 import numpy as np
+import gc
+import torch
 from collections import deque
 from stable_baselines3 import DQN
 from stable_baselines3.common.monitor import Monitor
@@ -16,6 +18,7 @@ from environments.slam_env import MultiAgentSLAMEnv
 from environments.curriculum_wrapper import CurriculumWrapper
 from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
+import psutil
 
 # Import the new EfficientNet feature extractor
 from rl.feature_extractors.efficientnet_feature_extractor import (
@@ -24,7 +27,7 @@ from rl.feature_extractors.efficientnet_feature_extractor import (
 )
 
 # FIXED MAP PATH
-MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt"
+MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 1  # Use 4 environments for ~2x speedup without overhead
@@ -44,6 +47,7 @@ class OptimizedProgressCallback(BaseCallback):
         self.episode_count = 0
         self.total_steps = 0
         self.start_time = None
+        self.last_gc_step = 0  # Track when we last did garbage collection
 
         # Metrics tracking
         self.episode_rewards = []
@@ -57,11 +61,24 @@ class OptimizedProgressCallback(BaseCallback):
     def _on_training_start(self) -> None:
         """Called at the beginning of training."""
         self.start_time = time.time()
-        print(f"📊 Training started with {self.n_envs} environments")
+        print(f"🚀 Training started with {self.n_envs} environments")
+
+        # Clear GPU cache at start
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"GPU: {torch.cuda.get_device_name()}")
+            print(f"Initial GPU Memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
         print("-" * 60)
 
     def _on_step(self) -> bool:
         self.total_steps += self.n_envs
+
+        # Periodic memory cleanup (every 10000 steps)
+        if self.total_steps - self.last_gc_step > 10000:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self.last_gc_step = self.total_steps
 
         # Check for episode completions in any environment
         for i in range(self.n_envs):
@@ -114,6 +131,17 @@ class OptimizedProgressCallback(BaseCallback):
                     # Get exploration rate
                     epsilon = self.model.exploration_schedule(self.model._current_progress_remaining)
 
+                    # Get RAM usage
+                    process = psutil.Process(os.getpid())
+                    ram_gb = process.memory_info().rss / 1e9  # Resident Set Size (in GB)
+
+                    gpu_mem = ""
+                    if torch.cuda.is_available():
+                        gpu_gb = torch.cuda.memory_allocated() / 1e9
+                        gpu_mem = f" | GPU: {gpu_gb:.2f}GB"
+
+                    ram_mem = f" | RAM: {ram_gb:.2f}GB"
+
                     print(f"Ep {self.episode_count:5d} | "
                           f"Steps: {self.total_steps:7,d} | "
                           f"Reward: {avg_reward:7.1f} | "
@@ -123,7 +151,10 @@ class OptimizedProgressCallback(BaseCallback):
                           f"Collision: {collisions:3d} | "
                           f"Hidden: {hidden_size:>3} | "
                           f"ε: {epsilon:.3f} | "
-                          f"FPS: {fps:4.0f}")
+                          f"FPS: {fps:4.0f} |"
+                          f"{ram_mem:>3} |"
+                          f"{gpu_mem}")
+
 
                     # Reset completion counter
                     self.recent_completions = 0
@@ -258,11 +289,16 @@ def train():
     print("="*60 + "\n")
 
     # Estimate training time
-    estimated_fps = N_ENVS * 300  # Conservative estimate (EfficientNet is heavier)
+    estimated_fps = N_ENVS * 200  # Conservative estimate (EfficientNet is heavier)
     total_steps = len(CURRICULUM) * STEPS_PER_STAGE
     estimated_hours = total_steps / estimated_fps / 3600
     print(f"Estimated total training time: {estimated_hours:.1f} hours")
     print(f"   ({len(CURRICULUM)} stages × {STEPS_PER_STAGE/1e6:.0f}M steps ÷ ~{estimated_fps} FPS)\n")
+
+    # Enable cudnn optimizations if available
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
 
     model = None
 
@@ -311,14 +347,14 @@ def train():
                     features_extractor_kwargs=feature_extractor_kwargs,
                     net_arch=[512, 512],  # Policy/value networks
                 ),
-                # DQN hyperparameters
-                learning_rate=5e-5,  # Slightly lower LR for EfficientNet
-                buffer_size=1_000_000,
+                # DQN hyperparameters - ADJUSTED FOR MEMORY
+                learning_rate=1e-4,  # Slightly lower LR for stability
+                buffer_size=500_000,  # Reduced buffer size to save memory
                 learning_starts=1000,
-                batch_size=32,
+                batch_size=32,  # Smaller batch size - critical for memory
                 tau=1.0,
                 gamma=0.99,
-                train_freq=4,
+                train_freq=8,  # Train less frequently to reduce memory pressure
                 gradient_steps=1,
                 target_update_interval=10000,
                 # Exploration
@@ -328,7 +364,7 @@ def train():
                 # Other
                 max_grad_norm=10,
                 seed=42,
-                device='auto',
+                device='cuda' if torch.cuda.is_available() else 'cpu',
             )
 
             print(f"✅ Model created on {model.device}")

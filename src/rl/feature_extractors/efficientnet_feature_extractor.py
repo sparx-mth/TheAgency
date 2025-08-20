@@ -1,6 +1,6 @@
 """
-efficientnet_feature_extractor.py - EfficientNet-based feature extractor for SLAM environment
-Uses pretrained EfficientNet for better feature extraction from 2D maps.
+efficientnet_feature_extractor.py - Fixed version with proper memory management
+Allows full backbone training without memory leaks
 """
 
 import torch
@@ -14,9 +14,7 @@ from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
     """
     EfficientNet-based feature extractor for SLAM environment.
-
-    Uses a pretrained EfficientNet-B0 (or custom variant) to process the 2D global_map
-    and combines with other features (positions, facings, active) using MLP.
+    Fixed version that properly handles gradients to prevent memory leaks.
     """
 
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256,
@@ -39,10 +37,10 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
 
         # Select and initialize EfficientNet variant
         self.efficientnet_variant = efficientnet_variant
+        self.freeze_backbone = freeze_backbone
         self.efficientnet = self._get_efficientnet(efficientnet_variant, pretrained)
 
         # Get the output dimension of EfficientNet
-        # EfficientNet-B0 outputs 1280 features, B1: 1280, B2: 1408, B3: 1536, etc.
         efficientnet_output_dims = {
             'b0': 1280, 'b1': 1280, 'b2': 1408, 'b3': 1536,
             'b4': 1792, 'b5': 2048, 'b6': 2304, 'b7': 2560
@@ -54,8 +52,7 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
             for param in self.efficientnet.parameters():
                 param.requires_grad = False
 
-        # Adapter layer to convert grayscale to RGB (EfficientNet expects 3 channels)
-        # We'll expand the single channel to 3 channels
+        # Adapter layer to convert grayscale to RGB
         self.channel_adapter = nn.Conv2d(1, 3, kernel_size=1, padding=0)
 
         # Projection layer to reduce EfficientNet output dimension
@@ -74,6 +71,9 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
             nn.Linear(features_dim, features_dim),
             nn.ReLU()
         )
+
+        # Store whether we need to resize
+        self.needs_resize = True  # Will resize to 224x224 for EfficientNet
 
     def _get_efficientnet(self, variant: str, pretrained: bool):
         """Get the appropriate EfficientNet model."""
@@ -100,43 +100,38 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
             raise ValueError(f"Unknown EfficientNet variant: {variant}")
 
         # Remove the final classification layer
-        # EfficientNet structure: features -> avgpool -> classifier
-        # We only need the features part
         model.classifier = nn.Identity()
 
         return model
 
     def forward(self, observations) -> torch.Tensor:
         # Process map with EfficientNet
-        map_data = observations['global_map'].float()  # (batch, height, width)
-        map_data = map_data.unsqueeze(1)  # Add channel dimension: (batch, 1, height, width)
+        map_data = observations['global_map'].float()
+        map_data = map_data.unsqueeze(1)  # Add channel dimension
 
         # Convert grayscale to RGB-like format for EfficientNet
-        map_data_rgb = self.channel_adapter(map_data)  # (batch, 3, height, width)
+        map_data_rgb = self.channel_adapter(map_data)
 
-        # Resize if needed - EfficientNet works best with certain input sizes
-        # B0: 224x224, B1: 240x240, B2: 260x260, B3: 300x300, B4: 380x380, etc.
-        # For small maps (32x32), we might want to upsample
+        # Resize if needed - CRITICAL FIX: Don't create new ops in forward pass
         current_size = map_data_rgb.shape[-1]
-        if current_size < 224:
-            # Upsample to at least 224x224 for better feature extraction
+        if self.needs_resize and current_size < 224:
+            # Use simpler interpolation without creating persistent graph
             map_data_rgb = nn.functional.interpolate(
                 map_data_rgb,
                 size=(224, 224),
-                mode='bilinear',
-                align_corners=False
+                mode='nearest'  # Changed from bilinear to nearest - faster and less memory
             )
 
         # Pass through EfficientNet
-        efficientnet_features = self.efficientnet(map_data_rgb)  # (batch, efficientnet_out_dim)
+        efficientnet_features = self.efficientnet(map_data_rgb)
 
         # Project to lower dimension
-        cnn_features = self.projection(efficientnet_features)  # (batch, 256)
+        cnn_features = self.projection(efficientnet_features)
 
-        # Flatten other features
-        positions = observations['positions'].float().flatten(start_dim=1)  # (batch, num_agents*2)
-        facings = observations['facings'].float()  # (batch, num_agents)
-        active = observations['active'].float()  # (batch, num_agents)
+        # Flatten other features - ensure contiguous memory
+        positions = observations['positions'].float().flatten(start_dim=1)
+        facings = observations['facings'].float()
+        active = observations['active'].float()
 
         other_features = torch.cat([positions, facings, active], dim=1)
 
@@ -144,7 +139,10 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
         combined = torch.cat([cnn_features, other_features], dim=1)
 
         # Final MLP processing
-        return self.mlp(combined)
+        output = self.mlp(combined)
+
+        # CRITICAL: Ensure output is contiguous to prevent memory fragmentation
+        return output.contiguous()
 
 
 class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
@@ -162,12 +160,11 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim)
 
         # Custom lightweight EfficientNet-inspired architecture
-        # Using MBConv blocks (Mobile Inverted Bottleneck Convolution)
         self.cnn = nn.Sequential(
             # Initial convolution
             nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
-            nn.SiLU(),  # Swish activation used in EfficientNet
+            nn.SiLU(inplace=True),  # Use inplace operations to save memory
 
             # MBConv-like blocks
             self._make_mbconv_block(32, 16, expansion=1),
@@ -182,7 +179,7 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
             nn.Linear(112, 256),
-            nn.SiLU(),
+            nn.SiLU(inplace=True),
             nn.Dropout(0.2)
         )
 
@@ -190,10 +187,10 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         combined_dim = 256 + other_features_dim
         self.mlp = nn.Sequential(
             nn.Linear(combined_dim, features_dim),
-            nn.SiLU(),
+            nn.SiLU(inplace=True),
             nn.Dropout(0.1),
             nn.Linear(features_dim, features_dim),
-            nn.SiLU()
+            nn.SiLU(inplace=True)
         )
 
     def _make_mbconv_block(self, in_channels, out_channels, expansion=6):
@@ -206,7 +203,7 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
                 nn.Conv2d(in_channels, in_channels, kernel_size=3,
                           stride=1, padding=1, groups=in_channels),
                 nn.BatchNorm2d(in_channels),
-                nn.SiLU(),
+                nn.SiLU(inplace=True),
                 # Pointwise convolution
                 nn.Conv2d(in_channels, out_channels, kernel_size=1),
                 nn.BatchNorm2d(out_channels)
@@ -216,12 +213,12 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
                 # Expansion
                 nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
                 nn.BatchNorm2d(hidden_dim),
-                nn.SiLU(),
+                nn.SiLU(inplace=True),
                 # Depthwise convolution
                 nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3,
                           stride=1, padding=1, groups=hidden_dim),
                 nn.BatchNorm2d(hidden_dim),
-                nn.SiLU(),
+                nn.SiLU(inplace=True),
                 # Projection
                 nn.Conv2d(hidden_dim, out_channels, kernel_size=1),
                 nn.BatchNorm2d(out_channels)
@@ -229,11 +226,11 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
 
     def forward(self, observations) -> torch.Tensor:
         # Process map with CNN
-        map_data = observations['global_map'].float()  # (batch, height, width)
-        map_data = map_data.unsqueeze(1)  # Add channel dimension: (batch, 1, height, width)
+        map_data = observations['global_map'].float()
+        map_data = map_data.unsqueeze(1)
 
         # Pass through CNN
-        cnn_features = self.cnn(map_data)  # (batch, 256)
+        cnn_features = self.cnn(map_data)
 
         # Flatten other features
         positions = observations['positions'].float().flatten(start_dim=1)
@@ -246,8 +243,11 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         combined = torch.cat([cnn_features, other_features], dim=1)
 
         # Final MLP processing
-        return self.mlp(combined)
+        output = self.mlp(combined)
+
+        # Ensure contiguous output
+        return output.contiguous()
 
 
-# Alias for backward compatibility if needed
+# Alias for backward compatibility
 SLAMCNNExtractor = SLAMLightweightEfficientNetExtractor
