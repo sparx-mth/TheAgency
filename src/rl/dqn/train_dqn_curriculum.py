@@ -30,11 +30,11 @@ from rl.feature_extractors.efficientnet_feature_extractor import (
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 1  # Use 4 environments for ~2x speedup without overhead
+N_ENVS = 8 # Use 4 environments for ~2x speedup without overhead
 STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage
 
 # Choose which EfficientNet variant to use
-USE_LIGHTWEIGHT = False  # Set to False to use full pretrained EfficientNet
+USE_LIGHTWEIGHT = True  # Set to False to use full pretrained EfficientNet
 
 
 class OptimizedProgressCallback(BaseCallback):
@@ -110,7 +110,7 @@ class OptimizedProgressCallback(BaseCallback):
                     self.recent_completions += 1
 
                 # Print progress every 100 episodes
-                if self.episode_count % 1 == 0:
+                if self.episode_count % 100 == 0:
                     # Calculate averages
                     recent_rewards = self.episode_rewards[-100:] if len(self.episode_rewards) >= 100 else self.episode_rewards
                     recent_lengths = self.episode_lengths[-100:] if len(self.episode_lengths) >= 100 else self.episode_lengths
@@ -335,7 +335,7 @@ def train():
                     features_dim=256,
                     efficientnet_variant='b0',
                     pretrained=True,
-                    freeze_backbone=False  # Allow fine-tuning
+                    freeze_backbone=True  # Allow fine-tuning
                 )
                 print("Using full EfficientNet-B0 with pretrained weights")
 
@@ -345,7 +345,7 @@ def train():
                 policy_kwargs=dict(
                     features_extractor_class=feature_extractor_class,
                     features_extractor_kwargs=feature_extractor_kwargs,
-                    net_arch=[512, 512],  # Policy/value networks
+                    net_arch=[256, 256],  # Policy/value networks
                 ),
                 # DQN hyperparameters - ADJUSTED FOR MEMORY
                 learning_rate=1e-4,  # Slightly lower LR for stability

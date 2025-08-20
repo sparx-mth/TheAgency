@@ -177,7 +177,7 @@ class MultiDiscreteToDiscreteWrapper(gym.Wrapper):
         Returns:
             Dictionary mapping action indices to their meanings
         """
-        action_names = ["TURN_LEFT", "TURN_RIGHT", "FORWARD", "STAY"]  # Assuming these are the actions
+        action_names = ["FORWARD", "TURN_LEFT", "TURN_RIGHT", "STAY"]  # Assuming these are the actions
 
         meanings = {}
         for action_idx in range(self.total_actions):

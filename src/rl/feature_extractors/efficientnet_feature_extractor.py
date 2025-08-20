@@ -1,6 +1,7 @@
 """
 efficientnet_feature_extractor.py - Fixed version with proper memory management
 Allows full backbone training without memory leaks
+Now includes semantic grouping for better neural network processing
 """
 
 import torch
@@ -15,6 +16,7 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
     """
     EfficientNet-based feature extractor for SLAM environment.
     Fixed version that properly handles gradients to prevent memory leaks.
+    Now includes semantic grouping for better map understanding.
     """
 
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256,
@@ -52,8 +54,8 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
             for param in self.efficientnet.parameters():
                 param.requires_grad = False
 
-        # Adapter layer to convert grayscale to RGB
-        self.channel_adapter = nn.Conv2d(1, 3, kernel_size=1, padding=0)
+        # NO LONGER NEEDED - we create 3 semantic channels directly
+        # self.channel_adapter = nn.Conv2d(1, 3, kernel_size=1, padding=0)
 
         # Projection layer to reduce EfficientNet output dimension
         self.projection = nn.Sequential(
@@ -104,26 +106,67 @@ class SLAMEfficientNetExtractor(BaseFeaturesExtractor):
 
         return model
 
-    def forward(self, observations) -> torch.Tensor:
-        # Process map with EfficientNet
-        map_data = observations['global_map'].float()
-        map_data = map_data.unsqueeze(1)  # Add channel dimension
+    def preprocess_map_to_semantic(self, map_data):
+        """
+        Convert map to semantic channels for better learning.
 
-        # Convert grayscale to RGB-like format for EfficientNet
-        map_data_rgb = self.channel_adapter(map_data)
+        Map values:
+        - UNKNOWN = -1
+        - FREE_SPACE = 0
+        - WALL = 1
+        - ENTRY_POINT = 2
+        - DOOR_CLOSED = 3
+        - DOOR_OPEN = 4
+        - WINDOW = 5
+        - OUT_OF_BOUNDS = 6
+
+        Creates 3 semantic channels:
+        1. Exploration status (known vs unknown)
+        2. Traversability (can move here)
+        3. Obstacles (walls, barriers)
+        """
+        batch_size = map_data.shape[0]
+        height, width = map_data.shape[1], map_data.shape[2]
+        device = map_data.device
+
+        # Create 3 semantic channels
+        channels = torch.zeros(batch_size, 3, height, width, device=device)
+
+        # Channel 0: Exploration status (0 = unknown, 1 = explored)
+        # Everything that's not -1 (UNKNOWN) is explored
+        channels[:, 0, :, :] = (map_data != -1).float()
+
+        # Channel 1: Traversability (0 = blocked, 1 = traversable)
+        # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
+        traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
+        channels[:, 1, :, :] = traversable.float()
+
+        # Channel 2: Obstacles and features (0 = empty, 1 = obstacle/feature)
+        # WALL (1), DOOR_CLOSED (3), WINDOW (5), OUT_OF_BOUNDS (6)
+        obstacles = (map_data == 1) | (map_data == 3) | (map_data == 5) | (map_data == 6)
+        channels[:, 2, :, :] = obstacles.float()
+
+        return channels
+
+    def forward(self, observations) -> torch.Tensor:
+        # Process map with semantic grouping
+        map_data = observations['global_map'].float()
+
+        # Convert to 3 semantic channels (exploration, traversability, obstacles)
+        map_data_semantic = self.preprocess_map_to_semantic(map_data)
 
         # Resize if needed - CRITICAL FIX: Don't create new ops in forward pass
-        current_size = map_data_rgb.shape[-1]
+        current_size = map_data_semantic.shape[-1]
         if self.needs_resize and current_size < 224:
             # Use simpler interpolation without creating persistent graph
-            map_data_rgb = nn.functional.interpolate(
-                map_data_rgb,
+            map_data_semantic = nn.functional.interpolate(
+                map_data_semantic,
                 size=(224, 224),
                 mode='nearest'  # Changed from bilinear to nearest - faster and less memory
             )
 
-        # Pass through EfficientNet
-        efficientnet_features = self.efficientnet(map_data_rgb)
+        # Pass through EfficientNet (now accepts 3 channels naturally)
+        efficientnet_features = self.efficientnet(map_data_semantic)
 
         # Project to lower dimension
         cnn_features = self.projection(efficientnet_features)
@@ -149,6 +192,7 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
     """
     A more lightweight version using a smaller custom EfficientNet-like architecture.
     Better for smaller input maps and faster training.
+    Now includes semantic grouping for better map understanding.
     """
 
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
@@ -160,9 +204,10 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim)
 
         # Custom lightweight EfficientNet-inspired architecture
+        # Now expecting 3 input channels from semantic grouping
         self.cnn = nn.Sequential(
-            # Initial convolution
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            # Initial convolution - now accepts 3 channels
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),  # Use inplace operations to save memory
 
@@ -224,13 +269,57 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
                 nn.BatchNorm2d(out_channels)
             )
 
-    def forward(self, observations) -> torch.Tensor:
-        # Process map with CNN
-        map_data = observations['global_map'].float()
-        map_data = map_data.unsqueeze(1)
+    def preprocess_map_to_semantic(self, map_data):
+        """
+        Convert map to semantic channels for better learning.
 
-        # Pass through CNN
-        cnn_features = self.cnn(map_data)
+        Map values:
+        - UNKNOWN = -1
+        - FREE_SPACE = 0
+        - WALL = 1
+        - ENTRY_POINT = 2
+        - DOOR_CLOSED = 3
+        - DOOR_OPEN = 4
+        - WINDOW = 5
+        - OUT_OF_BOUNDS = 6
+
+        Creates 3 semantic channels:
+        1. Exploration status (known vs unknown)
+        2. Traversability (can move here)
+        3. Obstacles (walls, barriers)
+        """
+        batch_size = map_data.shape[0]
+        height, width = map_data.shape[1], map_data.shape[2]
+        device = map_data.device
+
+        # Create 3 semantic channels
+        channels = torch.zeros(batch_size, 3, height, width, device=device)
+
+        # Channel 0: Exploration status (0 = unknown, 1 = explored)
+        # Everything that's not -1 (UNKNOWN) is explored
+        channels[:, 0, :, :] = (map_data != -1).float()
+
+        # Channel 1: Traversability (0 = blocked, 1 = traversable)
+        # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
+        traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
+        channels[:, 1, :, :] = traversable.float()
+
+        # Channel 2: Obstacles and features (0 = empty, 1 = obstacle/feature)
+        # WALL (1), DOOR_CLOSED (3), WINDOW (5), OUT_OF_BOUNDS (6)
+        obstacles = (map_data == 1) | (map_data == 3) | (map_data == 5) | (map_data == 6)
+        channels[:, 2, :, :] = obstacles.float()
+
+        return channels
+
+    def forward(self, observations) -> torch.Tensor:
+        # Process map with semantic grouping
+        map_data = observations['global_map'].float()
+
+        # Convert to 3 semantic channels (exploration, traversability, obstacles)
+        map_data_semantic = self.preprocess_map_to_semantic(map_data)
+
+        # Pass through CNN (now processes 3 semantic channels)
+        cnn_features = self.cnn(map_data_semantic)
 
         # Flatten other features
         positions = observations['positions'].float().flatten(start_dim=1)
