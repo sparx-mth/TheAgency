@@ -28,10 +28,10 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
 
         super().__init__(observation_space, features_dim)
 
-        # CNN for processing the 2D map
+        # CNN for processing the 2D map with 2 semantic channels
         map_shape = observation_space['global_map'].shape  # (height, width)
         self.cnn = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.Conv2d(2, 16, kernel_size=3, padding=1),  # 2 semantic input channels
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -50,11 +50,51 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
             nn.ReLU()
         )
 
+    def preprocess_map_to_semantic(self, map_data):
+        """
+        Convert map to semantic channels for better learning.
+
+        Map values:
+        - UNKNOWN = -1
+        - FREE_SPACE = 0
+        - WALL = 1
+        - ENTRY_POINT = 2
+        - DOOR_CLOSED = 3
+        - DOOR_OPEN = 4
+        - WINDOW = 5
+        - OUT_OF_BOUNDS = 6
+
+        Creates 2 semantic channels:
+        1. Exploration status (known vs unknown)
+        2. Traversability (can move here)
+        """
+        batch_size = map_data.shape[0]
+        height, width = map_data.shape[1], map_data.shape[2]
+        device = map_data.device
+
+        # Create 2 semantic channels
+        channels = torch.zeros(batch_size, 2, height, width, device=device)
+
+        # Channel 0: Exploration status (0 = unknown, 1 = explored)
+        # Everything that's not -1 (UNKNOWN) is explored
+        channels[:, 0, :, :] = (map_data != -1).float()
+
+        # Channel 1: Traversability (0 = blocked, 1 = traversable)
+        # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
+        traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
+        channels[:, 1, :, :] = traversable.float()
+
+        return channels
+
     def forward(self, observations) -> torch.Tensor:
         # Process map with CNN
         map_data = observations['global_map'].float()  # (batch, height, width)
-        map_data = map_data.unsqueeze(1)  # Add channel dimension: (batch, 1, height, width)
-        cnn_features = self.cnn(map_data)  # (batch, cnn_output_dim)
+
+        # Convert map to semantic channels
+        semantic_map = self.preprocess_map_to_semantic(map_data)  # (batch, 2, height, width)
+
+        # Pass semantic map through CNN
+        cnn_features = self.cnn(semantic_map)  # (batch, cnn_output_dim)
 
         # Flatten other features
         positions = observations['positions'].float().flatten(start_dim=1)  # (batch, num_agents*2)

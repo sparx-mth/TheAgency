@@ -1,11 +1,13 @@
 """
 curriculum_wrapper.py - Progressive curriculum learning wrapper for SLAM environment
 Reveals most of the map initially, keeping only a configurable square hidden.
+The hidden square is placed randomly on the map.
 """
 
 import numpy as np
 import gymnasium as gym
-from typing import Tuple, Dict, Any
+import random
+from typing import Tuple, Dict, Any, Optional
 
 
 class CurriculumWrapper(gym.Wrapper):
@@ -13,20 +15,25 @@ class CurriculumWrapper(gym.Wrapper):
     Wrapper that implements curriculum learning by initially revealing parts of the map.
 
     The wrapper starts with most of the map visible, keeping only a small square hidden.
-    This square gradually increases in size as training progresses.
+    This square is placed randomly on the map and gradually increases in size as training progresses.
     """
 
-    def __init__(self, env, hidden_size: int = 8):
+    def __init__(self, env, hidden_size: int = 8, random_position: bool = True,
+                 fixed_position: Optional[Tuple[int, int]] = None):
         """
         Initialize the curriculum wrapper.
 
         Args:
             env: Base SLAM environment (must be 32x32)
             hidden_size: Size of the initially hidden square (e.g., 8 for 8x8)
+            random_position: If True, place hidden square randomly. If False, use center or fixed_position
+            fixed_position: If provided, use this as the top-left corner of the hidden square (x, y)
         """
         super().__init__(env)
         self.hidden_size = hidden_size
         self.map_size = 32  # Fixed map size
+        self.random_position = random_position
+        self.fixed_position = fixed_position
 
         # Calculate adaptive parameters based on hidden area
         self.hidden_cells = hidden_size * hidden_size
@@ -43,17 +50,44 @@ class CurriculumWrapper(gym.Wrapper):
         self.env.max_steps = self.adaptive_max_steps
         self.env.completion_bonus = self.adaptive_completion_bonus
 
-        # Calculate hidden square boundaries (centered)
-        center = self.map_size // 2
-        half_hidden = self.hidden_size // 2
-        self.hidden_min = center - half_hidden
-        self.hidden_max = center + half_hidden
+        # Initialize hidden square boundaries (will be set in reset)
+        self.hidden_min_x = 0
+        self.hidden_max_x = 0
+        self.hidden_min_y = 0
+        self.hidden_max_y = 0
 
         print(f"CurriculumWrapper initialized:")
         print(f"  Hidden area: {hidden_size}x{hidden_size} ({self.hidden_cells} cells)")
         print(f"  Max steps: {self.adaptive_max_steps}")
         print(f"  Completion bonus: {self.adaptive_completion_bonus:.1f}")
-        print(f"  Hidden square: [{self.hidden_min}:{self.hidden_max}, {self.hidden_min}:{self.hidden_max}]")
+        print(f"  Random position: {self.random_position}")
+
+    def _choose_hidden_position(self) -> Tuple[int, int]:
+        """
+        Choose the position for the hidden square.
+
+        Returns:
+            Tuple of (min_x, min_y) for the top-left corner of the hidden square
+        """
+        if self.fixed_position is not None:
+            # Use the provided fixed position
+            min_x, min_y = self.fixed_position
+        elif self.random_position:
+            # Choose a random position that keeps the square within bounds
+            max_x_start = self.map_size - self.hidden_size
+            max_y_start = self.map_size - self.hidden_size
+
+            # Ensure we don't go out of bounds
+            min_x = random.randint(0, max(0, max_x_start))
+            min_y = random.randint(0, max(0, max_y_start))
+        else:
+            # Use center position (original behavior)
+            center = self.map_size // 2
+            half_hidden = self.hidden_size // 2
+            min_x = center - half_hidden
+            min_y = center - half_hidden
+
+        return min_x, min_y
 
     def reset(self, **kwargs) -> Tuple[Dict, Dict]:
         """
@@ -65,13 +99,24 @@ class CurriculumWrapper(gym.Wrapper):
         # First, do normal reset
         obs, info = self.env.reset(**kwargs)
 
+        # Choose position for hidden square
+        self.hidden_min_x, self.hidden_min_y = self._choose_hidden_position()
+        self.hidden_max_x = self.hidden_min_x + self.hidden_size
+        self.hidden_max_y = self.hidden_min_y + self.hidden_size
+
+        # Ensure boundaries are within map
+        self.hidden_max_x = min(self.hidden_max_x, self.map_size)
+        self.hidden_max_y = min(self.hidden_max_y, self.map_size)
+
+        # print(f"  Hidden square: [{self.hidden_min_x}:{self.hidden_max_x}, {self.hidden_min_y}:{self.hidden_max_y}]")
+
         # Reveal everything except the hidden square
         revealed_count = 0
         for y in range(self.map_size):
             for x in range(self.map_size):
                 # Check if this cell is outside the hidden square
-                if not (self.hidden_min <= x < self.hidden_max and
-                       self.hidden_min <= y < self.hidden_max):
+                if not (self.hidden_min_x <= x < self.hidden_max_x and
+                       self.hidden_min_y <= y < self.hidden_max_y):
                     # Reveal this cell by copying from true map to global map
                     if 0 <= x < self.map_size and 0 <= y < self.map_size:
                         self.env.global_map[y, x] = self.env.true_map[y, x]
@@ -82,22 +127,21 @@ class CurriculumWrapper(gym.Wrapper):
         possible_positions = []
 
         # Collect all valid positions in hidden area
-        for y in range(self.hidden_min, self.hidden_max):
-            for x in range(self.hidden_min, self.hidden_max):
+        for y in range(self.hidden_min_y, self.hidden_max_y):
+            for x in range(self.hidden_min_x, self.hidden_max_x):
                 # Check if it's a walkable tile (free space or open door)
                 if self.env.true_map[y, x] in [0, 3]:  # FREE_SPACE=0, DOOR_OPEN=3
                     possible_positions.append((x, y))
 
         # Place drone at a random valid position in hidden area
         if possible_positions:
-            import random
             x, y = random.choice(possible_positions)
             self.env.drones[0].pos = (x, y)
             entry_placed = True
         else:
             # Fallback: place at center of hidden area if no valid positions
-            x = (self.hidden_min + self.hidden_max) // 2
-            y = (self.hidden_min + self.hidden_max) // 2
+            x = (self.hidden_min_x + self.hidden_max_x) // 2
+            y = (self.hidden_min_y + self.hidden_max_y) // 2
             self.env.drones[0].pos = (x, y)
             print(f"Warning: No valid positions in hidden area, placing at ({x}, {y})")
 
@@ -105,8 +149,8 @@ class CurriculumWrapper(gym.Wrapper):
         self.env.reachable_mask = np.zeros_like(self.env.reachable_mask, dtype=bool)
 
         # Mark hidden cells as reachable if they're explorable
-        for y in range(self.hidden_min, self.hidden_max):
-            for x in range(self.hidden_min, self.hidden_max):
+        for y in range(self.hidden_min_y, self.hidden_max_y):
+            for x in range(self.hidden_min_x, self.hidden_max_x):
                 # Include all tiles in hidden area (even walls need to be discovered)
                 self.env.reachable_mask[y, x] = True
 
@@ -124,7 +168,12 @@ class CurriculumWrapper(gym.Wrapper):
             'revealed_initially': revealed_count,
             'max_steps': self.adaptive_max_steps,
             'completion_bonus': self.adaptive_completion_bonus,
-            'drone_start_pos': self.env.drones[0].pos
+            'drone_start_pos': self.env.drones[0].pos,
+            'hidden_position': (self.hidden_min_x, self.hidden_min_y),
+            'hidden_bounds': {
+                'x': (self.hidden_min_x, self.hidden_max_x),
+                'y': (self.hidden_min_y, self.hidden_max_y)
+            }
         }
 
         return obs, info
@@ -145,12 +194,15 @@ class CurriculumWrapper(gym.Wrapper):
         # Add curriculum info to every step
         info['hidden_cells'] = self.hidden_cells
         info['hidden_size'] = self.hidden_size
+        info['hidden_position'] = (self.hidden_min_x, self.hidden_min_y)
 
         return obs, reward, terminated, truncated, info
 
     def render(self):
         """Forward render call to the base environment."""
-        return self.env.render()
+        if hasattr(self.env, 'render'):
+            return self.env.render()
+        return None
 
     def close(self):
         """Forward close call to the base environment."""
@@ -169,7 +221,10 @@ class CurriculumWrapper(gym.Wrapper):
             'max_steps': self.adaptive_max_steps,
             'completion_bonus': self.adaptive_completion_bonus,
             'hidden_bounds': {
-                'min': self.hidden_min,
-                'max': self.hidden_max
-            }
+                'x_min': self.hidden_min_x,
+                'x_max': self.hidden_max_x,
+                'y_min': self.hidden_min_y,
+                'y_max': self.hidden_max_y
+            },
+            'random_position': self.random_position
         }

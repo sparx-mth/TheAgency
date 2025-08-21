@@ -6,6 +6,9 @@ Uses the wrapper to make MultiDiscrete action space compatible with DQN.
 import os
 import numpy as np
 import warnings
+
+from rl.feature_extractors.efficientnet_feature_extractor import SLAMCNNExtractor
+
 warnings.filterwarnings("ignore")
 
 from stable_baselines3 import DQN
@@ -113,7 +116,7 @@ def train():
         "MultiInputPolicy",
         vec_env,
         policy_kwargs=dict(
-            features_extractor_class=EnhancedSLAMCNNExtractor,
+            features_extractor_class=SLAMCNNExtractor,
             features_extractor_kwargs=dict(features_dim=256),
             net_arch=[512, 512],  # Hidden layers for Q-network
         ),
@@ -194,6 +197,3 @@ if __name__ == "__main__":
 
     # Run training
     train()
-
-    # Optionally test the trained model
-    # test_trained_model()

@@ -207,7 +207,7 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         # Now expecting 3 input channels from semantic grouping
         self.cnn = nn.Sequential(
             # Initial convolution - now accepts 3 channels
-            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(2, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),  # Use inplace operations to save memory
 
@@ -283,17 +283,16 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         - WINDOW = 5
         - OUT_OF_BOUNDS = 6
 
-        Creates 3 semantic channels:
+        Creates 2 semantic channels:
         1. Exploration status (known vs unknown)
         2. Traversability (can move here)
-        3. Obstacles (walls, barriers)
         """
         batch_size = map_data.shape[0]
         height, width = map_data.shape[1], map_data.shape[2]
         device = map_data.device
 
-        # Create 3 semantic channels
-        channels = torch.zeros(batch_size, 3, height, width, device=device)
+        # Create 2 semantic channels
+        channels = torch.zeros(batch_size, 2, height, width, device=device)
 
         # Channel 0: Exploration status (0 = unknown, 1 = explored)
         # Everything that's not -1 (UNKNOWN) is explored
@@ -303,11 +302,6 @@ class SLAMLightweightEfficientNetExtractor(BaseFeaturesExtractor):
         # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
         traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
         channels[:, 1, :, :] = traversable.float()
-
-        # Channel 2: Obstacles and features (0 = empty, 1 = obstacle/feature)
-        # WALL (1), DOOR_CLOSED (3), WINDOW (5), OUT_OF_BOUNDS (6)
-        obstacles = (map_data == 1) | (map_data == 3) | (map_data == 5) | (map_data == 6)
-        channels[:, 2, :, :] = obstacles.float()
 
         return channels
 

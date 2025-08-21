@@ -25,12 +25,13 @@ from rl.feature_extractors.efficientnet_feature_extractor import (
     SLAMEfficientNetExtractor,
     SLAMLightweightEfficientNetExtractor
 )
+from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 # FIXED MAP PATH
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 8 # Use 4 environments for ~2x speedup without overhead
+N_ENVS = 16 # Use 4 environments for ~2x speedup without overhead
 STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage
 
 # Choose which EfficientNet variant to use
@@ -61,7 +62,7 @@ class OptimizedProgressCallback(BaseCallback):
     def _on_training_start(self) -> None:
         """Called at the beginning of training."""
         self.start_time = time.time()
-        print(f"🚀 Training started with {self.n_envs} environments")
+        print(f" Training started with {self.n_envs} environments")
 
         # Clear GPU cache at start
         if torch.cuda.is_available():
@@ -103,7 +104,7 @@ class OptimizedProgressCallback(BaseCallback):
                 self.recent_discoveries.append(discovered)
 
                 # Determine if episode was successful
-                success = discovered >= total * 0.99 if total > 0 else False
+                success = discovered >= total * 1.0 if total > 0 else False
                 self.success_history.append(success)
 
                 if success:
@@ -170,7 +171,26 @@ class OptimizedProgressCallback(BaseCallback):
         print(f"\n>>> Rendering episode {self.episode_count}...")
 
         # Create test environment with rendering
-        sensor = CameraSensor(max_range=8, fov_deg=60, num_rays=24)
+        sensor = CameraSensor(max_range=4, fov_deg=45, num_rays=12)
+
+        if hidden_size and hidden_size > 0:
+            hidden_cells = hidden_size * hidden_size
+
+            # OPTIMAL FOR DQN WITH VISION
+            adaptive_discovery_reward = 10.0 / hidden_cells
+
+            # Larger completion bonus to overcome exploration noise
+            adaptive_completion_bonus = max(30.0, hidden_cells / 2.0)
+
+            # Step penalty that scales with area
+            if hidden_cells <= 64:  # 8x8
+                adaptive_step_penalty = -0.010
+            elif hidden_cells <= 144:  # 12x12
+                adaptive_step_penalty = -0.008
+            elif hidden_cells <= 256:  # 16x16
+                adaptive_step_penalty = -0.006
+            else:  # larger
+                adaptive_step_penalty = -0.004
         test_env = MultiAgentSLAMEnv(
             width=32,
             height=32,
@@ -179,10 +199,10 @@ class OptimizedProgressCallback(BaseCallback):
             map_path=MAP_PATH,
             render_mode='human',
             sensor_config={0: sensor},
-            discovery_reward=1.0,
-            collision_penalty=-0.5,
-            step_penalty=0.0,
-            completion_bonus=50.0,
+            discovery_reward=adaptive_discovery_reward,
+            collision_penalty=-0.5,  # Keep constant
+            step_penalty=adaptive_step_penalty,
+            completion_bonus=adaptive_completion_bonus,
         )
 
         if isinstance(hidden_size, int):
@@ -218,13 +238,39 @@ class OptimizedProgressCallback(BaseCallback):
 def create_env(hidden_size: int, env_id: int = 0):
     """Create a single environment for vectorization with improved rewards."""
 
+    # Define all map paths
+    MAP_PATHS = [f"/home/user/nadav/TheAgency/resources/planner/maps/house_map_{i}.txt"
+                 for i in range(11, 19)]  # Maps 11-18
+
+    # Each environment uses a different map (round-robin)
+    MAP_PATH = MAP_PATHS[env_id % len(MAP_PATHS)]
+
     def _init():
         # Load map
         loaded_map = np.loadtxt(MAP_PATH, dtype=np.int8)
         actual_height, actual_width = loaded_map.shape
 
         # Create sensor
-        sensor = CameraSensor(max_range=8, fov_deg=60, num_rays=24)
+        sensor = CameraSensor(max_range=4, fov_deg=45, num_rays=12)
+
+        if hidden_size and hidden_size > 0:
+            hidden_cells = hidden_size * hidden_size
+
+            # OPTIMAL FOR DQN WITH VISION
+            adaptive_discovery_reward = 10.0 / hidden_cells
+
+            # Larger completion bonus to overcome exploration noise
+            adaptive_completion_bonus = max(30.0, hidden_cells / 2.0)
+
+            # Step penalty that scales with area
+            if hidden_cells <= 64:  # 8x8
+                adaptive_step_penalty = -0.010
+            elif hidden_cells <= 144:  # 12x12
+                adaptive_step_penalty = -0.008
+            elif hidden_cells <= 256:  # 16x16
+                adaptive_step_penalty = -0.006
+            else:  # larger
+                adaptive_step_penalty = -0.004
 
         # Create base environment
         base_env = MultiAgentSLAMEnv(
@@ -235,14 +281,14 @@ def create_env(hidden_size: int, env_id: int = 0):
             map_path=MAP_PATH,
             render_mode=None,
             sensor_config={0: sensor},
-            discovery_reward=1.0,
+            discovery_reward=adaptive_discovery_reward,
             collision_penalty=-0.5,
-            step_penalty=0.0,
-            completion_bonus=50.0,
+            step_penalty=adaptive_step_penalty,
+            completion_bonus=adaptive_completion_bonus,
         )
 
         # Apply wrappers
-        if actual_width == 32 and actual_height == 32:
+        if actual_width == 32 and actual_height == 32 and hidden_size and hidden_size > 0:
             env = CurriculumWrapper(base_env, hidden_size=hidden_size)
             env = MultiDiscreteToDiscreteWrapper(env)
         else:
@@ -251,8 +297,8 @@ def create_env(hidden_size: int, env_id: int = 0):
         # Add monitor for episode statistics
         env = Monitor(env)
 
-        # Set seed for reproducibility
-        env.reset(seed=42 + env_id)
+        # Set seed for reproducibility - unique per environment
+        env.reset(seed=42 + env_id * 1000)
 
         return env
 
@@ -335,7 +381,7 @@ def train():
                     features_dim=256,
                     efficientnet_variant='b0',
                     pretrained=True,
-                    freeze_backbone=True  # Allow fine-tuning
+                    freeze_backbone=True
                 )
                 print("Using full EfficientNet-B0 with pretrained weights")
 
@@ -345,20 +391,17 @@ def train():
                 policy_kwargs=dict(
                     features_extractor_class=feature_extractor_class,
                     features_extractor_kwargs=feature_extractor_kwargs,
-                    net_arch=[256, 256],  # Policy/value networks
+                    net_arch=[],  # Policy/value networks
                 ),
-                # DQN hyperparameters - ADJUSTED FOR MEMORY
-                learning_rate=1e-4,  # Slightly lower LR for stability
-                buffer_size=500_000,  # Reduced buffer size to save memory
-                learning_starts=1000,
-                batch_size=32,  # Smaller batch size - critical for memory
-                tau=1.0,
-                gamma=0.99,
-                train_freq=8,  # Train less frequently to reduce memory pressure
-                gradient_steps=1,
-                target_update_interval=10000,
-                # Exploration
-                exploration_fraction=0.7,
+                # Core DQN parameters
+                learning_rate=5e-4,  # Moderate LR for stable CNN training
+                buffer_size=100_000,  # Large buffer for diverse experience
+                learning_starts=5_000,  # Start learning after initial exploration
+                batch_size=128,  # Larger batch for CNN stability
+                tau=0.005,  # Soft target update for stability
+                gamma=0.99,  # High discount for long-term planning (maps require planning)
+                # Exploration parameters
+                exploration_fraction=0.3,  # 30% of training for exploration
                 exploration_initial_eps=1.0,
                 exploration_final_eps=0.05,
                 # Other
