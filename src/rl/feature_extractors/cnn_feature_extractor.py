@@ -31,7 +31,7 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
         # CNN for processing the 2D map
         map_shape = observation_space['global_map'].shape  # (height, width)
         self.cnn = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.Conv2d(2, 16, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -90,8 +90,8 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
         # Process map with CNN
         map_data = observations['global_map'].float()  # (batch, height, width)
         # # Convert map to semantic channels
-        # semantic_map = self.preprocess_map_to_semantic(map_data)  # (batch, 2, height, width)
-        map_data = map_data.unsqueeze(1)  # Add channel dimension: (batch, 1, height, width)
+        map_data = self.preprocess_map_to_semantic(map_data)  # (batch, 2, height, width)
+        # map_data = map_data.unsqueeze(1)  # Add channel dimension: (batch, 1, height, width)
         cnn_features = self.cnn(map_data)  # (batch, cnn_output_dim)
 
         # Flatten other features
