@@ -13,7 +13,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from environments.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
 from cnn_feature_extractor import SLAMCNNExtractor
 

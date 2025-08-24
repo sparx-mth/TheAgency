@@ -12,10 +12,9 @@ This file demonstrates the complete SLAM system with all its features:
 
 import sys
 import numpy as np
-from typing import Dict, Any
 
 # Environment imports - NO LONGER NEED SingleAgentWrapper
-from environments.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv
 
 # Sensor imports
 from sensors.camera_sensor import CameraSensor

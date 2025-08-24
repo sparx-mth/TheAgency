@@ -9,7 +9,7 @@ import time
 import psutil
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import warnings
 import torch
 import gc
@@ -21,8 +21,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from stable_baselines3 import DQN
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from environments.slam_env import MultiAgentSLAMEnv
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
 
 # Import the EfficientNet feature extractor

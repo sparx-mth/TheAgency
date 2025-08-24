@@ -18,7 +18,7 @@ from heapq import heappush, heappop
 import numpy as np
 
 from .base_agent import BaseSLAMAgent
-from environments.constants import Action, TileType
+from environments.base.constants import Action, TileType
 
 
 class FrontierAgent(BaseSLAMAgent):

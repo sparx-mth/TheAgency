@@ -16,10 +16,9 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from environments.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.enhanced_cnn_extractor import EnhancedSLAMCNNExtractor
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 
 
 class ProgressCallback(BaseCallback):

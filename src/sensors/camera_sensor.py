@@ -15,7 +15,7 @@ from typing import List, Tuple
 import numpy as np
 
 from .base_sensor import BaseSensor
-from environments.constants import TileType, DIRECTION_DELTAS
+from environments.base.constants import TileType, DIRECTION_DELTAS
 
 
 class CameraSensor(BaseSensor):

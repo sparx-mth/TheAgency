@@ -18,7 +18,7 @@ class CurriculumWrapper(gym.Wrapper):
     This square is placed randomly on the map and gradually increases in size as training progresses.
     """
 
-    def __init__(self, env, hidden_size: int = 8, random_position: bool = True,
+    def __init__(self, env, hidden_size: int = 8, random_position: bool = False,
                  fixed_position: Optional[Tuple[int, int]] = None):
         """
         Initialize the curriculum wrapper.

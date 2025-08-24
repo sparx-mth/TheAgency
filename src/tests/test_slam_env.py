@@ -8,17 +8,15 @@ rewards, termination conditions, and rendering.
 
 import numpy as np
 import pygame
-import pytest
 import time
-from typing import Dict, List, Tuple
 
 # Add parent directory to path for imports
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from environments.slam_env import MultiAgentSLAMEnv
-from environments.constants import TileType, Action, DIRECTIONS
+from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.base.constants import TileType, Action
 from sensors.camera_sensor import CameraSensor
 from sensors.lidar_sensor import LidarSensor
 

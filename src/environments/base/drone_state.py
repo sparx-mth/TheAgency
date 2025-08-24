@@ -13,7 +13,7 @@ state and behavior.
 from dataclasses import dataclass, field
 from typing import Tuple, List, TYPE_CHECKING
 
-from environments.constants import DIRECTIONS
+from environments.base.constants import DIRECTIONS
 
 if TYPE_CHECKING:
     from sensors.base_sensor import BaseSensor

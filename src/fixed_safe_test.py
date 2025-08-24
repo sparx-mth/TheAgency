@@ -11,11 +11,10 @@ import numpy as np
 import gc
 from stable_baselines3 import DQN
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecMonitor
-from stable_baselines3.common.utils import set_random_seed
 
-from environments.slam_env import MultiAgentSLAMEnv
-from environments.curriculum_wrapper import CurriculumWrapper
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.wrappers.curriculum_wrapper import CurriculumWrapper
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
 from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 

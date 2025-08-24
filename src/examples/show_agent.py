@@ -4,7 +4,6 @@ Uses exact same environment parameters as training
 """
 
 import os
-import numpy as np
 import pygame
 import time
 import warnings
@@ -14,7 +13,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 
-from environments.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
 
 

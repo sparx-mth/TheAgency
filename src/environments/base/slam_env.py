@@ -19,12 +19,12 @@ import numpy as np
 import pygame
 from typing import Dict, List, Tuple, Optional, Any
 
-from environments.constants import (
+from environments.base.constants import (
     TileType, Action, DIRECTIONS, DIRECTION_DELTAS,
     TILE_SIZE, FPS, TILE_COLORS, DRONE_COLORS,
     DEFAULT_REWARD_PARAMS
 )
-from environments.drone_state import DroneState
+from environments.base.drone_state import DroneState
 from sensors.base_sensor import BaseSensor
 from sensors.camera_sensor import CameraSensor
 from communication.comm_interface import CommunicationInterface

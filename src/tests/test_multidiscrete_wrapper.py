@@ -9,17 +9,14 @@ and compatibility with the base environment.
 import numpy as np
 import pygame
 import time
-from typing import Dict, List
 
 # Add parent directory to path for imports
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from environments.slam_env import MultiAgentSLAMEnv
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
-from environments.constants import Action
-from sensors.camera_sensor import CameraSensor
+from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 
 
 class TestMultiDiscreteWrapper:

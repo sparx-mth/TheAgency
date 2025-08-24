@@ -18,7 +18,7 @@ if os.path.exists(src_path):
     sys.path.insert(0, src_path)
 
 # Import environment - NO LONGER NEED SingleAgentWrapper
-from environments.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv
 
 # Import agents
 from agents.random_agent import RandomAgent

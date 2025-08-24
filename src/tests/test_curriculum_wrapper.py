@@ -9,19 +9,17 @@ rendering through both wrappers, and edge cases.
 import numpy as np
 import pygame
 import time
-from typing import Dict, List
 
 # Add parent directory to path for imports
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from environments.slam_env import MultiAgentSLAMEnv
-from environments.curriculum_wrapper import CurriculumWrapper
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
-from environments.constants import TileType, Action
+from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.wrappers.curriculum_wrapper import CurriculumWrapper
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+from environments.base.constants import TileType
 from sensors.camera_sensor import CameraSensor
-from sensors.lidar_sensor import LidarSensor
 
 
 class TestCurriculumWrapper:

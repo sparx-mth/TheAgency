@@ -8,9 +8,9 @@ import time
 import numpy as np
 from stable_baselines3 import DQN
 
-from environments.slam_env import MultiAgentSLAMEnv
-from environments.curriculum_wrapper import CurriculumWrapper
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.wrappers.curriculum_wrapper import CurriculumWrapper
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
 
 # Configuration

@@ -5,21 +5,18 @@ Comprehensive benchmark to compare Random, Frontier, and DQN agents on house_map
 Uses the exact same environment configuration as DQN training for fair comparison.
 """
 
-import os
-import sys
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from pathlib import Path
 from tqdm import tqdm
 import warnings
 
 warnings.filterwarnings("ignore")
 
 # Import environment and agents
-from environments.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv
 from sensors.camera_sensor import CameraSensor
 # from agents.random_agent import RandomAgent
 from agents.frontier_agent import FrontierAgent
@@ -27,7 +24,7 @@ from agents.frontier_agent import FrontierAgent
 # Import for DQN
 from stable_baselines3 import DQN
 from stable_baselines3.common.monitor import Monitor
-from environments.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
+from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 
 # Import the custom feature extractor (needed for loading the model)
 # Try multiple possible import paths
