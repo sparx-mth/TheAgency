@@ -66,7 +66,7 @@ def run_manual_test(env_class: Any, env_config: dict = None):
         'default_sensor_params': {
             'max_range': 5,  # Short range
             'fov_deg': 30,  # Narrow FOV
-            'num_rays': 10
+            'num_rays': 90
         }
     }
 
@@ -164,7 +164,7 @@ if __name__ == "__main__":
 
     # Custom config for testing with specific map
     test_config = {
-        'map_path': '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_14.txt',
+        'map_path': '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt',
         'randomize': False,  # Use the loaded map
         'default_sensor_params': {
             'max_range': 4,  # Very short range

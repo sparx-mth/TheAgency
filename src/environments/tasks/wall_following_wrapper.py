@@ -1,11 +1,11 @@
 """
-Wall Following Wrapper for single-agent training.
+Wall Following Wrapper for single-agent training - FIXED VERSION.
 
 This wrapper trains an agent to:
-1. Find the first visible wall (or nearest if multiple, or facing if equidistant)
+1. Find the CLOSEST visible wall
 2. Approach and stick to it
-3. Follow along the entire wall from end to end
-4. Stop once that single wall is fully explored from the agent's accessible side
+3. Follow along only that single wall from end to end
+4. Stop once that single wall is fully explored
 """
 
 from typing import Dict, Tuple, Set, Optional, List
@@ -19,7 +19,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
     Environment wrapper for training wall-following behavior.
 
     The agent must:
-    1. Find the first visible wall (prioritized by: only wall > nearest > facing)
+    1. Find the closest visible wall
     2. Approach it and get adjacent
     3. Follow it to discover the entire wall segment from their side
     4. Episode ends when that single wall is fully explored
@@ -30,13 +30,13 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
         # Wall tracking
         self.target_wall_segment: Set[Tuple[int, int]] = set()
-        self.accessible_wall_cells: Set[Tuple[int, int]] = set()  # Wall cells accessible from agent's room
-        self.wall_boundaries: Set[Tuple[int, int]] = set()  # Boundary cells (red)
+        self.accessible_wall_cells: Set[Tuple[int, int]] = set()
+        self.wall_boundaries: Set[Tuple[int, int]] = set()
         self.discovered_cells: Set[Tuple[int, int]] = set()
 
         # Behavior tracking
-        self.phase = 'searching'  # 'searching', 'approaching', 'following'
-        self.wall_locked = False  # Once we lock onto a wall, we stick with it
+        self.phase = 'searching'
+        self.wall_locked = False
         self.wall_contact_steps = 0
         self.last_distance = float('inf')
         self.no_new_discovery_steps = 0
@@ -77,7 +77,6 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
         # If we have adjacent walls, pick one (prefer the one we're facing)
         if adjacent_walls:
-            # Check which wall we're facing
             facing_dirs = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # N, E, S, W
             dx, dy = facing_dirs[facing]
             facing_wall = (pos[0] + dx, pos[1] + dy)
@@ -92,147 +91,119 @@ class WallFollowingWrapper(BaseTaskWrapper):
         if not visible_walls:
             return None
 
-        # Calculate distances to all visible walls
-        wall_distances = {}
+        # Find the closest wall cell
+        min_dist = float('inf')
+        closest_wall = None
+
         for wx, wy in visible_walls:
             dist = abs(wx - pos[0]) + abs(wy - pos[1])
-            if dist not in wall_distances:
-                wall_distances[dist] = []
-            wall_distances[dist].append((wx, wy))
+            if dist < min_dist:
+                min_dist = dist
+                closest_wall = (wx, wy)
 
-        # Get the minimum distance
-        min_dist = min(wall_distances.keys())
-        nearest_walls = wall_distances[min_dist]
+        return closest_wall
 
-        # If only one wall at minimum distance, select it
-        if len(nearest_walls) == 1:
-            return nearest_walls[0]
-
-        # Multiple walls at same distance - prefer one in front
-        facing_dirs = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # N, E, S, W
-        dx, dy = facing_dirs[facing]
-
-        best_wall = None
-        best_score = -float('inf')
-
-        for wx, wy in nearest_walls:
-            # Vector from agent to wall
-            to_wall_x = wx - pos[0]
-            to_wall_y = wy - pos[1]
-
-            # Dot product gives alignment score
-            score = to_wall_x * dx + to_wall_y * dy
-
-            if score > best_score:
-                best_score = score
-                best_wall = (wx, wy)
-
-        return best_wall if best_wall else nearest_walls[0]
-
-    def _trace_wall_segment(self, start_pos: Tuple[int, int], agent_pos: Tuple[int, int], true_map, global_map) -> Set[Tuple[int, int]]:
+    def _trace_single_wall_segment(self, start_pos: Tuple[int, int], agent_pos: Tuple[int, int],
+                                   true_map, global_map) -> Set[Tuple[int, int]]:
         """
-        Trace a single straight wall line (either vertical or horizontal).
-        FIXED: Use visible walls from global_map to determine which wall to follow.
+        Trace a SINGLE continuous wall segment closest to the agent.
+        Stop at corners, T-junctions, or gaps.
         """
         wx, wy = start_pos
-
-        # First, get all currently visible walls from global_map
-        visible_walls = self._find_visible_walls(global_map)
-
-        # Check what walls are visible that connect to our start position
-        visible_vertical = []
-        visible_horizontal = []
-
-        for vx, vy in visible_walls:
-            # Check if it's part of a vertical line through start_pos
-            if vx == wx:
-                visible_vertical.append((vx, vy))
-            # Check if it's part of a horizontal line through start_pos
-            if vy == wy:
-                visible_horizontal.append((vx, vy))
-
-        # Determine orientation based on what's visible
-        # If we can see more of a vertical wall, follow vertical
-        # If we can see more of a horizontal wall, follow horizontal
-        prefer_vertical = len(visible_vertical) > len(visible_horizontal)
-
-        # If equal visibility, check actual wall extents in true map
-        if len(visible_vertical) == len(visible_horizontal):
-            # Count actual extent in true map
-            vertical_extent = 1
-            horizontal_extent = 1
-
-            # Count vertical
-            for y in range(wy - 1, -1, -1):
-                if true_map[y, wx] == TileType.WALL:
-                    vertical_extent += 1
-                else:
-                    break
-            for y in range(wy + 1, true_map.shape[0]):
-                if true_map[y, wx] == TileType.WALL:
-                    vertical_extent += 1
-                else:
-                    break
-
-            # Count horizontal
-            for x in range(wx - 1, -1, -1):
-                if true_map[wy, x] == TileType.WALL:
-                    horizontal_extent += 1
-                else:
-                    break
-            for x in range(wx + 1, true_map.shape[1]):
-                if true_map[wy, x] == TileType.WALL:
-                    horizontal_extent += 1
-                else:
-                    break
-
-            # If we have a corner, prefer the wall that extends from agent's perspective
-            if vertical_extent > 1 and horizontal_extent > 1:
-                # This is a corner - choose based on which direction agent can see better
-                # If agent is to the left/right of wall, they see vertical better
-                # If agent is above/below wall, they see horizontal better
-                dx = abs(agent_pos[0] - wx)
-                dy = abs(agent_pos[1] - wy)
-                prefer_vertical = (dx > 0 and dy == 0) or (len(visible_vertical) > 1)
-            else:
-                prefer_vertical = vertical_extent > horizontal_extent
-
-        # Now trace the wall in the determined direction
         segment = {start_pos}
 
-        if prefer_vertical:
-            # Trace vertical wall (same X, changing Y)
+        # Determine if this is part of a vertical or horizontal wall
+        # Check immediate neighbors in true map
+        has_north = (wy > 0 and true_map[wy-1, wx] == TileType.WALL)
+        has_south = (wy < true_map.shape[0]-1 and true_map[wy+1, wx] == TileType.WALL)
+        has_west = (wx > 0 and true_map[wy, wx-1] == TileType.WALL)
+        has_east = (wx < true_map.shape[1]-1 and true_map[wy, wx+1] == TileType.WALL)
+
+        # Count connections
+        vertical_connections = int(has_north) + int(has_south)
+        horizontal_connections = int(has_west) + int(has_east)
+
+        # If this is a corner or junction (3+ connections), just return this single cell
+        total_connections = vertical_connections + horizontal_connections
+        if total_connections >= 3:
+            return segment
+
+        # Determine primary direction based on connections
+        is_vertical = vertical_connections > horizontal_connections
+
+        # If equal, choose based on agent position
+        if vertical_connections == horizontal_connections:
+            dx = abs(agent_pos[0] - wx)
+            dy = abs(agent_pos[1] - wy)
+            is_vertical = dy >= dx
+
+        if is_vertical:
+            # Trace vertical wall, but stop at junctions/corners
+            # Go up
             for y in range(wy - 1, -1, -1):
-                if true_map[y, wx] == TileType.WALL:
-                    segment.add((wx, y))
-                else:
+                if true_map[y, wx] != TileType.WALL:
                     break
+                # Check for junction/corner
+                connections = 0
+                if wx > 0 and true_map[y, wx-1] == TileType.WALL:
+                    connections += 1
+                if wx < true_map.shape[1]-1 and true_map[y, wx+1] == TileType.WALL:
+                    connections += 1
+                if connections > 0:  # This is a corner/junction
+                    break
+                segment.add((wx, y))
+
+            # Go down
             for y in range(wy + 1, true_map.shape[0]):
-                if true_map[y, wx] == TileType.WALL:
-                    segment.add((wx, y))
-                else:
+                if true_map[y, wx] != TileType.WALL:
                     break
+                # Check for junction/corner
+                connections = 0
+                if wx > 0 and true_map[y, wx-1] == TileType.WALL:
+                    connections += 1
+                if wx < true_map.shape[1]-1 and true_map[y, wx+1] == TileType.WALL:
+                    connections += 1
+                if connections > 0:  # This is a corner/junction
+                    break
+                segment.add((wx, y))
         else:
-            # Trace horizontal wall (same Y, changing X)
+            # Trace horizontal wall, but stop at junctions/corners
+            # Go left
             for x in range(wx - 1, -1, -1):
-                if true_map[wy, x] == TileType.WALL:
-                    segment.add((x, wy))
-                else:
+                if true_map[wy, x] != TileType.WALL:
                     break
+                # Check for junction/corner
+                connections = 0
+                if wy > 0 and true_map[wy-1, x] == TileType.WALL:
+                    connections += 1
+                if wy < true_map.shape[0]-1 and true_map[wy+1, x] == TileType.WALL:
+                    connections += 1
+                if connections > 0:  # This is a corner/junction
+                    break
+                segment.add((x, wy))
+
+            # Go right
             for x in range(wx + 1, true_map.shape[1]):
-                if true_map[wy, x] == TileType.WALL:
-                    segment.add((x, wy))
-                else:
+                if true_map[wy, x] != TileType.WALL:
                     break
+                # Check for junction/corner
+                connections = 0
+                if wy > 0 and true_map[wy-1, x] == TileType.WALL:
+                    connections += 1
+                if wy < true_map.shape[0]-1 and true_map[wy+1, x] == TileType.WALL:
+                    connections += 1
+                if connections > 0:  # This is a corner/junction
+                    break
+                segment.add((x, wy))
 
         return segment
 
-    def _find_accessible_wall_cells(self, wall_segment: Set[Tuple[int, int]], agent_pos: Tuple[int, int], true_map) -> Set[Tuple[int, int]]:
+    def _find_accessible_wall_cells(self, wall_segment: Set[Tuple[int, int]],
+                                   agent_pos: Tuple[int, int], true_map) -> Set[Tuple[int, int]]:
         """
         Find which wall cells from the segment are accessible from the agent's current position.
-        This determines the portion of the wall the agent should explore.
         """
-        # First, find all free spaces reachable from agent position
+        # Find all free spaces reachable from agent position
         reachable_spaces = set()
         to_visit = [agent_pos]
         visited = set()
@@ -243,186 +214,50 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 continue
             visited.add((x, y))
 
-            # Check if this is a free space
             if 0 <= x < true_map.shape[1] and 0 <= y < true_map.shape[0]:
                 if true_map[y, x] in [TileType.FREE_SPACE, TileType.ENTRY_POINT, TileType.DOOR_OPEN]:
                     reachable_spaces.add((x, y))
 
-                    # Continue BFS through free spaces
                     for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                         nx, ny = x + dx, y + dy
                         if (nx, ny) not in visited:
                             to_visit.append((nx, ny))
 
         # Find wall cells that are adjacent to reachable spaces
-        adjacent_wall_cells = []
+        accessible_cells = set()
         for wx, wy in wall_segment:
-            # Check if this wall cell is next to any reachable space
-            is_accessible = False
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = wx + dx, wy + dy
                 if (nx, ny) in reachable_spaces:
-                    is_accessible = True
+                    accessible_cells.add((wx, wy))
                     break
-            if is_accessible:
-                adjacent_wall_cells.append((wx, wy))
 
-        if not adjacent_wall_cells:
-            return set()
+        return accessible_cells
 
-        # For a straight wall, we want the continuous portion that's accessible
-        # Sort cells and find the continuous segment
-        if len(adjacent_wall_cells) > 1:
-            # Check if vertical (same X) or horizontal (same Y)
-            first_cell = adjacent_wall_cells[0]
-            is_vertical = all(cell[0] == first_cell[0] for cell in adjacent_wall_cells)
-
-            if is_vertical:
-                # Sort by Y coordinate
-                adjacent_wall_cells.sort(key=lambda cell: cell[1])
-            else:
-                # Sort by X coordinate
-                adjacent_wall_cells.sort(key=lambda cell: cell[0])
-
-            # Find ALL continuous sequences (there might be gaps due to doors, etc.)
-            sequences = []
-            current_sequence = [adjacent_wall_cells[0]]
-
-            for i in range(1, len(adjacent_wall_cells)):
-                prev = adjacent_wall_cells[i-1]
-                curr = adjacent_wall_cells[i]
-
-                # Check if continuous (adjacent cells)
-                if is_vertical:
-                    is_continuous = (curr[1] - prev[1] == 1)
-                else:
-                    is_continuous = (curr[0] - prev[0] == 1)
-
-                if is_continuous:
-                    current_sequence.append(curr)
-                else:
-                    # Gap found - save current sequence and start new one
-                    if current_sequence:
-                        sequences.append(current_sequence)
-                    current_sequence = [curr]
-
-            # Don't forget the last sequence
-            if current_sequence:
-                sequences.append(current_sequence)
-
-            # Pick the longest continuous sequence, or the one closest to agent
-            if len(sequences) == 1:
-                return set(sequences[0])
-            else:
-                # Multiple sequences - pick the closest one to agent
-                best_sequence = None
-                best_distance = float('inf')
-
-                for sequence in sequences:
-                    # Calculate average distance to agent
-                    avg_distance = sum(abs(cell[0] - agent_pos[0]) + abs(cell[1] - agent_pos[1])
-                                     for cell in sequence) / len(sequence)
-                    if avg_distance < best_distance:
-                        best_distance = avg_distance
-                        best_sequence = sequence
-
-                return set(best_sequence) if best_sequence else set(adjacent_wall_cells)
-        else:
-            return set(adjacent_wall_cells)
-
-    def _find_wall_boundaries(self, accessible_cells: Set[Tuple[int, int]], wall_segment: Set[Tuple[int, int]],
-                              agent_pos: Tuple[int, int], true_map) -> Set[Tuple[int, int]]:
+    def _find_wall_boundaries(self, accessible_cells: Set[Tuple[int, int]]) -> Set[Tuple[int, int]]:
         """
-        Find the boundary cells (red cells) - these mark the actual limits of what can be
-        explored from the agent's current room/side.
-
-        Boundaries are:
-        1. First and last accessible cells in a continuous segment
-        2. Ends of segments separated by gaps (doors, inaccessible sections)
+        Find the boundary cells (red cells) - the start and end of the accessible wall segment.
         """
         if not accessible_cells:
             return set()
 
-        boundaries = set()
-        accessible_list = list(accessible_cells)
+        if len(accessible_cells) == 1:
+            return accessible_cells
 
-        if len(accessible_list) == 1:
-            # Single cell - it's both start and end
-            return {accessible_list[0]}
+        # Convert to list and sort to find endpoints
+        accessible_list = list(accessible_cells)
 
         # Check if vertical or horizontal
         first_cell = accessible_list[0]
         is_vertical = all(cell[0] == first_cell[0] for cell in accessible_list)
 
         if is_vertical:
-            # Vertical wall - sort by Y
             accessible_list.sort(key=lambda cell: cell[1])
-            x = first_cell[0]
-
-            # Find continuous segments (separated by gaps)
-            segments = []
-            current_segment = [accessible_list[0]]
-
-            for i in range(1, len(accessible_list)):
-                curr_y = accessible_list[i - 1][1]
-                next_y = accessible_list[i][1]
-
-                if next_y - curr_y == 1:
-                    # Continuous
-                    current_segment.append(accessible_list[i])
-                else:
-                    # Gap found - end current segment and start new one
-                    segments.append(current_segment)
-                    current_segment = [accessible_list[i]]
-
-            # Don't forget the last segment
-            segments.append(current_segment)
-
-            # Mark boundaries for each segment
-            for segment in segments:
-                if len(segment) == 1:
-                    # Single cell segment - it's a boundary
-                    boundaries.add(segment[0])
-                else:
-                    # Mark first and last of each continuous segment
-                    boundaries.add(segment[0])  # First cell
-                    boundaries.add(segment[-1])  # Last cell
-
         else:
-            # Horizontal wall - sort by X
             accessible_list.sort(key=lambda cell: cell[0])
-            y = first_cell[1]
 
-            # Find continuous segments (separated by gaps)
-            segments = []
-            current_segment = [accessible_list[0]]
-
-            for i in range(1, len(accessible_list)):
-                curr_x = accessible_list[i - 1][0]
-                next_x = accessible_list[i][0]
-
-                if next_x - curr_x == 1:
-                    # Continuous
-                    current_segment.append(accessible_list[i])
-                else:
-                    # Gap found - end current segment and start new one
-                    segments.append(current_segment)
-                    current_segment = [accessible_list[i]]
-
-            # Don't forget the last segment
-            segments.append(current_segment)
-
-            # Mark boundaries for each segment
-            for segment in segments:
-                if len(segment) == 1:
-                    # Single cell segment - it's a boundary
-                    boundaries.add(segment[0])
-                else:
-                    # Mark first and last of each continuous segment
-                    boundaries.add(segment[0])  # First cell
-                    boundaries.add(segment[-1])  # Last cell
-
-        return boundaries
+        # Return first and last cells as boundaries
+        return {accessible_list[0], accessible_list[-1]}
 
     def _is_adjacent_to_wall(self, pos: Tuple[int, int]) -> bool:
         """Check if position is adjacent to the target wall."""
@@ -440,24 +275,18 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
     def _update_discoveries(self, pos: Tuple[int, int], global_map):
         """Update discovered cells based on current position and vision."""
-        # Check which accessible wall cells have been discovered (visible in global map)
-        # Only count cells between boundaries (orange cells, not red)
         for wx, wy in self.accessible_wall_cells:
-            if (wx, wy) not in self.wall_boundaries:  # Don't need to discover boundary cells
+            if (wx, wy) not in self.wall_boundaries:
                 if global_map[wy, wx] != TileType.UNKNOWN:
                     self.discovered_cells.add((wx, wy))
 
     def _compute_task_reward(self, obs, action, base_reward) -> float:
-        """
-        Compute wall-following specific reward.
-        """
+        """Compute wall-following specific reward."""
         reward = -0.01  # Small step penalty
 
         pos = tuple(obs['positions'][0])
         facing = obs['facings'][0]
         global_map = obs['global_map']
-
-        # Get true map from the base environment
         true_map = self.env.true_map
 
         # Phase: SEARCHING - Find a wall to follow
@@ -465,21 +294,19 @@ class WallFollowingWrapper(BaseTaskWrapper):
             target_wall = self._select_target_wall(pos, facing, global_map)
 
             if target_wall:
-                # Lock onto this wall segment using true map AND global map for visibility
-                self.target_wall_segment = self._trace_wall_segment(target_wall, pos, true_map, global_map)
-                # Find which cells are accessible from agent's room
+                # Lock onto this SINGLE wall segment
+                self.target_wall_segment = self._trace_single_wall_segment(
+                    target_wall, pos, true_map, global_map
+                )
                 self.accessible_wall_cells = self._find_accessible_wall_cells(
                     self.target_wall_segment, pos, true_map
                 )
-                # FIX: Pass agent_pos and true_map to find_wall_boundaries
-                self.wall_boundaries = self._find_wall_boundaries(
-                    self.accessible_wall_cells, self.target_wall_segment, pos, true_map
-                )
+                self.wall_boundaries = self._find_wall_boundaries(self.accessible_wall_cells)
                 self.wall_locked = True
                 self.phase = 'approaching'
-                reward += 5.0  # Bonus for finding and locking onto a wall
-                print(f"\nLocked onto wall segment with {len(self.target_wall_segment)} total cells")
-                print(f"Accessible from this room: {len(self.accessible_wall_cells)} cells")
+                reward += 5.0
+                print(f"\nLocked onto single wall with {len(self.target_wall_segment)} cells")
+                print(f"Accessible: {len(self.accessible_wall_cells)} cells")
                 print(f"Boundaries: {len(self.wall_boundaries)} cells")
 
         # Phase: APPROACHING - Get to the wall
@@ -487,13 +314,11 @@ class WallFollowingWrapper(BaseTaskWrapper):
             dist = self._distance_to_wall(pos)
 
             if self._is_adjacent_to_wall(pos):
-                # Reached the wall!
                 self.phase = 'following'
                 self.wall_contact_steps = 1
-                reward += 15.0  # Big bonus for reaching wall
+                reward += 15.0
                 print(f"\nReached the wall! Starting to follow...")
             else:
-                # Reward getting closer
                 if dist < self.last_distance:
                     reward += 2.0
                 elif dist > self.last_distance:
@@ -501,81 +326,68 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
             self.last_distance = dist
 
-        # Phase: FOLLOWING - Explore the entire wall from this side
+        # Phase: FOLLOWING - Explore the entire wall
         elif self.phase == 'following':
             adjacent = self._is_adjacent_to_wall(pos)
 
-            # Update discoveries
             old_discovered = len(self.discovered_cells)
             self._update_discoveries(pos, global_map)
             new_discovered = len(self.discovered_cells)
 
             if adjacent:
                 self.wall_contact_steps += 1
-                reward += 1.5  # Reward for staying with wall
+                reward += 1.5
 
-                # Reward new discoveries
                 if new_discovered > old_discovered:
                     reward += (new_discovered - old_discovered) * 3.0
                     self.no_new_discovery_steps = 0
-                    print(f"Discovered: {new_discovered}/{len(self.accessible_wall_cells) - len(self.wall_boundaries)} accessible wall cells")
+                    cells_to_discover = len(self.accessible_wall_cells) - len(self.wall_boundaries)
+                    if cells_to_discover > 0:
+                        print(f"Discovered: {new_discovered}/{cells_to_discover} wall cells")
                 else:
                     self.no_new_discovery_steps += 1
-
             else:
-                # Penalty for leaving wall
                 reward -= 3.0
                 self.wall_contact_steps = 0
 
         # Collision penalty
-        if base_reward < -0.5:  # Collision detected in base env
+        if base_reward < -0.5:
             reward -= 5.0
 
         return reward
 
     def _check_task_status(self, obs, action) -> TaskStatus:
         """Check if wall-following task is complete."""
-        # Timeout for finding a wall
         if self.phase == 'searching' and self.task_step > 150:
             return TaskStatus.FAILURE
 
         if self.wall_locked and self.accessible_wall_cells:
-            # Update discoveries
-            global_map = obs['global_map']
-            self._update_discoveries(tuple(obs['positions'][0]), global_map)
+            self._update_discoveries(tuple(obs['positions'][0]), obs['global_map'])
 
-            # Calculate how many non-boundary cells need to be discovered
             cells_to_discover = self.accessible_wall_cells - self.wall_boundaries
 
             if cells_to_discover:
-                # Calculate coverage of non-boundary accessible wall cells
                 coverage = len(self.discovered_cells) / len(cells_to_discover)
 
-                # Debug print to see what's happening
-                if self.task_step % 10 == 0:  # Print every 10 steps
-                    print(f"Coverage: {coverage:.1%} ({len(self.discovered_cells)}/{len(cells_to_discover)} non-boundary cells)")
+                if self.task_step % 10 == 0:
+                    print(f"Coverage: {coverage:.1%} ({len(self.discovered_cells)}/{len(cells_to_discover)} cells)")
 
-                if self.phase == 'following' or self.phase == 'approaching':
-                    # Success: discovered all non-boundary accessible wall cells
+                if self.phase in ['following', 'approaching']:
                     if len(self.discovered_cells) >= len(cells_to_discover):
-                        print(f"\nWall fully explored! Discovered all {len(self.discovered_cells)} cells between boundaries")
+                        print(f"\nWall fully explored! Discovered all {len(self.discovered_cells)} cells")
                         return TaskStatus.SUCCESS
 
-                    # Alternative: very high coverage
                     if coverage >= 0.95:
                         print(f"\nWall exploration complete! Coverage: {coverage:.1%}")
                         return TaskStatus.SUCCESS
 
-                    # Also check if we haven't discovered anything new for a while with good coverage
                     if self.no_new_discovery_steps > 30 and coverage >= 0.85:
                         print(f"\nWall exploration complete (no new discoveries)! Coverage: {coverage:.1%}")
                         return TaskStatus.SUCCESS
             else:
-                # Edge case: all accessible cells are boundaries
-                print(f"\nWall segment has no cells to discover (all boundaries)")
+                print(f"\nWall segment complete (no cells to discover)")
                 return TaskStatus.SUCCESS
 
-        # General timeout
         if self.task_step > 500:
             return TaskStatus.FAILURE
 
@@ -601,26 +413,24 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
     def render(self):
         """Override render to highlight target wall with proper coloring."""
-        # Call parent render first
         super().render()
 
-        # If we have pygame and a target wall, color it appropriately
         if hasattr(self, 'env') and self.env.screen is not None and self.target_wall_segment:
             import pygame
             from environments.base.constants import TILE_SIZE
 
-            # First color the boundary cells in red (corners/ends of accessible portion)
+            # Color boundary cells in red
             for wx, wy in self.wall_boundaries:
                 rect = pygame.Rect(wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
                 pygame.draw.rect(self.env.screen, (255, 0, 0), rect)
 
-            # Then color accessible cells in orange (these need to be discovered)
+            # Color accessible cells in orange
             for wx, wy in self.accessible_wall_cells:
-                if (wx, wy) not in self.wall_boundaries:  # Don't overwrite red boundaries
+                if (wx, wy) not in self.wall_boundaries:
                     rect = pygame.Rect(wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
                     pygame.draw.rect(self.env.screen, (255, 128, 0), rect)
 
-            # Color discovered cells in green on the observed map (right side)
+            # Color discovered cells in green on observed map
             offset_x = self.env.width * TILE_SIZE + 50
             for wx, wy in self.discovered_cells:
                 rect = pygame.Rect(offset_x + wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
