@@ -164,12 +164,12 @@ if __name__ == "__main__":
 
     # Custom config for testing with specific map
     test_config = {
-        'map_path': '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_12.txt',
+        'map_path': '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_14.txt',
         'randomize': False,  # Use the loaded map
         'default_sensor_params': {
             'max_range': 4,  # Very short range
             'fov_deg': 25,  # Very narrow FOV
-            'num_rays': 7
+            'num_rays': 20
         }
     }
 
