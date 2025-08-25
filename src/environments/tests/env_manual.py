@@ -16,6 +16,7 @@ import numpy as np
 from typing import Any
 from environments.tasks.wall_following_wrapper import WallFollowingWrapper
 from environments.tasks.room_entry_wrapper import RoomEntryWrapper
+from environments.tasks.room_exploration_wrapper import RoomExplorationWrapper
 from environments.base.constants import Action
 
 
@@ -158,18 +159,21 @@ def select_environment():
     print("\nSelect environment to test:")
     print("1. Wall Following")
     print("2. Room Entry")
-    print("3. Room Exit (Not implemented yet)")
+    print("3. Room Exploration")
+    print("4. Room Exit (Not implemented yet)")
     print("Q. Quit")
     print("-" * 60)
 
     while True:
-        choice = input("Enter your choice (1-3 or Q): ").strip().upper()
+        choice = input("Enter your choice (1-4 or Q): ").strip().upper()
 
         if choice == '1':
             return WallFollowingWrapper, "Wall Following"
         elif choice == '2':
             return RoomEntryWrapper, "Room Entry"
         elif choice == '3':
+            return RoomExplorationWrapper, "Room Exploration"
+        elif choice == '4':
             print("Room Exit environment not implemented yet.")
             continue
         elif choice == 'Q':
