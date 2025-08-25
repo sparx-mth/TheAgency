@@ -15,6 +15,7 @@ import pygame
 import numpy as np
 from typing import Any
 from environments.tasks.wall_following_wrapper import WallFollowingWrapper
+from environments.tasks.room_entry_wrapper import RoomEntryWrapper
 from environments.base.constants import Action
 
 
@@ -24,17 +25,10 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
     print(f"ACTION: {action_name}")
     print(f"Position: {obs['position']}")
     print(f"Facing: {obs['facing']} (0=N, 1=E, 2=S, 3=W)")
-    print(f"Reward: {reward:.2f}")
+    print(f"Reward: {reward:.3f}")
     print(f"Done: {done}")
-    print(f"Task Status: {info.get('task_status', 'N/A')}")
+    print(f"Task Status: {info.get('task_status', 'N/A')} (0=Progress, 1=Success, 2=Failure)")
     print(f"Step: {info.get('task_step', 0)}")
-
-    # Task-specific info if available
-    if hasattr(env, 'get_info'):
-        task_info = env.get_info()
-        print(f"\nTask Info:")
-        for key, value in task_info.items():
-            print(f"  {key}: {value}")
 
     # Map stats
     global_map = obs['global_map']
@@ -53,8 +47,6 @@ def run_manual_test(env_class: Any, env_config: dict = None):
         env_class: Environment class to test
         env_config: Configuration for the environment
     """
-    global env  # Make env accessible to print_info
-
     # Default config with small FOV camera
     default_config = {
         'width': 32,
@@ -74,14 +66,14 @@ def run_manual_test(env_class: Any, env_config: dict = None):
         default_config.update(env_config)
 
     # Create environment
-    env = env_class(default_config)
+    env = env_class(env_config=default_config)
 
     # Reset and get initial observation
     obs, info = env.reset()
     env.render()
 
     print("\n" + "=" * 60)
-    print("ENVIRONMENT MANUAL TESTER")
+    print(f"TESTING: {env_class.__name__}")
     print("=" * 60)
     print("Controls:")
     print("  W/↑: Forward")
@@ -158,19 +150,106 @@ def run_manual_test(env_class: Any, env_config: dict = None):
     pygame.quit()
 
 
+def select_environment():
+    """Interactive menu to select which environment to test."""
+    print("\n" + "=" * 60)
+    print("SLAM TASK ENVIRONMENT TESTER")
+    print("=" * 60)
+    print("\nSelect environment to test:")
+    print("1. Wall Following")
+    print("2. Room Entry")
+    print("3. Room Exit (Not implemented yet)")
+    print("Q. Quit")
+    print("-" * 60)
+
+    while True:
+        choice = input("Enter your choice (1-3 or Q): ").strip().upper()
+
+        if choice == '1':
+            return WallFollowingWrapper, "Wall Following"
+        elif choice == '2':
+            return RoomEntryWrapper, "Room Entry"
+        elif choice == '3':
+            print("Room Exit environment not implemented yet.")
+            continue
+        elif choice == 'Q':
+            return None, None
+        else:
+            print("Invalid choice. Please try again.")
+
+
+def select_map_option():
+    """Select whether to use a specific map or random generation."""
+    print("\nMap options:")
+    print("1. Use random map")
+    print("2. Load specific map file")
+
+    choice = input("Enter your choice (1-2): ").strip()
+
+    if choice == '2':
+        map_path = input("Enter map file path (or press Enter for default): ").strip()
+        if not map_path:
+            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt'
+        return {'map_path': map_path, 'randomize': False}
+    else:
+        return {'randomize': True}
+
+
 if __name__ == "__main__":
-    # Test the wall-following environment
-    print("Testing Wall Following Environment...")
+    while True:
+        # Select environment
+        env_class, env_name = select_environment()
 
-    # Custom config for testing with specific map
-    test_config = {
-        'map_path': '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt',
-        'randomize': False,  # Use the loaded map
-        'default_sensor_params': {
-            'max_range': 4,  # Very short range
-            'fov_deg': 25,  # Very narrow FOV
-            'num_rays': 20
+        if env_class is None:
+            print("Exiting...")
+            break
+
+        print(f"\nSelected: {env_name}")
+
+        # Select map options
+        map_config = select_map_option()
+
+        # Configure sensor parameters
+        print("\nSensor configuration:")
+        print("1. Default (range=5, fov=30°)")
+        print("2. Short range (range=3, fov=25°)")
+        print("3. Long range (range=10, fov=45°)")
+
+        sensor_choice = input("Enter your choice (1-3): ").strip()
+
+        if sensor_choice == '2':
+            sensor_params = {
+                'max_range': 3,
+                'fov_deg': 25,
+                'num_rays': 20
+            }
+        elif sensor_choice == '3':
+            sensor_params = {
+                'max_range': 10,
+                'fov_deg': 45,
+                'num_rays': 90
+            }
+        else:
+            sensor_params = {
+                'max_range': 5,
+                'fov_deg': 30,
+                'num_rays': 60
+            }
+
+        # Build config
+        test_config = {
+            **map_config,
+            'default_sensor_params': sensor_params
         }
-    }
 
-    run_manual_test(WallFollowingWrapper, test_config)
+        # Run the test
+        print(f"\nStarting {env_name} environment...")
+        run_manual_test(env_class, test_config)
+
+        # Ask if user wants to test another environment
+        print("\n" + "=" * 60)
+        another = input("Test another environment? (y/n): ").strip().lower()
+        if another != 'y':
+            break
+
+    print("\nGoodbye!")
