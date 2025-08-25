@@ -17,6 +17,7 @@ from typing import Any
 from environments.tasks.wall_following_wrapper import WallFollowingWrapper
 from environments.tasks.room_entry_wrapper import RoomEntryWrapper
 from environments.tasks.room_exploration_wrapper import RoomExplorationWrapper
+from environments.tasks.navigation_wrapper import NavigationWrapper
 from environments.base.constants import Action
 
 
@@ -30,6 +31,11 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
     print(f"Done: {done}")
     print(f"Task Status: {info.get('task_status', 'N/A')} (0=Progress, 1=Success, 2=Failure)")
     print(f"Step: {info.get('task_step', 0)}")
+
+    # Navigation-specific info
+    if 'goal_position' in info and info['goal_position']:
+        print(f"Goal Position: {info['goal_position']}")
+        print(f"Steps to Goal: {info.get('steps_to_goal', 0)}")
 
     # Map stats
     global_map = obs['global_map']
@@ -160,12 +166,12 @@ def select_environment():
     print("1. Wall Following")
     print("2. Room Entry")
     print("3. Room Exploration")
-    print("4. Room Exit (Not implemented yet)")
+    print("4. Navigation to Goal")
     print("Q. Quit")
     print("-" * 60)
 
     while True:
-        choice = input("Enter your choice (1-4 or Q): ").strip().upper()
+        choice = input("Enter your choice (1-5 or Q): ").strip().upper()
 
         if choice == '1':
             return WallFollowingWrapper, "Wall Following"
@@ -174,8 +180,7 @@ def select_environment():
         elif choice == '3':
             return RoomExplorationWrapper, "Room Exploration"
         elif choice == '4':
-            print("Room Exit environment not implemented yet.")
-            continue
+            return NavigationWrapper, "Navigation to Goal"
         elif choice == 'Q':
             return None, None
         else:
@@ -190,14 +195,13 @@ def select_map_option():
 
     choice = input("Enter your choice (1-2): ").strip()
 
-    if choice == '2':
+    if choice == '1':
+        return {'randomize': True}
+    else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
             map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt'
         return {'map_path': map_path, 'randomize': False}
-    else:
-        return {'randomize': True}
-
 
 if __name__ == "__main__":
     while True:
