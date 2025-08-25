@@ -15,14 +15,14 @@ from environments.base.slam_env import MultiAgentSLAMEnv
 from environments.wrappers.curriculum_wrapper import CurriculumWrapper
 from environments.wrappers.multidiscrete_wrapper import MultiDiscreteToDiscreteWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.efficientnet_feature_extractor import SLAMLightweightEfficientNetExtractor
+from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 # FIXED MAP PATH
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 4  # Now you can use 16 environments safely!
-BASE_STEPS_PER_STAGE = 10_000_000  # Base steps for easy stages (will be scaled)
+N_ENVS = 4  # Use 4 environments for ~2x speedup without overhead
+STEPS_PER_STAGE = 10_000_000  # 10 million steps per stage (increased for better convergence)
 
 
 class OptimizedProgressCallback(BaseCallback):
@@ -104,7 +104,7 @@ class OptimizedProgressCallback(BaseCallback):
                           f"Complete: {completion_rate:3d}% | "
                           f"Collision: {collisions:3d} | "
                           f"Hidden: {hidden_size:>3} | "
-                          f"ε: {epsilon:.3f} | "
+                          f"Îµ: {epsilon:.3f} | "
                           f"FPS: {fps:4.0f}")
 
                     # Reset completion counter
@@ -208,106 +208,6 @@ def create_env(hidden_size: int, env_id: int = 0):
     return _init
 
 
-def get_adaptive_hyperparameters(n_envs, hidden_size=None):
-    """
-    CRITICAL FIX: Adapt hyperparameters based on BOTH:
-    1. Number of parallel environments
-    2. Difficulty of current curriculum stage (hidden area size)
-
-    The key insight: With VecEnv, train_freq counts total steps across ALL envs!
-    So we need to be careful about how we scale it.
-    """
-
-    # Calculate difficulty multiplier based on hidden area
-    if hidden_size is None:
-        difficulty = 1.0
-    else:
-        # Exponential difficulty scaling: area grows quadratically
-        base_hidden = 8  # Our easiest stage
-        hidden_cells = hidden_size * hidden_size
-        base_cells = base_hidden * base_hidden
-        # Use sqrt to make scaling more moderate
-        difficulty = np.sqrt(hidden_cells / base_cells)
-
-    # Environment scaling factor
-    env_scale = n_envs / 4.0
-
-    # Base configuration for 4 environments with 8x8 hidden area
-    base_config = {
-        'buffer_size': 1_000_000,
-        'learning_starts': 1000,
-        'train_freq': 4,  # With 4 envs, this means train after each env takes 1 step
-        'target_update_interval': 10000,
-        'batch_size': 32,
-        'gradient_steps': 1,
-        'exploration_fraction': 0.7,  # Base exploration
-        'exploration_final_eps': 0.05,  # Base final epsilon
-    }
-
-    # CRITICAL: The real issue with 16 envs!
-    # train_freq should stay constant or scale sub-linearly
-    # because it counts TOTAL steps across all envs
-
-    # Scale parameters
-    return {
-        # Larger buffer for more diverse experiences
-        'buffer_size': int(base_config['buffer_size'] * min(2.0, 1.0 + env_scale * 0.25)),
-
-        # Keep learning starts reasonable
-        'learning_starts': base_config['learning_starts'],
-
-        # CRITICAL FIX: Don't scale train_freq linearly!
-        # Keep it at 4 regardless of n_envs, or scale sub-linearly
-        'train_freq': base_config['train_freq'],  # Keep at 4 for all env counts
-
-        # Update target network based on actual training steps
-        'target_update_interval': base_config['target_update_interval'],
-
-        # Scale batch size with envs for better gradient estimates
-        'batch_size': min(256, base_config['batch_size'] * n_envs // 4),
-
-        # Scale gradient steps to process more data with more envs
-        'gradient_steps': max(1, n_envs // 8),  # 1 for <=8 envs, 2 for 16 envs
-
-        # Adjust exploration for difficulty
-        'exploration_fraction': min(0.9, base_config['exploration_fraction'] + (difficulty - 1) * 0.1),
-
-        # Keep final epsilon stable
-        'exploration_final_eps': base_config['exploration_final_eps'],
-
-        # Hidden size info
-        'hidden_size': hidden_size,
-        'difficulty': difficulty,
-    }
-
-
-def get_adaptive_training_steps(hidden_size, base_steps=BASE_STEPS_PER_STAGE):
-    """
-    Scale training steps based on problem difficulty.
-
-    Harder problems (larger hidden areas) need more training:
-    - 8x8 (64 cells): 1x steps
-    - 12x12 (144 cells): ~1.5x steps
-    - 16x16 (256 cells): ~2x steps
-    - 24x24 (576 cells): ~3x steps
-    - 32x32 (1024 cells): ~4x steps
-    """
-    if hidden_size is None:
-        return base_steps
-
-    # Calculate scaling factor based on area
-    base_size = 8
-    area_ratio = (hidden_size * hidden_size) / (base_size * base_size)
-
-    # Use sqrt for more moderate scaling
-    step_multiplier = np.sqrt(area_ratio)
-
-    # Minimum 1x, maximum 4x
-    step_multiplier = min(4.0, max(1.0, step_multiplier))
-
-    return int(base_steps * step_multiplier)
-
-
 def train():
     """Train DQN with curriculum learning using multiple environments."""
 
@@ -320,105 +220,71 @@ def train():
     print(f"Map: {MAP_PATH}")
     print(f"Map size: {map_width}x{map_height}")
     print(f"Parallel environments: {N_ENVS}")
-    print(f"Base steps per stage: {BASE_STEPS_PER_STAGE:,}")
+    print(f"Steps per stage: {STEPS_PER_STAGE:,}")
 
     # Curriculum stages - start with easier stages
     if map_width == 32 and map_height == 32:
         CURRICULUM = [8, 10, 12, 14, 16, 20, 24, 28, 32]
-        print(f"\nCurriculum stages: {CURRICULUM}")
-
-        # Show adaptive steps for each stage
-        print("\n📈 Adaptive Training Steps per Stage:")
-        total_steps = 0
-        for stage_idx, hidden_size in enumerate(CURRICULUM):
-            steps = get_adaptive_training_steps(hidden_size)
-            total_steps += steps
-            print(f"  Stage {stage_idx+1} ({hidden_size}x{hidden_size}): {steps/1e6:.1f}M steps")
-        print(f"  Total: {total_steps/1e6:.1f}M steps")
+        print(f"Curriculum stages: {CURRICULUM}")
     else:
         CURRICULUM = [None]
-        total_steps = BASE_STEPS_PER_STAGE
-        print("\nNo curriculum (map is not 32x32)")
+        print("No curriculum (map is not 32x32)")
 
     print("="*60 + "\n")
 
     # Estimate training time
     estimated_fps = N_ENVS * 400  # Conservative estimate
+    total_steps = len(CURRICULUM) * STEPS_PER_STAGE
     estimated_hours = total_steps / estimated_fps / 3600
-    print(f"  Estimated total training time: {estimated_hours:.1f} hours")
-    print(f"   ({total_steps/1e6:.0f}M total steps ÷ ~{estimated_fps} FPS)\n")
+    print(f"ðŸ“Š Estimated total training time: {estimated_hours:.1f} hours")
+    print(f"   ({len(CURRICULUM)} stages Ã— {STEPS_PER_STAGE/1e6:.0f}M steps Ã· ~{estimated_fps} FPS)\n")
 
     model = None
-    stage_start_timesteps = 0  # Track total timesteps for proper exploration scheduling
 
     for stage_idx, hidden_size in enumerate(CURRICULUM):
         stage_start = time.time()
 
-        # Get adaptive steps for this stage
-        stage_steps = get_adaptive_training_steps(hidden_size, BASE_STEPS_PER_STAGE)
-
         if hidden_size is not None:
             print(f"\n{'='*60}")
-            print(f" STAGE {stage_idx+1}/{len(CURRICULUM)}: Hidden {hidden_size}x{hidden_size} ({hidden_size*hidden_size} cells)")
-            print(f"   Training steps: {stage_steps/1e6:.1f}M")
+            print(f" STAGE {stage_idx+1}/{len(CURRICULUM)}: Hidden {hidden_size}x{hidden_size}")
         else:
             print(f"\n{'='*60}")
             print(f" TRAINING without curriculum")
         print("-"*40)
 
-        # Get adaptive hyperparameters for this stage
-        hyperparams = get_adaptive_hyperparameters(N_ENVS, hidden_size)
-
-        print("\n Stage-Adaptive Hyperparameters:")
-        print(f"  Difficulty multiplier: {hyperparams['difficulty']:.2f}x")
-        print(f"  Buffer size: {hyperparams['buffer_size']:,}")
-        print(f"  Train freq: every {hyperparams['train_freq']} steps")
-        print(f"  Batch size: {hyperparams['batch_size']}")
-        print(f"  Target update: every {hyperparams['target_update_interval']:,} steps")
-        print(f"  Exploration fraction: {hyperparams['exploration_fraction']:.2f}")
-        print(f"  Exploration final eps: {hyperparams.get('exploration_final_eps', 0.05):.3f}")
-        print(f"  Gradient steps: {hyperparams['gradient_steps']}")
-
         # Create vectorized environment
-        print(f"\nCreating {N_ENVS} environments...")
+        print(f"Creating {N_ENVS} environments...")
 
         env_fns = [create_env(hidden_size if hidden_size else 0, i) for i in range(N_ENVS)]
         vec_env = DummyVecEnv(env_fns)
         vec_env = VecMonitor(vec_env)  # Add monitoring wrapper
 
         if model is None:
-            # Create new model with ADAPTIVE hyperparameters
-            print("Creating new DQN model with adaptive hyperparameters...")
-
-            # Calculate total timesteps for proper exploration scheduling
-            if map_width == 32 and map_height == 32:
-                total_timesteps = sum(get_adaptive_training_steps(h) for h in CURRICULUM)
-            else:
-                total_timesteps = BASE_STEPS_PER_STAGE
+            # Create new model with IMPROVED hyperparameters
+            print("Creating new DQN model with improved hyperparameters...")
 
             model = DQN(
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=SLAMLightweightEfficientNetExtractor,
+                    features_extractor_class=SLAMCNNExtractor,
                     features_extractor_kwargs=dict(features_dim=256),
-                    net_arch=[],
+                    net_arch=[512, 512, 512, 512],
                 ),
-                # ADAPTIVE DQN PARAMETERS
+                # IMPROVED DQN PARAMETERS
                 learning_rate=1e-4,
-                buffer_size=hyperparams['buffer_size'],
-                learning_starts=hyperparams['learning_starts'],
-                batch_size=hyperparams['batch_size'],
-                tau=1.0,  # Hard update
+                buffer_size=1_000_000,  # Replay buffer size
+                learning_starts=1000,  # Start training after 1000 steps
+                batch_size=32,  # Batch size for training
+                tau=1.0,  # Hard update (target network update frequency)
                 gamma=0.99,  # Discount factor
-                train_freq=hyperparams['train_freq'],
-                gradient_steps=hyperparams['gradient_steps'],
-                target_update_interval=hyperparams['target_update_interval'],
-
-                # ADAPTIVE EXPLORATION
-                exploration_fraction=hyperparams['exploration_fraction'],
-                exploration_initial_eps=1.0,
-                exploration_final_eps=hyperparams.get('exploration_final_eps', 0.05),
+                train_freq=4,  # Train every 4 steps
+                gradient_steps=1,  # Gradient steps per training
+                target_update_interval=10000,  # Update target network every 1000 steps
+                # IMPROVED EXPLORATION
+                exploration_fraction=0.7,  # INCREASED from 0.3 - explore for 70% of training
+                exploration_initial_eps=1.0,  # Keep full random start
+                exploration_final_eps=0.05,  # Keep same minimum
 
                 # Other
                 max_grad_norm=10,
@@ -427,25 +293,10 @@ def train():
             )
 
             print(f" Model created on {model.device}")
-            print(f"   Total planned timesteps: {total_timesteps:,}")
         else:
-            # Update model's hyperparameters for new stage
+            # Reuse existing model with new environment
             model.set_env(vec_env)
-
-            # Update critical parameters that can be changed
-            model.train_freq = hyperparams['train_freq']
-            model.gradient_steps = hyperparams['gradient_steps']
-            model.target_update_interval = hyperparams['target_update_interval']
-            model.batch_size = hyperparams['batch_size']
-
-            # Adjust exploration for harder stages
-            # This is a bit hacky but necessary for curriculum learning
-            if hasattr(model, 'exploration_schedule'):
-                # Extend exploration for harder stages
-                remaining = 1.0 - (stage_start_timesteps / total_timesteps)
-                model._current_progress_remaining = remaining
-
-            print(" Model environment and parameters updated")
+            print("Model environment updated")
 
         # Create callbacks
         callbacks = []
@@ -459,7 +310,7 @@ def train():
 
         # Checkpoint callback
         checkpoint_callback = CheckpointCallback(
-            save_freq=500000 // N_ENVS,  # Save every 500k environment steps
+            save_freq=500000 // N_ENVS,  # Save every 100k steps
             save_path="./models/checkpoints/",
             name_prefix=f"stage_{stage_idx+1}_hidden_{hidden_size}"
         )
@@ -469,28 +320,25 @@ def train():
         callback = CallbackList(callbacks)
 
         # Train
-        print(f"\n Starting training for stage {stage_idx+1}...")
-        print(f"Target: {stage_steps:,} steps")
+        print(f"\nStarting training for stage {stage_idx+1}...")
+        print(f"Target: {STEPS_PER_STAGE:,} steps")
 
         model.learn(
-            total_timesteps=stage_steps,
+            total_timesteps=STEPS_PER_STAGE * (1 + stage_idx),
             callback=callback,
             reset_num_timesteps=False,
             progress_bar=False
         )
 
-        # Update total timesteps
-        stage_start_timesteps += stage_steps
-
         # Stage complete
         stage_time = time.time() - stage_start
-        stage_fps = stage_steps / stage_time
+        stage_fps = STEPS_PER_STAGE / stage_time
 
         # Save stage model
         if hidden_size is not None:
-            model_path = f"./models/adaptive_stage_{stage_idx+1}_hidden_{hidden_size}"
+            model_path = f"./models/improved_stage_{stage_idx+1}_hidden_{hidden_size}"
         else:
-            model_path = f"./models/adaptive_checkpoint_{stage_idx+1}"
+            model_path = f"./models/improved_checkpoint_{stage_idx+1}"
 
         model.save(model_path)
 
@@ -502,20 +350,18 @@ def train():
         # Estimate remaining time
         stages_left = len(CURRICULUM) - stage_idx - 1
         if stages_left > 0:
-            # Calculate remaining steps (adaptive)
-            remaining_steps = sum(get_adaptive_training_steps(CURRICULUM[i]) for i in range(stage_idx + 1, len(CURRICULUM)))
-            est_remaining = remaining_steps / stage_fps / 60
+            est_remaining = (stages_left * STEPS_PER_STAGE) / stage_fps / 60
             print(f"   Estimated time remaining: {est_remaining:.0f} minutes")
 
         # Clean up
         vec_env.close()
 
     # Save final model
-    model.save("./models/dqn_curriculum_adaptive_final")
+    model.save("./models/dqn_curriculum_improved_final")
 
     print("\n" + "="*60)
-    print("TRAINING COMPLETE!")
-    print(f"Final model saved to ./models/dqn_curriculum_adaptive_final.zip")
+    print(" TRAINING COMPLETE!")
+    print(f"Final model saved to ./models/dqn_curriculum_improved_final.zip")
     print("="*60)
 
 
