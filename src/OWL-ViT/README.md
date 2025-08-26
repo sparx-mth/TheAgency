@@ -26,3 +26,12 @@ The container uses the `l4t-ml` base image and supports testing code compatibili
 ```bash
 docker buildx build --platform=linux/arm64 -f Dockerfile.test-arm64 -t owl-arm64 .
 ```
+
+```bash
+docker run -it --rm \
+  --platform=linux/arm64 \
+  --memory=8g \
+  -v $PWD:/workspace \
+  -w /workspace \
+  owl-arm64 python3 run_owl.py
+```
