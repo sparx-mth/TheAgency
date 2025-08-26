@@ -1,0 +1,10 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+RUN apt-get update && apt-get install -y python3-pip git && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY . /workspace
+RUN pip install --no-cache-dir -r requirements.txt
+
+CMD ["python3", "run_owl.py"]
