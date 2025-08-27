@@ -13,7 +13,7 @@ from typing import Dict, Tuple, Optional, Set
 from abc import ABC, abstractmethod
 from enum import IntEnum
 
-from environments.base.slam_env import MultiAgentSLAMEnv
+from environments.base.slam_env import MultiAgentSLAMEnv  # Update import path as needed
 from environments.base.constants import Action
 
 
@@ -28,10 +28,8 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
     """
     Abstract base class for task-specific environment wrappers.
 
-    All task wrappers maintain the same observation space but modify:
-    - Reward function
-    - Success/failure conditions
-    - Episode termination criteria
+    Maintains compatibility with base environment observation/action spaces
+    while modifying rewards and termination conditions.
     """
 
     def __init__(self, env_config: Dict = None):
@@ -45,7 +43,7 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
         default_config = {
             'width': 32,
             'height': 32,
-            'num_agents': 1,  # Single agent
+            'num_agents': 1,  # Single agent for DQN
             'max_steps': 500,
             'randomize': True,
         }
@@ -57,8 +55,14 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
         base_env = MultiAgentSLAMEnv(**default_config)
         super().__init__(base_env)
 
-        # Convert to single-agent action space
-        self.action_space = spaces.Discrete(len(Action))
+        # Convert MultiDiscrete to Discrete action space for single agent
+        if isinstance(base_env.action_space, spaces.MultiDiscrete):
+            self.action_space = spaces.Discrete(int(base_env.action_space.nvec[0]))
+        else:
+            self.action_space = base_env.action_space
+
+        # Keep the original observation space
+        self.observation_space = base_env.observation_space
 
         # Task-specific state
         self.task_status = TaskStatus.IN_PROGRESS
@@ -70,12 +74,15 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
         self.task_status = TaskStatus.IN_PROGRESS
         self.task_step = 0
         self._reset_task()
-        return self._process_observation(obs), info
+        return obs, info  # Return observation as-is
 
     def step(self, action):
         """Execute action and compute task-specific rewards."""
         # Convert single action to multi-agent format
-        actions = np.array([action])
+        if isinstance(action, (int, np.integer)):
+            actions = np.array([action], dtype=np.int32)
+        else:
+            actions = np.array([action], dtype=np.int32)
 
         # Step base environment
         obs, base_reward, terminated, truncated, info = self.env.step(actions)
@@ -87,25 +94,20 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
         self.task_status = self._check_task_status(obs, action)
 
         # Update termination based on task
-        if self.task_status != TaskStatus.IN_PROGRESS:
+        if self.task_status == TaskStatus.SUCCESS:
             terminated = True
+            info['task_success'] = True
+        elif self.task_status == TaskStatus.FAILURE:
+            truncated = True
+            info['task_success'] = False
 
         self.task_step += 1
 
         # Add task info
-        info['task_status'] = self.task_status
+        info['task_status'] = self.task_status.value
         info['task_step'] = self.task_step
 
-        return self._process_observation(obs), task_reward, terminated, truncated, info
-
-    def _process_observation(self, obs):
-        """Process multi-agent observation to single-agent format."""
-        # Extract single drone's observation
-        return {
-            'global_map': obs['global_map'],
-            'position': obs['positions'][0],
-            'facing': obs['facings'][0],
-        }
+        return obs, task_reward, terminated, truncated, info
 
     @abstractmethod
     def _reset_task(self):

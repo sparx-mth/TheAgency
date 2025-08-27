@@ -25,8 +25,8 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
     """Print comprehensive environment information."""
     print("\n" + "=" * 60)
     print(f"ACTION: {action_name}")
-    print(f"Position: {obs['position']}")
-    print(f"Facing: {obs['facing']} (0=N, 1=E, 2=S, 3=W)")
+    print(f"Position: {obs['positions']}")
+    print(f"Facing: {obs['facings']} (0=N, 1=E, 2=S, 3=W)")
     print(f"Reward: {reward:.3f}")
     print(f"Done: {done}")
     print(f"Task Status: {info.get('task_status', 'N/A')} (0=Progress, 1=Success, 2=Failure)")
@@ -37,7 +37,7 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
         print(f"Goal Position: {info['goal_position']}")
         print(f"Steps to Goal: {info.get('steps_to_goal', 0)}")
 
-    # Map stats
+    # Map stats1
     global_map = obs['global_map']
     visible_cells = np.sum(global_map != -1)  # -1 is UNKNOWN
     wall_cells = np.sum(global_map == 1)  # 1 is WALL
@@ -200,7 +200,7 @@ def select_map_option():
     else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
-            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt'
+            map_path = '/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt'
         return {'map_path': map_path, 'randomize': False}
 
 if __name__ == "__main__":

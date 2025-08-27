@@ -1,54 +1,54 @@
 """
-Room Entry Environment Wrapper for SLAM
+Optimized Room Entry Environment Wrapper for SLAM
 
-This wrapper trains an agent to identify and pass through doorways.
-A doorway is defined as a passage (0) between two walls (1) in a straight line.
-The agent must step ON the doorway and then move THROUGH it to the other side.
+Performance optimizations:
+1. Pre-compute all doorways from true map at initialization
+2. Only check if newly discovered cells are known doorways (O(1) lookup)
+3. No repeated scanning of the map
+4. Minimal overhead per step
 """
 
 import gymnasium as gym
 import numpy as np
-import pygame
 from typing import Dict, Tuple, Optional, List, Set
+from numba import njit
 
 from environments.tasks.base_task_wrapper import BaseTaskWrapper, TaskStatus
-from environments.base.constants import TileType, TILE_SIZE, TILE_COLORS
+from environments.base.constants import TileType
+
+
+# Numba-optimized distance calculation
+@njit
+def manhattan_distance(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Fast Manhattan distance calculation."""
+    return abs(x1 - x2) + abs(y1 - y2)
 
 
 class RoomEntryWrapper(BaseTaskWrapper):
     """
-    Environment wrapper for training doorway entry behavior.
+    Optimized environment wrapper for training doorway entry behavior.
 
-    The agent must:
-    1. Identify doorways in the discovered map (1-0-1 patterns)
-    2. Navigate to the nearest doorway
-    3. Step ON the doorway position
-    4. Move THROUGH to the OTHER side (not back where it came from)
+    Key optimizations:
+    - Pre-compute all doorways from true map
+    - O(1) lookups for discovered doorways
+    - No map scanning during runtime
     """
 
     def __init__(
         self,
         env_config: Dict = None,
         # Reward parameters
-        entry_reward: float = 10.0,
-        approach_reward: float = 0.5,
-        wrong_direction_penalty: float = -2.0,
+        entry_reward: float = 20.0,
+        approach_reward: float = 1.0,
+        wrong_direction_penalty: float = -5.0,
         collision_penalty: float = -1.0,
         step_penalty: float = -0.01,
-        max_task_steps: int = 200,
+        max_task_steps: int = 500,
+        # Remove auto-explore completely
+        auto_explore: bool = False,
+        max_exploration_steps: int = 0,
     ):
-        """
-        Initialize the doorway entry environment.
-
-        Args:
-            env_config: Configuration for base environment
-            entry_reward: Reward for successfully passing through doorway
-            approach_reward: Reward for getting closer to target doorway
-            wrong_direction_penalty: Penalty for going back through doorway
-            collision_penalty: Penalty for collisions
-            step_penalty: Small penalty per step (only after door is found)
-            max_task_steps: Maximum steps for the task
-        """
+        """Initialize the optimized doorway entry environment."""
         super().__init__(env_config)
 
         # Reward parameters
@@ -59,20 +59,15 @@ class RoomEntryWrapper(BaseTaskWrapper):
         self.step_penalty = step_penalty
         self.max_task_steps = max_task_steps
 
-        # Task state
-        self.doorways = []  # List of detected doorways
-        self.target_doorway = None  # (x, y) of target doorway center
-        self.initial_distance = None
-        self.previous_distance = None
-        self.previous_pos = None
-        self.has_passed_through = False
-        self.doorway_orientation = None
-        self.approach_side = None  # Side from which we approached the doorway
-        self.position_before_doorway = None  # Position just before stepping on doorway
+        # Pre-computed doorway storage
+        self.all_doorways = {}  # {(x,y): orientation} for all doorways in true map
+        self.discovered_doorways = []  # List of discovered doorways
+        self.discovered_doorway_set = set()  # Set for O(1) lookups
 
-    def _reset_task(self):
-        """Reset task-specific state."""
-        self.doorways = []
+        # Track what we've checked
+        self.last_global_map_hash = None
+
+        # Task state
         self.target_doorway = None
         self.initial_distance = None
         self.previous_distance = None
@@ -82,80 +77,140 @@ class RoomEntryWrapper(BaseTaskWrapper):
         self.approach_side = None
         self.position_before_doorway = None
 
-    def _find_doorways(self):
-        """Find all doorways (1-0-1 patterns) in the discovered map."""
-        self.doorways = []
+    def reset(self, **kwargs):
+        """Reset the environment and pre-compute all doorways."""
+        obs, info = super().reset(**kwargs)
+
+        # Pre-compute ALL doorways from the true map
+        self._precompute_all_doorways()
+
+        # Reset discovered doorways
+        self.discovered_doorways = []
+        self.discovered_doorway_set = set()
+        self.last_global_map_hash = None
+
+        return obs, info
+
+    def _precompute_all_doorways(self):
+        """
+        Pre-compute all doorways from the true map.
+        This is done once at reset, not during runtime.
+        """
+        self.all_doorways = {}
+        true_map = self.env.true_map
+        height, width = true_map.shape
+
+        # Check all positions for doorway patterns
+        for y in range(height):
+            for x in range(width):
+                # Check horizontal doorway (wall-passage-wall)
+                if 1 <= x < width - 1:
+                    center = true_map[y, x]
+                    left = true_map[y, x-1]
+                    right = true_map[y, x+1]
+
+                    if (left == TileType.WALL and
+                        center in [TileType.FREE_SPACE, TileType.DOOR_OPEN] and
+                        right == TileType.WALL):
+                        # This is a horizontal doorway
+                        self.all_doorways[(x, y)] = 'horizontal'
+
+                # Check vertical doorway (wall-passage-wall)
+                if 1 <= y < height - 1:
+                    center = true_map[y, x]
+                    top = true_map[y-1, x]
+                    bottom = true_map[y+1, x]
+
+                    if (top == TileType.WALL and
+                        center in [TileType.FREE_SPACE, TileType.DOOR_OPEN] and
+                        bottom == TileType.WALL):
+                        # This is a vertical doorway (only add if not already horizontal)
+                        if (x, y) not in self.all_doorways:
+                            self.all_doorways[(x, y)] = 'vertical'
+
+        # print(f"Pre-computed {len(self.all_doorways)} doorways from true map")
+
+    def _check_for_new_doorways(self):
+        """
+        Check if any newly discovered cells reveal doorways.
+        Very fast since we only check against pre-computed doorways.
+        """
         global_map = self.env.global_map
 
-        # Check horizontal doorways (same Y coordinate)
-        for y in range(self.env.height):
-            for x in range(1, self.env.width - 1):
-                # Check if we have discovered enough to see a doorway pattern
-                center = global_map[y, x]
-                left = global_map[y, x-1]
-                right = global_map[y, x+1]
+        # Quick hash check to see if map has changed
+        map_hash = hash(global_map.tobytes())
+        if map_hash == self.last_global_map_hash:
+            return False  # No changes
+        self.last_global_map_hash = map_hash
 
-                # All three must be discovered (not -1)
-                if center == TileType.UNKNOWN or left == TileType.UNKNOWN or right == TileType.UNKNOWN:
-                    continue
+        # Check each pre-computed doorway to see if it's now discovered
+        new_doorways_found = False
+        for (x, y), orientation in self.all_doorways.items():
+            # Skip if already discovered
+            if (x, y) in self.discovered_doorway_set:
+                continue
 
-                # Check for doorway pattern: wall-passage-wall
-                if (left == TileType.WALL and
-                    center in [TileType.FREE_SPACE, TileType.DOOR_OPEN] and
-                    right == TileType.WALL):
-                    self.doorways.append(((x, y), 'horizontal'))
+            # Check if this doorway position is now discovered
+            if global_map[y, x] != TileType.UNKNOWN:
+                # For horizontal doorways, check left and right are also discovered
+                if orientation == 'horizontal':
+                    if (x > 0 and global_map[y, x-1] != TileType.UNKNOWN and
+                        x < self.env.width - 1 and global_map[y, x+1] != TileType.UNKNOWN):
+                        # Doorway is fully discovered
+                        self.discovered_doorways.append(((x, y), orientation))
+                        self.discovered_doorway_set.add((x, y))
+                        new_doorways_found = True
 
-        # Check vertical doorways (same X coordinate)
-        for x in range(self.env.width):
-            for y in range(1, self.env.height - 1):
-                # Check if we have discovered enough to see a doorway pattern
-                center = global_map[y, x]
-                top = global_map[y-1, x]
-                bottom = global_map[y+1, x]
+                # For vertical doorways, check top and bottom are also discovered
+                else:  # vertical
+                    if (y > 0 and global_map[y-1, x] != TileType.UNKNOWN and
+                        y < self.env.height - 1 and global_map[y+1, x] != TileType.UNKNOWN):
+                        # Doorway is fully discovered
+                        self.discovered_doorways.append(((x, y), orientation))
+                        self.discovered_doorway_set.add((x, y))
+                        new_doorways_found = True
 
-                # All three must be discovered (not -1)
-                if center == TileType.UNKNOWN or top == TileType.UNKNOWN or bottom == TileType.UNKNOWN:
-                    continue
+        return new_doorways_found
 
-                # Check for doorway pattern: wall-passage-wall
-                if (top == TileType.WALL and
-                    center in [TileType.FREE_SPACE, TileType.DOOR_OPEN] and
-                    bottom == TileType.WALL):
-                    # Avoid duplicate if already added as horizontal
-                    if ((x, y), 'horizontal') not in self.doorways:
-                        self.doorways.append(((x, y), 'vertical'))
+    def _reset_task(self):
+        """Reset task-specific state."""
+        self.target_doorway = None
+        self.initial_distance = None
+        self.previous_distance = None
+        self.previous_pos = None
+        self.has_passed_through = False
+        self.doorway_orientation = None
+        self.approach_side = None
+        self.position_before_doorway = None
 
     def _select_target_doorway(self):
-        """Select the nearest doorway as target."""
-        if not self.doorways:
+        """Select the nearest discovered doorway as target."""
+        if not self.discovered_doorways:
             return
 
-        drone_pos = self.env.drones[0].pos
+        drone_x, drone_y = self.env.drones[0].pos
 
-        # Find nearest doorway
+        # Find nearest doorway using numba-optimized distance
         min_distance = float('inf')
         best_doorway = None
 
-        for doorway_pos, orientation in self.doorways:
-            distance = abs(doorway_pos[0] - drone_pos[0]) + abs(doorway_pos[1] - drone_pos[1])
+        for (door_x, door_y), orientation in self.discovered_doorways:
+            distance = manhattan_distance(door_x, door_y, drone_x, drone_y)
             if distance < min_distance:
                 min_distance = distance
-                best_doorway = (doorway_pos, orientation)
+                best_doorway = ((door_x, door_y), orientation)
 
         if best_doorway:
             self.target_doorway = best_doorway[0]
             self.doorway_orientation = best_doorway[1]
             self.initial_distance = min_distance
             self.previous_distance = min_distance
-            print(f"Target doorway selected at {self.target_doorway}, orientation: {self.doorway_orientation}")
 
     def _determine_approach_side(self, drone_pos, doorway_pos):
         """Determine from which side the drone is approaching the doorway."""
         if self.doorway_orientation == 'horizontal':
-            # Doorway runs left-right, check if drone is above or below
             return 'above' if drone_pos[1] < doorway_pos[1] else 'below'
-        else:  # vertical
-            # Doorway runs up-down, check if drone is left or right
+        else:
             return 'left' if drone_pos[0] < doorway_pos[0] else 'right'
 
     def _check_valid_pass_through(self, current_pos):
@@ -163,79 +218,79 @@ class RoomEntryWrapper(BaseTaskWrapper):
         if not self.target_doorway or not self.position_before_doorway:
             return False
 
-        # Check if we're on the opposite side from where we approached
+        dx, dy = self.target_doorway
+        cx, cy = current_pos
+
         if self.doorway_orientation == 'horizontal':
-            # For horizontal doorway, check Y position
             if self.approach_side == 'above':
-                # Should now be below the doorway
-                return current_pos[1] > self.target_doorway[1]
-            else:  # approached from below
-                # Should now be above the doorway
-                return current_pos[1] < self.target_doorway[1]
-        else:  # vertical
-            # For vertical doorway, check X position
+                return cy > dy
+            else:
+                return cy < dy
+        else:
             if self.approach_side == 'left':
-                # Should now be right of the doorway
-                return current_pos[0] > self.target_doorway[0]
-            else:  # approached from right
-                # Should now be left of the doorway
-                return current_pos[0] < self.target_doorway[0]
+                return cx > dx
+            else:
+                return cx < dx
 
     def _compute_task_reward(self, obs, action, base_reward) -> float:
-        """Compute doorway entry specific reward."""
-        drone_pos = tuple(obs['positions'][0])
+        """Compute doorway entry specific reward with optimized logic."""
+        drone_x, drone_y = obs['positions'][0]
+        drone_pos = (drone_x, drone_y)
 
-        # Update doorway detection every step
-        self._find_doorways()
-        if not self.target_doorway and self.doorways:
+        # Check for newly discovered doorways (very fast with pre-computed data)
+        if self._check_for_new_doorways():
+            # New doorway found, maybe update target
+            if not self.target_doorway:
+                self._select_target_doorway()
+
+        # Select target if we don't have one but have discovered doorways
+        if not self.target_doorway and self.discovered_doorways:
             self._select_target_doorway()
 
-        # Stage 1: Searching for door - no step penalty until door is found
+        # Stage 1: Searching for door
         if not self.target_doorway:
-            reward = 0.0  # No reward or penalty while searching
-
-            # Only apply collision penalty
-            if self.previous_pos and self.previous_pos == drone_pos and action == 0:  # FORWARD
+            reward = 0.0
+            # Check collision
+            if self.previous_pos and self.previous_pos == drone_pos and action == 0:
                 reward += self.collision_penalty
 
-        # Stage 2 & 3: Door found - apply rewards/penalties
+        # Stage 2 & 3: Door found
         else:
-            reward = self.step_penalty  # Apply step penalty once door is found
+            reward = self.step_penalty
 
-            # Check for collision
-            if self.previous_pos and self.previous_pos == drone_pos and action == 0:  # FORWARD
+            # Check collision
+            if self.previous_pos and self.previous_pos == drone_pos and action == 0:
                 reward += self.collision_penalty
 
             # Check if on doorway
-            on_doorway = (drone_pos[0] == self.target_doorway[0] and
-                         drone_pos[1] == self.target_doorway[1])
+            on_doorway = (drone_x == self.target_doorway[0] and
+                         drone_y == self.target_doorway[1])
 
-            # Track approach side when stepping on doorway
+            # Track approach side
             if on_doorway and self.previous_pos and self.previous_pos != self.target_doorway:
                 self.position_before_doorway = self.previous_pos
                 self.approach_side = self._determine_approach_side(self.previous_pos, self.target_doorway)
-                print(f"Stepped on doorway from {self.approach_side} side")
 
             # Check if moved away from doorway
-            if self.position_before_doorway and self.previous_pos == self.target_doorway and drone_pos != self.target_doorway:
-                # We just moved off the doorway
+            if (self.position_before_doorway and
+                self.previous_pos == self.target_doorway and
+                drone_pos != self.target_doorway):
+
                 if self._check_valid_pass_through(drone_pos):
-                    # Successfully passed through to the other side
                     if not self.has_passed_through:
                         reward += self.entry_reward
                         self.has_passed_through = True
-                        print(f"SUCCESS! Passed through doorway to the other side!")
                 else:
-                    # Went back where we came from
                     if drone_pos == self.position_before_doorway:
                         reward += self.wrong_direction_penalty
-                        print(f"Wrong direction! Went back to where you came from!")
 
-            # Distance-based reward (only if haven't completed task)
-            if not self.has_passed_through:
-                current_distance = abs(drone_pos[0] - self.target_doorway[0]) + abs(drone_pos[1] - self.target_doorway[1])
+            # Distance-based reward
+            if not self.has_passed_through and self.target_doorway:
+                current_distance = manhattan_distance(
+                    drone_x, drone_y,
+                    self.target_doorway[0], self.target_doorway[1]
+                )
 
-                # Reward for getting closer to target
                 if self.previous_distance is not None:
                     if current_distance < self.previous_distance:
                         reward += self.approach_reward
@@ -249,11 +304,9 @@ class RoomEntryWrapper(BaseTaskWrapper):
 
     def _check_task_status(self, obs, action) -> TaskStatus:
         """Check if the doorway entry task is complete."""
-        # Success: passed through the doorway
         if self.has_passed_through:
             return TaskStatus.SUCCESS
 
-        # Failure: exceeded maximum steps
         if self.task_step >= self.max_task_steps:
             return TaskStatus.FAILURE
 
@@ -269,11 +322,14 @@ class RoomEntryWrapper(BaseTaskWrapper):
 
         # Add doorway specific visualization
         if self.env.screen is not None:
+            import pygame
+
             drone_pos = self.env.drones[0].pos
+            TILE_SIZE = 20  # Assuming standard tile size
 
             # Highlight all detected doorways on BOTH maps
             for map_offset in [0, self.env.width * TILE_SIZE + 50]:  # Left map and right map
-                for (x, y), orientation in self.doorways:
+                for (x, y), orientation in self.discovered_doorways:
                     # Different colors for different states
                     if (x, y) == self.target_doorway:
                         if self.has_passed_through:
@@ -306,7 +362,7 @@ class RoomEntryWrapper(BaseTaskWrapper):
                     center_y = y * TILE_SIZE + TILE_SIZE // 2
 
                     if orientation == 'horizontal':
-                        # Draw horizontal line with arrows
+                        # Draw horizontal line
                         pygame.draw.line(
                             self.env.screen,
                             color,
@@ -315,7 +371,7 @@ class RoomEntryWrapper(BaseTaskWrapper):
                             3
                         )
                     else:  # vertical
-                        # Draw vertical line with arrows
+                        # Draw vertical line
                         pygame.draw.line(
                             self.env.screen,
                             color,
@@ -355,7 +411,7 @@ class RoomEntryWrapper(BaseTaskWrapper):
                 self.env.screen.blit(text_surface, (10, 10))
 
                 # Door count
-                door_text = f"Doorways found: {len(self.doorways)}"
+                door_text = f"Doorways found: {len(self.discovered_doorways)}"
                 door_surface = self.env.font.render(door_text, True, (200, 200, 200))
                 self.env.screen.blit(door_surface, (10, 30))
 
