@@ -305,9 +305,9 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 self.wall_locked = True
                 self.phase = 'approaching'
                 reward += 5.0
-                print(f"\nLocked onto single wall with {len(self.target_wall_segment)} cells")
-                print(f"Accessible: {len(self.accessible_wall_cells)} cells")
-                print(f"Boundaries: {len(self.wall_boundaries)} cells")
+                #print(f"\nLocked onto single wall with {len(self.target_wall_segment)} cells")
+                #print(f"Accessible: {len(self.accessible_wall_cells)} cells")
+                #print(f"Boundaries: {len(self.wall_boundaries)} cells")
 
         # Phase: APPROACHING - Get to the wall
         if self.phase == 'approaching':
@@ -317,7 +317,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 self.phase = 'following'
                 self.wall_contact_steps = 1
                 reward += 15.0
-                print(f"\nReached the wall! Starting to follow...")
+                #print(f"\nReached the wall! Starting to follow...")
             else:
                 if dist < self.last_distance:
                     reward += 2.0
@@ -342,8 +342,8 @@ class WallFollowingWrapper(BaseTaskWrapper):
                     reward += (new_discovered - old_discovered) * 3.0
                     self.no_new_discovery_steps = 0
                     cells_to_discover = len(self.accessible_wall_cells) - len(self.wall_boundaries)
-                    if cells_to_discover > 0:
-                        print(f"Discovered: {new_discovered}/{cells_to_discover} wall cells")
+                    # if cells_to_discover > 0:
+                        #print(f"Discovered: {new_discovered}/{cells_to_discover} wall cells")
                 else:
                     self.no_new_discovery_steps += 1
             else:
@@ -369,23 +369,23 @@ class WallFollowingWrapper(BaseTaskWrapper):
             if cells_to_discover:
                 coverage = len(self.discovered_cells) / len(cells_to_discover)
 
-                if self.task_step % 10 == 0:
-                    print(f"Coverage: {coverage:.1%} ({len(self.discovered_cells)}/{len(cells_to_discover)} cells)")
+                # if self.task_step % 10 == 0:
+                    #print(f"Coverage: {coverage:.1%} ({len(self.discovered_cells)}/{len(cells_to_discover)} cells)")
 
                 if self.phase in ['following', 'approaching']:
                     if len(self.discovered_cells) >= len(cells_to_discover):
-                        print(f"\nWall fully explored! Discovered all {len(self.discovered_cells)} cells")
+                        #print(f"\nWall fully explored! Discovered all {len(self.discovered_cells)} cells")
                         return TaskStatus.SUCCESS
 
                     if coverage >= 0.95:
-                        print(f"\nWall exploration complete! Coverage: {coverage:.1%}")
+                        #print(f"\nWall exploration complete! Coverage: {coverage:.1%}")
                         return TaskStatus.SUCCESS
 
                     if self.no_new_discovery_steps > 30 and coverage >= 0.85:
-                        print(f"\nWall exploration complete (no new discoveries)! Coverage: {coverage:.1%}")
+                        #print(f"\nWall exploration complete (no new discoveries)! Coverage: {coverage:.1%}")
                         return TaskStatus.SUCCESS
             else:
-                print(f"\nWall segment complete (no cells to discover)")
+                #print(f"\nWall segment complete (no cells to discover)")
                 return TaskStatus.SUCCESS
 
         if self.task_step > 500:
