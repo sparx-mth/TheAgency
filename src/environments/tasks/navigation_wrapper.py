@@ -1,205 +1,315 @@
 """
-Navigation task wrapper for training an agent to reach discovered locations.
+Simplified Navigation Wrapper with Random Walk Exploration
 
-The agent explores freely for 100 steps, then receives a destination goal
-from previously discovered locations and must navigate to it.
+Key changes:
+1. Simple random walk for 20 steps (no frontier computation)
+2. Select goal from discovered free spaces
+3. Minimal overhead for maximum speed
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Set, Dict
 import pygame
+from numba import njit
 
 from environments.tasks.base_task_wrapper import BaseTaskWrapper, TaskStatus
-from environments.base.constants import TileType, TILE_SIZE, FPS
+from environments.base.constants import TileType, TILE_SIZE, Action
+
+
+@njit
+def manhattan_distance(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Fast Manhattan distance calculation."""
+    return abs(x1 - x2) + abs(y1 - y2)
 
 
 class NavigationWrapper(BaseTaskWrapper):
     """
-    Environment wrapper for navigation to known locations.
+    Simplified navigation wrapper with random walk exploration.
 
     Task flow:
-    1. First 100 steps: Free exploration (no goal, no task rewards)
-    2. After 100 steps: Goal assigned from discovered locations
-    3. Success: Reaching the goal position
-    4. Failure: Exceeding max steps after goal assignment
+    1. First 20 steps: Random walk exploration
+    2. Goal assignment from discovered locations
+    3. Agent navigates to goal
     """
 
-    def __init__(self, env_config: dict = None, max_steps_to_goal: int = 200):
-        """
-        Initialize navigation wrapper.
-
-        Args:
-            env_config: Configuration for base environment
-            max_steps_to_goal: Maximum steps allowed after goal is set
-        """
+    def __init__(
+        self,
+        env_config: dict = None,
+        # Exploration parameters
+        exploration_steps: int = 20,
+        # Task parameters
+        max_steps_to_goal: int = 200,
+        goal_selection: str = "random",  # "random" or "farthest"
+        # Reward parameters
+        goal_reached_reward: float = 200.0,
+        closer_reward_scale: float = 1.0,
+        farther_penalty_scale: float = 0.5,
+        time_penalty: float = 0.01,
+        collision_penalty: float = -1.0,
+    ):
         super().__init__(env_config)
 
-        self.exploration_steps = 20  # Steps before goal assignment
-        self.max_steps_to_goal = max_steps_to_goal
+        # Exploration
+        self.exploration_steps = exploration_steps
+        self.is_exploring = True
 
-        # Task-specific state
+        # Task parameters
+        self.max_steps_to_goal = max_steps_to_goal
+        self.goal_selection = goal_selection
+
+        # Reward parameters
+        self.goal_reached_reward = goal_reached_reward
+        self.closer_reward_scale = closer_reward_scale
+        self.farther_penalty_scale = farther_penalty_scale
+        self.time_penalty = time_penalty
+        self.collision_penalty = collision_penalty
+
+        # Task state
         self.goal_position: Optional[Tuple[int, int]] = None
-        self.discovered_positions = set()
+        self.discovered_free_spaces = set()
         self.steps_since_goal = 0
-        self.prev_distance_to_goal = None  # Track distance for reward shaping
+        self.prev_distance_to_goal = None
+        self.previous_pos = None
+
+    def reset(self, **kwargs):
+        """Reset environment and run random exploration."""
+        obs, info = super().reset(**kwargs)
+
+        # Reset task state
+        self._reset_task()
+
+        # Run random walk exploration
+        obs, info = self._run_random_exploration()
+
+        # Assign goal after exploration
+        self._assign_goal()
+
+        return obs, info
 
     def _reset_task(self):
         """Reset navigation task state."""
         self.goal_position = None
-        self.discovered_positions = set()
+        self.discovered_free_spaces = set()
         self.steps_since_goal = 0
         self.prev_distance_to_goal = None
+        self.previous_pos = None
+        self.is_exploring = True
 
-    def step(self, action):
-        """Execute action with navigation-specific logic."""
-        obs, reward, terminated, truncated, info = super().step(action)
+    def _run_random_exploration(self):
+        """Run simple random walk for initial exploration."""
+        # Random walk with forward bias for efficiency
+        action_probs = [0.6, 0.2, 0.2, 0.0]  # Forward, Left, Right, Stay
 
-        # Track discovered positions during exploration
-        if self.task_step <= self.exploration_steps:
-            global_map = obs['global_map']
+        for step in range(self.exploration_steps):
+            # Update discovered positions
+            global_map = self.env.global_map
+            drone_pos = self.env.drones[0].pos
+
+            # Quick scan around drone position (more efficient than full map scan)
+            view_range = 10  # Only check nearby area
+            min_x = max(0, drone_pos[0] - view_range)
+            max_x = min(self.env.width, drone_pos[0] + view_range + 1)
+            min_y = max(0, drone_pos[1] - view_range)
+            max_y = min(self.env.height, drone_pos[1] + view_range + 1)
+
+            for y in range(min_y, max_y):
+                for x in range(min_x, max_x):
+                    if global_map[y, x] in [TileType.FREE_SPACE, TileType.DOOR_OPEN]:
+                        self.discovered_free_spaces.add((x, y))
+
+            # Random action
+            action = np.random.choice(4, p=action_probs)
+            actions = np.array([action], dtype=np.int32)
+            obs, _, _, _, _ = self.env.step(actions)
+
+        # Final scan
+        global_map = self.env.global_map
+        drone_pos = self.env.drones[0].pos
+        for y in range(min_y, max_y):
+            for x in range(min_x, max_x):
+                if global_map[y, x] in [TileType.FREE_SPACE, TileType.DOOR_OPEN]:
+                    self.discovered_free_spaces.add((x, y))
+
+        self.is_exploring = False
+
+        return self._get_observations(), self._get_info()
+
+    def _assign_goal(self):
+        """Assign goal from discovered positions."""
+        if not self.discovered_free_spaces:
+            # Fallback: if nothing discovered, scan entire visible map
+            global_map = self.env.global_map
             for y in range(global_map.shape[0]):
                 for x in range(global_map.shape[1]):
-                    if global_map[y, x] != TileType.UNKNOWN:
-                        self.discovered_positions.add((x, y))
+                    if global_map[y, x] in [TileType.FREE_SPACE, TileType.DOOR_OPEN]:
+                        self.discovered_free_spaces.add((x, y))
 
-        # Assign goal after exploration phase
-        if self.task_step == self.exploration_steps and self.goal_position is None:
-            self._assign_goal()
+        if not self.discovered_free_spaces:
+            print("Warning: No free spaces discovered")
+            return
 
-        # Add goal info to observation
+        # Remove current position from candidates
+        current_pos = tuple(self.env.drones[0].pos)
+        candidates = list(self.discovered_free_spaces - {current_pos})
+
+        if not candidates:
+            candidates = list(self.discovered_free_spaces)
+
+        if not candidates:
+            return
+
+        # Select goal
+        if self.goal_selection == "farthest":
+            # Select farthest position
+            max_dist = -1
+            for pos in candidates:
+                dist = manhattan_distance(current_pos[0], current_pos[1], pos[0], pos[1])
+                if dist > max_dist:
+                    max_dist = dist
+                    self.goal_position = pos
+        else:  # random
+            self.goal_position = candidates[np.random.randint(len(candidates))]
+
+        # Initialize distance tracking
+        if self.goal_position:
+            self.prev_distance_to_goal = manhattan_distance(
+                current_pos[0], current_pos[1],
+                self.goal_position[0], self.goal_position[1]
+            )
+
+    def step(self, action):
+        """Execute action with navigation logic."""
+        # Skip if still exploring (shouldn't happen as exploration is in reset)
+        if self.is_exploring:
+            return super().step(action)
+
+        # Store previous position for collision detection
+        self.previous_pos = tuple(self.env.drones[0].pos)
+
+        # Normal step
+        obs, reward, terminated, truncated, info = super().step(action)
+
+        # Add goal info
         info['goal_position'] = self.goal_position
-        info['steps_to_goal'] = self.steps_since_goal if self.goal_position else 0
+        info['steps_to_goal'] = self.steps_since_goal
+        if self.prev_distance_to_goal:
+            info['distance_to_goal'] = self.prev_distance_to_goal
 
         return obs, reward, terminated, truncated, info
 
-    def _assign_goal(self):
-        """Assign a goal from discovered free spaces."""
-        # Filter for free spaces only
-        free_spaces = []
-        global_map = self.env.global_map
-
-        for pos in self.discovered_positions:
-            x, y = pos
-            if global_map[y, x] in [TileType.FREE_SPACE, TileType.DOOR_OPEN]:
-                # Don't set goal at current position
-                current_pos = self.env.drones[0].pos
-                if pos != current_pos:
-                    free_spaces.append(pos)
-
-        if free_spaces:
-            # Randomly select a goal from discovered free spaces
-            self.goal_position = free_spaces[np.random.randint(len(free_spaces))]
-
-            # Initialize distance tracking for reward shaping
-            current_pos = self.env.drones[0].pos
-            self.prev_distance_to_goal = abs(current_pos[0] - self.goal_position[0]) + \
-                                        abs(current_pos[1] - self.goal_position[1])
-
-            print(f"Goal assigned at position: {self.goal_position}")
-            print(f"Initial distance to goal: {self.prev_distance_to_goal}")
-        else:
-            print("Warning: No valid free spaces discovered for goal assignment")
-
     def _compute_task_reward(self, obs, action, base_reward) -> float:
-        """
-        Compute navigation reward with distance-based shaping.
-
-        Before goal: No task reward (exploration phase)
-        After goal:
-            - Positive reward for getting closer
-            - Negative reward for getting farther
-            - Large bonus for reaching goal
-        """
-        # No task reward during exploration phase
-        if self.goal_position is None:
+        """Compute navigation-specific reward."""
+        # No reward during exploration
+        if self.is_exploring or self.goal_position is None:
             return 0.0
 
         self.steps_since_goal += 1
-
-        # Current position - obs is still multi-agent format here
-        current_pos = tuple(obs['positions'][0])  # Get first drone's position
+        current_pos = tuple(obs['positions'][0])
 
         # Check if goal reached
         if current_pos == self.goal_position:
-            return 200.0  # Large success reward for reaching goal
+            return self.goal_reached_reward
 
-        # Calculate Manhattan distance to goal
-        current_distance = abs(current_pos[0] - self.goal_position[0]) + \
-                          abs(current_pos[1] - self.goal_position[1])
+        # Calculate current distance
+        current_distance = manhattan_distance(
+            current_pos[0], current_pos[1],
+            self.goal_position[0], self.goal_position[1]
+        )
 
         # Distance-based reward shaping
         reward = 0.0
 
         if self.prev_distance_to_goal is not None:
-            # Calculate change in distance
             distance_change = self.prev_distance_to_goal - current_distance
 
             if distance_change > 0:
-                # Got closer to goal - positive reward
-                reward = 1.0 * distance_change  # +1.0 per unit closer
+                # Got closer
+                reward = self.closer_reward_scale * distance_change
             elif distance_change < 0:
-                # Got farther from goal - negative reward
-                reward = 0.5 * distance_change  # -0.5 per unit farther
+                # Got farther
+                reward = -self.farther_penalty_scale * abs(distance_change)
             else:
-                # Same distance (turned or stayed) - small penalty
-                reward = -0.1
+                # Same distance - check if collision
+                if self.previous_pos and current_pos == self.previous_pos and action == 0:
+                    reward = self.collision_penalty
+                else:
+                    reward = -0.1  # Small penalty for turning
 
-        # Update previous distance for next step
+        # Update distance
         self.prev_distance_to_goal = current_distance
 
-        # Add small time penalty to encourage efficiency
-        reward -= 0.01
+        # Time penalty
+        reward -= self.time_penalty
 
         return reward
 
     def _check_task_status(self, obs, action) -> TaskStatus:
-        """Check if navigation task is complete."""
-        # No task status during exploration
-        if self.goal_position is None:
+        """Check navigation task status."""
+        if self.is_exploring or self.goal_position is None:
             return TaskStatus.IN_PROGRESS
 
-        current_pos = tuple(obs['positions'][0])  # Get first drone's position
+        current_pos = tuple(obs['positions'][0])
 
-        # Success: Reached goal
+        # Success: reached goal
         if current_pos == self.goal_position:
             return TaskStatus.SUCCESS
 
-        # Failure: Too many steps after goal assignment
+        # Failure: timeout
         if self.steps_since_goal > self.max_steps_to_goal:
             return TaskStatus.FAILURE
 
         return TaskStatus.IN_PROGRESS
 
+    def _get_observations(self):
+        """Get observations from base environment."""
+        return self.env._get_observations()
+
+    def _get_info(self):
+        """Get info with navigation details."""
+        info = self.env._get_info()
+        info.update({
+            'goal_position': self.goal_position,
+            'steps_to_goal': self.steps_since_goal,
+            'distance_to_goal': self.prev_distance_to_goal if self.prev_distance_to_goal else -1,
+            'discovered_positions': len(self.discovered_free_spaces),
+            'is_exploring': self.is_exploring,
+        })
+        return info
+
     def render(self) -> Optional[np.ndarray]:
         """Render with goal visualization."""
-        # Call base environment render
         rgb_array = self.env.render()
 
-        # Add goal marker if pygame is initialized and goal exists
         if self.goal_position and self.env.screen:
-            # Draw goal on both maps (true and observed)
+            # Draw goal on both maps
             for offset_x in [0, self.env.width * TILE_SIZE + 50]:
                 goal_x = offset_x + self.goal_position[0] * TILE_SIZE + TILE_SIZE // 2
                 goal_y = self.goal_position[1] * TILE_SIZE + TILE_SIZE // 2
 
-                # Draw goal as a star/target
-                # Outer circle (red)
-                pygame.draw.circle(self.env.screen, (255, 0, 0),
-                                 (goal_x, goal_y), 8, 2)
-                # Inner circle (white)
-                pygame.draw.circle(self.env.screen, (255, 255, 255),
-                                 (goal_x, goal_y), 4)
+                # Goal marker
+                pygame.draw.circle(self.env.screen, (255, 0, 0), (goal_x, goal_y), 8, 2)
+                pygame.draw.circle(self.env.screen, (255, 255, 255), (goal_x, goal_y), 4)
 
-                # Draw "GOAL" text above
+                # Goal text
                 if self.env.font:
                     goal_text = self.env.font.render("GOAL", True, (255, 0, 0))
-                    self.env.screen.blit(goal_text,
-                                       (goal_x - 15, goal_y - 20))
+                    self.env.screen.blit(goal_text, (goal_x - 15, goal_y - 20))
 
-            # Update display
+            # Status text
+            if self.env.font:
+                if self.is_exploring:
+                    status = f"EXPLORING... Step {self.task_step}/{self.exploration_steps}"
+                    color = (255, 128, 0)
+                else:
+                    dist = self.prev_distance_to_goal if self.prev_distance_to_goal else 0
+                    status = f"NAVIGATING - Steps: {self.steps_since_goal} | Distance: {dist}"
+                    color = (255, 255, 255)
+
+                text_surface = self.env.font.render(status, True, color)
+                self.env.screen.blit(text_surface, (10, 10))
+
             pygame.display.flip()
 
-            # Return updated RGB array if needed
             if self.env.render_mode == 'rgb_array':
                 return np.transpose(
                     np.array(pygame.surfarray.pixels3d(self.env.screen)),
@@ -207,47 +317,3 @@ class NavigationWrapper(BaseTaskWrapper):
                 )
 
         return rgb_array
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create navigation environment
-    env_config = {
-        'width': 20,
-        'height': 20,
-        'num_agents': 1,
-        'max_steps': 500,
-        'render_mode': 'human'
-    }
-
-    env = NavigationWrapper(env_config)
-
-    # Run a simple test episode
-    obs, info = env.reset()
-    done = False
-    step_count = 0
-
-    while not done:
-        # Random action for testing
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
-
-        step_count += 1
-
-        # Print when goal is assigned
-        if step_count == 100:
-            print(f"Goal assigned: {info.get('goal_position')}")
-
-        # Print progress
-        if step_count % 50 == 0:
-            print(f"Step {step_count}, Task Status: {info.get('task_status')}, Reward: {reward:.2f}")
-
-        # Render
-        env.render()
-
-        if done:
-            print(f"Episode finished. Status: {info.get('task_status')}")
-            break
-
-    env.close()

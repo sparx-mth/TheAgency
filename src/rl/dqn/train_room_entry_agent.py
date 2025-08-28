@@ -1,6 +1,5 @@
 """
-train_dqn_room_entry_fast.py - Optimized DQN training for Room Entry task
-Removes auto-exploration bottleneck for maximum speed
+train_room_entry_optimized.py - Ultra-optimized DQN training with pre-computed doorways
 """
 
 import os
@@ -15,12 +14,20 @@ from environments.tasks.room_entry_wrapper import RoomEntryWrapper
 from sensors.camera_sensor import CameraSensor
 from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
+# Import the pre-computation utility
+from environments.tasks.doorway_utils import precompute_doorways  # Adjust import path as needed
+
 # FIXED MAP PATH
-MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_11.txt"
+MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 4
-STEPS_PER_STAGE = 10_000_000  # Increased back to 10M for better learning
+N_ENVS = 8
+STEPS_PER_STAGE = 10_000_000
+
+# Pre-compute doorways ONCE at module level for maximum efficiency
+print(f"Pre-computing doorways from {MAP_PATH}...")
+PRECOMPUTED_DOORWAYS = precompute_doorways(MAP_PATH)
+print(f"Found {len(PRECOMPUTED_DOORWAYS)} doorways: {list(PRECOMPUTED_DOORWAYS.keys())[:5]}...")
 
 
 class FastRoomEntryCallback(BaseCallback):
@@ -32,33 +39,28 @@ class FastRoomEntryCallback(BaseCallback):
         self.episode_count = 0
         self.total_steps = 0
         self.start_time = None
-
-        # Metrics
         self.episode_rewards = []
         self.episode_lengths = []
         self.task_successes = []
 
     def _on_training_start(self) -> None:
         self.start_time = time.time()
-        print(f" Training started with {self.n_envs} environments")
+        print(f"Training started with {self.n_envs} environments")
         print("-" * 60)
 
     def _on_step(self) -> bool:
         self.total_steps += self.n_envs
 
-        # Check for episode completions
         for i in range(self.n_envs):
             if self.locals.get('dones')[i]:
                 self.episode_count += 1
                 info = self.locals['infos'][i]
 
-                # Collect metrics
                 if 'episode' in info:
                     self.episode_rewards.append(info['episode']['r'])
                     self.episode_lengths.append(info['episode']['l'])
                     self.task_successes.append(info.get('task_success', False))
 
-                # Print progress every 100 episodes
                 if self.episode_count % 100 == 0:
                     recent_rewards = self.episode_rewards[-100:]
                     recent_lengths = self.episode_lengths[-100:]
@@ -84,7 +86,7 @@ class FastRoomEntryCallback(BaseCallback):
 
 
 def create_env(env_id: int = 0):
-    """Create a single room entry environment WITHOUT auto-exploration."""
+    """Create a single room entry environment with pre-computed doorways."""
 
     def _init():
         # Load map dimensions
@@ -103,26 +105,29 @@ def create_env(env_id: int = 0):
             'map_path': MAP_PATH,
             'render_mode': None,
             'sensor_config': {0: sensor},
-            # Reward structure matching SLAM
             'discovery_reward': 1.0,
             'collision_penalty': -0.5,
             'step_penalty': 0.0,
             'completion_bonus': 50.0,
         }
 
-        # Create Room Entry wrapper WITHOUT auto-exploration
+        # Create Room Entry wrapper with PRE-COMPUTED doorways
         env = RoomEntryWrapper(
             env_config=env_config,
+            # Pass pre-computed doorways for maximum efficiency
+            precomputed_doorways=PRECOMPUTED_DOORWAYS,
             # Task rewards
-            entry_reward=20.0,  # Increased for stronger signal
-            approach_reward=1.0,  # Increased
-            wrong_direction_penalty=-5.0,  # Increased penalty
+            entry_reward=20.0,
+            approach_reward=1.0,
+            wrong_direction_penalty=-5.0,
             collision_penalty=-1.0,
             step_penalty=-0.01,
-            max_task_steps=500,  # Increased from 200
-            # DISABLE auto-exploration completely
-            auto_explore=False,
-            max_exploration_steps=0,
+            max_task_steps=500,
+            # Auto-exploration settings
+            auto_explore=True,
+            max_exploration_steps=1000,
+            min_doorways_to_discover=1,
+            exploration_strategy="frontier",
         )
 
         # Add monitor
@@ -137,25 +142,25 @@ def create_env(env_id: int = 0):
 
 
 def train():
-    """Train DQN for room entry task - FAST VERSION."""
+    """Train DQN for room entry task - OPTIMIZED VERSION."""
 
     # Verify map
     loaded_map = np.loadtxt(MAP_PATH, dtype=np.int8)
     map_height, map_width = loaded_map.shape
 
     print("="*60)
-    print(" DQN ROOM ENTRY TRAINING - OPTIMIZED")
+    print("DQN ROOM ENTRY TRAINING - ULTRA-OPTIMIZED")
     print(f"Map: {MAP_PATH}")
     print(f"Map size: {map_width}x{map_height}")
+    print(f"Pre-computed doorways: {len(PRECOMPUTED_DOORWAYS)}")
     print(f"Parallel environments: {N_ENVS}")
     print(f"Total steps: {STEPS_PER_STAGE:,}")
     print("="*60 + "\n")
 
-    # Single stage training without auto-exploration
-    estimated_fps = N_ENVS * 400  # Should achieve similar to SLAM
+    estimated_fps = N_ENVS * 500  # Should be even faster with optimizations
     estimated_hours = STEPS_PER_STAGE / estimated_fps / 3600
-    print(f" Estimated training time: {estimated_hours:.1f} hours")
-    print(f"   ({STEPS_PER_STAGE/1e6:.0f}M steps ÷ ~{estimated_fps} FPS)\n")
+    print(f"Estimated training time: {estimated_hours:.1f} hours")
+    print(f"  ({STEPS_PER_STAGE/1e6:.0f}M steps ÷ ~{estimated_fps} FPS)\n")
 
     # Create environments
     print(f"Creating {N_ENVS} environments...")
@@ -163,7 +168,7 @@ def train():
     vec_env = SubprocVecEnv(env_fns)
     vec_env = VecMonitor(vec_env)
 
-    # Create model - matching SLAM hyperparameters
+    # Create model
     print("Creating DQN model...")
     model = DQN(
         "MultiInputPolicy",
@@ -171,9 +176,8 @@ def train():
         policy_kwargs=dict(
             features_extractor_class=SLAMCNNExtractor,
             features_extractor_kwargs=dict(features_dim=256),
-            net_arch=[512, 512],  # Same as SLAM
+            net_arch=[512, 512],
         ),
-        # Same hyperparameters as successful SLAM training
         learning_rate=1e-4,
         buffer_size=1_000_000,
         learning_starts=1000,
@@ -183,30 +187,26 @@ def train():
         train_freq=4,
         gradient_steps=1,
         target_update_interval=10000,
-        # Exploration
         exploration_fraction=0.7,
         exploration_initial_eps=1.0,
         exploration_final_eps=0.05,
-        # Other
         max_grad_norm=10,
         seed=42,
         device='auto',
     )
 
-    print(f" Model created on {model.device}\n")
+    print(f"Model created on {model.device}\n")
 
     # Create callbacks
     callbacks = []
 
-    # Fast progress callback
     progress_callback = FastRoomEntryCallback(n_envs=N_ENVS)
     callbacks.append(progress_callback)
 
-    # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=500_000 // N_ENVS,  # Save every 1M steps
+        save_freq=500_000 // N_ENVS,
         save_path="./models/room_entry_checkpoints/",
-        name_prefix="room_entry_fast"
+        name_prefix="room_entry_optimized"
     )
     callbacks.append(checkpoint_callback)
 
@@ -230,13 +230,13 @@ def train():
     avg_fps = STEPS_PER_STAGE / training_time
 
     # Save final model
-    model.save("./models/dqn_room_entry_fast_final")
+    model.save("./models/dqn_room_entry_optimized_final")
 
     print("\n" + "="*60)
-    print(" TRAINING COMPLETE!")
+    print("TRAINING COMPLETE!")
     print(f"Total time: {training_time/60:.1f} minutes")
     print(f"Average FPS: {avg_fps:.0f}")
-    print(f"Model saved to ./models/dqn_room_entry_fast_final.zip")
+    print(f"Model saved to ./models/dqn_room_entry_optimized_final.zip")
     print("="*60)
 
     vec_env.close()
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     if not os.path.exists(MAP_PATH):
         raise FileNotFoundError(f"MAP FILE NOT FOUND: {MAP_PATH}")
 
-    print(f" Map file verified: {MAP_PATH}")
+    print(f"Map file verified: {MAP_PATH}")
 
     # Create directories
     os.makedirs("./models", exist_ok=True)

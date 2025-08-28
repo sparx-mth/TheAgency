@@ -1,15 +1,16 @@
 """
-Wall Following Wrapper for single-agent training - FIXED VERSION.
+Wall Following Wrapper for single-agent training - OPTIMIZED VERSION.
 
 This wrapper trains an agent to:
-1. Find the CLOSEST visible wall
-2. Approach and stick to it
+1. Start only when a wall is already visible (efficient pre-search)
+2. Approach and stick to the closest visible wall
 3. Follow along only that single wall from end to end
 4. Stop once that single wall is fully explored
 """
 
 from typing import Dict, Tuple, Set, Optional, List
 import numpy as np
+import time
 from environments.tasks.base_task_wrapper import BaseTaskWrapper, TaskStatus
 from environments.base.constants import TileType, DIRECTION_DELTAS
 
@@ -18,11 +19,8 @@ class WallFollowingWrapper(BaseTaskWrapper):
     """
     Environment wrapper for training wall-following behavior.
 
-    The agent must:
-    1. Find the closest visible wall
-    2. Approach it and get adjacent
-    3. Follow it to discover the entire wall segment from their side
-    4. Episode ends when that single wall is fully explored
+    The environment starts only when a wall is visible, using an efficient
+    pre-search phase during reset.
     """
 
     def __init__(self, env_config: Dict = None):
@@ -35,11 +33,134 @@ class WallFollowingWrapper(BaseTaskWrapper):
         self.discovered_cells: Set[Tuple[int, int]] = set()
 
         # Behavior tracking
-        self.phase = 'searching'
+        self.phase = 'approaching'  # Start directly in approaching phase
         self.wall_locked = False
         self.wall_contact_steps = 0
         self.last_distance = float('inf')
         self.no_new_discovery_steps = 0
+
+        # Pre-search timing
+        self.pre_search_time = 0.0
+        self.pre_search_steps = 0
+
+    def reset(self, **kwargs):
+        """Reset environment and perform efficient pre-search for walls."""
+        # First, do the standard reset
+        result = super().reset(**kwargs)
+
+        # Handle both old gym (returns obs) and new gym (returns obs, info) formats
+        if isinstance(result, tuple):
+            obs, info = result
+            return_info = True
+        else:
+            obs = result
+            info = {}
+            return_info = False
+
+        # Now perform pre-search to find a wall
+        start_time = time.time()
+        self.pre_search_steps = 0
+
+        # Efficient pre-search: random walk until we find a wall
+        obs = self._efficient_pre_search(obs)
+
+        self.pre_search_time = time.time() - start_time
+
+        # Initialize wall tracking based on found wall
+        self._initialize_wall_tracking(obs)
+
+        # Return in the same format we received
+        if return_info:
+            info['pre_search_time'] = self.pre_search_time
+            info['pre_search_steps'] = self.pre_search_steps
+            return obs, info
+        else:
+            return obs
+
+    def _efficient_pre_search(self, initial_obs):
+        """
+        Perform efficient random walk until a wall is visible.
+        Uses a smart exploration strategy to quickly find walls.
+        """
+        obs = initial_obs
+        max_pre_search_steps = 500
+        found_wall = False
+
+        # Action probabilities for smart exploration
+        # Prefer forward movement with occasional turns
+        action_probs = [0.6, 0.15, 0.15, 0.1]  # [forward, turn_left, turn_right, backward]
+        actions = [0, 1, 2, 3]
+
+        while not found_wall and self.pre_search_steps < max_pre_search_steps:
+            # Check if we can see any walls
+            global_map = obs['global_map']
+            visible_walls = self._find_visible_walls(global_map)
+
+            if visible_walls:
+                found_wall = True
+                break
+
+            # Take a random action with smart probabilities
+            action = np.random.choice(actions, p=action_probs)
+
+            # The SLAM environment expects an array of actions (one per agent)
+            # For single agent, we need to wrap the action in an array
+            action_array = np.array([action])
+
+            # Step the base environment directly (bypass wrapper logic during pre-search)
+            step_result = self.env.step(action_array)
+            # Handle both old (4-tuple) and new (5-tuple) gym step formats
+            if len(step_result) == 5:
+                obs, _, _, _, info = step_result
+            else:
+                obs, _, _, info = step_result
+            self.pre_search_steps += 1
+
+            # Occasionally do a full rotation to scan surroundings
+            if self.pre_search_steps % 20 == 0:
+                for _ in range(4):  # Full 360 rotation
+                    action_array = np.array([1])  # Turn left
+                    step_result = self.env.step(action_array)
+                    if len(step_result) == 5:
+                        obs, _, _, _, _ = step_result
+                    else:
+                        obs, _, _, _ = step_result
+                    global_map = obs['global_map']
+                    if self._find_visible_walls(global_map):
+                        found_wall = True
+                        break
+
+        return obs
+
+    def _initialize_wall_tracking(self, obs):
+        """Initialize wall tracking based on the first visible wall."""
+        pos = tuple(obs['positions'][0])
+        facing = obs['facings'][0]
+        global_map = obs['global_map']
+        true_map = self.env.true_map
+
+        # Find and lock onto the closest visible wall
+        target_wall = self._select_target_wall(pos, facing, global_map)
+
+        if target_wall:
+            # Lock onto this wall segment immediately
+            self.target_wall_segment = self._trace_single_wall_segment(
+                target_wall, pos, true_map, global_map
+            )
+            self.accessible_wall_cells = self._find_accessible_wall_cells(
+                self.target_wall_segment, pos, true_map
+            )
+            self.wall_boundaries = self._find_wall_boundaries(self.accessible_wall_cells)
+            self.wall_locked = True
+
+            # Check if we're already adjacent to the wall
+            if self._is_adjacent_to_wall(pos):
+                self.phase = 'following'
+                self.wall_contact_steps = 1
+            else:
+                self.phase = 'approaching'
+
+            self.last_distance = self._distance_to_wall(pos)
 
     def _reset_task(self):
         """Reset wall-following specific state."""
@@ -47,11 +168,13 @@ class WallFollowingWrapper(BaseTaskWrapper):
         self.accessible_wall_cells = set()
         self.wall_boundaries = set()
         self.discovered_cells = set()
-        self.phase = 'searching'
+        self.phase = 'approaching'  # Default to approaching
         self.wall_locked = False
         self.wall_contact_steps = 0
         self.last_distance = float('inf')
         self.no_new_discovery_steps = 0
+        self.pre_search_time = 0.0
+        self.pre_search_steps = 0
 
     def _find_visible_walls(self, global_map) -> Set[Tuple[int, int]]:
         """Find all currently visible (not unknown) wall cells."""
@@ -285,29 +408,9 @@ class WallFollowingWrapper(BaseTaskWrapper):
         reward = -0.01  # Small step penalty
 
         pos = tuple(obs['positions'][0])
-        facing = obs['facings'][0]
         global_map = obs['global_map']
-        true_map = self.env.true_map
 
-        # Phase: SEARCHING - Find a wall to follow
-        if self.phase == 'searching' and not self.wall_locked:
-            target_wall = self._select_target_wall(pos, facing, global_map)
-
-            if target_wall:
-                # Lock onto this SINGLE wall segment
-                self.target_wall_segment = self._trace_single_wall_segment(
-                    target_wall, pos, true_map, global_map
-                )
-                self.accessible_wall_cells = self._find_accessible_wall_cells(
-                    self.target_wall_segment, pos, true_map
-                )
-                self.wall_boundaries = self._find_wall_boundaries(self.accessible_wall_cells)
-                self.wall_locked = True
-                self.phase = 'approaching'
-                reward += 5.0
-                #print(f"\nLocked onto single wall with {len(self.target_wall_segment)} cells")
-                #print(f"Accessible: {len(self.accessible_wall_cells)} cells")
-                #print(f"Boundaries: {len(self.wall_boundaries)} cells")
+        # Since we start with a wall already found, we're either approaching or following
 
         # Phase: APPROACHING - Get to the wall
         if self.phase == 'approaching':
@@ -317,7 +420,6 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 self.phase = 'following'
                 self.wall_contact_steps = 1
                 reward += 15.0
-                #print(f"\nReached the wall! Starting to follow...")
             else:
                 if dist < self.last_distance:
                     reward += 2.0
@@ -341,9 +443,6 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 if new_discovered > old_discovered:
                     reward += (new_discovered - old_discovered) * 3.0
                     self.no_new_discovery_steps = 0
-                    cells_to_discover = len(self.accessible_wall_cells) - len(self.wall_boundaries)
-                    # if cells_to_discover > 0:
-                        #print(f"Discovered: {new_discovered}/{cells_to_discover} wall cells")
                 else:
                     self.no_new_discovery_steps += 1
             else:
@@ -358,8 +457,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
     def _check_task_status(self, obs, action) -> TaskStatus:
         """Check if wall-following task is complete."""
-        if self.phase == 'searching' and self.task_step > 150:
-            return TaskStatus.FAILURE
+        # No longer check for searching phase timeout since we skip that phase
 
         if self.wall_locked and self.accessible_wall_cells:
             self._update_discoveries(tuple(obs['positions'][0]), obs['global_map'])
@@ -369,23 +467,16 @@ class WallFollowingWrapper(BaseTaskWrapper):
             if cells_to_discover:
                 coverage = len(self.discovered_cells) / len(cells_to_discover)
 
-                # if self.task_step % 10 == 0:
-                    #print(f"Coverage: {coverage:.1%} ({len(self.discovered_cells)}/{len(cells_to_discover)} cells)")
-
                 if self.phase in ['following', 'approaching']:
                     if len(self.discovered_cells) >= len(cells_to_discover):
-                        #print(f"\nWall fully explored! Discovered all {len(self.discovered_cells)} cells")
                         return TaskStatus.SUCCESS
 
                     if coverage >= 0.95:
-                        #print(f"\nWall exploration complete! Coverage: {coverage:.1%}")
                         return TaskStatus.SUCCESS
 
                     if self.no_new_discovery_steps > 30 and coverage >= 0.85:
-                        #print(f"\nWall exploration complete (no new discoveries)! Coverage: {coverage:.1%}")
                         return TaskStatus.SUCCESS
             else:
-                #print(f"\nWall segment complete (no cells to discover)")
                 return TaskStatus.SUCCESS
 
         if self.task_step > 500:
@@ -408,6 +499,8 @@ class WallFollowingWrapper(BaseTaskWrapper):
             'discovered_accessible': len(self.discovered_cells),
             'total_accessible': len(self.accessible_wall_cells),
             'total_wall_cells': len(self.target_wall_segment),
+            'pre_search_time': self.pre_search_time,
+            'pre_search_steps': self.pre_search_steps,
         }
         return info
 
