@@ -276,7 +276,7 @@ def select_map_option():
     else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
-            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt'
+            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt'
         return {'map_path': map_path, 'randomize': False}, map_path
 
 
@@ -358,9 +358,9 @@ if __name__ == "__main__":
             }
         else:
             sensor_params = {
-                'max_range': 5,
-                'fov_deg': 30,
-                'num_rays': 60
+                'max_range': 2,
+                'fov_deg': 90,
+                'num_rays': 12
             }
 
         # Build config

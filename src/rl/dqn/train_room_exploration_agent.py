@@ -22,7 +22,7 @@ MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/m
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 8  # Increased for better parallelization
-STEPS_PER_STAGE = 10_000_000
+STEPS_PER_STAGE = 100_000_000
 
 # Pre-compute room data ONCE at module level
 print(f"Pre-computing room data from {MAP_PATH}...")
@@ -108,7 +108,7 @@ def create_env(coverage_threshold: float, env_id: int = 0):
         actual_height, actual_width = loaded_map.shape
 
         # Create sensor (optimized for speed)
-        sensor = CameraSensor(max_range=8, fov_deg=60, num_rays=24)
+        sensor = CameraSensor(max_range=2, fov_deg=90, num_rays=12)
 
         # Environment configuration
         env_config = {
@@ -122,7 +122,7 @@ def create_env(coverage_threshold: float, env_id: int = 0):
             # Base rewards
             'discovery_reward': 1.0,
             'collision_penalty': -0.5,
-            'step_penalty': 0.0,
+            'step_penalty': -0.01,
             'completion_bonus': 50.0,
         }
 

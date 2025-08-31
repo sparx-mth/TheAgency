@@ -19,7 +19,7 @@ MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/m
 
 # TRAINING SETTINGS
 N_ENVS = 8
-TOTAL_TIMESTEPS = 10_000_000
+TOTAL_TIMESTEPS = 100_000_000
 
 
 class NavigationCallback(BaseCallback):
@@ -99,9 +99,9 @@ def create_env(goal_selection: str, env_id: int = 0):
 
         # Create sensor
         sensor = CameraSensor(
-            max_range=8,
-            fov_deg=60,
-            num_rays=24
+            max_range=2,
+            fov_deg=90,
+            num_rays=12
         )
 
         # Environment configuration
@@ -116,7 +116,7 @@ def create_env(goal_selection: str, env_id: int = 0):
             # Base rewards
             'discovery_reward': 0.5,
             'collision_penalty': -1.0,
-            'step_penalty': 0.0,
+            'step_penalty': -0.01,
             'completion_bonus': 0.0,
         }
 
