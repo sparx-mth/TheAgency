@@ -163,9 +163,9 @@ def train():
 
     # Training stages with curriculum
     CURRICULUM = [
-        ("Stage 1: Random Goals", "random", 3_000_000),
-        ("Stage 2: Challenging Goals", "challenging", 3_000_000),
-        ("Stage 3: Farthest Goals", "farthest", 4_000_000),
+        ("Stage 1: Random Goals", "random", int(TOTAL_TIMESTEPS/3)),
+        ("Stage 2: Challenging Goals", "challenging", int(TOTAL_TIMESTEPS/3)),
+        ("Stage 3: Farthest Goals", "farthest", int(TOTAL_TIMESTEPS/3)),
     ]
 
     print(f"Training stages: {len(CURRICULUM)}")
