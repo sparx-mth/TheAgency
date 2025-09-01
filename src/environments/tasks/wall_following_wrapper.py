@@ -139,6 +139,9 @@ class WallFollowingWrapper(BaseTaskWrapper):
         global_map = obs['global_map']
         true_map = self.env.true_map
 
+        # Store the initial facing for wall tracing decision
+        self.initial_facing = facing
+
         # Find and lock onto the closest visible wall
         target_wall = self._select_target_wall(pos, facing, global_map)
 
@@ -187,29 +190,37 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
     def _select_target_wall(self, pos: Tuple[int, int], facing: int, global_map) -> Optional[Tuple[int, int]]:
         """
-        Select which wall cell to target. Prioritize walls adjacent to the agent,
-        then nearest visible walls.
+        Select which wall cell to target based on facing direction.
+        Prioritize walls the agent is looking at.
         """
-        # First, check for walls directly adjacent to the agent
+        # Facing directions: 0=North(-y), 1=East(+x), 2=South(+y), 3=West(-x)
+        facing_dirs = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+        dx, dy = facing_dirs[facing]
+
+        # First, check for walls in the direction we're facing
+        # Check multiple cells ahead in facing direction
+        for distance in range(1, 10):  # Look up to 10 cells ahead
+            wx, wy = pos[0] + dx * distance, pos[1] + dy * distance
+            if 0 <= wx < global_map.shape[1] and 0 <= wy < global_map.shape[0]:
+                if global_map[wy, wx] == TileType.WALL:
+                    return (wx, wy)
+
+        # If no wall directly ahead, check for walls adjacent to the agent
         adjacent_walls = []
-        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-            wx, wy = pos[0] + dx, pos[1] + dy
+        for adx, ady in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            wx, wy = pos[0] + adx, pos[1] + ady
             if 0 <= wx < global_map.shape[1] and 0 <= wy < global_map.shape[0]:
                 if global_map[wy, wx] == TileType.WALL:
                     adjacent_walls.append((wx, wy))
 
-        # If we have adjacent walls, pick one (prefer the one we're facing)
         if adjacent_walls:
-            facing_dirs = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # N, E, S, W
-            dx, dy = facing_dirs[facing]
+            # Prefer the wall in our facing direction if it exists
             facing_wall = (pos[0] + dx, pos[1] + dy)
-
             if facing_wall in adjacent_walls:
                 return facing_wall
-            else:
-                return adjacent_walls[0]
+            return adjacent_walls[0]
 
-        # Otherwise, find all visible walls
+        # Otherwise, find all visible walls and choose closest
         visible_walls = self._find_visible_walls(global_map)
         if not visible_walls:
             return None
@@ -229,13 +240,15 @@ class WallFollowingWrapper(BaseTaskWrapper):
     def _trace_single_wall_segment(self, start_pos: Tuple[int, int], agent_pos: Tuple[int, int],
                                    true_map, global_map) -> Set[Tuple[int, int]]:
         """
-        Trace a SINGLE continuous wall segment closest to the agent.
-        Stop at corners, T-junctions, or gaps.
+        Trace a SINGLE continuous wall segment based on agent's facing direction.
+        At corners/junctions, choose the segment aligned with viewing direction.
         """
         wx, wy = start_pos
         segment = {start_pos}
 
-        # Determine if this is part of a vertical or horizontal wall
+        # Get agent's facing direction
+        facing = self.initial_facing if hasattr(self, 'initial_facing') else 0
+
         # Check immediate neighbors in true map
         has_north = (wy > 0 and true_map[wy-1, wx] == TileType.WALL)
         has_south = (wy < true_map.shape[0]-1 and true_map[wy+1, wx] == TileType.WALL)
@@ -246,19 +259,49 @@ class WallFollowingWrapper(BaseTaskWrapper):
         vertical_connections = int(has_north) + int(has_south)
         horizontal_connections = int(has_west) + int(has_east)
 
-        # If this is a corner or junction (3+ connections), just return this single cell
-        total_connections = vertical_connections + horizontal_connections
-        if total_connections >= 3:
+        # Determine wall orientation based on facing and connections
+        is_vertical = False
+
+        # If this is a corner or junction, decide based on agent's view angle
+        if vertical_connections > 0 and horizontal_connections > 0:
+            # Corner or junction detected
+            # Facing: 0=North, 1=East, 2=South, 3=West
+
+            # Calculate if agent is looking more at horizontal or vertical wall
+            wall_rel_x = wx - agent_pos[0]
+            wall_rel_y = wy - agent_pos[1]
+
+            if facing == 0:  # Looking North
+                # If wall is above us, and has horizontal extension, follow horizontal
+                if wall_rel_y < 0:
+                    is_vertical = False if horizontal_connections > 0 else True
+                else:
+                    is_vertical = True
+            elif facing == 1:  # Looking East
+                # If wall is to our right, and has vertical extension, follow vertical
+                if wall_rel_x > 0:
+                    is_vertical = True if vertical_connections > 0 else False
+                else:
+                    is_vertical = False
+            elif facing == 2:  # Looking South
+                # If wall is below us, and has horizontal extension, follow horizontal
+                if wall_rel_y > 0:
+                    is_vertical = False if horizontal_connections > 0 else True
+                else:
+                    is_vertical = True
+            elif facing == 3:  # Looking West
+                # If wall is to our left, and has vertical extension, follow vertical
+                if wall_rel_x < 0:
+                    is_vertical = True if vertical_connections > 0 else False
+                else:
+                    is_vertical = False
+        elif vertical_connections > 0 and horizontal_connections == 0:
+            is_vertical = True
+        elif horizontal_connections > 0 and vertical_connections == 0:
+            is_vertical = False
+        else:
+            # Isolated wall cell - just return it
             return segment
-
-        # Determine primary direction based on connections
-        is_vertical = vertical_connections > horizontal_connections
-
-        # If equal, choose based on agent position
-        if vertical_connections == horizontal_connections:
-            dx = abs(agent_pos[0] - wx)
-            dy = abs(agent_pos[1] - wy)
-            is_vertical = dy >= dx
 
         if is_vertical:
             # Trace vertical wall, but stop at junctions/corners
@@ -396,6 +439,65 @@ class WallFollowingWrapper(BaseTaskWrapper):
         return min(abs(wx - pos[0]) + abs(wy - pos[1])
                   for wx, wy in self.target_wall_segment)
 
+    def _is_moving_along_wall(self, obs, action: int) -> bool:
+        """
+        Check if the agent is moving along the wall's primary axis.
+        This encourages scanning behavior appropriate to wall orientation.
+        """
+        if not self.accessible_wall_cells:
+            return False
+
+        pos = tuple(obs['positions'][0])
+        facing = obs['facings'][0]  # 0=North, 1=East, 2=South, 3=West
+
+        # Determine if wall is primarily vertical or horizontal
+        wall_list = list(self.accessible_wall_cells)
+        if len(wall_list) < 2:
+            return True  # Single cell wall, any movement is fine
+
+        # Check wall orientation
+        is_vertical = all(cell[0] == wall_list[0][0] for cell in wall_list)
+
+        # Find which side of the wall the agent is on
+        wall_x = wall_list[0][0] if is_vertical else None
+        wall_y = wall_list[0][1] if not is_vertical else None
+
+        # Actions: 0=forward, 1=turn_left, 2=turn_right, 3=backward
+        # Facing: 0=North(-y), 1=East(+x), 2=South(+y), 3=West(-x)
+
+        if is_vertical:
+            # Vertical wall - we want to move North/South along it
+            agent_on_left = pos[0] < wall_x if wall_x else False
+            agent_on_right = pos[0] > wall_x if wall_x else False
+
+            # Check if action will move us along the wall (north/south)
+            if action == 0:  # Forward
+                # Good if facing north or south
+                return facing in [0, 2]
+            elif action == 3:  # Backward
+                # Good if facing north or south (moves opposite direction)
+                return facing in [0, 2]
+            elif action in [1, 2]:  # Turning
+                # Turning can be good to orient properly
+                return True
+        else:
+            # Horizontal wall - we want to move East/West along it
+            agent_above = pos[1] < wall_y if wall_y else False
+            agent_below = pos[1] > wall_y if wall_y else False
+
+            # Check if action will move us along the wall (east/west)
+            if action == 0:  # Forward
+                # Good if facing east or west
+                return facing in [1, 3]
+            elif action == 3:  # Backward
+                # Good if facing east or west (moves opposite direction)
+                return facing in [1, 3]
+            elif action in [1, 2]:  # Turning
+                # Turning can be good to orient properly
+                return True
+
+        return False
+
     def _update_discoveries(self, pos: Tuple[int, int], global_map):
         """Update discovered cells based on current position and vision - INCLUDING boundaries."""
         # Check ALL accessible cells, including boundaries
@@ -445,6 +547,10 @@ class WallFollowingWrapper(BaseTaskWrapper):
                     self.no_new_discovery_steps = 0
                 else:
                     self.no_new_discovery_steps += 1
+
+                # Bonus for moving along the wall's primary axis
+                if self._is_moving_along_wall(obs, action):
+                    reward += 0.5
             else:
                 reward -= 3.0
                 self.wall_contact_steps = 0
