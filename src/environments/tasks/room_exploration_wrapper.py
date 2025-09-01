@@ -55,7 +55,7 @@ class RoomExplorationWrapper(BaseTaskWrapper):
         # Pre-computed room data
         precomputed_rooms: Dict = None,
         # Auto-exploration parameters
-        auto_explore: bool = True,
+        auto_explore: bool = False,
         max_exploration_steps: int = 500,
         min_room_discovery: float = 0.1,  # Discover at least 30% of room before starting
         exploration_strategy: str = "frontier",

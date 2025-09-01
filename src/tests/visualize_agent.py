@@ -7,28 +7,49 @@ import numpy as np
 import time
 from stable_baselines3 import DQN
 from sensors.camera_sensor import CameraSensor
+from environments.tasks.doorway_utils import precompute_doorways
+from environments.tasks.room_utils import precompute_room_data
 
 # ============================================================
 # CONFIGURATION - MODIFY THIS SECTION
 # ============================================================
 
 # Choose which agent/environment to visualize
-TASK = "room_exploration"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
+TASK = "navigation"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
 
 # Model paths for each task
 MODELS = {
     "wall_following": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_wall_following_final.zip",
-    "room_entry": "./home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_entry_final.zip",
+    "room_entry": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_entry_final.zip",
     "navigation": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_navigation_final.zip",
     "room_exploration": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_exploration_final.zip"
 }
 
 # Map path
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
 
 # Visualization settings
-N_EPISODES = 10
-RENDER_FPS = 10
+N_EPISODES = 1
+RENDER_FPS = 30
+
+# ============================================================
+# PRECOMPUTE DATA (Done once at startup)
+# ============================================================
+
+# Precompute doorways for room_entry task
+PRECOMPUTED_DOORWAYS = None
+if TASK == "room_entry":
+    print("Precomputing doorways...")
+    PRECOMPUTED_DOORWAYS = precompute_doorways(MAP_PATH)
+    print(f"Found {len(PRECOMPUTED_DOORWAYS)} doorways")
+
+# Precompute room data for room_exploration task
+PRECOMPUTED_ROOMS = None
+if TASK == "room_exploration":
+    print("Precomputing room data...")
+    PRECOMPUTED_ROOMS = precompute_room_data(MAP_PATH)
+    print(f"Found {len(PRECOMPUTED_ROOMS['rooms'])} rooms")
+    print(f"Found {len(PRECOMPUTED_ROOMS['doorways'])} doorways")
 
 # ============================================================
 # ENVIRONMENT CREATION
@@ -57,18 +78,13 @@ def create_wall_following_env():
 
 
 def create_room_entry_env():
-    """Create room entry environment."""
+    """Create room entry environment with precomputed doorways."""
     from environments.tasks.room_entry_wrapper import RoomEntryWrapper
 
     loaded_map = np.loadtxt(MAP_PATH, dtype=np.int8)
     height, width = loaded_map.shape
 
     sensor = CameraSensor(max_range=3, fov_deg=90, num_rays=16)
-
-    # Pre-compute doorways (simplified - you'd normally load these)
-    precomputed_doorways = {}
-    # Add your doorway detection logic here or load from file
-    # For now, using empty dict (will auto-discover)
 
     env_config = {
         'width': width,
@@ -80,23 +96,19 @@ def create_room_entry_env():
         'sensor_config': {0: sensor},
     }
 
-    # Note: You'll need to provide actual precomputed doorways
-    # This is a placeholder that will error without them
-    try:
-        return RoomEntryWrapper(
-            env_config=env_config,
-            precomputed_doorways=precomputed_doorways if precomputed_doorways else None,
-            auto_explore=True,
-            max_exploration_steps=100
-        )
-    except ValueError:
-        print("Warning: Room entry requires precomputed doorways. Using mock data.")
-        # Create mock doorways for demonstration
-        precomputed_doorways = {(10, 10): 'horizontal'}  # Example
-        return RoomEntryWrapper(
-            env_config=env_config,
-            precomputed_doorways=precomputed_doorways
-        )
+    # Use precomputed doorways
+    if PRECOMPUTED_DOORWAYS is None or len(PRECOMPUTED_DOORWAYS) == 0:
+        print("Warning: No doorways found. Precomputing now...")
+        doorways = precompute_doorways(MAP_PATH)
+    else:
+        doorways = PRECOMPUTED_DOORWAYS
+
+    return RoomEntryWrapper(
+        env_config=env_config,
+        precomputed_doorways=doorways,
+        auto_explore=True,
+        max_exploration_steps=100
+    )
 
 
 def create_navigation_env():
@@ -126,7 +138,7 @@ def create_navigation_env():
 
 
 def create_room_exploration_env():
-    """Create room exploration environment."""
+    """Create room exploration environment with precomputed room data."""
     from environments.tasks.room_exploration_wrapper import RoomExplorationWrapper
 
     loaded_map = np.loadtxt(MAP_PATH, dtype=np.int8)
@@ -144,17 +156,17 @@ def create_room_exploration_env():
         'sensor_config': {0: sensor},
     }
 
-    # Pre-computed room data (simplified - you'd normally load these)
-    precomputed_rooms = {
-        'doorways': set(),  # Add doorway positions
-        'rooms': [],  # Add room cell sets
-        'room_boundaries': {}  # Add room boundary walls
-    }
+    # Use precomputed room data
+    if PRECOMPUTED_ROOMS is None:
+        print("Warning: No room data found. Precomputing now...")
+        room_data = precompute_room_data(MAP_PATH)
+    else:
+        room_data = PRECOMPUTED_ROOMS
 
     return RoomExplorationWrapper(
         env_config=env_config,
-        precomputed_rooms=precomputed_rooms if precomputed_rooms else None,
-        auto_explore=True,
+        precomputed_rooms=room_data,
+        auto_explore=False,
         max_exploration_steps=100
     )
 
@@ -187,8 +199,9 @@ def visualize_agent(model_path, env, task_name, n_episodes=10, fps=10):
     try:
         model = DQN.load(model_path)
         print("Model loaded successfully!")
-    except:
+    except Exception as e:
         print(f"Error: Could not load model from {model_path}")
+        print(f"Error details: {e}")
         print("Using random actions for demonstration...")
         model = None
 
@@ -288,6 +301,8 @@ def main():
         print("Environment created successfully!")
     except Exception as e:
         print(f"Error creating environment: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
     # Visualize agent

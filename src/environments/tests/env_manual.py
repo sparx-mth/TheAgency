@@ -27,7 +27,7 @@ from environments.tasks.room_utils import precompute_room_data
 
 
 def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: str):
-    """Print comprehensive environment information."""
+    """Print comprehensive environment information including collision count."""
     print("\n" + "=" * 60)
     print(f"ACTION: {action_name}")
     print(f"Position: {obs['positions']}")
@@ -36,6 +36,11 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
     print(f"Done: {done}")
     print(f"Task Status: {info.get('task_status', 'N/A')} (0=Progress, 1=Success, 2=Failure)")
     print(f"Step: {info.get('task_step', 0)}")
+
+    # COLLISION TRACKING
+    print(f"Collisions: {info.get('collision_count', 0)} (total this episode)")
+    if 'collision_occurred' in info and info['collision_occurred']:
+        print("  ⚠️  COLLISION DETECTED THIS STEP!")
 
     # Wall following specific info (updated for new version)
     if 'pre_search_time' in info and info['pre_search_time'] > 0:
@@ -50,6 +55,9 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
 
     if 'wall_coverage' in info:
         print(f"Wall Coverage: {info['wall_coverage']:.1%}")
+
+    if 'normalized_discovery_progress' in info:
+        print(f"Discovery Progress: {info['normalized_discovery_progress']:.1%}")
 
     if 'phase' in info:
         print(f"Phase: {info['phase']}")
@@ -276,7 +284,7 @@ def select_map_option():
     else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
-            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt'
+            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt'
         return {'map_path': map_path, 'randomize': False}, map_path
 
 
