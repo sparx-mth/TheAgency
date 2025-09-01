@@ -51,16 +51,14 @@ class RoomEntryWrapper(BaseTaskWrapper):
     def __init__(
         self,
         env_config: Dict = None,
-        # Pre-computed doorways (REQUIRED for efficiency)
         precomputed_doorways: Dict[Tuple[int, int], str] = None,
-        # Reward parameters
-        entry_reward: float = 20.0,
-        approach_reward: float = 1.0,
-        wrong_direction_penalty: float = -5.0,
-        collision_penalty: float = -1.0,
+        # Simple reward structure - 4 clear signals
+        success_reward: float = 10.0,
+        progress_reward: float = 0.5,
+        collision_penalty: float = -0.5,
         step_penalty: float = -0.01,
         max_task_steps: int = 500,
-        # Auto-exploration parameters
+        # Auto-exploration parameters stay the same
         auto_explore: bool = True,
         max_exploration_steps: int = 1000,
         min_doorways_to_discover: int = 1,
@@ -82,9 +80,8 @@ class RoomEntryWrapper(BaseTaskWrapper):
         self.discovered_doorway_indices = []
 
         # Reward parameters
-        self.entry_reward = entry_reward
-        self.approach_reward = approach_reward
-        self.wrong_direction_penalty = wrong_direction_penalty
+        self.success_reward = success_reward
+        self.progress_reward = progress_reward
         self.collision_penalty = collision_penalty
         self.step_penalty = step_penalty
         self.max_task_steps = max_task_steps
@@ -320,64 +317,46 @@ class RoomEntryWrapper(BaseTaskWrapper):
             return (cx > dx) if self.approach_side == 'left' else (cx < dx)
 
     def _compute_task_reward(self, obs, action, base_reward) -> float:
-        """Compute doorway entry specific reward."""
+        """Balanced reward with guidance but no exploitation."""
         drone_x, drone_y = obs['positions'][0]
         drone_pos = (drone_x, drone_y)
 
-        # Fast doorway check
-        self._fast_check_doorways()
+        # Base penalty for efficiency
+        reward = self.step_penalty
 
-        # Select target if needed
-        if not self.target_doorway and self.discovered_doorway_indices:
-            self._select_target_doorway_fast()
+        # Collision penalty
+        if action == Action.FORWARD and self.previous_pos == drone_pos:
+            reward += self.collision_penalty
 
-        # No doorway found yet
-        if not self.target_doorway:
-            reward = 0.0
-            if self.previous_pos and self.previous_pos == drone_pos and action == 0:
-                reward += self.collision_penalty
-        else:
-            reward = self.step_penalty
+        if self.target_doorway and not self.has_passed_through:
+            current_distance = abs(drone_x - self.target_doorway[0]) + abs(drone_y - self.target_doorway[1])
 
-            # Collision check
-            if self.previous_pos and self.previous_pos == drone_pos and action == 0:
-                reward += self.collision_penalty
+            # Small progress reward, but only when getting closer (not for staying close)
+            if self.previous_distance is not None:
+                if current_distance < self.previous_distance:
+                    reward += self.progress_reward
+                # Optional: small penalty for moving away
+                elif current_distance > self.previous_distance:
+                    reward -= self.progress_reward * 0.5
 
-            # Check if on doorway
-            on_doorway = (drone_x == self.target_doorway[0] and
-                         drone_y == self.target_doorway[1])
-
-            # Track approach
-            if on_doorway and self.previous_pos and self.previous_pos != self.target_doorway:
+            # Track doorway entry
+            if drone_pos == self.target_doorway and self.previous_pos != self.target_doorway:
                 self.position_before_doorway = self.previous_pos
-                self.approach_side = self._determine_approach_side(self.previous_pos, self.target_doorway)
+                # Small one-time bonus for reaching doorway (not repeatable)
+                if not hasattr(self, 'reached_doorway'):
+                    reward += 1.0  # Small bonus for first contact
+                    self.reached_doorway = True
 
-            # Check pass through
-            if (self.position_before_doorway and
-                self.previous_pos == self.target_doorway and
-                drone_pos != self.target_doorway):
+            # Success check
+            elif (self.position_before_doorway and
+                  self.previous_pos == self.target_doorway and
+                  drone_pos != self.target_doorway and
+                  drone_pos != self.position_before_doorway):
 
-                if self._check_valid_pass_through(drone_pos):
-                    if not self.has_passed_through:
-                        reward += self.entry_reward
-                        self.has_passed_through = True
-                elif drone_pos == self.position_before_doorway:
-                    reward += self.wrong_direction_penalty
+                self.has_passed_through = True
+                reward += self.success_reward
 
-            # Distance reward
-            if not self.has_passed_through and self.target_doorway:
-                current_distance = manhattan_distance(
-                    drone_x, drone_y,
-                    self.target_doorway[0], self.target_doorway[1]
-                )
-
-                if self.previous_distance is not None:
-                    if current_distance < self.previous_distance:
-                        reward += self.approach_reward
-                    elif current_distance > self.previous_distance:
-                        reward -= self.approach_reward * 0.3
-
-                self.previous_distance = current_distance
+            self.previous_distance = current_distance
 
         self.previous_pos = drone_pos
         return reward
