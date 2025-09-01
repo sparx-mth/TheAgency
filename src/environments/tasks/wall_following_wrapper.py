@@ -42,6 +42,40 @@ class WallFollowingWrapper(BaseTaskWrapper):
         # Pre-search timing
         self.pre_search_time = 0.0
         self.pre_search_steps = 0
+        self.collision_count = 0  # Track collisions after pre-search
+
+    # Replace only the _reset_counters_after_presearch method:
+    def _reset_counters_after_presearch(self):
+        """
+        Reset all counters and accumulated values after pre-search phase.
+        This ensures the actual training episode starts fresh without
+        any accumulated rewards or penalties from the search phase.
+        """
+        # Reset task-specific counters
+        self.task_step = 0
+        self.task_reward = 0.0
+
+        # ADD: Reset collision counter after pre-search
+        self.collision_count = 0
+
+        # Reset any collision counters if they exist in the base environment
+        if hasattr(self.env, 'collision_count'):
+            self.env.collision_count = 0
+        if hasattr(self.env, 'total_collisions'):
+            self.env.total_collisions = 0
+
+        # Reset accumulated rewards in base environment if they exist
+        if hasattr(self.env, 'episode_reward'):
+            self.env.episode_reward = 0.0
+        if hasattr(self.env, 'cumulative_reward'):
+            self.env.cumulative_reward = 0.0
+
+        # Reset step counter in base environment
+        if hasattr(self.env, 'step_count'):
+            self.env.step_count = 0
+        if hasattr(self.env, 'episode_steps'):
+            self.env.episode_steps = 0
+
 
     def reset(self, **kwargs):
         """Reset environment and perform efficient pre-search for walls."""
@@ -131,6 +165,42 @@ class WallFollowingWrapper(BaseTaskWrapper):
                         break
 
         return obs
+
+    def step(self, action):
+        """
+        Override step to add final bonus and handle termination properly.
+        """
+        # Call parent step
+        obs, reward, terminated, truncated, info = super().step(action)
+
+        # Check if task just completed successfully
+        task_status = self._check_task_status(obs, action)
+
+        if task_status == TaskStatus.SUCCESS:
+            # FINAL BONUS for discovering the entire wall
+            final_bonus = 10.0
+            reward += final_bonus
+
+            # Set terminated flag
+            terminated = True
+            info['task_success'] = True
+            info['final_bonus'] = final_bonus
+            info['wall_coverage'] = 1.0
+
+        elif task_status == TaskStatus.FAILURE:
+            # Task failed (timeout)
+            truncated = True
+            info['task_success'] = False
+            info['wall_coverage'] = len(self.discovered_cells) / len(
+                self.accessible_wall_cells) if self.accessible_wall_cells else 0.0
+
+        # ADD: collision count to info
+        info['collision_count'] = self.collision_count
+
+        # Add task info to the info dict
+        info.update(self.get_info())
+
+        return obs, reward, terminated, truncated, info
 
     def _initialize_wall_tracking(self, obs):
         """Initialize wall tracking based on the first visible wall."""
@@ -506,58 +576,34 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 self.discovered_cells.add((wx, wy))
 
     def _compute_task_reward(self, obs, action, base_reward) -> float:
-        """Compute wall-following specific reward."""
-        reward = -0.01  # Small step penalty
+        """
+        Simplified reward: normalized discovery + step penalty + collision penalty.
+        """
+        # Small step penalty
+        reward = -0.01
 
         pos = tuple(obs['positions'][0])
         global_map = obs['global_map']
 
-        # Since we start with a wall already found, we're either approaching or following
+        # Track previously discovered cells
+        old_discovered = len(self.discovered_cells)
 
-        # Phase: APPROACHING - Get to the wall
-        if self.phase == 'approaching':
-            dist = self._distance_to_wall(pos)
+        # Update discoveries
+        self._update_discoveries(pos, global_map)
+        new_discovered = len(self.discovered_cells)
 
-            if self._is_adjacent_to_wall(pos):
-                self.phase = 'following'
-                self.wall_contact_steps = 1
-                reward += 15.0
-            else:
-                if dist < self.last_distance:
-                    reward += 2.0
-                elif dist > self.last_distance:
-                    reward -= 1.0
+        # Normalized discovery reward
+        if self.accessible_wall_cells and new_discovered > old_discovered:
+            discovery_reward = (new_discovered - old_discovered) / len(self.accessible_wall_cells)
+            reward += discovery_reward
+            self.no_new_discovery_steps = 0
+        else:
+            self.no_new_discovery_steps += 1
 
-            self.last_distance = dist
-
-        # Phase: FOLLOWING - Explore the entire wall
-        elif self.phase == 'following':
-            adjacent = self._is_adjacent_to_wall(pos)
-
-            old_discovered = len(self.discovered_cells)
-            self._update_discoveries(pos, global_map)
-            new_discovered = len(self.discovered_cells)
-
-            if adjacent:
-                self.wall_contact_steps += 1
-                reward += 1.5
-
-                if new_discovered > old_discovered:
-                    reward += (new_discovered - old_discovered) * 3.0
-                    self.no_new_discovery_steps = 0
-                else:
-                    self.no_new_discovery_steps += 1
-
-                # Bonus for moving along the wall's primary axis
-                if self._is_moving_along_wall(obs, action):
-                    reward += 0.5
-            else:
-                reward -= 3.0
-                self.wall_contact_steps = 0
-
-        # Collision penalty
+        # Collision penalty (simple check based on base_reward)
         if base_reward < -0.5:
-            reward -= 5.0
+            reward -= 2.0
+            self.collision_count += 1
 
         return reward
 
@@ -600,6 +646,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
             'total_wall_cells': len(self.target_wall_segment),
             'pre_search_time': self.pre_search_time,
             'pre_search_steps': self.pre_search_steps,
+            'collision_count': self.collision_count,  # ADD THIS LINE
         }
         return info
 
