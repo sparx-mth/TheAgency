@@ -114,16 +114,13 @@ def create_env(env_id: int = 0):
         # Create Room Entry wrapper with PRE-COMPUTED doorways
         env = RoomEntryWrapper(
             env_config=env_config,
-            # Pass pre-computed doorways for maximum efficiency
             precomputed_doorways=PRECOMPUTED_DOORWAYS,
-            # Task rewards
-            entry_reward=20.0,
-            approach_reward=1.0,
-            wrong_direction_penalty=-5.0,
+            success_reward=20.0,  # Changed from entry_reward
+            progress_reward=1.0,  # Changed from approach_reward
+            # Removed wrong_direction_penalty (doesn't exist)
             collision_penalty=-1.0,
             step_penalty=-0.01,
             max_task_steps=500,
-            # Auto-exploration settings
             auto_explore=True,
             max_exploration_steps=1000,
             min_doorways_to_discover=1,
