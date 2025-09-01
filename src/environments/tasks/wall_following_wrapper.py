@@ -5,7 +5,7 @@ This wrapper trains an agent to:
 1. Start only when a wall is already visible (efficient pre-search)
 2. Approach and stick to the closest visible wall
 3. Follow along only that single wall from end to end
-4. Stop once that single wall is fully explored
+4. Stop once that single wall is fully explored (INCLUDING boundaries/red cells)
 """
 
 from typing import Dict, Tuple, Set, Optional, List
@@ -397,11 +397,11 @@ class WallFollowingWrapper(BaseTaskWrapper):
                   for wx, wy in self.target_wall_segment)
 
     def _update_discoveries(self, pos: Tuple[int, int], global_map):
-        """Update discovered cells based on current position and vision."""
+        """Update discovered cells based on current position and vision - INCLUDING boundaries."""
+        # Check ALL accessible cells, including boundaries
         for wx, wy in self.accessible_wall_cells:
-            if (wx, wy) not in self.wall_boundaries:
-                if global_map[wy, wx] != TileType.UNKNOWN:
-                    self.discovered_cells.add((wx, wy))
+            if global_map[wy, wx] != TileType.UNKNOWN:
+                self.discovered_cells.add((wx, wy))
 
     def _compute_task_reward(self, obs, action, base_reward) -> float:
         """Compute wall-following specific reward."""
@@ -456,27 +456,21 @@ class WallFollowingWrapper(BaseTaskWrapper):
         return reward
 
     def _check_task_status(self, obs, action) -> TaskStatus:
-        """Check if wall-following task is complete."""
-        # No longer check for searching phase timeout since we skip that phase
-
+        """Check if wall-following task is complete - must discover ALL accessible cells including boundaries."""
         if self.wall_locked and self.accessible_wall_cells:
             self._update_discoveries(tuple(obs['positions'][0]), obs['global_map'])
 
-            cells_to_discover = self.accessible_wall_cells - self.wall_boundaries
+            # Must discover ALL accessible cells (no exclusion of boundaries)
+            if len(self.discovered_cells) >= len(self.accessible_wall_cells):
+                return TaskStatus.SUCCESS
 
-            if cells_to_discover:
-                coverage = len(self.discovered_cells) / len(cells_to_discover)
+            # Allow for 95% coverage as fallback
+            coverage = len(self.discovered_cells) / len(self.accessible_wall_cells)
+            if coverage >= 0.95:
+                return TaskStatus.SUCCESS
 
-                if self.phase in ['following', 'approaching']:
-                    if len(self.discovered_cells) >= len(cells_to_discover):
-                        return TaskStatus.SUCCESS
-
-                    if coverage >= 0.95:
-                        return TaskStatus.SUCCESS
-
-                    if self.no_new_discovery_steps > 30 and coverage >= 0.85:
-                        return TaskStatus.SUCCESS
-            else:
+            # If stuck for too long with high coverage
+            if self.no_new_discovery_steps > 30 and coverage >= 0.85:
                 return TaskStatus.SUCCESS
 
         if self.task_step > 500:
@@ -487,9 +481,8 @@ class WallFollowingWrapper(BaseTaskWrapper):
     def get_info(self) -> Dict:
         """Get additional task-specific information."""
         coverage = 0.0
-        cells_to_discover = self.accessible_wall_cells - self.wall_boundaries
-        if cells_to_discover:
-            coverage = len(self.discovered_cells) / len(cells_to_discover)
+        if self.accessible_wall_cells:
+            coverage = len(self.discovered_cells) / len(self.accessible_wall_cells)
 
         info = {
             'phase': self.phase,
@@ -512,7 +505,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
             import pygame
             from environments.base.constants import TILE_SIZE
 
-            # Color boundary cells in red
+            # Color boundary cells in red (visual only - they still need to be discovered)
             for wx, wy in self.wall_boundaries:
                 rect = pygame.Rect(wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
                 pygame.draw.rect(self.env.screen, (255, 0, 0), rect)

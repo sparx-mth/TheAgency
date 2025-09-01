@@ -319,7 +319,7 @@ def select_auto_explore_option(env_class):
     print("2. Disable auto-exploration (manual exploration)")
 
     choice = input("Enter your choice (1-2): ").strip()
-    return choice == '1'
+    return choice != '2'
 
 
 if __name__ == "__main__":
