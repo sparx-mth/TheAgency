@@ -19,8 +19,8 @@ from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 8  # Number of parallel environments
-TOTAL_TIMESTEPS = 100_000_000  # Total training steps
+N_ENVS = 4  # Number of parallel environments
+TOTAL_TIMESTEPS = 10_000_000  # Total training steps
 
 
 class WallFollowingCallback(BaseCallback):

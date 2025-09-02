@@ -21,10 +21,10 @@ from environments.tasks.doorway_utils import precompute_doorways  # Adjust impor
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 8
-STEPS_PER_STAGE = 100_000_000
+N_ENVS = 4
+STEPS_PER_STAGE = 10_000_000
 
-# Pre-compute doorways ONCE at module level for maximum efficiency
+# Pre-compute doorways ONCE at module level for maximum efficienc  y
 print(f"Pre-computing doorways from {MAP_PATH}...")
 PRECOMPUTED_DOORWAYS = precompute_doorways(MAP_PATH)
 print(f"Found {len(PRECOMPUTED_DOORWAYS)} doorways: {list(PRECOMPUTED_DOORWAYS.keys())[:5]}...")

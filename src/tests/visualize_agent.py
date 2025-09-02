@@ -15,7 +15,7 @@ from environments.tasks.room_utils import precompute_room_data
 # ============================================================
 
 # Choose which agent/environment to visualize
-TASK = "navigation"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
+TASK = "room_exploration"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
 
 # Model paths for each task
 MODELS = {
@@ -26,7 +26,7 @@ MODELS = {
 }
 
 # Map path
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_11.txt"
+MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # Visualization settings
 N_EPISODES = 1
