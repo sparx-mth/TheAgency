@@ -62,7 +62,7 @@ class RoomEntryWrapper(BaseTaskWrapper):
         auto_explore: bool = True,
         max_exploration_steps: int = 1000,
         min_doorways_to_discover: int = 1,
-        exploration_strategy: str = "frontier",
+        exploration_strategy: str = "random",
     ):
         """Initialize the optimized doorway entry environment."""
         super().__init__(env_config)

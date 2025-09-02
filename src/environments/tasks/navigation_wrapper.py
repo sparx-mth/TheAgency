@@ -5,6 +5,7 @@ Key changes:
 1. Simple random walk for 20 steps (no frontier computation)
 2. Select goal from discovered free spaces
 3. Minimal overhead for maximum speed
+4. GOAL IS NOW EXPLICITLY INCLUDED IN OBSERVATIONS
 """
 
 import numpy as np
@@ -39,7 +40,6 @@ class NavigationWrapper(BaseTaskWrapper):
         exploration_steps: int = 20,
         # Task parameters
         max_steps_to_goal: int = 200,
-        goal_selection: str = "random",  # "random" or "farthest"
         # Reward parameters
         goal_reached_reward: float = 200.0,
         closer_reward_scale: float = 1.0,
@@ -55,7 +55,6 @@ class NavigationWrapper(BaseTaskWrapper):
 
         # Task parameters
         self.max_steps_to_goal = max_steps_to_goal
-        self.goal_selection = goal_selection
 
         # Reward parameters
         self.goal_reached_reward = goal_reached_reward
@@ -158,17 +157,7 @@ class NavigationWrapper(BaseTaskWrapper):
         if not candidates:
             return
 
-        # Select goal
-        if self.goal_selection == "farthest":
-            # Select farthest position
-            max_dist = -1
-            for pos in candidates:
-                dist = manhattan_distance(current_pos[0], current_pos[1], pos[0], pos[1])
-                if dist > max_dist:
-                    max_dist = dist
-                    self.goal_position = pos
-        else:  # random
-            self.goal_position = candidates[np.random.randint(len(candidates))]
+        self.goal_position = candidates[np.random.randint(len(candidates))]
 
         # Initialize distance tracking
         if self.goal_position:
@@ -261,8 +250,45 @@ class NavigationWrapper(BaseTaskWrapper):
         return TaskStatus.IN_PROGRESS
 
     def _get_observations(self):
-        """Get observations from base environment."""
-        return self.env._get_observations()
+        """Get observations from base environment WITH GOAL INFORMATION."""
+        obs = self.env._get_observations()
+
+        # ADD GOAL POSITION TO OBSERVATIONS
+        if self.goal_position is not None and not self.is_exploring:
+            # Add absolute goal position
+            obs['goal_position'] = np.array(self.goal_position, dtype=np.int32)
+
+            # Add relative goal position (often more useful for RL)
+            drone_pos = self.env.drones[0].pos
+            obs['goal_relative'] = np.array([
+                self.goal_position[0] - drone_pos[0],
+                self.goal_position[1] - drone_pos[1]
+            ], dtype=np.float32)
+
+            # Add distance and angle to goal (polar coordinates)
+            dx = self.goal_position[0] - drone_pos[0]
+            dy = self.goal_position[1] - drone_pos[1]
+            distance = np.sqrt(dx**2 + dy**2)
+            angle = np.arctan2(dy, dx)
+            obs['goal_distance'] = np.float32(distance)
+            obs['goal_angle'] = np.float32(angle)
+
+            # Add goal visibility flag (1 if goal is in the current view, 0 otherwise)
+            if 'global_map' in obs:
+                # Check if goal position is visible in the global map
+                if self.env.global_map[self.goal_position[1], self.goal_position[0]] != TileType.UNKNOWN:
+                    obs['goal_visible'] = np.int8(1)
+                else:
+                    obs['goal_visible'] = np.int8(0)
+        else:
+            # During exploration or no goal set
+            obs['goal_position'] = np.array([-1, -1], dtype=np.int32)
+            obs['goal_relative'] = np.array([0.0, 0.0], dtype=np.float32)
+            obs['goal_distance'] = np.float32(-1.0)
+            obs['goal_angle'] = np.float32(0.0)
+            obs['goal_visible'] = np.int8(0)
+
+        return obs
 
     def _get_info(self):
         """Get info with navigation details."""

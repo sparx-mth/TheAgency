@@ -21,8 +21,8 @@ from environments.tasks.room_utils import precompute_room_data  # Adjust import 
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
-N_ENVS = 8  # Increased for better parallelization
-STEPS_PER_STAGE = 100_000_000
+N_ENVS = 4  # Increased for better parallelization
+STEPS_PER_STAGE = 30_000_000
 
 # Pre-compute room data ONCE at module level
 print(f"Pre-computing room data from {MAP_PATH}...")
@@ -131,11 +131,6 @@ def create_env(coverage_threshold: float, env_id: int = 0):
             env_config=env_config,
             # Pass pre-computed room data
             precomputed_rooms=PRECOMPUTED_ROOMS,
-            # Auto-exploration
-            auto_explore=True,
-            max_exploration_steps=500,
-            min_room_discovery=0.3,  # Discover 30% before starting
-            exploration_strategy="frontier",
             # Task rewards
             exploration_reward=0.1,
             door_penalty=-10.0,

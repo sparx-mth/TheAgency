@@ -54,12 +54,6 @@ class RoomExplorationWrapper(BaseTaskWrapper):
         env_config: Dict = None,
         # Pre-computed room data
         precomputed_rooms: Dict = None,
-        # Auto-exploration parameters
-        auto_explore: bool = False,
-        max_exploration_steps: int = 500,
-        min_room_discovery: float = 0.1,  # Discover at least 30% of room before starting
-        exploration_strategy: str = "frontier",
-        # Task parameters
         exploration_reward: float = 0.1,
         door_penalty: float = -10.0,
         completion_reward: float = 10.0,
@@ -89,13 +83,6 @@ class RoomExplorationWrapper(BaseTaskWrapper):
             self.doorways_x = np.array([], dtype=np.int32)
             self.doorways_y = np.array([], dtype=np.int32)
 
-        # Auto-exploration parameters
-        self.auto_explore = auto_explore
-        self.max_exploration_steps = max_exploration_steps
-        self.min_room_discovery = min_room_discovery
-        self.exploration_strategy = exploration_strategy
-        self.is_exploring = False
-        self.exploration_steps = 0
 
         # Task parameters
         self.exploration_reward = exploration_reward
@@ -129,10 +116,6 @@ class RoomExplorationWrapper(BaseTaskWrapper):
 
         # Identify current room based on starting position
         self._identify_current_room()
-
-        # Run auto-exploration if enabled
-        if self.auto_explore:
-            obs, info = self._run_auto_exploration()
 
         return obs, info
 
@@ -218,33 +201,6 @@ class RoomExplorationWrapper(BaseTaskWrapper):
                 if 0 <= nx < self.env.width and 0 <= ny < self.env.height:
                     if true_map[ny, nx] in [TileType.WALL, TileType.DOOR_CLOSED]:
                         self.current_room_cells.add((nx, ny))
-
-    def _run_auto_exploration(self):
-        """Run automatic exploration until sufficient room area is discovered."""
-        # print(f"Starting auto-exploration (max {self.max_exploration_steps} steps)...")
-        self.is_exploring = True
-
-        for step in range(self.max_exploration_steps):
-            # Check room discovery progress
-            if self._check_room_discovery_progress():
-                # print(f"Room sufficiently discovered after {step} exploration steps")
-                break
-
-            # Choose exploration action
-            if self.exploration_strategy == "frontier":
-                action = self._frontier_exploration_action()
-            else:
-                action = self._random_exploration_action()
-
-            # Execute action
-            actions = np.array([action], dtype=np.int32)
-            obs, _, _, _, _ = self.env.step(actions)
-            self.exploration_steps = step + 1
-
-        self.is_exploring = False
-        # print(f"Exploration complete. Room coverage: {self.last_coverage:.1%}")
-
-        return self._get_observations(), self._get_info()
 
     def _check_room_discovery_progress(self) -> bool:
         """Check if enough of the room has been discovered."""

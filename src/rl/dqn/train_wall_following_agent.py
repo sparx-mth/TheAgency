@@ -20,7 +20,7 @@ MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/m
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 4  # Number of parallel environments
-TOTAL_TIMESTEPS = 10_000_000  # Total training steps
+TOTAL_TIMESTEPS = 30_000_000  # Total training steps
 
 
 class WallFollowingCallback(BaseCallback):

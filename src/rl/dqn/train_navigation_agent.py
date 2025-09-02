@@ -18,8 +18,8 @@ from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # TRAINING SETTINGS
-N_ENVS = 8
-TOTAL_TIMESTEPS = 100_000_000
+N_ENVS = 4
+TOTAL_TIMESTEPS = 30_000_000
 
 
 class NavigationCallback(BaseCallback):
@@ -127,7 +127,6 @@ def create_env(goal_selection: str, env_id: int = 0):
             exploration_steps=20,
             # Task parameters
             max_steps_to_goal=200,
-            goal_selection=goal_selection,
             # Rewards
             goal_reached_reward=200.0,
             closer_reward_scale=1.0,

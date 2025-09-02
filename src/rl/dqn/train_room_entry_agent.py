@@ -94,7 +94,7 @@ def create_env(env_id: int = 0):
         actual_height, actual_width = loaded_map.shape
 
         # Create sensor
-        sensor = CameraSensor(max_range=2, fov_deg=90, num_rays=12)
+        sensor = CameraSensor(max_range=6, fov_deg=90, num_rays=30)
 
         # Environment configuration
         env_config = {
@@ -124,7 +124,7 @@ def create_env(env_id: int = 0):
             auto_explore=True,
             max_exploration_steps=1000,
             min_doorways_to_discover=1,
-            exploration_strategy="frontier",
+            exploration_strategy="random",
         )
 
         # Add monitor

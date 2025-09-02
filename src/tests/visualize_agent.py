@@ -15,7 +15,7 @@ from environments.tasks.room_utils import precompute_room_data
 # ============================================================
 
 # Choose which agent/environment to visualize
-TASK = "room_exploration"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
+TASK = "wall_following"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
 
 # Model paths for each task
 MODELS = {
