@@ -15,22 +15,22 @@ from environments.tasks.room_utils import precompute_room_data
 # ============================================================
 
 # Choose which agent/environment to visualize
-TASK = "wall_following"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
+TASK = "room_exploration"  # Options: "wall_following", "room_entry", "navigation", "room_exploration"
 
 # Model paths for each task
 MODELS = {
     "wall_following": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_wall_following_final.zip",
     "room_entry": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_entry_final.zip",
     "navigation": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_navigation_final.zip",
-    "room_exploration": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_exploration_final.zip"
+    "room_exploration": "/home/user/nadav/TheAgency/src/rl/dqn/models/room_exploration_checkpoints/stage_3_coverage_100_90000000_steps.zip"
 }
 
 # Map path
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
 
 # Visualization settings
-N_EPISODES = 1
-RENDER_FPS = 30
+N_EPISODES = 5
+RENDER_FPS = 120
 
 # ============================================================
 # PRECOMPUTE DATA (Done once at startup)
@@ -133,7 +133,6 @@ def create_navigation_env():
     return NavigationWrapper(
         env_config=env_config,
         exploration_steps=20,
-        goal_selection="farthest"
     )
 
 
@@ -167,7 +166,6 @@ def create_room_exploration_env():
         env_config=env_config,
         precomputed_rooms=room_data,
         auto_explore=False,
-        max_exploration_steps=100
     )
 
 

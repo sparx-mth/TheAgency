@@ -12,17 +12,17 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 
 from environments.tasks.room_exploration_wrapper import RoomExplorationWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
+from rl.feature_extractors.cnn_feature_extractor import NavigationCNNExtractor
 
 # Import pre-computation utility
 from environments.tasks.room_utils import precompute_room_data  # Adjust import path
 
 # FIXED MAP PATH
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 4  # Increased for better parallelization
-STEPS_PER_STAGE = 30_000_000
+STEPS_PER_STAGE = 10_000_000
 
 # Pre-compute room data ONCE at module level
 print(f"Pre-computing room data from {MAP_PATH}...")
@@ -108,7 +108,7 @@ def create_env(coverage_threshold: float, env_id: int = 0):
         actual_height, actual_width = loaded_map.shape
 
         # Create sensor (optimized for speed)
-        sensor = CameraSensor(max_range=2, fov_deg=90, num_rays=12)
+        sensor = CameraSensor(max_range=4, fov_deg=60, num_rays=12)
 
         # Environment configuration
         env_config = {
@@ -168,9 +168,7 @@ def train():
 
     # Training stages with curriculum
     CURRICULUM = [
-        ("Stage 1: 90% Coverage", 0.9),
-        ("Stage 2: 95% Coverage", 0.95),
-        ("Stage 3: 100% Coverage", 1.0),
+        ("Stage 1: 100% Coverage", 1.0),
     ]
 
     print(f"Training stages: {len(CURRICULUM)}")
@@ -207,7 +205,7 @@ def train():
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=SLAMCNNExtractor,
+                    features_extractor_class=NavigationCNNExtractor,
                     features_extractor_kwargs=dict(features_dim=256),
                     net_arch=[512, 512],
                 ),

@@ -1,10 +1,9 @@
 """
-Wall Following Wrapper - MINIMAL FIXES VERSION
+Wall Following Wrapper - BOUNDARY DISCOVERY ONLY VERSION
 
-Key fixes:
-1. Proper metric reset after pre-search
-2. Wall-lock verification
-3. Better collision detection
+Key changes:
+1. Success when ANY boundary is discovered (no need to discover wall cells)
+2. Episode ends immediately upon discovering a boundary
 """
 
 from typing import Dict, Tuple, Set, Optional, List
@@ -20,6 +19,7 @@ from environments.base.constants import TileType, DIRECTION_DELTAS
 class WallFollowingWrapper(BaseTaskWrapper):
     """
     Environment wrapper for training wall-following behavior.
+    Success when agent discovers ANY boundary cell.
     """
 
     def __init__(self, env_config: Dict = None):
@@ -30,6 +30,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
         self.accessible_wall_cells: Set[Tuple[int, int]] = set()
         self.wall_boundaries: Set[Tuple[int, int]] = set()
         self.discovered_cells: Set[Tuple[int, int]] = set()
+        self.discovered_boundaries: Set[Tuple[int, int]] = set()  # Track discovered boundaries separately
 
         # Behavior tracking
         self.phase = 'approaching'
@@ -101,8 +102,8 @@ class WallFollowingWrapper(BaseTaskWrapper):
         # Restore environment state
         self.env.current_step = saved_step
         for i, drone in enumerate(self.env.drones):
-            drone.pos = saved_drone_states[i]['pos']
-            drone.facing = saved_drone_states[i]['facing']
+            # drone.pos = saved_drone_states[i]['pos']
+            # drone.facing = saved_drone_states[i]['facing']
             drone.collision_count = saved_drone_states[i]['collision_count']
 
         # Reset all metrics after pre-search
@@ -133,6 +134,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
         self.accessible_wall_cells = set()
         self.wall_boundaries = set()
         self.discovered_cells = set()
+        self.discovered_boundaries = set()
         self.phase = 'approaching'
         self.wall_locked = False
         self.wall_contact_steps = 0
@@ -177,14 +179,15 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
         # Handle termination
         if self.task_status == TaskStatus.SUCCESS:
-            task_reward += 10.0  # Final bonus
+            task_reward += 100.0  # Large bonus for finding boundary
             terminated = True
             info['task_success'] = True
             info['wall_coverage'] = 1.0
         elif self.task_status == TaskStatus.FAILURE:
             truncated = True
             info['task_success'] = False
-            coverage = len(self.discovered_cells) / len(self.accessible_wall_cells) if self.accessible_wall_cells else 0
+            # Calculate progress toward boundaries
+            coverage = len(self.discovered_cells) / len(self.accessible_wall_cells | self.wall_boundaries) if (self.accessible_wall_cells | self.wall_boundaries) else 0
             info['wall_coverage'] = coverage
 
         # Increment task step
@@ -506,133 +509,67 @@ class WallFollowingWrapper(BaseTaskWrapper):
         return min(abs(wx - pos[0]) + abs(wy - pos[1])
                   for wx, wy in self.target_wall_segment)
 
+    def _distance_to_boundaries(self, pos: Tuple[int, int]) -> float:
+        """Calculate minimum Manhattan distance to boundary cells."""
+        if not self.wall_boundaries:
+            return float('inf')
+        return min(abs(bx - pos[0]) + abs(by - pos[1])
+                  for bx, by in self.wall_boundaries)
+
     def _update_discoveries(self, pos: Tuple[int, int], global_map):
         """Update discovered cells based on current position and vision."""
-        # Only track cells that are part of the task
-        task_cells = self.accessible_wall_cells | self.wall_boundaries
+        # Track all discovered cells
+        all_task_cells = self.accessible_wall_cells | self.wall_boundaries
 
-        for wx, wy in task_cells:
+        for wx, wy in all_task_cells:
             if 0 <= wx < global_map.shape[1] and 0 <= wy < global_map.shape[0]:
                 if global_map[wy, wx] != TileType.UNKNOWN:
                     self.discovered_cells.add((wx, wy))
+                    # Track boundaries separately
+                    if (wx, wy) in self.wall_boundaries:
+                        self.discovered_boundaries.add((wx, wy))
 
     def _compute_task_reward(self, obs, action, base_reward, collision_occurred) -> float:
         """
-        Sophisticated reward that incentivizes discovering the wall in minimum steps.
-        Key principle: Only reward NEW discoveries, penalize inefficient exploration.
+        Reward function focused on reaching boundaries quickly
         """
         pos = tuple(obs['positions'][0])
         global_map = obs['global_map']
 
-        # Track previously discovered cells
-        old_discovered = len(self.discovered_cells)
+        # Track previously discovered boundaries
+        old_boundary_discovered = len(self.discovered_boundaries)
 
-        # Update discoveries (now includes boundaries)
+        # Update discoveries
         self._update_discoveries(pos, global_map)
-        new_discovered = len(self.discovered_cells)
 
-        # Calculate coverage (now includes boundaries in the total)
-        total_to_discover = len(self.accessible_wall_cells | self.wall_boundaries)
-        coverage = len(self.discovered_cells) / total_to_discover if total_to_discover > 0 else 0
+        new_boundary_discovered = len(self.discovered_boundaries)
 
-        # BASE PENALTY - varies by situation
-        if not self.wall_locked:
-            # Still searching for wall
-            reward = -0.01  # Small penalty during search
+        # Calculate reward
+        reward = 0.0
 
-        elif new_discovered > old_discovered:
-            # MADE PROGRESS - this is the ONLY positive reward case
-            cells_discovered = new_discovered - old_discovered
-            remaining = total_to_discover - new_discovered
+        # HUGE reward for discovering a boundary (this is the goal!)
+        if new_boundary_discovered > old_boundary_discovered:
+            reward += 10.0  # Big immediate reward for boundary discovery
+            return reward  # Return immediately with big reward
 
-            # Reward based on progress toward completion
-            # Higher reward as we get closer to finishing (encourages completion)
-            if remaining == 0:
-                # Just completed the wall!
-                reward = 1.0 * cells_discovered
-            elif remaining <= 2:
-                # Almost done - high reward to encourage finishing
-                reward = 0.5 * cells_discovered
-            elif remaining <= 5:
-                # Close to completion
-                reward = 0.3 * cells_discovered
-            else:
-                # Normal discovery
-                reward = 0.2 * cells_discovered
+        # Small reward for getting closer to boundaries (to guide exploration)
+        if self.wall_boundaries:
+            current_dist = self._distance_to_boundaries(pos)
+            max_possible_dist = max(self.env.width, self.env.height)
 
-            # Reset stagnation counter
-            self.no_new_discovery_steps = 0
+            # Normalized proximity reward (0 to 0.1)
+            proximity_reward = 0.1 * (1.0 - current_dist / max_possible_dist)
+            reward += proximity_reward
 
-        else:
-            # NO PROGRESS - apply penalties based on situation
-            self.no_new_discovery_steps += 1
+        # Small reward for wall following (to encourage staying near wall)
+        if self._is_adjacent_to_wall(pos):
+            reward += 0.01
 
-            # Check if adjacent to wall
-            is_adjacent = self._is_adjacent_to_wall(pos)
-
-            # Check if we're between discovered sections (useful traversal)
-            is_traversing = False
-            if is_adjacent and self.wall_boundaries and len(self.wall_boundaries) == 2:
-                # Check if one boundary is discovered and other isn't
-                discovered_boundaries = self.wall_boundaries & self.discovered_cells
-                if len(discovered_boundaries) == 1:
-                    # We've discovered one boundary, check if moving toward the other
-                    undiscovered = self.wall_boundaries - discovered_boundaries
-                    if undiscovered:
-                        target = next(iter(undiscovered))
-                        # Calculate if we're on the path between boundaries
-                        is_traversing = self._is_on_wall_path(pos, target)
-
-            if is_traversing:
-                # Traversing along wall toward undiscovered boundary - small penalty
-                reward = -0.02
-            elif is_adjacent:
-                # Next to wall but not making progress - medium penalty
-                reward = -0.03
-            else:
-                # Away from wall - larger penalty
-                reward = -0.05
-
-            # Additional penalty that increases with stagnation
-            if self.no_new_discovery_steps > 5:
-                stagnation_penalty = min(0.1, self.no_new_discovery_steps * 0.01)
-                reward -= stagnation_penalty
-
-        # COLLISION PENALTY - use the flag we detected
+        # Collision penalty
         if collision_occurred:
-            reward -= 2.0
-
-        # CRITICAL ZONE PENALTY - if very close to completion but not finishing
-        if coverage > 0.9 and new_discovered == old_discovered:
-            # So close to done but not finishing - increasing penalty
             reward -= 0.1
 
         return reward
-
-    def _is_on_wall_path(self, pos: Tuple[int, int], target: Tuple[int, int]) -> bool:
-        """
-        Check if position is on a valid path along the wall toward target.
-        This helps identify useful traversal movements.
-        """
-        if not self.accessible_wall_cells:
-            return False
-
-        # Simple heuristic: check if we're adjacent to wall and moving reduces distance to target
-        if not self._is_adjacent_to_wall(pos):
-            return False
-
-        # Check if we're getting closer to target along the wall
-        current_dist = abs(pos[0] - target[0]) + abs(pos[1] - target[1])
-
-        # Check if this position is part of the wall segment
-        # (between the discovered and undiscovered parts)
-        for wx, wy in self.accessible_wall_cells:
-            if abs(wx - pos[0]) + abs(wy - pos[1]) == 1:  # Adjacent to this wall cell
-                wall_to_target = abs(wx - target[0]) + abs(wy - target[1])
-                if wall_to_target < current_dist:
-                    return True
-
-        return False
 
     def _check_task_status(self, obs, action) -> TaskStatus:
         """Check if wall-following task is complete."""
@@ -640,36 +577,37 @@ class WallFollowingWrapper(BaseTaskWrapper):
         if self.task_step >= 499:
             return TaskStatus.FAILURE
 
-        if self.wall_locked and self.accessible_wall_cells:
+        if self.wall_locked:
             self._update_discoveries(tuple(obs['positions'][0]), obs['global_map'])
 
-            total_to_discover = len(self.accessible_wall_cells | self.wall_boundaries)
-            if len(self.discovered_cells) >= total_to_discover:
-                return TaskStatus.SUCCESS
-
-            coverage = len(self.discovered_cells) / total_to_discover
-            if coverage >= 0.95:
+            # SUCCESS: As soon as ANY boundary is discovered
+            if len(self.discovered_boundaries) > 0:
                 return TaskStatus.SUCCESS
 
         return TaskStatus.IN_PROGRESS
 
     def get_info(self) -> Dict:
         """Get additional task-specific information."""
-        # Calculate coverage based on both wall cells and boundaries
-        total_to_discover = len(self.accessible_wall_cells | self.wall_boundaries)
-        coverage = 0.0
-        if total_to_discover > 0:
-            coverage = len(self.discovered_cells) / total_to_discover
+        # Simple coverage: have we found a boundary?
+        coverage = 1.0 if len(self.discovered_boundaries) > 0 else 0.0
+
+        # Distance to nearest boundary for debugging
+        if hasattr(self.env, 'drones') and len(self.env.drones) > 0:
+            pos = tuple(self.env.drones[0].pos)
+            dist_to_boundary = self._distance_to_boundaries(pos)
+        else:
+            dist_to_boundary = float('inf')
 
         info = {
             'phase': self.phase,
             'wall_locked': self.wall_locked,
             'wall_contact_steps': self.wall_contact_steps,
-            'wall_coverage': coverage,
-            'discovered_accessible': len(self.discovered_cells),
-            'total_accessible': len(self.accessible_wall_cells),
-            'total_wall_cells': len(self.target_wall_segment),
-            'total_with_boundaries': total_to_discover,
+            'boundary_found': len(self.discovered_boundaries) > 0,
+            'discovered_boundaries': len(self.discovered_boundaries),
+            'total_boundaries': len(self.wall_boundaries),
+            'distance_to_boundary': dist_to_boundary,
+            'discovered_walls': len(self.discovered_cells & self.accessible_wall_cells),
+            'total_accessible_walls': len(self.accessible_wall_cells),
             'pre_search_time': self.pre_search_time,
             'pre_search_steps': self.pre_search_steps,
             'collision_count': self.collision_count,
@@ -684,22 +622,26 @@ class WallFollowingWrapper(BaseTaskWrapper):
             import pygame
             from environments.base.constants import TILE_SIZE
 
-            # Draw red FRAMES (not solid fills) for boundary cells
+            # Draw red FRAMES for boundary cells (these are the GOALS)
             for wx, wy in self.wall_boundaries:
                 rect = pygame.Rect(wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
-                # Draw only the frame with 3 pixel width
-                pygame.draw.rect(self.env.screen, (255, 0, 0), rect, 3)
+                # Draw thick red frame to emphasize these are the goals
+                pygame.draw.rect(self.env.screen, (255, 0, 0), rect, 5)
 
-            # Color accessible cells in orange (these are solid)
+            # Color accessible cells in orange (optional to discover)
             for wx, wy in self.accessible_wall_cells:
                 if (wx, wy) not in self.wall_boundaries:
                     rect = pygame.Rect(wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
-                    pygame.draw.rect(self.env.screen, (255, 128, 0), rect, 3)
+                    pygame.draw.rect(self.env.screen, (255, 128, 0), rect, 2)
 
             # Color discovered cells in green on observed map
             offset_x = self.env.width * TILE_SIZE + 50
             for wx, wy in self.discovered_cells:
                 rect = pygame.Rect(offset_x + wx * TILE_SIZE, wy * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1)
-                pygame.draw.rect(self.env.screen, (0, 255, 0), rect, 3)
+                # Make discovered boundaries bright green and thicker
+                if (wx, wy) in self.discovered_boundaries:
+                    pygame.draw.rect(self.env.screen, (0, 255, 0), rect, 5)
+                else:
+                    pygame.draw.rect(self.env.screen, (0, 255, 0), rect, 2)
 
             pygame.display.flip()

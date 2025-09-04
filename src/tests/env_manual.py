@@ -40,7 +40,7 @@ def print_info(obs: dict, reward: float, done: bool, info: dict, action_name: st
     # COLLISION TRACKING
     print(f"Collisions: {info.get('collision_count', 0)} (total this episode)")
     if 'collision_occurred' in info and info['collision_occurred']:
-        print("  ⚠️  COLLISION DETECTED THIS STEP!")
+        print("  COLLISION DETECTED THIS STEP!")
 
     # Wall following specific info (updated for new version)
     if 'pre_search_time' in info and info['pre_search_time'] > 0:
@@ -284,7 +284,7 @@ def select_map_option():
     else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
-            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt'
+            map_path = '/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt'
         return {'map_path': map_path, 'randomize': False}, map_path
 
 
@@ -346,9 +346,9 @@ if __name__ == "__main__":
 
         # Configure sensor parameters
         print("\nSensor configuration:")
-        print("1. Default (range=5, fov=30°)")
+        print("1. Default (range=2 fov=90°)")
         print("2. Short range (range=3, fov=25°)")
-        print("3. Long range (range=10, fov=45°)")
+        print("3. Long range (range=7, fov=45°)")
 
         sensor_choice = input("Enter your choice (1-3): ").strip()
 
@@ -360,7 +360,7 @@ if __name__ == "__main__":
             }
         elif sensor_choice == '3':
             sensor_params = {
-                'max_range': 10,
+                'max_range': 7,
                 'fov_deg': 45,
                 'num_rays': 90
             }

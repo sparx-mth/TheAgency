@@ -89,9 +89,8 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
     def forward(self, observations) -> torch.Tensor:
         # Process map with CNN
         map_data = observations['global_map'].float()  # (batch, height, width)
-        # # Convert map to semantic channels
+        # Convert map to semantic channels
         map_data = self.preprocess_map_to_semantic(map_data)  # (batch, 2, height, width)
-        # map_data = map_data.unsqueeze(1)  # Add channel dimension: (batch, 1, height, width)
         cnn_features = self.cnn(map_data)  # (batch, cnn_output_dim)
 
         # Flatten other features
@@ -103,6 +102,96 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
 
         # Combine all features
         combined = torch.cat([cnn_features, other_features], dim=1)
+
+        # Final MLP processing
+        return self.mlp(combined)
+
+class NavigationCNNExtractor(BaseFeaturesExtractor):
+    """
+    Simplified navigation feature extractor with only goal position.
+    Uses 2-channel semantic preprocessing from SLAMCNNExtractor.
+    """
+
+    def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
+        super().__init__(observation_space, features_dim)
+
+        # CNN for 2-channel semantic map
+        self.cnn = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=3, padding=1),  # 2 semantic channels
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Flatten()
+        )
+
+        # Calculate total features
+        cnn_dim = 32 * 4 * 4
+        num_agents = observation_space['positions'].shape[0]
+
+        # Drone features: positions(2*n) + facings(n) + active(n)
+        drone_dim = num_agents * 2 + num_agents + num_agents
+
+        # Goal features: ONLY position (x, y)
+        goal_dim = 2  # Just goal_position(2)
+
+        other_dim = drone_dim + goal_dim
+
+        # MLP for combining all features
+        self.mlp = nn.Sequential(
+            nn.Linear(cnn_dim + other_dim, features_dim),
+            nn.ReLU(),
+            nn.Linear(features_dim, features_dim)
+        )
+
+    def preprocess_map_to_semantic(self, map_data):
+        """
+        Convert map to semantic channels for better learning.
+
+        Creates 2 semantic channels:
+        1. Exploration status (known vs unknown)
+        2. Traversability (can move here)
+        """
+        batch_size = map_data.shape[0]
+        height, width = map_data.shape[1], map_data.shape[2]
+        device = map_data.device
+
+        # Create 2 semantic channels
+        channels = torch.zeros(batch_size, 2, height, width, device=device)
+
+        # Channel 0: Exploration status (0 = unknown, 1 = explored)
+        channels[:, 0, :, :] = (map_data != -1).float()
+
+        # Channel 1: Traversability (0 = blocked, 1 = traversable)
+        # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
+        traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
+        channels[:, 1, :, :] = traversable.float()
+
+        return channels
+
+    def forward(self, observations) -> torch.Tensor:
+        # Process map with semantic preprocessing
+        map_data = observations['global_map'].float()
+        semantic_map = self.preprocess_map_to_semantic(map_data)
+        cnn_out = self.cnn(semantic_map)
+
+        # Drone features
+        positions = observations['positions'].float().flatten(start_dim=1)
+        facings = observations['facings'].float()
+        active = observations['active'].float()
+
+        # Goal features - ONLY position
+        goal_position = observations['goal_position'].float()
+
+        # Concatenate all features
+        other = torch.cat([
+            positions, facings, active,  # Drone state
+            goal_position  # Only goal position
+        ], dim=1)
+
+        # Combine CNN and other features
+        combined = torch.cat([cnn_out, other], dim=1)
 
         # Final MLP processing
         return self.mlp(combined)

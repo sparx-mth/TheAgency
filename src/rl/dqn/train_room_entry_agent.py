@@ -94,14 +94,18 @@ def create_env(env_id: int = 0):
         actual_height, actual_width = loaded_map.shape
 
         # Create sensor
-        sensor = CameraSensor(max_range=6, fov_deg=90, num_rays=30)
+        sensor = CameraSensor(
+            max_range=4,
+            fov_deg=60,
+            num_rays=24
+        )
 
         # Environment configuration
         env_config = {
             'width': actual_width,
             'height': actual_height,
             'num_agents': 1,
-            'max_steps': 2000,
+            'max_steps': 500,
             'map_path': MAP_PATH,
             'render_mode': None,
             'sensor_config': {0: sensor},

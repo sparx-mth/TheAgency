@@ -1,5 +1,5 @@
 """
-train_navigation_optimized.py - Optimized DQN training for Navigation task
+train_navigation_agent.py - Fixed DQN training for Navigation task
 """
 
 import os
@@ -12,14 +12,14 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 
 from environments.tasks.navigation_wrapper import NavigationWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
+from rl.feature_extractors.cnn_feature_extractor import NavigationCNNExtractor  # CHANGED
 
 # FIXED MAP PATH
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
 
 # TRAINING SETTINGS
 N_ENVS = 4
-TOTAL_TIMESTEPS = 30_000_000
+TOTAL_TIMESTEPS = 10_000_000
 
 
 class NavigationCallback(BaseCallback):
@@ -89,8 +89,8 @@ class NavigationCallback(BaseCallback):
         return True
 
 
-def create_env(goal_selection: str, env_id: int = 0):
-    """Create single navigation environment."""
+def create_env(env_id: int = 0, exploration_steps: int = 20):
+    """Create single navigation environment with configurable exploration."""
 
     def _init():
         # Load map dimensions
@@ -99,9 +99,9 @@ def create_env(goal_selection: str, env_id: int = 0):
 
         # Create sensor
         sensor = CameraSensor(
-            max_range=2,
-            fov_deg=90,
-            num_rays=12
+            max_range=4,
+            fov_deg=60,
+            num_rays=24
         )
 
         # Environment configuration
@@ -120,26 +120,24 @@ def create_env(goal_selection: str, env_id: int = 0):
             'completion_bonus': 0.0,
         }
 
-        # Create navigation wrapper
+        # Create navigation wrapper with configurable exploration
         env = NavigationWrapper(
             env_config=env_config,
-            # Exploration
-            exploration_steps=20,
+            # Exploration - NOW CONFIGURABLE
+            exploration_steps=exploration_steps,
             # Task parameters
             max_steps_to_goal=200,
             # Rewards
             goal_reached_reward=200.0,
-            closer_reward_scale=1.0,
-            farther_penalty_scale=0.5,
             time_penalty=0.01,
-            collision_penalty=-1.0,
         )
 
-        # Add monitor
-        env = Monitor(env)
-
-        # Set seed
+        # IMPORTANT: Reset once to ensure observation space is properly set up
+        # This initializes goal_position in the observation
         env.reset(seed=42 + env_id)
+
+        # Add monitor AFTER first reset
+        env = Monitor(env)
 
         return env
 
@@ -147,29 +145,30 @@ def create_env(goal_selection: str, env_id: int = 0):
 
 
 def train():
-    """Train DQN for navigation task with curriculum."""
+    """Train DQN for navigation task with progressive exploration curriculum."""
 
     # Verify map
     loaded_map = np.loadtxt(MAP_PATH, dtype=np.int8)
     map_height, map_width = loaded_map.shape
 
     print("=" * 60)
-    print("DQN NAVIGATION TRAINING - OPTIMIZED")
+    print("DQN NAVIGATION TRAINING - PROGRESSIVE EXPLORATION")
     print(f"Map: {MAP_PATH}")
     print(f"Map size: {map_width}x{map_height}")
     print(f"Parallel environments: {N_ENVS}")
     print(f"Total timesteps: {TOTAL_TIMESTEPS:,}")
 
-    # Training stages with curriculum
+    # PROGRESSIVE EXPLORATION CURRICULUM
     CURRICULUM = [
-        ("Stage 1: Random Goals", "random", int(TOTAL_TIMESTEPS/3)),
-        ("Stage 2: Challenging Goals", "challenging", int(TOTAL_TIMESTEPS/3)),
-        ("Stage 3: Farthest Goals", "farthest", int(TOTAL_TIMESTEPS/3)),
+        ("Easy: 10 exploration steps", 20, int(TOTAL_TIMESTEPS * 0.2)),  # First 20%
+        ("Medium: 20 exploration steps", 30, int(TOTAL_TIMESTEPS * 0.3)),  # Next 30%
+        ("Hard: 30 exploration steps", 40, int(TOTAL_TIMESTEPS * 0.3)),  # Next 30%
+        ("Expert: 40 exploration steps", 50, int(TOTAL_TIMESTEPS * 0.2)),  # Final 20%
     ]
 
-    print(f"Training stages: {len(CURRICULUM)}")
-    for idx, (name, goal_type, steps) in enumerate(CURRICULUM):
-        print(f"  {idx + 1}. {name} ({steps:,} steps)")
+    print("\nProgressive Exploration Curriculum:")
+    for idx, (name, exploration, steps) in enumerate(CURRICULUM):
+        print(f"  Stage {idx + 1}: {name} ({steps:,} steps)")
     print("=" * 60 + "\n")
 
     # Estimate time
@@ -180,44 +179,45 @@ def train():
 
     model = None
 
-    for stage_idx, (stage_name, goal_selection, stage_steps) in enumerate(CURRICULUM):
+    for stage_idx, (stage_name, exploration_steps, stage_timesteps) in enumerate(CURRICULUM):
         stage_start = time.time()
 
         print(f"\n{'=' * 60}")
         print(f"STAGE {stage_idx + 1}/{len(CURRICULUM)}: {stage_name}")
-        print(f"Goal selection: {goal_selection}")
+        print(f"Exploration steps: {exploration_steps}")
+        print(f"Training steps: {stage_timesteps:,}")
         print("-" * 40)
 
-        # Create parallel environments
+        # Create parallel environments with current exploration setting
         print(f"Creating {N_ENVS} environments...")
-        env_fns = [create_env(goal_selection, i) for i in range(N_ENVS)]
+        env_fns = [create_env(i, exploration_steps) for i in range(N_ENVS)]
         vec_env = SubprocVecEnv(env_fns)
         vec_env = VecMonitor(vec_env)
 
         if model is None:
-            # Create new model
+            # Create model (only first time)
             print("Creating DQN model...")
             model = DQN(
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=SLAMCNNExtractor,
+                    features_extractor_class=NavigationCNNExtractor,
                     features_extractor_kwargs=dict(features_dim=256),
                     net_arch=[512, 512],
                 ),
                 # Hyperparameters
                 learning_rate=1e-4,
                 buffer_size=1_000_000,
-                learning_starts=1000,
-                batch_size=32,
+                learning_starts=10000,
+                batch_size=256,
                 tau=1.0,
                 gamma=0.99,
                 train_freq=4,
                 gradient_steps=1,
-                target_update_interval=10000,
+                target_update_interval=1000,
                 # Exploration
-                exploration_fraction=0.6,
-                exploration_initial_eps=1.0 if stage_idx == 0 else 0.5,  # Less exploration in later stages
+                exploration_fraction=0.1,
+                exploration_initial_eps=1.0,
                 exploration_final_eps=0.05,
                 # Other
                 max_grad_norm=10,
@@ -226,14 +226,9 @@ def train():
             )
             print(f"Model created on {model.device}")
         else:
-            # Update environment
+            # Update environment for existing model
             model.set_env(vec_env)
-            # Adjust exploration for later stages
-            if stage_idx == 1:
-                model.exploration_initial_eps = 0.3
-            elif stage_idx == 2:
-                model.exploration_initial_eps = 0.2
-            print("Model environment updated")
+            print(f"Model environment updated for stage {stage_idx + 1}")
 
         # Create callbacks
         callbacks = []
@@ -246,7 +241,7 @@ def train():
         checkpoint_callback = CheckpointCallback(
             save_freq=500_000 // N_ENVS,
             save_path="./models/navigation_checkpoints/",
-            name_prefix=f"stage_{stage_idx + 1}_{goal_selection}"
+            name_prefix=f"nav_stage_{stage_idx + 1}_exp{exploration_steps}"
         )
         callbacks.append(checkpoint_callback)
 
@@ -254,49 +249,39 @@ def train():
 
         # Train
         print(f"\nTraining stage {stage_idx + 1}...")
-        print(f"Target: {stage_steps:,} steps")
 
         model.learn(
-            total_timesteps=stage_steps,
+            total_timesteps=stage_timesteps,
             callback=callback,
-            reset_num_timesteps=False,
+            reset_num_timesteps=False,  # Continue from previous training
             progress_bar=False
         )
 
         # Stage complete
         stage_time = time.time() - stage_start
-        stage_fps = stage_steps / stage_time
-
-        # Save stage model
-        model_path = f"./models/navigation_stage_{stage_idx + 1}_{goal_selection}"
-        model.save(model_path)
+        stage_fps = stage_timesteps / stage_time
 
         print(f"\nStage {stage_idx + 1} complete!")
         print(f"  Time: {stage_time / 60:.1f} minutes")
         print(f"  Average FPS: {stage_fps:.0f}")
-        print(f"  Model saved: {model_path}.zip")
 
-        # Estimate remaining
-        stages_left = len(CURRICULUM) - stage_idx - 1
-        if stages_left > 0:
-            remaining_steps = sum(s[2] for s in CURRICULUM[stage_idx + 1:])
-            est_remaining = remaining_steps / stage_fps / 60
-            print(f"  Est. remaining: {est_remaining:.0f} minutes")
+        # Save stage model
+        model_path = f"./models/nav_stage_{stage_idx + 1}_exp{exploration_steps}"
+        model.save(model_path)
+        print(f"  Model saved: {model_path}.zip")
 
         vec_env.close()
 
     # Save final model
-    model.save("./models/dqn_navigation_optimized_final")
+    model.save("./models/dqn_navigation_final")
 
     print("\n" + "=" * 60)
     print("NAVIGATION TRAINING COMPLETE!")
-    print(f"Final model: ./models/dqn_navigation_optimized_final.zip")
+    print(f"Final model: ./models/dqn_navigation_final.zip")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-    import sys
-
     # Verify map
     if not os.path.exists(MAP_PATH):
         raise FileNotFoundError(f"MAP FILE NOT FOUND: {MAP_PATH}")

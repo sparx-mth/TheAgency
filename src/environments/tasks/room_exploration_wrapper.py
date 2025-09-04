@@ -60,6 +60,7 @@ class RoomExplorationWrapper(BaseTaskWrapper):
         step_penalty: float = -0.001,
         coverage_threshold: float = 1.0,
         max_task_steps: int = 500,
+        auto_explore = False
     ):
         super().__init__(env_config)
 

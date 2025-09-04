@@ -16,11 +16,11 @@ from sensors.camera_sensor import CameraSensor
 from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 # FIXED MAP PATH
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 4  # Number of parallel environments
-TOTAL_TIMESTEPS = 30_000_000  # Total training steps
+TOTAL_TIMESTEPS = 10_000_000  # Total training steps
 
 
 class WallFollowingCallback(BaseCallback):
@@ -101,9 +101,9 @@ def create_env(env_id: int = 0):
 
         # Create sensor with reduced complexity for speed
         sensor = CameraSensor(
-            max_range=2,  # Reduced range for faster computation
-            fov_deg=90,
-            num_rays=12  # Reduced rays for speed
+            max_range=4,
+            fov_deg=60,
+            num_rays=24
         )
 
         # Environment configuration
