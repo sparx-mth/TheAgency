@@ -531,43 +531,47 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
     def _compute_task_reward(self, obs, action, base_reward, collision_occurred) -> float:
         """
-        Reward function focused on reaching boundaries quickly
+        Reward function with proportional wall discovery and boundary bonus
         """
         pos = tuple(obs['positions'][0])
         global_map = obs['global_map']
 
-        # Track previously discovered boundaries
-        old_boundary_discovered = len(self.discovered_boundaries)
+        # Track previously discovered cells
+        old_walls_discovered = len(self.discovered_cells & self.accessible_wall_cells)
+        old_boundaries_discovered = len(self.discovered_boundaries)
 
         # Update discoveries
         self._update_discoveries(pos, global_map)
 
-        new_boundary_discovered = len(self.discovered_boundaries)
+        new_walls_discovered = len(self.discovered_cells & self.accessible_wall_cells)
+        new_boundaries_discovered = len(self.discovered_boundaries)
 
         # Calculate reward
         reward = 0.0
 
-        # HUGE reward for discovering a boundary (this is the goal!)
-        if new_boundary_discovered > old_boundary_discovered:
-            reward += 10.0  # Big immediate reward for boundary discovery
-            return reward  # Return immediately with big reward
+        # 1. Proportional reward for discovering accessible wall cells
+        # Each new wall cell discovered gets a proportional reward (sum = 1.0 for all walls)
+        if len(self.accessible_wall_cells) > 0:
+            walls_discovered_this_step = new_walls_discovered - old_walls_discovered
+            if walls_discovered_this_step > 0:
+                # Each wall cell is worth 1.0/total_walls, so discovering all = 1.0 total
+                reward_per_wall = 1.0 / len(self.accessible_wall_cells)
+                reward += walls_discovered_this_step * reward_per_wall
 
-        # Small reward for getting closer to boundaries (to guide exploration)
-        if self.wall_boundaries:
-            current_dist = self._distance_to_boundaries(pos)
-            max_possible_dist = max(self.env.width, self.env.height)
+        # 2. BONUS reward for discovering boundaries (triggers success)
+        boundaries_discovered_this_step = new_boundaries_discovered - old_boundaries_discovered
+        if boundaries_discovered_this_step > 0:
+            # Give a significant bonus for each boundary discovered
+            # You can adjust this value based on how much you want to incentivize boundaries
+            reward += 5.0 * boundaries_discovered_this_step
 
-            # Normalized proximity reward (0 to 0.1)
-            proximity_reward = 0.1 * (1.0 - current_dist / max_possible_dist)
-            reward += proximity_reward
-
-        # Small reward for wall following (to encourage staying near wall)
-        if self._is_adjacent_to_wall(pos):
-            reward += 0.01
-
+        # 4. Penalties
         # Collision penalty
         if collision_occurred:
             reward -= 0.1
+
+        # Small time penalty to encourage efficiency (optional)
+        reward -= 0.001  # Small negative reward per step
 
         return reward
 

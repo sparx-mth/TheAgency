@@ -16,7 +16,7 @@ from sensors.camera_sensor import CameraSensor
 from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 # FIXED MAP PATH
-MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 4  # Number of parallel environments

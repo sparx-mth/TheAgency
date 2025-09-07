@@ -53,9 +53,9 @@ class RoomEntryWrapper(BaseTaskWrapper):
         env_config: Dict = None,
         precomputed_doorways: Dict[Tuple[int, int], str] = None,
         # Simple reward structure - 4 clear signals
-        success_reward: float = 10.0,
-        progress_reward: float = 0.5,
-        collision_penalty: float = -0.5,
+        success_reward: float = 100.0,
+        progress_reward: float = 0.0,
+        collision_penalty: float = -0.1,
         step_penalty: float = -0.01,
         max_task_steps: int = 500,
         # Auto-exploration parameters stay the same
