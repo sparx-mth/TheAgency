@@ -20,17 +20,17 @@ TASK = "room_exploration"  # Options: "wall_following", "room_entry", "navigatio
 # Model paths for each task
 MODELS = {
     "wall_following": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_wall_following_final.zip",
-    "room_entry": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_entry_final.zip",
-    "navigation": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_navigation_final.zip",
-    "room_exploration": "/home/user/nadav/TheAgency/src/rl/dqn/models/room_exploration_checkpoints/stage_3_coverage_100_90000000_steps.zip"
+    "room_entry": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_room_entry_optimized_final.zip",
+    "navigation": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/dqn_navigation_optimized_final.zi",
+    "room_exploration": "/home/nadavc/PycharmProjects/TheAgency_workspace/src/rl/dqn/models/room_exploration_stage_2_coverage_95.zip"
 }
 
 # Map path
-MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
 
 # Visualization settings
-N_EPISODES = 5
-RENDER_FPS = 120
+N_EPISODES = 4
+RENDER_FPS = 90
 
 # ============================================================
 # PRECOMPUTE DATA (Done once at startup)
@@ -68,7 +68,7 @@ def create_wall_following_env():
         'width': width,
         'height': height,
         'num_agents': 1,
-        'max_steps': 1000,
+        'max_steps': 100,
         'map_path': MAP_PATH,
         'render_mode': 'human',
         'sensor_config': {0: sensor},
@@ -90,7 +90,7 @@ def create_room_entry_env():
         'width': width,
         'height': height,
         'num_agents': 1,
-        'max_steps': 1000,
+        'max_steps': 100,
         'map_path': MAP_PATH,
         'render_mode': 'human',
         'sensor_config': {0: sensor},
@@ -124,7 +124,7 @@ def create_navigation_env():
         'width': width,
         'height': height,
         'num_agents': 1,
-        'max_steps': 1000,
+        'max_steps': 100,
         'map_path': MAP_PATH,
         'render_mode': 'human',
         'sensor_config': {0: sensor},
@@ -149,7 +149,7 @@ def create_room_exploration_env():
         'width': width,
         'height': height,
         'num_agents': 1,
-        'max_steps': 1000,
+        'max_steps': 100,
         'map_path': MAP_PATH,
         'render_mode': 'human',
         'sensor_config': {0: sensor},
@@ -165,7 +165,6 @@ def create_room_exploration_env():
     return RoomExplorationWrapper(
         env_config=env_config,
         precomputed_rooms=room_data,
-        auto_explore=False,
     )
 
 
