@@ -3,13 +3,15 @@ A* Navigation Agent for SLAM environments
 
 This agent uses A* pathfinding to navigate to goal positions, treating unknown
 cells as passable until proven otherwise.
+
+ADDED: State tracking for agent execution status
 """
 
 import numpy as np
 from typing import Dict, Any, Tuple, List, Optional
 from heapq import heappush, heappop
 
-from agents.base_agent import BaseSLAMAgent
+from agents.base_agent import BaseSLAMAgent, AgentState
 from environments.base.constants import Action, TileType
 
 
@@ -21,46 +23,70 @@ class AStarNavigationAgent(BaseSLAMAgent):
     - Minimalist design with clear logic flow
     - Treats unknown cells as passable (optimistic planning)
     - Replans only when necessary (path blocked or no path)
+    - Tracks execution state for coordination with other agents
     """
 
     def __init__(self, num_agents: int = 1):
         super().__init__(num_agents)
         self.path = []
         self.goal = None
+        self.steps_taken = 0
+        self.max_steps = 1000  # Maximum steps before considering task complete
 
     def get_actions(self, observations: Dict[str, Any], info: Dict[str, Any]) -> np.ndarray:
         """Get navigation actions using A* pathfinding."""
-        # Single agent only for simplicity
-        if self.num_agents != 1:
-            raise ValueError("This agent only supports single agent navigation")
+        try:
+            # Update state to in progress when first called
+            if self.execution_state == AgentState.NOT_YET_STARTED:
+                self.execution_state = AgentState.IN_PROGRESS
 
-        # Extract current state
-        map_grid = observations['global_map']
-        pos = tuple(observations['positions'][0])
-        facing = observations['facings'][0]
-        goal = observations.get('goal_position', None)
+            # Single agent only for simplicity
+            if self.num_agents != 1:
+                self.set_error("This agent only supports single agent navigation")
+                raise ValueError("This agent only supports single agent navigation")
 
-        # Check for valid goal
-        if goal is None or np.array_equal(goal, [-1, -1]):
-            return np.array([self._explore(pos, facing, map_grid)])
+            # Extract current state
+            map_grid = observations['global_map']
+            pos = tuple(observations['positions'][0])
+            facing = observations['facings'][0]
+            goal = observations.get('goal_position', None)
 
-        self.goal = tuple(goal)
+            # Update step counter
+            self.steps_taken += 1
 
-        # Check if at goal
-        if pos == self.goal:
+            # Check for completion conditions
+            if self.steps_taken >= self.max_steps:
+                self.execution_state = AgentState.COMPLETED
+                return np.array([Action.STAY])
+
+            # Check for valid goal
+            if goal is None or np.array_equal(goal, [-1, -1]):
+                # No goal means exploration mode
+                action = self._explore(pos, facing, map_grid)
+                return np.array([action])
+
+            self.goal = tuple(goal)
+
+            # Check if at goal
+            if pos == self.goal:
+                self.execution_state = AgentState.COMPLETED
+                return np.array([Action.STAY])
+
+            # Check if we need a new path
+            if not self._is_path_valid(pos, map_grid):
+                self.path = self._find_path(pos, self.goal, map_grid)
+
+            # Follow path or explore if no path exists
+            if self.path:
+                action = self._follow_path(pos, facing)
+            else:
+                action = self._explore(pos, facing, map_grid)
+
+            return np.array([action])
+
+        except Exception as e:
+            self.set_error(str(e))
             return np.array([Action.STAY])
-
-        # Check if we need a new path
-        if not self._is_path_valid(pos, map_grid):
-            self.path = self._find_path(pos, self.goal, map_grid)
-
-        # Follow path or explore if no path exists
-        if self.path:
-            action = self._follow_path(pos, facing)
-        else:
-            action = self._explore(pos, facing, map_grid)
-
-        return np.array([action])
 
     def _find_path(self, start: Tuple[int, int], goal: Tuple[int, int],
                    map_grid: np.ndarray) -> List[Tuple[int, int]]:
@@ -215,13 +241,19 @@ class AStarNavigationAgent(BaseSLAMAgent):
 
     def reset(self) -> None:
         """Reset agent state."""
+        super().reset()  # Reset execution state
         self.path = []
         self.goal = None
+        self.steps_taken = 0
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get agent metrics."""
-        return {
+        metrics = super().get_metrics()  # Get base metrics including execution state
+        metrics.update({
             'has_path': len(self.path) > 0,
             'path_length': len(self.path),
             'goal': self.goal,
-        }
+            'steps_taken': self.steps_taken,
+            'max_steps': self.max_steps
+        })
+        return metrics

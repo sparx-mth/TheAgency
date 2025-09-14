@@ -6,13 +6,15 @@ This agent:
 2. Approaches until 1 space away
 3. Walks along the wall to its end
 4. Turns 180° and walks back to the other end
+
+ADDED: State tracking for agent execution status
 """
 
 import numpy as np
 from typing import Dict, Any, Tuple, Optional
 from enum import Enum
 
-from agents.base_agent import BaseSLAMAgent
+from agents.base_agent import BaseSLAMAgent, AgentState
 from environments.base.constants import TileType, Action
 
 
@@ -27,27 +29,45 @@ class State(Enum):
 
 
 class WallFollowingAgent(BaseSLAMAgent):
-    """Simple wall-following agent."""
+    """Simple wall-following agent with execution state tracking."""
 
     def __init__(self, num_agents: int = 1):
         super().__init__(num_agents)
         self.reset()
+        self.max_exploration_steps = 200  # Maximum steps when finding wall
+        self.exploration_steps = 0
 
     def reset(self):
         """Reset agent state."""
+        super().reset()  # Reset execution state
         self.state = State.FIND_WALL
         self.target_wall = None
         self.turn_count = 0
         self.steps_along_wall = 0
+        self.exploration_steps = 0
 
     def get_actions(self, observations: Dict[str, Any], info: Dict[str, Any]) -> np.ndarray:
         """Get action based on current state."""
-        global_map = observations['global_map']
-        pos = tuple(observations['positions'][0])
-        facing = observations['facings'][0]
+        try:
+            # Update execution state when first called
+            if self.execution_state == AgentState.NOT_YET_STARTED:
+                self.execution_state = AgentState.IN_PROGRESS
 
-        action = self._execute_state(global_map, pos, facing)
-        return np.array([action], dtype=np.int32)
+            global_map = observations['global_map']
+            pos = tuple(observations['positions'][0])
+            facing = observations['facings'][0]
+
+            action = self._execute_state(global_map, pos, facing)
+
+            # Check if we're done
+            if self.state == State.DONE:
+                self.execution_state = AgentState.COMPLETED
+
+            return np.array([action], dtype=np.int32)
+
+        except Exception as e:
+            self.set_error(str(e))
+            return np.array([Action.STAY], dtype=np.int32)
 
     def _execute_state(self, global_map, pos, facing) -> int:
         """Execute action based on current state."""
@@ -74,6 +94,13 @@ class WallFollowingAgent(BaseSLAMAgent):
         walls = []
         h, w = global_map.shape
 
+        # Track exploration steps
+        self.exploration_steps += 1
+        if self.exploration_steps >= self.max_exploration_steps:
+            # Too many steps without finding a wall, mark as complete
+            self.state = State.DONE
+            return Action.STAY
+
         # Search for visible walls
         for y in range(max(0, pos[1] - 15), min(h, pos[1] + 16)):
             for x in range(max(0, pos[0] - 15), min(w, pos[0] + 16)):
@@ -86,6 +113,7 @@ class WallFollowingAgent(BaseSLAMAgent):
             walls.sort(key=lambda w: w[1])
             self.target_wall = walls[0][0]
             self.state = State.APPROACH_WALL
+            self.exploration_steps = 0  # Reset counter
             return self._approach_wall(global_map, pos, facing)
 
         # No wall found, explore
@@ -256,9 +284,12 @@ class WallFollowingAgent(BaseSLAMAgent):
 
     def get_metrics(self) -> Dict[str, Any]:
         """Return agent metrics."""
-        return {
-            'state': self.state.name,
+        metrics = super().get_metrics()  # Get base metrics including execution state
+        metrics.update({
+            'wall_state': self.state.name,
             'turn_count': self.turn_count,
             'steps_along_wall': self.steps_along_wall,
-            'target_wall': self.target_wall
-        }
+            'target_wall': self.target_wall,
+            'exploration_steps': self.exploration_steps
+        })
+        return metrics

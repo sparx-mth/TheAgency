@@ -34,6 +34,8 @@ class InteractiveSLAMViewer:
         self.clock = pygame.time.Clock()
         self.fps = 10
         self.running = False
+        self.pygame_initialized = True  # Track pygame initialization state
+        self.verbose = False  # Toggle for verbose printing
 
         # Default map path
         self.map_path = None
@@ -54,6 +56,13 @@ class InteractiveSLAMViewer:
         self.env = None
         self.agent = None
         self.num_agents = 1
+
+    def ensure_pygame_initialized(self):
+        """Ensure pygame is initialized before use"""
+        if not self.pygame_initialized:
+            pygame.init()
+            self.clock = pygame.time.Clock()
+            self.pygame_initialized = True
 
     def select_map_option(self):
         """Select map configuration - simple like env_manual.py"""
@@ -228,11 +237,13 @@ class InteractiveSLAMViewer:
             print("Selected: Basic SLAM")
             self.env = MultiAgentSLAMEnv(**base_config)
 
-    def select_agent(self):
+    def select_agent(self, quick_select=False):
         """Simple agent selection"""
-        print("\n" + "="*50)
-        print("SELECT AGENT")
-        print("="*50)
+        if not quick_select:
+            print("\n" + "="*50)
+            print("SELECT AGENT")
+            print("="*50)
+
         print("1. Logical Wall Agent (deterministic)")
         print("2. Frontier Agent (exploration)")
         print("3. Room Frontier Agent (doorway aware)")
@@ -245,20 +256,22 @@ class InteractiveSLAMViewer:
             # Logical Wall Agent
             print("\nSelected: Logical Wall Agent")
 
-            # Ask for wall following direction
-            direction = input("Follow direction (left/right) [right]: ").strip().lower()
-            if direction not in ['left', 'right']:
-                direction = 'right'
+            if not quick_select:
+                # Ask for wall following direction
+                direction = input("Follow direction (left/right) [right]: ").strip().lower()
+                if direction not in ['left', 'right']:
+                    direction = 'right'
 
-            # Ask for search pattern
-            pattern = input("Search pattern (forward/spiral) [forward]: ").strip().lower()
-            if pattern not in ['forward', 'spiral']:
-                pattern = 'forward'
+                # Ask for search pattern
+                pattern = input("Search pattern (forward/spiral) [forward]: ").strip().lower()
+                if pattern not in ['forward', 'spiral']:
+                    pattern = 'forward'
+
+                print(f"Configuration: follow_{direction}, {pattern}_search")
 
             self.agent = LogicalWallAgent(
                 num_agents=self.num_agents,
             )
-            print(f"Configuration: follow_{direction}, {pattern}_search")
 
         elif choice == '2':
             print("Selected: Frontier Agent")
@@ -288,15 +301,126 @@ class InteractiveSLAMViewer:
             # Doorway Entry Agent only takes num_agents
             self.agent = DoorwayEntryAgent(num_agents=self.num_agents)
 
+    def print_agent_state(self, obs, info, action=None, step=0):
+        """Print detailed agent state information"""
+        print("\n" + "-"*40)
+        print(f"Step {step}")
+
+        # Print agent type
+        agent_type = self.agent.__class__.__name__
+        print(f"Agent: {agent_type}")
+
+        # Print execution state
+        if hasattr(self.agent, 'execution_state'):
+            state = self.agent.execution_state
+            print(f"Status: {state.value if hasattr(state, 'value') else state}")
+
+            # Print error message if in error state
+            if hasattr(self.agent, 'get_error_message'):
+                error_msg = self.agent.get_error_message()
+                if error_msg:
+                    print(f"Error: {error_msg}")
+
+        # Print position if available
+        if hasattr(self.env, 'env') and hasattr(self.env.env, 'agent_positions'):
+            pos = self.env.env.agent_positions[0]
+            print(f"Position: ({pos[0]}, {pos[1]})")
+
+        # Print action if provided
+        if action is not None:
+            action_val = action[0] if isinstance(action, np.ndarray) else action
+            action_names = ['FORWARD', 'LEFT', 'RIGHT', 'STAY']
+            print(f"Action: {action_names[action_val]}")
+
+        # Print agent-specific state if available
+        if hasattr(self.agent, 'get_state_info'):
+            state_info = self.agent.get_state_info()
+            for key, value in state_info.items():
+                print(f"{key}: {value}")
+
+        # Print agent metrics if available
+        if hasattr(self.agent, 'get_metrics'):
+            metrics = self.agent.get_metrics()
+            # Skip execution_state and error_message as we already printed them
+            for key, value in metrics.items():
+                if key not in ['execution_state', 'error_message']:
+                    print(f"{key}: {value}")
+
+        # Print task-specific info
+        if 'wall_coverage' in info:
+            print(f"Wall Coverage: {info['wall_coverage']*100:.1f}%")
+        if 'room_coverage' in info:
+            print(f"Room Coverage: {info['room_coverage']*100:.1f}%")
+        if 'exploration_coverage' in info:
+            print(f"Exploration: {info['exploration_coverage']*100:.1f}%")
+
+        print("-"*40)
+
+    def change_agent_during_episode(self, obs, info):
+        """Allow changing agent during episode"""
+        print("\n" + "="*30)
+        print("CHANGE AGENT")
+        print("="*30)
+        print("Current agent:", self.agent.__class__.__name__)
+        print("-"*30)
+        print("1. Logical Wall Agent")
+        print("2. Frontier Agent")
+        print("3. Room Frontier Agent")
+        print("4. A* Navigation Agent")
+        print("5. Doorway Entry Agent")
+        print("0. Cancel")
+
+        choice = input("\nSelect new agent (0-5): ").strip()
+
+        if choice == '1':
+            self.agent = LogicalWallAgent(num_agents=self.num_agents)
+            print("Switched to: Logical Wall Agent")
+        elif choice == '2':
+            self.agent = FrontierAgent(
+                num_agents=self.num_agents,
+                camera_range=self.sensor_params['max_range']
+            )
+            print("Switched to: Frontier Agent")
+        elif choice == '3':
+            self.agent = RoomFrontierAgent(
+                num_agents=self.num_agents,
+                camera_range=self.sensor_params['max_range']
+            )
+            print("Switched to: Room Frontier Agent")
+        elif choice == '4':
+            self.agent = AStarNavigationAgent(num_agents=self.num_agents)
+            print("Switched to: A* Navigation Agent")
+        elif choice == '5':
+            self.agent = DoorwayEntryAgent(num_agents=self.num_agents)
+            print("Switched to: Doorway Entry Agent")
+        else:
+            print("Agent change cancelled")
+            return False
+
+        # Reset the new agent with current state
+        self.agent.reset()
+        return True
+
     def run_episode(self):
         """Run a single episode with the selected configuration"""
+        # Ensure pygame is initialized before running episode
+        self.ensure_pygame_initialized()
+
         print("\n" + "="*50)
         print("STARTING EPISODE")
+        print(f"Agent: {self.agent.__class__.__name__}")
         print(f"Sensor: range={self.sensor_params['max_range']}, "
               f"fov={self.sensor_params['fov_deg']}°, "
               f"rays={self.sensor_params['num_rays']}")
         print("="*50)
-        print("Controls: SPACE=pause, ESC=quit, R=reset")
+        print("Controls:")
+        print("  SPACE = pause/resume")
+        print("  ESC   = quit")
+        print("  R     = reset episode")
+        print("  S     = print current state")
+        print("  A     = change agent")
+        print("  V     = toggle verbose (auto-print every step)")
+        print("="*50)
 
         # Reset environment and agent
         obs, info = self.env.reset()
@@ -308,62 +432,101 @@ class InteractiveSLAMViewer:
         done = False
         total_reward = 0.0
         self.running = True
+        self.verbose = False  # Reset verbose for each episode
+        agent_error = False
 
         while self.running and not done:
             # Handle pygame events
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                    break
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        print("\nQuitting...")
+            try:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
                         self.running = False
                         break
-                    elif event.key == pygame.K_SPACE:
-                        paused = not paused
-                        print("PAUSED" if paused else "RESUMED")
-                    elif event.key == pygame.K_r:
-                        # Reset episode
-                        obs, info = self.env.reset()
-                        self.agent.reset()
-                        step = 0
-                        total_reward = 0.0
-                        done = False
-                        print("\nEPISODE RESET")
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            print("\nQuitting...")
+                            self.running = False
+                            break
+                        elif event.key == pygame.K_SPACE:
+                            paused = not paused
+                            print("PAUSED" if paused else "RESUMED")
+                        elif event.key == pygame.K_r:
+                            # Reset episode
+                            obs, info = self.env.reset()
+                            self.agent.reset()
+                            step = 0
+                            total_reward = 0.0
+                            done = False
+                            agent_error = False
+                            print("\nEPISODE RESET")
+                        elif event.key == pygame.K_s:
+                            # Print current state
+                            self.print_agent_state(obs, info, step=step)
+                        elif event.key == pygame.K_a:
+                            # Change agent
+                            if self.change_agent_during_episode(obs, info):
+                                agent_error = False
+                                if paused:
+                                    print("Agent changed! Press SPACE to resume.")
+                                else:
+                                    print("Agent changed! Continuing...")
+                        elif event.key == pygame.K_v:
+                            # Toggle verbose mode
+                            self.verbose = not self.verbose
+                            print(f"Verbose mode: {'ON' if self.verbose else 'OFF'}")
+            except pygame.error:
+                # Pygame was quit, exit the episode
+                self.running = False
+                break
 
             if not self.running:
                 break
 
-            if not paused and not done:
-                # Get agent action
-                actions = self.agent.get_actions(obs, info)
+            if not paused and not done and not agent_error:
+                try:
+                    # Get agent action
+                    actions = self.agent.get_actions(obs, info)
 
-                # Step environment
-                obs, reward, terminated, truncated, info = self.env.step(actions)
-                total_reward += reward
-                done = terminated or truncated
+                    # Step environment
+                    obs, reward, terminated, truncated, info = self.env.step(actions)
+                    total_reward += reward
+                    done = terminated or truncated
 
-                # Print status periodically
-                if step % 50 == 0:  # Every 50 steps
-                    action = actions[0] if isinstance(actions, np.ndarray) else actions
-                    action_names = ['FORWARD', 'LEFT', 'RIGHT', 'STAY']
-                    print(f"Step {step:4d} | Action: {action_names[action]:8s} | "
-                          f"Reward: {total_reward:7.2f}", end='')
+                    # Print state if verbose mode is on
+                    if self.verbose:
+                        self.print_agent_state(obs, info, actions, step=step)
 
-                    # Add task-specific info
-                    if 'wall_coverage' in info:
-                        print(f" | Wall: {info['wall_coverage']*100:.1f}%", end='')
-                    if 'room_coverage' in info:
-                        print(f" | Room: {info['room_coverage']*100:.1f}%", end='')
-                    if 'boundary_found' in info and info['boundary_found']:
-                        print(" | BOUNDARY!", end='')
-                    if 'has_passed_through' in info and info['has_passed_through']:
-                        print(" | PASSED!", end='')
+                    # Print status periodically (less frequently if verbose)
+                    print_interval = 100 if self.verbose else 50
+                    if step % print_interval == 0:
+                        action = actions[0] if isinstance(actions, np.ndarray) else actions
+                        action_names = ['FORWARD', 'LEFT', 'RIGHT', 'STAY']
+                        print(f"Step {step:4d} | Action: {action_names[action]:8s} | "
+                              f"Reward: {total_reward:7.2f}", end='')
 
-                    print()
+                        # Add task-specific info
+                        if 'wall_coverage' in info:
+                            print(f" | Wall: {info['wall_coverage']*100:.1f}%", end='')
+                        if 'room_coverage' in info:
+                            print(f" | Room: {info['room_coverage']*100:.1f}%", end='')
+                        if 'boundary_found' in info and info['boundary_found']:
+                            print(" | BOUNDARY!", end='')
+                        if 'has_passed_through' in info and info['has_passed_through']:
+                            print(" | PASSED!", end='')
 
-                step += 1
+                        print()
+
+                    step += 1
+
+                except Exception as e:
+                    print(f"\n⚠️ AGENT ERROR: {e}")
+                    print(f"Error occurred with {self.agent.__class__.__name__} at step {step}")
+                    agent_error = True
+                    paused = True
+                    print("\nEpisode paused. Options:")
+                    print("  A - Change to a different agent")
+                    print("  R - Reset episode")
+                    print("  ESC - Quit")
 
             # Render
             self.env.render()
@@ -373,6 +536,7 @@ class InteractiveSLAMViewer:
         if done:
             print("\n" + "="*50)
             print("EPISODE COMPLETE")
+            print(f"Agent: {self.agent.__class__.__name__}")
             print(f"Steps: {step}")
             print(f"Total Reward: {total_reward:.2f}")
 
@@ -386,6 +550,29 @@ class InteractiveSLAMViewer:
                     print("✗ Task failed")
 
             print("="*50)
+
+            # Ask if user wants to continue with a different agent
+            print("\nWhat would you like to do?")
+            print("1. Try another agent on the same environment")
+            print("2. Run same agent again")
+            print("3. Change configuration")
+            print("4. Quit")
+
+            choice = input("\nEnter choice (1-4): ").strip()
+
+            if choice == '1':
+                print("\nSelect a new agent:")
+                self.select_agent(quick_select=True)
+                self.agent.reset()
+                return 'continue_new_agent'
+            elif choice == '2':
+                return 'continue_same'
+            elif choice == '3':
+                return 'change_config'
+            else:
+                return 'quit'
+
+        return 'interrupted' if not self.running else 'continue_same'
 
     def run(self):
         """Main execution loop"""
@@ -412,37 +599,35 @@ class InteractiveSLAMViewer:
 
             # Run episodes
             while True:
-                self.run_episode()
+                result = self.run_episode()
 
-                if not self.running:
-                    break
-
-                # Ask what to do next
-                print("\nOptions:")
-                print("1. Run another episode (same config)")
-                print("2. Change configuration")
-                print("3. Quit")
-
-                choice = input("Enter choice (1-3): ").strip()
-
-                if choice == '2':
-                    # Close current environment
-                    self.env.close()
-                    break
-                elif choice == '3':
-                    self.env.close()
-                    pygame.quit()
+                if result == 'quit' or result == 'interrupted':
+                    if self.env:
+                        self.env.close()
+                    if self.pygame_initialized:
+                        pygame.quit()
+                        self.pygame_initialized = False
                     print("\nGoodbye!")
                     return
-                # else continue with same config
-
-            if not self.running:
-                break
+                elif result == 'change_config':
+                    # Close current environment
+                    self.env.close()
+                    # Quit pygame to reset video system
+                    pygame.quit()
+                    self.pygame_initialized = False
+                    break
+                elif result == 'continue_new_agent':
+                    # Continue with the newly selected agent
+                    continue
+                else:  # continue_same
+                    continue
 
         # Cleanup
         if self.env:
             self.env.close()
-        pygame.quit()
+        if self.pygame_initialized:
+            pygame.quit()
+            self.pygame_initialized = False
         print("\nGoodbye!")
 
 

@@ -2,6 +2,8 @@
 Doorway Traversal Agent that extends the navigation agent.
 
 This agent reuses the A* navigation logic and adds doorway-specific behavior.
+
+ADDED: State tracking for agent execution status
 """
 
 import numpy as np
@@ -10,6 +12,7 @@ from enum import IntEnum
 
 # Import the simple navigation agent we created earlier
 from agents.a_star_navigation_agent import AStarNavigationAgent
+from agents.base_agent import AgentState
 from environments.base.constants import Action, TileType
 
 
@@ -30,6 +33,8 @@ class DoorwayEntryAgent(AStarNavigationAgent):
     2. Navigate to nearest unvisited doorway using A*
     3. Step through the doorway
     4. Repeat
+
+    Tracks execution state for coordination with other agents
     """
 
     def __init__(self, num_agents: int = 1):
@@ -38,60 +43,84 @@ class DoorwayEntryAgent(AStarNavigationAgent):
         self.current_target = None
         self.state = DoorwayState.FINDING
         self.entry_position = None
+        self.max_doorways = 10  # Maximum doorways to visit before completion
+        self.no_doorway_counter = 0  # Counter for when no doorways are found
+        self.max_no_doorway_steps = 50  # Steps to explore when no doorways found
 
     def get_actions(self, observations: Dict[str, Any], info: Dict[str, Any]) -> np.ndarray:
         """Main action selection with doorway logic."""
-        if self.num_agents != 1:
-            raise ValueError("This agent only supports single agent navigation")
+        try:
+            # Update execution state when first called
+            if self.execution_state == AgentState.NOT_YET_STARTED:
+                self.execution_state = AgentState.IN_PROGRESS
 
-        # Extract state
-        map_grid = observations['global_map']
-        pos = tuple(observations['positions'][0])
-        facing = observations['facings'][0]
+            if self.num_agents != 1:
+                self.set_error("This agent only supports single agent navigation")
+                raise ValueError("This agent only supports single agent navigation")
 
-        # State machine for doorway traversal
-        if self.state == DoorwayState.FINDING:
-            # Find nearest unvisited doorway
-            doorway = self._find_nearest_doorway(pos, map_grid)
-            if doorway:
-                self.current_target = doorway
-                self.state = DoorwayState.APPROACHING
-                # Set goal for parent navigation agent
-                observations['goal_position'] = np.array(doorway)
-            else:
-                # No doorways found, explore
-                return np.array([self._explore(pos, facing, map_grid)])
+            # Check if we've visited enough doorways
+            if len(self.visited_doorways) >= self.max_doorways:
+                self.execution_state = AgentState.COMPLETED
+                return np.array([Action.STAY])
 
-        elif self.state == DoorwayState.APPROACHING:
-            # Check if reached doorway
-            if pos == self.current_target:
-                self.entry_position = pos
-                self.state = DoorwayState.ENTERING
-                # Move forward through doorway
-                return np.array([Action.FORWARD])
-            # Use parent's A* navigation
-            observations['goal_position'] = np.array(self.current_target)
+            # Extract state
+            map_grid = observations['global_map']
+            pos = tuple(observations['positions'][0])
+            facing = observations['facings'][0]
 
-        elif self.state == DoorwayState.ENTERING:
-            # Check if we've moved through
-            if pos != self.entry_position:
-                # Successfully passed through
-                self.visited_doorways.add(self.current_target)
-                self.current_target = None
-                self.state = DoorwayState.COMPLETE
+            # State machine for doorway traversal
+            if self.state == DoorwayState.FINDING:
+                # Find nearest unvisited doorway
+                doorway = self._find_nearest_doorway(pos, map_grid)
+                if doorway:
+                    self.current_target = doorway
+                    self.state = DoorwayState.APPROACHING
+                    self.no_doorway_counter = 0
+                    # Set goal for parent navigation agent
+                    observations['goal_position'] = np.array(doorway)
+                else:
+                    # No doorways found, explore
+                    self.no_doorway_counter += 1
+                    if self.no_doorway_counter >= self.max_no_doorway_steps:
+                        # No more doorways to find, task complete
+                        self.execution_state = AgentState.COMPLETED
+                        return np.array([Action.STAY])
+                    return np.array([self._explore(pos, facing, map_grid)])
+
+            elif self.state == DoorwayState.APPROACHING:
+                # Check if reached doorway
+                if pos == self.current_target:
+                    self.entry_position = pos
+                    self.state = DoorwayState.ENTERING
+                    # Move forward through doorway
+                    return np.array([Action.FORWARD])
+                # Use parent's A* navigation
+                observations['goal_position'] = np.array(self.current_target)
+
+            elif self.state == DoorwayState.ENTERING:
+                # Check if we've moved through
+                if pos != self.entry_position:
+                    # Successfully passed through
+                    self.visited_doorways.add(self.current_target)
+                    self.current_target = None
+                    self.state = DoorwayState.COMPLETE
+                return np.array([Action.STAY])
+
+            elif self.state == DoorwayState.COMPLETE:
+                # Reset to find next doorway
+                self.state = DoorwayState.FINDING
+                self.path = []  # Clear navigation path
+                return np.array([Action.STAY])
+
+            # Use parent's navigation if we have a target
+            if self.state == DoorwayState.APPROACHING:
+                return super().get_actions(observations, info)
+
             return np.array([Action.STAY])
 
-        elif self.state == DoorwayState.COMPLETE:
-            # Reset to find next doorway
-            self.state = DoorwayState.FINDING
-            self.path = []  # Clear navigation path
+        except Exception as e:
+            self.set_error(str(e))
             return np.array([Action.STAY])
-
-        # Use parent's navigation if we have a target
-        if self.state == DoorwayState.APPROACHING:
-            return super().get_actions(observations, info)
-
-        return np.array([Action.STAY])
 
     def _find_nearest_doorway(self, pos: Tuple[int, int],
                              map_grid: np.ndarray) -> Optional[Tuple[int, int]]:
@@ -149,18 +178,21 @@ class DoorwayEntryAgent(AStarNavigationAgent):
 
     def reset(self) -> None:
         """Reset agent state."""
-        super().reset()
+        super().reset()  # Reset execution state and parent state
         self.visited_doorways = set()
         self.current_target = None
         self.state = DoorwayState.FINDING
         self.entry_position = None
+        self.no_doorway_counter = 0
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get agent metrics."""
-        metrics = super().get_metrics()
+        metrics = super().get_metrics()  # Get base metrics including execution state
         metrics.update({
-            'state': self.state.name,
+            'doorway_state': self.state.name,
             'doorways_visited': len(self.visited_doorways),
             'current_target': self.current_target,
+            'max_doorways': self.max_doorways,
+            'no_doorway_counter': self.no_doorway_counter
         })
         return metrics

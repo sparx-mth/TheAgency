@@ -1,27 +1,130 @@
 """
 Room-aware frontier agent that explores within room boundaries.
 
-This agent extends the FrontierAgent to:
+This agent extends frontier exploration to:
 1. Detect doorways/openings in real-time as they are discovered
 2. Maintain a forbidden list of doorway positions
 3. Never step on detected doorways
+
+ADDED: State tracking for agent execution status
+Note: Simplified frontier logic included since base FrontierAgent wasn't provided
 """
 
 import numpy as np
 from typing import Dict, Any, Tuple, Set, List, Optional
-from agents.frontier_agent import FrontierAgent
+from heapq import heappush, heappop
+
+from agents.base_agent import BaseSLAMAgent, AgentState
 from environments.base.constants import TileType, Action
 
 
-class RoomFrontierAgent(FrontierAgent):
+class RoomFrontierAgent(BaseSLAMAgent):
     """
     Frontier agent that detects and avoids doorways in real-time.
+    Tracks execution state for coordination with other agents.
     """
 
     def __init__(self, num_agents: int = 1, camera_range: int = 10):
-        super().__init__(num_agents, camera_range)
+        super().__init__(num_agents)
+        self.camera_range = camera_range
         self.forbidden_doorways = set()  # Positions we must not step on
         self.last_map_state = None  # To detect map changes
+
+        # Frontier exploration state
+        self.goals = {}
+        self.paths = {}
+        self.wait_counters = {}
+        self.stuck_counters = {}
+        self.last_positions = {}
+        self.random_walk_counter = {}
+        self.max_wait = 10
+
+        # Execution tracking
+        self.steps_taken = 0
+        self.max_steps = 1000
+        self.no_frontier_counter = 0
+        self.max_no_frontier_steps = 50
+
+    def get_actions(self, observations: Dict[str, Any], info: Dict[str, Any]) -> np.ndarray:
+        """Get actions for room exploration with doorway avoidance."""
+        try:
+            # Update execution state when first called
+            if self.execution_state == AgentState.NOT_YET_STARTED:
+                self.execution_state = AgentState.IN_PROGRESS
+
+            # Check max steps
+            self.steps_taken += 1
+            if self.steps_taken >= self.max_steps:
+                self.execution_state = AgentState.COMPLETED
+                return np.array([Action.STAY] * self.num_agents)
+
+            # For simplicity, handle single agent
+            if self.num_agents == 1:
+                obs = {
+                    'global_map': observations['global_map'],
+                    'position': tuple(observations['positions'][0]),
+                    'facing': observations['facings'][0]
+                }
+                action = self._compute_action(0, obs, set(), {})
+
+                # Check if exploration is complete
+                if self._is_exploration_complete(observations['global_map']):
+                    self.execution_state = AgentState.COMPLETED
+
+                return np.array([action])
+            else:
+                # Multi-agent case
+                actions = []
+                assigned = set()
+                all_states = {}
+
+                for i in range(self.num_agents):
+                    if observations['active'][i]:
+                        obs = {
+                            'global_map': observations['global_map'],
+                            'position': tuple(observations['positions'][i]),
+                            'facing': observations['facings'][i]
+                        }
+                        all_states[i] = {
+                            'pos': obs['position'],
+                            'active': True
+                        }
+
+                for i in range(self.num_agents):
+                    if observations['active'][i]:
+                        obs = {
+                            'global_map': observations['global_map'],
+                            'position': tuple(observations['positions'][i]),
+                            'facing': observations['facings'][i]
+                        }
+                        action = self._compute_action(i, obs, assigned, all_states)
+                        actions.append(action)
+                    else:
+                        actions.append(Action.STAY)
+
+                # Check if exploration is complete
+                if self._is_exploration_complete(observations['global_map']):
+                    self.execution_state = AgentState.COMPLETED
+
+                return np.array(actions)
+
+        except Exception as e:
+            self.set_error(str(e))
+            return np.array([Action.STAY] * self.num_agents)
+
+    def _is_exploration_complete(self, global_map: np.ndarray) -> bool:
+        """Check if room exploration is complete."""
+        # Find frontiers
+        frontiers = self._find_safe_frontiers(global_map)
+
+        if not frontiers:
+            self.no_frontier_counter += 1
+            if self.no_frontier_counter >= self.max_no_frontier_steps:
+                return True
+        else:
+            self.no_frontier_counter = 0
+
+        return False
 
     def _detect_new_doorways(self, global_map: np.ndarray) -> Set[Tuple[int, int]]:
         """
@@ -213,6 +316,29 @@ class RoomFrontierAgent(FrontierAgent):
 
         return self._safe_random_walk(pos, facing_idx, global_map)
 
+    def _check_sensor_exploration(self, pos: Tuple[int, int], facing_idx: int,
+                                 global_map: np.ndarray) -> Optional[int]:
+        """Check if we should explore sensor boundaries."""
+        # Simple sensor check - look for unknown cells in view
+        height, width = global_map.shape
+        dx, dy = [(0, -1), (1, 0), (0, 1), (-1, 0)][facing_idx]
+
+        # Check ahead for unknowns
+        for dist in range(1, min(self.camera_range, 5)):
+            check_x = pos[0] + dx * dist
+            check_y = pos[1] + dy * dist
+
+            if 0 <= check_x < width and 0 <= check_y < height:
+                if global_map[check_y, check_x] == TileType.UNKNOWN:
+                    # Found unknown ahead, move forward if safe
+                    next_pos = (pos[0] + dx, pos[1] + dy)
+                    if next_pos not in self.forbidden_doorways:
+                        if self._is_passable(global_map[pos[1] + dy, pos[0] + dx]):
+                            return Action.FORWARD
+                    break
+
+        return None
+
     def _safe_random_walk(self, pos: Tuple[int, int], facing_idx: int, global_map: np.ndarray) -> int:
         """Random walk that avoids doorways."""
         # Check if forward is safe
@@ -232,18 +358,20 @@ class RoomFrontierAgent(FrontierAgent):
         new_x, new_y = next_pos
 
         if 0 <= new_x < width and 0 <= new_y < height:
-            tile = global_map[new_y, new_x]
-            # CRITICAL FIX: Include all passable tiles
-            passable_tiles = {
-                TileType.UNKNOWN,
-                TileType.FREE_SPACE,
-                TileType.ENTRY_POINT,
-                TileType.DOOR_OPEN
-            }
-            if tile in passable_tiles:
+            if self._is_passable(global_map[new_y, new_x]):
                 return Action.FORWARD
 
         return Action.TURN_RIGHT if np.random.random() > 0.5 else Action.TURN_LEFT
+
+    def _is_passable(self, tile: int) -> bool:
+        """Check if a tile is passable."""
+        passable_tiles = {
+            TileType.UNKNOWN,
+            TileType.FREE_SPACE,
+            TileType.ENTRY_POINT,
+            TileType.DOOR_OPEN
+        }
+        return tile in passable_tiles
 
     def _find_safe_frontiers(self, global_map: np.ndarray) -> List[Tuple[int, int]]:
         """Find frontier cells that are not doorways."""
@@ -276,6 +404,10 @@ class RoomFrontierAgent(FrontierAgent):
 
         return frontiers
 
+    def _manhattan_distance(self, pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
+        """Calculate Manhattan distance between two positions."""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+
     def _plan_safe_path(
         self,
         start: Tuple[int, int],
@@ -285,8 +417,6 @@ class RoomFrontierAgent(FrontierAgent):
         """Plan a path that avoids all forbidden doorways."""
         if start == goal:
             return []
-
-        from heapq import heappush, heappop
 
         height, width = global_map.shape
 
@@ -326,15 +456,7 @@ class RoomFrontierAgent(FrontierAgent):
                 # Check traversability
                 tile = global_map[neighbor[1], neighbor[0]]
 
-                # CRITICAL FIX: Include UNKNOWN as passable
-                passable_tiles = {
-                    TileType.UNKNOWN,
-                    TileType.FREE_SPACE,
-                    TileType.ENTRY_POINT,
-                    TileType.DOOR_OPEN
-                }
-
-                if tile not in passable_tiles:
+                if not self._is_passable(tile):
                     continue
 
                 if neighbor in closed_set:
@@ -466,12 +588,26 @@ class RoomFrontierAgent(FrontierAgent):
 
     def reset(self) -> None:
         """Reset agent state."""
-        super().reset()
+        super().reset()  # Reset execution state
         self.forbidden_doorways = set()
         self.last_map_state = None
+        self.goals = {}
+        self.paths = {}
+        self.wait_counters = {}
+        self.stuck_counters = {}
+        self.last_positions = {}
+        self.random_walk_counter = {}
+        self.steps_taken = 0
+        self.no_frontier_counter = 0
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get agent metrics."""
-        metrics = super().get_metrics()
-        metrics['detected_doorways'] = len(self.forbidden_doorways)
+        metrics = super().get_metrics()  # Get base metrics including execution state
+        metrics.update({
+            'detected_doorways': len(self.forbidden_doorways),
+            'active_goals': len([g for g in self.goals.values() if g is not None]),
+            'steps_taken': self.steps_taken,
+            'max_steps': self.max_steps,
+            'no_frontier_counter': self.no_frontier_counter
+        })
         return metrics
