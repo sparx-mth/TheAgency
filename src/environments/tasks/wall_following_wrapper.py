@@ -450,7 +450,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
             extended_boundaries = set()
 
             # Extend one cell up (north) - don't check what's there
-            extended_y = first_y - 1
+            extended_y = first_y - 0
             if extended_y >= 0:
                 extended_boundaries.add((x, extended_y))
             else:
@@ -458,7 +458,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 extended_boundaries.add((x, first_y))
 
             # Extend one cell down (south) - don't check what's there
-            extended_y = last_y + 1
+            extended_y = last_y + 0
             if extended_y < true_map.shape[0]:
                 extended_boundaries.add((x, extended_y))
             else:
@@ -478,7 +478,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
             extended_boundaries = set()
 
             # Extend one cell left (west) - don't check what's there
-            extended_x = first_x - 1
+            extended_x = first_x - 0
             if extended_x >= 0:
                 extended_boundaries.add((extended_x, y))
             else:
@@ -486,7 +486,7 @@ class WallFollowingWrapper(BaseTaskWrapper):
                 extended_boundaries.add((first_x, y))
 
             # Extend one cell right (east) - don't check what's there
-            extended_x = last_x + 1
+            extended_x = last_x + 0
             if extended_x < true_map.shape[1]:
                 extended_boundaries.add((extended_x, y))
             else:

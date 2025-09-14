@@ -112,7 +112,7 @@ def run_manual_test(env_class: Any, env_config: dict = None, precomputed_data: d
         'randomize': True,
         'render_mode': 'human',
         'default_sensor_params': {
-            'max_range': 4,  # Short range
+            'max_range': 2,  # Short range
             'fov_deg': 60,  # Narrow FOV
             'num_rays': 24
         }
@@ -284,7 +284,7 @@ def select_map_option():
     else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
-            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt'
+            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_20.txt'
         return {'map_path': map_path, 'randomize': False}, map_path
 
 
@@ -366,7 +366,7 @@ if __name__ == "__main__":
             }
         else:
             sensor_params = {
-                'max_range': 4,
+                'max_range': 2,
                 'fov_deg': 60,
                 'num_rays': 24
             }
