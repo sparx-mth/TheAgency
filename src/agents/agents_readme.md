@@ -1,90 +1,101 @@
 # Mapping Agents: Preconditions & Postconditions
 
-This document describes the **7 agents** used for hierarchical house mapping.  
+This document describes the **4 agents** implemented for hierarchical house mapping.  
 Each agent has defined **Preconditions** (when it can be activated) and **Postconditions** (when it is considered complete).
 
 ---
 
 ## 1. Wall-Following Agent
+**File:** `wall_following_agent.py`
+
+**Purpose:** Finds the closest wall, approaches it, and follows along its length in both directions.
 
 **Preconditions:**
-- A wall is detected adjacent to the agent (left, right, or front) within sensor range.
+- A wall is detected within sensor range 
+- Agent is not already following a wall
 
 **Postconditions:**
-- **End of wall**
-- **Corner reached** 
-- **Gap/Opening detected** 
+- Wall has been followed to one end
+- 180° turn completed
+- Wall has been followed back to the other end
+- State reaches DONE
 
+**States:**
+- FIND_WALL → APPROACH_WALL → FOLLOW_WALL → TURN_AROUND → FOLLOW_BACK → DONE
 
 ---
 
-## 2. Enter Doorway / Enter Room Agent
+## 2. Doorway Entry Agent
+**File:** `doorway_traversal_agent.py`
+
+**Purpose:** Detects doorways (free spaces with walls on opposite sides) and navigates through them.
 
 **Preconditions:**
-- A doorway or gap in the wall is detected within sensor range.
+- A doorway pattern is detected (free space with walls on opposite sides)
+- Doorway has not been previously visited
+- Path to doorway is navigable
 
 **Postconditions:**
-- The agent passes through the doorway.
-- The environment changes into a more open space (room) or another corridor.
+- Agent has passed through the doorway (position changed after entering)
+- Doorway is marked as visited
+- State returns to FINDING for next doorway
+
+**States:**
+- FINDING → APPROACHING → ENTERING → COMPLETE (cycles back to FINDING)
 
 ---
 
-## 3. Corridor Traversal Agent
+## 3. Room Frontier Agent
+**File:** `room_frontier_agent.py`
+
+**Purpose:** Explores room interiors using frontier-based exploration while detecting and avoiding doorways.
 
 **Preconditions:**
-- Parallel walls are detected on both sides.
-- Corridor width is relatively narrow compared to an open room.
+- Agent is inside a room or open space
+- Unexplored frontiers exist (known cells adjacent to unknown cells)
+- Detected doorways are marked as forbidden zones
 
 **Postconditions:**
-- Reached an intersection (branching point).
-- Reached a doorway leading into a room.
-- Reached the end of the corridor (wall directly ahead).
+- All accessible frontiers within the room have been explored
+- No more unknown cells adjacent to known free space (within room boundaries)
+- Agent never steps on detected doorways
+
+**Key Features:**
+- Real-time doorway detection (wall-space-wall patterns)
+- Maintains forbidden_doorways set to prevent crossing thresholds
+- Plans paths that avoid doorway positions
 
 ---
 
-## 4. Exit Room / Exit Doorway Agent
+## 4. A* Navigation Agent
+**File:** `a_star_navigation_agent.py`
+
+**Purpose:** Navigate to specific goal positions using A* pathfinding.
 
 **Preconditions:**
-- The agent is currently inside a bounded room.
-- One or more exit doorways are known/detected.
+- A valid goal position is provided
+- Current position is known
+- Map information is available (treats unknown as passable)
 
 **Postconditions:**
-- The agent passes through an exit doorway.
-- Current position is now outside the room (corridor or another room).
+- Agent reaches the goal position (within tolerance)
+- Returns STAY action when at goal
+- Replans if path becomes blocked
+
+**Key Features:**
+- Optimistic planning (assumes unknown cells are passable)
+- Dynamic replanning when obstacles discovered
+- Falls back to exploration when no goal is set
 
 ---
 
-## 5. Room Scanning Agent (without leaving)
+## Agent Hierarchy and Coordination
 
-**Preconditions:**
-- The agent is inside a room (open area vs corridor).
+The agents can be combined in a hierarchical manner:
 
-**Postconditions:**
-- Room area has been fully scanned (coverage ≥ X%, e.g. 90%).
-- The agent remains inside the room, near an exit doorway (ready to continue).
+1. **Room-level exploration**: Room Frontier Agent explores within room boundaries
+2. **Inter-room navigation**: Doorway Entry Agent moves between rooms
+3. **Perimeter mapping**: Wall-Following Agent traces structural boundaries
+4. **Goal-directed navigation**: A* Navigation Agent for specific target locations
 
----
-
-## 6. Return-to-Base Agent
-
-**Preconditions:**
-- Base location is known (origin or checkpoint).
-- Current position is known within the partial map.
-
-**Postconditions:**
-- Agent reaches the base location (within tolerance ε).
-- System can reset/end task or start a new one.
-
----
-
-## 7. Go-to-Specific-Point Agent
-
-**Preconditions:**
-- A target point exists in the map.
-- Path to target is navigable (no known blockages).
-
-**Postconditions:**
-- Agent reaches the target point within tolerance ε.
-- Current position matches the target location.
-
----
+Each agent operates with clear activation conditions and completion criteria, allowing for seamless transitions between exploration strategies based on the current mapping context.

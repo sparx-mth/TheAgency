@@ -420,67 +420,80 @@ class WallFollowingWrapper(BaseTaskWrapper):
 
     def _find_extended_wall_boundaries(self, accessible_cells: Set[Tuple[int, int]], true_map) -> Set[Tuple[int, int]]:
         """
-        Find boundary cells adjacent to wall endpoints in free space.
+        Find the extended boundary cells - the cells one position beyond the start and end of the accessible wall segment.
+        These will be the red frame cells.
         """
         if not accessible_cells:
             return set()
 
-        accessible_list = list(accessible_cells)
-        is_vertical = all(cell[0] == accessible_list[0][0] for cell in accessible_list)
+        if len(accessible_cells) == 1:
+            # For a single cell, just return it
+            return accessible_cells
 
-        boundaries = set()
+        # Convert to list and sort to find endpoints
+        accessible_list = list(accessible_cells)
+
+        # Check if vertical or horizontal
+        first_cell = accessible_list[0]
+        is_vertical = all(cell[0] == first_cell[0] for cell in accessible_list)
 
         if is_vertical:
+            # Sort by y coordinate
             accessible_list.sort(key=lambda cell: cell[1])
             x = accessible_list[0][0]
+
+            # Get the actual wall endpoints
             first_y = accessible_list[0][1]
             last_y = accessible_list[-1][1]
 
-            # Check positions adjacent to endpoints
-            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-                # Check near first endpoint
-                check_x, check_y = x + dx, first_y + dy
-                if (0 <= check_x < true_map.shape[1] and
-                        0 <= check_y < true_map.shape[0] and
-                        true_map[check_y, check_x] in [TileType.FREE_SPACE, TileType.ENTRY_POINT]):
-                    boundaries.add((check_x, check_y-1))
+            # SIMPLY extend one cell beyond in each direction
+            extended_boundaries = set()
 
-                # Check near last endpoint
-                check_x, check_y = x + dx, last_y + dy
-                if (0 <= check_x < true_map.shape[1] and
-                        0 <= check_y < true_map.shape[0] and
-                        true_map[check_y, check_x] in [TileType.FREE_SPACE, TileType.ENTRY_POINT]):
-                    boundaries.add((check_x, check_y+1))
+            # Extend one cell up (north) - don't check what's there
+            extended_y = first_y - 0
+            if extended_y >= 0:
+                extended_boundaries.add((x, extended_y))
+            else:
+                # If out of bounds, use the original
+                extended_boundaries.add((x, first_y))
+
+            # Extend one cell down (south) - don't check what's there
+            extended_y = last_y + 0
+            if extended_y < true_map.shape[0]:
+                extended_boundaries.add((x, extended_y))
+            else:
+                # If out of bounds, use the original
+                extended_boundaries.add((x, last_y))
+
         else:
-            # Similar for horizontal walls
+            # Sort by x coordinate
             accessible_list.sort(key=lambda cell: cell[0])
             y = accessible_list[0][1]
+
+            # Get the actual wall endpoints
             first_x = accessible_list[0][0]
             last_x = accessible_list[-1][0]
 
-            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-                # Check near first endpoint
-                check_x, check_y = first_x + dx, y + dy
-                if (0 <= check_x < true_map.shape[1] and
-                        0 <= check_y < true_map.shape[0] and
-                        true_map[check_y, check_x] in [TileType.FREE_SPACE, TileType.ENTRY_POINT]):
-                    boundaries.add((check_x-1, check_y))
+            # SIMPLY extend one cell beyond in each direction
+            extended_boundaries = set()
 
-                # Check near last endpoint
-                check_x, check_y = last_x + dx, y + dy
-                if (0 <= check_x < true_map.shape[1] and
-                        0 <= check_y < true_map.shape[0] and
-                        true_map[check_y, check_x] in [TileType.FREE_SPACE, TileType.ENTRY_POINT]):
-                    boundaries.add((check_x+1, check_y))
-
-        # If no free spaces found, use the endpoints themselves
-        if not boundaries:
-            if is_vertical:
-                boundaries = {accessible_list[0], accessible_list[-1]}
+            # Extend one cell left (west) - don't check what's there
+            extended_x = first_x - 0
+            if extended_x >= 0:
+                extended_boundaries.add((extended_x, y))
             else:
-                boundaries = {accessible_list[0], accessible_list[-1]}
+                # If out of bounds, use the original
+                extended_boundaries.add((first_x, y))
 
-        return boundaries
+            # Extend one cell right (east) - don't check what's there
+            extended_x = last_x + 0
+            if extended_x < true_map.shape[1]:
+                extended_boundaries.add((extended_x, y))
+            else:
+                # If out of bounds, use the original
+                extended_boundaries.add((last_x, y))
+
+        return extended_boundaries
 
     def _is_adjacent_to_wall(self, pos: Tuple[int, int]) -> bool:
         """Check if position is adjacent to the target wall."""

@@ -9,11 +9,22 @@ Updated to work with the new unified state format where observations contain:
 - positions: Array of all agent positions
 - facings: Array of all agent facing directions
 - active: Array of agent active states
+
+ADDED: State tracking for agent execution status
 """
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Union
 import numpy as np
+from enum import Enum
+
+
+class AgentState(Enum):
+    """Execution state of an agent."""
+    NOT_YET_STARTED = "not_yet_started"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    ERROR = "error"
 
 
 class BaseSLAMAgent(ABC):
@@ -35,6 +46,7 @@ class BaseSLAMAgent(ABC):
 
     Attributes:
         num_agents: Number of agents this controller manages
+        execution_state: Current execution state of the agent
     """
 
     def __init__(self, num_agents: int = 1):
@@ -45,6 +57,8 @@ class BaseSLAMAgent(ABC):
             num_agents: Number of agents to control (1 for single-agent)
         """
         self.num_agents = num_agents
+        self.execution_state = AgentState.NOT_YET_STARTED
+        self._error_message = None
 
     @abstractmethod
     def get_actions(
@@ -72,6 +86,63 @@ class BaseSLAMAgent(ABC):
         """
         pass
 
+    def get_state(self) -> AgentState:
+        """
+        Get the current execution state of the agent.
+
+        Returns:
+            Current AgentState
+        """
+        return self.execution_state
+
+    def set_state(self, state: AgentState) -> None:
+        """
+        Set the execution state of the agent.
+
+        Args:
+            state: New AgentState to set
+        """
+        self.execution_state = state
+        if state != AgentState.ERROR:
+            self._error_message = None
+
+    def set_error(self, error_message: str) -> None:
+        """
+        Set the agent to error state with a message.
+
+        Args:
+            error_message: Description of the error
+        """
+        self.execution_state = AgentState.ERROR
+        self._error_message = error_message
+
+    def get_error_message(self) -> str:
+        """
+        Get the error message if in error state.
+
+        Returns:
+            Error message or None
+        """
+        return self._error_message
+
+    def is_ready_to_run(self) -> bool:
+        """
+        Check if agent is ready to be executed.
+
+        Returns:
+            True if agent can be run
+        """
+        return self.execution_state in [AgentState.NOT_YET_STARTED, AgentState.IN_PROGRESS]
+
+    def is_completed(self) -> bool:
+        """
+        Check if agent has completed its task.
+
+        Returns:
+            True if agent is in completed state
+        """
+        return self.execution_state == AgentState.COMPLETED
+
     def reset(self) -> None:
         """
         Reset the agent's internal state.
@@ -79,10 +150,11 @@ class BaseSLAMAgent(ABC):
         Called at the beginning of each episode. Agents should reset any
         internal state, memory, or learned parameters here.
 
-        Default implementation does nothing, but stateful agents should
-        override this method.
+        Default implementation resets execution state, but stateful agents should
+        override this method and call super().reset().
         """
-        pass
+        self.execution_state = AgentState.NOT_YET_STARTED
+        self._error_message = None
 
     def save(self, path: str) -> None:
         """
@@ -116,7 +188,10 @@ class BaseSLAMAgent(ABC):
         Returns:
             Dictionary of metric names to values
         """
-        return {}
+        return {
+            'execution_state': self.execution_state.value,
+            'error_message': self._error_message
+        }
 
     @property
     def is_single_agent(self) -> bool:

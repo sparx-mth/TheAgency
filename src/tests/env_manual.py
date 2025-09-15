@@ -112,7 +112,7 @@ def run_manual_test(env_class: Any, env_config: dict = None, precomputed_data: d
         'randomize': True,
         'render_mode': 'human',
         'default_sensor_params': {
-            'max_range': 4,  # Short range
+            'max_range': 2,  # Short range
             'fov_deg': 60,  # Narrow FOV
             'num_rays': 24
         }
@@ -239,7 +239,7 @@ def run_manual_test(env_class: Any, env_config: dict = None, precomputed_data: d
     # Cleanup
     env.close()
     pygame.quit()
-1
+
 
 def select_environment():
     """Interactive menu to select which environment to test."""
@@ -346,7 +346,7 @@ if __name__ == "__main__":
 
         # Configure sensor parameters
         print("\nSensor configuration:")
-        print("1. Default (range=4 fov=60°)")
+        print("1. Default (range=2 fov=60°)")
         print("2. Short range (range=3, fov=25°)")
         print("3. Long range (range=7, fov=45°)")
 
@@ -367,7 +367,7 @@ if __name__ == "__main__":
         else:
             sensor_params = {
                 'max_range': 2,
-                'fov_deg': 70,
+                'fov_deg': 60,
                 'num_rays': 24
             }
 
