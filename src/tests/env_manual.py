@@ -235,11 +235,11 @@ def run_manual_test(env_class: Any, env_config: dict = None, precomputed_data: d
         # Render
         env.render()
         clock.tick(10)  # 10 FPS for manual control
-
+    print(info)
     # Cleanup
     env.close()
     pygame.quit()
-
+1
 
 def select_environment():
     """Interactive menu to select which environment to test."""
@@ -284,7 +284,7 @@ def select_map_option():
     else:
         map_path = input("Enter map file path (or press Enter for default): ").strip()
         if not map_path:
-            map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt'
+            map_path = '/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt'
         return {'map_path': map_path, 'randomize': False}, map_path
 
 
@@ -346,7 +346,7 @@ if __name__ == "__main__":
 
         # Configure sensor parameters
         print("\nSensor configuration:")
-        print("1. Default (range=2 fov=90°)")
+        print("1. Default (range=4 fov=60°)")
         print("2. Short range (range=3, fov=25°)")
         print("3. Long range (range=7, fov=45°)")
 
@@ -366,8 +366,8 @@ if __name__ == "__main__":
             }
         else:
             sensor_params = {
-                'max_range': 4,
-                'fov_deg': 60,
+                'max_range': 2,
+                'fov_deg': 70,
                 'num_rays': 24
             }
 

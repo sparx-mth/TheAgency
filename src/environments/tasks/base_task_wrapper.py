@@ -85,7 +85,7 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
             actions = np.array([action], dtype=np.int32)
 
         # Step base environment
-        obs, base_reward, terminated, truncated, info = self.env.step(actions)
+        obs, base_reward, terminated, truncated, _ = self.env.step(actions)
 
         # Compute task-specific reward
         task_reward = self._compute_task_reward(obs, action, base_reward)
@@ -96,18 +96,21 @@ class BaseTaskWrapper(gym.Wrapper, ABC):
         # Update termination based on task
         if self.task_status == TaskStatus.SUCCESS:
             terminated = True
-            info['task_success'] = True
         elif self.task_status == TaskStatus.FAILURE:
             truncated = True
-            info['task_success'] = False
 
         self.task_step += 1
 
-        # Add task info
-        info['task_status'] = self.task_status.value
-        info['task_step'] = self.task_step
-
+        # Always build info through _get_info()
+        info = self._get_info()
         return obs, task_reward, terminated, truncated, info
+
+    def _get_info(self):
+        """Base info fields common to all tasks."""
+        return {
+            "task_status": self.task_status.value,
+            "task_step": self.task_step,
+        }
 
     @abstractmethod
     def _reset_task(self):

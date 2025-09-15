@@ -12,7 +12,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 
 from environments.tasks.room_exploration_wrapper import RoomExplorationWrapper
 from sensors.camera_sensor import CameraSensor
-from rl.feature_extractors.cnn_feature_extractor import NavigationCNNExtractor
+from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 
 # Import pre-computation utility
 from environments.tasks.room_utils import precompute_room_data  # Adjust import path
@@ -22,7 +22,7 @@ MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 4  # Increased for better parallelization
-STEPS_PER_STAGE = 10_000_000
+STEPS_PER_STAGE = 1_000_000
 
 # Pre-compute room data ONCE at module level
 print(f"Pre-computing room data from {MAP_PATH}...")
@@ -64,10 +64,11 @@ class RoomExplorationCallback(BaseCallback):
                     self.episode_rewards.append(info['episode']['r'])
                     self.episode_lengths.append(info['episode']['l'])
 
-                    # Task metrics
-                    self.task_successes.append(info.get('task_success', False))
-                    self.door_failures.append(info.get('passed_through_door', False))
-                    self.room_coverages.append(info.get('room_coverage', 0.0))
+                # Task metrics - look in the info dict directly, not in episode
+                # The Monitor wrapper doesn't include custom keys in episode dict
+                self.task_successes.append(info.get('completion_achieved', False))
+                self.door_failures.append(info.get('passed_through_door', False))
+                self.room_coverages.append(info.get('room_coverage', 0.0))
 
                 # Print every 100 episodes
                 if self.episode_count % 100 == 0:
@@ -86,6 +87,7 @@ class RoomExplorationCallback(BaseCallback):
                     elapsed = time.time() - self.start_time
                     fps = self.total_steps / elapsed if elapsed > 0 else 0
                     epsilon = self.model.exploration_schedule(self.model._current_progress_remaining)
+                    loss = self.model.logger.name_to_value.get("train/loss", None)
 
                     print(f"Ep {self.episode_count:5d} | "
                           f"Steps: {self.total_steps:7,d} | "
@@ -94,7 +96,8 @@ class RoomExplorationCallback(BaseCallback):
                           f"Door Fail: {door_fail_rate:5.1f}% | "
                           f"Coverage: {avg_coverage:5.1f}% | "
                           f"ε: {epsilon:.3f} | "
-                          f"FPS: {fps:4.0f}")
+                          f"FPS: {fps:4.0f} | "
+                          f"Loss: {loss:.4f}" if loss is not None else "")
 
         return True
 
@@ -115,15 +118,15 @@ def create_env(coverage_threshold: float, env_id: int = 0):
             'width': actual_width,
             'height': actual_height,
             'num_agents': 1,
-            'max_steps': 2000,
+            'max_steps': 500,
             'map_path': MAP_PATH,
             'render_mode': None,
             'sensor_config': {0: sensor},
-            # Base rewards
-            'discovery_reward': 1.0,
-            'collision_penalty': -0.5,
-            'step_penalty': -0.01,
-            'completion_bonus': 50.0,
+            # Base rewards - DISABLED to let wrapper handle everything
+            'discovery_reward': 0.0,  # Was 1.0
+            'collision_penalty': -0.5,  # Keep collision penalty here
+            'step_penalty': 0.0,  # Was -0.01
+            'completion_bonus': 0.0,  # Was 50.0
         }
 
         # Create optimized wrapper with pre-computed rooms
@@ -131,13 +134,13 @@ def create_env(coverage_threshold: float, env_id: int = 0):
             env_config=env_config,
             # Pass pre-computed room data
             precomputed_rooms=PRECOMPUTED_ROOMS,
-            # Task rewards
-            exploration_reward=0.1,
-            door_penalty=-10.0,
-            completion_reward=10.0,
-            step_penalty=-0.001,
+            # Task rewards - THESE are the only rewards that matter
+            exploration_reward=1.0,  # Direct reward per new cell discovered
+            door_penalty=-5.0,  # Penalty for leaving room
+            completion_reward=100.0,  # Big reward for completing room
+            step_penalty=-0.01,  # Encourage efficiency
             coverage_threshold=coverage_threshold,
-            max_task_steps=500,
+            max_task_steps=300,
         )
 
         # Add monitor
@@ -168,7 +171,9 @@ def train():
 
     # Training stages with curriculum
     CURRICULUM = [
-        ("Stage 1: 100% Coverage", 1.0),
+        ("Stage 1: 90% Coverage", 0.9),
+        ("Stage 2: 95% Coverage", 0.95),
+        ("Stage 3: 100% Coverage", 1.0),
     ]
 
     print(f"Training stages: {len(CURRICULUM)}")
@@ -205,24 +210,24 @@ def train():
                 "MultiInputPolicy",
                 vec_env,
                 policy_kwargs=dict(
-                    features_extractor_class=NavigationCNNExtractor,
-                    features_extractor_kwargs=dict(features_dim=256),
-                    net_arch=[512, 512],
+                    features_extractor_class=SLAMCNNExtractor,
+                    features_extractor_kwargs=dict(features_dim=128),  # Reduced from 256
+                    net_arch=[256, 256],  # Reduced from [512, 512]
                 ),
                 # Hyperparameters
-                learning_rate=1e-4,
-                buffer_size=1_000_000,
-                learning_starts=1000,
-                batch_size=32,
+                learning_rate=5e-4,  # Increased from 1e-4 for faster learning
+                buffer_size=100_000,  # Reduced from 1M - plenty for simple task
+                learning_starts=500,  # Reduced from 1000
+                batch_size=64,  # Increased from 32 for more stable updates
                 tau=1.0,
-                gamma=0.99,
-                train_freq=4,
+                gamma=0.95,  # Reduced from 0.99 - shorter horizon for exploration
+                train_freq=1,  # More frequent training for simple task
                 gradient_steps=1,
-                target_update_interval=10000,
+                target_update_interval=5000,  # Reduced from 10000
                 # Exploration
-                exploration_fraction=0.7,
+                exploration_fraction=0.5,  # Reduced from 0.7 - learn exploitation faster
                 exploration_initial_eps=1.0,
-                exploration_final_eps=0.05,
+                exploration_final_eps=0.1,  # Increased from 0.05 - keep some exploration
                 # Other
                 max_grad_norm=10,
                 seed=42,
@@ -243,7 +248,7 @@ def train():
 
         # Checkpoint callback
         checkpoint_callback = CheckpointCallback(
-            save_freq=500_000 // N_ENVS,
+            save_freq=5_000 // N_ENVS,
             save_path="./models/room_exploration_checkpoints/",
             name_prefix=f"stage_{stage_idx + 1}_coverage_{int(coverage_threshold * 100)}"
         )

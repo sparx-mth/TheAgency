@@ -376,16 +376,18 @@ class RoomExplorationWrapper(BaseTaskWrapper):
         return self.env._get_observations()
 
     def _get_info(self):
-        """Get info with task details."""
-        info = self.env._get_info()
+        """Get info with task + exploration details."""
+        info = super()._get_info()  # <-- get task_status and task_step
+
         info.update({
-            'room_coverage': self.last_coverage,
-            'discovered_doorways': len(self.discovered_doorways),
-            'passed_through_door': self.passed_through_door,
-            'completion_achieved': self.completion_achieved,
-            'exploration_steps': self.exploration_steps,
-            'is_exploring': self.is_exploring,
+            'room_coverage': getattr(self, "last_coverage", 0.0),
+            'discovered_doorways': len(getattr(self, "discovered_doorways", [])),
+            'passed_through_door': getattr(self, "passed_through_door", False),
+            'completion_achieved': getattr(self, "completion_achieved", False),
+            'exploration_steps': getattr(self, "exploration_steps", 0),
+            'is_exploring': getattr(self, "is_exploring", False),
         })
+
         return info
 
     def render(self) -> Optional[np.ndarray]:

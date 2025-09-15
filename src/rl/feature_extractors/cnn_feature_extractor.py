@@ -28,10 +28,10 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
 
         super().__init__(observation_space, features_dim)
 
-        # CNN for processing the 2D map
+        # CNN for processing the 2D map - now expects 1 channel
         map_shape = observation_space['global_map'].shape  # (height, width)
         self.cnn = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),  # Changed to 1 channel
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -52,45 +52,56 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
 
     def preprocess_map_to_semantic(self, map_data):
         """
-        Convert map to semantic channels for better learning.
+        Convert map to single semantic channel with 3 values.
 
         Map values:
-        - UNKNOWN = -1
-        - FREE_SPACE = 0
-        - WALL = 1
-        - ENTRY_POINT = 2
-        - DOOR_CLOSED = 3
-        - DOOR_OPEN = 4
-        - WINDOW = 5
-        - OUT_OF_BOUNDS = 6
+        - UNKNOWN = -1        → 0.0 (unknown)
+        - FREE_SPACE = 0      → 0.5 (traversable)
+        - WALL = 1            → 1.0 (blocked)
+        - ENTRY_POINT = 2     → 0.5 (traversable)
+        - DOOR_CLOSED = 3     → 1.0 (blocked)
+        - DOOR_OPEN = 4       → 0.5 (traversable)
+        - WINDOW = 5          → 1.0 (blocked)
+        - OUT_OF_BOUNDS = 6   → 1.0 (blocked)
 
-        Creates 2 semantic channels:
-        1. Exploration status (known vs unknown)
-        2. Traversability (can move here)
+        Creates 1 semantic channel with values:
+        - 0.0 = Unknown (unexplored)
+        - 0.5 = Traversable (can move here)
+        - 1.0 = Blocked (cannot move here)
         """
         batch_size = map_data.shape[0]
         height, width = map_data.shape[1], map_data.shape[2]
         device = map_data.device
 
-        # Create 2 semantic channels
-        channels = torch.zeros(batch_size, 2, height, width, device=device)
+        # Create 1 semantic channel
+        channel = torch.zeros(batch_size, 1, height, width, device=device)
 
-        # Channel 0: Exploration status (0 = unknown, 1 = explored)
-        # Everything that's not -1 (UNKNOWN) is explored
-        channels[:, 0, :, :] = (map_data != -1).float()
+        # Set values based on map type
+        semantic = torch.zeros_like(map_data, dtype=torch.float32)
 
-        # Channel 1: Traversability (0 = blocked, 1 = traversable)
-        # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
-        traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
-        channels[:, 1, :, :] = traversable.float()
+        # Unknown areas (-1) → 0.0
+        semantic[map_data == -1] = 0.0
 
-        return channels
+        # Traversable areas → 0.5
+        semantic[map_data == 0] = 0.5  # FREE_SPACE
+        semantic[map_data == 2] = 0.5  # ENTRY_POINT
+        semantic[map_data == 4] = 0.5  # DOOR_OPEN
+
+        # Blocked areas → 1.0
+        semantic[map_data == 1] = 1.0  # WALL
+        semantic[map_data == 3] = 1.0  # DOOR_CLOSED
+        semantic[map_data == 5] = 1.0  # WINDOW
+        semantic[map_data == 6] = 1.0  # OUT_OF_BOUNDS
+
+        channel[:, 0, :, :] = semantic
+
+        return channel
 
     def forward(self, observations) -> torch.Tensor:
         # Process map with CNN
         map_data = observations['global_map'].float()  # (batch, height, width)
-        # Convert map to semantic channels
-        map_data = self.preprocess_map_to_semantic(map_data)  # (batch, 2, height, width)
+        # Convert map to semantic channel
+        map_data = self.preprocess_map_to_semantic(map_data)  # (batch, 1, height, width)
         cnn_features = self.cnn(map_data)  # (batch, cnn_output_dim)
 
         # Flatten other features
@@ -109,15 +120,15 @@ class SLAMCNNExtractor(BaseFeaturesExtractor):
 class NavigationCNNExtractor(BaseFeaturesExtractor):
     """
     Simplified navigation feature extractor with only goal position.
-    Uses 2-channel semantic preprocessing from SLAMCNNExtractor.
+    Uses 1-channel semantic preprocessing from SLAMCNNExtractor.
     """
 
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
         super().__init__(observation_space, features_dim)
 
-        # CNN for 2-channel semantic map
+        # CNN for 1-channel semantic map
         self.cnn = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),  # 2 semantic channels
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),  # Changed to 1 channel
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
@@ -147,28 +158,40 @@ class NavigationCNNExtractor(BaseFeaturesExtractor):
 
     def preprocess_map_to_semantic(self, map_data):
         """
-        Convert map to semantic channels for better learning.
+        Convert map to single semantic channel with 3 values.
 
-        Creates 2 semantic channels:
-        1. Exploration status (known vs unknown)
-        2. Traversability (can move here)
+        Creates 1 semantic channel with values:
+        - 0.0 = Unknown (unexplored)
+        - 0.5 = Traversable (can move here)
+        - 1.0 = Blocked (cannot move here)
         """
         batch_size = map_data.shape[0]
         height, width = map_data.shape[1], map_data.shape[2]
         device = map_data.device
 
-        # Create 2 semantic channels
-        channels = torch.zeros(batch_size, 2, height, width, device=device)
+        # Create 1 semantic channel
+        channel = torch.zeros(batch_size, 1, height, width, device=device)
 
-        # Channel 0: Exploration status (0 = unknown, 1 = explored)
-        channels[:, 0, :, :] = (map_data != -1).float()
+        # Set values based on map type
+        semantic = torch.zeros_like(map_data, dtype=torch.float32)
 
-        # Channel 1: Traversability (0 = blocked, 1 = traversable)
-        # FREE_SPACE (0), ENTRY_POINT (2), DOOR_OPEN (4)
-        traversable = (map_data == 0) | (map_data == 2) | (map_data == 4)
-        channels[:, 1, :, :] = traversable.float()
+        # Unknown areas (-1) → 0.0
+        semantic[map_data == -1] = 0.0
 
-        return channels
+        # Traversable areas → 0.5
+        semantic[map_data == 0] = 0.5  # FREE_SPACE
+        semantic[map_data == 2] = 0.5  # ENTRY_POINT
+        semantic[map_data == 4] = 0.5  # DOOR_OPEN
+
+        # Blocked areas → 1.0
+        semantic[map_data == 1] = 1.0  # WALL
+        semantic[map_data == 3] = 1.0  # DOOR_CLOSED
+        semantic[map_data == 5] = 1.0  # WINDOW
+        semantic[map_data == 6] = 1.0  # OUT_OF_BOUNDS
+
+        channel[:, 0, :, :] = semantic
+
+        return channel
 
     def forward(self, observations) -> torch.Tensor:
         # Process map with semantic preprocessing
