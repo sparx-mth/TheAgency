@@ -1,5 +1,5 @@
 """
-train_navigation_agent.py - Fixed DQN training for Navigation task
+train_navigation_agent.py - Fixed DQN training for Navigation task with evaluation rendering
 """
 
 import os
@@ -76,6 +76,7 @@ class NavigationCallback(BaseCallback):
                     elapsed = time.time() - self.start_time
                     fps = self.total_steps / elapsed if elapsed > 0 else 0
                     epsilon = self.model.exploration_schedule(self.model._current_progress_remaining)
+                    loss = self.model.logger.name_to_value.get("train/loss", None)
 
                     print(f"Ep {self.episode_count:5d} | "
                           f"Steps: {self.total_steps:7,d} | "
@@ -84,12 +85,94 @@ class NavigationCallback(BaseCallback):
                           f"Success: {success_rate:5.1f}% | "
                           f"Final Dist: {avg_final_dist:4.1f} | "
                           f"ε: {epsilon:.3f} | "
-                          f"FPS: {fps:4.0f}")
+                          f"FPS: {fps:4.0f} | "
+                          f"Loss: {loss:.4f}" if loss is not None else "")
 
         return True
 
 
-def create_env(env_id: int = 0, exploration_steps: int = 20):
+class EvaluationRenderingCallback(BaseCallback):
+    """Callback for rendering evaluation episodes every N training episodes."""
+
+    def __init__(self, eval_env_fn, eval_freq=500, n_eval_episodes=2, verbose=1):
+        """
+        Args:
+            eval_env_fn: Function that creates a new evaluation environment
+            eval_freq: Evaluate every N episodes
+            n_eval_episodes: Number of episodes to render during evaluation
+            verbose: Verbosity level
+        """
+        super().__init__(verbose)
+        self.eval_env_fn = eval_env_fn  # Store function instead of environment
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.episode_count = 0
+        self.n_envs = None  # Will be set in _init_callback
+
+    def _init_callback(self) -> None:
+        """Initialize the callback."""
+        if self.n_envs is None:
+            self.n_envs = self.training_env.num_envs
+
+    def _on_step(self) -> bool:
+        # Check if any environment finished an episode
+        for i in range(self.n_envs):
+            if self.locals.get('dones')[i]:
+                self.episode_count += 1
+
+                # Check if it's time to evaluate
+                if self.episode_count % self.eval_freq == 0:
+                    self._run_evaluation()
+
+        return True
+
+    def _run_evaluation(self):
+        """Run and render evaluation episodes."""
+        print(f"\n{'=' * 60}")
+        print(f"EVALUATION at episode {self.episode_count} - Rendering {self.n_eval_episodes} episodes...")
+        print("-" * 60)
+
+        # Create a fresh evaluation environment
+        eval_env = self.eval_env_fn()
+
+        try:
+            for ep_num in range(self.n_eval_episodes):
+                obs, _ = eval_env.reset()
+                done = False
+                truncated = False
+                episode_reward = 0
+                episode_length = 0
+
+                print(f"\nEpisode {ep_num + 1}/{self.n_eval_episodes}")
+
+                while not (done or truncated):
+                    # Get action from model (deterministic for evaluation)
+                    action, _ = self.model.predict(obs, deterministic=True)
+
+                    # Step environment
+                    obs, reward, done, truncated, info = eval_env.step(action)
+                    episode_reward += reward
+                    episode_length += 1
+
+                    # Render
+                    eval_env.render()
+
+                # Print episode summary
+                print(f"  Reward: {episode_reward:.2f}")
+                print(f"  Length: {episode_length}")
+                if 'task_success' in info:
+                    print(f"  Success: {info['task_success']}")
+                if 'goal_position' in info:
+                    print(f"  Goal was at: {info['goal_position']}")
+
+        finally:
+            # Always close the environment after evaluation
+            eval_env.close()
+            print("Evaluation environment closed.")
+
+        print("=" * 60 + "\n")
+
+def create_env(env_id: int = 0, exploration_steps: int = 20, render_mode: str = None):
     """Create single navigation environment with configurable exploration."""
 
     def _init():
@@ -111,7 +194,7 @@ def create_env(env_id: int = 0, exploration_steps: int = 20):
             'num_agents': 1,
             'max_steps': 2000,
             'map_path': MAP_PATH,
-            'render_mode': None,
+            'render_mode': render_mode,  # Pass render_mode through
             'sensor_config': {0: sensor},
             # Base rewards
             'discovery_reward': 0.5,
@@ -160,10 +243,10 @@ def train():
 
     # PROGRESSIVE EXPLORATION CURRICULUM
     CURRICULUM = [
-        ("Easy: 10 exploration steps", 20, int(TOTAL_TIMESTEPS * 0.2)),  # First 20%
-        ("Medium: 20 exploration steps", 30, int(TOTAL_TIMESTEPS * 0.3)),  # Next 30%
-        ("Hard: 30 exploration steps", 40, int(TOTAL_TIMESTEPS * 0.3)),  # Next 30%
-        ("Expert: 40 exploration steps", 50, int(TOTAL_TIMESTEPS * 0.2)),  # Final 20%
+        ("Easy: 30 exploration steps", 30, int(TOTAL_TIMESTEPS * 0.01)),  # First 20%
+        ("Medium: 40 exploration steps", 40, int(TOTAL_TIMESTEPS * 0.05)),  # Next 30%
+        ("Hard: 50 exploration steps", 50, int(TOTAL_TIMESTEPS * 0.2)),  # Next 30%
+        ("Expert: 100 exploration steps", 100, int(TOTAL_TIMESTEPS * 0.4)),  # Final 20%
     ]
 
     print("\nProgressive Exploration Curriculum:")
@@ -190,9 +273,13 @@ def train():
 
         # Create parallel environments with current exploration setting
         print(f"Creating {N_ENVS} environments...")
-        env_fns = [create_env(i, exploration_steps) for i in range(N_ENVS)]
+        env_fns = [create_env(i, exploration_steps, render_mode=None) for i in range(N_ENVS)]
         vec_env = SubprocVecEnv(env_fns)
         vec_env = VecMonitor(vec_env)
+
+        # Create evaluation environment for rendering
+        print("Creating evaluation environment for rendering...")
+        eval_env = create_env(0, exploration_steps, render_mode='human')()  # Create single env with rendering
 
         if model is None:
             # Create model (only first time)
@@ -237,6 +324,17 @@ def train():
         progress_callback = NavigationCallback(n_envs=N_ENVS)
         callbacks.append(progress_callback)
 
+        # Create evaluation environment function (not the environment itself)
+        eval_env_fn = create_env(0, exploration_steps, render_mode='human')
+
+        # Evaluation rendering callback - pass the function, not an instantiated environment
+        eval_rendering_callback = EvaluationRenderingCallback(
+            eval_env_fn=eval_env_fn,  # Pass the function
+            eval_freq=500,  # Every 15 episodes
+            n_eval_episodes=2  # Render 2 episodes
+        )
+        callbacks.append(eval_rendering_callback)
+
         # Checkpoint callback
         checkpoint_callback = CheckpointCallback(
             save_freq=500_000 // N_ENVS,
@@ -271,6 +369,7 @@ def train():
         print(f"  Model saved: {model_path}.zip")
 
         vec_env.close()
+        eval_env.close()  # Clean up evaluation environment
 
     # Save final model
     model.save("./models/dqn_navigation_final")

@@ -3,7 +3,7 @@ Doorway Traversal Agent that extends the navigation agent.
 
 This agent reuses the A* navigation logic and adds doorway-specific behavior.
 
-ADDED: State tracking for agent execution status
+State tracking for agent execution status
 """
 
 import numpy as np
@@ -30,9 +30,9 @@ class DoorwayEntryAgent(AStarNavigationAgent):
 
     Strategy:
     1. Find visible doorways
-    2. Navigate to nearest unvisited doorway using A*
+    2. Navigate to nearest doorway using A*
     3. Step through the doorway
-    4. Repeat
+    4. Complete after first doorway traversal
 
     Tracks execution state for coordination with other agents
     """
@@ -43,7 +43,6 @@ class DoorwayEntryAgent(AStarNavigationAgent):
         self.current_target = None
         self.state = DoorwayState.FINDING
         self.entry_position = None
-        self.max_doorways = 10  # Maximum doorways to visit before completion
         self.no_doorway_counter = 0  # Counter for when no doorways are found
         self.max_no_doorway_steps = 50  # Steps to explore when no doorways found
 
@@ -58,8 +57,8 @@ class DoorwayEntryAgent(AStarNavigationAgent):
                 self.set_error("This agent only supports single agent navigation")
                 raise ValueError("This agent only supports single agent navigation")
 
-            # Check if we've visited enough doorways
-            if len(self.visited_doorways) >= self.max_doorways:
+            # Check if already completed
+            if self.state == DoorwayState.COMPLETE:
                 self.execution_state = AgentState.COMPLETED
                 return np.array([Action.STAY])
 
@@ -82,8 +81,9 @@ class DoorwayEntryAgent(AStarNavigationAgent):
                     # No doorways found, explore
                     self.no_doorway_counter += 1
                     if self.no_doorway_counter >= self.max_no_doorway_steps:
-                        # No more doorways to find, task complete
+                        # No doorways to find, task complete
                         self.execution_state = AgentState.COMPLETED
+                        self.state = DoorwayState.COMPLETE
                         return np.array([Action.STAY])
                     return np.array([self._explore(pos, facing, map_grid)])
 
@@ -100,17 +100,14 @@ class DoorwayEntryAgent(AStarNavigationAgent):
             elif self.state == DoorwayState.ENTERING:
                 # Check if we've moved through
                 if pos != self.entry_position:
-                    # Successfully passed through
+                    # Successfully passed through first doorway - COMPLETE!
                     self.visited_doorways.add(self.current_target)
                     self.current_target = None
                     self.state = DoorwayState.COMPLETE
-                return np.array([Action.STAY])
-
-            elif self.state == DoorwayState.COMPLETE:
-                # Reset to find next doorway
-                self.state = DoorwayState.FINDING
-                self.path = []  # Clear navigation path
-                return np.array([Action.STAY])
+                    self.execution_state = AgentState.COMPLETED
+                    return np.array([Action.STAY])
+                # Still in the doorway, continue moving forward
+                return np.array([Action.FORWARD])
 
             # Use parent's navigation if we have a target
             if self.state == DoorwayState.APPROACHING:
@@ -192,7 +189,6 @@ class DoorwayEntryAgent(AStarNavigationAgent):
             'doorway_state': self.state.name,
             'doorways_visited': len(self.visited_doorways),
             'current_target': self.current_target,
-            'max_doorways': self.max_doorways,
             'no_doorway_counter': self.no_doorway_counter
         })
         return metrics

@@ -43,7 +43,7 @@ class RoomFrontierAgent(BaseSLAMAgent):
         self.steps_taken = 0
         self.max_steps = 1000
         self.no_frontier_counter = 0
-        self.max_no_frontier_steps = 50
+        self.max_no_frontier_steps = 10  # Reduced from 50 for faster completion
 
     def get_actions(self, observations: Dict[str, Any], info: Dict[str, Any]) -> np.ndarray:
         """Get actions for room exploration with doorway avoidance."""
@@ -113,16 +113,46 @@ class RoomFrontierAgent(BaseSLAMAgent):
             return np.array([Action.STAY] * self.num_agents)
 
     def _is_exploration_complete(self, global_map: np.ndarray) -> bool:
-        """Check if room exploration is complete."""
-        # Find frontiers
+        """
+        Enhanced check if room exploration is complete.
+        Handles edge cases where unreachable frontiers might exist.
+        """
+        # Find frontiers that are actually reachable
         frontiers = self._find_safe_frontiers(global_map)
 
-        if not frontiers:
+        # Filter out unreachable frontiers
+        reachable_frontiers = []
+        if frontiers and hasattr(self, 'last_positions') and self.last_positions:
+            # Get current position (for single agent, use agent 0)
+            current_pos = self.last_positions.get(0)
+            if current_pos:
+                for frontier in frontiers:
+                    # Check if we can actually path to this frontier
+                    path = self._plan_safe_path(current_pos, frontier, global_map)
+                    if path and len(path) < 50:  # Don't consider very distant frontiers
+                        reachable_frontiers.append(frontier)
+        else:
+            reachable_frontiers = frontiers
+
+        # If no reachable frontiers, increment counter
+        if not reachable_frontiers:
             self.no_frontier_counter += 1
+            # print(f"No reachable frontiers found. Counter: {self.no_frontier_counter}/{self.max_no_frontier_steps}")
+
+            # Reduced threshold for faster completion
             if self.no_frontier_counter >= self.max_no_frontier_steps:
+                # print(f"Room exploration complete - no reachable frontiers for {self.no_frontier_counter} steps")
                 return True
         else:
+            # Reset counter if we found frontiers
+            # if self.no_frontier_counter > 0:
+                # print(f"Found {len(reachable_frontiers)} reachable frontiers, resetting counter")
             self.no_frontier_counter = 0
+
+        # Additional check: if we've been exploring for a long time with very few frontiers
+        if self.steps_taken > 500 and len(reachable_frontiers) <= 2:
+            self.no_frontier_counter += 5  # Accelerate completion for sparse frontiers
+            # print(f"Few frontiers remaining ({len(reachable_frontiers)}), accelerating completion")
 
         return False
 
@@ -188,41 +218,37 @@ class RoomFrontierAgent(BaseSLAMAgent):
         all_states: Dict[int, Dict[str, Any]]
     ) -> int:
         """
-        Override compute action to detect and avoid doorways in real-time.
+        Override compute action with better completion detection.
         """
         global_map = obs['global_map']
         pos = tuple(obs['position'])
         facing_idx = obs['facing']
 
-        # REAL-TIME DOORWAY DETECTION - runs every step
+        # REAL-TIME DOORWAY DETECTION
         new_doorways = self._detect_new_doorways(global_map)
         if new_doorways:
             # Found new doorways, update our paths if needed
             if agent_id in self.paths and self.paths[agent_id]:
-                # Check if our current path goes through any new doorways
                 for doorway in new_doorways:
                     if doorway in self.paths[agent_id]:
-                        # Path is now invalid, clear it
                         self.paths[agent_id] = []
                         self.goals[agent_id] = None
                         break
 
-        # Check if we're about to move into a forbidden doorway
+        # Check if we're facing a doorway
         dx, dy = [(0, -1), (1, 0), (0, 1), (-1, 0)][facing_idx]
         next_pos = (pos[0] + dx, pos[1] + dy)
 
-        # CRITICAL: If facing a doorway, must turn away immediately
         if next_pos in self.forbidden_doorways:
-            # Turn right (could also randomize the turn direction)
             return Action.TURN_RIGHT
 
-        # Initialize counters if needed
+        # Initialize counters
         if agent_id not in self.wait_counters:
             self.wait_counters[agent_id] = 0
         if agent_id not in self.random_walk_counter:
             self.random_walk_counter[agent_id] = 0
 
-        # Check if stuck (same as parent class)
+        # Check if stuck
         if agent_id in self.last_positions:
             if self.last_positions[agent_id] == pos:
                 self.stuck_counters[agent_id] = self.stuck_counters.get(agent_id, 0) + 1
@@ -243,20 +269,16 @@ class RoomFrontierAgent(BaseSLAMAgent):
             self.paths[agent_id] = []
             self.stuck_counters[agent_id] = 0
             self.wait_counters[agent_id] = 0
-
-            # Random walk but avoid doorways
-            action = self._safe_random_walk(pos, facing_idx, global_map)
-            return action
+            return self._safe_random_walk(pos, facing_idx, global_map)
 
         # Continue random walk if in that mode
         if self.random_walk_counter.get(agent_id, 0) > 0:
             self.random_walk_counter[agent_id] -= 1
             return self._safe_random_walk(pos, facing_idx, global_map)
 
-        # Sensor exploration - but check it won't make us face a doorway
+        # Sensor exploration
         action = self._check_sensor_exploration(pos, facing_idx, global_map)
         if action is not None:
-            # Verify the action won't move us into a doorway
             if action == Action.FORWARD:
                 if next_pos in self.forbidden_doorways:
                     action = Action.TURN_RIGHT
@@ -265,21 +287,28 @@ class RoomFrontierAgent(BaseSLAMAgent):
         # Find frontiers (excluding doorways)
         all_frontiers = self._find_safe_frontiers(global_map)
 
+        # Filter for reachable frontiers only
+        reachable_frontiers = []
+        for frontier in all_frontiers:
+            path = self._plan_safe_path(pos, frontier, global_map)
+            if path and len(path) < 50:  # Don't pursue very distant frontiers
+                reachable_frontiers.append(frontier)
+
+        # Use reachable frontiers instead of all frontiers
+        all_frontiers = reachable_frontiers
+
         # Check current goal validity
         current_goal = self.goals.get(agent_id)
         goal_still_valid = False
 
         if current_goal:
-            # Goal is invalid if it's now a doorway
             if current_goal in self.forbidden_doorways:
                 goal_still_valid = False
             elif current_goal in all_frontiers or self._manhattan_distance(current_goal, pos) <= 2:
                 if self.paths.get(agent_id):
-                    # Verify path doesn't go through doorways
                     path_valid = all(p not in self.forbidden_doorways for p in self.paths[agent_id])
                     goal_still_valid = path_valid
                 else:
-                    # Try to replan
                     new_path = self._plan_safe_path(pos, current_goal, global_map)
                     if new_path:
                         self.paths[agent_id] = new_path
@@ -303,17 +332,21 @@ class RoomFrontierAgent(BaseSLAMAgent):
                 else:
                     self.goals[agent_id] = None
                     self.paths[agent_id] = []
-                    return self._safe_random_walk(pos, facing_idx, global_map)
+                    # No valid goals, might be complete
+                    return Action.STAY
             else:
-                # No frontiers available
+                # No frontiers available - room likely fully explored
                 self.goals[agent_id] = None
                 self.paths[agent_id] = []
-                return Action.STAY  # Room fully explored
+                # print(f"No available frontiers at step {self.steps_taken}")
+                return Action.STAY
 
         # Follow path
         if self.paths.get(agent_id):
             return self._follow_safe_path(agent_id, pos, facing_idx, all_states, global_map)
 
+        # No path, do a short random walk then check again
+        self.random_walk_counter[agent_id] = 3
         return self._safe_random_walk(pos, facing_idx, global_map)
 
     def _check_sensor_exploration(self, pos: Tuple[int, int], facing_idx: int,
@@ -374,7 +407,10 @@ class RoomFrontierAgent(BaseSLAMAgent):
         return tile in passable_tiles
 
     def _find_safe_frontiers(self, global_map: np.ndarray) -> List[Tuple[int, int]]:
-        """Find frontier cells that are not doorways."""
+        """
+        Find frontier cells that are not doorways.
+        Enhanced to filter out problematic frontiers.
+        """
         frontiers = []
         height, width = global_map.shape
 
@@ -392,14 +428,22 @@ class RoomFrontierAgent(BaseSLAMAgent):
 
                 # Check if adjacent to unknown
                 is_frontier = False
+                unknown_neighbor_count = 0
+
                 for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                     nx, ny = x + dx, y + dy
                     if 0 <= nx < width and 0 <= ny < height:
                         if global_map[ny, nx] == TileType.UNKNOWN:
-                            is_frontier = True
-                            break
+                            # Additional check: don't consider it a frontier if the unknown
+                            # is beyond a doorway
+                            path_to_unknown = [(x, y), (nx, ny)]
+                            if not any(p in self.forbidden_doorways for p in path_to_unknown):
+                                is_frontier = True
+                                unknown_neighbor_count += 1
 
-                if is_frontier:
+                # Only consider it a frontier if it has enough unknown neighbors
+                # This filters out single-pixel artifacts
+                if is_frontier and unknown_neighbor_count >= 1:
                     frontiers.append((x, y))
 
         return frontiers

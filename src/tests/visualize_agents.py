@@ -56,6 +56,7 @@ class InteractiveSLAMViewer:
         self.env = None
         self.agent = None
         self.num_agents = 1
+        self.manual_goal = None  # Store manual goal position
 
     def ensure_pygame_initialized(self):
         """Ensure pygame is initialized before use"""
@@ -79,7 +80,7 @@ class InteractiveSLAMViewer:
             map_path = input("Enter map file path (or press Enter for map_19): ").strip()
             if not map_path:
                 # Default to map_19
-                map_path = '/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt'
+                map_path = '/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt'
 
             # Check if file exists
             if not Path(map_path).exists():
@@ -322,9 +323,35 @@ class InteractiveSLAMViewer:
                     print(f"Error: {error_msg}")
 
         # Print position if available
+        current_pos = None
         if hasattr(self.env, 'env') and hasattr(self.env.env, 'agent_positions'):
             pos = self.env.env.agent_positions[0]
             print(f"Position: ({pos[0]}, {pos[1]})")
+            current_pos = pos
+        elif 'positions' in obs:
+            pos = obs['positions'][0]
+            print(f"Position: ({pos[0]}, {pos[1]})")
+            current_pos = pos
+
+        # Print goal information if available
+        if 'goal_position' in obs and obs['goal_position'][0] >= 0:
+            goal_pos = obs['goal_position']
+            print(f"Goal: ({goal_pos[0]}, {goal_pos[1]})")
+            if current_pos is not None:
+                distance = abs(goal_pos[0] - current_pos[0]) + abs(goal_pos[1] - current_pos[1])
+                print(f"Distance to goal: {distance}")
+        elif self.manual_goal:
+            goal_pos = self.manual_goal
+            print(f"Goal (manual): {goal_pos}")
+            if current_pos is not None:
+                distance = abs(goal_pos[0] - current_pos[0]) + abs(goal_pos[1] - current_pos[1])
+                print(f"Distance to goal: {distance}")
+        elif hasattr(self.env, 'goal_position') and self.env.goal_position:
+            goal_pos = self.env.goal_position
+            print(f"Goal: {goal_pos}")
+            if current_pos is not None:
+                distance = abs(goal_pos[0] - current_pos[0]) + abs(goal_pos[1] - current_pos[1])
+                print(f"Distance to goal: {distance}")
 
         # Print action if provided
         if action is not None:
@@ -362,6 +389,16 @@ class InteractiveSLAMViewer:
         print("CHANGE AGENT")
         print("="*30)
         print("Current agent:", self.agent.__class__.__name__)
+
+        # Print current position
+        current_pos = None
+        if hasattr(self.env, 'env') and hasattr(self.env.env, 'agent_positions'):
+            current_pos = self.env.env.agent_positions[0]
+            print(f"Current drone position: ({current_pos[0]}, {current_pos[1]})")
+        elif 'positions' in obs:
+            current_pos = obs['positions'][0]
+            print(f"Current drone position: ({current_pos[0]}, {current_pos[1]})")
+
         print("-"*30)
         print("1. Logical Wall Agent")
         print("2. Frontier Agent")
@@ -373,24 +410,59 @@ class InteractiveSLAMViewer:
         choice = input("\nSelect new agent (0-5): ").strip()
 
         if choice == '1':
+            self.manual_goal = None  # Clear manual goal
             self.agent = LogicalWallAgent(num_agents=self.num_agents)
             print("Switched to: Logical Wall Agent")
         elif choice == '2':
+            self.manual_goal = None  # Clear manual goal
             self.agent = FrontierAgent(
                 num_agents=self.num_agents,
                 camera_range=self.sensor_params['max_range']
             )
             print("Switched to: Frontier Agent")
         elif choice == '3':
+            self.manual_goal = None  # Clear manual goal
             self.agent = RoomFrontierAgent(
                 num_agents=self.num_agents,
                 camera_range=self.sensor_params['max_range']
             )
             print("Switched to: Room Frontier Agent")
         elif choice == '4':
+            # A* Navigation Agent - check if we need to set a goal
+            print("\nSwitched to: A* Navigation Agent")
+
+            # Check if we're in NavigationWrapper with a goal
+            if hasattr(self.env, '__class__') and self.env.__class__.__name__ == 'NavigationWrapper':
+                if hasattr(self.env, 'goal_position') and self.env.goal_position:
+                    print(f"Using existing goal at: {self.env.goal_position}")
+                    self.manual_goal = None  # Clear manual goal since we have env goal
+                else:
+                    # Need to set a goal
+                    print("No goal set. Setting a random goal...")
+                    self._set_navigation_goal(current_pos)
+            else:
+                # Not in NavigationWrapper
+                print("Warning: Not in Navigation environment.")
+                print("A* agent needs a goal to function properly.")
+
+                # Check if there's already a goal position set
+                if hasattr(self.env, 'goal_position') and self.env.goal_position:
+                    print(f"Found existing goal at: {self.env.goal_position}")
+                    use_existing = input("Use this goal? (y/n) [y]: ").strip().lower()
+                    if use_existing == 'n':
+                        self._set_manual_goal(current_pos)
+                    else:
+                        self.manual_goal = None
+                else:
+                    # Try to set a goal anyway if possible
+                    set_goal = input("Set a goal position? (y/n) [y]: ").strip().lower()
+                    if set_goal != 'n':
+                        self._set_manual_goal(current_pos)
+
             self.agent = AStarNavigationAgent(num_agents=self.num_agents)
-            print("Switched to: A* Navigation Agent")
+
         elif choice == '5':
+            self.manual_goal = None  # Clear manual goal
             self.agent = DoorwayEntryAgent(num_agents=self.num_agents)
             print("Switched to: Doorway Entry Agent")
         else:
@@ -400,6 +472,91 @@ class InteractiveSLAMViewer:
         # Reset the new agent with current state
         self.agent.reset()
         return True
+
+    def _set_navigation_goal(self, current_pos):
+        """Set a goal for NavigationWrapper environment"""
+        print("\nGoal Selection:")
+        print("1. Random goal")
+        print("2. Manual coordinates")
+
+        choice = input("Select option (1-2) [1]: ").strip()
+
+        if choice == '2':
+            # Manual entry
+            x_str = input(f"Enter goal X (0-{self.env.width-1}): ").strip()
+            y_str = input(f"Enter goal Y (0-{self.env.height-1}): ").strip()
+
+            try:
+                goal_x = int(x_str)
+                goal_y = int(y_str)
+
+                if 0 <= goal_x < self.env.width and 0 <= goal_y < self.env.height:
+                    self.env.goal_position = (goal_x, goal_y)
+                    print(f"Goal set to: ({goal_x}, {goal_y})")
+
+                    # Reset steps counter for new goal
+                    if hasattr(self.env, 'steps_since_goal'):
+                        self.env.steps_since_goal = 0
+                else:
+                    print("Invalid coordinates! Using random goal.")
+                    self._select_random_goal(current_pos)
+            except ValueError:
+                print("Invalid input! Using random goal.")
+                self._select_random_goal(current_pos)
+        else:
+            # Random goal
+            self._select_random_goal(current_pos)
+
+    def _select_random_goal(self, current_pos):
+        """Select a random goal from free spaces"""
+        # Try to use discovered spaces first
+        if hasattr(self.env, 'discovered_free_spaces') and self.env.discovered_free_spaces:
+            positions = list(self.env.discovered_free_spaces)
+            if current_pos:
+                positions = [p for p in positions if p != tuple(current_pos)]
+            if positions:
+                self.env.goal_position = positions[np.random.randint(len(positions))]
+                print(f"Random goal set to: {self.env.goal_position}")
+                if hasattr(self.env, 'steps_since_goal'):
+                    self.env.steps_since_goal = 0
+                return
+
+        # Scan map for free spaces
+        free_spaces = []
+        if hasattr(self.env, 'env'):
+            global_map = self.env.env.global_map
+            for y in range(global_map.shape[0]):
+                for x in range(global_map.shape[1]):
+                    if global_map[y, x] in [TileType.FREE_SPACE, TileType.DOOR_OPEN]:
+                        if not current_pos or (x, y) != tuple(current_pos):
+                            free_spaces.append((x, y))
+
+        if free_spaces:
+            self.env.goal_position = free_spaces[np.random.randint(len(free_spaces))]
+            print(f"Goal set to: {self.env.goal_position}")
+            if hasattr(self.env, 'steps_since_goal'):
+                self.env.steps_since_goal = 0
+        else:
+            print("Warning: No free spaces found for goal!")
+
+    def _set_manual_goal(self, current_pos):
+        """Try to set goal for non-NavigationWrapper environments"""
+        print("\nNote: Setting manual goal for non-Navigation environment.")
+        x_str = input("Enter goal X coordinate: ").strip()
+        y_str = input("Enter goal Y coordinate: ").strip()
+
+        try:
+            goal_x = int(x_str)
+            goal_y = int(y_str)
+
+            # Store the manual goal
+            self.manual_goal = (goal_x, goal_y)
+
+            print(f"Manual goal set to: ({goal_x}, {goal_y})")
+            print("Note: This goal will be injected into observations for the agent.")
+        except ValueError:
+            print("Invalid input! Manual goal not set.")
+            self.manual_goal = None
 
     def run_episode(self):
         """Run a single episode with the selected configuration"""
@@ -458,6 +615,7 @@ class InteractiveSLAMViewer:
                             total_reward = 0.0
                             done = False
                             agent_error = False
+                            self.manual_goal = None  # Clear manual goal on reset
                             print("\nEPISODE RESET")
                         elif event.key == pygame.K_s:
                             # Print current state
@@ -484,8 +642,15 @@ class InteractiveSLAMViewer:
 
             if not paused and not done and not agent_error:
                 try:
-                    # Get agent action
-                    actions = self.agent.get_actions(obs, info)
+                    # Inject manual goal into observations if set and using A* agent
+                    if self.manual_goal and isinstance(self.agent, AStarNavigationAgent):
+                        # Create a copy of observations to avoid modifying original
+                        obs_with_goal = obs.copy()
+                        obs_with_goal['goal_position'] = np.array(self.manual_goal)
+                        actions = self.agent.get_actions(obs_with_goal, info)
+                    else:
+                        # Normal path for other agents or no manual goal
+                        actions = self.agent.get_actions(obs, info)
 
                     # Step environment
                     obs, reward, terminated, truncated, info = self.env.step(actions)
@@ -564,10 +729,13 @@ class InteractiveSLAMViewer:
                 print("\nSelect a new agent:")
                 self.select_agent(quick_select=True)
                 self.agent.reset()
+                self.manual_goal = None  # Clear manual goal when switching agents
                 return 'continue_new_agent'
             elif choice == '2':
+                self.manual_goal = None  # Clear manual goal for new episode
                 return 'continue_same'
             elif choice == '3':
+                self.manual_goal = None  # Clear manual goal
                 return 'change_config'
             else:
                 return 'quit'
@@ -615,6 +783,8 @@ class InteractiveSLAMViewer:
                     # Quit pygame to reset video system
                     pygame.quit()
                     self.pygame_initialized = False
+                    # Clear manual goal
+                    self.manual_goal = None
                     break
                 elif result == 'continue_new_agent':
                     # Continue with the newly selected agent

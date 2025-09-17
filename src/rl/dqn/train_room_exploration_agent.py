@@ -1,5 +1,5 @@
 """
-train_room_exploration_optimized.py - Optimized DQN training with pre-computed rooms
+train_room_exploration_optimized.py - Optimized DQN training with pre-computed rooms and evaluation rendering
 """
 
 import os
@@ -102,7 +102,91 @@ class RoomExplorationCallback(BaseCallback):
         return True
 
 
-def create_env(coverage_threshold: float, env_id: int = 0):
+class EvaluationRenderingCallback(BaseCallback):
+    """Callback for rendering evaluation episodes every N training episodes."""
+
+    def __init__(self, eval_env_fn, eval_freq=500, n_eval_episodes=2, verbose=1):
+        """
+        Args:
+            eval_env_fn: Function that creates a new evaluation environment
+            eval_freq: Evaluate every N episodes
+            n_eval_episodes: Number of episodes to render during evaluation
+            verbose: Verbosity level
+        """
+        super().__init__(verbose)
+        self.eval_env_fn = eval_env_fn  # Store function instead of environment
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.episode_count = 0
+        self.n_envs = None  # Will be set in _init_callback
+
+    def _init_callback(self) -> None:
+        """Initialize the callback."""
+        if self.n_envs is None:
+            self.n_envs = self.training_env.num_envs
+
+    def _on_step(self) -> bool:
+        # Check if any environment finished an episode
+        for i in range(self.n_envs):
+            if self.locals.get('dones')[i]:
+                self.episode_count += 1
+
+                # Check if it's time to evaluate
+                if self.episode_count % self.eval_freq == 0:
+                    self._run_evaluation()
+
+        return True
+
+    def _run_evaluation(self):
+        """Run and render evaluation episodes."""
+        print(f"\n{'='*60}")
+        print(f"EVALUATION at episode {self.episode_count} - Rendering {self.n_eval_episodes} episodes...")
+        print("-"*60)
+
+        # Create a fresh evaluation environment
+        eval_env = self.eval_env_fn()
+
+        try:
+            for ep_num in range(self.n_eval_episodes):
+                obs, _ = eval_env.reset()
+                done = False
+                truncated = False
+                episode_reward = 0
+                episode_length = 0
+
+                print(f"\nEpisode {ep_num + 1}/{self.n_eval_episodes}")
+
+                while not (done or truncated):
+                    # Get action from model (deterministic for evaluation)
+                    action, _ = self.model.predict(obs, deterministic=True)
+
+                    # Step environment
+                    obs, reward, done, truncated, info = eval_env.step(action)
+                    episode_reward += reward
+                    episode_length += 1
+
+                    # Render
+                    eval_env.render()
+
+                # Print episode summary
+                print(f"  Reward: {episode_reward:.2f}")
+                print(f"  Length: {episode_length}")
+                if 'completion_achieved' in info:
+                    print(f"  Room completed: {info['completion_achieved']}")
+                if 'passed_through_door' in info:
+                    print(f"  Door failure: {info['passed_through_door']}")
+                if 'room_coverage' in info:
+                    print(f"  Coverage: {info['room_coverage']*100:.1f}%")
+
+        finally:
+            # Always close the environment after evaluation
+            eval_env.close()
+            print("Evaluation environment closed.")
+
+        print("="*60 + "\n")
+
+
+def create_env(coverage_threshold: float, env_id: int = 0, render_mode: str = None):
     """Create single room exploration environment with pre-computed rooms."""
 
     def _init():
@@ -120,7 +204,7 @@ def create_env(coverage_threshold: float, env_id: int = 0):
             'num_agents': 1,
             'max_steps': 500,
             'map_path': MAP_PATH,
-            'render_mode': None,
+            'render_mode': render_mode,  # Pass render_mode through
             'sensor_config': {0: sensor},
             # Base rewards - DISABLED to let wrapper handle everything
             'discovery_reward': 0.0,  # Was 1.0
@@ -199,9 +283,13 @@ def train():
 
         # Create parallel environments
         print(f"Creating {N_ENVS} environments (coverage={coverage_threshold:.0%})...")
-        env_fns = [create_env(coverage_threshold, i) for i in range(N_ENVS)]
+        env_fns = [create_env(coverage_threshold, i, render_mode=None) for i in range(N_ENVS)]
         vec_env = SubprocVecEnv(env_fns)
         vec_env = VecMonitor(vec_env)
+
+        # Create evaluation environment function (not the environment itself)
+        print("Setting up evaluation environment function...")
+        eval_env_fn = create_env(coverage_threshold, 0, render_mode='human')
 
         if model is None:
             # Create new model
@@ -246,6 +334,14 @@ def train():
         progress_callback = RoomExplorationCallback(n_envs=N_ENVS)
         callbacks.append(progress_callback)
 
+        # Evaluation rendering callback - pass the function, not an instantiated environment
+        eval_rendering_callback = EvaluationRenderingCallback(
+            eval_env_fn=eval_env_fn,  # Pass the function
+            eval_freq=500,  # Every 500 episodes
+            n_eval_episodes=2  # Render 2 episodes
+        )
+        callbacks.append(eval_rendering_callback)
+
         # Checkpoint callback
         checkpoint_callback = CheckpointCallback(
             save_freq=5_000 // N_ENVS,
@@ -287,6 +383,7 @@ def train():
             print(f"  Est. remaining: {est_remaining:.0f} minutes")
 
         vec_env.close()
+        # No need to close eval_env here since it's handled in the callback
 
     # Save final model
     model.save("./models/dqn_room_exploration_optimized_final")

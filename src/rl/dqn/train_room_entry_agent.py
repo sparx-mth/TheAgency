@@ -1,5 +1,5 @@
 """
-train_room_entry_optimized.py - Ultra-optimized DQN training with pre-computed doorways
+train_room_entry_optimized.py - Ultra-optimized DQN training with pre-computed doorways and evaluation rendering
 """
 
 import os
@@ -18,13 +18,13 @@ from rl.feature_extractors.cnn_feature_extractor import SLAMCNNExtractor
 from environments.tasks.doorway_utils import precompute_doorways  # Adjust import path as needed
 
 # FIXED MAP PATH
-MAP_PATH = "/home/nadavc/PycharmProjects/TheAgency_workspace/resources/planner/maps/house_map_19.txt"
+MAP_PATH = "/home/user/nadav/TheAgency/resources/planner/maps/house_map_19.txt"
 
 # OPTIMIZATION SETTINGS
 N_ENVS = 4
 STEPS_PER_STAGE = 10_000_000
 
-# Pre-compute doorways ONCE at module level for maximum efficienc  y
+# Pre-compute doorways ONCE at module level for maximum efficiency
 print(f"Pre-computing doorways from {MAP_PATH}...")
 PRECOMPUTED_DOORWAYS = precompute_doorways(MAP_PATH)
 print(f"Found {len(PRECOMPUTED_DOORWAYS)} doorways: {list(PRECOMPUTED_DOORWAYS.keys())[:5]}...")
@@ -42,6 +42,7 @@ class FastRoomEntryCallback(BaseCallback):
         self.episode_rewards = []
         self.episode_lengths = []
         self.task_successes = []
+        self.doorway_distances = []
 
     def _on_training_start(self) -> None:
         self.start_time = time.time()
@@ -60,32 +61,123 @@ class FastRoomEntryCallback(BaseCallback):
                     self.episode_rewards.append(info['episode']['r'])
                     self.episode_lengths.append(info['episode']['l'])
                     self.task_successes.append(info.get('task_success', False))
+                    if 'distance_to_doorway' in info:
+                        self.doorway_distances.append(info['distance_to_doorway'])
 
                 if self.episode_count % 100 == 0:
                     recent_rewards = self.episode_rewards[-100:]
                     recent_lengths = self.episode_lengths[-100:]
                     recent_successes = self.task_successes[-100:]
+                    recent_distances = self.doorway_distances[-100:] if self.doorway_distances else []
 
                     avg_reward = np.mean(recent_rewards) if recent_rewards else 0
                     avg_length = np.mean(recent_lengths) if recent_lengths else 0
                     success_rate = np.mean(recent_successes) * 100 if recent_successes else 0
+                    avg_final_dist = np.mean([d for d in recent_distances if d > 0]) if recent_distances else 0
 
                     elapsed = time.time() - self.start_time
                     fps = self.total_steps / elapsed if elapsed > 0 else 0
                     epsilon = self.model.exploration_schedule(self.model._current_progress_remaining)
+                    loss = self.model.logger.name_to_value.get("train/loss", None)
 
                     print(f"Ep {self.episode_count:5d} | "
                           f"Steps: {self.total_steps:7,d} | "
                           f"Reward: {avg_reward:7.1f} | "
                           f"Length: {avg_length:5.0f} | "
                           f"Success: {success_rate:5.1f}% | "
+                          f"Final Dist: {avg_final_dist:4.1f} | "
                           f"ε: {epsilon:.3f} | "
-                          f"FPS: {fps:4.0f}")
+                          f"FPS: {fps:4.0f} | "
+                          f"Loss: {loss:.4f}" if loss is not None else "")
 
         return True
 
 
-def create_env(env_id: int = 0):
+class EvaluationRenderingCallback(BaseCallback):
+    """Callback for rendering evaluation episodes every N training episodes."""
+
+    def __init__(self, eval_env_fn, eval_freq=500, n_eval_episodes=2, verbose=1):
+        """
+        Args:
+            eval_env_fn: Function that creates a new evaluation environment
+            eval_freq: Evaluate every N episodes
+            n_eval_episodes: Number of episodes to render during evaluation
+            verbose: Verbosity level
+        """
+        super().__init__(verbose)
+        self.eval_env_fn = eval_env_fn  # Store function instead of environment
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.episode_count = 0
+        self.n_envs = None  # Will be set in _init_callback
+
+    def _init_callback(self) -> None:
+        """Initialize the callback."""
+        if self.n_envs is None:
+            self.n_envs = self.training_env.num_envs
+
+    def _on_step(self) -> bool:
+        # Check if any environment finished an episode
+        for i in range(self.n_envs):
+            if self.locals.get('dones')[i]:
+                self.episode_count += 1
+
+                # Check if it's time to evaluate
+                if self.episode_count % self.eval_freq == 0:
+                    self._run_evaluation()
+
+        return True
+
+    def _run_evaluation(self):
+        """Run and render evaluation episodes."""
+        print(f"\n{'='*60}")
+        print(f"EVALUATION at episode {self.episode_count} - Rendering {self.n_eval_episodes} episodes...")
+        print("-"*60)
+
+        # Create a fresh evaluation environment
+        eval_env = self.eval_env_fn()
+
+        try:
+            for ep_num in range(self.n_eval_episodes):
+                obs, _ = eval_env.reset()
+                done = False
+                truncated = False
+                episode_reward = 0
+                episode_length = 0
+
+                print(f"\nEpisode {ep_num + 1}/{self.n_eval_episodes}")
+
+                while not (done or truncated):
+                    # Get action from model (deterministic for evaluation)
+                    action, _ = self.model.predict(obs, deterministic=True)
+
+                    # Step environment
+                    obs, reward, done, truncated, info = eval_env.step(action)
+                    episode_reward += reward
+                    episode_length += 1
+
+                    # Render
+                    eval_env.render()
+
+                # Print episode summary
+                print(f"  Reward: {episode_reward:.2f}")
+                print(f"  Length: {episode_length}")
+                if 'task_success' in info:
+                    print(f"  Success: {info['task_success']}")
+                if 'doorway_position' in info:
+                    print(f"  Target doorway: {info['doorway_position']}")
+                if 'distance_to_doorway' in info:
+                    print(f"  Final distance: {info['distance_to_doorway']:.2f}")
+
+        finally:
+            # Always close the environment after evaluation
+            eval_env.close()
+            print("Evaluation environment closed.")
+
+        print("="*60 + "\n")
+
+
+def create_env(env_id: int = 0, render_mode: str = None):
     """Create a single room entry environment with pre-computed doorways."""
 
     def _init():
@@ -107,7 +199,7 @@ def create_env(env_id: int = 0):
             'num_agents': 1,
             'max_steps': 500,
             'map_path': MAP_PATH,
-            'render_mode': None,
+            'render_mode': render_mode,  # Pass render_mode through
             'sensor_config': {0: sensor},
             'discovery_reward': 1.0,
             'collision_penalty': -0.5,
@@ -124,7 +216,7 @@ def create_env(env_id: int = 0):
             # Removed wrong_direction_penalty (doesn't exist)
             collision_penalty=-1.0,
             step_penalty=-0.01,
-            max_task_steps=500,
+            max_task_steps=100,
             auto_explore=True,
             max_exploration_steps=1000,
             min_doorways_to_discover=1,
@@ -150,7 +242,7 @@ def train():
     map_height, map_width = loaded_map.shape
 
     print("="*60)
-    print("DQN ROOM ENTRY TRAINING - ULTRA-OPTIMIZED")
+    print("DQN ROOM ENTRY TRAINING - ULTRA-OPTIMIZED WITH RENDERING")
     print(f"Map: {MAP_PATH}")
     print(f"Map size: {map_width}x{map_height}")
     print(f"Pre-computed doorways: {len(PRECOMPUTED_DOORWAYS)}")
@@ -165,9 +257,13 @@ def train():
 
     # Create environments
     print(f"Creating {N_ENVS} environments...")
-    env_fns = [create_env(i) for i in range(N_ENVS)]
+    env_fns = [create_env(i, render_mode=None) for i in range(N_ENVS)]
     vec_env = SubprocVecEnv(env_fns)
     vec_env = VecMonitor(vec_env)
+
+    # Create evaluation environment function (not the environment itself)
+    print("Setting up evaluation environment function...")
+    eval_env_fn = create_env(0, render_mode='human')
 
     # Create model
     print("Creating DQN model...")
@@ -201,9 +297,19 @@ def train():
     # Create callbacks
     callbacks = []
 
+    # Progress callback
     progress_callback = FastRoomEntryCallback(n_envs=N_ENVS)
     callbacks.append(progress_callback)
 
+    # Evaluation rendering callback - pass the function, not an instantiated environment
+    eval_rendering_callback = EvaluationRenderingCallback(
+        eval_env_fn=eval_env_fn,  # Pass the function
+        eval_freq=500,  # Every 500 episodes
+        n_eval_episodes=2  # Render 2 episodes
+    )
+    callbacks.append(eval_rendering_callback)
+
+    # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
         save_freq=500_000 // N_ENVS,
         save_path="./models/room_entry_checkpoints/",
@@ -215,7 +321,8 @@ def train():
 
     # Train
     print("Starting training...")
-    print(f"Target: {STEPS_PER_STAGE:,} steps\n")
+    print(f"Target: {STEPS_PER_STAGE:,} steps")
+    print("Evaluation rendering will occur every 500 episodes\n")
 
     start_time = time.time()
 
@@ -241,6 +348,7 @@ def train():
     print("="*60)
 
     vec_env.close()
+    # No need to close eval_env here since it's handled in the callback
 
 
 if __name__ == "__main__":

@@ -85,4 +85,46 @@ def main():
 
 
 if __name__ == "__main__":
+    example = """
+    1. "Scan the kitchen."
+    
+    2. "Go to the bedroom and scan it."
+    
+    3. "Map the living room and the dining room."
+    
+    4. "Scan the bathroom, then the hallway."
+    
+    5. "Navigate to the office, scan it, then exit."
+    
+    6. "Go to the garage and scan it."
+    
+    7. "Scan the kitchen, bathroom, and bedroom."
+    
+    8. "Explore and scan room A and room B."
+    
+    9. "Map the pantry, then go to the dining room and scan it."
+    
+    10. "Go to the laundry room, scan it, then scan the hallway."
+    
+    11. "Scan the living room first, then the kitchen, then the bedroom."
+    
+    12. "Navigate through all rooms: kitchen, living room, and bathroom, scanning each one."
+    
+    13. "Go to room C, scan it, then go to room D and scan it."
+    
+    14. "Scan every room in the house starting with the hallway and ending with the garage."
+    
+    15. "Enter the dining room, scan it, exit, then go scan the bedroom."
+    
+    16. "Map the living room, pantry, and office in that order."
+    
+    17. "Go to the study and scan it, then scan the laundry room."
+    
+    18. "Navigate to room X, scan it, then scan room Y, then return to hallway."
+    
+    19. "Scan the kitchen, then immediately map the bathroom and bedroom."
+    
+    20 "Explore the garage, scan it, then map the dining room and the pantry."
+    """
+
     main()
