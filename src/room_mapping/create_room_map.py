@@ -6,8 +6,10 @@ Creates room map from camera scans using perspective geometry for accurate dista
 
 import numpy as np
 import math
-from typing import List, Dict, Optional
-from tile_definitions import TileType, OBJECT_TO_TILE, OBJECT_SIZES, OBJECT_HEIGHTS
+from typing import List, Dict
+from tile_definitions import (
+    TileType, OBJECT_TO_TILE, OBJECT_SIZES, OBJECT_HEIGHTS, TILE_NAMES
+)
 
 
 def estimate_distance_from_bbox(bbox: List[int], object_class: str,
@@ -36,7 +38,6 @@ def estimate_distance_from_bbox(bbox: List[int], object_class: str,
     real_object_height = OBJECT_HEIGHTS.get(object_class.lower(), 1.0)
 
     # Calculate focal length in pixels
-    # focal_length = (frame_height / 2) / tan(fov_v / 2)
     focal_length_px = (frame_height / 2) / math.tan(math.radians(camera_fov_v / 2))
 
     # Basic distance from perspective projection
@@ -46,22 +47,13 @@ def estimate_distance_from_bbox(bbox: List[int], object_class: str,
         distance = 5.0  # Default fallback
 
     # Adjust for camera height and object vertical position
-    # Objects lower in frame are typically closer (on ground)
     bbox_center_y = (y1 + y2) / 2
     vertical_position = bbox_center_y / frame_height  # 0 = top, 1 = bottom
 
     # Apply ground plane constraint
-    # If camera is looking straight ahead, objects on ground appear lower
     if vertical_position > 0.5:  # Object in lower half of frame
-        # Use ground plane geometry
-        # Angle from camera to object base
         angle_to_base = math.atan2(camera_height, distance)
-
-        # Refine distance estimate considering camera height
-        # For objects on ground level
         ground_distance = camera_height / math.tan(angle_to_base)
-
-        # Blend between direct and ground estimates
         weight = (vertical_position - 0.5) * 2  # 0 to 1 for lower half
         distance = distance * (1 - weight * 0.3)  # Slight adjustment
 
@@ -81,7 +73,7 @@ def create_map_from_scans(scans: List[Dict],
     Convert camera scans into a 2D grid map using proper distance estimation.
 
     Args:
-        scans: List of scans with 'angle' and 'bboxes'
+        scans: List of scans with 'yaw' (in radians) and 'bboxes'
         room_width_m: Room width in meters
         room_height_m: Room depth in meters
         camera_height_m: Camera height from ground (typical: 1.5m standing, 1.0m sitting)
@@ -98,7 +90,7 @@ def create_map_from_scans(scans: List[Dict],
     grid_width = int(room_width_m / grid_resolution)
     grid_height = int(room_height_m / grid_resolution)
 
-    # Initialize map
+    # Initialize map with walls
     room_map = np.zeros((grid_height, grid_width), dtype=np.int8)
     room_map[0, :] = TileType.WALL
     room_map[-1, :] = TileType.WALL
@@ -113,12 +105,12 @@ def create_map_from_scans(scans: List[Dict],
     print(f"Camera config: height={camera_height_m}m, FOV={camera_fov_h}°x{camera_fov_v}°")
     print(f"Frame size: {frame_width}x{frame_height}px")
 
-    # Track all detections for debugging
     all_detections = []
 
     # Process each scan
     for scan in scans:
-        angle_rad = math.radians(scan['angle'])
+        # Changed: accept 'yaw' in radians directly (no conversion needed)
+        angle_rad = scan.get('yaw', scan.get('angle', 0))  # Support both 'yaw' and 'angle' fields
 
         for bbox_data in scan['bboxes']:
             obj_class = bbox_data['class'].lower()
@@ -153,11 +145,11 @@ def create_map_from_scans(scans: List[Dict],
             obj_width_tiles = max(1, int(obj_dims[0] / grid_resolution))
             obj_depth_tiles = max(1, int(obj_dims[1] / grid_resolution))
 
-            # Store detection info
+            # Store detection info (convert to degrees for display)
             all_detections.append({
                 'class': obj_class,
                 'distance': distance_m,
-                'angle': math.degrees(object_angle),
+                'angle': math.degrees(object_angle),  # Convert to degrees for display
                 'grid_pos': (obj_x, obj_y),
                 'confidence': bbox_data.get('confidence', 1.0)
             })
@@ -188,67 +180,67 @@ def save_map(room_map: np.ndarray, filename: str = "room_map.txt"):
     print(f"\nMap saved to {filename}")
     print(f"Map size: {room_map.shape[1]}x{room_map.shape[0]} tiles")
 
-    # Count objects by type
+    # Count objects by type using TILE_NAMES from definitions
     object_counts = {}
-    for tile_value in range(7, 16):  # Object tile types
-        count = np.sum(room_map == tile_value)
-        if count > 0:
-            object_counts[tile_value] = count
+    for tile_type, tile_name in TILE_NAMES.items():
+        if tile_type >= TileType.CHAIR:  # Object tile types start from CHAIR
+            count = np.sum(room_map == tile_type)
+            if count > 0:
+                object_counts[tile_name] = count
 
     if object_counts:
         print("Objects placed:")
-        tile_names = {7: "Chair", 8: "Table", 9: "Couch", 10: "TV",
-                     11: "Bed", 12: "Desk", 13: "Plant", 14: "Cabinet", 15: "Appliance"}
-        for tile_type, count in object_counts.items():
-            print(f"  {tile_names.get(tile_type, 'Unknown')}: {count} tiles")
+        for name, count in object_counts.items():
+            print(f"  {name}: {count} tiles")
 
 
 # Example usage with realistic camera parameters
 if __name__ == "__main__":
-    # Example scans from a room
-    scans = [
-        {
-            'angle': 0,  # North
-            'bboxes': [
-                {'class': 'tv', 'bbox': [280, 200, 380, 280], 'confidence': 0.95},
-                {'class': 'table', 'bbox': [200, 300, 340, 420], 'confidence': 0.88},
-                {'class': 'chair', 'bbox': [400, 320, 480, 440], 'confidence': 0.82},
-            ]
-        },
-        {
-            'angle': 90,  # East
-            'bboxes': [
-                {'class': 'couch', 'bbox': [150, 250, 450, 400], 'confidence': 0.91},
-                {'class': 'plant', 'bbox': [500, 280, 560, 380], 'confidence': 0.75},
-            ]
-        },
-        {
-            'angle': 180,  # South
-            'bboxes': [
-                {'class': 'desk', 'bbox': [240, 260, 400, 380], 'confidence': 0.93},
-                {'class': 'chair', 'bbox': [420, 340, 500, 460], 'confidence': 0.77},
-                {'class': 'cabinet', 'bbox': [100, 180, 180, 360], 'confidence': 0.85},
-            ]
-        },
-        {
-            'angle': 270,  # West
-            'bboxes': [
-                {'class': 'bed', 'bbox': [100, 220, 500, 450], 'confidence': 0.96},
-            ]
-        },
-    ]
+    import json
+    import os
+
+    # Load scans from JSON file
+    json_path = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/images/scans.json"
+
+    try:
+        with open(json_path, 'r') as f:
+            scans = json.load(f)
+        print(f"Loaded {len(scans)} scans from {json_path}")
+    except FileNotFoundError:
+        print(f"Warning: {json_path} not found. Using example scans.")
+        # Fallback example scans if JSON file doesn't exist (now using radians)
+        scans = [
+            {
+                'yaw': 0,  # North (0 radians)
+                'bboxes': [
+                    {'class': 'tv', 'bbox': [280, 200, 380, 280], 'confidence': 0.95},
+                    {'class': 'table', 'bbox': [200, 300, 340, 420], 'confidence': 0.88},
+                    {'class': 'chair', 'bbox': [400, 320, 480, 440], 'confidence': 0.82},
+                ]
+            },
+            {
+                'yaw': 1.5708,  # East (π/2 radians ≈ 90°)
+                'bboxes': [
+                    {'class': 'couch', 'bbox': [150, 250, 450, 400], 'confidence': 0.91},
+                    {'class': 'plant', 'bbox': [500, 280, 560, 380], 'confidence': 0.75},
+                ]
+            },
+        ]
+    except json.JSONDecodeError as e:
+        print(f"Error parsing JSON file: {e}")
+        print("Using example scans instead.")
+        scans = []
 
     # Create map with camera parameters
     room_map = create_map_from_scans(
         scans,
-        room_width_m=16.0,
-        room_height_m=16.0,
-        camera_height_m=1.5,  # Standing height
-        camera_fov_h=60,       # Typical webcam horizontal FOV
-        camera_fov_v=45,       # Typical webcam vertical FOV
-        frame_width=640,
-        frame_height=480,
-        grid_resolution=0.25
-    )
+        room_width_m=5.0,
+        room_height_m=5.0,
+        camera_height_m=0.1,  # Standing height
+        camera_fov_h=60,  # Typical webcam horizontal FOV
+        camera_fov_v=45,  # Typical webcam vertical FOV
+        frame_width=1280,
+        frame_height=720,
+        grid_resolution=0.1    )
 
     save_map(room_map, "room_map.txt")

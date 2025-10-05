@@ -7,7 +7,7 @@ Simple script to render a room map text file using pygame.
 import numpy as np
 import pygame
 import sys
-from tile_definitions import TileType, TILE_COLORS
+from tile_definitions import TileType, TILE_COLORS, TILE_NAMES
 
 
 def render_map(map_file: str, tile_size: int = 20):
@@ -92,21 +92,45 @@ def render_with_legend(map_file: str, tile_size: int = 20):
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Arial", 14)
 
-    # Legend items
-    legend_items = [
-        ("Wall", TileType.WALL),
-        ("Free Space", TileType.FREE_SPACE),
-        ("Entry/Camera", TileType.ENTRY_POINT),
-        ("Chair", TileType.CHAIR),
-        ("Table", TileType.TABLE),
-        ("Couch", TileType.COUCH),
-        ("TV", TileType.TV),
-        ("Bed", TileType.BED),
-        ("Desk", TileType.DESK),
-        ("Plant", TileType.PLANT),
-        ("Cabinet", TileType.CABINET),
-        ("Appliance", TileType.APPLIANCE),
+    # Build legend from tiles actually present in the map
+    unique_tiles = np.unique(room_map)
+    legend_items = []
+
+    # Priority order for legend display
+    priority_order = [
+        TileType.WALL,
+        TileType.FREE_SPACE,
+        TileType.ENTRY_POINT,
+        TileType.DOOR_OPEN,
+        TileType.DOOR_CLOSED,
+        TileType.WINDOW,
+        TileType.CHAIR,
+        TileType.PLASTIC_CHAIR,
+        TileType.TABLE,
+        TileType.COUCH,
+        TileType.TV,
+        TileType.BED,
+        TileType.DESK,
+        TileType.PLANT,
+        TileType.CABINET,
+        TileType.APPLIANCE,
+        TileType.REFRIGERATOR,
+        TileType.SUITCASE,
+        TileType.BOX,
+        TileType.CARDBOARD_BOX,
+        TileType.COMPUTER,
+        TileType.KEYBOARD,
+        TileType.MOUSE,
+        TileType.SOCKET,
+        TileType.BOTTLE,
+        TileType.WEAPON,
     ]
+
+    # Add tiles in priority order if they exist in the map
+    for tile_type in priority_order:
+        if tile_type in unique_tiles:
+            name = TILE_NAMES.get(tile_type, f"Type {tile_type}")
+            legend_items.append((name, tile_type))
 
     print(f"Rendering {map_file} ({width}x{height})")
     print("Press ESC or close window to exit")
