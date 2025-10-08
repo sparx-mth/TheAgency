@@ -31,13 +31,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # ======================= CONFIG =======================
-IMAGES_DIR = Path(r"/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/images")
+IMAGES_DIR = Path(r"/home/user/PycharmProjects/TheAgency/src/room_mapping/images")
 ENGINE = "owlv2"  # "yolo" or "owlv2"
-THRESH = 0.45
+THRESH = 0.4
 # When using OWLv2 (open-vocab), set your desired labels here:
-OPEN_VOCAB_LABELS = ["desk", "cabinet", "tv", "table", "couch", "plant", "bed",
+OPEN_VOCAB_LABELS = ["desk", "cabinet", "table", "couch", "bicycle", "bed",
                      "suitcase", "table", "socket", "refrigerator", "bottle",
-                     "mouse", "weapon", "chair", "keyboard", "computer", "box", "Cardboard box", "gun", "Plastic chair"]
+                     "mouse", "weapon", "chair", "keyboard", "computer", "cardboard box", "gun", "plastic chair"]
 # Save annotated images with rectangles/labels
 SAVE_ANNOTATED = True
 ANNOTATED_DIR = IMAGES_DIR / "images_annotated"
@@ -247,9 +247,7 @@ def main():
 
     # Save outputs
     out_json = IMAGES_DIR / "scans.json"
-    out_py = IMAGES_DIR / "scans.py"
     out_json.write_text(json.dumps(scans, ensure_ascii=False, indent=2))
-    out_py.write_text("scans = " + json.dumps(scans, ensure_ascii=False, indent=2) + "\n")
 
     # Print summary
     print("Done.")
@@ -262,7 +260,6 @@ def main():
     print(f"Total detections: {total_detections}")
 
     print(f"Wrote: {out_json}")
-    print(f"Wrote: {out_py}")
     if SAVE_ANNOTATED:
         print(f"Annotated images: {ANNOTATED_DIR}")
 

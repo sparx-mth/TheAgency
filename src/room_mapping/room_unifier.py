@@ -326,191 +326,111 @@ class RoomUnifier:
         print(f"Saved grid map to {map_file} (shape: {grid.shape})")
 
 
-def main():
-    """Example usage with two rooms, each scanned from 4 angles."""
+def load_scans_from_file(filename: str) -> List[Dict]:
+    """Load scan data from JSON file."""
+    with open(filename, 'r') as f:
+        return json.load(f)
 
-    # Create unifier for a 15x15 meter house
+
+def main():
+    """Process real scan data from scans.json."""
+
+    # Load the real scan data
+    scans = load_scans_from_file(f"/home/user/PycharmProjects/TheAgency/src/room_mapping/images/scans.json")
+
+    # Create unifier for a 10x10 meter house (adjust as needed)
     unifier = RoomUnifier(
-        house_width_m=15.0,
-        house_height_m=15.0,
-        grid_resolution=0.25  # 25cm per grid cell
+        house_width_m=10.0,
+        house_height_m=10.0,
+        grid_resolution=0.2  # 20cm per grid cell
     )
 
-    # =================================================================
-    # LIVING ROOM - Camera at position (4.0, 4.0)
-    # =================================================================
-    living_cam_x = 4.0
-    living_cam_y = 4.0
+    # Set camera position in the center of the house
+    # You can adjust this based on your actual setup
+    camera_x_m = 5.0  # Center X
+    camera_y_m = 5.0  # Center Y
 
-    # Living Room - Scan 1: Facing North (0 radians)
-    living_scan_north = {
-        'yaw': 0,
-        'bboxes': [
-            # Couch against north wall (straight ahead, close)
-            {'class': 'couch', 'bbox': [300, 350, 980, 650], 'confidence': 0.92},
-            # TV on wall above couch (higher in frame)
-            {'class': 'tv', 'bbox': [480, 200, 800, 350], 'confidence': 0.88},
-            # Plant in left corner
-            {'class': 'plant', 'bbox': [50, 400, 150, 580], 'confidence': 0.75},
-            # Cabinet on right side
-            {'class': 'cabinet', 'bbox': [1050, 380, 1200, 620], 'confidence': 0.83}
-        ]
-    }
-    unifier.add_scan(living_scan_north, camera_x_m=living_cam_x, camera_y_m=living_cam_y,
-                     camera_height_m=1.6, camera_fov_h=70, camera_fov_v=50,
-                     frame_width=1280, frame_height=720, room_name="living_room")
+    # Camera parameters based on typical values
+    # Adjust these based on your actual camera setup
+    camera_height_m = 1.5  # Camera height from ground
+    camera_fov_h = 70  # Horizontal field of view in degrees
+    camera_fov_v = 50  # Vertical field of view in degrees
+    frame_width = 640  # Adjust based on your actual image resolution
+    frame_height = 480  # Adjust based on your actual image resolution
 
-    # Living Room - Scan 2: Facing East (π/2 radians)
-    living_scan_east = {
-        'yaw': 1.57,  # 90 degrees
-        'bboxes': [
-            # Table against east wall (straight ahead)
-            {'class': 'table', 'bbox': [400, 420, 880, 600], 'confidence': 0.89},
-            # Chairs around table
-            {'class': 'chair', 'bbox': [320, 460, 420, 620], 'confidence': 0.81},
-            {'class': 'chair', 'bbox': [860, 460, 960, 620], 'confidence': 0.79},
-            # Window on wall (high up)
-            {'class': 'window', 'bbox': [500, 150, 780, 320], 'confidence': 0.91},
-            # Box in corner
-            {'class': 'box', 'bbox': [100, 500, 200, 600], 'confidence': 0.72}
-        ]
-    }
-    unifier.add_scan(living_scan_east, camera_x_m=living_cam_x, camera_y_m=living_cam_y,
-                     camera_height_m=1.6, camera_fov_h=70, camera_fov_v=50,
-                     frame_width=1280, frame_height=720, room_name="living_room")
+    # Process each scan
+    for i, scan in enumerate(scans):
+        # Extract pose data if available
+        if 'pose' in scan:
+            # Use relative position from pose, adjusted to house coordinates
+            pose_x = scan['pose']['x'] + camera_x_m
+            pose_y = scan['pose']['y'] + camera_y_m
+            pose_z = scan['pose'].get('z', camera_height_m)
+        else:
+            # Use default camera position
+            pose_x = camera_x_m
+            pose_y = camera_y_m
+            pose_z = camera_height_m
 
-    # Living Room - Scan 3: Facing South (π radians)
-    living_scan_south = {
-        'yaw': 3.14,  # 180 degrees
-        'bboxes': [
-            # Door to hallway (closed)
-            {'class': 'door_closed', 'bbox': [550, 300, 730, 680], 'confidence': 0.94},
-            # Another chair near door
-            {'class': 'plastic_chair', 'bbox': [350, 450, 480, 630], 'confidence': 0.77},
-            # Suitcase in corner
-            {'class': 'suitcase', 'bbox': [900, 480, 1050, 620], 'confidence': 0.68},
-            # Socket on wall
-            {'class': 'socket', 'bbox': [200, 520, 230, 550], 'confidence': 0.65}
-        ]
-    }
-    unifier.add_scan(living_scan_south, camera_x_m=living_cam_x, camera_y_m=living_cam_y,
-                     camera_height_m=1.6, camera_fov_h=70, camera_fov_v=50,
-                     frame_width=1280, frame_height=720, room_name="living_room")
+        # Determine scan direction based on yaw
+        yaw = scan['yaw']
+        direction = ""
+        if abs(yaw - 0.0) < 0.1:
+            direction = "North"
+        elif abs(yaw - 1.5708) < 0.1:
+            direction = "East"
+        elif abs(yaw - 3.1416) < 0.1:
+            direction = "South"
+        elif abs(yaw - 4.7124) < 0.1:
+            direction = "West"
 
-    # Living Room - Scan 4: Facing West (-π/2 or 3π/2 radians)
-    living_scan_west = {
-        'yaw': 4.71,  # 270 degrees
-        'bboxes': [
-            # Another cabinet on west wall
-            {'class': 'cabinet', 'bbox': [200, 350, 500, 650], 'confidence': 0.86},
-            # Computer setup in corner
-            {'class': 'computer', 'bbox': [650, 400, 750, 500], 'confidence': 0.82},
-            {'class': 'keyboard', 'bbox': [680, 500, 780, 530], 'confidence': 0.78},
-            {'class': 'mouse', 'bbox': [800, 505, 830, 525], 'confidence': 0.71},
-            # Bottle on cabinet
-            {'class': 'bottle', 'bbox': [350, 330, 380, 400], 'confidence': 0.64}
-        ]
-    }
-    unifier.add_scan(living_scan_west, camera_x_m=living_cam_x, camera_y_m=living_cam_y,
-                     camera_height_m=1.6, camera_fov_h=70, camera_fov_v=50,
-                     frame_width=1280, frame_height=720, room_name="living_room")
+        print(f"\nProcessing scan {i + 1} - Facing {direction} (yaw={yaw:.4f})")
+        if 'image' in scan:
+            print(f"  Associated image: {scan['image']}")
 
-    # =================================================================
-    # BEDROOM - Camera at position (11.0, 11.0) - Far from living room
-    # =================================================================
-    bedroom_cam_x = 11.0
-    bedroom_cam_y = 11.0
-
-    # Bedroom - Scan 1: Facing North (0 radians)
-    bedroom_scan_north = {
-        'yaw': 0,
-        'bboxes': [
-            # Bed against north wall (large, prominent)
-            {'class': 'bed', 'bbox': [200, 300, 1080, 700], 'confidence': 0.95},
-            # Window above bed
-            {'class': 'window', 'bbox': [450, 120, 830, 280], 'confidence': 0.89},
-            # Plant on nightstand (small, to the side)
-            {'class': 'plant', 'bbox': [100, 440, 180, 540], 'confidence': 0.73}
-        ]
-    }
-    unifier.add_scan(bedroom_scan_north, camera_x_m=bedroom_cam_x, camera_y_m=bedroom_cam_y,
-                     camera_height_m=1.5, camera_fov_h=65, camera_fov_v=45,
-                     frame_width=1280, frame_height=720, room_name="bedroom")
-
-    # Bedroom - Scan 2: Facing East (π/2 radians)
-    bedroom_scan_east = {
-        'yaw': 1.57,  # 90 degrees
-        'bboxes': [
-            # Desk against east wall
-            {'class': 'desk', 'bbox': [300, 380, 900, 620], 'confidence': 0.91},
-            # Chair at desk
-            {'class': 'chair', 'bbox': [520, 480, 680, 650], 'confidence': 0.84},
-            # Computer on desk
-            {'class': 'computer', 'bbox': [450, 340, 550, 440], 'confidence': 0.87},
-            {'class': 'keyboard', 'bbox': [480, 440, 620, 470], 'confidence': 0.82},
-            {'class': 'mouse', 'bbox': [640, 445, 670, 465], 'confidence': 0.76},
-            # Cardboard boxes stacked in corner
-            {'class': 'cardboard_box', 'bbox': [50, 500, 200, 650], 'confidence': 0.69},
-            {'class': 'cardboard_box', 'bbox': [80, 400, 220, 500], 'confidence': 0.71}
-        ]
-    }
-    unifier.add_scan(bedroom_scan_east, camera_x_m=bedroom_cam_x, camera_y_m=bedroom_cam_y,
-                     camera_height_m=1.5, camera_fov_h=65, camera_fov_v=45,
-                     frame_width=1280, frame_height=720, room_name="bedroom")
-
-    # Bedroom - Scan 3: Facing South (π radians)
-    bedroom_scan_south = {
-        'yaw': 3.14,  # 180 degrees
-        'bboxes': [
-            # Door to hallway (open)
-            {'class': 'door_open', 'bbox': [480, 280, 600, 700], 'confidence': 0.93},
-            # Cabinet/wardrobe next to door
-            {'class': 'cabinet', 'bbox': [700, 200, 1100, 680], 'confidence': 0.90},
-            # Suitcase near door
-            {'class': 'suitcase', 'bbox': [300, 520, 450, 650], 'confidence': 0.74},
-            # Socket on wall
-            {'class': 'socket', 'bbox': [150, 510, 180, 540], 'confidence': 0.67}
-        ]
-    }
-    unifier.add_scan(bedroom_scan_south, camera_x_m=bedroom_cam_x, camera_y_m=bedroom_cam_y,
-                     camera_height_m=1.5, camera_fov_h=65, camera_fov_v=45,
-                     frame_width=1280, frame_height=720, room_name="bedroom")
-
-    # Bedroom - Scan 4: Facing West (-π/2 or 3π/2 radians)
-    bedroom_scan_west = {
-        'yaw': 4.71,  # 270 degrees
-        'bboxes': [
-            # TV on west wall
-            {'class': 'tv', 'bbox': [400, 250, 880, 450], 'confidence': 0.88},
-            # Small table under TV
-            {'class': 'table', 'bbox': [450, 450, 830, 580], 'confidence': 0.81},
-            # Plastic chair in corner
-            {'class': 'plastic_chair', 'bbox': [100, 480, 250, 640], 'confidence': 0.75},
-            # Bottles on table
-            {'class': 'bottle', 'bbox': [500, 420, 530, 480], 'confidence': 0.66},
-            {'class': 'bottle', 'bbox': [750, 420, 780, 480], 'confidence': 0.68}
-        ]
-    }
-    unifier.add_scan(bedroom_scan_west, camera_x_m=bedroom_cam_x, camera_y_m=bedroom_cam_y,
-                     camera_height_m=1.5, camera_fov_h=65, camera_fov_v=45,
-                     frame_width=1280, frame_height=720, room_name="bedroom")
+        # Add scan to unifier
+        unifier.add_scan(
+            scan_data=scan,
+            camera_x_m=pose_x,
+            camera_y_m=pose_y,
+            camera_height_m=pose_z,
+            camera_fov_h=camera_fov_h,
+            camera_fov_v=camera_fov_v,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            room_name="main_room"  # You can change this or make it dynamic
+        )
 
     # Save results
     unifier.save()
 
     # Print summary
-    print(f"\nProcessed {len(unifier.rooms)} rooms")
+    print(f"\n" + "=" * 50)
+    print("PROCESSING COMPLETE")
+    print("=" * 50)
+    print(f"Processed {len(unifier.rooms)} room(s)")
     print(f"Total objects detected: {len(unifier.all_objects)}")
-    print(f"\nRoom details:")
-    for room_name, room_info in unifier.rooms.items():
-        print(f"  {room_name}:")
-        print(f"    Camera position: {room_info['camera_position_m']}m")
-        print(f"    Objects: {len(room_info['objects'])}")
-        print(f"    Doors: {len(room_info['doors'])}")
+
+    if unifier.all_objects:
+        print(f"\nDetected object types:")
+        object_types = {}
+        for obj in unifier.all_objects:
+            obj_type = obj['type']
+            if obj_type not in object_types:
+                object_types[obj_type] = 0
+            object_types[obj_type] += 1
+
+        for obj_type, count in sorted(object_types.items()):
+            print(f"  - {obj_type}: {count}")
+
     print(f"\nGrid info:")
-    print(f"  House: {unifier.house_width_m}x{unifier.house_height_m}m")
-    print(f"  Grid: {unifier.grid_width}x{unifier.grid_height} cells")
+    print(f"  House dimensions: {unifier.house_width_m}x{unifier.house_height_m}m")
+    print(f"  Grid dimensions: {unifier.grid_width}x{unifier.grid_height} cells")
     print(f"  Resolution: {unifier.grid_resolution}m per cell")
+
+    print(f"\nOutput files:")
+    print(f"  - unified_rooms.json: Room structure and object positions")
+    print(f"  - house_map.txt: 2D grid map")
 
 
 if __name__ == "__main__":

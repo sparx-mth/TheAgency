@@ -19,7 +19,7 @@ class TileType:
     TV = 10
     BED = 11
     DESK = 12
-    PLANT = 13
+    bicycle = 13
     CABINET = 14
     APPLIANCE = 15
     SUITCASE = 16
@@ -59,8 +59,8 @@ OBJECT_TO_TILE = {
     # Work furniture
     'desk': TileType.DESK,
 
-    # Plants
-    'plant': TileType.PLANT,
+    # bicycles
+    'bicycle': TileType.bicycle,
 
     # Storage furniture
     'cabinet': TileType.CABINET,
@@ -107,7 +107,7 @@ TILE_COLORS = {
     TileType.TV: (64, 64, 64),               # Dark gray
     TileType.BED: (255, 182, 193),           # Light pink
     TileType.DESK: (160, 82, 45),            # Sienna
-    TileType.PLANT: (0, 128, 0),             # Green
+    TileType.bicycle: (0, 128, 0),             # Green
     TileType.CABINET: (92, 51, 23),          # Dark wood
     TileType.APPLIANCE: (192, 192, 192),     # Silver
     TileType.SUITCASE: (139, 90, 43),        # Tan
@@ -133,7 +133,7 @@ OBJECT_SIZES = {
     TileType.TV: (1.2, 0.3, 0.7),           # TV on stand
     TileType.BED: (1.5, 2.0, 0.6),          # Queen bed
     TileType.DESK: (1.2, 0.6, 0.75),        # Office desk
-    TileType.PLANT: (0.3, 0.3, 1.0),        # Potted plant
+    TileType.bicycle: (1.5, 0.3, 1.0),        # Potted bicycle
     TileType.CABINET: (0.8, 0.4, 1.8),      # Storage cabinet
     TileType.APPLIANCE: (0.6, 0.6, 1.7),    # Generic appliance
     TileType.SUITCASE: (0.7, 0.45, 0.25),   # Large suitcase lying flat
@@ -173,8 +173,8 @@ OBJECT_HEIGHTS = {
     # Work furniture
     'desk': 0.75,              # Desk surface
 
-    # Plants
-    'plant': 1.0,              # Medium potted plant
+    # bicycles
+    'bicycle': 1.0,              # Medium potted bicycle
 
     # Storage furniture
     'cabinet': 1.8,            # Tall cabinet
@@ -225,7 +225,7 @@ TILE_NAMES = {
     TileType.TV: "TV",
     TileType.BED: "Bed",
     TileType.DESK: "Desk",
-    TileType.PLANT: "Plant",
+    TileType.bicycle: "bicycle",
     TileType.CABINET: "Cabinet",
     TileType.APPLIANCE: "Appliance",
     TileType.SUITCASE: "Suitcase",
@@ -244,7 +244,7 @@ TILE_NAMES = {
 
 # List of all vocabulary labels supported
 OPEN_VOCAB_LABELS = [
-    "desk", "cabinet", "tv", "table", "couch", "plant", "bed",
+    "desk", "cabinet", "tv", "table", "couch", "bicycle", "bed",
     "suitcase", "table", "socket", "refrigerator", "bottle",
     "mouse", "weapon", "chair", "keyboard", "computer", "box",
     "cardboard box", "gun", "plastic chair"
