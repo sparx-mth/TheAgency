@@ -11,9 +11,10 @@ import os
 PROMPT = """You are a mission planner for an autonomous drone that navigates houses. The drone needs clear navigation instructions based on a house map and user requests.
 
 CONTEXT:
-- The drone starts in the bedroom unless told otherwise
-- The drone can navigate to coordinates, enter/exit rooms, and scan areas
+- The drone starts at the bottom center of the house (main entrance area)
+- The drone can navigate using compass directions (north/south/east/west) and relative positions
 - You have knowledge of typical house layouts (bathrooms have toiletries, kitchens have appliances, studies have computers, etc.)
+- North is towards the top of the house, South towards the bottom, East to the right, West to the left
 
 HOUSE MAP (JSON format showing rooms, objects, and their grid positions):
 {house_json}
@@ -21,28 +22,31 @@ HOUSE MAP (JSON format showing rooms, objects, and their grid positions):
 USER TASK: {user_task}
 
 YOUR JOB:
-Generate ONE SHORT SENTENCE or BRIEF PARAGRAPH (max 2-3 sentences) with navigation instructions.
+Generate navigation instructions with TWO parts:
+1. A brief statement about the target location
+2. Human-readable directions on how to get there from the starting position
 
 RESPONSE FORMAT:
 
 1. If object EXISTS in map:
-   "I see the [object] is in the [room] at (x,y), so the task is: navigate to [room] at (x,y) and retrieve it."
+   "I see the [object] is in the [room]. To get there: head [direction] from your current position, then [continue direction/turn] to reach the [room]. The [object] is located [near/next to/by] [landmark/other object]."
 
 2. If object DOESN'T EXIST but you know where it typically is:
-   "I don't see [object] in the map, but it's typically in the [room], so the task is: navigate to [room] to search for it."
+   "I don't see [object] in the map, but it's typically in the [room]. To search for it: move [direction] from here, then [continue/turn] towards the [room area]. Check near [typical location like counters/cabinets/etc]."
 
 3. For room navigation:
-   "I see the [room] at (x,y), so the task is: navigate to (x,y) and enter."
+   "I see the [room]. To navigate there: go [direction] from your starting point, then [continue/turn] to enter the [room]."
    OR
-   "I haven't found the [room] yet, so the task is: explore unexplored doors to find it."
+   "I haven't found the [room] yet. To explore: head [direction] to check unexplored doors, particularly towards the [north/south/east/west] section of the house."
 
 GUIDELINES:
-- Keep it SHORT - one clear instruction
-- Use real-world knowledge: refrigerator-kitchen, toilet paper-bathroom, car keys-On the table, and more
-- Include positions (x,y) when available
-- Be direct and specific
+- Always describe the path using compass directions (north, south, east, west, northeast, etc.)
+- Reference nearby objects or landmarks when describing the target's location
+- Keep instructions clear and sequential (first do this, then do that)
+- Use real-world knowledge: refrigerator-kitchen, toilet paper-bathroom, car keys-table, etc.
+- Mention relative positions like "next to", "near", "by", "in the corner", "along the wall"
 
-Generate the brief navigation instruction:"""
+Generate the navigation instruction with directions:"""
 
 
 def ask_ollama(house_json, user_task):
