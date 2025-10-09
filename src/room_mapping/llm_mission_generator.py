@@ -22,22 +22,28 @@ HOUSE MAP (JSON format showing rooms, objects, and their grid positions):
 USER TASK: {user_task}
 
 YOUR JOB:
-Generate navigation instructions with TWO parts:
-1. A brief statement about the target location
-2. Human-readable directions on how to get there from the starting position
+Generate navigation instructions based STRICTLY on what exists in the map. NEVER invent rooms or objects that aren't listed.
 
 RESPONSE FORMAT:
 
-1. If object EXISTS in map:
+1. If object EXISTS in map (verify it's actually listed):
    "I see the [object] is in the [room]. To get there: head [direction] from your current position, then [continue direction/turn] to reach the [room]. The [object] is located [near/next to/by] [landmark/other object]."
 
-2. If object DOESN'T EXIST but you know where it typically is:
-   "I don't see [object] in the map, but it's typically in the [room]. To search for it: move [direction] from here, then [continue/turn] towards the [room area]. Check near [typical location like counters/cabinets/etc]."
+2. If object DOESN'T EXIST in the map but you know where it typically belongs:
+   "I don't see [object] in the map, but it's typically found in the [typical room]. Since there's no [typical room] in this house, the task is: explore the house systematically by heading [direction] and checking each room for the [object]."
+   OR if the typical room exists but object isn't there:
+   "I don't see [object] in the map, but it's typically in the [room]. To search for it: move [direction] to the [room] and check near [typical locations]."
 
 3. For room navigation:
-   "I see the [room]. To navigate there: go [direction] from your starting point, then [continue/turn] to enter the [room]."
-   OR
-   "I haven't found the [room] yet. To explore: head [direction] to check unexplored doors, particularly towards the [north/south/east/west] section of the house."
+   If room EXISTS: "I see the [room]. To navigate there: go [direction] from your starting point, then [continue/turn] to enter the [room]."
+   If room DOESN'T EXIST: "I don't see a [room] in this house. The task is: explore the available rooms by heading [direction] to check if any room serves as a [room]."
+
+CRITICAL RULES:
+- ONLY mention rooms that are explicitly listed in the map
+- ONLY mention objects that are explicitly listed in the map
+- If something isn't in the map, clearly state "I don't see [X] in the map"
+- When suggesting where something typically is, check if that room actually exists first
+- If neither the object nor its typical room exists, suggest systematic exploration
 
 GUIDELINES:
 - Always describe the path using compass directions (north, south, east, west, northeast, etc.)
@@ -45,6 +51,8 @@ GUIDELINES:
 - Keep instructions clear and sequential (first do this, then do that)
 - Use real-world knowledge: refrigerator-kitchen, toilet paper-bathroom, car keys-table, etc.
 - Mention relative positions like "next to", "near", "by", "in the corner", "along the wall"
+
+IMPORTANT: Output ONLY the navigation instruction as a single paragraph. Do NOT include any introduction, explanation, clarification, or numbered lists. Just write the complete instruction directly.
 
 Generate the navigation instruction with directions:"""
 
