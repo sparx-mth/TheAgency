@@ -1,0 +1,44 @@
+{
+  "image": {
+    "path": "/opt/nanoowl/examples/jetson_server/captures/2025_10_09___10_37_47/x-0200y0000z0300yaw0000000.jpg",
+    "width": 1280,
+    "height": 720
+  },
+  "prompts": [
+    "a bottle",
+    "a computer"
+  ],
+  "detections": [
+    {
+      "label": "a bottle",
+      "bbox": [
+        50,
+        226,
+        115,
+        468
+      ],
+      "score": 0.38318297266960144
+    },
+    {
+      "label": "a computer",
+      "bbox": [
+        896,
+        215,
+        1176,
+        531
+      ],
+      "score": 0.281935453414917
+    },
+    {
+      "label": "a computer",
+      "bbox": [
+        815,
+        41,
+        1226,
+        522
+      ],
+      "score": 0.108228899538517
+    }
+  ],
+  "ts": 1759997135.1821337
+}

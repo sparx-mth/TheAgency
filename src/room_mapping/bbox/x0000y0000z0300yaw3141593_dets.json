@@ -1,0 +1,38 @@
+{
+  "image": {
+    "path": "/opt/nanoowl/examples/jetson_server/captures/2025_10_09___10_37_47/x0200y0000z0300yaw3141593.jpg",
+    "width": 1280,
+    "height": 720
+  },
+  "prompts": [
+    "a suitcase",
+    "a suitcase[a label]",
+    "a suitcase[a black label]",
+    "a suitcase[a maple-leaf label]",
+    "a suitcase[a red label]",
+    "a suitcase[a white label]"
+  ],
+  "detections": [
+    {
+      "label": "a suitcase",
+      "bbox": [
+        115,
+        135,
+        482,
+        511
+      ],
+      "score": 0.5700187683105469
+    },
+    {
+      "label": "a suitcase",
+      "bbox": [
+        486,
+        155,
+        880,
+        521
+      ],
+      "score": 0.5682188272476196
+    }
+  ],
+  "ts": 1759997135.8665357
+}

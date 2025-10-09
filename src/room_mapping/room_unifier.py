@@ -9,6 +9,8 @@ and unifies them into a single global house structure.
 import numpy as np
 import json
 import math
+import os
+import glob
 from typing import Dict, List, Tuple, Optional
 from tile_definitions import OBJECT_TO_TILE, OBJECT_HEIGHTS, TileType, OBJECT_SIZES
 
@@ -103,12 +105,13 @@ class RoomUnifier:
                  frame_width: int = 1280,
                  frame_height: int = 720,
                  room_name: Optional[str] = None,
-                 room_dims_m: Optional[Tuple[float, float]] = None):
+                 room_dims_m: Optional[Tuple[float, float]] = None,
+                 yaw: float = 0.0):
         """
         Add a scan from a specific camera position.
 
         Args:
-            scan_data: BBOX data with 'yaw' and 'bboxes'
+            scan_data: Detection data with 'detections'
             camera_x_m: Camera X position in meters within the house
             camera_y_m: Camera Y position in meters within the house
             camera_height_m: Camera height from ground in meters
@@ -118,13 +121,13 @@ class RoomUnifier:
             frame_height: Camera frame height in pixels
             room_name: Optional name for the room being scanned
             room_dims_m: Optional (width, height) of room in meters
+            yaw: Camera angle in radians
         """
         # Convert camera position to grid
         cam_grid_x, cam_grid_y = self.meters_to_grid(camera_x_m, camera_y_m)
 
-        # Get scan parameters
-        yaw = scan_data.get('yaw', 0)  # Camera angle in radians
-        bboxes = scan_data.get('bboxes', [])
+        # Get detections from new format
+        detections = scan_data.get('detections', [])
 
         # Calculate FOV in radians for this scan
         fov_h_rad = math.radians(camera_fov_h)
@@ -133,10 +136,13 @@ class RoomUnifier:
         detected_objects = []
         detected_doors = []
 
-        for bbox_item in bboxes:
-            obj_class = bbox_item['class'].lower()
-            bbox = bbox_item['bbox']
-            confidence = bbox_item.get('confidence', 1.0)
+        for detection in detections:
+            # Extract object class from label (remove 'a ' or 'an ' prefix)
+            label = detection.get('label', '').lower()
+            obj_class = label.replace('a ', '').replace('an ', '').strip()
+
+            bbox = detection['bbox']
+            confidence = detection.get('score', 1.0)
 
             # Skip unknown objects
             tile_type = OBJECT_TO_TILE.get(obj_class)
@@ -150,11 +156,19 @@ class RoomUnifier:
             # Calculate horizontal angle offset
             bbox_center_x = (bbox[0] + bbox[2]) / 2
             angle_offset = ((bbox_center_x / frame_width) - 0.5) * fov_h_rad
-            object_angle = yaw + angle_offset
+            object_angle = yaw + math.pi + angle_offset
 
             # Calculate object position in meters
-            obj_x_m = camera_x_m + distance_m * math.sin(object_angle)
-            obj_y_m = camera_y_m - distance_m * math.cos(object_angle)
+            obj_x_m = camera_x_m - distance_m * math.sin(object_angle)
+            obj_y_m = camera_y_m + distance_m * math.cos(object_angle)
+
+            print("\n================ DEBUG ORIENTATION ================")
+            print(f"Yaw (rad): {yaw:.3f} | Object angle: {object_angle:.3f}")
+            print(f"Angle offset (deg): {math.degrees(angle_offset):.1f}")
+            print(f"cos(angle + π/2): {math.cos(object_angle + math.pi/2):.3f}")
+            print(f"sin(angle + π/2): {math.sin(object_angle + math.pi/2):.3f}")
+            print(f"Object will be at: ({obj_x_m:.2f}, {obj_y_m:.2f}) from camera at ({camera_x_m:.2f}, {camera_y_m:.2f})")
+            print("===================================================")
 
             # Convert to grid coordinates
             obj_grid_x, obj_grid_y = self.meters_to_grid(obj_x_m, obj_y_m)
@@ -326,17 +340,52 @@ class RoomUnifier:
         print(f"Saved grid map to {map_file} (shape: {grid.shape})")
 
 
-def load_scans_from_file(filename: str) -> List[Dict]:
-    """Load scan data from JSON file."""
-    with open(filename, 'r') as f:
-        return json.load(f)
+def parse_pose_from_filename(filename: str) -> Dict:
+    """
+    Parse pose and yaw from filename like 'x0000y0200z1500yaw4712389_dets.json'
+
+    Returns:
+        Dict with x, y, z (in cm) and yaw (in radians)
+    """
+    import re
+
+    # Extract base filename without path and extension
+    base = os.path.basename(filename).replace('_dets.json', '')
+
+    # Parse x, y, z values (they're in mm, convert to meters)
+    x_match = re.search(r'x(-?\d+)', base)
+    y_match = re.search(r'y(-?\d+)', base)
+    z_match = re.search(r'z(-?\d+)', base)
+    yaw_match = re.search(r'yaw(\d+)', base)
+
+    pose = {}
+    if x_match:
+        pose['x'] = int(x_match.group(1)) / 1000.0  # Convert mm to m
+    if y_match:
+        pose['y'] = int(y_match.group(1)) / 1000.0  # Convert mm to m
+    if z_match:
+        pose['z'] = int(z_match.group(1)) / 1000.0  # Convert mm to m
+    if yaw_match:
+        # Yaw appears to be in units of 0.000001 radians
+        pose['yaw'] = int(yaw_match.group(1)) / 1000000.0
+
+    return pose
 
 
 def main():
-    """Process real scan data from scans.json."""
+    """Process real scan data from individual JSON files."""
 
-    # Load the real scan data
-    scans = load_scans_from_file(f"/home/user/PycharmProjects/TheAgency/src/room_mapping/images/scans.json")
+    # Directory containing the JSON files
+    bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/bbox"
+
+    # Find all detection JSON files
+    json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+
+    if not json_files:
+        print(f"No detection files found in {bbox_dir}")
+        return
+
+    print(f"Found {len(json_files)} detection files")
 
     # Create unifier for a 10x10 meter house (adjust as needed)
     unifier = RoomUnifier(
@@ -345,35 +394,41 @@ def main():
         grid_resolution=0.2  # 20cm per grid cell
     )
 
-    # Set camera position in the center of the house
-    # You can adjust this based on your actual setup
-    camera_x_m = 5.0  # Center X
-    camera_y_m = 5.0  # Center Y
+    # Set default camera position in the center of the house
+    default_camera_x_m = 5.0  # Center X
+    default_camera_y_m = 5.0  # Center Y
 
     # Camera parameters based on typical values
-    # Adjust these based on your actual camera setup
-    camera_height_m = 1.5  # Camera height from ground
+    camera_height_m = 0.3  # Camera height from ground
     camera_fov_h = 70  # Horizontal field of view in degrees
     camera_fov_v = 50  # Vertical field of view in degrees
-    frame_width = 640  # Adjust based on your actual image resolution
-    frame_height = 480  # Adjust based on your actual image resolution
 
-    # Process each scan
-    for i, scan in enumerate(scans):
-        # Extract pose data if available
-        if 'pose' in scan:
-            # Use relative position from pose, adjusted to house coordinates
-            pose_x = scan['pose']['x'] + camera_x_m
-            pose_y = scan['pose']['y'] + camera_y_m
-            pose_z = scan['pose'].get('z', camera_height_m)
+    # Process each JSON file
+    for i, json_file in enumerate(sorted(json_files)):
+        print(f"\nProcessing file {i + 1}/{len(json_files)}: {os.path.basename(json_file)}")
+
+        # Load the detection data
+        with open(json_file, 'r') as f:
+            scan_data = json.load(f)
+
+        # Parse pose from filename
+        pose = parse_pose_from_filename(json_file)
+
+        # Calculate camera position in house coordinates
+        camera_x_m = default_camera_x_m + pose.get('x', 0)
+        camera_y_m = default_camera_y_m + pose.get('y', 0)
+        camera_z_m = pose.get('z', camera_height_m)
+        yaw = pose.get('yaw', 0)
+
+        # Get image dimensions if available
+        if 'image' in scan_data:
+            frame_width = scan_data['image'].get('width', 1280)
+            frame_height = scan_data['image'].get('height', 720)
         else:
-            # Use default camera position
-            pose_x = camera_x_m
-            pose_y = camera_y_m
-            pose_z = camera_height_m
+            frame_width = 1280
+            frame_height = 720
 
         # Determine scan direction based on yaw
-        yaw = scan['yaw']
         direction = ""
         if abs(yaw - 0.0) < 0.1:
             direction = "North"
@@ -383,22 +438,25 @@ def main():
             direction = "South"
         elif abs(yaw - 4.7124) < 0.1:
             direction = "West"
+        else:
+            direction = f"{yaw:.2f} rad"
 
-        print(f"\nProcessing scan {i + 1} - Facing {direction} (yaw={yaw:.4f})")
-        if 'image' in scan:
-            print(f"  Associated image: {scan['image']}")
+        print(f"  Position: ({camera_x_m:.2f}, {camera_y_m:.2f}, {camera_z_m:.2f})m")
+        print(f"  Facing: {direction}")
+        print(f"  Detections: {len(scan_data.get('detections', []))}")
 
         # Add scan to unifier
         unifier.add_scan(
-            scan_data=scan,
-            camera_x_m=pose_x,
-            camera_y_m=pose_y,
-            camera_height_m=pose_z,
+            scan_data=scan_data,
+            camera_x_m=camera_x_m,
+            camera_y_m=camera_y_m,
+            camera_height_m=camera_z_m,
             camera_fov_h=camera_fov_h,
             camera_fov_v=camera_fov_v,
             frame_width=frame_width,
             frame_height=frame_height,
-            room_name="main_room"  # You can change this or make it dynamic
+            room_name="main_room",  # All from the same room
+            yaw=yaw
         )
 
     # Save results

@@ -33,6 +33,7 @@ class TileType:
     REFRIGERATOR = 24
     PLASTIC_CHAIR = 25
     CARDBOARD_BOX = 26
+    CABLE = 27
     UNKNOWN = -1
 
 # Map object names to tile types
@@ -83,6 +84,13 @@ OBJECT_TO_TILE = {
 
     # Electrical
     'socket': TileType.SOCKET,
+    'cable': TileType.CABLE,
+    'wire': TileType.CABLE,
+    'cord': TileType.CABLE,
+    'power cable': TileType.CABLE,
+    'usb cable': TileType.CABLE,
+    'hdmi cable': TileType.CABLE,
+    'ethernet cable': TileType.CABLE,
 
     # Small items
     'bottle': TileType.BOTTLE,
@@ -107,7 +115,7 @@ TILE_COLORS = {
     TileType.TV: (64, 64, 64),               # Dark gray
     TileType.BED: (255, 182, 193),           # Light pink
     TileType.DESK: (160, 82, 45),            # Sienna
-    TileType.bicycle: (0, 128, 0),             # Green
+    TileType.bicycle: (0, 128, 0),           # Green
     TileType.CABINET: (92, 51, 23),          # Dark wood
     TileType.APPLIANCE: (192, 192, 192),     # Silver
     TileType.SUITCASE: (139, 90, 43),        # Tan
@@ -121,6 +129,7 @@ TILE_COLORS = {
     TileType.REFRIGERATOR: (240, 248, 255),  # Alice blue (white-ish for fridge)
     TileType.PLASTIC_CHAIR: (255, 255, 224), # Light yellow (plastic look)
     TileType.CARDBOARD_BOX: (210, 180, 140), # Tan (lighter cardboard)
+    TileType.CABLE: (32, 32, 32),            # Very dark gray/black for cables
     TileType.UNKNOWN: (50, 50, 50),          # Very dark gray
 }
 
@@ -133,7 +142,7 @@ OBJECT_SIZES = {
     TileType.TV: (1.2, 0.3, 0.7),           # TV on stand
     TileType.BED: (1.5, 2.0, 0.6),          # Queen bed
     TileType.DESK: (1.2, 0.6, 0.75),        # Office desk
-    TileType.bicycle: (1.5, 0.3, 1.0),        # Potted bicycle
+    TileType.bicycle: (1.5, 0.3, 1.0),      # Potted bicycle
     TileType.CABINET: (0.8, 0.4, 1.8),      # Storage cabinet
     TileType.APPLIANCE: (0.6, 0.6, 1.7),    # Generic appliance
     TileType.SUITCASE: (0.7, 0.45, 0.25),   # Large suitcase lying flat
@@ -147,6 +156,7 @@ OBJECT_SIZES = {
     TileType.REFRIGERATOR: (0.6, 0.65, 1.7), # Standard refrigerator
     TileType.PLASTIC_CHAIR: (0.45, 0.45, 0.85), # Plastic chair (slightly smaller)
     TileType.CARDBOARD_BOX: (0.45, 0.35, 0.35), # Medium cardboard box
+    TileType.CABLE: (0.5, 0.05, 0.02),     # Cable thickness/coiled size
 }
 
 # Average real-world heights in meters (for distance estimation)
@@ -174,13 +184,13 @@ OBJECT_HEIGHTS = {
     'desk': 0.75,              # Desk surface
 
     # bicycles
-    'bicycle': 1.0,              # Medium potted bicycle
+    'bicycle': 1.0,            # Medium potted bicycle
 
     # Storage furniture
     'cabinet': 1.8,            # Tall cabinet
 
     # Appliances
-    'refrigerator': 0.5,
+    'refrigerator': 1.7,       # Corrected from 0.5
     'microwave': 0.3,
 
     # Travel/Storage
@@ -197,6 +207,13 @@ OBJECT_HEIGHTS = {
 
     # Electrical
     'socket': 0.1,             # Wall socket
+    'cable': 0.02,             # Cable thickness when lying flat
+    'wire': 0.02,              # Wire thickness
+    'cord': 0.02,              # Cord thickness
+    'power cable': 0.02,       # Power cable
+    'usb cable': 0.01,         # USB cable (thinner)
+    'hdmi cable': 0.015,       # HDMI cable
+    'ethernet cable': 0.01,    # Ethernet cable
 
     # Small items
     'bottle': 0.25,            # Water bottle
@@ -239,6 +256,7 @@ TILE_NAMES = {
     TileType.REFRIGERATOR: "Refrigerator",
     TileType.PLASTIC_CHAIR: "Plastic Chair",
     TileType.CARDBOARD_BOX: "Cardboard Box",
+    TileType.CABLE: "Cable",
     TileType.UNKNOWN: "Unknown",
 }
 
@@ -247,5 +265,6 @@ OPEN_VOCAB_LABELS = [
     "desk", "cabinet", "tv", "table", "couch", "bicycle", "bed",
     "suitcase", "table", "socket", "refrigerator", "bottle",
     "mouse", "weapon", "chair", "keyboard", "computer", "box",
-    "cardboard box", "gun", "plastic chair"
+    "cardboard box", "gun", "plastic chair", "cable", "wire",
+    "cord", "power cable", "usb cable", "hdmi cable", "ethernet cable"
 ]

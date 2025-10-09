@@ -1,0 +1,38 @@
+{
+  "image": {
+    "path": "/opt/nanoowl/examples/jetson_server/captures/2025_10_09___10_37_47/x0000y0200z0300yaw4712389.jpg",
+    "width": 1280,
+    "height": 720
+  },
+  "prompts": [
+    "a hat",
+    "a black hat",
+    "a near",
+    "a cabinet",
+    "a cable",
+    "a mouse"
+  ],
+  "detections": [
+    {
+      "label": "a cable",
+      "bbox": [
+        902,
+        62,
+        1065,
+        228
+      ],
+      "score": 0.12583762407302856
+    },
+    {
+      "label": "a mouse",
+      "bbox": [
+        418,
+        412,
+        646,
+        571
+      ],
+      "score": 0.11586390435695648
+    }
+  ],
+  "ts": 1759997135.626404
+}
