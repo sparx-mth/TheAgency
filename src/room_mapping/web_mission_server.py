@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-mission_generator.py - Simple LLM-based mission generator for drone navigation
+web_mission_server.py - Flask server for Mission Generator Web GUI
+Connects the web interface to the existing LLM mission generator
 """
 
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import json
 import subprocess
 import tempfile
@@ -10,10 +13,14 @@ import os
 import threading
 import time
 
+app = Flask(__name__, static_folder='.')
+CORS(app)  # Enable CORS for all routes
+
 # Global variable to store latest house data
 latest_house_data = None
 data_lock = threading.Lock()
 
+# Import the PROMPT from the original file
 PROMPT = """You are a mission planner for an autonomous drone that navigates houses. The drone needs clear navigation instructions based on a house map and user requests.
 
 CRITICAL JSON READING RULES:
@@ -76,7 +83,6 @@ IMPORTANT: Output ONLY the navigation instruction as a single paragraph. Do NOT 
 
 Generate the navigation instruction with directions:"""
 
-
 def load_house_data():
     """Load and simplify house data"""
     try:
@@ -96,7 +102,8 @@ def load_house_data():
             }
 
         return simplified
-    except:
+    except Exception as e:
+        print(f"Error loading house data: {e}")
         return None
 
 
@@ -132,75 +139,103 @@ def ask_ollama(house_json, user_task):
         return f"Error: {e}"
 
 
-def main():
-    global latest_house_data
+@app.route('/')
+def serve_index():
+    """Serve the HTML GUI from index.html file"""
+    return send_from_directory('.', 'index.html')
 
-    print("Mission Generator for Drone Navigation")
-    print("-" * 40)
 
-    # Initial load
-    latest_house_data = load_house_data()
-    if not latest_house_data:
-        print("ERROR: unified_rooms.json not found.")
-        print("Run room_unifier.py first to generate the house structure.")
-        return
+@app.route('/api/status', methods=['GET'])
+def get_status():
+    """Get current house status"""
+    with data_lock:
+        current_data = latest_house_data
 
-    # Start background updater thread
-    updater = threading.Thread(target=background_updater, daemon=True)
-    updater.start()
-    print("Auto-reload enabled (updates every second)")
-    print("-" * 40)
+    if current_data:
+        total_objects = sum(len(room.get('objects', [])) for room in current_data['rooms'].values())
+        return jsonify({
+            'rooms': len(current_data['rooms']),
+            'objects': total_objects
+        })
 
-    # Interactive loop
-    while True:
-        user_task = input("\nEnter task (or 'quit'): ").strip()
+    return jsonify({'rooms': 0, 'objects': 0})
 
-        if user_task.lower() == 'quit':
-            break
 
-        if not user_task:
-            continue
+@app.route('/api/generate', methods=['POST'])
+def generate_mission():
+    """Generate mission instructions"""
+    try:
+        data = request.get_json()
+        task = data.get('task', '')
+
+        print(f"Received task: {task}")
+
+        if not task:
+            return jsonify({'response': 'Please provide a task'}), 400
 
         # Get latest house data
         with data_lock:
             current_data = latest_house_data
 
         if not current_data:
-            print("Error: No house data available")
-            continue
+            return jsonify({'response': 'No house data available. Please run room_unifier.py first.'}), 400
 
         house_json = json.dumps(current_data, indent=2)
 
-        # Count objects for feedback
-        total_objects = sum(len(room.get('objects', [])) for room in current_data['rooms'].values())
-        print(f"\nGenerating mission... (using {len(current_data['rooms'])} rooms, {total_objects} objects)")
-        print("=" * 60)
+        print(f"Calling Ollama with task: {task}")
 
-        response = ask_ollama(house_json, user_task)
-        print(response)
-        print("=" * 60)
+        # Generate response using Ollama
+        response = ask_ollama(house_json, task)
+
+        print("\n=== DEBUG: JSON being sent ===")
+        print(house_json)
+        print("\n=== DEBUG: Task ===")
+        print("=" * 30)
+
+        print(f"Ollama response: {response[:100]}...")
+
+        return jsonify({'response': response})
+
+    except Exception as e:
+        print(f"Error in generate_mission: {e}")
+        return jsonify({'response': f'Error: {str(e)}'}), 500
+
+
+def main():
+    global latest_house_data
+
+    print("Mission Generator Web Server")
+    print("-" * 40)
+
+    # Check if index.html exists
+    if not os.path.exists('index.html'):
+        print("ERROR: index.html not found in the current directory.")
+        print("Make sure index.html is in the same folder as this script.")
+        return
+
+    # Initial load
+    latest_house_data = load_house_data()
+    if not latest_house_data:
+        print("WARNING: unified_rooms.json not found.")
+        print("Run room_unifier.py first to generate the house structure.")
+    else:
+        print("Loaded house data successfully")
+        total_objects = sum(len(room.get('objects', [])) for room in latest_house_data['rooms'].values())
+        print(f"Found {len(latest_house_data['rooms'])} rooms with {total_objects} objects")
+
+    # Start background updater thread
+    updater = threading.Thread(target=background_updater, daemon=True)
+    updater.start()
+    print("Auto-reload enabled (updates every second)")
+
+    print("-" * 40)
+    print("Starting web server on http://localhost:8080")
+    print("Open your browser and navigate to the URL above")
+    print("-" * 40)
+
+    # Run Flask server
+    app.run(host='0.0.0.0', port=8080, debug=False)
 
 
 if __name__ == "__main__":
-    example = """
-    1. "Find the refrigerator"
-
-    2. "Get to the weapon"
-
-    3. "living room"
-
-    4. "Find the shampoo"
-
-    5. "Locate all chairs"
-
-    6. "Go to the garage"
-
-    7. "find the computer"
-
-    8. "kitchen"
-
-    9. "toilet paper"
-
-    10. "car keys"
-    """
     main()

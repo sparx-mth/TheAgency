@@ -381,7 +381,7 @@ def process_files():
     default_camera_y_m = 5.0  # Center Y
 
     # Camera parameters based on typical values
-    camera_height_m = 0.3  # Camera height from ground
+    camera_height_m = 0.5  # Camera height from ground
     camera_fov_h = 70  # Horizontal field of view in degrees
     camera_fov_v = 50  # Vertical field of view in degrees
 

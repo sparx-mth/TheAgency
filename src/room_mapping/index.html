@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🚁 Mission Generator - Drone Navigation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', sans-serif;
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            direction: ltr;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 900px;
+            padding: 40px;
+            animation: slideIn 0.5s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            background: linear-gradient(135deg, #2c3e50, #3498db);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .status-bar {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            box-shadow: 0 4px 15px rgba(44, 62, 80, 0.3);
+        }
+
+        .status-item {
+            text-align: center;
+        }
+
+        .status-value {
+            font-size: 1.8em;
+            font-weight: bold;
+        }
+
+        .status-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .input-section {
+            margin-bottom: 25px;
+        }
+
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            gap: 10px;
+        }
+
+        #taskInput {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1.1em;
+            transition: all 0.3s;
+        }
+
+        #taskInput:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+        }
+
+        #sendBtn {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #sendBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(52, 152, 219, 0.3);
+        }
+
+        #sendBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .examples {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .example-chip {
+            background: #f5f5f5;
+            padding: 8px 15px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .example-chip:hover {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            transform: translateY(-2px);
+        }
+
+        .output-section {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .response-item {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .response-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .task-label {
+            color: #2c3e50;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .timestamp {
+            color: #999;
+            font-size: 0.85em;
+        }
+
+        .response-text {
+            color: #333;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .empty-state svg {
+            width: 100px;
+            height: 100px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        .connection-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 10px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 20px;
+            font-size: 0.9em;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
+            }
+            70% {
+                box-shadow: 0 0 0 10px rgba(76, 175, 80, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+            }
+        }
+
+        .status-dot.offline {
+            background: #f44336;
+            animation: none;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 1.8em;
+            }
+
+            .status-bar {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .examples {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚁 Mission Generator</h1>
+        <p class="subtitle">SPARX</p>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-value" id="roomCount">0</div>
+                <div class="status-label">Rooms Detected</div>
+            </div>
+            <div class="status-item">
+                <div class="status-value" id="objectCount">0</div>
+                <div class="status-label">Objects Found</div>
+            </div>
+            <div class="connection-status">
+                <span class="status-dot" id="connectionDot"></span>
+                <span id="connectionText">Connected</span>
+            </div>
+        </div>
+
+        <div class="input-section">
+            <div class="examples">
+                <div class="example-chip" onclick="setExample('Find the refrigerator')">🍕 Find refrigerator</div>
+                <div class="example-chip" onclick="setExample('Get to the weapon')">🔫 Get to weapon</div>
+                <div class="example-chip" onclick="setExample('Find the computer')">💻 Find computer</div>
+                <div class="example-chip" onclick="setExample('Go to living room')">🛋️ Living room</div>
+                <div class="example-chip" onclick="setExample('Find all chairs')">🪑 All chairs</div>
+                <div class="example-chip" onclick="setExample('Where is the toilet paper')">🧻 Toilet paper</div>
+            </div>
+
+            <div class="input-wrapper">
+                <input
+                    type="text"
+                    id="taskInput"
+                    placeholder="Enter navigation task (e.g., 'Find the refrigerator')"
+                    onkeypress="handleKeyPress(event)"
+                >
+                <button id="sendBtn" onclick="sendTask()">
+                    <span>Send</span>
+                    <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="output-section" id="output">
+            <div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                    <line x1="12" y1="22.08" x2="12" y2="12"/>
+                </svg>
+                <p>Ready for navigation tasks</p>
+                <p style="font-size: 0.9em; margin-top: 10px;">Type a command or click an example to begin</p>
+            </div>
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Generating mission instructions...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isProcessing = false;
+
+        // Update status periodically
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                document.getElementById('roomCount').textContent = data.rooms || 0;
+                document.getElementById('objectCount').textContent = data.objects || 0;
+                document.getElementById('connectionDot').classList.remove('offline');
+                document.getElementById('connectionText').textContent = 'Connected';
+            } catch (error) {
+                document.getElementById('connectionDot').classList.add('offline');
+                document.getElementById('connectionText').textContent = 'Offline';
+            }
+        }
+
+        // Send task to backend
+        async function sendTask() {
+            const input = document.getElementById('taskInput');
+            const task = input.value.trim();
+
+            if (!task || isProcessing) return;
+
+            isProcessing = true;
+            document.getElementById('sendBtn').disabled = true;
+
+            // Clear empty state if it exists
+            const emptyState = document.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            // Show loading
+            document.getElementById('loading').classList.add('active');
+
+            try {
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ task: task })
+                });
+
+                const data = await response.json();
+
+                // Hide loading
+                document.getElementById('loading').classList.remove('active');
+
+                // Add response to output
+                addResponse(task, data.response);
+
+                // Clear input
+                input.value = '';
+
+                // Update status
+                updateStatus();
+
+            } catch (error) {
+                document.getElementById('loading').classList.remove('active');
+                addResponse(task, 'Error: Failed to connect to server. Make sure the Flask server is running.');
+            } finally {
+                isProcessing = false;
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+
+        // Add response to output
+        function addResponse(task, response) {
+            const output = document.getElementById('output');
+            const timestamp = new Date().toLocaleTimeString();
+
+            const responseHtml = `
+                <div class="response-item">
+                    <div class="response-header">
+                        <span class="task-label">Task: ${task}</span>
+                        <span class="timestamp">${timestamp}</span>
+                    </div>
+                    <div class="response-text">${response}</div>
+                </div>
+            `;
+
+            // Remove loading if it's there
+            const loading = document.getElementById('loading');
+            if (loading.classList.contains('active')) {
+                loading.classList.remove('active');
+            }
+
+            // Insert at the beginning (newest first)
+            output.insertAdjacentHTML('afterbegin', responseHtml);
+
+            // Limit to last 10 responses
+            const items = output.querySelectorAll('.response-item');
+            if (items.length > 10) {
+                items[items.length - 1].remove();
+            }
+        }
+
+        // Handle enter key
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendTask();
+            }
+        }
+
+        // Set example in input
+        function setExample(text) {
+            document.getElementById('taskInput').value = text;
+            document.getElementById('taskInput').focus();
+        }
+
+        // Initial status update
+        updateStatus();
+
+        // Update status every 5 seconds
+        setInterval(updateStatus, 5000);
+    </script>
+</body>
+</html>
