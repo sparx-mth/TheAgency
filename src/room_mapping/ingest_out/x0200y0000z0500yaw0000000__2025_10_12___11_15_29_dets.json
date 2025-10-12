@@ -1,0 +1,75 @@
+{
+  "image": {
+    "path": "/data/captures_root/latest/x0200y0000z0500yaw0000000__2025_10_12___11_15_29.jpg",
+    "width": 1280,
+    "height": 720
+  },
+  "prompts": [
+    "a gun",
+    "a chair"
+  ],
+  "detections": [
+    {
+      "label": "a gun",
+      "bbox": [
+        401,
+        195,
+        958,
+        405
+      ],
+      "score": 0.6920483708381653
+    },
+    {
+      "label": "a chair",
+      "bbox": [
+        420,
+        114,
+        919,
+        672
+      ],
+      "score": 0.4724471867084503
+    },
+    {
+      "label": "a chair",
+      "bbox": [
+        1005,
+        118,
+        1265,
+        669
+      ],
+      "score": 0.38576456904411316
+    }
+  ],
+  "ts": 1760256964.5427146,
+  "pose": {
+    "x": 0.2,
+    "y": 0.0,
+    "z": 0.5,
+    "yaw": 0.0
+  },
+  "entries": [
+    {
+      "timestamp": 1760256948,
+      "prompt": "Describe the objects in the image",
+      "response": "1. A black gun with a long barrel.\n2. A white plastic chair.\n3. A white tile floor.\n4.</s>"
+    }
+  ],
+  "converter_result": {
+    "caption": "1. A black gun with a long barrel.\n2. A white plastic chair.\n3. A white tile floor.\n4.",
+    "texts": [
+      [
+        "a gun",
+        "a chair"
+      ]
+    ],
+    "posted": false,
+    "ts": 1760256962.7083087,
+    "iso_time": "2025-10-12T08:16:02Z",
+    "latency_sec": 13.673
+  },
+  "source_image_name": "x0200y0000z0500yaw0000000__2025_10_12___11_15_29.jpg",
+  "source_paths": {
+    "image": "/data/captures_root/latest/x0200y0000z0500yaw0000000__2025_10_12___11_15_29.jpg",
+    "meta_json": "/data/captures_root/latest/x0200y0000z0500yaw0000000__2025_10_12___11_15_29.json"
+  }
+}
