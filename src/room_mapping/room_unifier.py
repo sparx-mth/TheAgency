@@ -376,7 +376,7 @@ def main():
     """Process real scan data from individual JSON files."""
 
     # Directory containing the JSON files
-    bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/bbox"
+    bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/ingest_out"
 
     # Find all detection JSON files
     json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))

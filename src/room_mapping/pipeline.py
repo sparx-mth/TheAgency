@@ -63,15 +63,12 @@ def process_scans():
 
 # ============= STEP 2: RENDER HOUSE =============
 def render_house():
-    """Optional: Render the house map"""
+    """Always render the house map without asking"""
     print("\n" + "=" * 60)
     print("STEP 2: House Visualization")
     print("=" * 60)
-
-    response = input("Do you want to visualize the house map? (y/n): ").strip().lower()
-    if response == 'y':
-        subprocess.Popen(["python3", "render_house.py", "--cell-size", "20"])
-        print("Renderer launched in separate window")
+    subprocess.Popen(["python3", "render_house.py", "--cell-size", "20"])
+    print("Renderer launched in separate window")
 
 
 # ============= STEP 3: MISSION GENERATION =============
@@ -98,7 +95,7 @@ def run_pipeline():
         print("Pipeline aborted.")
         return
 
-    # Step 2: Optional visualization
+    # Step 2: Always visualize
     render_house()
 
     # Step 3: Run mission generator
