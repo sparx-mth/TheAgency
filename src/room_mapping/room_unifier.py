@@ -11,6 +11,7 @@ import json
 import math
 import os
 import glob
+import time
 from typing import Dict, List, Tuple, Optional
 from tile_definitions import OBJECT_TO_TILE, OBJECT_HEIGHTS, TileType, OBJECT_SIZES
 
@@ -162,14 +163,6 @@ class RoomUnifier:
             obj_x_m = camera_x_m - distance_m * math.sin(object_angle)
             obj_y_m = camera_y_m + distance_m * math.cos(object_angle)
 
-            print("\n================ DEBUG ORIENTATION ================")
-            print(f"Yaw (rad): {yaw:.3f} | Object angle: {object_angle:.3f}")
-            print(f"Angle offset (deg): {math.degrees(angle_offset):.1f}")
-            print(f"cos(angle + π/2): {math.cos(object_angle + math.pi/2):.3f}")
-            print(f"sin(angle + π/2): {math.sin(object_angle + math.pi/2):.3f}")
-            print(f"Object will be at: ({obj_x_m:.2f}, {obj_y_m:.2f}) from camera at ({camera_x_m:.2f}, {camera_y_m:.2f})")
-            print("===================================================")
-
             # Convert to grid coordinates
             obj_grid_x, obj_grid_y = self.meters_to_grid(obj_x_m, obj_y_m)
 
@@ -220,12 +213,6 @@ class RoomUnifier:
                 self.rooms[room_name]["doors"].extend(detected_doors)
             else:
                 self.rooms[room_name] = room_info
-
-            print(f"Scanned '{room_name}' from position ({camera_x_m:.1f}, {camera_y_m:.1f})m")
-            print(f"  Found {len(detected_objects)} objects and {len(detected_doors)} doors")
-        else:
-            print(f"Scanned from position ({camera_x_m:.1f}, {camera_y_m:.1f})m")
-            print(f"  Found {len(detected_objects)} objects and {len(detected_doors)} doors")
 
     def get_unified_structure(self) -> Dict:
         """Return the unified room structure."""
@@ -332,12 +319,10 @@ class RoomUnifier:
         # Save JSON structure
         with open(json_file, 'w') as f:
             json.dump(output, f, indent=2)
-        print(f"Saved structure to {json_file}")
 
         # Save grid map
         grid = self.create_grid_map()
         np.savetxt(map_file, grid, fmt='%d')
-        print(f"Saved grid map to {map_file} (shape: {grid.shape})")
 
 
 def parse_pose_from_filename(filename: str) -> Dict:
@@ -372,8 +357,8 @@ def parse_pose_from_filename(filename: str) -> Dict:
     return pose
 
 
-def main():
-    """Process real scan data from individual JSON files."""
+def process_files():
+    """Process all detection files and return count."""
 
     # Directory containing the JSON files
     bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/ingest_out"
@@ -382,10 +367,7 @@ def main():
     json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
 
     if not json_files:
-        print(f"No detection files found in {bbox_dir}")
-        return
-
-    print(f"Found {len(json_files)} detection files")
+        return 0
 
     # Create unifier for a 10x10 meter house (adjust as needed)
     unifier = RoomUnifier(
@@ -404,12 +386,13 @@ def main():
     camera_fov_v = 50  # Vertical field of view in degrees
 
     # Process each JSON file
-    for i, json_file in enumerate(sorted(json_files)):
-        print(f"\nProcessing file {i + 1}/{len(json_files)}: {os.path.basename(json_file)}")
-
+    for json_file in sorted(json_files):
         # Load the detection data
-        with open(json_file, 'r') as f:
-            scan_data = json.load(f)
+        try:
+            with open(json_file, 'r') as f:
+                scan_data = json.load(f)
+        except:
+            continue
 
         # Parse pose from filename
         pose = parse_pose_from_filename(json_file)
@@ -428,23 +411,6 @@ def main():
             frame_width = 1280
             frame_height = 720
 
-        # Determine scan direction based on yaw
-        direction = ""
-        if abs(yaw - 0.0) < 0.1:
-            direction = "North"
-        elif abs(yaw - 1.5708) < 0.1:
-            direction = "East"
-        elif abs(yaw - 3.1416) < 0.1:
-            direction = "South"
-        elif abs(yaw - 4.7124) < 0.1:
-            direction = "West"
-        else:
-            direction = f"{yaw:.2f} rad"
-
-        print(f"  Position: ({camera_x_m:.2f}, {camera_y_m:.2f}, {camera_z_m:.2f})m")
-        print(f"  Facing: {direction}")
-        print(f"  Detections: {len(scan_data.get('detections', []))}")
-
         # Add scan to unifier
         unifier.add_scan(
             scan_data=scan_data,
@@ -462,33 +428,55 @@ def main():
     # Save results
     unifier.save()
 
-    # Print summary
-    print(f"\n" + "=" * 50)
-    print("PROCESSING COMPLETE")
+    return len(json_files)
+
+
+def main():
+    """Monitor directory and process files when changes detected."""
+
+    print("Room Unifier - Continuous Monitor")
     print("=" * 50)
-    print(f"Processed {len(unifier.rooms)} room(s)")
-    print(f"Total objects detected: {len(unifier.all_objects)}")
+    print("Monitoring for new detection files...")
+    print("Press Ctrl+C to stop\n")
 
-    if unifier.all_objects:
-        print(f"\nDetected object types:")
-        object_types = {}
-        for obj in unifier.all_objects:
-            obj_type = obj['type']
-            if obj_type not in object_types:
-                object_types[obj_type] = 0
-            object_types[obj_type] += 1
+    # Directory to monitor
+    bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/ingest_out"
 
-        for obj_type, count in sorted(object_types.items()):
-            print(f"  - {obj_type}: {count}")
+    # Track processed files
+    last_file_count = 0
+    check_interval = 2  # Check every 2 seconds
 
-    print(f"\nGrid info:")
-    print(f"  House dimensions: {unifier.house_width_m}x{unifier.house_height_m}m")
-    print(f"  Grid dimensions: {unifier.grid_width}x{unifier.grid_height} cells")
-    print(f"  Resolution: {unifier.grid_resolution}m per cell")
+    try:
+        while True:
+            # Get current file count
+            current_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+            current_count = len(current_files)
 
-    print(f"\nOutput files:")
-    print(f"  - unified_rooms.json: Room structure and object positions")
-    print(f"  - house_map.txt: 2D grid map")
+            # Check if there are new files
+            if current_count != last_file_count:
+                if current_count > 0:
+                    print(
+                        f"\n[{time.strftime('%H:%M:%S')}] Detected {current_count} files (change from {last_file_count})")
+                    print("Processing...")
+
+                    # Process all files
+                    processed = process_files()
+
+                    if processed > 0:
+                        print(f"Processed {processed} files")
+                        print(f"Updated unified_rooms.json and house_map.txt")
+
+                    last_file_count = current_count
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] No detection files found")
+                    last_file_count = 0
+
+            # Wait before next check
+            time.sleep(check_interval)
+
+    except KeyboardInterrupt:
+        print("\n\nMonitoring stopped by user")
+        print("Final outputs: unified_rooms.json, house_map.txt")
 
 
 if __name__ == "__main__":

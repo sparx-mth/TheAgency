@@ -7,6 +7,12 @@ import json
 import subprocess
 import tempfile
 import os
+import threading
+import time
+
+# Global variable to store latest house data
+latest_house_data = None
+data_lock = threading.Lock()
 
 PROMPT = """You are a mission planner for an autonomous drone that navigates houses. The drone needs clear navigation instructions based on a house map and user requests.
 
@@ -64,6 +70,41 @@ IMPORTANT: Output ONLY the navigation instruction as a single paragraph. Do NOT 
 Generate the navigation instruction with directions:"""
 
 
+def load_house_data():
+    """Load and simplify house data"""
+    try:
+        with open("unified_rooms.json", 'r') as f:
+            house_data = json.load(f)
+
+        # Simplify house data for prompt
+        simplified = {"rooms": {}}
+        for room_name, room_info in house_data.get('rooms', {}).items():
+            simplified["rooms"][room_name] = {
+                "position": room_info.get('camera_position'),
+                "objects": [
+                    {"type": obj['type'], "location": obj['location']}
+                    for obj in room_info.get('objects', [])
+                ],
+                "doors": room_info.get('doors', [])
+            }
+
+        return simplified
+    except:
+        return None
+
+
+def background_updater():
+    """Background thread that continuously updates house data"""
+    global latest_house_data
+
+    while True:
+        new_data = load_house_data()
+        if new_data:
+            with data_lock:
+                latest_house_data = new_data
+        time.sleep(1)  # Update every second
+
+
 def ask_ollama(house_json, user_task):
     """Send prompt to Ollama and get response"""
     full_prompt = PROMPT.format(house_json=house_json, user_task=user_task)
@@ -85,31 +126,23 @@ def ask_ollama(house_json, user_task):
 
 
 def main():
+    global latest_house_data
+
     print("Mission Generator for Drone Navigation")
     print("-" * 40)
 
-    # Load house structure
-    try:
-        with open("unified_rooms.json", 'r') as f:
-            house_data = json.load(f)
-    except FileNotFoundError:
+    # Initial load
+    latest_house_data = load_house_data()
+    if not latest_house_data:
         print("ERROR: unified_rooms.json not found.")
         print("Run room_unifier.py first to generate the house structure.")
         return
 
-    # Simplify house data for prompt
-    simplified = {"rooms": {}}
-    for room_name, room_info in house_data.get('rooms', {}).items():
-        simplified["rooms"][room_name] = {
-            "position": room_info.get('camera_position'),
-            "objects": [
-                {"type": obj['type'], "location": obj['location']}
-                for obj in room_info.get('objects', [])
-            ],
-            "doors": room_info.get('doors', [])
-        }
-
-    house_json = json.dumps(simplified, indent=2)
+    # Start background updater thread
+    updater = threading.Thread(target=background_updater, daemon=True)
+    updater.start()
+    print("Auto-reload enabled (updates every second)")
+    print("-" * 40)
 
     # Interactive loop
     while True:
@@ -121,15 +154,27 @@ def main():
         if not user_task:
             continue
 
-        print("\nGenerating mission...")
+        # Get latest house data
+        with data_lock:
+            current_data = latest_house_data
+
+        if not current_data:
+            print("Error: No house data available")
+            continue
+
+        house_json = json.dumps(current_data, indent=2)
+
+        # Count objects for feedback
+        total_objects = sum(len(room.get('objects', [])) for room in current_data['rooms'].values())
+        print(f"\nGenerating mission... (using {len(current_data['rooms'])} rooms, {total_objects} objects)")
         print("=" * 60)
+
         response = ask_ollama(house_json, user_task)
         print(response)
         print("=" * 60)
 
 
 if __name__ == "__main__":
-
     example = """
     1. "Find the refrigerator"
 
@@ -151,5 +196,4 @@ if __name__ == "__main__":
 
     10. "car keys"
     """
-
     main()

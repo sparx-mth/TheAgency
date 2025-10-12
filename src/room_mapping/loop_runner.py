@@ -1,54 +1,129 @@
 #!/usr/bin/env python3
 """
-run_pipeline_loop.py - Runs pipeline every 15 seconds
+run_all.py - Run all house mapping components
 """
 
-import time
 import subprocess
-from datetime import datetime
-
-INTERVAL_SECONDS = 15
-
-
-def run_pipeline_once():
-    """Run the pipeline script once"""
-    try:
-        print(f"\n{'=' * 60}")
-        print(f"Running pipeline at {datetime.now().strftime('%H:%M:%S')}")
-        print(f"{'=' * 60}")
-
-        subprocess.run(["python3", "pipeline.py"], check=True)
-
-        print(f"\n Pipeline completed successfully")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"\n Pipeline failed with error: {e}")
-        return False
-    except Exception as e:
-        print(f"\n Unexpected error: {e}")
-        return False
+import time
+import sys
+import os
+import glob
 
 
 def main():
-    print("Starting pipeline loop (every 15 seconds)")
-    print("Press Ctrl+C to stop\n")
+    print("=" * 60)
+    print("HOUSE MAPPING SYSTEM - STARTING ALL COMPONENTS")
+    print("=" * 60)
 
-    run_count = 0
+    # Ask about cleaning directory
+    bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/ingest_out"
+    json_files = []
+    if os.path.exists(bbox_dir):
+        import glob
+        json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+
+    if json_files:
+        print(f"\nFound {len(json_files)} existing detection files in:")
+        print(f"  {bbox_dir}")
+        response = input("\nClean directory before starting? (y/n): ").strip().lower()
+
+        if response == 'y':
+            print("Cleaning directory...")
+            for f in json_files:
+                try:
+                    os.remove(f)
+                    print(f"  Removed: {os.path.basename(f)}")
+                except:
+                    pass
+
+            # Also clean output files
+            for f in ["unified_rooms.json", "house_map.txt"]:
+                if os.path.exists(f):
+                    os.remove(f)
+                    print(f"  Removed: {f}")
+
+            print("Directory cleaned!\n")
+        else:
+            print("Keeping existing files.\n")
+
+    processes = []
 
     try:
-        while True:
-            run_count += 1
-            print(f"\n--- Run #{run_count} ---")
+        # 1. Start room unifier (monitors for new JSON files)
+        print("\n[1/3] Starting Room Unifier (monitors for new scans)...")
+        unifier = subprocess.Popen(
+            [sys.executable, "room_unifier.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        processes.append(("Room Unifier", unifier))
+        time.sleep(2)  # Let it initialize
 
-            run_pipeline_once()
+        # 2. Start renderer (auto-refreshes the visualization)
+        print("[2/3] Starting House Renderer (auto-refresh enabled)...")
+        renderer = subprocess.Popen(
+            [sys.executable, "render_house.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        processes.append(("Renderer", renderer))
+        time.sleep(1)
 
-            print(f"\nWaiting {INTERVAL_SECONDS} seconds until next run...")
-            time.sleep(INTERVAL_SECONDS)
+        # 3. Start LLM mission generator (interactive)
+        print("[3/3] Starting Mission Generator (interactive mode)...")
+        print("\n" + "=" * 60)
+        print("ALL SYSTEMS RUNNING!")
+        print("=" * 60)
+        print("\nSwitching to Mission Generator interactive mode...")
+        print("(Other components running in background)\n")
+
+        # Run mission generator in foreground for interaction
+        mission = subprocess.Popen(
+            [sys.executable, "llm_mission_generator.py"],
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            text=True
+        )
+        processes.append(("Mission Generator", mission))
+
+        # Wait for mission generator to finish (user quits)
+        mission.wait()
 
     except KeyboardInterrupt:
-        print(f"\n\nStopped after {run_count} runs")
-        print("Goodbye!")
+        print("\n\nShutting down all components...")
+
+    finally:
+        # Clean shutdown
+        for name, proc in processes:
+            if proc.poll() is None:  # Still running
+                print(f"Stopping {name}...")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+        print("\nAll components stopped.")
+        print("=" * 60)
 
 
 if __name__ == "__main__":
+    # Check if required files exist
+    required_files = [
+        "room_unifier.py",
+        "render_house.py",
+        "llm_mission_generator.py",
+        "tile_definitions.py"
+    ]
+
+    missing = [f for f in required_files if not os.path.exists(f)]
+    if missing:
+        print("ERROR: Missing required files:")
+        for f in missing:
+            print(f"  - {f}")
+        sys.exit(1)
+
     main()
