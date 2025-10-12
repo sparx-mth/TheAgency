@@ -60,6 +60,10 @@ class HouseRenderer:
             self.grid = np.full((self.grid_height, self.grid_width),
                                 TileType.FREE_SPACE, dtype=np.int8)
 
+        # Auto-reload timer
+        self.last_reload_time = pygame.time.get_ticks()
+        self.reload_interval = 1000  # Reload every 1000ms (1 second)
+
     def render(self):
         """Render the house grid."""
         # Clear screen
@@ -135,14 +139,21 @@ class HouseRenderer:
         """Reload the map from file."""
         try:
             self.grid = np.loadtxt("house_map.txt", dtype=np.int8)
-            print("Reloaded house_map.txt")
+            # Silent reload - no print unless there's an error
 
             # Also reload structure
             with open("unified_rooms.json", 'r') as f:
                 self.structure = json.load(f)
-            print("Reloaded unified_rooms.json")
-        except Exception as e:
-            print(f"Error reloading: {e}")
+        except Exception:
+            # Silent fail - file might be in the middle of writing
+            pass
+
+    def check_auto_reload(self):
+        """Check if it's time to auto-reload the files."""
+        current_time = pygame.time.get_ticks()
+        if current_time - self.last_reload_time > self.reload_interval:
+            self.reload()
+            self.last_reload_time = current_time
 
     def resize_window(self, new_cell_size):
         """Resize the window with new cell size."""
@@ -157,6 +168,7 @@ class HouseRenderer:
         print(f"Rendering {self.grid_width}x{self.grid_height} grid")
         print(f"Cell size: {self.cell_size}px")
         print(f"Window size: {self.window_width}x{self.window_height} pixels")
+        print(f"Auto-reload: Every {self.reload_interval/1000} seconds")
 
         running = True
         while running:
@@ -168,10 +180,14 @@ class HouseRenderer:
                         running = False
                     elif event.key == pygame.K_r:
                         self.reload()
+                        print("Manual reload")
                     elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
                         self.resize_window(self.cell_size + 2)
                     elif event.key == pygame.K_MINUS:
                         self.resize_window(self.cell_size - 2)
+
+            # Check for auto-reload
+            self.check_auto_reload()
 
             self.render()
             self.clock.tick(30)
@@ -197,7 +213,7 @@ def main():
     print("-" * 40)
     print("Controls:")
     print("  ESC     - Exit")
-    print("  R       - Reload files")
+    print("  R       - Reload files (manual)")
     print("  +/-     - Adjust cell size")
     print("-" * 40)
 
