@@ -144,7 +144,7 @@ if __name__ == "__main__":
     # Check if required files exist
     required_files = [
         "receiver_owl.py",
-        "room_unifier.py",
+        "pixel_room_mapper.py",
         "render_house.py",
         "llm_mission_generator.py",
         "tile_definitions.py"

@@ -169,7 +169,7 @@ if __name__ == "__main__":
     # Check if required files exist
     required_files = [
         "receiver_owl.py",
-        "room_unifier.py",
+        "pixel_room_mapper.py",
         "render_house.py",
         "web_mission_server.py",  # New web server file
         "tile_definitions.py"
