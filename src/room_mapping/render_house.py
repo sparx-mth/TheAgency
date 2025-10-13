@@ -1,35 +1,27 @@
 #!/usr/bin/env python3
 """
-render_house.py - Pygame House Renderer
+render_house_dynamic.py - Dynamic Pygame House Renderer
 
-Renders the unified house structure using pygame,
-showing all rooms, objects, doors, and camera positions.
+Renders house with dynamic tiles loaded from the JSON file.
+Auto-reloads to show real-time updates.
 """
 
 import pygame
 import numpy as np
 import json
 import sys
-from tile_definitions import TileType, TILE_COLORS, TILE_NAMES, OBJECT_SIZES
 
 
-class HouseRenderer:
-    """Simple pygame renderer for unified house structure."""
+class DynamicHouseRenderer:
+    """Pygame renderer with dynamic tile support."""
 
-    def __init__(self, unified_json="unified_rooms.json", map_txt="house_map.txt", cell_size=12):
-        """
-        Initialize the house renderer.
-
-        Args:
-            unified_json: Path to unified rooms JSON file
-            map_txt: Path to house map text file
-            cell_size: Pixels per grid cell (default 12, range 5-50 recommended)
-        """
-        # Load structure to get dimensions
+    def __init__(self, unified_json="unified_rooms.json", map_txt="house_map.txt", cell_size=20):
+        """Initialize the renderer."""
+        # Load structure
         with open(unified_json, 'r') as f:
             self.structure = json.load(f)
 
-        # Get house and grid parameters
+        # Get dimensions
         self.house_width_m = self.structure["house_dimensions_m"]["width"]
         self.house_height_m = self.structure["house_dimensions_m"]["height"]
         self.grid_resolution = self.structure["grid_resolution"]
@@ -38,137 +30,167 @@ class HouseRenderer:
         self.grid_width = int(self.house_width_m / self.grid_resolution)
         self.grid_height = int(self.house_height_m / self.grid_resolution)
 
-        # Set display parameters
-        self.cell_size = max(5, min(50, cell_size))  # Clamp between 5 and 50
-        self.legend_width = 200  # Width of legend panel
+        # Load dynamic tile registry
+        self.tile_registry = {}
+        self.tile_colors = {}
+        self.load_tile_registry()
+
+        # Display parameters
+        self.cell_size = max(5, min(50, cell_size))
+        self.legend_width = 200
         self.window_width = self.grid_width * self.cell_size + self.legend_width
         self.window_height = self.grid_height * self.cell_size
 
         # Initialize pygame
         pygame.init()
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
-        pygame.display.set_caption("House Map Viewer")
+        pygame.display.set_caption("Dynamic House Map")
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.Font(None, 16)
+        self.font = pygame.font.Font(None, 14)
 
-        # Load grid map
+        # Load grid
         try:
             self.grid = np.loadtxt(map_txt, dtype=np.int8)
-            print(f"Loaded map from {map_txt}")
         except:
-            print(f"Could not load {map_txt}, creating empty grid")
-            self.grid = np.full((self.grid_height, self.grid_width),
-                                TileType.FREE_SPACE, dtype=np.int8)
+            self.grid = np.full((self.grid_height, self.grid_width), 0, dtype=np.int8)
 
-        # Auto-reload timer
-        self.last_reload_time = pygame.time.get_ticks()
-        self.reload_interval = 1000  # Reload every 1000ms (1 second)
+        # Auto-reload
+        self.last_reload = pygame.time.get_ticks()
+        self.reload_interval = 500  # Reload every 500ms
+
+    def load_tile_registry(self):
+        """Load dynamic tile types and generate colors."""
+        if "tile_registry" in self.structure:
+            # Load from JSON
+            registry = self.structure["tile_registry"]
+
+            # Generate colors for each tile
+            for name, tile_id in registry.items():
+                # Special colors for reserved types
+                if name == "free_space":
+                    self.tile_colors[tile_id] = (200, 200, 200)
+                elif name == "wall":
+                    self.tile_colors[tile_id] = (100, 100, 100)
+                elif name == "camera":
+                    self.tile_colors[tile_id] = (0, 255, 255)
+                else:
+                    # Generate color from hash
+                    hash_val = hash(name)
+                    r = max(50, (hash_val & 0xFF0000) >> 16)
+                    g = max(50, (hash_val & 0x00FF00) >> 8)
+                    b = max(50, hash_val & 0x0000FF)
+                    self.tile_colors[tile_id] = (r, g, b)
+
+                self.tile_registry[name] = tile_id
 
     def render(self):
-        """Render the house grid."""
-        # Clear screen
+        """Render the grid."""
         self.screen.fill((30, 30, 30))
 
-        # Draw grid cells
+        # Draw grid
         for y in range(self.grid_height):
             for x in range(self.grid_width):
                 tile_type = self.grid[y, x]
-                color = TILE_COLORS.get(tile_type, (50, 50, 50))
+                color = self.tile_colors.get(tile_type, (50, 50, 50))
 
-                rect = pygame.Rect(
-                    x * self.cell_size,
-                    y * self.cell_size,
-                    self.cell_size,
-                    self.cell_size
-                )
+                rect = pygame.Rect(x * self.cell_size, y * self.cell_size,
+                                   self.cell_size, self.cell_size)
                 pygame.draw.rect(self.screen, color, rect)
-
-                # Draw grid lines
                 pygame.draw.rect(self.screen, (60, 60, 60), rect, 1)
 
-        # Draw legend on the right
+        # Draw legend
         self.draw_legend()
-
         pygame.display.flip()
 
     def draw_legend(self):
-        """Draw color legend on the right side."""
-        # Background for legend
+        """Draw legend with dynamic tiles."""
+        # Background
         legend_rect = pygame.Rect(self.grid_width * self.cell_size, 0,
                                   self.legend_width, self.window_height)
         pygame.draw.rect(self.screen, (40, 40, 40), legend_rect)
 
-        # Find all tile types present in the grid
-        present_types = set()
-        for y in range(self.grid_height):
-            for x in range(self.grid_width):
-                present_types.add(self.grid[y, x])
+        # Find present tile types
+        present_types = set(self.grid.flatten())
 
-        # Sort tile types for consistent display
-        sorted_types = sorted(present_types)
-
-        # Draw legend items
-        y_offset = 20
-        x_base = self.grid_width * self.cell_size + 15
+        # Draw items
+        y_offset = 10
+        x_base = self.grid_width * self.cell_size + 10
 
         # Title
-        title_text = self.font.render("LEGEND", True, (255, 255, 255))
-        self.screen.blit(title_text, (x_base, y_offset))
-        y_offset += 30
+        title = self.font.render("DETECTED OBJECTS", True, (255, 255, 255))
+        self.screen.blit(title, (x_base, y_offset))
+        y_offset += 25
 
-        for tile_type in sorted_types:
-            if tile_type in TILE_COLORS and tile_type in TILE_NAMES:
-                # Draw color box
-                color = TILE_COLORS[tile_type]
-                box_rect = pygame.Rect(x_base, y_offset, 20, 20)
-                pygame.draw.rect(self.screen, color, box_rect)
-                pygame.draw.rect(self.screen, (200, 200, 200), box_rect, 1)
+        # Stats
+        stats = self.font.render(
+            f"Total: {len(self.structure.get('rooms', {}).get('main_room', {}).get('objects', []))} objects",
+            True, (180, 180, 180))
+        self.screen.blit(stats, (x_base, y_offset))
+        y_offset += 20
 
-                # Draw label
-                name = TILE_NAMES[tile_type]
-                label_text = self.font.render(name, True, (220, 220, 220))
-                self.screen.blit(label_text, (x_base + 30, y_offset + 2))
+        # Separator
+        pygame.draw.line(self.screen, (80, 80, 80),
+                         (x_base, y_offset), (x_base + 170, y_offset))
+        y_offset += 10
 
-                y_offset += 25
+        # Sort by name for consistent display
+        sorted_tiles = sorted([(name, tid) for name, tid in self.tile_registry.items()
+                               if tid in present_types], key=lambda x: x[0])
 
-                # Stop if we run out of space
-                if y_offset > self.window_height - 30:
-                    break
+        for name, tile_id in sorted_tiles:
+            if y_offset > self.window_height - 25:
+                break
+
+            # Color box
+            color = self.tile_colors[tile_id]
+            box_rect = pygame.Rect(x_base, y_offset, 16, 16)
+            pygame.draw.rect(self.screen, color, box_rect)
+            pygame.draw.rect(self.screen, (200, 200, 200), box_rect, 1)
+
+            # Label
+            # Capitalize and clean up name
+            display_name = name.replace('_', ' ').title()
+            if display_name == "Free Space":
+                display_name = "Empty"
+
+            label = self.font.render(display_name[:20], True, (220, 220, 220))
+            self.screen.blit(label, (x_base + 25, y_offset + 1))
+            y_offset += 20
 
     def reload(self):
-        """Reload the map from file."""
+        """Reload map and structure."""
         try:
-            self.grid = np.loadtxt("house_map.txt", dtype=np.int8)
-            # Silent reload - no print unless there's an error
+            # Reload grid
+            new_grid = np.loadtxt("house_map.txt", dtype=np.int8)
+            if new_grid.shape == self.grid.shape:
+                self.grid = new_grid
 
-            # Also reload structure
+            # Reload structure and tiles
             with open("unified_rooms.json", 'r') as f:
                 self.structure = json.load(f)
-        except Exception:
-            # Silent fail - file might be in the middle of writing
-            pass
+                self.load_tile_registry()
+        except:
+            pass  # Silent fail during file writes
 
     def check_auto_reload(self):
-        """Check if it's time to auto-reload the files."""
-        current_time = pygame.time.get_ticks()
-        if current_time - self.last_reload_time > self.reload_interval:
+        """Auto-reload check."""
+        current = pygame.time.get_ticks()
+        if current - self.last_reload > self.reload_interval:
             self.reload()
-            self.last_reload_time = current_time
-
-    def resize_window(self, new_cell_size):
-        """Resize the window with new cell size."""
-        self.cell_size = max(5, min(50, new_cell_size))
-        self.window_width = self.grid_width * self.cell_size + self.legend_width
-        self.window_height = self.grid_height * self.cell_size
-        self.screen = pygame.display.set_mode((self.window_width, self.window_height))
-        print(f"Cell size: {self.cell_size}px, Window: {self.window_width}x{self.window_height}")
+            self.last_reload = current
 
     def run(self):
-        """Main rendering loop."""
-        print(f"Rendering {self.grid_width}x{self.grid_height} grid")
+        """Main loop."""
+        print("Dynamic House Renderer")
+        print("-" * 30)
+        print(f"Grid: {self.grid_width}x{self.grid_height}")
         print(f"Cell size: {self.cell_size}px")
-        print(f"Window size: {self.window_width}x{self.window_height} pixels")
-        print(f"Auto-reload: Every {self.reload_interval/1000} seconds")
+        print(f"Auto-reload: {self.reload_interval}ms")
+        print("\nControls:")
+        print("  ESC - Exit")
+        print("  R   - Manual reload")
+        print("  +/- - Zoom")
+        print("-" * 30)
 
         running = True
         while running:
@@ -180,52 +202,31 @@ class HouseRenderer:
                         running = False
                     elif event.key == pygame.K_r:
                         self.reload()
-                        print("Manual reload")
-                    elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
-                        self.resize_window(self.cell_size + 2)
+                        print(f"Reloaded - {len(self.tile_registry)} tile types")
+                    elif event.key in [pygame.K_PLUS, pygame.K_EQUALS]:
+                        self.cell_size = min(50, self.cell_size + 2)
+                        self.window_width = self.grid_width * self.cell_size + self.legend_width
+                        self.window_height = self.grid_height * self.cell_size
+                        self.screen = pygame.display.set_mode((self.window_width, self.window_height))
                     elif event.key == pygame.K_MINUS:
-                        self.resize_window(self.cell_size - 2)
+                        self.cell_size = max(5, self.cell_size - 2)
+                        self.window_width = self.grid_width * self.cell_size + self.legend_width
+                        self.window_height = self.grid_height * self.cell_size
+                        self.screen = pygame.display.set_mode((self.window_width, self.window_height))
 
-            # Check for auto-reload
             self.check_auto_reload()
-
             self.render()
             self.clock.tick(30)
 
         pygame.quit()
-        sys.exit()
-
-
-def main():
-    """Run the house renderer."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="House Map Renderer")
-    parser.add_argument("--cell-size", type=int, default=20,
-                        help="Size of each cell in pixels (5-50, default: 12)")
-    parser.add_argument("--json", default="unified_rooms.json",
-                        help="Path to unified rooms JSON file")
-    parser.add_argument("--map", default="house_map.txt",
-                        help="Path to house map text file")
-    args = parser.parse_args()
-
-    print("House Map Renderer")
-    print("-" * 40)
-    print("Controls:")
-    print("  ESC     - Exit")
-    print("  R       - Reload files (manual)")
-    print("  +/-     - Adjust cell size")
-    print("-" * 40)
-
-    try:
-        renderer = HouseRenderer(args.json, args.map, args.cell_size)
-        renderer.run()
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Please run room_unifier.py first to generate the required files.")
-    except Exception as e:
-        print(f"Error: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        renderer = DynamicHouseRenderer()
+        renderer.run()
+    except FileNotFoundError:
+        print("Error: unified_rooms.json or house_map.txt not found")
+        print("Run the pixel_room_mapper.py first!")
+    except Exception as e:
+        print(f"Error: {e}")
