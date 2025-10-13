@@ -73,6 +73,8 @@ class DynamicHouseRenderer:
                     self.tile_colors[tile_id] = (100, 100, 100)
                 elif name == "camera":
                     self.tile_colors[tile_id] = (0, 255, 255)
+                elif name == "door":
+                    self.tile_colors[tile_id] = (139, 69, 19)  # Brown
                 else:
                     # Generate color from hash
                     hash_val = hash(name)
