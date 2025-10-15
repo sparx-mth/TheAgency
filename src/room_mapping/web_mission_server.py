@@ -25,10 +25,10 @@ PROMPT = """You are a mission planner for an autonomous drone that navigates hou
 
 CRITICAL JSON READING RULES:
 - You MUST read the JSON map EXACTLY as provided - every object listed is real, nothing else exists
-- NEVER claim to see objects that are not explicitly in the "type" field of the JSON
-- If you say "I see [object]" - that object MUST exist in the JSON with that exact type
+- NEVER claim to see objects that are not explicitly in the "objects" field of each room
+- If you say "I see [object]" - that object MUST exist in the JSON with that exact name
 - DO NOT hallucinate, imagine, or invent ANY objects not in the JSON data
-- Before saying any object exists, verify it's actually in the JSON "type" fields
+- Before saying any object exists, verify it's actually in the JSON "objects" lists
 
 CONTEXT:
 - The drone starts at the bottom center of the house (main entrance area)
@@ -36,13 +36,13 @@ CONTEXT:
 - You have knowledge of typical house layouts (bathrooms have toiletries, kitchens have appliances, studies have computers, etc.)
 - North is towards the top of the house, South towards the bottom, East to the right, West to the left
 
-HOUSE MAP (JSON format showing rooms, objects, and their grid positions):
+HOUSE MAP (JSON format showing all rooms and their objects):
 {house_json}
 
 USER TASK: {user_task}
 
 YOUR JOB:
-Generate navigation instructions based STRICTLY on what exists in the map. NEVER invent rooms or objects that aren't listed. Check the "type" field of each object carefully.
+Generate navigation instructions based STRICTLY on what exists in the map. NEVER invent rooms or objects that aren't listed. Check the "objects" list of each room carefully.
 
 SYNONYM HANDLING:
 Use your understanding of language to recognize when objects are the same thing with different names. For example, if someone asks for a "gun" and the map has a "weapon", these refer to the same object. Similarly, "couch" and "sofa" are the same furniture piece. Always check if the requested item might be listed under a synonym or related term before deciding it doesn't exist.
@@ -66,7 +66,7 @@ RESPONSE FORMAT:
 
 CRITICAL RULES:
 - ONLY mention rooms that are explicitly listed in the map
-- ONLY mention objects whose "type" field is explicitly listed in the map
+- ONLY mention objects whose names appear in the "objects" list of each room
 - Use your knowledge of synonyms - if someone asks for something, check if it exists under a different but equivalent name
 - If something isn't in the map, clearly state "I don't see [X] in the map"
 - When suggesting where something typically is, check if that room actually exists first
@@ -83,23 +83,39 @@ IMPORTANT: Output ONLY the navigation instruction as a single paragraph. Do NOT 
 
 Generate the navigation instruction with directions:"""
 
+
 def load_house_data():
-    """Load and simplify house data"""
+    """Load and format house data clearly for LLM"""
     try:
         with open("unified_rooms.json", 'r') as f:
             house_data = json.load(f)
 
-        # Simplify house data for prompt
-        simplified = {"rooms": {}}
+        # Create clear structure showing rooms and their objects
+        simplified = {
+            "available_rooms": list(house_data.get('rooms', {}).keys()),
+            "rooms": {}
+        }
+
         for room_name, room_info in house_data.get('rooms', {}).items():
+            # Extract just the object types (names) for each room
+            object_types = []
+            for obj in room_info.get('objects', []):
+                if 'type' in obj:
+                    object_types.append(obj['type'])
+
+            # Make it clear what's in each room
             simplified["rooms"][room_name] = {
-                "position": room_info.get('camera_position'),
-                "objects": [
-                    {"type": obj['type'], "location": obj['location']}
-                    for obj in room_info.get('objects', [])
-                ],
+                "bbox": room_info.get('bbox'),  # Keep bbox for position reference
+                "objects": object_types,  # List of object names in this room
+                "object_count": len(object_types),
                 "doors": room_info.get('doors', [])
             }
+
+        # Add summary for clarity
+        simplified["summary"] = {
+            "total_rooms": len(simplified["rooms"]),
+            "total_objects": sum(room["object_count"] for room in simplified["rooms"].values())
+        }
 
         return simplified
     except Exception as e:
@@ -152,10 +168,9 @@ def get_status():
         current_data = latest_house_data
 
     if current_data:
-        total_objects = sum(len(room.get('objects', [])) for room in current_data['rooms'].values())
         return jsonify({
-            'rooms': len(current_data['rooms']),
-            'objects': total_objects
+            'rooms': current_data['summary']['total_rooms'],
+            'objects': current_data['summary']['total_objects']
         })
 
     return jsonify({'rooms': 0, 'objects': 0})
@@ -178,7 +193,7 @@ def generate_mission():
             current_data = latest_house_data
 
         if not current_data:
-            return jsonify({'response': 'No house data available. Please run room_unifier.py first.'}), 400
+            return jsonify({'response': 'No house data available. Please run pixel_room_mapper.py first.'}), 400
 
         house_json = json.dumps(current_data, indent=2)
 
@@ -187,9 +202,10 @@ def generate_mission():
         # Generate response using Ollama
         response = ask_ollama(house_json, task)
 
-        print("\n=== DEBUG: JSON being sent ===")
+        print("\n=== DEBUG: JSON being sent to LLM ===")
         print(house_json)
         print("\n=== DEBUG: Task ===")
+        print(task)
         print("=" * 30)
 
         print(f"Ollama response: {response[:100]}...")
@@ -217,16 +233,21 @@ def main():
     latest_house_data = load_house_data()
     if not latest_house_data:
         print("WARNING: unified_rooms.json not found.")
-        print("Run room_unifier.py first to generate the house structure.")
+        print("Run pixel_room_mapper.py first to generate the house structure.")
     else:
         print("Loaded house data successfully")
-        total_objects = sum(len(room.get('objects', [])) for room in latest_house_data['rooms'].values())
-        print(f"Found {len(latest_house_data['rooms'])} rooms with {total_objects} objects")
+        print(
+            f"Found {latest_house_data['summary']['total_rooms']} rooms with {latest_house_data['summary']['total_objects']} objects")
+        print("\nRooms detected:")
+        for room_name, room_data in latest_house_data['rooms'].items():
+            print(f"  - {room_name}: {room_data['object_count']} objects")
+            if room_data['objects']:
+                print(f"    Objects: {', '.join(room_data['objects'])}")
 
     # Start background updater thread
     updater = threading.Thread(target=background_updater, daemon=True)
     updater.start()
-    print("Auto-reload enabled (updates every second)")
+    print("\nAuto-reload enabled (updates every second)")
 
     print("-" * 40)
     print("Starting web server on http://localhost:8080")

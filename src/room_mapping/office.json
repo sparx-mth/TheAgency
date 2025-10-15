@@ -1,0 +1,142 @@
+{
+  "house_dimensions_m": {
+    "width": 5.882352941176471,
+    "height": 5.882352941176471
+  },
+  "grid_resolution": 0.14705882352941177,
+  "rooms": {
+    "Inbal's Office": {
+      "name": "Inbal's Office",
+      "bbox": [
+        0,
+        0,
+        18,
+        10
+      ],
+      "objects": [
+        {
+          "type": "table",
+          "tile_type": 4
+        },
+        {
+          "type": "chair",
+          "tile_type": 5
+        },
+        {
+          "type": "table and monitor",
+          "tile_type": 6
+        },
+        {
+          "type": "tv",
+          "tile_type": 7
+        }
+      ],
+      "doors": []
+    },
+    "Yaniv Oren's Office": {
+      "name": "Yaniv Oren's Office",
+      "bbox": [
+        0,
+        10,
+        18,
+        23
+      ],
+      "objects": [
+        {
+          "type": "table",
+          "tile_type": 4
+        },
+        {
+          "type": "chair",
+          "tile_type": 5
+        },
+        {
+          "type": "table and monitor",
+          "tile_type": 6
+        },
+        {
+          "type": "tv",
+          "tile_type": 7
+        }
+      ],
+      "doors": []
+    },
+    "Moshe's Office": {
+      "name": "Moshe's Office",
+      "bbox": [
+        0,
+        23,
+        18,
+        34
+      ],
+      "objects": [
+        {
+          "type": "table",
+          "tile_type": 4
+        },
+        {
+          "type": "chair",
+          "tile_type": 5
+        },
+        {
+          "type": "table and monitor",
+          "tile_type": 6
+        },
+        {
+          "type": "tv",
+          "tile_type": 7
+        }
+      ],
+      "doors": []
+    },
+    "Open Space": {
+      "name": "Open Space",
+      "bbox": [
+        23,
+        24,
+        40,
+        40
+      ],
+      "objects": [
+        {
+          "type": "chair",
+          "tile_type": 5
+        },
+        {
+          "type": "table and monitor",
+          "tile_type": 6
+        },
+        {
+          "type": "table",
+          "tile_type": 4
+        },
+        {
+          "type": "tv",
+          "tile_type": 7
+        }
+      ],
+      "doors": []
+    },
+    "hallway": {
+      "name": "hallway",
+      "bbox": [
+        18,
+        0,
+        24,
+        24
+      ],
+      "objects": [],
+      "doors": []
+    }
+  },
+  "tile_registry": {
+    "free_space": 0,
+    "wall": 1,
+    "camera": 2,
+    "door": 3,
+    "table": 4,
+    "chair": 5,
+    "table and monitor": 6,
+    "tv": 7
+  }
+}
