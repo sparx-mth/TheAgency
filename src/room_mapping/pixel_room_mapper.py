@@ -383,7 +383,7 @@ class PixelRoomMapper:
             "camera_position": [cam_grid_x, cam_grid_y],
             "bbox": list(self.room_bbox),  # [x1, y1, x2, y2]
             "objects": self.all_objects,
-            "doors": []
+            "doors": [30, 7]
         }
 
         # Simplified output

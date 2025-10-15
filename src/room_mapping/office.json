@@ -31,7 +31,7 @@
           "tile_type": 7
         }
       ],
-      "doors": []
+      "doors": [16, 6]
     },
     "Yaniv Oren's Office": {
       "name": "Yaniv Oren's Office",
@@ -59,7 +59,7 @@
           "tile_type": 7
         }
       ],
-      "doors": []
+      "doors": [16, 14]
     },
     "Moshe's Office": {
       "name": "Moshe's Office",
@@ -87,7 +87,7 @@
           "tile_type": 7
         }
       ],
-      "doors": []
+      "doors": [16, 30]
     },
     "Open Space": {
       "name": "Open Space",
@@ -137,6 +137,7 @@
     "table": 4,
     "chair": 5,
     "table and monitor": 6,
-    "tv": 7
+    "tv": 7,
+    "entry point": 8
   }
 }
