@@ -17,7 +17,7 @@ def main():
     print("=" * 60)
 
     # Ask about cleaning directory
-    bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/ingest_out"
+    bbox_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/ingest_out"
     json_files = []
     if os.path.exists(bbox_dir):
         import glob
@@ -62,7 +62,7 @@ def main():
 
         # Wait for first JSON files to appear
         print("\nWaiting for first detection files...")
-        bbox_dir = "/home/user/PycharmProjects/TheAgency/src/room_mapping/ingest_out"
+        bbox_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/ingest_out"
 
         while True:
             if os.path.exists(bbox_dir):
@@ -83,7 +83,7 @@ def main():
         # 2. Now start the rest of the components
         print("\n[2/5] Starting Room Unifier (monitors for new scans)...")
         unifier = subprocess.Popen(
-            [sys.executable, "room_unifier.py"],
+            [sys.executable, "pixel_room_mapper.py"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
@@ -171,8 +171,7 @@ if __name__ == "__main__":
         "receiver_owl.py",
         "pixel_room_mapper.py",
         "render_house.py",
-        "web_mission_server.py",  # New web server file
-        "tile_definitions.py"
+        "web_mission_server.py",
     ]
 
     missing = [f for f in required_files if not os.path.exists(f)]

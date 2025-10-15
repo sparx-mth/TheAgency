@@ -40,6 +40,14 @@ class DynamicTileManager:
 
         self.next_tile_id = 4  # Start after reserved types (including door)
 
+        # Reverse mapping from tile_id to name for overlap handling
+        self.id_to_name = {
+            self.FREE_SPACE: 'free_space',
+            self.WALL: 'wall',
+            self.CAMERA: 'camera',
+            self.DOOR: 'door'
+        }
+
     def get_tile_type(self, object_class: str) -> int:
         """Get or create tile type for object class."""
         # Normalize object class
@@ -48,6 +56,7 @@ class DynamicTileManager:
         if obj_key not in self.tile_registry:
             # Create new tile type
             self.tile_registry[obj_key] = self.next_tile_id
+            self.id_to_name[self.next_tile_id] = obj_key
 
             # Generate a color based on hash for consistency
             hash_val = hash(obj_key)
@@ -65,6 +74,29 @@ class DynamicTileManager:
 
         return self.tile_registry[obj_key]
 
+    def get_overlap_tile_type(self, existing_tile_id: int, new_object_class: str) -> int:
+        """Create or get tile type for overlapping objects."""
+        # Get names of both objects
+        existing_name = self.id_to_name.get(existing_tile_id, "unknown")
+        new_name = new_object_class.lower().strip()
+
+        # Skip creating overlap for reserved types
+        if existing_tile_id in [self.FREE_SPACE, self.WALL, self.CAMERA, self.DOOR]:
+            return self.get_tile_type(new_object_class)
+
+        # Same object type = just keep existing (chair + chair = chair)
+        if existing_name == new_name:
+            return existing_tile_id
+
+        # Already an overlap? Just keep it (don't make complex chains)
+        if " and " in existing_name:
+            return existing_tile_id
+
+        # Two different objects = create simple overlap
+        names = sorted([existing_name, new_name])
+        overlap_name = f"{names[0]} and {names[1]}"
+        return self.get_tile_type(overlap_name)
+
     def get_all_tiles(self) -> Dict:
         """Return all registered tiles."""
         return self.tile_registry.copy()
@@ -77,7 +109,7 @@ class PixelRoomMapper:
                  mode: str = "standalone",
                  room_width_m: float = 2.5,
                  room_height_m: float = 2.5,
-                 grid_resolution: float = 0.05,
+                 grid_resolution: float = 0.1,
                  existing_map_file: Optional[str] = None,
                  room_bbox: Optional[Tuple[int, int, int, int]] = None,
                  camera_fov_h: float = 100,
@@ -127,17 +159,15 @@ class PixelRoomMapper:
             room_width_cells = x2 - x1
             room_height_cells = y2 - y1
 
-            # Infer grid resolution from JSON if available
-            try:
-                with open("unified_rooms.json", 'r') as f:
-                    structure = json.load(f)
-                    self.grid_resolution = structure["grid_resolution"]
-            except:
-                self.grid_resolution = 0.05  # Default
+            # FIXED: Calculate grid resolution based on known room size and cell count
+            # We know the room is 2.5m x 2.5m in real world
+            self.room_width_m = room_width_m  # Use the provided room dimensions
+            self.room_height_m = room_height_m
 
-            # Calculate room dimensions in meters
-            self.room_width_m = room_width_cells * self.grid_resolution
-            self.room_height_m = room_height_cells * self.grid_resolution
+            # Calculate resolution from the known room size and cell dimensions
+            # Use the average if width and height cells are different
+            self.grid_resolution = (self.room_width_m / room_width_cells +
+                                    self.room_height_m / room_height_cells) / 2
 
             # Room grid dimensions
             self.grid_width = room_width_cells
@@ -157,20 +187,22 @@ class PixelRoomMapper:
         self.all_objects = []
         self.rooms = {}
 
-        # Fixed distance assumption (reduced for 2.5m room)
+        # Fixed distance assumption for object placement
+        # Objects are assumed to be at this distance from camera
         self.FIXED_DISTANCE = 0.7
 
     def estimate_object_size_from_pixels(self,
                                          bbox: List[int],
                                          frame_width: int,
-                                         frame_height: int) -> Tuple[float, float]:
+                                         frame_height: int,
+                                         object_class: str = "") -> Tuple[float, float]:
         """Estimate object size with proper proportions relative to room."""
         # Calculate pixel ratios
         h_ratio = (bbox[2] - bbox[0]) / frame_width
         v_ratio = (bbox[3] - bbox[1]) / frame_height
 
         # Scale factor based on camera FOV and distance
-        # At 0.7m distance with 100° FOV, visible width ≈ 1.5m
+        # At 0.7m distance with 100° FOV, visible width ≈ 1.67m
         visible_width = 2 * self.FIXED_DISTANCE * math.tan(self.camera_fov_h / 2)
         visible_height = 2 * self.FIXED_DISTANCE * math.tan(self.camera_fov_v / 2)
 
@@ -178,16 +210,31 @@ class PixelRoomMapper:
         h_object_meters = h_ratio * visible_width
         v_object_meters = v_ratio * visible_height
 
-        # Apply scaling factor to better match room proportions
-        # Objects typically appear larger in pixel space than actual size
-        scale_factor = 0.6  # Adjusted for 0.7m distance
+        # Different scale factors for different object types
+        # The scale_factor compensates for perspective distortion and object distance variation
+        # Larger objects (furniture) need less scaling, smaller objects need more
+        if any(word in object_class.lower() for word in ['chair', 'table', 'couch', 'sofa', 'desk', 'bed']):
+            scale_factor = 1.0  # Furniture - use full estimated size
+        elif any(word in object_class.lower() for word in ['person', 'tv', 'monitor']):
+            scale_factor = 0.8  # Medium objects
+        else:
+            scale_factor = 0.9  # Default for other objects
 
         h_object_meters *= scale_factor
         v_object_meters *= scale_factor
 
-        # Clamp to reasonable sizes (max 1/4 of room dimension for safety)
-        h_object_meters = min(h_object_meters, self.room_width_m / 4)
-        v_object_meters = min(v_object_meters, self.room_height_m / 4)
+        # Minimum object size (at least 10cm)
+        h_object_meters = max(0.1, h_object_meters)
+        v_object_meters = max(0.1, v_object_meters)
+
+        # Clamp to reasonable sizes (max 1/3 of room dimension)
+        h_object_meters = min(h_object_meters, self.room_width_m / 3)
+        v_object_meters = min(v_object_meters, self.room_height_m / 3)
+
+        # Debug print
+        print(f"  Object: {object_class[:20]:20s} | Pixel size: {bbox[2] - bbox[0]:4d}x{bbox[3] - bbox[1]:4d} | "
+              f"Size (m): {h_object_meters:.2f}x{v_object_meters:.2f} | "
+              f"Cells: {int(h_object_meters / self.grid_resolution)}x{int(v_object_meters / self.grid_resolution)}")
 
         return h_object_meters, v_object_meters
 
@@ -235,6 +282,9 @@ class PixelRoomMapper:
 
         detections = scan_data.get('detections', [])
 
+        print(f"\nProcessing scan with yaw={yaw:.3f}, {len(detections)} detections")
+        print(f"  Grid resolution: {self.grid_resolution:.4f} m/cell")
+
         for detection in detections:
             label = detection.get('label', '').lower()
             obj_class = label.replace('a ', '').replace('an ', '').strip()
@@ -252,9 +302,9 @@ class PixelRoomMapper:
                 bbox, yaw, frame_width
             )
 
-            # Estimate size
+            # Estimate size - now passing object class for better scaling
             width_m, height_m = self.estimate_object_size_from_pixels(
-                bbox, frame_width, frame_height
+                bbox, frame_width, frame_height, obj_class
             )
 
             # Constrain size based on position to prevent overflow
@@ -318,10 +368,10 @@ class PixelRoomMapper:
         if 0 <= actual_cam_x < self.map_width and 0 <= actual_cam_y < self.map_height:
             grid[actual_cam_y, actual_cam_x] = self.tiles.CAMERA
 
-        # Place objects
+        # Place objects with overlap detection
         for obj in self.all_objects:
             cx, cy = obj["location"]
-            tile_type = obj["tile_type"]
+            obj_class = obj["type"]
             width_m, height_m = obj["size_m"]
 
             width_cells = max(1, int(width_m / self.grid_resolution))
@@ -340,7 +390,20 @@ class PixelRoomMapper:
                     # Check bounds and don't overwrite walls/camera/doors
                     if (0 < x < self.map_width - 1 and 0 < y < self.map_height - 1 and
                             1 <= local_x < self.grid_width - 1 and 1 <= local_y < self.grid_height - 1):
-                        if grid[y, x] not in [self.tiles.WALL, self.tiles.CAMERA, self.tiles.DOOR]:
+                        existing_tile = grid[y, x]
+
+                        # Skip special tiles
+                        if existing_tile in [self.tiles.WALL, self.tiles.CAMERA, self.tiles.DOOR]:
+                            continue
+
+                        # Handle overlap
+                        if existing_tile != self.tiles.FREE_SPACE:
+                            # Create overlap tile type
+                            overlap_tile = self.tiles.get_overlap_tile_type(existing_tile, obj_class)
+                            grid[y, x] = overlap_tile
+                        else:
+                            # Place normally
+                            tile_type = self.tiles.get_tile_type(obj_class)
                             grid[y, x] = tile_type
 
         return grid
@@ -348,6 +411,9 @@ class PixelRoomMapper:
     def save(self, json_file: str = "unified_rooms.json",
              map_file: str = "house_map.txt"):
         """Save the room structure and grid map."""
+
+        # Create grid first to detect overlaps and create overlap tiles
+        grid = self.create_grid_map()
 
         # Adjust camera position for map coordinates
         cam_grid_x, cam_grid_y = self.meters_to_grid(self.camera_x_m, self.camera_y_m)
@@ -364,6 +430,7 @@ class PixelRoomMapper:
             "doors": []
         }
 
+        # Now get all tiles including overlaps that were created
         output = {
             "house_dimensions_m": {
                 "width": self.map_width * self.grid_resolution,
@@ -378,12 +445,41 @@ class PixelRoomMapper:
         with open(json_file, 'w') as f:
             json.dump(output, f, indent=2)
 
-        grid = self.create_grid_map()
         np.savetxt(map_file, grid, fmt='%d')
 
+        print(f"\n=== SAVE SUMMARY ===")
         print(f"Saved {len(self.all_objects)} objects with {len(self.tiles.get_all_tiles())} tile types")
+        print(f"Grid resolution: {self.grid_resolution:.4f} m/cell")
         if self.mode == "existing_map":
             print(f"Room placed at offset ({self.room_offset_x}, {self.room_offset_y})")
+
+        # Print object size statistics
+        if self.all_objects:
+            sizes = [(obj["size_m"][0], obj["size_m"][1]) for obj in self.all_objects]
+            avg_width = sum(s[0] for s in sizes) / len(sizes)
+            avg_height = sum(s[1] for s in sizes) / len(sizes)
+            max_width = max(s[0] for s in sizes)
+            max_height = max(s[1] for s in sizes)
+            min_width = min(s[0] for s in sizes)
+            min_height = min(s[1] for s in sizes)
+
+            print(f"\nObject size statistics:")
+            print(f"  Average: {avg_width:.2f}m x {avg_height:.2f}m")
+            print(f"  Max: {max_width:.2f}m x {max_height:.2f}m")
+            print(f"  Min: {min_width:.2f}m x {min_height:.2f}m")
+
+            # Count objects by cell size
+            cell_sizes = {}
+            for obj in self.all_objects:
+                w_cells = max(1, int(obj["size_m"][0] / self.grid_resolution))
+                h_cells = max(1, int(obj["size_m"][1] / self.grid_resolution))
+                size_key = f"{w_cells}x{h_cells}"
+                cell_sizes[size_key] = cell_sizes.get(size_key, 0) + 1
+
+            print(f"\nObject cell distributions:")
+            for size, count in sorted(cell_sizes.items()):
+                print(f"  {size:8s} cells: {count} objects")
+        print("=" * 20)
 
 
 def parse_yaw_from_filename(filename: str) -> float:
@@ -419,6 +515,8 @@ def process_files(mode="standalone", existing_map=None, room_bbox=None):
     else:
         mapper = PixelRoomMapper(
             mode="existing_map",
+            room_width_m=2.5,  # Pass the known room size
+            room_height_m=2.5,
             existing_map_file=existing_map,
             room_bbox=room_bbox,
             camera_fov_h=100,
@@ -450,7 +548,7 @@ def main():
     # Check for mode argument
     mode = "standalone"
     existing_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/office_map.txt"
-    room_bbox = (25, 0, 42, 21)
+    room_bbox = (23, 7, 40, 24)
 
     if room_bbox is not None and existing_map is not None:
         mode = "existing_map"
@@ -458,6 +556,7 @@ def main():
         print(f"Mode: Existing Map")
         print(f"Map file: {existing_map}")
         print(f"Room bbox: {room_bbox}")
+        print(f"Room real size: 2.5m x 2.5m")
     else:
         print("Mode: Standalone")
         print("  - Room size: 2.5m x 2.5m")
@@ -466,7 +565,7 @@ def main():
     print("  - Camera: Center of room")
     print("  - Distance: 0.7m (fixed)")
     print("  - FOV: 100° horizontal, 50° vertical")
-    print("  - Dynamic tile generation")
+    print("  - Dynamic tile generation with overlap detection")
     print("\nMonitoring for detection files...")
     print("Press Ctrl+C to stop\n")
 
