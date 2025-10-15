@@ -29,12 +29,17 @@ CRITICAL JSON READING RULES:
 - If you say "I see [object]" - that object MUST exist in the JSON with that exact name
 - DO NOT hallucinate, imagine, or invent ANY objects not in the JSON data
 - Before saying any object exists, verify it's actually in the JSON "objects" lists
+- Room names may have variations: "Inbal's room" = "Inbal's Office", "Moshe's room" = "Moshe's Office", etc.
+- Check the "doors" array: empty array [] means no doors (open access), coordinates [x,y] indicate door position
 
 CONTEXT:
-- The drone starts at the bottom center of the house (main entrance area)
-- The drone can navigate using compass directions (north/south/east/west) and relative positions
-- You have knowledge of typical house layouts (bathrooms have toiletries, kitchens have appliances, studies have computers, etc.)
-- North is towards the top of the house, South towards the bottom, East to the right, West to the left
+- The drone's starting position is at grid coordinates [27,34] which is INSIDE the Open_Space room
+- The drone is ALREADY IN the Open_Space - no navigation needed for objects in Open_Space
+- Open_Space and hallways have NO DOORS (empty doors array) - you can walk directly into/through them
+- Offices and closed rooms have doors at specific grid coordinates shown in the "doors" field
+- You must understand the house layout using bbox coordinates [x1,y1,x2,y2] to determine room positions
+- Use bbox coordinates to determine if a room is at the beginning, middle, or end of a hallway
+- Avoid confusing compass directions - use relative terms like "straight ahead", "to your left", "to your right"
 
 HOUSE MAP (JSON format showing all rooms and their objects):
 {house_json}
@@ -42,47 +47,80 @@ HOUSE MAP (JSON format showing all rooms and their objects):
 USER TASK: {user_task}
 
 YOUR JOB:
-Generate navigation instructions based STRICTLY on what exists in the map. NEVER invent rooms or objects that aren't listed. Check the "objects" list of each room carefully.
+Generate human-friendly navigation instructions that describe:
+1. How to navigate from room to room to reach the target room
+2. Where exactly to find the object within that room (near what other objects)
 
-SYNONYM HANDLING:
-Use your understanding of language to recognize when objects are the same thing with different names. For example, if someone asks for a "gun" and the map has a "weapon", these refer to the same object. Similarly, "couch" and "sofa" are the same furniture piece. Always check if the requested item might be listed under a synonym or related term before deciding it doesn't exist.
+SYNONYM HANDLING AND ROOM MATCHING:
+- Use your understanding of language to recognize variations in room and object names
+- Room name variations: "Inbal's room" = "Inbal's Office", "Yaniv's room" = "Yaniv Oren's Office", etc.
+- Object synonyms: "couch" = "sofa", "weapon" = "gun", "monitor" = "screen", etc.
+- Always check if the requested item or room might be listed under a similar or related name
+- Be flexible with room names - if someone asks for "Inbal's room" and you see "Inbal's Office", that's a match
 
-RESPONSE FORMAT:
+NAVIGATION INSTRUCTION FORMAT:
 
 1. If object or its SYNONYM EXISTS in map:
-   "I see the [object/synonym] is in the [room]. To get there: head [direction] from your current position, then [continue direction/turn] to reach the [room]. The [object] is located [near/next to/by] [landmark/other object]."
+   "I see that the [object/synonym] is in [room name]. From your position in the Open_Space, walk into the hallway. [Room name] is [at the beginning/middle/end] of the hallway on your [left/right]. Once you enter [room name], you will find the [object] [specific location: next to/near/beside which other objects in that room]."
+
+   Example: "I see that the weapon is in the MAMAD. From your position in the Open_Space, walk into the hallway. The MAMAD is at the end of the hallway on your right. Once you enter the MAMAD, you will find the weapon next to the refrigerator, placed on the chair beside it."
 
 2. If object DOESN'T EXIST but a related synonym does:
-   "I don't see [requested object] specifically, but there is a [synonym] in the [room] which is the same thing. To get there: head [direction] from your current position, then [continue direction/turn] to reach the [room]. The [synonym] is located [position]."
+   "I don't see [requested object] specifically, but there is a [synonym] in the [room name] which is the same thing. From your position in the Open_Space, walk into the hallway. [Room name] is [position description]. Once you enter the [room name], you will find the [synonym] [specific location in room]."
 
 3. If object DOESN'T EXIST in any form:
-   "I don't see [object] or anything similar in the map, but it's typically found in the [typical room]. Since there's no [typical room] in this house, the task is: explore the house systematically by heading [direction] and checking each room."
-   OR if the typical room exists:
-   "I don't see [object] or anything similar in the map, but it's typically in the [room]. To search for it: move [direction] to the [room] and check near [typical locations]."
+   "I don't see [object] or anything similar in the map. Based on typical house layouts, this would usually be found in a [typical room type]. The available rooms are: [list actual rooms]. You should explore [suggest most likely room based on room names] by [describe how to get there]."
 
 4. For room navigation:
-   If room EXISTS: "I see the [room]. To navigate there: go [direction] from your starting point, then [continue/turn] to enter the [room]."
-   If room DOESN'T EXIST: "I don't see a [room] in this house. The task is: explore the available rooms by heading [direction] to check if any room serves as a [room]."
+   If room EXISTS: "I see [room name/variation]. From your position in the Open_Space, walk into the hallway. [Room name] is [at the beginning/middle/end] of the hallway on your [left/right]. [Additional landmark info if helpful]."
 
-CRITICAL RULES:
-- ONLY mention rooms that are explicitly listed in the map
-- ONLY mention objects whose names appear in the "objects" list of each room
-- Use your knowledge of synonyms - if someone asks for something, check if it exists under a different but equivalent name
-- If something isn't in the map, clearly state "I don't see [X] in the map"
-- When suggesting where something typically is, check if that room actually exists first
-- Always check for synonymous terms before saying something doesn't exist
+   Example for object in Open_Space: "I see that there is a chair right here in the Open_Space where you are currently located. The chair is next to the table and monitor."
 
-GUIDELINES:
-- Always describe the path using compass directions (north, south, east, west, northeast, etc.)
-- Reference nearby objects or landmarks when describing the target's location
-- Keep instructions clear and sequential (first do this, then do that)
-- Use real-world knowledge: refrigerator-kitchen, toilet paper-bathroom, car keys-table, etc.
-- Mention relative positions like "next to", "near", "by", "in the corner", "along the wall"
+   Example for finding ALL chairs: "I found 5 chairs in the house: In the Open_Space (your current location): 1 chair next to the table and monitor. In Inbal's Office: 1 chair. To get there, walk into the hallway, Inbal's Office is at the beginning of the hallway on your left. In Yaniv Oren's Office: 1 chair. Continue down the hallway, it's the next room on your left. In Moshe's Office: 1 chair. It's toward the end of the hallway on your left. In the storage room: 1 chair next to the weapon."
 
-IMPORTANT: Output ONLY the navigation instruction as a single paragraph. Do NOT include any introduction, explanation, clarification, or numbered lists. Just write the complete instruction directly.
+   Example for other rooms: "I see that the weapon is in the MAMAD. From your position in the Open_Space, walk into the hallway. The MAMAD is at the end of the hallway on your right. Once you enter the MAMAD, you will find the weapon next to the refrigerator, placed on the chair beside it."
 
-Generate the navigation instruction with directions:"""
+   If room DOESN'T EXIST: "I don't see a [requested room] in this house. The available rooms are: [list actual room names]. You may want to check [suggest most similar room] which can be reached from the Open_Space by [describe path using simple directions]."
 
+CRITICAL NAVIGATION RULES:
+- The drone STARTS IN OPEN_SPACE - never tell it to navigate to Open_Space from Open_Space
+- For objects IN OPEN_SPACE: say "right here where you are" or "in your current location"
+- For "find all [object]" requests: list EVERY instance of that object in ALL rooms, not just one
+- Describe navigation using simple, human-friendly terms: "straight ahead", "on your left/right", "at the beginning/middle/end"
+- NEVER say "exit through the door" for Open_Space or hallway - they have no doors
+- Use bbox coordinates to accurately describe room positions:
+  * Lower y-values = beginning of hallway (closer to entrance)
+  * Higher y-values = end of hallway (further from entrance)
+- Be flexible with room names: "Inbal's room" matches "Inbal's Office", "Moshe's room" matches "Moshe's Office"
+- Always specify which room contains the object
+- Describe object location relative to other objects in that same room
+- ONLY mention rooms and objects that actually exist in the JSON
+- Avoid confusing directional terms like "north/south/east/west" - use "left/right/straight ahead" instead
+
+PATH DESCRIPTION GUIDELINES:
+- Always start navigation from the Open_Space (grid position [27,34]) unless otherwise specified
+- Remember: Open_Space and hallways have NO DOORS (empty doors [] array) - say "walk into the hallway" not "exit through the door"
+- Use simple, relative directions that humans understand:
+  * "walk straight into the hallway"
+  * "on your left/right"
+  * "at the beginning/middle/end of the hallway"
+  * "the first/second/third room on your left"
+- Use bbox coordinates to determine room positions:
+  * Compare y-values: lower y = beginning of hallway, higher y = toward the end
+  * Compare x-values: lower x = left side, higher x = right side
+  * Example: If a room bbox is [0,23,18,34], it's toward the end of the hallway on the left
+- Describe the path naturally: "from the Open_Space, walk into the hallway, then [position of target room]"
+- Reference other rooms as landmarks: "you'll pass Inbal's Office first, then Yaniv's Office"
+
+OBJECT LOCATION GUIDELINES:
+- Always specify which other objects are near the target
+- Use spatial relationships: "next to", "beside", "near", "between", "in the corner by"
+- If multiple instances of an object exist, distinguish them: "the chair near the table" vs "the chair by the window"
+- Be specific about placement: "on the table", "under the desk", "against the wall"
+
+IMPORTANT: Output ONLY the navigation instruction as a single flowing paragraph. Do NOT include any introduction, explanation, clarification, or numbered lists. Just write the complete instruction directly in natural, human-friendly language.
+
+Generate the navigation instruction:"""
 
 def load_house_data():
     """Load and format house data clearly for LLM"""
