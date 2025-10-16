@@ -10,7 +10,9 @@ import os
 import glob
 import webbrowser
 from pathlib import Path
+
 BASE_PATH = str(Path(__file__).resolve().parent.parent)
+
 
 def main():
     print("=" * 60)
@@ -21,12 +23,18 @@ def main():
     bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
     json_files = []
     if os.path.exists(bbox_dir):
-        import glob
-        json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+        # Look for ALL .json files, not just *_dets.json
+        json_files = glob.glob(os.path.join(bbox_dir, "*.json"))
 
     if json_files:
-        print(f"\nFound {len(json_files)} existing detection files in:")
+        print(f"\nFound {len(json_files)} existing JSON files in:")
         print(f"  {bbox_dir}")
+        print("\nFiles found:")
+        for f in json_files[:5]:  # Show first 5 files
+            print(f"  - {os.path.basename(f)}")
+        if len(json_files) > 5:
+            print(f"  ... and {len(json_files) - 5} more")
+
         response = input("\nClean directory before starting? (y/n): ").strip().lower()
 
         if response == 'y':
@@ -65,17 +73,30 @@ def main():
         print("\nWaiting for first detection files...")
         bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
 
-
+        wait_count = 0
         while True:
             if os.path.exists(bbox_dir):
-                json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+                # Look for ALL .json files
+                json_files = glob.glob(os.path.join(bbox_dir, "*.json"))
                 if json_files:
-                    print(f"✔ Found {len(json_files)} detection files!")
+                    print(f"\n Found {len(json_files)} JSON files!")
                     print("Starting remaining components...")
                     break
 
             print(".", end="", flush=True)
             time.sleep(1)
+            wait_count += 1
+
+            # Add timeout check
+            if wait_count > 30:  # 30 seconds timeout
+                print("\n No JSON files found after 30 seconds.")
+                response = input("Continue anyway? (y/n): ").strip().lower()
+                if response == 'y':
+                    print("Continuing with setup...")
+                    break
+                else:
+                    print("Exiting...")
+                    sys.exit(1)
 
             # Check if receiver is still running
             if receiver.poll() is not None:

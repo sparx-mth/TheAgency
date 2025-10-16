@@ -414,23 +414,27 @@ class PixelRoomMapper:
         print(f"Tile types: {existing_count} existing + {new_count} new = {len(self.tiles.tile_registry)} total")
 
 
-def parse_yaw_from_filename(filename: str) -> float:
-    """Extract yaw from filename."""
-    import re
-    base = os.path.basename(filename)
-    yaw_match = re.search(r'yaw(\d+)', base)
-    if yaw_match:
-        return int(yaw_match.group(1)) / 1000000.0
+def get_yaw_from_json(scan_data: Dict) -> float:
+    """Extract yaw from JSON data's pose field."""
+    if 'pose' in scan_data and 'yaw' in scan_data['pose']:
+        yaw = scan_data['pose']['yaw']
+        print(f"  Found yaw in JSON: {yaw} radians ({math.degrees(yaw):.1f} degrees)")
+        return yaw
+    print("  Warning: No yaw found in JSON, defaulting to 0.0")
     return 0.0
 
 
 def process_files(mode="standalone", existing_map=None, existing_json=None, room_bbox=None, room_name="main_room"):
     """Process all detection files."""
     bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
-    json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+    # Look for ALL .json files, not just *_dets.json
+    json_files = glob.glob(os.path.join(bbox_dir, "*.json"))
 
     if not json_files:
+        print(f"No JSON files found in {bbox_dir}")
         return 0
+
+    print(f"Found {len(json_files)} JSON files to process")
 
     # Create mapper
     if mode == "standalone":
@@ -460,12 +464,16 @@ def process_files(mode="standalone", existing_map=None, existing_json=None, room
     # Process each file
     for json_file in sorted(json_files):
         try:
+            print(f"Processing: {os.path.basename(json_file)}")
             with open(json_file, 'r') as f:
                 scan_data = json.load(f)
-            yaw = parse_yaw_from_filename(json_file)
+            # Get yaw from JSON data instead of filename
+            yaw = get_yaw_from_json(scan_data)
             mapper.add_scan(scan_data, yaw)
         except Exception as e:
             print(f"Error processing {json_file}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     mapper.save()
@@ -504,7 +512,8 @@ def main():
 
     try:
         while True:
-            current_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
+            # Look for ALL .json files, not just *_dets.json
+            current_files = glob.glob(os.path.join(bbox_dir, "*.json"))
             current_count = len(current_files)
 
             if current_count != last_file_count:
