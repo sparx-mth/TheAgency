@@ -9,7 +9,8 @@ import sys
 import os
 import glob
 import webbrowser
-
+from pathlib import Path
+BASE_PATH = str(Path(__file__).resolve().parent.parent)
 
 def main():
     print("=" * 60)
@@ -17,7 +18,7 @@ def main():
     print("=" * 60)
 
     # Ask about cleaning directory
-    bbox_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/ingest_out"
+    bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
     json_files = []
     if os.path.exists(bbox_dir):
         import glob
@@ -62,7 +63,8 @@ def main():
 
         # Wait for first JSON files to appear
         print("\nWaiting for first detection files...")
-        bbox_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/ingest_out"
+        bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
+
 
         while True:
             if os.path.exists(bbox_dir):

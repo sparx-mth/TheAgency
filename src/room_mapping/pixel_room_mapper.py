@@ -10,6 +10,8 @@ import os
 import glob
 import time
 from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+BASE_PATH = str(Path(__file__).resolve().parent.parent)  # Goes up to workspace level
 
 
 class DynamicTileManager:
@@ -424,7 +426,7 @@ def parse_yaw_from_filename(filename: str) -> float:
 
 def process_files(mode="standalone", existing_map=None, existing_json=None, room_bbox=None, room_name="main_room"):
     """Process all detection files."""
-    bbox_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/ingest_out"
+    bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
     json_files = glob.glob(os.path.join(bbox_dir, "*_dets.json"))
 
     if not json_files:
@@ -474,8 +476,8 @@ def main():
     """Monitor and process detection files."""
     # Configuration
     mode = "standalone"
-    existing_map = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/office_map.txt"
-    existing_json = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/office.json"  # Add existing JSON
+    existing_map = os.path.join(BASE_PATH, "room_mapping/office_map.txt")
+    existing_json = os.path.join(BASE_PATH, "room_mapping/office.json")
     room_bbox = (23, 7, 40, 24)
     room_name = "MAMAD"  # Specify which room to update
 
@@ -496,7 +498,7 @@ def main():
     print("\nMonitoring for detection files...")
     print("Press Ctrl+C to stop\n")
 
-    bbox_dir = "/home/nadavc/PycharmProjects/TheAgency_workspace/src/room_mapping/ingest_out"
+    bbox_dir = os.path.join(BASE_PATH, "room_mapping/ingest_out")
     last_file_count = 0
     check_interval = 2
 
