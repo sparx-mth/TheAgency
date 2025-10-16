@@ -214,8 +214,11 @@ class PixelRoomMapper:
         angle_offset = -((bbox_center_x / frame_width) - 0.5) * self.camera_fov_h
         object_angle = yaw + angle_offset
 
-        obj_x_m = self.camera_x_m - self.FIXED_DISTANCE * math.sin(object_angle)
-        obj_y_m = self.camera_y_m - self.FIXED_DISTANCE * math.cos(object_angle)
+        # ROTATED 90 DEGREES COUNTERCLOCKWISE:
+        # Original: angle 0 was up (north), now angle 0 is right (east)
+        # So we use cos for x-offset and sin for y-offset (swapped from original)
+        obj_x_m = self.camera_x_m + self.FIXED_DISTANCE * math.cos(object_angle)
+        obj_y_m = self.camera_y_m - self.FIXED_DISTANCE * math.sin(object_angle)
 
         # Clamp position to room boundaries
         margin = 0.2
@@ -396,7 +399,7 @@ class PixelRoomMapper:
             "camera_position": [cam_grid_x, cam_grid_y],
             "bbox": list(self.room_bbox),  # [x1, y1, x2, y2]
             "objects": self.all_objects,
-            "doors": [30, 7]
+            "doors": [25, 7]
         }
 
         # Simplified output
