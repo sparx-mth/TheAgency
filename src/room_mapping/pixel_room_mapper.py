@@ -234,14 +234,25 @@ class PixelRoomMapper:
 
     def add_scan(self, scan_data: Dict, yaw: float = 0.0):
         """Add a scan to the room map."""
-        if 'image' in scan_data:
+        # Try new structure first (nanoowl.result)
+        if 'nanoowl' in scan_data and 'result' in scan_data['nanoowl']:
+            result = scan_data['nanoowl']['result']
+            if 'image' in result:
+                frame_width = result['image'].get('width', 1280)
+                frame_height = result['image'].get('height', 720)
+            else:
+                frame_width = 1280
+                frame_height = 720
+            detections = result.get('detections', [])
+        # Fall back to old structure
+        elif 'image' in scan_data:
             frame_width = scan_data['image'].get('width', 1280)
             frame_height = scan_data['image'].get('height', 720)
+            detections = scan_data.get('detections', [])
         else:
             frame_width = 1280
             frame_height = 720
-
-        detections = scan_data.get('detections', [])
+            detections = scan_data.get('detections', [])
 
         for detection in detections:
             label = detection.get('label', '').lower()
