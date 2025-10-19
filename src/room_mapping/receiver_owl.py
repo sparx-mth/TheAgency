@@ -19,9 +19,9 @@ def ingest():
         except Exception as e:
             return jsonify({"error": f"bad meta json: {e}"}), 400
 
-        file = request.files.get("image")
-        if file is None:
-            return jsonify({"error": "missing file part 'image'"}), 400
+        # file = request.files.get("image")
+        # if file is None:
+        #     return jsonify({"error": "missing file part 'image'"}), 400
 
         # 2) Derive a stem for saving outputs
         # Prefer the original image’s stem if present; else timestamp.
@@ -31,10 +31,10 @@ def ingest():
         except Exception:
             stem = f"frame_{int(time.time())}"
 
-        # 3) Save annotated image
-        jpg_name = secure_filename(f"{stem}_ann.jpg")
-        jpg_path = os.path.join(OUT_DIR, jpg_name)
-        file.save(jpg_path)
+        # # 3) Save annotated image
+        # jpg_name = secure_filename(f"{stem}_ann.jpg")
+        # jpg_path = os.path.join(OUT_DIR, jpg_name)
+        # file.save(jpg_path)
 
         # 4) Save meta JSON (pretty)
         json_name = secure_filename(f"{stem}_dets.json")

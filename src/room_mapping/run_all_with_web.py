@@ -86,9 +86,11 @@ def main():
             print(".", end="", flush=True)
             time.sleep(1)
             wait_count += 1
+            if wait_count % 60 == 0:
+                print("\n", end="", flush=True)
 
             # Add timeout check
-            if wait_count > 30:  # 30 seconds timeout
+            if wait_count > 600:  # 600 seconds timeout
                 print("\n No JSON files found after 30 seconds.")
                 response = input("Continue anyway? (y/n): ").strip().lower()
                 if response == 'y':
