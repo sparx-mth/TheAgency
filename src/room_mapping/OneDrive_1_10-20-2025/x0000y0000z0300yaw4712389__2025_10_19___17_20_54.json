@@ -1,0 +1,58 @@
+{
+  "pose": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.3,
+    "yaw": 4.712389
+  },
+  "image": "x0000y0000z0300yaw4712389__2025_10_19___17_20_54.jpg",
+  "entries": [
+    {
+      "timestamp": 1760883657,
+      "prompt": "Describe the objects in the image",
+      "response": "1. A black computer monitor.\n2. A black keyboard.</s>"
+    },
+    {
+      "timestamp": 1760883659,
+      "prompt": "Describe the image",
+      "response": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_19___17_18_28/x0000y0000z0300yaw4712389__2025_10_19___17_20_54.jpg\", \"ok\": true, \"response_describe\": \"1. A black computer monitor.\\n2. A black keyboard.</s>\", \"response_question\": null}"
+    }
+  ],
+  "nanoowl": {
+    "ts": 1760883659.5155547,
+    "iso_time": "2025-10-19T14:20:59Z",
+    "endpoint": "http://172.16.17.12:5060/infer",
+    "status": 200,
+    "prompts": [
+      "a black",
+      "a monitor",
+      "a keyboard"
+    ],
+    "annotate": 0,
+    "result": {
+      "detections": [
+        {
+          "bbox": [
+            140,
+            157,
+            593,
+            520
+          ],
+          "label": "a monitor",
+          "score": 0.366000235080719
+        }
+      ],
+      "image": {
+        "height": 540,
+        "width": 960
+      },
+      "latency_sec": 0.0766,
+      "prompts": [
+        "a black",
+        "a monitor",
+        "a keyboard"
+      ]
+    }
+  },
+  "vlm_caption": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_19___17_18_28/x0000y0000z0300yaw4712389__2025_10_19___17_20_54.jpg\", \"ok\": true, \"response_describe\": \"1. A black computer monitor.\\n2. A black keyboard.</s>\", \"response_question\": null}"
+}
