@@ -283,6 +283,20 @@ def generate_mission():
         return jsonify({'response': f'Error: {str(e)}', 'agent_commands': ''}), 500
 
 
+@app.route('/SPARX.jpg')
+def serve_logo():
+    """Serve the SPARX logo image"""
+    import os
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sparx_logo.png')
+
+    if os.path.exists(logo_path):
+        return send_file(logo_path,
+                         mimetype='image/jpeg',
+                         as_attachment=False,
+                         max_age=0)
+    else:
+        return 'Logo not found', 404
+
 @app.route('/api/map', methods=['GET'])
 def get_map():
     """Serve the current map image"""

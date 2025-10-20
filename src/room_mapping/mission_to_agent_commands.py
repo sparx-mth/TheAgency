@@ -26,8 +26,8 @@ NAVIGATION MISSION TO EXECUTE:
 
 YOUR SPECIALIZED AGENTS:
 - DoorAgent: Opens doors, enters rooms, and exits rooms (ONLY for rooms with doors!)
-- MoveAgent: Moves drone to specific rooms or locations  
-- ScanAgent: Scans and analyzes the current room (cannot move, only scans)
+- NavigationAgent: Moves drone to specific rooms or locations  
+- ScanAgent: Scans the room and makes sure not to leave it.
 - WallAgent: Follows walls and detects wall boundaries for navigation
 
 CRITICAL OUTPUT RULES:
@@ -45,13 +45,13 @@ DOOR RULES:
 
 CORRECT SEQUENCE PATTERN:
 For room WITH doors:
-1. Move to room entrance (MoveAgent)
+1. Move to room entrance (NavigationAgent)
 2. Enter room (DoorAgent)
 3. Scan room (ScanAgent)
 4. Exit room (DoorAgent)
 
 For room WITHOUT doors:
-1. Move to room (MoveAgent)
+1. Move to room (NavigationAgent)
 2. Scan room (ScanAgent)
 
 WRONG PATTERNS TO AVOID:
@@ -65,8 +65,8 @@ Example Input: "From Open Space, walk into hallway. MAMAD is at end on right. En
 JSON shows: Open Space "doors":[], hallway "doors":[], MAMAD "doors":["door1"]
 
 CORRECT Output:
-1. Activate MoveAgent to navigate from Open Space to hallway
-2. Activate MoveAgent to navigate through hallway to MAMAD entrance
+1. Activate NavigationAgent to navigate from Open Space to hallway
+2. Activate NavigationAgent to navigate through hallway to MAMAD entrance
 3. Activate DoorAgent to enter the MAMAD
 4. Activate ScanAgent to scan the MAMAD
 5. Activate DoorAgent to exit the MAMAD

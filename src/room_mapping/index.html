@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🚁 Mission Generator - Drone Navigation</title>
+    <title>SPARX Mission Generator - Drone Navigation</title>
     <style>
         * {
             margin: 0;
@@ -73,21 +73,16 @@
             }
         }
 
-        h1 {
-            color: #333;
+        /* ADDED: Logo styles */
+        .logo-container {
             text-align: center;
-            margin-bottom: 10px;
-            font-size: 2em;
-            background: linear-gradient(135deg, #2c3e50, #3498db);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            margin-bottom: 20px;
         }
 
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 20px;
-            font-size: 1em;
+        .logo-container img {
+            max-width: 200px;
+            height: auto;
+            object-fit: contain;
         }
 
         .status-bar {
@@ -436,8 +431,8 @@
             .container {
                 padding: 20px;
             }
-            h1 {
-                font-size: 1.6em;
+            .logo-container img {
+                max-width: 150px;
             }
             .status-bar {
                 flex-direction: column;
@@ -455,8 +450,10 @@
         <!-- Left Panel: Chat Interface -->
         <div class="left-panel">
             <div class="container">
-                <h1>🚁 Mission Generator</h1>
-                <p class="subtitle">SPARX</p>
+                <!-- REPLACED: Text header with logo -->
+                <div class="logo-container">
+                    <img src="SPARX.jpg" alt="SPARX Mission Generator" title="Mission Generator">
+                </div>
 
                 <div class="status-bar">
                     <div class="status-item">
@@ -478,7 +475,7 @@
                         <div class="example-chip" onclick="setExample('Find the refrigerator')">🍕 Find refrigerator</div>
                         <div class="example-chip" onclick="setExample('Get to the weapon')">🔫 Get to weapon</div>
                         <div class="example-chip" onclick="setExample('Find the computer')">💻 Find computer</div>
-                        <div class="example-chip" onclick="setExample('Go to living room')">🛋️ Living room</div>
+                        <div class="example-chip" onclick="setExample('Go to Inbals office')">🛋️ Inbal's office</div>
                         <div class="example-chip" onclick="setExample('Find all chairs')">🪑 All chairs</div>
                     </div>
 
