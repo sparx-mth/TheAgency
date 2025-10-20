@@ -2,9 +2,10 @@
 """
 web_mission_server.py - Flask server for Mission Generator Web GUI
 Connects the web interface to the existing LLM mission generator
+Saves mission output to file for agent command processor
 """
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 import json
 import subprocess
@@ -13,12 +14,17 @@ import os
 import threading
 import time
 
+os.makedirs('static', exist_ok=True)
+
 app = Flask(__name__, static_folder='.')
 CORS(app)  # Enable CORS for all routes
 
 # Global variable to store latest house data
 latest_house_data = None
 data_lock = threading.Lock()
+
+# File for mission exchange
+MISSION_FILE = "current_mission.txt"
 
 # Import the PROMPT from the original file
 PROMPT = """You are a mission planner for an autonomous drone that navigates houses. The drone needs clear navigation instructions based on a house map and user requests.
@@ -122,6 +128,7 @@ IMPORTANT: Output ONLY the navigation instruction as a single flowing paragraph.
 
 Generate the navigation instruction:"""
 
+
 def load_house_data():
     """Load and format house data clearly for LLM"""
     try:
@@ -183,14 +190,29 @@ def ask_ollama(house_json, user_task):
         temp_file = f.name
 
     try:
-        cmd = f"cat {temp_file} | ollama run llama3.1:8b"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        cmd = f"cat {temp_file} | ollama run llama3.2:3b"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
         response = result.stdout.strip()
         os.unlink(temp_file)
         return response
     except Exception as e:
         os.unlink(temp_file)
         return f"Error: {e}"
+
+
+def check_agent_commands():
+    """Check if agent commands are available"""
+    agent_file = "agent_commands.txt"
+    if os.path.exists(agent_file):
+        try:
+            with open(agent_file, 'r') as f:
+                commands = f.read().strip()
+            # Clear the file after reading
+            os.remove(agent_file)
+            return commands
+        except:
+            return None
+    return None
 
 
 @app.route('/')
@@ -224,14 +246,15 @@ def generate_mission():
         print(f"Received task: {task}")
 
         if not task:
-            return jsonify({'response': 'Please provide a task'}), 400
+            return jsonify({'response': 'Please provide a task', 'agent_commands': ''}), 400
 
         # Get latest house data
         with data_lock:
             current_data = latest_house_data
 
         if not current_data:
-            return jsonify({'response': 'No house data available. Please run pixel_room_mapper.py first.'}), 400
+            return jsonify({'response': 'No house data available. Please run pixel_room_mapper.py first.',
+                            'agent_commands': ''}), 400
 
         house_json = json.dumps(current_data, indent=2)
 
@@ -240,23 +263,81 @@ def generate_mission():
         # Generate response using Ollama
         response = ask_ollama(house_json, task)
 
-        print("\n=== DEBUG: JSON being sent to LLM ===")
-        print(house_json)
-        print("\n=== DEBUG: Task ===")
-        print(task)
-        print("=" * 30)
-
         print(f"Ollama response: {response[:100]}...")
 
-        return jsonify({'response': response})
+        # Save mission to file for agent command processor
+        with open(MISSION_FILE, 'w') as f:
+            f.write(response)
+        print(f"Mission saved to {MISSION_FILE}")
+
+        # Check if agent commands are available (will be created by mission_to_agent_commands.py)
+        agent_commands = check_agent_commands()
+
+        return jsonify({
+            'response': response,
+            'agent_commands': agent_commands or ''
+        })
 
     except Exception as e:
         print(f"Error in generate_mission: {e}")
-        return jsonify({'response': f'Error: {str(e)}'}), 500
+        return jsonify({'response': f'Error: {str(e)}', 'agent_commands': ''}), 500
 
+
+@app.route('/api/map', methods=['GET'])
+def get_map():
+    """Serve the current map image"""
+    import os
+
+    # Use absolute path
+    map_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'current_map.png')
+
+    if os.path.exists(map_path):
+        # Fix: Use proper path and add as_attachment=False
+        return send_file(map_path,
+                         mimetype='image/png',
+                         as_attachment=False,
+                         max_age=0)
+    else:
+        return 'Map not found', 404
+
+
+@app.route('/api/map_status', methods=['GET'])
+def get_map_status():
+    """Check if map exists and when it was last updated"""
+    map_path = 'static/current_map.png'
+
+    if os.path.exists(map_path):
+        return jsonify({
+            'available': True,
+            'last_updated': os.path.getmtime(map_path)
+        })
+    else:
+        return jsonify({
+            'available': False,
+            'last_updated': None
+        })
+
+@app.route('/api/check_agent_commands', methods=['GET'])
+def api_check_agent_commands():
+    """API endpoint to check for agent commands"""
+    commands = check_agent_commands()
+    return jsonify({'agent_commands': commands or ''})
+
+
+def clean_ollama_cache():
+    """Clean Ollama cache and stop running models (run once at startup)."""
+    cleanup_cmds = [
+        "ollama stop all || true",
+        "rm -rf ~/.ollama/cache/* || true",
+        "rm -rf ~/.ollama/data/tmp/* || true"
+    ]
+    for cmd in cleanup_cmds:
+        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Ollama cache cleaned before startup.")
 
 def main():
     global latest_house_data
+    clean_ollama_cache()
 
     print("Mission Generator Web Server")
     print("-" * 40)
@@ -279,8 +360,6 @@ def main():
         print("\nRooms detected:")
         for room_name, room_data in latest_house_data['rooms'].items():
             print(f"  - {room_name}: {room_data['object_count']} objects")
-            if room_data['objects']:
-                print(f"    Objects: {', '.join(room_data['objects'])}")
 
     # Start background updater thread
     updater = threading.Thread(target=background_updater, daemon=True)

@@ -4,12 +4,14 @@ render_house_dynamic.py - Dynamic Pygame House Renderer
 
 Renders house with dynamic tiles loaded from the JSON file.
 Auto-reloads to show real-time updates.
+NOW SAVES IMAGES FOR WEB DISPLAY ONLY WHEN MAP CHANGES
 """
 
 import pygame
 import numpy as np
 import json
 import sys
+import os  # ADDED FOR WEB INTEGRATION
 
 
 class DynamicHouseRenderer:
@@ -58,6 +60,10 @@ class DynamicHouseRenderer:
         self.last_reload = pygame.time.get_ticks()
         self.reload_interval = 500  # Reload every 500ms
 
+        # CHANGE DETECTION - Track grid state
+        self.last_grid_hash = None
+        self.last_structure_hash = None
+
     def load_tile_registry(self):
         """Load dynamic tile types and generate colors."""
         if "tile_registry" in self.structure:
@@ -85,6 +91,12 @@ class DynamicHouseRenderer:
 
                 self.tile_registry[name] = tile_id
 
+    def save_map_image(self, filename="static/current_map.png"):
+        """Save current pygame screen to file for web display"""
+        os.makedirs('static', exist_ok=True)
+        pygame.image.save(self.screen, filename)
+        print(f"[Map saved: {filename}]")  # Debug message
+
     def render(self):
         """Render the grid."""
         self.screen.fill((30, 30, 30))
@@ -103,6 +115,40 @@ class DynamicHouseRenderer:
         # Draw legend
         self.draw_legend()
         pygame.display.flip()
+
+        # CHANGE DETECTION - Only save when grid or structure changes
+        current_grid_hash = hash(self.grid.tobytes())
+        current_structure_hash = hash(json.dumps(self.structure, sort_keys=True))
+
+        if (current_grid_hash != self.last_grid_hash or
+                current_structure_hash != self.last_structure_hash):
+            # Something changed, save the image
+            self.save_map_image()
+            self.last_grid_hash = current_grid_hash
+            self.last_structure_hash = current_structure_hash
+
+    def wrap_text(self, text, max_width):
+        """Wrap text to fit within max_width pixels."""
+        words = text.split(' ')
+        lines = []
+        current_line = []
+
+        for word in words:
+            test_line = ' '.join(current_line + [word])
+            if self.font.size(test_line)[0] <= max_width:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                else:
+                    # Single word too long, add it as is
+                    lines.append(word)
+
+        if current_line:
+            lines.append(' '.join(current_line))
+
+        return lines if lines else [text]
 
     def draw_legend(self):
         """Draw legend with dynamic tiles."""
@@ -149,15 +195,23 @@ class DynamicHouseRenderer:
             pygame.draw.rect(self.screen, color, box_rect)
             pygame.draw.rect(self.screen, (200, 200, 200), box_rect, 1)
 
-            # Label
+            # Label with text wrapping
             # Capitalize and clean up name
             display_name = name.replace('_', ' ').title()
             if display_name == "Free Space":
                 display_name = "Empty"
 
-            label = self.font.render(display_name[:20], True, (220, 220, 220))
-            self.screen.blit(label, (x_base + 25, y_offset + 1))
-            y_offset += 20
+            # Wrap text to fit in available width (legend_width - margins - color box)
+            max_text_width = self.legend_width - 40  # Leave space for margins and color box
+            wrapped_lines = self.wrap_text(display_name, max_text_width)
+
+            # Render each line
+            for i, line in enumerate(wrapped_lines):
+                label = self.font.render(line, True, (220, 220, 220))
+                self.screen.blit(label, (x_base + 25, y_offset + 1 + (i * 14)))
+
+            # Adjust y_offset based on number of lines
+            y_offset += max(20, len(wrapped_lines) * 14 + 6)
 
     def reload(self):
         """Reload map and structure."""
@@ -188,6 +242,7 @@ class DynamicHouseRenderer:
         print(f"Grid: {self.grid_width}x{self.grid_height}")
         print(f"Cell size: {self.cell_size}px")
         print(f"Auto-reload: {self.reload_interval}ms")
+        print(f"Web save: Only when map changes (to static/current_map.png)")  # UPDATED
         print("\nControls:")
         print("  ESC - Exit")
         print("  R   - Manual reload")

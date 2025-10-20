@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 run_all_with_web.py - Run all house mapping components with Web GUI
+Now includes the mission to agent command monitor
 """
 
 import subprocess
@@ -16,7 +17,7 @@ BASE_PATH = str(Path(__file__).resolve().parent.parent)
 
 def main():
     print("=" * 60)
-    print("HOUSE MAPPING SYSTEM WITH WEB GUI")
+    print("HOUSE MAPPING SYSTEM WITH DUAL LLM PIPELINE")
     print("=" * 60)
 
     # Ask about cleaning directory
@@ -47,7 +48,7 @@ def main():
                     pass
 
             # Also clean output files
-            for f in ["unified_rooms.json", "house_map.txt"]:
+            for f in ["unified_rooms.json", "house_map.txt", "current_mission.txt", "agent_commands.txt"]:
                 if os.path.exists(f):
                     os.remove(f)
                     print(f"  Removed: {f}")
@@ -60,7 +61,7 @@ def main():
 
     try:
         # 1. Start receiver_owl first
-        print("\n[1/5] Starting Receiver OWL (processes incoming images)...")
+        print("\n[1/6] Starting Receiver OWL (processes incoming images)...")
         receiver = subprocess.Popen(
             [sys.executable, "receiver_owl.py"],
             stdout=subprocess.PIPE,
@@ -79,7 +80,7 @@ def main():
                 # Look for ALL .json files
                 json_files = glob.glob(os.path.join(bbox_dir, "*.json"))
                 if json_files:
-                    print(f"\n Found {len(json_files)} JSON files!")
+                    print(f"\n✓ Found {len(json_files)} JSON files!")
                     print("Starting remaining components...")
                     break
 
@@ -106,7 +107,7 @@ def main():
                 sys.exit(1)
 
         # 2. Now start the rest of the components
-        print("\n[2/5] Starting Room Unifier (monitors for new scans)...")
+        print("\n[2/6] Starting Room Unifier (monitors for new scans)...")
         unifier = subprocess.Popen(
             [sys.executable, "pixel_room_mapper.py"],
             stdout=subprocess.PIPE,
@@ -117,7 +118,7 @@ def main():
         time.sleep(2)  # Let it initialize
 
         # 3. Start renderer (auto-refreshes the visualization)
-        print("[3/5] Starting House Renderer (auto-refresh enabled)...")
+        print("[3/6] Starting House Renderer (auto-refresh enabled)...")
         renderer = subprocess.Popen(
             [sys.executable, "render_house.py"],
             stdout=subprocess.PIPE,
@@ -128,7 +129,7 @@ def main():
         time.sleep(1)
 
         # 4. Start Web Mission Server
-        print("[4/5] Starting Web Mission Server...")
+        print("[4/6] Starting Web Mission Server (First LLM)...")
         web_server = subprocess.Popen(
             [sys.executable, "web_mission_server.py"],
             stdout=subprocess.PIPE,
@@ -138,8 +139,19 @@ def main():
         processes.append(("Web Server", web_server))
         time.sleep(2)  # Give server time to start
 
-        # 5. Open browser
-        print("[5/5] Opening web browser...")
+        # 5. Start Mission to Agent Monitor (Second LLM)
+        print("[5/6] Starting Agent Command Monitor (Second LLM)...")
+        agent_monitor = subprocess.Popen(
+            [sys.executable, "mission_to_agent_commands.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        processes.append(("Agent Monitor", agent_monitor))
+        time.sleep(1)
+
+        # 6. Open browser
+        print("[6/6] Opening web browser...")
         webbrowser.open("http://localhost:8080")
 
         print("\n" + "=" * 60)
@@ -147,6 +159,9 @@ def main():
         print("=" * 60)
         print("\n🌐 Web GUI is available at: http://localhost:8080")
         print("🚁 You can now use the web interface to send navigation tasks")
+        print("🤖 Dual LLM Pipeline Active:")
+        print("   1. Mission Generator LLM creates navigation instructions")
+        print("   2. Agent Command LLM converts to step-by-step commands")
         print("\nPress Ctrl+C to stop all components")
         print("=" * 60)
 
@@ -157,7 +172,7 @@ def main():
             # Check if any critical process has died
             for name, proc in processes:
                 if proc.poll() is not None:  # Process terminated
-                    print(f"\nWarning: {name} has stopped")
+                    print(f"\n Warning: {name} has stopped")
                     if name == "Web Server":
                         print("Restarting Web Server...")
                         web_server = subprocess.Popen(
@@ -170,6 +185,19 @@ def main():
                         for i, (n, p) in enumerate(processes):
                             if n == "Web Server":
                                 processes[i] = ("Web Server", web_server)
+                                break
+                    elif name == "Agent Monitor":
+                        print("Restarting Agent Monitor...")
+                        agent_monitor = subprocess.Popen(
+                            [sys.executable, "mission_to_agent_commands.py"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True
+                        )
+                        # Update the process in the list
+                        for i, (n, p) in enumerate(processes):
+                            if n == "Agent Monitor":
+                                processes[i] = ("Agent Monitor", agent_monitor)
                                 break
 
     except KeyboardInterrupt:
@@ -197,6 +225,8 @@ if __name__ == "__main__":
         "pixel_room_mapper.py",
         "render_house.py",
         "web_mission_server.py",
+        "mission_to_agent_commands.py",
+        "index.html"
     ]
 
     missing = [f for f in required_files if not os.path.exists(f)]
@@ -204,7 +234,7 @@ if __name__ == "__main__":
         print("ERROR: Missing required files:")
         for f in missing:
             print(f"  - {f}")
-        print("\nMake sure you have created web_mission_server.py")
+        print("\nMake sure you have created all necessary files")
         sys.exit(1)
 
     main()

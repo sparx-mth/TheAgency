@@ -15,22 +15,51 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', sans-serif;
             background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             padding: 20px;
             direction: ltr;
         }
 
+        /* MODIFIED: Main layout container */
+        .main-layout {
+            display: flex;
+            gap: 20px;
+            max-width: 1600px;
+            margin: 0 auto;
+            height: calc(100vh - 40px);
+        }
+
+        /* MODIFIED: Left panel for chat */
+        .left-panel {
+            flex: 1;
+            min-width: 500px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ADDED: Right panel for map */
+        .right-panel {
+            width: 500px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* MODIFIED: Container now fills height */
         .container {
             background: rgba(255, 255, 255, 0.95);
             backdrop-filter: blur(10px);
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            width: 100%;
-            max-width: 900px;
-            padding: 40px;
+            padding: 30px;
             animation: slideIn 0.5s ease;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
 
         @keyframes slideIn {
@@ -48,7 +77,7 @@
             color: #333;
             text-align: center;
             margin-bottom: 10px;
-            font-size: 2.5em;
+            font-size: 2em;
             background: linear-gradient(135deg, #2c3e50, #3498db);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -57,16 +86,16 @@
         .subtitle {
             text-align: center;
             color: #666;
-            margin-bottom: 30px;
-            font-size: 1.1em;
+            margin-bottom: 20px;
+            font-size: 1em;
         }
 
         .status-bar {
             background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
             color: white;
-            padding: 15px;
+            padding: 10px;
             border-radius: 10px;
-            margin-bottom: 25px;
+            margin-bottom: 20px;
             display: flex;
             justify-content: space-around;
             align-items: center;
@@ -78,17 +107,17 @@
         }
 
         .status-value {
-            font-size: 1.8em;
+            font-size: 1.4em;
             font-weight: bold;
         }
 
         .status-label {
-            font-size: 0.9em;
+            font-size: 0.8em;
             opacity: 0.9;
         }
 
         .input-section {
-            margin-bottom: 25px;
+            margin-bottom: 20px;
         }
 
         .input-wrapper {
@@ -99,10 +128,10 @@
 
         #taskInput {
             flex: 1;
-            padding: 15px;
+            padding: 12px;
             border: 2px solid #e0e0e0;
             border-radius: 10px;
-            font-size: 1.1em;
+            font-size: 1em;
             transition: all 0.3s;
         }
 
@@ -116,9 +145,9 @@
             background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
             color: white;
             border: none;
-            padding: 15px 30px;
+            padding: 12px 24px;
             border-radius: 10px;
-            font-size: 1.1em;
+            font-size: 1em;
             cursor: pointer;
             transition: all 0.3s;
             display: flex;
@@ -140,17 +169,17 @@
         .examples {
             display: flex;
             flex-wrap: wrap;
-            gap: 10px;
-            margin-bottom: 20px;
+            gap: 8px;
+            margin-bottom: 15px;
         }
 
         .example-chip {
             background: #f5f5f5;
-            padding: 8px 15px;
+            padding: 6px 12px;
             border-radius: 20px;
             cursor: pointer;
             transition: all 0.3s;
-            font-size: 0.9em;
+            font-size: 0.85em;
             color: #666;
         }
 
@@ -160,19 +189,19 @@
             transform: translateY(-2px);
         }
 
+        /* MODIFIED: Output section to fill remaining space */
         .output-section {
             background: #f8f9fa;
             border-radius: 15px;
-            padding: 25px;
-            min-height: 200px;
-            max-height: 400px;
+            padding: 20px;
             overflow-y: auto;
+            flex: 1;
         }
 
         .response-item {
             background: white;
             border-radius: 10px;
-            padding: 20px;
+            padding: 15px;
             margin-bottom: 15px;
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
             animation: fadeIn 0.5s ease;
@@ -193,26 +222,61 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
             border-bottom: 2px solid #f0f0f0;
         }
 
         .task-label {
             color: #2c3e50;
             font-weight: bold;
-            font-size: 0.9em;
+            font-size: 0.85em;
         }
 
         .timestamp {
             color: #999;
-            font-size: 0.85em;
+            font-size: 0.8em;
         }
 
         .response-text {
             color: #333;
-            line-height: 1.6;
+            line-height: 1.5;
             white-space: pre-wrap;
+            font-size: 0.95em;
+        }
+
+        .agent-section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .agent-label {
+            color: #2c3e50;
+            font-weight: bold;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+
+        .agent-commands {
+            color: #555;
+            font-family: monospace;
+            white-space: pre-wrap;
+            background: #f5f5f5;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 0.85em;
+        }
+
+        .agent-loading {
+            color: #3498db;
+            font-style: italic;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
         }
 
         .loading {
@@ -247,9 +311,9 @@
         }
 
         .empty-state svg {
-            width: 100px;
-            height: 100px;
-            margin-bottom: 20px;
+            width: 80px;
+            height: 80px;
+            margin-bottom: 15px;
             opacity: 0.3;
         }
 
@@ -260,7 +324,7 @@
             padding: 5px 10px;
             background: rgba(255, 255, 255, 0.2);
             border-radius: 20px;
-            font-size: 0.9em;
+            font-size: 0.85em;
         }
 
         .status-dot {
@@ -268,10 +332,10 @@
             height: 8px;
             border-radius: 50%;
             background: #4caf50;
-            animation: pulse 2s infinite;
+            animation: pulseDot 2s infinite;
         }
 
-        @keyframes pulse {
+        @keyframes pulseDot {
             0% {
                 box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
             }
@@ -288,20 +352,97 @@
             animation: none;
         }
 
+        /* ADDED: Map styles */
+        .map-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .map-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .map-title {
+            color: #2c3e50;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+
+        .map-refresh {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.3s;
+        }
+
+        .map-refresh:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 10px rgba(52, 152, 219, 0.3);
+        }
+
+        .map-display {
+            flex: 1;
+            border-radius: 10px;
+            background: #f8f9fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .map-display img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        .map-placeholder {
+            color: #999;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .map-timestamp {
+            color: #999;
+            font-size: 0.8em;
+            margin-top: 10px;
+            text-align: right;
+        }
+
+        /* ADDED: Responsive design */
+        @media (max-width: 1200px) {
+            .main-layout {
+                flex-direction: column;
+            }
+            .left-panel {
+                min-width: unset;
+            }
+            .right-panel {
+                width: 100%;
+                height: 400px;
+            }
+        }
+
         @media (max-width: 600px) {
             .container {
                 padding: 20px;
             }
-
             h1 {
-                font-size: 1.8em;
+                font-size: 1.6em;
             }
-
             .status-bar {
                 flex-direction: column;
                 gap: 10px;
             }
-
             .examples {
                 flex-direction: column;
             }
@@ -309,70 +450,102 @@
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🚁 Mission Generator</h1>
-        <p class="subtitle">SPARX</p>
+    <!-- MODIFIED: Added main layout wrapper -->
+    <div class="main-layout">
+        <!-- Left Panel: Chat Interface -->
+        <div class="left-panel">
+            <div class="container">
+                <h1>🚁 Mission Generator</h1>
+                <p class="subtitle">SPARX</p>
 
-        <div class="status-bar">
-            <div class="status-item">
-                <div class="status-value" id="roomCount">0</div>
-                <div class="status-label">Rooms Detected</div>
-            </div>
-            <div class="status-item">
-                <div class="status-value" id="objectCount">0</div>
-                <div class="status-label">Objects Found</div>
-            </div>
-            <div class="connection-status">
-                <span class="status-dot" id="connectionDot"></span>
-                <span id="connectionText">Connected</span>
+                <div class="status-bar">
+                    <div class="status-item">
+                        <div class="status-value" id="roomCount">0</div>
+                        <div class="status-label">Rooms Detected</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="objectCount">0</div>
+                        <div class="status-label">Objects Found</div>
+                    </div>
+                    <div class="connection-status">
+                        <span class="status-dot" id="connectionDot"></span>
+                        <span id="connectionText">Connected</span>
+                    </div>
+                </div>
+
+                <div class="input-section">
+                    <div class="examples">
+                        <div class="example-chip" onclick="setExample('Find the refrigerator')">🍕 Find refrigerator</div>
+                        <div class="example-chip" onclick="setExample('Get to the weapon')">🔫 Get to weapon</div>
+                        <div class="example-chip" onclick="setExample('Find the computer')">💻 Find computer</div>
+                        <div class="example-chip" onclick="setExample('Go to living room')">🛋️ Living room</div>
+                        <div class="example-chip" onclick="setExample('Find all chairs')">🪑 All chairs</div>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <input
+                            type="text"
+                            id="taskInput"
+                            placeholder="Enter navigation task (e.g., 'Find the refrigerator')"
+                            onkeypress="handleKeyPress(event)"
+                        >
+                        <button id="sendBtn" onclick="sendTask()">
+                            <span>Send</span>
+                            <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="output-section" id="output">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        <p>Ready for navigation tasks</p>
+                        <p style="font-size: 0.9em; margin-top: 10px;">Type a command or click an example to begin</p>
+                    </div>
+                    <div class="loading" id="loading">
+                        <div class="spinner"></div>
+                        <p>Generating mission instructions...</p>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <div class="input-section">
-            <div class="examples">
-                <div class="example-chip" onclick="setExample('Find the refrigerator')">🍕 Find refrigerator</div>
-                <div class="example-chip" onclick="setExample('Get to the weapon')">🔫 Get to weapon</div>
-                <div class="example-chip" onclick="setExample('Find the computer')">💻 Find computer</div>
-                <div class="example-chip" onclick="setExample('Go to living room')">🛋️ Living room</div>
-                <div class="example-chip" onclick="setExample('Find all chairs')">🪑 All chairs</div>
-                <div class="example-chip" onclick="setExample('Where is the toilet paper')">🧻 Toilet paper</div>
-            </div>
-
-            <div class="input-wrapper">
-                <input
-                    type="text"
-                    id="taskInput"
-                    placeholder="Enter navigation task (e.g., 'Find the refrigerator')"
-                    onkeypress="handleKeyPress(event)"
-                >
-                <button id="sendBtn" onclick="sendTask()">
-                    <span>Send</span>
-                    <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                    </svg>
-                </button>
-            </div>
-        </div>
-
-        <div class="output-section" id="output">
-            <div class="empty-state">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                    <line x1="12" y1="22.08" x2="12" y2="12"/>
-                </svg>
-                <p>Ready for navigation tasks</p>
-                <p style="font-size: 0.9em; margin-top: 10px;">Type a command or click an example to begin</p>
-            </div>
-            <div class="loading" id="loading">
-                <div class="spinner"></div>
-                <p>Generating mission instructions...</p>
+        <!-- ADDED: Right Panel - Map Display -->
+        <div class="right-panel">
+            <div class="map-container">
+                <div class="map-header">
+                    <span class="map-title">Live House Map</span>
+                    <button class="map-refresh" onclick="refreshMap()">🔄 Refresh</button>
+                </div>
+                <div class="map-display" id="mapDisplay">
+                    <div class="map-placeholder">
+                        <svg width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.3">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="9" y1="3" x2="9" y2="21"/>
+                            <line x1="15" y1="3" x2="15" y2="21"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="3" y1="15" x2="21" y2="15"/>
+                        </svg>
+                        <p>Waiting for map data...</p>
+                        <p style="font-size: 0.85em;">The map will appear once rendering starts</p>
+                    </div>
+                </div>
+                <div class="map-timestamp" id="mapTimestamp"></div>
             </div>
         </div>
     </div>
 
     <script>
         let isProcessing = false;
+        let activePollingIds = new Set();
+        let mapUpdateInterval;
+        let lastMapTimestamp = 0;  // Track last loaded map timestamp
 
         // Update status periodically
         async function updateStatus() {
@@ -387,6 +560,46 @@
                 document.getElementById('connectionDot').classList.add('offline');
                 document.getElementById('connectionText').textContent = 'Offline';
             }
+        }
+
+        // Poll for agent commands
+        async function pollForAgentCommands(responseId, maxAttempts = 20) {
+            let attempts = 0;
+
+            const pollInterval = setInterval(async () => {
+                if (!activePollingIds.has(responseId)) {
+                    clearInterval(pollInterval);
+                    return;
+                }
+
+                attempts++;
+
+                try {
+                    const response = await fetch('/api/check_agent_commands');
+                    const data = await response.json();
+
+                    if (data.agent_commands) {
+                        // Update the specific response with agent commands
+                        const agentDiv = document.getElementById(`agent-${responseId}`);
+                        if (agentDiv) {
+                            agentDiv.innerHTML = `
+                                <div class="agent-label">🤖 Agent Execution Plan:</div>
+                                <div class="agent-commands">${data.agent_commands}</div>
+                            `;
+                        }
+
+                        activePollingIds.delete(responseId);
+                        clearInterval(pollInterval);
+                    }
+                } catch (error) {
+                    console.error('Error polling for agent commands:', error);
+                }
+
+                if (attempts >= maxAttempts) {
+                    activePollingIds.delete(responseId);
+                    clearInterval(pollInterval);
+                }
+            }, 1500); // Poll every 1.5 seconds
         }
 
         // Send task to backend
@@ -422,8 +635,16 @@
                 // Hide loading
                 document.getElementById('loading').classList.remove('active');
 
+                // Generate unique ID for this response
+                const responseId = Date.now().toString();
+
                 // Add response to output
-                addResponse(task, data.response);
+                addResponse(task, data.response, data.agent_commands, responseId);
+
+                // If no agent commands yet, start polling
+                if (!data.agent_commands) {
+                    pollForAgentCommands(responseId);
+                }
 
                 // Clear input
                 input.value = '';
@@ -433,7 +654,7 @@
 
             } catch (error) {
                 document.getElementById('loading').classList.remove('active');
-                addResponse(task, 'Error: Failed to connect to server. Make sure the Flask server is running.');
+                addResponse(task, 'Error: Failed to connect to server. Make sure the Flask server is running.', '');
             } finally {
                 isProcessing = false;
                 document.getElementById('sendBtn').disabled = false;
@@ -441,9 +662,28 @@
         }
 
         // Add response to output
-        function addResponse(task, response) {
+        function addResponse(task, response, agentCommands, responseId) {
             const output = document.getElementById('output');
             const timestamp = new Date().toLocaleTimeString();
+
+            let agentSection = '';
+            if (agentCommands) {
+                agentSection = `
+                    <div class="agent-section" id="agent-${responseId}">
+                        <div class="agent-label">🤖 Agent Execution Plan:</div>
+                        <div class="agent-commands">${agentCommands}</div>
+                    </div>
+                `;
+            } else if (responseId) {
+                // Add placeholder that will be updated
+                activePollingIds.add(responseId);
+                agentSection = `
+                    <div class="agent-section" id="agent-${responseId}">
+                        <div class="agent-label">🤖 Agent Execution Plan:</div>
+                        <div class="agent-loading">Waiting for agent command processor...</div>
+                    </div>
+                `;
+            }
 
             const responseHtml = `
                 <div class="response-item">
@@ -452,6 +692,7 @@
                         <span class="timestamp">${timestamp}</span>
                     </div>
                     <div class="response-text">${response}</div>
+                    ${agentSection}
                 </div>
             `;
 
@@ -484,11 +725,85 @@
             document.getElementById('taskInput').focus();
         }
 
-        // Initial status update
-        updateStatus();
+        // UPDATED: Smart map loading - only when changed
+        async function checkAndLoadMap() {
+            try {
+                // First check if map has been updated
+                const statusResponse = await fetch('/api/map_status');
+                const status = await statusResponse.json();
 
-        // Update status every 5 seconds
-        setInterval(updateStatus, 5000);
+                if (!status.available) {
+                    return;
+                }
+
+                // Only load if timestamp is newer than last loaded
+                if (status.last_updated > lastMapTimestamp) {
+                    console.log('Map has changed, loading new image...');
+
+                    const mapDisplay = document.getElementById('mapDisplay');
+                    const mapTimestamp = document.getElementById('mapTimestamp');
+
+                    // Load the new map image
+                    const img = new Image();
+
+                    img.onload = function() {
+                        // Clear and display new image
+                        mapDisplay.innerHTML = '';
+                        mapDisplay.appendChild(img);
+
+                        // Update timestamp display
+                        mapTimestamp.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+
+                        // Remember this timestamp
+                        lastMapTimestamp = status.last_updated;
+                    };
+
+                    img.onerror = function() {
+                        console.error('Failed to load map image');
+                    };
+
+                    // Load with cache buster based on actual file timestamp
+                    img.src = `/api/map?t=${status.last_updated}`;
+                }
+                // If timestamp hasn't changed, do nothing (keep current image)
+
+            } catch (error) {
+                console.error('Error checking map status:', error);
+            }
+        }
+
+        // Manual refresh function
+        function refreshMap() {
+            // Force reload by resetting timestamp
+            lastMapTimestamp = 0;
+            checkAndLoadMap();
+        }
+
+        // Auto-check for map updates
+        function startMapMonitoring() {
+            console.log('Starting map monitoring (checks for changes only)...');
+            checkAndLoadMap();  // Initial check
+
+            // Check for changes every 2 seconds (but only load if changed)
+            mapUpdateInterval = setInterval(() => {
+                checkAndLoadMap();
+            }, 2000);
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Page loaded, initializing...');
+            updateStatus();
+            setInterval(updateStatus, 5000);
+            startMapMonitoring();
+        });
+
+        // Clean up on page unload
+        window.addEventListener('beforeunload', function() {
+            if (mapUpdateInterval) {
+                clearInterval(mapUpdateInterval);
+            }
+        });
     </script>
 </body>
 </html>
