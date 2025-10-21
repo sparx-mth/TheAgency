@@ -14,8 +14,8 @@ import numpy as np
 from typing import Dict, Any, Tuple, Optional
 from enum import Enum
 
-from agents.base_agent import BaseSLAMAgent, AgentState
-from environments.base.constants import TileType, Action
+from src.agents.base_agent import BaseSLAMAgent, AgentState
+from src.environments.base.constants import TileType, Action
 
 
 class State(Enum):

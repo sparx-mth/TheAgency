@@ -60,7 +60,7 @@ DIRECTION_DELTAS: Dict[str, Tuple[int, int]] = {
 # ============= Rendering Constants =============
 # Display parameters
 TILE_SIZE = 20  # Size of each tile in pixels
-FPS = 20        # Frames per second for rendering
+FPS = 1        # Frames per second for rendering
 
 # Color mapping for tiles (RGB values)
 TILE_COLORS = {

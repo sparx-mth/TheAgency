@@ -11,9 +11,9 @@ from typing import Dict, Any, Tuple, List, Optional
 from enum import IntEnum
 
 # Import the simple navigation agent we created earlier
-from agents.a_star_navigation_agent import AStarNavigationAgent
-from agents.base_agent import AgentState
-from environments.base.constants import Action, TileType
+from src.agents.a_star_navigation_agent import AStarNavigationAgent
+from src.agents.base_agent import AgentState
+from src.environments.base.constants import Action, TileType
 
 
 class DoorwayState(IntEnum):
@@ -120,10 +120,10 @@ class DoorwayEntryAgent(AStarNavigationAgent):
             return np.array([Action.STAY])
 
     def _find_nearest_doorway(self, pos: Tuple[int, int],
-                             map_grid: np.ndarray) -> Optional[Tuple[int, int]]:
+                              map_grid: np.ndarray) -> Optional[Tuple[int, int]]:
         """
         Find the nearest unvisited doorway.
-        A doorway is a free space with walls on opposite sides.
+        A doorway is identified by tile type 3 (door tile).
         """
         height, width = map_grid.shape
         min_dist = float('inf')
@@ -135,12 +135,8 @@ class DoorwayEntryAgent(AStarNavigationAgent):
                 if (x, y) in self.visited_doorways:
                     continue
 
-                # Skip unknown or non-passable tiles
-                if map_grid[y, x] not in {TileType.FREE_SPACE, TileType.DOOR_OPEN}:
-                    continue
-
-                # Check if it's a doorway pattern
-                if self._is_doorway(x, y, map_grid):
+                # Check if this is a door tile (tile type 3)
+                if map_grid[y, x] == 3:  # Door tile from your tile registry
                     dist = abs(pos[0] - x) + abs(pos[1] - y)
                     if dist < min_dist:
                         min_dist = dist

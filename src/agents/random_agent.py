@@ -13,7 +13,7 @@ from typing import Any, Dict
 import numpy as np
 
 from .base_agent import BaseSLAMAgent
-from environments.base.constants import Action
+from src.environments.base.constants import Action
 
 
 class RandomAgent(BaseSLAMAgent):

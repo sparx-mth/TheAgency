@@ -11,8 +11,8 @@ import numpy as np
 from typing import Dict, Any, Tuple, List, Optional
 from heapq import heappush, heappop
 
-from agents.base_agent import BaseSLAMAgent, AgentState
-from environments.base.constants import Action, TileType
+from src.agents.base_agent import BaseSLAMAgent, AgentState
+from src.environments.base.constants import Action, TileType
 
 
 class AStarNavigationAgent(BaseSLAMAgent):

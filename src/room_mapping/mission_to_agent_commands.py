@@ -172,8 +172,8 @@ def monitor_missions():
                         print("-" * 70)
 
                         # Clear old agent commands immediately
-                        if os.path.exists(AGENT_COMMANDS_FILE):
-                            os.remove(AGENT_COMMANDS_FILE)
+                        # if os.path.exists(AGENT_COMMANDS_FILE):
+                            # os.remove(AGENT_COMMANDS_FILE)
 
                         # Load current house data
                         house_data = load_house_data()

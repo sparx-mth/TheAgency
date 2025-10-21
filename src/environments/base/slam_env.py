@@ -19,16 +19,16 @@ import numpy as np
 import pygame
 from typing import Dict, List, Tuple, Optional, Any
 
-from environments.base.constants import (
+from src.environments.base.constants import (
     TileType, Action, DIRECTIONS, DIRECTION_DELTAS,
     TILE_SIZE, FPS, TILE_COLORS, DRONE_COLORS,
     DEFAULT_REWARD_PARAMS
 )
-from environments.base.drone_state import DroneState
-from sensors.base_sensor import BaseSensor
-from sensors.camera_sensor import CameraSensor
-from communication.comm_interface import CommunicationInterface
-from communication.local_comm import LocalCommunication
+from src.environments.base.drone_state import DroneState
+from src.sensors.base_sensor import BaseSensor
+from src.sensors.camera_sensor import CameraSensor
+from src.communication.comm_interface import CommunicationInterface
+from src.communication.local_comm import LocalCommunication
 
 
 class MultiAgentSLAMEnv(gym.Env):
