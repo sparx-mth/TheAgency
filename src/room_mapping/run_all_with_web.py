@@ -61,7 +61,7 @@ def main():
 
     try:
         # 1. Start receiver_owl first
-        print("\n[1/6] Starting Receiver OWL (processes incoming images)...")
+        print("\n[1/7] Starting Receiver OWL (processes incoming images)...")
         receiver = subprocess.Popen(
             [sys.executable, "receiver_owl.py"],
             stdout=subprocess.PIPE,
@@ -107,7 +107,7 @@ def main():
                 sys.exit(1)
 
         # 2. Now start the rest of the components
-        print("\n[2/6] Starting Room Unifier (monitors for new scans)...")
+        print("\n[2/7] Starting Room Unifier (monitors for new scans)...")
         unifier = subprocess.Popen(
             [sys.executable, "pixel_room_mapper.py"],
             stdout=subprocess.PIPE,
@@ -117,8 +117,18 @@ def main():
         processes.append(("Room Unifier", unifier))
         time.sleep(2)  # Let it initialize
 
+        print("[3/7] Starting LLM Mission Processor...")
+        llm_processor = subprocess.Popen(
+            [sys.executable, "llm_mission_processor.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        processes.append(("LLM Processor", llm_processor))
+        time.sleep(2)  # Let it initialize
+
         # 3. Start renderer (auto-refreshes the visualization)
-        print("[3/6] Starting House Renderer (auto-refresh enabled)...")
+        print("[4/7] Starting House Renderer (auto-refresh enabled)...")
         renderer = subprocess.Popen(
             [sys.executable, "render_house.py"],
             stdout=subprocess.PIPE,
@@ -129,7 +139,7 @@ def main():
         time.sleep(1)
 
         # 4. Start Web Mission Server
-        print("[4/6] Starting Web Mission Server (First LLM)...")
+        print("[5/7] Starting Web Mission Server...")
         web_server = subprocess.Popen(
             [sys.executable, "web_mission_server.py"],
             stdout=subprocess.PIPE,
@@ -140,7 +150,7 @@ def main():
         time.sleep(2)  # Give server time to start
 
         # 5. Start Mission to Agent Monitor (Second LLM)
-        print("[5/6] Starting Agent Command Monitor (Second LLM)...")
+        print("[6/7] Starting Agent Command Monitor (Second LLM)...")
         agent_monitor = subprocess.Popen(
             [sys.executable, "mission_to_agent_commands.py"],
             stdout=subprocess.PIPE,
@@ -151,7 +161,7 @@ def main():
         time.sleep(1)
 
         # 6. Open browser
-        print("[6/6] Opening web browser...")
+        print("[7/7] Opening web browser...")
         webbrowser.open("http://localhost:8080")
 
         print("\n" + "=" * 60)
@@ -226,6 +236,7 @@ if __name__ == "__main__":
         "render_house.py",
         "web_mission_server.py",
         "mission_to_agent_commands.py",
+        "llm_mission_processor.py",
         "index.html"
     ]
 

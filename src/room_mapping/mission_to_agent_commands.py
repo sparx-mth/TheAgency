@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mission_to_agent_monitor.py - Monitors for new missions and converts them to agent commands
+mission_to_agent_commands.py - Monitors for new missions and converts them to agent commands
 Watches for missions from web_mission_server.py and generates step-by-step agent execution plans
 """
 
@@ -158,6 +158,9 @@ def monitor_missions():
                 current_modified = os.path.getmtime(MISSION_FILE)
 
                 if current_modified > last_modified:
+                    # Small delay to ensure file is fully written
+                    time.sleep(0.2)
+
                     # Read the new mission
                     with open(MISSION_FILE, 'r') as f:
                         mission = f.read().strip()
@@ -168,10 +171,14 @@ def monitor_missions():
                         print("Mission:", mission[:200] + "..." if len(mission) > 200 else mission)
                         print("-" * 70)
 
+                        # Clear old agent commands immediately
+                        if os.path.exists(AGENT_COMMANDS_FILE):
+                            os.remove(AGENT_COMMANDS_FILE)
+
                         # Load current house data
                         house_data = load_house_data()
                         if not house_data or not house_data.get('rooms'):
-                            print("  No room data available - using general navigation")
+                            print(" No room data available - using general navigation")
                             house_data = {"rooms": {}}
 
                         # Create JSON representation
@@ -189,7 +196,7 @@ def monitor_missions():
                         print("=" * 70)
                         print(agent_commands)
                         print("=" * 70)
-                        print(f" Commands saved to {AGENT_COMMANDS_FILE}")
+                        print(f"✓ Commands saved to {AGENT_COMMANDS_FILE}")
 
                         last_mission = mission
                         last_modified = current_modified
@@ -206,22 +213,23 @@ def monitor_missions():
 
 
 def main():
+    # Clean up any old files at startup
+    for file in [AGENT_COMMANDS_FILE, MISSION_FILE]:
+        if os.path.exists(file):
+            os.remove(file)
+            print(f" Cleaned old {file}")
+
     # Check if unified_rooms.json exists
     if not os.path.exists("unified_rooms.json"):
-        print("  Warning: unified_rooms.json not found.")
-        print("   The agent planner will work but without room awareness.")
-        print("   Run pixel_room_mapper.py first for best results.")
+        print(" Warning: unified_rooms.json not found.")
+        print("  The agent planner will work but without room awareness.")
+        print("  Run pixel_room_mapper.py first for best results.")
         print()
     else:
         house_data = load_house_data()
         if house_data and house_data.get('rooms'):
             num_rooms = len(house_data.get('rooms', {}))
             print(f" Loaded house map with {num_rooms} rooms")
-
-    # Clean up any old files
-    if os.path.exists(AGENT_COMMANDS_FILE):
-        os.remove(AGENT_COMMANDS_FILE)
-        print(f"  Cleaned old {AGENT_COMMANDS_FILE}")
 
     # Start monitoring
     monitor_missions()
