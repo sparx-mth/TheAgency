@@ -61,15 +61,25 @@ Adding "verification" steps after scanning
 Repeating the mission instructions in the steps
 Using DoorAgent on rooms with empty doors array
 
-Example Input: "From Open Space, walk into hallway. MAMAD is at end on right. Enter MAMAD to find refrigerator"
-JSON shows: Open Space "doors":[], hallway "doors":[], MAMAD "doors":["door1"]
+EXAMPLE (for illustration only — actual behavior depends entirely on the JSON house map and room structure):
 
-CORRECT Output:
+Example Input:
+"From Open Space, walk into hallway. MAMAD is at end on right. Enter MAMAD to find refrigerator"
+
+Example JSON:
+Open Space: "doors": []
+hallway: "doors": []
+MAMAD: "doors": ["door1"]
+
+Correct Output Sequence:
 1. Activate NavigationAgent to navigate from Open Space to hallway
-2. Activate NavigationAgent to navigate through hallway to MAMAD entrance
-3. Activate DoorAgent to enter the MAMAD
-4. Activate ScanAgent to scan the MAMAD
+2. Activate NavigationAgent to navigate through the hallway to the MAMAD entrance
+3. Activate DoorAgent to open and enter the MAMAD
+4. Activate ScanAgent to scan the MAMAD interior to find the refrigerator
 5. Activate DoorAgent to exit the MAMAD
+
+Note: This is only an example. The actual sequence must always depend on the real JSON data, the presence or absence of doors, and the relative positions of rooms in the specific house map.
+
 
 Generate ONLY the numbered steps:"""
 
@@ -161,7 +171,7 @@ def monitor_missions():
                         # Load current house data
                         house_data = load_house_data()
                         if not house_data or not house_data.get('rooms'):
-                            print("⚠️  No room data available - using general navigation")
+                            print("  No room data available - using general navigation")
                             house_data = {"rooms": {}}
 
                         # Create JSON representation
@@ -175,11 +185,11 @@ def monitor_missions():
                         with open(AGENT_COMMANDS_FILE, 'w') as f:
                             f.write(agent_commands)
 
-                        print("\n📋 Agent Execution Plan:")
+                        print("\n Agent Execution Plan:")
                         print("=" * 70)
                         print(agent_commands)
                         print("=" * 70)
-                        print(f"✅ Commands saved to {AGENT_COMMANDS_FILE}")
+                        print(f" Commands saved to {AGENT_COMMANDS_FILE}")
 
                         last_mission = mission
                         last_modified = current_modified
@@ -198,7 +208,7 @@ def monitor_missions():
 def main():
     # Check if unified_rooms.json exists
     if not os.path.exists("unified_rooms.json"):
-        print("⚠️  Warning: unified_rooms.json not found.")
+        print("  Warning: unified_rooms.json not found.")
         print("   The agent planner will work but without room awareness.")
         print("   Run pixel_room_mapper.py first for best results.")
         print()
@@ -206,12 +216,12 @@ def main():
         house_data = load_house_data()
         if house_data and house_data.get('rooms'):
             num_rooms = len(house_data.get('rooms', {}))
-            print(f"✅ Loaded house map with {num_rooms} rooms")
+            print(f" Loaded house map with {num_rooms} rooms")
 
     # Clean up any old files
     if os.path.exists(AGENT_COMMANDS_FILE):
         os.remove(AGENT_COMMANDS_FILE)
-        print(f"🗑️  Cleaned old {AGENT_COMMANDS_FILE}")
+        print(f"  Cleaned old {AGENT_COMMANDS_FILE}")
 
     # Start monitoring
     monitor_missions()
