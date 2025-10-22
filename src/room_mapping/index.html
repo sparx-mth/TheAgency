@@ -23,22 +23,22 @@
         .main-layout {
             display: flex;
             gap: 20px;
-            max-width: 1600px;
+            max-width: 1900px;  /* CHANGED: Increased from 1600px to accommodate larger map */
             margin: 0 auto;
             height: calc(100vh - 40px);
         }
 
-        /* MODIFIED: Left panel for chat */
+        /* MODIFIED: Left panel for chat - MADE SMALLER */
         .left-panel {
-            flex: 1;
-            min-width: 500px;
+            flex: 0 0 400px;  /* CHANGED: Fixed width 400px instead of flex: 1 with min-width 500px */
             display: flex;
             flex-direction: column;
         }
 
-        /* ADDED: Right panel for map */
+        /* MODIFIED: Right panel for map - MADE BIGGER */
         .right-panel {
-            width: 500px;
+            flex: 1;  /* CHANGED: Takes remaining space instead of fixed 500px */
+            min-width: 800px;  /* CHANGED: Minimum width for map panel */
             background: rgba(255, 255, 255, 0.95);
             backdrop-filter: blur(10px);
             border-radius: 20px;
@@ -54,7 +54,7 @@
             backdrop-filter: blur(10px);
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 30px;
+            padding: 20px;  /* CHANGED: Reduced from 30px */
             animation: slideIn 0.5s ease;
             flex: 1;
             display: flex;
@@ -73,24 +73,25 @@
             }
         }
 
-        /* ADDED: Logo styles */
+        /* MODIFIED: Logo styles - SMALLER */
         .logo-container {
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
         }
 
         .logo-container img {
-            max-width: 200px;
+            max-width: 150px;  /* CHANGED: Reduced from 200px */
             height: auto;
             object-fit: contain;
         }
 
+        /* MODIFIED: Status bar - SMALLER */
         .status-bar {
             background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
             color: white;
-            padding: 10px;
+            padding: 8px;  /* CHANGED: Reduced from 10px */
             border-radius: 10px;
-            margin-bottom: 20px;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
             display: flex;
             justify-content: space-around;
             align-items: center;
@@ -102,17 +103,18 @@
         }
 
         .status-value {
-            font-size: 1.4em;
+            font-size: 1.2em;  /* CHANGED: Reduced from 1.4em */
             font-weight: bold;
         }
 
         .status-label {
-            font-size: 0.8em;
+            font-size: 0.75em;  /* CHANGED: Reduced from 0.8em */
             opacity: 0.9;
         }
 
+        /* MODIFIED: Input section - SMALLER */
         .input-section {
-            margin-bottom: 20px;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
         }
 
         .input-wrapper {
@@ -123,10 +125,10 @@
 
         #taskInput {
             flex: 1;
-            padding: 12px;
+            padding: 10px;  /* CHANGED: Reduced from 12px */
             border: 2px solid #e0e0e0;
             border-radius: 10px;
-            font-size: 1em;
+            font-size: 0.9em;  /* CHANGED: Reduced from 1em */
             transition: all 0.3s;
         }
 
@@ -140,9 +142,9 @@
             background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
             color: white;
             border: none;
-            padding: 12px 24px;
+            padding: 10px 20px;  /* CHANGED: Reduced from 12px 24px */
             border-radius: 10px;
-            font-size: 1em;
+            font-size: 0.9em;  /* CHANGED: Reduced from 1em */
             cursor: pointer;
             transition: all 0.3s;
             display: flex;
@@ -161,20 +163,21 @@
             transform: none;
         }
 
+        /* MODIFIED: Examples - SMALLER */
         .examples {
             display: flex;
             flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 15px;
+            gap: 6px;  /* CHANGED: Reduced from 8px */
+            margin-bottom: 10px;  /* CHANGED: Reduced from 15px */
         }
 
         .example-chip {
             background: #f5f5f5;
-            padding: 6px 12px;
+            padding: 5px 10px;  /* CHANGED: Reduced from 6px 12px */
             border-radius: 20px;
             cursor: pointer;
             transition: all 0.3s;
-            font-size: 0.85em;
+            font-size: 0.8em;  /* CHANGED: Reduced from 0.85em */
             color: #666;
         }
 
@@ -188,16 +191,17 @@
         .output-section {
             background: #f8f9fa;
             border-radius: 15px;
-            padding: 20px;
+            padding: 15px;  /* CHANGED: Reduced from 20px */
             overflow-y: auto;
             flex: 1;
         }
 
+        /* MODIFIED: Response items - SMALLER */
         .response-item {
             background: white;
             border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 15px;
+            padding: 12px;  /* CHANGED: Reduced from 15px */
+            margin-bottom: 12px;  /* CHANGED: Reduced from 15px */
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
             animation: fadeIn 0.5s ease;
         }
@@ -217,141 +221,94 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 10px;
-            padding-bottom: 8px;
+            margin-bottom: 8px;  /* CHANGED: Reduced from 10px */
+            padding-bottom: 6px;  /* CHANGED: Reduced from 8px */
             border-bottom: 2px solid #f0f0f0;
         }
 
         .task-label {
             color: #2c3e50;
             font-weight: bold;
-            font-size: 0.85em;
+            font-size: 0.8em;  /* CHANGED: Reduced from 0.85em */
         }
 
         .timestamp {
             color: #999;
-            font-size: 0.8em;
+            font-size: 0.75em;  /* CHANGED: Reduced from 0.8em */
         }
 
         .response-text {
             color: #333;
-            line-height: 1.5;
+            line-height: 1.4;  /* CHANGED: Reduced from 1.5 */
             white-space: pre-wrap;
-            font-size: 0.95em;
+            font-size: 0.85em;  /* CHANGED: Reduced from 0.95em */
         }
 
         .agent-section {
-            margin-top: 10px;
-            padding-top: 10px;
+            margin-top: 8px;  /* CHANGED: Reduced from 10px */
+            padding-top: 8px;  /* CHANGED: Reduced from 10px */
             border-top: 2px solid #e0e0e0;
         }
 
         .agent-label {
             color: #2c3e50;
             font-weight: bold;
-            margin-bottom: 8px;
-            font-size: 0.9em;
+            margin-bottom: 6px;  /* CHANGED: Reduced from 8px */
+            font-size: 0.85em;  /* CHANGED: Reduced from 0.9em */
         }
 
         .agent-commands {
-            color: #555;
-            font-family: monospace;
-            white-space: pre-wrap;
             background: #f5f5f5;
-            padding: 8px;
-            border-radius: 5px;
-            font-size: 0.85em;
+            padding: 8px;  /* CHANGED: Reduced from 10px */
+            border-radius: 8px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 0.8em;  /* CHANGED: Reduced from 0.85em */
         }
 
         .agent-loading {
-            color: #3498db;
+            color: #666;
             font-style: italic;
-            animation: pulse 1.5s ease-in-out infinite;
+            font-size: 0.85em;  /* CHANGED: Reduced from 0.9em */
         }
 
-        @keyframes pulse {
-            0%, 100% { opacity: 0.6; }
-            50% { opacity: 1; }
+        .empty-state {
+            text-align: center;
+            padding: 30px;  /* CHANGED: Reduced from 40px */
+            color: #999;
+            font-size: 0.9em;  /* CHANGED: Reduced font size */
         }
 
         .loading {
             display: none;
             text-align: center;
-            padding: 20px;
+            padding: 15px;  /* CHANGED: Reduced from 20px */
         }
 
         .loading.active {
             display: block;
         }
 
-        .spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #3498db;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 15px;
+        .loading-dots {
+            display: inline-block;
+            animation: loading 1.4s infinite;
         }
 
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .empty-state {
-            text-align: center;
-            color: #999;
-            padding: 40px;
-        }
-
-        .empty-state svg {
-            width: 80px;
-            height: 80px;
-            margin-bottom: 15px;
-            opacity: 0.3;
-        }
-
-        .connection-status {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            padding: 5px 10px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 20px;
-            font-size: 0.85em;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #4caf50;
-            animation: pulseDot 2s infinite;
-        }
-
-        @keyframes pulseDot {
-            0% {
-                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
+        @keyframes loading {
+            0%, 60%, 100% {
+                transform: translateY(0);
             }
-            70% {
-                box-shadow: 0 0 0 10px rgba(76, 175, 80, 0);
-            }
-            100% {
-                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+            30% {
+                transform: translateY(-10px);
             }
         }
 
-        .status-dot.offline {
-            background: #f44336;
-            animation: none;
-        }
-
-        /* ADDED: Map styles */
-        .map-container {
+        /* MODIFIED: Map section */
+        .map-section {
             flex: 1;
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
 
         .map-header {
@@ -362,178 +319,180 @@
         }
 
         .map-title {
-            color: #2c3e50;
-            font-weight: bold;
             font-size: 1.2em;
+            font-weight: bold;
+            color: #2c3e50;
         }
 
-        .map-refresh {
-            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+        .map-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .refresh-btn {
+            background: #3498db;
             color: white;
             border: none;
             padding: 8px 16px;
             border-radius: 8px;
             cursor: pointer;
-            font-size: 0.85em;
             transition: all 0.3s;
+            font-size: 0.9em;
         }
 
-        .map-refresh:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 10px rgba(52, 152, 219, 0.3);
+        .refresh-btn:hover {
+            background: #2980b9;
+            transform: translateY(-1px);
         }
 
+        .map-timestamp {
+            color: #666;
+            font-size: 0.8em;
+        }
+
+        /* MODIFIED: Map display area - BIGGER */
         .map-display {
             flex: 1;
+            background: #f5f5f5;
             border-radius: 10px;
-            background: #f8f9fa;
             display: flex;
-            align-items: center;
             justify-content: center;
-            overflow: hidden;
-            position: relative;
+            align-items: center;
+            overflow: auto;
+            padding: 10px;
         }
 
         .map-display img {
             max-width: 100%;
             max-height: 100%;
+            width: auto;
+            height: auto;
             object-fit: contain;
         }
 
         .map-placeholder {
-            color: #999;
             text-align: center;
+            color: #999;
             padding: 40px;
         }
 
-        .map-timestamp {
-            color: #999;
-            font-size: 0.8em;
-            margin-top: 10px;
-            text-align: right;
+        /* Connection status */
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 5px;
         }
 
-        /* ADDED: Responsive design */
-        @media (max-width: 1200px) {
-            .main-layout {
-                flex-direction: column;
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00ff00;
+            animation: pulse 2s infinite;
+        }
+
+        .connection-dot.offline {
+            background: #ff0000;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
             }
-            .left-panel {
-                min-width: unset;
-            }
-            .right-panel {
-                width: 100%;
-                height: 400px;
+            50% {
+                opacity: 0.5;
             }
         }
 
-        @media (max-width: 600px) {
-            .container {
-                padding: 20px;
-            }
-            .logo-container img {
-                max-width: 150px;
-            }
-            .status-bar {
-                flex-direction: column;
-                gap: 10px;
-            }
-            .examples {
-                flex-direction: column;
-            }
+        /* MODIFIED: Title - SMALLER */
+        h1 {
+            font-size: 1.3em;  /* CHANGED: Reduced from default */
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
         }
     </style>
 </head>
 <body>
-    <!-- MODIFIED: Added main layout wrapper -->
     <div class="main-layout">
-        <!-- Left Panel: Chat Interface -->
+        <!-- MODIFIED: Left Panel - Chat Interface (SMALLER) -->
         <div class="left-panel">
             <div class="container">
-                <!-- REPLACED: Text header with logo -->
+                <!-- Logo -->
                 <div class="logo-container">
-                    <img src="SPARX.jpg" alt="SPARX Mission Generator" title="Mission Generator">
+                    <img src="SPARX.jpg" alt="SPARX Logo" onerror="this.style.display='none'">
                 </div>
 
+                <h1>Mission Generator</h1>
+
+                <!-- Status Bar -->
                 <div class="status-bar">
                     <div class="status-item">
                         <div class="status-value" id="roomCount">0</div>
-                        <div class="status-label">Rooms Detected</div>
+                        <div class="status-label">Rooms</div>
                     </div>
                     <div class="status-item">
                         <div class="status-value" id="objectCount">0</div>
-                        <div class="status-label">Objects Found</div>
+                        <div class="status-label">Objects</div>
                     </div>
-                    <div class="connection-status">
-                        <span class="status-dot" id="connectionDot"></span>
-                        <span id="connectionText">Connected</span>
+                    <div class="status-item connection-status">
+                        <div class="connection-dot" id="connectionDot"></div>
+                        <div class="status-label" id="connectionText">Connecting...</div>
                     </div>
                 </div>
 
+                <!-- Input Section -->
                 <div class="input-section">
                     <div class="examples">
-                        <div class="example-chip" onclick="setExample('Find the refrigerator')">🍕 Find refrigerator</div>
-                        <div class="example-chip" onclick="setExample('Get to the weapon')">🔫 Get to weapon</div>
-                        <div class="example-chip" onclick="setExample('Find the computer')">💻 Find computer</div>
-                        <div class="example-chip" onclick="setExample('Go to Inbals office')">🛋️ Inbal's office</div>
-                        <div class="example-chip" onclick="setExample('Find all chairs')">🪑 All chairs</div>
+                        <div class="example-chip" onclick="setExample('Go to the kitchen')">🏠 Go to kitchen</div>
+                        <div class="example-chip" onclick="setExample('Find the red chair')">🔍 Find red chair</div>
+                        <div class="example-chip" onclick="setExample('Navigate to bedroom')">🚶 To bedroom</div>
                     </div>
 
                     <div class="input-wrapper">
-                        <input
-                            type="text"
-                            id="taskInput"
-                            placeholder="Enter navigation task (e.g., 'Find the refrigerator')"
-                            onkeypress="handleKeyPress(event)"
-                        >
+                        <input type="text"
+                               id="taskInput"
+                               placeholder="Enter navigation task..."
+                               onkeypress="handleKeyPress(event)">
                         <button id="sendBtn" onclick="sendTask()">
-                            <span>Send</span>
-                            <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                            </svg>
+                            <span>Navigate</span>
+                            <span>➤</span>
                         </button>
                     </div>
                 </div>
 
+                <!-- Output Section -->
                 <div class="output-section" id="output">
                     <div class="empty-state">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                            <line x1="12" y1="22.08" x2="12" y2="12"/>
-                        </svg>
-                        <p>Ready for navigation tasks</p>
-                        <p style="font-size: 0.9em; margin-top: 10px;">Type a command or click an example to begin</p>
+                        <p>🚁 Ready for navigation commands</p>
+                        <p style="font-size: 0.9em; margin-top: 10px;">Enter a task above to generate mission instructions</p>
                     </div>
-                    <div class="loading" id="loading">
-                        <div class="spinner"></div>
-                        <p>Generating mission instructions...</p>
+                    <div id="loading" class="loading">
+                        <span class="loading-dots">⚡ Processing</span>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- ADDED: Right Panel - Map Display -->
+        <!-- MODIFIED: Right Panel - Map Display (BIGGER) -->
         <div class="right-panel">
-            <div class="map-container">
+            <div class="map-section">
                 <div class="map-header">
-                    <span class="map-title">Live House Map</span>
-                    <button class="map-refresh" onclick="refreshMap()">🔄 Refresh</button>
-                </div>
-                <div class="map-display" id="mapDisplay">
-                    <div class="map-placeholder">
-                        <svg width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.3">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                            <line x1="9" y1="3" x2="9" y2="21"/>
-                            <line x1="15" y1="3" x2="15" y2="21"/>
-                            <line x1="3" y1="9" x2="21" y2="9"/>
-                            <line x1="3" y1="15" x2="21" y2="15"/>
-                        </svg>
-                        <p>Waiting for map data...</p>
-                        <p style="font-size: 0.85em;">The map will appear once rendering starts</p>
+                    <div class="map-title">🗺️ House Map</div>
+                    <div class="map-controls">
+                        <span class="map-timestamp" id="mapTimestamp">Waiting for map...</span>
+                        <button class="refresh-btn" onclick="refreshMap()">↻ Refresh</button>
                     </div>
                 </div>
-                <div class="map-timestamp" id="mapTimestamp"></div>
+
+                <div class="map-display" id="mapDisplay">
+                    <div class="map-placeholder">
+                        <p>📍 Map will appear here</p>
+                        <p style="font-size: 0.9em; margin-top: 10px;">Waiting for first scan...</p>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -541,10 +500,10 @@
     <script>
         let isProcessing = false;
         let activePollingIds = new Set();
-        let mapUpdateInterval;
-        let lastMapTimestamp = 0;  // Track last loaded map timestamp
+        let lastMapTimestamp = 0;
+        let mapUpdateInterval = null;
 
-        // Update status periodically
+        // Update status
         async function updateStatus() {
             try {
                 const response = await fetch('/api/status');

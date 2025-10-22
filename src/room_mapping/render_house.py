@@ -5,6 +5,7 @@ render_house_dynamic.py - Dynamic Pygame House Renderer
 Renders house with dynamic tiles loaded from the JSON file.
 Auto-reloads to show real-time updates.
 NOW SAVES IMAGES FOR WEB DISPLAY ONLY WHEN MAP CHANGES
+IMPROVED: Better text spacing for detected objects
 """
 
 import pygame
@@ -12,12 +13,13 @@ import numpy as np
 import json
 import sys
 import os  # ADDED FOR WEB INTEGRATION
+import re  # ADDED FOR TEXT FORMATTING
 
 
 class DynamicHouseRenderer:
     """Pygame renderer with dynamic tile support."""
 
-    def __init__(self, unified_json="unified_rooms.json", map_txt="house_map.txt", cell_size=20):
+    def __init__(self, unified_json="unified_rooms.json", map_txt="house_map.txt", cell_size=25):
         """Initialize the renderer."""
         # Load structure
         with open(unified_json, 'r') as f:
@@ -39,7 +41,7 @@ class DynamicHouseRenderer:
 
         # Display parameters
         self.cell_size = max(5, min(50, cell_size))
-        self.legend_width = 200
+        self.legend_width = 400  # Increased width for bigger text display
         self.window_width = self.grid_width * self.cell_size + self.legend_width
         self.window_height = self.grid_height * self.cell_size
 
@@ -48,7 +50,11 @@ class DynamicHouseRenderer:
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
         pygame.display.set_caption("Dynamic House Map")
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.Font(None, 14)
+
+        # Multiple fonts for different purposes
+        self.font_title = pygame.font.Font(None, 26)  # Title font
+        self.font_stats = pygame.font.Font(None, 22)  # Stats font
+        self.font_objects = pygame.font.Font(None, 40)  # BIGGER font for object list
 
         # Load grid
         try:
@@ -97,6 +103,41 @@ class DynamicHouseRenderer:
         pygame.image.save(self.screen, filename)
         print(f"[Map saved: {filename}]")  # Debug message
 
+    def format_object_name(self, name):
+        """Format object names with proper spacing."""
+        # First, replace underscores with spaces
+        display_name = name.replace('_', ' ')
+
+        # Handle CamelCase and concatenated words
+        # Add space before uppercase letters that follow lowercase letters
+        display_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', display_name)
+
+        # Add space between consecutive uppercase letters followed by lowercase
+        display_name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', display_name)
+
+        # Handle "And" specifically - ensure it has spaces around it
+        display_name = re.sub(r'([a-zA-Z])(And)([A-Z])', r'\1 \2 \3', display_name)
+
+        # Clean up any multiple spaces
+        display_name = ' '.join(display_name.split())
+
+        # Title case for better readability
+        words = display_name.split()
+        formatted_words = []
+
+        for word in words:
+            # Keep "And", "Or", "The" etc. in proper case
+            if word.lower() in ['and', 'or', 'the', 'of', 'in', 'on', 'at']:
+                formatted_words.append(word.lower())
+            else:
+                formatted_words.append(word.capitalize())
+
+        # Capitalize first word regardless
+        if formatted_words:
+            formatted_words[0] = formatted_words[0].capitalize()
+
+        return ' '.join(formatted_words)
+
     def render(self):
         """Render the grid."""
         self.screen.fill((30, 30, 30))
@@ -127,15 +168,18 @@ class DynamicHouseRenderer:
             self.last_grid_hash = current_grid_hash
             self.last_structure_hash = current_structure_hash
 
-    def wrap_text(self, text, max_width):
+    def wrap_text(self, text, max_width, font=None):
         """Wrap text to fit within max_width pixels."""
+        if font is None:
+            font = self.font_objects  # Default to objects font
+
         words = text.split(' ')
         lines = []
         current_line = []
 
         for word in words:
             test_line = ' '.join(current_line + [word])
-            if self.font.size(test_line)[0] <= max_width:
+            if font.size(test_line)[0] <= max_width:
                 current_line.append(word)
             else:
                 if current_line:
@@ -164,54 +208,57 @@ class DynamicHouseRenderer:
         y_offset = 10
         x_base = self.grid_width * self.cell_size + 10
 
-        # Title
-        title = self.font.render("DETECTED OBJECTS", True, (255, 255, 255))
+        # Title (using title font)
+        title = self.font_title.render("DETECTED OBJECTS", True, (255, 255, 255))
         self.screen.blit(title, (x_base, y_offset))
-        y_offset += 25
+        y_offset += 35
 
-        # Stats
-        stats = self.font.render(
-            f"Total: {len(self.structure.get('rooms', {}).get('main_room', {}).get('objects', []))} objects",
-            True, (180, 180, 180))
+        # Stats (using stats font)
+        stats_text = f"Total: {len(self.structure.get('rooms', {}).get('main_room', {}).get('objects', []))} objects"
+        stats = self.font_stats.render(stats_text, True, (180, 180, 180))
         self.screen.blit(stats, (x_base, y_offset))
-        y_offset += 20
+        y_offset += 25
 
         # Separator
         pygame.draw.line(self.screen, (80, 80, 80),
-                         (x_base, y_offset), (x_base + 170, y_offset))
-        y_offset += 10
+                         (x_base, y_offset), (x_base + self.legend_width - 20, y_offset))
+        y_offset += 15
 
         # Sort by name for consistent display
         sorted_tiles = sorted([(name, tid) for name, tid in self.tile_registry.items()
                                if tid in present_types], key=lambda x: x[0])
 
         for name, tile_id in sorted_tiles:
-            if y_offset > self.window_height - 25:
+            if y_offset > self.window_height - 40:
                 break
 
-            # Color box
+            # Color box (slightly larger to match bigger text)
             color = self.tile_colors[tile_id]
-            box_rect = pygame.Rect(x_base, y_offset, 16, 16)
+            box_rect = pygame.Rect(x_base, y_offset + 2, 22, 22)
             pygame.draw.rect(self.screen, color, box_rect)
             pygame.draw.rect(self.screen, (200, 200, 200), box_rect, 1)
 
-            # Label with text wrapping
-            # Capitalize and clean up name
-            display_name = name.replace('_', ' ').title()
-            if display_name == "Free Space":
+            # Format the display name with proper spacing
+            display_name = self.format_object_name(name)
+
+            # Special cases
+            if display_name.lower() == "free space":
                 display_name = "Empty"
+            elif display_name.lower() == "entry point":
+                display_name = "Entry Point"
 
-            # Wrap text to fit in available width (legend_width - margins - color box)
-            max_text_width = self.legend_width - 40  # Leave space for margins and color box
-            wrapped_lines = self.wrap_text(display_name, max_text_width)
+            # Wrap text to fit in available width (using bigger font)
+            max_text_width = self.legend_width - 60  # Leave space for margins and color box
+            wrapped_lines = self.wrap_text(display_name, max_text_width, self.font_objects)
 
-            # Render each line
+            # Render each line with BIGGER FONT
+            line_height = 26  # Increased line height for bigger font
             for i, line in enumerate(wrapped_lines):
-                label = self.font.render(line, True, (220, 220, 220))
-                self.screen.blit(label, (x_base + 25, y_offset + 1 + (i * 14)))
+                label = self.font_objects.render(line, True, (220, 220, 220))
+                self.screen.blit(label, (x_base + 35, y_offset + (i * line_height)))
 
             # Adjust y_offset based on number of lines
-            y_offset += max(20, len(wrapped_lines) * 14 + 6)
+            y_offset += max(32, len(wrapped_lines) * line_height + 10)
 
     def reload(self):
         """Reload map and structure."""
@@ -237,17 +284,19 @@ class DynamicHouseRenderer:
 
     def run(self):
         """Main loop."""
-        print("Dynamic House Renderer")
-        print("-" * 30)
+        print("Dynamic House Renderer - Improved Text Spacing & Bigger Font")
+        print("-" * 60)
         print(f"Grid: {self.grid_width}x{self.grid_height}")
         print(f"Cell size: {self.cell_size}px")
+        print(f"Legend width: {self.legend_width}px")
+        print(f"Object list font size: 32pt (bigger)")
         print(f"Auto-reload: {self.reload_interval}ms")
-        print(f"Web save: Only when map changes (to static/current_map.png)")  # UPDATED
+        print(f"Web save: Only when map changes (to static/current_map.png)")
         print("\nControls:")
         print("  ESC - Exit")
         print("  R   - Manual reload")
         print("  +/- - Zoom")
-        print("-" * 30)
+        print("-" * 60)
 
         running = True
         while running:
