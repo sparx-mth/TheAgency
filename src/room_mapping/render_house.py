@@ -6,6 +6,7 @@ Renders house with dynamic tiles loaded from the JSON file.
 Auto-reloads to show real-time updates.
 NOW SAVES IMAGES FOR WEB DISPLAY ONLY WHEN MAP CHANGES
 IMPROVED: Better text spacing for detected objects
+FIXED: Using predefined color scheme for consistency
 """
 
 import pygame
@@ -71,31 +72,50 @@ class DynamicHouseRenderer:
         self.last_structure_hash = None
 
     def load_tile_registry(self):
-        """Load dynamic tile types and generate colors."""
+        """Load dynamic tile types and use fixed colors."""
+        # Define fixed colors for tile IDs (matching DynamicTileManager)
+        fixed_tile_colors = {
+            0: (240, 240, 240),  # free_space - light gray
+            1: (50, 50, 50),  # wall - dark gray
+            2: (0, 255, 0),  # camera - green
+            3: (139, 69, 19),  # door - brown
+            4: (139, 90, 43),  # table - tan
+            5: (165, 42, 42),  # chair - brown-red
+            6: (100, 100, 200),  # table and monitor - blue-gray
+            7: (75, 75, 150),  # tv - dark blue
+            8: (255, 255, 0),  # entry point - yellow
+            9: (128, 0, 128),  # bicycle - purple
+            10: (80, 80, 80),  # black suitcase - dark gray
+            11: (0, 128, 255),  # bottle - light blue
+            12: (255, 128, 0),  # mug - orange
+            13: (100, 100, 200),  # monitor - blue
+            14: (64, 64, 64),  # keyboard - gray
+            15: (150, 50, 150),  # bicycle and chair - purple-red
+            16: (80, 80, 160),  # keyboard and monitor - gray-blue
+            -1: (20, 20, 20),  # unknown - very dark gray
+        }
+
         if "tile_registry" in self.structure:
             # Load from JSON
             registry = self.structure["tile_registry"]
 
-            # Generate colors for each tile
+            # Apply colors from fixed scheme
             for name, tile_id in registry.items():
-                # Special colors for reserved types
-                if name == "free_space":
-                    self.tile_colors[tile_id] = (200, 200, 200)
-                elif name == "wall":
-                    self.tile_colors[tile_id] = (100, 100, 100)
-                elif name == "camera":
-                    self.tile_colors[tile_id] = (0, 255, 255)
-                elif name == "door":
-                    self.tile_colors[tile_id] = (139, 69, 19)  # Brown
+                # Use fixed color if available, otherwise use a default
+                if tile_id in fixed_tile_colors:
+                    self.tile_colors[tile_id] = fixed_tile_colors[tile_id]
                 else:
-                    # Generate color from hash
-                    hash_val = hash(name)
-                    r = max(50, (hash_val & 0xFF0000) >> 16)
-                    g = max(50, (hash_val & 0x00FF00) >> 8)
-                    b = max(50, hash_val & 0x0000FF)
-                    self.tile_colors[tile_id] = (r, g, b)
+                    # Fallback for any undefined tile IDs
+                    # Generate a distinguishable color based on the ID
+                    base_color = 100 + (tile_id * 10) % 155
+                    self.tile_colors[tile_id] = (base_color, base_color, base_color)
 
                 self.tile_registry[name] = tile_id
+
+        # Also add the fixed colors that might not be in the registry
+        for tile_id, color in fixed_tile_colors.items():
+            if tile_id not in self.tile_colors:
+                self.tile_colors[tile_id] = color
 
     def save_map_image(self, filename="static/current_map.png"):
         """Save current pygame screen to file for web display"""
@@ -284,7 +304,7 @@ class DynamicHouseRenderer:
 
     def run(self):
         """Main loop."""
-        print("Dynamic House Renderer - Improved Text Spacing & Bigger Font")
+        print("Dynamic House Renderer - Fixed Color Scheme")
         print("-" * 60)
         print(f"Grid: {self.grid_width}x{self.grid_height}")
         print(f"Cell size: {self.cell_size}px")
@@ -292,6 +312,7 @@ class DynamicHouseRenderer:
         print(f"Object list font size: 32pt (bigger)")
         print(f"Auto-reload: {self.reload_interval}ms")
         print(f"Web save: Only when map changes (to static/current_map.png)")
+        print("\nColors: Using predefined color scheme for consistency")
         print("\nControls:")
         print("  ESC - Exit")
         print("  R   - Manual reload")

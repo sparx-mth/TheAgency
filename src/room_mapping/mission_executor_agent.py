@@ -109,6 +109,9 @@ class MissionExecutorAgent(BaseSLAMAgent):
         self.active_agent = None
         self.active_agent_type = None
 
+        # Goal tracking
+        self.final_goal = None  # Store the final destination (e.g., door position)
+
         # Mission files
         self.mission_file = "agent_commands.txt"
         self.last_mission_time = 0
@@ -394,12 +397,14 @@ class MissionExecutorAgent(BaseSLAMAgent):
                         door_coords = self.get_door_position(current_step.target_location)
                         if door_coords:
                             observations['goal_position'] = np.array(door_coords)
+                            self.final_goal = door_coords  # Store final destination
                             print(f"Navigating to door at {door_coords}")
                         else:
                             # Try to get close to room entrance
                             coords = self.get_closest_room_tile(current_step.target_location, current_pos, observations)
                             if coords:
                                 observations['goal_position'] = np.array(coords)
+                                self.final_goal = coords  # Store final destination
                     else:
                         # We're close enough, activate door agent
                         self.switch_agent(current_step, observations)
@@ -433,6 +438,7 @@ class MissionExecutorAgent(BaseSLAMAgent):
                     self.current_step_index += 1
                     self.active_agent = None
                     self.active_agent_type = None
+                    self.final_goal = None  # Clear final goal when step completes
 
             return action
 
@@ -483,6 +489,7 @@ class MissionExecutorAgent(BaseSLAMAgent):
                     self.active_agent = self.navigation_agent
                     self.active_agent_type = AgentType.NAVIGATION  # Stay in navigation mode
                     observations['goal_position'] = np.array(door_pos)
+                    self.final_goal = door_pos  # Store final destination
                     return  # Don't switch to door agent yet
 
             # We're close enough, activate door agent
@@ -517,11 +524,13 @@ class MissionExecutorAgent(BaseSLAMAgent):
                 coords = self.get_closest_room_tile(step.target_location, current_pos, observations)
                 if coords:
                     observations['goal_position'] = np.array(coords)
+                    self.final_goal = coords  # Store final destination
                 else:
                     # Fallback to room center
                     coords = self.get_room_coordinates(step.target_location)
                     if coords:
                         observations['goal_position'] = np.array(coords)
+                        self.final_goal = coords  # Store final destination
 
             return self.active_agent.get_actions(observations, info)
 

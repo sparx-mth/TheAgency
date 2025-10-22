@@ -159,8 +159,8 @@ class PixelRoomMapper:
 
             # Camera at center of room
             self.camera_x_m = self.room_width_m / 2
-            self.camera_y_m = self.room_height_m / 2
-
+            self.camera_y_m = self.room_height_m - 0.7
+            print(self.camera_x_m, self.camera_y_m)
             # Map dimensions from existing map
             self.map_height, self.map_width = self.existing_grid.shape
 
@@ -171,7 +171,7 @@ class PixelRoomMapper:
         self.all_objects = []
 
         # Fixed distance assumption
-        self.FIXED_DISTANCE = 0.7
+        self.FIXED_DISTANCE = 1.2
 
     def estimate_object_size_from_pixels(self,
                                          bbox: List[int],
@@ -188,20 +188,9 @@ class PixelRoomMapper:
         h_object_meters = h_ratio * visible_width
         v_object_meters = v_ratio * visible_height
 
-        # Scale factor based on object type
-        if any(word in object_class.lower() for word in ['chair', 'table', 'couch', 'sofa', 'desk', 'bed']):
-            scale_factor = 1.0
-        elif any(word in object_class.lower() for word in ['person', 'tv', 'monitor']):
-            scale_factor = 0.8
-        else:
-            scale_factor = 0.9
-
-        h_object_meters *= scale_factor
-        v_object_meters *= scale_factor
-
-        # Minimum and maximum sizes
-        h_object_meters = max(0.1, min(h_object_meters, self.room_width_m / 3))
-        v_object_meters = max(0.1, min(v_object_meters, self.room_height_m / 3))
+        # # Minimum and maximum sizes
+        # h_object_meters = max(0.1, min(h_object_meters, self.room_width_m / 3))
+        # v_object_meters = max(0.1, min(v_object_meters, self.room_height_m / 3))
 
         return h_object_meters, v_object_meters
 
@@ -471,7 +460,7 @@ def process_files(mode="standalone", existing_map=None, existing_json=None, room
             existing_json_file=existing_json,
             room_bbox=room_bbox,
             room_name=room_name,
-            camera_fov_h=100,
+            camera_fov_h=50,
             camera_fov_v=50
         )
 
@@ -500,7 +489,7 @@ def main():
     mode = "standalone"
     existing_map = os.path.join(BASE_PATH, "room_mapping/office_map.txt")
     existing_json = os.path.join(BASE_PATH, "room_mapping/office.json")
-    room_bbox = (23, 7, 40, 24)
+    room_bbox = (23, 10, 40, 24)
     room_name = "MAMAD"  # Specify which room to update
 
     if room_bbox is not None and existing_map is not None:

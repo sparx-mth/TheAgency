@@ -14,22 +14,7 @@
         10
       ],
       "objects": [
-        {
-          "type": "table",
-          "tile_type": 4
-        },
-        {
-          "type": "chair",
-          "tile_type": 5
-        },
-        {
-          "type": "table and monitor",
-          "tile_type": 6
-        },
-        {
-          "type": "tv",
-          "tile_type": 7
-        }
+
       ],
       "doors": [16, 6]
     },
@@ -42,22 +27,7 @@
         23
       ],
       "objects": [
-        {
-          "type": "table",
-          "tile_type": 4
-        },
-        {
-          "type": "chair",
-          "tile_type": 5
-        },
-        {
-          "type": "table and monitor",
-          "tile_type": 6
-        },
-        {
-          "type": "tv",
-          "tile_type": 7
-        }
+
       ],
       "doors": [16, 14]
     },
@@ -70,22 +40,7 @@
         34
       ],
       "objects": [
-        {
-          "type": "table",
-          "tile_type": 4
-        },
-        {
-          "type": "chair",
-          "tile_type": 5
-        },
-        {
-          "type": "table and monitor",
-          "tile_type": 6
-        },
-        {
-          "type": "tv",
-          "tile_type": 7
-        }
+
       ],
       "doors": [16, 30]
     },
@@ -98,22 +53,7 @@
         40
       ],
       "objects": [
-        {
-          "type": "chair",
-          "tile_type": 5
-        },
-        {
-          "type": "table and monitor",
-          "tile_type": 6
-        },
-        {
-          "type": "table",
-          "tile_type": 4
-        },
-        {
-          "type": "tv",
-          "tile_type": 7
-        }
+
       ],
       "doors": []
     },

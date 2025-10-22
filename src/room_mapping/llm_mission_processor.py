@@ -129,7 +129,7 @@ def ask_ollama(house_json, user_task):
         temp_file = f.name
 
     try:
-        cmd = f"cat {temp_file} | ollama run llama3.1:8b"
+        cmd = f"cat {temp_file} | ollama run llama3.2:3b"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
         response = result.stdout.strip()
         os.unlink(temp_file)

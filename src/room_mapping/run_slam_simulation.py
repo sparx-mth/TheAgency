@@ -178,8 +178,14 @@ class MissionControlledSLAMEnv(MultiAgentSLAMEnv):
 
         # Draw goal position if it exists
         metrics = self.mission_agent.get_metrics()
-        if hasattr(self.mission_agent.navigation_agent, 'goal') and self.mission_agent.navigation_agent.goal:
+        # Use final_goal if available, otherwise use navigation agent's goal
+        goal = None
+        if hasattr(self.mission_agent, 'final_goal') and self.mission_agent.final_goal:
+            goal = self.mission_agent.final_goal
+        elif hasattr(self.mission_agent.navigation_agent, 'goal') and self.mission_agent.navigation_agent.goal:
             goal = self.mission_agent.navigation_agent.goal
+
+        if goal:
             goal_color = (0, 255, 255)  # Cyan
 
             # Draw on both maps
@@ -217,9 +223,14 @@ class MissionControlledSLAMEnv(MultiAgentSLAMEnv):
                     pygame.draw.line(self.screen, (255, 255, 0), (center_x, center_y), (end_x, end_y), 2)
 
                     # Draw line from drone to goal if goal exists
-                    if hasattr(self.mission_agent.navigation_agent,
-                               'goal') and self.mission_agent.navigation_agent.goal:
+                    goal = None
+                    if hasattr(self.mission_agent, 'final_goal') and self.mission_agent.final_goal:
+                        goal = self.mission_agent.final_goal
+                    elif hasattr(self.mission_agent.navigation_agent,
+                                 'goal') and self.mission_agent.navigation_agent.goal:
                         goal = self.mission_agent.navigation_agent.goal
+
+                    if goal:
                         goal_x = offset + goal[0] * TILE_SIZE + TILE_SIZE // 2
                         goal_y = goal[1] * TILE_SIZE + TILE_SIZE // 2
                         # Draw a faint line connecting drone to goal
@@ -240,7 +251,10 @@ class MissionControlledSLAMEnv(MultiAgentSLAMEnv):
 
         # Get current goal if exists
         goal_str = "None"
-        if hasattr(self.mission_agent.navigation_agent, 'goal') and self.mission_agent.navigation_agent.goal:
+        if hasattr(self.mission_agent, 'final_goal') and self.mission_agent.final_goal:
+            goal = self.mission_agent.final_goal
+            goal_str = f"({goal[0]}, {goal[1]})"
+        elif hasattr(self.mission_agent.navigation_agent, 'goal') and self.mission_agent.navigation_agent.goal:
             goal = self.mission_agent.navigation_agent.goal
             goal_str = f"({goal[0]}, {goal[1]})"
 
