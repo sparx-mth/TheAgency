@@ -1,0 +1,56 @@
+{
+  "pose": {
+    "x": 0.0,
+    "y": 0.9,
+    "z": 0.0,
+    "yaw": 3.14159265
+  },
+  "image": "x0000y0900z0000yaw3141593__2025_10_22___14_09_52.jpg",
+  "entries": [
+    {
+      "timestamp": 1761131395,
+      "prompt": "Describe the objects in the image",
+      "response": "1. A clear plastic water bottle with a green cap.</s>"
+    },
+    {
+      "timestamp": 1761131403,
+      "prompt": "Describe the image",
+      "response": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw3141593__2025_10_22___14_09_52.jpg\", \"ok\": true, \"response_describe\": \"1. A clear plastic water bottle with a green cap.</s>\", \"response_question\": null}"
+    }
+  ],
+  "nanoowl": {
+    "ts": 1761131403.0724177,
+    "iso_time": "2025-10-22T11:10:03Z",
+    "endpoint": "http://172.16.17.12:5060/infer",
+    "status": 200,
+    "prompts": [
+      "a bottle",
+      "a bottle[cap]"
+    ],
+    "annotate": 0,
+    "result": {
+      "detections": [
+        {
+          "bbox": [
+            145,
+            7,
+            283,
+            477
+          ],
+          "label": "a bottle",
+          "score": 0.7164247035980225
+        }
+      ],
+      "image": {
+        "height": 540,
+        "width": 960
+      },
+      "latency_sec": 0.1352,
+      "prompts": [
+        "a bottle",
+        "a bottle[cap]"
+      ]
+    }
+  },
+  "vlm_caption": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw3141593__2025_10_22___14_09_52.jpg\", \"ok\": true, \"response_describe\": \"1. A clear plastic water bottle with a green cap.</s>\", \"response_question\": null}"
+}

@@ -1,0 +1,56 @@
+{
+  "pose": {
+    "x": 0.0,
+    "y": 0.9,
+    "z": 0.0,
+    "yaw": 0.523598776
+  },
+  "image": "x0000y0900z0000yaw0523599__2025_10_22___14_08_51.jpg",
+  "entries": [
+    {
+      "timestamp": 1761131335,
+      "prompt": "Describe the objects in the image",
+      "response": "1. A bicycle that is standing upright.\n2. A white wall that is behind the bicycle.</s>"
+    },
+    {
+      "timestamp": 1761131342,
+      "prompt": "Describe the image",
+      "response": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw0523599__2025_10_22___14_08_51.jpg\", \"ok\": true, \"response_describe\": \"1. A bicycle that is standing upright.\\n2. A white wall that is behind the bicycle.</s>\", \"response_question\": null}"
+    }
+  ],
+  "nanoowl": {
+    "ts": 1761131342.8084376,
+    "iso_time": "2025-10-22T11:09:02Z",
+    "endpoint": "http://172.16.17.12:5060/infer",
+    "status": 200,
+    "prompts": [
+      "a standing",
+      "a bicycle"
+    ],
+    "annotate": 0,
+    "result": {
+      "detections": [
+        {
+          "bbox": [
+            117,
+            116,
+            825,
+            552
+          ],
+          "label": "a bicycle",
+          "score": 0.8727439641952515
+        }
+      ],
+      "image": {
+        "height": 540,
+        "width": 960
+      },
+      "latency_sec": 0.0797,
+      "prompts": [
+        "a standing",
+        "a bicycle"
+      ]
+    }
+  },
+  "vlm_caption": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw0523599__2025_10_22___14_08_51.jpg\", \"ok\": true, \"response_describe\": \"1. A bicycle that is standing upright.\\n2. A white wall that is behind the bicycle.</s>\", \"response_question\": null}"
+}

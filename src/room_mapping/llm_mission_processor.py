@@ -12,7 +12,7 @@ import os
 import time
 
 # File paths for communication
-TASK_REQUEST_FILE = "task_request.json"
+TASK_REQUEST_FILE = "data/task_request.json"
 MISSION_RESPONSE_FILE = "mission_response.txt"
 MISSION_FILE = "current_mission.txt"
 

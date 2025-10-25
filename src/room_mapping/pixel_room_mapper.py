@@ -13,7 +13,6 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 BASE_PATH = str(Path(__file__).resolve().parent.parent)  # Goes up to workspace level
 
-
 class DynamicTileManager:
     """Manages dynamic tile types."""
 
@@ -159,7 +158,7 @@ class PixelRoomMapper:
 
             # Camera at center of room
             self.camera_x_m = self.room_width_m / 2
-            self.camera_y_m = self.room_height_m - 0.7
+            self.camera_y_m = self.room_height_m - 0.3
             print(self.camera_x_m, self.camera_y_m)
             # Map dimensions from existing map
             self.map_height, self.map_width = self.existing_grid.shape
@@ -171,7 +170,7 @@ class PixelRoomMapper:
         self.all_objects = []
 
         # Fixed distance assumption
-        self.FIXED_DISTANCE = 1.2
+        self.FIXED_DISTANCE = 1.0
 
     def estimate_object_size_from_pixels(self,
                                          bbox: List[int],
@@ -188,9 +187,6 @@ class PixelRoomMapper:
         h_object_meters = h_ratio * visible_width
         v_object_meters = v_ratio * visible_height
 
-        # # Minimum and maximum sizes
-        # h_object_meters = max(0.1, min(h_object_meters, self.room_width_m / 3))
-        # v_object_meters = max(0.1, min(v_object_meters, self.room_height_m / 3))
 
         return h_object_meters, v_object_meters
 
@@ -366,8 +362,8 @@ class PixelRoomMapper:
 
         return grid
 
-    def save(self, json_file: str = "unified_rooms.json",
-             map_file: str = "house_map.txt"):
+    def save(self, json_file: str = "data/unified_rooms.json",
+             map_file: str = "data/house_map.txt"):
         """Save the room structure and grid map."""
 
         # Create grid first
@@ -444,7 +440,7 @@ def process_files(mode="standalone", existing_map=None, existing_json=None, room
         mapper = PixelRoomMapper(
             mode="standalone",
             room_width_m=2.5,
-            room_height_m=2.5,
+            room_height_m=2.0,
             grid_resolution=0.05,
             existing_json_file=existing_json,
             room_name=room_name,
@@ -455,13 +451,13 @@ def process_files(mode="standalone", existing_map=None, existing_json=None, room
         mapper = PixelRoomMapper(
             mode="existing_map",
             room_width_m=2.5,
-            room_height_m=2.5,
+            room_height_m=2.0,
             existing_map_file=existing_map,
             existing_json_file=existing_json,
             room_bbox=room_bbox,
             room_name=room_name,
             camera_fov_h=50,
-            camera_fov_v=50
+            camera_fov_v=60
         )
 
     # Process each file

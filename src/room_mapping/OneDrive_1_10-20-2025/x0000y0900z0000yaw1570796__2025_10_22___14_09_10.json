@@ -1,0 +1,62 @@
+{
+  "pose": {
+    "x": 0.0,
+    "y": 0.9,
+    "z": 0.0,
+    "yaw": 1.57079633
+  },
+  "image": "x0000y0900z0000yaw1570796__2025_10_22___14_09_10.jpg",
+  "entries": [
+    {
+      "timestamp": 1761131353,
+      "prompt": "Describe the objects in the image",
+      "response": "1. A black rifle with a scope, resting on a yellow table.</s>"
+    },
+    {
+      "timestamp": 1761131362,
+      "prompt": "Describe the image",
+      "response": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw1570796__2025_10_22___14_09_10.jpg\", \"ok\": true, \"response_describe\": \"1. A black rifle with a scope, resting on a yellow table.</s>\", \"response_question\": null}"
+    }
+  ],
+  "nanoowl": {
+    "ts": 1761131362.2890897,
+    "iso_time": "2025-10-22T11:09:22Z",
+    "endpoint": "http://172.16.17.12:5060/infer",
+    "status": 200,
+    "prompts": [
+      "a rifle",
+      "a scope",
+      "a table",
+      "a rifle[scope]",
+      "a rifle[table]"
+    ],
+    "annotate": 0,
+    "result": {
+      "detections": [
+        {
+          "bbox": [
+            322,
+            139,
+            850,
+            333
+          ],
+          "label": "a rifle",
+          "score": 0.7295324802398682
+        }
+      ],
+      "image": {
+        "height": 540,
+        "width": 960
+      },
+      "latency_sec": 0.1401,
+      "prompts": [
+        "a rifle",
+        "a scope",
+        "a table",
+        "a rifle[scope]",
+        "a rifle[table]"
+      ]
+    }
+  },
+  "vlm_caption": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw1570796__2025_10_22___14_09_10.jpg\", \"ok\": true, \"response_describe\": \"1. A black rifle with a scope, resting on a yellow table.</s>\", \"response_question\": null}"
+}

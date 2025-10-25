@@ -2,7 +2,7 @@
 """
 web_mission_server.py - Flask server for Mission Generator Web GUI
 Connects the web interface to the existing LLM mission generator
-Saves mission output to file for agent command processor
+Updated to work with new pipeline structure
 """
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
@@ -13,8 +13,6 @@ import tempfile
 import os
 import threading
 import time
-
-os.makedirs('static', exist_ok=True)
 
 app = Flask(__name__, static_folder='.')
 CORS(app)  # Enable CORS for all routes
@@ -27,12 +25,10 @@ data_lock = threading.Lock()
 MISSION_FILE = "current_mission.txt"
 
 
-
-
 def load_house_data():
     """Load and format house data clearly for LLM"""
     try:
-        with open("unified_rooms.json", 'r') as f:
+        with open("data/unified_rooms.json", 'r') as f:
             house_data = json.load(f)
 
         # Create clear structure showing rooms and their objects
@@ -80,9 +76,6 @@ def background_updater():
         time.sleep(1)  # Update every second
 
 
-
-
-
 def check_agent_commands():
     """Check if agent commands are available"""
     agent_file = "agent_commands.txt"
@@ -96,6 +89,76 @@ def check_agent_commands():
         except:
             return None
     return None
+
+
+def wait_for_pipeline_results(task, timeout=30):
+    """Wait for and aggregate results from the new pipeline"""
+    start_time = time.time()
+
+    # Files to check from the pipeline
+    result_files = {
+        'object_location': 'data/object_location.json',
+        'planned_path': 'data/planned_path.json',
+        'inroom_description': 'data/inroom_description.json',
+        'route_narration': 'data/route_narration.json'
+    }
+
+    results = {}
+    mission_response = []
+
+    # Wait for pipeline to process
+    while time.time() - start_time < timeout:
+        all_found = True
+
+        # Check each expected output file
+        for key, filepath in result_files.items():
+            if key not in results and os.path.exists(filepath):
+                try:
+                    # Check if file was updated after our request
+                    if os.path.getmtime(filepath) > start_time:
+                        with open(filepath, 'r') as f:
+                            data = json.load(f)
+                        results[key] = data
+                        print(f"Found {key} result")
+                except Exception as e:
+                    print(f"Error reading {filepath}: {e}")
+
+        # If we have the minimum required results, format response
+        if 'object_location' in results and 'route_narration' in results:
+            # Build mission response from pipeline results
+            obj_data = results['object_location']
+
+            # Start with what was found
+            if obj_data.get('found_object'):
+                mission_response.append(
+                    f"Target identified: {obj_data.get('found_object', 'unknown')} in {obj_data.get('found_room', 'unknown room')}")
+
+            # Add route narration if available
+            if 'route_narration' in results:
+                narration = results['route_narration'].get('narration', '')
+                if narration:
+                    mission_response.append("\nNavigation instructions:")
+                    mission_response.append(narration)
+
+            # Add in-room description if available
+            if 'inroom_description' in results:
+                desc = results['inroom_description'].get('description', '')
+                if desc:
+                    mission_response.append("\nIn-room guidance:")
+                    mission_response.append(desc)
+
+            # Check for agent commands
+            agent_commands = check_agent_commands()
+
+            return '\n'.join(mission_response), agent_commands
+
+        time.sleep(0.5)
+
+    # Timeout - return what we have
+    if mission_response:
+        return '\n'.join(mission_response), check_agent_commands()
+    else:
+        return 'Timeout: Mission processing incomplete. Make sure all pipeline components are running.', ''
 
 
 @app.route('/')
@@ -121,7 +184,7 @@ def get_status():
 
 @app.route('/api/generate', methods=['POST'])
 def generate_mission():
-    """Generate mission instructions"""
+    """Generate mission instructions using the new pipeline"""
     try:
         data = request.get_json()
         task = data.get('task', '')
@@ -131,40 +194,25 @@ def generate_mission():
         if not task:
             return jsonify({'response': 'Please provide a task', 'agent_commands': ''}), 400
 
-        # Write task request for LLM processor
+        # Write task request for the new pipeline (object_request.json instead of task_request.json)
         request_data = {
             'task': task,
+            'requested': task,  # Some components might expect 'requested' field
             'timestamp': time.time()
         }
-        with open("task_request.json", 'w') as f:
+
+        # Write to the new expected location
+        with open("data/object_request.json", 'w') as f:
             json.dump(request_data, f)
-        print(f"Task request written to task_request.json")
+        print(f"Task request written to data/object_request.json")
 
-        # Wait for response (with timeout)
-        response_file = "mission_response.txt"
-        timeout = 30
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            if os.path.exists(response_file):
-                # Check if file has been updated after our request
-                if os.path.getmtime(response_file) > request_data['timestamp']:
-                    with open(response_file, 'r') as f:
-                        response = f.read().strip()
-
-                    # Check for agent commands
-                    agent_commands = check_agent_commands()
-
-                    return jsonify({
-                        'response': response,
-                        'agent_commands': agent_commands or ''
-                    })
-            time.sleep(0.5)
+        # Wait for pipeline results
+        response, agent_commands = wait_for_pipeline_results(task)
 
         return jsonify({
-            'response': 'Timeout waiting for LLM processor. Make sure llm_mission_processor.py is running.',
-            'agent_commands': ''
-        }), 504
+            'response': response,
+            'agent_commands': agent_commands or ''
+        })
 
     except Exception as e:
         print(f"Error in generate_mission: {e}")
@@ -185,13 +233,14 @@ def serve_logo():
     else:
         return 'Logo not found', 404
 
+
 @app.route('/api/map', methods=['GET'])
 def get_map():
     """Serve the current map image"""
     import os
 
     # Use absolute path
-    map_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'current_map.png')
+    map_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'current_map.png')
 
     if os.path.exists(map_path):
         # Fix: Use proper path and add as_attachment=False
@@ -206,7 +255,7 @@ def get_map():
 @app.route('/api/map_status', methods=['GET'])
 def get_map_status():
     """Check if map exists and when it was last updated"""
-    map_path = 'static/current_map.png'
+    map_path = 'data/current_map.png'  # Changed from 'data/current_map.png'
 
     if os.path.exists(map_path):
         return jsonify({
@@ -218,6 +267,7 @@ def get_map_status():
             'available': False,
             'last_updated': None
         })
+
 
 @app.route('/api/check_agent_commands', methods=['GET'])
 def api_check_agent_commands():

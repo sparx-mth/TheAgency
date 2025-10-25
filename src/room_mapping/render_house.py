@@ -20,7 +20,7 @@ import re  # ADDED FOR TEXT FORMATTING
 class DynamicHouseRenderer:
     """Pygame renderer with dynamic tile support."""
 
-    def __init__(self, unified_json="unified_rooms.json", map_txt="house_map.txt", cell_size=25):
+    def __init__(self, unified_json="data/unified_rooms.json", map_txt="data/house_map.txt", cell_size=25):
         """Initialize the renderer."""
         # Load structure
         with open(unified_json, 'r') as f:
@@ -117,9 +117,9 @@ class DynamicHouseRenderer:
             if tile_id not in self.tile_colors:
                 self.tile_colors[tile_id] = color
 
-    def save_map_image(self, filename="static/current_map.png"):
+    def save_map_image(self, filename="data/current_map.png"):
         """Save current pygame screen to file for web display"""
-        os.makedirs('static', exist_ok=True)
+        os.makedirs('data', exist_ok=True)
         pygame.image.save(self.screen, filename)
         print(f"[Map saved: {filename}]")  # Debug message
 
@@ -284,12 +284,12 @@ class DynamicHouseRenderer:
         """Reload map and structure."""
         try:
             # Reload grid
-            new_grid = np.loadtxt("house_map.txt", dtype=np.int8)
+            new_grid = np.loadtxt("data/house_map.txt", dtype=np.int8)
             if new_grid.shape == self.grid.shape:
                 self.grid = new_grid
 
             # Reload structure and tiles
-            with open("unified_rooms.json", 'r') as f:
+            with open("data/unified_rooms.json", 'r') as f:
                 self.structure = json.load(f)
                 self.load_tile_registry()
         except:
@@ -311,7 +311,7 @@ class DynamicHouseRenderer:
         print(f"Legend width: {self.legend_width}px")
         print(f"Object list font size: 32pt (bigger)")
         print(f"Auto-reload: {self.reload_interval}ms")
-        print(f"Web save: Only when map changes (to static/current_map.png)")
+        print(f"Web save: Only when map changes (to data/current_map.png)")
         print("\nColors: Using predefined color scheme for consistency")
         print("\nControls:")
         print("  ESC - Exit")

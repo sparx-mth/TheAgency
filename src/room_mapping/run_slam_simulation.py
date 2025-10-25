@@ -43,7 +43,7 @@ class DynamicTileManager:
             if 'wall' in name_lower:
                 self.tile_to_slam_type[tile_id] = TileType.WALL
             elif 'door' in name_lower:
-                self.tile_to_slam_type[tile_id] = TileType.DOOR_CLOSED
+                self.tile_to_slam_type[tile_id] = TileType.DOOR_OPEN
             elif 'entry' in name_lower:
                 self.tile_to_slam_type[tile_id] = TileType.ENTRY_POINT
             elif name_lower == 'free_space':

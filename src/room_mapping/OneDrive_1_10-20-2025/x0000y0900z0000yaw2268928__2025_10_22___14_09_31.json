@@ -1,0 +1,58 @@
+{
+  "pose": {
+    "x": 0.0,
+    "y": 0.9,
+    "z": 0.0,
+    "yaw": 2.26892803
+  },
+  "image": "x0000y0900z0000yaw2268928__2025_10_22___14_09_31.jpg",
+  "entries": [
+    {
+      "timestamp": 1761131374,
+      "prompt": "Describe the objects in the image",
+      "response": "1. A black suitcase with a red and white Canadian flag sticker.</s>"
+    },
+    {
+      "timestamp": 1761131383,
+      "prompt": "Describe the image",
+      "response": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw2268928__2025_10_22___14_09_31.jpg\", \"ok\": true, \"response_describe\": \"1. A black suitcase with a red and white Canadian flag sticker.</s>\", \"response_question\": null}"
+    }
+  ],
+  "nanoowl": {
+    "ts": 1761131383.6547208,
+    "iso_time": "2025-10-22T11:09:43Z",
+    "endpoint": "http://172.16.17.12:5060/infer",
+    "status": 200,
+    "prompts": [
+      "a suitcase",
+      "a sticker",
+      "a suitcase[sticker]"
+    ],
+    "annotate": 0,
+    "result": {
+      "detections": [
+        {
+          "bbox": [
+            262,
+            64,
+            492,
+            322
+          ],
+          "label": "a suitcase",
+          "score": 0.4851484000682831
+        }
+      ],
+      "image": {
+        "height": 540,
+        "width": 960
+      },
+      "latency_sec": 0.0781,
+      "prompts": [
+        "a suitcase",
+        "a sticker",
+        "a suitcase[sticker]"
+      ]
+    }
+  },
+  "vlm_caption": "{\"auto_prompt\": \"Describe the objects in the image\", \"image_path\": \"/mnt/VLM/jetson-data/images/captures/2025_10_22___14_08_49/x0000y0900z0000yaw2268928__2025_10_22___14_09_31.jpg\", \"ok\": true, \"response_describe\": \"1. A black suitcase with a red and white Canadian flag sticker.</s>\", \"response_question\": null}"
+}
