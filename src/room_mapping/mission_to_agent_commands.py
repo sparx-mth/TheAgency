@@ -87,7 +87,7 @@ Generate ONLY the numbered steps:"""
 def load_house_data():
     """Load and process house data with room positions"""
     try:
-        with open("unified_rooms.json", 'r') as f:
+        with open("data/unified_rooms.json", 'r') as f:
             house_data = json.load(f)
 
         # Create a more detailed summary for the LLM
@@ -220,7 +220,7 @@ def main():
             print(f" Cleaned old {file}")
 
     # Check if unified_rooms.json exists
-    if not os.path.exists("unified_rooms.json"):
+    if not os.path.exists("data/unified_rooms.json"):
         print(" Warning: unified_rooms.json not found.")
         print("  The agent planner will work but without room awareness.")
         print("  Run pixel_room_mapper.py first for best results.")

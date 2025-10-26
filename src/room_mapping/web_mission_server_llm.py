@@ -81,19 +81,19 @@ def background_updater():
 
 
 
-def check_agent_commands():
-    """Check if agent commands are available"""
+def check_agent_commands(min_timestamp=None):
+    """Return agent commands only if the file is newer than min_timestamp.
+       Do NOT delete it here; the timestamp is our guard."""
     agent_file = "agent_commands.txt"
     if os.path.exists(agent_file):
         try:
-            with open(agent_file, 'r') as f:
-                commands = f.read().strip()
-            # Clear the file after reading
-            os.remove(agent_file)
-            return commands
+            if (min_timestamp is None) or (os.path.getmtime(agent_file) > float(min_timestamp)):
+                with open(agent_file, 'r') as f:
+                    return f.read().strip()
         except:
             return None
     return None
+
 
 
 @app.route('/')
@@ -138,31 +138,38 @@ def generate_mission():
             json.dump(request_data, f)
         print(f"Task request written to task_request.json")
 
-        # Wait for response (with timeout)
+        # Wait for both mission response and its matching agent commands
         response_file = "mission_response.txt"
         timeout = 30
         start_time = time.time()
 
+        mission_text = None
+        agent_commands = None
+
         while time.time() - start_time < timeout:
+            # 1) Mission text produced by llm_mission_processor.py
             if os.path.exists(response_file):
-                # Check if file has been updated after our request
                 if os.path.getmtime(response_file) > request_data['timestamp']:
                     with open(response_file, 'r') as f:
-                        response = f.read().strip()
+                        mission_text = f.read().strip()
 
-                    # Check for agent commands
-                    agent_commands = check_agent_commands()
+            # 2) Agent commands produced by mission_to_agent_commands.py
+            agent_commands = check_agent_commands(min_timestamp=request_data['timestamp'])
 
-                    return jsonify({
-                        'response': response,
-                        'agent_commands': agent_commands or ''
-                    })
-            time.sleep(0.5)
+            if mission_text and agent_commands:
+                return jsonify({
+                    'response': mission_text,
+                    'agent_commands': agent_commands
+                })
 
+            time.sleep(0.25)
+
+        # If we timeout, return whatever we have
         return jsonify({
-            'response': 'Timeout waiting for LLM processor. Make sure llm_mission_processor.py is running.',
-            'agent_commands': ''
-        }), 504
+            'response': mission_text or 'Timeout waiting for LLM processor. Make sure llm_mission_processor.py is running.',
+            'agent_commands': agent_commands or ''
+        }), (200 if mission_text else 504)
+
 
     except Exception as e:
         print(f"Error in generate_mission: {e}")
@@ -219,9 +226,11 @@ def get_map_status():
 
 @app.route('/api/check_agent_commands', methods=['GET'])
 def api_check_agent_commands():
-    """API endpoint to check for agent commands"""
-    commands = check_agent_commands()
+    """API endpoint to check for agent commands (optionally since=timestamp)"""
+    since = request.args.get('since', None)
+    commands = check_agent_commands(min_timestamp=since)
     return jsonify({'agent_commands': commands or ''})
+
 
 
 def main():
