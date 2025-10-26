@@ -65,7 +65,7 @@ def describe_next_to(room_dict, room, obj_type):
 
     names = nearest_names(objs, target, k=2)
     if not names:
-        return "It’s alone in the room."
+        return f"You can easily find the {obj_type} it is the only object in the room."
     if len(names) == 1:
         return f"It’s next to the {names[0]}."
     return f"It’s next to the {names[0]} and the {names[1]}."

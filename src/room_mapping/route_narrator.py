@@ -45,7 +45,8 @@ def relative_turn(prev_h, cur_h):
 def is_hall(name):
     if not name:
         return False
-    return 'hall' in name.lower() or 'corridor' in name.lower() in name.lower()
+    name_l = name.lower()
+    return ('hall' in name_l) or ('corridor' in name_l)
 
 def waypoint_label(wp):
     room = wp.get('room')
@@ -77,7 +78,7 @@ def load_plan(path_file):
 # --- Narration core -----------------------------------------------------------
 
 def narrate_waypoints(waypoints, grid_res_m):
-    """Produce a human-style route using forward/left/right/back."""
+    """Produce a human-style route using forward/left/right/back with abstract phrasing."""
     if not waypoints:
         return "No route available."
 
@@ -95,20 +96,32 @@ def narrate_waypoints(waypoints, grid_res_m):
         })
 
     out = []
-    start_room = waypoints[0].get('room')
-    goal_room = waypoints[-1].get('room')
-    out.append(f"From your current position in {start_room}, follow these steps to reach {goal_room}:")
 
     if not legs:
-        out.append("You are already at your destination.")
-        return " ".join(out)
+        out.append("1) You are already at your destination.")
+        return "\n".join(out)
 
+    # First leg
     first = legs[0]
     prev_h = first['heading']
     dist_phrase = phrase_distance(first['distance_m'])
-    target_label = waypoint_label(first['to'])
-    out.append(f"1) Move forward {dist_phrase} to reach {target_label}.")
+    to_wp = first['to']
+    to_room = to_wp.get('room', '')
+    wtype = to_wp.get('type', '')
 
+    # If first target is the goal, skip it (no post-arrival navigation)
+    if wtype != 'goal':
+        if wtype == 'exit_room':
+            out.append(f"1) Move forward {dist_phrase} to exit {to_room}.")
+        elif wtype == 'enter_hallway':
+            out.append(f"1) Move forward {dist_phrase} and enter the hallway.")
+        elif wtype == 'enter_room':
+            out.append(f"1) Move forward {dist_phrase} and enter the {to_room}.")
+        else:
+            target_label = waypoint_label(to_wp)
+            out.append(f"1) Move forward {dist_phrase} toward {target_label}.")
+
+    # Subsequent legs
     step_no = 2
     for i in range(1, len(legs)):
         leg = legs[i]
@@ -117,27 +130,38 @@ def narrate_waypoints(waypoints, grid_res_m):
         prev_h = cur_h
 
         dist_phrase = phrase_distance(leg['distance_m'])
-        target_label = waypoint_label(leg['to'])
-        to_room = leg['to'].get('room', '')
-        wtype = leg['to'].get('type', '')
+        to_wp = leg['to']
+        to_room = to_wp.get('room', '')
+        wtype = to_wp.get('type', '')
+
+        # Skip any 'goal' leg to avoid post-arrival navigation
+        if wtype == 'goal':
+            continue
+
+        prev_to_wp = legs[i-1]['to']
+        prev_to_room = prev_to_wp.get('room', '')
+        prev_wtype = prev_to_wp.get('type', '')
+
+        already_in_hall = is_hall(prev_to_room) or (prev_wtype == 'enter_hallway')
 
         if wtype == 'enter_hallway' or is_hall(to_room):
-            out.append(f"{step_no}) Go {turn} {dist_phrase} into the hallway.")
+            if already_in_hall:
+                out.append(f"{step_no}) Turn {turn} and go {dist_phrase} along the hallway.")
+            else:
+                out.append(f"{step_no}) Turn {turn} and go {dist_phrase}, then enter the hallway.")
         elif wtype == 'enter_room':
-            out.append(f"{step_no}) Go {turn} {dist_phrase}, then enter the {to_room}.")
+            out.append(f"{step_no}) Turn {turn} and go {dist_phrase}, then enter the {to_room}.")
         elif wtype == 'exit_room':
-            out.append(f"{step_no}) Go {turn} {dist_phrase} toward the exit of {to_room}.")
-        elif wtype == 'goal':
-            out.append(f"{step_no}) Continue {turn} {dist_phrase} inside {to_room}. You have arrived.")
+            out.append(f"{step_no}) Turn {turn} and go {dist_phrase} to exit {to_room}.")
         else:
-            out.append(f"{step_no}) Go {turn} {dist_phrase} toward the {to_room}.")
+            if to_room:
+                out.append(f"{step_no}) Turn {turn} and proceed {dist_phrase} toward the {to_room}.")
+            else:
+                out.append(f"{step_no}) Turn {turn} and proceed {dist_phrase}.")
+
         step_no += 1
 
-    last_room = waypoints[-1].get('room')
-    if last_room and not is_hall(last_room):
-        out.append("Tip: Once inside, look around to your right first, then scan the room carefully to find the target.")
-
-    return " ".join(out)
+    return "\n".join(out)
 
 # --- Loop --------------------------------------------------------------------
 

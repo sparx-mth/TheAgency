@@ -78,7 +78,7 @@ def background_updater():
 
 def check_agent_commands():
     """Check if agent commands are available"""
-    agent_file = "agent_commands.txt"
+    agent_file = "data/agent_commands.txt"
     if os.path.exists(agent_file):
         try:
             with open(agent_file, 'r') as f:

@@ -1,0 +1,61 @@
+HOUSE MAPPING PIPELINE OVERVIEW
+=================================
+
+1. receiver_owl.py
+------------------
+Input: JSON detection files containing object bounding boxes and class labels (no images).
+Output: JSON files stored in `room_mapping/ingest_out/`.
+Purpose: Collects pre-processed detection results (from an external OWL/YOLO vision module) that describe detected objects and their positions in the scene.
+
+2. pixel_room_mapper.py
+-----------------------
+Input: Detection JSON files from `receiver_owl.py` and optional base map (office.json / office_map.txt).
+Output: `data/unified_rooms.json` and `data/house_map.txt`.
+Purpose: Builds or updates the unified 2D occupancy grid and per-room object mapping based on detected objects from multiple JSON scans.
+
+3. render_house.py
+------------------
+Input: `data/unified_rooms.json` and `data/house_map.txt`.
+Output: `data/current_map.png`.
+Purpose: Renders a visual map of the house layout, including rooms and detected objects, for the web interface.
+
+4. web_mission_server.py
+------------------------
+Input: Web requests from the user and all generated data files (`unified_rooms.json`, `planned_path.json`, etc.).
+Output: JSON responses to the web interface, mission instructions, and agent commands.
+Purpose: Provides a live Flask-based web interface where users can request missions and view progress in real time.
+
+5. llm_object_finder.py
+-----------------------
+Input: `data/unified_rooms.json` and `data/object_request.json` (created by the web server when a mission is requested).
+Output: `data/object_location.json`.
+Purpose: Uses a multilingual embedding model to find the best matching room and object for the user’s requested target.
+
+6. path_planner.py
+------------------
+Input: `data/unified_rooms.json`, `data/house_map.txt`, and `data/object_location.json`.
+Output: `data/planned_path.json`.
+Purpose: Computes a navigation path (using A*) from the starting position to the room containing the target object.
+
+7. object_location_describer.py
+-------------------------------
+Input: `data/unified_rooms.json` and `data/object_location.json`.
+Output: `data/inroom_description.json`.
+Purpose: Describes where the target object is located inside the target room (e.g., “next to the bike and the suitcase”).
+
+8. route_narrator.py
+--------------------
+Input: `data/planned_path.json`.
+Output: `data/route_narration.json`.
+Purpose: Converts the planned path into human-readable navigation instructions (e.g., “Turn right and go about two meters”).
+
+9. route_to_agents.py (mission_to_agent_commands.py)
+----------------------------------------------------
+Input: `data/planned_path.json`, `data/unified_rooms.json`, and the target object.
+Output: `data/agent_commands.json` and `data/agent_commands.txt`.
+Purpose: Translates the path plan into structured commands for autonomous agents (NavigationAgent, DoorAgent, ScanAgent).
+
+Summary
+-------
+The full pipeline transforms detection JSON files into a complete mission plan:
+1. Detect → 2. Map → 3. Render → 4. Web request → 5. Find object → 6. Plan path → 7. Describe location → 8. Narrate route → 9. Generate agent commands.

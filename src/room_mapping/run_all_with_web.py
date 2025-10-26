@@ -49,7 +49,7 @@ def clean_directory(folder, keep_files=None):
             deleted += 1
         except Exception:
             pass
-    print(f"🧹 Cleaned {deleted} files from {folder.name}")
+    print(f" Cleaned {deleted} files from {folder.name}")
 
 
 # ----------------------------------------------------------
@@ -75,7 +75,7 @@ def wait_for_json_files(folder, timeout=120):
     while True:
         json_files = glob.glob(str(folder / "*.json"))
         if json_files:
-            print(f"✓ Found {len(json_files)} JSON files in {folder}")
+            print(f" Found {len(json_files)} JSON files in {folder}")
             return True
         if time.time() - start > timeout:
             print("Timeout: no JSON files found within 2 minutes.")
@@ -129,16 +129,16 @@ def main():
         processes.append(start_process("route_narrator.py", "Route Narrator", 1.0))
 
         # 9. Mission → Agent Commands
-        processes.append(start_process("mission_to_agent_commands.py", "Agent Command Monitor", 1.0))
+        processes.append(start_process("route_to_agents.py", "Agent Command Monitor", 1.0))
 
         # Open Web GUI
-        print("\n🌐 Opening Web GUI at http://localhost:8080 ...")
+        print("\n Opening Web GUI at http://localhost:8080 ...")
         webbrowser.open("http://localhost:8080")
 
         print("\n" + "=" * 60)
-        print("✅ ALL COMPONENTS RUNNING")
+        print("ALL COMPONENTS RUNNING")
         print("=" * 60)
-        print("📡 Web GUI: http://localhost:8080")
+        print(" Web GUI: http://localhost:8080")
         print("Press Ctrl+C to stop all components.\n")
 
         # Monitor loop
@@ -146,7 +146,7 @@ def main():
             time.sleep(2)
             for name, proc in processes:
                 if proc.poll() is not None:
-                    print(f"\n⚠ {name} stopped unexpectedly (exit code {proc.returncode})")
+                    print(f"\n {name} stopped unexpectedly (exit code {proc.returncode})")
                     print(f"Restarting {name}...")
                     new_proc = subprocess.Popen(
                         [sys.executable, f"{name.lower().replace(' ', '_')}.py"],
