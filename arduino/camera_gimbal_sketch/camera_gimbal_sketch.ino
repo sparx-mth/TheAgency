@@ -6,16 +6,19 @@ Servo yawServo;
 const int PITCH_PIN = 3;
 const int YAW_PIN = 2;
 const int SIGNAL_PIN = 7;
-const int BIT0_INDEX_PIN = 4;   // LSB
-const int BIT1_INDEX_PIN = 5;
+const int BIT0_INDEX_PIN = 10;   // LSB
+const int BIT1_INDEX_PIN = 9;
 const int BIT2_INDEX_PIN = 6;   // MSB
+
+const int BIT_FIRST_ANGLE = BIT0_INDEX_PIN;
 
 
 const int yaw_angles[] = {30, 90, 130, 180};
 const int pitch_angles[] = {25, 30, 30, 0};
 const int num_angles = sizeof(yaw_angles) / sizeof(yaw_angles[0]);
 
-const int ANGLE_DELAY = 20000;
+const int ANGLE_DELAY = 8000;
+const int WRITE_DELAY = 1000;
 
 int index = 0;
 
@@ -48,7 +51,13 @@ void setup() {
 void loop() {
   Serial.println("*****************  loop ***************");
   digitalWrite(SIGNAL_PIN, LOW);
+  delay(WRITE_DELAY);
   Serial.println("Trigger LOW. Do not take frame");
+
+  int is_first_angle = (index%num_angles == 0);
+  digitalWrite(BIT_FIRST_ANGLE, is_first_angle);
+  Serial.print("Is first angle: ");
+  Serial.println(is_first_angle);
 
   Serial.println("Update Servo Angles");
   const int pitch = pitch_angles[index%num_angles];
@@ -62,10 +71,13 @@ void loop() {
   Serial.println(yaw);
   
   
-  write_to_pins(index%num_angles);
-  Serial.print("Index written to pins: ");
-  Serial.println(index%num_angles);
+  // write_to_pins(index%num_angles);
+  // Serial.print("Index written to pins: ");
+  // Serial.println(index%num_angles);
+  
   index++;
+  
+  delay(WRITE_DELAY);
   digitalWrite(SIGNAL_PIN, HIGH); 
   Serial.println("Trigger HIGH. May take frame");
 
