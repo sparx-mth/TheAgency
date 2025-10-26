@@ -127,7 +127,7 @@ def ask_ollama(house_json, mission_instruction):
 
     try:
         # Send file content to Ollama
-        cmd = f"cat {temp_file} | ollama run llama3.2:1b"
+        cmd = f"cat {temp_file} | ollama run llama3.2:3b"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
         response = result.stdout.strip()
 

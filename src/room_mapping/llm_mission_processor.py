@@ -12,7 +12,7 @@ import os
 import time
 
 # File paths for communication
-TASK_REQUEST_FILE = "data/task_request.json"
+TASK_REQUEST_FILE = "task_request.json"
 MISSION_RESPONSE_FILE = "mission_response.txt"
 MISSION_FILE = "current_mission.txt"
 
@@ -83,7 +83,7 @@ Generate the navigation instruction:"""
 def load_house_data():
     """Load and format house data clearly for LLM"""
     try:
-        with open("unified_rooms.json", 'r') as f:
+        with open("data/unified_rooms.json", 'r') as f:
             house_data = json.load(f)
 
         # Create clear structure showing rooms and their objects
@@ -129,7 +129,7 @@ def ask_ollama(house_json, user_task):
         temp_file = f.name
 
     try:
-        cmd = f"cat {temp_file} | ollama run llama3.2:3b"
+        cmd = f"cat {temp_file} | ollama run llama3.1:8b"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
         response = result.stdout.strip()
         os.unlink(temp_file)
