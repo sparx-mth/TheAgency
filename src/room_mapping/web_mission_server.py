@@ -21,10 +21,6 @@ CORS(app)  # Enable CORS for all routes
 latest_house_data = None
 data_lock = threading.Lock()
 
-# File for mission exchange
-MISSION_FILE = "current_mission.txt"
-
-
 def load_house_data():
     """Load and format house data clearly for LLM"""
     try:
@@ -95,7 +91,6 @@ def wait_for_pipeline_results(task, timeout=30):
     """Wait for and aggregate results from the new pipeline"""
     start_time = time.time()
 
-    # Files to check from the pipeline
     result_files = {
         'object_location': 'data/object_location.json',
         'planned_path': 'data/planned_path.json',
@@ -106,15 +101,10 @@ def wait_for_pipeline_results(task, timeout=30):
     results = {}
     mission_response = []
 
-    # Wait for pipeline to process
     while time.time() - start_time < timeout:
-        all_found = True
-
-        # Check each expected output file
         for key, filepath in result_files.items():
             if key not in results and os.path.exists(filepath):
                 try:
-                    # Check if file was updated after our request
                     if os.path.getmtime(filepath) > start_time:
                         with open(filepath, 'r') as f:
                             data = json.load(f)
@@ -123,38 +113,73 @@ def wait_for_pipeline_results(task, timeout=30):
                 except Exception as e:
                     print(f"Error reading {filepath}: {e}")
 
-        # If we have the minimum required results, format response
-        if 'object_location' in results and 'route_narration' in results:
-            # Build mission response from pipeline results
+        # --- NEW: if object_location exists, check immediately ---
+        if 'object_location' in results:
             obj_data = results['object_location']
+            found_room = obj_data.get('room')
+            found_object = obj_data.get('object')
 
-            # Start with what was found
-            if obj_data.get('found_object'):
-                mission_response.append(
-                    f"Target identified: {obj_data.get('found_object', 'unknown')} in {obj_data.get('found_room', 'unknown room')}")
+            # Normalize 'none' strings
+            if isinstance(found_room, str) and found_room.lower() == 'none':
+                found_room = None
+            if isinstance(found_object, str) and found_object.lower() == 'none':
+                found_object = None
 
-            # Add route narration if available
+            # If both are missing -> stop immediately
+            if not found_room and not found_object:
+                return "Unable to find the requested object. Please try searching for something else.", ""
+
+            # If object found but room missing -> invalid
+            if found_object and not found_room:
+                return "Invalid mission data: object found without room. Please try again.", ""
+
+        # Only proceed with full mission if both object_location and route_narration ready
+        if 'object_location' in results and 'route_narration' in results:
+            obj_data = results['object_location']
+            found_room = obj_data.get('room')
+            found_object = obj_data.get('object')
+
+            if isinstance(found_room, str) and found_room.lower() == 'none':
+                found_room = None
+            if isinstance(found_object, str) and found_object.lower() == 'none':
+                found_object = None
+
+            # CASE 1: both found
+            if found_room and found_object:
+                mission_response.append(f"Target identified: {found_object} in {found_room}")
+
+            # CASE 2: room found only
+            elif found_room and not found_object:
+                mission_response.append(f"Object not found, but room '{found_room}' identified. Navigating to the room for further inspection.")
+                results.pop('inroom_description', None)
+
+            # CASE 3: object without room (invalid)
+            elif found_object and not found_room:
+                return "Invalid mission data: object found without room. Please try again.", ""
+
+            # CASE 4: nothing found
+            else:
+                return "Unable to find the requested object. Please try searching for something else.", ""
+
+            # Add route narration
             if 'route_narration' in results:
                 narration = results['route_narration'].get('narration', '')
                 if narration:
                     mission_response.append("\nNavigation instructions:")
                     mission_response.append(narration)
 
-            # Add in-room description if available
+            # Add in-room description
             if 'inroom_description' in results:
                 desc = results['inroom_description'].get('description', '')
                 if desc:
                     mission_response.append("\nIn-room guidance:")
                     mission_response.append(desc)
 
-            # Check for agent commands
             agent_commands = check_agent_commands()
-
             return '\n'.join(mission_response), agent_commands
 
         time.sleep(0.5)
 
-    # Timeout - return what we have
     if mission_response:
         return '\n'.join(mission_response), check_agent_commands()
     else:
@@ -194,29 +219,29 @@ def generate_mission():
         if not task:
             return jsonify({'response': 'Please provide a task', 'agent_commands': ''}), 400
 
-        # Write task request for the new pipeline (object_request.json instead of task_request.json)
         request_data = {
             'task': task,
-            'requested': task,  # Some components might expect 'requested' field
+            'requested': task,
             'timestamp': time.time()
         }
 
-        # Write to the new expected location
         with open("data/object_request.json", 'w') as f:
             json.dump(request_data, f)
-        print(f"Task request written to data/object_request.json")
+        print("Task request written to data/object_request.json")
 
         # Wait for pipeline results
         response, agent_commands = wait_for_pipeline_results(task)
 
-        return jsonify({
-            'response': response,
-            'agent_commands': agent_commands or ''
-        })
+        # --- NEW: if object not found or invalid, clear commands ---
+        if response.startswith("Unable to find") or response.startswith("Invalid mission"):
+            return jsonify({'response': response, 'agent_commands': ''})
+
+        return jsonify({'response': response, 'agent_commands': agent_commands or ''})
 
     except Exception as e:
         print(f"Error in generate_mission: {e}")
         return jsonify({'response': f'Error: {str(e)}', 'agent_commands': ''}), 500
+
 
 
 @app.route('/SPARX.jpg')
