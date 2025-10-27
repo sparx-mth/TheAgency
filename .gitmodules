@@ -12,3 +12,6 @@
 [submodule "NanoLLM_VILA_and_OWL"]
 	path = NanoLLM_VILA_and_OWL
 	url = https://github.com/sparx-mth/NanoLLM_VILA_and_OWL.git
+[submodule "technion_joint_research/docs"]
+	path = technion_joint_research/docs
+	url = https://github.com/moshebeutel/25.Planning.in.the.unknown.Technion.IAI.git
