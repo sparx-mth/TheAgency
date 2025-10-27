@@ -140,7 +140,7 @@ def generate_mission():
 
         # Wait for both mission response and its matching agent commands
         response_file = "mission_response.txt"
-        timeout = 30
+        timeout = 120
         start_time = time.time()
 
         mission_text = None

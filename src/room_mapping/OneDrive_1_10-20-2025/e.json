@@ -30,16 +30,7 @@
     "annotate": 0,
     "result": {
       "detections": [
-        {
-          "bbox": [
-            117,
-            116,
-            825,
-            552
-          ],
-          "label": "a bicycle",
-          "score": 0.8727439641952515
-        }
+
       ],
       "image": {
         "height": 540,

@@ -187,6 +187,9 @@ class PixelRoomMapper:
         h_object_meters = h_ratio * visible_width
         v_object_meters = v_ratio * visible_height
 
+        # # Minimum and maximum sizes
+        h_object_meters = max(0.1, min(h_object_meters, self.room_width_m / 3))
+        v_object_meters = max(0.1, min(v_object_meters, self.room_height_m / 3))
 
         return h_object_meters, v_object_meters
 
