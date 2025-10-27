@@ -9,3 +9,6 @@
 	path = ORB-SLAM3-ROS2-Docker
 	url = https://github.com/sparx-mth/ORB-SLAM3-ROS2-Docker.git
 	branch = map_merger_daphna
+[submodule "NanoLLM_VILA_and_OWL"]
+	path = NanoLLM_VILA_and_OWL
+	url = https://github.com/sparx-mth/NanoLLM_VILA_and_OWL.git
