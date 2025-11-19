@@ -1,0 +1,11 @@
+sudo vim /etc/network/interfaces 
+
+sudo nmcli connection modify dynamic-enp129s0 ipv4.method manual ipv4.addresses 192.168.131.19/24 ipv4.gateway 192.168.131.1
+
+sudo nmcli connection up dynamic-enp129s0
+ 
+nmcli device show enp129s0
+ 
+sudo systemctl start netfilter-persistent
+ping 192.168.131.109
+ 
