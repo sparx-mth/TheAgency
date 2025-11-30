@@ -1,0 +1,6 @@
+# Requested takeoff altitude above ground level
+float32 alt_agl
+---
+# Response
+bool success   # indicate successful run of triggered service
+string message # informational, e.g. for error messages

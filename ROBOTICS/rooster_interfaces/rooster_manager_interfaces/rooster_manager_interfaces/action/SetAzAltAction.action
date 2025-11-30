@@ -1,0 +1,13 @@
+# Set rooster azimuth and altitude
+bool azimuth_valid # if true set azimuth
+float32 azimuth # radians
+
+bool altitude_valid # if true set altitude
+float32 altitude # AGL in meters
+---
+# Response
+bool success
+string message
+---
+float32 azimuth_err
+float32 altitude_err

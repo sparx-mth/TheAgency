@@ -1,0 +1,13 @@
+# Request
+
+uint8 type
+uint8 LED_TYPE_DAY=0
+uint8 LED_TYPE_IR=1
+
+uint8 power
+
+---
+# Response
+bool success
+string message
+

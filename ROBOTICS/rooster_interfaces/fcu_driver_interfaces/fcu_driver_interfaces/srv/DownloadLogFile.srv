@@ -1,0 +1,6 @@
+# Request
+uint32 id
+string path
+---
+# Response
+bool ack

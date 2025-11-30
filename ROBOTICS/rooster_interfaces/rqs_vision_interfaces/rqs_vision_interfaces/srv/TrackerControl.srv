@@ -1,0 +1,18 @@
+uint8 action
+
+uint8 ACTION_RELEASE=0
+uint8 ACTION_LOCK=1
+
+
+float32 center_x_normlized
+float32 center_y_normlized
+
+
+float32 width_normlized
+float32 height_normlized
+
+
+---
+
+bool success
+string message

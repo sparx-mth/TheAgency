@@ -1,0 +1,7 @@
+# Set camera controls
+uint16 camera_id
+string controls # JSON string
+---
+# Response
+bool success
+string message

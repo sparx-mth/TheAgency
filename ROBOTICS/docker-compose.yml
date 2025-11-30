@@ -1,0 +1,55 @@
+x-common-settings: &compose-base
+  network_mode: host
+  ipc: host
+  privileged: true 
+  image: sphera-backend:rooster
+  entrypoint: /bin/bash
+  environment:
+    - DISPLAY
+    - QT_X11_NO_MITSHM=1
+    - QT_QPA_PLATFORM=xcb
+    - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    - ROS_DOMAIN_ID=5
+    - GID=125
+    - CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+
+services:
+  build_ws:
+    <<: *compose-base
+    container_name: build_ws
+    volumes:
+        - $HOME/rqs_iai_ws:/home/rooster/workspace
+    command: -c "source /opt/ros/foxy/setup.bash && colcon build --symlink-install"
+
+  it:
+    # Use on sphera pc (no need for zenoh - full interfaces access)
+    # docker attach it
+    <<: *compose-base
+    container_name: it
+    stdin_open: true       # enables interactive mode (like `-i`)
+    tty: true              # allocates a TTY (like `-t`)
+    privileged: true       # optional, for full hardware access
+    network_mode: host     # optional, share host networking
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - $HOME/rqs7-private-parameters:/home/rooster/rqs7-private-parameters
+      - /etc/localtime:/etc/localtime:ro
+      - $HOME/rqs_iai_ws:/home/rooster/workspace
+      - ./cyclonedds.xml:/etc/cyclonedds.xml
+    command: -c "export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages && source /opt/ros/foxy/setup.bash && source /home/rooster/workspace/install/setup.bash &&  exec bash"
+
+  it-remote:
+    # Use on sphera pc (no need for zenoh - full interfaces access)
+    # docker attach it
+    <<: *compose-base
+    container_name: it-remote
+    stdin_open: true       # enables interactive mode (like `-i`)
+    tty: true              # allocates a TTY (like `-t`)
+    privileged: true       # optional, for full hardware access
+    network_mode: host     # optional, share host networking
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - $HOME/rqs7-private-parameters:/home/rooster/rqs7-private-parameters
+      - /etc/localtime:/etc/localtime:ro
+      - $HOME/rqs_iai_ws:/home/rooster/workspace
+    command: -c "export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages && source /opt/ros/foxy/setup.bash && source /home/rooster/workspace/install/setup.bash && zenoh-bridge-dds -c /home/rooster/workspace/src/GCS_ZENOH_CONFIG.json5& exec bash"
