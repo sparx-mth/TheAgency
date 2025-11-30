@@ -8,4 +8,22 @@ nmcli device show enp129s0
  
 sudo systemctl start netfilter-persistent
 ping 192.168.131.109
- 
+
+
+sudo nmcli connection show
+```
+NAME                UUID                                  TYPE      DEVICE          
+netplan-enp129s0    f3a09c35-9906-347d-aec9-91f417e4663e  ethernet  enp129s0        
+Wired connection 1  9b841d46-4922-3109-809b-1c565461b701  ethernet  enx00e04c68010e 
+lo                  014e0000-8a4f-481c-9ebf-cce37ca17b80  loopback  lo              
+docker0             073a1a18-fa00-4dd8-9521-56c218526f8d  bridge    docker0
+```
+
+sudo nmcli connection modify "Wired connection 1" ipv4.method manual ipv4.addresses 192.168.131.5/24 ipv4.gateway 192.168.131.1
+
+sudo netplan generate
+sudo netplan apply
+
+
+for auto: 
+keep only 50-cloud-init.yaml and delete all **other** files in /etc/netplan/
