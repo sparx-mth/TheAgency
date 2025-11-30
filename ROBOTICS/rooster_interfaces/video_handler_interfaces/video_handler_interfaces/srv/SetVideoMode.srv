@@ -1,0 +1,20 @@
+bool recording
+bool playing
+
+
+#[W,H]
+uint16 resolution_width
+uint16 resolution_height
+
+uint32 BITRATE_1500000=1500000
+uint32 bitrate
+
+uint8 fps
+
+string host
+uint16 port
+uint16 camera_id
+---
+# Response
+bool success
+string message

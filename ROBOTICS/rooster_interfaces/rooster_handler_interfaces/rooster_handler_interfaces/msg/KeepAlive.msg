@@ -1,0 +1,17 @@
+std_msgs/Header header
+
+
+bool is_active
+
+uint8 requested_flight_mode
+uint8 FLIGHT_MODE_NONE=0
+uint8 FLIGHT_MODE_GROUND_ROLL=1
+uint8 FLIGHT_MODE_MANUAL=2
+uint8 FLIGHT_MODE_POSITION=3
+uint8 FLIGHT_MODE_ALTITUDE=4
+uint8 FLIGHT_MODE_ACRO=5
+uint8 FLIGHT_MODE_STABILIZED=6
+uint8 FLIGHT_MODE_TAKEOFF=7
+uint8 FLIGHT_MODE_LAND=8
+
+bool command_reboot

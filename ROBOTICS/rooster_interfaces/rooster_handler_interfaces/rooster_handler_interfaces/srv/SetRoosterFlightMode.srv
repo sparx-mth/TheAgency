@@ -1,0 +1,16 @@
+# Request
+
+# Available modes: 'Posctl', 'Altctl', 'Acro', 'Stabilized', 'GroundRoll'
+uint8 mode
+uint8 MODE_GROUND_ROLL=1
+uint8 MODE_STABILIZED=2
+uint8 MODE_POSITION=3
+uint8 MODE_ALTITUDE=4
+uint8 MODE_ACRO=5
+
+
+---
+# Response
+bool success
+string message
+

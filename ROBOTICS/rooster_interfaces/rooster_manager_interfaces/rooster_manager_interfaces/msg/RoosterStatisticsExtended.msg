@@ -1,0 +1,23 @@
+std_msgs/Header header
+
+uint32 time_turned_on_minutes
+uint32 time_armed_mimutes
+
+string rooster_version
+
+string rooster_manager_version
+string rooster_manager_commit
+
+string microhard_handler_version
+string microhard_handler_commit
+
+string video_handler_version
+string video_handler_commit
+
+string io_driver_version
+string io_driver_commit
+
+string fcu_driver_version
+string fcu_driver_commit
+
+string mavsdk_version

@@ -1,0 +1,9 @@
+# Request
+
+string name
+
+---
+# Response
+bool success
+string message
+
