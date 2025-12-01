@@ -4,7 +4,7 @@ This repository provides tools and instructions for running the RQS IAI ROS2 wor
 
 ---
 
-## 📌 ROS Domain ID Structure
+## ROS Domain ID Structure
 
 Each system component operates on a different **ROS_DOMAIN_ID**:
 
@@ -29,7 +29,7 @@ environment:
 
 ---
 
-## 🚀 Starting the Main Docker Environment
+## Starting the Main Docker Environment
 
 From inside the workspace:
 
@@ -46,7 +46,7 @@ docker attach it
 
 ---
 
-## 🔍 ROS2 Domain Scanner
+## ROS2 Domain Scanner
 
 A Python tool for scanning all ROS2 Domain IDs (0–255) and detecting active DDS networks.
 
@@ -82,7 +82,7 @@ python3 multi_video_stream.py
 
 ---
 
-## 🟦 Running RViz2 in Docker
+## Running RViz2 in Docker
 
 Run inside:
 
@@ -98,7 +98,7 @@ docker run --rm -it   --net=host   -e DISPLAY=$DISPLAY   -e QT_X11_NO_MITSHM=1  
 
 ---
 
-## 📦 Setup Inside the RViz Container
+## Setup Inside the RViz Container
 
 Install CycloneDDS:
 
@@ -123,6 +123,67 @@ Run RViz2:
 
 ```bash
 rviz2
+```
+
+
+---
+
+## 🟩 Running ROS Humble AprilTag Container
+
+This section describes how to run a ROS 2 Humble container with AprilTag detection connected to the same DDS network.
+
+### 1️⃣ Run ROS Humble Desktop Container
+
+```bash
+docker run --rm -it   --net=host   -e DISPLAY=$DISPLAY   -e QT_X11_NO_MITSHM=1   -e LIBGL_ALWAYS_SOFTWARE=1   -e ROS_DOMAIN_ID=5   -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp   -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml   -v /tmp/.X11-unix:/tmp/.X11-unix:rw   -v $(pwd)/cyclonedds.xml:/etc/cyclonedds.xml:ro   osrf/ros:humble-desktop   bash
+```
+
+Inside the container:
+
+```bash
+source /opt/ros/humble/setup.bash
+echo "DOMAIN=$ROS_DOMAIN_ID  RMW=$RMW_IMPLEMENTATION"
+```
+
+### 2️⃣ Install CycloneDDS and Configure ROS 2
+
+```bash
+apt-get update
+apt-get install -y ros-humble-rmw-cyclonedds-cpp
+source /opt/ros/humble/setup.bash
+
+export ROS_DOMAIN_ID=5
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+```
+
+Verify available camera topics:
+
+```bash
+ros2 topic list | grep camera
+```
+
+### 3️⃣ Install AprilTag ROS Package
+
+```bash
+apt-get update
+apt-get install -y ros-humble-apriltag-ros
+source /opt/ros/humble/setup.bash
+```
+
+### 4️⃣ Run AprilTag Node
+
+```bash
+ros2 run apriltag_ros apriltag_node --ros-args   -r image:=/R1/camera/image_raw   -r camera_info:=/R1/camera/camera_info   -p family:=36h11   -p size:=0.20   -p publish_tf:=true
+```
+
+### 5️⃣ Check AprilTag Topics (Second Humble Terminal)
+
+In another terminal (attached to the same container or another Humble container configured with the same ROS_DOMAIN_ID and RMW):
+
+```bash
+ros2 topic list | grep apriltag
+ros2 topic echo /detections
 ```
 
 ---
