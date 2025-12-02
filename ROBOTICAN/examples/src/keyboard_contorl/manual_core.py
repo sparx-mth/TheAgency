@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 from rooster_manager_interfaces.msg import RoosterState
-from fcu_driver_interfaces.msg import ManualControl
+from fcu_driver_interfaces.msg import ManualControl, UAVState
 from rclpy.node import Node
+from datetime import datetime
 
 
 @dataclass
@@ -82,55 +83,159 @@ class ManualCommandModel:
             self.axes.r = self._clamp(self.axes.r + s)
 
 
-class CsvLogger:
-    """Responsible for logging commands + state to CSV."""
+class RLTransitionLogger:
+    """
+    Logs RL-style transitions:
 
-    def __init__(self, node: Node, path: str):
+    One row per action (pulse / path segment):
+
+    S:  position, angles, velocity, altitude_relative (if available)
+    A:  x, y, z, r, duration
+    S': same fields as S after action
+
+    File name is timestamped so each run gets a new CSV.
+    """
+
+    def __init__(self, node: Node, base_path: str):
         self._node = node
-        self._path = os.path.abspath(path)
+
+        # Build timestamped file name
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        root, ext = os.path.splitext(base_path)
+        if ext == "":
+            ext = ".csv"
+        filename = f"csv{os.sep}{root}_{ts}{ext}"
+        self._path = os.path.abspath(filename)
+
         self._file = open(self._path, "w", newline="")
         self._writer = csv.writer(self._file)
 
+        # Episode is the whole GUI run, step is per action
+        self.episode_id = 1
+        self.step_id = 0
+
         self._writer.writerow(
             [
-                "t", "src",
-                "x", "y", "z", "r",
-                "roll", "pitch", "azimuth",
-                "flight_mode", "armed", "airborne",
+                "episode",
+                "step",
+                "t_start",
+                "t_end",
+
+                # S (before action)
+                "S_pos_x",
+                "S_pos_y",
+                "S_pos_z",
+                "S_vel_x",
+                "S_vel_y",
+                "S_vel_z",
+                "S_roll",
+                "S_pitch",
+                "S_azimuth",
+                "S_alt_rel",
+
+                # A (action)
+                "A_x",
+                "A_y",
+                "A_z",
+                "A_r",
+                "A_duration",
+
+                # S' (after action)
+                "Sp_pos_x",
+                "Sp_pos_y",
+                "Sp_pos_z",
+                "Sp_vel_x",
+                "Sp_vel_y",
+                "Sp_vel_z",
+                "Sp_roll",
+                "Sp_pitch",
+                "Sp_azimuth",
+                "Sp_alt_rel",
             ]
         )
         self._file.flush()
-        self._node.get_logger().info(f"Logging to {self._path}")
+        self._node.get_logger().info(f"RL transitions will be logged to {self._path}")
 
-    def log_command(
-        self,
-        src: str,
-        manual_msg: ManualControl,
-        state: Optional[RoosterState],
-        now_sec: float,
-    ):
-        if state is None:
-            roll = pitch = azimuth = 0.0
-            flight_mode = -1
-            armed = False
-            airborne = False
-        else:
-            roll = state.roll
-            pitch = state.pitch
-            azimuth = state.azimuth
-            flight_mode = state.flight_mode
-            armed = state.armed
-            airborne = state.airborne
+    @staticmethod
+    def _extract_state_fields(st: Optional[RoosterState]):
+        """
+        Returns (pos_x, pos_y, pos_z,
+                 vel_x, vel_y, vel_z,
+                 roll, pitch, azimuth, alt_rel)
+        or empty strings if missing.
+        """
+        if st is None:
+            return ("", "", "", "", "", "", "", "", "", "")
 
-        self._writer.writerow(
-            [
-                f"{now_sec:.6f}", src,
-                f"{manual_msg.x:.1f}", f"{manual_msg.y:.1f}",
-                f"{manual_msg.z:.1f}", f"{manual_msg.r:.1f}",
-                f"{roll:.4f}", f"{pitch:.4f}", f"{azimuth:.4f}",
-                flight_mode, int(armed), int(airborne),
-            ]
+        # --- Position ---
+        try:
+            pos_x = st.position.x
+            pos_y = st.position.y
+            pos_z = st.position.z
+        except Exception as exp:
+            print(f"Failed to extract position from state: {exp}")
+            pos_x = pos_y = pos_z = ""
+
+        # --- Velocity ---
+        try:
+            vel_x = st.velocity.x
+            vel_y = st.velocity.y
+            vel_z = st.velocity.z
+        except Exception as exp:
+            print(f"Failed to extract velocity from state: {exp}")
+            vel_x = vel_y = vel_z = ""
+
+        # --- Angles / azimuth / altitude_relative ---
+        roll = getattr(st, "roll", "")
+        pitch = getattr(st, "pitch", "")
+        azimuth = getattr(st, "azimuth", "")
+        alt_rel = getattr(st, "altitude_relative", "")
+
+        return (
+            pos_x,
+            pos_y,
+            pos_z,
+            vel_x,
+            vel_y,
+            vel_z,
+            roll,
+            pitch,
+            azimuth,
+            alt_rel,
         )
+
+    def log_transition(
+        self,
+        s_before: Optional[RoosterState],
+        action_x: float,
+        action_y: float,
+        action_z: float,
+        action_r: float,
+        duration: float,
+        t_start: float,
+        t_end: float,
+        s_after: Optional[RoosterState],
+    ):
+        """Write one (S, A, S') row."""
+        self.step_id += 1
+
+        s_vec = self._extract_state_fields(s_before)
+        sp_vec = self._extract_state_fields(s_after)
+
+        row = [
+            self.episode_id,
+            self.step_id,
+            f"{t_start:.6f}",
+            f"{t_end:.6f}",
+            *s_vec,
+            action_x,
+            action_y,
+            action_z,
+            action_r,
+            duration,
+            *sp_vec,
+        ]
+        self._writer.writerow(row)
         self._file.flush()
 
     def close(self):
