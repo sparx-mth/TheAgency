@@ -26,7 +26,7 @@ class GroundRollCourse(Node):
     def __init__(self):
         super().__init__("ground_roll_course")
 
-        self.id = "R2"
+        self.id = "R3"
 
         # State
         self.arm_state = False

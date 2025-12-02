@@ -167,3 +167,8 @@ isaac_sim/documents/*
 isaac_sim/logs/*
 
 orb_slam_module
+
+ROBOTICAN/examples/src/*.csv
+ROBOTICAN/examples/src/keyboard_contorl/csv/*
+ROBOTICAN/examples/src/keyboard_contorl/__pycache__/
+ROBOTICAN/examples/src/paths/*

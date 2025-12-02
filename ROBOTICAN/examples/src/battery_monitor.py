@@ -8,7 +8,7 @@ from fcu_driver_interfaces.msg import Battery  # Using the message type from you
 class BatteryMonitorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("R2 Battery")
+        self.root.title("R1 Battery")
 
         # Window Setup: Small, Top-Right Corner, Always on Top
         self.width = 220
@@ -83,7 +83,7 @@ class BatteryListener(Node):
         # Subscribe to the R2 battery topic
         self.subscription = self.create_subscription(
             Battery,
-            '/R2/fcu/battery',
+            '/R1/fcu/battery',
             self.listener_callback,
             10
         )
