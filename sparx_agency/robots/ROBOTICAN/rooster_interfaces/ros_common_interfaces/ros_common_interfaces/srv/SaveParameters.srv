@@ -1,0 +1,8 @@
+bool home_relative # if true file_path is relative to $HOME
+string file_path
+string[] names # A list of parameter names to set.
+
+---
+
+bool success
+string message

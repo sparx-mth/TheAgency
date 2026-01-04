@@ -1,0 +1,16 @@
+[
+  {
+    "id": "map_001",
+    "image": "data/maps/map_001.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building‑map analyst.\nLegend: black=unknown, dark‑gray=free, light‑gray=wall, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = white pixels aligned on the wall line, (4) Detect obstacles = white pixels surrounded by unknown.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{"rooms":[{"id":1,"area_px":661}],"corridors":[{"id":1,"length_px":80}],"doorways":[{"x":69,"y":103},{"x":80,"y":103},{"x":69,"y":110},{"x":80,"y":110},{"x":69,"y":114},{"x":80,"y":114},{"x":69,"y":108},{"x":80,"y":108}],"obstacles":[]}"
+}
+]
+}
+]

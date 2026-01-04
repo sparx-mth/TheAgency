@@ -1,0 +1,548 @@
+[
+  {
+    "id": "map_001",
+    "image": "data/maps/map_001.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 19699}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 584}, {\"id\": 3, \"length_px\": 27}, {\"id\": 4, \"length_px\": 27}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_002",
+    "image": "data/maps/map_002.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 26967}, {\"id\": 2, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 700}, {\"id\": 3, \"length_px\": 114}, {\"id\": 4, \"length_px\": 27}, {\"id\": 5, \"length_px\": 27}, {\"id\": 6, \"length_px\": 26}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 68, \"y\": 219}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_003",
+    "image": "data/maps/map_003.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 28951}, {\"id\": 2, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 722}, {\"id\": 3, \"length_px\": 114}, {\"id\": 4, \"length_px\": 27}, {\"id\": 5, \"length_px\": 27}, {\"id\": 6, \"length_px\": 26}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 68, \"y\": 219}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_004",
+    "image": "data/maps/map_004.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 34856}, {\"id\": 2, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 650}, {\"id\": 4, \"length_px\": 114}, {\"id\": 5, \"length_px\": 27}, {\"id\": 6, \"length_px\": 27}, {\"id\": 7, \"length_px\": 26}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 58, \"y\": 219}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_005",
+    "image": "data/maps/map_005.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 51974}, {\"id\": 2, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 926}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 27}, {\"id\": 7, \"length_px\": 27}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 26}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_006",
+    "image": "data/maps/map_006.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 55377}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 266}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 27}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 699}, {\"id\": 11, \"length_px\": 26}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_007",
+    "image": "data/maps/map_007.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 61334}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 688}, {\"id\": 12, \"length_px\": 26}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_008",
+    "image": "data/maps/map_008.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 66170}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 2835}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 615}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 28}, {\"id\": 15, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_009",
+    "image": "data/maps/map_009.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 66170}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 805}, {\"id\": 5, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 615}, {\"id\": 13, \"length_px\": 56}, {\"id\": 14, \"length_px\": 26}, {\"id\": 15, \"length_px\": 28}, {\"id\": 16, \"length_px\": 114}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_010",
+    "image": "data/maps/map_010.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 79113}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 1225}, {\"id\": 5, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 68}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 28}, {\"id\": 15, \"length_px\": 416}, {\"id\": 16, \"length_px\": 333}, {\"id\": 17, \"length_px\": 114}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_011",
+    "image": "data/maps/map_011.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 82851}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 1225}, {\"id\": 5, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 68}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 28}, {\"id\": 15, \"length_px\": 358}, {\"id\": 16, \"length_px\": 356}, {\"id\": 17, \"length_px\": 114}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_012",
+    "image": "data/maps/map_012.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 89331}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 1225}, {\"id\": 5, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 68}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 28}, {\"id\": 15, \"length_px\": 256}, {\"id\": 16, \"length_px\": 166}, {\"id\": 17, \"length_px\": 114}, {\"id\": 18, \"length_px\": 85}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_013",
+    "image": "data/maps/map_013.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 103114}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 1225}, {\"id\": 5, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 68}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 28}, {\"id\": 15, \"length_px\": 142}, {\"id\": 16, \"length_px\": 166}, {\"id\": 17, \"length_px\": 114}, {\"id\": 18, \"length_px\": 85}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_014",
+    "image": "data/maps/map_014.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 104448}, {\"id\": 2, \"area_px\": 3364}, {\"id\": 3, \"area_px\": 3364}, {\"id\": 4, \"area_px\": 1225}, {\"id\": 5, \"area_px\": 3364}], \"corridors\": [{\"id\": 1, \"length_px\": 36}, {\"id\": 2, \"length_px\": 405}, {\"id\": 3, \"length_px\": 406}, {\"id\": 4, \"length_px\": 166}, {\"id\": 5, \"length_px\": 114}, {\"id\": 6, \"length_px\": 114}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 27}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 27}, {\"id\": 11, \"length_px\": 120}, {\"id\": 12, \"length_px\": 68}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 28}, {\"id\": 15, \"length_px\": 166}, {\"id\": 16, \"length_px\": 114}, {\"id\": 17, \"length_px\": 85}], \"doorways\": [], \"obstacles\": [{\"x\": 126, \"y\": 33}, {\"x\": 35, \"y\": 172}, {\"x\": 335, \"y\": 241}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_015",
+    "image": "data/maps/map_015.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 9841}], \"corridors\": [{\"id\": 1, \"length_px\": 687}], \"doorways\": [], \"obstacles\": []}"
+      }
+    ]
+  },
+  {
+    "id": "map_016",
+    "image": "data/maps/map_016.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 15278}, {\"id\": 2, \"area_px\": 2113}], \"corridors\": [{\"id\": 1, \"length_px\": 165}, {\"id\": 2, \"length_px\": 207}, {\"id\": 3, \"length_px\": 224}, {\"id\": 4, \"length_px\": 20}, {\"id\": 5, \"length_px\": 342}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_017",
+    "image": "data/maps/map_017.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 15278}, {\"id\": 2, \"area_px\": 3413}], \"corridors\": [{\"id\": 1, \"length_px\": 165}, {\"id\": 2, \"length_px\": 207}, {\"id\": 3, \"length_px\": 275}, {\"id\": 4, \"length_px\": 20}, {\"id\": 5, \"length_px\": 342}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_018",
+    "image": "data/maps/map_018.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 3684}, {\"id\": 2, \"area_px\": 15512}, {\"id\": 3, \"area_px\": 3413}], \"corridors\": [{\"id\": 1, \"length_px\": 176}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 20}, {\"id\": 6, \"length_px\": 342}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_019",
+    "image": "data/maps/map_019.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 4560}, {\"id\": 2, \"area_px\": 16090}, {\"id\": 3, \"area_px\": 3413}, {\"id\": 4, \"area_px\": 81}], \"corridors\": [{\"id\": 1, \"length_px\": 134}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 20}, {\"id\": 6, \"length_px\": 308}, {\"id\": 7, \"length_px\": 21}, {\"id\": 8, \"length_px\": 22}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_020",
+    "image": "data/maps/map_020.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 4560}, {\"id\": 2, \"area_px\": 16090}, {\"id\": 3, \"area_px\": 3413}, {\"id\": 4, \"area_px\": 7826}], \"corridors\": [{\"id\": 1, \"length_px\": 134}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 20}, {\"id\": 6, \"length_px\": 308}, {\"id\": 7, \"length_px\": 21}, {\"id\": 8, \"length_px\": 307}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_021",
+    "image": "data/maps/map_021.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 4560}, {\"id\": 2, \"area_px\": 16090}, {\"id\": 3, \"area_px\": 3413}, {\"id\": 4, \"area_px\": 8664}, {\"id\": 5, \"area_px\": 6636}], \"corridors\": [{\"id\": 1, \"length_px\": 134}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 20}, {\"id\": 6, \"length_px\": 308}, {\"id\": 7, \"length_px\": 21}, {\"id\": 8, \"length_px\": 279}, {\"id\": 9, \"length_px\": 178}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}, {\"x\": 26, \"y\": 291}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_022",
+    "image": "data/maps/map_022.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 4560}, {\"id\": 2, \"area_px\": 24664}, {\"id\": 3, \"area_px\": 3413}, {\"id\": 4, \"area_px\": 8664}, {\"id\": 5, \"area_px\": 6636}], \"corridors\": [{\"id\": 1, \"length_px\": 134}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 20}, {\"id\": 6, \"length_px\": 612}, {\"id\": 7, \"length_px\": 21}, {\"id\": 8, \"length_px\": 279}, {\"id\": 9, \"length_px\": 21}, {\"id\": 10, \"length_px\": 178}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}, {\"x\": 112, \"y\": 249}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_023",
+    "image": "data/maps/map_023.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 4560}, {\"id\": 2, \"area_px\": 29901}, {\"id\": 3, \"area_px\": 3413}, {\"id\": 4, \"area_px\": 8664}, {\"id\": 5, \"area_px\": 6636}], \"corridors\": [{\"id\": 1, \"length_px\": 134}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 20}, {\"id\": 6, \"length_px\": 382}, {\"id\": 7, \"length_px\": 21}, {\"id\": 8, \"length_px\": 303}, {\"id\": 9, \"length_px\": 279}, {\"id\": 10, \"length_px\": 21}, {\"id\": 11, \"length_px\": 178}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}, {\"x\": 112, \"y\": 249}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_024",
+    "image": "data/maps/map_024.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 4560}, {\"id\": 2, \"area_px\": 32378}, {\"id\": 3, \"area_px\": 3413}, {\"id\": 4, \"area_px\": 1050}, {\"id\": 5, \"area_px\": 2537}, {\"id\": 6, \"area_px\": 650}, {\"id\": 7, \"area_px\": 8664}, {\"id\": 8, \"area_px\": 624}, {\"id\": 9, \"area_px\": 6636}, {\"id\": 10, \"area_px\": 208}, {\"id\": 11, \"area_px\": 1462}], \"corridors\": [{\"id\": 1, \"length_px\": 134}, {\"id\": 2, \"length_px\": 165}, {\"id\": 3, \"length_px\": 207}, {\"id\": 4, \"length_px\": 275}, {\"id\": 5, \"length_px\": 65}, {\"id\": 6, \"length_px\": 156}, {\"id\": 7, \"length_px\": 20}, {\"id\": 8, \"length_px\": 21}, {\"id\": 9, \"length_px\": 130}, {\"id\": 10, \"length_px\": 49}, {\"id\": 11, \"length_px\": 303}, {\"id\": 12, \"length_px\": 279}, {\"id\": 13, \"length_px\": 147}, {\"id\": 14, \"length_px\": 70}, {\"id\": 15, \"length_px\": 21}, {\"id\": 16, \"length_px\": 171}, {\"id\": 17, \"length_px\": 178}, {\"id\": 18, \"length_px\": 32}, {\"id\": 19, \"length_px\": 106}], \"doorways\": [], \"obstacles\": [{\"x\": 26, \"y\": 94}, {\"x\": 112, \"y\": 249}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_025",
+    "image": "data/maps/map_025.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 2565}, {\"id\": 2, \"area_px\": 2829}, {\"id\": 3, \"area_px\": 1848}], \"corridors\": [{\"id\": 1, \"length_px\": 153}, {\"id\": 2, \"length_px\": 110}, {\"id\": 3, \"length_px\": 36}, {\"id\": 4, \"length_px\": 87}], \"doorways\": [], \"obstacles\": []}"
+      }
+    ]
+  },
+  {
+    "id": "map_026",
+    "image": "data/maps/map_026.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 2565}, {\"id\": 2, \"area_px\": 6516}, {\"id\": 3, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 153}, {\"id\": 2, \"length_px\": 177}, {\"id\": 3, \"length_px\": 112}, {\"id\": 4, \"length_px\": 36}], \"doorways\": [], \"obstacles\": []}"
+      }
+    ]
+  },
+  {
+    "id": "map_027",
+    "image": "data/maps/map_027.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 16117}, {\"id\": 2, \"area_px\": 2565}, {\"id\": 3, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 424}, {\"id\": 2, \"length_px\": 153}, {\"id\": 3, \"length_px\": 112}, {\"id\": 4, \"length_px\": 36}], \"doorways\": [], \"obstacles\": [{\"x\": 327, \"y\": 122}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_028",
+    "image": "data/maps/map_028.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 23446}, {\"id\": 2, \"area_px\": 2565}, {\"id\": 3, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 631}, {\"id\": 2, \"length_px\": 153}, {\"id\": 3, \"length_px\": 112}, {\"id\": 4, \"length_px\": 36}], \"doorways\": [], \"obstacles\": [{\"x\": 327, \"y\": 122}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_029",
+    "image": "data/maps/map_029.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 6834}, {\"id\": 2, \"area_px\": 26132}, {\"id\": 3, \"area_px\": 2565}, {\"id\": 4, \"area_px\": 3249}, {\"id\": 5, \"area_px\": 242}], \"corridors\": [{\"id\": 1, \"length_px\": 207}, {\"id\": 2, \"length_px\": 699}, {\"id\": 3, \"length_px\": 153}, {\"id\": 4, \"length_px\": 112}, {\"id\": 5, \"length_px\": 36}, {\"id\": 6, \"length_px\": 31}], \"doorways\": [], \"obstacles\": [{\"x\": 327, \"y\": 122}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_030",
+    "image": "data/maps/map_030.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 9979}, {\"id\": 2, \"area_px\": 2200}, {\"id\": 3, \"area_px\": 2574}, {\"id\": 4, \"area_px\": 8727}, {\"id\": 5, \"area_px\": 3136}, {\"id\": 6, \"area_px\": 20019}, {\"id\": 7, \"area_px\": 26132}, {\"id\": 8, \"area_px\": 2565}, {\"id\": 9, \"area_px\": 264}, {\"id\": 10, \"area_px\": 3249}, {\"id\": 11, \"area_px\": 242}], \"corridors\": [{\"id\": 1, \"length_px\": 199}, {\"id\": 2, \"length_px\": 217}, {\"id\": 3, \"length_px\": 139}, {\"id\": 4, \"length_px\": 36}, {\"id\": 5, \"length_px\": 231}, {\"id\": 6, \"length_px\": 110}, {\"id\": 7, \"length_px\": 625}, {\"id\": 8, \"length_px\": 699}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 26}, {\"id\": 11, \"length_px\": 153}, {\"id\": 12, \"length_px\": 32}, {\"id\": 13, \"length_px\": 112}, {\"id\": 14, \"length_px\": 36}, {\"id\": 15, \"length_px\": 31}], \"doorways\": [], \"obstacles\": [{\"x\": 327, \"y\": 122}, {\"x\": 360, \"y\": 202}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_031",
+    "image": "data/maps/map_031.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 9979}, {\"id\": 2, \"area_px\": 2200}, {\"id\": 3, \"area_px\": 2574}, {\"id\": 4, \"area_px\": 8969}, {\"id\": 5, \"area_px\": 3136}, {\"id\": 6, \"area_px\": 21077}, {\"id\": 7, \"area_px\": 26132}, {\"id\": 8, \"area_px\": 2565}, {\"id\": 9, \"area_px\": 5757}, {\"id\": 10, \"area_px\": 1254}, {\"id\": 11, \"area_px\": 3192}, {\"id\": 12, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 199}, {\"id\": 2, \"length_px\": 217}, {\"id\": 3, \"length_px\": 139}, {\"id\": 4, \"length_px\": 36}, {\"id\": 5, \"length_px\": 221}, {\"id\": 6, \"length_px\": 110}, {\"id\": 7, \"length_px\": 559}, {\"id\": 8, \"length_px\": 699}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 26}, {\"id\": 11, \"length_px\": 153}, {\"id\": 12, \"length_px\": 254}, {\"id\": 13, \"length_px\": 77}, {\"id\": 14, \"length_px\": 111}, {\"id\": 15, \"length_px\": 112}, {\"id\": 16, \"length_px\": 36}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 43}, {\"x\": 44, \"y\": 178}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_032",
+    "image": "data/maps/map_032.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 9979}, {\"id\": 2, \"area_px\": 2200}, {\"id\": 3, \"area_px\": 2574}, {\"id\": 4, \"area_px\": 13061}, {\"id\": 5, \"area_px\": 2607}, {\"id\": 6, \"area_px\": 3400}, {\"id\": 7, \"area_px\": 3136}, {\"id\": 8, \"area_px\": 3192}, {\"id\": 9, \"area_px\": 21077}, {\"id\": 10, \"area_px\": 27375}, {\"id\": 11, \"area_px\": 2565}, {\"id\": 12, \"area_px\": 5757}, {\"id\": 13, \"area_px\": 1254}, {\"id\": 14, \"area_px\": 3192}, {\"id\": 15, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 199}, {\"id\": 2, \"length_px\": 217}, {\"id\": 3, \"length_px\": 139}, {\"id\": 4, \"length_px\": 611}, {\"id\": 5, \"length_px\": 140}, {\"id\": 6, \"length_px\": 187}, {\"id\": 7, \"length_px\": 36}, {\"id\": 8, \"length_px\": 110}, {\"id\": 9, \"length_px\": 111}, {\"id\": 10, \"length_px\": 559}, {\"id\": 11, \"length_px\": 699}, {\"id\": 12, \"length_px\": 27}, {\"id\": 13, \"length_px\": 26}, {\"id\": 14, \"length_px\": 153}, {\"id\": 15, \"length_px\": 254}, {\"id\": 16, \"length_px\": 77}, {\"id\": 17, \"length_px\": 111}, {\"id\": 18, \"length_px\": 112}, {\"id\": 19, \"length_px\": 36}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}, {\"x\": 34, \"y\": 178}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_033",
+    "image": "data/maps/map_033.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 2607}, {\"id\": 2, \"area_px\": 3268}, {\"id\": 3, \"area_px\": 903}, {\"id\": 4, \"area_px\": 2554}, {\"id\": 5, \"area_px\": 3105}, {\"id\": 6, \"area_px\": 1848}], \"corridors\": [{\"id\": 1, \"length_px\": 140}, {\"id\": 2, \"length_px\": 187}, {\"id\": 3, \"length_px\": 37}, {\"id\": 4, \"length_px\": 66}, {\"id\": 5, \"length_px\": 28}, {\"id\": 6, \"length_px\": 110}, {\"id\": 7, \"length_px\": 87}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_034",
+    "image": "data/maps/map_034.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 2607}, {\"id\": 2, \"area_px\": 3268}, {\"id\": 3, \"area_px\": 903}, {\"id\": 4, \"area_px\": 14080}, {\"id\": 5, \"area_px\": 2554}, {\"id\": 6, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 140}, {\"id\": 2, \"length_px\": 187}, {\"id\": 3, \"length_px\": 37}, {\"id\": 4, \"length_px\": 66}, {\"id\": 5, \"length_px\": 379}, {\"id\": 6, \"length_px\": 28}, {\"id\": 7, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_035",
+    "image": "data/maps/map_035.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 7383}, {\"id\": 2, \"area_px\": 2607}, {\"id\": 3, \"area_px\": 3268}, {\"id\": 4, \"area_px\": 1013}, {\"id\": 5, \"area_px\": 25195}, {\"id\": 6, \"area_px\": 2554}, {\"id\": 7, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 493}, {\"id\": 2, \"length_px\": 140}, {\"id\": 3, \"length_px\": 187}, {\"id\": 4, \"length_px\": 37}, {\"id\": 5, \"length_px\": 75}, {\"id\": 6, \"length_px\": 600}, {\"id\": 7, \"length_px\": 28}, {\"id\": 8, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_036",
+    "image": "data/maps/map_036.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 13545}, {\"id\": 2, \"area_px\": 2607}, {\"id\": 3, \"area_px\": 3268}, {\"id\": 4, \"area_px\": 1606}, {\"id\": 5, \"area_px\": 3192}, {\"id\": 6, \"area_px\": 3094}, {\"id\": 7, \"area_px\": 30303}, {\"id\": 8, \"area_px\": 4095}, {\"id\": 9, \"area_px\": 2554}, {\"id\": 10, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 642}, {\"id\": 2, \"length_px\": 140}, {\"id\": 3, \"length_px\": 187}, {\"id\": 4, \"length_px\": 37}, {\"id\": 5, \"length_px\": 87}, {\"id\": 6, \"length_px\": 111}, {\"id\": 7, \"length_px\": 123}, {\"id\": 8, \"length_px\": 831}, {\"id\": 9, \"length_px\": 27}, {\"id\": 10, \"length_px\": 134}, {\"id\": 11, \"length_px\": 28}, {\"id\": 12, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_037",
+    "image": "data/maps/map_037.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 9099}, {\"id\": 2, \"area_px\": 13908}, {\"id\": 3, \"area_px\": 2607}, {\"id\": 4, \"area_px\": 3268}, {\"id\": 5, \"area_px\": 3136}, {\"id\": 6, \"area_px\": 3192}, {\"id\": 7, \"area_px\": 2928}, {\"id\": 8, \"area_px\": 3094}, {\"id\": 9, \"area_px\": 30303}, {\"id\": 10, \"area_px\": 495}, {\"id\": 11, \"area_px\": 4095}, {\"id\": 12, \"area_px\": 2554}, {\"id\": 13, \"area_px\": 3192}, {\"id\": 14, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 123}, {\"id\": 2, \"length_px\": 199}, {\"id\": 3, \"length_px\": 353}, {\"id\": 4, \"length_px\": 350}, {\"id\": 5, \"length_px\": 140}, {\"id\": 6, \"length_px\": 187}, {\"id\": 7, \"length_px\": 37}, {\"id\": 8, \"length_px\": 110}, {\"id\": 9, \"length_px\": 111}, {\"id\": 10, \"length_px\": 209}, {\"id\": 11, \"length_px\": 123}, {\"id\": 12, \"length_px\": 831}, {\"id\": 13, \"length_px\": 27}, {\"id\": 14, \"length_px\": 27}, {\"id\": 15, \"length_px\": 31}, {\"id\": 16, \"length_px\": 134}, {\"id\": 17, \"length_px\": 28}, {\"id\": 18, \"length_px\": 111}, {\"id\": 19, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_038",
+    "image": "data/maps/map_038.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 10100}, {\"id\": 2, \"area_px\": 2200}, {\"id\": 3, \"area_px\": 13908}, {\"id\": 4, \"area_px\": 2607}, {\"id\": 5, \"area_px\": 3268}, {\"id\": 6, \"area_px\": 3136}, {\"id\": 7, \"area_px\": 3192}, {\"id\": 8, \"area_px\": 2928}, {\"id\": 9, \"area_px\": 3094}, {\"id\": 10, \"area_px\": 30303}, {\"id\": 11, \"area_px\": 3929}, {\"id\": 12, \"area_px\": 4095}, {\"id\": 13, \"area_px\": 2554}, {\"id\": 14, \"area_px\": 5757}, {\"id\": 15, \"area_px\": 1254}, {\"id\": 16, \"area_px\": 3192}, {\"id\": 17, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 199}, {\"id\": 2, \"length_px\": 217}, {\"id\": 3, \"length_px\": 353}, {\"id\": 4, \"length_px\": 350}, {\"id\": 5, \"length_px\": 140}, {\"id\": 6, \"length_px\": 187}, {\"id\": 7, \"length_px\": 37}, {\"id\": 8, \"length_px\": 110}, {\"id\": 9, \"length_px\": 111}, {\"id\": 10, \"length_px\": 209}, {\"id\": 11, \"length_px\": 123}, {\"id\": 12, \"length_px\": 831}, {\"id\": 13, \"length_px\": 27}, {\"id\": 14, \"length_px\": 27}, {\"id\": 15, \"length_px\": 220}, {\"id\": 16, \"length_px\": 134}, {\"id\": 17, \"length_px\": 26}, {\"id\": 18, \"length_px\": 28}, {\"id\": 19, \"length_px\": 254}, {\"id\": 20, \"length_px\": 77}, {\"id\": 21, \"length_px\": 111}, {\"id\": 22, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}, {\"x\": 34, \"y\": 178}]}"
+      }
+    ]
+  },
+  {
+    "id": "map_039",
+    "image": "data/maps/map_039.png",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "You are a building-map analyst.\nLegend: black=unknown, dark-gray=free, medium-gray=wall, light-gray=door, white=static.\nTasks: (1) Detect rooms (free regions bounded by walls/unknown), (2) Detect corridors (narrow free passages) and give approx length in pixels, (3) Detect doorways = light-gray pixels connecting free space on both sides of a wall line, (4) Detect obstacles = static pixels inside free space.\nOutput JSON only with keys: rooms, corridors, doorways, obstacles."
+      },
+      {
+        "from": "gpt",
+        "value": "{\"rooms\": [{\"id\": 1, \"area_px\": 10100}, {\"id\": 2, \"area_px\": 2200}, {\"id\": 3, \"area_px\": 1848}, {\"id\": 4, \"area_px\": 13908}, {\"id\": 5, \"area_px\": 2607}, {\"id\": 6, \"area_px\": 3268}, {\"id\": 7, \"area_px\": 3136}, {\"id\": 8, \"area_px\": 3192}, {\"id\": 9, \"area_px\": 2928}, {\"id\": 10, \"area_px\": 3094}, {\"id\": 11, \"area_px\": 30303}, {\"id\": 12, \"area_px\": 3929}, {\"id\": 13, \"area_px\": 4095}, {\"id\": 14, \"area_px\": 2554}, {\"id\": 15, \"area_px\": 5757}, {\"id\": 16, \"area_px\": 1254}, {\"id\": 17, \"area_px\": 3192}, {\"id\": 18, \"area_px\": 3249}], \"corridors\": [{\"id\": 1, \"length_px\": 199}, {\"id\": 2, \"length_px\": 217}, {\"id\": 3, \"length_px\": 117}, {\"id\": 4, \"length_px\": 353}, {\"id\": 5, \"length_px\": 350}, {\"id\": 6, \"length_px\": 140}, {\"id\": 7, \"length_px\": 187}, {\"id\": 8, \"length_px\": 37}, {\"id\": 9, \"length_px\": 110}, {\"id\": 10, \"length_px\": 111}, {\"id\": 11, \"length_px\": 209}, {\"id\": 12, \"length_px\": 123}, {\"id\": 13, \"length_px\": 831}, {\"id\": 14, \"length_px\": 27}, {\"id\": 15, \"length_px\": 27}, {\"id\": 16, \"length_px\": 220}, {\"id\": 17, \"length_px\": 134}, {\"id\": 18, \"length_px\": 26}, {\"id\": 19, \"length_px\": 28}, {\"id\": 20, \"length_px\": 254}, {\"id\": 21, \"length_px\": 77}, {\"id\": 22, \"length_px\": 111}, {\"id\": 23, \"length_px\": 112}], \"doorways\": [], \"obstacles\": [{\"x\": 360, \"y\": 33}, {\"x\": 34, \"y\": 178}]}"
+      }
+    ]
+  }
+]

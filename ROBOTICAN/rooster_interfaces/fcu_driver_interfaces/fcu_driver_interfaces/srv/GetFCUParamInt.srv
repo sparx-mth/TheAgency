@@ -1,6 +1,0 @@
-# Request
-string id
----
-# Response
-int32 value
-bool success

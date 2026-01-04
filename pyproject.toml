@@ -1,12 +1,14 @@
 [tool.poetry]
-name = "agency-planner"
+name = "sparx_agency"
 version = "0.1.0"
 description = ""
-authors = ["NadavCherry"]
-readme = ["README.md", "docs/planner/README.md"]
+authors = ["NadavCherry", "Shir Ben Ami", "Daphna Ashkenazi", "Moshe Beutel"]
+readme = ["README.md"]
 
 packages = [
-    { include = "planner", from="src"}
+    { include = "core", from="sparx_agency"},
+    { include = "robots", from="sparx_agency"},
+    { include = "tasks", from="sparx_agency"}
 ]
 
 [tool.poetry.dependencies]
@@ -19,8 +21,8 @@ matplotlib = "^3.10.3"
 seaborn = "^0.13.2"
 
 [tool.poetry.scripts]
-benchmark = "planner.evaluation.benchmark_runner:main"
-analyze = "planner.evaluation.analyze_results:main"
+benchmark = "sparx_agency.core.planning.evaluation.benchmark_runner:main"
+analyze = "sparx_agency.core.planning.evaluation.analyze_results:main"
 
 
 [build-system]

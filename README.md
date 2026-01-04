@@ -1,31 +1,45 @@
-# The Agency
-This repo hosts code gatthered and developed for The Agency Project in SPARX.
+# SPARX Agency Packages
 
-The aim of this project is to develope group capabilities using drones.
+## Package Overview
 
-Contents:
-1. [Multi Planner](#Multi-Planner)
-2. [Multi SLAM](#Multi-SLAM)
+The SPARX Agency system is composed of several packages, each of which provides a specific functionality or feature.
 
-## Multi-Planner
-See `agency-planner` [documentation](docs/planner/README.md).
-
-## Multi-SLAM
-
-![Multi-SLAM](docs/images/covins_demo.png)
+![Package Diagram](docs/diagrams/block_diagram.svg)
 
 
-The first task of The Agency is explore and map an unknown indoor enviornment.
-The SLAM problem will be solved by multiple agents and this mulkti SLAM shall be done using COVINS.
+### Core Package
 
-### COVINS
-* [Project](https://asl.ethz.ch/v4rl/research/datasets-code1/code--multi-robot-coordination-for-autonomous-navigation-in-part1.html)
-* [Code](https://github.com/VIS4ROB-lab/covins)
-* [Paper](https://arxiv.org/abs/2108.05756)
+The core package contains fundamental components and utilities used across the project. It includes base classes, common
+utilities, and core functionality for drone operations.
 
-![COVINS Overview](docs/images/covins_overview.png)
+[Core Package Documentation](sparx_agency/core/README.md)
 
-COVINS algorithm acts as a server for several clients preforming ORB-SLAM in the same environment.
+### Demos Package
 
-An overview of ORB-SLAM3 is given [here](docs/orb_slam_components.md).
+Contains demonstration programs and example implementations showcasing various features of the SPARX Agency system.
+Useful for learning and testing purposes.
+
+[Demos Package Documentation](sparx_agency/demos/README.md)
+
+### Robots Package
+
+Contains platform specific code for controlling the drone hardware e.g. Xtend, Robotican, etc.
+
+[Interfaces Package Documentation](sparx_agency/robots/README.md)
+
+### Tasks Package
+
+Implementation of specific mission tasks and behaviors that can be assigned to drones, including navigation, mapping,
+and coordination tasks.
+
+[Tasks Package Documentation](sparx_agency/tasks/README.md)
+
+## Package Dependencies
+
+- Core: Base package, no dependencies
+- Interfaces: Depends on core
+- Tasks: Depends on core and interfaces
+- Demos: May depend on all other packages
+
+For detailed implementation information, please refer to each package's individual documentation.
 

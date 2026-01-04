@@ -69,7 +69,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
-docs/_build/
+pre_baseline/docs/_build/
 
 # PyBuilder
 .pybuilder/
@@ -169,6 +169,6 @@ isaac_sim/logs/*
 orb_slam_module
 
 ROBOTICAN/examples/src/*.csv
-ROBOTICAN/examples/src/keyboard_contorl/csv/*
-ROBOTICAN/examples/src/keyboard_contorl/__pycache__/
-ROBOTICAN/examples/src/paths/*
+src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/csv/*
+src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/__pycache__/
+src/interfaces/ROBOTICAN/examples/src/paths/*
