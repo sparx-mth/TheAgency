@@ -286,16 +286,16 @@ class ControllerAutomation:
         print(f"Scenario created... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         scenario = [
-            self.disarm_robot(),
-            self.arm_robot(),
-            self.takeoff(),
-            self.move_forward(400),
-            self.move_backward(400),
+            # self.disarm_robot(),
+            # self.arm_robot(),
+            # self.takeoff(),
+            # self.move_forward(400),
+            # self.move_backward(400),
             # self.move_left(100),
             # self.move_right(100),
             # self.move_up(100),
             # self.move_down(100),
-            self.rotate_left(3000),
+            # self.rotate_left(3000),
             # self.rotate_right(100),
             # self.full_rotation(1),
             # self.full_rotation(-1),
