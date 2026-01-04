@@ -1,0 +1,10 @@
+# Request
+
+uint8 bandwidth
+
+---
+
+# Response
+bool success
+string message
+

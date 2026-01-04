@@ -1,0 +1,13 @@
+
+#goal
+string file_name
+string file_checksum
+uint64 file_size
+---
+#result
+string message
+bool success
+---
+#feedback
+float32 progress # Progress in percentage
+

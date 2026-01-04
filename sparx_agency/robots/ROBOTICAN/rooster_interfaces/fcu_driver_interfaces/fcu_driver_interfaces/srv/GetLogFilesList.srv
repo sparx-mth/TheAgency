@@ -1,0 +1,9 @@
+# Request
+---
+# Response
+uint32[] id
+string[] date
+uint32[] size_bytes
+
+bool success   # indicate successful run of triggered service
+string message # informational, e.g. for error messages

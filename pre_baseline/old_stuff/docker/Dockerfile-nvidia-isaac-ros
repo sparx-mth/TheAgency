@@ -1,0 +1,37 @@
+FROM nvcr.io/nvidia/isaac-sim:4.0.0
+
+RUN apt-get update && apt-get install -y \
+    lsb-release \
+    gnupg2 \
+    curl \
+    tmux \
+    git \
+    tree
+
+
+# Isaac-ROS - following https://docs.omniverse.nvidia.com/isaacsim/latest/installation/install_ros.html
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt install -y ros-humble-ros-base ros-humble-vision-msgs ros-humble-ackermann-msgs
+
+WORKDIR /isaac-sim
+RUN git clone https://github.com/isaac-sim/IsaacSim-ros_workspaces
+RUN apt install -y python3-rosdep python3-rosinstall python3-rosinstall-generator python3-wstool build-essential python3-colcon-common-extensions
+WORKDIR /isaac-sim/IsaacSim-ros_workspaces/humble_ws
+
+# Initialize rosdep
+RUN sudo rosdep init && sudo rosdep update
+# Source ROS setup and run your commands
+RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
+    rosdep install -i --from-path src --rosdistro humble -y && \
+    colcon build"
+
+RUN apt-get install -y ros-humble-rqt-tf-tree
+
+ENV TERM=xterm-color
+ENV ROS_DISTRO=humble
+
+WORKDIR /isaac-sim
+
+CMD ["bash"]

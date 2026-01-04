@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <defs>
+    <style type="text/css"><![CDATA[
+      .title {font: bold 28px sans-serif; fill: #0b4f9d;}
+      .subtitle {font: bold 22px sans-serif; fill: #0b4f9d;}
+      .label {font: 18px sans-serif; fill: #222;}
+      .small {font: 14px sans-serif; fill: #333;}
+      .box {fill: #f5f8ff; stroke: #0b4f9d; stroke-width: 2;}
+      .group {fill: #ffffff; stroke: #888; stroke-width: 2;}
+      .core {fill: #eef6ff; stroke: #1d6fd3; stroke-width: 3;}
+      .demos {fill: #fee6ee; stroke: #1d6fd3; stroke-width: 3;}
+      .task {fill: #fff7e6; stroke: #d47f00; stroke-width: 2;}
+      .robot {fill: #9f99e0; stroke: #ff7f99; stroke-width: 2;}
+      .arrow {stroke: #444; stroke-width: 2; marker-end: url(#arrowhead);}
+      .dashed {stroke-dasharray: 6 6;}
+    ]]></style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#444" />
+    </marker>
+  </defs>
+
+  <!-- Diagram title -->
+  <text x="600" y="50" text-anchor="middle" class="title">Robotics Package Architecture</text>
+
+  <!-- CORE group -->
+  <rect x="100" y="120" width="550" height="360" rx="12" class="group" />
+  <text x="375" y="155" text-anchor="middle" class="subtitle">Core</text>
+  <text x="375" y="185" text-anchor="middle" class="small">Algorithms &amp; Services</text>
+
+  <!-- Mapping block -->
+  <rect x="130" y="220" width="240" height="100" rx="10" class="box" />
+  <text x="250" y="265" text-anchor="middle" class="label">Mapping</text>
+  <text x="250" y="292" text-anchor="middle" class="small">SLAM / Occupancy Grid / 3D Map</text>
+
+  <!-- Localization block -->
+  <rect x="380" y="220" width="240" height="100" rx="10" class="box" />
+  <text x="500" y="265" text-anchor="middle" class="label">Localization</text>
+  <text x="500" y="292" text-anchor="middle" class="small">Pose Estimation / Sensor Fusion</text>
+
+  <!-- Planning block -->
+  <rect x="255" y="340" width="240" height="100" rx="10" class="box" />
+  <text x="375" y="385" text-anchor="middle" class="label">Planning</text>
+  <text x="375" y="412" text-anchor="middle" class="small">Global &amp; Local Path / Task Planning</text>
+
+  <!-- Shared interfaces (optional depiction) -->
+<!--  <text x="375" y="465" text-anchor="middle" class="small">Common APIs: map_server, pose_service, planner_service</text>-->
+<!---->
+  <!-- TASKS group -->
+  <rect x="700" y="120" width="400" height="310" rx="12" class="group" />
+  <text x="900" y="160" text-anchor="middle" class="subtitle">Tasks</text>
+  <text x="900" y="180" text-anchor="middle" class="small">High-level task implementations</text>
+
+  <!-- Task: Exploration -->
+  <rect x="730" y="210" width="350" height="80" rx="10" class="task" />
+  <text x="905" y="240" text-anchor="middle" class="label">Explore Indoor Area</text>
+  <text x="905" y="265" text-anchor="middle" class="small">Uses: Mapping/Localization/Planning</text>
+
+  <!-- Task: Find Object -->
+  <rect x="730" y="300" width="350" height="80" rx="10" class="task" />
+  <text x="905" y="330" text-anchor="middle" class="label">Find an Object</text>
+  <text x="905" y="355" text-anchor="middle" class="small">Uses: Planning/Mapping/Localization</text>
+
+    <!-- DEMOS group -->
+    <rect x="700" y="440" width="400" height="300" rx="12" class="group" />
+    <text x="900" y="480" text-anchor="middle" class="subtitle">Demos</text>
+    <text x="900" y="500" text-anchor="middle" class="small">Runnable SPARX Demo</text>
+
+        <!-- DEMO: VLM on the edge -->
+    <rect x="730" y="540" width="350" height="80" rx="12" class="demos" />
+    <text x="900" y="580" text-anchor="middle" class="label">Demo No 1 - VLM on the edge</text>
+    <text x="900" y="600" text-anchor="middle" class="small">Rotating camera open set object detection</text>
+
+         <!-- DEMO: VLM on rooster -->
+    <rect x="730" y="640" width="350" height="80" rx="12" class="demos" />
+    <text x="900" y="680" text-anchor="middle" class="label">Demo No 2 - VLM on rooster</text>
+    <text x="900" y="700" text-anchor="middle" class="small">Rotating rooster open set object detection </text>
+
+
+
+
+    <!-- ROBOTS group -->
+    <rect x="100" y="500" width="550" height="240" rx="12" class="group" />
+    <text x="380" y="530" text-anchor="middle" class="subtitle">Robots</text>
+    <text x="380" y="550" text-anchor="middle" class="small">Specific Platforms Code</text>
+
+        <!-- DEMO: VLM on the edge -->
+    <rect x="130" y="580" width="470" height="60" rx="12" class="robot" />
+    <text x="350" y="615" text-anchor="middle" class="label">XTEND</text>
+
+         <!-- DEMO: VLM on rooster -->
+    <rect x="130" y="650" width="470" height="60" rx="12" class="robot" />
+    <text x="350" y="685" text-anchor="middle" class="label">ROBOTICAN</text>
+
+
+
+<!--  &lt;!&ndash; Dependencies arrows from Tasks to Core &ndash;&gt;-->
+<!--  &lt;!&ndash; From Exploration to Mapping &ndash;&gt;-->
+<!--  <line x1="730" y1="330" x2="370" y2="270" class="arrow" />-->
+<!--  &lt;!&ndash; From Exploration to Localization &ndash;&gt;-->
+<!--  <line x1="1080" y1="330" x2="500" y2="270" class="arrow" />-->
+<!--  &lt;!&ndash; From Exploration to Planning &ndash;&gt;-->
+<!--  <line x1="905" y1="370" x2="375" y2="390" class="arrow" />-->
+
+<!--  &lt;!&ndash; From Find Object to Planning &ndash;&gt;-->
+<!--  <line x1="905" y1="430" x2="375" y2="390" class="arrow dashed" />-->
+<!--  &lt;!&ndash; From Find Object to Mapping &ndash;&gt;-->
+<!--  <line x1="730" y1="430" x2="250" y2="270" class="arrow dashed" />-->
+<!--  &lt;!&ndash; From Find Object to Localization &ndash;&gt;-->
+<!--  <line x1="1080" y1="430" x2="500" y2="270" class="arrow dashed" />-->
+
+  <!-- Legend -->
+<!--  <rect x="100" y="650" width="1000" height="110" rx="10" class="group" />-->
+<!--  <text x="120" y="680" class="small">Legend:</text>-->
+<!--  <circle cx="160" cy="675" r="8" fill="#eef6ff" stroke="#1d6fd3" stroke-width="3" />-->
+<!--  <text x="175" y="680" class="small">Core component</text>-->
+<!--  <circle cx="160" cy="705" r="8" fill="#fff7e6" stroke="#d47f00" stroke-width="2" />-->
+<!--  <text x="175" y="710" class="small">Task module</text>-->
+<!--  <line x1="150" y1="735" x2="170" y2="735" class="arrow" />-->
+<!--  <text x="175" y="740" class="small">Strong dependency (direct API call)</text>-->
+<!--  <line x1="380" y1="735" x2="400" y2="735" class="arrow dashed" />-->
+<!--  <text x="405" y="740" class="small">Typical/indirect dependency</text>-->
+</svg>

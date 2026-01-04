@@ -1,0 +1,10 @@
+# Request
+
+uint16 frequency
+
+---
+
+# Response
+bool success
+string message
+
