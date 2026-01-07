@@ -1,4 +1,4 @@
-# core/common/types/__init__.py
+from .perception import Intrinsics, PoseSE3, RGBFrame, DepthFrame, PointCloud, Observation
 
 from .primitives import (
     Number, Coord2D, Coord3D, Index2D, Index3D,
@@ -26,3 +26,6 @@ from .control import (
     ControlMode, ControlCommand,
     KinematicLimits,
 )
+
+__all__ = ["Intrinsics", "PoseSE3", "RGBFrame", "DepthFrame", "PointCloud", "Observation", "Coord2D", "Coord3D", "Index2D", "Index3D", "Number"]
+

@@ -1,0 +1,37 @@
+mode: gazebo
+
+topics:
+  rgb: /simple_drone/front/image_raw
+  camera_info: /simple_drone/front/camera_info
+  odom: /simple_drone/odom
+
+frames:
+  # we will strip leading "/" from incoming frames
+  strip_leading_slash: true
+  map_frame: simple_drone/odom
+  base_frame: simple_drone/base_footprint
+  camera_frame: simple_drone/front_cam_link
+
+intrinsics:
+  source: camera_info   # or "fixed"
+  fixed:
+    width: 640
+    height: 360
+    fx: 185.6909
+    fy: 185.6909
+    cx: 320.5
+    cy: 180.5
+
+mapping:
+  resolution_m: 0.30
+  size_x_m: 40.0
+  size_y_m: 40.0
+  z_min: -0.5
+  z_max: 3.0
+  range_max: 12.0
+  log_odds:
+    l0: 0.0
+    locc: 0.85
+    lfree: -0.4
+    lmin: -3.5
+    lmax: 3.5

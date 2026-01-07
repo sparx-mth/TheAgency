@@ -65,3 +65,10 @@ class Pose3D:
 
     def position(self) -> Vec3:
         return Vec3(self.x, self.y, self.z)
+
+
+@dataclass
+class PoseSE3:
+    # T_map_cam (or T_map_base), 4x4 homogeneous
+    T: np.ndarray  # shape (4,4), float64
+    stamp_sec: float
