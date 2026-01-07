@@ -11,7 +11,6 @@ import cv2
 import numpy as np
 
 import rclpy
-from cv_bridge import CvBridge
 from depth_anything_v2.dpt import DepthAnythingV2
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
@@ -221,7 +220,6 @@ class GazeboRos2Ingest(Node):
         self.declare_parameter("depth_grid_w", 50)
         self.declare_parameter("depth_grid_h", 50)
 
-        self._bridge = CvBridge()
         self._dbg_count = 0
 
         # Debug publishers
@@ -350,7 +348,7 @@ class GazeboRos2Ingest(Node):
         self._dbg_count += 1
         if depth_m is not None and debug_depth:
             # raw 32FC1
-            depth_msg = self._bridge.cv2_to_imgmsg(depth_m.astype(np.float32), encoding="32FC1")
+            depth_msg = self.numpy_to_image_msg(depth_m.astype(np.float32), frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="32FC1")
             depth_msg.header = msg.header
             depth_msg.header.frame_id = cam_frame
             self.pub_depth_raw.publish(depth_msg)
@@ -358,7 +356,7 @@ class GazeboRos2Ingest(Node):
             # vis mono8
             vis_u8 = depth_to_vis_u8(depth_m, clip_min=self.pipeline.cfg.range_min,
                                      clip_max=self.pipeline.cfg.range_max)
-            vis_msg = self._bridge.cv2_to_imgmsg(vis_u8, encoding="mono8")
+            vis_msg = self.numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="mono8")
             vis_msg.header = msg.header
             vis_msg.header.frame_id = cam_frame
             self.pub_depth_vis.publish(vis_msg)
@@ -368,7 +366,8 @@ class GazeboRos2Ingest(Node):
                 grid_vis = make_depth_grid_vis(depth_m, grid_w, grid_h,
                                                clip_min=self.pipeline.cfg.range_min,
                                                clip_max=self.pipeline.cfg.range_max)
-                grid_msg = self._bridge.cv2_to_imgmsg(grid_vis, encoding="bgr8")
+                grid_msg = self.numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="bgr8")
+                grid_msg.header = msg.header
                 grid_msg.header = msg.header
                 grid_msg.header.frame_id = cam_frame
                 self.pub_depth_grid.publish(grid_msg)
@@ -408,6 +407,68 @@ class GazeboRos2Ingest(Node):
             f"Published occupancy grid {occ_msg.info.width}x{occ_msg.info.height} "
             f"res={occ_msg.info.resolution:.3f} frame={occ_msg.header.frame_id}"
         )
+
+    def image_msg_to_numpy(self, msg: Image) -> np.ndarray:
+        """
+        Supports: rgb8, bgr8, mono8, 32FC1
+        Returns a numpy view/copy shaped (H,W,C) or (H,W).
+        """
+        h = msg.height
+        w = msg.width
+        enc = msg.encoding.lower()
+
+        if enc in ("rgb8", "bgr8"):
+            arr = np.frombuffer(msg.data, dtype=np.uint8)
+            arr = arr.reshape((h, w, 3))
+            return arr
+
+        if enc in ("mono8",):
+            arr = np.frombuffer(msg.data, dtype=np.uint8)
+            return arr.reshape((h, w))
+
+        if enc in ("32fc1",):
+            arr = np.frombuffer(msg.data, dtype=np.float32)
+            return arr.reshape((h, w))
+
+        raise ValueError(f"Unsupported encoding: {msg.encoding}")
+
+    def numpy_to_image_msg(self, arr: np.ndarray, *, frame_id: str, stamp, encoding: str) -> Image:
+        """
+        Create sensor_msgs/Image from numpy without cv_bridge.
+        encoding examples: 'rgb8', 'bgr8', 'mono8', '32FC1'
+        """
+        msg = Image()
+        msg.header.stamp = stamp
+        msg.header.frame_id = frame_id
+
+        if encoding.lower() in ("rgb8", "bgr8"):
+            assert arr.ndim == 3 and arr.shape[2] == 3 and arr.dtype == np.uint8
+            msg.height, msg.width = arr.shape[0], arr.shape[1]
+            msg.encoding = encoding
+            msg.is_bigendian = False
+            msg.step = msg.width * 3
+            msg.data = arr.tobytes()
+            return msg
+
+        if encoding.lower() == "mono8":
+            assert arr.ndim == 2 and arr.dtype == np.uint8
+            msg.height, msg.width = arr.shape
+            msg.encoding = "mono8"
+            msg.is_bigendian = False
+            msg.step = msg.width
+            msg.data = arr.tobytes()
+            return msg
+
+        if encoding.lower() == "32fc1":
+            assert arr.ndim == 2 and arr.dtype == np.float32
+            msg.height, msg.width = arr.shape
+            msg.encoding = "32FC1"
+            msg.is_bigendian = False
+            msg.step = msg.width * 4
+            msg.data = arr.tobytes()
+            return msg
+
+        raise ValueError(f"Unsupported encoding: {encoding}")
 
 
 def main():
