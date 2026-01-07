@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Simple WebSocket test server to receive virtual controller messages.
 Use this to test the automation.py client.

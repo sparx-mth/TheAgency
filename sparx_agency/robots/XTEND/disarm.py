@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 WebSocket Virtual Controller Client
 Sends and/or receives virtual controller data via WebSocket at a configurable rate.
