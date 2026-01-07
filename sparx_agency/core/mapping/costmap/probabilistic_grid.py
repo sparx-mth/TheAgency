@@ -83,89 +83,108 @@ class ProbabilisticGridCostmap(Costmap):
 
         return spec, grid
 
-    def update_from_cloud_cam_raycast(
+    def update_from_cloud_base_raycast(
             self,
-            cloud_cam: np.ndarray,  # Nx3 in optical cam convention
-            pose_xy_yaw: tuple[float, float, float],
+            cloud_base: np.ndarray,  # Nx3 in BASE coords (x fwd, y left, z up)
+            robot_xy_yaw: tuple[float, float, float],
             stamp_sec: Optional[float] = None,
     ) -> None:
         """
         Option B:
-          - Convert optical cloud to ground-plane points relative to robot
-          - Ray-cast from robot cell to endpoint cell:
-                traversed cells -> free evidence
-                endpoint cell   -> occupied evidence
-        pose_xy_yaw is robot base in map frame.
+          - raycast from robot cell to each point endpoint
+          - cells along ray => free evidence
+          - endpoint cell => occupied evidence
         """
-        if cloud_cam is None or cloud_cam.size == 0:
+        if cloud_base is None or cloud_base.size == 0:
             return
 
-        x0_map, y0_map, yaw = pose_xy_yaw
+        rx, ry, yaw = robot_xy_yaw
+        pts = np.asarray(cloud_base, dtype=np.float32)
 
-        pts = np.asarray(cloud_cam, dtype=np.float32)
-        if pts.ndim != 2 or pts.shape[1] != 3:
-            raise ValueError("cloud_cam must be Nx3")
-
-        # Optical -> base-ish convention.
-        # optical: x right, y down, z forward
-        # base ground: X forward, Y left, Z up
-        if self.cfg.cloud_is_optical:
-            X = pts[:, 2]  # forward
-            Y = -pts[:, 0]  # left
-            Z = -pts[:, 1]  # up
-        else:
-            X, Y, Z = pts[:, 0], pts[:, 1], pts[:, 2]
-
-        # Filter by height and range
-        m = np.isfinite(X) & np.isfinite(Y) & np.isfinite(Z)
-        if self.cfg.z_min_m is not None:
-            m &= (Z >= float(self.cfg.z_min_m))
-        if self.cfg.z_max_m is not None:
-            m &= (Z <= float(self.cfg.z_max_m))
-
-        # Use forward range (X) + lateral (Y) to compute planar range
-        r = np.sqrt(X * X + Y * Y)
-        m &= (r > 0.05) & (r <= float(self.cfg.max_range_m))
-        X, Y = X[m], Y[m]
-        if X.size == 0:
+        # Filter by z and range in BASE
+        x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+        rng = np.sqrt(x * x + y * y)
+        m = (
+                (z >= self.cfg.z_min_m) & (z <= self.cfg.z_max_m) &
+                (rng >= 0.0) & (rng <= self.cfg.max_range_m)
+        )
+        pts = pts[m]
+        if pts.shape[0] == 0:
             return
 
-        # Rotate robot-relative points into map frame using yaw, then translate
-        c = math.cos(yaw)
-        s = math.sin(yaw)
-        px_map = x0_map + (c * X - s * Y)
-        py_map = y0_map + (s * X + c * Y)
+        # Rolling window: shift grid to keep robot near center (optional)
+        if self.cfg.rolling_window:
+            new_origin_x = float(rx) - 0.5 * float(self.cfg.size_m)
+            # center on robot
+            new_origin_y = float(ry) - 0.5 * float(self.cfg.size_m)
+            self._shift_to_new_origin(new_origin_x, new_origin_y)
 
-        # Convert robot origin to grid cell
-        gx0 = int(np.floor((x0_map - self.origin_x) / self.cfg.resolution_m))
-        gy0 = int(np.floor((y0_map - self.origin_y) / self.cfg.resolution_m))
-        if gx0 < 0 or gx0 >= self.width or gy0 < 0 or gy0 >= self.height:
-            # robot outside grid
+        # Robot cell
+        r_cx = int(np.floor((rx - self.origin_x) / self.cfg.resolution_m))
+        r_cy = int(np.floor((ry - self.origin_y) / self.cfg.resolution_m))
+        if not (0 <= r_cx < self.width and 0 <= r_cy < self.height):
             return
 
-        # For performance: sample endpoints (optional)
-        # You can thin points here if needed:
-        # px_map = px_map[::3]; py_map = py_map[::3]
+        cyaw = float(np.cos(yaw))
+        syaw = float(np.sin(yaw))
 
-        # Ray-cast for each endpoint
-        for x1, y1 in zip(px_map, py_map):
-            gx1 = int(np.floor((x1 - self.origin_x) / self.cfg.resolution_m))
-            gy1 = int(np.floor((y1 - self.origin_y) / self.cfg.resolution_m))
-            if gx1 < 0 or gx1 >= self.width or gy1 < 0 or gy1 >= self.height:
+        # For speed, sample points (optional): keep every k-th point if needed
+        # pts = pts[::2]
+
+        for i in range(pts.shape[0]):
+            bx, by = float(pts[i, 0]), float(pts[i, 1])
+
+            # base -> map (2D) using robot pose (x,y,yaw)
+            mx = rx + cyaw * bx - syaw * by
+            my = ry + syaw * bx + cyaw * by
+
+            e_cx = int(np.floor((mx - self.origin_x) / self.cfg.resolution_m))
+            e_cy = int(np.floor((my - self.origin_y) / self.cfg.resolution_m))
+
+            if not (0 <= e_cx < self.width and 0 <= e_cy < self.height):
                 continue
 
-            cells = list(bresenham(gx0, gy0, gx1, gy1))
-            if len(cells) == 0:
-                continue
+            # Trace cells; mark free except final endpoint
+            cells = bresenham(r_cx, r_cy, e_cx, e_cy)
+            last = None
+            for c in cells:
+                last = c
+                # free update (we will overwrite endpoint later)
+                xg, yg = c
+                self._lo[yg, xg] = np.clip(self._lo[yg, xg] + self.cfg.lo_free, self.cfg.lo_min, self.cfg.lo_max)
 
-            # Free along the ray excluding endpoint
-            for gx, gy in cells[:-1]:
-                self._lo[gy, gx] = np.clip(self._lo[gy, gx] + self.cfg.lo_free,
-                                           self.cfg.lo_min, self.cfg.lo_max)
-
-            # Occupied at endpoint
-            ex, ey = cells[-1]
-            self._lo[ey, ex] = np.clip(self._lo[ey, ex] + self.cfg.lo_occ,
-                                       self.cfg.lo_min, self.cfg.lo_max)
+            if last is not None:
+                lx, ly = last
+                self._lo[ly, lx] = np.clip(self._lo[ly, lx] + self.cfg.lo_occ, self.cfg.lo_min, self.cfg.lo_max)
 
         self._last_stamp_sec = stamp_sec
+
+    def _shift_to_new_origin(self, new_origin_x: float, new_origin_y: float) -> None:
+        """
+        Keep grid aligned with world while moving origin.
+        We approximate by integer-cell rolling of the log-odds grid.
+        """
+        res = float(self.cfg.resolution_m)
+        dx_cells = int(np.round((self.origin_x - new_origin_x) / res))
+        dy_cells = int(np.round((self.origin_y - new_origin_y) / res))
+
+        if dx_cells == 0 and dy_cells == 0:
+            self.origin_x = new_origin_x
+            self.origin_y = new_origin_y
+            return
+
+        self._lo = np.roll(self._lo, shift=(dy_cells, dx_cells), axis=(0, 1))
+
+        # clear newly uncovered regions
+        if dy_cells > 0:
+            self._lo[:dy_cells, :] = 0.0
+        elif dy_cells < 0:
+            self._lo[dy_cells:, :] = 0.0
+
+        if dx_cells > 0:
+            self._lo[:, :dx_cells] = 0.0
+        elif dx_cells < 0:
+            self._lo[:, dx_cells:] = 0.0
+
+        self.origin_x = new_origin_x
+        self.origin_y = new_origin_y
