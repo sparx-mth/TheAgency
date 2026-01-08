@@ -1,4 +1,4 @@
-from .params import RRTStarOmplParams
-from .planner import RRTStarOmplPlanner
+from .params import RRTStarParams
+from .planner import RRTStarPlanner
 
-__all__ = ["RRTStarOmplParams", "RRTStarOmplPlanner"]
+__all__ = ["RRTStarPlanner", "RRTStarParams"]
