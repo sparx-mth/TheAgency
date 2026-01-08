@@ -1,14 +1,8 @@
-"""
-Planner interface.
-
-A Planner receives a start/goal and environment context (e.g., Costmap2D)
-and returns a PlanResult containing a geometric path (Path2D).
-"""
-
+"""Planner interface definition."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, Protocol, runtime_checkable
 
 from sparx_agency.core.common.types import Pose2D, PlanResult
 
@@ -16,11 +10,13 @@ from sparx_agency.core.common.types import Pose2D, PlanResult
 @dataclass(frozen=True)
 class PlanRequest:
     """
-    Inputs to the planner.
+    Input to path planners.
 
-    Notes:
-    - Keep this minimal and stable; planners may accept extra options via `options`.
-    - `frame_id` is metadata only (no ROS dependency).
+    Attributes:
+        start: Initial robot pose in world frame.
+        goal: Target pose in world frame.
+        frame_id: Coordinate frame identifier.
+        options: Algorithm-specific options (e.g., timeout override).
     """
     start: Pose2D
     goal: Pose2D
@@ -31,11 +27,10 @@ class PlanRequest:
 @runtime_checkable
 class BasePlanner(Protocol):
     """
-    Planner contract.
+    Protocol for path planners.
 
-    `world` is intentionally typed as Any here to avoid import cycles and to
-    keep planning interfaces decoupled from a specific environment type.
-    In your implementation, it will typically be Costmap2D or similar.
+    Implementations receive a start/goal request and environment,
+    returning a geometric path (no time parameterization).
     """
 
     name: str
@@ -44,7 +39,11 @@ class BasePlanner(Protocol):
         """
         Compute a geometric path from start to goal.
 
+        Args:
+            request: Start and goal poses.
+            world: Environment representation (typically Costmap2D).
+
         Returns:
-            PlanResult with status + optional Path2D and debug artifacts.
+            PlanResult with status, optional Path2D, and debug info.
         """
         ...
