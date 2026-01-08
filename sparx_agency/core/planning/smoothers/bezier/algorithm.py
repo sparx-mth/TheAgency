@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.interpolate import CubicHermiteSpline
 
-from core.common.types.planning import Path2D, TrajectoryPoint
-from core.common.types.control import KinematicLimits
+from sparx_agency.core.common.types.planning import Path2D, TrajectoryPoint
+from sparx_agency.core.common.types.control import KinematicLimits
 from .params import BezierParams
 
 

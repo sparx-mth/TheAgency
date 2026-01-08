@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from core.common.types.planning import Trajectory
-from core.planning.interfaces.smoother import BaseSmoother, SmootherRequest
+from sparx_agency.core.common.types.planning import Trajectory
+from sparx_agency.core.planning.interfaces.smoother import BaseSmoother, SmootherRequest
 
-from core.planning.smoothers.adapter import DiscreteTrajectory
+from sparx_agency.core.planning.smoothers.adapter import DiscreteTrajectory
 from .algorithm import MinSnapAlgorithm
 from .params import MinSnapParams
 

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.planning.interfaces.planner import BasePlanner, PlanRequest
-from core.common.types import PlanResult
+from sparx_agency.core.planning.interfaces.planner import BasePlanner, PlanRequest
+from sparx_agency.core.common.types import PlanResult
 
 from .params import RRTStarOmplParams
 from .algorithm import plan_rrtstar_ompl

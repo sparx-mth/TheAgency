@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
-from core.planning.interfaces.smoother import BaseSmoother
+from sparx_agency.core.planning.interfaces.smoother import BaseSmoother
 
 
 @dataclass(frozen=True)

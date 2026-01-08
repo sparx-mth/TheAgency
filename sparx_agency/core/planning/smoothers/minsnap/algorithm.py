@@ -33,8 +33,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from core.common.types import Path2D
-from core.common.types.planning import TrajectoryPoint
+from sparx_agency.core.common.types import Path2D
+from sparx_agency.core.common.types.planning import TrajectoryPoint
 
 from .params import MinSnapParams
 
