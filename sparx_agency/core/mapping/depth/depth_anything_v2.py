@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
-
+from PIL import Image
 import numpy as np
 
 from sparx_agency.core.mapping.interfaces.depth_model import DepthModel
@@ -43,33 +43,23 @@ class DepthAnythingV2DepthModel(DepthModel):
         )
 
     def infer_depth(self, rgb: np.ndarray) -> np.ndarray:
-        """
-        Input: HxWx3 uint8/float, RGB (or BGR if assume_bgr=True)
-        Output: HxW float32 depth (metric for *Metric* models; otherwise relative depth)
-        """
-        from PIL import Image
+        # 1. Get raw disparity from model (0-255 or 0-N)
+        out = self.pipe(Image.fromarray(rgb))
+        raw_disparity = np.array(out["depth"]).astype(np.float32)
 
-        if rgb is None or rgb.size == 0:
-            raise ValueError("infer_depth got empty image")
+        # 2. Normalize to 0.0 - 1.0
+        d_min = raw_disparity.min()
+        d_max = raw_disparity.max()
+        den = max(d_max - d_min, 1e-6)
+        depth_norm = (raw_disparity - d_min) / den
 
-        img = rgb
-        if img.dtype != np.uint8:
-            # common cases: float32 0..1 or 0..255
-            img = np.clip(img, 0.0, 1.0) if img.max() <= 1.5 else np.clip(img / 255.0, 0.0, 1.0)
-            img = (img * 255.0).astype(np.uint8)
+        # 3. THE FIX: The "Inverted Scale"
+        # To see a person clearly, the points must have a wide Z-range.
+        # Person should be at ~2.0m, Background at ~15.0m.
+        max_range = 5.0
+        min_range = -1.0
 
-        if self.cfg.assume_bgr:
-            img = img[..., ::-1]  # BGR->RGB
+        # This formula flips disparity so high values (close) become small meters
+        depth_m = min_range + (max_range - min_range) * (1.0 - depth_norm)
 
-        pil = Image.fromarray(img, mode="RGB")
-        out = self.pipe(pil)
-
-        # Transformers depth-estimation pipeline returns a PIL image under key "depth"
-        depth_pil = out["depth"]
-        depth = np.array(depth_pil).astype(np.float32)
-
-        # Ensure HxW
-        if depth.ndim == 3:
-            depth = depth[..., 0]
-
-        return depth
+        return depth_m

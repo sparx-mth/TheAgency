@@ -27,15 +27,15 @@ def bresenham(x0: int, y0: int, x1: int, y1: int):
 class ProbabilisticGridConfig:
     # Map geometry
     resolution_m: float = 0.30
-    size_m: float = 12.0                 # 12m x 12m
+    size_m: float = 100.0                 # 12m x 12m
     frame_id: str = "map"
 
     # Rolling window (keeps robot near center, but retains history by shifting grid)
     rolling_window: bool = True
 
     # Evidence model (log-odds)
-    lo_occ: float = 0.85                 # how strongly an endpoint increases occupancy
-    lo_free: float = -0.40               # how strongly a traversed cell decreases occupancy
+    lo_occ: float = 1.2                 # how strongly an endpoint increases occupancy
+    lo_free: float = -0.80               # how strongly a traversed cell decreases occupancy
     lo_min: float = -4.0
     lo_max: float =  4.0
 
