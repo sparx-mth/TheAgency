@@ -7,20 +7,20 @@ from sparx_agency.core.common.types import PlanResult
 from sparx_agency.core.planning.interfaces.planner import BasePlanner, PlanRequest
 from sparx_agency.core.planning.environment import Costmap2D
 
-from .params import RRTStarParams
+from .params import RRTStarOmplParams
 from .algorithm import plan_rrtstar
 
 
 @dataclass
-class RRTStarPlanner(BasePlanner):
+class RRTStarOmplPlanner(BasePlanner):
     """
     RRT* planner that produces geometric paths.
 
     Uses OMPL's RRT* implementation with optional clearance-based
     cost optimization. Output paths are interpolated at uniform spacing.
     """
-    name: str = field(default="rrtstar", init=False)
-    params: RRTStarParams = field(default_factory=RRTStarParams)
+    name: str = field(default="rrtstar_ompl", init=False)
+    params: RRTStarOmplParams = field(default_factory=RRTStarOmplParams)
 
     def plan(self, request: PlanRequest, world: Costmap2D) -> PlanResult:
         """

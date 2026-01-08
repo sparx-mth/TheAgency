@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class RRTStarParams:
+class RRTStarOmplParams:
     """
     Configuration for RRT* path planning.
 

@@ -12,7 +12,7 @@ from typing import List, Optional, TYPE_CHECKING
 from sparx_agency.core.common.types import Path2D, Pose2D, PlanResult, PlanStatus
 from sparx_agency.core.planning.environment import Costmap2D
 
-from .params import RRTStarParams
+from .params import RRTStarOmplParams
 
 if TYPE_CHECKING:
     from ompl import base as ob
@@ -21,32 +21,32 @@ if TYPE_CHECKING:
 try:
     from ompl import base as ob
     from ompl import geometric as og
+    OMPL_AVAILABLE = True
 except ImportError as e:
     ob = None  # type: ignore
     og = None  # type: ignore
     _OMPL_ERROR = str(e)
+    OMPL_AVAILABLE = False
 else:
     _OMPL_ERROR = None
 
 
-class _ClearanceObjective(ob.StateCostIntegralObjective):
-    """Cost objective that penalizes states close to obstacles."""
+def _make_clearance_objective(si, costmap: Costmap2D, weight: float):
+    """Create clearance objective (only called when OMPL is available)."""
+    class _ClearanceObjective(ob.StateCostIntegralObjective):
+        """Cost objective that penalizes states close to obstacles."""
 
-    def __init__(
-        self,
-        si: ob.SpaceInformation,
-        costmap: Costmap2D,
-        weight: float,
-    ) -> None:
-        super().__init__(si, True)
-        self._costmap = costmap
-        self._weight = weight
+        def __init__(self, si, costmap: Costmap2D, weight: float) -> None:
+            super().__init__(si, True)
+            self._costmap = costmap
+            self._weight = weight
 
-    def stateCost(self, state: ob.State) -> ob.Cost:
-        x, y = state()[0], state()[1]
-        clearance = self._costmap.world_clearance(x, y)
-        # Cost inversely proportional to clearance
-        return ob.Cost(self._weight / (clearance + 1.0))
+        def stateCost(self, state) -> ob.Cost:
+            x, y = state[0], state[1]
+            clearance = self._costmap.world_clearance(x, y)
+            return ob.Cost(self._weight / (clearance + 1.0))
+
+    return _ClearanceObjective(si, costmap, weight)
 
 
 def _interpolate_path(points: List[Pose2D], spacing: float) -> List[Pose2D]:
@@ -79,12 +79,7 @@ def _interpolate_path(points: List[Pose2D], spacing: float) -> List[Pose2D]:
     return result
 
 
-def _reduce_path(
-    si: ob.SpaceInformation,
-    costmap: Costmap2D,
-    states: List[ob.State],
-    min_clearance: float,
-) -> List[ob.State]:
+def _reduce_path(si, costmap: Costmap2D, states: List, min_clearance: float) -> List:
     """
     Adaptive waypoint reduction preserving path validity.
 
@@ -106,7 +101,7 @@ def _reduce_path(
     kept = [si.cloneState(states[0])]
 
     for i in range(1, len(states) - 1):
-        x, y = states[i]()[0], states[i]()[1]
+        x, y = states[i][0], states[i][1]
         clearance = costmap.world_clearance(x, y)
         can_skip = si.checkMotion(kept[-1], states[i + 1])
 
@@ -121,7 +116,7 @@ def plan_rrtstar(
     start: Pose2D,
     goal: Pose2D,
     costmap: Costmap2D,
-    params: RRTStarParams,
+    params: RRTStarOmplParams,
 ) -> PlanResult:
     """
     Plan a collision-free path using RRT* with clearance optimization.
@@ -136,7 +131,7 @@ def plan_rrtstar(
         PlanResult containing status and Path2D if successful.
         The path is interpolated at `params.interpolation_spacing` intervals.
     """
-    if ob is None:
+    if not OMPL_AVAILABLE:
         return PlanResult(
             status=PlanStatus.ERROR,
             message=f"OMPL not available: {_OMPL_ERROR}",
@@ -161,24 +156,24 @@ def plan_rrtstar(
     ss = og.SimpleSetup(space)
 
     # State validity checker
-    def is_valid(state: ob.State) -> bool:
-        x, y = state()[0], state()[1]
+    def is_valid(state) -> bool:
+        x, y = state[0], state[1]
         return costmap.is_free(*costmap.world_to_grid(x, y))
 
     ss.setStateValidityChecker(ob.StateValidityCheckerFn(is_valid))
 
     # Set start and goal
     start_state = ob.State(space)
-    start_state()[0], start_state()[1] = start.x, start.y
+    start_state[0], start_state[1] = start.x, start.y
 
     goal_state = ob.State(space)
-    goal_state()[0], goal_state()[1] = goal.x, goal.y
+    goal_state[0], goal_state[1] = goal.x, goal.y
 
     ss.setStartAndGoalStates(start_state, goal_state)
 
     # Clearance objective
     if params.use_clearance_objective and costmap.clearance is not None:
-        objective = _ClearanceObjective(
+        objective = _make_clearance_objective(
             ss.getSpaceInformation(),
             costmap,
             params.clearance_weight,
@@ -201,7 +196,7 @@ def plan_rrtstar(
     reduced = _reduce_path(si, costmap, states, params.min_clearance_for_keep)
 
     # Convert to world poses
-    waypoints = [Pose2D(s()[0], s()[1]) for s in reduced]
+    waypoints = [Pose2D(s[0], s[1]) for s in reduced]
 
     # Free cloned states
     for s in reduced:
@@ -226,5 +221,5 @@ def plan_rrtstar(
                 "waypoints_interpolated": len(waypoints),
             },
         ),
-        message=f"Path found: {n_before} → {len(waypoints)} waypoints",
+        message=f"Path found: {n_before} -> {len(waypoints)} waypoints",
     )
