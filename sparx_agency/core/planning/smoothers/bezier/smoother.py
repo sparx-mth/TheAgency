@@ -1,30 +1,76 @@
+"""Hermite spline trajectory smoother."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from sparx_agency.core.common.types.planning import Trajectory
-from sparx_agency.core.planning.interfaces.smoother import BaseSmoother, SmootherRequest
-
+from sparx_agency.core.common.types import Trajectory
+from sparx_agency.core.planning.interfaces.smoother import SmootherRequest
 from sparx_agency.core.planning.smoothers.adapter import DiscreteTrajectory
-from .algorithm import BezierAlgorithm
-from .params import BezierParams
+
+from . import algorithm
+from .params import HermiteParams
 
 
-class BezierSmoother(BaseSmoother):
-    """Heading-aware Hermite/Bezier-like trajectory smoother."""
-    name: str = "bezier"
+class HermiteSmoother:
+    """
+    G1-continuous trajectory smoother using cubic Hermite splines.
 
-    def __init__(self, *, params: Optional[BezierParams] = None) -> None:
-        self.params = params or BezierParams()
-        self.params.validate()
-        self._algo = BezierAlgorithm(params=self.params)
+    Produces smooth trajectories that pass through all waypoints with
+    tangent continuity. Suitable for ground robots and slow-moving drones.
+
+    Implements BaseSmoother protocol.
+
+    Example:
+        >>> smoother = HermiteSmoother()
+        >>> trajectory = smoother.smooth(SmootherRequest(path=my_path))
+    """
+    name: str = "hermite"
+
+    def __init__(self, params: Optional[HermiteParams] = None) -> None:
+        """
+        Initialize smoother.
+
+        Args:
+            params: Algorithm configuration. Uses defaults if None.
+        """
+        self.params = params or HermiteParams()
 
     def smooth(self, request: SmootherRequest, world: Any = None) -> Trajectory:
-        options: Dict[str, Any] = dict(request.options or {})
-        sol = self._algo.solve(
+        """
+        Smooth path into time-parameterized trajectory.
+
+        Args:
+            request: Path and optional constraints.
+            world: Optional environment context (unused).
+
+        Returns:
+            Discrete trajectory implementing Trajectory protocol.
+        """
+        params = self._merge_options(request.options)
+
+        solution = algorithm.solve(
             path=request.path,
-            limits=request.limits,   # expects KinematicLimits-like (max_speed_xy)
-            options=options,
-            world=world,
+            params=params,
+            limits=request.limits,
         )
-        return DiscreteTrajectory(points=sol.samples)
+
+        return DiscreteTrajectory(points=solution.samples)
+
+    def _merge_options(self, options: Dict[str, Any]) -> HermiteParams:
+        """Override params with request options."""
+        if not options:
+            return self.params
+
+        overrides = {
+            k: v for k, v in options.items()
+            if hasattr(self.params, k)
+        }
+
+        if not overrides:
+            return self.params
+
+        return HermiteParams(**{**self.params.__dict__, **overrides})
+
+
+# Backward compatibility alias
+BezierSmoother = HermiteSmoother

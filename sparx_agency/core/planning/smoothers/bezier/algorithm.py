@@ -1,326 +1,259 @@
+"""
+Cubic Hermite spline smoothing algorithm.
+
+Produces G1-continuous trajectories from waypoint paths by:
+1. Building cubic Hermite splines with computed tangents
+2. Parameterizing by arc length for uniform-speed sampling
+3. Sampling at fixed time intervals
+"""
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.interpolate import CubicHermiteSpline
 
-from sparx_agency.core.common.types.planning import Path2D, TrajectoryPoint
-from sparx_agency.core.common.types.control import KinematicLimits
-from .params import BezierParams
+from sparx_agency.core.common.types import Path2D, TrajectoryPoint, KinematicLimits
+from .params import HermiteParams
 
 
 @dataclass(frozen=True)
-class BezierSolution:
+class HermiteSolution:
+    """Result of Hermite smoothing: discrete trajectory samples."""
     samples: Tuple[TrajectoryPoint, ...]
+    total_length: float
+    total_time: float
 
 
-class BezierAlgorithm:
+def solve(
+    path: Path2D,
+    params: HermiteParams,
+    limits: Optional[KinematicLimits] = None,
+) -> HermiteSolution:
     """
-    Heading-aware smoothing using cubic Hermite splines.
+    Smooth path using cubic Hermite splines.
 
-    Steps:
-      1) Filter near-duplicate waypoints
-      2) Parameterize by chord length
-      3) Compute tangents for G1 heading continuity
-      4) Build arc-length lookup table
-      5) Sample in time at dt -> TrajectoryPoint(t,x,y,vx,vy,s,curvature,yaw)
+    Args:
+        path: Input waypoints with poses.
+        params: Algorithm configuration.
+        limits: Optional kinematic constraints.
+
+    Returns:
+        Smoothed trajectory as discrete samples.
+
+    Raises:
+        ValueError: If fewer than 2 distinct waypoints after filtering.
     """
+    # Extract and filter waypoints
+    pts = np.array([(p.x, p.y) for p in path.points])
+    pts = _filter_close_points(pts, params.min_point_spacing)
 
-    def __init__(self, *, params: BezierParams) -> None:
-        self.params = params
+    if len(pts) < 2:
+        raise ValueError("Hermite smoothing requires at least 2 distinct waypoints")
 
-    def solve(
-        self,
-        *,
-        path: Path2D,
-        limits: Optional[KinematicLimits],
-        options: Dict[str, Any],
-        world: Any = None,
-    ) -> BezierSolution:
-        p = self._merge_params(options)
+    # Compute spline parameter (cumulative chord length)
+    u = _cumulative_chord_length(pts)
 
-        xs, ys, yaws = self._extract_xy_yaw(path)
-        xs, ys, yaws = self._filter_points(xs, ys, yaws, p.min_point_spacing)
-        if len(xs) < 2:
-            raise ValueError("BezierAlgorithm requires at least 2 distinct waypoints")
+    # Compute tangents for G1 continuity
+    tangents = _compute_tangents(pts, u, params.tangent_scale)
 
-        xs_np = np.array(xs, dtype=float)
-        ys_np = np.array(ys, dtype=float)
+    # Build Hermite splines
+    spline_x = CubicHermiteSpline(u, pts[:, 0], tangents[:, 0])
+    spline_y = CubicHermiteSpline(u, pts[:, 1], tangents[:, 1])
 
-        # parameter u = cumulative chord length
-        u = self._compute_parameters(xs_np, ys_np)
+    # Build arc-length lookup table
+    arc_s, arc_u = _build_arc_length_table(spline_x, spline_y, u, params.arc_lut_samples)
+    total_length = float(arc_s[-1])
 
-        dx, dy = self._compute_tangents(xs_np, ys_np, u, p.tangent_scale)
+    # Compute speed and total time
+    speed = _select_speed(params, limits)
+    total_time = total_length / speed if speed > 0 and total_length > 0 else 0.0
 
-        spline_x = CubicHermiteSpline(u, xs_np, dx)
-        spline_y = CubicHermiteSpline(u, ys_np, dy)
+    # Sample trajectory
+    samples = _sample_trajectory(
+        spline_x, spline_y, arc_s, arc_u,
+        total_length, total_time, speed, params.dt,
+        params.zero_endpoint_velocity
+    )
 
-        arc_s, arc_u = self._build_arc_length_lut(spline_x, spline_y, u, p.arc_lut_samples)
-        total_len = float(arc_s[-1])
+    return HermiteSolution(
+        samples=tuple(samples),
+        total_length=total_length,
+        total_time=total_time
+    )
 
-        cruise_speed = self._choose_speed_xy(p, limits)
-        total_time = (total_len / cruise_speed) if (cruise_speed > 0 and total_len > 0) else 0.0
 
-        samples = self._sample_time(
-            spline_x=spline_x,
-            spline_y=spline_y,
-            arc_s=arc_s,
-            arc_u=arc_u,
-            total_len=total_len,
-            total_time=total_time,
-            cruise_speed=cruise_speed,
-            dt=p.dt,
-            endpoints_zero_v=p.constrain_endpoints_velocity_zero,
-        )
+def _filter_close_points(pts: NDArray, min_spacing: float) -> NDArray:
+    """Remove points closer than min_spacing, keeping first and last."""
+    if len(pts) <= 2:
+        return pts
 
-        return BezierSolution(samples=tuple(samples))
+    kept = [pts[0]]
+    for p in pts[1:-1]:
+        if np.linalg.norm(p - kept[-1]) >= min_spacing:
+            kept.append(p)
 
-    # -----------------------
-    # params / options
-    # -----------------------
+    # Always include last point if sufficiently far
+    if np.linalg.norm(pts[-1] - kept[-1]) >= min_spacing * 0.5:
+        kept.append(pts[-1])
+    elif len(kept) > 1:
+        kept[-1] = pts[-1]  # Replace last kept with actual endpoint
+    else:
+        kept.append(pts[-1])
 
-    def _merge_params(self, options: Dict[str, Any]) -> BezierParams:
-        if not options:
-            return self.params
-        data = {**self.params.__dict__}
-        for k, v in options.items():
-            if k in data:
-                data[k] = v
-        merged = BezierParams(**data)
-        merged.validate()
-        return merged
+    return np.array(kept)
 
-    def _choose_speed_xy(self, p: BezierParams, limits: Optional[KinematicLimits]) -> float:
-        if limits is None:
-            return p.nominal_speed_xy
-        # Conservative: clamp by limits.max_speed_xy
-        return min(float(limits.max_speed_xy), float(p.nominal_speed_xy))
 
-    # -----------------------
-    # path extraction
-    # -----------------------
+def _cumulative_chord_length(pts: NDArray) -> NDArray:
+    """Compute cumulative chord-length parameterization."""
+    diffs = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    u = np.zeros(len(pts))
+    u[1:] = np.cumsum(diffs)
+    return u
 
-    @staticmethod
-    def _extract_xy_yaw(path: Path2D) -> Tuple[List[float], List[float], List[float]]:
-        xs: List[float] = []
-        ys: List[float] = []
-        yaws: List[float] = []
-        for p in path.points:
-            xs.append(float(p.x))
-            ys.append(float(p.y))
-            yaws.append(float(p.yaw))
-        return xs, ys, yaws
 
-    # -----------------------
-    # geometry helpers
-    # -----------------------
+def _compute_tangents(pts: NDArray, u: NDArray, scale: float) -> NDArray:
+    """
+    Compute tangent vectors for G1 continuity.
 
-    @staticmethod
-    def _filter_points(
-        xs: Sequence[float],
-        ys: Sequence[float],
-        yaws: Sequence[float],
-        min_spacing: float,
-    ) -> Tuple[List[float], List[float], List[float]]:
-        if len(xs) == 0:
-            return [], [], []
+    Endpoints: direction to/from neighbor.
+    Interior: average of normalized incoming/outgoing directions.
+    Magnitude scaled by local segment length.
+    """
+    n = len(pts)
+    tangents = np.zeros_like(pts)
 
-        out_x = [float(xs[0])]
-        out_y = [float(ys[0])]
-        out_yaw = [float(yaws[0])]
+    for i in range(n):
+        if i == 0:
+            direction = pts[1] - pts[0]
+            seg_len = u[1] - u[0]
+        elif i == n - 1:
+            direction = pts[-1] - pts[-2]
+            seg_len = u[-1] - u[-2]
+        else:
+            incoming = pts[i] - pts[i-1]
+            outgoing = pts[i+1] - pts[i]
 
-        for x, y, yaw in zip(xs[1:], ys[1:], yaws[1:]):
-            if math.hypot(float(x) - out_x[-1], float(y) - out_y[-1]) >= min_spacing:
-                out_x.append(float(x))
-                out_y.append(float(y))
-                out_yaw.append(float(yaw))
+            # Normalize and average
+            in_norm = np.linalg.norm(incoming)
+            out_norm = np.linalg.norm(outgoing)
+            if in_norm > 1e-9:
+                incoming = incoming / in_norm
+            if out_norm > 1e-9:
+                outgoing = outgoing / out_norm
 
-        # Ensure final point present (unless almost identical)
-        if len(xs) > 1 and math.hypot(float(xs[-1]) - out_x[-1], float(ys[-1]) - out_y[-1]) >= (min_spacing * 0.5):
-            out_x.append(float(xs[-1]))
-            out_y.append(float(ys[-1]))
-            out_yaw.append(float(yaws[-1]))
+            direction = incoming + outgoing
+            seg_len = (u[i+1] - u[i-1]) / 2
 
-        return out_x, out_y, out_yaw
+        # Normalize direction
+        norm = np.linalg.norm(direction)
+        if norm > 1e-9:
+            direction = direction / norm
+        else:
+            direction = np.array([1.0, 0.0])
 
-    @staticmethod
-    def _compute_parameters(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-        diffs = np.sqrt(np.diff(xs) ** 2 + np.diff(ys) ** 2)
-        u = np.zeros(len(xs), dtype=float)
-        u[1:] = np.cumsum(diffs)
-        return u
+        tangents[i] = direction * seg_len * scale
 
-    @staticmethod
-    def _compute_tangents(
-        xs: np.ndarray,
-        ys: np.ndarray,
-        u: np.ndarray,
-        tangent_scale: float,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Tangents for G1 continuity:
-          - endpoints: direction to/from neighbor
-          - interior: normalized(incoming) + normalized(outgoing)
-        Tangent magnitude scaled by local segment length.
-        """
-        n = len(xs)
-        dx = np.zeros(n, dtype=float)
-        dy = np.zeros(n, dtype=float)
+    return tangents
 
-        for i in range(n):
-            if i == 0:
-                direction = np.array([xs[1] - xs[0], ys[1] - ys[0]], dtype=float)
-            elif i == n - 1:
-                direction = np.array([xs[-1] - xs[-2], ys[-1] - ys[-2]], dtype=float)
-            else:
-                incoming = np.array([xs[i] - xs[i - 1], ys[i] - ys[i - 1]], dtype=float)
-                outgoing = np.array([xs[i + 1] - xs[i], ys[i + 1] - ys[i]], dtype=float)
 
-                in_len = float(np.linalg.norm(incoming))
-                out_len = float(np.linalg.norm(outgoing))
-                if in_len > 1e-9:
-                    incoming /= in_len
-                if out_len > 1e-9:
-                    outgoing /= out_len
+def _build_arc_length_table(
+    spline_x: CubicHermiteSpline,
+    spline_y: CubicHermiteSpline,
+    u: NDArray,
+    num_samples: int
+) -> Tuple[NDArray, NDArray]:
+    """Build lookup table mapping arc length to spline parameter."""
+    u_samples = np.linspace(u[0], u[-1], num_samples)
+    x_vals = spline_x(u_samples)
+    y_vals = spline_y(u_samples)
 
-                direction = incoming + outgoing
+    ds = np.sqrt(np.diff(x_vals)**2 + np.diff(y_vals)**2)
+    arc_s = np.zeros(len(u_samples))
+    arc_s[1:] = np.cumsum(ds)
 
-            norm = float(np.linalg.norm(direction))
-            if norm > 1e-9:
-                direction /= norm
-            else:
-                direction = np.array([1.0, 0.0], dtype=float)
+    return arc_s, u_samples
 
-            if i == 0:
-                seg_len = float(u[1] - u[0])
-            elif i == n - 1:
-                seg_len = float(u[-1] - u[-2])
-            else:
-                seg_len = float((u[i + 1] - u[i - 1]) / 2.0)
 
-            dx[i] = float(direction[0] * seg_len * tangent_scale)
-            dy[i] = float(direction[1] * seg_len * tangent_scale)
+def _select_speed(params: HermiteParams, limits: Optional[KinematicLimits]) -> float:
+    """Select cruise speed respecting limits."""
+    if limits is None:
+        return params.nominal_speed_xy
+    return min(limits.max_speed_xy, params.nominal_speed_xy)
 
-        return dx, dy
 
-    @staticmethod
-    def _build_arc_length_lut(
-        spline_x: CubicHermiteSpline,
-        spline_y: CubicHermiteSpline,
-        u: np.ndarray,
-        num_samples: int,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        u_samples = np.linspace(float(u[0]), float(u[-1]), int(num_samples), dtype=float)
-        x_vals = spline_x(u_samples)
-        y_vals = spline_y(u_samples)
+def _sample_trajectory(
+    spline_x: CubicHermiteSpline,
+    spline_y: CubicHermiteSpline,
+    arc_s: NDArray,
+    arc_u: NDArray,
+    total_length: float,
+    total_time: float,
+    speed: float,
+    dt: float,
+    zero_endpoints: bool
+) -> List[TrajectoryPoint]:
+    """Sample trajectory at fixed time intervals."""
+    if total_time <= 0 or total_length <= 0:
+        # Degenerate case
+        return [
+            TrajectoryPoint(t=0.0, x=float(spline_x(arc_u[0])), y=float(spline_y(arc_u[0]))),
+            TrajectoryPoint(t=0.0, x=float(spline_x(arc_u[-1])), y=float(spline_y(arc_u[-1])))
+        ]
 
-        ds = np.sqrt(np.diff(x_vals) ** 2 + np.diff(y_vals) ** 2)
-        arc_s = np.zeros(len(u_samples), dtype=float)
-        arc_s[1:] = np.cumsum(ds)
-        return arc_s, u_samples
+    n_samples = int(total_time / dt) + 1
+    times = np.linspace(0, total_time, n_samples)
 
-    @staticmethod
-    def _arc_length_to_u(arc_s: np.ndarray, arc_u: np.ndarray, s: float) -> float:
-        s_clamped = float(np.clip(s, 0.0, float(arc_s[-1])))
-        return float(np.interp(s_clamped, arc_s, arc_u))
+    samples = []
+    for t in times:
+        s = (t / total_time) * total_length
+        u = float(np.interp(np.clip(s, 0, total_length), arc_s, arc_u))
 
-    @staticmethod
-    def _curvature_from_derivatives(dx: float, dy: float, ddx: float, ddy: float) -> float:
-        speed = math.hypot(dx, dy)
-        if speed <= 1e-9:
-            return 0.0
-        return abs(dx * ddy - dy * ddx) / (speed ** 3)
+        x = float(spline_x(u))
+        y = float(spline_y(u))
 
-    def _sample_time(
-        self,
-        *,
-        spline_x: CubicHermiteSpline,
-        spline_y: CubicHermiteSpline,
-        arc_s: np.ndarray,
-        arc_u: np.ndarray,
-        total_len: float,
-        total_time: float,
-        cruise_speed: float,
-        dt: float,
-        endpoints_zero_v: bool,
-    ) -> List[TrajectoryPoint]:
-        if total_time <= 0.0 or total_len <= 0.0:
-            # Degenerate: two points at t=0
-            u0 = float(arc_u[0])
-            u1 = float(arc_u[-1])
-            p0 = TrajectoryPoint(t=0.0, x=float(spline_x(u0)), y=float(spline_y(u0)))
-            p1 = TrajectoryPoint(t=0.0, x=float(spline_x(u1)), y=float(spline_y(u1)))
-            return [p0, p1]
+        # First derivative → tangent direction
+        dx_du = float(spline_x(u, 1))
+        dy_du = float(spline_y(u, 1))
+        speed_du = math.hypot(dx_du, dy_du)
 
-        n = int(total_time / dt)
-        out: List[TrajectoryPoint] = []
+        if speed_du > 1e-9:
+            tx, ty = dx_du / speed_du, dy_du / speed_du
+        else:
+            tx, ty = 1.0, 0.0
 
-        for k in range(n + 1):
-            t = min(k * dt, total_time)
-            s = (t / total_time) * total_len
-            u = self._arc_length_to_u(arc_s, arc_u, s)
+        vx, vy = tx * speed, ty * speed
 
-            x = float(spline_x(u))
-            y = float(spline_y(u))
+        # Second derivative → curvature
+        ddx = float(spline_x(u, 2))
+        ddy = float(spline_y(u, 2))
+        curvature = abs(dx_du * ddy - dy_du * ddx) / (speed_du ** 3) if speed_du > 1e-9 else 0.0
 
-            # First derivative wrt u -> tangent direction
-            dx_du = float(spline_x(u, 1))
-            dy_du = float(spline_y(u, 1))
-            speed_du = math.hypot(dx_du, dy_du)
+        yaw = math.atan2(vy, vx) if abs(vx) + abs(vy) > 1e-9 else 0.0
 
-            if speed_du > 1e-9:
-                tx = dx_du / speed_du
-                ty = dy_du / speed_du
-            else:
-                tx, ty = 1.0, 0.0
+        samples.append(TrajectoryPoint(
+            t=float(t), x=x, y=y, z=0.0,
+            vx=vx, vy=vy, vz=0.0,
+            s=s, curvature=curvature, yaw=yaw
+        ))
 
-            vx = tx * cruise_speed
-            vy = ty * cruise_speed
+    # Enforce zero endpoint velocities if requested
+    if zero_endpoints and samples:
+        samples[0] = _with_zero_velocity(samples[0])
+        samples[-1] = _with_zero_velocity(samples[-1])
 
-            # Second derivative for curvature estimate
-            ddx_du2 = float(spline_x(u, 2))
-            ddy_du2 = float(spline_y(u, 2))
-            curvature = self._curvature_from_derivatives(dx_du, dy_du, ddx_du2, ddy_du2)
+    return samples
 
-            yaw = math.atan2(vy, vx) if (abs(vx) + abs(vy)) > 1e-9 else None
 
-            out.append(
-                TrajectoryPoint(
-                    t=float(t),
-                    x=float(x),
-                    y=float(y),
-                    z=0.0,
-                    vx=float(vx),
-                    vy=float(vy),
-                    vz=0.0,
-                    s=float(s),
-                    curvature=float(curvature),
-                    yaw=yaw,
-                )
-            )
-
-        if endpoints_zero_v and out:
-            # enforce start/end v=0 without changing positions/timestamps
-            out[0] = TrajectoryPoint(**{**out[0].__dict__, "vx": 0.0, "vy": 0.0, "vz": 0.0})
-            out[-1] = TrajectoryPoint(**{**out[-1].__dict__, "vx": 0.0, "vy": 0.0, "vz": 0.0})
-
-        # Ensure last sample is exactly at total_time
-        if out and abs(out[-1].t - total_time) > 1e-9:
-            u_end = float(arc_u[-1])
-            out.append(
-                TrajectoryPoint(
-                    t=float(total_time),
-                    x=float(spline_x(u_end)),
-                    y=float(spline_y(u_end)),
-                    z=0.0,
-                    vx=0.0 if endpoints_zero_v else out[-1].vx,
-                    vy=0.0 if endpoints_zero_v else out[-1].vy,
-                    vz=0.0,
-                    s=float(total_len),
-                )
-            )
-
-        return out
+def _with_zero_velocity(pt: TrajectoryPoint) -> TrajectoryPoint:
+    """Return copy of point with zero velocity."""
+    return TrajectoryPoint(
+        t=pt.t, x=pt.x, y=pt.y, z=pt.z,
+        vx=0.0, vy=0.0, vz=0.0,
+        ax=pt.ax, ay=pt.ay, az=pt.az,
+        yaw=pt.yaw, yaw_rate=pt.yaw_rate,
+        s=pt.s, curvature=pt.curvature
+    )
