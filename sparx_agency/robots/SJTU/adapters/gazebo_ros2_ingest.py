@@ -305,6 +305,8 @@ class GazeboRos2Ingest(Node):
         odom = self._latest.odom
         cam_info = self._latest.cam_info
 
+        stamp = odom.header.stamp
+
         # Frames
         if self.use_msg_frames:
             map_frame = self.norm_frame(odom.header.frame_id)
@@ -339,6 +341,7 @@ class GazeboRos2Ingest(Node):
         debug_cloud = bool(self.get_parameter("debug_publish_cloud").value)
         debug_grid = bool(self.get_parameter("debug_publish_depth_grid").value)
 
+
         grid_w = int(self.get_parameter("depth_grid_w").value)
         grid_h = int(self.get_parameter("depth_grid_h").value)
 
@@ -347,16 +350,21 @@ class GazeboRos2Ingest(Node):
 
         self._dbg_count += 1
         if depth_m is not None and debug_depth:
-            # raw 32FC1
-            depth_msg = self.numpy_to_image_msg(depth_m.astype(np.float32), frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="32FC1")
-            depth_msg.header = msg.header
-            depth_msg.header.frame_id = cam_frame
+            depth_msg = self.numpy_to_image_msg(depth_m.astype(np.float32), frame_id=cam_frame, stamp=msg.header.stamp, encoding="32FC1")
+
             self.pub_depth_raw.publish(depth_msg)
+            # depth_msg.header = msg.header
+            # depth_msg.header.frame_id = cam_frame
+            # self.pub_depth_raw.publish(depth_msg)
+            # self.get_logger().debug(
+            #     f"rgb {rgb.shape} depth {depth_m.shape} cam_info {cam_info.width}x{cam_info.height} "
+            #     f"depth min/max = {float(np.nanmin(depth_m)):.3f}/{float(np.nanmax(depth_m)):.3f}"
+            # )
 
             # vis mono8
             vis_u8 = depth_to_vis_u8(depth_m, clip_min=self.pipeline.cfg.range_min,
                                      clip_max=self.pipeline.cfg.range_max)
-            vis_msg = self.numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="mono8")
+            vis_msg = self.numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=stamp, encoding="mono8")
             vis_msg.header = msg.header
             vis_msg.header.frame_id = cam_frame
             self.pub_depth_vis.publish(vis_msg)
@@ -366,7 +374,7 @@ class GazeboRos2Ingest(Node):
                 grid_vis = make_depth_grid_vis(depth_m, grid_w, grid_h,
                                                clip_min=self.pipeline.cfg.range_min,
                                                clip_max=self.pipeline.cfg.range_max)
-                grid_msg = self.numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="bgr8")
+                grid_msg = self.numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=stamp, encoding="bgr8")
                 grid_msg.header = msg.header
                 grid_msg.header = msg.header
                 grid_msg.header.frame_id = cam_frame
@@ -379,7 +387,7 @@ class GazeboRos2Ingest(Node):
                 cv2.imwrite(os.path.join(save_dir, f"depth_vis_{ts}.png"), vis_u8)
                 if debug_grid:
                     cv2.imwrite(os.path.join(save_dir, f"depth_grid_{ts}.png"), grid_vis)
-
+        # self.get_logger().info(f"cloud_cam = {cloud_cam}")
         if cloud_cam is not None and debug_cloud:
             # publish PointCloud2 in camera frame
             header = Header()
@@ -388,6 +396,7 @@ class GazeboRos2Ingest(Node):
 
             pts = cloud_cam.astype(np.float32)
             cloud_msg = point_cloud2.create_cloud_xyz32(header, pts.tolist())
+            # self.get_logger().info(f"cloud_cam frame_id: {cloud_msg.header.frame_id} len of pts: {len(pts.tolist())}")
             self.pub_cloud.publish(cloud_msg)
 
             if save_dir and (self._dbg_count % max(1, save_every_n) == 0):
@@ -397,16 +406,16 @@ class GazeboRos2Ingest(Node):
 
         # Publish occupancy grid from costmap
         try:
-            occ_msg = costmap_to_occupancygrid(self.costmap, stamp=msg.header.stamp, frame_id=map_frame)
+            occ_msg = costmap_to_occupancygrid(self.costmap, stamp=self.get_clock().now().to_msg(), frame_id=cam_frame)
         except Exception as e:
             self.get_logger().error(f"Cannot convert costmap to OccupancyGrid: {e}")
             return
 
         self.pub_occ.publish(occ_msg)
-        self.get_logger().info(
-            f"Published occupancy grid {occ_msg.info.width}x{occ_msg.info.height} "
-            f"res={occ_msg.info.resolution:.3f} frame={occ_msg.header.frame_id}"
-        )
+        # self.get_logger().info(
+        #     f"Published occupancy grid {occ_msg.info.width}x{occ_msg.info.height} "
+        #     f"res={occ_msg.info.resolution:.3f} frame={occ_msg.header.frame_id}"
+        # )
 
     def image_msg_to_numpy(self, msg: Image) -> np.ndarray:
         """
@@ -461,11 +470,14 @@ class GazeboRos2Ingest(Node):
 
         if encoding.lower() == "32fc1":
             assert arr.ndim == 2 and arr.dtype == np.float32
-            msg.height, msg.width = arr.shape
+            depth = np.ascontiguousarray(arr.astype(np.float32))
+            h, w = depth.shape[:2]
+            msg.height = h
+            msg.width = w
             msg.encoding = "32FC1"
             msg.is_bigendian = False
-            msg.step = msg.width * 4
-            msg.data = arr.tobytes()
+            msg.step = w * 4
+            msg.data = depth.tobytes()
             return msg
 
         raise ValueError(f"Unsupported encoding: {encoding}")
