@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
-from core.common.types import Path2D, Trajectory, DynamicLimits
+from sparx_agency.core.common.types import Path2D, Trajectory, DynamicLimits
 
 
 @dataclass(frozen=True)

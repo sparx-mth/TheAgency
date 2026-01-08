@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
-from core.common.types import Pose2D, PlanResult
+from sparx_agency.core.common.types import Pose2D, PlanResult
 
 
 @dataclass(frozen=True)

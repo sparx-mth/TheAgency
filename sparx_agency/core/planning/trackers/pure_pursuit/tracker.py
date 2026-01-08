@@ -4,12 +4,12 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from core.common.types.control import ControlCommand, KinematicLimits
-from core.common.types.motion import State3D
-from core.common.types.planning import Trajectory, TrajectoryPoint
+from sparx_agency.core.common.types.control import ControlCommand, KinematicLimits
+from sparx_agency.core.common.types.motion import State3D
+from sparx_agency.core.common.types.planning import Trajectory, TrajectoryPoint
 
-from core.planning.interfaces.tracker import BaseTracker, TrackerRequest, TrackerResult
-from core.planning.trackers.pure_pursuit.algorithm import (
+from sparx_agency.core.planning.interfaces.tracker import BaseTracker, TrackerRequest, TrackerResult
+from sparx_agency.core.planning.trackers.pure_pursuit.algorithm import (
     clearance_to_factor,
     compute_lookahead,
     compute_speed,
@@ -20,7 +20,7 @@ from core.planning.trackers.pure_pursuit.algorithm import (
     pick_lookahead_index,
     world_to_body_velocity,
 )
-from core.planning.trackers.pure_pursuit.params import PurePursuitParams
+from sparx_agency.core.planning.trackers.pure_pursuit.params import PurePursuitParams
 
 
 def _get_limits(req: TrackerRequest, fallback: KinematicLimits) -> KinematicLimits:

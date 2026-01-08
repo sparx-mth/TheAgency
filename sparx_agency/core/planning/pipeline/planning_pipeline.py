@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List, Tuple
 
-from core.common.types import (
+from sparx_agency.core.common.types import (
     Pose2D,
     State3D,
     Path2D,
@@ -27,7 +27,7 @@ from core.common.types import (
     ControlCommand,
 )
 
-from core.planning.interfaces import (
+from sparx_agency.core.planning.interfaces import (
     PlanRequest,
     BasePlanner,
     SmootherRequest,

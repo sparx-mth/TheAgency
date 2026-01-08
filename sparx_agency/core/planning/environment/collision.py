@@ -11,7 +11,7 @@ from __future__ import annotations
 from math import hypot
 from typing import Tuple
 
-from core.planning.environment.costmap2d import Costmap2D
+from sparx_agency.core.planning.environment.costmap2d import Costmap2D
 
 
 def is_state_valid(world: Costmap2D, x: float, y: float) -> bool:

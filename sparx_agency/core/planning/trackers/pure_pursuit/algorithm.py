@@ -4,8 +4,8 @@ import math
 from dataclasses import dataclass
 from typing import Sequence, Tuple
 
-from core.common.types.geometry import normalize_angle
-from core.common.types.planning import TrajectoryPoint
+from sparx_agency.core.common.types.geometry import normalize_angle
+from sparx_agency.core.common.types.planning import TrajectoryPoint
 
 
 @dataclass(frozen=True, slots=True)

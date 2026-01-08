@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple
 
-from core.common.types.planning import Trajectory, TrajectoryPoint
+from sparx_agency.core.common.types.planning import Trajectory, TrajectoryPoint
 
 
 @dataclass(frozen=True)

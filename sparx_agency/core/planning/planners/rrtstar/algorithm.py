@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from math import hypot
 from typing import Any, List, Optional, Sequence, Tuple
 
-from core.common.types import Pose2D, Path2D, PlanResult, PlanStatus
+from sparx_agency.core.common.types import Pose2D, Path2D, PlanResult, PlanStatus
 
 from .params import RRTStarOmplParams
 
