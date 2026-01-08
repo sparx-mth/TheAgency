@@ -1,28 +1,25 @@
-"""
-RRT* (OMPL) planner parameters.
-
-ROS-free configuration for OMPL-based RRT* planning on a 2D costmap.
-"""
+"""RRT* planner configuration."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class RRTStarOmplParams:
-    # Planning
-    planning_timeout_s: float = 3.0
+class RRTStarParams:
+    """
+    Configuration for RRT* path planning.
 
-    # Clearance objective (if world provides clearance in meters or cells)
+    Attributes:
+        timeout: Maximum planning time in seconds.
+        use_clearance_objective: Optimize for obstacle clearance if available.
+        clearance_weight: Weight for clearance cost (higher = prefer open space).
+        min_clearance_for_keep: Minimum clearance (meters) to allow waypoint removal.
+        interpolation_spacing: Target spacing between output waypoints (meters).
+        frame_id: Coordinate frame identifier for output path.
+    """
+    timeout: float = 3.0
     use_clearance_objective: bool = True
-    clearance_weight: float = 10.0  # cost ~ weight/(clearance+1)
-
-    # Path post-processing (adaptive reduction similar to your C++)
-    min_clearance_for_keep: float = 0.3  # meters (or "world clearance units")
-    # If world clearance is in *cells* and you prefer that, set accordingly.
-
-    # Interpolation (world meters)
-    interpolation_spacing_m: float = 0.2
-
-    # Misc
+    clearance_weight: float = 10.0
+    min_clearance_for_keep: float = 0.3
+    interpolation_spacing: float = 0.2
     frame_id: str = "map"
