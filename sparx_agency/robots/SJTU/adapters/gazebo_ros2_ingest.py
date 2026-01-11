@@ -29,6 +29,7 @@ from sparx_agency.core.common.types.perception import (
 )
 from sparx_agency.core.mapping.costmap import ProbabilisticGridCostmap
 from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridConfig
+from sparx_agency.core.mapping.costmap.sanity_check_costmap import SanityCheckCostmap
 from sparx_agency.core.mapping.interfaces import DepthModel
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.robots.SJTU.helpers.helpers import make_depth_grid_vis, depth_to_vis_u8
@@ -231,7 +232,7 @@ class GazeboRos2Ingest(Node):
         self._img_count = 0
         self._latest = LatestState()
 
-        self.costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        self.costmap = SanityCheckCostmap(size_m=50.0, res=0.25) #ProbabilisticGridCostmap(ProbabilisticGridConfig())
         self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
         self.cloud_generator = PinholeCloudGenerator()
