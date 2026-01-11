@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RRT* Planner Demo with Hermite Smoothing.
+RRT* Planner Demo with Hermite and MinSnap Smoothing.
 
 Usage:
     python run_pipeline.py
@@ -20,6 +20,7 @@ from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.interfaces.smoother import SmootherRequest
 from sparx_agency.core.planning.planners.rrtstar import RRTStarOmplPlanner, RRTStarOmplParams
 from sparx_agency.core.planning.smoothers.hermite import HermiteSmoother, HermiteParams
+from sparx_agency.core.planning.smoothers.minsnap import MinSnapSmoother, MinSnapParams
 
 
 def load_map(pgm_path: str, yaml_path: str, inflate_radius: float = 0.1) -> Costmap2D:
@@ -64,8 +65,9 @@ def load_map(pgm_path: str, yaml_path: str, inflate_radius: float = 0.1) -> Cost
 
 
 def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D,
-              waypoints, trajectory=None, save_path: str = "path_result.png"):
-    """Visualize map with raw path and smoothed trajectory."""
+              waypoints, traj_hermite=None, traj_minsnap=None,
+              save_path: str = "path_result.png"):
+    """Visualize map with raw path and smoothed trajectories."""
     fig, ax = plt.subplots(figsize=(12, 10))
 
     # Show map
@@ -73,20 +75,27 @@ def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D,
               costmap.origin_y, costmap.origin_y + costmap.height * costmap.resolution]
     ax.imshow(costmap.occupancy, cmap='gray_r', origin='lower', extent=extent, alpha=0.7)
 
-    # Plot raw path (cyan)
+    # Plot raw path (cyan dashed)
     if waypoints:
         xs = [p.x for p in waypoints]
         ys = [p.y for p in waypoints]
-        ax.plot(xs, ys, 'c--', linewidth=1.5, alpha=0.7, label='RRT* Path')
+        ax.plot(xs, ys, 'c--', linewidth=1.5, alpha=0.6, label='RRT* Path')
         ax.scatter(xs, ys, c='cyan', s=20, marker='o', edgecolors='blue',
                    linewidths=0.5, zorder=5)
 
-    # Plot smoothed trajectory (orange)
-    if trajectory:
-        samples = trajectory.sample_by_time(dt=0.05)
+    # Plot Hermite trajectory (orange)
+    if traj_hermite:
+        samples = traj_hermite.sample_by_time(dt=0.05)
         tx = [s.x for s in samples]
         ty = [s.y for s in samples]
-        ax.plot(tx, ty, color='orange', linewidth=2.5, label='Hermite Smooth')
+        ax.plot(tx, ty, color='orange', linewidth=2.5, label='Hermite')
+
+    # Plot MinSnap trajectory (magenta)
+    if traj_minsnap:
+        samples = traj_minsnap.sample_by_time(dt=0.05)
+        tx = [s.x for s in samples]
+        ty = [s.y for s in samples]
+        ax.plot(tx, ty, color='magenta', linewidth=2.5, linestyle='--', label='MinSnap')
 
     # Mark start/goal
     ax.scatter(start.x, start.y, c='green', s=100, marker='o', label='Start', zorder=10)
@@ -94,7 +103,7 @@ def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D,
 
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
-    ax.set_title('RRT* + Hermite Smoothing')
+    ax.set_title('RRT* + Trajectory Smoothing Comparison')
     ax.legend(loc='upper right')
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
@@ -115,13 +124,13 @@ def main():
 
     # Load map
     print(f"Loading map: {PGM_FILE}")
-    costmap = load_map(str(PGM_FILE), str(YAML_FILE), inflate_radius=0.2)
+    costmap = load_map(str(PGM_FILE), str(YAML_FILE), inflate_radius=0.1)
     print(f"Map: {costmap.width}x{costmap.height}, res={costmap.resolution}m")
 
     # Plan with RRT*
     print(f"Planning: ({START.x}, {START.y}) → ({GOAL.x}, {GOAL.y})")
     planner = RRTStarOmplPlanner(params=RRTStarOmplParams(
-        timeout=5.0,
+        timeout=3.0,
         use_clearance_objective=True,
         clearance_weight=10.0,
         interpolation_spacing=3.0
@@ -139,20 +148,29 @@ def main():
     waypoints = list(result.path.points)
     print(f"Path: {len(waypoints)} waypoints, length={result.path.length():.2f}m")
 
+    smooth_request = SmootherRequest(path=result.path)
+
     # Smooth with Hermite splines
     print("Smoothing with Hermite splines...")
-    smoother = HermiteSmoother(params=HermiteParams(
+    hermite_smoother = HermiteSmoother(params=HermiteParams(
         dt=0.02,
         nominal_speed_xy=0.5,
         tangent_scale=0.5,
     ))
+    traj_hermite = hermite_smoother.smooth(smooth_request)
+    print(f"  Hermite: {traj_hermite.total_time:.2f}s")
 
-    smooth_request = SmootherRequest(path=result.path)
-    trajectory = smoother.smooth(smooth_request)
-    print(f"Trajectory: {trajectory.total_time:.2f}s")
+    # Smooth with MinSnap
+    print("Smoothing with MinSnap...")
+    minsnap_smoother = MinSnapSmoother(params=MinSnapParams(
+        dt=0.02,
+        nominal_speed_xy=0.5,
+    ))
+    traj_minsnap = minsnap_smoother.smooth(smooth_request)
+    print(f"  MinSnap: {traj_minsnap.total_time:.2f}s")
 
     # Visualize
-    visualize(costmap, START, GOAL, waypoints, trajectory, "path_result.png")
+    visualize(costmap, START, GOAL, waypoints, traj_hermite, traj_minsnap, "path_result.png")
 
 
 if __name__ == "__main__":
