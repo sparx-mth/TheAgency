@@ -21,7 +21,7 @@ from sparx_agency.core.common.types import (
     Trajectory,
     TrajectoryPoint,
 )
-from sparx_agency.core.planning.interfaces import TrackerRequest, TrackerResult
+from sparx_agency.core.planning.interfaces.tracker import TrackerRequest, TrackerResult
 
 from .algorithm import (
     adaptive_lookahead,
@@ -105,10 +105,10 @@ class PurePursuitTracker:
         if cte > p.path_tolerance:
             return self._stop("path_diverged", failed=True)
 
-        # Path curvature at current point (from trajectory, if available)
+        # Path curvature at current point
         path_curvature = get_curvature(pts[self._s.progress_idx])
 
-        # Compute target speed (slows near goal and on curves)
+        # Compute target speed
         speed_target = compute_target_speed(
             cruise=p.cruise_speed,
             dist_to_goal=dist_goal,
@@ -130,7 +130,7 @@ class PurePursuitTracker:
         # Smooth speed command
         self._s.speed_cmd += p.speed_smoothing * (speed_target - self._s.speed_cmd)
 
-        # Adaptive lookahead (reduced on tight curves)
+        # Adaptive lookahead
         lookahead_dist = adaptive_lookahead(
             base=p.base_lookahead,
             speed=self._s.speed_cmd,
@@ -139,13 +139,13 @@ class PurePursuitTracker:
             bounds=(p.min_lookahead, p.max_lookahead),
         )
 
-        # Find lookahead point (circle-path intersection)
+        # Find lookahead point
         look_idx, target = find_lookahead_point(xy, pos, self._s.progress_idx, lookahead_dist)
 
-        # Classic Pure Pursuit: compute curvature to reach lookahead point
+        # Compute curvature
         curvature, alpha, actual_L_d = compute_pure_pursuit_curvature(pos, pose.yaw, target)
 
-        # Convert curvature to steering commands
+        # Convert to steering commands
         max_yaw_rate = min(p.max_yaw_rate, lim.max_yaw_rate)
         yaw_rate, steering_angle = compute_steering_commands(
             curvature=curvature,
@@ -200,8 +200,10 @@ class PurePursuitTracker:
         failed: bool = False,
         ref: Optional[TrajectoryPoint] = None,
     ) -> TrackerResult:
+        """Return a stop command (zero velocity)."""
         return TrackerResult(
-            command=ControlCommand.zero(tracker=self.name, reason=reason),
+            # Use ControlCommand.velocity with zeros instead of .zero()
+            command=ControlCommand.velocity(0.0, 0.0, 0.0, 0.0, tracker=self.name, reason=reason),
             reference=ref,
             metadata={"done": done, "failed": failed, "reason": reason},
         )
