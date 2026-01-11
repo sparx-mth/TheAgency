@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RRT* Planner Demo - Uses project modules.
+RRT* Planner Demo with Hermite Smoothing.
 
 Usage:
     python run_pipeline.py
@@ -17,34 +17,30 @@ from sparx_agency.core.mapping.costmap.occupancy import occupancy_from_grayscale
 from sparx_agency.core.mapping.costmap.distance_field import compute_clearance_field, DistanceFieldParams
 from sparx_agency.core.mapping.costmap.inflation import inflate_occupancy, InflationParams
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
-
-# RRT* - adjust path if needed
+from sparx_agency.core.planning.interfaces.smoother import SmootherRequest
 from sparx_agency.core.planning.planners.rrtstar import RRTStarOmplPlanner, RRTStarOmplParams
+from sparx_agency.core.planning.smoothers.hermite import HermiteSmoother, HermiteParams
 
 
 def load_map(pgm_path: str, yaml_path: str, inflate_radius: float = 0.1) -> Costmap2D:
-    """Load PGM map with YAML metadata using project modules."""
-    # Load YAML config
+    """Load PGM map with YAML metadata."""
     with open(yaml_path, 'r') as f:
         config = yaml.safe_load(f)
 
     resolution = config['resolution']
-    origin = config['origin']  # [x, y, theta]
+    origin = config['origin']
 
-    # Load PGM image
     img = plt.imread(pgm_path)
     if img.max() <= 1.0:
         img = (img * 255).astype(np.uint8)
 
-    # Convert to occupancy: White (>=250) = free, Gray/Black = occupied
     thresholds = OccupancyThresholds(
-        occupied_if_below=249,  # Gray and black are walls
-        free_if_above=250,      # Only white is free
+        occupied_if_below=249,
+        free_if_above=250,
         unknown_as_occupied=True
     )
     occupancy = occupancy_from_grayscale(img, thresholds)
 
-    # Optional: inflate obstacles for safety margin
     if inflate_radius > 0:
         occupancy = inflate_occupancy(
             occupancy,
@@ -52,14 +48,12 @@ def load_map(pgm_path: str, yaml_path: str, inflate_radius: float = 0.1) -> Cost
             params=InflationParams(radius_m=inflate_radius)
         )
 
-    # Compute clearance field for cost optimization
     clearance = compute_clearance_field(
         occupancy,
         resolution=resolution,
         params=DistanceFieldParams()
     )
 
-    # Build Costmap2D
     params = CostmapParams(
         resolution=resolution,
         origin_x=origin[0],
@@ -69,8 +63,9 @@ def load_map(pgm_path: str, yaml_path: str, inflate_radius: float = 0.1) -> Cost
     return Costmap2D(occupancy, params, clearance=clearance)
 
 
-def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D, waypoints, save_path: str = "path_result.png"):
-    """Visualize map with path overlay."""
+def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D,
+              waypoints, trajectory=None, save_path: str = "path_result.png"):
+    """Visualize map with raw path and smoothed trajectory."""
     fig, ax = plt.subplots(figsize=(12, 10))
 
     # Show map
@@ -78,21 +73,29 @@ def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D, waypoints, save_p
               costmap.origin_y, costmap.origin_y + costmap.height * costmap.resolution]
     ax.imshow(costmap.occupancy, cmap='gray_r', origin='lower', extent=extent, alpha=0.7)
 
-    # Plot path
+    # Plot raw path (cyan)
     if waypoints:
         xs = [p.x for p in waypoints]
         ys = [p.y for p in waypoints]
-        ax.plot(xs, ys, 'b-', linewidth=1, label='Path')
-        ax.scatter(xs, ys, c='cyan', s=15, marker='o', edgecolors='blue', linewidths=0.5, zorder=5, label='Waypoints')
+        ax.plot(xs, ys, 'c--', linewidth=1.5, alpha=0.7, label='RRT* Path')
+        ax.scatter(xs, ys, c='cyan', s=20, marker='o', edgecolors='blue',
+                   linewidths=0.5, zorder=5)
+
+    # Plot smoothed trajectory (orange)
+    if trajectory:
+        samples = trajectory.sample_by_time(dt=0.05)
+        tx = [s.x for s in samples]
+        ty = [s.y for s in samples]
+        ax.plot(tx, ty, color='orange', linewidth=2.5, label='Hermite Smooth')
 
     # Mark start/goal
-    ax.scatter(start.x, start.y, c='green', s=80, marker='o', label='Start', zorder=10)
-    ax.scatter(goal.x, goal.y, c='red', s=80, marker='*', label='Goal', zorder=10)
+    ax.scatter(start.x, start.y, c='green', s=100, marker='o', label='Start', zorder=10)
+    ax.scatter(goal.x, goal.y, c='red', s=100, marker='*', label='Goal', zorder=10)
 
-    ax.set_xlabel('X (meters)')
-    ax.set_ylabel('Y (meters)')
-    ax.set_title('RRT* Path Planning Result')
-    ax.legend()
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_title('RRT* + Hermite Smoothing')
+    ax.legend(loc='upper right')
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
 
@@ -103,25 +106,22 @@ def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D, waypoints, save_p
 
 
 def main():
-    # === CONFIG ===
     MAP_DIR = Path(__file__).parent / "maps"
     PGM_FILE = MAP_DIR / "hospital_map_cropped.pgm"
     YAML_FILE = MAP_DIR / "hospital_map_cropped.yaml"
 
-    # Hardcoded start/goal (adjust based on your map!)
     START = Pose2D(x=-2.0, y=-2.5)
     GOAL = Pose2D(x=5.0, y=5.0)
 
-    # === LOAD MAP ===
+    # Load map
     print(f"Loading map: {PGM_FILE}")
     costmap = load_map(str(PGM_FILE), str(YAML_FILE), inflate_radius=0.2)
-    print(f"Map size: {costmap.width}x{costmap.height}, resolution: {costmap.resolution}m")
+    print(f"Map: {costmap.width}x{costmap.height}, res={costmap.resolution}m")
 
-    # === PLAN using project's RRTStarPlanner ===
-    print(f"Planning from ({START.x}, {START.y}) to ({GOAL.x}, {GOAL.y})...")
-
+    # Plan with RRT*
+    print(f"Planning: ({START.x}, {START.y}) → ({GOAL.x}, {GOAL.y})")
     planner = RRTStarOmplPlanner(params=RRTStarOmplParams(
-        timeout=3.0,
+        timeout=5.0,
         use_clearance_objective=True,
         clearance_weight=10.0,
         interpolation_spacing=3.0
@@ -131,18 +131,28 @@ def main():
     result = planner.plan(request, costmap)
 
     print(f"Status: {result.status}")
-    print(f"Message: {result.message}")
 
-    if result.path:
-        waypoints = list(result.path.points)
-        print(f"\n=== PATH FOUND ({len(waypoints)} waypoints) ===")
-        for i, wp in enumerate(waypoints):
-            print(f"  [{i:3d}] x={wp.x:8.3f}, y={wp.y:8.3f}")
+    if not result.ok:
+        print(f"Planning failed: {result.message}")
+        return
 
-        # === VISUALIZE ===
-        visualize(costmap, START, GOAL, waypoints, "path_result.png")
-    else:
-        print("Planning failed!")
+    waypoints = list(result.path.points)
+    print(f"Path: {len(waypoints)} waypoints, length={result.path.length():.2f}m")
+
+    # Smooth with Hermite splines
+    print("Smoothing with Hermite splines...")
+    smoother = HermiteSmoother(params=HermiteParams(
+        dt=0.02,
+        nominal_speed_xy=0.5,
+        tangent_scale=0.5,
+    ))
+
+    smooth_request = SmootherRequest(path=result.path)
+    trajectory = smoother.smooth(smooth_request)
+    print(f"Trajectory: {trajectory.total_time:.2f}s")
+
+    # Visualize
+    visualize(costmap, START, GOAL, waypoints, trajectory, "path_result.png")
 
 
 if __name__ == "__main__":
