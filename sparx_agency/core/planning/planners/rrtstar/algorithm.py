@@ -3,6 +3,9 @@ RRT* path planning using OMPL.
 
 Implements RRT* with optional clearance-based cost optimization,
 adaptive waypoint reduction, and world-space interpolation.
+
+IMPORTANT: This version properly handles thin walls by setting
+appropriate collision checking resolution along edges.
 """
 from __future__ import annotations
 
@@ -153,7 +156,41 @@ def plan_rrtstar(
     bounds.setHigh(1, costmap.origin_y + costmap.height * costmap.resolution)
     space.setBounds(bounds)
 
+    # =========================================================================
+    # Set longest valid segment length to catch thin walls
+    # =========================================================================
+    # This controls how finely OMPL samples along edges during motion validation.
+    # If walls are 1-2 pixels thick, we need to check at sub-pixel resolution.
+    #
+    # longest_valid_segment_fraction = segment_length / space_diagonal
+    # We want segment_length < wall_thickness ≈ resolution
+    # =========================================================================
+
+    if params.longest_valid_segment_m is not None:
+        longest_segment = params.longest_valid_segment_m
+    else:
+        # Default: half the map resolution to catch single-pixel walls
+        longest_segment = costmap.resolution * 0.5
+
+    # Compute space diagonal for fraction calculation
+    space_width = costmap.width * costmap.resolution
+    space_height = costmap.height * costmap.resolution
+    space_diagonal = hypot(space_width, space_height)
+
+    # Set the fraction (OMPL uses fraction of max extent)
+    longest_segment_fraction = longest_segment / space_diagonal
+    # Clamp to reasonable range
+    longest_segment_fraction = max(0.001, min(0.1, longest_segment_fraction))
+
+    space.setLongestValidSegmentFraction(longest_segment_fraction)
+
     ss = og.SimpleSetup(space)
+    si = ss.getSpaceInformation()
+
+    # =========================================================================
+    # Also set state validity checking resolution for additional safety
+    # =========================================================================
+    si.setStateValidityCheckingResolution(params.collision_check_resolution)
 
     # State validity checker
     def is_valid(state) -> bool:
@@ -174,21 +211,20 @@ def plan_rrtstar(
     # Clearance objective
     if params.use_clearance_objective and costmap.clearance is not None:
         objective = _make_clearance_objective(
-            ss.getSpaceInformation(),
+            si,
             costmap,
             params.clearance_weight,
         )
         ss.setOptimizationObjective(objective)
 
     # Run planner
-    ss.setPlanner(og.RRTstar(ss.getSpaceInformation()))
+    ss.setPlanner(og.RRTstar(si))
     solved = ss.solve(params.timeout)
 
     if not solved:
         return PlanResult(status=PlanStatus.NO_PATH, message="No solution found")
 
     # Extract and process path
-    si = ss.getSpaceInformation()
     path = ss.getSolutionPath()
     states = [path.getState(i) for i in range(path.getStateCount())]
 
@@ -219,6 +255,8 @@ def plan_rrtstar(
                 "planner": "rrtstar",
                 "waypoints_raw": n_before,
                 "waypoints_interpolated": len(waypoints),
+                "longest_segment_m": longest_segment,
+                "longest_segment_fraction": longest_segment_fraction,
             },
         ),
         message=f"Path found: {n_before} -> {len(waypoints)} waypoints",
