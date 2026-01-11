@@ -1,4 +1,4 @@
-"""Hermite spline trajectory smoother."""
+"""Cubic Hermite spline trajectory smoother."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -18,8 +18,6 @@ class HermiteSmoother:
     Produces smooth trajectories that pass through all waypoints with
     tangent continuity. Suitable for ground robots and slow-moving drones.
 
-    Implements BaseSmoother protocol.
-
     Example:
         >>> smoother = HermiteSmoother()
         >>> trajectory = smoother.smooth(SmootherRequest(path=my_path))
@@ -27,25 +25,10 @@ class HermiteSmoother:
     name: str = "hermite"
 
     def __init__(self, params: Optional[HermiteParams] = None) -> None:
-        """
-        Initialize smoother.
-
-        Args:
-            params: Algorithm configuration. Uses defaults if None.
-        """
         self.params = params or HermiteParams()
 
     def smooth(self, request: SmootherRequest, world: Any = None) -> Trajectory:
-        """
-        Smooth path into time-parameterized trajectory.
-
-        Args:
-            request: Path and optional constraints.
-            world: Optional environment context (unused).
-
-        Returns:
-            Discrete trajectory implementing Trajectory protocol.
-        """
+        """Smooth path into time-parameterized trajectory."""
         params = self._merge_options(request.options)
 
         solution = algorithm.solve(
@@ -70,7 +53,3 @@ class HermiteSmoother:
             return self.params
 
         return HermiteParams(**{**self.params.__dict__, **overrides})
-
-
-# Backward compatibility alias
-BezierSmoother = HermiteSmoother
