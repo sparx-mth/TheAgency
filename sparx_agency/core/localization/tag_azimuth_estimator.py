@@ -59,7 +59,6 @@ class TagAzimuthEstimator:
     def relative_yaw_deg(tx: float, tz: float) -> float:
         """
         Relative yaw (deg) of the tag from camera center.
-        Using atan2(-tx, tz) as in your original script.
         """
         return math.degrees(math.atan2(-tx, tz))
 
