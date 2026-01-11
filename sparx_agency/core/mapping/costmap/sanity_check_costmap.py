@@ -26,7 +26,9 @@ class SanityCheckCostmap(Costmap):
         # 2. THE SANITY GATE:
         # Only points between 0.2m and 2.0m height are obstacles.
         # This removes the floor 'Triangle' because floor Z is ~0.0.
-        mask = (cloud_xyz[:, 2] > 0.2) & (cloud_xyz[:, 2] < 2.0)
+        # Inside your occupancy grid update:
+        mask = (cloud_xyz[:, 2] > 0.3) & (cloud_xyz[:, 2] < 2.0)
+        # This ignores the floor (0.0m) and ceiling
         obs_pts = cloud_xyz[mask]
 
         # 3. Project only these true obstacles to the 2D grid

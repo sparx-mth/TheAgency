@@ -24,33 +24,33 @@ class ProbabilisticGridCostmap(Costmap):
         self._seen_mask.fill(False)
 
     def update_from_cloud(self, cloud_xyz: np.ndarray, sensor_origin: np.ndarray):
-        # 1. Project to grid
         res = self.cfg.resolution_m
+        # Explicitly cast to int32 immediately
         gx = ((cloud_xyz[:, 0] - self.origin_x) / res).astype(np.int32)
         gy = ((cloud_xyz[:, 1] - self.origin_y) / res).astype(np.int32)
-        gz = cloud_xyz[:, 2]
+        gz = cloud_xyz[:, 2]  # Height stays as float for filtering
 
-        # 2. LOOSEN THE FILTER (Debug Mode)
-        # Check if points are even inside the 40x40 box
+        # 1. Bounds check
         in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
 
-        # 3. Force "Seen"
+        # 2. Height Gate: Only points between 0.3m and 2.0m are obstacles.
+        # This deletes the floor 'Triangle' shadow
+        is_obstacle = (gz > 0.3) & (gz < 2.0)
+
+        # 3. Mark everything in-bounds as 'Seen'
+        # We use integers here to avoid the IndexError
         self._seen_mask[gy[in_bounds], gx[in_bounds]] = True
 
-        # 4. Update Occupancy for EVERYTHING in bounds (No height filter for now)
-        # If this works, we will re-add height filtering later
-        valid_gx, valid_gy = gx[in_bounds], gy[in_bounds]
+        # 4. Update Occupancy ONLY for obstacle points
+        # Re-cast to int32 here as a safety 'Sanity Check' against the IndexError
+        valid_gx = gx[in_bounds & is_obstacle].astype(np.int32)
+        valid_gy = gy[in_bounds & is_obstacle].astype(np.int32)
+
         if valid_gx.size > 0:
-            indices = valid_gy * self.width + valid_gx
-            # Increment lo-odds for every pixel hit
             self._lo[valid_gy, valid_gx] = np.clip(
                 self._lo[valid_gy, valid_gx] + self.cfg.lo_occ,
                 self.cfg.lo_min, self.cfg.lo_max
             )
-
-        # 5. Ray-clearing
-        self._clear_rays(sensor_origin, valid_gx[::50], valid_gy[::50])
-
     def _clear_rays(self, origin, txs, tys):
         res = self.cfg.resolution_m
         sx = int((origin[0] - self.origin_x) / res)
