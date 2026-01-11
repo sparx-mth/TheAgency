@@ -82,12 +82,12 @@ def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D, waypoints, save_p
     if waypoints:
         xs = [p.x for p in waypoints]
         ys = [p.y for p in waypoints]
-        ax.plot(xs, ys, 'b-', linewidth=2, label='Path')
-        ax.scatter(xs, ys, c='blue', s=10, zorder=5)
+        ax.plot(xs, ys, 'b-', linewidth=1, label='Path')
+        ax.scatter(xs, ys, c='cyan', s=15, marker='o', edgecolors='blue', linewidths=0.5, zorder=5, label='Waypoints')
 
     # Mark start/goal
-    ax.scatter(start.x, start.y, c='green', s=200, marker='o', label='Start', zorder=10)
-    ax.scatter(goal.x, goal.y, c='red', s=200, marker='*', label='Goal', zorder=10)
+    ax.scatter(start.x, start.y, c='green', s=80, marker='o', label='Start', zorder=10)
+    ax.scatter(goal.x, goal.y, c='red', s=80, marker='*', label='Goal', zorder=10)
 
     ax.set_xlabel('X (meters)')
     ax.set_ylabel('Y (meters)')
@@ -97,7 +97,7 @@ def visualize(costmap: Costmap2D, start: Pose2D, goal: Pose2D, waypoints, save_p
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=300)
     print(f"Saved: {save_path}")
     plt.show()
 
@@ -109,22 +109,22 @@ def main():
     YAML_FILE = MAP_DIR / "hospital_map_cropped.yaml"
 
     # Hardcoded start/goal (adjust based on your map!)
-    START = Pose2D(x=-5.0, y=-5.0)
+    START = Pose2D(x=-2.0, y=-2.5)
     GOAL = Pose2D(x=5.0, y=5.0)
 
     # === LOAD MAP ===
     print(f"Loading map: {PGM_FILE}")
-    costmap = load_map(str(PGM_FILE), str(YAML_FILE), inflate_radius=0.1)
+    costmap = load_map(str(PGM_FILE), str(YAML_FILE), inflate_radius=0.2)
     print(f"Map size: {costmap.width}x{costmap.height}, resolution: {costmap.resolution}m")
 
     # === PLAN using project's RRTStarPlanner ===
     print(f"Planning from ({START.x}, {START.y}) to ({GOAL.x}, {GOAL.y})...")
 
     planner = RRTStarOmplPlanner(params=RRTStarOmplParams(
-        timeout=5.0,
+        timeout=3.0,
         use_clearance_objective=True,
         clearance_weight=10.0,
-        interpolation_spacing=0.2
+        interpolation_spacing=3.0
     ))
 
     request = PlanRequest(start=START, goal=GOAL, frame_id="map")
