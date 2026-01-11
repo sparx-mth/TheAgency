@@ -1,6 +1,6 @@
-# SPARX Agency Packages
+# SPARX Agency
 
-## Package Overview
+## Overview
 
 The SPARX Agency system is composed of several packages, each of which provides a specific functionality or feature.
 
