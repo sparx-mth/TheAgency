@@ -15,6 +15,7 @@ class DepthAnythingV2Config:
     # If you want relative depth instead, examples: "depth-anything/Depth-Anything-V2-Small-hf"
     device: Optional[str] = "cuda"  # "cuda", "cpu", or None=auto
     assume_bgr: bool = False      # set True if your images come as BGR (OpenCV)
+    max_range_m: float = 15.0
 
 
 class DepthAnythingV2DepthModel(DepthModel):
@@ -51,15 +52,18 @@ class DepthAnythingV2DepthModel(DepthModel):
         d_min = raw_disparity.min()
         d_max = raw_disparity.max()
         den = max(d_max - d_min, 1e-6)
+
+        # depth = (raw_disparity - d_min) / (d_max - d_min) * 255.0
+        # depth_m = depth.astype(np.uint8)
+
         depth_norm = (raw_disparity - d_min) / den
 
-        # 3. THE FIX: The "Inverted Scale"
-        # To see a person clearly, the points must have a wide Z-range.
+        # 3. To see a person clearly, the points must have a wide Z-range.
         # Person should be at ~2.0m, Background at ~15.0m.
-        max_range = 5.0
-        min_range = -1.0
-
-        # This formula flips disparity so high values (close) become small meters
-        depth_m = min_range + (max_range - min_range) * (1.0 - depth_norm)
+        max_range = 15.0
+        min_range = 0.5  # Objects start 0.5m in front of camera
+        # depth_m = min_range + (max_range - min_range) * (1.0 - depth_norm)
+        depth_m = 1.0 / (depth_norm + (1.0 / max_range))
+        depth_m = 1.0 / (depth_norm + (1.0 / self.cfg.max_range_m))
 
         return depth_m
