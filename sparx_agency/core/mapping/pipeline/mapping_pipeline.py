@@ -1,6 +1,8 @@
 # sparx_agency/core/mapping/pipeline/mapping_pipeline.py
 
 from __future__ import annotations
+
+import datetime
 from dataclasses import dataclass
 from typing import Optional
 
@@ -51,7 +53,6 @@ class PinholeCloudGenerator(CloudGenerator):
         xs = np.arange(0, W, s, dtype=np.int32)
         xv, yv = np.meshgrid(xs, ys)
 
-        # FORCED CAST TO INT: This stops the IndexError
         xv = xv.astype(np.int32)
         yv = yv.astype(np.int32)
 
@@ -64,35 +65,46 @@ class PinholeCloudGenerator(CloudGenerator):
         if not np.any(m):
             return np.zeros((0, 3), dtype=np.float32)
         try:
-            # 4. Apply mask to coordinates and sampled depth
-            xv_valid = xv[m].astype(np.float32)
-            yv_valid = yv[m].astype(np.float32)
-            d_valid = d[m]
+            xv = xv[m].astype(np.float32)
+            yv = yv[m].astype(np.float32)
+            d = d[m]
+        except Exception as e:
+            print(f"Error: xv, yv, d is {xv}, {yv}, {d} with error: {e}")
 
-            # 5. Project to 3D Space (Optical Frame)
-            # Using the focal lengths from your camera_info
-            A = (xv_valid - intr.cx) / intr.fx
-            B = (yv_valid - intr.cy) / intr.fy
 
-            x = A * d_valid
-            y = B * d_valid
-            z = d_valid
-        except Exception as exp:
-            print(f"Exception in depth_to_cloud: {exp}")
-            return np.stack([x, y, z], axis=1).astype(np.float32)
+
+        y =  -(xv - intr.cx) * d / intr.fx
+        z =  -(yv - intr.cy) * d / intr.fy
+        x = d  # forward in optical
+
 
         # Now x, y, z are guaranteed to exist for stacking
+        pts = np.stack([x, y, z], axis=1)
+        print(f"DEBUG : vcloud shape: {pts.shape}")
         return np.stack([x, y, z], axis=1).astype(np.float32)
 
-def optical_xyz_to_base_xyz(pts_optical: np.ndarray) -> np.ndarray:
-    x_opt = pts_optical[:, 0]  # Right
-    y_opt = pts_optical[:, 1]  # Down
-    z_opt = pts_optical[:, 2]  # Forward
 
-    # Standard Robot FLU Convention:
-    base_x = z_opt  # Robot Forward = Optical Depth (Z)
-    base_y = -x_opt  # Robot Left    = -Optical Right (X)
-    base_z = -y_opt  # Robot Up      = -Optical Down (Y)
+def optical_xyz_to_base_xyz(pts_optical: np.ndarray) -> np.ndarray:
+    # pts_optical[:, 0] is X (Right)
+    # pts_optical[:, 1] is Y (Down)
+    # pts_optical[:, 2] is Z (Forward/Depth)
+
+    # 1. FORWARD must be Positive X (Red in Rviz)
+    # We take the Depth (Z_opt) and put it in X_base
+    base_x = pts_optical[:, 0] # Z
+
+    # 2. LEFT must be Positive Y (Green in Rviz)
+    # In optical, X is Right. So Left is -X.
+    base_y = pts_optical[:, 1] # -X
+
+    # 3. UP must be Positive Z (Blue in Rviz)
+    # In optical, Y is Down. So Up is -Y.
+
+    base_z = pts_optical[:, 2] # -Y
+
+    # LOGGING: If this is working, Max Base X should be ~10.0 to 15.0
+    # and Max Base Y should be ~half of that.
+    print(f"DEBUG: Max X (Fwd): {np.max(base_x):.2f}, Max Y (Side): {np.max(base_y):.2f}")
 
     return np.stack([base_x, base_y, base_z], axis=1).astype(np.float32)
 
@@ -120,7 +132,8 @@ class MappingPipeline:
         self.last_cloud_base: np.ndarray = np.zeros((0, 3), dtype=np.float32)
 
         self.frame_count = 0
-        self.save_interval = 50  # Adjust X here
+        self.save_interval = 100  # Adjust X here
+        self._last_indices = None
 
 
     def step(self, obs: Observation) -> None:
@@ -146,7 +159,7 @@ class MappingPipeline:
             # max_depth = 20.0
             # depth_meters = max_depth / (depth_norm + 0.01)
             raw_depth = np.asarray(obs.depth.depth_m, dtype=np.float32)
-            self.last_depth = raw_depth * 20.0
+            self.last_depth = raw_depth
             # self.last_depth = depth_meters.astype(np.float32)
             cloud_cam = self.cloud_generator.depth_to_cloud(self.last_depth, intr)
             # self.last_depth = depth
@@ -162,18 +175,18 @@ class MappingPipeline:
             stamp_sec = obs.rgb.stamp_sec
             # Get raw 0-255 disparity from model
             depth_m = self.depth_model.infer_depth(obs.rgb.image)
-            try:
-                expected_h, expected_w = intr.height, intr.width
-                if depth_m.shape[:2] != (expected_h, expected_w):
-                    depth_m = cv2.resize(depth_m, (expected_w, expected_h), interpolation=cv2.INTER_LINEAR)
-                # Just use the result from the model.
-                self.last_depth = depth_m.astype(np.float32)
+            # try:
+            #     expected_h, expected_w = intr.height, intr.width
+            #     if depth_m.shape[:2] != (expected_h, expected_w):
+            #         depth_m = cv2.resize(depth_m, (expected_w, expected_h), interpolation=cv2.INTER_LINEAR)
+            #     # Just use the result from the model.
+            self.last_depth = depth_m.astype(np.float32)
 
-                # 3. Generate Cloud
-                cloud_cam = self.cloud_generator.depth_to_cloud(self.last_depth, intr)
-                self.last_cloud_cam = cloud_cam
-            except Exception as e:
-                print(f"Error: cloud_generator.depth_to_cloud is {e}")
+            # 3. Generate Cloud
+            cloud_cam = self.cloud_generator.depth_to_cloud(self.last_depth, intr)
+            self.last_cloud_cam = cloud_cam
+            # except Exception as e:
+            #     print(f"Error: cloud_generator.depth_to_cloud is {e}")
 
         else:
             return
@@ -185,14 +198,16 @@ class MappingPipeline:
         # Using your mapping for the Gazebo drone link
         try:
             cloud_base = optical_xyz_to_base_xyz(self.last_cloud_cam)
+            print(f"DEBUG: cloud_base:")
             self.last_cloud_base = cloud_base
+            if self.last_depth is not None:
+                raw_depth = np.asarray(self.last_depth, dtype=np.float32)
+                self.visualize_depth_errors(raw_depth, cloud_base)
+            else:
+                print("No depth data available for visualization")
         except Exception as e:
             print(f"Error: optical_xyz_to_base_xyz is {e}")
-        # if self.last_depth is not None:
-        #     raw_depth = np.asarray(self.last_depth, dtype=np.float32)
-        #     # self.visualize_depth_errors(raw_depth, cloud_base)
-        # else:
-        #     print("No depth data available for visualization")
+
 
 
         # 2. Extract Pose and Transform to World
@@ -202,14 +217,18 @@ class MappingPipeline:
             # Update costmap with the WORLD points
             self.costmap.update_from_cloud(cloud_odom, obs.pose_map_base.t)
             print(f"Updated Pose Map Base T: {obs.pose_map_base.t}")
+            print(f" cloud odom == cloud base: {np.allclose(cloud_odom, cloud_base)}")
         else:
             # Fallback: if no pose, we can only update relative to the drone
             # Use identity pose (0,0,0) as sensor origin
-            print(f"Fallback Cloud Base")
-            self.costmap.update_from_cloud(
-                cloud_xyz=cloud_base,
-                sensor_origin=np.zeros(3, dtype=np.float32),
-            )
+            try:
+                print(f"Fallback Cloud Base")
+                self.costmap.update_from_cloud(
+                    cloud_xyz=cloud_base,
+                    sensor_origin=np.zeros(3, dtype=np.float32),
+                )
+            except Exception as e:
+                print(f"Error: costmap.update_from_cloud is {e}")
 
     def visualize_depth_errors(self, raw_depth, cloud_base):
         self.frame_count += 1
@@ -248,8 +267,10 @@ class MappingPipeline:
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
         # Save as PNG - check your terminal's current directory for these files
-        filename = f"depth_diagnostic_{self.frame_count:04d}.png"
+        time_str = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
+        filename = f"depth_axes_diagnostic_{self.frame_count:04d}_{time_str}.png"
         plt.savefig(filename)
         plt.close(fig)
         print(f"Diagnostic saved to {filename}")
+
 
