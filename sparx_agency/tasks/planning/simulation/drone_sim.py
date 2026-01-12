@@ -22,12 +22,12 @@ import math
 class DroneSimParams:
     """
     Drone simulator configuration.
-    
+
     Dynamics Model:
         v_dot = (v_cmd - v) / tau + wind + noise
         p_dot = v
         yaw_dot = yaw_rate_cmd / tau_yaw
-        
+
     Noise Sources:
         - Wind: Slowly varying disturbance (Ornstein-Uhlenbeck process)
         - Process noise: Random acceleration perturbations
@@ -35,41 +35,41 @@ class DroneSimParams:
     """
     # Time step
     dt: float = 0.02  # 50 Hz
-    
+
     # Velocity dynamics (first-order lag)
     tau_velocity: float = 0.15  # Time constant for velocity response (s)
     tau_yaw: float = 0.1  # Time constant for yaw rate response (s)
-    
+
     # Kinematic limits
     max_speed_xy: float = 1.0  # m/s
     max_speed_z: float = 0.5  # m/s
     max_yaw_rate: float = 1.0  # rad/s
-    
+
     # Wind model (Ornstein-Uhlenbeck process)
     wind_enabled: bool = True
     wind_mean: Tuple[float, float, float] = (0.05, 0.0, 0.0)  # Mean wind (m/s)
     wind_std: float = 0.1  # Wind standard deviation (m/s)
     wind_tau: float = 2.0  # Wind correlation time (s)
-    
+
     # Gust model (occasional larger disturbances)
     gust_enabled: bool = True
     gust_probability: float = 0.01  # Per timestep probability
     gust_magnitude: float = 0.3  # m/s
     gust_duration: float = 0.5  # s
-    
+
     # Process noise (random accelerations)
     process_noise_std: float = 0.02  # m/s² per √Hz
-    
+
     # Sensor noise
     position_noise_std: float = 0.01  # m
     velocity_noise_std: float = 0.02  # m/s
     yaw_noise_std: float = 0.01  # rad
-    
+
     # Command delay (latency)
     command_delay: float = 0.02  # s
-    
+
     # Collision detection
-    collision_radius: float = 0.15  # m
+    collision_radius: float = 0.10  # m
 
 
 @dataclass
@@ -79,26 +79,26 @@ class DroneState:
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
-    
+
     # Velocity (world frame)
     vx: float = 0.0
     vy: float = 0.0
     vz: float = 0.0
-    
+
     # Heading
     yaw: float = 0.0
     yaw_rate: float = 0.0
-    
+
     # Wind state
     wind_x: float = 0.0
     wind_y: float = 0.0
     wind_z: float = 0.0
-    
+
     # Gust state
     gust_remaining: float = 0.0
     gust_vx: float = 0.0
     gust_vy: float = 0.0
-    
+
     # Time
     t: float = 0.0
 
@@ -106,11 +106,11 @@ class DroneState:
 class DroneSimulator:
     """
     Simple drone dynamics simulator.
-    
+
     Integrates velocity commands with first-order dynamics,
     adds wind disturbances, and simulates sensor noise.
     """
-    
+
     def __init__(
         self,
         params: Optional[DroneSimParams] = None,
@@ -120,7 +120,7 @@ class DroneSimulator:
     ):
         """
         Initialize simulator.
-        
+
         Args:
             params: Simulator configuration
             initial_state: Starting state (defaults to origin)
@@ -130,16 +130,16 @@ class DroneSimulator:
         self.params = params or DroneSimParams()
         self.state = initial_state or DroneState()
         self.obstacle_fn = obstacle_fn
-        
+
         self._rng = np.random.default_rng(seed)
         self._command_buffer: List[Tuple[float, float, float, float, float]] = []
-        
+
         # Initialize wind to mean
         if self.params.wind_enabled:
             self.state.wind_x = self.params.wind_mean[0]
             self.state.wind_y = self.params.wind_mean[1]
             self.state.wind_z = self.params.wind_mean[2]
-    
+
     def reset(
         self,
         x: float = 0.0,
@@ -155,7 +155,7 @@ class DroneSimulator:
             self.state.wind_z = self.params.wind_mean[2]
         self._command_buffer.clear()
         return self.state
-    
+
     def step(
         self,
         vx_cmd: float,
@@ -165,20 +165,20 @@ class DroneSimulator:
     ) -> Tuple[DroneState, dict]:
         """
         Step simulation forward by dt.
-        
+
         Args:
             vx_cmd: Commanded X velocity (body frame for holonomic)
-            vy_cmd: Commanded Y velocity  
+            vy_cmd: Commanded Y velocity
             vz_cmd: Commanded Z velocity
             yaw_rate_cmd: Commanded yaw rate
-            
+
         Returns:
             (state, info) where info contains debug data
         """
         p = self.params
         s = self.state
         dt = p.dt
-        
+
         # Transform body-frame commands to world frame
         cos_yaw = np.cos(s.yaw)
         sin_yaw = np.sin(s.yaw)
