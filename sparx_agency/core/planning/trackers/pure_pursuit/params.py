@@ -27,7 +27,13 @@ class PurePursuitParams:
     cruise_speed: float = 0.4
     min_speed: float = 0.1
     max_speed: float = 0.5
-    curvature_speed_factor: float = 0.3  # slow on curves
+
+    # Curvature adaptation factors
+    # Higher values = more reduction on curves
+    # Formula: value / (1 + factor * curvature)
+    curvature_speed_factor: float = 0.5      # Speed reduction on curves
+    curvature_lookahead_factor: float = 0.8  # Lookahead reduction on curves
+
     slow_down_distance: float = 1.0  # ramp down near goal
 
     # Tolerances (m)

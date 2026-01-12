@@ -108,14 +108,14 @@ class PurePursuitTracker:
         # Path curvature at current point
         path_curvature = get_curvature(pts[self._s.progress_idx])
 
-        # Compute target speed
+        # Compute target speed (use params limits, not KinematicLimits)
         speed_target = compute_target_speed(
             cruise=p.cruise_speed,
             dist_to_goal=dist_goal,
             curvature=path_curvature,
             slow_down_dist=p.slow_down_distance,
             curvature_factor=p.curvature_speed_factor,
-            bounds=(p.min_speed, min(p.max_speed, lim.max_speed_xy)),
+            bounds=(p.min_speed, p.max_speed),
         )
 
         # Apply clearance factor if available
@@ -136,6 +136,7 @@ class PurePursuitTracker:
             speed=self._s.speed_cmd,
             curvature=path_curvature,
             speed_gain=p.lookahead_speed_gain,
+            curvature_gain=p.curvature_lookahead_factor,
             bounds=(p.min_lookahead, p.max_lookahead),
         )
 
@@ -186,6 +187,7 @@ class PurePursuitTracker:
                 "actual_lookahead": actual_L_d,
                 "alpha": alpha,
                 "curvature": curvature,
+                "path_curvature": path_curvature,
                 "speed_target": speed_target,
                 "speed_cmd": self._s.speed_cmd,
                 "yaw_rate_cmd": self._s.yaw_rate_cmd,
@@ -202,7 +204,6 @@ class PurePursuitTracker:
     ) -> TrackerResult:
         """Return a stop command (zero velocity)."""
         return TrackerResult(
-            # Use ControlCommand.velocity with zeros instead of .zero()
             command=ControlCommand.velocity(0.0, 0.0, 0.0, 0.0, tracker=self.name, reason=reason),
             reference=ref,
             metadata={"done": done, "failed": failed, "reason": reason},
