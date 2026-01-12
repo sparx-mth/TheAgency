@@ -3,3 +3,6 @@ tqdm==4.67.1
 pandas~=2.3.0
 matplotlib~=3.10.3
 seaborn~=0.13.2
+opencv-python
+pupil-apriltags
+pyyaml

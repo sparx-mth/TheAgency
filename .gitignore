@@ -173,3 +173,7 @@ src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/csv/*
 src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/__pycache__/
 src/interfaces/ROBOTICAN/examples/src/paths/*
 src/room_mapping/2025_12_25___09_40_51/
+
+gz-sim-environment
+ROBOTICAN/examples
+ORB-SLAM3-ROS2-Docker

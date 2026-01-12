@@ -61,6 +61,18 @@ class TagAzimuthEstimator:
         Relative yaw (deg) of the tag from camera center.
         """
         return math.degrees(math.atan2(-tx, tz))
+    
+    @staticmethod
+    def obs_from_tvec(tag_id: int, tvec) -> TagObservation:
+        """
+        Convenience helper for adapters that use solvePnP:
+        OpenCV returns tvec in camera frame: [tx, ty, tz].
+        We only need tx and tz for azimuth.
+        """
+        tx = float(tvec[0])
+        tz = float(tvec[2])
+        return TagObservation(tag_id=tag_id, tx=tx, tz=tz)
+
 
     def estimate_from_observations(
         self, observations: list[TagObservation]

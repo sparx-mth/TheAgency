@@ -1,216 +1,265 @@
-# sparx_agency/robots/common/ros2/tag_azimuth_node.py
 from __future__ import annotations
 
+import time
 import math
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional, List, Tuple, Union
+import json
+import cv2
+import numpy as np
+from pupil_apriltags import Detector
 
-import rclpy
-from rclpy.node import Node
-from rclpy.time import Time
-from std_msgs.msg import Float32
-
-import tf2_ros
-from tf2_ros import TransformException
-
-from sparx_agency.core.localization.tag_azimuth_estimator import (
+from apriltag_localization.core.localization.tag_azimuth_estimator import (
     TagAzimuthEstimator,
     TagObservation,
 )
+from datetime import datetime
+
+@dataclass(frozen=True)
+class CameraCalib:
+    K: np.ndarray          # 3x3
+    D: np.ndarray          # (n,) usually 5 or 8
 
 
-class TagAzimuthNode(Node):
+def load_tag_config(path: str) -> Dict[int, float]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"tag_config_path does not exist: {path}")
+
+    with p.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    tags = data.get("tags", data)
+    if not isinstance(tags, dict) or not tags:
+        raise ValueError(f"No tags found in config: {path}")
+    
+    out: Dict[int, float] = {}
+    for k, v in tags.items():
+        out[int(k)] = float(v)
+
+    if not out:
+        raise ValueError(f"No tags found in config: {path}")
+    return out
+
+
+def load_camera_calib_yaml(path: str) -> CameraCalib:
     """
-    ROS2 adapter:
-    - Reads tag configuration from YAML
-    - Looks up TF transforms camera_frame -> tag_frame for known tags
-    - Builds observations (tx,tz) and passes to core estimator
-    - Publishes /<robot_ns>/camera_azimuth (Float32 degrees 0..360)
+    Supports common formats like:
+    camera_matrix: {data: [fx, 0, cx, 0, fy, cy, 0, 0, 1]}
+    distortion_coefficients: {data: [k1,k2,p1,p2,k3]}
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"camera_calib_path does not exist: {path}")
+
+    with p.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    # Try ROS-like calibration YAML keys
+    cm = data.get("camera_matrix", {})
+    dc = data.get("distortion_coefficients", {})
+
+    K_data = cm.get("data", None) or data.get("K", None)
+    D_data = dc.get("data", None) or data.get("D", None)
+
+    if K_data is None:
+        raise ValueError("Missing camera matrix in calib file (camera_matrix.data or K).")
+    if D_data is None:
+        # Allowed: no distortion
+        D_data = [0, 0, 0, 0, 0]
+
+    K = np.array(K_data, dtype=np.float64).reshape(3, 3)
+    D = np.array(D_data, dtype=np.float64).reshape(-1)
+    
+    # Basic validation
+    if not np.isfinite(K).all() or K.shape != (3, 3) or K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise ValueError("Invalid camera intrinsics K (fx/fy must be > 0).")
+
+    return CameraCalib(K=K, D=D)
+
+
+def tag_object_points(tag_size_m: float) -> np.ndarray:
+    """
+    3D model points for the 4 tag corners in tag frame (Z=0 plane).
+    Order MUST match the detector corners order (pupil_apriltags returns corners in
+    consistent order around the tag).
+    """
+    s = tag_size_m / 2.0
+    return np.array(
+        [
+            [-s, -s, 0],
+            [ s, -s, 0],
+            [ s,  s, 0],
+            [-s,  s, 0],
+        ],
+        dtype=np.float64,
+    )
+
+
+class TagAzimuthOpenCVTask:
+    """
+    TASK adapter (no ROS):
+    - MUST have:
+        1) tag_config_deg (id -> wall azimuth deg)
+        2) camera calibration (K, D)
+        3) AprilTag detector (pupil_apriltags.Detector)
+    - For EACH input image/frame: returns a single azimuth (float degrees 0..360)
     """
 
-    def __init__(self):
-        super().__init__("tag_azimuth_node")
+    def __init__(
+        self,
+        tag_config_path: str,
+        camera_calib_path: str,
+        tag_size_m: float,
+        tag_family: str = "tag36h11",
+        nthreads: int = 2,
+        max_history: int = 20,
+        max_time_diff_sec: float = 1.0,
+    ):
+        # 1) tags config
+        self.tag_config_deg = load_tag_config(tag_config_path)
+        if not self.tag_config_deg:
+            raise ValueError("Tag config is empty. Cannot continue.")
+    
+        # 2) camera calib
+        self.calib = load_camera_calib_yaml(camera_calib_path)
+        if self.calib is None or self.calib.K is None:
+            raise ValueError("Camera calibration is missing. Cannot continue.")
 
-        # --------------------
-        # Parameters (generic)
-        # --------------------
-        self.declare_parameter("robot_ns", "")  # "" or "R1" or "/R1" etc.
-        self.declare_parameter("camera_frame", "")  # explicit camera frame
-        self.declare_parameter("tag_family", "36h11")
-        self.declare_parameter("tag_config_path", "")  # YAML file path
-        self.declare_parameter("publish_topic", "")  # optional override
-        self.declare_parameter("timer_hz", 5.0)
-        self.declare_parameter("history_len", 20)
-        self.declare_parameter("max_time_diff_sec", 1.0)
+        # 3) detector
+        if not tag_family:
+            raise ValueError("tag_family is missing. Cannot create detector.")
+        self.detector = Detector(families=tag_family, nthreads=int(nthreads))
+        if self.detector is None:
+            raise RuntimeError("Failed to create AprilTag detector.")
 
-        self.declare_parameter("candidate_tag_frames", [
-            "tag{family}:{id}",
-            "tag_{id}",
-            "tag{id}",
-        ])
+        self.obj_pts = tag_object_points(float(tag_size_m))
 
-        self.robot_ns = self._clean_ns(self.get_parameter("robot_ns").value)
-        self.tag_family = str(self.get_parameter("tag_family").value).strip()
-
-        camera_frame = str(self.get_parameter("camera_frame").value).strip()
-        self.camera_frame = camera_frame if camera_frame else self._default_camera_frame()
-
-        # Load YAML config for tags (id -> wall azimuth)
-        cfg_path = str(self.get_parameter("tag_config_path").value).strip()
-        if not cfg_path:
-            raise RuntimeError("tag_config_path param is required (YAML with tag azimuth mapping)")
-        self.tag_config_deg = self._load_tag_config(cfg_path)
-
-        history_len = int(self.get_parameter("history_len").value)
-        max_dt = float(self.get_parameter("max_time_diff_sec").value)
+        # Azimuth estimator
         self.estimator = TagAzimuthEstimator(
             tag_config_deg=self.tag_config_deg,
-            max_history=history_len,
-            max_time_diff_sec=max_dt,
+            max_history=max_history,
+            max_time_diff_sec=max_time_diff_sec,
         )
 
-        # TF
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-        # Publisher topic
-        publish_topic = str(self.get_parameter("publish_topic").value).strip()
-        if publish_topic:
-            topic = publish_topic
-        else:
-            # default: /<robot_ns>/camera_azimuth  OR /camera_azimuth if robot_ns empty
-            topic = f"/{self.robot_ns}/camera_azimuth" if self.robot_ns else "/camera_azimuth"
-
-        self.pub = self.create_publisher(Float32, topic, 10)
-
-        # Candidate frame templates
-        self.candidate_templates = list(self.get_parameter("candidate_tag_frames").value)
-
-        # Timer
-        hz = float(self.get_parameter("timer_hz").value)
-        period = 1.0 / max(hz, 0.1)
-        self.timer = self.create_timer(period, self._on_timer)
-
-        self.get_logger().info(f"TagAzimuthNode started")
-        self.get_logger().info(f"robot_ns='{self.robot_ns}' camera_frame='{self.camera_frame}' tag_family='{self.tag_family}'")
-        self.get_logger().info(f"known_tag_ids={sorted(self.tag_config_deg.keys())}")
-        self.get_logger().info(f"publishing to: {topic}")
-
-    # --------------------
-    # Helpers
-    # --------------------
-    def _clean_ns(self, s: str) -> str:
-        s = str(s).strip()
-        if s.startswith("/"):
-            s = s[1:]
-        return s.rstrip("/")
-
-    def _default_camera_frame(self) -> str:
-        # Generic fallback; you should override via param if your TF differs.
-        # If you want robot-specific naming: set camera_frame param in launch.
-        return f"{self.robot_ns}_camera" if self.robot_ns else "camera"
-
-    def _load_tag_config(self, path: str) -> Dict[int, float]:
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"tag_config_path does not exist: {path}")
-
-        with p.open("r") as f:
-            data = yaml.safe_load(f)
-
-        # Allow two formats:
-        # 1) { tags: {10: 0.0, 11: 90.0, ...} }
-        # 2) { 10: 0.0, 11: 90.0, ... }
-        tags = data.get("tags", data)
-
-        out: Dict[int, float] = {}
-        for k, v in tags.items():
-            out[int(k)] = float(v)
-
-        if not out:
-            raise ValueError(f"No tags found in config: {path}")
-        return out
-
-    def _candidate_frames_for_id(self, tag_id: int) -> List[str]:
-        frames = []
-        for templ in self.candidate_templates:
-            frames.append(
-                templ.format(family=self.tag_family, id=tag_id)
-            )
-        return frames
-
-    def _lookup_camera_to_tag(self, tag_frame: str):
-        return self.tf_buffer.lookup_transform(
-            self.camera_frame,  # target
-            tag_frame,          # source
-            rclpy.time.Time(),  # latest
+    
+    def _solve_tag_pose(self, corners_2d: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        corners_2d: (4,2) float64
+        returns (rvec, tvec) where tvec is tag position in camera frame.
+        """
+        ok, rvec, tvec = cv2.solvePnP(
+            self.obj_pts,
+            corners_2d,
+            self.calib.K,
+            self.calib.D,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE,  
         )
+        if not ok:
+            return None
+        
+        if float(tvec[2]) < 0:
+            tvec = -tvec
+            rvec = -rvec
 
-    # --------------------
-    # Main loop
-    # --------------------
-    def _on_timer(self):
-        observations: List[TagObservation] = []
-        last_err: Optional[Exception] = None
+        return rvec.reshape(3), tvec.reshape(3)
 
-        for tag_id in self.estimator.known_tag_ids:
-            transform = None
-            for frame in self._candidate_frames_for_id(tag_id):
-                try:
-                    transform = self._lookup_camera_to_tag(frame)
-                    break
-                except TransformException as e:
-                    last_err = e
-                    continue
 
-            if transform is None:
+    def compute_azimuth_from_bgr(self, frame_bgr: np.ndarray, stamp_sec: float) -> float:
+        """
+        Main API: image in -> azimuth out.
+        Raises RuntimeError if cannot compute.
+        """
+        if frame_bgr is None:
+            raise ValueError("frame_bgr is None")
+
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        dets = self.detector.detect(gray)
+
+        observations: list[TagObservation] = []
+
+        for d in dets:
+            tag_id = int(d.tag_id)
+            if tag_id not in self.tag_config_deg:
                 continue
 
-            t = transform.transform.translation
-            tx = float(t.x)
-            tz = float(t.z)
+            corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+            tvec = self._solve_tag_pose(corners)
+            if tvec is None:
+                continue
 
-            # If tz is ~0, atan2 might still be defined, but can be noisy.
-            # We keep it and let core handle edge cases.
-            observations.append(TagObservation(tag_id=tag_id, tx=tx, tz=tz))
+            obs = TagAzimuthEstimator.obs_from_tvec(tag_id=tag_id, tvec=tvec)
+            observations.append(obs)
 
         if not observations:
-            self.get_logger().warn(
-                f"No tags visible. Last TF error: {last_err}",
-                throttle_duration_sec=2.0,
-            )
-            return
+            raise RuntimeError("No usable known tags detected in image.")
 
-        now = self.get_clock().now()
-        stamp_sec = now.nanoseconds / 1e9
-
-        result = self.estimator.update(observations, stamp_sec=stamp_sec)
+        result = self.estimator.update(observations, stamp_sec=float(stamp_sec))
         if result is None:
-            self.get_logger().warn("Estimator returned None (no usable observations).")
-            return
+            raise RuntimeError("Estimator failed to produce azimuth.")
 
-        yaw_deg, best_tag = result
-
-        msg = Float32()
-        msg.data = float(yaw_deg)
-        self.pub.publish(msg)
-
-        self.get_logger().info(
-            f"Azimuth: {yaw_deg:.1f}° (Best tag: {best_tag})"
-        )
+        yaw_deg, _best_tag = result
+        return float(yaw_deg)
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = TagAzimuthNode()
+
+def main():
+    """
+    Example usage:
+
+    python -m sparx_agency.tasks.localization.nodes.tag_azimuth_node \
+        --tag_config_path /path/tags.yaml \
+        --camera_calib_path /path/cam.yaml \
+        --tag_size_m 0.08 \
+        --image /path/frame.png \
+        --tag_family tag36h11
+
+    Output:
+      Prints a single float azimuth in degrees (0..360) to stdout.
+      Exits with non-zero code on failure.
+    """
+    import argparse
+    import sys
+    import time
+
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag_config_path", required=True)
+    ap.add_argument("--camera_calib_path", required=True)
+    ap.add_argument("--tag_size_m", type=float, required=True)
+    ap.add_argument("--tag_family", default="tag36h11")
+    ap.add_argument("--image", required=True, help="Path to an input image (BGR).")
+    ap.add_argument("--nthreads", type=int, default=2)
+    ap.add_argument("--history_len", type=int, default=20)
+    ap.add_argument("--max_time_diff_sec", type=float, default=1.0)
+    args = ap.parse_args()
+
+    # Build task (will raise and stop if tags/calib/detector are missing)
+    task = TagAzimuthOpenCVTask(
+        tag_config_path=args.tag_config_path,
+        camera_calib_path=args.camera_calib_path,
+        tag_size_m=args.tag_size_m,
+        tag_family=args.tag_family,
+        nthreads=args.nthreads,
+        max_history=args.history_len,
+        max_time_diff_sec=args.max_time_diff_sec,
+    )
+
+    frame = cv2.imread(args.image, cv2.IMREAD_COLOR)
+    if frame is None:
+        print(f"ERROR: Failed to read image: {args.image}", file=sys.stderr)
+        raise SystemExit(2)
+
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        yaw = task.compute_azimuth_from_bgr(frame, stamp_sec=time.time())
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        raise SystemExit(1)
+
+    # Print azimuth only (simple output)
+    print(f"{yaw:.6f}")
 
 
 if __name__ == "__main__":
