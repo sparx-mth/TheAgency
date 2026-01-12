@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime
 from typing import Optional
 from PIL import Image
 import numpy as np
+from matplotlib import pyplot as plt
 
 from sparx_agency.core.mapping.interfaces.depth_model import DepthModel
 
@@ -42,12 +44,14 @@ class DepthAnythingV2DepthModel(DepthModel):
             model=self.cfg.model_id,
             device=device_idx,
         )
+        self.frame_count = 0
+        self.save_interval = 100
 
     def infer_depth(self, rgb: np.ndarray) -> np.ndarray:
         # 1. Get raw disparity from model (0-255 or 0-N)
         out = self.pipe(Image.fromarray(rgb))
         raw_disparity = np.array(out["depth"]).astype(np.float32)
-
+        self.visualize_depth_raw_data(raw_disparity)
         # 2. Normalize to 0.0 - 1.0
         d_min = raw_disparity.min()
         d_max = raw_disparity.max()
@@ -62,8 +66,32 @@ class DepthAnythingV2DepthModel(DepthModel):
         # Person should be at ~2.0m, Background at ~15.0m.
         max_range = 15.0
         min_range = 0.5  # Objects start 0.5m in front of camera
-        # depth_m = min_range + (max_range - min_range) * (1.0 - depth_norm)
-        depth_m = 1.0 / (depth_norm + (1.0 / max_range))
-        depth_m = 1.0 / (depth_norm + (1.0 / self.cfg.max_range_m))
 
+        depth_m = raw_disparity/50
         return depth_m
+
+
+    def visualize_depth_raw_data(self, raw_depth):
+        self.frame_count += 1
+        if self.frame_count % self.save_interval != 0:
+            return
+
+        # Create a single plot
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        fig.suptitle(f"Raw Depth Distribution - Frame {self.frame_count}")
+
+        # 1. Image Depth (The 'D' values)
+        # This helps see if your depth model is saturated before clipping/scaling
+        ax.hist(raw_depth.ravel(), bins=100, color='gray')
+        ax.set_title("Raw Model Output (Pre-Clipping)")
+        ax.set_xlabel("Intensity / Raw Value")
+        ax.set_ylabel("Frequency")
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        # Save as PNG
+        time_str = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
+        filename = f"depth_diagnostic_{self.frame_count:04d}_{time_str}.png"
+        plt.savefig(filename)
+        plt.close(fig)
+        print(f"Diagnostic saved to {filename}")

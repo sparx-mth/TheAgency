@@ -12,6 +12,7 @@ import numpy as np
 
 import rclpy
 from depth_anything_v2.dpt import DepthAnythingV2
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs_py import point_cloud2
@@ -112,6 +113,7 @@ def odom_to_pose_se3(odom: Odometry) -> PoseSE3:
     o = odom.pose.pose.orientation
     R = quat_to_rot(float(o.x), float(o.y), float(o.z), float(o.w))
     t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float32)
+    print(f"odom_to_pose_se3 R = {R}, t = {t}")
     return PoseSE3(R=R, t=t)
 
 
@@ -232,7 +234,8 @@ class GazeboRos2Ingest(Node):
         self._img_count = 0
         self._latest = LatestState()
 
-        self.costmap = SanityCheckCostmap(size_m=50.0, res=0.25) #ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        #self.costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        self.costmap = SanityCheckCostmap()
         self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
         self.cloud_generator = PinholeCloudGenerator()
@@ -394,7 +397,7 @@ class GazeboRos2Ingest(Node):
             header = Header()
             header.stamp = msg.header.stamp
             header.frame_id = cam_frame
-
+            self.get_logger().info(f"cloud_cam frame_id: {cloud_cam.shape} {header.frame_id}")
             pts = cloud_cam.astype(np.float32)
             cloud_msg = point_cloud2.create_cloud_xyz32(header, pts.tolist())
             # self.get_logger().info(f"cloud_cam frame_id: {cloud_msg.header.frame_id} len of pts: {len(pts.tolist())}")
