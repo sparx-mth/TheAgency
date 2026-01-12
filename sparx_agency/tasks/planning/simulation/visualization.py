@@ -12,7 +12,6 @@ from typing import List, Tuple, Optional
 import colorsys
 import pygame
 
-from sparx_agency.core.planning.environment import Costmap2D
 from sparx_agency.core.common.types import Path2D
 
 from map_loading import ObstacleMap
@@ -78,13 +77,11 @@ class DroneVisualizer:
     def __init__(self, obstacle_map: Optional[ObstacleMap] = None,
                  trajectory=None, raw_path: Optional[Path2D] = None,
                  settings: Optional[ViewSettings] = None,
-                 costmap: Optional[Costmap2D] = None,
                  drone_radius: float = 0.15):
         self.settings = settings or ViewSettings()
         self.obstacle_map = obstacle_map
         self.trajectory = trajectory
         self.raw_path = raw_path
-        self.costmap = costmap  # For scenario 4 (PGM maps)
         self.drone_radius = drone_radius  # Actual collision radius for accurate visualization
 
         pygame.init()
@@ -137,12 +134,6 @@ class DroneVisualizer:
             x_max = self.obstacle_map.origin_x + self.obstacle_map.width + s.margin
             y_min = self.obstacle_map.origin_y - s.margin
             y_max = self.obstacle_map.origin_y + self.obstacle_map.height + s.margin
-        elif self.costmap:
-            # For scenario 4 with PGM costmap
-            x_min = self.costmap.origin_x - s.margin
-            x_max = self.costmap.origin_x + self.costmap.width * self.costmap.resolution + s.margin
-            y_min = self.costmap.origin_y - s.margin
-            y_max = self.costmap.origin_y + self.costmap.height * self.costmap.resolution + s.margin
         else:
             x_min, x_max, y_min, y_max = -5, 15, -5, 15
         self.world_bounds = (x_min, y_min, x_max, y_max)
@@ -154,8 +145,6 @@ class DroneVisualizer:
         self._draw_grid(self.static_surface)
         if self.obstacle_map:
             self._draw_obstacles(self.static_surface)
-        elif self.costmap:
-            self._draw_costmap(self.static_surface)
         if self.raw_path:
             self._draw_raw_path(self.static_surface)
         if self.trajectory:
@@ -193,35 +182,6 @@ class DroneVisualizer:
             radius = self.transform.scale_distance(r)
             pygame.draw.circle(surface, s.obstacle_color, center, radius)
             pygame.draw.circle(surface, s.obstacle_border, center, radius, 2)
-
-    def _draw_costmap(self, surface):
-        """Draw costmap occupancy grid (for scenario 4 with PGM maps)."""
-        if not self.costmap:
-            return
-
-        s = self.settings
-        occupancy = self.costmap.occupancy
-
-        # Get screen coordinates for the costmap corners
-        x0 = self.costmap.origin_x
-        y0 = self.costmap.origin_y
-        res = self.costmap.resolution
-
-        # Draw each occupied cell
-        for iy in range(occupancy.shape[0]):
-            for ix in range(occupancy.shape[1]):
-                if occupancy[iy, ix] > 200:  # Occupied
-                    world_x = x0 + ix * res
-                    world_y = y0 + iy * res
-
-                    tl = self.transform.to_screen(world_x, world_y + res)
-                    br = self.transform.to_screen(world_x + res, world_y)
-
-                    w = max(1, br[0] - tl[0])
-                    h = max(1, br[1] - tl[1])
-
-                    rect = pygame.Rect(tl[0], tl[1], w, h)
-                    pygame.draw.rect(surface, s.obstacle_color, rect)
 
     def _draw_raw_path(self, surface):
         """Draw the raw RRT* waypoints with thin connecting lines."""
