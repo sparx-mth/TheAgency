@@ -223,18 +223,33 @@ def adaptive_lookahead(
     speed: float,
     curvature: float,
     speed_gain: float,
+    curvature_gain: float,
     bounds: Tuple[float, float],
 ) -> float:
     """
-    Adaptive lookahead distance.
+    Adaptive lookahead distance based on speed and curvature.
 
-    L_d = base + speed × gain, reduced on tight curves.
+    L_d = (base + speed × speed_gain) / (1 + curvature_gain × |κ|)
+
+    - Increases with speed (look further ahead when going fast)
+    - Decreases with curvature (look closer on tight turns)
+
+    Args:
+        base: Base lookahead distance (m)
+        speed: Current speed (m/s)
+        curvature: Path curvature (1/m), higher = tighter turn
+        speed_gain: How much speed increases lookahead
+        curvature_gain: How much curvature decreases lookahead
+        bounds: (min, max) lookahead limits
+
+    Returns:
+        Lookahead distance (m)
     """
     lookahead = base + speed_gain * max(0.0, speed)
 
-    # Reduce on tight curves (curvature > 0.5 means radius < 2m)
-    if curvature > 0.5:
-        lookahead *= 0.7
+    # Smooth curvature-based reduction
+    curve_factor = 1.0 / (1.0 + curvature_gain * abs(curvature))
+    lookahead *= curve_factor
 
     return float(np.clip(lookahead, bounds[0], bounds[1]))
 
@@ -248,7 +263,23 @@ def compute_target_speed(
     bounds: Tuple[float, float],
 ) -> float:
     """
-    Speed profile: slows near goal and on curves.
+    Speed profile based on distance to goal and path curvature.
+
+    v = cruise / (1 + curvature_factor × |κ|)
+
+    - Slows down near goal (linear ramp)
+    - Slows down on curves (inverse relationship)
+
+    Args:
+        cruise: Cruise speed (m/s)
+        dist_to_goal: Distance to goal (m)
+        curvature: Path curvature (1/m)
+        slow_down_dist: Distance at which to start slowing (m)
+        curvature_factor: How much curvature reduces speed
+        bounds: (min, max) speed limits
+
+    Returns:
+        Target speed (m/s)
     """
     speed = cruise
 
@@ -257,9 +288,8 @@ def compute_target_speed(
         ratio = dist_to_goal / slow_down_dist
         speed *= 0.3 + 0.7 * ratio
 
-    # Slow down on curves: v_max ∝ 1/√κ (centripetal acceleration limit)
-    # Simplified: 1 / (1 + k × curvature)
-    curve_factor = 1.0 / (1.0 + curvature_factor * max(0.0, curvature))
+    # Slow down on curves: v = v / (1 + k × |κ|)
+    curve_factor = 1.0 / (1.0 + curvature_factor * abs(curvature))
     speed *= curve_factor
 
     return float(np.clip(speed, bounds[0], bounds[1]))
