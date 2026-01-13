@@ -1,55 +1,59 @@
-from __future__ import annotations
-
+"""
+Pure Pursuit parameters.
+"""
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True, slots=True)
 class PurePursuitParams:
     """
-    Pure Pursuit tracker parameters (ROS-free).
+    Pure Pursuit configuration.
 
-    This tracker outputs a velocity ControlCommand in BODY frame:
-        cmd = (vx_body, vy_body, vz, yaw_rate)
+    Based on Coulter (1992) with modern extensions for adaptive lookahead
+    and speed profiling.
     """
+    # Robot model
+    holonomic: bool = True  # True for omnidirectional, False for diff-drive
+    wheelbase: Optional[float] = None  # For Ackermann steering (meters)
 
-    # Lookahead (meters)
+    # Lookahead (m)
     base_lookahead: float = 0.6
     min_lookahead: float = 0.3
     max_lookahead: float = 1.5
-    lookahead_speed_gain: float = 0.5
+    lookahead_speed_gain: float = 0.5  # L_d += speed × gain
 
-    # Speed profile (m/s)
+    # Speed (m/s)
     cruise_speed: float = 0.4
     min_speed: float = 0.1
     max_speed: float = 0.5
 
-    # Curvature-based speed reduction
-    curvature_speed_factor: float = 0.3
+    # Curvature adaptation factors
+    # Higher values = more reduction on curves
+    # Formula: value / (1 + factor * curvature)
+    curvature_speed_factor: float = 0.5      # Speed reduction on curves
+    curvature_lookahead_factor: float = 0.8  # Lookahead reduction on curves
 
-    # Slow down near goal (meters)
-    slow_down_distance: float = 1.0
+    slow_down_distance: float = 1.0  # ramp down near goal
 
-    # Tolerances (meters)
+    # Tolerances (m)
     goal_tolerance: float = 0.15
-    path_tolerance: float = 0.8
+    path_tolerance: float = 0.8  # max cross-track error
 
-    # Altitude control (simple P, optional)
+    # Angular velocity limits
+    max_yaw_rate: float = 0.5  # rad/s
+
+    # Altitude control (3D)
     altitude_kp: float = 1.2
     max_vertical_speed: float = 0.3
 
-    # Yaw control (smooth)
-    yaw_kp: float = 0.5
-    max_yaw_rate: float = 0.35
-    yaw_deadband: float = 0.15
-    yaw_speed_threshold: float = 0.05
-    yaw_rate_smoothing: float = 0.15
+    # Smoothing (low-pass filter α)
+    speed_smoothing: float = 0.3
+    yaw_rate_smoothing: float = 0.3
 
-    # Resampling for internal discrete representation
-    sample_dt: float = 0.05  # seconds, used for trajectory.sample_by_time(sample_dt)
+    # Trajectory sampling
+    sample_dt: float = 0.05  # seconds
 
-    # Closest-point search window (indices in sampled list)
+    # Closest point search window (indices)
     closest_search_back: int = 10
     closest_search_forward: int = 120
-
-    # Internal speed smoothing
-    speed_smoothing_alpha: float = 0.3

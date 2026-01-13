@@ -1,83 +1,81 @@
-"""
-Collision checking helpers for Costmap2D.
-
-Includes:
-- point validity checks
-- segment collision checks (grid ray marching)
-"""
-
+"""Collision checking utilities for Costmap2D."""
 from __future__ import annotations
 
-from math import hypot
-from typing import Tuple
+from skimage.draw import line
 
-from core.planning.environment.costmap2d import Costmap2D
-
-
-def is_state_valid(world: Costmap2D, x: float, y: float) -> bool:
-    """Check if a world (x,y) lies in free space."""
-    gx, gy = world.world_to_grid(x, y)
-    return world.is_free(gx, gy)
+from .costmap2d import Costmap2D
 
 
-def _bresenham(gx0: int, gy0: int, gx1: int, gy1: int):
+def is_state_valid(costmap: Costmap2D, x: float, y: float) -> bool:
     """
-    Bresenham grid traversal from (gx0,gy0) to (gx1,gy1).
-    Yields integer cells along the line including endpoints.
-    """
-    dx = abs(gx1 - gx0)
-    dy = abs(gy1 - gy0)
-    x, y = gx0, gy0
-    sx = 1 if gx0 < gx1 else -1
-    sy = 1 if gy0 < gy1 else -1
-    err = dx - dy
+    Check if world position is collision-free.
 
-    while True:
-        yield x, y
-        if x == gx1 and y == gy1:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            x += sx
-        if e2 < dx:
-            err += dx
-            y += sy
+    Args:
+        costmap: Occupancy grid.
+        x, y: World coordinates (meters).
+
+    Returns:
+        True if position is in free space and within bounds.
+    """
+    gx, gy = costmap.world_to_grid(x, y)
+    return costmap.is_free(gx, gy)
 
 
 def is_segment_collision_free(
-    world: Costmap2D,
-    x0: float, y0: float,
-    x1: float, y1: float,
+    costmap: Costmap2D,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
 ) -> bool:
     """
-    Check if straight segment between two world points is collision-free.
-    """
-    gx0, gy0 = world.world_to_grid(x0, y0)
-    gx1, gy1 = world.world_to_grid(x1, y1)
+    Check if line segment is collision-free using Bresenham rasterization.
 
-    for gx, gy in _bresenham(gx0, gy0, gx1, gy1):
-        if not world.is_free(gx, gy):
+    Args:
+        costmap: Occupancy grid.
+        x0, y0: Segment start (world meters).
+        x1, y1: Segment end (world meters).
+
+    Returns:
+        True if all cells along the segment are free.
+    """
+    gx0, gy0 = costmap.world_to_grid(x0, y0)
+    gx1, gy1 = costmap.world_to_grid(x1, y1)
+
+    rows, cols = line(gy0, gx0, gy1, gx1)
+
+    for gy, gx in zip(rows, cols):
+        if not costmap.is_free(gx, gy):
             return False
     return True
 
 
 def segment_collision_ratio(
-    world: Costmap2D,
-    x0: float, y0: float,
-    x1: float, y1: float,
+    costmap: Costmap2D,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
 ) -> float:
     """
-    Return fraction of cells along the segment that are occupied.
-    Useful as a diagnostic / soft-cost.
-    """
-    gx0, gy0 = world.world_to_grid(x0, y0)
-    gx1, gy1 = world.world_to_grid(x1, y1)
+    Compute fraction of cells along segment that are occupied.
 
-    total = 0
-    bad = 0
-    for gx, gy in _bresenham(gx0, gy0, gx1, gy1):
-        total += 1
-        if world.is_occupied(gx, gy):
-            bad += 1
-    return (bad / total) if total > 0 else 1.0
+    Useful for soft collision costs in optimization-based planners.
+
+    Args:
+        costmap: Occupancy grid.
+        x0, y0: Segment start (world meters).
+        x1, y1: Segment end (world meters).
+
+    Returns:
+        Ratio in [0, 1]. Returns 1.0 for zero-length segments.
+    """
+    gx0, gy0 = costmap.world_to_grid(x0, y0)
+    gx1, gy1 = costmap.world_to_grid(x1, y1)
+
+    rows, cols = line(gy0, gx0, gy1, gx1)
+    if len(rows) == 0:
+        return 1.0
+
+    occupied = sum(1 for gy, gx in zip(rows, cols) if costmap.is_occupied(gx, gy))
+    return occupied / len(rows)

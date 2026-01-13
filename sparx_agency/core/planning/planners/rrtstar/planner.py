@@ -1,37 +1,41 @@
-"""
-RRT* planner implementation using OMPL Python bindings.
-
-Implements BasePlanner:
-  plan(PlanRequest, world) -> PlanResult
-"""
+"""RRT* planner implementing BasePlanner protocol."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from core.planning.interfaces.planner import BasePlanner, PlanRequest
-from core.common.types import PlanResult
+from sparx_agency.core.common.types import PlanResult
+from sparx_agency.core.planning.interfaces.planner import BasePlanner, PlanRequest
+from sparx_agency.core.planning.environment import Costmap2D
 
 from .params import RRTStarOmplParams
-from .algorithm import plan_rrtstar_ompl
+from .algorithm import plan_rrtstar
 
 
 @dataclass
 class RRTStarOmplPlanner(BasePlanner):
     """
-    OMPL RRT* planner that returns a geometric Path2D (no velocities).
+    RRT* planner that produces geometric paths.
 
-    The 'world' is expected to behave like Costmap2D (duck typing):
-      - width, height, resolution, origin_x, origin_y
-      - is_free(ix, iy) -> bool
-      - optional clearance functions (see algorithm.py)
+    Uses OMPL's RRT* implementation with optional clearance-based
+    cost optimization. Output paths are interpolated at uniform spacing.
     """
-    params: RRTStarOmplParams = RRTStarOmplParams()
-    name: str = "rrtstar_ompl"
+    name: str = field(default="rrtstar_ompl", init=False)
+    params: RRTStarOmplParams = field(default_factory=RRTStarOmplParams)
 
-    def plan(self, request: PlanRequest, world: object) -> PlanResult:
-        return plan_rrtstar_ompl(
+    def plan(self, request: PlanRequest, world: Costmap2D) -> PlanResult:
+        """
+        Compute a collision-free path from start to goal.
+
+        Args:
+            request: Planning request with start/goal poses.
+            world: Costmap2D occupancy grid.
+
+        Returns:
+            PlanResult with status and Path2D if successful.
+        """
+        return plan_rrtstar(
             start=request.start,
             goal=request.goal,
-            world=world,
+            costmap=world,
             params=self.params,
         )
