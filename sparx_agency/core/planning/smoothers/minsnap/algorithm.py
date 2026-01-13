@@ -1,290 +1,294 @@
 """
-MinSnap trajectory generation.
+Minimum-snap trajectory generation.
 
-This module is the only place that integrates with the external library
-`minsnap_trajectories`. It performs:
+Produces smooth polynomial trajectories that minimize snap (4th derivative),
+ideal for quadrotors and other dynamically agile robots.
 
-1) Waypoint preparation:
-   - Extract x/y from Path2D points
-   - Optionally filter points that are too close
-
-2) Time allocation:
-   - Assign cumulative waypoint times using a trapezoidal/triangular motion
-     estimate with safety margins.
-
-3) Trajectory generation:
-   - Build `ms.Waypoint` objects and call `ms.generate_trajectory(...)`.
-
-4) Sampling:
-   - Sample position/velocity/acceleration on a uniform time grid (dt).
-   - Compute auxiliary scalars:
-       * s (cumulative arc length)
-       * curvature (|v x a| / |v|^3)
-       * optional yaw / yaw_rate from velocity direction
-
-The output of this module is a tuple of core `TrajectoryPoint` samples plus a
-small debug dictionary (useful for evaluation or visualization elsewhere).
+Uses the minsnap_trajectories library for polynomial optimization.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
 
-from core.common.types import Path2D
-from core.common.types.planning import TrajectoryPoint
-
+from sparx_agency.core.common.types import Path2D, TrajectoryPoint, KinematicLimits
 from .params import MinSnapParams
 
 try:
     import minsnap_trajectories as ms
-except Exception as e:  # pragma: no cover
-    ms = None
-    _MINSNAP_IMPORT_ERROR = e
-else:
-    _MINSNAP_IMPORT_ERROR = None
+    _MS_AVAILABLE = True
+except ImportError as e:
+    ms = None  # type: ignore
+    _MS_AVAILABLE = False
+    _MS_IMPORT_ERROR = e
 
 
 @dataclass(frozen=True)
-class MinSnapRawResult:
-    """
-    Raw algorithm output.
-
-    `samples` are time-ordered `TrajectoryPoint` objects.
-    `debug` contains non-essential metadata (counts, times, effective limits).
-    """
+class MinSnapSolution:
+    """Result of minimum-snap trajectory generation."""
     samples: Tuple[TrajectoryPoint, ...]
-    debug: Dict[str, Any]
+    total_length: float
+    total_time: float
 
 
-def _filter_points(xs: List[float], ys: List[float], zs: List[float], min_spacing: float) -> Tuple[List[float], List[float], List[float]]:
-    """Drop consecutive waypoints closer than `min_spacing`."""
-    if not xs:
-        return [], [], []
-    fx, fy, fz = [xs[0]], [ys[0]], [zs[0]]
-
-    for x, y, z in zip(xs[1:], ys[1:], zs[1:]):
-        dist = math.sqrt((x - fx[-1]) ** 2 + (y - fy[-1]) ** 2 + (z - fz[-1]) ** 2)
-        if dist >= min_spacing:
-            fx.append(x); fy.append(y); fz.append(z)
-
-    # Always include last point (tolerant)
-    if len(xs) > 1:
-        dist = math.sqrt((xs[-1] - fx[-1]) ** 2 + (ys[-1] - fy[-1]) ** 2 + (zs[-1] - fz[-1]) ** 2)
-        if dist >= min_spacing * 0.5:
-            fx.append(xs[-1]); fy.append(ys[-1]); fz.append(zs[-1])
-
-    return fx, fy, fz
-
-
-def _extract_limits(limits: Optional[Any], fallback_v: float) -> Tuple[float, float]:
+def solve(
+    path: Path2D,
+    params: MinSnapParams,
+    limits: Optional[KinematicLimits] = None,
+) -> MinSnapSolution:
     """
-    Best-effort extraction of (max_v, max_a) from an optional limits object.
+    Generate minimum-snap trajectory from path.
 
-    The smoother interface uses an abstract `limits` type, so we support multiple
-    common attribute names. If a field is missing, a conservative fallback is used.
+    Args:
+        path: Input waypoints.
+        params: Algorithm configuration.
+        limits: Optional kinematic constraints.
+
+    Returns:
+        Discrete trajectory samples.
+
+    Raises:
+        ImportError: If minsnap_trajectories is not installed.
+        ValueError: If fewer than 2 waypoints after filtering.
     """
+    if not _MS_AVAILABLE:
+        raise ImportError(
+            "minsnap_trajectories is required for MinSnapSmoother. "
+            "Install with: pip install minsnap-trajectories"
+        ) from _MS_IMPORT_ERROR
+
+    # Extract and filter waypoints
+    pts = np.array([(p.x, p.y, 0.0) for p in path.points])
+    pts = _filter_close_points(pts, params.min_point_spacing)
+
+    if len(pts) < 2:
+        raise ValueError("MinSnap requires at least 2 distinct waypoints")
+
+    # Get velocity/acceleration limits
+    max_v, max_a = _get_limits(params, limits)
+
+    # Allocate segment times
+    times = _allocate_times(pts, max_v, max_a, params)
+
+    # Build minsnap waypoints
+    waypoints = _build_waypoints(pts, times, params.zero_endpoint_velocity)
+
+    # Generate trajectory
+    traj = ms.generate_trajectory(
+        waypoints,
+        degree=params.degree,
+        idx_minimized_orders=params.idx_minimized_orders,
+        num_continuous_orders=params.num_continuous_orders,
+        algorithm=params.algorithm,
+    )
+
+    # Sample trajectory
+    total_time = float(traj.time_reference[-1])
+    samples = _sample_trajectory(traj, total_time, params.dt)
+
+    total_length = _compute_arc_length(samples)
+
+    return MinSnapSolution(
+        samples=tuple(samples),
+        total_length=total_length,
+        total_time=total_time,
+    )
+
+
+def _filter_close_points(pts: NDArray, min_spacing: float) -> NDArray:
+    """Remove consecutive points closer than min_spacing."""
+    if len(pts) <= 2:
+        return pts
+
+    kept = [pts[0]]
+    for p in pts[1:-1]:
+        if np.linalg.norm(p - kept[-1]) >= min_spacing:
+            kept.append(p)
+
+    # Always include endpoint
+    if np.linalg.norm(pts[-1] - kept[-1]) >= min_spacing * 0.5:
+        kept.append(pts[-1])
+    else:
+        kept[-1] = pts[-1]
+
+    return np.array(kept)
+
+
+def _get_limits(
+    params: MinSnapParams,
+    limits: Optional[KinematicLimits]
+) -> Tuple[float, float]:
+    """Extract velocity and acceleration limits."""
     if limits is None:
-        return fallback_v, 1.0
+        return params.nominal_speed_xy, 1.0
 
-    max_v = None
-    for k in ("max_velocity", "max_speed", "max_speed_xy"):
-        if hasattr(limits, k):
-            max_v = float(getattr(limits, k))
-            break
-    if max_v is None or max_v <= 0:
-        max_v = fallback_v
-
-    max_a = None
-    for k in ("max_acceleration", "max_acc", "max_acc_xy"):
-        if hasattr(limits, k):
-            max_a = float(getattr(limits, k))
-            break
-    if max_a is None or max_a <= 0:
-        max_a = 1.0
+    max_v = min(limits.max_speed_xy, params.nominal_speed_xy)
+    max_a = limits.max_accel_xy if limits.max_accel_xy else 1.0
 
     return max_v, max_a
 
 
-def _allocate_times(xs: List[float], ys: List[float], zs: List[float], *, max_v: float, max_a: float, p: MinSnapParams) -> List[float]:
+def _allocate_times(
+    pts: NDArray,
+    max_v: float,
+    max_a: float,
+    params: MinSnapParams,
+) -> List[float]:
     """
-    Allocate cumulative waypoint times with a simple motion estimate.
+    Allocate cumulative waypoint times using trapezoidal motion estimate.
 
-    The segment time is computed using a triangular/trapezoidal approximation,
-    then scaled and clamped to ensure conservative timing.
+    Uses triangular profile for short segments, trapezoidal for longer ones.
     """
     times = [0.0]
-    v_eff = max_v * p.v_eff_ratio
-    a_max = max_a
+    v_eff = max_v * params.v_eff_ratio
 
-    for i in range(1, len(xs)):
-        dist = math.sqrt((xs[i] - xs[i - 1]) ** 2 + (ys[i] - ys[i - 1]) ** 2 + (zs[i] - zs[i - 1]) ** 2)
+    for i in range(1, len(pts)):
+        dist = float(np.linalg.norm(pts[i] - pts[i-1]))
 
         if dist < 0.01:
-            times.append(times[-1] + p.min_segment_time)
-            continue
-
-        t_accel = v_eff / a_max
-        d_accel = 0.5 * a_max * t_accel ** 2
-
-        if dist < 2 * d_accel:
-            seg_time = 2 * math.sqrt(dist / a_max)
+            seg_time = params.min_segment_time
         else:
-            seg_time = 2 * t_accel + (dist - 2 * d_accel) / v_eff
+            # Time to accelerate to v_eff
+            t_accel = v_eff / max_a
+            d_accel = 0.5 * max_a * t_accel ** 2
 
-        seg_time = max(seg_time * p.segment_time_scale, p.min_segment_time)
+            if dist < 2 * d_accel:
+                # Triangular profile (can't reach full speed)
+                seg_time = 2 * math.sqrt(dist / max_a)
+            else:
+                # Trapezoidal profile
+                seg_time = 2 * t_accel + (dist - 2 * d_accel) / v_eff
+
+            seg_time = max(seg_time * params.segment_time_scale, params.min_segment_time)
+
         times.append(times[-1] + seg_time)
 
     return times
 
 
-def _curvature(v: np.ndarray, a: np.ndarray) -> float:
-    """Curvature via |v x a| / |v|^3 (3D)."""
-    vx, vy, vz = float(v[0]), float(v[1]), float(v[2])
-    ax, ay, az = float(a[0]), float(a[1]), float(a[2])
+def _build_waypoints(
+    pts: NDArray,
+    times: List[float],
+    zero_endpoints: bool,
+) -> List:
+    """Build minsnap Waypoint objects."""
+    waypoints = []
 
-    speed = math.sqrt(vx * vx + vy * vy + vz * vz)
-    if speed <= 1e-6:
+    for i, (pt, t) in enumerate(zip(pts, times)):
+        is_endpoint = (i == 0 or i == len(pts) - 1)
+
+        if zero_endpoints and is_endpoint:
+            waypoints.append(ms.Waypoint(
+                time=t,
+                position=pt,
+                velocity=np.zeros(3)
+            ))
+        else:
+            waypoints.append(ms.Waypoint(time=t, position=pt))
+
+    return waypoints
+
+
+def _sample_trajectory(traj, total_time: float, dt: float) -> List[TrajectoryPoint]:
+    """Sample trajectory at uniform time intervals."""
+    t_samples = np.arange(0.0, total_time + dt/2, dt)
+    if t_samples[-1] < total_time - 1e-6:
+        t_samples = np.append(t_samples, total_time)
+
+    # Get position, velocity, acceleration
+    pva = ms.compute_trajectory_derivatives(traj, t_samples, order=3)
+    pos, vel, acc = pva[0], pva[1], pva[2]
+
+    samples = []
+    prev_yaw: Optional[float] = None
+    prev_t: Optional[float] = None
+
+    for i, t in enumerate(t_samples):
+        vx, vy = float(vel[i, 0]), float(vel[i, 1])
+
+        # Compute yaw and yaw rate from velocity
+        yaw: Optional[float] = None
+        yaw_rate: Optional[float] = None
+
+        speed_xy = math.hypot(vx, vy)
+        if speed_xy > 1e-6:
+            yaw = math.atan2(vy, vx)
+
+            if prev_yaw is not None and prev_t is not None:
+                dt_actual = float(t) - prev_t
+                if dt_actual > 1e-9:
+                    # Normalize angle difference to [-π, π]
+                    dyaw = (yaw - prev_yaw + math.pi) % (2 * math.pi) - math.pi
+                    yaw_rate = dyaw / dt_actual
+
+            prev_yaw = yaw
+            prev_t = float(t)
+
+        # Compute curvature from velocity and acceleration
+        curvature = _compute_curvature(vel[i], acc[i])
+
+        samples.append(TrajectoryPoint(
+            t=float(t),
+            x=float(pos[i, 0]),
+            y=float(pos[i, 1]),
+            z=float(pos[i, 2]),
+            vx=vx,
+            vy=vy,
+            vz=float(vel[i, 2]),
+            ax=float(acc[i, 0]),
+            ay=float(acc[i, 1]),
+            az=float(acc[i, 2]),
+            yaw=yaw,
+            yaw_rate=yaw_rate,
+            curvature=curvature,
+        ))
+
+    # Compute arc lengths
+    _add_arc_lengths(samples)
+
+    return samples
+
+
+def _compute_curvature(v: NDArray, a: NDArray) -> float:
+    """Compute curvature as |v × a| / |v|³."""
+    speed = float(np.linalg.norm(v))
+    if speed < 1e-6:
         return 0.0
 
-    cx = vy * az - vz * ay
-    cy = vz * ax - vx * az
-    cz = vx * ay - vy * ax
-    cross_mag = math.sqrt(cx * cx + cy * cy + cz * cz)
-    return cross_mag / (speed ** 3)
+    cross = np.cross(v, a)
+    return float(np.linalg.norm(cross)) / (speed ** 3)
 
 
-def _cum_arc_length(pos: np.ndarray) -> np.ndarray:
-    """Cumulative arc length for sampled positions shaped (N, 3)."""
-    s = np.zeros((pos.shape[0],), dtype=float)
-    for i in range(1, pos.shape[0]):
-        dp = pos[i] - pos[i - 1]
-        s[i] = s[i - 1] + float(np.linalg.norm(dp))
-    return s
+def _add_arc_lengths(samples: List[TrajectoryPoint]) -> None:
+    """Add cumulative arc length to samples (modifies in place via replacement)."""
+    if not samples:
+        return
 
+    s = 0.0
+    for i in range(len(samples)):
+        if i > 0:
+            dx = samples[i].x - samples[i-1].x
+            dy = samples[i].y - samples[i-1].y
+            dz = samples[i].z - samples[i-1].z
+            s += math.sqrt(dx*dx + dy*dy + dz*dz)
 
-class MinSnapAlgorithm:
-    """Generate discrete minimum-snap samples from a Path2D."""
-
-    def __init__(self, *, params: MinSnapParams) -> None:
-        self.params = params
-
-    def solve(
-        self,
-        path: Path2D,
-        *,
-        limits: Optional[Any] = None,
-        options: Optional[Dict[str, Any]] = None,
-        world: Any = None,
-    ) -> MinSnapRawResult:
-        """
-        Build and sample a minimum-snap trajectory.
-
-        Args:
-            path: geometric waypoints (2D; z is set to 0)
-            limits: optional dynamics limits object
-            options: per-call overrides (e.g., dt, min_point_spacing)
-            world: reserved for future environment-aware rules
-
-        Returns:
-            MinSnapRawResult with `TrajectoryPoint` samples and debug metadata.
-        """
-        if ms is None:  # pragma: no cover
-            raise ImportError("minsnap_trajectories is not installed") from _MINSNAP_IMPORT_ERROR
-
-        opts = dict(options or {})
-        dt = float(opts.get("dt", self.params.dt))
-        min_spacing = float(opts.get("min_point_spacing", self.params.min_point_spacing))
-
-        if dt <= 0:
-            raise ValueError(f"dt must be > 0, got {dt}")
-        if min_spacing < 0:
-            raise ValueError("min_point_spacing must be >= 0")
-
-        xs = [p.x for p in path.points]
-        ys = [p.y for p in path.points]
-        zs = [0.0 for _ in path.points]
-
-        xs, ys, zs = _filter_points(xs, ys, zs, min_spacing)
-        if len(xs) < 2:
-            raise ValueError("Need at least 2 distinct waypoints after filtering")
-
-        max_v, max_a = _extract_limits(limits, fallback_v=self.params.nominal_speed_xy)
-        times = _allocate_times(xs, ys, zs, max_v=max_v, max_a=max_a, p=self.params)
-
-        refs: List[ms.Waypoint] = []
-        for i in range(len(xs)):
-            pos = np.array([xs[i], ys[i], zs[i]], dtype=float)
-            if self.params.constrain_endpoints_velocity_zero and (i == 0 or i == len(xs) - 1):
-                refs.append(ms.Waypoint(time=times[i], position=pos, velocity=np.zeros(3)))
-            else:
-                refs.append(ms.Waypoint(time=times[i], position=pos))
-
-        traj = ms.generate_trajectory(
-            refs,
-            degree=self.params.degree,
-            idx_minimized_orders=self.params.idx_minimized_orders,
-            num_continuous_orders=self.params.num_continuous_orders,
-            algorithm=self.params.algorithm,
+        # Replace sample with updated s value
+        old = samples[i]
+        samples[i] = TrajectoryPoint(
+            t=old.t, x=old.x, y=old.y, z=old.z,
+            vx=old.vx, vy=old.vy, vz=old.vz,
+            ax=old.ax, ay=old.ay, az=old.az,
+            yaw=old.yaw, yaw_rate=old.yaw_rate,
+            s=s, curvature=old.curvature,
         )
 
-        total_time = float(traj.time_reference[-1])
-        t_samples = np.arange(0.0, total_time + 1e-9, dt, dtype=float)
-        if t_samples.size == 0 or t_samples[-1] < total_time - 1e-6:
-            t_samples = np.append(t_samples, total_time)
 
-        pva = ms.compute_trajectory_derivatives(traj, t_samples, order=3)
-        pos = pva[0]
-        vel = pva[1]
-        acc = pva[2]
-
-        s_cum = _cum_arc_length(pos)
-
-        samples: List[TrajectoryPoint] = []
-        prev_yaw: Optional[float] = None
-        prev_t: Optional[float] = None
-
-        for i, t in enumerate(t_samples):
-            x, y, z = float(pos[i, 0]), float(pos[i, 1]), float(pos[i, 2])
-            vx, vy, vz = float(vel[i, 0]), float(vel[i, 1]), float(vel[i, 2])
-            ax, ay, az = float(acc[i, 0]), float(acc[i, 1]), float(acc[i, 2])
-
-            yaw: Optional[float] = None
-            yaw_rate: Optional[float] = None
-            if math.hypot(vx, vy) > 1e-6:
-                yaw = math.atan2(vy, vx)
-                if prev_yaw is not None and prev_t is not None:
-                    dt_y = float(t - prev_t)
-                    if dt_y > 1e-9:
-                        dyaw = (yaw - prev_yaw + math.pi) % (2 * math.pi) - math.pi
-                        yaw_rate = dyaw / dt_y
-                prev_yaw = yaw
-                prev_t = float(t)
-
-            samples.append(
-                TrajectoryPoint(
-                    t=float(t),
-                    x=x, y=y, z=z,
-                    vx=vx, vy=vy, vz=vz,
-                    ax=ax, ay=ay, az=az,
-                    yaw=yaw,
-                    yaw_rate=yaw_rate,
-                    s=float(s_cum[i]),
-                    curvature=float(_curvature(vel[i], acc[i])),
-                )
-            )
-
-        debug = {
-            "n_waypoints_in": len(path.points),
-            "n_waypoints_used": len(xs),
-            "dt": dt,
-            "total_time": total_time,
-            "total_length": float(s_cum[-1]) if len(s_cum) else 0.0,
-            "max_v_used": max_v,
-            "max_a_used": max_a,
-            "waypoint_times": times,
-        }
-
-        return MinSnapRawResult(samples=tuple(samples), debug=debug)
+def _compute_arc_length(samples: List[TrajectoryPoint]) -> float:
+    """Get total arc length from samples."""
+    if not samples:
+        return 0.0
+    return samples[-1].s or 0.0

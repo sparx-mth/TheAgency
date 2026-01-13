@@ -1,66 +1,87 @@
 # Trackers
 
-This package contains **ROS-free** tracking algorithms that convert a **planned/smoothed trajectory**
-into a **control command** (typically velocity) given the robot’s current state.
+Trajectory tracking: convert `Trajectory` + `State3D` → `ControlCommand`.
 
-Goals:
-- Keep tracking logic **pure core** (no ROS, no threads, no node lifecycle).
-- Provide reusable trackers that can run in simulation, ROS, or any other runtime.
-- Clean boundaries: trackers compute commands; integration layers apply/publish them.
+## Pipeline
 
----
+```
+Planner → Path → Smoother → Trajectory → Tracker → ControlCommand
+```
 
-## What is a Tracker?
+## Pure Pursuit
 
-A **Tracker** consumes:
-- `State2D` / `State3D` (pose + twist): `core.common.types.motion`
-- A `Trajectory` (time-parameterized): `core.common.types.planning.Trajectory`
+Classic geometric path tracking algorithm (Coulter 1992, CMU-RI-TR-92-01).
 
-And outputs:
-- `ControlCommand` (ROS-free): `core.common.types.control.ControlCommand`
+**Core formula:**
+```
+κ = 2·sin(α) / L_d
+```
+where:
+- `α` = angle to lookahead point in robot frame
+- `L_d` = lookahead distance
+- `κ` = curvature of arc to follow
 
-A tracker does **not**:
-- manage control loops or timing threads
-- publish commands to ROS topics
-- arm/disarm, handle safety modes, or perform low-level motor control
+**For differential drive:** `ω = v · κ`
 
-Those belong in the **integration layer** (e.g., ROS node, simulator bridge, hardware driver).
+**For Ackermann steering:** `δ = arctan(L · κ)`
 
----
+### Features
 
-## Available Trackers
+- **Classic geometry:** Arc-based steering, not point-to-point
+- **Holonomic mode:** For omnidirectional robots (lateral velocity allowed)
+- **Non-holonomic mode:** For differential drive (forward only + yaw rate)
+- **Ackermann mode:** Computes steering angle given wheelbase
+- **Adaptive lookahead:** `L_d = base + speed × gain`
+- **Speed profiling:** Slows near goal and on curves
 
-### Pure Pursuit (`pure_pursuit`)
-A classic geometric tracker that continuously steers toward a **lookahead point** on the trajectory.
-This avoids stopping at intermediate waypoints and naturally produces smooth turns.
+### Usage
 
-Key features in this implementation:
-- Adaptive lookahead: base + speed-proportional, reduced on tight curves
-- Speed profiling:
-  - slow down near the goal
-  - slow down on high curvature
-  - optional obstacle clearance factor
-- Smooth yaw-rate correction with deadband + low-pass filtering
-- Optional vertical (altitude) P control for `State3D`
+```python
+from sparx_agency.core.planning.trackers import PurePursuitTracker, PurePursuitParams
+from sparx_agency.core.planning.interfaces import TrackerRequest
 
----
+# Omnidirectional robot
+tracker = PurePursuitTracker(PurePursuitParams(holonomic=True))
 
-## Inputs / Outputs
+# Differential drive
+tracker = PurePursuitTracker(PurePursuitParams(holonomic=False))
 
-### Inputs
-- `State2D` / `State3D`
-  - `state.pose.x, state.pose.y, state.pose.yaw`
-  - for 3D: `state.pose.z`
-- `Trajectory` (Protocol)
-  - `trajectory.sample_by_time(dt)` returns `List[TrajectoryPoint]`
+# Ackermann (car-like)
+tracker = PurePursuitTracker(PurePursuitParams(holonomic=False, wheelbase=0.3))
 
-### Output
-- `ControlCommand.velocity(vx, vy, vz, yaw_rate, **meta)`
+# Control loop
+result = tracker.step(TrackerRequest(state=current_state, trajectory=trajectory, t=0))
 
-**Important:** Pure Pursuit in this package outputs **BODY-frame** planar velocities:
-- `x` = forward
-- `y` = left (depending on your convention)
-- `yaw_rate` = around +Z axis
+if result.done:
+    stop()
+elif result.failed:
+    replan()
+else:
+    send(result.command)  # (vx, vy, vz, yaw_rate) in body frame
+```
 
-Your integration layer must interpret that consistently when applying the command.
+### Metadata Output
 
+```python
+result.metadata = {
+    "alpha": 0.17,           # angle to lookahead (rad)
+    "curvature": 0.51,       # arc curvature (1/m)
+    "steering_angle": 0.15,  # Ackermann angle (rad), if wheelbase set
+    "lookahead_dist": 0.66,  # computed L_d (m)
+    ...
+}
+```
+
+## Registry
+
+Runtime tracker selection:
+
+```python
+from sparx_agency.core.planning.trackers import default_tracker_registry
+
+tracker = default_tracker_registry().create("pure_pursuit")
+```
+
+## References
+
+- Coulter, R.C. (1992). "Implementation of the Pure Pursuit Path Tracking Algorithm." CMU-RI-TR-92-01.
