@@ -42,8 +42,10 @@ class ProbabilisticGridConfig:
     # Unknown value for nav_msgs/OccupancyGrid
     unknown_value: int = -1
     # evidence model
-    points_to_occupied: int = 5      # threshold in a cell to consider occupied
+    points_to_occupied: int = 30      # threshold in a cell to consider occupied
     max_points_cap: int = 50         # cap per-cell counter
+    min_height_obstacle: float = 0.9
+    max_height_obstacle: float = 2.5
 
     # Filtering / sensing limits
     max_range_m: float = 10.0            # forward 5-10m as you asked
@@ -54,3 +56,5 @@ class ProbabilisticGridConfig:
     #   x right, y down, z forward
     # We'll convert to base-style (x forward, y left, z up) before yaw rotation.
     cloud_is_optical: bool = True
+
+    debug: bool = False

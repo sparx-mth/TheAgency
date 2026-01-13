@@ -20,6 +20,7 @@ class ProbabilisticGridCostmap(Costmap):
         self.origin_x = -0.5 * self.cfg.size_m
         self.origin_y = -0.5 * self.cfg.size_m
 
+
     def reset(self) -> None:
         self._lo.fill(0.0)
         self._seen_mask.fill(False)
@@ -27,25 +28,32 @@ class ProbabilisticGridCostmap(Costmap):
     def update_from_cloud(self, cloud_xyz: np.ndarray, sensor_origin: np.ndarray):
         res = self.cfg.resolution_m
         # Use WORLD coordinates (cloud_xyz) for gx/gy
-        gx = ((-cloud_xyz[:, 0] - self.origin_x) / res).astype(np.int32)
-        gy = ((cloud_xyz[:, 1] - self.origin_y) / res).astype(np.int32)
+        gx = ((cloud_xyz[:, 1] - self.origin_y) / res).astype(np.int32)  # Map World Y to Grid X
+        gy = ((cloud_xyz[:, 0] - self.origin_x) / res).astype(np.int32)  # Map World X to Grid Y
         gz = cloud_xyz[:, 2]
 
         in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
-        # GATE: 0.4 to 2.5m catches walls but ignores the floor/odom-drift
-        is_obstacle = (gz > 1.1) & (gz < 2.5)
-
-        # Track current indices for the "Red" highlight
-        valid_idx = in_bounds
-        # self._last_indices = (gx[valid_idx], gy[valid_idx])
+        is_obstacle = (gz > self.cfg.min_height_obstacle) & (gz < self.cfg.max_height_obstacle)
+        obs_pts_mask = in_bounds & is_obstacle
+        counts = np.zeros((self.height, self.width), dtype=np.int32)
+        # for EVERY point. If 50 points fall in cell (10, 10),
+        # counts[10, 10] will equal 50.
+        np.add.at(counts, (gx[obs_pts_mask], gy[obs_pts_mask]), 1)
+        confirmed_obs = (counts >= self.cfg.points_to_occupied)
+        thin_points = in_bounds & (~confirmed_obs[gy, gx])
 
         # Log-odds update
         obs_mask = in_bounds & is_obstacle
         free_mask = in_bounds & (~is_obstacle)
+
+        self._lo[confirmed_obs] += self.cfg.lo_occ
+        self._lo[gx[thin_points], gy[thin_points]] += self.cfg.lo_free
         self._lo[gx[obs_mask], gy[obs_mask]] += self.cfg.lo_occ
         self._lo[gx[free_mask], gy[free_mask]] += self.cfg.lo_free
         self._seen_mask[gx[in_bounds], gy[in_bounds]] = True
         self._lo = np.clip(self._lo, self.cfg.lo_min, self.cfg.lo_max)
+        if self.cfg.debug:
+            self._last_indices = np.where(confirmed_obs)
 
     def get_grid(self) -> Tuple[GridSpec, np.ndarray]:
         # 1. Start with Gray (Unknown -1)

@@ -32,6 +32,7 @@ class MappingPipelineConfig:
 
     # If your depth->cloud is optical (x right, y down, z forward)
     cloud_is_optical: bool = True
+    debug: bool = False
 
 
 
@@ -40,7 +41,7 @@ class PinholeCloudGenerator(CloudGenerator):
     def __init__(self, stride: int = 2):
         self.stride = max(1, int(stride))
 
-    def depth_to_cloud(self, depth_m: np.ndarray, intr: Intrinsics) -> np.ndarray:
+    def depth_to_cloud_to_base_xyz(self, depth_m: np.ndarray, intr: Intrinsics) -> np.ndarray:
         if depth_m is None:
             return np.zeros((0, 3), dtype=np.float32)
 
@@ -77,14 +78,13 @@ class PinholeCloudGenerator(CloudGenerator):
         z =  -(yv - intr.cy) * d / intr.fy
         x = d  # forward in optical
 
-
-        # Now x, y, z are guaranteed to exist for stacking
-        pts = np.stack([x, y, z], axis=1)
-        print(f"DEBUG : vcloud shape: {pts.shape}")
         return np.stack([x, y, z], axis=1).astype(np.float32)
 
 
 def optical_xyz_to_base_xyz(pts_optical: np.ndarray) -> np.ndarray:
+
+    # Merged with depth_to_cloud_to_base_xyz() in MappingPipeline.step()
+
     # pts_optical[:, 0] is X (Right)
     # pts_optical[:, 1] is Y (Down)
     # pts_optical[:, 2] is Z (Forward/Depth)
@@ -128,105 +128,77 @@ class MappingPipeline:
         self.cfg = cfg or MappingPipelineConfig()
 
         self.last_depth: Optional[np.ndarray] = None
-        self.last_cloud_cam: np.ndarray = np.zeros((0, 3), dtype=np.float32)  # NEVER None
-        self.last_cloud_base: np.ndarray = np.zeros((0, 3), dtype=np.float32)
+        self.last_cloud_local: np.ndarray = np.zeros((0, 3), dtype=np.float32)
+        self.last_cloud_global: np.ndarray = np.zeros((0, 3), dtype=np.float32)
+
 
         self.frame_count = 0
         self.save_interval = 100  # Adjust X here
         self._last_indices = None
 
-
     def step(self, obs: Observation) -> None:
-        # Reset debug outputs each step (still not None)
-        self.last_cloud_cam = np.zeros((0, 3), dtype=np.float32)
-        self.last_cloud_base = np.zeros((0, 3), dtype=np.float32)
+        # 1. Initialization and Reset
+        self.last_cloud_local = np.zeros((0, 3), dtype=np.float32)
+        self.last_cloud_global = np.zeros((0, 3), dtype=np.float32)
 
         intr = obs.intrinsics
-        stamp_sec = None
 
-        # 1) Get depth
+        # 2. Source Selection (Cloud vs Depth vs RGB)
+        cloud_local_corr = None
+
         if obs.cloud is not None:
-            cloud_cam = np.asarray(obs.cloud.xyz, dtype=np.float32).reshape((-1, 3))
-            stamp_sec = obs.cloud.stamp_sec
-            self.last_cloud_cam = cloud_cam
+            cloud_local_corr = np.asarray(obs.cloud.xyz, dtype=np.float32).reshape((-1, 3))
+
         elif obs.depth is not None:
             if intr is None:
                 raise ValueError("Observation.depth provided but intrinsics is None")
-            # depth = np.asarray(obs.depth.depth_m, dtype=np.float32)
-            # d_min = depth.min()
-            # d_max = depth.max()
-            # depth_norm = (depth - d_min) / (d_max - d_min + 1e-7)
-            # max_depth = 20.0
-            # depth_meters = max_depth / (depth_norm + 0.01)
-            raw_depth = np.asarray(obs.depth.depth_m, dtype=np.float32)
-            self.last_depth = raw_depth
-            # self.last_depth = depth_meters.astype(np.float32)
-            cloud_cam = self.cloud_generator.depth_to_cloud(self.last_depth, intr)
-            # self.last_depth = depth
-            # cloud_cam = self.cloud_generator.depth_to_cloud(depth, intr)
-            self.last_cloud_cam = cloud_cam
+            self.last_depth = np.asarray(obs.depth.depth_m, dtype=np.float32)
+            cloud_local_corr = self.cloud_generator.depth_to_cloud_to_base_xyz(self.last_depth, intr)
 
         elif obs.rgb is not None:
-            if self.depth_model is None:
-                raise ValueError("Observation.rgb provided but depth_model is None")
-            if intr is None:
-                raise ValueError("Observation.rgb provided but intrinsics is None")
+            if self.depth_model is None or intr is None:
+                raise ValueError("Observation.rgb provided but depth_model or intrinsics is None")
 
-            stamp_sec = obs.rgb.stamp_sec
-            # Get raw 0-255 disparity from model
-            depth_m = self.depth_model.infer_depth(obs.rgb.image)
-            # try:
-            #     expected_h, expected_w = intr.height, intr.width
-            #     if depth_m.shape[:2] != (expected_h, expected_w):
-            #         depth_m = cv2.resize(depth_m, (expected_w, expected_h), interpolation=cv2.INTER_LINEAR)
-            #     # Just use the result from the model.
-            self.last_depth = depth_m.astype(np.float32)
+            # Infer depth from RGB and generate cloud
+            self.last_depth = self.depth_model.infer_depth(obs.rgb.image).astype(np.float32)
+            cloud_local_corr = self.cloud_generator.depth_to_cloud_to_base_xyz(self.last_depth, intr)
+        self.last_cloud_local = cloud_local_corr
 
-            # 3. Generate Cloud
-            cloud_cam = self.cloud_generator.depth_to_cloud(self.last_depth, intr)
-            self.last_cloud_cam = cloud_cam
-            # except Exception as e:
-            #     print(f"Error: cloud_generator.depth_to_cloud is {e}")
+
+        if self.last_depth is not None and self.cfg.debug:
+            self.visualize_depth_errors(self.last_depth, cloud_local_corr)
+
+        # 4. Costmap Update (World vs Local)
+        if obs.pose_map_base is not None:
+            # Transform to 'odom/map' frame and update
+            cloud_odom = obs.pose_map_base.transform_points(cloud_local_corr)
+            self.costmap.update_from_cloud(cloud_odom, obs.pose_map_base.t)
+            self.last_cloud_global = cloud_odom
 
         else:
-            return
-
-        if self.last_cloud_cam.shape[0] == 0:
-            return
-
-        # 1. Convert Optical (Cam) -> Base (Robot FLU)
-        # Using your mapping for the Gazebo drone link
-        try:
-            cloud_base = optical_xyz_to_base_xyz(self.last_cloud_cam)
-            print(f"DEBUG: cloud_base:")
-            self.last_cloud_base = cloud_base
-            if self.last_depth is not None:
-                raw_depth = np.asarray(self.last_depth, dtype=np.float32)
-                self.visualize_depth_errors(raw_depth, cloud_base)
-            else:
-                print("No depth data available for visualization")
-        except Exception as e:
-            print(f"Error: optical_xyz_to_base_xyz is {e}")
-
-
+            # Fallback: update relative to sensor origin
+            self.costmap.update_from_cloud(
+                cloud_xyz=cloud_local_corr,
+                sensor_origin=np.zeros(3, dtype=np.float32),
+            )
+            self.last_cloud_local = cloud_local_corr
 
         # 2. Extract Pose and Transform to World
         if obs.pose_map_base is not None:
             # It rotates and translates the points into the 'odom' frame.
-            cloud_odom = obs.pose_map_base.transform_points(cloud_base)
+            cloud_odom = obs.pose_map_base.transform_points(cloud_local_corr)
             # Update costmap with the WORLD points
             self.costmap.update_from_cloud(cloud_odom, obs.pose_map_base.t)
-            print(f"Updated Pose Map Base T: {obs.pose_map_base.t}")
-            print(f" cloud odom == cloud base: {np.allclose(cloud_odom, cloud_base)}")
+            self.last_cloud_global = cloud_odom
         else:
             # Fallback: if no pose, we can only update relative to the drone
             # Use identity pose (0,0,0) as sensor origin
             try:
-                print(f"Fallback Cloud Base")
                 self.costmap.update_from_cloud(
-                    cloud_xyz=cloud_base,
+                    cloud_xyz=cloud_local_corr,
                     sensor_origin=np.zeros(3, dtype=np.float32),
                 )
+                self.last_cloud_global = cloud_local_corr
             except Exception as e:
                 print(f"Error: costmap.update_from_cloud is {e}")
 

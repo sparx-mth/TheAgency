@@ -113,7 +113,6 @@ def odom_to_pose_se3(odom: Odometry) -> PoseSE3:
     o = odom.pose.pose.orientation
     R = quat_to_rot(float(o.x), float(o.y), float(o.z), float(o.w))
     t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float32)
-    print(f"odom_to_pose_se3 R = {R}, t = {t}")
     return PoseSE3(R=R, t=t)
 
 
@@ -167,7 +166,7 @@ def costmap_to_occupancygrid(costmap, stamp, frame_id: str) -> OccupancyGrid:
 
 
 
-class GazeboRos2Ingest(Node):
+class GazeboRos2Ingestor(Node):
     """
     Gazebo adapter:
       - ROS IN:  image + camera_info + odom
@@ -228,14 +227,14 @@ class GazeboRos2Ingest(Node):
         # Debug publishers
         self.pub_depth_raw = self.create_publisher(Image, "/debug/depth_raw", 1)  # 32FC1
         self.pub_depth_vis = self.create_publisher(Image, "/debug/depth_vis", 1)  # mono8
-        self.pub_cloud = self.create_publisher(PointCloud2, "/debug/cloud_cam", 1)  # PointCloud2
+        self.pub_cloud = self.create_publisher(PointCloud2, "/debug/cloud_global", 1)  # PointCloud2
         self.pub_depth_grid = self.create_publisher(Image, "/debug/depth_grid_vis", 1)
 
         self._img_count = 0
         self._latest = LatestState()
 
-        #self.costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
-        self.costmap = SanityCheckCostmap()
+        self.costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        # self.costmap = SanityCheckCostmap()
         self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
         self.cloud_generator = PinholeCloudGenerator()
@@ -339,7 +338,7 @@ class GazeboRos2Ingest(Node):
             return
         # Debug: publish depth / cloud / grid
         depth_m = getattr(self.pipeline, "last_depth", None)
-        cloud_cam = getattr(self.pipeline, "last_cloud_cam", None)
+        cloud_global = getattr(self.pipeline, "last_cloud_global", None)
 
         debug_depth = bool(self.get_parameter("debug_publish_depth").value)
         debug_cloud = bool(self.get_parameter("debug_publish_cloud").value)
@@ -391,35 +390,30 @@ class GazeboRos2Ingest(Node):
                 cv2.imwrite(os.path.join(save_dir, f"depth_vis_{ts}.png"), vis_u8)
                 if debug_grid:
                     cv2.imwrite(os.path.join(save_dir, f"depth_grid_{ts}.png"), grid_vis)
-        # self.get_logger().info(f"cloud_cam = {cloud_cam}")
-        if cloud_cam is not None and debug_cloud:
+
+        if cloud_global is not None and debug_cloud:
             # publish PointCloud2 in camera frame
             header = Header()
             header.stamp = msg.header.stamp
-            header.frame_id = cam_frame
-            self.get_logger().info(f"cloud_cam frame_id: {cloud_cam.shape} {header.frame_id}")
-            pts = cloud_cam.astype(np.float32)
+            header.frame_id = map_frame
+            # self.get_logger().info(f"cloud_global frame_id: {cloud_global.shape} {header.frame_id}")
+            pts = cloud_global.astype(np.float32)
             cloud_msg = point_cloud2.create_cloud_xyz32(header, pts.tolist())
-            # self.get_logger().info(f"cloud_cam frame_id: {cloud_msg.header.frame_id} len of pts: {len(pts.tolist())}")
             self.pub_cloud.publish(cloud_msg)
 
             if save_dir and (self._dbg_count % max(1, save_every_n) == 0):
                 os.makedirs(save_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                np.save(os.path.join(save_dir, f"cloud_cam_{ts}.npy"), pts)
+                np.save(os.path.join(save_dir, f"cloud_global_{ts}.npy"), pts)
 
         # Publish occupancy grid from costmap
         try:
-            occ_msg = costmap_to_occupancygrid(self.costmap, stamp=self.get_clock().now().to_msg(), frame_id=cam_frame)
+            occ_msg = costmap_to_occupancygrid(self.costmap, stamp=self.get_clock().now().to_msg(), frame_id=map_frame)
         except Exception as e:
             self.get_logger().error(f"Cannot convert costmap to OccupancyGrid: {e}")
             return
 
         self.pub_occ.publish(occ_msg)
-        # self.get_logger().info(
-        #     f"Published occupancy grid {occ_msg.info.width}x{occ_msg.info.height} "
-        #     f"res={occ_msg.info.resolution:.3f} frame={occ_msg.header.frame_id}"
-        # )
 
     def image_msg_to_numpy(self, msg: Image) -> np.ndarray:
         """
@@ -489,7 +483,7 @@ class GazeboRos2Ingest(Node):
 
 def main():
     rclpy.init()
-    node = GazeboRos2Ingest()
+    node = GazeboRos2Ingestor()
     try:
         rclpy.spin(node)
     finally:
