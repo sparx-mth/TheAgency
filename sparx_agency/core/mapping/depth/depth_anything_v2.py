@@ -18,6 +18,7 @@ class DepthAnythingV2Config:
     device: Optional[str] = "cuda"  # "cuda", "cpu", or None=auto
     assume_bgr: bool = False      # set True if your images come as BGR (OpenCV)
     max_range_m: float = 15.0
+    debug: bool = False
 
 
 class DepthAnythingV2DepthModel(DepthModel):
@@ -51,7 +52,8 @@ class DepthAnythingV2DepthModel(DepthModel):
         # 1. Get raw disparity from model (0-255 or 0-N)
         out = self.pipe(Image.fromarray(rgb))
         raw_disparity = np.array(out["depth"]).astype(np.float32)
-        self.visualize_depth_raw_data(raw_disparity)
+        if self.cfg.debug:
+            self.visualize_depth_raw_data(raw_disparity)
         # 2. Normalize to 0.0 - 1.0
         d_min = raw_disparity.min()
         d_max = raw_disparity.max()
