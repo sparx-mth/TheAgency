@@ -16,7 +16,6 @@ from sparx_agency.core.localization.tag_azimuth_estimator import (
     TagObservation,
 )
 from datetime import datetime
-# Shared AprilTag/OpenCV helpers live in TASKS-level module (depends on pupil_apriltags)
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     CameraCalib,
     load_camera_calib_yaml,
@@ -98,22 +97,22 @@ class TagAzimuthOpenCVTask:
     def _solve_tag_tvec(self, corners_2d: np.ndarray) -> Optional[np.ndarray]:
         """Return tvec (3,) where tvec is TAG origin position in CAMERA frame."""
 
-        out = solvepnp_ippe_square(
-            obj_pts_3d=self.obj_pts,
+        tag_T_cam = solvepnp_ippe_square(
             corners_2d=corners_2d,
+            obj_pts_3d=self.obj_pts,
             K=self.calib.K,
             D=self.calib.D,
         )
-        if out is None:
+        if tag_T_cam is None:
             return None
 
-        _rvec, tvec = out
+        tvec = tag_T_cam[:3, 3].copy()   # (3,)
 
         # Keep behavior you had: flip if OpenCV returns negative Z
         if float(tvec[2]) < 0:
             tvec = -tvec
 
-        return tvec.reshape(3)
+        return tvec
 
     def compute_azimuth_from_bgr(self, frame_bgr: np.ndarray, stamp_sec: float) -> float:
         """Main API: image -> azimuth (0..360 deg)."""

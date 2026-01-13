@@ -1,56 +1,56 @@
 accelerate==1.12.0
-action-msgs==1.2.2
-action-tutorials-interfaces==0.20.7
-action-tutorials-py==0.20.7
-actionlib-msgs==4.9.0
+action-msgs
+action-tutorials-interfaces
+action-tutorials-py
+actionlib-msgs
 aiofiles==23.2.1
 altair==5.5.0
-ament-cmake-test==1.3.12
-ament-copyright==0.12.14
-ament-cppcheck==0.12.14
-ament-cpplint==0.12.14
-ament-flake8==0.12.14
-ament-index-python==1.4.0
-ament-lint==0.12.14
-ament-lint-cmake==0.12.14
-ament-package==0.14.1
-ament-pep257==0.12.14
-ament-uncrustify==0.12.14
-ament-xmllint==0.12.14
-angles==1.15.0
-annotated-doc==0.0.4
-annotated-types==0.7.0
-anyio==4.12.0
+ament-cmake-test
+ament-copyright
+ament-cppcheck
+ament-cpplint
+ament-flake8
+ament-index-python
+ament-lint
+ament-lint-cmake
+ament-package
+ament-pep257
+ament-uncrustify
+ament-xmllint
+angles
+annotated-doc
+annotated-types
+anyio
 appdirs==1.4.4
-apriltag-msgs==2.0.1
-apturl==0.5.2
-argcomplete==1.8.1
-aruco-msgs==5.0.5
-aruco-opencv-msgs==2.3.1
-attrs==25.4.0
-bcrypt==3.2.0
-beautifulsoup4==4.10.0
-beniget==0.4.1
-blinker==1.4
-bloom==0.13.0
-bond==4.1.2
-breezy==3.2.1
-Brlapi==0.8.3
-brotli==1.2.0
-builtin-interfaces==1.2.2
-catkin-pkg==1.1.0
-catkin-pkg-modules==1.1.0
-certifi==2026.1.4
-chardet==4.0.0
-charset-normalizer==3.4.4
-click==8.0.3
-colcon-argcomplete==0.3.3
-colcon-bash==0.5.0
-colcon-cd==0.2.1
-colcon-cmake==0.2.29
-colcon-common-extensions==0.3.0
-colcon-core==0.20.1
-colcon-defaults==0.2.9
+#apriltag-msgs
+#apturl
+argcomplete
+#aruco-msgs
+#aruco-opencv-msgs
+attrs
+bcrypt
+beautifulsoup4
+beniget
+blinker
+bloom
+bond
+breezy
+Brlapi
+brotli
+builtin-interfaces
+catkin-pkg
+catkin-pkg-modules
+certifi
+chardet
+charset-normalizer
+click
+colcon-argcomplete
+colcon-bash
+colcon-cd
+colcon-cmake
+colcon-common-extensions
+colcon-core
+colcon-defaults
 colcon-devtools==0.3.0
 colcon-installed-package-information==0.2.1
 colcon-library-path==0.2.1
@@ -71,46 +71,46 @@ colcon-test-result==0.3.8
 colcon-zsh==0.5.0
 colorama==0.4.4
 command-not-found==0.3
-communication-handler-interfaces==0.0.0
-composition-interfaces==1.2.2
-configobj==5.0.6
-cov-core==1.15.0
-coverage==6.2
-cryptography==3.4.8
-cupshelpers==1.0
-cv-bridge==3.2.1
-cycler==0.11.0
-dbus-python==1.2.18
-decorator==4.4.2
-defer==1.0.6
-demo-nodes-py==0.20.7
+# communication-handler-interfaces
+composition-interfaces
+configobj
+cov-core
+coverage
+cryptography
+cupshelpers
+cv-bridge
+cycler
+dbus-python
+decorator
+defer
+demo-nodes-py
 Deprecated==1.2.13
-diagnostic-msgs==4.9.0
-diagnostic-updater==4.0.6
+# diagnostic-msgs
+# diagnostic-updater==4.0.6
 -e git+https://github.com/real-stanford/diffusion_policy.git@5ba07ac6661db573af695b419a7947ecb704690f#egg=diffusion_policy
 distlib==0.3.4
 distro==1.7.0
-distro-info==1.1+ubuntu0.2
+distro-info
 docutils==0.17.1
-domain-coordinator==0.10.0
+# domain-coordinator==0.10.0
 dulwich==0.20.31
-duplicity==0.8.21
-dwb-msgs==1.1.20
+duplicity
+# dwb-msgs==1.1.20
 empy==3.3.4
-example-interfaces==0.9.3
-examples-rclpy-executors==0.15.5
-examples-rclpy-minimal-action-client==0.15.5
-examples-rclpy-minimal-action-server==0.15.5
-examples-rclpy-minimal-client==0.15.5
-examples-rclpy-minimal-publisher==0.15.5
-examples-rclpy-minimal-service==0.15.5
-examples-rclpy-minimal-subscriber==0.15.5
+# example-interfaces==0.9.3
+# examples-rclpy-executors==0.15.5
+# examples-rclpy-minimal-action-client==0.15.5
+# examples-rclpy-minimal-action-server==0.15.5
+# examples-rclpy-minimal-client==0.15.5
+# examples-rclpy-minimal-publisher==0.15.5
+# examples-rclpy-minimal-service==0.15.5
+# examples-rclpy-minimal-subscriber==0.15.5
 exceptiongroup==1.3.1
 fastapi==0.128.0
 fastbencode==0.0.5
 fasteners==0.14.1
 fastimport==0.9.14
-fcu-driver-interfaces==0.0.0
+# fcu-driver-interfaces==0.0.0
 ffmpy==1.0.0
 filelock==3.20.2
 flake8==4.0.1
@@ -119,12 +119,12 @@ fs==2.4.12
 fsspec==2025.12.0
 future==0.18.2
 gast==0.5.2
-geometry-msgs==4.9.0
-gpg==1.16.0
+geometry-msgs
+gpg
 gradio==6.2.0
 gradio_client==2.0.2
 gradio_imageslider==0.0.20
-grid-map-msgs==2.0.1
+# grid-map-msgs
 groovy==0.1.2
 h11==0.16.0
 hf-xet==1.2.0

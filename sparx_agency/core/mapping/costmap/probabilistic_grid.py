@@ -1,190 +1,77 @@
 from __future__ import annotations
-
-import math
-from typing import Optional, Tuple
 import numpy as np
-
-from sparx_agency.core.mapping.interfaces.costmap import Costmap, GridSpec
+from typing import Optional, Tuple
 from .probabilistic_grid_config import ProbabilisticGridConfig, bresenham
+from sparx_agency.core.mapping.interfaces.costmap import Costmap, GridSpec
 
 
 class ProbabilisticGridCostmap(Costmap):
     def __init__(self, cfg: Optional[ProbabilisticGridConfig] = None):
+        self._last_indices = None
         self.cfg = cfg or ProbabilisticGridConfig()
-
         self.width = int(np.ceil(self.cfg.size_m / self.cfg.resolution_m))
         self.height = int(np.ceil(self.cfg.size_m / self.cfg.resolution_m))
+
+        # Internal state
+        self._lo = np.zeros((self.height, self.width), dtype=np.float32)
+        # Persistent mask to track which cells have been observed at least once
+        self._seen_mask = np.zeros((self.height, self.width), dtype=bool)
 
         self.origin_x = -0.5 * self.cfg.size_m
         self.origin_y = -0.5 * self.cfg.size_m
 
-        self._lo = np.zeros((self.height, self.width), dtype=np.float32)
-        self._counts = np.zeros((self.height, self.width), dtype=np.uint16)
-
-        self._last_stamp_sec: Optional[float] = None
 
     def reset(self) -> None:
         self._lo.fill(0.0)
-        self._counts.fill(0)
-        self._last_stamp_sec = None
+        self._seen_mask.fill(False)
 
-    def update_from_points_xy(self, points_xy: np.ndarray, stamp_sec: Optional[float] = None) -> None:
-        """
-        Option A: count points per cell.
-        If count >= points_to_occupied -> occupancy evidence increases.
-        """
-        if points_xy is None or points_xy.size == 0:
-            return
+    def update_from_cloud(self, cloud_xyz: np.ndarray, sensor_origin: np.ndarray):
+        res = self.cfg.resolution_m
+        # Use WORLD coordinates (cloud_xyz) for gx/gy
+        gx = ((cloud_xyz[:, 1] - self.origin_y) / res).astype(np.int32)  # Map World Y to Grid X
+        gy = ((cloud_xyz[:, 0] - self.origin_x) / res).astype(np.int32)  # Map World X to Grid Y
+        gz = cloud_xyz[:, 2]
 
-        pts = np.asarray(points_xy, dtype=np.float32)
-        if pts.ndim != 2 or pts.shape[1] != 2:
-            raise ValueError("points_xy must be Nx2")
+        in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
+        is_obstacle = (gz > self.cfg.min_height_obstacle) & (gz < self.cfg.max_height_obstacle)
+        obs_pts_mask = in_bounds & is_obstacle
+        counts = np.zeros((self.height, self.width), dtype=np.int32)
+        # for EVERY point. If 50 points fall in cell (10, 10),
+        # counts[10, 10] will equal 50.
+        np.add.at(counts, (gx[obs_pts_mask], gy[obs_pts_mask]), 1)
+        confirmed_obs = (counts >= self.cfg.points_to_occupied)
+        thin_points = in_bounds & (~confirmed_obs[gy, gx])
 
-        # clear per-frame counts
-        self._counts.fill(0)
+        # Log-odds update
+        obs_mask = in_bounds & is_obstacle
+        free_mask = in_bounds & (~is_obstacle)
 
-        cx = np.floor((pts[:, 0] - self.origin_x) / self.cfg.resolution_m).astype(np.int32)
-        cy = np.floor((pts[:, 1] - self.origin_y) / self.cfg.resolution_m).astype(np.int32)
-        m = (cx >= 0) & (cx < self.width) & (cy >= 0) & (cy < self.height)
-        cx, cy = cx[m], cy[m]
-        if cx.size == 0:
-            return
-
-        np.add.at(self._counts, (cy, cx), 1)
-        if self.cfg.max_points_cap > 0:
-            np.minimum(self._counts, self.cfg.max_points_cap, out=self._counts)
-
-        occ = self._counts >= int(self.cfg.points_to_occupied)
-        self._lo[occ] = np.clip(self._lo[occ] + self.cfg.lo_occ, self.cfg.lo_min, self.cfg.lo_max)
-
-        self._last_stamp_sec = stamp_sec
+        self._lo[confirmed_obs] += self.cfg.lo_occ
+        self._lo[gx[thin_points], gy[thin_points]] += self.cfg.lo_free
+        self._lo[gx[obs_mask], gy[obs_mask]] += self.cfg.lo_occ
+        self._lo[gx[free_mask], gy[free_mask]] += self.cfg.lo_free
+        self._seen_mask[gx[in_bounds], gy[in_bounds]] = True
+        self._lo = np.clip(self._lo, self.cfg.lo_min, self.cfg.lo_max)
+        if self.cfg.debug:
+            self._last_indices = np.where(confirmed_obs)
 
     def get_grid(self) -> Tuple[GridSpec, np.ndarray]:
-        """
-        Returns (spec, grid_int8) where grid is shape (H,W) int8.
-        Values: 0..100, or -1 for unknown.
-        """
-        spec = GridSpec(
-            resolution_m=float(self.cfg.resolution_m),
-            width=int(self.width),
-            height=int(self.height),
-            origin_x=float(self.origin_x),
-            origin_y=float(self.origin_y),
-            frame_id=self.cfg.frame_id,
-        )
+        # 1. Start with Gray (Unknown -1)
+        grid_data = np.full((self.width, self.height), -1, dtype=np.int8)
 
-        # log-odds -> probability
-        p = 1.0 / (1.0 + np.exp(-self._lo))
-        grid = (p * 100.0).astype(np.int8)
+        # 2. Fill in the history
+        mask_free = self._seen_mask & (self._lo <= 0)
+        grid_data[mask_free] = 20  # Light Gray
 
-        # unknown where log-odds still ~0 (no evidence)
-        unknown = np.abs(self._lo) < 1e-3
-        grid[unknown] = np.int8(self.cfg.unknown_value)
+        mask_wall = self._seen_mask & (self._lo > 0.5)
+        grid_data[mask_wall] = 100  # Black
 
-        return spec, grid
+        # 3. Highlight the CURRENT frame in a special value
+        if hasattr(self, '_last_indices') and self._last_indices is not None:
+            lx, ly = self._last_indices
+            # Values > 100 show up as colored (Red/Purple) in 'Costmap' mode
+            grid_data[lx, ly] = 120
 
-    def update_from_cloud_base_raycast(
-            self,
-            cloud_base: np.ndarray,  # Nx3 in BASE coords (x fwd, y left, z up)
-            robot_xy_yaw: tuple[float, float, float],
-            stamp_sec: Optional[float] = None,
-    ) -> None:
-        """
-        Option B:
-          - raycast from robot cell to each point endpoint
-          - cells along ray => free evidence
-          - endpoint cell => occupied evidence
-        """
-        if cloud_base is None or cloud_base.size == 0:
-            return
-
-        rx, ry, yaw = robot_xy_yaw
-        pts = np.asarray(cloud_base, dtype=np.float32)
-
-        # Filter by z and range in BASE
-        x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
-        rng = np.sqrt(x * x + y * y)
-        m = (
-                (z >= self.cfg.z_min_m) & (z <= self.cfg.z_max_m) &
-                (rng >= 0.0) & (rng <= self.cfg.max_range_m)
-        )
-        pts = pts[m]
-        if pts.shape[0] == 0:
-            return
-
-        # Rolling window: shift grid to keep robot near center (optional)
-        if self.cfg.rolling_window:
-            new_origin_x = float(rx) - 0.5 * float(self.cfg.size_m)
-            # center on robot
-            new_origin_y = float(ry) - 0.5 * float(self.cfg.size_m)
-            self._shift_to_new_origin(new_origin_x, new_origin_y)
-
-        # Robot cell
-        r_cx = int(np.floor((rx - self.origin_x) / self.cfg.resolution_m))
-        r_cy = int(np.floor((ry - self.origin_y) / self.cfg.resolution_m))
-        if not (0 <= r_cx < self.width and 0 <= r_cy < self.height):
-            return
-
-        cyaw = float(np.cos(yaw))
-        syaw = float(np.sin(yaw))
-
-        # For speed, sample points (optional): keep every k-th point if needed
-        # pts = pts[::2]
-
-        for i in range(pts.shape[0]):
-            bx, by = float(pts[i, 0]), float(pts[i, 1])
-
-            # base -> map (2D) using robot pose (x,y,yaw)
-            mx = rx + cyaw * bx - syaw * by
-            my = ry + syaw * bx + cyaw * by
-
-            e_cx = int(np.floor((mx - self.origin_x) / self.cfg.resolution_m))
-            e_cy = int(np.floor((my - self.origin_y) / self.cfg.resolution_m))
-
-            if not (0 <= e_cx < self.width and 0 <= e_cy < self.height):
-                continue
-
-            # Trace cells; mark free except final endpoint
-            cells = bresenham(r_cx, r_cy, e_cx, e_cy)
-            last = None
-            for c in cells:
-                last = c
-                # free update (we will overwrite endpoint later)
-                xg, yg = c
-                self._lo[yg, xg] = np.clip(self._lo[yg, xg] + self.cfg.lo_free, self.cfg.lo_min, self.cfg.lo_max)
-
-            if last is not None:
-                lx, ly = last
-                self._lo[ly, lx] = np.clip(self._lo[ly, lx] + self.cfg.lo_occ, self.cfg.lo_min, self.cfg.lo_max)
-
-        self._last_stamp_sec = stamp_sec
-
-    def _shift_to_new_origin(self, new_origin_x: float, new_origin_y: float) -> None:
-        """
-        Keep grid aligned with world while moving origin.
-        We approximate by integer-cell rolling of the log-odds grid.
-        """
-        res = float(self.cfg.resolution_m)
-        dx_cells = int(np.round((self.origin_x - new_origin_x) / res))
-        dy_cells = int(np.round((self.origin_y - new_origin_y) / res))
-
-        if dx_cells == 0 and dy_cells == 0:
-            self.origin_x = new_origin_x
-            self.origin_y = new_origin_y
-            return
-
-        self._lo = np.roll(self._lo, shift=(dy_cells, dx_cells), axis=(0, 1))
-
-        # clear newly uncovered regions
-        if dy_cells > 0:
-            self._lo[:dy_cells, :] = 0.0
-        elif dy_cells < 0:
-            self._lo[dy_cells:, :] = 0.0
-
-        if dx_cells > 0:
-            self._lo[:, :dx_cells] = 0.0
-        elif dx_cells < 0:
-            self._lo[:, dx_cells:] = 0.0
-
-        self.origin_x = new_origin_x
-        self.origin_y = new_origin_y
+        spec = GridSpec(self.cfg.resolution_m, self.width, self.height,
+                        self.origin_x, self.origin_y, self.cfg.frame_id)
+        return spec, grid_data
