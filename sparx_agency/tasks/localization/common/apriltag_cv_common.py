@@ -59,7 +59,7 @@ def make_detector(tag_family: str, nthreads: int = 2) -> Detector:
         raise ValueError("tag_family is empty")
     return Detector(families=tag_family, nthreads=int(nthreads))
 
-def solvepnp_tag_T_cam_ippe_square(
+def solvepnp_ippe_square(
     corners_2d: np.ndarray,
     obj_pts_3d: np.ndarray,
     K: np.ndarray,
