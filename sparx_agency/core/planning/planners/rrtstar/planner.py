@@ -1,41 +1,100 @@
-"""RRT* planner implementing BasePlanner protocol."""
+"""RRT* planners implementing BasePlanner protocol (2D and 3D)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, Dict, Protocol, runtime_checkable
 
-from sparx_agency.core.common.types import PlanResult
-from sparx_agency.core.planning.interfaces.planner import BasePlanner, PlanRequest
+from sparx_agency.core.common.types import Pose2D, Pose3D, PlanResult
 from sparx_agency.core.planning.environment import Costmap2D
 
-from .params import RRTStarOmplParams
-from .algorithm import plan_rrtstar
+from .params import RRTStarOmplParams, RRTStarOmpl3DParams
+from .algorithm import plan_rrtstar, plan_rrtstar_3d
 
+
+# =============================================================================
+# Plan Request types
+# =============================================================================
+
+@dataclass(frozen=True)
+class PlanRequest:
+    """2D planning request."""
+    start: Pose2D
+    goal: Pose2D
+    frame_id: str = "map"
+    options: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PlanRequest3D:
+    """3D planning request."""
+    start: Pose3D
+    goal: Pose3D
+    frame_id: str = "map"
+    options: Dict[str, Any] = field(default_factory=dict)
+
+
+# =============================================================================
+# Planner protocols
+# =============================================================================
+
+@runtime_checkable
+class BasePlanner(Protocol):
+    """Protocol for 2D path planners."""
+    name: str
+
+    def plan(self, request: PlanRequest, world: Any) -> PlanResult:
+        ...
+
+
+@runtime_checkable
+class BasePlanner3D(Protocol):
+    """Protocol for 3D path planners."""
+    name: str
+
+    def plan(self, request: PlanRequest3D, world: Any) -> PlanResult:
+        ...
+
+
+# =============================================================================
+# Planner implementations
+# =============================================================================
 
 @dataclass
-class RRTStarOmplPlanner(BasePlanner):
-    """
-    RRT* planner that produces geometric paths.
-
-    Uses OMPL's RRT* implementation with optional clearance-based
-    cost optimization. Output paths are interpolated at uniform spacing.
-    """
+class RRTStarOmplPlanner:
+    """2D RRT* planner."""
     name: str = field(default="rrtstar_ompl", init=False)
     params: RRTStarOmplParams = field(default_factory=RRTStarOmplParams)
 
     def plan(self, request: PlanRequest, world: Costmap2D) -> PlanResult:
-        """
-        Compute a collision-free path from start to goal.
-
-        Args:
-            request: Planning request with start/goal poses.
-            world: Costmap2D occupancy grid.
-
-        Returns:
-            PlanResult with status and Path2D if successful.
-        """
         return plan_rrtstar(
             start=request.start,
             goal=request.goal,
             costmap=world,
+            params=self.params,
+        )
+
+
+@dataclass
+class RRTStarOmpl3DPlanner:
+    """3D RRT* planner."""
+    name: str = field(default="rrtstar_ompl_3d", init=False)
+    params: RRTStarOmpl3DParams = field(default_factory=RRTStarOmpl3DParams)
+
+    def plan(self, request: PlanRequest3D, world) -> PlanResult:
+        """
+        Plan a 3D path.
+
+        Args:
+            request: 3D planning request with start/goal Pose3D.
+            world: VoxelMap3D with is_free(i,j,k), world_to_grid(x,y,z),
+                   world_clearance(x,y,z), and bounds (origin_x/y/z, width/height/depth, resolution).
+
+        Returns:
+            PlanResult with path3d in artifacts["path3d"] if successful.
+        """
+        return plan_rrtstar_3d(
+            start=request.start,
+            goal=request.goal,
+            voxelmap=world,
             params=self.params,
         )
