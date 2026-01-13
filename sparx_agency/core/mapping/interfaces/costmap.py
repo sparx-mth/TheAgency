@@ -29,13 +29,22 @@ class Costmap(ABC):
     def reset(self) -> None:
         raise NotImplementedError
 
+    # @abstractmethod
+    # def update_from_points_xy(
+    #     self,
+    #     points_xy: np.ndarray,      # (N,2) in map/world frame
+    #     stamp_sec: Optional[float] = None,
+    # ) -> None:
+    #     raise NotImplementedError
+
     @abstractmethod
-    def update_from_points_xy(
-        self,
-        points_xy: np.ndarray,      # (N,2) in map/world frame
-        stamp_sec: Optional[float] = None,
+    def update_from_cloud(
+            self,
+            cloud_xyz: np.ndarray,  # (N,3) in map/world frame
+            sensor_origin: np.ndarray,  # (3,) [x, y, z] in map/world frame
     ) -> None:
-        raise NotImplementedError
+        """Process 3D data to update the 2D grid."""
+        pass
 
     @abstractmethod
     def get_grid(self) -> Tuple[GridSpec, np.ndarray]:
