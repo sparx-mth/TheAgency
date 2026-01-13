@@ -1,0 +1,11 @@
+# Requested geographic data
+
+---
+# Response
+bool is_origin_valid
+ros_common_interfaces/LLA origin
+
+bool is_using_custom_land_points
+ros_common_interfaces/LLA[] custom_land_points
+
+float32 effective_flight_range

@@ -1,0 +1,9 @@
+std_msgs/Header header
+
+rooster_handler_interfaces/RoosterState[3] roosters_state
+
+bool is_joystick_connected
+string selected_rooster_name
+bool selected_rooster_arming_state
+string selected_rooster_flight_mode
+float32 selected_rooster_altitude
