@@ -1,0 +1,16 @@
+# Request
+
+uint8 type
+uint8 TYPE_GYRO=1
+uint8 TYPE_ACCELEROMETER=2
+uint8 TYPE_LEVEL=3
+uint8 TYPE_MAGNETOMETER=4
+
+---
+# Response
+bool success
+string message
+
+
+
+

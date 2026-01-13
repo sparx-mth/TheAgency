@@ -1,0 +1,5 @@
+std_msgs/Header header
+
+uint32 time_turned_on_minutes
+string rooster_version
+string mavsdk_version

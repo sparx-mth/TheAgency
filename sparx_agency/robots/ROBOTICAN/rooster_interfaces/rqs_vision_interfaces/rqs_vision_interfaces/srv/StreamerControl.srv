@@ -1,0 +1,18 @@
+uint8 action
+
+uint8 ACTION_STOP=0
+uint8 ACTION_START=1
+uint8 ACTION_RESTART=2
+
+
+string pipeline
+
+int32 width
+int32 height
+
+float32 fps
+
+---
+
+bool success
+string message
