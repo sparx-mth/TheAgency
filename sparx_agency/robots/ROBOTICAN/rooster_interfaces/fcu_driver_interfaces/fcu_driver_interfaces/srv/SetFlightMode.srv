@@ -1,6 +1,0 @@
-# Request
-# Available modes: 'Hold', 'Return To Launch', 'Takeoff', 'Land', Mission, 'Follow Me', 'Offboard', 'Manual', 'Posctl', 'Altctl', 'Rattitude', 'Acro', 'Stabilized'
-string mode
----
-# Response
-bool success
