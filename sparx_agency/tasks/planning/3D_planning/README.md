@@ -11,6 +11,11 @@ The goal is to work with a **complete house / apartment**, not a single room.
 
 Gibson Tiny contains multiple **full indoor buildings** (houses / apartments).
 
+```bash
+mkdir -p gibson
+cd gibson
+```
+
 ### Download
 ```bash
 wget https://storage.googleapis.com/gibson_scenes/gibson_tiny.tar.gz
@@ -200,3 +205,40 @@ The interactive demo is split into small files, each with a **single responsibil
 | Occupancy logic | Collision + clearance checks (runtime) |
 
 ---
+
+
+## 6. Installation & Running the Demo
+
+### Install Dependencies
+
+From the project root directory:
+
+```bash
+pip install -r requirements.txt
+````
+
+(Optional but recommended) Using a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+### Run the Interactive Planner
+
+From the `3D_planning` directory:
+
+```bash
+python3 main.py
+```
+
+(Optional) Select planner type:
+
+```bash
+python3 main.py --planner bitstar
+python3 main.py --planner informed_rrtstar
+```
+
