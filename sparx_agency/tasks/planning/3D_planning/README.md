@@ -1,6 +1,7 @@
 # Gibson Tiny Dataset – Quick Start
 
-This README explains how to download the **Gibson Tiny** dataset and what the two main generated files represent.
+This README explains how to download the **Gibson Tiny** dataset, how scenes are structured,
+and how the interactive 3D RRT* planning demo is organized.
 
 The goal is to work with a **complete house / apartment**, not a single room.
 
@@ -61,9 +62,9 @@ Benevolence/
 
 ---
 
-## 3. Generated Files
+## 3. Generated Geometry Files
 
-After processing a scene, two main files are produced.
+After processing a scene, two main geometry artifacts are commonly produced.
 
 ### 1️⃣ `<scene>_pointcloud.ply`
 
@@ -73,7 +74,7 @@ Example:
 Benevolence_pointcloud.ply
 ```
 
-* A **point cloud sampled from the house mesh**
+* Point cloud sampled from the house mesh
 * Points lie on walls, floors, ceilings, and furniture
 * Represents **surface geometry only**
 * Does NOT encode free vs occupied space
@@ -96,24 +97,106 @@ Benevolence_voxel_centers.ply
 
 * Centers of voxels created from the point cloud
 * Each point represents an **occupied surface voxel**
-* **Not a full occupancy map**
+* Not a full occupancy map
 * Empty space is not explicitly represented
 
 Used for:
 
 * Understanding scene scale and structure
-* Debugging voxel size
+* Debugging voxel resolution
 * Intermediate step before occupancy mapping
 
 ---
 
-## 4. Concept Summary
+## 4. Code Structure (Interactive RRT* Planner)
 
-| Representation   | Meaning                                  |
-| ---------------- | ---------------------------------------- |
-| Mesh             | Exact surface geometry                   |
-| Point cloud      | Sampled surface points                   |
-| Surface voxels   | Discretized surface geometry             |
-| Occupancy voxels | Free / occupied / unknown (not included) |
+The interactive demo is split into small files, each with a **single responsibility**.
+
+```
+3D_planning/
+├── main.py
+├── logging_utils.py
+├── tube.py
+├── voxelmap.py
+├── gibson_io.py
+├── interaction.py
+├── final_window.py
+```
+
+### main.py
+
+* Entry point of the demo
+* Loads the scene and point cloud
+* Builds the voxel map and collision model
+* Handles START / GOAL selection flow
+* Launches the final planning window
+
+---
+
+### logging_utils.py
+
+* Simple logging helpers:
+
+  * `pinfo`, `pok`, `pwarn`, `perr`
+* Keeps all console output consistent and readable
+
+---
+
+### tube.py
+
+* Generates a **thick 3D tube** from a polyline path
+* Used to visualize the planned RRT* path reliably
+* Avoids platform-dependent line-width issues in Open3D
+
+---
+
+### voxelmap.py
+
+* Builds a voxel-based collision map from a point cloud
+* Inflates obstacles to handle thin walls
+* Integrates mesh raycasting for:
+
+  * Distance-to-surface checks
+  * Inside/outside mesh validation
+* Provides `is_free()` and clearance queries for the planner
+
+---
+
+### gibson_io.py
+
+* Scene I/O utilities
+* Loads Gibson meshes (`mesh_z_up.obj`)
+* Samples point clouds from the mesh surface
+
+---
+
+### interaction.py
+
+* Interactive UI for user input
+* Handles:
+
+  * Point picking (Shift + Click)
+  * Keyboard-based 3D adjustment (WASD / arrows)
+* Used for precise START and GOAL placement
+
+---
+
+### final_window.py
+
+* Final visualization and planning window
+* Triggers OMPL RRT* planning
+* Draws the resulting path as a thick black tube
+* Allows stepping along the path with a movable marker
+
+---
+
+## 5. Representation Summary
+
+| Representation  | Meaning                                |
+| --------------- | -------------------------------------- |
+| Mesh            | Exact surface geometry                 |
+| Point cloud     | Sampled surface points                 |
+| Surface voxels  | Discretized surface geometry           |
+| Occupancy logic | Collision + clearance checks (runtime) |
 
 ---
