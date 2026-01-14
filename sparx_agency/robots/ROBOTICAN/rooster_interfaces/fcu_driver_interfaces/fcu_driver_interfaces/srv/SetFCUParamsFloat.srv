@@ -1,6 +1,0 @@
-# Request
-string[] ids
-float32[] values
----
-# Response
-bool[] successes
