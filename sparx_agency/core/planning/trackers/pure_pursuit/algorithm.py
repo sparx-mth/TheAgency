@@ -1,25 +1,10 @@
 """
-Pure Pursuit path tracking algorithm.
+Pure Pursuit path tracking algorithm (2D and 3D).
 
-Based on Coulter (1992), CMU-RI-TR-92-01:
-"Implementation of the Pure Pursuit Path Tracking Algorithm"
+Based on Coulter (1992), CMU-RI-TR-92-01.
 
-Core idea: Compute a circular arc from robot position to a lookahead point,
-then derive the steering command from the arc's curvature.
-
-Key formula:
-    κ = 2·sin(α) / L_d
-
-where:
-    α   = angle to lookahead point in robot frame
-    L_d = lookahead distance
-    κ   = curvature of the arc to follow
-
-For differential drive / unicycle:
-    ω = v · κ = v · 2·sin(α) / L_d
-
-For Ackermann steering:
-    δ = arctan(L · κ)  where L = wheelbase
+2D: Classic curvature-based steering (κ = 2·sin(α) / L_d)
+3D: Direct velocity toward lookahead point (holonomic)
 """
 from __future__ import annotations
 
@@ -30,14 +15,62 @@ from sparx_agency.core.common.types import TrajectoryPoint
 from sparx_agency.core.common.types.geometry import normalize_angle
 
 
-def trajectory_to_xy(points: List[TrajectoryPoint]) -> np.ndarray:
-    """Extract (N, 2) position array from trajectory points."""
-    return np.array([[p.x, p.y] for p in points], dtype=np.float64)
-
+# =============================================================================
+# Shared utilities
+# =============================================================================
 
 def get_curvature(point: TrajectoryPoint) -> float:
     """Extract curvature from trajectory point (default 0)."""
     return float(point.curvature) if point.curvature is not None else 0.0
+
+
+def adaptive_lookahead(
+    base: float,
+    speed: float,
+    curvature: float,
+    speed_gain: float,
+    curvature_gain: float,
+    bounds: Tuple[float, float],
+) -> float:
+    """
+    Adaptive lookahead distance based on speed and curvature.
+
+    L_d = (base + speed × speed_gain) / (1 + curvature_gain × |κ|)
+    """
+    lookahead = base + speed_gain * max(0.0, speed)
+    curve_factor = 1.0 / (1.0 + curvature_gain * abs(curvature))
+    lookahead *= curve_factor
+    return float(np.clip(lookahead, bounds[0], bounds[1]))
+
+
+def compute_target_speed(
+    cruise: float,
+    dist_to_goal: float,
+    curvature: float,
+    slow_down_dist: float,
+    curvature_factor: float,
+    bounds: Tuple[float, float],
+) -> float:
+    """Speed profile based on distance to goal and path curvature."""
+    speed = cruise
+
+    if slow_down_dist > 0 and dist_to_goal < slow_down_dist:
+        ratio = dist_to_goal / slow_down_dist
+        speed *= 0.3 + 0.7 * ratio
+
+    curve_factor = 1.0 / (1.0 + curvature_factor * abs(curvature))
+    speed *= curve_factor
+
+    return float(np.clip(speed, bounds[0], bounds[1]))
+
+
+# =============================================================================
+# 2D Pure Pursuit
+# =============================================================================
+
+def trajectory_to_xy(points: List[TrajectoryPoint]) -> np.ndarray:
+    """Extract (N, 2) position array from trajectory points."""
+    return np.array([[p.x, p.y] for p in points], dtype=np.float64)
 
 
 def find_closest_index(
@@ -47,12 +80,7 @@ def find_closest_index(
     search_back: int,
     search_forward: int,
 ) -> Tuple[int, float]:
-    """
-    Find closest point index within a window around current_idx.
-
-    Returns:
-        (closest_index, cross_track_error)
-    """
+    """Find closest point index within a window (2D)."""
     n = len(xy)
     current_idx = max(0, min(current_idx, n - 1))
     i0 = max(0, current_idx - search_back)
@@ -74,45 +102,26 @@ def find_lookahead_point(
     start_idx: int,
     lookahead_dist: float,
 ) -> Tuple[int, np.ndarray]:
-    """
-    Find lookahead point on path at distance L_d from robot.
-
-    Classic method: find intersection of circle (radius L_d, centered at robot)
-    with path segments. Falls back to arc-length if no intersection.
-
-    Returns:
-        (index, point_xy)
-    """
+    """Find lookahead point on path at distance L_d from robot (2D)."""
     n = len(xy)
     if start_idx >= n - 1:
         return n - 1, xy[-1]
 
     L_d_sq = lookahead_dist ** 2
 
-    # Search forward for segment intersecting the lookahead circle
     for i in range(start_idx, n - 1):
-        p1 = xy[i]
-        p2 = xy[i + 1]
-
-        # Check if either endpoint is beyond lookahead
+        p1, p2 = xy[i], xy[i + 1]
         d1_sq = np.sum((p1 - pos) ** 2)
         d2_sq = np.sum((p2 - pos) ** 2)
 
-        # If segment straddles the lookahead circle, interpolate
         if d1_sq <= L_d_sq <= d2_sq:
-            # Linear interpolation to find point at exactly L_d
-            d1 = np.sqrt(d1_sq)
-            d2 = np.sqrt(d2_sq)
-            t = (lookahead_dist - d1) / max(d2 - d1, 1e-6)
-            t = np.clip(t, 0, 1)
-            point = p1 + t * (p2 - p1)
-            return i + 1, point
+            d1, d2 = np.sqrt(d1_sq), np.sqrt(d2_sq)
+            t = np.clip((lookahead_dist - d1) / max(d2 - d1, 1e-6), 0, 1)
+            return i + 1, p1 + t * (p2 - p1)
 
-        # If we've passed the lookahead distance, use this point
         if d2_sq > L_d_sq:
             return i + 1, p2
 
-    # Fallback: return last point
     return n - 1, xy[-1]
 
 
@@ -122,36 +131,18 @@ def compute_pure_pursuit_curvature(
     target: np.ndarray,
 ) -> Tuple[float, float, float]:
     """
-    Classic Pure Pursuit: compute curvature to reach lookahead point.
+    Classic Pure Pursuit: compute curvature to reach lookahead point (2D).
 
-    The robot follows a circular arc from its current position to the target.
-
-    Args:
-        pos: Robot position (x, y).
-        yaw: Robot heading (radians).
-        target: Lookahead point (x, y).
-
-    Returns:
-        (curvature, alpha, lookahead_dist)
-        - curvature: κ = 2·sin(α) / L_d
-        - alpha: angle to target in robot frame
-        - lookahead_dist: actual distance to target
+    Returns: (curvature, alpha, lookahead_dist)
     """
-    # Vector to target in world frame
-    dx = target[0] - pos[0]
-    dy = target[1] - pos[1]
+    dx, dy = target[0] - pos[0], target[1] - pos[1]
     L_d = np.sqrt(dx * dx + dy * dy)
 
     if L_d < 1e-6:
         return 0.0, 0.0, 0.0
 
-    # Angle to target in world frame
     target_angle = np.arctan2(dy, dx)
-
-    # Angle to target in robot frame (alpha)
     alpha = normalize_angle(target_angle - yaw)
-
-    # Pure Pursuit curvature formula: κ = 2·sin(α) / L_d
     curvature = 2.0 * np.sin(alpha) / L_d
 
     return float(curvature), float(alpha), float(L_d)
@@ -163,25 +154,9 @@ def compute_steering_commands(
     max_yaw_rate: float,
     wheelbase: Optional[float] = None,
 ) -> Tuple[float, Optional[float]]:
-    """
-    Convert curvature to steering commands.
+    """Convert curvature to steering commands (2D)."""
+    yaw_rate = float(np.clip(speed * curvature, -max_yaw_rate, max_yaw_rate))
 
-    Args:
-        curvature: Path curvature κ (1/m).
-        speed: Linear velocity (m/s).
-        max_yaw_rate: Maximum angular velocity (rad/s).
-        wheelbase: If provided, also compute Ackermann steering angle.
-
-    Returns:
-        (yaw_rate, steering_angle)
-        - yaw_rate: ω = v · κ (for diff-drive / unicycle)
-        - steering_angle: δ = arctan(L · κ) (for Ackermann, or None)
-    """
-    # Differential drive / unicycle: ω = v · κ
-    yaw_rate = speed * curvature
-    yaw_rate = float(np.clip(yaw_rate, -max_yaw_rate, max_yaw_rate))
-
-    # Ackermann steering angle (optional)
     steering_angle = None
     if wheelbase is not None and wheelbase > 0:
         steering_angle = float(np.arctan(wheelbase * curvature))
@@ -194,102 +169,129 @@ def compute_body_velocity(
     alpha: float,
     holonomic: bool = True,
 ) -> Tuple[float, float]:
-    """
-    Compute body-frame velocity components.
-
-    Args:
-        speed: Desired speed magnitude.
-        alpha: Angle to target in robot frame.
-        holonomic: If True, allow lateral velocity (omnidirectional).
-                   If False, only forward velocity (diff-drive).
-
-    Returns:
-        (vx_body, vy_body)
-    """
+    """Compute body-frame velocity components (2D)."""
     if holonomic:
-        # Omnidirectional: can move directly toward target
-        vx = speed * np.cos(alpha)
-        vy = speed * np.sin(alpha)
-    else:
-        # Non-holonomic: only forward motion, steering handles direction
-        vx = speed
-        vy = 0.0
-
-    return float(vx), float(vy)
+        return float(speed * np.cos(alpha)), float(speed * np.sin(alpha))
+    return float(speed), 0.0
 
 
-def adaptive_lookahead(
-    base: float,
+# =============================================================================
+# 3D Pure Pursuit
+# =============================================================================
+
+def trajectory_to_xyz(points: List[TrajectoryPoint]) -> np.ndarray:
+    """Extract (N, 3) position array from trajectory points."""
+    return np.array([[p.x, p.y, p.z] for p in points], dtype=np.float64)
+
+
+def find_closest_index_3d(
+    xyz: np.ndarray,
+    pos: np.ndarray,
+    current_idx: int,
+    search_back: int,
+    search_forward: int,
+) -> Tuple[int, float]:
+    """Find closest point index within a window (3D)."""
+    n = len(xyz)
+    current_idx = max(0, min(current_idx, n - 1))
+    i0 = max(0, current_idx - search_back)
+    i1 = min(n, current_idx + search_forward)
+
+    if i0 >= i1:
+        return current_idx, 0.0
+
+    window = xyz[i0:i1]
+    dists = np.linalg.norm(window - pos, axis=1)
+    local_idx = int(np.argmin(dists))
+
+    return i0 + local_idx, float(dists[local_idx])
+
+
+def find_lookahead_point_3d(
+    xyz: np.ndarray,
+    pos: np.ndarray,
+    start_idx: int,
+    lookahead_dist: float,
+) -> Tuple[int, np.ndarray]:
+    """Find lookahead point on path at distance L_d from robot (3D)."""
+    n = len(xyz)
+    if start_idx >= n - 1:
+        return n - 1, xyz[-1]
+
+    L_d_sq = lookahead_dist ** 2
+
+    for i in range(start_idx, n - 1):
+        p1, p2 = xyz[i], xyz[i + 1]
+        d1_sq = np.sum((p1 - pos) ** 2)
+        d2_sq = np.sum((p2 - pos) ** 2)
+
+        if d1_sq <= L_d_sq <= d2_sq:
+            d1, d2 = np.sqrt(d1_sq), np.sqrt(d2_sq)
+            t = np.clip((lookahead_dist - d1) / max(d2 - d1, 1e-6), 0, 1)
+            return i + 1, p1 + t * (p2 - p1)
+
+        if d2_sq > L_d_sq:
+            return i + 1, p2
+
+    return n - 1, xyz[-1]
+
+
+def compute_velocity_3d(
+    pos: np.ndarray,
+    target: np.ndarray,
     speed: float,
-    curvature: float,
-    speed_gain: float,
-    curvature_gain: float,
-    bounds: Tuple[float, float],
-) -> float:
+    max_speed_z: float,
+) -> Tuple[float, float, float, float]:
     """
-    Adaptive lookahead distance based on speed and curvature.
+    Compute 3D velocity vector toward lookahead point.
 
-    L_d = (base + speed × speed_gain) / (1 + curvature_gain × |κ|)
-
-    - Increases with speed (look further ahead when going fast)
-    - Decreases with curvature (look closer on tight turns)
+    For holonomic robots (drones), velocity points directly at target.
+    Z velocity is clamped separately for safety.
 
     Args:
-        base: Base lookahead distance (m)
-        speed: Current speed (m/s)
-        curvature: Path curvature (1/m), higher = tighter turn
-        speed_gain: How much speed increases lookahead
-        curvature_gain: How much curvature decreases lookahead
-        bounds: (min, max) lookahead limits
+        pos: Current position (x, y, z).
+        target: Lookahead point (x, y, z).
+        speed: Desired total speed (m/s).
+        max_speed_z: Maximum vertical speed (m/s).
 
     Returns:
-        Lookahead distance (m)
+        (vx, vy, vz, yaw) - velocity components and heading
     """
-    lookahead = base + speed_gain * max(0.0, speed)
+    delta = target - pos
+    dist = np.linalg.norm(delta)
 
-    # Smooth curvature-based reduction
-    curve_factor = 1.0 / (1.0 + curvature_gain * abs(curvature))
-    lookahead *= curve_factor
+    if dist < 1e-6:
+        return 0.0, 0.0, 0.0, 0.0
 
-    return float(np.clip(lookahead, bounds[0], bounds[1]))
+    # Unit direction
+    direction = delta / dist
+
+    # Scale by speed
+    vx = direction[0] * speed
+    vy = direction[1] * speed
+    vz = direction[2] * speed
+
+    # Clamp vertical speed
+    vz = float(np.clip(vz, -max_speed_z, max_speed_z))
+
+    # Yaw from xy velocity
+    yaw = float(np.arctan2(vy, vx)) if abs(vx) + abs(vy) > 1e-6 else 0.0
+
+    return float(vx), float(vy), float(vz), yaw
 
 
-def compute_target_speed(
-    cruise: float,
-    dist_to_goal: float,
-    curvature: float,
-    slow_down_dist: float,
-    curvature_factor: float,
-    bounds: Tuple[float, float],
+def compute_yaw_rate_3d(
+    current_yaw: float,
+    target_yaw: float,
+    max_yaw_rate: float,
+    dt: float = 0.05,
 ) -> float:
     """
-    Speed profile based on distance to goal and path curvature.
+    Compute yaw rate to reach target yaw.
 
-    v = cruise / (1 + curvature_factor × |κ|)
-
-    - Slows down near goal (linear ramp)
-    - Slows down on curves (inverse relationship)
-
-    Args:
-        cruise: Cruise speed (m/s)
-        dist_to_goal: Distance to goal (m)
-        curvature: Path curvature (1/m)
-        slow_down_dist: Distance at which to start slowing (m)
-        curvature_factor: How much curvature reduces speed
-        bounds: (min, max) speed limits
-
-    Returns:
-        Target speed (m/s)
+    Simple proportional control with rate limiting.
     """
-    speed = cruise
-
-    # Slow down near goal
-    if slow_down_dist > 0 and dist_to_goal < slow_down_dist:
-        ratio = dist_to_goal / slow_down_dist
-        speed *= 0.3 + 0.7 * ratio
-
-    # Slow down on curves: v = v / (1 + k × |κ|)
-    curve_factor = 1.0 / (1.0 + curvature_factor * abs(curvature))
-    speed *= curve_factor
-
-    return float(np.clip(speed, bounds[0], bounds[1]))
+    yaw_error = normalize_angle(target_yaw - current_yaw)
+    # P-control with implicit gain (reach target in ~0.5s)
+    yaw_rate = yaw_error / 0.5
+    return float(np.clip(yaw_rate, -max_yaw_rate, max_yaw_rate))
