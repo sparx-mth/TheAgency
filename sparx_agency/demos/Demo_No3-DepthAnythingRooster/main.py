@@ -6,7 +6,7 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGr
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
 
 # Import the class we defined earlier
-from sparx_agency.tasks.mapping.mapping_task import MappingTask
+from sparx_agency.tasks.mapping.mapping_with_depth_anything import MappingTask
 
 
 def main():
