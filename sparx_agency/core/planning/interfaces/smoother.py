@@ -1,44 +1,50 @@
 """
 Smoother interface.
 
-A Smoother converts a geometric path into a time-parameterized trajectory.
+A Smoother converts a geometric path (Path2D) into a time-parameterized
+trajectory (Trajectory) suitable for tracking/control.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
-from core.common.types import Path2D, Trajectory, DynamicLimits
+from sparx_agency.core.common.types import Path2D, Trajectory, KinematicLimits
 
 
 @dataclass(frozen=True)
 class SmootherRequest:
     """
-    Inputs to the trajectory smoother.
+    Input to trajectory smoothers.
 
-    - `limits` is optional: if not provided, the smoother may use conservative defaults.
-    - `options` can include algorithm-specific parameters (degree, continuity, etc.).
+    Attributes:
+        path: Geometric path to smooth.
+        limits: Optional kinematic constraints. If None, smoother uses defaults.
+        options: Algorithm-specific parameters (e.g., continuity order, speed).
     """
     path: Path2D
-    limits: Optional[DynamicLimits] = None
+    limits: Optional[KinematicLimits] = None
     options: Dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
 class BaseSmoother(Protocol):
-    """Smoother contract."""
+    """
+    Smoother protocol.
+
+    Converts Path2D → Trajectory with time parameterization.
+    """
     name: str
 
     def smooth(self, request: SmootherRequest, world: Any = None) -> Trajectory:
         """
-        Produce a time-parameterized trajectory from a path.
+        Generate trajectory from path.
 
         Args:
-            request: SmootherRequest with path + optional limits/options
-            world: optional environment context (e.g., for altitude rules, obstacle-aware smoothing)
+            request: Path and constraints.
+            world: Optional environment context (e.g., for obstacle-aware smoothing).
 
         Returns:
-            Trajectory object implementing core.common.types.Trajectory
+            Time-parameterized trajectory.
         """
         ...

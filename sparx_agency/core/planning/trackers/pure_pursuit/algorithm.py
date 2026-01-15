@@ -1,214 +1,297 @@
+"""
+Pure Pursuit path tracking algorithm (2D and 3D).
+
+Based on Coulter (1992), CMU-RI-TR-92-01.
+
+2D: Classic curvature-based steering (κ = 2·sin(α) / L_d)
+3D: Direct velocity toward lookahead point (holonomic)
+"""
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-from typing import Sequence, Tuple
+import numpy as np
+from typing import List, Tuple, Optional
 
-from core.common.types.geometry import normalize_angle
-from core.common.types.planning import TrajectoryPoint
+from sparx_agency.core.common.types import TrajectoryPoint
+from sparx_agency.core.common.types.geometry import normalize_angle
 
 
-@dataclass(frozen=True, slots=True)
-class TrackingDebug:
+# =============================================================================
+# Shared utilities
+# =============================================================================
+
+def get_curvature(point: TrajectoryPoint) -> float:
+    """Extract curvature from trajectory point (default 0)."""
+    return float(point.curvature) if point.curvature is not None else 0.0
+
+
+def adaptive_lookahead(
+    base: float,
+    speed: float,
+    curvature: float,
+    speed_gain: float,
+    curvature_gain: float,
+    bounds: Tuple[float, float],
+) -> float:
     """
-    Optional debug outputs you might want to log upstream.
+    Adaptive lookahead distance based on speed and curvature.
+
+    L_d = (base + speed × speed_gain) / (1 + curvature_gain × |κ|)
     """
-    closest_index: int
-    lookahead_index: int
-    cross_track_error: float
-    dist_to_goal: float
-    curvature: float
-    lookahead_m: float
-    speed_target: float
-    speed_cmd: float
-    desired_yaw: float
+    lookahead = base + speed_gain * max(0.0, speed)
+    curve_factor = 1.0 / (1.0 + curvature_gain * abs(curvature))
+    lookahead *= curve_factor
+    return float(np.clip(lookahead, bounds[0], bounds[1]))
 
 
-def world_to_body_velocity(vx_world: float, vy_world: float, yaw: float) -> Tuple[float, float]:
-    """Rotate a world-frame planar velocity into body frame."""
-    c = math.cos(yaw)
-    s = math.sin(yaw)
-    vx_body = vx_world * c + vy_world * s
-    vy_body = -vx_world * s + vy_world * c
-    return vx_body, vy_body
+def compute_target_speed(
+    cruise: float,
+    dist_to_goal: float,
+    curvature: float,
+    slow_down_dist: float,
+    curvature_factor: float,
+    bounds: Tuple[float, float],
+) -> float:
+    """Speed profile based on distance to goal and path curvature."""
+    speed = cruise
+
+    if slow_down_dist > 0 and dist_to_goal < slow_down_dist:
+        ratio = dist_to_goal / slow_down_dist
+        speed *= 0.3 + 0.7 * ratio
+
+    curve_factor = 1.0 / (1.0 + curvature_factor * abs(curvature))
+    speed *= curve_factor
+
+    return float(np.clip(speed, bounds[0], bounds[1]))
 
 
-def _dist2(x1: float, y1: float, x2: float, y2: float) -> float:
-    dx = x2 - x1
-    dy = y2 - y1
-    return dx * dx + dy * dy
+# =============================================================================
+# 2D Pure Pursuit
+# =============================================================================
 
-
-def distance_to_goal(points: Sequence[TrajectoryPoint], x: float, y: float) -> float:
-    """Distance to final point in the sampled trajectory."""
-    if not points:
-        return float("inf")
-    g = points[-1]
-    return math.hypot(float(g.x) - x, float(g.y) - y)
-
-
-def get_curvature(p: TrajectoryPoint) -> float:
-    """Curvature accessor with safe default."""
-    return float(p.curvature) if p.curvature is not None else 0.0
+def trajectory_to_xy(points: List[TrajectoryPoint]) -> np.ndarray:
+    """Extract (N, 2) position array from trajectory points."""
+    return np.array([[p.x, p.y] for p in points], dtype=np.float64)
 
 
 def find_closest_index(
-    points: Sequence[TrajectoryPoint],
-    x: float,
-    y: float,
-    current_index: int,
+    xy: np.ndarray,
+    pos: np.ndarray,
+    current_idx: int,
     search_back: int,
     search_forward: int,
 ) -> Tuple[int, float]:
+    """Find closest point index within a window (2D)."""
+    n = len(xy)
+    current_idx = max(0, min(current_idx, n - 1))
+    i0 = max(0, current_idx - search_back)
+    i1 = min(n, current_idx + search_forward)
+
+    if i0 >= i1:
+        return current_idx, 0.0
+
+    window = xy[i0:i1]
+    dists = np.linalg.norm(window - pos, axis=1)
+    local_idx = int(np.argmin(dists))
+
+    return i0 + local_idx, float(dists[local_idx])
+
+
+def find_lookahead_point(
+    xy: np.ndarray,
+    pos: np.ndarray,
+    start_idx: int,
+    lookahead_dist: float,
+) -> Tuple[int, np.ndarray]:
+    """Find lookahead point on path at distance L_d from robot (2D)."""
+    n = len(xy)
+    if start_idx >= n - 1:
+        return n - 1, xy[-1]
+
+    L_d_sq = lookahead_dist ** 2
+
+    for i in range(start_idx, n - 1):
+        p1, p2 = xy[i], xy[i + 1]
+        d1_sq = np.sum((p1 - pos) ** 2)
+        d2_sq = np.sum((p2 - pos) ** 2)
+
+        if d1_sq <= L_d_sq <= d2_sq:
+            d1, d2 = np.sqrt(d1_sq), np.sqrt(d2_sq)
+            t = np.clip((lookahead_dist - d1) / max(d2 - d1, 1e-6), 0, 1)
+            return i + 1, p1 + t * (p2 - p1)
+
+        if d2_sq > L_d_sq:
+            return i + 1, p2
+
+    return n - 1, xy[-1]
+
+
+def compute_pure_pursuit_curvature(
+    pos: np.ndarray,
+    yaw: float,
+    target: np.ndarray,
+) -> Tuple[float, float, float]:
     """
-    Find closest point index within a limited window around current_index.
-    Returns (closest_index, cross_track_error_m).
+    Classic Pure Pursuit: compute curvature to reach lookahead point (2D).
+
+    Returns: (curvature, alpha, lookahead_dist)
     """
-    if not points:
-        raise ValueError("Trajectory has no points")
+    dx, dy = target[0] - pos[0], target[1] - pos[1]
+    L_d = np.sqrt(dx * dx + dy * dy)
 
-    n = len(points)
-    current_index = max(0, min(current_index, n - 1))
-    i0 = max(0, current_index - max(0, search_back))
-    i1 = min(n - 1, current_index + max(0, search_forward))
+    if L_d < 1e-6:
+        return 0.0, 0.0, 0.0
 
-    best_i = current_index
-    best_d2 = float("inf")
+    target_angle = np.arctan2(dy, dx)
+    alpha = normalize_angle(target_angle - yaw)
+    curvature = 2.0 * np.sin(alpha) / L_d
 
-    for i in range(i0, i1 + 1):
-        p = points[i]
-        d2 = _dist2(x, y, float(p.x), float(p.y))
-        if d2 < best_d2:
-            best_d2 = d2
-            best_i = i
-
-    return best_i, math.sqrt(best_d2)
+    return float(curvature), float(alpha), float(L_d)
 
 
-def compute_lookahead(
-    base_lookahead: float,
-    min_lookahead: float,
-    max_lookahead: float,
-    lookahead_speed_gain: float,
-    current_speed: float,
+def compute_steering_commands(
     curvature: float,
-) -> float:
-    """
-    Adaptive lookahead:
-      lookahead = base + k*speed
-      reduce on tight curves (simple heuristic)
-    """
-    lookahead = base_lookahead + lookahead_speed_gain * max(0.0, current_speed)
-    if curvature > 0.5:
-        lookahead *= 0.7
-    return max(min_lookahead, min(lookahead, max_lookahead))
-
-
-def compute_speed(
-    cruise_speed: float,
-    min_speed: float,
-    max_speed: float,
-    slow_down_distance: float,
-    curvature_speed_factor: float,
-    dist_to_goal: float,
-    curvature: float,
-    clearance_factor: float,
-) -> float:
-    """
-    Speed policy:
-    - slow down near goal
-    - slow down on curves using 1/(1+k*curvature)
-    - multiply by clearance factor (0..1)
-    """
-    speed = cruise_speed
-
-    if slow_down_distance > 1e-6 and dist_to_goal < slow_down_distance:
-        alpha = max(0.0, min(1.0, dist_to_goal / slow_down_distance))
-        speed *= (0.3 + 0.7 * alpha)
-
-    curve_factor = 1.0 / (1.0 + curvature_speed_factor * max(0.0, curvature))
-    speed *= curve_factor
-    speed *= max(0.0, min(1.0, clearance_factor))
-
-    return max(min_speed, min(speed, max_speed))
-
-
-def compute_yaw_rate(
-    current_yaw: float,
-    desired_yaw: float,
-    current_speed: float,
-    yaw_kp: float,
+    speed: float,
     max_yaw_rate: float,
-    yaw_deadband: float,
-    yaw_speed_threshold: float,
-    yaw_rate_smoothing: float,
-    prev_yaw_rate: float,
+    wheelbase: Optional[float] = None,
+) -> Tuple[float, Optional[float]]:
+    """Convert curvature to steering commands (2D)."""
+    yaw_rate = float(np.clip(speed * curvature, -max_yaw_rate, max_yaw_rate))
+
+    steering_angle = None
+    if wheelbase is not None and wheelbase > 0:
+        steering_angle = float(np.arctan(wheelbase * curvature))
+
+    return yaw_rate, steering_angle
+
+
+def compute_body_velocity(
+    speed: float,
+    alpha: float,
+    holonomic: bool = True,
+) -> Tuple[float, float]:
+    """Compute body-frame velocity components (2D)."""
+    if holonomic:
+        return float(speed * np.cos(alpha)), float(speed * np.sin(alpha))
+    return float(speed), 0.0
+
+
+# =============================================================================
+# 3D Pure Pursuit
+# =============================================================================
+
+def trajectory_to_xyz(points: List[TrajectoryPoint]) -> np.ndarray:
+    """Extract (N, 3) position array from trajectory points."""
+    return np.array([[p.x, p.y, p.z] for p in points], dtype=np.float64)
+
+
+def find_closest_index_3d(
+    xyz: np.ndarray,
+    pos: np.ndarray,
+    current_idx: int,
+    search_back: int,
+    search_forward: int,
+) -> Tuple[int, float]:
+    """Find closest point index within a window (3D)."""
+    n = len(xyz)
+    current_idx = max(0, min(current_idx, n - 1))
+    i0 = max(0, current_idx - search_back)
+    i1 = min(n, current_idx + search_forward)
+
+    if i0 >= i1:
+        return current_idx, 0.0
+
+    window = xyz[i0:i1]
+    dists = np.linalg.norm(window - pos, axis=1)
+    local_idx = int(np.argmin(dists))
+
+    return i0 + local_idx, float(dists[local_idx])
+
+
+def find_lookahead_point_3d(
+    xyz: np.ndarray,
+    pos: np.ndarray,
+    start_idx: int,
+    lookahead_dist: float,
+) -> Tuple[int, np.ndarray]:
+    """Find lookahead point on path at distance L_d from robot (3D)."""
+    n = len(xyz)
+    if start_idx >= n - 1:
+        return n - 1, xyz[-1]
+
+    L_d_sq = lookahead_dist ** 2
+
+    for i in range(start_idx, n - 1):
+        p1, p2 = xyz[i], xyz[i + 1]
+        d1_sq = np.sum((p1 - pos) ** 2)
+        d2_sq = np.sum((p2 - pos) ** 2)
+
+        if d1_sq <= L_d_sq <= d2_sq:
+            d1, d2 = np.sqrt(d1_sq), np.sqrt(d2_sq)
+            t = np.clip((lookahead_dist - d1) / max(d2 - d1, 1e-6), 0, 1)
+            return i + 1, p1 + t * (p2 - p1)
+
+        if d2_sq > L_d_sq:
+            return i + 1, p2
+
+    return n - 1, xyz[-1]
+
+
+def compute_velocity_3d(
+    pos: np.ndarray,
+    target: np.ndarray,
+    speed: float,
+    max_speed_z: float,
+) -> Tuple[float, float, float, float]:
+    """
+    Compute 3D velocity vector toward lookahead point.
+
+    For holonomic robots (drones), velocity points directly at target.
+    Z velocity is clamped separately for safety.
+
+    Args:
+        pos: Current position (x, y, z).
+        target: Lookahead point (x, y, z).
+        speed: Desired total speed (m/s).
+        max_speed_z: Maximum vertical speed (m/s).
+
+    Returns:
+        (vx, vy, vz, yaw) - velocity components and heading
+    """
+    delta = target - pos
+    dist = np.linalg.norm(delta)
+
+    if dist < 1e-6:
+        return 0.0, 0.0, 0.0, 0.0
+
+    # Unit direction
+    direction = delta / dist
+
+    # Scale by speed
+    vx = direction[0] * speed
+    vy = direction[1] * speed
+    vz = direction[2] * speed
+
+    # Clamp vertical speed
+    vz = float(np.clip(vz, -max_speed_z, max_speed_z))
+
+    # Yaw from xy velocity
+    yaw = float(np.arctan2(vy, vx)) if abs(vx) + abs(vy) > 1e-6 else 0.0
+
+    return float(vx), float(vy), float(vz), yaw
+
+
+def compute_yaw_rate_3d(
+    current_yaw: float,
+    target_yaw: float,
+    max_yaw_rate: float,
+    dt: float = 0.05,
 ) -> float:
     """
-    Smoothed yaw-rate control:
-    - no yaw correction at low speeds
-    - deadband to avoid jitter
-    - exponential smoothing on output
+    Compute yaw rate to reach target yaw.
+
+    Simple proportional control with rate limiting.
     """
-    if current_speed < yaw_speed_threshold:
-        return 0.8 * prev_yaw_rate
-
-    yaw_error = normalize_angle(desired_yaw - current_yaw)
-    if abs(yaw_error) < yaw_deadband:
-        return 0.7 * prev_yaw_rate
-
-    target = yaw_kp * yaw_error
-    target = max(-max_yaw_rate, min(target, max_yaw_rate))
-
-    a = max(0.0, min(1.0, yaw_rate_smoothing))
-    return a * target + (1.0 - a) * prev_yaw_rate
-
-
-def pick_lookahead_index(
-    points: Sequence[TrajectoryPoint],
-    closest_index: int,
-    lookahead_m: float,
-) -> int:
-    """
-    Choose a lookahead point by accumulating distances forward from closest_index.
-    """
-    n = len(points)
-    if n == 0:
-        raise ValueError("Trajectory has no points")
-
-    closest_index = max(0, min(closest_index, n - 1))
-    if closest_index >= n - 1:
-        return n - 1
-
-    accum = 0.0
-    i = closest_index
-    while i < n - 1 and accum < lookahead_m:
-        p0 = points[i]
-        p1 = points[i + 1]
-        ds = math.hypot(float(p1.x) - float(p0.x), float(p1.y) - float(p0.y))
-        accum += ds
-        i += 1
-
-    return min(i, n - 1)
-
-
-def clearance_to_factor(
-    clearance_m: float,
-    min_clearance_for_full_speed: float,
-    min_clearance_threshold: float,
-) -> float:
-    """
-    Map clearance (meters) -> [0.3..1.0] factor.
-    """
-    if clearance_m >= min_clearance_for_full_speed:
-        return 1.0
-    if clearance_m <= min_clearance_threshold:
-        return 0.3
-
-    denom = (min_clearance_for_full_speed - min_clearance_threshold)
-    if denom <= 1e-9:
-        return 1.0
-
-    ratio = (clearance_m - min_clearance_threshold) / denom
-    ratio = max(0.0, min(1.0, ratio))
-    return 0.3 + 0.7 * ratio
+    yaw_error = normalize_angle(target_yaw - current_yaw)
+    # P-control with implicit gain (reach target in ~0.5s)
+    yaw_rate = yaw_error / 0.5
+    return float(np.clip(yaw_rate, -max_yaw_rate, max_yaw_rate))

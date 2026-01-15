@@ -55,8 +55,8 @@ Notes:
 The pipeline should not hardcode the smoother class. Use the registry:
 
 ```python
-from core.planning.smoothers import SmootherRegistry
-from core.planning.smoothers.register_defaults import register_default_smoothers
+from sparx_agency.core.planning.smoothers import SmootherRegistry
+from sparx_agency.core.planning.smoothers.register_defaults import register_default_smoothers
 
 register_default_smoothers()
 

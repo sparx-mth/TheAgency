@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List
 
-from core.planning.trackers.pure_pursuit.params import PurePursuitParams
-from core.planning.trackers.pure_pursuit.tracker import PurePursuitTracker
+from sparx_agency.core.planning.trackers.pure_pursuit.params import PurePursuitParams
+from sparx_agency.core.planning.trackers.pure_pursuit.tracker import PurePursuitTracker
 
 
 @dataclass(frozen=True, slots=True)

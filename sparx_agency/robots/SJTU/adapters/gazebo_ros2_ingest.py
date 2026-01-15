@@ -28,15 +28,13 @@ from sparx_agency.core.common.types.perception import (
     RGBFrame,
     Observation,
 )
-from sparx_agency.core.mapping.costmap import ProbabilisticGridCostmap
-from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridConfig
-from sparx_agency.core.mapping.costmap.sanity_check_costmap import SanityCheckCostmap
-from sparx_agency.core.mapping.interfaces import DepthModel
+
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.robots.SJTU.helpers.helpers import make_depth_grid_vis, depth_to_vis_u8
 # ROS-free mapping pipeline
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, PinholeCloudGenerator, \
     MappingPipelineConfig
+from sparx_agency.core.mapping.interfaces.costmap import Costmap
 
 
 def strip_leading_slash(s: str) -> str:
@@ -178,8 +176,8 @@ class GazeboRos2Ingestor(Node):
       - By default uses frames from messages (after stripping leading '/')
     """
 
-    def __init__(self):
-        super().__init__("gazebo_ros2_ingest")
+    def __init__(self,  pipeline: MappingPipeline, costmap: Costmap):
+        super().__init__("gazebo_ros2_ingestor")
 
         # --- params ---
         self.declare_parameter("rgb_topic", "/simple_drone/front/image_raw")
@@ -233,19 +231,14 @@ class GazeboRos2Ingestor(Node):
         self._img_count = 0
         self._latest = LatestState()
 
-        self.costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        self.costmap = costmap #ProbabilisticGridCostmap(ProbabilisticGridConfig())
         # self.costmap = SanityCheckCostmap()
         self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
         self.cloud_generator = PinholeCloudGenerator()
         self.pipeline_cfg = MappingPipelineConfig()
-        # --- pipeline ---
-        self.pipeline = MappingPipeline(
-            costmap=self.costmap,
-            depth_model=self.depth_model,
-            cloud_generator=self.cloud_generator,
-            cfg=self.pipeline_cfg,
-        )
+
+        self.pipeline = pipeline
 
         # --- QoS ---
         sensor_qos = QoSProfile(

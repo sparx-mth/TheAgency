@@ -1,34 +1,24 @@
 """
-Smoother registry.
+Smoother registry for name-based construction.
 
-Higher-level code (apps/tests/experiments) can choose a smoother by name and
-construct it via this registry. This keeps orchestration code stable while
-allowing algorithm replacement.
+Allows algorithm selection by string key, enabling configuration-driven pipelines.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
-from core.planning.interfaces.smoother import BaseSmoother
-
-
-@dataclass(frozen=True)
-class RegistryEntry:
-    """A registered smoother factory entry."""
-    name: str
-    factory: Callable[..., BaseSmoother]
+from sparx_agency.core.planning.interfaces.smoother import BaseSmoother
 
 
 class SmootherRegistry:
     """
-    Register and construct smoothers by string key.
+    Registry for smoother factory functions.
 
-    Typical usage:
-        SmootherRegistry.register("minsnap", lambda **kw: MinSnapSmoother(**kw))
-        smoother = SmootherRegistry.create("minsnap", params=MinSnapParams(...))
+    Example:
+        >>> SmootherRegistry.register("hermite", lambda **kw: HermiteSmoother(**kw))
+        >>> smoother = SmootherRegistry.create("hermite", params=HermiteParams())
     """
-    _entries: Dict[str, RegistryEntry] = {}
+    _factories: Dict[str, Callable[..., BaseSmoother]] = {}
 
     @classmethod
     def register(cls, name: str, factory: Callable[..., BaseSmoother]) -> None:
@@ -36,29 +26,33 @@ class SmootherRegistry:
         Register a smoother factory.
 
         Args:
-            name: unique key (case-insensitive)
-            factory: callable that returns a BaseSmoother instance
+            name: Unique key (case-insensitive).
+            factory: Callable returning BaseSmoother instance.
         """
         key = name.strip().lower()
         if not key:
             raise ValueError("Smoother name cannot be empty")
-        cls._entries[key] = RegistryEntry(name=key, factory=factory)
+        cls._factories[key] = factory
 
     @classmethod
     def create(cls, name: str, **kwargs: Any) -> BaseSmoother:
         """
-        Construct a smoother instance by name.
+        Construct smoother by name.
+
+        Args:
+            name: Registered smoother key.
+            **kwargs: Passed to factory.
 
         Raises:
-            KeyError if the name is unknown.
+            KeyError: If name not registered.
         """
         key = name.strip().lower()
-        if key not in cls._entries:
-            known = ", ".join(sorted(cls._entries.keys()))
-            raise KeyError(f"Unknown smoother '{name}'. Known: [{known}]")
-        return cls._entries[key].factory(**kwargs)
+        if key not in cls._factories:
+            known = ", ".join(sorted(cls._factories.keys()))
+            raise KeyError(f"Unknown smoother '{name}'. Registered: [{known}]")
+        return cls._factories[key](**kwargs)
 
     @classmethod
-    def known(cls) -> list[str]:
-        """Return registered smoother keys."""
-        return sorted(cls._entries.keys())
+    def list(cls) -> List[str]:
+        """Return registered smoother names."""
+        return sorted(cls._factories.keys())
