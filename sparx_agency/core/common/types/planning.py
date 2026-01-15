@@ -48,7 +48,7 @@ class Path2D:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TrajectoryPoint:
     """
     Single point on a time-parameterized trajectory.

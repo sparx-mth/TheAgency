@@ -39,7 +39,7 @@ Gst.init(None)
 
 
 class VideoStreamManager(Node):
-    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
+    def ע__init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
         super().__init__("video_stream_example")
         self.id = drone_id
         self.i = 0
@@ -389,6 +389,11 @@ class VideoStreamManager(Node):
         # with self.yaw_rad_lock:
         #     last_yaw_rad = -self.yaw_rad
         # self.last_pub_time = now
+        # TODO: replace get_camera_yaw with april_tag new version  for example:
+        #  self.april_localization = TagAzimuthOpenCVTask(tag_config_path: str,
+        #         camera_calib_path: str,
+        #         tag_size_m: float,)
+        #         last_yaw_rad, tag_id = self.april_localization.compute_azimuth_from_bgr(frame, timestamp_sec)
 
         last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
 
