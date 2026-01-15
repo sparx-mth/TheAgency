@@ -56,3 +56,6 @@ class Pose3D:
 
     def position(self) -> Vec3:
         return Vec3(self.x, self.y, self.z)
+
+    def distance_to(self, other: Pose3D) -> float:
+        return hypot(other.x - self.x, other.y - self.y, other.z - self.z)
