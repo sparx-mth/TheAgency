@@ -18,8 +18,7 @@ def main():
 
     # 2. Setup DepthAnythingV2
     # NOTE: Use 'vits' (small) encoder for Jetson performance
-    depth_cfg = DepthAnythingV2Config(encoder='vits')
-    depth_model = DepthAnythingV2DepthModel(depth_cfg)
+    depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
     # 3. Assemble the Pipeline
     pipeline = MappingPipeline(
