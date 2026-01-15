@@ -1,6 +1,3 @@
-# =========================
-# File: sparx_agency/core/planning/planners/rrtstar/algorithm.py
-# =========================
 """
 RRT* path planning using OMPL (2D and 3D).
 
@@ -23,96 +20,20 @@ from sparx_agency.core.planning.environment import Costmap2D
 
 from .params import RRTStarOmplParams, RRTStarOmpl3DParams
 
+# Import shared utilities from common
+from ..common import (
+    ob, og, OMPL_AVAILABLE, OMPL_ERROR,
+    interpolate_path_2d, reduce_path_2d, make_clearance_objective_2d,
+    dist3d, interpolate_path_3d, reduce_path_3d, make_clearance_objective_3d,
+)
+
 if TYPE_CHECKING:
     from ompl import base as ob
 
-try:
-    from ompl import base as ob
-    from ompl import geometric as og
-    OMPL_AVAILABLE = True
-except ImportError as e:
-    ob = None
-    og = None
-    _OMPL_ERROR = str(e)
-    OMPL_AVAILABLE = False
-else:
-    _OMPL_ERROR = None
-
 
 # =============================================================================
-# Shared utilities
+# 2D RRT*
 # =============================================================================
-
-def _make_clearance_objective_2d(si, costmap: Costmap2D, weight: float):
-    """Create 2D clearance objective."""
-    class _ClearanceObjective(ob.StateCostIntegralObjective):
-        def __init__(self, si, costmap: Costmap2D, weight: float) -> None:
-            super().__init__(si, True)
-            self._costmap = costmap
-            self._weight = weight
-
-        def stateCost(self, state) -> ob.Cost:
-            clearance = self._costmap.world_clearance(state[0], state[1])
-            return ob.Cost(self._weight / (clearance + 1.0))
-
-    return _ClearanceObjective(si, costmap, weight)
-
-
-def _make_clearance_objective_3d(si, voxelmap, weight: float):
-    """Create 3D clearance objective (expects voxelmap.world_clearance(x,y,z))."""
-    class _ClearanceObjective3D(ob.StateCostIntegralObjective):
-        def __init__(self, si, voxelmap, weight: float) -> None:
-            super().__init__(si, True)
-            self._voxelmap = voxelmap
-            self._weight = weight
-
-        def stateCost(self, state) -> ob.Cost:
-            clearance = self._voxelmap.world_clearance(state[0], state[1], state[2])
-            return ob.Cost(self._weight / (clearance + 1.0))
-
-    return _ClearanceObjective3D(si, voxelmap, weight)
-
-
-# =============================================================================
-# 2D RRT* (unchanged logic; minor debug not added here)
-# =============================================================================
-
-def _interpolate_path_2d(points: List[Pose2D], spacing: float) -> List[Pose2D]:
-    """Interpolate 2D path at uniform spacing."""
-    if len(points) < 2 or spacing <= 0:
-        return points
-
-    result = [points[0]]
-    for a, b in zip(points[:-1], points[1:]):
-        dx, dy = b.x - a.x, b.y - a.y
-        dist = hypot(dx, dy)
-
-        if dist > spacing:
-            n_segments = int(dist / spacing)
-            for i in range(1, n_segments + 1):
-                t = i / (n_segments + 1)
-                result.append(Pose2D(a.x + t * dx, a.y + t * dy))
-        result.append(b)
-    return result
-
-
-def _reduce_path_2d(si, costmap: Costmap2D, states: List, min_clearance: float) -> List:
-    """Adaptive waypoint reduction for 2D."""
-    if len(states) < 3:
-        return [si.cloneState(s) for s in states]
-
-    kept = [si.cloneState(states[0])]
-    for i in range(1, len(states) - 1):
-        x, y = states[i][0], states[i][1]
-        clearance = costmap.world_clearance(x, y)
-        can_skip = si.checkMotion(kept[-1], states[i + 1])
-
-        if clearance < min_clearance or not can_skip:
-            kept.append(si.cloneState(states[i]))
-
-    kept.append(si.cloneState(states[-1]))
-    return kept
-
 
 def plan_rrtstar(
     start: Pose2D,
@@ -122,7 +43,7 @@ def plan_rrtstar(
 ) -> PlanResult:
     """Plan a 2D collision-free path using RRT*."""
     if not OMPL_AVAILABLE:
-        return PlanResult(status=PlanStatus.ERROR, message=f"OMPL not available: {_OMPL_ERROR}")
+        return PlanResult(status=PlanStatus.ERROR, message=f"OMPL not available: {OMPL_ERROR}")
 
     if not costmap.is_free(*costmap.world_to_grid(start.x, start.y)):
         return PlanResult(status=PlanStatus.INVALID_START, message="Start in collision")
@@ -158,7 +79,7 @@ def plan_rrtstar(
     ss.setStartAndGoalStates(start_state, goal_state)
 
     if params.use_clearance_objective and getattr(costmap, "clearance", None) is not None:
-        ss.setOptimizationObjective(_make_clearance_objective_2d(si, costmap, params.clearance_weight))
+        ss.setOptimizationObjective(make_clearance_objective_2d(si, costmap, params.clearance_weight))
 
     ss.setPlanner(og.RRTstar(si))
     if not ss.solve(params.timeout):
@@ -166,7 +87,7 @@ def plan_rrtstar(
 
     path = ss.getSolutionPath()
     states = [path.getState(i) for i in range(path.getStateCount())]
-    reduced = _reduce_path_2d(si, costmap, states, params.min_clearance_for_keep)
+    reduced = reduce_path_2d(si, costmap, states, params.min_clearance_for_keep)
     waypoints = [Pose2D(s[0], s[1]) for s in reduced]
 
     for s in reduced:
@@ -176,7 +97,7 @@ def plan_rrtstar(
         waypoints.append(goal)
 
     n_before = len(waypoints)
-    waypoints = _interpolate_path_2d(waypoints, params.interpolation_spacing)
+    waypoints = interpolate_path_2d(waypoints, params.interpolation_spacing)
 
     return PlanResult(
         status=PlanStatus.SUCCESS,
@@ -214,47 +135,6 @@ except ImportError:
             return len(self.points)
 
 
-def _dist3d(a: Pose3D, b: Pose3D) -> float:
-    return sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2 + (b.z - a.z) ** 2)
-
-
-def _interpolate_path_3d(points: List[Pose3D], spacing: float) -> List[Pose3D]:
-    """Interpolate 3D path at uniform spacing."""
-    if len(points) < 2 or spacing <= 0:
-        return points
-
-    result = [points[0]]
-    for a, b in zip(points[:-1], points[1:]):
-        dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
-        dist = sqrt(dx * dx + dy * dy + dz * dz)
-
-        if dist > spacing:
-            n_segments = int(dist / spacing)
-            for i in range(1, n_segments + 1):
-                t = i / (n_segments + 1)
-                result.append(Pose3D(a.x + t * dx, a.y + t * dy, a.z + t * dz))
-        result.append(b)
-    return result
-
-
-def _reduce_path_3d(si, voxelmap, states: List, min_clearance: float) -> List:
-    """Adaptive waypoint reduction for 3D."""
-    if len(states) < 3:
-        return [si.cloneState(s) for s in states]
-
-    kept = [si.cloneState(states[0])]
-    for i in range(1, len(states) - 1):
-        x, y, z = states[i][0], states[i][1], states[i][2]
-        clearance = voxelmap.world_clearance(x, y, z)
-        can_skip = si.checkMotion(kept[-1], states[i + 1])
-
-        if clearance < min_clearance or not can_skip:
-            kept.append(si.cloneState(states[i]))
-
-    kept.append(si.cloneState(states[-1]))
-    return kept
-
-
 def plan_rrtstar_3d(
     start: Pose3D,
     goal: Pose3D,
@@ -284,7 +164,7 @@ def plan_rrtstar_3d(
       PlanResult with artifacts["path3d"] on success.
     """
     if not OMPL_AVAILABLE:
-        return PlanResult(status=PlanStatus.ERROR, message=f"OMPL not available: {_OMPL_ERROR}")
+        return PlanResult(status=PlanStatus.ERROR, message=f"OMPL not available: {OMPL_ERROR}")
 
     # Validate start/goal using WORLD validity (important!)
     if not voxelmap.is_free_world(start.x, start.y, start.z):
@@ -438,7 +318,7 @@ def plan_rrtstar_3d(
 
     # Enable clearance objective if requested
     if params.use_clearance_objective:
-        ss.setOptimizationObjective(_make_clearance_objective_3d(si, voxelmap, params.clearance_weight))
+        ss.setOptimizationObjective(make_clearance_objective_3d(si, voxelmap, params.clearance_weight))
 
     # Planner
     planner = og.RRTstar(si)
@@ -535,17 +415,17 @@ def plan_rrtstar_3d(
     states = [path.getState(i) for i in range(path.getStateCount())]
 
     # Reduce waypoints using OMPL motion checks
-    reduced = _reduce_path_3d(si, voxelmap, states, params.min_clearance_for_keep)
+    reduced = reduce_path_3d(si, voxelmap, states, params.min_clearance_for_keep)
     waypoints = [Pose3D(float(s[0]), float(s[1]), float(s[2])) for s in reduced]
 
     for s in reduced:
         si.freeState(s)
 
-    if _dist3d(waypoints[-1], goal) > 0.1:
+    if dist3d(waypoints[-1], goal) > 0.1:
         waypoints.append(goal)
 
     n_before = len(waypoints)
-    waypoints = _interpolate_path_3d(waypoints, params.interpolation_spacing)
+    waypoints = interpolate_path_3d(waypoints, params.interpolation_spacing)
 
     path3d = Path3D(
         points=tuple(waypoints),

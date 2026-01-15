@@ -11,10 +11,14 @@ from sparx_agency.core.common.types import Pose3D, PlanStatus
 # NOTE: update these imports/paths if your project stores these elsewhere.
 from sparx_agency.core.planning.planners.bitstar.algorithm import (
     plan_bitstar_3d,
-    plan_informed_rrtstar_3d,
 )
 from sparx_agency.core.planning.planners.bitstar.params import (
     BITStarParams,
+)
+from sparx_agency.core.planning.planners.informed_rrtstar.algorithm import (
+    plan_informed_rrtstar_3d,
+)
+from sparx_agency.core.planning.planners.informed_rrtstar.params import (
     InformedRRTStarParams,
 )
 

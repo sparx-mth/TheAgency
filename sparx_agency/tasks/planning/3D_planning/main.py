@@ -63,6 +63,8 @@ def main():
     # NOTE: update these imports/paths if your project stores these classes elsewhere.
     from sparx_agency.core.planning.planners.bitstar.params import (
         BITStarParams,
+    )
+    from sparx_agency.core.planning.planners.informed_rrtstar.params import (
         InformedRRTStarParams,
     )
 
