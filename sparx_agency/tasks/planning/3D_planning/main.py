@@ -51,7 +51,7 @@ def main():
     args = _parse_args()
 
     ROOT = Path("gibson/extracted/gibson_tiny")
-    SCENE = "Corozal"
+    SCENE = "Shelbyville"
 
     POINTS = 1_500_000
     VOXEL = 0.12
@@ -80,8 +80,8 @@ def main():
     )
 
     rrtstar_params = RRTStarOmpl3DParams(
-        timeout=200.0,
-        use_clearance_objective=True,
+        timeout=60.0,
+        use_clearance_objective=False,
         clearance_weight=0.001,
         min_clearance_for_keep=ROBOT_RADIUS,
         interpolation_spacing=0.10,
@@ -99,7 +99,7 @@ def main():
 
     bitstar_params = BITStarParams(
         timeout=30.0,
-        use_clearance_objective=True,
+        use_clearance_objective=False,
         clearance_weight=0.01,
         min_clearance_for_keep=ROBOT_RADIUS,
         interpolation_spacing=0.10,
@@ -116,8 +116,8 @@ def main():
     )
 
     informed_params = InformedRRTStarParams(
-        timeout=100.0,
-        use_clearance_objective=True,
+        timeout=60.0,
+        use_clearance_objective=False,
         clearance_weight=0.001,
         min_clearance_for_keep=ROBOT_RADIUS,
         interpolation_spacing=0.10,
