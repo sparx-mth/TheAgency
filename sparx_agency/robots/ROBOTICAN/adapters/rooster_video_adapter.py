@@ -39,7 +39,7 @@ Gst.init(None)
 
 
 class VideoStreamManager(Node):
-    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.5", port=5001):
+    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
         super().__init__("video_stream_example")
         self.id = drone_id
         self.i = 0
@@ -328,9 +328,10 @@ class VideoStreamManager(Node):
     def on_pub_timer(self):
         if not self.capturing_enabled:
             return
-        # if self.last_sample_time is None:
-        #     self.get_logger().info("No capture time")
-        #     return
+        if self.last_sample_time is None:
+            self.get_logger().info("No capture time")
+            return
+        self.get_logger().info(f"time.monotonic() = {time.monotonic()}, self.last_sample_time = {self.last_sample_time}")
         if (time.monotonic() - self.last_sample_time) > self.stream_timeout_s:
             self.get_logger().warn("Stream stale (no UDP frames). Not publishing.")
             return
@@ -353,7 +354,7 @@ class VideoStreamManager(Node):
         h, w, _ = frame.shape
         stamp_msg = now.to_msg()
         self.i += 1
-
+        self.get_logger().info(f"Process Frame #{self.i}: {h}x{w}")
         # Build CameraInfo template once, when we see the first frame
         if self.camera_info_template is None:
             # Use the camera frame id you actually publish on images
@@ -390,24 +391,7 @@ class VideoStreamManager(Node):
         # self.last_pub_time = now
 
         last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
-        # # azimuth_value_msg = Point()
-        # # azimuth_msg = PointStamped()
-        # #
-        # # # Build azimuth msg ALWAYS stamped
-        # # azimuth_msg.header.stamp = stamp_msg
-        # # azimuth_msg.header.frame_id = self.dir_name  # keep this always
-        # # if last_yaw_deg is None:
-        # #     self.get_logger().warn(
-        # #         f"No tags visible. Last TF error: {tag_id}")
-        # #     azimuth_msg.point.x = float("nan")  # or -999.0
-        # #     azimuth_msg.point.y = -1.0  # tag_id sentinel
-        # #
-        # # else:
-        # #     azimuth_value_msg.x = float(last_yaw_deg)
-        # #     azimuth_value_msg.y = float(tag_id)
-        # #     azimuth_msg.point = azimuth_value_msg
-        # #     self.get_logger().info(
-        # #         f"Azimuth: {last_yaw_deg:.1f}° (Based on Tag {tag_id})")
+
         if last_yaw_rad is None:
             self.get_logger().warn(f"Failed to get camera yaw from tag_id = {tag_id}")
             last_yaw_rad = 3.14
