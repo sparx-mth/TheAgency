@@ -15,7 +15,7 @@ class ControlMode(str, Enum):
     ACCELERATION = "acceleration"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ControlCommand:
     """Generic control command output."""
     mode: ControlMode
@@ -39,7 +39,7 @@ class ControlCommand:
         return ControlCommand(ControlMode.VELOCITY, vx, vy, vz, yaw_rate, dict(meta))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class KinematicLimits:
     """
     Kinematic constraints for trajectory generation.
