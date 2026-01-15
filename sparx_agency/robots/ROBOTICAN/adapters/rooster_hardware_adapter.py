@@ -3,6 +3,9 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import Image
 from fcu_driver_interfaces.msg import UAVState
+
+from sparx_agency.core.mapping.costmap import ProbabilisticGridCostmap
+from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
 from sparx_agency.robots.ROBOTICAN.adapters.sphera_ros2_ingestor import SpheraRos2Ingestor
 
 
@@ -13,8 +16,9 @@ class RoosterHardwareAdapter(Node):
         # drone_id can be 'R2' for both Sphera or Rooster
         self.drone_id = self.declare_parameter('drone_id', 'R2').value
 
+
         # The ingestor manages hardware-specific GStreamer and KeepAlive
-        self.ingestor = SpheraRos2Ingestor(pipeline=None, drone_id=self.drone_id)
+        self.ingestor = SpheraRos2Ingestor(drone_id=self.drone_id)
 
         # On-demand publishers for the Jetson
         self.img_pub = self.create_publisher(Image, f'/{self.drone_id}/on_demand/image', 10)
@@ -44,6 +48,11 @@ class RoosterHardwareAdapter(Node):
 
 def main():
     rclpy.init()
+    print("Hello World")
     node = RoosterHardwareAdapter()
     rclpy.spin(node)
     rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
