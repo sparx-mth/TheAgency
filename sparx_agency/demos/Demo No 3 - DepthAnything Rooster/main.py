@@ -5,39 +5,47 @@ from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline,
 from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridCostmap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
 
-# New Sphera Ingestor
-from sparx_agency.robots.ROBOTICAN.adapters.sphera_ros2_ingestor import SpheraRos2Ingestor
+# Import the class we defined earlier
+from sparx_agency.tasks.mapping.mapping_task import MappingTask
+
 
 def main():
     rclpy.init()
 
-    # 1. Configure the Brain (Same as SJTU)
+    # 1. Setup the Costmap (Occupancy Grid)
     map_cfg = ProbabilisticGridConfig(points_to_occupied=30)
     costmap = ProbabilisticGridCostmap(map_cfg)
-    depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
-    cloud_gen = PinholeCloudGenerator()
 
-    # 2. Assemble Pipeline
+    # 2. Setup DepthAnythingV2
+    # NOTE: Use 'vits' (small) encoder for Jetson performance
+    depth_cfg = DepthAnythingV2Config(encoder='vits')
+    depth_model = DepthAnythingV2DepthModel(depth_cfg)
+
+    # 3. Assemble the Pipeline
     pipeline = MappingPipeline(
         costmap=costmap,
         depth_model=depth_model,
-        cloud_generator=cloud_gen
+        cloud_generator=PinholeCloudGenerator()
     )
 
-    # 3. Initialize Ingestor (The "Plumbing" for Rooster)
-    node = SpheraRos2Ingestor(pipeline=pipeline, costmap=costmap, drone_id="R2")
+    # 4. Initialize the Task Node
+    # This node handles the Triggering/Request logic
+    node = MappingTask(pipeline=pipeline)
 
-    # 4. START: Ask for video explicitly
-    node.activate_video_hardware()
+    print("Jetson Mapping Node started.")
+    print("Asking Rooster/Sphera for the first frame...")
+
+    # Trigger the first frame request
+    node.request_new_frame()
 
     try:
-        print("Mapping Started: Receiving hardware stream and running DepthAnything...")
         rclpy.spin(node)
     except KeyboardInterrupt:
-        print("Shutting down and saving map...")
+        print("Shutting down Jetson Mapping...")
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
