@@ -1,6 +1,5 @@
-"""RRT* planner configuration."""
+"""RRT* planner configuration (2D and 3D)."""
 from __future__ import annotations
-
 from dataclasses import dataclass
 
 
@@ -25,8 +24,17 @@ class RRTStarOmplParams:
     min_clearance_for_keep: float = 0.3
     interpolation_spacing: float = 0.2
     frame_id: str = "map"
+
+    # OMPL: state validity resolution is a FRACTION of space extent.
     collision_check_resolution: float = 0.005
+
+    # OMPL: additional discretization hint (meters) -> converted to fraction.
     longest_valid_segment_m: float | None = None
+
+    # Debug
+    debug_enabled: bool = False
+    debug_every_n_validity: int = 2000
+    debug_max_print_validity: int = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,3 +52,9 @@ class RRTStarOmpl3DParams:
     frame_id: str = "map"
     collision_check_resolution: float = 0.005
     longest_valid_segment_m: float | None = None
+    rrt_range_m: float | None = None
+
+    # Debug
+    debug_enabled: bool = False
+    debug_every_n_validity: int = 2000
+    debug_max_print_validity: int = 200
