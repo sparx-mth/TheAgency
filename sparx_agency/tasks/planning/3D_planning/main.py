@@ -40,7 +40,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--all",
-        default=True,
+        default=False,
         action="store_true",
         help="Plan with ALL algorithms (BIT*, Informed RRT*, RRT*) and display all paths.",
     )
