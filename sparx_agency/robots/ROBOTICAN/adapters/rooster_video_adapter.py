@@ -34,12 +34,14 @@ import gi
 gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 from gi.repository import Gst, GstVideo
+from sparx_agency.tasks.localization.opencv.tag_azimuth_node import TagAzimuthOpenCVTask
+
 
 Gst.init(None)
 
 
 class VideoStreamManager(Node):
-    def ע__init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
+    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
         super().__init__("video_stream_example")
         self.id = drone_id
         self.i = 0
@@ -128,17 +130,18 @@ class VideoStreamManager(Node):
             12: 270.0,  # South Desk
             13: 180.0,  # West Door
         }
-        # self.tag_config = {
-        #     10: 0.0,  # North
-        #     11: 90.0,  # East
-        #     12: 180.0,  # South
-        #     13: 270.0,  # West
-        # }
+
+
         self.tag_family = "36h11"
         self.known_tag_ids = list(self.tag_config.keys())
         self.last_seen_tag_id = None
         self.last_seen_tag_stamp = None
 
+        self.april_localization = TagAzimuthOpenCVTask(
+            tag_config_path="sparx_agency/tasks/localization/config/tags_azimuth.yaml",
+            camera_calib_path="sparx_agency/tasks/localization/config/front_camera_calib.yaml",
+            tag_size_m=0.16,
+        )
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -394,14 +397,28 @@ class VideoStreamManager(Node):
         #         camera_calib_path: str,
         #         tag_size_m: float,)
         #         last_yaw_rad, tag_id = self.april_localization.compute_azimuth_from_bgr(frame, timestamp_sec)
+        #last_yaw_rad = self.compute_azimuth_from_bgr(frame, now)
+        #last_yaw_rad = math.radians(last_yaw_rad)
 
-        last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
+        #last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
 
-        if last_yaw_rad is None:
-            self.get_logger().warn(f"Failed to get camera yaw from tag_id = {tag_id}")
-            last_yaw_rad = 3.14
-            #return
 
+        timestamp_sec = now.nanoseconds * 1e-9
+        last_yaw_deg = None
+
+        try:
+            last_yaw_deg = self.april_localization.compute_azimuth_from_bgr(
+                frame,
+                timestamp_sec,
+            )
+
+        except Exception as e:
+            self.get_logger().warn(f"Azimuth failed: {e}")
+
+        if last_yaw_deg is None:
+            last_yaw_rad = math.pi #3.14
+        else:
+            last_yaw_rad = math.radians(last_yaw_deg)
 
         msg_used = copy.deepcopy(msg)
         msg_used.header.frame_id = f"{self.dir_name}_____{last_yaw_rad:.5f}"
