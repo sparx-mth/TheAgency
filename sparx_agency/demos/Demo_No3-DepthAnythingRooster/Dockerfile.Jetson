@@ -1,0 +1,42 @@
+# Use the optimized Jetson base image
+# FROM transformers:r36.4.tegra-aarch64-cu126-22.04
+FROM rooster_mapping_jetson:depth_anything
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Install ROS 2 Humble + CycloneDDS dependencies
+RUN apt-get update && apt-get install -y \
+    software-properties-common curl \
+    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null \
+    && apt-get update && apt-get install -y \
+    ros-humble-ros-base \
+    ros-humble-cv-bridge \
+    ros-humble-rmw-cyclonedds-cpp \
+    python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Setup the Rooster Environment Script
+# Creating the file inside the container based on your provided script
+RUN echo '#!/usr/bin/env bash \n\
+unset ROS_DOMAIN_ID \n\
+unset RMW_IMPLEMENTATION \n\
+unset CYCLONEDDS_URI \n\
+source /opt/ros/humble/setup.bash \n\
+[ -f "/home/user/rqs_iai_ws/install/setup.bash" ] && source "/home/user/rqs_iai_ws/install/setup.bash" \n\
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \n\
+export ROS_DOMAIN_ID=2 \n\
+# In container, we map the config to a standard location \n\
+export CYCLONEDDS_URI=file:///etc/cyclonedds.xml \n\
+echo "Rooster ROS 2 Env Loaded (Domain 2, CycloneDDS)"' > /ros2_env.sh && chmod +x /ros2_env.sh
+
+# 3. Setup Working Directories and Paths
+WORKDIR /home/user/GIT/TheAgency
+ENV PYTHONPATH=$PYTHONPATH:/home/user/GIT/TheAgency
+
+# 4. Auto-source the environment for interactive shells
+RUN echo "source /ros2_env.sh" >> ~/.bashrc
+
+# 5. Ensure the container starts with the environment sourced
+ENTRYPOINT ["/bin/bash", "-c", "source /ros2_env.sh && \"$@\"", "--"]
+CMD ["bash"]

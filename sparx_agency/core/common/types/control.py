@@ -15,7 +15,7 @@ class ControlMode(str, Enum):
     ACCELERATION = "acceleration"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ControlCommand:
     """Generic control command output."""
     mode: ControlMode
@@ -26,20 +26,15 @@ class ControlCommand:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _assert_finite("ControlCommand.x", self.x)
-        _assert_finite("ControlCommand.y", self.y)
-        _assert_finite("ControlCommand.z", self.z)
-        _assert_finite("ControlCommand.yaw_rate", self.yaw_rate)
+        for name in ("x", "y", "z", "yaw_rate"):
+            _assert_finite(f"ControlCommand.{name}", getattr(self, name))
 
     @staticmethod
-    def velocity(
-        vx: float, vy: float, vz: float = 0.0, yaw_rate: float = 0.0, **meta: Any
-    ) -> ControlCommand:
-        """Factory for velocity commands."""
+    def velocity(vx: float, vy: float, vz: float = 0.0, yaw_rate: float = 0.0, **meta: Any) -> ControlCommand:
         return ControlCommand(ControlMode.VELOCITY, vx, vy, vz, yaw_rate, dict(meta))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class KinematicLimits:
     """
     Kinematic constraints for trajectory generation.
@@ -61,13 +56,9 @@ class KinematicLimits:
     max_accel_z: Optional[float] = 0.5
 
     def __post_init__(self) -> None:
-        if self.max_speed_xy <= 0:
-            raise ValueError(f"max_speed_xy must be > 0, got {self.max_speed_xy}")
-        if self.max_speed_z <= 0:
-            raise ValueError(f"max_speed_z must be > 0, got {self.max_speed_z}")
-        if self.max_yaw_rate <= 0:
-            raise ValueError(f"max_yaw_rate must be > 0, got {self.max_yaw_rate}")
-        if self.max_accel_xy is not None and self.max_accel_xy <= 0:
-            raise ValueError(f"max_accel_xy must be > 0, got {self.max_accel_xy}")
-        if self.max_accel_z is not None and self.max_accel_z <= 0:
-            raise ValueError(f"max_accel_z must be > 0, got {self.max_accel_z}")
+        for name, val in [("max_speed_xy", self.max_speed_xy), ("max_speed_z", self.max_speed_z), ("max_yaw_rate", self.max_yaw_rate)]:
+            if val <= 0:
+                raise ValueError(f"{name} must be > 0, got {val}")
+        for name, val in [("max_accel_xy", self.max_accel_xy), ("max_accel_z", self.max_accel_z)]:
+            if val is not None and val <= 0:
+                raise ValueError(f"{name} must be > 0, got {val}")

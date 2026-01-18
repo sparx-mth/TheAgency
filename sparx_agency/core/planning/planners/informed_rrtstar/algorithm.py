@@ -1,16 +1,16 @@
 """
-BIT* (Batch Informed Trees) 3D path planning using OMPL.
+Informed RRT* 3D path planning using OMPL.
 
-BIT* combines the best of RRT* and graph-based planners:
-- Processes samples in batches for efficiency
-- Uses heuristics to focus sampling
-- Asymptotically optimal with faster convergence than RRT*
+Informed RRT* improves on RRT* by:
+- Sampling in ellipsoidal region after first solution
+- Focusing samples toward goal using admissible heuristic
+- Faster convergence in higher dimensions
 """
 from __future__ import annotations
 
 from sparx_agency.core.common.types import Pose3D, Path3D, PlanStatus, PlanResult
 
-from .params import BITStarParams
+from .params import InformedRRTStarParams
 
 # Import shared utilities from common
 from ..common import (
@@ -20,19 +20,19 @@ from ..common import (
 )
 
 
-def plan_bitstar_3d(
+def plan_informed_rrtstar_3d(
     start: Pose3D,
     goal: Pose3D,
     voxelmap,
-    params: BITStarParams,
+    params: InformedRRTStarParams,
 ) -> PlanResult:
     """
-    Plan a 3D path using BIT* (Batch Informed Trees).
+    Plan a 3D path using Informed RRT*.
 
-    BIT* combines the best of RRT* and graph-based planners:
-    - Processes samples in batches for efficiency
-    - Uses heuristics to focus sampling
-    - Asymptotically optimal
+    Informed RRT* improves on RRT* by:
+    - Sampling in ellipsoidal region after first solution
+    - Focusing samples toward goal using admissible heuristic
+    - Faster convergence in higher dimensions
     """
     if not OMPL_AVAILABLE:
         return PlanResult(status=PlanStatus.ERROR, message=f"OMPL unavailable: {OMPL_ERROR}")
@@ -57,13 +57,12 @@ def plan_bitstar_3d(
     if params.use_clearance_objective:
         ss.setOptimizationObjective(make_clearance_objective_3d(si, voxelmap, params.clearance_weight))
 
-    # Create BIT* planner
-    planner = og.BITstar(si)
+    # Create Informed RRT* planner
+    planner = og.InformedRRTstar(si)
 
-    # Configure BIT* parameters
-    planner.setSamplesPerBatch(params.samples_per_batch)
-    planner.setUseKNearest(params.use_k_nearest)
-    planner.setRewireFactor(params.rewire_factor)
+    # Configure range if specified
+    if params.range_m is not None:
+        planner.setRange(params.range_m)
 
     ss.setPlanner(planner)
 
@@ -71,16 +70,16 @@ def plan_bitstar_3d(
     solved = ss.solve(params.timeout)
 
     if not solved:
-        return PlanResult(status=PlanStatus.NO_PATH, message="BIT* found no solution")
+        return PlanResult(status=PlanStatus.NO_PATH, message="Informed RRT* found no solution")
 
     # Check for exact solution
     try:
         is_exact = bool(ss.haveExactSolutionPath())
     except:
-        is_exact = True  # Assume exact if check not available
+        is_exact = True
 
     if not is_exact:
-        return PlanResult(status=PlanStatus.NO_PATH, message="BIT* found only approximate solution")
+        return PlanResult(status=PlanStatus.NO_PATH, message="Informed RRT* found only approximate solution")
 
     # Extract path
     path = ss.getSolutionPath()
@@ -101,12 +100,12 @@ def plan_bitstar_3d(
     path3d = Path3D(
         points=tuple(waypoints),
         frame_id=params.frame_id,
-        metadata={"planner": "bitstar_3d", "waypoints_raw": n_raw, "waypoints_final": len(waypoints)},
+        metadata={"planner": "informed_rrtstar_3d", "waypoints_raw": n_raw, "waypoints_final": len(waypoints)},
     )
 
     return PlanResult(
         status=PlanStatus.SUCCESS,
         path=path3d,
-        message=f"BIT* path: {n_raw} -> {len(waypoints)} waypoints",
+        message=f"Informed RRT* path: {n_raw} -> {len(waypoints)} waypoints",
         artifacts={"path3d": path3d},
     )

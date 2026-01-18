@@ -1,4 +1,4 @@
-"""RRT* planner configuration."""
+"""RRT* planner configuration (2D and 3D)."""
 from __future__ import annotations
 from dataclasses import dataclass
 

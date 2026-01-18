@@ -14,7 +14,7 @@ from .geometry import Pose2D, Pose3D
 from .primitives import _assert_finite
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Twist2D:
     """
     2D velocity in world frame.
@@ -36,7 +36,7 @@ class Twist2D:
         return hypot(self.vx, self.vy)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Twist3D:
     """
     3D velocity in world frame.
@@ -47,13 +47,11 @@ class Twist3D:
     yaw_rate: float = 0.0
 
     def __post_init__(self):
-        _assert_finite("Twist3D.vx", self.vx)
-        _assert_finite("Twist3D.vy", self.vy)
-        _assert_finite("Twist3D.vz", self.vz)
-        _assert_finite("Twist3D.yaw_rate", self.yaw_rate)
+        for name in ("vx", "vy", "vz", "yaw_rate"):
+            _assert_finite(f"Twist3D.{name}", getattr(self, name))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Accel2D:
     """
     2D linear acceleration in world frame.
@@ -66,7 +64,7 @@ class Accel2D:
         _assert_finite("Accel2D.ay", self.ay)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Accel3D:
     """
     3D linear acceleration in world frame.
@@ -76,12 +74,11 @@ class Accel3D:
     az: float
 
     def __post_init__(self):
-        _assert_finite("Accel3D.ax", self.ax)
-        _assert_finite("Accel3D.ay", self.ay)
-        _assert_finite("Accel3D.az", self.az)
+        for name in ("ax", "ay", "az"):
+            _assert_finite(f"Accel3D.{name}", getattr(self, name))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class State2D:
     """
     Full 2D robot state used by trackers and controllers.
@@ -90,7 +87,7 @@ class State2D:
     twist: Twist2D = field(default_factory=lambda: Twist2D(0.0, 0.0, 0.0))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class State3D:
     """
     Full 3D robot/drone state used by trackers and controllers.

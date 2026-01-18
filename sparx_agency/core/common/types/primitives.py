@@ -36,7 +36,7 @@ def _assert_finite(name: str, value: float) -> None:
 # Vector primitives
 # ---------------------------------------------------------------------
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Vec2:
     x: float
     y: float
@@ -52,7 +52,7 @@ class Vec2:
         return self.x, self.y
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Vec3:
     x: float
     y: float
