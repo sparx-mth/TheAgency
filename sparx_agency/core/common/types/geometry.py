@@ -15,7 +15,7 @@ def normalize_angle(angle: float) -> float:
     return angle
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Pose2D:
     """2D pose: position (x, y) and orientation (yaw) in world frame."""
     x: float
@@ -40,7 +40,7 @@ class Pose2D:
         return atan2(other.y - self.y, other.x - self.x)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Pose3D:
     """3D pose with yaw-only orientation."""
     x: float

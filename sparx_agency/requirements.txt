@@ -1,0 +1,8 @@
+cv_bridge
+numpy>=1.21,<2.3.0
+matplotlib
+opencv-python
+Pillow
+torch
+transformers
+websockets
