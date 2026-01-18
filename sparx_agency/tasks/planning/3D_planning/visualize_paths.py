@@ -24,6 +24,9 @@ Usage:
     # View specific pairs
     python3 visualize_paths.py --pair-ids 0 5 10 15
 
+    # View and analyze FAILED pairs
+    python3 visualize_paths.py --failed
+
 Controls in visualization:
     - Mouse: Rotate/pan/zoom
     - Q: Quit
@@ -375,6 +378,176 @@ def visualize_single_pair_evolution(
     vis.destroy_window()
 
 
+def analyze_failed_pairs(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Analyze failed pairs and return detailed information about them.
+    """
+    pairs = results["pairs"]
+    config = results["config"]
+
+    failed_pairs = [p for p in pairs if not p["success"]]
+    successful_pairs = [p for p in pairs if p["success"]]
+
+    if not failed_pairs:
+        pok("No failed pairs!")
+        return []
+
+    print("\n" + "=" * 80)
+    print(f"FAILED PAIRS ANALYSIS ({len(failed_pairs)}/{len(pairs)} failed)")
+    print("=" * 80)
+
+    # Compute statistics for comparison
+    if successful_pairs:
+        successful_euclidean = [p["euclidean_distance"] for p in successful_pairs]
+        avg_successful_dist = np.mean(successful_euclidean)
+        std_successful_dist = np.std(successful_euclidean)
+        max_successful_dist = np.max(successful_euclidean)
+        min_successful_dist = np.min(successful_euclidean)
+    else:
+        avg_successful_dist = std_successful_dist = max_successful_dist = min_successful_dist = 0
+
+    failed_euclidean = [p["euclidean_distance"] for p in failed_pairs]
+    avg_failed_dist = np.mean(failed_euclidean)
+
+    print(f"\nTimeout used: {config['timeout_s']}s")
+    print(f"\nEuclidean Distance Comparison:")
+    print(
+        f"  Successful pairs: {avg_successful_dist:.2f} +/- {std_successful_dist:.2f}m (range: {min_successful_dist:.2f} - {max_successful_dist:.2f}m)")
+    print(f"  Failed pairs:     {avg_failed_dist:.2f}m (avg)")
+
+    # Check if failed pairs have longer distances
+    if avg_failed_dist > avg_successful_dist + std_successful_dist:
+        print(f"  >> Failed pairs have significantly LONGER euclidean distances!")
+    elif avg_failed_dist < avg_successful_dist - std_successful_dist:
+        print(f"  >> Failed pairs have significantly SHORTER euclidean distances (might be in tight spaces)")
+
+    # Analyze Z coordinates (floor positions)
+    print(f"\nZ-Coordinate Analysis (Floor Positions):")
+    failed_start_z = [p["start"][2] for p in failed_pairs]
+    failed_goal_z = [p["goal"][2] for p in failed_pairs]
+    print(f"  Start Z: {np.mean(failed_start_z):.2f} +/- {np.std(failed_start_z):.2f}m")
+    print(f"  Goal Z:  {np.mean(failed_goal_z):.2f} +/- {np.std(failed_goal_z):.2f}m")
+    print(f"  Z difference: {np.mean(np.abs(np.array(failed_goal_z) - np.array(failed_start_z))):.2f}m (avg)")
+
+    # Print each failed pair
+    print(f"\n{'─' * 80}")
+    print("INDIVIDUAL FAILED PAIRS:")
+    print(f"{'─' * 80}")
+
+    for p in failed_pairs:
+        pair_id = p["pair_id"]
+        start = p["start"]
+        goal = p["goal"]
+        euclidean = p["euclidean_distance"]
+        error = p.get("error_message", "Unknown")
+        planning_time = p.get("total_planning_time_s", 0)
+
+        print(f"\n  Pair {pair_id}:")
+        print(f"    Start:    ({start[0]:7.2f}, {start[1]:7.2f}, {start[2]:7.2f})")
+        print(f"    Goal:     ({goal[0]:7.2f}, {goal[1]:7.2f}, {goal[2]:7.2f})")
+        print(f"    Euclidean distance: {euclidean:.2f}m")
+        print(f"    Planning time:      {planning_time:.2f}s")
+        print(f"    Error: {error}")
+
+    print(f"\n{'=' * 80}")
+
+    return failed_pairs
+
+
+def visualize_failed_pairs(
+        results: Dict[str, Any],
+        max_pairs: int = 10,
+) -> None:
+    """
+    Visualize failed pairs in the 3D environment.
+    Shows start (green) and goal (red) points connected by a line.
+    """
+    if not OPEN3D_AVAILABLE:
+        perr("Open3D not available")
+        return
+
+    config = results["config"]
+    pairs = results["pairs"]
+
+    failed_pairs = [p for p in pairs if not p["success"]]
+
+    if not failed_pairs:
+        pok("No failed pairs to visualize!")
+        return
+
+    # Limit to max_pairs
+    if len(failed_pairs) > max_pairs:
+        pinfo(f"Showing first {max_pairs} of {len(failed_pairs)} failed pairs")
+        failed_pairs = failed_pairs[:max_pairs]
+
+    # Analyze first
+    analyze_failed_pairs(results)
+
+    # Load environment
+    ROOT = Path("gibson/extracted/gibson_tiny")
+    SCENE = config["scene"]
+
+    pinfo(f"Loading environment: {SCENE}")
+    mesh = load_gibson_mesh(ROOT, SCENE)
+    pcd = sample_point_cloud(mesh, 500_000)
+
+    # Create visualization
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(
+        window_name=f"Failed Pairs - {SCENE} ({len(failed_pairs)} pairs)",
+        width=1400,
+        height=900
+    )
+
+    vis.add_geometry(pcd)
+
+    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+    vis.add_geometry(frame)
+
+    # Add failed pairs
+    print("\n" + "=" * 60)
+    print("FAILED PAIRS VISUALIZATION")
+    print("=" * 60)
+
+    for idx, pair in enumerate(failed_pairs):
+        pair_id = pair["pair_id"]
+        start = pair["start"]
+        goal = pair["goal"]
+        euclidean = pair["euclidean_distance"]
+
+        color = get_path_color(idx)
+
+        # Add start sphere (green tint)
+        start_color = (color[0] * 0.5, min(1.0, color[1] + 0.5), color[2] * 0.5)
+        start_sphere = create_endpoint_sphere(start, start_color, radius=0.15)
+        vis.add_geometry(start_sphere)
+
+        # Add goal sphere (red tint)
+        goal_color = (min(1.0, color[0] + 0.5), color[1] * 0.5, color[2] * 0.5)
+        goal_sphere = create_endpoint_sphere(goal, goal_color, radius=0.15)
+        vis.add_geometry(goal_sphere)
+
+        # Add line connecting start and goal (to show the direct path that couldn't be found)
+        line_points = np.array([start, goal])
+        line = o3d.geometry.LineSet()
+        line.points = o3d.utility.Vector3dVector(line_points)
+        line.lines = o3d.utility.Vector2iVector([[0, 1]])
+        line.colors = o3d.utility.Vector3dVector([color])
+        vis.add_geometry(line)
+
+        print(f"  Pair {pair_id}: Euclidean={euclidean:.2f}m, Start Z={start[2]:.2f}, Goal Z={goal[2]:.2f}")
+
+    print("=" * 60)
+    print("\nLegend:")
+    print("  Larger spheres with GREEN tint = Start points")
+    print("  Larger spheres with RED tint = Goal points")
+    print("  Lines = Direct path (couldn't find route)")
+    print("=" * 60)
+
+    vis.run()
+    vis.destroy_window()
+
+
 def find_latest_results_file(results_dir: str = "results") -> Optional[Path]:
     """Find the most recent benchmark results file in the results directory."""
     results_path = Path(results_dir)
@@ -407,6 +580,8 @@ def parse_args() -> argparse.Namespace:
                        help="Show specific pairs by IDs")
     group.add_argument("--num-paths", type=int, default=5,
                        help="Number of paths to show (default: 5)")
+    group.add_argument("--failed", action="store_true", default=True,
+                       help="Show and analyze failed pairs")
 
     # Display options
     parser.add_argument("--show-first", action="store_true",
@@ -450,6 +625,16 @@ def main():
     successful_ids = [p["pair_id"] for p in pairs if p["success"]]
 
     pinfo(f"Found {len(successful_ids)} successful pairs out of {len(pairs)}")
+
+    # Handle failed pairs visualization
+    if args.failed:
+        failed_ids = [p["pair_id"] for p in pairs if not p["success"]]
+        if not failed_ids:
+            pok("No failed pairs found!")
+            return
+        pinfo(f"Found {len(failed_ids)} failed pairs")
+        visualize_failed_pairs(results, max_pairs=20)
+        return
 
     # Determine which pairs to show
     if args.pair_id is not None:

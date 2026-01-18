@@ -65,12 +65,15 @@ def analyze_basic_stats(results: Dict[str, Any]) -> Dict[str, Any]:
         print("[ERROR] No successful pairs to analyze!")
         return {}
 
-    # Extract data
+    # Extract data - ONLY from successful pairs (failed pairs have None times, not 0)
     times_to_first = [p["time_to_first_solution_s"] for p in successful]
     final_lengths = [p["final_path_length_m"] for p in successful]
     first_lengths = [p["solutions"][0]["path_length_m"] for p in successful if p["solutions"]]
     num_solutions = [p["num_solutions_found"] for p in successful]
     euclidean_dists = [p["euclidean_distance"] for p in successful]
+
+    # Extract waypoint counts from final solutions
+    final_waypoints = [p["solutions"][-1]["num_waypoints"] for p in successful if p["solutions"]]
 
     # Compute improvements
     improvements_abs = []  # Absolute improvement in meters
@@ -103,6 +106,7 @@ def analyze_basic_stats(results: Dict[str, Any]) -> Dict[str, Any]:
         "final_length_std": np.std(final_lengths),
         "final_length_min": np.min(final_lengths),
         "final_length_max": np.max(final_lengths),
+        "final_length_median": np.median(final_lengths),
 
         "first_length_mean": np.mean(first_lengths) if first_lengths else 0,
         "first_length_std": np.std(first_lengths) if first_lengths else 0,
@@ -111,15 +115,24 @@ def analyze_basic_stats(results: Dict[str, Any]) -> Dict[str, Any]:
         "improvement_abs_std": np.std(improvements_abs) if improvements_abs else 0,
         "improvement_pct_mean": np.mean(improvements_pct) if improvements_pct else 0,
         "improvement_pct_std": np.std(improvements_pct) if improvements_pct else 0,
+        "improvement_pct_median": np.median(improvements_pct) if improvements_pct else 0,
 
         "num_solutions_mean": np.mean(num_solutions),
         "num_solutions_std": np.std(num_solutions),
+        "num_solutions_median": np.median(num_solutions),
 
         "efficiency_mean": np.mean(efficiencies) if efficiencies else 0,
         "efficiency_std": np.std(efficiencies) if efficiencies else 0,
 
         "euclidean_dist_mean": np.mean(euclidean_dists),
         "euclidean_dist_std": np.std(euclidean_dists),
+
+        # Waypoint statistics
+        "waypoints_mean": np.mean(final_waypoints) if final_waypoints else 0,
+        "waypoints_std": np.std(final_waypoints) if final_waypoints else 0,
+        "waypoints_median": np.median(final_waypoints) if final_waypoints else 0,
+        "waypoints_min": np.min(final_waypoints) if final_waypoints else 0,
+        "waypoints_max": np.max(final_waypoints) if final_waypoints else 0,
     }
 
     return stats
@@ -154,6 +167,7 @@ def print_analysis(results: Dict[str, Any], stats: Dict[str, Any]) -> None:
     print_stat("Mean", stats["final_length_mean"], stats["final_length_std"], "m")
     print(f"  {'Min':40s}: {stats['final_length_min']:8.3f} m")
     print(f"  {'Max':40s}: {stats['final_length_max']:8.3f} m")
+    print(f"  {'Median':40s}: {stats['final_length_median']:8.3f} m")
 
     print_header("PATH LENGTH (FIRST SOLUTION)")
     print_stat("Mean", stats["first_length_mean"], stats["first_length_std"], "m")
@@ -161,9 +175,17 @@ def print_analysis(results: Dict[str, Any], stats: Dict[str, Any]) -> None:
     print_header("PATH IMPROVEMENT (First → Final)")
     print_stat("Absolute improvement", stats["improvement_abs_mean"], stats["improvement_abs_std"], "m")
     print_stat("Percentage improvement", stats["improvement_pct_mean"], stats["improvement_pct_std"], "%")
+    print(f"  {'Median percentage':40s}: {stats['improvement_pct_median']:8.3f} %")
+
+    print_header("WAYPOINTS (FINAL PATH)")
+    print_stat("Mean", stats["waypoints_mean"], stats["waypoints_std"])
+    print(f"  {'Min':40s}: {stats['waypoints_min']:8.0f}")
+    print(f"  {'Max':40s}: {stats['waypoints_max']:8.0f}")
+    print(f"  {'Median':40s}: {stats['waypoints_median']:8.0f}")
 
     print_header("SOLUTION QUALITY")
     print_stat("Solutions found per pair", stats["num_solutions_mean"], stats["num_solutions_std"])
+    print(f"  {'Median solutions':40s}: {stats['num_solutions_median']:8.0f}")
     print_stat("Path efficiency (path/euclidean)", stats["efficiency_mean"], stats["efficiency_std"])
     print_stat("Euclidean distance", stats["euclidean_dist_mean"], stats["euclidean_dist_std"], "m")
 
@@ -220,6 +242,15 @@ def compute_improvement_over_time(results: Dict[str, Any],
     return time_points, mean_improvement, std_improvement
 
 
+def add_stats_textbox(ax, mean_val, std_val, median_val, unit: str = "") -> None:
+    """Add a statistics textbox to a plot."""
+    unit_str = unit if unit else ""
+    text = f"Mean: {mean_val:.2f}{unit_str}\nStd: {std_val:.2f}{unit_str}\nMedian: {median_val:.2f}{unit_str}"
+    ax.text(0.97, 0.97, text, transform=ax.transAxes, fontsize=9,
+            verticalalignment='top', horizontalalignment='right',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='gray', alpha=0.9))
+
+
 def plot_analysis(results: Dict[str, Any], stats: Dict[str, Any],
                   save_path: Optional[Path] = None) -> None:
     """Generate analysis plots."""
@@ -230,30 +261,39 @@ def plot_analysis(results: Dict[str, Any], stats: Dict[str, Any],
     pairs = results["pairs"]
     successful = [p for p in pairs if p["success"]]
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle(f"BIT* Benchmark Analysis - {results['config']['scene']}", fontsize=14)
+    # Create 3x3 grid for 7 plots (last 2 cells empty or combined)
+    fig, axes = plt.subplots(3, 3, figsize=(16, 14))
+    fig.suptitle(f"BIT* Benchmark Analysis - {results['config']['scene']}\n"
+                 f"({stats['num_successful']}/{stats['num_total']} successful, "
+                 f"{stats['success_rate']:.1f}% success rate)", fontsize=14, fontweight='bold')
 
     # 1. Time to first solution histogram
     ax = axes[0, 0]
     times = [p["time_to_first_solution_s"] for p in successful]
-    ax.hist(times, bins=20, color='steelblue', edgecolor='black', alpha=0.7)
-    ax.axvline(stats["time_to_first_mean"], color='red', linestyle='--',
-               label=f'Mean: {stats["time_to_first_mean"]:.2f}s')
-    ax.set_xlabel("Time to First Solution (s)")
-    ax.set_ylabel("Count")
-    ax.set_title("Time to First Solution Distribution")
-    ax.legend()
+    ax.hist(times, bins=25, color='steelblue', edgecolor='white', alpha=0.8)
+    ax.axvline(stats["time_to_first_mean"], color='crimson', linestyle='--', linewidth=2, label='Mean')
+    ax.axvline(stats["time_to_first_median"], color='darkorange', linestyle=':', linewidth=2, label='Median')
+    ax.set_xlabel("Time to First Solution (s)", fontsize=10)
+    ax.set_ylabel("Count", fontsize=10)
+    ax.set_title("Time to First Solution Distribution", fontsize=11, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    add_stats_textbox(ax, stats["time_to_first_mean"], stats["time_to_first_std"],
+                      stats["time_to_first_median"], "s")
 
     # 2. Final path length histogram
     ax = axes[0, 1]
     lengths = [p["final_path_length_m"] for p in successful]
-    ax.hist(lengths, bins=20, color='seagreen', edgecolor='black', alpha=0.7)
-    ax.axvline(stats["final_length_mean"], color='red', linestyle='--',
-               label=f'Mean: {stats["final_length_mean"]:.2f}m')
-    ax.set_xlabel("Final Path Length (m)")
-    ax.set_ylabel("Count")
-    ax.set_title("Final Path Length Distribution")
-    ax.legend()
+    ax.hist(lengths, bins=25, color='seagreen', edgecolor='white', alpha=0.8)
+    ax.axvline(stats["final_length_mean"], color='crimson', linestyle='--', linewidth=2, label='Mean')
+    ax.axvline(stats["final_length_median"], color='darkorange', linestyle=':', linewidth=2, label='Median')
+    ax.set_xlabel("Final Path Length (m)", fontsize=10)
+    ax.set_ylabel("Count", fontsize=10)
+    ax.set_title("Final Path Length Distribution", fontsize=11, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    add_stats_textbox(ax, stats["final_length_mean"], stats["final_length_std"],
+                      stats["final_length_median"], "m")
 
     # 3. Improvement percentage histogram
     ax = axes[0, 2]
@@ -264,59 +304,135 @@ def plot_analysis(results: Dict[str, Any], stats: Dict[str, Any],
             final = p["solutions"][-1]["path_length_m"]
             if first > 0:
                 improvements.append((first - final) / first * 100)
-    ax.hist(improvements, bins=20, color='coral', edgecolor='black', alpha=0.7)
-    ax.axvline(stats["improvement_pct_mean"], color='red', linestyle='--',
-               label=f'Mean: {stats["improvement_pct_mean"]:.1f}%')
-    ax.set_xlabel("Path Improvement (%)")
-    ax.set_ylabel("Count")
-    ax.set_title("Path Improvement Distribution")
-    ax.legend()
+    ax.hist(improvements, bins=25, color='coral', edgecolor='white', alpha=0.8)
+    ax.axvline(stats["improvement_pct_mean"], color='crimson', linestyle='--', linewidth=2, label='Mean')
+    ax.axvline(stats["improvement_pct_median"], color='darkorange', linestyle=':', linewidth=2, label='Median')
+    ax.set_xlabel("Path Improvement (%)", fontsize=10)
+    ax.set_ylabel("Count", fontsize=10)
+    ax.set_title("Path Improvement Distribution", fontsize=11, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    add_stats_textbox(ax, stats["improvement_pct_mean"], stats["improvement_pct_std"],
+                      stats["improvement_pct_median"], "%")
 
     # 4. Improvement over time
     ax = axes[1, 0]
     time_points, mean_imp, std_imp = compute_improvement_over_time(results)
     if len(time_points) > 0:
-        ax.plot(time_points, mean_imp, color='purple', linewidth=2, label='Mean')
+        ax.plot(time_points, mean_imp, color='purple', linewidth=2.5, label='Mean')
         ax.fill_between(time_points, mean_imp - std_imp, mean_imp + std_imp,
                         color='purple', alpha=0.2, label='±1 Std')
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Improvement from First Solution (%)")
-        ax.set_title("Path Improvement Over Time")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel("Improvement from First Solution (%)", fontsize=10)
+        ax.set_title("Path Improvement Over Time", fontsize=11, fontweight='bold')
+        ax.legend(loc='lower right', fontsize=8)
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
 
     # 5. Number of solutions per pair
     ax = axes[1, 1]
     num_sols = [p["num_solutions_found"] for p in successful]
-    ax.hist(num_sols, bins=range(1, max(num_sols) + 2), color='goldenrod',
-            edgecolor='black', alpha=0.7, align='left')
-    ax.axvline(stats["num_solutions_mean"], color='red', linestyle='--',
-               label=f'Mean: {stats["num_solutions_mean"]:.1f}')
-    ax.set_xlabel("Number of Solutions Found")
-    ax.set_ylabel("Count")
-    ax.set_title("Solutions Found per Pair")
-    ax.legend()
+    max_sols = max(num_sols) if num_sols else 1
+    ax.hist(num_sols, bins=range(1, max_sols + 2), color='goldenrod',
+            edgecolor='white', alpha=0.8, align='left')
+    ax.axvline(stats["num_solutions_mean"], color='crimson', linestyle='--', linewidth=2, label='Mean')
+    ax.axvline(stats["num_solutions_median"], color='darkorange', linestyle=':', linewidth=2, label='Median')
+    ax.set_xlabel("Number of Solutions Found", fontsize=10)
+    ax.set_ylabel("Count", fontsize=10)
+    ax.set_title("Solutions Found per Pair", fontsize=11, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    add_stats_textbox(ax, stats["num_solutions_mean"], stats["num_solutions_std"],
+                      stats["num_solutions_median"], "")
 
     # 6. Path length vs Euclidean distance
     ax = axes[1, 2]
     euclidean = [p["euclidean_distance"] for p in successful]
     final_len = [p["final_path_length_m"] for p in successful]
-    ax.scatter(euclidean, final_len, alpha=0.6, c='teal', edgecolors='black', linewidth=0.5)
+    ax.scatter(euclidean, final_len, alpha=0.5, c='teal', edgecolors='darkslategray',
+               linewidth=0.3, s=30)
 
     # Add y=x reference line
     max_val = max(max(euclidean), max(final_len))
-    ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5, label='y=x (optimal)')
+    ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.6, linewidth=1.5, label='y=x (optimal)')
 
-    ax.set_xlabel("Euclidean Distance (m)")
-    ax.set_ylabel("Final Path Length (m)")
-    ax.set_title("Path Length vs Euclidean Distance")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Euclidean Distance (m)", fontsize=10)
+    ax.set_ylabel("Final Path Length (m)", fontsize=10)
+    ax.set_title("Path Length vs Euclidean Distance", fontsize=11, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
 
-    plt.tight_layout()
+    # Add efficiency stat
+    ax.text(0.97, 0.03, f"Avg Efficiency: {stats['efficiency_mean']:.2f}x",
+            transform=ax.transAxes, fontsize=9, verticalalignment='bottom',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='gray', alpha=0.9))
+
+    # 7. Number of waypoints histogram (NEW)
+    ax = axes[2, 0]
+    waypoints = [p["solutions"][-1]["num_waypoints"] for p in successful if p["solutions"]]
+    if waypoints:
+        ax.hist(waypoints, bins=25, color='mediumpurple', edgecolor='white', alpha=0.8)
+        ax.axvline(stats["waypoints_mean"], color='crimson', linestyle='--', linewidth=2, label='Mean')
+        ax.axvline(stats["waypoints_median"], color='darkorange', linestyle=':', linewidth=2, label='Median')
+        ax.set_xlabel("Number of Waypoints", fontsize=10)
+        ax.set_ylabel("Count", fontsize=10)
+        ax.set_title("Waypoints in Final Path", fontsize=11, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=8)
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        add_stats_textbox(ax, stats["waypoints_mean"], stats["waypoints_std"],
+                          stats["waypoints_median"], "")
+
+    # 8. Waypoints vs Path Length scatter (NEW)
+    ax = axes[2, 1]
+    if waypoints:
+        path_lengths = [p["final_path_length_m"] for p in successful if p["solutions"]]
+        ax.scatter(waypoints, path_lengths, alpha=0.5, c='darkcyan', edgecolors='darkslategray',
+                   linewidth=0.3, s=30)
+        ax.set_xlabel("Number of Waypoints", fontsize=10)
+        ax.set_ylabel("Final Path Length (m)", fontsize=10)
+        ax.set_title("Waypoints vs Path Length", fontsize=11, fontweight='bold')
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+
+        # Add correlation coefficient
+        if len(waypoints) > 1:
+            corr = np.corrcoef(waypoints, path_lengths)[0, 1]
+            ax.text(0.97, 0.03, f"Correlation: {corr:.3f}",
+                    transform=ax.transAxes, fontsize=9, verticalalignment='bottom',
+                    horizontalalignment='right',
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='gray', alpha=0.9))
+
+    # 9. Summary stats box (using last cell)
+    ax = axes[2, 2]
+    ax.axis('off')
+    summary_text = (
+        f"SUMMARY STATISTICS\n"
+        f"{'─' * 30}\n\n"
+        f"Time to First Solution:\n"
+        f"  Mean:   {stats['time_to_first_mean']:.3f}s\n"
+        f"  Std:    {stats['time_to_first_std']:.3f}s\n"
+        f"  Median: {stats['time_to_first_median']:.3f}s\n\n"
+        f"Final Path Length:\n"
+        f"  Mean:   {stats['final_length_mean']:.2f}m\n"
+        f"  Std:    {stats['final_length_std']:.2f}m\n"
+        f"  Median: {stats['final_length_median']:.2f}m\n\n"
+        f"Path Improvement:\n"
+        f"  Mean:   {stats['improvement_pct_mean']:.1f}%\n"
+        f"  Std:    {stats['improvement_pct_std']:.1f}%\n"
+        f"  Median: {stats['improvement_pct_median']:.1f}%\n\n"
+        f"Waypoints:\n"
+        f"  Mean:   {stats['waypoints_mean']:.1f}\n"
+        f"  Std:    {stats['waypoints_std']:.1f}\n"
+        f"  Median: {stats['waypoints_median']:.1f}\n"
+    )
+    ax.text(0.1, 0.95, summary_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', horizontalalignment='left',
+            fontfamily='monospace',
+            bbox=dict(boxstyle='round,pad=0.8', facecolor='lightyellow', edgecolor='gray', alpha=0.95))
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
         print(f"[OK] Plot saved to: {save_path}")
     else:
         plt.show()
