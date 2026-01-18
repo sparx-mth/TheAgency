@@ -124,8 +124,9 @@ class TagAzimuthOpenCVTask:
         dets = self.detector.detect(gray)
 
         observations: list[TagObservation] = []
-
+        print(f"Detected {len(dets)} tags in image.")
         for d in dets:
+            print(f"Detected tag id={d.tag_id}")
             tag_id = int(d.tag_id)
             if tag_id not in self.tag_config_deg:
                 continue

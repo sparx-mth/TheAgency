@@ -13,7 +13,7 @@ def main():
 
     # Configuration
     ROOSTER_ID = "R1"
-    # Points to your existing path file in p3 installthe ROBOTICAN tree
+    # Points to your existing path file in the ROBOTICAN tree
     PATH_FILE = "robots/ROBOTICAN/helpers/txt/roll_custom_path.txt"
 
     # 1. Initialize Video Adapter

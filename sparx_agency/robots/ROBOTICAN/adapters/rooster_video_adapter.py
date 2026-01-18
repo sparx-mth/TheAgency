@@ -129,6 +129,7 @@ class VideoStreamManager(Node):
             11: 0.0,  # East Window
             12: 270.0,  # South Desk
             13: 180.0,  # West Door
+            15: 0.0,   # East Table
         }
 
 
@@ -138,8 +139,8 @@ class VideoStreamManager(Node):
         self.last_seen_tag_stamp = None
 
         self.april_localization = TagAzimuthOpenCVTask(
-            tag_config_path="sparx_agency/tasks/localization/config/tags_azimuth.yaml",
-            camera_calib_path="sparx_agency/tasks/localization/config/front_camera_calib.yaml",
+            tag_config_path="../sparx_agency/tasks/localization/config/tags_azimuth.yaml",
+            camera_calib_path="../sparx_agency/tasks/localization/config/front_camera_calib.yaml",
             tag_size_m=0.16,
         )
 
@@ -405,7 +406,9 @@ class VideoStreamManager(Node):
 
         timestamp_sec = now.nanoseconds * 1e-9
         last_yaw_deg = None
-
+        cv2.imwrite(f"../workspace/tag_frame_input_{self.captured_count:03d}.png", frame)
+        self.get_logger().info(f"Processing captured frame #{self.captured_count}")
+        self.captured_count += 1
         try:
             last_yaw_deg = self.april_localization.compute_azimuth_from_bgr(
                 frame,
