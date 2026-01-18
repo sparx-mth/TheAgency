@@ -13,5 +13,5 @@ class CloudGenerator(ABC):
     """
 
     @abstractmethod
-    def depth_to_cloud(self, depth_m: np.ndarray, intr: Intrinsics) -> np.ndarray:
+    def depth_to_cloud_to_base_xyz(self, depth_m: np.ndarray, intr: Intrinsics) -> np.ndarray:
         raise NotImplementedError

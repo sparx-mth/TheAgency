@@ -12,6 +12,7 @@ import numpy as np
 
 import rclpy
 from depth_anything_v2.dpt import DepthAnythingV2
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs_py import point_cloud2
@@ -27,14 +28,13 @@ from sparx_agency.core.common.types.perception import (
     RGBFrame,
     Observation,
 )
-from sparx_agency.core.mapping.costmap import ProbabilisticGridCostmap
-from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridConfig
-from sparx_agency.core.mapping.interfaces import DepthModel
+
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.robots.SJTU.helpers.helpers import make_depth_grid_vis, depth_to_vis_u8
 # ROS-free mapping pipeline
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, PinholeCloudGenerator, \
     MappingPipelineConfig
+from sparx_agency.core.mapping.interfaces.costmap import Costmap
 
 
 def strip_leading_slash(s: str) -> str:
@@ -164,7 +164,7 @@ def costmap_to_occupancygrid(costmap, stamp, frame_id: str) -> OccupancyGrid:
 
 
 
-class GazeboRos2Ingest(Node):
+class GazeboRos2Ingestor(Node):
     """
     Gazebo adapter:
       - ROS IN:  image + camera_info + odom
@@ -176,8 +176,8 @@ class GazeboRos2Ingest(Node):
       - By default uses frames from messages (after stripping leading '/')
     """
 
-    def __init__(self):
-        super().__init__("gazebo_ros2_ingest")
+    def __init__(self,  pipeline: MappingPipeline, costmap: Costmap):
+        super().__init__("gazebo_ros2_ingestor")
 
         # --- params ---
         self.declare_parameter("rgb_topic", "/simple_drone/front/image_raw")
@@ -225,24 +225,20 @@ class GazeboRos2Ingest(Node):
         # Debug publishers
         self.pub_depth_raw = self.create_publisher(Image, "/debug/depth_raw", 1)  # 32FC1
         self.pub_depth_vis = self.create_publisher(Image, "/debug/depth_vis", 1)  # mono8
-        self.pub_cloud = self.create_publisher(PointCloud2, "/debug/cloud_cam", 1)  # PointCloud2
+        self.pub_cloud = self.create_publisher(PointCloud2, "/debug/cloud_global", 1)  # PointCloud2
         self.pub_depth_grid = self.create_publisher(Image, "/debug/depth_grid_vis", 1)
 
         self._img_count = 0
         self._latest = LatestState()
 
-        self.costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        self.costmap = costmap #ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        # self.costmap = SanityCheckCostmap()
         self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
         self.cloud_generator = PinholeCloudGenerator()
         self.pipeline_cfg = MappingPipelineConfig()
-        # --- pipeline ---
-        self.pipeline = MappingPipeline(
-            costmap=self.costmap,
-            depth_model=self.depth_model,
-            cloud_generator=self.cloud_generator,
-            cfg=self.pipeline_cfg,
-        )
+
+        self.pipeline = pipeline
 
         # --- QoS ---
         sensor_qos = QoSProfile(
@@ -305,6 +301,8 @@ class GazeboRos2Ingest(Node):
         odom = self._latest.odom
         cam_info = self._latest.cam_info
 
+        stamp = odom.header.stamp
+
         # Frames
         if self.use_msg_frames:
             map_frame = self.norm_frame(odom.header.frame_id)
@@ -333,11 +331,12 @@ class GazeboRos2Ingest(Node):
             return
         # Debug: publish depth / cloud / grid
         depth_m = getattr(self.pipeline, "last_depth", None)
-        cloud_cam = getattr(self.pipeline, "last_cloud_cam", None)
+        cloud_global = getattr(self.pipeline, "last_cloud_global", None)
 
         debug_depth = bool(self.get_parameter("debug_publish_depth").value)
         debug_cloud = bool(self.get_parameter("debug_publish_cloud").value)
         debug_grid = bool(self.get_parameter("debug_publish_depth_grid").value)
+
 
         grid_w = int(self.get_parameter("depth_grid_w").value)
         grid_h = int(self.get_parameter("depth_grid_h").value)
@@ -347,16 +346,21 @@ class GazeboRos2Ingest(Node):
 
         self._dbg_count += 1
         if depth_m is not None and debug_depth:
-            # raw 32FC1
-            depth_msg = self.numpy_to_image_msg(depth_m.astype(np.float32), frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="32FC1")
-            depth_msg.header = msg.header
-            depth_msg.header.frame_id = cam_frame
+            depth_msg = self.numpy_to_image_msg(depth_m.astype(np.float32), frame_id=cam_frame, stamp=msg.header.stamp, encoding="32FC1")
+
             self.pub_depth_raw.publish(depth_msg)
+            # depth_msg.header = msg.header
+            # depth_msg.header.frame_id = cam_frame
+            # self.pub_depth_raw.publish(depth_msg)
+            # self.get_logger().debug(
+            #     f"rgb {rgb.shape} depth {depth_m.shape} cam_info {cam_info.width}x{cam_info.height} "
+            #     f"depth min/max = {float(np.nanmin(depth_m)):.3f}/{float(np.nanmax(depth_m)):.3f}"
+            # )
 
             # vis mono8
             vis_u8 = depth_to_vis_u8(depth_m, clip_min=self.pipeline.cfg.range_min,
                                      clip_max=self.pipeline.cfg.range_max)
-            vis_msg = self.numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="mono8")
+            vis_msg = self.numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=stamp, encoding="mono8")
             vis_msg.header = msg.header
             vis_msg.header.frame_id = cam_frame
             self.pub_depth_vis.publish(vis_msg)
@@ -366,7 +370,7 @@ class GazeboRos2Ingest(Node):
                 grid_vis = make_depth_grid_vis(depth_m, grid_w, grid_h,
                                                clip_min=self.pipeline.cfg.range_min,
                                                clip_max=self.pipeline.cfg.range_max)
-                grid_msg = self.numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=msg.header.stamp, encoding="bgr8")
+                grid_msg = self.numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=stamp, encoding="bgr8")
                 grid_msg.header = msg.header
                 grid_msg.header = msg.header
                 grid_msg.header.frame_id = cam_frame
@@ -380,33 +384,29 @@ class GazeboRos2Ingest(Node):
                 if debug_grid:
                     cv2.imwrite(os.path.join(save_dir, f"depth_grid_{ts}.png"), grid_vis)
 
-        if cloud_cam is not None and debug_cloud:
+        if cloud_global is not None and debug_cloud:
             # publish PointCloud2 in camera frame
             header = Header()
             header.stamp = msg.header.stamp
-            header.frame_id = cam_frame
-
-            pts = cloud_cam.astype(np.float32)
+            header.frame_id = map_frame
+            # self.get_logger().info(f"cloud_global frame_id: {cloud_global.shape} {header.frame_id}")
+            pts = cloud_global.astype(np.float32)
             cloud_msg = point_cloud2.create_cloud_xyz32(header, pts.tolist())
             self.pub_cloud.publish(cloud_msg)
 
             if save_dir and (self._dbg_count % max(1, save_every_n) == 0):
                 os.makedirs(save_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                np.save(os.path.join(save_dir, f"cloud_cam_{ts}.npy"), pts)
+                np.save(os.path.join(save_dir, f"cloud_global_{ts}.npy"), pts)
 
         # Publish occupancy grid from costmap
         try:
-            occ_msg = costmap_to_occupancygrid(self.costmap, stamp=msg.header.stamp, frame_id=map_frame)
+            occ_msg = costmap_to_occupancygrid(self.costmap, stamp=self.get_clock().now().to_msg(), frame_id=map_frame)
         except Exception as e:
             self.get_logger().error(f"Cannot convert costmap to OccupancyGrid: {e}")
             return
 
         self.pub_occ.publish(occ_msg)
-        self.get_logger().info(
-            f"Published occupancy grid {occ_msg.info.width}x{occ_msg.info.height} "
-            f"res={occ_msg.info.resolution:.3f} frame={occ_msg.header.frame_id}"
-        )
 
     def image_msg_to_numpy(self, msg: Image) -> np.ndarray:
         """
@@ -461,11 +461,14 @@ class GazeboRos2Ingest(Node):
 
         if encoding.lower() == "32fc1":
             assert arr.ndim == 2 and arr.dtype == np.float32
-            msg.height, msg.width = arr.shape
+            depth = np.ascontiguousarray(arr.astype(np.float32))
+            h, w = depth.shape[:2]
+            msg.height = h
+            msg.width = w
             msg.encoding = "32FC1"
             msg.is_bigendian = False
-            msg.step = msg.width * 4
-            msg.data = arr.tobytes()
+            msg.step = w * 4
+            msg.data = depth.tobytes()
             return msg
 
         raise ValueError(f"Unsupported encoding: {encoding}")
@@ -473,7 +476,7 @@ class GazeboRos2Ingest(Node):
 
 def main():
     rclpy.init()
-    node = GazeboRos2Ingest()
+    node = GazeboRos2Ingestor()
     try:
         rclpy.spin(node)
     finally:

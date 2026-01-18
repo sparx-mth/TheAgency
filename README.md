@@ -43,3 +43,8 @@ and coordination tasks.
 
 For detailed implementation information, please refer to each package's individual documentation.
 
+### Install ROS dependencies 
+
+```bash
+./scripts/install_ros_deps.sh ./ros2_ws
+source ./ros2_ws/install/setup.bash

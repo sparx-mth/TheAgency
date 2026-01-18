@@ -68,7 +68,7 @@ class Path3D:
         return sum(a.distance_to(b) for a, b in zip(self.points[:-1], self.points[1:]))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TrajectoryPoint:
     """
     Single point on a time-parameterized trajectory.
