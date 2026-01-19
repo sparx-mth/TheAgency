@@ -31,6 +31,13 @@ def main():
     # This node handles the Triggering/Request logic
     node = MappingTask(pipeline=pipeline)
 
+    import os
+    print("Node:", node.get_name(), "ns:", node.get_namespace())
+    print("ROS_DOMAIN_ID:", os.getenv("ROS_DOMAIN_ID"))
+    print("RMW_IMPLEMENTATION:", os.getenv("RMW_IMPLEMENTATION"))
+    print("ROS_LOCALHOST_ONLY:", os.getenv("ROS_LOCALHOST_ONLY"))
+    print("CYCLONEDDS_URI:", os.getenv("CYCLONEDDS_URI"))
+
     print("Jetson Mapping Node started.")
     print("Asking Rooster/Sphera for the first frame...")
 
