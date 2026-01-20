@@ -1,5 +1,10 @@
-import os, json, time, cv2, glob, datetime, re
+import os, json, time, glob, datetime, re
 from typing import Optional, Tuple
+
+import cv2
+import numpy as np
+
+from sensor_msgs.msg import Image
 
 _POSE_NAME_RES = [
     re.compile(
@@ -32,13 +37,6 @@ def _update_sidecar_json(json_path: str, pose: dict, image_basename: str, vlm_te
         json.dump(obj, f, indent=2)
     os.replace(tmp, json_path)
 
-def list_frames(frames_dir: str):
-    exts = ("*.jpg","*.jpeg","*.png","*.bmp")
-    files = []
-    for ext in exts:
-        files.extend(glob.glob(os.path.join(frames_dir, ext)))
-    return sorted(files)
-
 def get_pose_for_frame(path: str, *, angles_map: dict, from_name: bool):
     if from_name:
         p = parse_pose_from_name(path)
@@ -57,64 +55,15 @@ def pose_to_name(pose: dict) -> str:
 
     return f"x{x}y{y}z{z}yaw{yaw}__{timestamp}"
 
-def center_crop_frac(img, frac: float):
-    """
-    Center-crop by a fraction of the original size.
-    frac=1.0 → no crop, 0.5 → crop to middle 50% (both width & height).
-    """
-    frac = max(0.05, min(1.0, float(frac)))  # clamp
-    H, W = img.shape[:2]
-    cw, ch = int(W * frac), int(H * frac)
-    x0 = (W - cw) // 2
-    y0 = (H - ch) // 2
-    return img[y0:y0+ch, x0:x0+cw], (x0, y0, x0+cw, y0+ch)
+def strip_leading_slash(s: str) -> str:
+    """Normalizes ROS frame names."""
+    if not s:
+        return s
+    return s[1:] if s.startswith("/") else s
 
-def _apply_crop_and_flip(img, crop_frac: float, flip180: bool):
-    """Center-crop then optionally rotate 180°."""
-    work = img
-    crop_box = None
-    if crop_frac < 1.0:
-        # assumes you already have center_crop_frac(img, frac) -> (cropped, (x1,y1,x2,y2))
-        work, crop_box = center_crop_frac(img, crop_frac)
-    if flip180:
-        work = cv2.rotate(work, cv2.ROTATE_180)
-    return work, crop_box
-
-import cv2
-import numpy as np
-
-def correct_histogram(image: np.ndarray, method: str = "clahe") -> np.ndarray:
-    """
-    Apply histogram correction to enhance image contrast.
-
-    Args:
-        image (np.ndarray): Input image, can be grayscale or color (BGR).
-        method (str): 'clahe' for adaptive (default), 'global' for global histogram equalization.
-
-    Returns:
-        np.ndarray: Contrast-enhanced image.
-    """
-    if len(image.shape) == 2:  # Grayscale
-        if method == "global":
-            return cv2.equalizeHist(image)
-        elif method == "clahe":
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            return clahe.apply(image)
-    elif len(image.shape) == 3:  # Color (BGR)
-        img_yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
-        if method == "global":
-            img_yuv[:,:,0] = cv2.equalizeHist(img_yuv[:,:,0])
-        elif method == "clahe":
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
-        return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
-    else:
-        raise ValueError("Unsupported image format")
-
-def _save_jpg(path: str, bgr):
-    if not cv2.imwrite(path, bgr):
-        raise RuntimeError(f"failed to write {path}")
-
+def stamp_to_sec(stamp) -> float:
+    """Converts ROS builtin_interfaces/Time to float seconds."""
+    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
 def _fmt_signed(value: float, scale: int, width: int, eps: float) -> str:
     if abs(value) < eps:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -160,8 +161,15 @@ class MappingPipeline:
                 raise ValueError("Observation.rgb provided but depth_model or intrinsics is None")
 
             # Infer depth from RGB and generate cloud
+            t0 = time.perf_counter()
             self.last_depth = self.depth_model.infer_depth(obs.rgb.image).astype(np.float32)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            print(f"Depth inference took {dt_ms:.2f} ms")
+
+            t0 = time.perf_counter()
             cloud_local_corr = self.cloud_generator.depth_to_cloud_to_base_xyz(self.last_depth, intr)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            print(f"Cloud generation took {dt_ms:.2f} ms")
         self.last_cloud_local = cloud_local_corr
 
 
@@ -171,8 +179,11 @@ class MappingPipeline:
         # 4. Costmap Update (World vs Local)
         if obs.pose_map_base is not None:
             # Transform to 'odom/map' frame and update
+            t0 = time.perf_counter()
             cloud_odom = obs.pose_map_base.transform_points(cloud_local_corr)
             self.costmap.update_from_cloud(cloud_odom, obs.pose_map_base.t)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            print(f"Costmap update took {dt_ms:.2f} ms")
             self.last_cloud_global = cloud_odom
 
         else:

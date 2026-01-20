@@ -20,7 +20,7 @@ from geometry_msgs.msg import Point, PointStamped
 from message_filters import Subscriber, TimeSynchronizer
 
 from fcu_driver_interfaces.msg import UAVState
-from sparx_agency.robots.common.txt_and_image_utils import _update_sidecar_json
+from sparx_agency.robots.common.txt_utils import _update_sidecar_json
 
 
 def _remap_path(local_path: str, src_root: Optional[str], dst_root: Optional[str]) -> str:

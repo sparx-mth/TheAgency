@@ -14,7 +14,7 @@ from sparx_agency.tasks.mapping.mapping_depth_anything_cb import MappingTask
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--drone-id", default="R1")
-    parser.add_argument("--period", type=float, default=15, help="Run DepthAnything once every N seconds.")
+    parser.add_argument("--period", type=float, default=2, help="Run DepthAnything once every N seconds.")
     parser.add_argument("--no-caminfo", action="store_true", help="Allow running without camera_info (not recommended).")
 
     parser.add_argument("--width", type=int, default=640)
