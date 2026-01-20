@@ -20,7 +20,7 @@ from geometry_msgs.msg import Point, PointStamped
 from message_filters import Subscriber, TimeSynchronizer
 
 from fcu_driver_interfaces.msg import UAVState
-from sparx_agency.robots.common.txt_utils import _update_sidecar_json
+from sparx_agency.robots.common.txt_utils import update_sidecar_json
 
 
 def _remap_path(local_path: str, src_root: Optional[str], dst_root: Optional[str]) -> str:
@@ -224,7 +224,7 @@ class ImageStateBuffer(Node):
         self.save_image_to_dir(cv_img, jpg_path)
 
         # First create/update JSON with pose and image name
-        _update_sidecar_json(json_path, pose, img_basename, vlm_text=None)
+        update_sidecar_json(json_path, pose, img_basename, vlm_text=None)
         self._last_img_stamp = stamp_tup
         self._same_frame_hits = 0
 
