@@ -1,10 +1,14 @@
 import numpy as np
 import math
+from scipy.spatial.transform import Rotation as R
 import rclpy
 from rclpy.node import Node
 
 from sensor_msgs.msg import Image
 from fcu_driver_interfaces.msg import UAVState
+
+from sparx_agency.core.common.types import PoseSE3
+from sparx_agency.tasks.mapping.common.matrix_conversion import uav_state_to_pose_se3
 
 
 class _Intrinsics:
@@ -96,13 +100,18 @@ class MappingTask(Node):
         )
 
     def image_cb(self, msg: Image):
+        self.get_logger().debug(f"Image received: {msg.header.stamp}")
         self.last_img = msg
 
     def state_cb(self, msg: UAVState):
+        self.get_logger().debug(f"State received: {msg.header.stamp}")
         self.last_state = msg
 
     def _tick(self):
+        self.get_logger().info("tick")
+
         if self.last_img is None:
+            self.get_logger().warn("No image received yet.")
             return
 
         st = self.last_img.header.stamp
@@ -112,11 +121,11 @@ class MappingTask(Node):
 
         try:
             rgb = _ros_image_to_rgb_np(self.last_img)
-
+            pose = uav_state_to_pose_se3(self.last_state)
             obs = _Observation(
                 rgb=_Rgb(rgb),
                 intrinsics=self.intr,
-                pose_map_base=None,  # bag mode: local update
+                pose_map_base=pose,  # bag mode: local update
                 depth=None,
                 cloud=None,
             )

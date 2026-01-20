@@ -35,6 +35,7 @@ from sparx_agency.robots.SJTU.helpers.helpers import make_depth_grid_vis, depth_
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, PinholeCloudGenerator, \
     MappingPipelineConfig
 from sparx_agency.core.mapping.interfaces.costmap import Costmap
+from sparx_agency.robots.common.state_converter import odom_to_pose_se3
 
 
 def strip_leading_slash(s: str) -> str:
@@ -48,16 +49,6 @@ def stamp_to_sec(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
 
-def quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-    # Returns 3x3 rotation matrix
-    xx, yy, zz = qx*qx, qy*qy, qz*qz
-    xy, xz, yz = qx*qy, qx*qz, qy*qz
-    wx, wy, wz = qw*qx, qw*qy, qw*qz
-    return np.array([
-        [1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
-        [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
-        [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)],
-    ], dtype=np.float32)
 
 
 def image_msg_to_rgb_numpy(msg: Image) -> np.ndarray:
@@ -106,12 +97,6 @@ def cam_info_to_intrinsics(ci: CameraInfo) -> Intrinsics:
     )
 
 
-def odom_to_pose_se3(odom: Odometry) -> PoseSE3:
-    p = odom.pose.pose.position
-    o = odom.pose.pose.orientation
-    R = quat_to_rot(float(o.x), float(o.y), float(o.z), float(o.w))
-    t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float32)
-    return PoseSE3(R=R, t=t)
 
 
 def pipeline_result_to_occupancygrid(result: Any, stamp, frame_id: str) -> OccupancyGrid:
