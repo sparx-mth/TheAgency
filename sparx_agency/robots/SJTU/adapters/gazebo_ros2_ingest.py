@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 import rclpy
-from depth_anything_v2.dpt import DepthAnythingV2
+#from depth_anything_v2.dpt import DepthAnythingV2
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
