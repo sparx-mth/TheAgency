@@ -14,7 +14,9 @@ _POSE_NAME_RES = [
         r".*?_x(?P<x>-?\d+(?:\.\d+)?)_y(?P<y>-?\d+(?:\.\d+)?)_z(?P<z>-?\d+(?:\.\d+)?)_yaw(?P<yaw>-?\d+(?:\.\d+)?)(?:\.[A-Za-z0-9]+)$"
     ),
 ]
-def _update_sidecar_json(json_path: str, pose: dict, image_basename: str, vlm_text: Optional[str]):
+
+
+def update_sidecar_json(json_path: str, pose: dict, image_basename: str, vlm_text: Optional[str]):
     obj = {}
     if os.path.isfile(json_path):
         try:
