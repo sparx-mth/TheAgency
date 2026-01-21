@@ -9,7 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Vector3Stamped
 from cv_bridge import CvBridge
-
+from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
 
 class FlowDepthVelocityNode(Node):
     """
@@ -66,6 +66,8 @@ class FlowDepthVelocityNode(Node):
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
 
+        max_corners = int(self.get_parameter("max_corners").value)
+        min_corners = int(self.get_parameter("min_corners").value)
         lk_win = int(self.get_parameter("lk_win").get_parameter_value().integer_value)
         lk_levels = int(self.get_parameter("lk_levels").get_parameter_value().integer_value)
 
@@ -77,11 +79,6 @@ class FlowDepthVelocityNode(Node):
 
         self.bridge = CvBridge()
 
-        # state
-        self.prev_gray = None
-        self.prev_pts = None
-        self.prev_stamp = None
-
         self.latest_depth = None
         self.latest_depth_stamp = None
 
@@ -90,6 +87,14 @@ class FlowDepthVelocityNode(Node):
         self.fy = None
         self.cx = None
         self.cy = None
+
+        # tracker module (fixed)
+        self.tracker = OpticalFlowTracker(
+            max_corners=max_corners,
+            min_corners=min_corners,
+            lk_win=lk_win,
+            lk_levels=lk_levels,
+        )
 
         # LK params
         self.lk_params = dict(
@@ -100,7 +105,6 @@ class FlowDepthVelocityNode(Node):
 
         # pubs/subs
         self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, 10)
-
         self.rgb_sub = self.create_subscription(Image, image_topic, self.rgb_callback, 10)
         self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, 10)
         self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
@@ -137,61 +141,14 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().error(f"RGB convert failed: {e}")
             return
 
-        # Grayscale for LK
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Init the first frame 
-        if self.prev_gray is None:
-            self.prev_gray = gray
-            self.prev_pts = self.detect_features(gray)
-            self.prev_stamp = msg.header.stamp
+        flow_res = self.tracker.process(frame, msg.header.stamp)
+        if flow_res is None:
             return
 
-        # dt
-        curr_stamp = msg.header.stamp
-        dt_ns = (curr_stamp.sec - self.prev_stamp.sec) * 1_000_000_000 + \
-                (curr_stamp.nanosec - self.prev_stamp.nanosec)
-        dt = float(dt_ns) * 1e-9
-        if dt <= 0.0: # if no time elapsed, skip frame
-            self.prev_gray = gray
-            self.prev_stamp = curr_stamp
-            return
-
-        # Refresh features if needed
-        if self.prev_pts is None or len(self.prev_pts) < self.min_corners: # redetect if too few points
-            self.prev_pts = self.detect_features(self.prev_gray)
-            if self.prev_pts is None: # still no points found--skip frame
-                self.prev_gray = gray
-                self.prev_stamp = curr_stamp
-                return
-
-        # LK optical flow
-        # next_pts: [N,1,2] float32 the new positions of input features in the second image
-        # st: [N,1] uint8 status vector (1=found, 0=not found)
-        # err: [N,1] float32 error vector "how good the flow for the feature is"
-        
-        next_pts, st, err = cv2.calcOpticalFlowPyrLK( 
-            self.prev_gray, gray, self.prev_pts, None, **self.lk_params
+        vx_mps, vy_mps, n_used = self.velocity_from_flow_and_depth(
+            flow_res.good_old, flow_res.good_new, self.latest_depth, flow_res.dt
         )
-        if next_pts is None or st is None: # flow failed -- skip frame
-            self.prev_gray = gray
-            self.prev_pts = None
-            self.prev_stamp = curr_stamp
-            return
 
-        # Select good points
-        good_new = next_pts[st == 1]  # tracked points only
-        good_old = self.prev_pts[st == 1] # corresponding old points
-        if len(good_new) == 0: # no good points -- skip frame
-            self.prev_gray = gray
-            self.prev_pts = None
-            self.prev_stamp = curr_stamp
-            return
-
-        # Compute per-point metric velocities using depth sampling
-        vx_mps, vy_mps, n_used = self.velocity_from_flow_and_depth(good_old, good_new, self.latest_depth, dt)
-
-        # Publish (robust median over points)
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = msg.header.stamp
         vel_msg.header.frame_id = self.camera_frame
@@ -200,32 +157,16 @@ class FlowDepthVelocityNode(Node):
         vel_msg.vector.z = 0.0
         self.vel_pub.publish(vel_msg)
 
-        # Debug visualization
         if self.show_debug:
-            vis = frame.copy() # create a copy to draw on
-            self.draw_debug(vis, good_old, good_new, self.latest_depth) # draw flow+depth
-            txt = f"vx={vx_mps:.3f} m/s vy={vy_mps:.3f} m/s used={n_used}"
+            vis = frame.copy()
+            self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
+            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} used={n_used}"
             cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             cv2.imshow("Flow+Depth Velocity", vis)
             cv2.waitKey(1)
 
-        # Update state for next frame
-        self.prev_gray = gray
-        self.prev_pts = good_new.reshape(-1, 1, 2)
-        self.prev_stamp = curr_stamp
 
     # ---------- core helpers ----------
-
-    def detect_features(self, gray):
-        """Detect good features to track in the given grayscale image."""
-        pts = cv2.goodFeaturesToTrack(
-            gray,
-            maxCorners=self.max_corners, # maximum number of corners to return
-            qualityLevel=0.01, # minimal quality level of image corners
-            minDistance=7, # minimum possible Euclidean distance between the returned corners
-            blockSize=7,  # size of an average block for computing a derivative covariation matrix over each pixel neighborhood
-        )
-        return pts
 
     def velocity_from_flow_and_depth(self, good_old, good_new, depth_map, dt: float):
         """

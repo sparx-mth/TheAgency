@@ -27,7 +27,6 @@ def quat_to_yaw(qx, qy, qz, qw) -> float:
     cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
     return math.atan2(siny_cosp, cosy_cosp)
 
-
 def rotate_xy(vx, vy, yaw) -> Tuple[float, float]:
     cy = math.cos(yaw)
     sy = math.sin(yaw)
@@ -85,7 +84,7 @@ class FlowDepthPoseEvalNode(Node):
         self.est_z = 0.0
         self.last_vel_stamp = None  # builtin_interfaces/Time
 
-        self.gt_pose_latest: Optional[Pose] = None
+        self.gt_pose_latest: Optional[Pose] = None # last received GT pose
         self.gt_pose_time_latest = None  # node clock time when received (since Pose has no stamp)
 
         # error stats
@@ -115,6 +114,7 @@ class FlowDepthPoseEvalNode(Node):
 
     # -------- callbacks --------
     def gt_pose_cb(self, msg: Pose):
+        # store latest GT pose
         self.gt_pose_latest = msg
         self.gt_pose_time_latest = self.get_clock().now()
 
@@ -127,15 +127,17 @@ class FlowDepthPoseEvalNode(Node):
             self.get_logger().info("[PoseEval] Initialized estimated pose from first GT pose.")
 
     def vel_cb(self, msg: Vector3Stamped):
+        """Callback for velocity messages."""
         # Need GT for comparison (and possibly init)
         if self.gt_pose_latest is None and self.init_from_gt:
             return
 
-        # dt from velocity stamps
+        # for first message, just store stamp
         if self.last_vel_stamp is None:
             self.last_vel_stamp = msg.header.stamp
             return
 
+        # dt from velocity stamps
         dt_ns = (msg.header.stamp.sec - self.last_vel_stamp.sec) * 1_000_000_000 + \
                 (msg.header.stamp.nanosec - self.last_vel_stamp.nanosec)
         dt = float(dt_ns) * 1e-9
@@ -158,7 +160,7 @@ class FlowDepthPoseEvalNode(Node):
         try:
             source_frame = norm_frame(msg.header.frame_id)
             target_frame = self.target_frame
-
+            
             tf = self.tf_buffer.lookup_transform(
                 target_frame,
                 source_frame,
@@ -184,7 +186,7 @@ class FlowDepthPoseEvalNode(Node):
         # Publish estimated pose
         out = PoseStamped()
         out.header.stamp = msg.header.stamp
-        out.header.frame_id = self.target_frame
+        out.header.frame_id = self.target_frame 
         out.pose.position.x = float(self.est_x)
         out.pose.position.y = float(self.est_y)
         out.pose.position.z = float(self.est_z)
