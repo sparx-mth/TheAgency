@@ -64,3 +64,54 @@ def numpy_to_image_msg(arr: np.ndarray, *, frame_id: str, stamp, encoding: str) 
 
     msg.data = arr.tobytes()
     return msg
+
+
+def get_objects_via_histogram(depth_img, min_dist=0.3, max_dist=5.0, bins=50):
+    # 1. Mask the floor (bottom 50%)
+    h, w = depth_img.shape
+    work_depth = depth_img.copy()
+    work_depth[h - int(h * 0.333):, :] = 0
+
+    # 2. Compute Histogram to find depth "peaks"
+    # Only consider pixels within our valid range
+    valid_pixels = work_depth[(work_depth >= min_dist) & (work_depth <= max_dist)]
+    if len(valid_pixels) == 0:
+        return []
+
+    hist, bin_edges = np.histogram(valid_pixels, bins=bins, range=(min_dist, max_dist))
+
+    # 3. Find peaks in the histogram (simple threshold)
+    # A peak is any bin with a significant number of pixels
+    peak_threshold = (h * w) * 0.01  # e.g., at least 1% of the frame
+    peak_bins = np.where(hist > peak_threshold)[0]
+
+    detected_objects = []
+
+    # 4. For each peak, find the blobs
+    for bin_idx in peak_bins:
+        d_min = bin_edges[bin_idx]
+        d_max = bin_edges[bin_idx + 1]
+
+        # Create a mask for this specific depth peak
+        mask = ((work_depth >= d_min) & (work_depth <= d_max)).astype(np.uint8) * 255
+
+        # 5. Look for Blobs (Connected Components)
+        # This is more efficient than findContours for simple rectangles
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+
+        for i in range(1, num_labels):  # Skip background
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < 500: continue  # Ignore tiny noise blobs
+
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w_obj = stats[i, cv2.CC_STAT_WIDTH]
+            h_obj = stats[i, cv2.CC_STAT_HEIGHT]
+
+            detected_objects.append({
+                "bbox": (x, y, x + w_obj, y + h_obj),
+                "avg_depth": (d_min + d_max) / 2.0,
+                "area": area
+            })
+
+    return detected_objects
