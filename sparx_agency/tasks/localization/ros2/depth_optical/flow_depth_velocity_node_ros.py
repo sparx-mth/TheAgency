@@ -47,8 +47,9 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
 
-        self.declare_parameter("lk_win", 21)
-        self.declare_parameter("lk_levels", 3)
+        #  LK params
+        self.declare_parameter("lk_win", 21) # window size
+        self.declare_parameter("lk_levels", 3) # pyramid levels
 
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
@@ -68,6 +69,7 @@ class FlowDepthVelocityNode(Node):
         lk_win = int(self.get_parameter("lk_win").get_parameter_value().integer_value)
         lk_levels = int(self.get_parameter("lk_levels").get_parameter_value().integer_value)
 
+        # log params
         self.get_logger().info(f"[FlowDepth] RGB: {image_topic}")
         self.get_logger().info(f"[FlowDepth] Depth: {depth_topic}")
         self.get_logger().info(f"[FlowDepth] CamInfo: {caminfo_topic}")
@@ -83,6 +85,7 @@ class FlowDepthVelocityNode(Node):
         self.latest_depth = None
         self.latest_depth_stamp = None
 
+        # camera intrinsics
         self.fx = None
         self.fy = None
         self.cx = None
@@ -92,7 +95,7 @@ class FlowDepthVelocityNode(Node):
         self.lk_params = dict(
             winSize=(lk_win, lk_win),
             maxLevel=lk_levels,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01), 
         )
 
         # pubs/subs
@@ -134,9 +137,10 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().error(f"RGB convert failed: {e}")
             return
 
+        # Grayscale for LK
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Init
+        # Init the first frame 
         if self.prev_gray is None:
             self.prev_gray = gray
             self.prev_pts = self.detect_features(gray)
@@ -148,32 +152,37 @@ class FlowDepthVelocityNode(Node):
         dt_ns = (curr_stamp.sec - self.prev_stamp.sec) * 1_000_000_000 + \
                 (curr_stamp.nanosec - self.prev_stamp.nanosec)
         dt = float(dt_ns) * 1e-9
-        if dt <= 0.0:
+        if dt <= 0.0: # if no time elapsed, skip frame
             self.prev_gray = gray
             self.prev_stamp = curr_stamp
             return
 
         # Refresh features if needed
-        if self.prev_pts is None or len(self.prev_pts) < self.min_corners:
+        if self.prev_pts is None or len(self.prev_pts) < self.min_corners: # redetect if too few points
             self.prev_pts = self.detect_features(self.prev_gray)
-            if self.prev_pts is None:
+            if self.prev_pts is None: # still no points found--skip frame
                 self.prev_gray = gray
                 self.prev_stamp = curr_stamp
                 return
 
-        # LK
-        next_pts, st, err = cv2.calcOpticalFlowPyrLK(
+        # LK optical flow
+        # next_pts: [N,1,2] float32 the new positions of input features in the second image
+        # st: [N,1] uint8 status vector (1=found, 0=not found)
+        # err: [N,1] float32 error vector "how good the flow for the feature is"
+        
+        next_pts, st, err = cv2.calcOpticalFlowPyrLK( 
             self.prev_gray, gray, self.prev_pts, None, **self.lk_params
         )
-        if next_pts is None or st is None:
+        if next_pts is None or st is None: # flow failed -- skip frame
             self.prev_gray = gray
             self.prev_pts = None
             self.prev_stamp = curr_stamp
             return
 
-        good_new = next_pts[st == 1]
-        good_old = self.prev_pts[st == 1]
-        if len(good_new) == 0:
+        # Select good points
+        good_new = next_pts[st == 1]  # tracked points only
+        good_old = self.prev_pts[st == 1] # corresponding old points
+        if len(good_new) == 0: # no good points -- skip frame
             self.prev_gray = gray
             self.prev_pts = None
             self.prev_stamp = curr_stamp
@@ -193,26 +202,28 @@ class FlowDepthVelocityNode(Node):
 
         # Debug visualization
         if self.show_debug:
-            vis = frame.copy()
-            self.draw_debug(vis, good_old, good_new, self.latest_depth)
+            vis = frame.copy() # create a copy to draw on
+            self.draw_debug(vis, good_old, good_new, self.latest_depth) # draw flow+depth
             txt = f"vx={vx_mps:.3f} m/s vy={vy_mps:.3f} m/s used={n_used}"
-            cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             cv2.imshow("Flow+Depth Velocity", vis)
             cv2.waitKey(1)
 
-        # Update state
+        # Update state for next frame
         self.prev_gray = gray
         self.prev_pts = good_new.reshape(-1, 1, 2)
         self.prev_stamp = curr_stamp
 
     # ---------- core helpers ----------
+
     def detect_features(self, gray):
+        """Detect good features to track in the given grayscale image."""
         pts = cv2.goodFeaturesToTrack(
             gray,
-            maxCorners=self.max_corners,
-            qualityLevel=0.01,
-            minDistance=7,
-            blockSize=7,
+            maxCorners=self.max_corners, # maximum number of corners to return
+            qualityLevel=0.01, # minimal quality level of image corners
+            minDistance=7, # minimum possible Euclidean distance between the returned corners
+            blockSize=7,  # size of an average block for computing a derivative covariation matrix over each pixel neighborhood
         )
         return pts
 
@@ -225,8 +236,9 @@ class FlowDepthVelocityNode(Node):
         Returns:
           (vx_mps, vy_mps, n_used) as robust medians over valid points
         """
-        H, W = depth_map.shape[:2]
+        H, W = depth_map.shape[:2] # height, width of depth map
 
+        # pixel velocities px/s of the tracked points in the optical flow
         du = (good_new[:, 0] - good_old[:, 0]) / dt  # px/s
         dv = (good_new[:, 1] - good_old[:, 1]) / dt  # px/s
 
@@ -276,8 +288,9 @@ class FlowDepthVelocityNode(Node):
                 continue
             t = (z - dmin) / den  # 0..1
             # map t to a visible color (no need to be perfect)
-            color = (int(255 * (1 - t)), int(255 * t), 128)
-            cv2.arrowedLine(vis_bgr, (x1, y1), (x2, y2), color, 1, tipLength=0.3)
+            #color = (int(255 * (1 - t)), int(255 * t), 128)
+            color = (0, 0, 255)
+            cv2.arrowedLine(vis_bgr, (x1, y1), (x2, y2), color, 2, tipLength=0.3)
 
 
 def main():
