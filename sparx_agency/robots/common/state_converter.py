@@ -1,6 +1,6 @@
 import numpy as np
 
-from sparx_agency.core.common.types import PoseSE3, Intrinsics
+from sparx_agency.core.common.types import PoseSE3, Intrinsics, Pose3D, State3D, Twist3D
 from sparx_agency.robots.common.spatial_math import euler_to_rot_zyx, quat_to_rot
 
 from nav_msgs.msg import Odometry, OccupancyGrid
@@ -71,3 +71,4 @@ def costmap_to_occupancygrid(costmap, stamp, frame_id: str) -> OccupancyGrid:
     msg.data = np.array(grid, dtype=np.int8).flatten().tolist()
 
     return msg
+

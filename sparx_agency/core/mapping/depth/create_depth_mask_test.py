@@ -5,25 +5,15 @@ import cv2
 import numpy as np
 import time
 
+from sparx_agency.robots.common.image_utils import get_objects_by_quantized_surfaces, get_objects_via_histogram_clustered
+
 # Add project root to path so we can import sparx_agency
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
 
 from sparx_agency.core.mapping.depth import DepthAnythingV2DepthModel
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2Config
 from sparx_agency.core.mapping.depth.depth_object_segmenter import DepthObjectSegmenter
-
-
-class TicToc:
-    def __init__(self, name=None):
-        self.name = name
-        self.tstart = None
-        
-    def __enter__(self):
-        self.tstart = time.time()
-        
-    def __exit__(self, type, value, traceback):
-        print(f"[{self.name}] took {time.time() - self.tstart:.4f}s")
-
+from sparx_agency.robots.common import TicToc, get_objects_via_histogram
 
 
 def get_depth_from_model(rgb_img, depth_model):
@@ -34,70 +24,88 @@ def get_depth_from_model(rgb_img, depth_model):
 
 # --- Main Logic ---
 
-def process_frame(image_path_or_array, depth_model, segmenter, output_dir="debug_output"):
-    os.makedirs(output_dir, exist_ok=True)
-    
+def create_hist_image(depth_map, min_dist=0.1, max_dist=4.0, bins=50):
+    h_hist, w_hist = 200, 400
+    hist_img = np.zeros((h_hist, w_hist, 3), dtype=np.uint8)
+
+    # Use the FULL depth map
+    valid_pixels = depth_map[(depth_map >= min_dist) & (depth_map <= max_dist)]
+
+    if len(valid_pixels) == 0:
+        cv2.putText(hist_img, "No Data", (w_hist // 3, h_hist // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        return hist_img
+
+    hist, _ = np.histogram(valid_pixels, bins=bins, range=(min_dist, max_dist))
+
+    if hist.max() > 0:
+        # Normalize bars to the height of the hist_img
+        hist_norm = (hist / hist.max() * (h_hist - 20)).astype(int)
+        bin_w = w_hist // bins
+        for i in range(bins):
+            # Draw cyan bars for the histogram
+            cv2.rectangle(hist_img, (i * bin_w, h_hist - hist_norm[i]),
+                          ((i + 1) * bin_w, h_hist), (255, 255, 0), -1)
+
+    return hist_img
+
+
+def process_frame(image_path_or_array, depth_model):
     # 1. Load Image
     if isinstance(image_path_or_array, str):
-        basename = os.path.basename(image_path_or_array)
         rgb_img = cv2.imread(image_path_or_array)
     else:
-        basename = "frame.jpg"
         rgb_img = image_path_or_array
 
-    if rgb_img is None:
-        print(f"Error: Could not load image {basename}")
-        return
+    if rgb_img is None: return
 
-    h, w = rgb_img.shape[:2]
-    print(f"Processing {basename} ({w}x{h})...")
-
-    # 2. Call Depth Anything
-    with TicToc("Depth Anything Inference"):
+    # 2. Inference
+    with TicToc("Inference"):
         depth_map = get_depth_from_model(rgb_img, depth_model)
 
-    # 3. Segment Objects (3D RANSAC + BEV)
-    with TicToc("3D Segmentation"):
-        # We assume some generic focal length if unknown, e.g. w usually ~ 1.0 * f
-        # Let's update segmenter focal length based on image width just in case
-        # segmenter.focal_length = w * 0.8 
-        objects = segmenter.segment_objects(depth_map, rgb_img)
+    # 3. Object Clustering (using your fixed function)
+    with TicToc("Clustering"):
+        objects = get_objects_via_histogram_clustered(depth_map, min_dist=0.1, max_dist=4.5)
 
-    print(f"Found {len(objects)} objects.")
-
-    # 4. Overlay results on RGB
+    # 4. Panel 1: RGB + Overlay
+    h, w = rgb_img.shape[:2]
     overlay = rgb_img.copy()
-    
-    for i, obj in enumerate(objects):
+    for obj in objects:
         x1, y1, x2, y2 = obj['bbox']
-        d_val = obj['avg_depth']
-        
-        # Color based on depth
-        color = (0, 255, 0)
-        
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(overlay, f"ID {i}: {d_val:.1f}m", (x1, max(y1 - 5, 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        
-        # Save Crop
-        crop = rgb_img[y1:y2, x1:x2]
-        if crop.size > 0:
-            crop_name = f"{os.path.splitext(basename)[0]}_obj_{i:02d}.jpg"
-            cv2.imwrite(os.path.join(output_dir, crop_name), crop)
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(overlay, f"{obj['avg_depth']:.1f}m", (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    # 5. Save Debug Full Image
-    combined = np.hstack([rgb_img, overlay])
-    # Resize for saving if huge
-    if combined.shape[1] > 2000:
-        scale = 2000 / combined.shape[1]
-        combined = cv2.resize(combined, (0,0), fx=scale, fy=scale)
-        
-    cv2.imwrite(os.path.join(output_dir, f"debug_{basename}"), combined)
-    print(f"Saved debug images to {output_dir}/")
+    # 5. Panel 2: Depth Visualization
+    # Normalize depth map to 0-255 for visibility
+    depth_viz = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    depth_viz = 255 - depth_viz
+
+    depth_raw_view = (depth_map - 0.5) / (5.0 - 0.5)
+    depth_raw_view = np.clip(depth_raw_view, 0, 1)
+    depth_viz_grayscale = (depth_raw_view * 255).astype(np.uint8)
+    depth_viz_bgr = cv2.cvtColor(depth_viz_grayscale, cv2.COLOR_GRAY2BGR)
+    # 6. Panel 3: Histogram
+    hist_viz = create_hist_image(depth_map, min_dist=0.1, max_dist=4.0, bins=100)
+
+    # Resize all to match height for hstack
+    display_h = 400
+    aspect = w / h
+    display_w = int(display_h * aspect)
+
+    res_overlay = cv2.resize(overlay, (display_w, display_h))
+    res_depth = cv2.resize(depth_viz_bgr, (display_w, display_h))
+    res_hist = cv2.resize(hist_viz, (display_w, display_h))
+
+    # Combine: [ RGB Overlay | Depth Map | Histogram ]
+    combined = np.hstack([res_overlay, res_depth, res_hist])
+
+    cv2.imshow("Detection Pipeline: RGB Overlay | Depth | Histogram", combined)
+    cv2.waitKey(0)
 
 
 if __name__ == "__main__":
-    folder_path = "/home/daphnaa/GIT/Depth-Anything-V2-original/assets/examples/2025_10_05___15_01_16"
+    folder_path = "/home/user1/Pictures/OneDrive_1_1-22-2026/"
     imgs_list = sorted(glob.glob(os.path.join(folder_path, "*.jpg")))
     
     # Init models once
@@ -108,8 +116,8 @@ if __name__ == "__main__":
     # Taking a standard assumption that FoV ~ 60 degrees -> f ~ 1.0 * w usually.
     # But let's stick to 500-1000 range defaults or update per image.
     # The segmenter default is 500. Let's try 700.
-    seg = DepthObjectSegmenter(focal_length_px=700.0, ransac_thresh=0.04, cluster_min_points=50)
+    # seg = DepthObjectSegmenter(focal_length_px=700.0, ransac_thresh=0.04, cluster_min_points=50)
 
     # Process first 5 images for test
     for test_image in imgs_list[:5]:
-        process_frame(test_image, d_model, seg)
+        process_frame(test_image, d_model)

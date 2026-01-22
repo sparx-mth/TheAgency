@@ -39,7 +39,7 @@ Gst.init(None)
 
 
 class VideoStreamManager(Node):
-    def ע__init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
+    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
         super().__init__("video_stream_example")
         self.id = drone_id
         self.i = 0
