@@ -108,6 +108,17 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_pose_ev
 ros2 bag play rosbag2_2026_01_20-09_37_20/ --clock --rate 0.1
 ```
 
+if you want to record
+```bash
+
+ros2 bag record   /clock   /simple_drone/front/image_raw   /simple_drone/front/camera_info   /simple_drone/gt_pose   /simple_drone/gt_vel   /simple_drone/odom   /simple_drone/imu   /tf   /tf_static
+
+
+apt-get install -y \
+  ros-humble-rosbag2 \
+  ros-humble-rosbag2-storage-default-plugins \
+  ros-humble-rosbag2-compression-zstd
+```
 ---
 
 ## RViz Setup
