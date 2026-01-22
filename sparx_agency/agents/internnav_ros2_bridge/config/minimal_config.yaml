@@ -1,0 +1,72 @@
+# =============================================================================
+# MINIMAL CONFIGURATION EXAMPLE
+# =============================================================================
+# Copy this file and modify the topic names for your simulation.
+# Only the essential settings are included here.
+# =============================================================================
+
+bridge:
+  server:
+    host: "localhost"
+    port: 8000
+    protocol: "http"
+  control:
+    inference_rate: 4.0  # Hz - how often to query the model
+
+# =============================================================================
+# YOUR INPUT TOPICS - Modify these to match your simulation
+# =============================================================================
+
+inputs:
+  rgb:
+    enabled: true
+    topic: "/camera/rgb/image_raw"  # ← CHANGE THIS to your RGB topic
+    msg_type: "sensor_msgs/Image"   # or "sensor_msgs/CompressedImage"
+    preprocessing:
+      target_size: [224, 224]
+      color_convert: "bgr_to_rgb"
+
+  instruction:
+    enabled: true
+    topic: "/navigation/instruction"  # ← Topic to receive instructions
+    default: "Navigate forward"
+
+# =============================================================================
+# YOUR OUTPUT TOPICS - Modify these to match your simulation
+# =============================================================================
+
+outputs:
+  mode: "discrete"  # Options: "discrete", "continuous", "both"
+
+  discrete:
+    enabled: true
+    topic: "/navigation/action"  # ← CHANGE THIS to your action topic
+    action_mapping:
+      # Model output → Your simulation's expected action string
+      "MOVE_FORWARD": "forward"
+      "TURN_LEFT": "left"
+      "TURN_RIGHT": "right"
+      "STOP": "stop"
+
+  continuous:
+    enabled: false  # Set to true if you need velocity commands
+    topic: "/cmd_vel"
+    action_to_velocity:
+      "MOVE_FORWARD": {linear_x: 0.25, angular_z: 0.0}
+      "TURN_LEFT": {linear_x: 0.0, angular_z: 0.5}
+      "TURN_RIGHT": {linear_x: 0.0, angular_z: -0.5}
+      "STOP": {linear_x: 0.0, angular_z: 0.0}
+
+# =============================================================================
+# MODEL SETTINGS - Usually don't need to change
+# =============================================================================
+
+model:
+  variant: "InternVLA-N1"
+  input_format:
+    image_format: "base64"
+    use_history: false
+  action_space:
+    type: "discrete"
+    forward_distance: 0.25
+    turn_angle: 30
