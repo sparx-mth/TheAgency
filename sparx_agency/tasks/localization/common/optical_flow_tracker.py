@@ -69,7 +69,8 @@ class OpticalFlowTracker:
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
     def _detect_features(self, gray: np.ndarray) -> Optional[np.ndarray]:
-        pts = cv2.goodFeaturesToTrack(
+        # Shi-Tomsi Algorithm for Feature Detection
+        pts = cv2.goodFeaturesToTrack( 
             gray,
             maxCorners=self.max_corners,
             qualityLevel=self.quality_level,
@@ -112,6 +113,7 @@ class OpticalFlowTracker:
                 self.prev_stamp = stamp
                 return None
 
+        # LK -Lucas Kanade algorithm 
         next_pts, st, err = cv2.calcOpticalFlowPyrLK(
             self.prev_gray, gray, self.prev_pts, None, **self.lk_params
         )
@@ -121,8 +123,9 @@ class OpticalFlowTracker:
             self.prev_stamp = stamp
             return None
 
-        good_new = next_pts[st == 1]
-        good_old = self.prev_pts[st == 1]
+        
+        good_new = next_pts[st == 1] #good_new= the new locations (x,y) of the points in the current frame
+        good_old = self.prev_pts[st == 1] #good_old= the orignal locations of the same points in the previous frame
 
         if len(good_new) == 0:
             self.prev_gray = gray
@@ -138,6 +141,6 @@ class OpticalFlowTracker:
         return FlowResult(
             good_old=good_old.reshape(-1, 2).astype(np.float32),
             good_new=good_new.reshape(-1, 2).astype(np.float32),
-            dt=dt,
-            n_used=int(len(good_new)),
+            dt=dt, 
+            n_used=int(len(good_new)), #how many points we succeed to use
         )
