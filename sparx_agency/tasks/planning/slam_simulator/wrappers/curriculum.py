@@ -85,7 +85,7 @@ class CurriculumWrapper(gym.Wrapper):
         self.hidden_x, self.hidden_y = self._choose_hidden_position()
 
         # Reveal everything except hidden square
-        from simulator.constants import TileType
+        from sparx_agency.tasks.planning.slam_simulator.constants import TileType
         for y in range(self.map_height):
             for x in range(self.map_width):
                 if not self._is_hidden(x, y):
