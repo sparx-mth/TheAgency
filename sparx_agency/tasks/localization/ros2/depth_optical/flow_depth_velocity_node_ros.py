@@ -192,7 +192,7 @@ class FlowDepthVelocityNode(Node):
             return 0.0, 0.0, 0
 
         Z = np.zeros_like(du, dtype=np.float32)
-        Z[valid] = depth_map[v[valid], u[valid]]
+        Z[valid] = depth_map[v[valid], u[valid]] # sample depth map
 
         # filter bad depth
         valid = valid & np.isfinite(Z)

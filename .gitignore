@@ -182,3 +182,5 @@ ORB-SLAM3-ROS2-Docker
 sparx_agency/build/
 sparx_agency/log/
 sparx_agency/install/
+
+sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*

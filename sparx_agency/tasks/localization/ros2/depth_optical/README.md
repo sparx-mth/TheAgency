@@ -75,12 +75,9 @@ GT Pose Error & RMS Drift
 ### 1. Depth Estimation
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.depth_anything_node_ros \
+python3 -m python3 -m sparx_agency.tasks.mapping.create_map_from_video \
   --ros-args \
   -p use_sim_time:=true \
-  -p debug_publish_depth:=true \
-  -p debug_publish_cloud:=false \
-  -p debug_publish_depth_grid:=false \
   -r /debug/depth_raw:=/depth_anything/depth \
   -r /debug/depth_vis:=/depth_anything/depth_vis \
   -r /debug/cloud_global:=/depth_anything/cloud
