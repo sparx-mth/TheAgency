@@ -33,12 +33,17 @@ slam_simulator/
 ├── __init__.py          # Package exports
 ├── constants.py         # Enums, colors, default configs
 ├── drone.py             # Drone state management
-├── sensors/
-│   ├── base.py          # Abstract sensor interface
-│   └── camera.py        # Camera sensor (FOV-based raycasting)
+├── env.py               # Main Gymnasium environment
 ├── map_generator.py     # Random map generation & utilities
 ├── renderer.py          # Pygame visualization
-└── env.py               # Main Gymnasium environment
+├── sensors/
+│   ├── __init__.py
+│   ├── base.py          # Abstract sensor interface
+│   └── camera.py        # Camera sensor (FOV-based raycasting)
+└── wrappers/
+    ├── __init__.py
+    ├── discrete_action.py  # MultiDiscrete → Discrete conversion
+    └── curriculum.py       # Progressive difficulty wrapper
 ```
 
 ## Environment Parameters
@@ -153,3 +158,45 @@ Load:
 env = SLAMEnv(map_path='my_map.txt', randomize=False)
 ```
 
+## Wrappers
+
+### DiscreteActionWrapper
+
+Converts `MultiDiscrete([4,4,4])` to `Discrete(64)` for DQN compatibility.
+
+```python
+from slam_simulator import SLAMEnv, DiscreteActionWrapper
+
+env = SLAMEnv(num_agents=2)  # MultiDiscrete([4, 4])
+env = DiscreteActionWrapper(env)  # Discrete(16)
+
+action = env.action_space.sample()  # Single int 0-15
+obs, reward, done, trunc, info = env.step(action)
+
+# Decode action to see per-agent actions
+print(env.decode(action))  # e.g., [0, 2] = [FORWARD, TURN_RIGHT]
+```
+
+### CurriculumWrapper
+
+Progressive learning: reveals most of the map, keeps a small square hidden.
+
+```python
+from slam_simulator import SLAMEnv, CurriculumWrapper
+
+env = SLAMEnv(width=32, height=32, num_agents=1)
+env = CurriculumWrapper(env, hidden_size=8, random_position=True)
+
+# Start with 8x8 hidden area
+obs, info = env.reset()
+print(info['curriculum'])  # {'hidden_size': 8, 'hidden_position': (x, y), ...}
+
+# Increase difficulty over time
+env.set_hidden_size(16)  # Now 16x16 hidden
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `hidden_size` | int | 8 | Size of hidden square |
+| `random_position` | bool | False | Randomize hidden area position |
+| `fixed_position` | tuple | None | Fixed (x, y) for hidden area |
