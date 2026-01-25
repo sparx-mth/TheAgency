@@ -205,7 +205,8 @@ class FlowDepthEssentialVelocityNode(Node):
         Returns: (R [3,3], t_dir [3], inliers_mask [N] bool) or None
         """
         K = self.K_mat()
-
+        
+        # Estimate Essential Matrix via RANSAC
         E, mask = cv2.findEssentialMat(
             pts1, pts2, K,
             method=cv2.RANSAC,
@@ -219,6 +220,7 @@ class FlowDepthEssentialVelocityNode(Node):
         if int(inliers.sum()) < self.min_inliers:
             return None
 
+        # Recover pose from Essential Matrix
         n_in, R, t, _ = cv2.recoverPose(E, pts1[inliers], pts2[inliers], K)
         if n_in < self.min_inliers:
             return None
