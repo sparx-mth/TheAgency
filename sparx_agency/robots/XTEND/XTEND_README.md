@@ -1,0 +1,1 @@
+python3 get_xtend_probe.py   --host 192.0.0.15   --port 8000   --robot-uid drn120ea1b0   --mode both   --frequency-hz 10   --rtsp-uri rtsp://192.0.0.15:8556/osd_snapshot   --show-video   --raw-dump-seconds 8   --robot-status-only
