@@ -60,6 +60,14 @@ from .informed_rrtstar import (
     plan_informed_rrtstar_3d,
 )
 
+from .astar import (
+    AStarParams,
+    AStar3DParams,
+    AStarGridPlanner2D,
+    AStarVoxelPlanner3D,
+)
+
+
 __all__ = [
     # === Interface types (from sparx_agency) ===
     "PlanRequest",
@@ -82,4 +90,9 @@ __all__ = [
     "InformedRRTStarParams",
     "InformedRRTStarPlanner",
     "plan_informed_rrtstar_3d",
+    # === A* (3D & 2D) ===
+    "AStarParams",
+    "AStar3DParams",
+    "AStarGridPlanner2D",
+    "AStarVoxelPlanner3D",
 ]
