@@ -47,10 +47,8 @@ class Twist3D:
     yaw_rate: float = 0.0
 
     def __post_init__(self):
-        _assert_finite("Twist3D.vx", self.vx)
-        _assert_finite("Twist3D.vy", self.vy)
-        _assert_finite("Twist3D.vz", self.vz)
-        _assert_finite("Twist3D.yaw_rate", self.yaw_rate)
+        for name in ("vx", "vy", "vz", "yaw_rate"):
+            _assert_finite(f"Twist3D.{name}", getattr(self, name))
 
 
 @dataclass(frozen=True)
@@ -76,9 +74,8 @@ class Accel3D:
     az: float
 
     def __post_init__(self):
-        _assert_finite("Accel3D.ax", self.ax)
-        _assert_finite("Accel3D.ay", self.ay)
-        _assert_finite("Accel3D.az", self.az)
+        for name in ("ax", "ay", "az"):
+            _assert_finite(f"Accel3D.{name}", getattr(self, name))
 
 
 @dataclass(frozen=True)

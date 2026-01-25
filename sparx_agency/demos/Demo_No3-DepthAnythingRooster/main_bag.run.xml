@@ -1,0 +1,33 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="main_bag" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
+    <module name="TheAgency" />
+    <option name="ENV_FILES" value="" />
+    <option name="INTERPRETER_OPTIONS" value="" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="AMENT_PREFIX_PATH" value="/opt/ros/humble:$PROJECT_DIR$/../../../user/rqs_iai_ws/install/local" />
+      <env name="LD_LIBRARY_PATH" value="$PROJECT_DIR$/../../../user/rqs_iai_ws/install/fcu_driver_interfaces/lib:$PROJECT_DIR$/../../../user/rqs_iai_ws/install/ros_common_interfaces/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib" />
+      <env name="PYTHONPATH" value="$PROJECT_DIR$/../../../user/rqs_iai_ws/install/ros_common_interfaces/lib/python3.10/site-packages:$PROJECT_DIR$/../../../user/rqs_iai_ws/install/fcu_driver_interfaces/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$PROJECT_DIR$/../../../user/rqs_iai_ws/install/local/lib/python3.10/site-packages" />
+      <env name="PYTHONUNBUFFERED" value="1" />
+      <env name="RMW_IMPLEMENTATION" value="rmw_cyclonedds_cpp" />
+      <env name="ROS_DISTRO" value="humble" />
+      <env name="ROS_DOMAIN_ID" value="42" />
+      <env name="ROS_VERSION" value="2" />
+    </envs>
+    <option name="SDK_HOME" value="" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/sparx_agency/demos/Demo_No3-DepthAnythingRooster" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+    <option name="RUN_TOOL" value="" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/sparx_agency/demos/Demo_No3-DepthAnythingRooster/main_bag.py" />
+    <option name="PARAMETERS" value="" />
+    <option name="SHOW_COMMAND_LINE" value="false" />
+    <option name="EMULATE_TERMINAL" value="false" />
+    <option name="MODULE_MODE" value="false" />
+    <option name="REDIRECT_INPUT" value="false" />
+    <option name="INPUT_FILE" value="" />
+    <method v="2" />
+  </configuration>
+</component>

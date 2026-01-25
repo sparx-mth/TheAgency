@@ -13,7 +13,11 @@ def main():
 
     # Configuration
     ROOSTER_ID = "R1"
+<<<<<<< HEAD
     # Points to your existing path file in the ROBOTICAN tree
+=======
+    # Points to your existing path file in p3 installthe ROBOTICAN tree
+>>>>>>> origin/baseline_daphna
     PATH_FILE = "robots/ROBOTICAN/helpers/txt/roll_custom_path.txt"
 
     # 1. Initialize Video Adapter

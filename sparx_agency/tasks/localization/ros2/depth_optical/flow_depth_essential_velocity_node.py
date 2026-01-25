@@ -49,14 +49,14 @@ class FlowDepthEssentialVelocityNode(Node):
         self.declare_parameter("use_depth_norm", False)
 
         # essential matrix params
-        self.declare_parameter("ransac_thresh_px", 1.5)      # pixel threshold
+        self.declare_parameter("ransac_thresh_px", 2.5)      # pixel threshold
         self.declare_parameter("ransac_prob", 0.999)
         self.declare_parameter("min_inliers", 30)
 
         # scale search params (tune if needed)
         self.declare_parameter("scale_min", 0.0)
-        self.declare_parameter("scale_max", 0.5)            # meters per frame (if metric depth)
-        self.declare_parameter("scale_steps", 51)           # coarse search steps
+        self.declare_parameter("scale_max", 0.02)            # meters per frame (if metric depth)
+        self.declare_parameter("scale_steps", 401)           # coarse search steps
 
         # debug
         self.declare_parameter("show_debug", False)
@@ -164,6 +164,9 @@ class FlowDepthEssentialVelocityNode(Node):
 
         # Estimate R,t_dir via Essential Matrix (RANSAC)
         pose = self.estimate_pose_essential(good_old, good_new)
+
+        self.get_logger().info(f"[Essential] inliers={int(inliers.sum())} dt={dt:.4f}")
+
         if pose is None:
             return
         R, t_dir, inliers = pose
@@ -171,7 +174,11 @@ class FlowDepthEssentialVelocityNode(Node):
         # Estimate scale s using depth + reprojection
         s = self.estimate_scale_by_reprojection(R, t_dir, good_old[inliers], good_new[inliers], self.latest_depth)
         if s is None:
+            self.get_logger().warn("[Essential] No scale (scale estimation failed)")
             return
+
+        speed = float(np.linalg.norm((s * t_dir) / dt))
+        self.get_logger().info(f"[Essential] s={s:.5f} speed_norm={speed:.3f} m/s t_dir={t_dir}")
 
         # translation (per frame), then velocity
         trans = s * t_dir  # (meters or relative units)
@@ -266,6 +273,8 @@ class FlowDepthEssentialVelocityNode(Node):
         pts2 = pts2[valid]
         Z = Z[valid]
 
+        self.get_logger().info(f"[Essential] depth-valid points: {len(pts1)}")
+        
         if len(pts1) < self.min_inliers:
             return None
 
@@ -302,6 +311,7 @@ class FlowDepthEssentialVelocityNode(Node):
                 best_err = med
                 best_s = float(s)
 
+        self.get_logger().info(f"[Essential] best_s={best_s} best_err_med_sq={best_err:.2f}")
         # sanity: if reprojection still huge, skip update
         if best_s is None or best_err > (10.0**2):  # median > 10px^2 -> tune if needed
             return None

@@ -66,10 +66,13 @@ class DepthAnythingV2DepthModel(DepthModel):
 
         # 3. To see a person clearly, the points must have a wide Z-range.
         # Person should be at ~2.0m, Background at ~15.0m.
-        max_range = 15.0
+        max_range = 5.0
         min_range = 0.5  # Objects start 0.5m in front of camera
+        # depth_inverted = 1.0 - depth_norm
+        # depth_m = depth_inverted * (max_range - min_range) + min_range
+        depth_m = depth_norm * (max_range - min_range) + min_range
 
-        depth_m = raw_disparity/50
+        # depth_m = (d_max - raw_disparity)/50
         return depth_m
 
 
