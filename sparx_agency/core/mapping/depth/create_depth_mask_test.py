@@ -5,7 +5,9 @@ import cv2
 import numpy as np
 import time
 
-from sparx_agency.robots.common.image_utils import get_objects_by_quantized_surfaces, get_objects_via_histogram_clustered
+from sparx_agency.robots.common.image_utils import get_objects_by_quantized_surfaces, \
+     create_hist_image_with_objects, get_objects_via_depth_kmeans, \
+    get_objects_via_depth_edges, merge_boxes
 
 # Add project root to path so we can import sparx_agency
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
@@ -65,12 +67,16 @@ def process_frame(image_path_or_array, depth_model):
 
     # 3. Object Clustering (using your fixed function)
     with TicToc("Clustering"):
-        objects = get_objects_via_histogram_clustered(depth_map, min_dist=0.1, max_dist=4.5)
+        min_d, max_d, bins = 0.3, 5.0, 60
+        # objs_k = get_objects_via_depth_kmeans(depth_map, min_dist=0.3, max_dist=5.0, K=3)
+        # objs_e = get_objects_via_depth_edges(depth_map, min_dist=0.3, max_dist=5.0)
+        objs = get_objects_via_histogram(depth_map, min_dist=0.3, max_dist=5.0, bins=bins)
+        # objs = merge_boxes(objs_k + objs_e, iou_thr=0.5)
 
-    # 4. Panel 1: RGB + Overlay
+        # 4. Panel 1: RGB + Overlay
     h, w = rgb_img.shape[:2]
     overlay = rgb_img.copy()
-    for obj in objects:
+    for obj in objs:
         x1, y1, x2, y2 = obj['bbox']
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(overlay, f"{obj['avg_depth']:.1f}m", (x1, y1 - 5),
@@ -86,7 +92,8 @@ def process_frame(image_path_or_array, depth_model):
     depth_viz_grayscale = (depth_raw_view * 255).astype(np.uint8)
     depth_viz_bgr = cv2.cvtColor(depth_viz_grayscale, cv2.COLOR_GRAY2BGR)
     # 6. Panel 3: Histogram
-    hist_viz = create_hist_image(depth_map, min_dist=0.1, max_dist=4.0, bins=100)
+
+    hist_viz = create_hist_image_with_objects(depth_map, objs, min_dist=0.3, max_dist=5.0, bins=60)
 
     # Resize all to match height for hstack
     display_h = 400
