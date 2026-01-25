@@ -4,11 +4,13 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 
 from sparx_agency.tasks.planning.slam_simulator.constants import (
-    TileType, Action, DIRECTIONS, DIRECTION_DELTAS, DEFAULT_REWARDS, DEFAULT_SENSOR_CONFIG
+    TileType, Action, DIRECTIONS, DEFAULT_REWARDS, DEFAULT_SENSOR_CONFIG
 )
 from sparx_agency.tasks.planning.slam_simulator.drone import Drone
 from sparx_agency.tasks.planning.slam_simulator.sensors import CameraSensor, BaseSensor
-from sparx_agency.tasks.planning.slam_simulator.map_generator import generate_random_map, load_map, find_entry_points, compute_reachable_mask
+from sparx_agency.tasks.planning.slam_simulator.map_generator import (
+    generate_random_map, load_map, find_entry_points, compute_reachable_mask
+)
 from sparx_agency.tasks.planning.slam_simulator.renderer import Renderer
 
 
@@ -45,10 +47,7 @@ class SLAMEnv(gym.Env):
             self.width = width
             self.height = height
 
-        # Rewards
-        self.rewards = rewards if rewards else DEFAULT_REWARDS
-
-        # Sensors
+        self.rewards = rewards if rewards else DEFAULT_REWARDS.copy()
         self.sensor_config = sensor_config if sensor_config else {}
 
         # State (initialized in reset)
