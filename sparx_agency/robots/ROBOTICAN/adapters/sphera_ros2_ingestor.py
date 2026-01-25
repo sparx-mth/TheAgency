@@ -17,12 +17,13 @@ from gi.repository import Gst
 
 
 class SpheraRos2Ingestor(Node):
-    def __init__(self, pipeline, costmap, drone_id="R2"):
+    def __init__(self, drone_id="R2"):
         super().__init__('sphera_ros2_ingestor')
-        self.pipeline = pipeline
-        self.costmap = costmap
+
         self.drone_id = drone_id
         self.bridge = CvBridge()
+        self._latest_frame_msg = None
+        self._latest_state_msg = None
 
         # 1. Hardware Heartbeat (Keep the Rooster alive)
         self.keep_alive_pub = self.create_publisher(KeepAlive, f"/{self.drone_id}/keep_alive", 10)
@@ -34,7 +35,7 @@ class SpheraRos2Ingestor(Node):
         self.last_pose = None
 
         # 3. Video Setup
-        self.video_client = self.create_client(SetVideoMode, f"/{self.drone_id}/video/set_video_mode")
+        self.video_client = self.create_client(SetVideoMode, f"/{self.drone_id}/video_handler/set_video_mode")
         Gst.init(None)
 
         # GStreamer pipeline for UDP stream from Rooster
@@ -43,6 +44,12 @@ class SpheraRos2Ingestor(Node):
         self.gst_pipeline = Gst.parse_launch(gst_str)
         sink = self.gst_pipeline.get_by_name("sink")
         sink.connect("new-sample", self._on_new_frame)
+
+    def get_latest_frame(self):
+        return self._latest_frame_msg
+
+    def get_latest_state(self):
+        return self._latest_state_msg
 
     def _publish_heartbeat(self):
         msg = KeepAlive(is_active=True, requested_flight_mode=1)
@@ -56,7 +63,7 @@ class SpheraRos2Ingestor(Node):
 
         req = SetVideoMode.Request()
         req.playing = True
-        req.host = "192.168.131.24"  # Set this to your local processing machine IP
+        req.host = "192.168.131.20"  # Set this to your local processing machine IP
         req.port = 5001
         req.resolution_width = 640
         req.resolution_height = 360
@@ -68,7 +75,7 @@ class SpheraRos2Ingestor(Node):
     def uav_state_callback(self, msg):
         # Store the latest pose for the next video frame
         self.last_pose = msg.pose
-
+        self._latest_state = msg
     def _on_new_frame(self, sink):
         sample = sink.emit("pull-sample")
         buf = sample.get_buffer()
@@ -79,31 +86,29 @@ class SpheraRos2Ingestor(Node):
 
             # --- EXECUTE MAPPING PIPELINE ---
             # This triggers DepthAnythingV2 + Cloud Generation + Costmap Update
-            self.pipeline.process_frame(frame, self.last_pose)
+            self.gst_pipeline.process_frame(frame, self.last_pose)
+            msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
+            self._latest_frame_msg = msg
 
             buf.unmap(map_info)
         return Gst.FlowReturn.OK
 
     def activate_video_hardware(self):
-        """Sends the service request to the drone to start streaming."""
-        # Check if the service is ready before calling
+        """Call this to start the stream"""
         if not self.video_client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error("SetVideoMode service not available!")
-            return False
+            self.get_logger().error("Video service not found!")
+            return
 
         req = SetVideoMode.Request()
         req.camera_id = 0
         req.playing = True
-        # Ensure this is the IP of your processing machine (host)
-        req.host = "192.168.131.20"
         req.port = 5001
+        req.host = "192.168.131.20"  # Or the IP of the PC running this script
         req.resolution_width = 640
         req.resolution_height = 360
-        req.bitrate = SetVideoMode.Request.BITRATE_1500000
+        req.bitrate = 1500000
 
-        self.get_logger().info(f"Requesting hardware video stream for {self.drone_id}...")
-
-        # Call the service
+        self.get_logger().info(f"Sending activation request to {self.drone_id}...")
         self.video_client.call_async(req)
 
         # Start the local GStreamer pipeline to receive the packets

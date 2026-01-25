@@ -1,11 +1,9 @@
 """Planning-related types: paths, trajectories, and plan results."""
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
-
-from .geometry import Pose2D
+from typing import Any, Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable
+from .geometry import Pose2D, Pose3D
 from .primitives import _assert_finite
 
 
@@ -41,11 +39,33 @@ class Path2D:
         return self.points[-1]
 
     def length(self) -> float:
-        """Total path length in meters."""
-        return sum(
-            a.distance_to(b)
-            for a, b in zip(self.points[:-1], self.points[1:])
-        )
+        return sum(a.distance_to(b) for a, b in zip(self.points[:-1], self.points[1:]))
+
+
+@dataclass(frozen=True)
+class Path3D:
+    """Geometric 3D path without time parameterization."""
+    points: Tuple[Pose3D, ...]
+    frame_id: str = "map"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if len(self.points) < 2:
+            raise ValueError("Path3D requires at least 2 points")
+
+    def __len__(self) -> int:
+        return len(self.points)
+
+    @property
+    def start(self) -> Pose3D:
+        return self.points[0]
+
+    @property
+    def goal(self) -> Pose3D:
+        return self.points[-1]
+
+    def length(self) -> float:
+        return sum(a.distance_to(b) for a, b in zip(self.points[:-1], self.points[1:]))
 
 
 @dataclass(frozen=True)
@@ -60,38 +80,20 @@ class TrajectoryPoint:
     x: float
     y: float
     z: float = 0.0
-
     vx: float = 0.0
     vy: float = 0.0
     vz: float = 0.0
-
     ax: float = 0.0
     ay: float = 0.0
     az: float = 0.0
-
     yaw: Optional[float] = None
     yaw_rate: Optional[float] = None
-
-    s: Optional[float] = None  # Arc length from start
-    curvature: Optional[float] = None  # Path curvature at this point
+    s: Optional[float] = None
+    curvature: Optional[float] = None
 
     def __post_init__(self) -> None:
-        _assert_finite("TrajectoryPoint.t", self.t)
-        _assert_finite("TrajectoryPoint.x", self.x)
-        _assert_finite("TrajectoryPoint.y", self.y)
-        _assert_finite("TrajectoryPoint.z", self.z)
-
-    @property
-    def position(self) -> Tuple[float, float, float]:
-        return (self.x, self.y, self.z)
-
-    @property
-    def velocity(self) -> Tuple[float, float, float]:
-        return (self.vx, self.vy, self.vz)
-
-    @property
-    def acceleration(self) -> Tuple[float, float, float]:
-        return (self.ax, self.ay, self.az)
+        for name in ("t", "x", "y", "z"):
+            _assert_finite(f"TrajectoryPoint.{name}", getattr(self, name))
 
 
 @runtime_checkable
@@ -104,27 +106,17 @@ class Trajectory(Protocol):
     """
 
     @property
-    def total_time(self) -> float:
-        """Duration from first to last sample."""
-        ...
+    def total_time(self) -> float: ...
 
     @property
-    def start(self) -> Tuple[float, float, float]:
-        """Starting position (x, y, z)."""
-        ...
+    def start(self) -> Tuple[float, float, float]: ...
 
     @property
-    def end(self) -> Tuple[float, float, float]:
-        """Ending position (x, y, z)."""
-        ...
+    def end(self) -> Tuple[float, float, float]: ...
 
-    def sample(self, t: float) -> TrajectoryPoint:
-        """Sample trajectory at time t (with interpolation if needed)."""
-        ...
+    def sample(self, t: float) -> TrajectoryPoint: ...
 
-    def sample_by_time(self, dt: float) -> List[TrajectoryPoint]:
-        """Sample trajectory at uniform time intervals."""
-        ...
+    def sample_by_time(self, dt: float) -> List[TrajectoryPoint]: ...
 
 
 class PlanStatus(str, Enum):
@@ -149,11 +141,10 @@ class PlanResult:
         artifacts: Algorithm-specific debug data.
     """
     status: PlanStatus
-    path: Optional[Path2D] = None
+    path: Optional[Union[Path2D, Path3D]] = None
     message: str = ""
     artifacts: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        """True if planning succeeded with a valid path."""
         return self.status == PlanStatus.SUCCESS and self.path is not None
