@@ -8,6 +8,8 @@ Planner -> Path -> Smoother -> Trajectory -> Tracker -> ControlCommand
 from .planner import (
     PlanRequest,
     BasePlanner,
+    PlanRequest3D,
+    BasePlanner3D,
 )
 from .smoother import (
     SmootherRequest,
@@ -18,3 +20,14 @@ from .tracker import (
     TrackerResult,
     BaseTracker,
 )
+
+from .exploration import (
+    ExplorationContext,
+    ExplorationDecision,
+    ExplorationPolicy,
+)
+
+__all__ = [
+    "PlanRequest", "PlanRequest3D", "BasePlanner", "BasePlanner3D",
+    "ExplorationContext", "ExplorationDecision", "ExplorationPolicy",
+]
