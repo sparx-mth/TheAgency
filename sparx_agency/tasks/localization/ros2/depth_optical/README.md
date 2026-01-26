@@ -75,7 +75,7 @@ GT Pose Error & RMS Drift
 ### 1. Depth Estimation
 
 ```bash
-python3 -m python3 -m sparx_agency.tasks.mapping.create_map_from_video \
+python3 -m sparx_agency.tasks.mapping.create_map_from_video \
   --ros-args \
   -p use_sim_time:=true \
   -r /debug/depth_raw:=/depth_anything/depth \
@@ -93,7 +93,7 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
 ### 3. Pose Evaluation
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_pose_eval_node_ros \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_pose_eval_node \
   --ros-args \
   -p use_sim_time:=true \
   -p target_frame:=/simple_drone/odom

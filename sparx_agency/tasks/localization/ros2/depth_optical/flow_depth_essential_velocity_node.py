@@ -165,11 +165,11 @@ class FlowDepthEssentialVelocityNode(Node):
         # Estimate R,t_dir via Essential Matrix (RANSAC)
         pose = self.estimate_pose_essential(good_old, good_new)
 
-        self.get_logger().info(f"[Essential] inliers={int(inliers.sum())} dt={dt:.4f}")
-
         if pose is None:
             return
         R, t_dir, inliers = pose
+
+        self.get_logger().info(f"[Essential] inliers={int(inliers.sum())} dt={dt:.4f}")
 
         # Estimate scale s using depth + reprojection
         s = self.estimate_scale_by_reprojection(R, t_dir, good_old[inliers], good_new[inliers], self.latest_depth)
