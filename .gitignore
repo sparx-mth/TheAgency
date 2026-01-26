@@ -178,7 +178,6 @@ gz-sim-environment
 ROBOTICAN/examples
 ORB-SLAM3-ROS2-Docker
 
-*.png
 sparx_agency/build/
 sparx_agency/log/
 sparx_agency/install/

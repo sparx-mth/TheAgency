@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# this script compares two pose evaluation CSV files (from pose_eval_rosbag2.py)
 """
 run the script:
 python3 compare_pose_eval.py \
