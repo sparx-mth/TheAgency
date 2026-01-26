@@ -259,6 +259,13 @@ class XtendProbe:
                     # Special handling: ROBOT_STATUS -> extract the robot block and summarize keys
                     if cmd == "ROBOT_STATUS":
                         robot_block = xtend_extract_robot_block(msg, self.robot_uid)
+                        if not self._printed_schema:
+                            self._printed_schema = True
+                            print("[XTEND] Robot block keys:", sorted(robot_block.keys()))
+                            print("[XTEND] Key paths depth=3:")
+                            for kp in summarize_dict_keys(robot_block, depth=3):
+                                print(" -", kp)
+
                         if robot_block is not None:
                             pose_se3 = xtend_robot_block_to_pose_se3(robot_block)
                             state3d = xtend_robot_block_to_state3d(robot_block)
