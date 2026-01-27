@@ -1,346 +1,96 @@
 # =============================================================================
 # InternNav Bridge Configuration
 # =============================================================================
-# This configuration file defines how your ROS2 simulation topics map to
-# the InternNav model's expected inputs and outputs.
-#
-# To adapt to any simulation, simply modify the topic names and parameters below.
-# =============================================================================
 
 bridge:
-  # -------------------------------------------------------------------------
-  # Model Server Connection
-  # -------------------------------------------------------------------------
   server:
     host: "localhost"
     port: 8000
-    protocol: "http"  # http, grpc, or websocket
-    timeout_sec: 10.0
-    retry_attempts: 3
-    # Model endpoint path (depends on your server setup)
-    inference_endpoint: "/v1/inference"
-    health_endpoint: "/health"
+    protocol: "http"
+    timeout_sec: 30.0
 
-  # -------------------------------------------------------------------------
-  # Control Loop Settings
-  # -------------------------------------------------------------------------
   control:
-    # Rate at which to query the model (Hz)
-    inference_rate: 4.0
-    # Whether to run inference continuously or only when new data arrives
+    inference_rate: 4.0      # Hz
     continuous_inference: false
-    # Minimum time between inferences (seconds)
     min_inference_interval: 0.1
-    # Whether to wait for all required inputs before inference
-    sync_inputs: true
-    # Timeout for synchronized inputs (seconds)
-    sync_timeout: 1.0
 
 # =============================================================================
-# INPUT CONFIGURATION
-# =============================================================================
-# Define what data your simulation provides and how to transform it.
+# INPUTS - Modify topics to match your simulation
 # =============================================================================
 
 inputs:
-  # -------------------------------------------------------------------------
-  # RGB Camera Input
-  # -------------------------------------------------------------------------
   rgb:
     enabled: true
-    # Your simulation's RGB topic
     topic: "/camera/rgb/image_raw"
-    # Message type (sensor_msgs/Image or sensor_msgs/CompressedImage)
-    msg_type: "sensor_msgs/Image"
-    # Queue size for subscriber
-    queue_size: 1
-    # Image preprocessing
-    preprocessing:
-      # Target resolution for the model (width x height)
-      target_size: [224, 224]
-      # Resize interpolation: nearest, bilinear, bicubic
-      interpolation: "bilinear"
-      # Normalization (ImageNet standard for most VLMs)
-      normalize:
-        enabled: true
-        mean: [0.485, 0.456, 0.406]
-        std: [0.229, 0.224, 0.225]
-      # Color format conversion (if needed)
-      # Options: none, bgr_to_rgb, rgb_to_bgr
-      color_convert: "bgr_to_rgb"
+    msg_type: "sensor_msgs/Image"  # or "sensor_msgs/CompressedImage"
 
-  # -------------------------------------------------------------------------
-  # Depth Camera Input (Optional)
-  # -------------------------------------------------------------------------
   depth:
     enabled: false
     topic: "/camera/depth/image_raw"
-    msg_type: "sensor_msgs/Image"
-    queue_size: 1
-    preprocessing:
-      target_size: [224, 224]
-      interpolation: "nearest"
-      # Depth normalization
-      normalize:
-        enabled: true
-        min_depth: 0.0
-        max_depth: 10.0
-        # Output range after normalization
-        output_range: [0.0, 1.0]
 
-  # -------------------------------------------------------------------------
-  # Language Instruction Input
-  # -------------------------------------------------------------------------
   instruction:
     enabled: true
-    # Topic for receiving navigation instructions
     topic: "/navigation/instruction"
-    # Message type: std_msgs/String or custom
-    msg_type: "std_msgs/String"
-    queue_size: 1
-    # Default instruction if none provided
     default: "Navigate to the goal"
-    # Whether instruction persists across inferences or needs refresh
-    persistent: true
 
-  # -------------------------------------------------------------------------
-  # Odometry Input (Optional - for providing pose context)
-  # -------------------------------------------------------------------------
   odometry:
     enabled: false
     topic: "/odom"
-    msg_type: "nav_msgs/Odometry"
-    queue_size: 1
-    # What to extract from odometry
-    use_position: true
-    use_orientation: true
-    use_velocity: false
-
-  # -------------------------------------------------------------------------
-  # Goal Input (Optional - for goal-conditioned navigation)
-  # -------------------------------------------------------------------------
-  goal:
-    enabled: false
-    topic: "/goal_pose"
-    msg_type: "geometry_msgs/PoseStamped"
-    queue_size: 1
-    # How to represent goal to model: "relative", "absolute", "image"
-    representation: "relative"
 
 # =============================================================================
-# OUTPUT CONFIGURATION
-# =============================================================================
-# Define how model outputs are transformed to your simulation's expected format.
+# OUTPUTS - Modify topics to match your simulation
 # =============================================================================
 
 outputs:
-  # -------------------------------------------------------------------------
-  # Action Output Mode
-  # -------------------------------------------------------------------------
-  # Options: "discrete", "continuous", "both"
-  mode: "discrete"
-
-  # -------------------------------------------------------------------------
-  # Discrete Action Output
-  # -------------------------------------------------------------------------
+  # Discrete action output (String messages)
   discrete:
     enabled: true
     topic: "/navigation/action"
-    # Custom message or std_msgs/String
-    msg_type: "std_msgs/String"
-    queue_size: 1
-    # Map model outputs to your simulation's expected action names
     action_mapping:
-      # InternNav action -> Your simulation action
-      "MOVE_FORWARD": "forward"
-      "TURN_LEFT": "left"
-      "TURN_RIGHT": "right"
-      "STOP": "stop"
-      "LOOK_UP": "look_up"
-      "LOOK_DOWN": "look_down"
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "left"
+      TURN_RIGHT: "right"
+      STOP: "stop"
+      LOOK_UP: "look_up"
+      LOOK_DOWN: "look_down"
 
-  # -------------------------------------------------------------------------
-  # Continuous Velocity Output (Twist)
-  # -------------------------------------------------------------------------
+  # Continuous velocity output (Twist messages)
   continuous:
     enabled: false
     topic: "/cmd_vel"
-    msg_type: "geometry_msgs/Twist"
-    queue_size: 1
-    # Convert discrete actions to velocities
     action_to_velocity:
-      "MOVE_FORWARD":
-        linear_x: 0.25
-        angular_z: 0.0
-      "TURN_LEFT":
-        linear_x: 0.0
-        angular_z: 0.5236  # 30 degrees/sec
-      "TURN_RIGHT":
-        linear_x: 0.0
-        angular_z: -0.5236
-      "STOP":
-        linear_x: 0.0
-        angular_z: 0.0
-    # Duration to publish velocity command (seconds)
-    command_duration: 1.0
-    # Velocity limits
+      MOVE_FORWARD: {linear_x: 0.25, angular_z: 0.0}
+      TURN_LEFT: {linear_x: 0.0, angular_z: 0.5}
+      TURN_RIGHT: {linear_x: 0.0, angular_z: -0.5}
+      STOP: {linear_x: 0.0, angular_z: 0.0}
     limits:
-      max_linear: 0.5
+      max_linear: 1.0
       max_angular: 1.0
 
-  # -------------------------------------------------------------------------
-  # Action Feedback (for debugging/monitoring)
-  # -------------------------------------------------------------------------
   feedback:
     enabled: true
     topic: "/navigation/feedback"
-    msg_type: "std_msgs/String"
-    # What to include in feedback
-    include_confidence: true
-    include_reasoning: true
-    include_raw_output: false
 
-  # -------------------------------------------------------------------------
-  # Navigation Status
-  # -------------------------------------------------------------------------
   status:
     enabled: true
     topic: "/navigation/status"
-    msg_type: "std_msgs/String"
-    # Status messages
-    messages:
-      running: "navigating"
-      stopped: "stopped"
-      completed: "goal_reached"
-      failed: "navigation_failed"
 
 # =============================================================================
-# MODEL CONFIGURATION
-# =============================================================================
-# Settings specific to the InternNav model.
+# MODEL
 # =============================================================================
 
 model:
-  # Model variant: "InternVLA-N1", "InternVLA-N1-S2", "StreamVLN", etc.
   variant: "InternVLA-N1"
-  
-  # Input format expected by the model
+  ckpt_path: ""
   input_format:
-    # Image format: "base64", "numpy", "tensor", "raw_bytes"
-    image_format: "base64"
-    # Image encoding for base64: "png", "jpeg"
-    image_encoding: "jpeg"
-    jpeg_quality: 95
-    # Whether to send image history
-    use_history: false
-    history_length: 4
-  
-  # Action space configuration
-  action_space:
-    type: "discrete"  # discrete or continuous
-    # Discrete action labels (model's expected output format)
-    discrete_actions:
-      - "MOVE_FORWARD"
-      - "TURN_LEFT"
-      - "TURN_RIGHT"
-      - "STOP"
-    # Movement parameters (should match simulation)
-    forward_distance: 0.25  # meters
-    turn_angle: 30  # degrees
-
-  # Prompt template for the model
-  prompt_template: |
-    You are a navigation agent. Given the current observation and the instruction, 
-    output the next action to take.
-    
-    Instruction: {instruction}
-    
-    Available actions: MOVE_FORWARD, TURN_LEFT, TURN_RIGHT, STOP
-    
-    Output only the action name.
-
-# =============================================================================
-# TRANSFORMATION CONFIGURATION
-# =============================================================================
-# Define coordinate frame transformations if needed.
-# =============================================================================
-
-transforms:
-  # Whether to use TF2 for transformations
-  use_tf: false
-  
-  # Frame IDs
-  frames:
-    world: "world"
-    robot_base: "base_link"
-    camera: "camera_link"
-  
-  # Static transform from camera to robot base (if not using TF)
-  camera_to_base:
-    translation: [0.0, 0.0, 0.5]  # x, y, z in meters
-    rotation: [0.0, 0.0, 0.0, 1.0]  # quaternion x, y, z, w
-
-# =============================================================================
-# SIMULATION-SPECIFIC PRESETS
-# =============================================================================
-# Quick presets for common simulators. Set 'preset' to use one.
-# These override the above settings.
-# =============================================================================
-
-presets:
-  # Isaac Sim preset
-  isaac_sim:
-    inputs:
-      rgb:
-        topic: "/front_stereo_camera/left_rgb/image_raw"
-        msg_type: "sensor_msgs/Image"
-      depth:
-        enabled: true
-        topic: "/front_stereo_camera/left_depth/image_raw"
-    outputs:
-      continuous:
-        enabled: true
-        topic: "/cmd_vel"
-
-  # Gazebo preset
-  gazebo:
-    inputs:
-      rgb:
-        topic: "/camera/image_raw"
-        msg_type: "sensor_msgs/Image"
-      depth:
-        topic: "/camera/depth/image_raw"
-    outputs:
-      continuous:
-        enabled: true
-        topic: "/cmd_vel"
-
-  # Habitat preset
-  habitat:
-    inputs:
-      rgb:
-        topic: "/habitat/rgb"
-        msg_type: "sensor_msgs/Image"
-        preprocessing:
-          target_size: [480, 640]
-      depth:
-        enabled: true
-        topic: "/habitat/depth"
-    outputs:
-      mode: "discrete"
-      discrete:
-        topic: "/habitat/action"
-
-  # Unity preset
-  unity:
-    inputs:
-      rgb:
-        topic: "/unity/camera/rgb/image_raw"
-        msg_type: "sensor_msgs/CompressedImage"
-    outputs:
-      continuous:
-        enabled: true
-        topic: "/unity/cmd_vel"
-
-# Use a preset by setting this value (or leave empty/null for custom config)
-use_preset: null  # Options: null, "isaac_sim", "gazebo", "habitat", "unity"
+    target_width: 640
+    target_height: 480
+  # Model settings (these have sensible defaults, override if needed)
+  model_settings:
+    policy_name: "InternVLAN1_Policy"
+    # state_encoder: null  # Use default
+    device: "cuda:0"
+    width: 640
+    height: 480
+    resize_w: 384
+    resize_h: 384
