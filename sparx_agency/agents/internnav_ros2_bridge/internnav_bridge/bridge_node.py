@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-InternNav Bridge Node
+InternNav Bridge Node for Rooster Platform
 
 ROS2 bridge connecting simulations to the InternNav model server.
+Supports ManualControl output and KeepAlive for Rooster/Sphera environment.
 """
 
 import json
 import threading
 import time
 from typing import Dict, Optional
+from enum import Enum
 
 import cv2
 import numpy as np
@@ -18,7 +20,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
-from std_msgs.msg import String
+from std_msgs.msg import String, Header
 from sensor_msgs.msg import Image, CompressedImage
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -28,9 +30,28 @@ from .types import ActionType, BridgeState
 from .model_client import ModelClient
 from .config import load_config
 
+# Try to import Rooster-specific messages
+try:
+    from fcu_driver_interfaces.msg import ManualControl, UAVState
+    from rooster_handler_interfaces.msg import KeepAlive
+    from rooster_manager_interfaces.msg import RoosterState
+    ROOSTER_MSGS_AVAILABLE = True
+except ImportError:
+    ROOSTER_MSGS_AVAILABLE = False
+    ManualControl = None
+    UAVState = None
+    KeepAlive = None
+    RoosterState = None
+
+
+class ActionState(Enum):
+    """State of action execution."""
+    IDLE = "idle"
+    EXECUTING = "executing"
+
 
 class InternNavBridge(Node):
-    """Main ROS2 bridge node."""
+    """Main ROS2 bridge node with Rooster/Sphera support."""
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__('internnav_bridge')
@@ -46,6 +67,17 @@ class InternNavBridge(Node):
         self.state = BridgeState()
         self.cv_bridge = CvBridge()
         self.lock = threading.Lock()
+
+        # Action execution state (for timed actions)
+        self.action_state = ActionState.IDLE
+        self.action_start_time = 0.0
+        self.action_duration = 0.0
+        self.current_manual_control = None
+
+        # Rooster state
+        self.arm_state = False
+        self.flight_mode = None
+        self.is_ready = False
 
         # Model client
         server_cfg = self.config['bridge']['server']
@@ -72,6 +104,7 @@ class InternNavBridge(Node):
         # Callback groups
         self.input_cb_group = ReentrantCallbackGroup()
         self.inference_cb_group = MutuallyExclusiveCallbackGroup()
+        self.control_cb_group = MutuallyExclusiveCallbackGroup()
 
         # Setup subscribers and publishers
         self._setup_subscribers()
@@ -88,7 +121,11 @@ class InternNavBridge(Node):
     def _setup_subscribers(self):
         """Setup input subscribers."""
         inputs = self.config['inputs']
-        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
 
         # RGB
         if inputs['rgb'].get('enabled', True):
@@ -118,26 +155,77 @@ class InternNavBridge(Node):
             self.state.current_instruction = inst_cfg.get('default', '')
             self.get_logger().info(f"Subscribed to Instruction: {inst_cfg['topic']}")
 
-        # Odometry
+        # Odometry (standard)
         if inputs.get('odometry', {}).get('enabled', False):
             self.odom_sub = self.create_subscription(
                 Odometry, inputs['odometry']['topic'], self._odom_callback, qos,
                 callback_group=self.input_cb_group
             )
 
+        # Rooster State subscription
+        outputs = self.config['outputs']
+        if outputs.get('state', {}).get('enabled', False) and ROOSTER_MSGS_AVAILABLE:
+            state_topic = outputs['state'].get('topic', '/R1/state')
+            self.rooster_state_sub = self.create_subscription(
+                RoosterState, state_topic, self._rooster_state_callback, 10,
+                callback_group=self.input_cb_group
+            )
+            self.get_logger().info(f"Subscribed to Rooster State: {state_topic}")
+
     def _setup_publishers(self):
         """Setup output publishers."""
         outputs = self.config['outputs']
 
-        # Discrete action
+        # Discrete action (for logging/debugging)
         if outputs.get('discrete', {}).get('enabled', True):
             self.action_pub = self.create_publisher(String, outputs['discrete']['topic'], 1)
             self.get_logger().info(f"Publishing actions to: {outputs['discrete']['topic']}")
 
-        # Continuous velocity
+        # Continuous velocity (Twist)
         if outputs.get('continuous', {}).get('enabled', False):
             self.cmd_vel_pub = self.create_publisher(Twist, outputs['continuous']['topic'], 1)
             self.get_logger().info(f"Publishing velocities to: {outputs['continuous']['topic']}")
+
+        # ManualControl output (Rooster-specific)
+        if outputs.get('manual_control', {}).get('enabled', False):
+            if not ROOSTER_MSGS_AVAILABLE:
+                self.get_logger().error(
+                    "ManualControl enabled but fcu_driver_interfaces not available! "
+                    "Make sure the package is installed."
+                )
+            else:
+                mc_cfg = outputs['manual_control']
+                self.manual_control_pub = self.create_publisher(
+                    ManualControl, mc_cfg['topic'], 10
+                )
+                self.get_logger().info(f"Publishing ManualControl to: {mc_cfg['topic']}")
+
+                # Create ManualControl publish timer (40Hz default)
+                mc_rate = mc_cfg.get('publish_rate_hz', 40.0)
+                self.manual_control_timer = self.create_timer(
+                    1.0 / mc_rate, self._manual_control_callback,
+                    callback_group=self.control_cb_group
+                )
+
+        # KeepAlive publisher (Rooster-specific)
+        if outputs.get('keep_alive', {}).get('enabled', False):
+            if not ROOSTER_MSGS_AVAILABLE:
+                self.get_logger().error(
+                    "KeepAlive enabled but rooster_handler_interfaces not available!"
+                )
+            else:
+                ka_cfg = outputs['keep_alive']
+                self.keep_alive_pub = self.create_publisher(
+                    KeepAlive, ka_cfg['topic'], 10
+                )
+                self.get_logger().info(f"Publishing KeepAlive to: {ka_cfg['topic']}")
+
+                # Create KeepAlive timer (1Hz default)
+                ka_rate = ka_cfg.get('publish_rate_hz', 1.0)
+                self.keep_alive_timer = self.create_timer(
+                    1.0 / ka_rate, self._keep_alive_callback,
+                    callback_group=self.control_cb_group
+                )
 
         # Feedback
         if outputs.get('feedback', {}).get('enabled', True):
@@ -147,7 +235,7 @@ class InternNavBridge(Node):
         if outputs.get('status', {}).get('enabled', True):
             self.status_pub = self.create_publisher(String, outputs['status']['topic'], 1)
 
-    # === Callbacks ===
+    # === Input Callbacks ===
 
     def _rgb_callback(self, msg):
         try:
@@ -179,11 +267,84 @@ class InternNavBridge(Node):
     def _odom_callback(self, msg: Odometry):
         with self.lock:
             self.state.current_odometry = {
-                'position': {'x': msg.pose.pose.position.x, 'y': msg.pose.pose.position.y,
-                             'z': msg.pose.pose.position.z},
-                'orientation': {'x': msg.pose.pose.orientation.x, 'y': msg.pose.pose.orientation.y,
-                                'z': msg.pose.pose.orientation.z, 'w': msg.pose.pose.orientation.w}
+                'position': {
+                    'x': msg.pose.pose.position.x,
+                    'y': msg.pose.pose.position.y,
+                    'z': msg.pose.pose.position.z
+                },
+                'orientation': {
+                    'x': msg.pose.pose.orientation.x,
+                    'y': msg.pose.pose.orientation.y,
+                    'z': msg.pose.pose.orientation.z,
+                    'w': msg.pose.pose.orientation.w
+                }
             }
+
+    def _rooster_state_callback(self, msg: 'RoosterState'):
+        """Handle Rooster state updates."""
+        if self.arm_state != msg.armed or self.flight_mode != msg.flight_mode:
+            self.get_logger().info(
+                f"Rooster state - armed: {msg.armed}, flight_mode: {msg.flight_mode}, "
+                f"ready: {msg.is_ready}"
+            )
+            self.arm_state = msg.armed
+            self.flight_mode = msg.flight_mode
+            self.is_ready = msg.is_ready
+
+    # === Control Callbacks ===
+
+    def _keep_alive_callback(self):
+        """Publish KeepAlive message to maintain control authority."""
+        if not hasattr(self, 'keep_alive_pub'):
+            return
+
+        ka_cfg = self.config['outputs']['keep_alive']
+
+        msg = KeepAlive()
+        msg.header = Header()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.is_active = ka_cfg.get('is_active', True)
+        msg.requested_flight_mode = ka_cfg.get('requested_flight_mode', 1)  # GROUND_ROLL
+        msg.command_reboot = ka_cfg.get('command_reboot', False)
+
+        self.keep_alive_pub.publish(msg)
+
+    def _manual_control_callback(self):
+        """Publish ManualControl message at high rate."""
+        if not hasattr(self, 'manual_control_pub'):
+            return
+
+        with self.lock:
+            # Check if we're executing an action
+            if self.action_state == ActionState.EXECUTING:
+                elapsed = time.time() - self.action_start_time
+                if elapsed >= self.action_duration:
+                    # Action complete, go to idle (stop)
+                    self.action_state = ActionState.IDLE
+                    self.current_manual_control = self._get_stop_control()
+                    self.get_logger().debug("Action complete, stopping")
+
+            # Publish current control (or stop if none)
+            if self.current_manual_control is not None:
+                msg = self.current_manual_control
+            else:
+                msg = self._get_stop_control()
+
+            msg.header.stamp = self.get_clock().now().to_msg()
+            self.manual_control_pub.publish(msg)
+
+    def _get_stop_control(self) -> 'ManualControl':
+        """Get a stop ManualControl message."""
+        msg = ManualControl()
+        msg.header = Header()
+        msg.x = 0.0
+        msg.y = 0.0
+        msg.z = 0.0
+        msg.r = 0.0
+        msg.buttons = 0
+        return msg
+
+    # === Inference ===
 
     def _inference_callback(self):
         """Run model inference."""
@@ -194,7 +355,11 @@ class InternNavBridge(Node):
         if current_time - self.state.last_inference_time < control.get('min_inference_interval', 0.1):
             return
 
+        # Don't run inference while executing an action (for timed actions)
         with self.lock:
+            if self.action_state == ActionState.EXECUTING:
+                return
+
             if self.state.current_rgb is None:
                 return
             if not control.get('continuous_inference', False) and not self.state.is_navigating:
@@ -246,22 +411,30 @@ class InternNavBridge(Node):
         action = self._parse_action(action_str)
         outputs = self.config['outputs']
 
-        # Discrete action
+        # Discrete action (for logging)
         if outputs.get('discrete', {}).get('enabled', True):
             mapping = outputs['discrete'].get('action_mapping', {})
             mapped = mapping.get(action.value, action_str)
             msg = String()
             msg.data = mapped
             self.action_pub.publish(msg)
-            self.get_logger().debug(f"Action: {mapped}")
+            self.get_logger().info(f"Action: {mapped} (raw: {action_str})")
 
-        # Continuous velocity
-        if outputs.get('continuous', {}).get('enabled', False):
+        # ManualControl output (Rooster)
+        if outputs.get('manual_control', {}).get('enabled', False) and ROOSTER_MSGS_AVAILABLE:
+            self._execute_manual_control_action(action)
+
+        # Continuous velocity (Twist) - fallback
+        elif outputs.get('continuous', {}).get('enabled', False):
             self._publish_velocity(action)
 
         # Feedback
         if outputs.get('feedback', {}).get('enabled', True):
-            feedback = {'action': action.value, 'timestamp': time.time(), 'inference_ms': result.inference_time_ms}
+            feedback = {
+                'action': action.value,
+                'timestamp': time.time(),
+                'inference_ms': result.inference_time_ms
+            }
             msg = String()
             msg.data = json.dumps(feedback)
             self.feedback_pub.publish(msg)
@@ -272,6 +445,36 @@ class InternNavBridge(Node):
             self._publish_status("completed")
         else:
             self._publish_status("navigating")
+
+    def _execute_manual_control_action(self, action: ActionType):
+        """Execute action using ManualControl with timed duration."""
+        mc_cfg = self.config['outputs']['manual_control']
+        action_mapping = mc_cfg.get('action_mapping', {})
+
+        # Get action parameters
+        action_params = action_mapping.get(action.value, action_mapping.get('STOP', {}))
+
+        # Create ManualControl message
+        msg = ManualControl()
+        msg.header = Header()
+        msg.x = float(action_params.get('x', 0.0))
+        msg.y = float(action_params.get('y', 0.0))
+        msg.z = float(action_params.get('z', 0.0))
+        msg.r = float(action_params.get('r', 0.0))
+        msg.buttons = int(action_params.get('buttons', 0))
+
+        duration = action_params.get('duration_sec', 0.25)
+
+        with self.lock:
+            self.current_manual_control = msg
+            self.action_start_time = time.time()
+            self.action_duration = duration
+            self.action_state = ActionState.EXECUTING
+
+        self.get_logger().debug(
+            f"Executing {action.value}: x={msg.x}, y={msg.y}, z={msg.z}, r={msg.r} "
+            f"for {duration:.2f}s"
+        )
 
     def _parse_action(self, action_str: str) -> ActionType:
         """Parse action string to ActionType."""
@@ -290,16 +493,21 @@ class InternNavBridge(Node):
         return ActionType.UNKNOWN
 
     def _publish_velocity(self, action: ActionType):
-        """Publish velocity command."""
+        """Publish velocity command (Twist)."""
         cfg = self.config['outputs']['continuous']
         vel_map = cfg.get('action_to_velocity', {})
         vel = vel_map.get(action.value, {'linear_x': 0.0, 'angular_z': 0.0})
         limits = cfg.get('limits', {})
 
         msg = Twist()
-        msg.linear.x = max(-limits.get('max_linear', 1.0), min(limits.get('max_linear', 1.0), vel.get('linear_x', 0.0)))
-        msg.angular.z = max(-limits.get('max_angular', 1.0),
-                            min(limits.get('max_angular', 1.0), vel.get('angular_z', 0.0)))
+        msg.linear.x = max(
+            -limits.get('max_linear', 1.0),
+            min(limits.get('max_linear', 1.0), vel.get('linear_x', 0.0))
+        )
+        msg.angular.z = max(
+            -limits.get('max_angular', 1.0),
+            min(limits.get('max_angular', 1.0), vel.get('angular_z', 0.0))
+        )
         self.cmd_vel_pub.publish(msg)
 
     def _publish_status(self, status: str):
@@ -311,13 +519,23 @@ class InternNavBridge(Node):
 
     def _log_config(self):
         """Log configuration summary."""
-        self.get_logger().info("=" * 50)
-        self.get_logger().info("InternNav Bridge Configuration:")
+        outputs = self.config['outputs']
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("InternNav Bridge Configuration (Rooster Mode):")
         self.get_logger().info(
-            f"  Server: {self.config['bridge']['server']['host']}:{self.config['bridge']['server']['port']}")
+            f"  Server: {self.config['bridge']['server']['host']}:"
+            f"{self.config['bridge']['server']['port']}"
+        )
         self.get_logger().info(f"  RGB: {self.config['inputs']['rgb']['topic']}")
-        self.get_logger().info(f"  Action: {self.config['outputs']['discrete']['topic']}")
-        self.get_logger().info("=" * 50)
+
+        if outputs.get('manual_control', {}).get('enabled'):
+            self.get_logger().info(f"  ManualControl: {outputs['manual_control']['topic']}")
+            self.get_logger().info(f"  KeepAlive: {outputs['keep_alive']['topic']}")
+        else:
+            self.get_logger().info(f"  Action: {outputs['discrete']['topic']}")
+
+        self.get_logger().info(f"  Rooster msgs available: {ROOSTER_MSGS_AVAILABLE}")
+        self.get_logger().info("=" * 60)
 
 
 def main(args=None):
