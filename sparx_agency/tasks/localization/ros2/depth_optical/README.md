@@ -86,7 +86,7 @@ python3 -m sparx_agency.tasks.mapping.create_map_from_video \
 ### 2. Flow + Depth Velocity
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_ros \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node \
   --ros-args -p use_sim_time:=true -p show_debug:=true
 ```
 
@@ -96,7 +96,11 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
 python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_pose_eval_node \
   --ros-args \
   -p use_sim_time:=true \
-  -p target_frame:=/simple_drone/odom
+  -p target_frame:=/simple_drone/odom \
+  -p csv_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/pose_eval_run1.csv \
+  -p est_tum_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/est_tum.txt \
+  -p gt_tum_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/gt_tum.txt
+
 ```
 
 ### 4. Play Rosbag
