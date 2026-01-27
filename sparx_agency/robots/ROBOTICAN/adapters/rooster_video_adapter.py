@@ -49,7 +49,7 @@ class VideoStreamManager(Node):
         self.height = int(self.width * 9 / 16)
         self.host = host_ip    # host IP "192.168.131.24" Laptop
         self.port = port
-        self.stream_timeout_s = 0.1
+        self.stream_timeout_s = 0.3
 
         self.last_pub_time = self.get_clock().now()  # in seconds, wall-clock time
         self.pub_period = Duration(seconds=0.1)  # seconds between publishes
@@ -138,8 +138,8 @@ class VideoStreamManager(Node):
         self.last_seen_tag_stamp = None
 
         self.april_localization = TagAzimuthOpenCVTask(
-            tag_config_path="sparx_agency/tasks/localization/config/tags_azimuth.yaml",
-            camera_calib_path="sparx_agency/tasks/localization/config/front_camera_calib.yaml",
+            tag_config_path="/home/rooster/sparx_agency/tasks/localization/config/tags_azimuth.yaml",
+            camera_calib_path="/home/rooster/sparx_agency/tasks/localization/config/front_camera_calib.yaml",
             tag_size_m=0.16,
         )
 

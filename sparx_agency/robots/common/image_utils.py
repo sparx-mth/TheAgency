@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import glob
 import os
 import cv2
 import numpy as np
 from sensor_msgs.msg import Image
-
 
 def list_frames(frames_dir: str):
     exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp")

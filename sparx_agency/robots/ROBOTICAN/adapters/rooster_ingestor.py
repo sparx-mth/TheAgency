@@ -9,7 +9,7 @@ from sensor_msgs.msg import Image
 from fcu_driver_interfaces.msg import UAVState
 
 from sparx_agency.core.common.types import Observation, RGBFrame, Intrinsics
-from sparx_agency.robots.common import stamp_to_sec
+from sparx_agency.robots.common.txt_utils import stamp_to_sec
 from sparx_agency.robots.common.perception_converter import rgbframe_from_bgr, rgbframe_from_ros_image
 from sparx_agency.robots.common.state_converter import uav_state_to_pose_se3
 from sparx_agency.robots.common.state_converter import costmap_to_occupancygrid
