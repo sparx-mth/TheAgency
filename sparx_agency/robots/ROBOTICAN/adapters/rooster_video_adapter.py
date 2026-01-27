@@ -397,10 +397,6 @@ class VideoStreamManager(Node):
         #         camera_calib_path: str,
         #         tag_size_m: float,)
         #         last_yaw_rad, tag_id = self.april_localization.compute_azimuth_from_bgr(frame, timestamp_sec)
-        #last_yaw_rad = self.compute_azimuth_from_bgr(frame, now)
-        #last_yaw_rad = math.radians(last_yaw_rad)
-
-        #last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
 
 
         timestamp_sec = now.nanoseconds * 1e-9
