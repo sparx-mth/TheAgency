@@ -1,266 +1,66 @@
 # =============================================================================
-# InternNav Bridge Configuration - Simple Drone Environment
-# =============================================================================
-# Configuration for drone simulation running in Docker
-# Model server running on host at port 8087
+# Simple Drone Configuration
 # =============================================================================
 
 bridge:
   server:
-    # IMPORTANT: Since simulation runs in Docker and server is on host:
-    # Option 1: Use host.docker.internal (works on Docker Desktop for Mac/Windows)
-    # Option 2: Use the host's actual IP address (works on Linux)
-    # Option 3: Run Docker with --network=host
-    # 
-    # For Linux Docker, typically use the host's IP or docker0 bridge IP (172.17.0.1)
-    # Uncomment the appropriate line below:
-    
-    host: "127.0.0.1"  # Using host network mode
-    # host: "host.docker.internal"  # Docker Desktop (Mac/Windows)
-    # host: "192.168.x.x"  # Replace with your host's actual IP
-    
+    host: "127.0.0.1"
     port: 8023
-    protocol: "http"
-    timeout_sec: 30.0  # Increased timeout for model inference
-    retry_attempts: 3
-    inference_endpoint: "/inference"  # InternNav default endpoint
-    health_endpoint: "/health"
+    timeout_sec: 30.0
 
   control:
-    # Inference rate - balance between responsiveness and computational load
-    # Drone camera runs at ~30-40 Hz, but model inference is slower
-    inference_rate: 4.0  # Hz
-    continuous_inference: false
-    min_inference_interval: 0.2  # seconds
-    sync_inputs: true
-    sync_timeout: 1.0
-
-# =============================================================================
-# INPUT CONFIGURATION - Simple Drone Topics
-# =============================================================================
+    inference_rate: 4.0
+    min_inference_interval: 0.2
 
 inputs:
-  # -------------------------------------------------------------------------
-  # Front Camera RGB Input
-  # -------------------------------------------------------------------------
   rgb:
     enabled: true
     topic: "/simple_drone/front/image_raw"
-    msg_type: "sensor_msgs/Image"
-    queue_size: 1
-    preprocessing:
-      # InternNav expects 224x224 or similar square input
-      target_size: [224, 224]
-      interpolation: "bilinear"
-      # Image is already rgb8, no color conversion needed
-      color_convert: "none"
-      # Standard ImageNet normalization for vision models
-      normalize:
-        enabled: true
-        mean: [0.485, 0.456, 0.406]
-        std: [0.229, 0.224, 0.225]
 
-  # -------------------------------------------------------------------------
-  # Depth Camera (using bottom camera if available, otherwise disabled)
-  # -------------------------------------------------------------------------
   depth:
     enabled: false
-    topic: "/simple_drone/bottom/image_raw"
-    msg_type: "sensor_msgs/Image"
-    queue_size: 1
-    preprocessing:
-      target_size: [224, 224]
-      interpolation: "nearest"
-      normalize:
-        enabled: true
-        min_depth: 0.0
-        max_depth: 20.0
-        output_range: [0.0, 1.0]
 
-  # -------------------------------------------------------------------------
-  # Navigation Instruction Input
-  # -------------------------------------------------------------------------
   instruction:
     enabled: true
     topic: "/simple_drone/navigation/instruction"
-    msg_type: "std_msgs/String"
-    queue_size: 1
-    default: "Fly forward and explore the environment"
-    persistent: true
+    default: "Fly forward and explore"
 
-  # -------------------------------------------------------------------------
-  # Odometry Input
-  # -------------------------------------------------------------------------
   odometry:
     enabled: true
     topic: "/simple_drone/odom"
-    msg_type: "nav_msgs/Odometry"
-    queue_size: 1
-    use_position: true
-    use_orientation: true
-    use_velocity: true
-
-  # -------------------------------------------------------------------------
-  # Goal Input (using RViz goal_pose)
-  # -------------------------------------------------------------------------
-  goal:
-    enabled: false
-    topic: "/goal_pose"
-    msg_type: "geometry_msgs/PoseStamped"
-    queue_size: 1
-    representation: "relative"
-
-# =============================================================================
-# OUTPUT CONFIGURATION - Drone Control
-# =============================================================================
 
 outputs:
-  # For a drone, we primarily need continuous velocity control
-  mode: "both"  # Publish both discrete actions and velocities
-
-  # -------------------------------------------------------------------------
-  # Discrete Action Output (for monitoring/logging)
-  # -------------------------------------------------------------------------
   discrete:
     enabled: true
     topic: "/simple_drone/navigation/action"
-    msg_type: "std_msgs/String"
-    queue_size: 1
     action_mapping:
-      "MOVE_FORWARD": "forward"
-      "TURN_LEFT": "turn_left"
-      "TURN_RIGHT": "turn_right"
-      "STOP": "hover"
-      "LOOK_UP": "pitch_up"
-      "LOOK_DOWN": "pitch_down"
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "turn_left"
+      TURN_RIGHT: "turn_right"
+      STOP: "hover"
 
-  # -------------------------------------------------------------------------
-  # Continuous Velocity Output (primary control for drone)
-  # -------------------------------------------------------------------------
   continuous:
     enabled: true
     topic: "/simple_drone/cmd_vel"
-    msg_type: "geometry_msgs/Twist"
-    queue_size: 1
-    
-    # Drone velocity mapping
-    # Note: For drones, linear.z controls altitude, angular.z controls yaw
     action_to_velocity:
-      "MOVE_FORWARD":
-        linear_x: 0.5    # Forward velocity (m/s)
-        linear_y: 0.0
-        linear_z: 0.0    # Maintain altitude
-        angular_z: 0.0
-      "TURN_LEFT":
-        linear_x: 0.0
-        linear_y: 0.0
-        linear_z: 0.0
-        angular_z: 0.3   # Yaw rate (rad/s) - ~17 deg/s
-      "TURN_RIGHT":
-        linear_x: 0.0
-        linear_y: 0.0
-        linear_z: 0.0
-        angular_z: -0.3
-      "STOP":
-        linear_x: 0.0
-        linear_y: 0.0
-        linear_z: 0.0
-        angular_z: 0.0
-      "LOOK_UP":  # For drone, this could mean ascend
-        linear_x: 0.0
-        linear_y: 0.0
-        linear_z: 0.2    # Ascend
-        angular_z: 0.0
-      "LOOK_DOWN":  # For drone, this could mean descend
-        linear_x: 0.0
-        linear_y: 0.0
-        linear_z: -0.2   # Descend
-        angular_z: 0.0
-    
-    # How long to publish each velocity command
-    command_duration: 0.5  # seconds
-    
-    # Velocity limits for safety
+      MOVE_FORWARD: {linear_x: 0.5, angular_z: 0.0}
+      TURN_LEFT: {linear_x: 0.0, angular_z: 0.3}
+      TURN_RIGHT: {linear_x: 0.0, angular_z: -0.3}
+      STOP: {linear_x: 0.0, angular_z: 0.0}
     limits:
-      max_linear: 1.0    # m/s
-      max_angular: 0.5   # rad/s
+      max_linear: 1.0
+      max_angular: 0.5
 
-  # -------------------------------------------------------------------------
-  # Feedback (for debugging)
-  # -------------------------------------------------------------------------
   feedback:
     enabled: true
     topic: "/simple_drone/navigation/feedback"
-    msg_type: "std_msgs/String"
-    include_confidence: true
-    include_reasoning: true
-    include_raw_output: false
 
-  # -------------------------------------------------------------------------
-  # Navigation Status
-  # -------------------------------------------------------------------------
   status:
     enabled: true
     topic: "/simple_drone/navigation/status"
-    msg_type: "std_msgs/String"
-    messages:
-      running: "navigating"
-      stopped: "hovering"
-      completed: "goal_reached"
-      failed: "navigation_failed"
-
-# =============================================================================
-# MODEL CONFIGURATION
-# =============================================================================
 
 model:
   variant: "internvla_n1"
-  
   input_format:
-    image_format: "base64"
-    image_encoding: "jpeg"
-    jpeg_quality: 90
-    use_history: false  # Set to true if you want temporal context
-    history_length: 4
-  
-  action_space:
-    type: "discrete"
-    discrete_actions:
-      - "MOVE_FORWARD"
-      - "TURN_LEFT"
-      - "TURN_RIGHT"
-      - "STOP"
-    # These should match the drone's movement capabilities
-    forward_distance: 0.5  # meters per action
-    turn_angle: 30  # degrees per turn
-
-  # Prompt template for navigation
-  prompt_template: |
-    You are controlling a drone for visual navigation.
-    Given the current camera view and instruction, decide the next action.
-    
-    Instruction: {instruction}
-    
-    Available actions:
-    - MOVE_FORWARD: Move the drone forward
-    - TURN_LEFT: Rotate the drone left
-    - TURN_RIGHT: Rotate the drone right  
-    - STOP: Hover in place (goal reached or obstacle)
-    
-    Output only the action name.
-
-# =============================================================================
-# TRANSFORMS (optional)
-# =============================================================================
-
-transforms:
-  use_tf: false
-  frames:
-    world: "world"
-    robot_base: "/simple_drone/base_link"
-    camera: "/simple_drone/front_cam_link"
-
-# =============================================================================
-# No preset - this is a custom configuration
-# =============================================================================
-use_preset: null
+    target_width: 640
+    target_height: 480

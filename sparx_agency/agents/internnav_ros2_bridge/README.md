@@ -433,11 +433,3 @@ source install/setup.bash
 - Reduce image resolution in config
 - Disable image history if not needed
 
-## 📄 License
-
-MIT License - See LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- [InternNav](https://github.com/InternRobotics/InternNav) - The navigation foundation model
-- [InternRobotics](https://github.com/InternRobotics) - For the amazing navigation research
