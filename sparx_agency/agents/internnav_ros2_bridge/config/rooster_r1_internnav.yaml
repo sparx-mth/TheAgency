@@ -1,0 +1,158 @@
+# =============================================================================
+# Rooster R1 InternNav Bridge Configuration (Sphera Environment)
+# =============================================================================
+# This configuration connects InternNav to the Rooster drone platform.
+# Uses ManualControl messages and KeepAlive for flight control.
+# =============================================================================
+
+bridge:
+  server:
+    host: "127.0.0.1"
+    port: 8023
+    protocol: "http"
+    timeout_sec: 30.0
+
+  control:
+    inference_rate: 4.0
+    continuous_inference: false
+    min_inference_interval: 0.2
+
+# =============================================================================
+# INPUT CONFIGURATION
+# =============================================================================
+
+inputs:
+  rgb:
+    enabled: true
+    topic: "/R1/camera/image_raw"
+    msg_type: "sensor_msgs/Image"
+
+  depth:
+    enabled: false
+
+  instruction:
+    enabled: true
+    topic: "/R1/navigation/instruction"
+    default: "Explore forward safely"
+
+  odometry:
+    enabled: false  # We'll use UAV state separately
+
+# =============================================================================
+# OUTPUT CONFIGURATION
+# =============================================================================
+# For Rooster/Sphera, we use:
+# - manual_control: fcu_driver_interfaces/ManualControl at 40Hz
+# - keep_alive: rooster_handler_interfaces/KeepAlive at 1Hz
+# =============================================================================
+
+outputs:
+  # Discrete actions - for logging/debugging only
+  discrete:
+    enabled: true
+    topic: "/R1/navigation/action"
+    action_mapping:
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "left"
+      TURN_RIGHT: "right"
+      STOP: "stop"
+
+  # Standard Twist output (disabled - using manual_control)
+  continuous:
+    enabled: false
+
+  # ManualControl output - PRIMARY OUTPUT for Rooster
+  # Values are in normalized range [-1000, 1000]
+  # x: forward/backward thrust
+  # y: left/right strafe
+  # z: throttle/thrust (base force for ground roll)
+  # r: yaw rotation (counter-clockwise positive)
+  manual_control:
+    enabled: true
+    topic: "/R1/manual_control"
+    publish_rate_hz: 40.0
+
+    # Action mapping for ground roll mode
+    # z provides base "force" to keep wheels engaged
+    # r controls yaw/turning
+    # x controls forward/backward
+    action_mapping:
+      MOVE_FORWARD:
+        x: 0.0
+        y: 0.0
+        z: 500.0
+        r: 0.0
+        buttons: 0
+        duration_sec: 0.5
+      TURN_LEFT:
+        x: 0.0
+        y: 0.0
+        z: 400.0
+        r: 250.0
+        buttons: 0
+        duration_sec: 0.75
+      TURN_RIGHT:
+        x: 0.0
+        y: 0.0
+        z: 400.0
+        r: -250.0
+        buttons: 0
+        duration_sec: 0.75
+      STOP:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        r: 0.0
+        buttons: 0
+        duration_sec: 0.1
+      UNKNOWN:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        r: 0.0
+        buttons: 0
+        duration_sec: 0.1
+
+  # KeepAlive - Required to maintain control authority
+  keep_alive:
+    enabled: true
+    topic: "/R1/keep_alive"
+    publish_rate_hz: 1.0
+    is_active: true
+    # Flight modes: NONE=0, GROUND_ROLL=1, MANUAL=2, POSITION=3, ALTITUDE=4, etc.
+    requested_flight_mode: 1  # GROUND_ROLL
+    command_reboot: false
+
+  # State subscription for monitoring
+  state:
+    enabled: true
+    topic: "/R1/state"
+
+  # Feedback publisher
+  feedback:
+    enabled: true
+    topic: "/R1/navigation/feedback"
+
+  # Status publisher
+  status:
+    enabled: true
+    topic: "/R1/navigation/status"
+
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+
+model:
+  variant: "internvla_n1"
+
+  input_format:
+    target_width: 640
+    target_height: 480
+
+  model_settings:
+    policy_name: "InternVLAN1_Policy"
+    device: "cuda:0"
+    width: 640
+    height: 480
+    resize_w: 384
+    resize_h: 384
