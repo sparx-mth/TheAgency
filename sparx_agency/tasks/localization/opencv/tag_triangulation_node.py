@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-for full pose (world_T_cam) using:
-  - Known tag poses in WORLD (from YAML)
-  - AprilTag detection (pupil_apriltags)
-  - solvePnP (OpenCV) to estimate tag pose in CAMERA
-  - Compose transforms: world_T_cam = world_T_tag * tag_T_cam
+Tag Triangulation (world_T_cam) using AprilTags + OpenCV (no ROS).
+
+Pipeline:
+  1) Known tag poses in WORLD (YAML): world_T_tag
+  2) AprilTag detection (pupil_apriltags) -> 2D corners
+  3) solvePnP (OpenCV IPPE_SQUARE) -> tag_T_cam (TAG -> CAM)
+  4) Invert -> cam_T_tag (CAM -> TAG)
+  5) Estimate camera pose in world: world_T_cam from multiple tags
 
 Outputs:
-  - Prints / overlays (x,y,z) and quaternion (qx,qy,qz,qw) of camera in world frame
+  - Prints / overlays (x,y,z) + quaternion (qx,qy,qz,qw)
   - Optional JSONL logging per frame
 
 Usage example:
@@ -18,6 +21,7 @@ Usage example:
       --source 0 \
       --out_json /tmp/triangulation_log.jsonl
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,7 +49,7 @@ from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     tag_object_points,
     make_detector,
     invert_T,
-    solvepnp_tag_T_cam_ippe_square,
+    solvepnp_ippe_square,
 )
 
 
@@ -194,7 +198,7 @@ class TagTriangulationOpenCVTask:
                 corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
 
                 # tag_T_cam: TAG -> CAM
-                tag_T_cam = solvepnp_tag_T_cam_ippe_square(
+                tag_T_cam = solvepnp_ippe_square(
                     corners_2d=corners,
                     obj_pts_3d=self.obj_pts,
                     K=self.calib.K,

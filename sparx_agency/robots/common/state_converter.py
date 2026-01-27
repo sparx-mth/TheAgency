@@ -1,3 +1,4 @@
+from __future__ import annotations
 import numpy as np
 
 from sparx_agency.core.common.types import PoseSE3, Intrinsics, Pose3D, State3D, Twist3D
