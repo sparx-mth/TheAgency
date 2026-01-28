@@ -1,20 +1,22 @@
 """
-Main simulation loop (dynamic environment).
+Main simulation loop - CLEAN VERSION.
 
-Notes:
-- This loop uses core modules to create a single initial trajectory (planner+smoother).
-- After that, the environment ONLY:
-  - updates dynamic obstacles
-  - provides collision callback
-  - draws local interaction radius
-  - computes hazard flags (geometric only)
-No replanning/re-smoothing happens here.
+This file is PURE ORCHESTRATION - no algorithmic code.
+All algorithms (planning, smoothing, tracking) come from core modules.
+
+Architecture:
+1. Build obstacle map from config
+2. Global Planning: RRT* creates path
+3. Smoother: Convert path to trajectory
+4. Tracker: Pure pursuit follows trajectory
+5. Visualization: Show progress, allow click-to-place obstacles
+
+Click-placed obstacles are STATIC - they don't move.
+The simulation just tracks the pre-planned trajectory.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Tuple, Dict, Any, Optional, List
-import math
+from typing import Tuple
 
 from sparx_agency.core.common.types import Pose2D, Pose3D, Twist3D, State3D
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
@@ -25,15 +27,16 @@ from sparx_agency.core.planning.smoothers.hermite import HermiteSmoother, Hermit
 from sparx_agency.core.planning.smoothers.minsnap import MinSnapSmoother, MinSnapParams
 from sparx_agency.core.planning.trackers.pure_pursuit import PurePursuitTracker, PurePursuitParams
 
-from .config import ScenarioConfig
-from .drone_sim import DroneSimulator, DroneSimParams
-from .map_dynamic import ObstacleMapDynamic
-from .visualization import DroneVisualizer
+from sparx_agency.tasks.planning.dynamic_interaction_environment.config import ScenarioConfig
+from sparx_agency.tasks.planning.dynamic_interaction_environment.drone_sim import DroneSimulator, DroneSimParams
+from sparx_agency.tasks.planning.dynamic_interaction_environment.obstacle_map import ObstacleMap
+from sparx_agency.tasks.planning.dynamic_interaction_environment.visualization import Visualizer
 
 
-def build_obstacle_map(cfg: ScenarioConfig) -> ObstacleMapDynamic:
+def build_obstacle_map(cfg: ScenarioConfig) -> ObstacleMap:
+    """Build obstacle map from config."""
     m = cfg.map
-    obs_map = ObstacleMapDynamic(m.width, m.height, m.origin_x, m.origin_y, m.resolution)
+    obs_map = ObstacleMap(m.width, m.height, m.origin_x, m.origin_y, m.resolution)
     for o in m.obstacles:
         if o.type == "rect":
             obs_map.add_rectangle(o.x, o.y, o.w, o.h)
@@ -42,106 +45,27 @@ def build_obstacle_map(cfg: ScenarioConfig) -> ObstacleMapDynamic:
     return obs_map
 
 
-def _distance_point_to_rect(px: float, py: float, rx: float, ry: float, rw: float, rh: float) -> float:
-    cx = max(rx, min(px, rx + rw))
-    cy = max(ry, min(py, ry + rh))
-    return math.hypot(px - cx, py - cy)
-
-
-def compute_hazards(
-    obs_map: ObstacleMapDynamic,
-    drone_xy: Tuple[float, float],
-    local_radius_m: float,
-    trajectory,
-    t_now: float,
-    horizon_s: float,
-    sample_dt_s: float,
-    path_proximity_m: float,
-) -> Dict[str, Any]:
-    """
-    Environment-only hazard flags:
-    - in_local_radius: any obstacle intersects local radius
-    - near_path_ahead: any obstacle is near future trajectory points (geometric)
-    """
-    dx, dy = drone_xy
-    r_local = float(local_radius_m)
-
-    in_local_radius = False
-
-    # Static circles
-    for cx, cy, r in obs_map.circles:
-        if math.hypot(cx - dx, cy - dy) <= (r + r_local):
-            in_local_radius = True
-            break
-
-    # Static rects
-    if not in_local_radius:
-        for rx, ry, rw, rh in obs_map.rectangles:
-            if _distance_point_to_rect(dx, dy, rx, ry, rw, rh) <= r_local:
-                in_local_radius = True
-                break
-
-    # Dynamic circles
-    if not in_local_radius:
-        for o in obs_map.dynamic_circles:
-            if math.hypot(o.cx - dx, o.cy - dy) <= (o.r + r_local):
-                in_local_radius = True
-                break
-
-    # "Path-ahead" proximity: check future trajectory samples against obstacle boundaries
-    near_path_ahead = False
-    if trajectory is not None:
-        t_end = t_now + float(horizon_s)
-        t = t_now
-        while t <= t_end:
-            p = trajectory.sample(t)
-            px, py = float(p.x), float(p.y)
-
-            # static circles
-            for cx, cy, r in obs_map.circles:
-                if math.hypot(px - cx, py - cy) <= (r + path_proximity_m):
-                    near_path_ahead = True
-                    break
-            if near_path_ahead:
-                break
-
-            # static rects
-            for rx, ry, rw, rh in obs_map.rectangles:
-                if _distance_point_to_rect(px, py, rx, ry, rw, rh) <= path_proximity_m:
-                    near_path_ahead = True
-                    break
-            if near_path_ahead:
-                break
-
-            # dynamic circles
-            for o in obs_map.dynamic_circles:
-                if math.hypot(px - o.cx, py - o.cy) <= (o.r + path_proximity_m):
-                    near_path_ahead = True
-                    break
-            if near_path_ahead:
-                break
-
-            t += float(sample_dt_s)
-
-    return {
-        "in_local_radius": in_local_radius,
-        "near_path_ahead": near_path_ahead,
-        "dynamic_count": len(obs_map.dynamic_circles),
-    }
-
-
 def run_simulation(cfg: ScenarioConfig) -> bool:
+    """
+    Run the trajectory tracking simulation.
+
+    Returns True if goal was reached, False otherwise.
+    """
     print(f"\n{'=' * 60}\nSCENARIO: {cfg.name}\n{'=' * 60}")
 
-    # Map
+    # -------------------------------------------------------------------------
+    # 1. Build obstacle map
+    # -------------------------------------------------------------------------
     obs_map = build_obstacle_map(cfg)
-    costmap = obs_map.to_costmap(cfg.map.inflate_radius, include_dynamic=False)
+    costmap = obs_map.to_costmap(cfg.map.inflate_radius, include_placed=False)
     print(f"Costmap: {costmap.width}x{costmap.height}, res={costmap.resolution}m")
 
-    # Initial plan + smooth once (driver responsibility, not environment)
+    # -------------------------------------------------------------------------
+    # 2. Global planning (from core)
+    # -------------------------------------------------------------------------
     start = Pose2D(x=cfg.start[0], y=cfg.start[1])
     goal = Pose2D(x=cfg.goal[0], y=cfg.goal[1])
-    print(f"Planning (initial only): ({start.x:.2f}, {start.y:.2f}) -> ({goal.x:.2f}, {goal.y:.2f})")
+    print(f"Planning: ({start.x:.2f}, {start.y:.2f}) -> ({goal.x:.2f}, {goal.y:.2f})")
 
     p = cfg.planner
     planner = RRTStarOmplPlanner(
@@ -153,21 +77,34 @@ def run_simulation(cfg: ScenarioConfig) -> bool:
         )
     )
     plan_result = planner.plan(PlanRequest(start=start, goal=goal, frame_id="map"), costmap)
+
     if not plan_result.ok:
         print(f"Planning failed: {plan_result.message}")
         return False
     print(f"Path: {len(plan_result.path.points)} waypoints, {plan_result.path.length():.2f}m")
 
+    # -------------------------------------------------------------------------
+    # 3. Smoothing (from core)
+    # -------------------------------------------------------------------------
     s = cfg.smoother
-    smoother = (
-        HermiteSmoother(HermiteParams(dt=s.dt, nominal_speed_xy=s.nominal_speed, tangent_scale=s.tangent_scale))
-        if s.type == "hermite"
-        else MinSnapSmoother(MinSnapParams(dt=s.dt, nominal_speed_xy=s.nominal_speed))
-    )
+    if s.type == "hermite":
+        smoother = HermiteSmoother(HermiteParams(
+            dt=s.dt,
+            nominal_speed_xy=s.nominal_speed,
+            tangent_scale=s.tangent_scale
+        ))
+    else:
+        smoother = MinSnapSmoother(MinSnapParams(
+            dt=s.dt,
+            nominal_speed_xy=s.nominal_speed
+        ))
+
     trajectory = smoother.smooth(SmootherRequest(path=plan_result.path))
     print(f"Trajectory: {trajectory.total_time:.2f}s")
 
-    # Tracker (core algorithm under test)
+    # -------------------------------------------------------------------------
+    # 4. Tracker (from core)
+    # -------------------------------------------------------------------------
     t = cfg.tracker
     tracker = PurePursuitTracker(
         PurePursuitParams(
@@ -186,7 +123,9 @@ def run_simulation(cfg: ScenarioConfig) -> bool:
     )
     tracker.reset()
 
-    # Simulator
+    # -------------------------------------------------------------------------
+    # 5. Drone simulator
+    # -------------------------------------------------------------------------
     sc = cfg.simulator
     sim_params = DroneSimParams(
         dt=sc.dt,
@@ -214,77 +153,81 @@ def run_simulation(cfg: ScenarioConfig) -> bool:
     sim = DroneSimulator(params=sim_params, obstacle_fn=collision_fn, seed=cfg.seed)
     sim.reset(x=start.x, y=start.y, z=0.0)
 
-    # Visualizer
-    li = cfg.local_interaction
-    vis = DroneVisualizer(
+    # -------------------------------------------------------------------------
+    # 6. Visualizer
+    # -------------------------------------------------------------------------
+    vis = Visualizer(
         obstacle_map=obs_map,
         trajectory=trajectory,
         raw_path=plan_result.path,
         drone_radius=sim_params.collision_radius,
-        local_radius_m=li.radius_m,
-        show_local_radius=li.enabled,
+        click_obstacle_radius=cfg.click_obstacles.default_radius,
+        click_obstacles_enabled=cfg.click_obstacles.enabled,
     )
 
-    print("\nRunning... (SPACE=pause, Q=quit)")
+    print("\nRunning... (SPACE=pause, Q=quit, Click=place obstacle, C=clear)")
+
     dt = sim_params.dt
     t_sim = 0.0
     success = False
 
+    # -------------------------------------------------------------------------
+    # Main loop - PURE TRACKING, no algorithm code
+    # -------------------------------------------------------------------------
     while t_sim < cfg.max_time:
-        # Environment: update dynamic obstacles
-        if cfg.dynamic.enabled:
-            obs_map.update_dynamic(dt, bounce_on_walls=cfg.dynamic.bounce_on_walls)
-
-        # Core interaction
+        # Get measured state
         x, y, z, vx, vy, vz, yaw = sim.get_measured_state()
         state = State3D(
             pose=Pose3D(x=x, y=y, z=z, yaw=yaw),
             twist=Twist3D(vx=vx, vy=vy, vz=vz, yaw_rate=0.0),
         )
 
+        # Track trajectory (all logic in core)
         tr = tracker.step(TrackerRequest(state=state, trajectory=trajectory, t=t_sim))
+
+        # Step simulator
         sim_state, info = sim.step(tr.command.x, tr.command.y, tr.command.z, tr.command.yaw_rate)
 
-        # Environment-only hazard flags
-        hazards = compute_hazards(
-            obs_map=obs_map,
-            drone_xy=(sim_state.x, sim_state.y),
-            local_radius_m=cfg.local_interaction.radius_m if cfg.local_interaction.enabled else 0.0,
-            trajectory=trajectory if cfg.local_interaction.enabled else None,
-            t_now=t_sim,
-            horizon_s=cfg.local_interaction.horizon_s,
-            sample_dt_s=cfg.local_interaction.sample_dt_s,
-            path_proximity_m=cfg.local_interaction.path_proximity_m,
-        )
-
+        # Update visualizer
         lookahead = (tr.reference.x, tr.reference.y, tr.reference.z) if tr.reference else None
         running = vis.update(
-            (sim_state.x, sim_state.y, sim_state.z),
-            (sim_state.vx, sim_state.vy, sim_state.vz),
-            sim_state.yaw,
-            t_sim,
-            tr.metadata.get("cross_track_error", 0.0),
-            tr.metadata.get("progress_idx", 0),
+            drone_position=(sim_state.x, sim_state.y, sim_state.z),
+            drone_velocity=(sim_state.vx, sim_state.vy, sim_state.vz),
+            drone_yaw=sim_state.yaw,
+            time=t_sim,
+            cross_track_error=tr.metadata.get("cross_track_error", 0.0),
+            progress_idx=tr.metadata.get("progress_idx", 0),
             lookahead_point=lookahead,
             gust_active=info["gust_active"],
             collision=info["collision"],
             done=tr.metadata.get("done", False),
             failed=tr.metadata.get("failed", False),
             wind=info["wind"],
-            hazards=hazards,
         )
 
         if not running:
             break
+
+        # Check goal reached
         if tr.metadata.get("done"):
             success = True
-            print("\n✓ GOAL REACHED!")
+            print(f"\n✓ GOAL REACHED at t={t_sim:.2f}s")
             break
+
         if tr.metadata.get("failed"):
             print(f"\n✗ FAILED: {tr.metadata.get('reason', 'unknown')}")
             break
 
         t_sim += dt
 
-    vis.wait_for_close() if running else vis.close()
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    print(f"\nPlaced obstacles: {len(obs_map.placed_obstacles)}")
+
+    if running:
+        vis.wait_for_close()
+    else:
+        vis.close()
+
     return success
