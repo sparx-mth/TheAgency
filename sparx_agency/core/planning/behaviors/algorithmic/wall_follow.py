@@ -35,7 +35,7 @@ from sparx_agency.core.planning.environment.occupancy_grid2d import OccupancyGri
 
 from ..interfaces.context import BehaviorContext
 from ..interfaces.output import BehaviorOutput, BehaviorStatus
-from ..utils.world_adapters import costmap_from_occupancy_grid
+from sparx_agency.core.planning.integrations.maps.occupancy_to_costmap2d import costmap_from_occupancy_grid
 
 
 @dataclass

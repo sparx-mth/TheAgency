@@ -40,7 +40,7 @@ from typing import Any, Optional
 from sparx_agency.core.common.types import State3D
 
 from .types import SafetyStatus, UnknownPolicy
-from .adapters import query_tube
+from sparx_agency.core.planning.safety.adapters import query_tube
 
 
 @dataclass(frozen=True)
