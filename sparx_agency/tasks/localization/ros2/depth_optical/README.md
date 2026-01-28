@@ -114,7 +114,7 @@ if you want to record
 
 ros2 bag record   /clock   /simple_drone/front/image_raw   /simple_drone/front/camera_info   /simple_drone/gt_pose   /simple_drone/gt_vel   /simple_drone/odom   /simple_drone/imu   /tf   /tf_static
 
-
+sudo apt update
 apt-get install -y \
   ros-humble-rosbag2 \
   ros-humble-rosbag2-storage-default-plugins \
