@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """
-Run Trajectory Tracking Dynamic Environment.
+Run Trajectory Tracking Simulation - CLEAN VERSION.
 
 Usage:
-    python run_pygame_sim.py              # Run all scenarios
-    python run_pygame_sim.py -s 1         # Run scenario 1
+    python run_sim.py              # Run scenario 1
+    python run_sim.py -s 2         # Run scenario 2
+    python run_sim.py -s 3         # Run scenario 3
+    python run_sim.py --all        # Run all scenarios
 
 Controls:
-    SPACE  pause
-    Q/ESC  quit
-    Left Click  spawn dynamic obstacle (circle)
-    C      clear dynamic obstacles
-    R      toggle local radius overlay
+    Left Click  : Place obstacle
+    Right Click : Remove obstacle
+    C           : Clear all placed obstacles
+    SPACE       : Pause/resume
+    Q/ESC       : Quit
 """
 import argparse
 
-from sparx_agency.tasks.planning.dynamic_interaction_environment.config import SCENARIOS, ScenarioConfig
-from sparx_agency.tasks.planning.dynamic_interaction_environment.simulation import run_simulation
+from config import SCENARIOS, ScenarioConfig
 
 
 def apply_overrides(cfg: ScenarioConfig, args) -> ScenarioConfig:
+    """Apply command-line overrides to config."""
     if args.smoother:
         cfg.smoother.type = args.smoother
     if args.seed is not None:
@@ -29,31 +31,43 @@ def apply_overrides(cfg: ScenarioConfig, args) -> ScenarioConfig:
     if args.no_wind:
         cfg.simulator.wind_enabled = False
         cfg.simulator.gust_enabled = False
-    if args.no_dynamic:
-        cfg.dynamic.enabled = False
-    if args.local_radius is not None:
-        cfg.local_interaction.radius_m = args.local_radius
-        cfg.local_interaction.enabled = cfg.local_interaction.radius_m > 0.0
+    if args.obstacle_radius is not None:
+        cfg.click_obstacles.default_radius = args.obstacle_radius
     return cfg
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Trajectory Tracking Dynamic Environment")
-    parser.add_argument("-s", "--scenario", type=int, choices=[1, 2, 3, 4], default=4, help="Scenario (1-3) or 4 for all")
-    parser.add_argument("--smoother", choices=["hermite", "minsnap"], help="Smoother type")
-    parser.add_argument("--seed", type=int, help="Random seed")
-    parser.add_argument("--max-time", type=float, help="Max simulation time (s)")
-    parser.add_argument("--no-wind", action="store_true", help="Disable wind and gusts")
-    parser.add_argument("--no-dynamic", action="store_true", help="Disable dynamic obstacles update/spawn")
-    parser.add_argument("--local-radius", type=float, help="Local interaction radius (m). 0 disables.")
+    parser = argparse.ArgumentParser(description="Trajectory Tracking Simulation")
+
+    # Scenario selection
+    parser.add_argument("-s", "--scenario", type=int, choices=[1, 2, 3], default=1,
+                        help="Scenario number (1-3)")
+    parser.add_argument("--all", action="store_true",default=True,
+                        help="Run all scenarios")
+
+    # General options
+    parser.add_argument("--smoother", choices=["hermite", "minsnap"],
+                        help="Smoother type")
+    parser.add_argument("--seed", type=int,
+                        help="Random seed")
+    parser.add_argument("--max-time", type=float,
+                        help="Max simulation time (s)")
+    parser.add_argument("--no-wind", action="store_true",
+                        help="Disable wind and gusts")
+    parser.add_argument("--obstacle-radius", type=float,
+                        help="Radius for click-placed obstacles (m)")
+
     args = parser.parse_args()
 
-    scenarios = [1, 2, 3] if args.scenario == 4 else [args.scenario]
+    # Import here to avoid issues if pygame not installed
+    from simulation import run_simulation
+
+    scenarios = [1, 2, 3] if args.all else [args.scenario]
     results = []
 
-    print("\n" + "#" * 60)
-    print("# TRAJECTORY TRACKING DYNAMIC ENVIRONMENT")
-    print("#" * 60)
+    print("\n" + "#" * 50)
+    print("# TRAJECTORY TRACKING SIMULATION")
+    print("#" * 50)
 
     for num in scenarios:
         cfg = apply_overrides(SCENARIOS[num](), args)
@@ -62,11 +76,11 @@ def main() -> None:
         print(f"\nScenario {num}: {'✓ SUCCESS' if ok else '✗ ENDED'}")
 
     if len(scenarios) > 1:
-        print("\n" + "#" * 60)
+        print("\n" + "#" * 50)
         print("# SUMMARY")
         for num, ok in results:
             print(f"  Scenario {num}: {'✓' if ok else '✗'}")
-        print("#" * 60)
+        print("#" * 50)
 
 
 if __name__ == "__main__":
