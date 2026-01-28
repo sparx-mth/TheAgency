@@ -17,7 +17,8 @@ class DepthAnythingV2Config:
     # If you want relative depth instead, examples: "depth-anything/Depth-Anything-V2-Small-hf"
     device: Optional[str] = "cuda"  # "cuda", "cpu", or None=auto
     assume_bgr: bool = False      # set True if your images come as BGR (OpenCV)
-    max_range_m: float = 15.0
+    max_range_m: float = 35.0
+    min_range_m: float = 0.3
     debug: bool = False
 
 
@@ -66,11 +67,9 @@ class DepthAnythingV2DepthModel(DepthModel):
 
         # 3. To see a person clearly, the points must have a wide Z-range.
         # Person should be at ~2.0m, Background at ~15.0m.
-        max_range = 5.0
-        min_range = 0.5  # Objects start 0.5m in front of camera
         # depth_inverted = 1.0 - depth_norm
         # depth_m = depth_inverted * (max_range - min_range) + min_range
-        depth_m = depth_norm * (max_range - min_range) + min_range
+        depth_m = depth_norm * (self.cfg.max_range_m - self.cfg.min_range_m) + self.cfg.min_range_m
 
         # depth_m = (d_max - raw_disparity)/50
         return depth_m

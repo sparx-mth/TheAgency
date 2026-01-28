@@ -66,60 +66,6 @@ def numpy_to_image_msg(arr: np.ndarray, *, frame_id: str, stamp, encoding: str) 
     msg.data = arr.tobytes()
     return msg
 
-
-# 
-def get_objects_by_quantized_surfaces(depth_map, min_dist=0.5, max_dist=4.0):
-    # 1. Convert real meters to 0-255 grayscale
-    # We use your 0.5m to 5.0m range
-    depth_scaled = ((depth_map - 0.5) / (5.0 - 0.5) * 255).clip(0, 255).astype(np.uint8)
-
-    # 2. QUANTIZE: This is the magic step.
-    # By dividing by 10 and multiplying by 10, all pixels within
-    # a 10-unit range (your smoothness range) get the SAME value.
-    quantized = (depth_scaled // 10) * 10
-
-    detected_objects = []
-
-    # 3. Iterate through the possible depth levels
-    # We only care about levels representing distances < 4.0m
-    unique_levels = np.unique(quantized)
-
-    for level in unique_levels:
-        if level == 0 or level > 200: continue  # Skip extreme near/far noise
-
-        # Create a mask for just this depth "slice"
-        mask = (quantized == level).astype(np.uint8) * 255
-
-        # 4. Use Morphology to bridge small gaps (like the chair slats)
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-        # 5. Connected Components: "If you are close to each other, you are the same object"
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
-
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if 800 < area < (depth_map.shape[0] * depth_map.shape[1] * 0.3):
-                x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], \
-                    stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-
-                bbox_area = w * h
-                area_ratio = area / bbox_area
-                image_area = depth_map.shape[1] * depth_map.shape[0]
-
-                if area_ratio < 0.2:
-                    continue
-
-                if area_ratio > 0.6 and area > 0.4 * image_area:
-                    continue
-
-                detected_objects.append({
-                    "bbox": (x, y, x + w, y + h),
-                    "avg_depth": level  # Or calculate median from depth_map
-                })
-
-    return detected_objects
-
 import numpy as np
 import cv2
 
@@ -369,313 +315,229 @@ def get_objects_via_histogram(
 
     return final
 
+def _finite_mask(depth_m: np.ndarray) -> np.ndarray:
+    return np.isfinite(depth_m) & (depth_m > 0)
 
-def get_objects_via_depth_kmeans(
-    depth_map: np.ndarray,
-    min_dist=0.3,
-    max_dist=5.0,
-    K=3,
-    sample_max=200_000,     # sample pixels for speed
-    min_area_px=800,
-    close_kernel=15,
-    close_iters=1,
-    prob=None,              # keep for signature compatibility
-):
-    depth = np.asarray(depth_map, np.float32)
-    H, W = depth.shape[:2]
-    image_area = H * W
+def estimate_floor_mask_from_bottom_band(
+    depth_m: np.ndarray,
+    min_dist: float = 0.3,
+    max_dist: float = 5.0,
+    bottom_band_frac: float = 0.22,
+    x_trim_frac: float = 0.06,
+    close_thresh_m: float = 0.08,
+    smooth_ksize: int = 31,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Estimate a floor mask using per-row robust depth from a bottom band.
+    Returns:
+      floor_mask: bool[H,W]
+      floor_profile: float[H] depth per row (nan where unknown)
+    """
+    H, W = depth_m.shape[:2]
+    d = depth_m.astype(np.float32).copy()
 
-    valid = np.isfinite(depth) & (depth > 0) & (depth >= min_dist) & (depth <= max_dist)
-    if valid.sum() < 200:
-        return []
+    # Clamp to working range
+    d[~_finite_mask(d)] = np.nan
+    d[(d < min_dist) | (d > max_dist)] = np.nan
 
-    vals = depth[valid].reshape(-1, 1)  # Nx1 float32
+    y0 = int(H * (1.0 - bottom_band_frac))
+    x0 = int(W * x_trim_frac)
+    x1 = int(W * (1.0 - x_trim_frac))
 
-    # random subsample for kmeans
-    n = vals.shape[0]
-    if n > sample_max:
-        idx = np.random.choice(n, sample_max, replace=False)
-        train = vals[idx]
+    floor_profile = np.full((H,), np.nan, dtype=np.float32)
+
+    # Robust per-row estimate from trimmed x-range (median is robust)
+    for y in range(y0, H):
+        row = d[y, x0:x1]
+        row = row[np.isfinite(row)]
+        if row.size < 50:
+            continue
+        floor_profile[y] = np.median(row)
+
+    # Smooth profile (ignore NaNs by simple interpolation)
+    ys = np.arange(H)
+    valid = np.isfinite(floor_profile)
+    if valid.sum() >= 10:
+        interp = np.interp(ys, ys[valid], floor_profile[valid]).astype(np.float32)
+        if smooth_ksize and smooth_ksize >= 3:
+            if smooth_ksize % 2 == 0:
+                smooth_ksize += 1
+            interp = cv2.GaussianBlur(interp.reshape(-1, 1), (1, smooth_ksize), 0).reshape(-1)
+        floor_profile = interp
     else:
-        train = vals
+        # Not enough signal, return empty mask
+        return np.zeros((H, W), dtype=bool), floor_profile
 
-    # kmeans in 1D
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 1e-3)
-    attempts = 3
-    flags = cv2.KMEANS_PP_CENTERS
-    compactness, labels_t, centers = cv2.kmeans(train, K, None, criteria, attempts, flags)
-    centers = centers.reshape(-1)  # K depths
+    # Floor pixels are those close to the floor profile for their row
+    floor_mask = np.zeros((H, W), dtype=bool)
+    for y in range(y0, H):
+        fy = floor_profile[y]
+        if not np.isfinite(fy):
+            continue
+        floor_mask[y, :] = np.isfinite(d[y, :]) & (np.abs(d[y, :] - fy) <= close_thresh_m)
 
-    # Assign ALL valid pixels to nearest center (1D nearest mean)
-    # (faster than re-running kmeans full)
-    # Compute |d - center|
-    diffs = np.abs(vals - centers.reshape(1, -1))  # NxK
-    lbl_all = np.argmin(diffs, axis=1).astype(np.int32)
+    return floor_mask, floor_profile
 
-    # Build full label image for valid pixels
-    label_img = -np.ones((H, W), dtype=np.int32)
-    label_img[valid] = lbl_all
-
-    # Background is usually the cluster with the MOST pixels
-    counts = np.bincount(lbl_all, minlength=K)
-    bg_label = int(np.argmax(counts))
-
-    detected_objects = []
-    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel, close_kernel))
-
-    for k in range(K):
-        if k == bg_label:
-            continue  # skip background cluster
-
-        mask = (label_img == k).astype(np.uint8) * 255
-
-        # close holes / merge chair slats
-        if close_kernel > 1 and close_iters > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close, iterations=close_iters)
-
-        num, labels_cc, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        for i in range(1, num):
-            x, y, w, h, area = stats[i]
-            if area < min_area_px:
-                continue
-
-            comp = (labels_cc == i) & valid
-            if comp.sum() == 0:
-                continue
-
-            dvals = depth[comp]
-            avg_depth = float(np.mean(dvals))
-            d_min = float(np.percentile(dvals, 10))
-            d_max = float(np.percentile(dvals, 90))
-            spread = d_max - d_min
-            if should_skip_component(x, y, w, h, area, H, W, avg_depth, spread):
-                continue
-            if spread > 0.9:  # start with 0.5, tune (0.3–0.8 depending on your depth scale)
-                continue
-            print(f" ========= Object {i}, spread: {spread:.2f}m, ========= \n touches border: x: {x}, y: {y}, w: {w}, h: {h}, W: {W}, H: {H}, margin: {1}")
-            detected_objects.append({
-                "bbox": (int(x), int(y), int(x + w), int(y + h)),
-                "avg_depth": avg_depth,
-                "area": int(area),
-                "depth_range": (d_min, d_max),
-                "cluster_center": float(centers[k]),
-                "cluster_id": int(k),
-            })
-            print(detected_objects[-1])
-
-    return detected_objects
-
-def touches_border(x, y, w, h, W, H, margin=1):
-    return (x <= margin) or (y <= margin) or (x + w >= W - margin) or (y + h >= H - margin)
-
-
-def should_skip_component(x, y, w, h, area, H, W, avg_depth, spread,
-                          border_margin=2,
-                          min_area_px=800,
-                          max_spread_m=0.45,
-                          strip_frac=0.12,
-                          border_area_frac=0.003):
+def compute_dynamic_delta_m(
+    floor_residuals: np.ndarray,
+    base_m: float = 0.03,
+    k: float = 4.0,
+    clip=(0.03, 0.25),
+) -> float:
     """
-    Rejects background-ish components:
-      - tiny noise
-      - border-touching strips (floor/wall bands)
-      - border-touching components that are too big
-      - depth-incoherent components (large spread)
+    Computes a dynamic depth delta (meters) based on floor residual statistics.
+
+    floor_residuals = floor_depth - depth (only where floor_mask==1)
     """
-    if area < min_area_px:
-        return True
+    r = floor_residuals[np.isfinite(floor_residuals)]
+    if r.size < 200:
+        return float(np.clip(base_m, clip[0], clip[1]))
 
-    touches = (x <= border_margin) or (y <= border_margin) or (x + w >= W - border_margin) or (y + h >= H - border_margin)
-    image_area = H * W
+    med = np.median(r)
+    mad = np.median(np.abs(r - med)) + 1e-6
+    sigma = 1.4826 * mad  # robust std
 
-    # 1) Depth coherence gate (kills gradients / planes)
-    # Use absolute + relative guard
-    if spread > max(max_spread_m, 0.25 * avg_depth):
-        return True
+    delta = base_m + k * sigma
+    return float(np.clip(delta, clip[0], clip[1]))
 
-    if touches:
-        # 2) Strip gate: if it touches border and is "thin", it's usually floor/wall band
-        if (h < strip_frac * H) or (w < strip_frac * W):
-            return True
+def object_mask_from_floor(
+    depth_m: np.ndarray,
+    floor_profile: np.ndarray,
+    delta_m: float,
+    floor_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Returns binary mask of objects ABOVE the floor.
+    """
+    floor_2d = floor_profile[:, None]  # broadcast
+    residual = floor_2d - depth_m
 
-        # 3) Border big blob gate (more aggressive than before)
-        if area > border_area_frac * image_area:
-            return True
+    mask = residual > delta_m
 
-    return False
+    if floor_mask is not None:
+        mask[floor_mask > 0] = 0
 
+    return mask.astype(np.uint8)
+#
+# def apply_mask_to_rgb(bgr: np.ndarray, mask: np.ndarray, bg_color=(0, 0, 0)):
+#     out = np.zeros_like(bgr)
+#     out[:] = bg_color
+#     out[mask > 0] = bgr[mask > 0]
+#     return out
 
-def get_objects_via_depth_edges(
-    depth_map: np.ndarray,
-    min_dist=0.3,
-    max_dist=5.0,
-    grad_thresh=0.06,      # meters-per-pixel-ish (tune 0.03–0.12)
-    min_area_px=800,
-    close_kernel=17,
-    close_iters=1,
-):
-    depth = np.asarray(depth_map, np.float32)
-    H, W = depth.shape[:2]
+def choose_near_bins(
+    depth_m: np.ndarray,
+    min_dist: float = 0.3,
+    max_dist: float = 5.0,
+    bins: int = 80,
+    k_near: int = 2,
+    min_bin_frac: float = 0.01,
+    ignore_floor_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pick K near (small depth) histogram bins that have enough mass.
+    Returns:
+      bin_edges: float[bins+1]
+      hist: float[bins]
+      chosen_bin_ids: int[k'] (k' <= k_near)
+    """
+    d = depth_m.astype(np.float32)
+    mask = _finite_mask(d) & (d >= min_dist) & (d <= max_dist)
+    if ignore_floor_mask is not None:
+        mask = mask & (~ignore_floor_mask.astype(bool))
 
-    valid = np.isfinite(depth) & (depth > 0) & (depth >= min_dist) & (depth <= max_dist)
-    if valid.sum() < 200:
-        return []
+    vals = d[mask]
+    if vals.size == 0:
+        bin_edges = np.linspace(min_dist, max_dist, bins + 1, dtype=np.float32)
+        return bin_edges, np.zeros((bins,), dtype=np.float32), np.array([], dtype=np.int32)
 
-    # Fill invalid with nearby values to avoid crazy gradients
-    d = depth.copy()
-    d[~valid] = np.nan
-    # simple inpaint-like fill: replace NaNs with median of valid
-    med = float(np.nanmedian(d))
-    d = np.nan_to_num(d, nan=med)
+    hist, bin_edges = np.histogram(vals, bins=bins, range=(min_dist, max_dist))
+    hist = hist.astype(np.float32)
+    total = float(hist.sum()) + 1e-6
 
-    # Smooth a bit to reduce speckle noise
-    d_blur = cv2.GaussianBlur(d, (5, 5), 0)
+    # Candidate bins sorted by depth (near first)
+    candidate_ids = np.arange(bins, dtype=np.int32)
+    # Keep bins with enough mass
+    good = (hist / total) >= float(min_bin_frac)
+    candidate_ids = candidate_ids[good]
 
-    # Gradient magnitude
-    gx = cv2.Sobel(d_blur, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(d_blur, cv2.CV_32F, 0, 1, ksize=3)
-    mag = cv2.magnitude(gx, gy)
-
-    # Edge mask where depth changes sharply
-    edge = (mag > grad_thresh).astype(np.uint8) * 255
-
-    # Close to connect boundaries and fill gaps
-    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel, close_kernel))
-    edge = cv2.morphologyEx(edge, cv2.MORPH_CLOSE, k_close, iterations=close_iters)
-
-    # Convert boundary-ish mask into regions: fill holes by closing + dilation
-    edge = cv2.dilate(edge, k_close, iterations=1)
-
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(edge, connectivity=8)
-
-    objs = []
-    for i in range(1, num):
-        x, y, w, h, area = stats[i]
-        if area < min_area_px:
-            continue
-
-        # get depth stats inside bbox, using valid pixels only
-        roi_valid = valid[y:y+h, x:x+w]
-        roi_depth = depth[y:y+h, x:x+w]
-        if roi_valid.sum() < 50:
-            continue
-
-        dvals = roi_depth[roi_valid]
-        avg = float(np.mean(dvals))
-        d10 = float(np.percentile(dvals, 10))
-        d90 = float(np.percentile(dvals, 90))
-
-        objs.append({
-            "bbox": (int(x), int(y), int(x+w), int(y+h)),
-            "avg_depth": avg,
-            "area": int(area),
-            "depth_range": (d10, d90),
-            "source": "edges"
-        })
-
-    return objs
+    # Near-first: already increasing id corresponds to increasing depth
+    chosen = candidate_ids[: int(k_near)]
+    return bin_edges.astype(np.float32), hist, chosen.astype(np.int32)
 
 
-def iou(a, b):
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = max(0, ix2-ix1), max(0, iy2-iy1)
-    inter = iw*ih
-    area_a = max(1, (ax2-ax1)*(ay2-ay1))
-    area_b = max(1, (bx2-bx1)*(by2-by1))
-    return inter / float(area_a + area_b - inter + 1e-6)
+def mask_by_bins(
+    depth_m: np.ndarray,
+    bin_edges: np.ndarray,
+    chosen_bin_ids: np.ndarray,
+    keep_floor: bool = False,
+    floor_mask: np.ndarray | None = None,
+    out_background: int = 0,  # 0=black, 255=white
+) -> np.ndarray:
+    """
+    Build a uint8 mask where pixels in chosen bins are 255, else background value.
+    """
+    H, W = depth_m.shape[:2]
+    d = depth_m.astype(np.float32)
+    keep = np.zeros((H, W), dtype=bool)
 
-def merge_boxes(objs, iou_thr=0.5):
-    objs = sorted(objs, key=lambda o: o.get("area", 0), reverse=True)
-    kept = []
-    for o in objs:
-        if all(iou(o["bbox"], k["bbox"]) < iou_thr for k in kept):
-            kept.append(o)
-    return kept
+    for bid in chosen_bin_ids.tolist():
+        lo = float(bin_edges[bid])
+        hi = float(bin_edges[bid + 1])
+        keep |= _finite_mask(d) & (d >= lo) & (d < hi)
 
+    if keep_floor and floor_mask is not None:
+        keep |= floor_mask.astype(bool)
+    else:
+        if floor_mask is not None:
+            keep &= ~floor_mask.astype(bool)
 
-def preprocess_depth(depth_map, min_dist=0.3, max_dist=5.0):
-    d = np.asarray(depth_map, np.float32)
-    valid = np.isfinite(d) & (d > 0) & (d >= min_dist) & (d <= max_dist)
-
-    if valid.sum() < 200:
-        return d, valid
-
-    # clamp & fill invalid with median (prevents crazy gradients)
-    med = float(np.median(d[valid]))
-    d = np.clip(d, min_dist, max_dist)
-    d2 = d.copy()
-    d2[~valid] = med
-
-    # bilateral filter preserves edges but smooths quantization/noise
-    d2 = cv2.bilateralFilter(d2, d=7, sigmaColor=0.08, sigmaSpace=7)
-
-    return d2, valid
-
-def get_objects_via_depth_edges_adaptive(
-    depth_map, min_dist=0.3, max_dist=5.0,
-    min_area_px=600,
-    close_kernel=17,
-    close_iters=1,
-    grad_percentile=92,     # 90–96 works well
-):
-    d, valid = preprocess_depth(depth_map, min_dist, max_dist)
-    H, W = d.shape[:2]
-
-    gx = cv2.Sobel(d, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(d, cv2.CV_32F, 0, 1, ksize=3)
-    mag = cv2.magnitude(gx, gy)
-
-    mag_v = mag[valid]
-    if mag_v.size < 200:
-        return []
-
-    thr = float(np.percentile(mag_v, grad_percentile))
-    edge = (mag > thr).astype(np.uint8) * 255
-
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel, close_kernel))
-    edge = cv2.morphologyEx(edge, cv2.MORPH_CLOSE, k, iterations=close_iters)
-    edge = cv2.dilate(edge, k, iterations=1)
-
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(edge, connectivity=8)
-
-    objs = []
-    for i in range(1, num):
-        x, y, w, h, area = stats[i]
-        if area < min_area_px:
-            continue
-
-        roi_valid = valid[y:y+h, x:x+w]
-        if roi_valid.sum() < 80:
-            continue
-
-        roi_depth = depth_map[y:y+h, x:x+w]
-        dvals = roi_depth[roi_valid]
-        avg = float(np.mean(dvals))
-        d10 = float(np.percentile(dvals, 10))
-        d90 = float(np.percentile(dvals, 90))
-
-        objs.append({
-            "bbox": (int(x), int(y), int(x+w), int(y+h)),
-            "avg_depth": avg,
-            "area": int(area),
-            "depth_range": (d10, d90),
-            "source": "edges_adapt",
-            "grad_thr": thr,
-        })
-
-    return objs
+    mask = np.full((H, W), out_background, dtype=np.uint8)
+    mask[keep] = 255
+    return mask
 
 
-def bbox_filters(x, y, w, h, W, H):
-    # kill super-thin junk
-    if w < 12 or h < 12:
-        return True
-    # kill extreme aspect ratios
-    ar = max(w/h, h/w)
-    if ar > 8.0:
-        return True
-    return False
+def apply_mask_to_rgb(rgb_bgr: np.ndarray, mask_255: np.ndarray, bg_color=(0, 0, 0)) -> np.ndarray:
+    """
+    Keep pixels where mask==255, paint rest bg_color.
+    """
+    out = np.zeros_like(rgb_bgr)
+    out[:] = bg_color
+    keep = mask_255.astype(np.uint8) == 255
+    out[keep] = rgb_bgr[keep]
+    return out
 
+
+def hist_to_bgr_image(hist: np.ndarray,
+                      height: int = 400,
+                      width: int = 400,
+                      normalize: bool = True) -> np.ndarray:
+    """
+    hist: shape (bins,)
+    returns: BGR image (height, width, 3) showing histogram as vertical bars
+    """
+    hist = np.asarray(hist).astype(np.float32).reshape(-1)
+    bins = hist.shape[0]
+
+    # Normalize to [0, 1] for drawing
+    if normalize:
+        mx = float(hist.max()) if hist.size else 0.0
+        hist_n = hist / mx if mx > 1e-9 else hist
+    else:
+        hist_n = hist
+
+    img = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Bar width in pixels
+    bar_w = max(1, width // bins)
+
+    for i in range(bins):
+        v = float(hist_n[i])
+        bar_h = int(v * (height - 2))
+        x1 = i * bar_w
+        x2 = min(width - 1, x1 + bar_w - 1)
+        y1 = height - 1
+        y2 = max(0, height - 1 - bar_h)
+        cv2.rectangle(img, (x1, y2), (x2, y1), (255, 255, 255), thickness=-1)
+
+    return img

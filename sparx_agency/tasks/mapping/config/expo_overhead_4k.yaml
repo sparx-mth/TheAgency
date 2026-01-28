@@ -1,0 +1,24 @@
+camera:
+  width: 3840
+  height: 2160
+
+  # Approx intrinsics for ~90deg HFOV, ~60deg VFOV at 4K
+  fx: 1920.0
+  fy: 1871.7
+  cx: 1919.5
+  cy: 1079.5
+
+mapping:
+  resolution_m: 0.25
+  grid_width_m: 50.0
+  grid_height_m: 50.0
+
+  inference_width: 1280
+  inference_height: 720
+  stride: 8
+
+  floor_ransac_iters: 200
+  floor_dist_thresh: 0.05
+
+  free_height_m: 0.10
+  occupied_height_m: 1.35
