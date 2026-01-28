@@ -4,7 +4,7 @@ import heapq
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from sparx_agency.core.planning.environment.voxelmap import VoxelMap3D
+from sparx_agency.core.planning.environment.voxelmap3d import VoxelMap3D
 
 Index3D = Tuple[int, int, int]
 
