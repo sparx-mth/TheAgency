@@ -5,9 +5,8 @@ import cv2
 import numpy as np
 import time
 
-from sparx_agency.robots.common.image_utils import get_objects_by_quantized_surfaces, \
-     create_hist_image_with_objects, get_objects_via_depth_kmeans, \
-    get_objects_via_depth_edges, merge_boxes
+from sparx_agency.robots.common.image_utils import create_hist_image_with_objects, estimate_floor_mask_from_bottom_band, \
+    choose_near_bins, mask_by_bins, apply_mask_to_rgb, hist_to_bgr_image, compute_dynamic_delta_m
 
 # Add project root to path so we can import sparx_agency
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
@@ -23,8 +22,6 @@ def get_depth_from_model(rgb_img, depth_model):
     depth_img = depth_model.infer_depth(rgb_img).astype(np.float32)
     return depth_img
 
-import cv2
-import numpy as np
 
 def make_depth_bin_overlays(
     depth_m: np.ndarray,
@@ -183,6 +180,113 @@ def create_hist_image(depth_map, min_dist=0.1, max_dist=4.0, bins=50):
 
     return hist_img
 
+# def _to_bgr(img: np.ndarray) -> np.ndarray:
+#     """Ensure image is BGR uint8 for cv2.hstack."""
+#     if img is None:
+#         raise ValueError("One of the display images is None")
+#
+#     if img.ndim == 2:  # grayscale
+#         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+#     elif img.ndim == 3 and img.shape[2] == 4:  # BGRA
+#         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+#
+#     if img.dtype != np.uint8:
+#         # Best-effort conversion for display
+#         img = np.clip(img, 0, 255).astype(np.uint8)
+#
+#     return img
+
+def _to_panel_img(x, target_h: int = 400) -> np.ndarray:
+    """
+    Convert x to a displayable BGR uint8 image.
+    Supports:
+      - BGR images (H,W,3)
+      - grayscale images (H,W)
+      - boolean masks (H,W) or list-of-lists
+      - 1D histograms (N,)
+      - scalars (float/int/bool) -> text tile
+    """
+    # 1) Scalars -> text tile
+    if isinstance(x, (float, int, bool, np.number)):
+        img = np.zeros((target_h, target_h, 3), dtype=np.uint8)
+        cv2.putText(img, str(x), (10, target_h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+        return img
+
+    # 2) Convert to numpy
+    arr = np.asarray(x)
+
+    # 3) 1D -> histogram bars
+    if arr.ndim == 1:
+        hist = arr.astype(np.float32).reshape(-1)
+        w = target_h
+        h = target_h
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        mx = float(hist.max()) if hist.size and float(hist.max()) > 0 else 1.0
+        hist_n = hist / mx
+        n = hist_n.size
+        for i in range(n):
+            x1 = int(i * w / n)
+            x2 = int((i + 1) * w / n)
+            y2 = int((1.0 - float(hist_n[i])) * (h - 1))
+            cv2.rectangle(img, (x1, y2), (max(x1 + 1, x2 - 1), h - 1), (255, 255, 255), -1)
+        return img
+
+    # 4) 2D -> grayscale/mask
+    if arr.ndim == 2:
+        # Boolean mask: show True=255, False=0
+        if arr.dtype == bool:
+            gray = (arr.astype(np.uint8) * 255)
+        else:
+            # Normalize other 2D arrays for display
+            a = arr.astype(np.float32)
+            mn = float(np.nanmin(a))
+            mx = float(np.nanmax(a))
+            if mx > mn:
+                a = (a - mn) / (mx - mn)
+            a = np.nan_to_num(a, nan=0.0)
+            gray = (np.clip(a, 0.0, 1.0) * 255).astype(np.uint8)
+
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    # 5) 3D image
+    if arr.ndim == 3:
+        if arr.shape[2] == 4:
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+        if arr.dtype != np.uint8:
+            a = arr.astype(np.float32)
+            mn = float(np.nanmin(a))
+            mx = float(np.nanmax(a))
+            if mx > mn:
+                a = (a - mn) / (mx - mn)
+            a = np.nan_to_num(a, nan=0.0)
+            arr = (np.clip(a, 0.0, 1.0) * 255).astype(np.uint8)
+        return arr
+
+    raise ValueError(f"Unsupported display type/shape: type={type(x)} shape={getattr(arr, 'shape', None)}")
+
+
+def display_panel(display_dict: dict, window_prefix="Detection Pipeline", display_h=400):
+    items = list(display_dict.items())
+    titles = [k for k, _ in items]
+
+    imgs = []
+    for k, v in items:
+        img = _to_panel_img(v, target_h=display_h)
+        h, w = img.shape[:2]
+        new_w = int(display_h * (w / float(h)))
+        imgs.append(cv2.resize(img, (new_w, display_h), interpolation=cv2.INTER_AREA))
+
+    combined = np.hstack(imgs)
+    title = f"{window_prefix}: " + " | ".join(titles)
+    cv2.imshow(title, combined)
+    cv2.waitKey(0)
+
+def overlay_mask(bgr, mask, alpha=0.5):
+    mask_u8 = (np.asarray(mask).astype(np.uint8) * 255)
+    mask_bgr = cv2.cvtColor(mask_u8, cv2.COLOR_GRAY2BGR)
+    return cv2.addWeighted(bgr, 1 - alpha, mask_bgr, alpha, 0)
+
 
 def process_frame(image_path_or_array, depth_model):
     # 1. Load Image
@@ -215,36 +319,73 @@ def process_frame(image_path_or_array, depth_model):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
     # 5. Panel 2: Depth Visualization
-    # Normalize depth map to 0-255 for visibility
-    depth_viz = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    depth_viz = 255 - depth_viz
-
-    depth_raw_view = (depth_map - 0.5) / (5.0 - 0.5)
-    depth_raw_view = np.clip(depth_raw_view, 0, 1)
-    depth_viz_grayscale = (depth_raw_view * 255).astype(np.uint8)
-    depth_viz_bgr = cv2.cvtColor(depth_viz_grayscale, cv2.COLOR_GRAY2BGR)
+    # # Normalize depth map to 0-255 for visibility
+    # depth_viz = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    # depth_viz = 255 - depth_viz
+    #
+    # depth_raw_view = (depth_map - 0.5) / (5.0 - 0.5)
+    # depth_raw_view = np.clip(depth_raw_view, 0, 1)
+    # depth_viz_grayscale = (depth_raw_view * 255).astype(np.uint8)
+    # depth_viz_bgr = cv2.cvtColor(depth_viz_grayscale, cv2.COLOR_GRAY2BGR)
     # 6. Panel 3: Histogram
 
     hist_viz = create_hist_image_with_objects(depth_map, objs, min_dist=0.3, max_dist=5.0, bins=60)
 
-    # Resize all to match height for hstack
-    display_h = 400
-    aspect = w / h
-    display_w = int(display_h * aspect)
+def object_mask_from_floor(depth_m: np.ndarray,
+                           floor_profile: np.ndarray,
+                           delta_m: float) -> np.ndarray:
+    H, W = depth_m.shape
+    floor2d = floor_profile[:, None]  # (H,1) broadcast
+    residual = floor2d - depth_m
+    mask = residual > delta_m
+    return mask.astype(np.uint8)  # 0/1
 
-    res_overlay = cv2.resize(overlay, (display_w, display_h))
-    res_depth = cv2.resize(depth_viz_bgr, (display_w, display_h))
-    res_hist = cv2.resize(hist_viz, (display_w, display_h))
 
-    # Combine: [ RGB Overlay | Depth Map | Histogram ]
-    combined = np.hstack([res_overlay, res_depth, res_hist])
+def close_objects_filter(depth_m: np.ndarray, bgr: np.ndarray):
+    """
+    Removes floor and keeps only objects ABOVE the floor using dynamic delta.
+    """
 
-    cv2.imshow("Detection Pipeline: RGB Overlay | Depth | Histogram", combined)
-    cv2.waitKey(0)
+    floor_mask, floor_profile = estimate_floor_mask_from_bottom_band(
+        depth_m,
+        min_dist=0.3,
+        max_dist=5.0,
+        bottom_band_frac=0.25,
+        close_thresh_m=0.10,
+    )
+
+    # 2) Residuals ONLY from floor
+    residual = floor_profile[:, None] - depth_m
+    floor_residuals = residual[floor_mask > 0]
+
+    # 3) Dynamic delta
+    delta_m = compute_dynamic_delta_m(
+        floor_residuals,
+        base_m=0.03,
+        k=4.0,
+    )
+
+    # 4) Object mask
+    obj_mask = object_mask_from_floor(
+        depth_m,
+        floor_profile,
+        delta_m,
+    )
+
+    # 5) Clean RGB
+    rgb_clean = apply_mask_to_rgb(bgr, obj_mask, bg_color=(0, 0, 0))
+
+    return {
+        "delta_m": delta_m,
+        "floor_mask": overlay_mask(bgr, floor_mask),
+        "object_mask": overlay_mask(bgr, obj_mask),
+        "rgb_clean": rgb_clean,
+    }
+
 
 
 if __name__ == "__main__":
-    folder_path = "/home/daphnaa/GIT/Depth-Anything-V2-original/assets/examples/2025_10_05___15_01_16"
+    folder_path = "/home/user1/Pictures/2026_01_27___12_30_15/"
     imgs_list = sorted(glob.glob(os.path.join(folder_path, "*.jpg")))
     
     # Init models once
@@ -253,14 +394,28 @@ if __name__ == "__main__":
 
     for test_image in imgs_list:
         # process_frame(test_image, d_model)
-        with TicToc("Inference"):
+        # with TicToc("Inference"):
+        #     rgb_img = cv2.imread(test_image)
+        #     depth_map = get_depth_from_model(rgb_img, d_model)
+        #
+        # show_rgb_depth_hist_bins(
+        #     rgb_bgr=rgb_img,
+        #     depth_m=depth_map,
+        #     min_dist=0.3,
+        #     max_dist=5.0,
+        #     bins=150,
+        # )
+        with TicToc("Depth Extraction"):
             rgb_img = cv2.imread(test_image)
             depth_map = get_depth_from_model(rgb_img, d_model)
 
-        show_rgb_depth_hist_bins(
-            rgb_bgr=rgb_img,
-            depth_m=depth_map,
-            min_dist=0.3,
-            max_dist=5.0,
-            bins=150,
-        )
+        with TicToc("Close Objects Filter"):
+            display_dict = close_objects_filter(depth_map, rgb_img)
+
+        rgb_clean = display_dict["rgb_clean"]
+        delta_m = display_dict["delta_m"]
+
+        print(f"[Close Objects Filter] delta = {delta_m:.3f} m")
+
+        # with TicToc("Display Panel"):
+        display_panel(display_dict)
