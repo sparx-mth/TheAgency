@@ -40,7 +40,7 @@ from sparx_agency.core.common.types import State3D, Trajectory
 
 from .types import SafetyCheckResult, SafetyStatus, TrajectorySafetyParams, UnknownPolicy
 from .trajectory_sampling import nearest_index_xyz, sample_trajectory
-from sparx_agency.core.planning.safety.adapters import query_tube
+from sparx_agency.core.planning.integrations.safety_maps.dispatch import query_tube
 
 
 class TrajectorySafetyChecker:
