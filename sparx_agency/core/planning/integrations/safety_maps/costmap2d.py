@@ -21,7 +21,7 @@ from typing import Tuple
 
 from sparx_agency.core.planning.environment.costmap2d import Costmap2D
 
-from ..types import SafetyStatus
+from sparx_agency.core.planning.safety.types import SafetyStatus
 from .common import ring8_offsets
 
 

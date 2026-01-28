@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from sparx_agency.core.common.types import Pose3D, Path3D, PlanResult, PlanStatus
 from sparx_agency.core.planning.interfaces.planner import PlanRequest3D, BasePlanner3D
-from sparx_agency.core.planning.environment.voxelmap import VoxelMap3D
+from sparx_agency.core.planning.environment.voxelmap3d import VoxelMap3D
 
 from .params import AStar3DParams
 from .algorithm_3d import astar_voxel_3d

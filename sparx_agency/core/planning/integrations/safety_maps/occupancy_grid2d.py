@@ -21,7 +21,7 @@ from typing import Tuple
 
 from sparx_agency.core.planning.environment.occupancy_grid2d import OccupancyGrid2D
 
-from ..types import SafetyStatus, UnknownPolicy
+from sparx_agency.core.planning.safety.types import SafetyStatus, UnknownPolicy
 from .common import ring8_offsets
 
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 
-from ..types import SafetyStatus
+from sparx_agency.core.planning.safety.types import SafetyStatus
 from .common import shell26_offsets
 
 

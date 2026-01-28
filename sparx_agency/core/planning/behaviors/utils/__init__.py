@@ -7,7 +7,7 @@ This subpackage contains shared utilities for behavior implementations:
 """
 
 from .path_utils import pick_subgoal_along_path, trim_path_prefix
-from .world_adapters import costmap_from_occupancy_grid
+from sparx_agency.core.planning.integrations.maps.occupancy_to_costmap2d import costmap_from_occupancy_grid
 
 __all__ = [
     "costmap_from_occupancy_grid",
