@@ -1,0 +1,48 @@
+# prison_instructions.yaml
+# 20 prison-themed navigation instructions for testing InternVLA-N1 (InternNav) in a prison-like environment.
+# Usage idea (ROS2 Foxy, in container):
+#   ros2 topic pub -1 /R1/navigation/instruction std_msgs/msg/String "{data: '<instruction>'}"
+
+scenario: "prison"
+language: "en"
+instructions:
+  - id: 1
+    text: "Enter the prison cell on your left and look for the prisoner."
+  - id: 2
+    text: "Go into the nearest open cell and search inside."
+  - id: 3
+    text: "Walk down the corridor and check the first door on the right."
+  - id: 4
+    text: "Move forward until you reach an intersection, then turn left."
+  - id: 5
+    text: "Follow the hallway and avoid obstacles; keep going until you find a doorway."
+  - id: 6
+    text: "Inspect the cell doors on your left side and stop at the first open entrance."
+  - id: 7
+    text: "Go to the end of the corridor, then turn around and return to where you started."
+  - id: 8
+    text: "Enter the cell on the right, look around, then exit back into the corridor."
+  - id: 9
+    text: "Approach the barred gate ahead and stop before reaching it."
+  - id: 10
+    text: "Turn right and explore the adjacent area as if searching for a guard station."
+  - id: 11
+    text: "Move forward and keep close to the left wall, like you are following the cell block."
+  - id: 12
+    text: "Take the next left opening you see and go inside."
+  - id: 13
+    text: "Take the next right opening you see and go inside."
+  - id: 14
+    text: "Scan the area for a doorway, then move toward it and enter."
+  - id: 15
+    text: "Explore the area ahead, then turn left and continue exploring."
+  - id: 16
+    text: "Go into a small room nearby and look around as if searching for keys."
+  - id: 17
+    text: "Move along the corridor and avoid getting too close to walls or obstacles."
+  - id: 18
+    text: "Enter the left cell, check the corners, then stop."
+  - id: 19
+    text: "Walk forward, turn right at the next opportunity, and continue forward."
+  - id: 20
+    text: "Find an open space, move into it, and explore until you decide to stop."
