@@ -128,6 +128,7 @@ class GazeboRos2Ingestor(Node):
         self.declare_parameter("depth_grid_h", 50)
 
         self._dbg_count = 0
+        self._busy = False
 
         # Debug publishers
         self.pub_depth_raw = self.create_publisher(Image, "/debug/depth_raw", 1)  # 32FC1
@@ -150,7 +151,7 @@ class GazeboRos2Ingestor(Node):
         # --- QoS ---
         sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
@@ -187,6 +188,8 @@ class GazeboRos2Ingestor(Node):
         self._latest.odom = msg
 
     def cb_rgb(self, msg: Image):
+        if self._busy:
+            return  # drop frames while running slow inference
         self._img_count += 1
         if self.process_every_n > 1 and (self._img_count % self.process_every_n) != 0:
             return
