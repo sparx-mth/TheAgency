@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-HTTP Client for InternNav Agent Server.
-
-Handles: init -> step -> reset lifecycle with pickle+base64 encoding.
-
-FIXED: Check if agent already exists before trying to init (prevents OOM)
-"""
+"""HTTP Client for InternNav Agent Server."""
 
 import base64
 import pickle
@@ -21,7 +15,6 @@ from .types import StepResponse, INDEX_TO_ACTION
 class ModelClient:
     """HTTP client for InternNav Agent Server API."""
 
-    # Required default settings for InternVLA-N1
     DEFAULT_MODEL_SETTINGS = {
         "policy_name": "InternVLAN1_Policy",
         "state_encoder": None,
@@ -43,17 +36,10 @@ class ModelClient:
         "continuous_traj": True,
         "infer_mode": "partial_async",
         "vis_debug": False,
-        "vis_debug_path": "./logs/vis_debug"
     }
 
-    def __init__(
-            self,
-            host: str = "localhost",
-            port: int = 8000,
-            timeout: float = 30.0,
-            protocol: str = "http",
-            logger=None
-    ):
+    def __init__(self, host: str = "localhost", port: int = 8000,
+                 timeout: float = 30.0, protocol: str = "http", logger=None):
         self.base_url = f"{protocol}://{host}:{port}"
         self.timeout = timeout
         self.logger = logger
@@ -62,27 +48,12 @@ class ModelClient:
         self.initialized = False
 
     def _log(self, level: str, msg: str):
-        """Log message with ROS2 Foxy compatibility."""
         if self.logger:
-            try:
-                if level == "info":
-                    self.logger.info(msg)
-                elif level == "warn":
-                    self.logger.warn(msg)
-                elif level == "error":
-                    self.logger.error(msg)
-                elif level == "debug":
-                    self.logger.debug(msg)
-                else:
-                    self.logger.info(msg)
-            except ValueError:
-                # ROS2 Foxy logger severity bug - fallback to print
-                print(f"[{level.upper()}] {msg}")
+            getattr(self.logger, level, self.logger.info)(msg)
         else:
             print(f"[{level.upper()}] {msg}")
 
     def check_health(self) -> bool:
-        """Check if server is reachable."""
         try:
             response = self.session.get(f"{self.base_url}/openapi.json", timeout=5.0)
             return response.status_code == 200
@@ -91,39 +62,24 @@ class ModelClient:
             return False
 
     def check_agent_exists(self) -> bool:
-        """Check if agent already exists on server by trying a simple step."""
         try:
-            # Try to call reset - if agent exists, this will work
             url = f"{self.base_url}/agent/{self.agent_name}/reset"
-            response = self.session.post(
-                url,
-                json={"reset_index": None},
-                timeout=5.0
-            )
+            response = self.session.post(url, json={"reset_index": None}, timeout=5.0)
             if response.status_code == 200:
-                self._log("info", f"Agent '{self.agent_name}' already exists on server")
+                self._log("info", f"Agent '{self.agent_name}' already exists")
                 return True
             return False
         except Exception:
             return False
 
-    def init_agent(
-            self,
-            model_name: str = "InternVLA-N1",
-            ckpt_path: str = "",
-            model_settings: Optional[Dict] = None
-    ) -> bool:
-        """Initialize agent on server (only if not already initialized)."""
-
-        # FIRST: Check if agent already exists
+    def init_agent(self, model_name: str = "InternVLA-N1",
+                   ckpt_path: str = "", model_settings: Optional[Dict] = None) -> bool:
         if self.check_agent_exists():
-            self._log("info", "Agent already initialized, skipping init to avoid OOM")
+            self._log("info", "Agent already initialized, skipping")
             self.initialized = True
             return True
 
         url = f"{self.base_url}/agent/init"
-
-        # Merge default settings with user-provided settings
         final_settings = self.DEFAULT_MODEL_SETTINGS.copy()
         if model_settings:
             final_settings.update(model_settings)
@@ -137,7 +93,7 @@ class ModelClient:
         }
 
         try:
-            self._log("info", f"Initializing agent with model '{model_name}'...")
+            self._log("info", f"Initializing agent '{model_name}'...")
             response = self.session.post(url, json=payload, timeout=self.timeout * 3)
 
             if response.status_code == 201:
@@ -148,15 +104,12 @@ class ModelClient:
                 return True
             else:
                 self._log("error", f"Init failed: HTTP {response.status_code}")
-                # Check if it failed because agent already exists
                 if "already" in response.text.lower() or response.status_code == 409:
-                    self._log("info", "Agent may already exist, marking as initialized")
                     self.initialized = True
                     return True
                 return False
-
         except requests.exceptions.Timeout:
-            self._log("warn", "Init timeout (model loading may take time)")
+            self._log("warn", "Init timeout (model loading)")
             self.initialized = True
             return True
         except Exception as e:
@@ -164,37 +117,17 @@ class ModelClient:
             return False
 
     def reset(self, reset_index: Optional[List[int]] = None) -> bool:
-        """Reset agent for new episode."""
         url = f"{self.base_url}/agent/{self.agent_name}/reset"
-
         try:
-            response = self.session.post(
-                url, json={"reset_index": reset_index}, timeout=self.timeout
-            )
-            success = response.status_code == 200
-            if success:
-                self._log("info", "Agent reset successful")
-            return success
+            response = self.session.post(url, json={"reset_index": reset_index}, timeout=self.timeout)
+            return response.status_code == 200
         except Exception as e:
             self._log("warn", f"Reset error: {e}")
             return False
 
-    def step(
-            self,
-            rgb: np.ndarray,
-            instruction: str,
-            depth: Optional[np.ndarray] = None
-    ) -> StepResponse:
-        """
-        Execute one navigation step.
-
-        Args:
-            rgb: RGB image (H, W, 3) uint8
-            instruction: Navigation instruction
-            depth: Optional depth image (H, W, 1) float32
-        """
+    def step(self, rgb: np.ndarray, instruction: str,
+             depth: Optional[np.ndarray] = None) -> StepResponse:
         if not self.initialized:
-            # Try to check if agent exists first
             if self.check_agent_exists():
                 self.initialized = True
             elif not self.init_agent():
@@ -202,50 +135,38 @@ class ModelClient:
 
         url = f"{self.base_url}/agent/{self.agent_name}/step"
 
-        # Build observation (InternNav format)
         obs = [{
             'rgb': rgb,
             'depth': depth if depth is not None else np.zeros((rgb.shape[0], rgb.shape[1], 1), dtype=np.float32),
             'instruction': instruction
         }]
-
-        # Encode as pickle + base64
         encoded_obs = base64.b64encode(pickle.dumps(obs)).decode('utf-8')
 
         try:
             start_time = time.time()
             response = self.session.post(
-                url,
-                json={"observation": encoded_obs},
-                timeout=self.timeout,
-                headers={'Content-Type': 'application/json'}
+                url, json={"observation": encoded_obs},
+                timeout=self.timeout, headers={'Content-Type': 'application/json'}
             )
             inference_time = (time.time() - start_time) * 1000
 
             if response.status_code == 200:
                 return self._parse_response(response.json(), inference_time)
             else:
-                return StepResponse(
-                    success=False,
-                    error=f"HTTP {response.status_code}",
-                    inference_time_ms=inference_time
-                )
-
+                return StepResponse(success=False, error=f"HTTP {response.status_code}",
+                                   inference_time_ms=inference_time)
         except requests.exceptions.Timeout:
             return StepResponse(success=False, error=f"Timeout after {self.timeout}s")
         except Exception as e:
             return StepResponse(success=False, error=str(e))
 
     def _parse_response(self, data: Dict, inference_time: float) -> StepResponse:
-        """Parse step response from server."""
         action = "STOP"
         action_index = 0
 
         try:
-            # Handle InternNav nested format: {"action":[{"action":[2]}]}
             if "action" in data:
                 action_data = data["action"]
-
                 if isinstance(action_data, list) and len(action_data) > 0:
                     first = action_data[0]
                     if isinstance(first, dict) and "action" in first:
@@ -260,14 +181,8 @@ class ModelClient:
                     action_index = int(action_data)
 
             action = INDEX_TO_ACTION.get(action_index, "STOP")
-
         except Exception as e:
-            self._log("warn", f"Error parsing response: {e}")
+            self._log("warn", f"Parse error: {e}")
 
-        return StepResponse(
-            action=action,
-            action_index=action_index,
-            raw_response=data,
-            inference_time_ms=inference_time,
-            success=True
-        )
+        return StepResponse(action=action, action_index=action_index,
+                           raw_response=data, inference_time_ms=inference_time, success=True)

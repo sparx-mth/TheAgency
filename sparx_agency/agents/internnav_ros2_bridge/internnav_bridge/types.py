@@ -14,21 +14,16 @@ class ActionType(Enum):
     MOVE_FORWARD = "MOVE_FORWARD"
     TURN_LEFT = "TURN_LEFT"
     TURN_RIGHT = "TURN_RIGHT"
-    LOOK_UP = "LOOK_UP"
-    LOOK_DOWN = "LOOK_DOWN"
     UNKNOWN = "UNKNOWN"
 
 
-# Action name to index mapping (VLN-CE standard)
+# Action index mapping (VLN-CE standard)
 ACTION_INDEX = {
     "STOP": 0,
     "MOVE_FORWARD": 1,
     "TURN_LEFT": 2,
     "TURN_RIGHT": 3,
-    "LOOK_UP": 4,
-    "LOOK_DOWN": 5,
 }
-
 INDEX_TO_ACTION = {v: k for k, v in ACTION_INDEX.items()}
 
 

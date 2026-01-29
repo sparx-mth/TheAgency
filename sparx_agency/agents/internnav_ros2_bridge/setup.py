@@ -1,32 +1,26 @@
-from setuptools import setup
-import os
-from glob import glob
+from setuptools import setup, find_packages
 
 package_name = 'internnav_bridge'
 
 setup(
     name=package_name,
     version='1.0.0',
-    # IMPORTANT: Explicitly list only the main package
-    # Do NOT use find_packages() as it would include launch/ and config/
-    # which conflicts with ROS2's launch module
-    packages=[package_name],
-    data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
+    packages=find_packages(),
+    install_requires=[
+        'setuptools',
+        'requests',
+        'numpy',
+        'opencv-python',
+        'pyyaml',
     ],
-    install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Your Name',
-    maintainer_email='your.email@example.com',
-    description='ROS2 bridge for InternNav navigation models',
+    maintainer='your_name',
+    maintainer_email='your_email@example.com',
+    description='ROS2 bridge for InternNav model server',
     license='MIT',
     entry_points={
         'console_scripts': [
             'bridge_node = internnav_bridge.bridge_node:main',
-            'action_executor = internnav_bridge.action_executor:main',
         ],
     },
 )
