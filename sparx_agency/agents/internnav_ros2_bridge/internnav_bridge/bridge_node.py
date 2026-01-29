@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-InternNav Bridge Node for Rooster Platform
+InternNav Bridge Node for Rooster Platform - GROUND ROLL ONLY
 
 ROS2 bridge connecting simulations to the InternNav model server.
-Supports ManualControl output and KeepAlive for Rooster/Sphera environment.
+Uses ManualControl for ground rolling - NO FLYING.
+
+Key differences from flying mode:
+- Stabilization uses z=0 (no throttle)
+- Movement uses x for forward, r for turning
+- z is only used minimally to keep wheels engaged (not for lift)
 """
 
 import json
+import math
 import threading
 import time
 from typing import Dict, Optional
@@ -35,6 +41,7 @@ try:
     from fcu_driver_interfaces.msg import ManualControl, UAVState
     from rooster_handler_interfaces.msg import KeepAlive
     from rooster_manager_interfaces.msg import RoosterState
+
     ROOSTER_MSGS_AVAILABLE = True
 except ImportError:
     ROOSTER_MSGS_AVAILABLE = False
@@ -42,6 +49,15 @@ except ImportError:
     UAVState = None
     KeepAlive = None
     RoosterState = None
+
+# Arm service
+try:
+    from std_srvs.srv import SetBool
+
+    STD_SRVS_AVAILABLE = True
+except ImportError:
+    STD_SRVS_AVAILABLE = False
+    SetBool = None
 
 
 class ActionState(Enum):
@@ -51,7 +67,7 @@ class ActionState(Enum):
 
 
 class InternNavBridge(Node):
-    """Main ROS2 bridge node with Rooster/Sphera support."""
+    """Main ROS2 bridge node - GROUND ROLL mode only."""
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__('internnav_bridge')
@@ -74,10 +90,23 @@ class InternNavBridge(Node):
         self.action_duration = 0.0
         self.current_manual_control = None
 
-        # Rooster state
+        # Rooster/UAV state (from UAVState message)
         self.arm_state = False
+        self.airborne = False
         self.flight_mode = None
         self.is_ready = False
+        self.uav_state_received = False
+
+        # ARM control
+        self.arm_requested = False
+        self.arm_in_progress = False
+        self.last_arm_attempt = 0.0
+        self.arm_retry_interval = 2.0
+
+        # GROUND ROLL - No stabilization throttle needed!
+        self.stabilize_time = 1.0  # Just wait 1s for arm to settle
+        self.arm_time = 0.0
+        self.is_stabilized = False
 
         # Model client
         server_cfg = self.config['bridge']['server']
@@ -109,6 +138,7 @@ class InternNavBridge(Node):
         # Setup subscribers and publishers
         self._setup_subscribers()
         self._setup_publishers()
+        self._setup_arm_service()
 
         # Inference timer
         rate = self.config['bridge']['control'].get('inference_rate', 4.0)
@@ -117,6 +147,42 @@ class InternNavBridge(Node):
         )
 
         self._log_config()
+
+    def _setup_arm_service(self):
+        """Setup the force_arm service client."""
+        if not STD_SRVS_AVAILABLE:
+            self.get_logger().error("std_srvs not available! Cannot arm drone.")
+            self.force_arm_client = None
+            return
+
+        rgb_topic = self.config['inputs']['rgb']['topic']
+        parts = rgb_topic.split('/')
+        rooster_id = parts[1] if len(parts) > 1 else "R1"
+
+        arm_service = f"/{rooster_id}/fcu/command/force_arm"
+        self.force_arm_client = self.create_client(SetBool, arm_service)
+        self.get_logger().info(f"Created ARM service client: {arm_service}")
+
+    def _request_arm(self, arm: bool = True) -> bool:
+        """Request drone to arm via force_arm service."""
+        if self.force_arm_client is None:
+            self.get_logger().error("ARM service client not available!")
+            return False
+
+        if not self.force_arm_client.service_is_ready():
+            self.get_logger().warn("ARM service not ready, waiting...")
+            if not self.force_arm_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().error("ARM service timeout!")
+                return False
+
+        self.get_logger().info(f"Calling force_arm service (arm={arm})...")
+        request = SetBool.Request()
+        request.data = arm
+
+        future = self.force_arm_client.call_async(request)
+        self.arm_in_progress = True
+        self.last_arm_attempt = time.time()
+        return True
 
     def _setup_subscribers(self):
         """Setup input subscribers."""
@@ -155,14 +221,27 @@ class InternNavBridge(Node):
             self.state.current_instruction = inst_cfg.get('default', '')
             self.get_logger().info(f"Subscribed to Instruction: {inst_cfg['topic']}")
 
-        # Odometry (standard)
+        # Odometry
         if inputs.get('odometry', {}).get('enabled', False):
             self.odom_sub = self.create_subscription(
                 Odometry, inputs['odometry']['topic'], self._odom_callback, qos,
                 callback_group=self.input_cb_group
             )
 
-        # Rooster State subscription
+        # UAVState subscription
+        if ROOSTER_MSGS_AVAILABLE:
+            rgb_topic = self.config['inputs']['rgb']['topic']
+            parts = rgb_topic.split('/')
+            rooster_id = parts[1] if len(parts) > 1 else "R1"
+
+            uav_state_topic = f"/{rooster_id}/fcu/state"
+            self.uav_state_sub = self.create_subscription(
+                UAVState, uav_state_topic, self._uav_state_callback, 10,
+                callback_group=self.input_cb_group
+            )
+            self.get_logger().info(f"Subscribed to UAVState: {uav_state_topic}")
+
+        # RoosterState (backwards compat)
         outputs = self.config['outputs']
         if outputs.get('state', {}).get('enabled', False) and ROOSTER_MSGS_AVAILABLE:
             state_topic = outputs['state'].get('topic', '/R1/state')
@@ -176,7 +255,7 @@ class InternNavBridge(Node):
         """Setup output publishers."""
         outputs = self.config['outputs']
 
-        # Discrete action (for logging/debugging)
+        # Discrete action
         if outputs.get('discrete', {}).get('enabled', True):
             self.action_pub = self.create_publisher(String, outputs['discrete']['topic'], 1)
             self.get_logger().info(f"Publishing actions to: {outputs['discrete']['topic']}")
@@ -186,13 +265,10 @@ class InternNavBridge(Node):
             self.cmd_vel_pub = self.create_publisher(Twist, outputs['continuous']['topic'], 1)
             self.get_logger().info(f"Publishing velocities to: {outputs['continuous']['topic']}")
 
-        # ManualControl output (Rooster-specific)
+        # ManualControl output
         if outputs.get('manual_control', {}).get('enabled', False):
             if not ROOSTER_MSGS_AVAILABLE:
-                self.get_logger().error(
-                    "ManualControl enabled but fcu_driver_interfaces not available! "
-                    "Make sure the package is installed."
-                )
+                self.get_logger().error("ManualControl enabled but fcu_driver_interfaces not available!")
             else:
                 mc_cfg = outputs['manual_control']
                 self.manual_control_pub = self.create_publisher(
@@ -200,19 +276,16 @@ class InternNavBridge(Node):
                 )
                 self.get_logger().info(f"Publishing ManualControl to: {mc_cfg['topic']}")
 
-                # Create ManualControl publish timer (40Hz default)
                 mc_rate = mc_cfg.get('publish_rate_hz', 40.0)
                 self.manual_control_timer = self.create_timer(
                     1.0 / mc_rate, self._manual_control_callback,
                     callback_group=self.control_cb_group
                 )
 
-        # KeepAlive publisher (Rooster-specific)
+        # KeepAlive publisher
         if outputs.get('keep_alive', {}).get('enabled', False):
             if not ROOSTER_MSGS_AVAILABLE:
-                self.get_logger().error(
-                    "KeepAlive enabled but rooster_handler_interfaces not available!"
-                )
+                self.get_logger().error("KeepAlive enabled but rooster_handler_interfaces not available!")
             else:
                 ka_cfg = outputs['keep_alive']
                 self.keep_alive_pub = self.create_publisher(
@@ -220,7 +293,6 @@ class InternNavBridge(Node):
                 )
                 self.get_logger().info(f"Publishing KeepAlive to: {ka_cfg['topic']}")
 
-                # Create KeepAlive timer (1Hz default)
                 ka_rate = ka_cfg.get('publish_rate_hz', 1.0)
                 self.keep_alive_timer = self.create_timer(
                     1.0 / ka_rate, self._keep_alive_callback,
@@ -262,7 +334,12 @@ class InternNavBridge(Node):
         with self.lock:
             self.state.current_instruction = msg.data
             self.state.is_navigating = True
+            self.arm_requested = True
+            self.is_stabilized = False
         self.get_logger().info(f"Instruction: {msg.data}")
+
+        if not self.arm_state:
+            self._request_arm(True)
 
     def _odom_callback(self, msg: Odometry):
         with self.lock:
@@ -280,21 +357,36 @@ class InternNavBridge(Node):
                 }
             }
 
+    def _uav_state_callback(self, msg: 'UAVState'):
+        """Handle UAVState updates."""
+        with self.lock:
+            was_armed = self.arm_state
+            self.arm_state = msg.armed
+            self.airborne = msg.airborne
+            self.uav_state_received = True
+
+            if msg.armed and not was_armed:
+                self.arm_time = time.time()
+                self.is_stabilized = False
+                self.get_logger().info("✓ ARMED! Waiting for stabilization...")
+            elif not msg.armed and was_armed:
+                self.get_logger().warn("DISARMED!")
+                self.is_stabilized = False
+
+        if was_armed != msg.armed:
+            self.get_logger().info(f"UAVState - armed: {msg.armed}, airborne: {msg.airborne}")
+
     def _rooster_state_callback(self, msg: 'RoosterState'):
         """Handle Rooster state updates."""
-        if self.arm_state != msg.armed or self.flight_mode != msg.flight_mode:
-            self.get_logger().info(
-                f"Rooster state - armed: {msg.armed}, flight_mode: {msg.flight_mode}, "
-                f"ready: {msg.is_ready}"
-            )
-            self.arm_state = msg.armed
+        if self.flight_mode != msg.flight_mode:
+            self.get_logger().info(f"Rooster state - flight_mode: {msg.flight_mode}, ready: {msg.is_ready}")
             self.flight_mode = msg.flight_mode
             self.is_ready = msg.is_ready
 
     # === Control Callbacks ===
 
     def _keep_alive_callback(self):
-        """Publish KeepAlive message to maintain control authority."""
+        """Publish KeepAlive for GROUND_ROLL mode."""
         if not hasattr(self, 'keep_alive_pub'):
             return
 
@@ -304,42 +396,65 @@ class InternNavBridge(Node):
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.is_active = ka_cfg.get('is_active', True)
-        msg.requested_flight_mode = ka_cfg.get('requested_flight_mode', 1)  # GROUND_ROLL
-        msg.command_reboot = ka_cfg.get('command_reboot', False)
+        msg.requested_flight_mode = 1  # GROUND_ROLL = 1
+        msg.command_reboot = False
 
         self.keep_alive_pub.publish(msg)
 
+        # Re-arm if needed
+        current_time = time.time()
+        if self.arm_requested and not self.arm_state:
+            if current_time - self.last_arm_attempt > self.arm_retry_interval:
+                self.get_logger().info("Re-attempting ARM...")
+                self._request_arm(True)
+
     def _manual_control_callback(self):
-        """Publish ManualControl message at high rate."""
+        """Publish ManualControl - GROUND ROLL only (no lift)."""
         if not hasattr(self, 'manual_control_pub'):
             return
 
-        with self.lock:
-            # Check if we're executing an action
-            if self.action_state == ActionState.EXECUTING:
-                elapsed = time.time() - self.action_start_time
-                if elapsed >= self.action_duration:
-                    # Action complete, go to idle (stop)
-                    self.action_state = ActionState.IDLE
-                    self.current_manual_control = self._get_stop_control()
-                    self.get_logger().debug("Action complete, stopping")
+        current_time = time.time()
 
-            # Publish current control (or stop if none)
-            if self.current_manual_control is not None:
+        with self.lock:
+            # Stabilization: just wait, NO throttle (z=0)
+            if self.arm_state and not self.is_stabilized:
+                elapsed_since_arm = current_time - self.arm_time
+                if elapsed_since_arm < self.stabilize_time:
+                    # Send zeros during stabilization - NO LIFT
+                    msg = self._get_stop_control()
+                    msg.header.stamp = self.get_clock().now().to_msg()
+                    self.manual_control_pub.publish(msg)
+                    return
+                else:
+                    if not self.is_stabilized:
+                        self.get_logger().info("✓ Stabilization complete, ready for ground roll")
+                        self.is_stabilized = True
+
+            # Check action execution
+            if self.action_state == ActionState.EXECUTING:
+                elapsed = current_time - self.action_start_time
+                if elapsed >= self.action_duration:
+                    self.action_state = ActionState.IDLE
+                    self.current_manual_control = None
+                    self.get_logger().debug("Action complete")
+
+            # Determine what to publish
+            if self.action_state == ActionState.EXECUTING and self.current_manual_control is not None:
                 msg = self.current_manual_control
             else:
+                # IDLE: send zeros (ground roll doesn't need constant throttle)
                 msg = self._get_stop_control()
 
             msg.header.stamp = self.get_clock().now().to_msg()
             self.manual_control_pub.publish(msg)
 
     def _get_stop_control(self) -> 'ManualControl':
-        """Get a stop ManualControl message."""
+        """Get a stop ManualControl message - ALL ZEROS for ground mode."""
         msg = ManualControl()
         msg.header = Header()
         msg.x = 0.0
         msg.y = 0.0
-        msg.z = 0.0
+        msg.z = 0.0  # NO THROTTLE - ground roll only!
         msg.r = 0.0
         msg.buttons = 0
         return msg
@@ -351,11 +466,9 @@ class InternNavBridge(Node):
         control = self.config['bridge']['control']
         current_time = time.time()
 
-        # Check timing
         if current_time - self.state.last_inference_time < control.get('min_inference_interval', 0.1):
             return
 
-        # Don't run inference while executing an action (for timed actions)
         with self.lock:
             if self.action_state == ActionState.EXECUTING:
                 return
@@ -364,12 +477,15 @@ class InternNavBridge(Node):
                 return
             if not control.get('continuous_inference', False) and not self.state.is_navigating:
                 return
+
+            if self.arm_requested and (not self.arm_state or not self.is_stabilized):
+                return
+
             payload = self._prepare_payload()
 
         if payload is None:
             return
 
-        # Run inference
         result = self.client.step(payload['rgb'], payload['instruction'], payload.get('depth'))
 
         if not result.success:
@@ -385,7 +501,6 @@ class InternNavBridge(Node):
         target_w = model_cfg.get('target_width', 640)
         target_h = model_cfg.get('target_height', 480)
 
-        # Process RGB
         rgb = self.state.current_rgb
         if rgb.shape[1] != target_w or rgb.shape[0] != target_h:
             rgb = cv2.resize(rgb, (target_w, target_h))
@@ -394,7 +509,6 @@ class InternNavBridge(Node):
 
         payload = {'rgb': rgb, 'instruction': self.state.current_instruction}
 
-        # Process depth if available
         if self.config['inputs'].get('depth', {}).get('enabled') and self.state.current_depth is not None:
             depth = self.state.current_depth
             if depth.shape[1] != target_w or depth.shape[0] != target_h:
@@ -418,13 +532,16 @@ class InternNavBridge(Node):
             msg = String()
             msg.data = mapped
             self.action_pub.publish(msg)
-            self.get_logger().info(f"Action: {mapped} (raw: {action_str})")
+            self.get_logger().info(f"Action: {mapped} (raw: {action_str}) [armed={self.arm_state}]")
 
-        # ManualControl output (Rooster)
+        # ManualControl output
         if outputs.get('manual_control', {}).get('enabled', False) and ROOSTER_MSGS_AVAILABLE:
+            if not self.arm_state:
+                self.get_logger().warn("Cannot execute action - not armed!")
+                self._request_arm(True)
+                return
             self._execute_manual_control_action(action)
 
-        # Continuous velocity (Twist) - fallback
         elif outputs.get('continuous', {}).get('enabled', False):
             self._publish_velocity(action)
 
@@ -433,7 +550,8 @@ class InternNavBridge(Node):
             feedback = {
                 'action': action.value,
                 'timestamp': time.time(),
-                'inference_ms': result.inference_time_ms
+                'inference_ms': result.inference_time_ms,
+                'armed': self.arm_state
             }
             msg = String()
             msg.data = json.dumps(feedback)
@@ -447,11 +565,10 @@ class InternNavBridge(Node):
             self._publish_status("navigating")
 
     def _execute_manual_control_action(self, action: ActionType):
-        """Execute action using ManualControl with timed duration."""
+        """Execute action using ManualControl - GROUND ROLL."""
         mc_cfg = self.config['outputs']['manual_control']
         action_mapping = mc_cfg.get('action_mapping', {})
 
-        # Get action parameters
         action_params = action_mapping.get(action.value, action_mapping.get('STOP', {}))
 
         # Create ManualControl message
@@ -459,11 +576,11 @@ class InternNavBridge(Node):
         msg.header = Header()
         msg.x = float(action_params.get('x', 0.0))
         msg.y = float(action_params.get('y', 0.0))
-        msg.z = float(action_params.get('z', 0.0))
+        msg.z = float(action_params.get('z', 0.0))  # Use config value
         msg.r = float(action_params.get('r', 0.0))
         msg.buttons = int(action_params.get('buttons', 0))
 
-        duration = action_params.get('duration_sec', 0.25)
+        duration = action_params.get('duration_sec', 0.5)
 
         with self.lock:
             self.current_manual_control = msg
@@ -471,9 +588,8 @@ class InternNavBridge(Node):
             self.action_duration = duration
             self.action_state = ActionState.EXECUTING
 
-        self.get_logger().debug(
-            f"Executing {action.value}: x={msg.x}, y={msg.y}, z={msg.z}, r={msg.r} "
-            f"for {duration:.2f}s"
+        self.get_logger().info(
+            f"Executing {action.value}: x={msg.x}, y={msg.y}, z={msg.z}, r={msg.r} for {duration:.2f}s"
         )
 
     def _parse_action(self, action_str: str) -> ActionType:
@@ -521,7 +637,7 @@ class InternNavBridge(Node):
         """Log configuration summary."""
         outputs = self.config['outputs']
         self.get_logger().info("=" * 60)
-        self.get_logger().info("InternNav Bridge Configuration (Rooster Mode):")
+        self.get_logger().info("InternNav Bridge - GROUND ROLL MODE (No Flying)")
         self.get_logger().info(
             f"  Server: {self.config['bridge']['server']['host']}:"
             f"{self.config['bridge']['server']['port']}"
@@ -531,10 +647,10 @@ class InternNavBridge(Node):
         if outputs.get('manual_control', {}).get('enabled'):
             self.get_logger().info(f"  ManualControl: {outputs['manual_control']['topic']}")
             self.get_logger().info(f"  KeepAlive: {outputs['keep_alive']['topic']}")
-        else:
-            self.get_logger().info(f"  Action: {outputs['discrete']['topic']}")
 
         self.get_logger().info(f"  Rooster msgs available: {ROOSTER_MSGS_AVAILABLE}")
+        self.get_logger().info(f"  ARM via: force_arm service")
+        self.get_logger().info(f"  Flight Mode: GROUND_ROLL (1)")
         self.get_logger().info("=" * 60)
 
 
