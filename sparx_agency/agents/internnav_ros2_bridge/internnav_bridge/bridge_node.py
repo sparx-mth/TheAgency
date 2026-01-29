@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-InternNav Bridge Node for Rooster Platform - GROUND ROLL ONLY
+InternNav Bridge Node for Rooster Platform - GROUND ROLL ONLY (No Flying!)
 
 ROS2 bridge connecting simulations to the InternNav model server.
 Uses ManualControl for ground rolling - NO FLYING.
+
+FIXED: STOP action no longer terminates navigation. Navigation continues until:
+  - A new instruction with "done", "finished", "goal reached" etc.
+  - Explicit stop command via topic
+  - Manual intervention
 
 Key differences from flying mode:
 - Stabilization uses z=0 (no throttle)
@@ -26,7 +31,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
-from std_msgs.msg import String, Header
+from std_msgs.msg import String, Header, Bool
 from sensor_msgs.msg import Image, CompressedImage
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -66,8 +71,30 @@ class ActionState(Enum):
     EXECUTING = "executing"
 
 
+class NavigationStatus(Enum):
+    """Navigation status for tracking goal completion."""
+    IDLE = "idle"
+    NAVIGATING = "navigating"
+    PAUSED = "paused"  # STOP action - but still active
+    COMPLETED_SUCCESS = "success"
+    COMPLETED_FAILURE = "failure"
+
+
 class InternNavBridge(Node):
     """Main ROS2 bridge node - GROUND ROLL mode only."""
+
+    # Keywords that indicate goal reached (in instruction or model output)
+    GOAL_KEYWORDS = [
+        "goal reached", "arrived", "destination", "finished",
+        "complete", "done navigating", "navigation complete",
+        "target reached", "successfully"
+    ]
+
+    # Keywords that indicate failure
+    FAILURE_KEYWORDS = [
+        "cannot reach", "unreachable", "blocked", "failed",
+        "impossible", "stuck", "give up"
+    ]
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__('internnav_bridge')
@@ -83,6 +110,12 @@ class InternNavBridge(Node):
         self.state = BridgeState()
         self.cv_bridge = CvBridge()
         self.lock = threading.Lock()
+
+        # Navigation status (NEW - replaces simple is_navigating boolean)
+        self.nav_status = NavigationStatus.IDLE
+        self.consecutive_stops = 0  # Track consecutive STOP actions
+        self.max_consecutive_stops = 10  # After this many, consider it might be stuck
+        self.last_action = None
 
         # Action execution state (for timed actions)
         self.action_state = ActionState.IDLE
@@ -251,6 +284,14 @@ class InternNavBridge(Node):
             )
             self.get_logger().info(f"Subscribed to Rooster State: {state_topic}")
 
+        # NEW: Navigation control subscriber (to explicitly stop navigation)
+        nav_control_topic = inputs.get('nav_control', {}).get('topic', '/navigation/control')
+        self.nav_control_sub = self.create_subscription(
+            String, nav_control_topic, self._nav_control_callback, 1,
+            callback_group=self.input_cb_group
+        )
+        self.get_logger().info(f"Subscribed to Navigation Control: {nav_control_topic}")
+
     def _setup_publishers(self):
         """Setup output publishers."""
         outputs = self.config['outputs']
@@ -331,15 +372,73 @@ class InternNavBridge(Node):
             self.get_logger().error(f"Depth callback error: {e}")
 
     def _instruction_callback(self, msg: String):
+        """Handle new navigation instruction."""
+        instruction = msg.data.strip()
+        instruction_lower = instruction.lower()
+
         with self.lock:
-            self.state.current_instruction = msg.data
+            # Check if this is a termination command
+            if self._check_goal_reached(instruction_lower):
+                self.nav_status = NavigationStatus.COMPLETED_SUCCESS
+                self.state.is_navigating = False
+                self.get_logger().info(f"Navigation COMPLETED (success): {instruction}")
+                self._publish_status("success")
+                return
+
+            if self._check_failure(instruction_lower):
+                self.nav_status = NavigationStatus.COMPLETED_FAILURE
+                self.state.is_navigating = False
+                self.get_logger().info(f"Navigation COMPLETED (failure): {instruction}")
+                self._publish_status("failure")
+                return
+
+            # Normal navigation instruction - start/continue navigation
+            self.state.current_instruction = instruction
             self.state.is_navigating = True
+            self.nav_status = NavigationStatus.NAVIGATING
+            self.consecutive_stops = 0  # Reset stop counter
             self.arm_requested = True
             self.is_stabilized = False
-        self.get_logger().info(f"Instruction: {msg.data}")
+
+        self.get_logger().info(f"New instruction: {instruction}")
 
         if not self.arm_state:
             self._request_arm(True)
+
+    def _nav_control_callback(self, msg: String):
+        """Handle explicit navigation control commands."""
+        command = msg.data.strip().lower()
+
+        with self.lock:
+            if command in ["stop", "end", "finish", "done"]:
+                self.nav_status = NavigationStatus.COMPLETED_SUCCESS
+                self.state.is_navigating = False
+                self.get_logger().info("Navigation explicitly stopped via control command")
+                self._publish_status("success")
+            elif command == "pause":
+                self.nav_status = NavigationStatus.PAUSED
+                self.get_logger().info("Navigation paused")
+                self._publish_status("paused")
+            elif command == "resume":
+                if self.nav_status == NavigationStatus.PAUSED:
+                    self.nav_status = NavigationStatus.NAVIGATING
+                    self.state.is_navigating = True
+                    self.get_logger().info("Navigation resumed")
+                    self._publish_status("navigating")
+            elif command == "reset":
+                self.nav_status = NavigationStatus.IDLE
+                self.state.is_navigating = False
+                self.consecutive_stops = 0
+                self.get_logger().info("Navigation reset")
+                self._publish_status("idle")
+
+    def _check_goal_reached(self, text: str) -> bool:
+        """Check if text indicates goal has been reached."""
+        return any(keyword in text for keyword in self.GOAL_KEYWORDS)
+
+    def _check_failure(self, text: str) -> bool:
+        """Check if text indicates navigation failure."""
+        return any(keyword in text for keyword in self.FAILURE_KEYWORDS)
 
     def _odom_callback(self, msg: Odometry):
         with self.lock:
@@ -475,8 +574,14 @@ class InternNavBridge(Node):
 
             if self.state.current_rgb is None:
                 return
-            if not control.get('continuous_inference', False) and not self.state.is_navigating:
-                return
+
+            # FIXED: Check navigation status instead of simple boolean
+            # Continue inference if NAVIGATING or PAUSED (but not if COMPLETED or IDLE)
+            if self.nav_status in [NavigationStatus.COMPLETED_SUCCESS,
+                                   NavigationStatus.COMPLETED_FAILURE,
+                                   NavigationStatus.IDLE]:
+                if not control.get('continuous_inference', False):
+                    return
 
             if self.arm_requested and (not self.arm_state or not self.is_stabilized):
                 return
@@ -525,6 +630,14 @@ class InternNavBridge(Node):
         action = self._parse_action(action_str)
         outputs = self.config['outputs']
 
+        # Track consecutive stops
+        if action == ActionType.STOP:
+            self.consecutive_stops += 1
+        else:
+            self.consecutive_stops = 0
+
+        self.last_action = action
+
         # Discrete action (for logging)
         if outputs.get('discrete', {}).get('enabled', True):
             mapping = outputs['discrete'].get('action_mapping', {})
@@ -532,7 +645,10 @@ class InternNavBridge(Node):
             msg = String()
             msg.data = mapped
             self.action_pub.publish(msg)
-            self.get_logger().info(f"Action: {mapped} (raw: {action_str}) [armed={self.arm_state}]")
+            self.get_logger().info(
+                f"Action: {mapped} (raw: {action_str}) [armed={self.arm_state}, "
+                f"stops={self.consecutive_stops}]"
+            )
 
         # ManualControl output
         if outputs.get('manual_control', {}).get('enabled', False) and ROOSTER_MSGS_AVAILABLE:
@@ -551,16 +667,27 @@ class InternNavBridge(Node):
                 'action': action.value,
                 'timestamp': time.time(),
                 'inference_ms': result.inference_time_ms,
-                'armed': self.arm_state
+                'armed': self.arm_state,
+                'consecutive_stops': self.consecutive_stops,
+                'nav_status': self.nav_status.value
             }
             msg = String()
             msg.data = json.dumps(feedback)
             self.feedback_pub.publish(msg)
 
-        # Status
+        # FIXED: STOP action does NOT end navigation!
+        # Only publish current status, don't change navigation state
         if action == ActionType.STOP:
-            self.state.is_navigating = False
-            self._publish_status("completed")
+            # Just pausing, not completing
+            self._publish_status("paused")
+
+            # Warn if many consecutive stops (might be stuck)
+            if self.consecutive_stops >= self.max_consecutive_stops:
+                self.get_logger().warn(
+                    f"Warning: {self.consecutive_stops} consecutive STOP actions. "
+                    "Robot may be stuck or goal may be reached. "
+                    "Send explicit 'done' instruction or control command to end navigation."
+                )
         else:
             self._publish_status("navigating")
 
@@ -638,6 +765,7 @@ class InternNavBridge(Node):
         outputs = self.config['outputs']
         self.get_logger().info("=" * 60)
         self.get_logger().info("InternNav Bridge - GROUND ROLL MODE (No Flying)")
+        self.get_logger().info("FIXED: STOP action no longer terminates navigation")
         self.get_logger().info(
             f"  Server: {self.config['bridge']['server']['host']}:"
             f"{self.config['bridge']['server']['port']}"

@@ -1,6 +1,8 @@
 # =============================================================================
 # Rooster R1 InternNav Bridge - GROUND ROLL ONLY (No Flying!)
 # =============================================================================
+# FIXED VERSION: STOP action does not terminate navigation
+# =============================================================================
 # Uses x for forward/backward, r for yaw rotation
 # z should be 0 or very low - just enough for wheel traction, NOT for lift
 # =============================================================================
@@ -38,6 +40,12 @@ inputs:
   odometry:
     enabled: false
 
+  # NEW: Navigation control topic for explicit start/stop/pause
+  # Send "stop", "done", "pause", "resume", or "reset" to control navigation
+  nav_control:
+    enabled: true
+    topic: "/R1/navigation/control"
+
 outputs:
   # Discrete actions - for logging/debugging only
   discrete:
@@ -71,23 +79,23 @@ outputs:
       MOVE_FORWARD:
         x: 200.0      # Forward thrust
         y: 0.0
-        z: 500.0        # NO vertical thrust - ground only!
+        z: 400.0
         r: 0.0
         buttons: 0
         duration_sec: 0.5
       TURN_LEFT:
         x: 0.0
         y: 0.0
-        z: 400.0        # NO vertical thrust
-        r: -600.0      # Yaw left (positive = CCW)
+        z: 250.0
+        r: -450.0      # Yaw left (positive = CCW)
         buttons: 0
         duration_sec: 0.5
 
       TURN_RIGHT:
         x: 0.0
         y: 0.0
-        z: 400.0        # NO vertical thrust
-        r: 600.0     # Yaw right (negative = CW)
+        z: 250.0
+        r: 450.0     # Yaw right (negative = CW)
         buttons: 0
         duration_sec: 0.5
 
@@ -97,12 +105,12 @@ outputs:
         z: 0.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.1
+        duration_sec: 0.25
       UNKNOWN:
         x: -50.0
         y: 0.0
-        z: 0.0
-        r: 400.0
+        z: 100.0
+        r: 0.0
         buttons: 0
         duration_sec: 0.1
 
