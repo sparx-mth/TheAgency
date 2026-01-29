@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import csv
+import numpy as np
 from collections import deque
 from typing import Optional, Tuple
 
@@ -23,6 +24,20 @@ def norm_frame(frame: str) -> str:
         return ""
     return frame.lstrip("/")
 
+def rotate_vector_3d(v: np.ndarray, q) -> np.ndarray:
+    """
+    Rotates a 3D vector by a quaternion (x, y, z, w).
+    This accounts for full 3D orientation (Roll, Pitch, Yaw).
+    """
+    # Extract quaternion components
+    x, y, z, w = q.x, q.y, q.z, q.w
+    
+    # Quaternion rotation formula: v' = v + 2 * cross(q_vec, cross(q_vec, v) + w * v)
+    q_vec = np.array([x, y, z])
+    uv = np.cross(q_vec, v)
+    uuv = np.cross(q_vec, uv)
+    
+    return v + 2.0 * (w * uv + uuv)
 
 def quat_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
     # yaw from quaternion (Z axis)
@@ -139,133 +154,86 @@ class FlowDepthPoseEvalNode(Node):
 
     # -------- callbacks --------
     def gt_pose_cb(self, msg: Pose):
-        # store latest GT pose
-        self.gt_pose_latest = msg
-
-        # initialize estimate to GT at first message (optional)
-        if self.init_from_gt and (not self.have_est):
-            self.est_x = float(msg.position.x)
-            self.est_y = float(msg.position.y)
-            self.est_z = float(msg.position.z)
-            self.have_est = True
-            self.get_logger().info("[PoseEval] Initialized estimated pose from first GT pose.")
+            self.gt_pose_latest = msg
+            if self.init_from_gt and not self.have_est:
+                self.est_x, self.est_y, self.est_z = msg.position.x, msg.position.y, msg.position.z
+                self.have_est = True
+                self.get_logger().info("Initialized estimate from Ground Truth.")
 
     def vel_cb(self, msg: Vector3Stamped):
-        """Callback for velocity messages."""
-        # Need GT for comparison (and possibly init)
         if self.gt_pose_latest is None and self.init_from_gt:
             return
 
-        # for first velocity message, only store stamp (no integration)
         if self.last_vel_stamp is None:
             self.last_vel_stamp = msg.header.stamp
             return
 
-        # dt from velocity stamps
-        dt_ns = (msg.header.stamp.sec - self.last_vel_stamp.sec) * 1_000_000_000 + \
-                (msg.header.stamp.nanosec - self.last_vel_stamp.nanosec)
-        dt = float(dt_ns) * 1e-9
+        # Calculate Delta Time (dt)
+        t_now = rclpy.time.Time.from_msg(msg.header.stamp)
+        t_prev = rclpy.time.Time.from_msg(self.last_vel_stamp)
+        dt = (t_now - t_prev).nanoseconds * 1e-9
         self.last_vel_stamp = msg.header.stamp
 
-        # skip crazy dt (bag pauses / jumps)
         if dt <= 0.0 or dt > 1.0:
             return
 
-        # Ensure we have an estimate
-        if not self.have_est:
-            self.have_est = True  # start at origin if not init_from_gt
-
-        # velocity in camera frame
-        v_cam_x = float(msg.vector.x)
-        v_cam_y = float(msg.vector.y)
-        v_cam_z = float(msg.vector.z)
-
-        # Transform velocity to target frame using TF at the SAME timestamp as msg
+        # 3D Rotation using TF
         try:
             source_frame = norm_frame(msg.header.frame_id)
-            target_frame = self.target_frame
-
-            tf = self.tf_buffer.lookup_transform(
-                target_frame,
-                source_frame,
-                msg.header.stamp,  # IMPORTANT: timestamped TF lookup (better for bag replay)
-            )
-
-            q = tf.transform.rotation
-            yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
-            v_x, v_y = rotate_xy(v_cam_x, v_cam_y, yaw)
-            v_z = v_cam_z
-
+            # Lookup transform from drone frame to world (odom) frame
+            tf = self.tf_buffer.lookup_transform(self.target_frame, source_frame, msg.header.stamp)
+            
+            # Rotate the velocity vector from Body Frame to World Frame
+            v_body = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+            v_world = rotate_vector_3d(v_body, tf.transform.rotation)
+            
+            v_x, v_y, v_z = v_world
         except TransformException as e:
-            self.get_logger().warn(f"[PoseEval] TF lookup failed: {e}")
+            self.get_logger().warn(f"TF lookup failed: {e}")
             return
 
-        # Integrate position
+        # Integrate velocity to update position
+        if not self.have_est: self.have_est = True
         self.est_x += v_x * dt
         self.est_y += v_y * dt
         self.est_z += v_z * dt
 
-        # Publish estimated pose
-        out = PoseStamped()
-        out.header.stamp = msg.header.stamp
-        out.header.frame_id = self.target_frame
-        out.pose.position.x = float(self.est_x)
-        out.pose.position.y = float(self.est_y)
-        out.pose.position.z = float(self.est_z)
-        out.pose.orientation.w = 1.0  # unknown -> identity
-        self.pose_pub.publish(out)
+        # Publish Estimated Pose
+        est_msg = PoseStamped()
+        est_msg.header = msg.header
+        est_msg.header.frame_id = self.target_frame
+        est_msg.pose.position.x, est_msg.pose.position.y, est_msg.pose.position.z = self.est_x, self.est_y, self.est_z
+        est_msg.pose.orientation.w = 1.0
+        self.pose_pub.publish(est_msg)
 
-        # time in seconds for logs/files
-        t_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        # Logging and Comparison
+        t_sec = t_now.nanoseconds * 1e-9
+        if self.est_tum_file:
+            self.est_tum_file.write(f"{t_sec:.9f} {self.est_x:.6f} {self.est_y:.6f} {self.est_z:.6f} 0 0 0 1\n")
 
-        # Write EST TUM
-        if self.est_tum_file is not None:
-            self.est_tum_file.write(
-                f"{t_sec:.9f} {self.est_x:.9f} {self.est_y:.9f} {self.est_z:.9f} 0.0 0.0 0.0 1.0\n"
-            )
-
-        # Compare to GT + Write GT TUM
-        if self.gt_pose_latest is not None:
-            gx = float(self.gt_pose_latest.position.x)
-            gy = float(self.gt_pose_latest.position.y)
-            gz = float(self.gt_pose_latest.position.z)
-
-            if self.gt_tum_file is not None:
-                gq = self.gt_pose_latest.orientation
-                self.gt_tum_file.write(
-                    f"{t_sec:.9f} {gx:.9f} {gy:.9f} {gz:.9f} {gq.x:.9f} {gq.y:.9f} {gq.z:.9f} {gq.w:.9f}\n"
-                )
-
-            err = math.sqrt((self.est_x - gx) ** 2 + (self.est_y - gy) ** 2 + (self.est_z - gz) ** 2)
+        if self.gt_pose_latest:
+            gx, gy, gz = self.gt_pose_latest.position.x, self.gt_pose_latest.position.y, self.gt_pose_latest.position.z
+            err = math.sqrt((self.est_x - gx)**2 + (self.est_y - gy)**2 + (self.est_z - gz)**2)
             self.err_hist.append(err)
-
-            # CSV
-            if self.csv_writer is not None:
+            
+            if self.csv_writer:
                 self.csv_writer.writerow([t_sec, self.est_x, self.est_y, self.est_z, gx, gy, gz, err])
+            
+            if self.gt_tum_file:
+                go = self.gt_pose_latest.orientation
+                self.gt_tum_file.write(f"{t_sec:.9f} {gx:.6f} {gy:.6f} {gz:.6f} {go.x} {go.y} {go.z} {go.w}\n")
 
-        # Flush periodically (safer if interrupted)
-        if self.flush_every_n > 0 and (self.est_tum_file or self.gt_tum_file or self.csv_file):
-            self._tum_write_count += 1
-            if self._tum_write_count % self.flush_every_n == 0:
-                try:
-                    if self.est_tum_file:
-                        self.est_tum_file.flush()
-                    if self.gt_tum_file:
-                        self.gt_tum_file.flush()
-                    if self.csv_file:
-                        self.csv_file.flush()
-                except Exception:
-                    pass
+        # Periodically print stats
+        if (self.get_clock().now() - self.last_print_time).nanoseconds * 1e-9 > self.print_every_sec:
+            if self.err_hist:
+                rms = math.sqrt(sum(e*e for e in self.err_hist)/len(self.err_hist))
+                self.get_logger().info(f"Dist Error: {self.err_hist[-1]:.3f}m | RMS: {rms:.3f}m")
+            self.last_print_time = self.get_clock().now()
 
-        # Periodic print
-        now = self.get_clock().now()
-        if (now - self.last_print_time).nanoseconds * 1e-9 >= self.print_every_sec:
-            self.last_print_time = now
-            if len(self.err_hist) > 0:
-                last = self.err_hist[-1]
-                rms = math.sqrt(sum(e * e for e in self.err_hist) / len(self.err_hist))
-                self.get_logger().info(f"[PoseEval] err_last={last:.3f} m, err_rms({len(self.err_hist)})={rms:.3f} m")
-
+    def destroy_node(self):
+        for f in [self.csv_file, self.est_tum_file, self.gt_tum_file]:
+            if f: f.close()
+        super().destroy_node()
 
 def main():
     rclpy.init()

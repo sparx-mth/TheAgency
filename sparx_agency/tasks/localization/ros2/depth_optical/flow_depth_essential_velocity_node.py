@@ -39,23 +39,23 @@ class FlowDepthEssentialVelocityNode(Node):
 
         # tracking params
         self.declare_parameter("max_corners", 300)
-        self.declare_parameter("min_corners", 30)
+        self.declare_parameter("min_corners", 15)
         self.declare_parameter("lk_win", 21)
-        self.declare_parameter("lk_levels", 3)
+        self.declare_parameter("lk_levels", 4)
 
         # depth params
         self.declare_parameter("min_depth", 0.05)
-        self.declare_parameter("max_depth", 50.0)
+        self.declare_parameter("max_depth", 30.0)
         self.declare_parameter("use_depth_norm", False)
 
         # essential matrix params
-        self.declare_parameter("ransac_thresh_px", 2.5)      # pixel threshold
+        self.declare_parameter("ransac_thresh_px", 4)      # pixel threshold
         self.declare_parameter("ransac_prob", 0.999)
-        self.declare_parameter("min_inliers", 30)
+        self.declare_parameter("min_inliers", 20)
 
         # scale search params (tune if needed)
         self.declare_parameter("scale_min", 0.0)
-        self.declare_parameter("scale_max", 0.02)            # meters per frame (if metric depth)
+        self.declare_parameter("scale_max", 0.2)            # meters per frame (if metric depth)
         self.declare_parameter("scale_steps", 401)           # coarse search steps
 
         # debug
@@ -184,12 +184,15 @@ class FlowDepthEssentialVelocityNode(Node):
         trans = s * t_dir  # (meters or relative units)
         v = trans / dt
 
+        # v is in optical frame: x_right, y_down, z_forward
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = msg.header.stamp
-        vel_msg.header.frame_id = self.camera_frame
+        vel_msg.header.frame_id = "simple_drone/front_cam_optical_frame"
+
         vel_msg.vector.x = float(v[0])
         vel_msg.vector.y = float(v[1])
         vel_msg.vector.z = float(v[2])
+
         self.vel_pub.publish(vel_msg)
 
         if self.show_debug:
