@@ -15,7 +15,7 @@ bridge:
     timeout_sec: 30.0
 
   control:
-    inference_rate: 4.0
+    inference_rate: 5.0
     continuous_inference: false
     min_inference_interval: 0.2
 
@@ -69,7 +69,7 @@ outputs:
   manual_control:
     enabled: true
     topic: "/R1/manual_control"
-    publish_rate_hz: 40.0
+    publish_rate_hz: 80.0
 
     # Action mapping for ground roll mode
     # z provides base "force" to keep wheels engaged
@@ -77,42 +77,42 @@ outputs:
     # x controls forward/backward
     action_mapping:
       MOVE_FORWARD:
-        x: 200.0      # Forward thrust
+        x: 250.0      # Forward thrust
         y: 0.0
         z: 400.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.5
+        duration_sec: 0.2
       TURN_LEFT:
         x: 0.0
         y: 0.0
         z: 250.0
-        r: -450.0      # Yaw left (positive = CCW)
+        r: -650.0      # Yaw left (positive = CCW)
         buttons: 0
-        duration_sec: 0.5
+        duration_sec: 0.2
 
       TURN_RIGHT:
         x: 0.0
         y: 0.0
         z: 250.0
-        r: 450.0     # Yaw right (negative = CW)
+        r: 650.0     # Yaw right (negative = CW)
         buttons: 0
-        duration_sec: 0.5
+        duration_sec: 0.2
 
       STOP:
         x: 0.0
         y: 0.0
-        z: 0.0
+        z: -1000.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.25
+        duration_sec: 0.2
       UNKNOWN:
         x: -50.0
         y: 0.0
         z: 100.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.1
+        duration_sec: 0.2
 
   # KeepAlive - Required to maintain control authority
   keep_alive:

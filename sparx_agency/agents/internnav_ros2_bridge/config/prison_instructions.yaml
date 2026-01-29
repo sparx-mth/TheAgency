@@ -7,11 +7,11 @@ scenario: "prison"
 language: "en"
 instructions:
   - id: 1
-    text: "Enter the prison cell on your left and look for the prisoner."
+    text: "Enter the prison cell located on your left and stop once you reach the cell."
   - id: 2
     text: "Go into the nearest open cell and search inside."
   - id: 3
-    text: "Walk down the corridor and check the first door on the right."
+    text: "Enter the prison cell located on your right and stop once you reach the cell."
   - id: 4
     text: "Move forward until you reach an intersection, then turn left."
   - id: 5
