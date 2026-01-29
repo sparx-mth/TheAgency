@@ -3,6 +3,8 @@
 HTTP Client for InternNav Agent Server.
 
 Handles: init -> step -> reset lifecycle with pickle+base64 encoding.
+
+FIXED: Check if agent already exists before trying to init (prevents OOM)
 """
 
 import base64
@@ -60,8 +62,22 @@ class ModelClient:
         self.initialized = False
 
     def _log(self, level: str, msg: str):
+        """Log message with ROS2 Foxy compatibility."""
         if self.logger:
-            getattr(self.logger, level)(msg)
+            try:
+                if level == "info":
+                    self.logger.info(msg)
+                elif level == "warn":
+                    self.logger.warn(msg)
+                elif level == "error":
+                    self.logger.error(msg)
+                elif level == "debug":
+                    self.logger.debug(msg)
+                else:
+                    self.logger.info(msg)
+            except ValueError:
+                # ROS2 Foxy logger severity bug - fallback to print
+                print(f"[{level.upper()}] {msg}")
         else:
             print(f"[{level.upper()}] {msg}")
 
@@ -74,13 +90,37 @@ class ModelClient:
             self._log("warn", f"Health check failed: {e}")
             return False
 
+    def check_agent_exists(self) -> bool:
+        """Check if agent already exists on server by trying a simple step."""
+        try:
+            # Try to call reset - if agent exists, this will work
+            url = f"{self.base_url}/agent/{self.agent_name}/reset"
+            response = self.session.post(
+                url,
+                json={"reset_index": None},
+                timeout=5.0
+            )
+            if response.status_code == 200:
+                self._log("info", f"Agent '{self.agent_name}' already exists on server")
+                return True
+            return False
+        except Exception:
+            return False
+
     def init_agent(
             self,
             model_name: str = "InternVLA-N1",
             ckpt_path: str = "",
             model_settings: Optional[Dict] = None
     ) -> bool:
-        """Initialize agent on server."""
+        """Initialize agent on server (only if not already initialized)."""
+
+        # FIRST: Check if agent already exists
+        if self.check_agent_exists():
+            self._log("info", "Agent already initialized, skipping init to avoid OOM")
+            self.initialized = True
+            return True
+
         url = f"{self.base_url}/agent/init"
 
         # Merge default settings with user-provided settings
@@ -108,6 +148,11 @@ class ModelClient:
                 return True
             else:
                 self._log("error", f"Init failed: HTTP {response.status_code}")
+                # Check if it failed because agent already exists
+                if "already" in response.text.lower() or response.status_code == 409:
+                    self._log("info", "Agent may already exist, marking as initialized")
+                    self.initialized = True
+                    return True
                 return False
 
         except requests.exceptions.Timeout:
@@ -149,7 +194,10 @@ class ModelClient:
             depth: Optional depth image (H, W, 1) float32
         """
         if not self.initialized:
-            if not self.init_agent():
+            # Try to check if agent exists first
+            if self.check_agent_exists():
+                self.initialized = True
+            elif not self.init_agent():
                 return StepResponse(success=False, error="Agent not initialized")
 
         url = f"{self.base_url}/agent/{self.agent_name}/step"

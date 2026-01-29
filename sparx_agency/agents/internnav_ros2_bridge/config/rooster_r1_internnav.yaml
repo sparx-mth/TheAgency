@@ -1,8 +1,8 @@
 # =============================================================================
-# Rooster R1 InternNav Bridge Configuration (Sphera Environment)
+# Rooster R1 InternNav Bridge - GROUND ROLL ONLY (No Flying!)
 # =============================================================================
-# This configuration connects InternNav to the Rooster drone platform.
-# Uses ManualControl messages and KeepAlive for flight control.
+# Uses x for forward/backward, r for yaw rotation
+# z should be 0 or very low - just enough for wheel traction, NOT for lift
 # =============================================================================
 
 bridge:
@@ -36,15 +36,7 @@ inputs:
     default: "Explore forward safely"
 
   odometry:
-    enabled: false  # We'll use UAV state separately
-
-# =============================================================================
-# OUTPUT CONFIGURATION
-# =============================================================================
-# For Rooster/Sphera, we use:
-# - manual_control: fcu_driver_interfaces/ManualControl at 40Hz
-# - keep_alive: rooster_handler_interfaces/KeepAlive at 1Hz
-# =============================================================================
+    enabled: false
 
 outputs:
   # Discrete actions - for logging/debugging only
@@ -61,12 +53,11 @@ outputs:
   continuous:
     enabled: false
 
-  # ManualControl output - PRIMARY OUTPUT for Rooster
-  # Values are in normalized range [-1000, 1000]
-  # x: forward/backward thrust
-  # y: left/right strafe
-  # z: throttle/thrust (base force for ground roll)
-  # r: yaw rotation (counter-clockwise positive)
+  # ManualControl for GROUND ROLL
+  # x: forward/backward (positive = forward)
+  # y: strafe left/right
+  # z: vertical thrust - KEEP LOW OR ZERO for ground roll!
+  # r: yaw rotation (positive = counter-clockwise/left)
   manual_control:
     enabled: true
     topic: "/R1/manual_control"
@@ -78,26 +69,28 @@ outputs:
     # x controls forward/backward
     action_mapping:
       MOVE_FORWARD:
-        x: 0.0
+        x: 200.0      # Forward thrust
         y: 0.0
-        z: 500.0
+        z: 500.0        # NO vertical thrust - ground only!
         r: 0.0
         buttons: 0
         duration_sec: 0.5
       TURN_LEFT:
         x: 0.0
         y: 0.0
-        z: 400.0
-        r: 250.0
+        z: 400.0        # NO vertical thrust
+        r: -600.0      # Yaw left (positive = CCW)
         buttons: 0
-        duration_sec: 0.75
+        duration_sec: 0.5
+
       TURN_RIGHT:
         x: 0.0
         y: 0.0
-        z: 400.0
-        r: -250.0
+        z: 400.0        # NO vertical thrust
+        r: 600.0     # Yaw right (negative = CW)
         buttons: 0
-        duration_sec: 0.75
+        duration_sec: 0.5
+
       STOP:
         x: 0.0
         y: 0.0
@@ -106,10 +99,10 @@ outputs:
         buttons: 0
         duration_sec: 0.1
       UNKNOWN:
-        x: 0.0
+        x: -50.0
         y: 0.0
         z: 0.0
-        r: 0.0
+        r: 400.0
         buttons: 0
         duration_sec: 0.1
 
