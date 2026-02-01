@@ -183,3 +183,5 @@ sparx_agency/log/
 sparx_agency/install/
 
 sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
+
+myenv/

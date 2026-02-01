@@ -13,7 +13,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Vector3Stamped, Twist
+from geometry_msgs.msg import Vector3Stamped, Pose
 from cv_bridge import CvBridge
 
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
@@ -23,6 +23,12 @@ from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalF
 class DepthFrame:
     stamp: Time
     depth: np.ndarray  # float32 HxW
+
+
+@dataclass
+class PoseFrame:
+    stamp: Time
+    p: np.ndarray  # (3,) float64
 
 
 def stamp_to_time(stamp) -> Time:
@@ -48,15 +54,10 @@ def robust_median_mad(values: np.ndarray, z_thresh: float = 3.5) -> Tuple[float,
 
 class FlowDepthVelocityNode(Node):
     """
-    Flow+Depth velocity (no Essential) + auto depth-scale calibration using GT velocity magnitude.
-
-    Outputs Vector3Stamped in `camera_frame` (optical convention):
-      x = right, y = down, z = forward
-
-    Calibration:
-      - Reads /simple_drone/gt_vel (geometry_msgs/msg/Twist)
-      - Computes alpha = median( |v_gt| / |v_depth_raw| ) over a sliding window
-      - Applies alpha to depth (equivalently scales velocity)
+    - RGB + depth + caminfo
+    - LK optical flow
+    - Solve translation-only model (vx, vy, vz) in camera optical frame (x right, y down, z forward)
+    - Optional: calibrate depth scale using /simple_drone/gt_pose (Pose without header -> use receipt time)
     """
 
     def __init__(self):
@@ -71,10 +72,8 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("image_topic", "/simple_drone/front/image_raw")
         self.declare_parameter("depth_topic", "/depth_anything/depth")
         self.declare_parameter("camera_info_topic", "/simple_drone/front/camera_info")
+        self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
         self.declare_parameter("output_topic", "/flow_depth/velocity")
-
-        # GT velocity topic (Twist)
-        self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
 
         # feature/LK params
         self.declare_parameter("max_corners", 300)
@@ -86,7 +85,15 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)
         self.declare_parameter("max_depth", 50.0)
         self.declare_parameter("use_depth_norm", False)
-        self.declare_parameter("depth_scale_init", 1.0)   # initial alpha
+
+        # base depth_scale (static) + dynamic GT scale
+        self.declare_parameter("depth_scale", 1.0)
+        self.declare_parameter("enable_gt_scale", True)
+        self.declare_parameter("gt_pose_buffer_size", 200)
+        self.declare_parameter("scale_window", 50)           # keep last N alpha values
+        self.declare_parameter("min_gt_dt", 1e-3)
+        self.declare_parameter("max_gt_dt", 0.2)
+        self.declare_parameter("min_speed_for_scale", 0.02)  # m/s ignore near-static
 
         # sync & robustness params
         self.declare_parameter("depth_buffer_size", 30)
@@ -96,28 +103,17 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("max_flow_px_per_s", 1500.0)
         self.declare_parameter("mad_z_thresh", 3.5)
 
-        # Calibration params
-        self.declare_parameter("enable_gt_calib", True)
-        self.declare_parameter("gt_max_time_diff", 0.25)        # sec (rgb vs gt)
-        self.declare_parameter("calib_window", 120)             # number of alpha samples
-        self.declare_parameter("calib_min_samples", 30)         # before "locking in"
-        self.declare_parameter("calib_vmin", 0.05)              # m/s ignore too small GT
-        self.declare_parameter("calib_vmax", 5.0)               # m/s ignore crazy GT
-        self.declare_parameter("calib_vdepth_min", 1e-3)        # ignore near-zero estimate
-        self.declare_parameter("alpha_clip_min", 0.01)
-        self.declare_parameter("alpha_clip_max", 100.0)
-
         # debug
         self.declare_parameter("show_debug", False)
         self.declare_parameter("log_every_n", 30)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_optical_frame")
 
         # read params
-        self.image_topic = self.get_parameter("image_topic").value
-        self.depth_topic = self.get_parameter("depth_topic").value
-        self.caminfo_topic = self.get_parameter("camera_info_topic").value
-        self.output_topic = self.get_parameter("output_topic").value
-        self.gt_vel_topic = self.get_parameter("gt_vel_topic").value
+        self.image_topic = str(self.get_parameter("image_topic").value)
+        self.depth_topic = str(self.get_parameter("depth_topic").value)
+        self.caminfo_topic = str(self.get_parameter("camera_info_topic").value)
+        self.gt_pose_topic = str(self.get_parameter("gt_pose_topic").value)
+        self.output_topic = str(self.get_parameter("output_topic").value)
 
         self.max_corners = int(self.get_parameter("max_corners").value)
         self.min_corners = int(self.get_parameter("min_corners").value)
@@ -136,32 +132,30 @@ class FlowDepthVelocityNode(Node):
         self.max_flow_px_per_s = float(self.get_parameter("max_flow_px_per_s").value)
         self.mad_z_thresh = float(self.get_parameter("mad_z_thresh").value)
 
-        self.enable_gt_calib = bool(self.get_parameter("enable_gt_calib").value)
-        self.gt_max_time_diff = float(self.get_parameter("gt_max_time_diff").value)
-        self.calib_window = int(self.get_parameter("calib_window").value)
-        self.calib_min_samples = int(self.get_parameter("calib_min_samples").value)
-        self.calib_vmin = float(self.get_parameter("calib_vmin").value)
-        self.calib_vmax = float(self.get_parameter("calib_vmax").value)
-        self.calib_vdepth_min = float(self.get_parameter("calib_vdepth_min").value)
-        self.alpha_clip_min = float(self.get_parameter("alpha_clip_min").value)
-        self.alpha_clip_max = float(self.get_parameter("alpha_clip_max").value)
-
         self.show_debug = bool(self.get_parameter("show_debug").value)
         self.log_every_n = int(self.get_parameter("log_every_n").value)
-        self.camera_frame = self.get_parameter("camera_frame").value
+        self.camera_frame = str(self.get_parameter("camera_frame").value)
 
-        # depth scale (alpha)
-        self.alpha = float(self.get_parameter("depth_scale_init").value)
-        self.alpha_buf: Deque[float] = deque(maxlen=self.calib_window)
+        self.base_depth_scale = float(self.get_parameter("depth_scale").value)
+
+        self.enable_gt_scale = bool(self.get_parameter("enable_gt_scale").value)
+        self.gt_pose_buffer_size = int(self.get_parameter("gt_pose_buffer_size").value)
+        self.scale_window = int(self.get_parameter("scale_window").value)
+        self.min_gt_dt = float(self.get_parameter("min_gt_dt").value)
+        self.max_gt_dt = float(self.get_parameter("max_gt_dt").value)
+        self.min_speed_for_scale = float(self.get_parameter("min_speed_for_scale").value)
+
+        # current dynamic scale (starts at base)
+        self.depth_scale_dyn = self.base_depth_scale
+        self.alpha_hist: Deque[float] = deque(maxlen=max(1, self.scale_window))
 
         # log
         self.get_logger().info(f"[FlowDepth] RGB: {self.image_topic}")
         self.get_logger().info(f"[FlowDepth] Depth: {self.depth_topic}")
         self.get_logger().info(f"[FlowDepth] CamInfo: {self.caminfo_topic}")
-        self.get_logger().info(f"[FlowDepth] GT vel: {self.gt_vel_topic} (Twist)")
+        self.get_logger().info(f"[FlowDepth] GT Pose: {self.gt_pose_topic} (Pose no header -> using receipt time)")
         self.get_logger().info(f"[FlowDepth] Pub: {self.output_topic}")
-        self.get_logger().info(f"[FlowDepth] depth_buf={self.depth_buffer_size} max_depth_dt={self.max_depth_time_diff}s")
-        self.get_logger().info(f"[FlowDepth] alpha_init={self.alpha:.6f} enable_gt_calib={self.enable_gt_calib}")
+        self.get_logger().info(f"[FlowDepth] enable_gt_scale={self.enable_gt_scale} scale_window={self.scale_window}")
 
         self.bridge = CvBridge()
 
@@ -171,12 +165,9 @@ class FlowDepthVelocityNode(Node):
         self.cx: Optional[float] = None
         self.cy: Optional[float] = None
 
-        # depth buffer
+        # buffers
         self.depth_buf: Deque[DepthFrame] = deque(maxlen=self.depth_buffer_size)
-
-        # latest gt velocity
-        self.gt_vel_vec: Optional[np.ndarray] = None  # (3,)
-        self.gt_vel_stamp: Optional[Time] = None
+        self.gt_pose_buf: Deque[PoseFrame] = deque(maxlen=self.gt_pose_buffer_size)
 
         # tracker
         self.tracker = OpticalFlowTracker(
@@ -193,8 +184,8 @@ class FlowDepthVelocityNode(Node):
         self.depth_sub = self.create_subscription(Image, self.depth_topic, self.depth_callback, qos_profile_sensor_data)
         self.caminfo_sub = self.create_subscription(CameraInfo, self.caminfo_topic, self.caminfo_callback, qos_profile_sensor_data)
 
-        if self.enable_gt_calib:
-            self.gt_sub = self.create_subscription(Twist, self.gt_vel_topic, self.gt_vel_callback, qos_profile_sensor_data)
+        # GT pose has no header -> QoS not critical
+        self.gt_pose_sub = self.create_subscription(Pose, self.gt_pose_topic, self.gt_pose_callback, 10)
 
         self._dbg_counter = 0
 
@@ -206,14 +197,11 @@ class FlowDepthVelocityNode(Node):
         self.cx = float(K[2])
         self.cy = float(K[5])
 
-    def gt_vel_callback(self, msg: Twist):
-        self.gt_vel_vec = np.array(
-            [msg.linear.x, msg.linear.y, msg.linear.z],
-            dtype=np.float64
-        )
-        # Twist has no header stamp; use node time as "best effort"
-        # In sim/bag this is still okay if callbacks are roughly in time.
-        self.gt_vel_stamp = self.get_clock().now()
+    def gt_pose_callback(self, msg: Pose):
+        # Pose has no stamp -> take receipt time (sim time)
+        t = self.get_clock().now()
+        p = np.array([msg.position.x, msg.position.y, msg.position.z], dtype=np.float64)
+        self.gt_pose_buf.append(PoseFrame(stamp=t, p=p))
 
     def depth_callback(self, msg: Image):
         try:
@@ -221,7 +209,6 @@ class FlowDepthVelocityNode(Node):
         except Exception as e:
             self.get_logger().error(f"Depth convert failed: {e}")
             return
-
         depth_np = np.asarray(depth, dtype=np.float32)
         t = stamp_to_time(msg.header.stamp)
         self.depth_buf.append(DepthFrame(stamp=t, depth=depth_np))
@@ -242,8 +229,8 @@ class FlowDepthVelocityNode(Node):
                 self.get_logger().warn(f"[FlowDepth] depth too old/new: |t_rgb - t_depth| = {dt_depth:.3f}s (skip)")
             return
 
-        # Apply current alpha to depth (turn "relative depth" to metric-like)
-        depth_map = (self.alpha * depth_map).astype(np.float32, copy=False)
+        # Apply current dynamic scale
+        depth_map = (self.depth_scale_dyn * depth_map).astype(np.float32)
 
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -268,11 +255,19 @@ class FlowDepthVelocityNode(Node):
             dt=dt,
         )
 
-        # --- update alpha from GT (magnitude) ---
-        if self.enable_gt_calib:
-            self.try_update_alpha_from_gt(vx, vy, vz)
+        # Optionally update scale from GT
+        v_est_norm = float(np.linalg.norm([vx, vy, vz]))
+        v_gt = self.try_get_gt_speed_now()
 
-        # publish (camera optical frame convention)
+        if self.enable_gt_scale and (v_gt is not None) and (v_est_norm > 1e-6) and (v_gt >= self.min_speed_for_scale):
+            alpha = float(v_gt / v_est_norm)
+
+            # reject crazy alphas
+            if np.isfinite(alpha) and (0.01 <= alpha <= 100.0):
+                self.alpha_hist.append(alpha)
+                self.depth_scale_dyn = self.base_depth_scale * float(np.median(np.array(self.alpha_hist, dtype=np.float64)))
+
+        # Publish velocity (camera optical frame)
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = msg.header.stamp
         vel_msg.header.frame_id = self.camera_frame
@@ -282,12 +277,12 @@ class FlowDepthVelocityNode(Node):
         self.vel_pub.publish(vel_msg)
 
         if (self._dbg_counter % self.log_every_n) == 0:
-            vnorm = float(np.linalg.norm([vx, vy, vz]))
-            alpha_n = len(self.alpha_buf)
             self.get_logger().info(
                 f"[FlowDepth] used={n_used} kept={n_kept} "
-                f"v=({vx:.3f},{vy:.3f},{vz:.3f}) |v|={vnorm:.3f} "
-                f"dt={dt:.3f}s |rgb-depth|={dt_depth:.3f}s alpha={self.alpha:.5f} (n={alpha_n})"
+                f"v_est=({vx:.3f},{vy:.3f},{vz:.3f}) |v|={v_est_norm:.3f} "
+                f"v_gt={(-1.0 if v_gt is None else v_gt):.3f} "
+                f"depth_scale_dyn={self.depth_scale_dyn:.4f} "
+                f"|rgb-depth|={dt_depth:.3f}s"
             )
 
         self._dbg_counter += 1
@@ -295,44 +290,27 @@ class FlowDepthVelocityNode(Node):
         if self.show_debug:
             vis = frame.copy()
             self.draw_debug(vis, flow_res.good_old, flow_res.good_new, depth_map)
-            txt = f"v=({vx:.3f},{vy:.3f},{vz:.3f}) alpha={self.alpha:.3f}"
+            txt = f"v=({vx:.2f},{vy:.2f},{vz:.2f}) scale={self.depth_scale_dyn:.3f} dTD={dt_depth:.3f}"
             cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             cv2.imshow("Flow+Depth Velocity", vis)
             cv2.waitKey(1)
 
-    # ---------- calibration helper ----------
-    def try_update_alpha_from_gt(self, vx: float, vy: float, vz: float):
-        if self.gt_vel_vec is None:
-            return
-        if self.gt_vel_stamp is None:
-            return
-
-        # Twist has no stamp, so we can't do exact time sync; best-effort gate:
-        # if callbacks drift a lot, this still stays roughly okay.
-        # You can disable this gate by setting gt_max_time_diff very large.
-        dt_gt = abs((self.get_clock().now() - self.gt_vel_stamp).nanoseconds) * 1e-9
-        if dt_gt > self.gt_max_time_diff:
-            return
-
-        vgt = float(np.linalg.norm(self.gt_vel_vec))
-        vdepth = float(np.linalg.norm([vx, vy, vz]))
-
-        if not (self.calib_vmin <= vgt <= self.calib_vmax):
-            return
-        if vdepth < self.calib_vdepth_min:
-            return
-
-        alpha_i = vgt / vdepth
-        if not np.isfinite(alpha_i):
-            return
-
-        alpha_i = float(np.clip(alpha_i, self.alpha_clip_min, self.alpha_clip_max))
-        self.alpha_buf.append(alpha_i)
-
-        if len(self.alpha_buf) >= self.calib_min_samples:
-            new_alpha = float(np.median(np.array(self.alpha_buf, dtype=np.float64)))
-            if np.isfinite(new_alpha) and new_alpha > 0:
-                self.alpha = new_alpha
+    # ---------- GT speed from pose buffer ----------
+    def try_get_gt_speed_now(self) -> Optional[float]:
+        """
+        gt_pose is Pose without header.
+        We compute speed from last two received poses using receipt time (sim time).
+        """
+        if len(self.gt_pose_buf) < 2:
+            return None
+        a = self.gt_pose_buf[-2]
+        b = self.gt_pose_buf[-1]
+        dt = time_diff_sec(a.stamp, b.stamp)
+        if not (self.min_gt_dt <= dt <= self.max_gt_dt):
+            return None
+        dp = b.p - a.p
+        v = float(np.linalg.norm(dp) / dt)
+        return v
 
     # ---------- sync helper ----------
     def get_depth_closest_to(self, t_rgb: Time) -> Tuple[Optional[np.ndarray], Optional[Time], float]:
@@ -349,26 +327,22 @@ class FlowDepthVelocityNode(Node):
 
     # ---------- core helpers ----------
     def velocity_from_flow_and_depth(self, good_old, good_new, depth_map, dt: float):
-        """
-        Solve least squares for (vx, vy, vz) from optical flow constraints:
-          du * Z = -fx * vx + (u-cx) * vz
-          dv * Z = -fy * vy + (v-cy) * vz
-
-        Returns vx, vy, vz in *camera optical convention* (x right, y down, z forward).
-        """
         if good_old is None or good_new is None or good_old.shape[0] < 8:
             return 0.0, 0.0, 0.0, 0, 0
 
         H, W = depth_map.shape[:2]
+
         u_new = good_new[:, 0]
         v_new = good_new[:, 1]
 
         du = (good_new[:, 0] - good_old[:, 0]) / dt
         dv = (good_new[:, 1] - good_old[:, 1]) / dt
 
-        # reject insane flow early
+        # reject insane flow
         flow_mag = np.sqrt(du * du + dv * dv)
         keep_flow = np.isfinite(flow_mag) & (flow_mag < self.max_flow_px_per_s)
+        if not np.any(keep_flow):
+            return 0.0, 0.0, 0.0, 0, 0
 
         u_idx = np.rint(u_new).astype(np.int32)
         v_idx = np.rint(v_new).astype(np.int32)
@@ -379,39 +353,35 @@ class FlowDepthVelocityNode(Node):
 
         Z = depth_map[v_idx[valid], u_idx[valid]].astype(np.float64)
 
-        keep = np.isfinite(Z)
+        validZ = np.isfinite(Z)
         if not self.use_depth_norm:
-            keep = keep & (Z > self.min_depth) & (Z < self.max_depth)
+            validZ = validZ & (Z > self.min_depth) & (Z < self.max_depth)
 
-        if np.sum(keep) < 8:
-            return 0.0, 0.0, 0.0, int(np.sum(valid)), int(np.sum(keep))
+        if int(np.sum(validZ)) < 8:
+            return 0.0, 0.0, 0.0, int(np.sum(valid)), 0
 
-        curr_u = u_new[valid][keep].astype(np.float64)
-        curr_v = v_new[valid][keep].astype(np.float64)
-        curr_du = du[valid][keep].astype(np.float64)
-        curr_dv = dv[valid][keep].astype(np.float64)
-        curr_Z = Z[keep].astype(np.float64)
+        curr_u = u_new[valid][validZ].astype(np.float64)
+        curr_v = v_new[valid][validZ].astype(np.float64)
+        curr_du = du[valid][validZ].astype(np.float64)
+        curr_dv = dv[valid][validZ].astype(np.float64)
+        curr_Z = Z[validZ]
 
-        n = int(curr_Z.size)
-
+        n = curr_Z.shape[0]
         A = np.zeros((2 * n, 3), dtype=np.float64)
         B = np.zeros((2 * n, 1), dtype=np.float64)
 
-        # fill A,B vectorized (faster + less bugs)
-        # row 0..n-1 for du
-        A[0:n, 0] = -self.fx
-        A[0:n, 1] = 0.0
-        A[0:n, 2] = (curr_u - self.cx)
-        B[0:n, 0] = curr_du * curr_Z
+        # du * Z = -fx*vx + (u-cx)*vz
+        # dv * Z = -fy*vy + (v-cy)*vz
+        A[0::2, 0] = -self.fx
+        A[0::2, 2] = (curr_u - self.cx)
+        B[0::2, 0] = curr_du * curr_Z
 
-        # row n..2n-1 for dv
-        A[n:2*n, 0] = 0.0
-        A[n:2*n, 1] = -self.fy
-        A[n:2*n, 2] = (curr_v - self.cy)
-        B[n:2*n, 0] = curr_dv * curr_Z
+        A[1::2, 1] = -self.fy
+        A[1::2, 2] = (curr_v - self.cy)
+        B[1::2, 0] = curr_dv * curr_Z
 
         try:
-            vel, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
+            vel, *_ = np.linalg.lstsq(A, B, rcond=None)
             vx, vy, vz = vel.flatten()
         except np.linalg.LinAlgError:
             return 0.0, 0.0, 0.0, n, 0
