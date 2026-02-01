@@ -15,9 +15,9 @@ instructions:
   - id: 4
     text: "Move forward until you reach an intersection, then turn left."
   - id: 5
-    text: "Follow the hallway and avoid obstacles; keep going until you find a doorway."
+    text: "Enter the room on the right, it looks like a prison cell."
   - id: 6
-    text: "Inspect the cell doors on your left side and stop at the first open entrance."
+    text: "Continue straight to the end of the hallway and then enter the room on the right."
   - id: 7
     text: "Go to the end of the corridor, then turn around and return to where you started."
   - id: 8
@@ -25,11 +25,11 @@ instructions:
   - id: 9
     text: "Approach the barred gate ahead and stop before reaching it."
   - id: 10
-    text: "Turn right and explore the adjacent area as if searching for a guard station."
+    text: "Go through the door and look for the cone."
   - id: 11
-    text: "Move forward and keep close to the left wall, like you are following the cell block."
+    text: "Go through the door and look for the iron bars."
   - id: 12
-    text: "Take the next left opening you see and go inside."
+    text: "Enter the door and then look for the blue barrel."
   - id: 13
     text: "Take the next right opening you see and go inside."
   - id: 14
