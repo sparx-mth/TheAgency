@@ -15,9 +15,9 @@ bridge:
     timeout_sec: 30.0
 
   control:
-    inference_rate: 5.0
+    inference_rate: 1.0
     continuous_inference: false
-    min_inference_interval: 0.2
+    min_inference_interval: 0.3
 
 # =============================================================================
 # INPUT CONFIGURATION
@@ -77,19 +77,19 @@ outputs:
     # x controls forward/backward
     action_mapping:
       MOVE_FORWARD:
-        x: 250.0      # Forward thrust
+        x: 400.0      # Forward thrust
         y: 0.0
         z: 400.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.2
+        duration_sec: 0.5
       TURN_LEFT:
         x: 0.0
         y: 0.0
         z: 250.0
         r: -650.0      # Yaw left (positive = CCW)
         buttons: 0
-        duration_sec: 0.2
+        duration_sec: 0.3
 
       TURN_RIGHT:
         x: 0.0
@@ -97,7 +97,7 @@ outputs:
         z: 250.0
         r: 650.0     # Yaw right (negative = CW)
         buttons: 0
-        duration_sec: 0.2
+        duration_sec: 0.3
 
       STOP:
         x: 0.0
@@ -105,14 +105,14 @@ outputs:
         z: -1000.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.2
+        duration_sec: 0.3
       UNKNOWN:
         x: -50.0
         y: 0.0
         z: 100.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.2
+        duration_sec: 0.3
 
   # KeepAlive - Required to maintain control authority
   keep_alive:
