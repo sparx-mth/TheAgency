@@ -21,4 +21,4 @@ mapping:
   floor_dist_thresh: 0.05
 
   free_height_m: 0.10
-  occupied_height_m: 1.35
+  occupied_height_m: 0.7
