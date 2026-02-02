@@ -2,7 +2,7 @@ import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 
 import cv2
 import numpy as np
@@ -11,6 +11,8 @@ import yaml
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
+from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
+from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
 
 
 @dataclass
@@ -408,7 +410,7 @@ def build_occupancy_raycast(
     observed = np.isfinite(maxH)
 
     min_hits_for_occ = 2  # try 2..6 (0.1m usually 3-5)
-    min_hits_for_free = 14  # optional
+    min_hits_for_free = 20  # optional
     meanH = np.zeros_like(cell_sum_h)
     mask = cell_hits > 0
     meanH[mask] = cell_sum_h[mask] / cell_hits[mask]
@@ -474,34 +476,36 @@ def occ_to_png(grid: np.ndarray) -> np.ndarray:
     return img
 
 
-def depth_vis_u8(depth_m: np.ndarray):
-    finite = np.isfinite(depth_m)
-    d = depth_m.copy()
-
-    # choose a robust range from finite values
-    p01 = float(np.percentile(d[finite], 1))
-    p99 = float(np.percentile(d[finite], 99))
-
-    d_norm = np.zeros_like(d, dtype=np.float32)
-    d_norm[finite] = (d[finite] - p01) / max(p99 - p01, 1e-6)
-    d_norm = np.clip(d_norm, 0.0, 1.0)
-
-    vis = np.zeros(d.shape, dtype=np.uint8)
-    vis[finite] = (255.0 * (1.0 - d_norm[finite])).astype(np.uint8)  # near bright
-    vis[~finite] = 0  # or 255, just be consistent
+def depth_vis_u8(depth_m: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
     finite = np.isfinite(depth_m)
     if not finite.any():
         raise RuntimeError("Depth is all non-finite (NaN/Inf).")
 
-    dmin = float(np.min(depth_m[finite]))
-    dmax = float(np.max(depth_m[finite]))
+    d = depth_m.copy()
+    p01 = float(np.percentile(d[finite], 1))
+    p99 = float(np.percentile(d[finite], 99))
+
+    d_norm = np.zeros_like(d, dtype=np.float32)
+    den = max(p99 - p01, 1e-6)
+    d_norm[finite] = (d[finite] - p01) / den
+    d_norm = np.clip(d_norm, 0.0, 1.0)
+
+    vis = np.zeros(d.shape, dtype=np.uint8)
+    vis[finite] = (255.0 * (1.0 - d_norm[finite])).astype(np.uint8)
+
+    dmin = float(np.min(d[finite]))
+    dmax = float(np.max(d[finite]))
 
     dbg = {
-        "shape", depth_m.shape,
-        "dtype", depth_m.dtype,
-        "min/max", dmin, dmax
+        "p01": p01,
+        "p99": p99,
+        "min": dmin,
+        "max": dmax,
+        "shape": d.shape,
+        "dtype": str(d.dtype),
     }
     return vis, dbg
+
 
 
 def main():
@@ -525,7 +529,48 @@ def main():
     intr = resize_intrinsics(intr_full, cfg.inference_width, cfg.inference_height)
 
     depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
-    depth_m = depth_model.infer_depth(rgb_inf).astype(np.float32)  # MUST be meters
+
+    # ---- Full depth ----
+    depth_full_m = depth_model.infer_depth(rgb_inf).astype(np.float32)
+
+    # ---- Tiled depth ----
+    tile_cfg = TileCfg(
+        tile_w=640,
+        tile_h=384,
+        overlap_div=4,  # 25% overlap
+        model_w=518,
+        model_h=518,
+        global_norm_from_full_pass=True,
+    )
+    print(tile_cfg.tile_w, tile_cfg.tile_h, tile_cfg.overlap_x, tile_cfg.overlap_y, tile_cfg.step_x, tile_cfg.step_y)
+
+    depth_tiled_m, tiled_dbg = infer_depth_tiled(
+        rgb_full=rgb_inf,
+        intr_full=intr,  # only needed if your tiler does intrinsics per tile; ok to pass
+        depth_model=depth_model,
+        cfg=tile_cfg,
+    )
+
+    # Choose which depth you use downstream for occupancy:
+    depth_m = depth_tiled_m  # or depth_full_m if you want baseline
+
+    # ---- Comparison report (before masking) ----
+    # optional: compare only in valid range to avoid near-max clipped zones dominating
+    max_r = DepthAnythingV2Config().max_range_m
+    min_r = DepthAnythingV2Config().min_range_m
+    valid_for_compare = (
+            np.isfinite(depth_full_m) & np.isfinite(depth_tiled_m) &
+            (depth_full_m > (min_r + 0.05)) & (depth_full_m < (max_r - 0.5)) &
+            (depth_tiled_m > (min_r + 0.05)) & (depth_tiled_m < (max_r - 0.5))
+    )
+    depth_compare_report(depth_full_m, depth_tiled_m, valid_mask=valid_for_compare, name_a="full", name_b="tiled")
+
+    # save visuals for both depth maps
+    vis_full, _ = depth_vis_u8(depth_full_m)
+    vis_tiled, _ = depth_vis_u8(depth_tiled_m)
+    cv2.imwrite(os.path.join(args.out_dir, "depth_full_vis.png"), vis_full)
+    cv2.imwrite(os.path.join(args.out_dir, "depth_tiled_vis.png"), vis_tiled)
+    save_depth_diff_visuals(args.out_dir, depth_full_m, depth_tiled_m, max_abs_m=2.0)
 
     max_r = DepthAnythingV2Config().max_range_m
     min_r = DepthAnythingV2Config().min_range_m
