@@ -8,6 +8,10 @@ camera:
   cx: 959.5
   cy: 539.5
 
+camera_extrinsics:
+  rpy_deg: [roll, pitch, yaw]
+  t_m: [tx, ty, tz]
+
 mapping:
   resolution_m: 0.1
   grid_width_m: 600.0

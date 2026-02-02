@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import datetime
 from typing import Optional
+
+import torch
 from PIL import Image
 import numpy as np
 from matplotlib import pyplot as plt
@@ -49,30 +51,57 @@ class DepthAnythingV2DepthModel(DepthModel):
         self.frame_count = 0
         self.save_interval = 100
 
-    def infer_depth(self, rgb: np.ndarray) -> np.ndarray:
-        # 1. Get raw disparity from model (0-255 or 0-N)
+    def infer_raw(self, rgb: np.ndarray) -> np.ndarray:
+        """
+        Returns raw model output as float32 HxW (no min/max mapping).
+        Prefer predicted_depth over depth visualization.
+        """
         out = self.pipe(Image.fromarray(rgb))
-        raw_disparity = np.array(out["depth"]).astype(np.float32)
+
+        if "predicted_depth" in out:
+            pred = out["predicted_depth"]
+            if torch.is_tensor(pred):
+                pred = pred.detach().float().cpu().numpy()
+            pred = np.asarray(pred).squeeze().astype(np.float32)
+            if self.cfg.debug:
+                self.visualize_depth_raw_data(pred)
+            return pred
+
+        # Fallback (less ideal): out["depth"] is often a PIL visualization
+        raw = np.array(out["depth"]).astype(np.float32)
         if self.cfg.debug:
-            self.visualize_depth_raw_data(raw_disparity)
-        # 2. Normalize to 0.0 - 1.0
-        d_min = raw_disparity.min()
-        d_max = raw_disparity.max()
-        den = max(d_max - d_min, 1e-6)
+            self.visualize_depth_raw_data(raw)
+        return raw
 
-        # depth = (raw_disparity - d_min) / (d_max - d_min) * 255.0
-        # depth_m = depth.astype(np.uint8)
+    def raw_stats(self, raw: np.ndarray) -> dict:
+        raw = raw[np.isfinite(raw)]
+        if raw.size == 0:
+            return {"min": 0.0, "max": 1.0}
+        # robust range is better than strict min/max
+        lo = float(np.percentile(raw, 1))
+        hi = float(np.percentile(raw, 99))
+        return {"min": lo, "max": hi}
 
-        depth_norm = (raw_disparity - d_min) / den
+    def infer_depth(self, rgb: np.ndarray, norm_stats: dict | None = None) -> np.ndarray:
+        raw = self.infer_raw(rgb)
 
-        # 3. To see a person clearly, the points must have a wide Z-range.
-        # Person should be at ~2.0m, Background at ~15.0m.
-        # depth_inverted = 1.0 - depth_norm
-        # depth_m = depth_inverted * (max_range - min_range) + min_range
+        # If this is a metric model and predicted_depth is metric-ish:
+        # -> you can just return raw (optionally clamp)
+        if "Metric" in self.cfg.model_id or "metric" in self.cfg.model_id:
+            depth_m = raw
+            depth_m = np.clip(depth_m, self.cfg.min_range_m, self.cfg.max_range_m)
+            return depth_m.astype(np.float32)
+
+        # Relative model: normalize using provided global stats if available
+        if norm_stats is None:
+            norm_stats = self.raw_stats(raw)
+        lo = norm_stats["min"]
+        hi = norm_stats["max"]
+        den = max(hi - lo, 1e-6)
+
+        depth_norm = np.clip((raw - lo) / den, 0.0, 1.0)
         depth_m = depth_norm * (self.cfg.max_range_m - self.cfg.min_range_m) + self.cfg.min_range_m
-
-        # depth_m = (d_max - raw_disparity)/50
-        return depth_m
+        return depth_m.astype(np.float32)
 
 
     def visualize_depth_raw_data(self, raw_depth):
