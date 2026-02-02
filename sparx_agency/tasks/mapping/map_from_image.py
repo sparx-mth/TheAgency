@@ -10,6 +10,7 @@ import yaml
 
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
+from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
 
 
 @dataclass
@@ -113,6 +114,8 @@ def fit_floor_plane_ransac(
     min_inliers: int,
     normal_gate_abs_z: float = 0.0,
     seed: int = 0,
+    up_axis: int = 2,
+    up_gate: float = 0.75
 ) -> Optional[Tuple[np.ndarray, float, np.ndarray]]:
     """
     Returns (n, d, inlier_mask) for plane n·p + d = 0.
@@ -132,7 +135,7 @@ def fit_floor_plane_ransac(
         if nn < 1e-9:
             continue
         n = n / nn
-        if abs(float(n[1])) < 0.75:
+        if abs(float(n[up_axis])) < up_gate:
             continue
         # Optional orientation gate (DISABLED by default)
         if normal_gate_abs_z > 0.0 and abs(float(n[2])) < normal_gate_abs_z:
@@ -170,43 +173,126 @@ def refine_plane_svd(pts: np.ndarray) -> Tuple[np.ndarray, float]:
     return n.astype(np.float32), float(d)
 
 
-def plane_basis(n: np.ndarray)-> Tuple[np.ndarray, np.ndarray]:
-    cam_x = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+def plane_basis_from_camera(n: np.ndarray, cam_forward: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    # cam_forward is in SAME coordinate frame as pts (for your base_xyz: [1,0,0])
+    f = cam_forward.astype(np.float32)
+    f = f / (np.linalg.norm(f) + 1e-9)
 
-    # Project cam_x onto plane to get a stable 'u'
-    u = cam_x - float(np.dot(cam_x, n)) * n
-    u = u / (np.linalg.norm(u) + 1e-9)
-
-    # v completes the basis on the plane
-    v = np.cross(n, u)
+    # project forward onto the plane
+    v = f - np.dot(f, n) * n
     v = v / (np.linalg.norm(v) + 1e-9)
+
+    # u completes right-handed basis on the plane
+    u = np.cross(v, n)
+    u = u / (np.linalg.norm(u) + 1e-9)
     return u, v
 
-def plane_basis_from_camera(n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+
+
+
+def overlay_depth_grid_xyz_base(
+    depth_m: np.ndarray,
+    intr,
+    grid_n: int = 10,
+    out_path: str = "depth_grid_xyz.png",
+    max_z: float = 35.0,
+) -> np.ndarray:
     """
-    Build (u,v) axes on the floor plane aligned with the camera:
-    - v = camera forward projected onto plane
-    - u = camera right projected onto plane
-    Assumes camera frame: x=right, y=down, z=forward.
+    Overlay per-cell XYZ in base_xyz convention:
+      X = forward
+      Y = left
+      Z = up
+
+    depth_m: HxW float32 depth in meters
+    intr: has width,height,fx,fy,cx,cy matching depth_m resolution
     """
-    n = n.astype(np.float32)
-    n = n / (np.linalg.norm(n) + 1e-9)
+    H, W = depth_m.shape[:2]
+    assert W == intr.width and H == intr.height, "Intrinsics must match depth resolution"
 
-    f = np.array([0.0, 0.0, 1.0], dtype=np.float32)  # camera forward (z)
-    r = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # camera right (x)
+    d = depth_m.astype(np.float32)
+    d_vis = np.clip(d, 0.0, max_z)
 
-    # project onto plane
-    v = f - (np.dot(f, n)) * n
-    u = r - (np.dot(r, n)) * n
+    # Robust normalization (ignore NaNs)
+    finite = np.isfinite(d_vis)
+    if not np.any(finite):
+        img = np.zeros((H, W, 3), dtype=np.uint8)
+    else:
+        dmin = float(np.min(d_vis[finite]))
+        dmax = float(np.max(d_vis[finite]))
+        d_norm = (d_vis - dmin) / (dmax - dmin + 1e-6)
+        d_norm[~finite] = 0.0
+        gray = (255.0 * (1.0 - d_norm)).astype(np.uint8)  # near bright
+        img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-    v = v / (np.linalg.norm(v) + 1e-9)
-    u = u / (np.linalg.norm(u) + 1e-9)
+    # Grid edges
+    xs = np.linspace(0, W, grid_n + 1, dtype=np.int32)
+    ys = np.linspace(0, H, grid_n + 1, dtype=np.int32)
 
-    # re-orthogonalize u to v
-    u = u - (np.dot(u, v)) * v
-    u = u / (np.linalg.norm(u) + 1e-9)
+    # Draw grid lines
+    for x in xs:
+        cv2.line(img, (int(x), 0), (int(x), H - 1), (80, 80, 80), 1, cv2.LINE_AA)
+    for y in ys:
+        cv2.line(img, (0, int(y)), (W - 1, int(y)), (80, 80, 80), 1, cv2.LINE_AA)
 
-    return u, v
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.35
+    thickness = 1
+
+    for gy in range(grid_n):
+        for gx in range(grid_n):
+            x0, x1 = xs[gx], xs[gx + 1]
+            y0, y1 = ys[gy], ys[gy + 1]
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            cell = d[y0:y1, x0:x1]
+            cell_f = cell[np.isfinite(cell) & (cell > 1e-3)]
+            if cell_f.size == 0:
+                z = np.nan
+            else:
+                z = float(np.median(cell_f))  # depth
+
+            u = int((x0 + x1) // 2)
+            v = int((y0 + y1) // 2)
+
+            if not np.isfinite(z):
+                text1 = "nan"
+                text2 = ""
+                color = (0, 0, 255)
+            else:
+                # base_xyz: X forward, Y left, Z up
+                X = z
+                Y = -(u - intr.cx) * z / intr.fx
+                Z = -(v - intr.cy) * z / intr.fy
+
+                text1 = f"X {X:4.1f}"
+                text2 = f"Y {Y:+.1f} Z {Z:+.1f}"
+                text1 = f"Z {Z:+.1f}"
+                text2 = " "
+                color = (0, 255, 255)
+
+            # Compute background size for up to 2 lines
+            (tw1, th1), _ = cv2.getTextSize(text1, font, font_scale, thickness)
+            if text2:
+                (tw2, th2), _ = cv2.getTextSize(text2, font, font_scale, thickness)
+            else:
+                tw2, th2 = 0, 0
+            tw = max(tw1, tw2)
+            th = th1 + (th2 + 4 if text2 else 0) + 4
+
+            tx, ty = u - 35, v
+            tx = max(0, min(W - tw - 4, tx))
+            ty = max(th + 1, min(H - 2, ty))
+
+            cv2.rectangle(img, (tx, ty - th - 2), (tx + tw + 4, ty + 2), (0, 0, 0), -1)
+            cv2.putText(img, text1, (tx + 2, ty - (th2 + 4 if text2 else 0)),
+                        font, font_scale, color, thickness, cv2.LINE_AA)
+            if text2:
+                cv2.putText(img, text2, (tx + 2, ty),
+                            font, font_scale, color, thickness, cv2.LINE_AA)
+
+    cv2.imwrite(out_path, img)
+    return img
 
 
 def build_occupancy_raycast(
@@ -228,6 +314,9 @@ def build_occupancy_raycast(
     """
 
     # Signed distance to plane: positive = above floor
+    if n[2] < 0:
+        n = -n
+        d = -d
     signed = (pts @ n + d).astype(np.float32)
     height = signed.copy()
     height[height < 0.0] = 0.0
@@ -270,11 +359,18 @@ def build_occupancy_raycast(
     gw = int(np.clip(gw, 50, max_cells))
     gh = int(np.clip(gh, 50, max_cells))
 
+    print(f"BOUNDS: x [{min_x:.2f}, {max_x:.2f}] span={span_x:.2f}m -> gw={gw}")
+    print(f"BOUNDS: y [{min_y:.2f}, {max_y:.2f}] span={span_y:.2f}m -> gh={gh}")
+    print(f"MAP meters: {gw * cfg.resolution_m:.2f} x {gh * cfg.resolution_m:.2f}")
+
     origin_x = min_x
     origin_y = min_y
 
     # Allocate
     grid = np.full((gh, gw), -1, dtype=np.int8)
+    cell_max_h = np.zeros((gh, gw), dtype=np.float32)
+    cell_hits = np.zeros((gh, gw), dtype=np.uint16)
+    cell_sum_h = np.zeros((gh, gw), dtype=np.float32)
 
     # Convert to cell indices
     ix = np.floor((xp - origin_x) / cfg.resolution_m).astype(np.int32)
@@ -284,6 +380,8 @@ def build_occupancy_raycast(
     ixv = ix[valid]
     iyv = iy[valid]
     hv = height[valid]
+    np.add.at(cell_hits, (iyv, ixv), 1)
+    np.add.at(cell_sum_h, (iyv, ixv), hv)
 
     # Sensor cell
     s_ix = int(np.floor((sx - origin_x) / cfg.resolution_m))
@@ -308,8 +406,14 @@ def build_occupancy_raycast(
     np.maximum.at(maxH, (iyv, ixv), hv)
 
     observed = np.isfinite(maxH)
-    occ_cells = observed & (maxH >= cfg.occupied_height_m)
-    free_cells = observed & (maxH <= cfg.free_height_m)
+
+    min_hits_for_occ = 2  # try 2..6 (0.1m usually 3-5)
+    min_hits_for_free = 14  # optional
+    meanH = np.zeros_like(cell_sum_h)
+    mask = cell_hits > 0
+    meanH[mask] = cell_sum_h[mask] / cell_hits[mask]
+    occ_cells = observed & (cell_hits >= min_hits_for_occ) & (meanH >= cfg.occupied_height_m)
+    free_cells = observed & (cell_hits >= min_hits_for_free) & (maxH <= cfg.free_height_m)
 
     # Seed floor-ish cells as free (optional but helpful)
     grid[free_cells] = 0
@@ -338,76 +442,30 @@ def build_occupancy_raycast(
         if grid[ly, lx] != 100:
             grid[ly, lx] = 100
             occ_written += 1
+    if debug:
+        uniq, cnt = np.unique(grid, return_counts=True)
+        print("=========== Before filter ============")
+        print(f"  occupied targets: {occ_x.size} rays:{rays} free_written:{free_written} occ_written:{occ_written}")
+        print("  GRID unique:", list(zip(uniq.tolist(), cnt.tolist())))
+        h = cell_hits[observed]
+        print(
+            f"  hits(observed) p50/p90/p99: ({int(np.percentile(h, 50))}, {int(np.percentile(h, 90))}, {int(np.percentile(h, 99))})")
+
+    occ_img = (grid == 100).astype(np.uint8) * 255
+    kernel = np.ones((3, 3), np.uint8)
+    occ_img = cv2.morphologyEx(occ_img, cv2.MORPH_CLOSE, kernel, iterations=1)
+    grid[(occ_img > 0)] = 100
 
     if debug:
+        print("=========== After filter ============")
         uniq, cnt = np.unique(grid, return_counts=True)
         print(f"  occupied targets: {occ_x.size} rays:{rays} free_written:{free_written} occ_written:{occ_written}")
         print("  GRID unique:", list(zip(uniq.tolist(), cnt.tolist())))
+        h = cell_hits[observed]
+        print(
+            f"  hits(observed) p50/p90/p99: ({int(np.percentile(h, 50))}, {int(np.percentile(h, 90))}, {int(np.percentile(h, 99))})")
 
     return grid
-
-
-def build_occupancy_corner_range(pts: np.ndarray, n: np.ndarray, d: float, u: np.ndarray, v: np.ndarray, cfg: MapCfg):
-    gw = int(cfg.grid_width_m / cfg.resolution_m)
-    gh = int(cfg.grid_height_m / cfg.resolution_m)
-
-    min_h = np.full((gh, gw), np.inf, dtype=np.float32)
-    max_h = np.full((gh, gw), -np.inf, dtype=np.float32)
-    cnt   = np.zeros((gh, gw), dtype=np.int32)
-
-    signed = pts @ n + d
-    # orient so "above plane" is positive
-    if float(np.median(signed)) < 0.0:
-        signed = -signed
-    h = signed.copy()
-    h[h < 0.0] = 0.0
-
-    p_proj = pts - (signed[:, None] * n[None, :])
-    x = p_proj @ u
-    y = p_proj @ v
-
-    margin = 2.0
-    origin_x = float(np.percentile(x, 1)) - margin
-    origin_y = float(np.percentile(y, 1)) - margin
-
-    ix = np.floor((x - origin_x) / cfg.resolution_m).astype(np.int32)
-    iy = np.floor((y - origin_y) / cfg.resolution_m).astype(np.int32)
-
-    valid = (ix >= 0) & (ix < gw) & (iy >= 0) & (iy < gh)
-    ixv, iyv, hv = ix[valid], iy[valid], h[valid]
-
-    np.add.at(cnt, (iyv, ixv), 1)
-    np.minimum.at(min_h, (iyv, iyv*0 + ixv), hv)  # see note below
-
-    np.maximum.at(max_h, (iyv, ixv), hv)
-
-    grid = np.full((gh, gw), -1, dtype=np.int8)
-    observed = cnt >= 2
-
-    h_range = max_h - min_h
-
-    # free if the highest thing is still basically floor
-    grid[observed & (max_h <= cfg.free_height_m)] = 0
-
-    # occupied if there is a vertical structure in the cell
-    grid[observed & (h_range >= cfg.occupied_height_m)] = 100
-
-    dbg = {
-        "gw": gw, "gh": gh,
-        "origin_x": origin_x, "origin_y": origin_y,
-        "x_p01_p99": (float(np.percentile(x, 1)), float(np.percentile(x, 99))),
-        "y_p01_p99": (float(np.percentile(y, 1)), float(np.percentile(y, 99))),
-        "cells_observed": int(observed.sum()),
-        "cells_free": int((grid == 0).sum()),
-        "cells_occ": int((grid == 100).sum()),
-        "valid_points": int(valid.sum()),
-        "total_points": int(pts.shape[0]),
-    }
-    print("cell h_range p50/p90/p99:",
-          np.percentile(h_range[observed], [50, 90, 99]).tolist() if np.any(observed) else None)
-
-    return grid, max_h, cnt, dbg
-
 
 def occ_to_png(grid: np.ndarray) -> np.ndarray:
     img = np.full(grid.shape, 127, dtype=np.uint8)
@@ -416,13 +474,32 @@ def occ_to_png(grid: np.ndarray) -> np.ndarray:
     return img
 
 
-def depth_vis_u8(depth_m: np.ndarray) -> Tuple[np.ndarray, dict]:
-    p01, p50, p99 = np.percentile(depth_m[np.isfinite(depth_m)], [1, 50, 99]).tolist()
-    d = np.clip((depth_m - p01) / max(p99 - p01, 1e-6), 0.0, 1.0)
-    vis = (d * 255.0).astype(np.uint8)
+def depth_vis_u8(depth_m: np.ndarray):
+    finite = np.isfinite(depth_m)
+    d = depth_m.copy()
+
+    # choose a robust range from finite values
+    p01 = float(np.percentile(d[finite], 1))
+    p99 = float(np.percentile(d[finite], 99))
+
+    d_norm = np.zeros_like(d, dtype=np.float32)
+    d_norm[finite] = (d[finite] - p01) / max(p99 - p01, 1e-6)
+    d_norm = np.clip(d_norm, 0.0, 1.0)
+
+    vis = np.zeros(d.shape, dtype=np.uint8)
+    vis[finite] = (255.0 * (1.0 - d_norm[finite])).astype(np.uint8)  # near bright
+    vis[~finite] = 0  # or 255, just be consistent
+    finite = np.isfinite(depth_m)
+    if not finite.any():
+        raise RuntimeError("Depth is all non-finite (NaN/Inf).")
+
+    dmin = float(np.min(depth_m[finite]))
+    dmax = float(np.max(depth_m[finite]))
+
     dbg = {
-        "raw_p01_p50_p99": (float(p01), float(p50), float(p99)),
-        "raw_minmax": (float(np.min(depth_m)), float(np.max(depth_m))),
+        "shape", depth_m.shape,
+        "dtype", depth_m.dtype,
+        "min/max", dmin, dmax
     }
     return vis, dbg
 
@@ -437,6 +514,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     intr_full, cfg = load_yaml(args.config)
+    cloud_generator = PinholeCloudGenerator(cfg.stride)
 
     bgr = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if bgr is None:
@@ -451,14 +529,20 @@ def main():
 
     max_r = DepthAnythingV2Config().max_range_m
     min_r = DepthAnythingV2Config().min_range_m
+
     valid_depth = (
             np.isfinite(depth_m) &
             (depth_m > (min_r + 0.05)) &
             (depth_m < (max_r - 0.5))
     )
+    H = depth_m.shape[0]
+    depth_m = depth_m.copy()
+    depth_m[: int(0.25 * H), :] = np.nan
+    # Apply mask
+    depth_m[~valid_depth] = np.nan
 
-    sat_pct = float((depth_m >= (max_r - 0.5)).mean()) * 100.0
-    print(f"DEPTH sat_pct_near_max: {sat_pct:.2f}%")
+    sat_pct = float((~valid_depth).mean()) * 100.0
+    print(f"DEPTH invalid_or_sat_pct: {sat_pct:.2f}%")
     print("DEPTH:",
           "shape", depth_m.shape,
           "dtype", depth_m.dtype,
@@ -467,14 +551,30 @@ def main():
     vis, vis_dbg = depth_vis_u8(depth_m)
     print("DEPTH dbg:", vis_dbg)
     cv2.imwrite(os.path.join(args.out_dir, "depth_vis.png"), vis)
+    overlay_depth_grid_xyz_base(depth_m, intr, grid_n=15, out_path=os.path.join(args.out_dir,"depth_grid_xyz.png"), max_z=35.0)
 
-    pts, y_pix = depth_to_pointcloud_sparse(depth_m, intr, cfg.stride)
+    pts = cloud_generator.depth_to_cloud_to_base_xyz(depth_m, intr)
     print(f"PTS: total={pts.shape[0]} stride={cfg.stride} (inf={cfg.inference_width}x{cfg.inference_height})")
 
-    y_thr = int((1.0 - cfg.floor_bottom_frac) * intr.height)
-    cand = y_pix >= y_thr
+    # Assume pts are in base_xyz: x forward, y left, z up.
+    # Floor should be the "lowest" points => most negative z.
+    z = pts[:, 2].astype(np.float32)
+
+    # keep finite
+    m = np.isfinite(z)
+
+    # choose bottom_frac of points by z (lowest)
+    bottom_frac = float(cfg.floor_bottom_frac)
+    bottom_frac = float(np.clip(bottom_frac, 0.05, 0.9))
+
+    z_thr = np.quantile(z[m], bottom_frac)  # e.g. 0.45 => 45% most-negative (lowest) points
+    cand = m & (z <= z_thr)
+
     pts_floor = pts[cand]
-    print(f"FLOOR cand: bottom_frac={cfg.floor_bottom_frac} y_thr={y_thr} pts_floor={pts_floor.shape[0]}")
+    print(
+        f"FLOOR cand (z-quantile): floor_bottom_frac={bottom_frac} "
+        f"z_thr={float(z_thr):.3f} pts_floor={pts_floor.shape[0]} / {pts.shape[0]}"
+    )
 
     plane = fit_floor_plane_ransac(
         pts_floor,
@@ -501,24 +601,49 @@ def main():
     med = float(np.median(np.abs(pts_floor[inliers0] @ n + d)))
     print(f"PLANE refine: n={n} d={d:.3f} med_dist(inliers)={med:.4f}")
 
-    u, v = plane_basis_from_camera(n)
+    cam_forward = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # x-forward in your base_xyz
+    u, v = plane_basis_from_camera(n, cam_forward)
 
+    fwd_p = cam_forward - (cam_forward @ n) * n
+    nf = np.linalg.norm(fwd_p)
+    if nf > 1e-6:
+        fwd_p = fwd_p / nf
+        if float(v @ fwd_p) < 0.0:
+            v = -v
+            u = np.cross(n, v)
+            u = u / (np.linalg.norm(u) + 1e-9)
 
-    # grid, max_h, cnt, dbg = build_occupancy_corner_range(pts, n, d, u, v, cfg)
+    signed_all = pts @ n + d
+    print("SANITY signed_all p01/p50/p99:",
+          [float(np.percentile(signed_all, 1)),
+           float(np.percentile(signed_all, 50)),
+           float(np.percentile(signed_all, 99))])
+
+    cx_pix = intr.width // 2
+    cy_pix = intr.height // 2
+    z = float(depth_m[cy_pix, cx_pix])
+
+    if np.isfinite(z) and z > 1e-6:
+        X = (cx_pix - intr.cx) * z / intr.fx
+        Y = (cy_pix - intr.cy) * z / intr.fy
+        p = np.array([X, Y, z], dtype=np.float32)
+
+        signed_c = float(p @ n + d)
+        p_proj_c = p - signed_c * n
+        xp_c = float(p_proj_c @ u)
+        yp_c = float(p_proj_c @ v)
+
+        print(f"SANITY center depth z: {z} finite: True")
+        print(f"SANITY center pixel -> p={p}  (u,v)=({xp_c:.3f},{yp_c:.3f})  signed={signed_c:.3f}")
+        print("SANITY yp>0 means forward:", yp_c > 0.0)
+    else:
+        print("SANITY center depth invalid:", z)
+
     occ = build_occupancy_raycast(pts, n, d, u, v, cfg, debug=True)
 
-    # print("MAP dbg:")
-    # print(f"  grid: {dbg['gw']} x {dbg['gh']} res: {cfg.resolution_m}")
-    # print(f"  origin: ({dbg['origin_x']:.3f}, {dbg['origin_y']:.3f}) mode: corner")
-    # print(f"  valid points: {dbg['valid_points']} / {dbg['total_points']}")
-    # print(f"  x p01/p99: {dbg['x_p01_p99']}")
-    # print(f"  y p01/p99: {dbg['y_p01_p99']}")
-    # print(f"  cells observed/free/occ: {dbg['cells_observed']} {dbg['cells_free']} {dbg['cells_occ']}")
-    #
-    # uniq, cntu = np.unique(grid, return_counts=True)
-    # print("GRID unique:", list(zip(uniq.tolist(), cntu.tolist())))
-
-    cv2.imwrite(os.path.join(args.out_dir, "occ_map.png"), occ_to_png(occ))
+    png = occ_to_png(occ)
+    png = np.flipud(png)
+    cv2.imwrite(os.path.join(args.out_dir, "occ_map.png"), png)
     print("Saved outputs to:", args.out_dir)
 
 
