@@ -36,7 +36,7 @@ def get_default_config() -> Dict:
     return {
         'bridge': {
             'server': {'host': 'localhost', 'port': 8000, 'protocol': 'http', 'timeout_sec': 30.0},
-            'control': {'inference_rate': 4.0, 'continuous_inference': False, 'min_inference_interval': 0.1}
+            'control': {'inference_rate': 4.0, 'continuous_inference': False, 'min_inference_interval': 0.1, 'handheld': False}
         },
         'inputs': {
             'rgb': {'enabled': True, 'topic': '/camera/rgb/image_raw', 'msg_type': 'sensor_msgs/Image'},

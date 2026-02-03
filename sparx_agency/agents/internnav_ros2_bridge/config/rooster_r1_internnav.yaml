@@ -15,9 +15,13 @@ bridge:
     timeout_sec: 30.0
 
   control:
-    inference_rate: 1.0
+    inference_rate: 0.67
     continuous_inference: false
-    min_inference_interval: 0.3
+    min_inference_interval: 1.5
+    # Handheld mode: no ARM, no keep_alive, no motor commands.
+    # Just inference + discrete action publishing. Carry the drone and follow the actions.
+    # Set to false for normal ground roll mode.
+    handheld: true
 
 # =============================================================================
 # INPUT CONFIGURATION
@@ -77,42 +81,42 @@ outputs:
     # x controls forward/backward
     action_mapping:
       MOVE_FORWARD:
-        x: 400.0      # Forward thrust
+        x: 0.0      # Forward thrust
         y: 0.0
-        z: 400.0
+        z: 0.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.5
+        duration_sec: 1.0
       TURN_LEFT:
         x: 0.0
         y: 0.0
-        z: 250.0
-        r: -650.0      # Yaw left (positive = CCW)
+        z: 0.0
+        r: 0.0      # Yaw left (positive = CCW)
         buttons: 0
-        duration_sec: 0.3
+        duration_sec: 1.0
 
       TURN_RIGHT:
         x: 0.0
         y: 0.0
-        z: 250.0
-        r: 650.0     # Yaw right (negative = CW)
+        z: 0.0
+        r: 0.0     # Yaw right (negative = CW)
         buttons: 0
-        duration_sec: 0.3
+        duration_sec: 1.0
 
       STOP:
         x: 0.0
         y: 0.0
-        z: -1000.0
+        z: 0.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.3
+        duration_sec: 1.0
       UNKNOWN:
-        x: -50.0
+        x: 0.0
         y: 0.0
-        z: 100.0
+        z: 0.0
         r: 0.0
         buttons: 0
-        duration_sec: 0.3
+        duration_sec: 1.0
 
   # KeepAlive - Required to maintain control authority
   keep_alive:

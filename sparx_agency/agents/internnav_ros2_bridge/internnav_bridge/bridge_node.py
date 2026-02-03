@@ -88,6 +88,9 @@ class InternNavBridge(Node):
         self.action_duration = 0.0
         self.current_manual_control = None
 
+        # Handheld mode: no ARM, no keep_alive, no motor commands — just inference + discrete actions
+        self.handheld_mode = self.config['bridge']['control'].get('handheld', False)
+
         # UAV state
         self.arm_state = False
         self.arm_requested = False
@@ -123,7 +126,10 @@ class InternNavBridge(Node):
 
         self._setup_subscribers()
         self._setup_publishers()
-        self._setup_arm_service()
+        if not self.handheld_mode:
+            self._setup_arm_service()
+        else:
+            self.force_arm_client = None
 
         rate = self.config['bridge']['control'].get('inference_rate', 4.0)
         self.inference_timer = self.create_timer(1.0 / rate, self._inference_callback,
@@ -176,7 +182,7 @@ class InternNavBridge(Node):
                                                       self._odom_callback, qos,
                                                       callback_group=self.input_cb_group)
 
-        if ROOSTER_MSGS_AVAILABLE:
+        if ROOSTER_MSGS_AVAILABLE and not self.handheld_mode:
             rgb_topic = self.config['inputs']['rgb']['topic']
             rooster_id = rgb_topic.split('/')[1] if len(rgb_topic.split('/')) > 1 else "R1"
             self.uav_state_sub = self.create_subscription(UAVState, f"/{rooster_id}/fcu/state",
@@ -197,14 +203,14 @@ class InternNavBridge(Node):
         if outputs.get('continuous', {}).get('enabled'):
             self.cmd_vel_pub = self.create_publisher(Twist, outputs['continuous']['topic'], 1)
 
-        if outputs.get('manual_control', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE:
+        if outputs.get('manual_control', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE and not self.handheld_mode:
             mc_cfg = outputs['manual_control']
             self.manual_control_pub = self.create_publisher(ManualControl, mc_cfg['topic'], 10)
             mc_rate = mc_cfg.get('publish_rate_hz', 40.0)
             self.manual_control_timer = self.create_timer(1.0 / mc_rate, self._manual_control_callback,
                                                           callback_group=self.control_cb_group)
 
-        if outputs.get('keep_alive', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE:
+        if outputs.get('keep_alive', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE and not self.handheld_mode:
             ka_cfg = outputs['keep_alive']
             self.keep_alive_pub = self.create_publisher(KeepAlive, ka_cfg['topic'], 10)
             ka_rate = ka_cfg.get('publish_rate_hz', 1.0)
@@ -258,11 +264,12 @@ class InternNavBridge(Node):
             self.state.is_navigating = True
             self.nav_status = NavigationStatus.NAVIGATING
             self.consecutive_stops = 0
-            self.arm_requested = True
-            self.is_stabilized = False
+            if not self.handheld_mode:
+                self.arm_requested = True
+                self.is_stabilized = False
 
         self.get_logger().info(f"Instruction: {instruction}")
-        if not self.arm_state:
+        if not self.handheld_mode and not self.arm_state:
             self._request_arm(True)
 
     def _nav_control_callback(self, msg: String):
@@ -366,7 +373,7 @@ class InternNavBridge(Node):
                                    NavigationStatus.COMPLETED_FAILURE, NavigationStatus.IDLE]:
                 if not control.get('continuous_inference'):
                     return
-            if self.arm_requested and (not self.arm_state or not self.is_stabilized):
+            if not self.handheld_mode and self.arm_requested and (not self.arm_state or not self.is_stabilized):
                 return
 
             payload = self._prepare_payload()
@@ -423,14 +430,17 @@ class InternNavBridge(Node):
             msg = String()
             msg.data = mapped
             self.action_pub.publish(msg)
-            self.get_logger().info(f"Action: {mapped} [armed={self.arm_state}]")
+            if self.handheld_mode:
+                self.get_logger().info(f"Action: {mapped} [handheld]")
+            else:
+                self.get_logger().info(f"Action: {mapped} [armed={self.arm_state}]")
 
-        if outputs.get('manual_control', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE:
+        if not self.handheld_mode and outputs.get('manual_control', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE:
             if not self.arm_state:
                 self._request_arm(True)
                 return
             self._execute_manual_control_action(action)
-        elif outputs.get('continuous', {}).get('enabled'):
+        elif not self.handheld_mode and outputs.get('continuous', {}).get('enabled'):
             self._publish_velocity(action)
 
         if outputs.get('feedback', {}).get('enabled', True):
@@ -500,7 +510,8 @@ class InternNavBridge(Node):
     def _log_config(self):
         outputs = self.config['outputs']
         self.get_logger().info("=" * 50)
-        self.get_logger().info("InternNav Bridge - GROUND ROLL MODE")
+        mode = "HANDHELD (no ARM/motors)" if self.handheld_mode else "GROUND ROLL"
+        self.get_logger().info(f"InternNav Bridge - {mode} MODE")
         self.get_logger().info(f"  Server: {self.config['bridge']['server']['host']}:"
                                f"{self.config['bridge']['server']['port']}")
         self.get_logger().info(f"  RGB: {self.config['inputs']['rgb']['topic']}")

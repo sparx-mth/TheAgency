@@ -87,7 +87,8 @@ python3 -m internnav_bridge.overlay_recorder_node --ros-args \
   -p instruction_topic:=/R1/navigation/instruction \
   -p action_topic:=/R1/navigation/action \
   -p status_topic:=/R1/navigation/status \
-  -p output:=/tmp/internnav_overlay.mp4
+  -p output:=/tmp/internnav_overlay.mp4 \
+  -p show_preview:=True
 ```
 Type an instruction ID (e.g., 1) to publish the matching text from the YAML.
 
