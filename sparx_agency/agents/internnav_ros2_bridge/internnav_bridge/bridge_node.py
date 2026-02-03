@@ -87,6 +87,8 @@ class InternNavBridge(Node):
         self.action_start_time = 0.0
         self.action_duration = 0.0
         self.current_manual_control = None
+        self.last_inference_rgb = None  # frame sent to model, for waypoint annotation
+        self.last_waypoint = None       # (x, y) from S2
 
         # Handheld mode: no ARM, no keep_alive, no motor commands — just inference + discrete actions
         self.handheld_mode = self.config['bridge']['control'].get('handheld', False)
@@ -222,6 +224,12 @@ class InternNavBridge(Node):
 
         if outputs.get('status', {}).get('enabled', True):
             self.status_pub = self.create_publisher(String, outputs['status']['topic'], 1)
+
+        # Waypoint visualization publishers (derived from discrete action topic)
+        base_ns = outputs.get('discrete', {}).get('topic', '/navigation/action').rsplit('/', 1)[0]
+        self.waypoint_pub = self.create_publisher(String, f"{base_ns}/waypoint", 1)
+        self.waypoint_image_pub = self.create_publisher(Image, f"{base_ns}/waypoint_image", 1)
+        self.get_logger().info(f"Waypoint topics: {base_ns}/waypoint, {base_ns}/waypoint_image")
 
     # === Callbacks ===
     def _rgb_callback(self, msg):
@@ -381,6 +389,7 @@ class InternNavBridge(Node):
         if payload is None:
             return
 
+        self.last_inference_rgb = payload['rgb'].copy()
         result = self.client.step(payload['rgb'], payload['instruction'], payload.get('depth'))
 
         if not result.success:
@@ -446,9 +455,14 @@ class InternNavBridge(Node):
         if outputs.get('feedback', {}).get('enabled', True):
             feedback = {'action': action.value, 'timestamp': time.time(),
                        'inference_ms': result.inference_time_ms, 'armed': self.arm_state}
+            if result.waypoint:
+                feedback['waypoint'] = list(result.waypoint)
             msg = String()
             msg.data = json.dumps(feedback)
             self.feedback_pub.publish(msg)
+
+        # --- Publish S2 waypoint and annotated image ---
+        self._publish_waypoint(result)
 
         self._publish_status("paused" if action == ActionType.STOP else "navigating")
 
@@ -500,6 +514,61 @@ class InternNavBridge(Node):
         msg.angular.z = max(-limits.get('max_angular', 1.0),
                            min(limits.get('max_angular', 1.0), vel.get('angular_z', 0.0)))
         self.cmd_vel_pub.publish(msg)
+
+    def _publish_waypoint(self, result):
+        """Publish S2 waypoint data and annotated image with waypoint circle."""
+        wp = result.waypoint
+        if wp:
+            self.last_waypoint = wp
+            self.get_logger().info(f"Publishing S2 waypoint: ({wp[0]}, {wp[1]})")
+        else:
+            self.get_logger().debug("No waypoint this step")
+
+        # Always publish waypoint JSON (null if no active waypoint)
+        wp_msg = String()
+        wp_msg.data = json.dumps({'x': wp[0], 'y': wp[1], 'action': result.action} if wp else
+                                 {'x': None, 'y': None, 'action': result.action})
+        self.waypoint_pub.publish(wp_msg)
+
+        # Publish annotated image if we have a frame and an active waypoint
+        active_wp = wp or self.last_waypoint
+        if self.last_inference_rgb is not None and active_wp:
+            annotated = self._draw_waypoint(self.last_inference_rgb.copy(), active_wp, is_fresh=(wp is not None))
+            try:
+                img_msg = self.cv_bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+                img_msg.header.stamp = self.get_clock().now().to_msg()
+                self.waypoint_image_pub.publish(img_msg)
+            except Exception as e:
+                self.get_logger().error(f"Waypoint image publish error: {e}")
+
+    @staticmethod
+    def _draw_waypoint(img: np.ndarray, waypoint: tuple, is_fresh: bool = True) -> np.ndarray:
+        """Draw S2 pixel goal on inference frame — bold red circle."""
+        x, y = int(waypoint[0]), int(waypoint[1])
+        h, w = img.shape[:2]
+        x = max(0, min(x, w - 1))
+        y = max(0, min(y, h - 1))
+
+        red = (0, 0, 255)
+        dark_red = (0, 0, 180)
+
+        # Bold outer ring
+        cv2.circle(img, (x, y), 28, dark_red, 2, cv2.LINE_AA)
+        # Main circle
+        cv2.circle(img, (x, y), 20, red, 3, cv2.LINE_AA)
+        # Center dot
+        cv2.circle(img, (x, y), 5, red, -1, cv2.LINE_AA)
+
+        # Label
+        label = f"S2 GOAL ({x},{y})"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), _ = cv2.getTextSize(label, font, 0.55, 2)
+        lx = max(0, min(x - tw // 2, w - tw))
+        ly = max(th + 4, y - 36)
+        cv2.rectangle(img, (lx - 3, ly - th - 3), (lx + tw + 3, ly + 5), (0, 0, 0), -1)
+        cv2.putText(img, label, (lx, ly), font, 0.55, red, 2, cv2.LINE_AA)
+
+        return img
 
     def _publish_status(self, status: str):
         if hasattr(self, 'status_pub'):

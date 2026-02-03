@@ -46,6 +46,7 @@ class StepResponse:
     """Response from model inference."""
     action: str = "STOP"
     action_index: int = 0
+    waypoint: Optional[tuple] = None  # (x, y) pixel coords from S2, in input image space
     raw_response: Dict = field(default_factory=dict)
     inference_time_ms: float = 0.0
     success: bool = True
