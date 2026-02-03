@@ -163,6 +163,15 @@ class ModelClient:
     def _parse_response(self, data: Dict, inference_time: float) -> StepResponse:
         action = "STOP"
         action_index = 0
+        waypoint = None
+
+        # Debug: log response structure to find the waypoint key
+        self._log("info", f"Server response keys: {list(data.keys())}")
+        for k, v in data.items():
+            if k != "action":
+                self._log("info", f"  response['{k}'] = {repr(v)[:200]}")
+            elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
+                self._log("info", f"  response['action'][0] keys: {list(v[0].keys())}")
 
         try:
             if "action" in data:
@@ -184,5 +193,62 @@ class ModelClient:
         except Exception as e:
             self._log("warn", f"Parse error: {e}")
 
-        return StepResponse(action=action, action_index=action_index,
+        # --- Extract S2 waypoint pixel coordinates ---
+        waypoint = self._extract_waypoint(data)
+        if waypoint:
+            self._log("info", f"S2 waypoint: ({waypoint[0]}, {waypoint[1]})")
+        else:
+            self._log("debug", "No S2 waypoint this step")
+
+        return StepResponse(action=action, action_index=action_index, waypoint=waypoint,
                            raw_response=data, inference_time_ms=inference_time, success=True)
+
+    def _extract_waypoint(self, data: Dict):
+        """Extract S2 waypoint pixel coords from server response.
+
+        The server returns the waypoint as [y, x] (numpy row,col convention).
+        We convert to (x, y) for OpenCV drawing.
+        Searches multiple possible locations in the response JSON.
+        """
+        # Keys to search for waypoint data (pixel_goal is the key from patched server)
+        wp_keys = ("pixel_goal", "waypoint", "pixel_point", "target_point", "s2_output", "subgoal", "pixel")
+
+        # Check top-level
+        for key in wp_keys:
+            val = data.get(key)
+            if val is not None:
+                return self._parse_waypoint_value(val)
+
+        # Check inside action[0] dict
+        action_data = data.get("action")
+        if isinstance(action_data, list) and len(action_data) > 0:
+            first = action_data[0]
+            if isinstance(first, dict):
+                for key in wp_keys:
+                    val = first.get(key)
+                    if val is not None:
+                        return self._parse_waypoint_value(val)
+
+        return None
+
+    @staticmethod
+    def _parse_waypoint_value(val):
+        """Parse waypoint value into (x, y) tuple.
+
+        Server returns [y, x] (numpy convention). We return (x, y) for drawing.
+        """
+        try:
+            if isinstance(val, (list, tuple)):
+                coords = val
+                # If nested: [[y, x]] -> take first
+                if len(coords) > 0 and isinstance(coords[0], (list, tuple)):
+                    coords = coords[0]
+                if len(coords) >= 2:
+                    y, x = float(coords[0]), float(coords[1])
+                    return (int(x), int(y))
+            elif isinstance(val, dict):
+                if 'x' in val and 'y' in val:
+                    return (int(val['x']), int(val['y']))
+        except (ValueError, TypeError, IndexError):
+            pass
+        return None
