@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Overlay Recorder Node
+Overlay Recorder Node — Side-by-Side Display
+
+Shows two panels:
+  LEFT:  S2 inference frame with red pixel-goal circle (from bridge waypoint_image topic)
+  RIGHT: Live video stream with text overlays (instruction, action, status, FPS)
 
 Subscribes to:
 - RGB image (sensor_msgs/Image or sensor_msgs/CompressedImage)
 - Instruction (std_msgs/String)
-- Action (std_msgs/String)  [optional]
-- Status (std_msgs/String)  [optional]
+- Action (std_msgs/String)
+- Status (std_msgs/String)
+- Waypoint image (sensor_msgs/Image) — the S2 frame annotated by bridge_node
 
-Writes an MP4 video where each frame is annotated with:
-- current instruction
-- last action
-- status
-- timestamp / FPS (optional)
-
-This is simulator-agnostic (Gazebo/Spera/anything) as long as ROS2 topics exist.
+This is simulator-agnostic (Gazebo/Sphera/anything) as long as ROS2 topics exist.
 """
 
 from __future__ import annotations
@@ -71,6 +70,7 @@ class OverlayRecorder(Node):
         self.declare_parameter("instruction_topic", "/navigation/instruction")
         self.declare_parameter("action_topic", "/navigation/action")
         self.declare_parameter("status_topic", "/navigation/status")
+        self.declare_parameter("waypoint_image_topic", "")  # empty = auto-derive from action_topic
 
         self.declare_parameter("output", "/tmp/internnav_overlay.mp4")
         self.declare_parameter("fps", 10.0)
@@ -88,6 +88,12 @@ class OverlayRecorder(Node):
         self.instruction_topic = self.get_parameter("instruction_topic").value
         self.action_topic = self.get_parameter("action_topic").value
         self.status_topic = self.get_parameter("status_topic").value
+
+        wp_img_topic = self.get_parameter("waypoint_image_topic").value
+        if not wp_img_topic:
+            # Derive: /R1/navigation/action -> /R1/navigation/waypoint_image
+            wp_img_topic = self.action_topic.rsplit('/', 1)[0] + "/waypoint_image"
+        self.waypoint_image_topic = wp_img_topic
 
         self.output_path = self.get_parameter("output").value
         self.fps = float(self.get_parameter("fps").value)
@@ -110,6 +116,7 @@ class OverlayRecorder(Node):
 
         self.bridge = CvBridge()
         self.text = TextState()
+        self.last_s2_frame = None  # latest S2 inference frame with red circle
 
         if self.rgb_type.lower() == "compressed":
             self.rgb_sub = self.create_subscription(
@@ -124,19 +131,25 @@ class OverlayRecorder(Node):
         self.action_sub = self.create_subscription(String, self.action_topic, self._action_cb, 10)
         self.status_sub = self.create_subscription(String, self.status_topic, self._status_cb, 10)
 
+        # S2 waypoint image from bridge_node (Image with red circle already drawn)
+        self.waypoint_image_sub = self.create_subscription(
+            Image, self.waypoint_image_topic, self._waypoint_image_cb, qos_img
+        )
+
         # -------- Video --------
-        # mp4v usually works out-of-the-box with OpenCV builds on Ubuntu.
+        # Side-by-side: total width = 2 * target_width
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (self.tw, self.th), True)
+        self.writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (self.tw * 2, self.th), True)
         if not self.writer.isOpened():
             raise RuntimeError(f"Failed to open VideoWriter: {self.output_path}")
 
         self.last_frame_t = None
         self.ema_fps = None
 
-        self.get_logger().info(f"Recording to: {self.output_path}")
+        self.get_logger().info(f"Recording to: {self.output_path}  (side-by-side {self.tw*2}x{self.th})")
         self.get_logger().info(f"RGB: {self.rgb_topic} ({self.rgb_type}) | inst: {self.instruction_topic}")
         self.get_logger().info(f"action: {self.action_topic} | status: {self.status_topic}")
+        self.get_logger().info(f"S2 waypoint image: {self.waypoint_image_topic}")
 
     def destroy_node(self):
         try:
@@ -160,6 +173,17 @@ class OverlayRecorder(Node):
 
     def _status_cb(self, msg: String):
         self.text.status = msg.data.strip()
+
+    # -------- S2 waypoint image callback --------
+    def _waypoint_image_cb(self, msg: Image):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            if frame.shape[1] != self.tw or frame.shape[0] != self.th:
+                frame = cv2.resize(frame, (self.tw, self.th), interpolation=cv2.INTER_AREA)
+            self.last_s2_frame = frame
+            self.get_logger().info("S2 frame received", throttle_duration_sec=5.0)
+        except Exception as e:
+            self.get_logger().error(f"Waypoint image error: {e}")
 
     # -------- Image callbacks --------
     def _rgb_cb_raw(self, msg: Image):
@@ -194,12 +218,37 @@ class OverlayRecorder(Node):
                 self.ema_fps = 0.9 * self.ema_fps + 0.1 * inst_fps
         self.last_frame_t = now
 
-        annotated = self._draw_overlay(frame_bgr, now)
-        self.writer.write(annotated)
+        # RIGHT panel: live stream with text overlays (unchanged from original)
+        right = self._draw_overlay(frame_bgr, now)
+
+        # LEFT panel: S2 inference frame with red circle, or placeholder
+        left = self._get_s2_panel()
+
+        # Combine side-by-side: [S2 GOAL | LIVE STREAM]
+        combined = np.hstack((left, right))
+
+        self.writer.write(combined)
 
         if self.show_preview:
-            cv2.imshow("InternNav Overlay Recorder", annotated)
+            cv2.imshow("InternNav  |  S2 Goal  |  Live Stream", combined)
             cv2.waitKey(1)
+
+    def _get_s2_panel(self) -> np.ndarray:
+        """Return the left panel: last S2 frame or a dark placeholder."""
+        if self.last_s2_frame is not None:
+            panel = self.last_s2_frame.copy()
+        else:
+            panel = np.zeros((self.th, self.tw, 3), dtype=np.uint8)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(panel, "Waiting for S2...", (self.tw // 2 - 130, self.th // 2),
+                        font, 0.7, (100, 100, 100), 2, cv2.LINE_AA)
+
+        # Panel label top-left
+        cv2.rectangle(panel, (0, 0), (210, 32), (0, 0, 0), -1)
+        cv2.putText(panel, "S2 PIXEL GOAL", (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+
+        return panel
 
     def _draw_overlay(self, img: np.ndarray, now_ts: float) -> np.ndarray:
         out = img.copy()

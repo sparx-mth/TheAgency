@@ -143,6 +143,12 @@ outputs:
     enabled: true
     topic: "/R1/navigation/status"
 
+  # S2 waypoint publisher (auto-derived from discrete topic namespace)
+  # Publishes JSON {x, y, action} on /R1/navigation/waypoint
+  # Publishes annotated Image on /R1/navigation/waypoint_image
+  waypoint:
+    enabled: true
+
 # =============================================================================
 # MODEL CONFIGURATION
 # =============================================================================
