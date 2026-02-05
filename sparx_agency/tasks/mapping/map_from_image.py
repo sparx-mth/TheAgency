@@ -12,6 +12,7 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenha
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
 from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
+from sparx_agency.robots.common.spatial_math import rot_y
 from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
 
 
@@ -304,6 +305,7 @@ def build_occupancy_raycast(
     u: np.ndarray,
     v: np.ndarray,
     cfg: MapCfg,
+    sensor_origin: np.ndarray,
     debug: bool = True,
 ) -> np.ndarray:
     """
@@ -328,16 +330,20 @@ def build_occupancy_raycast(
     xp = (p_proj @ u).astype(np.float32)
     yp = (p_proj @ v).astype(np.float32)
 
-    front = (yp > 0.0)
-    xp = xp[front]
-    yp = yp[front]
-    height = height[front]
 
-    # Sensor projection on plane: closest point to camera origin is p0 = -d*n
-    p0 = (-d) * n
+
+    # Sensor origin projected onto plane
+    o = sensor_origin.astype(np.float32)
+    p0 = o - (float(o @ n) + d) * n  # projection of origin onto plane
+    print("SENSOR origin:", o, "projected p0:", p0, "p0_z:", float(p0[2]))
+
     sx = float(p0 @ u)
     sy = float(p0 @ v)
 
+    front = (yp - sy) > 0.0
+    xp = xp[front]
+    yp = yp[front]
+    height = height[front]
     # ---- Dynamic map bounds (include BOTH endpoints and sensor) ----
     margin = 2.0  # meters
     min_x = float(np.percentile(xp, 1))
@@ -409,8 +415,8 @@ def build_occupancy_raycast(
 
     observed = np.isfinite(maxH)
 
-    min_hits_for_occ = 2  # try 2..6 (0.1m usually 3-5)
-    min_hits_for_free = 20  # optional
+    min_hits_for_occ = 3  # try 2..6 (0.1m usually 3-5)
+    min_hits_for_free = 10  # optional
     meanH = np.zeros_like(cell_sum_h)
     mask = cell_hits > 0
     meanH[mask] = cell_sum_h[mask] / cell_hits[mask]
@@ -518,7 +524,11 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     intr_full, cfg = load_yaml(args.config)
-    cloud_generator = PinholeCloudGenerator(cfg.stride)
+    cloud_generator = PinholeCloudGenerator(
+        stride=cfg.stride,
+        cam_rpy_deg=(0.0, 30.0, 0.0),  # roll, pitch-down, yaw
+        t_base=(0.0, 0.0, 10.0),  # camera is 10m above ground
+    )
 
     bgr = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if bgr is None:
@@ -599,6 +609,11 @@ def main():
     overlay_depth_grid_xyz_base(depth_m, intr, grid_n=15, out_path=os.path.join(args.out_dir,"depth_grid_xyz.png"), max_z=35.0)
 
     pts = cloud_generator.depth_to_cloud_to_base_xyz(depth_m, intr)
+    R = rot_y(-30.0)  # 30 deg down
+    t = np.array([0.0, 0.0, 10.0], np.float32)  # camera at +10m in Z-up world
+
+    pts_w = cloud_generator.transform_points(pts, R, t)
+    cam_o_w = t.copy()  # camera origin in world
     print(f"PTS: total={pts.shape[0]} stride={cfg.stride} (inf={cfg.inference_width}x{cfg.inference_height})")
 
     # Assume pts are in base_xyz: x forward, y left, z up.
@@ -684,7 +699,7 @@ def main():
     else:
         print("SANITY center depth invalid:", z)
 
-    occ = build_occupancy_raycast(pts, n, d, u, v, cfg, debug=True)
+    occ = build_occupancy_raycast(pts, n, d, u, v, cfg, sensor_origin=cam_o_w, debug=True)
 
     png = occ_to_png(occ)
     png = np.flipud(png)

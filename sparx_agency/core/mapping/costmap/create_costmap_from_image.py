@@ -45,202 +45,178 @@ class ImageToCostmap:
         else:
             return np.eye(3) 
 
-    def generate_costmap(self, rgb: np.ndarray, depth: np.ndarray) -> dict:
-        H, W = depth.shape
-        points = self.masker.depth_to_points(depth) # (H, W, 3)
-        valid_mask = (depth > 0) & (depth < self.cfg.max_range)
+    def generate_costmap_from_points(self, points: np.ndarray) -> dict:
+        """
+        Generate costmap from 3D points (H*W, 3) or (N, 3).
+        Expects points in Camera Frame (Y down, Z forward) or similar.
+        Will fit floor and align.
+        """
+        # Ensure points is Nx3
+        pts_flat = points.reshape(-1, 3)
         
+        # Valid check
+        valid_mask = (pts_flat[:, 2] > 0) & (pts_flat[:, 2] < self.cfg.max_range)
+        valid_points = pts_flat[valid_mask]
+        
+        if len(valid_points) < 100:
+             return {}
+
         # 1. Fit Floor Plane
-        # Use bottom half heuristic for floor search
-        search_mask = valid_mask.copy()
-        search_mask[: int(H/3), :] = False
+        # Use bottom half heuristic for floor search if structured?
+        # If unstructured points, difficult to use simple "bottom half" heuristic without Y sorting.
+        # Let's simple use RANSAC with existing masker logic, but masker expects (H,W,3).
+        # We'll adapt masker or just copy logic?
+        # ImageToCostmap instance has self.masker.
+        # Let's just use self.masker.fit_plane_ransac which now works on flat points?
+        # NO, masker.fit_plane_ransac expects (points, mask). points can be any shape as long as mask matches?
+        # Actually it flattens inside.
         
-        # We expect floor normal roughly near Y axis (0, 1, 0)
-        # But if camera is pitched down 45 deg, normal will be tilted.
-        # Relax constraint to allow high-angle views (up to 70 deg pitch)
-        plane, floor_mask = self.masker.fit_plane_ransac(
-            points, search_mask, 
+        # Heuristic: Filter points that are clearly too high to be floor (e.g. above camera if camera is looking straight?)
+        # Let's blindly RANSAC on all valid points for robustness or subset?
+        # Floor is usually the largest plane.
+        
+        plane, floor_mask_flat = self.masker.fit_plane_ransac(
+            pts_flat, valid_mask, 
             orientation_axis=np.array([0, 1, 0]), 
             max_angle_deg=70.0 
         )
         
         if plane is None:
-            print("Failed to fit floor plane!")
+            # print("Failed to fit floor plane!")
             return {}
-        print(f"Floor Plane: {plane}")
-
-        # 2. Align World
+            
+        # 2. Align World (same as before)
         normal = plane[:3]
         target_normal = np.array([0, 1, 0])
-        
         R = self.get_rotation_matrix(normal, target_normal)
         
-        # Apply rotation
-        pts_flat = points[valid_mask]
-        pts_aligned = pts_flat @ R.T
+        pts_aligned = pts_flat @ R.T # Rotate all points (even invalid ones, to keep indexing simple? No need.)
+        # Let's work with valid points for speed
+        pts_aligned_valid = valid_points @ R.T
+        
+        # Floor mask on valid subset
+        floor_mask_subset = floor_mask_flat[valid_mask]
         
         # 3. Translate Floor to Y=0
-        inlier_indices = floor_mask[valid_mask]
-        floor_pts_aligned = pts_aligned[inlier_indices]
+        floor_pts_aligned = pts_aligned_valid[floor_mask_subset]
         
         if len(floor_pts_aligned) > 0:
             floor_y = np.median(floor_pts_aligned[:, 1])
-            pts_aligned[:, 1] -= floor_y
+            pts_aligned_valid[:, 1] -= floor_y
         else:
             floor_y = 0.0
             
-        # Ensure 'Up' is positive relative to floor
-        # Camera is at 0 (before translation). After translation: -floor_y.
-        # We assume Camera is ABOVE floor. So Camera Y must be positive.
         camera_y = -floor_y
         if camera_y < 0:
-             print(f"Flipping Y axis (Camera y={camera_y:.2f} < 0)")
-             pts_aligned[:, 1] *= -1
-        else:
-             print(f"Y axis orientation OK (Camera y={camera_y:.2f} >= 0)")
+             # print(f"Flipping Y axis")
+             pts_aligned_valid[:, 1] *= -1
              
-        # Check if Z is flipped (negative)
-        # We expect points to be in front of the camera (positive Z usually, or at least forward).
-        # We expect points to be in front of the camera (positive Z usually, or at least forward).
-        # Typically "Forward" in map should be positive Z.
-        if np.median(pts_aligned[:, 2]) < 0:
-            print("Flipping Z axis to face forward")
-            pts_aligned[:, 2] *= -1
-            pts_aligned[:, 0] *= -1
-
-        print(f"Aligned Points Stats (final):")
-        print(f"  X: min={pts_aligned[:,0].min():.2f} max={pts_aligned[:,0].max():.2f}")
-        print(f"  Y: min={pts_aligned[:,1].min():.2f} max={pts_aligned[:,1].max():.2f}")
-        print(f"  Z: min={pts_aligned[:,2].min():.2f} max={pts_aligned[:,2].max():.2f}")
+        if np.median(pts_aligned_valid[:, 2]) < 0:
+             # print("Flipping Z axis")
+             pts_aligned_valid[:, 2] *= -1
+             pts_aligned_valid[:, 0] *= -1
 
         # --- Auto-Rotate Yaw using PCA ---
-        # Find dominant axis of obstacles (walls/stands)
-        # Use points that are definitely obstacles
-        obs_mask_rot = (pts_aligned[:, 1] > self.cfg.obstacle_height) & (pts_aligned[:, 1] < self.cfg.max_height)
-        obs_pts = pts_aligned[obs_mask_rot]
+        obs_mask_rot = (pts_aligned_valid[:, 1] > self.cfg.obstacle_height) & (pts_aligned_valid[:, 1] < self.cfg.max_height)
+        obs_pts = pts_aligned_valid[obs_mask_rot]
         
         if len(obs_pts) > 100:
-            # Flatten to 2D (X, Z)
             X = obs_pts[:, [0, 2]]
-            # Center
             mean = np.mean(X, axis=0)
             X_centered = X - mean
-            # Covariance
             cov = np.cov(X_centered, rowvar=False)
-            # Eigenvalues/vectors
             evals, evecs = np.linalg.eigh(cov)
-            # Dominant vector (largest eigenvalue) is last column of evecs
             dominant_axis = evecs[:, 1]
-            
-            # Angle of dominant axis wrt Z axis (0, 1)
-            # We want to align dominant axis to Z axis (or X axis)
             angle = np.arctan2(dominant_axis[0], dominant_axis[1])
-            print(f"Detected dominant structure angle: {np.degrees(angle):.1f} deg. Aligning...")
-            
-            # Rotation matrix around Y
-            # We want to rotate by -angle
             c, s = np.cos(-angle), np.sin(-angle)
-            R_yaw = np.array([
-                [c, 0, -s],
-                [0, 1, 0],
-                [s, 0, c]
-            ])
-            pts_aligned = pts_aligned @ R_yaw.T
-        else:
-            print("Not enough obstacle points for PCA alignment.")
+            R_yaw = np.array([[c, 0, -s], [0, 1, 0], [s, 0, c]])
+            pts_aligned_valid = pts_aligned_valid @ R_yaw.T
 
-        # 4. Project to 2D Grid with Auto-Scaling
+        # 4. Project to 2D Grid
         res = self.cfg.grid_res
         
-        # Filter extremes for map generation (clip to max range)
-        valid_map_pts = (pts_aligned[:, 2] > 0) & (pts_aligned[:, 2] < self.cfg.map_size_m)
+        # Filter extremes
+        valid_map_pts = (pts_aligned_valid[:, 2] > 0) & (pts_aligned_valid[:, 2] < self.cfg.map_size_m)
         if valid_map_pts.sum() == 0:
-            print("No points in valid depth range!")
             return {}
 
-        xs = pts_aligned[valid_map_pts, 0]
-        ys = pts_aligned[valid_map_pts, 1]
-        zs = pts_aligned[valid_map_pts, 2]
+        xs = pts_aligned_valid[valid_map_pts, 0]
+        ys = pts_aligned_valid[valid_map_pts, 1]
+        zs = pts_aligned_valid[valid_map_pts, 2]
 
         min_x, max_x = xs.min(), xs.max()
         min_z, max_z = zs.min(), zs.max()
         
-        print(f"Map Bounds: X=[{min_x:.2f}, {max_x:.2f}], Z=[{min_z:.2f}, {max_z:.2f}]")
-        
-        # Add padding
-        pad = 1.0 # meters
+        pad = 1.0 
         min_x -= pad
         max_x += pad
-        min_z = max(0, min_z) # Start Z at 0? Or min_z? Let's stick to world 0 is camera.
+        min_z = max(0, min_z)
         max_z += pad
         
         map_w = int((max_x - min_x) / res)
         map_h = int((max_z - min_z) / res)
         
-        print(f"Map Grid Size: {map_w} x {map_h}")
-        
-        if map_w <= 0 or map_h <= 0:
-            print("Invalid map size")
-            return {}
+        if map_w <= 0 or map_h <= 0 or map_w > 10000 or map_h > 10000:
+             return {}
             
         us = ((xs - min_x) / res).astype(np.int32)
         vs = ((zs - min_z) / res).astype(np.int32)
         
-        # Clip
         valid_uv = (us >= 0) & (us < map_w) & (vs >= 0) & (vs < map_h)
         us = us[valid_uv]
         vs = vs[valid_uv]
         ys = ys[valid_uv]
         
-        # Accumulate scores
         grid_acc = np.zeros((map_h, map_w, 3), dtype=np.int32)
-        # Flatten grid to (N_cells, 3) to allow efficient indexing
-        # grid_acc is (H, W, 3). Reshape to (H*W, 3) is safe view.
         grid_flat = grid_acc.reshape(-1, 3)
         flat_idx = vs * map_w + us
         
-        # User requested 0.5m threshold
         obstacle_h_thresh = 0.5
-        
         is_obstacle = (ys > obstacle_h_thresh) & (ys < self.cfg.max_height)
         is_floor = (ys >= -0.15) & (ys <= obstacle_h_thresh)
         
-        # Add votes using unbuffered add.at on the view
-        # column 0 is obstacle, 1 is floor
         np.add.at(grid_flat[:, 0], flat_idx[is_obstacle], 1)
         np.add.at(grid_flat[:, 1], flat_idx[is_floor], 1)
         
         obs_count = grid_acc[:,:,0]
         floor_count = grid_acc[:,:,1]
         
-        print(f"Votes: Obstacle={obs_count.sum()}, Floor={floor_count.sum()}")
-        print(f"Max votes in a cell: Obstacle={obs_count.max()}, Floor={floor_count.max()}")
-        
-        # Lower threshold to > 0 to catch sparse points
         occupied = obs_count > 0
         free = (floor_count > 0) & (~occupied)
         
         costmap = np.zeros((map_h, map_w, 3), dtype=np.uint8)
-        costmap[free] = [0, 255, 0] # Green
-        costmap[occupied] = [0, 0, 255] # Red
+        costmap[free] = [0, 255, 0] 
+        costmap[occupied] = [0, 0, 255] 
         
-        # Post-process for "schematic" look
-        # Dilate obstacles to connect walls and make them solid blocks
         kernel = np.ones((3,3), np.uint8)
         mask_occ = (costmap[:,:,2] == 255).astype(np.uint8)
-        # Just Dilate to make walls thicker
         mask_occ = cv2.dilate(mask_occ, kernel, iterations=3)
         costmap[mask_occ == 1] = [0, 0, 255]
         
-        # Draw robot at (0,0) -> ( -min_x / res, -min_z / res )
         rob_u = int((-min_x) / res)
         rob_v = int((-min_z) / res)
         if 0 <= rob_u < map_w and 0 <= rob_v < map_h:
             cv2.circle(costmap, (rob_u, rob_v), 5, (255, 255, 0), -1)
 
+        # 5. Extract 3D Points
+        # Recover boolean masks for valid_map_pts subset
+        # is_obstacle and is_floor are indices into valid_map_pts which is subset of pts_aligned_valid
+        
+        obstacle_pts_3d = pts_aligned_valid[valid_map_pts][is_obstacle]
+        floor_pts_3d = pts_aligned_valid[valid_map_pts][is_floor]
+
         return {
             "costmap": costmap,
+            "obstacle_points": obstacle_pts_3d,
+            "floor_points": floor_pts_3d, 
+            "origin": (min_x, min_z), 
+            "resolution": res
         }
+
+    def generate_costmap(self, rgb: np.ndarray, depth: np.ndarray) -> dict:
+        H, W = depth.shape
+        points = self.masker.depth_to_points(depth) # (H, W, 3)
+        return self.generate_costmap_from_points(points)
 
 def main():
     # Setup

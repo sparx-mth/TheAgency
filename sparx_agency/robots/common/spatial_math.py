@@ -58,3 +58,45 @@ def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: floa
         cx=float(cx),
         cy=float(cy)
     )
+
+def rpy_deg_to_R_base(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    """
+    Rotation matrix for roll/pitch/yaw defined about *base axes*:
+      roll  around X (forward)
+      pitch around Y (left)
+      yaw   around Z (up)
+
+    Returns R (3x3) such that: p_rot = R @ p
+    """
+    r = np.deg2rad(roll_deg)
+    p = np.deg2rad(pitch_deg)
+    y = np.deg2rad(yaw_deg)
+
+    cr, sr = np.cos(r), np.sin(r)
+    cp, sp = np.cos(p), np.sin(p)
+    cy, sy = np.cos(y), np.sin(y)
+
+    Rx = np.array([[1, 0, 0],
+                   [0, cr, -sr],
+                   [0, sr, cr]], dtype=np.float32)
+    Ry = np.array([[cp, 0, sp],
+                   [0, 1, 0],
+                   [-sp, 0, cp]], dtype=np.float32)
+    Rz = np.array([[cy, -sy, 0],
+                   [sy,  cy, 0],
+                   [0,    0, 1]], dtype=np.float32)
+
+    return (Rz @ Ry @ Rx).astype(np.float32)
+
+
+def rot_y(deg: float) -> np.ndarray:
+    a = np.deg2rad(deg)
+    c, s = np.cos(a), np.sin(a)
+    # right-handed, axes: X forward, Y left, Z up
+    return np.array([
+        [ c, 0.0,  s],
+        [0.0, 1.0, 0.0],
+        [-s, 0.0,  c],
+    ], dtype=np.float32)
+
+
