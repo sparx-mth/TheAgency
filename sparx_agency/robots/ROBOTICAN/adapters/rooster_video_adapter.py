@@ -41,7 +41,7 @@ Gst.init(None)
 
 
 class VideoStreamManager(Node):
-    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.20", port=5001):
+    def __init__(self, drone_id="R1", high_resolution=640, host_ip="192.168.131.5", port=5001):
         super().__init__("video_stream_example")
         self.id = drone_id
         self.i = 0
@@ -49,7 +49,7 @@ class VideoStreamManager(Node):
         self.height = int(self.width * 9 / 16)
         self.host = host_ip    # host IP "192.168.131.24" Laptop
         self.port = port
-        self.stream_timeout_s = 0.1
+        self.stream_timeout_s = 0.3
 
         self.last_pub_time = self.get_clock().now()  # in seconds, wall-clock time
         self.pub_period = Duration(seconds=0.1)  # seconds between publishes
@@ -138,8 +138,8 @@ class VideoStreamManager(Node):
         self.last_seen_tag_stamp = None
 
         self.april_localization = TagAzimuthOpenCVTask(
-            tag_config_path="sparx_agency/tasks/localization/config/tags_azimuth.yaml",
-            camera_calib_path="sparx_agency/tasks/localization/config/front_camera_calib.yaml",
+            tag_config_path="/home/rooster/sparx_agency/tasks/localization/config/tags_azimuth.yaml",
+            camera_calib_path="/home/rooster/sparx_agency/tasks/localization/config/front_camera_calib.yaml",
             tag_size_m=0.16,
         )
 
@@ -397,10 +397,6 @@ class VideoStreamManager(Node):
         #         camera_calib_path: str,
         #         tag_size_m: float,)
         #         last_yaw_rad, tag_id = self.april_localization.compute_azimuth_from_bgr(frame, timestamp_sec)
-        #last_yaw_rad = self.compute_azimuth_from_bgr(frame, now)
-        #last_yaw_rad = math.radians(last_yaw_rad)
-
-        #last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
 
 
         timestamp_sec = now.nanoseconds * 1e-9

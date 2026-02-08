@@ -12,9 +12,9 @@ def main():
     rclpy.init()
 
     # Configuration
-    ROOSTER_ID = "R2"
+    ROOSTER_ID = "R1"
     # Points to your existing path file in the ROBOTICAN tree
-    PATH_FILE = "robots/ROBOTICAN/helpers/txt/roll_custom_path.txt"
+    PATH_FILE = "/home/rooster/sparx_agency/robots/ROBOTICAN/helpers/txt/roll_custom_path.txt"
 
     # 1. Initialize Video Adapter
     video_node = VideoStreamManager(

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-import math
 import os
 from dataclasses import dataclass
 from typing import Optional, Any
@@ -23,69 +22,20 @@ from nav_msgs.msg import Odometry, OccupancyGrid
 
 # --- core types (ROS-free) ---
 from sparx_agency.core.common.types.perception import (
-    Intrinsics,
-    PoseSE3,
     RGBFrame,
     Observation,
 )
 
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
-from sparx_agency.robots.SJTU.helpers.helpers import make_depth_grid_vis, depth_to_vis_u8
+from sparx_agency.robots.common.helpers import make_depth_grid_vis, depth_to_vis_u8
 # ROS-free mapping pipeline
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, PinholeCloudGenerator, \
     MappingPipelineConfig
 from sparx_agency.core.mapping.interfaces.costmap import Costmap
-
-
-def strip_leading_slash(s: str) -> str:
-    if not s:
-        return s
-    return s[1:] if s.startswith("/") else s
-
-
-def stamp_to_sec(stamp) -> float:
-    # builtin_interfaces/msg/Time
-    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-
-def quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-    # Returns 3x3 rotation matrix
-    xx, yy, zz = qx*qx, qy*qy, qz*qz
-    xy, xz, yz = qx*qy, qx*qz, qy*qz
-    wx, wy, wz = qw*qx, qw*qy, qw*qz
-    return np.array([
-        [1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
-        [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
-        [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)],
-    ], dtype=np.float32)
-
-
-def image_msg_to_rgb_numpy(msg: Image) -> np.ndarray:
-    """
-    Convert sensor_msgs/Image to HxWx3 uint8 RGB WITHOUT cv_bridge.
-
-    Supports: rgb8, bgr8
-    """
-    enc = (msg.encoding or "").lower()
-    if enc not in ("rgb8", "bgr8"):
-        raise ValueError(f"Unsupported image encoding: {msg.encoding} (expected rgb8 or bgr8)")
-
-    h = int(msg.height)
-    w = int(msg.width)
-    step = int(msg.step)
-
-    # raw bytes -> (h, step) -> slice first w*3 bytes -> (h, w, 3)
-    buf = np.frombuffer(msg.data, dtype=np.uint8)
-    if buf.size < h * step:
-        raise ValueError(f"Image buffer too small: {buf.size} < {h*step}")
-
-    row = buf.reshape((h, step))
-    rgb = row[:, :w*3].reshape((h, w, 3))
-
-    if enc == "bgr8":
-        rgb = rgb[..., ::-1].copy()
-
-    return rgb
+from sparx_agency.robots.common.state_converter import odom_to_pose_se3, cam_info_to_intrinsics, \
+    costmap_to_occupancygrid
+from sparx_agency.robots.common.txt_utils import strip_leading_slash,  stamp_to_sec
+from sparx_agency.robots.common.image_utils import ros_image_to_rgb_np, numpy_to_image_msg
 
 
 @dataclass
@@ -93,25 +43,6 @@ class LatestState:
     odom: Optional[Odometry] = None
     cam_info: Optional[CameraInfo] = None
 
-
-def cam_info_to_intrinsics(ci: CameraInfo) -> Intrinsics:
-    fx = float(ci.k[0])
-    fy = float(ci.k[4])
-    cx = float(ci.k[2])
-    cy = float(ci.k[5])
-    return Intrinsics(
-        width=int(ci.width),
-        height=int(ci.height),
-        fx=fx, fy=fy, cx=cx, cy=cy
-    )
-
-
-def odom_to_pose_se3(odom: Odometry) -> PoseSE3:
-    p = odom.pose.pose.position
-    o = odom.pose.pose.orientation
-    R = quat_to_rot(float(o.x), float(o.y), float(o.z), float(o.w))
-    t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float32)
-    return PoseSE3(R=R, t=t)
 
 
 def pipeline_result_to_occupancygrid(result: Any, stamp, frame_id: str) -> OccupancyGrid:
@@ -139,30 +70,6 @@ def pipeline_result_to_occupancygrid(result: Any, stamp, frame_id: str) -> Occup
         "MappingPipeline.step(obs) must return an OccupancyGrid or an object with "
         "to_occupancy_grid()/to_ros_msg()/to_msg() returning OccupancyGrid"
     )
-
-
-def costmap_to_occupancygrid(costmap, stamp, frame_id: str) -> OccupancyGrid:
-    """
-    Convert ROS-free costmap (ProbabilisticGridCostmap) into nav_msgs/OccupancyGrid.
-    """
-    spec, grid = costmap.get_grid()  # GridSpec + (H,W) int8
-    msg = OccupancyGrid()
-    msg.header.stamp = stamp
-    msg.header.frame_id = frame_id
-
-    msg.info.resolution = float(spec.resolution_m)
-    msg.info.width = int(spec.width)
-    msg.info.height = int(spec.height)
-
-    msg.info.origin.position.x = float(spec.origin_x)
-    msg.info.origin.position.y = float(spec.origin_y)
-    msg.info.origin.position.z = 0.0
-    msg.info.origin.orientation.w = 1.0
-
-    msg.data = grid.reshape(-1, order="C").tolist()
-    return msg
-
-
 
 class GazeboRos2Ingestor(Node):
     """
@@ -293,7 +200,7 @@ class GazeboRos2Ingestor(Node):
             return
 
         try:
-            rgb = image_msg_to_rgb_numpy(msg)
+            rgb = ros_image_to_rgb_np(msg)
         except Exception as e:
             self.get_logger().error(f"Failed to decode image: {e}")
             return
@@ -346,7 +253,7 @@ class GazeboRos2Ingestor(Node):
 
         self._dbg_count += 1
         if depth_m is not None and debug_depth:
-            depth_msg = self.numpy_to_image_msg(depth_m.astype(np.float32), frame_id=cam_frame, stamp=msg.header.stamp, encoding="32FC1")
+            depth_msg = numpy_to_image_msg(depth_m.astype(np.float32), frame_id=cam_frame, stamp=msg.header.stamp, encoding="32FC1")
 
             self.pub_depth_raw.publish(depth_msg)
             # depth_msg.header = msg.header
@@ -360,7 +267,7 @@ class GazeboRos2Ingestor(Node):
             # vis mono8
             vis_u8 = depth_to_vis_u8(depth_m, clip_min=self.pipeline.cfg.range_min,
                                      clip_max=self.pipeline.cfg.range_max)
-            vis_msg = self.numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=stamp, encoding="mono8")
+            vis_msg = numpy_to_image_msg(vis_u8, frame_id=msg.header.frame_id, stamp=stamp, encoding="mono8")
             vis_msg.header = msg.header
             vis_msg.header.frame_id = cam_frame
             self.pub_depth_vis.publish(vis_msg)
@@ -370,7 +277,7 @@ class GazeboRos2Ingestor(Node):
                 grid_vis = make_depth_grid_vis(depth_m, grid_w, grid_h,
                                                clip_min=self.pipeline.cfg.range_min,
                                                clip_max=self.pipeline.cfg.range_max)
-                grid_msg = self.numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=stamp, encoding="bgr8")
+                grid_msg = numpy_to_image_msg(grid_vis, frame_id=msg.header.frame_id, stamp=stamp, encoding="bgr8")
                 grid_msg.header = msg.header
                 grid_msg.header = msg.header
                 grid_msg.header.frame_id = cam_frame
@@ -407,71 +314,6 @@ class GazeboRos2Ingestor(Node):
             return
 
         self.pub_occ.publish(occ_msg)
-
-    def image_msg_to_numpy(self, msg: Image) -> np.ndarray:
-        """
-        Supports: rgb8, bgr8, mono8, 32FC1
-        Returns a numpy view/copy shaped (H,W,C) or (H,W).
-        """
-        h = msg.height
-        w = msg.width
-        enc = msg.encoding.lower()
-
-        if enc in ("rgb8", "bgr8"):
-            arr = np.frombuffer(msg.data, dtype=np.uint8)
-            arr = arr.reshape((h, w, 3))
-            return arr
-
-        if enc in ("mono8",):
-            arr = np.frombuffer(msg.data, dtype=np.uint8)
-            return arr.reshape((h, w))
-
-        if enc in ("32fc1",):
-            arr = np.frombuffer(msg.data, dtype=np.float32)
-            return arr.reshape((h, w))
-
-        raise ValueError(f"Unsupported encoding: {msg.encoding}")
-
-    def numpy_to_image_msg(self, arr: np.ndarray, *, frame_id: str, stamp, encoding: str) -> Image:
-        """
-        Create sensor_msgs/Image from numpy without cv_bridge.
-        encoding examples: 'rgb8', 'bgr8', 'mono8', '32FC1'
-        """
-        msg = Image()
-        msg.header.stamp = stamp
-        msg.header.frame_id = frame_id
-
-        if encoding.lower() in ("rgb8", "bgr8"):
-            assert arr.ndim == 3 and arr.shape[2] == 3 and arr.dtype == np.uint8
-            msg.height, msg.width = arr.shape[0], arr.shape[1]
-            msg.encoding = encoding
-            msg.is_bigendian = False
-            msg.step = msg.width * 3
-            msg.data = arr.tobytes()
-            return msg
-
-        if encoding.lower() == "mono8":
-            assert arr.ndim == 2 and arr.dtype == np.uint8
-            msg.height, msg.width = arr.shape
-            msg.encoding = "mono8"
-            msg.is_bigendian = False
-            msg.step = msg.width
-            msg.data = arr.tobytes()
-            return msg
-
-        if encoding.lower() == "32fc1":
-            assert arr.ndim == 2 and arr.dtype == np.float32
-            depth = np.ascontiguousarray(arr.astype(np.float32))
-            h, w = depth.shape[:2]
-            msg.height = h
-            msg.width = w
-            msg.encoding = "32FC1"
-            msg.is_bigendian = False
-            msg.step = w * 4
-            msg.data = depth.tobytes()
-            return msg
-
-        raise ValueError(f"Unsupported encoding: {encoding}")
 
 
 def main():
