@@ -124,8 +124,9 @@ class TagAzimuthOpenCVTask:
         dets = self.detector.detect(gray)
 
         observations: list[TagObservation] = []
-
+        print(f"Detected {len(dets)} tags in image.")
         for d in dets:
+            print(f"Detected tag id={d.tag_id}")
             tag_id = int(d.tag_id)
             if tag_id not in self.tag_config_deg:
                 continue
@@ -146,6 +147,7 @@ class TagAzimuthOpenCVTask:
             raise RuntimeError("Estimator failed to produce azimuth.")
 
         yaw_deg, _best_tag = result
+        yaw_deg = (-yaw_deg) % 360.0
         return float(yaw_deg)
 
 

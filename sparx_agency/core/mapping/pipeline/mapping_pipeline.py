@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import datetime
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 import cv2
 import numpy as np
 import matplotlib
+
+from sparx_agency.robots.common.spatial_math import rpy_deg_to_R_base
+
 matplotlib.use('Agg')  # MUST be before importing pyplot
 from matplotlib import pyplot as plt
 
@@ -38,8 +42,15 @@ class MappingPipelineConfig:
 
 
 class PinholeCloudGenerator(CloudGenerator):
-    def __init__(self, stride: int = 2):
+    def __init__(self, stride: int = 2,
+                 cam_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
+                 t_base: tuple[float, float, float] = (0.0, 0.0, 0.0),):
         self.stride = max(1, int(stride))
+        self.cam_rpy_deg = cam_rpy_deg
+        self.t_base = np.array(t_base, dtype=np.float32)
+
+        r, p, y = cam_rpy_deg
+        self.R_base = rpy_deg_to_R_base(r, p, y)  # 3x3
 
     def depth_to_cloud_to_base_xyz(self, depth_m: np.ndarray, intr: Intrinsics) -> np.ndarray:
         if depth_m is None:
@@ -79,6 +90,22 @@ class PinholeCloudGenerator(CloudGenerator):
         x = d  # forward in optical
 
         return np.stack([x, y, z], axis=1).astype(np.float32)
+
+    def angle_correction_translation(self, pts):
+        # ---- Angle correction: rotate points in base frame ----
+        pts = (self.R_base @ pts.T).T
+
+        # ---- Optional translation (camera position in base) ----
+        pts += self.t_base[None, :]
+
+        return pts
+
+    def transform_points(self, pts: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+        # pts: (N,3), R: (3,3), t: (3,)
+        return (pts @ R.T) + t[None, :]
+
+
+
 
 
 def optical_xyz_to_base_xyz(pts_optical: np.ndarray) -> np.ndarray:
@@ -160,8 +187,15 @@ class MappingPipeline:
                 raise ValueError("Observation.rgb provided but depth_model or intrinsics is None")
 
             # Infer depth from RGB and generate cloud
+            t0 = time.perf_counter()
             self.last_depth = self.depth_model.infer_depth(obs.rgb.image).astype(np.float32)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            print(f"Depth inference took {dt_ms:.2f} ms")
+
+            t0 = time.perf_counter()
             cloud_local_corr = self.cloud_generator.depth_to_cloud_to_base_xyz(self.last_depth, intr)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            print(f"Cloud generation took {dt_ms:.2f} ms")
         self.last_cloud_local = cloud_local_corr
 
 
@@ -171,8 +205,11 @@ class MappingPipeline:
         # 4. Costmap Update (World vs Local)
         if obs.pose_map_base is not None:
             # Transform to 'odom/map' frame and update
+            t0 = time.perf_counter()
             cloud_odom = obs.pose_map_base.transform_points(cloud_local_corr)
             self.costmap.update_from_cloud(cloud_odom, obs.pose_map_base.t)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            print(f"Costmap update took {dt_ms:.2f} ms")
             self.last_cloud_global = cloud_odom
 
         else:
