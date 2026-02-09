@@ -64,8 +64,10 @@ class AgentServer:
         response = {'action': action}
         if isinstance(action, list) and len(action) > 0 and isinstance(action[0], dict):
             pixel_goal = action[0].pop('pixel_goal', None)
-            if pixel_goal is not None:
-                response['pixel_goal'] = pixel_goal
+            pixel_goal_step = action[0].pop('pixel_goal_step', None)
+            # Always include pixel_goal (even None) so client can detect "no goal"
+            response['pixel_goal'] = pixel_goal
+            response['pixel_goal_step'] = pixel_goal_step
         return response
 
     async def reset_agent(self, agent_name: str, request: ResetRequest):
