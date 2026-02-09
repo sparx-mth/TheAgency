@@ -33,6 +33,31 @@ def sparsify_graph(G: nx.Graph, resolution: float, max_chain_m: float) -> None:
             G.remove_node(node)
 
 
+def merge_short_edges(G: nx.Graph, resolution: float, min_edge_m: float) -> None:
+    """
+    Collapse degree-2 nodes whose shorter edge is below *min_edge_m*.
+
+    The node is removed and its farther neighbour is connected to
+    the closer one with the summed distance.
+
+    Args:
+        G: Graph to simplify (modified in-place).
+        resolution: Meters per cell.
+        min_edge_m: Minimum edge length in meters; shorter triggers merge.
+    """
+    threshold_cells = min_edge_m / resolution
+    deg2 = [n for n in G.nodes if G.degree(n) == 2]
+
+    for node in deg2:
+        if node not in G or G.degree(node) != 2:
+            continue
+        a, b = list(G.neighbors(node))
+        da, db = G[node][a]["dist"], G[node][b]["dist"]
+        if min(da, db) < threshold_cells:
+            G.add_edge(a, b, dist=da + db)
+            G.remove_node(node)
+
+
 def get_junctions(G: nx.Graph) -> List[tuple]:
     """Return nodes with degree >= 3 (topological waypoints / intersections)."""
     return [n for n in G.nodes if G.degree(n) >= 3]

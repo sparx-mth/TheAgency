@@ -17,7 +17,7 @@ import numpy as np
 from scipy.spatial import Voronoi
 
 from sparx_agency.core.mapping.costmap.sdf import boundary_cost_field
-from sparx_agency.core.mapping.topology.graph_utils import sparsify_graph
+from sparx_agency.core.mapping.topology.graph_utils import merge_short_edges, sparsify_graph
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,11 +30,14 @@ class TopologyParams:
         inner_inflate_m:  Small extra inflation to avoid edges crossing thin walls.
         sparsify_dist_m:  Max chain length (meters) to collapse degree-2 nodes.
                           Set to 0 to skip sparsification.
+        min_edge_m:       Merge degree-2 nodes whose shorter edge is below this
+                          threshold (meters).  Set to 0 to skip.
         min_component:    Drop connected components smaller than this.
     """
     sdf_scale_m: float = 3.0
     inner_inflate_m: float = 0.33
     sparsify_dist_m: float = 0.6
+    min_edge_m: float = 0.3
     min_component: int = 4
 
 
@@ -135,5 +138,9 @@ def extract_voronoi_graph(
     # 6. Sparsify
     if params.sparsify_dist_m > 0 and len(G) > 0:
         sparsify_graph(G, resolution, params.sparsify_dist_m)
+
+    # 7. Merge degree-2 nodes with a short edge
+    if params.min_edge_m > 0 and len(G) > 0:
+        merge_short_edges(G, resolution, params.min_edge_m)
 
     return G
