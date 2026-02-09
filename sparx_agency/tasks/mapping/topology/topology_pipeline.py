@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Visual pipeline test: occupancy → inflation → SDF → Voronoi topology
-                      → door separation → room–object graph.
+                      → door separation → room–object graph → Voronoi cells (colors).
 
 Creates a synthetic apartment and plots every pipeline stage.
 All algorithmic code lives in sparx_agency.core — this file is
@@ -457,7 +457,7 @@ def main():
 
     # ── Figure 1: Core pipeline stages 1–6 ──
     fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
-    fig1.suptitle("Topology Pipeline: Occupancy → Inflation → SDF → Voronoi",
+    fig1.suptitle("Topology Pipeline: Steps 1–6",
                   fontsize=14, fontweight="bold")
 
     plot_occupancy(axes1[0, 0], occ, "1. Raw Occupancy")
@@ -469,26 +469,38 @@ def main():
                     "6. Voronoi Graph + Inflation")
 
     fig1.tight_layout()
-    out1 = os.path.join(out_dir, "topology_pipeline_test.png")
+    out1 = os.path.join(out_dir, "topology_pipeline_1_6.png")
     fig1.savefig(out1, dpi=150, bbox_inches="tight")
-    print(f"Saved pipeline plot       → {out1}")
+    print(f"Saved pipeline plot (1–6) → {out1}")
 
-    # ── Figure 2: Room separation + Room–object graph ──
-    fig2, axes2 = plt.subplots(1, 3, figsize=(21, 6))
-    fig2.suptitle("Room Separation & Object Assignment",
+    # ── Figure 2: Stages 6–10 (includes 10 = Voronoi cells with colors) ──
+    fig2, axes2 = plt.subplots(2, 3, figsize=(21, 12))
+    fig2.suptitle("Topology Pipeline: Steps 6–10",
                   fontsize=14, fontweight="bold")
 
-    plot_door_field(axes2[0], occ, door_field, doors,
+    # 6 (repeat)
+    plot_components(axes2[0, 0], occ, inflated, G,
+                    "6. Voronoi Graph + Inflation")
+
+    # 7–9 (same as before)
+    plot_door_field(axes2[0, 1], occ, door_field, doors,
                     "7. Door Probability Field")
-    plot_room_components(axes2[1], occ, inflated, G_sep,
+    plot_room_components(axes2[0, 2], occ, inflated, G_sep,
                          "8. Separated Rooms")
-    plot_room_object_graph(axes2[2], occ, inflated, G_sep, rog, objects,
+    plot_room_object_graph(axes2[1, 0], occ, inflated, G_sep, rog, objects,
                            "9. Room–Object Graph")
 
+    # 10 (new)
+    plot_voronoi_cells(axes2[1, 1], occ,
+                       "10. Voronoi Cells (colored tessellation)")
+
+    # Hide the unused 6th panel
+    axes2[1, 2].set_axis_off()
+
     fig2.tight_layout()
-    out2 = os.path.join(out_dir, "topology_room_objects.png")
+    out2 = os.path.join(out_dir, "topology_pipeline_6_10.png")
     fig2.savefig(out2, dpi=150, bbox_inches="tight")
-    print(f"Saved room-object plot    → {out2}")
+    print(f"Saved pipeline plot (6–10)→ {out2}")
 
     plt.show()
 
