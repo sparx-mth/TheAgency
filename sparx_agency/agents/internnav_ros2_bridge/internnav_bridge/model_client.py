@@ -165,13 +165,13 @@ class ModelClient:
         action_index = 0
         waypoint = None
 
-        # Debug: log response structure to find the waypoint key
-        self._log("info", f"Server response keys: {list(data.keys())}")
+        # Debug: log response structure (use debug level to avoid flooding)
+        self._log("debug", f"Server response keys: {list(data.keys())}")
         for k, v in data.items():
             if k != "action":
-                self._log("info", f"  response['{k}'] = {repr(v)[:200]}")
+                self._log("debug", f"  response['{k}'] = {repr(v)[:200]}")
             elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
-                self._log("info", f"  response['action'][0] keys: {list(v[0].keys())}")
+                self._log("debug", f"  response['action'][0] keys: {list(v[0].keys())}")
 
         try:
             if "action" in data:
@@ -196,7 +196,7 @@ class ModelClient:
         # --- Extract S2 waypoint pixel coordinates ---
         waypoint = self._extract_waypoint(data)
         if waypoint:
-            self._log("info", f"S2 waypoint: ({waypoint[0]}, {waypoint[1]})")
+            self._log("debug", f"S2 waypoint: ({waypoint[0]}, {waypoint[1]})")
         else:
             self._log("debug", "No S2 waypoint this step")
 

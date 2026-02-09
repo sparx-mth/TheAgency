@@ -81,6 +81,7 @@ class InternNavBridge(Node):
         self.nav_status = NavigationStatus.IDLE
         self.consecutive_stops = 0
         self.last_action = None
+        self.inference_step = 0  # monotonic step counter for log traceability
 
         # Action execution
         self.action_state = ActionState.IDLE
@@ -89,6 +90,9 @@ class InternNavBridge(Node):
         self.current_manual_control = None
         self.last_inference_rgb = None  # frame sent to model, for waypoint annotation
         self.last_waypoint = None       # (x, y) from S2
+        self.last_waypoint_rgb = None   # the RGB frame that the waypoint corresponds to
+        self.waypoint_age = 0           # how many inference steps since last fresh waypoint
+        self.max_waypoint_age = 12      # clear stale waypoint after this many steps
 
         # Handheld mode: no ARM, no keep_alive, no motor commands — just inference + discrete actions
         self.handheld_mode = self.config['bridge']['control'].get('handheld', False)
@@ -286,6 +290,7 @@ class InternNavBridge(Node):
             if command in ["stop", "end", "finish", "done"]:
                 self.nav_status = NavigationStatus.COMPLETED_SUCCESS
                 self.state.is_navigating = False
+                self._clear_waypoint_state()
                 self._publish_status("success")
             elif command == "pause":
                 self.nav_status = NavigationStatus.PAUSED
@@ -296,6 +301,13 @@ class InternNavBridge(Node):
                 self.nav_status = NavigationStatus.IDLE
                 self.state.is_navigating = False
                 self.consecutive_stops = 0
+                self._clear_waypoint_state()
+
+    def _clear_waypoint_state(self):
+        """Clear all waypoint tracking state."""
+        self.last_waypoint = None
+        self.last_waypoint_rgb = None
+        self.waypoint_age = 0
 
     def _odom_callback(self, msg: Odometry):
         with self.lock:
@@ -432,6 +444,8 @@ class InternNavBridge(Node):
         else:
             self.consecutive_stops = 0
         self.last_action = action
+        self.inference_step += 1
+        step = self.inference_step
 
         if outputs.get('discrete', {}).get('enabled', True):
             mapping = outputs['discrete'].get('action_mapping', {})
@@ -439,10 +453,12 @@ class InternNavBridge(Node):
             msg = String()
             msg.data = mapped
             self.action_pub.publish(msg)
-            if self.handheld_mode:
-                self.get_logger().info(f"Action: {mapped} [handheld]")
-            else:
-                self.get_logger().info(f"Action: {mapped} [armed={self.arm_state}]")
+
+            # Single consolidated log line per inference step
+            wp = result.waypoint
+            mode = "handheld" if self.handheld_mode else f"armed={self.arm_state}"
+            wp_str = f"goal=({wp[0]},{wp[1]})" if wp else "goal=none"
+            self.get_logger().info(f"[step {step}] {mapped} | {wp_str} [{mode}]")
 
         if not self.handheld_mode and outputs.get('manual_control', {}).get('enabled') and ROOSTER_MSGS_AVAILABLE:
             if not self.arm_state:
@@ -518,24 +534,45 @@ class InternNavBridge(Node):
     def _publish_waypoint(self, result):
         """Publish S2 waypoint data and annotated image with waypoint circle."""
         wp = result.waypoint
+
         if wp:
             self.last_waypoint = wp
-            self.get_logger().info(f"Publishing S2 waypoint: ({wp[0]}, {wp[1]})")
+            self.last_waypoint_rgb = self.last_inference_rgb.copy() if self.last_inference_rgb is not None else None
+            self.waypoint_age = 0
         else:
-            self.get_logger().debug("No waypoint this step")
+            self.waypoint_age += 1
+            self.get_logger().debug(f"No waypoint this step (age={self.waypoint_age})")
+
+            # Clear stale waypoint after too many steps without a fresh one
+            if self.waypoint_age > self.max_waypoint_age:
+                if self.last_waypoint is not None:
+                    self.get_logger().info("Clearing stale waypoint")
+                self.last_waypoint = None
+                self.last_waypoint_rgb = None
 
         # Always publish waypoint JSON (null if no active waypoint)
+        active_wp = wp or self.last_waypoint
         wp_msg = String()
-        wp_msg.data = json.dumps({'x': wp[0], 'y': wp[1], 'action': result.action} if wp else
+        wp_msg.data = json.dumps({'x': active_wp[0], 'y': active_wp[1], 'action': result.action} if active_wp else
                                  {'x': None, 'y': None, 'action': result.action})
         self.waypoint_pub.publish(wp_msg)
 
-        # Publish annotated image if we have a frame and an active waypoint
-        active_wp = wp or self.last_waypoint
-        if self.last_inference_rgb is not None and active_wp:
-            annotated = self._draw_waypoint(self.last_inference_rgb.copy(), active_wp, is_fresh=(wp is not None))
+        # Publish annotated image: use the S2 frame (when waypoint was set), not the current frame
+        if active_wp:
+            # Prefer the frame from when the waypoint was captured
+            frame = self.last_waypoint_rgb if self.last_waypoint_rgb is not None else self.last_inference_rgb
+            if frame is not None:
+                annotated = self._draw_waypoint(frame.copy(), active_wp, is_fresh=(wp is not None))
+                try:
+                    img_msg = self.cv_bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+                    img_msg.header.stamp = self.get_clock().now().to_msg()
+                    self.waypoint_image_pub.publish(img_msg)
+                except Exception as e:
+                    self.get_logger().error(f"Waypoint image publish error: {e}")
+        elif self.last_inference_rgb is not None:
+            # No waypoint at all — publish current frame without circle so the panel stays alive
             try:
-                img_msg = self.cv_bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+                img_msg = self.cv_bridge.cv2_to_imgmsg(self.last_inference_rgb.copy(), encoding='bgr8')
                 img_msg.header.stamp = self.get_clock().now().to_msg()
                 self.waypoint_image_pub.publish(img_msg)
             except Exception as e:
@@ -543,30 +580,35 @@ class InternNavBridge(Node):
 
     @staticmethod
     def _draw_waypoint(img: np.ndarray, waypoint: tuple, is_fresh: bool = True) -> np.ndarray:
-        """Draw S2 pixel goal on inference frame — bold red circle."""
+        """Draw S2 pixel goal on inference frame — bold red circle (dimmed if stale)."""
         x, y = int(waypoint[0]), int(waypoint[1])
         h, w = img.shape[:2]
         x = max(0, min(x, w - 1))
         y = max(0, min(y, h - 1))
 
-        red = (0, 0, 255)
-        dark_red = (0, 0, 180)
+        if is_fresh:
+            color = (0, 0, 255)       # bright red
+            outer_color = (0, 0, 180)  # dark red
+            label = f"S2 GOAL ({x},{y})"
+        else:
+            color = (0, 100, 200)      # dimmed orange
+            outer_color = (0, 80, 140)
+            label = f"S2 GOAL ({x},{y}) [stale]"
 
         # Bold outer ring
-        cv2.circle(img, (x, y), 28, dark_red, 2, cv2.LINE_AA)
+        cv2.circle(img, (x, y), 28, outer_color, 2, cv2.LINE_AA)
         # Main circle
-        cv2.circle(img, (x, y), 20, red, 3, cv2.LINE_AA)
+        cv2.circle(img, (x, y), 20, color, 3, cv2.LINE_AA)
         # Center dot
-        cv2.circle(img, (x, y), 5, red, -1, cv2.LINE_AA)
+        cv2.circle(img, (x, y), 5, color, -1, cv2.LINE_AA)
 
         # Label
-        label = f"S2 GOAL ({x},{y})"
         font = cv2.FONT_HERSHEY_SIMPLEX
         (tw, th), _ = cv2.getTextSize(label, font, 0.55, 2)
         lx = max(0, min(x - tw // 2, w - tw))
         ly = max(th + 4, y - 36)
         cv2.rectangle(img, (lx - 3, ly - th - 3), (lx + tw + 3, ly + 5), (0, 0, 0), -1)
-        cv2.putText(img, label, (lx, ly), font, 0.55, red, 2, cv2.LINE_AA)
+        cv2.putText(img, label, (lx, ly), font, 0.55, color, 2, cv2.LINE_AA)
 
         return img
 

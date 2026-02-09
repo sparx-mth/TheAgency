@@ -86,6 +86,7 @@ class InternVLAN1Agent(Agent):
 
         # PATCH 1/4: Track current pixel goal for inclusion in HTTP response
         self._current_pixel_goal = None
+        self._pixel_goal_step = -1
 
     def reset(self, reset_index=None):
         '''reset_index: [0]'''
@@ -113,6 +114,7 @@ class InternVLAN1Agent(Agent):
 
         # PATCH 2/4: Clear pixel goal on reset
         self._current_pixel_goal = None
+        self._pixel_goal_step = -1
 
         # Reset s2 agent
         with self.s2_agent_lock:
@@ -282,12 +284,16 @@ class InternVLAN1Agent(Agent):
             time.sleep(0.2)
 
         # PATCH 3/4 continued: Update pixel goal after S2 completes
+        # Capture IMMEDIATELY before S1 processing can clear output_pixel (line ~369)
         if _s2_invoked:
-            if self.s2_output.output_pixel is not None:
+            with self.s2_output_lock:
                 pg = self.s2_output.output_pixel
+            if pg is not None:
                 self._current_pixel_goal = pg.tolist() if hasattr(pg, 'tolist') else list(pg)
-            else:
-                self._current_pixel_goal = None
+                self._pixel_goal_step = self.episode_step  # track when it was set
+            # Do NOT clear _current_pixel_goal to None here — keep the last
+            # known goal alive while S1 executes toward it. It will be
+            # replaced on the next successful S2 invocation.
 
         output = {}
         # Simple branch:
@@ -418,8 +424,12 @@ class InternVLAN1Agent(Agent):
 
         # PATCH 4/4: Include pixel_goal in return value for HTTP response
         if 'action' in output:
-            return [{'action': output['action'], 'ideal_flag': True, 'pixel_goal': self._current_pixel_goal}]
+            return [{'action': output['action'], 'ideal_flag': True,
+                     'pixel_goal': self._current_pixel_goal,
+                     'pixel_goal_step': self._pixel_goal_step}]
         elif 'velocity' in output:
-            return [{'action': output['velocity'], 'ideal_flag': False, 'pixel_goal': self._current_pixel_goal}]
+            return [{'action': output['velocity'], 'ideal_flag': False,
+                     'pixel_goal': self._current_pixel_goal,
+                     'pixel_goal_step': self._pixel_goal_step}]
         else:
             assert False

@@ -15,13 +15,13 @@ instructions:
   - id: 4
     text: "Move forward until you reach an intersection, then turn left."
   - id: 5
-    text: "Enter the room on the right, it looks like a prison cell."
+    text: "Exit the room and find the weapon."
   - id: 6
     text: "Continue straight to the end of the hallway and then enter the room on the right."
   - id: 7
     text: "Go to the end of the corridor, then turn around and return to where you started."
   - id: 8
-    text: "Enter the cell on the right, look around, then exit back into the corridor."
+    text: "Exit the room, turn right, go to the end of the hallway and enter the room on the left."
   - id: 9
     text: "Approach the barred gate ahead and stop before reaching it."
   - id: 10

@@ -18,8 +18,10 @@ This is simulator-agnostic (Gazebo/Sphera/anything) as long as ROS2 topics exist
 
 from __future__ import annotations
 
+import json
 import os
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,6 +30,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 
 from std_msgs.msg import String
 from sensor_msgs.msg import Image, CompressedImage
@@ -108,33 +112,68 @@ class OverlayRecorder(Node):
         os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
 
         # -------- ROS --------
+        # Camera QoS: BEST_EFFORT for high-rate sensor data
         qos_img = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
 
+        # Waypoint image QoS: RELIABLE to match bridge publisher (which uses default=RELIABLE).
+        # BEST_EFFORT subscriber + RELIABLE publisher can silently drop messages
+        # on many DDS implementations, especially under executor pressure.
+        qos_waypoint = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,  # slightly larger buffer to survive executor delays
+        )
+
+        # Separate callback groups so high-rate RGB doesn't starve the waypoint callback
+        self.rgb_cb_group = MutuallyExclusiveCallbackGroup()
+        self.waypoint_cb_group = MutuallyExclusiveCallbackGroup()
+        self.text_cb_group = ReentrantCallbackGroup()
+
         self.bridge = CvBridge()
         self.text = TextState()
         self.last_s2_frame = None  # latest S2 inference frame with red circle
+        self.s2_frame_time = 0.0   # timestamp of last received S2 frame
+        self.s2_frame_count = 0    # total S2 frames received (for diagnostics)
+        self.s2_lock = threading.Lock()  # protects s2 frame state
+        self.current_pixel_goal = None   # (x, y) from latest waypoint JSON, for display only
+        self._pixel_goal_changed = False  # True when a new (different) pixel goal arrives
 
         if self.rgb_type.lower() == "compressed":
             self.rgb_sub = self.create_subscription(
-                CompressedImage, self.rgb_topic, self._rgb_cb_compressed, qos_img
+                CompressedImage, self.rgb_topic, self._rgb_cb_compressed, qos_img,
+                callback_group=self.rgb_cb_group
             )
         else:
             self.rgb_sub = self.create_subscription(
-                Image, self.rgb_topic, self._rgb_cb_raw, qos_img
+                Image, self.rgb_topic, self._rgb_cb_raw, qos_img,
+                callback_group=self.rgb_cb_group
             )
 
-        self.inst_sub = self.create_subscription(String, self.instruction_topic, self._inst_cb, 10)
-        self.action_sub = self.create_subscription(String, self.action_topic, self._action_cb, 10)
-        self.status_sub = self.create_subscription(String, self.status_topic, self._status_cb, 10)
+        self.inst_sub = self.create_subscription(String, self.instruction_topic, self._inst_cb, 10,
+                                                  callback_group=self.text_cb_group)
+        self.action_sub = self.create_subscription(String, self.action_topic, self._action_cb, 10,
+                                                    callback_group=self.text_cb_group)
+        self.status_sub = self.create_subscription(String, self.status_topic, self._status_cb, 10,
+                                                    callback_group=self.text_cb_group)
 
         # S2 waypoint image from bridge_node (Image with red circle already drawn)
+        # Uses RELIABLE QoS + dedicated callback group to ensure delivery
         self.waypoint_image_sub = self.create_subscription(
-            Image, self.waypoint_image_topic, self._waypoint_image_cb, qos_img
+            Image, self.waypoint_image_topic, self._waypoint_image_cb, qos_waypoint,
+            callback_group=self.waypoint_cb_group
         )
+
+        # S2 waypoint JSON (coordinates) — used to detect when the pixel goal changes
+        wp_json_topic = self.action_topic.rsplit('/', 1)[0] + "/waypoint"
+        self.waypoint_json_sub = self.create_subscription(
+            String, wp_json_topic, self._waypoint_json_cb, 10,
+            callback_group=self.waypoint_cb_group
+        )
+        self.get_logger().info(f"S2 waypoint JSON: {wp_json_topic}")
 
         # -------- Video --------
         # Side-by-side: total width = 2 * target_width
@@ -174,14 +213,51 @@ class OverlayRecorder(Node):
     def _status_cb(self, msg: String):
         self.text.status = msg.data.strip()
 
-    # -------- S2 waypoint image callback --------
+    # -------- S2 waypoint callbacks --------
+    def _waypoint_json_cb(self, msg: String):
+        """Track current pixel goal coordinates; flag when it changes."""
+        try:
+            data = json.loads(msg.data)
+            x, y = data.get('x'), data.get('y')
+            if x is not None and y is not None:
+                new_goal = (int(x), int(y))
+            else:
+                new_goal = None
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return
+
+        if new_goal != self.current_pixel_goal:
+            self.current_pixel_goal = new_goal
+            self._pixel_goal_changed = True
+            self.get_logger().info(f"Pixel goal changed → {new_goal}")
+
     def _waypoint_image_cb(self, msg: Image):
+        """Accept the S2 frame only when the pixel goal has changed.
+
+        The pixel goal and image are published together by the bridge,
+        so we gate the image update on whether _waypoint_json_cb detected
+        a new (different) pixel goal.
+        """
+        if not self._pixel_goal_changed:
+            return  # same pixel goal — skip this frame
+
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
             if frame.shape[1] != self.tw or frame.shape[0] != self.th:
                 frame = cv2.resize(frame, (self.tw, self.th), interpolation=cv2.INTER_AREA)
-            self.last_s2_frame = frame
-            self.get_logger().info("S2 frame received", throttle_duration_sec=5.0)
+
+            with self.s2_lock:
+                self.last_s2_frame = frame
+                self.s2_frame_time = time.time()
+                self.s2_frame_count += 1
+                count = self.s2_frame_count
+
+            self._pixel_goal_changed = False  # consumed — wait for next change
+
+            self.get_logger().info(
+                f"S2 frame #{count} | goal={self.current_pixel_goal}",
+                throttle_duration_sec=2.0
+            )
         except Exception as e:
             self.get_logger().error(f"Waypoint image error: {e}")
 
@@ -235,18 +311,41 @@ class OverlayRecorder(Node):
 
     def _get_s2_panel(self) -> np.ndarray:
         """Return the left panel: last S2 frame or a dark placeholder."""
-        if self.last_s2_frame is not None:
-            panel = self.last_s2_frame.copy()
+        now = time.time()
+
+        with self.s2_lock:
+            s2_frame = self.last_s2_frame
+            s2_time = self.s2_frame_time
+            s2_count = self.s2_frame_count
+
+        if s2_frame is not None:
+            panel = s2_frame.copy()
+            age = now - s2_time
         else:
             panel = np.zeros((self.th, self.tw, 3), dtype=np.uint8)
             font = cv2.FONT_HERSHEY_SIMPLEX
             cv2.putText(panel, "Waiting for S2...", (self.tw // 2 - 130, self.th // 2),
                         font, 0.7, (100, 100, 100), 2, cv2.LINE_AA)
+            age = None
 
         # Panel label top-left
-        cv2.rectangle(panel, (0, 0), (210, 32), (0, 0, 0), -1)
-        cv2.putText(panel, "S2 PIXEL GOAL", (8, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+        goal = self.current_pixel_goal
+        label = f"S2 GOAL ({goal[0]},{goal[1]})" if goal else "S2 PIXEL GOAL"
+        label_w = max(210, len(label) * 12 + 16)
+        cv2.rectangle(panel, (0, 0), (label_w, 32), (0, 0, 0), -1)
+        label_color = (0, 0, 255)  # red
+        if age is not None and age > 5.0:
+            label_color = (0, 140, 255)  # orange when stale
+        cv2.putText(panel, label, (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, label_color, 2, cv2.LINE_AA)
+
+        # Age indicator bottom-left
+        if age is not None:
+            age_txt = f"{age:.1f}s ago  (#{s2_count})"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            age_color = (200, 200, 200) if age < 5.0 else (0, 140, 255)
+            cv2.putText(panel, age_txt, (8, self.th - 10),
+                        font, 0.5, age_color, 1, cv2.LINE_AA)
 
         return panel
 
@@ -298,8 +397,11 @@ class OverlayRecorder(Node):
 def main():
     rclpy.init()
     node = OverlayRecorder()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
