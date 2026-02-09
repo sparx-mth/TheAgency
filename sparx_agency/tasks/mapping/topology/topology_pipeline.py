@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Visual pipeline test: occupancy → inflation → SDF → Voronoi topology.
+Visual pipeline test: occupancy → inflation → SDF → Voronoi topology
+                      → door separation → room–object graph.
 
 Creates a synthetic apartment and plots every pipeline stage.
 All algorithmic code lives in sparx_agency.core — this file is
@@ -37,6 +38,9 @@ from sparx_agency.core.mapping.costmap.inflation import inflate_occupancy, Infla
 from sparx_agency.core.mapping.costmap.sdf import compute_sdf, boundary_cost_field
 from sparx_agency.core.mapping.topology import (
     extract_voronoi_graph, TopologyParams, get_junctions, get_dead_ends,
+    separate_rooms, DoorInfo, RoomSeparationParams,
+    ObjectInfo, NodeType, assign_objects_to_rooms, build_room_object_graph,
+    get_room_nodes, get_objects_in_room,
 )
 
 # ========================= SYNTHETIC APARTMENT =============================
@@ -78,26 +82,65 @@ def create_apartment_occupancy(shape=(200, 300)) -> np.ndarray:
     occ[40:55, div_c:div_c + wall] = 0
     occ[130:145, div_c:div_c + wall] = 0
 
-    # Furniture — Living room
+    # ── Room 0 — Living room (top-left) ──
     box(25, 35, 15, 25)     # TV
-    box(35, 42, 55, 72)     # coffee table
-    box(20, 30, 55, 80)     # sofa
+    box(35, 42, 55, 72)     # Table
+    box(20, 30, 55, 80)     # Sofa
 
-    # Furniture — Bedroom
-    box(30, 55, 180, 220)   # bed
-    box(30, 38, 225, 233)   # nightstand
-    box(10, 35, 260, 275)   # wardrobe
+    # ── Room 1 — Bedroom (top-right) ──
+    box(30, 55, 180, 220)   # Bed
+    box(30, 38, 225, 233)   # Night lamp
+    box(10, 35, 260, 275)   # Wardrobe
 
-    # Furniture — Bathroom
-    box(140, 165, 15, 40)   # bathtub
-    box(130, 138, 60, 72)   # sink
+    # ── Room 2 — Bathroom (bottom-left) ──
+    box(140, 165, 15, 40)   # Bathtub
+    box(130, 138, 60, 72)   # Toilet
 
-    # Furniture — Kitchen
-    box(140, 155, 185, 215) # island
-    box(120, 130, 245, 290) # counter
-    box(165, 175, 175, 195) # small table
+    # ── Room 3 — Kitchen (bottom-right) ──
+    box(140, 155, 185, 215) # Kettle
+    box(120, 130, 245, 290) # Oven
+    box(165, 175, 175, 195) # Refrigerator
+
+    # Room 4 — Corridor has no furniture
 
     return occ
+
+
+def create_apartment_objects() -> list[ObjectInfo]:
+    """
+    Define tangible objects matching the furniture boxes drawn in
+    :func:`create_apartment_occupancy`.  Positions are box centres.
+    """
+    return [
+        # ── Room 0 — Living room ──
+        ObjectInfo("tv",    np.array([30.0,  20.0]),  (25, 35, 15, 25),   "tv"),
+        ObjectInfo("sofa",  np.array([25.0,  67.5]),  (20, 30, 55, 80),   "sofa"),
+        ObjectInfo("table", np.array([38.5,  63.5]),  (35, 42, 55, 72),   "table"),
+        # ── Room 1 — Bedroom ──
+        ObjectInfo("bed",      np.array([42.5, 200.0]), (30, 55, 180, 220), "bed"),
+        ObjectInfo("Night lamp",  np.array([34.0, 229.0]), (30, 38, 225, 233), "Night lamp"),
+        ObjectInfo("wardrobe", np.array([22.5, 267.5]), (10, 35, 260, 275), "wardrobe"),
+        # ── Room 2 — Bathroom ──
+        ObjectInfo("bathtub", np.array([152.5, 27.5]), (140, 165, 15, 40), "bathtub"),
+        ObjectInfo("toilet",  np.array([134.0, 66.0]), (130, 138, 60, 72), "toilet"),
+        # ── Room 3 — Kitchen ──
+        ObjectInfo("kettle",       np.array([147.5, 200.0]), (140, 155, 185, 215), "kettle"),
+        ObjectInfo("oven",         np.array([125.0, 267.5]), (120, 130, 245, 290), "oven"),
+        ObjectInfo("refrigerator", np.array([170.0, 185.0]), (165, 175, 175, 195), "refrigerator"),
+    ]
+
+
+def create_apartment_doors() -> list[DoorInfo]:
+    """
+    Define the 4 door openings matching the gaps in
+    :func:`create_apartment_occupancy`.
+    """
+    return [
+        DoorInfo(position=np.array([86.0,  52.0]),  size=np.array([0.10, 0.40])),   # corridor → living room
+        DoorInfo(position=np.array([116.0, 52.0]),  size=np.array([0.10, 0.40])),   # corridor → bathroom
+        DoorInfo(position=np.array([47.0,  141.0]), size=np.array([0.40, 0.10])),   # living room → bedroom
+        DoorInfo(position=np.array([137.0, 141.0]), size=np.array([0.40, 0.10])),   # bathroom → kitchen
+    ]
 
 
 # ============================== VISUALIZATION ===============================
@@ -164,35 +207,6 @@ def plot_voronoi_graph(ax, occ, G, title):
     ax.set_axis_off()
 
 
-def plot_voronoi_cells(ax, occ, title):
-    """Voronoi tessellation: each wall segment and furniture piece gets its own cell."""
-    H, W = occ.shape
-    occ_bool = occ != 0
-
-    # occ already has unique IDs per object — propagate to free space
-    _, idx = distance_transform_edt(~occ_bool, return_indices=True)
-    tessellation = occ[idx[0], idx[1]]
-    tessellation[occ_bool] = 0
-
-    n_labels = int(occ.max())
-    cmap = plt.cm.tab20(np.linspace(0, 1, max(n_labels, 1)))
-    rgb = np.ones((H, W, 3)) * 0.95
-    for i in range(1, n_labels + 1):
-        rgb[tessellation == i] = cmap[(i - 1) % len(cmap)][:3]
-
-    # Cell boundaries
-    boundary = np.zeros((H, W), dtype=bool)
-    boundary[1:, :] |= tessellation[1:, :] != tessellation[:-1, :]
-    boundary[:, 1:] |= tessellation[:, 1:] != tessellation[:, :-1]
-    rgb[boundary & ~occ_bool] = [0.35, 0.35, 0.35]
-
-    rgb[occ_bool] = [0.2, 0.2, 0.2]
-
-    ax.imshow(rgb, interpolation="nearest")
-    ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.set_axis_off()
-
-
 def plot_components(ax, occ, inflated, G, title):
     rgb = np.ones((*occ.shape, 3)) * 0.95
     rgb[inflated != 0] = [0.85, 0.85, 0.85]
@@ -226,17 +240,145 @@ def plot_components(ax, occ, inflated, G, title):
     ax.set_axis_off()
 
 
+def plot_door_field(ax, occ, door_field, doors, title):
+    """Overlay door probability heatmap on the occupancy grid."""
+    rgb = np.ones((*occ.shape, 3)) * 0.95
+    rgb[occ != 0] = [0.2, 0.2, 0.2]
+    ax.imshow(rgb, interpolation="nearest")
+
+    masked = np.ma.masked_where(door_field < 1e-6, door_field)
+    im = ax.imshow(masked, cmap="magma", interpolation="nearest", alpha=0.7)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="density")
+
+    for d in doors:
+        ax.plot(d.position[1], d.position[0], "c*", markersize=10, zorder=6)
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_axis_off()
+
+
+def plot_room_components(ax, occ, inflated, G_sep, title):
+    """Color each connected component (room) in a distinct color."""
+    rgb = np.ones((*occ.shape, 3)) * 0.95
+    rgb[inflated != 0] = [0.85, 0.85, 0.85]
+    rgb[occ != 0] = [0.2, 0.2, 0.2]
+    ax.imshow(rgb, interpolation="nearest")
+
+    if len(G_sep.nodes) == 0:
+        ax.set_title(title + " (empty)", fontsize=11, fontweight="bold")
+        ax.set_axis_off()
+        return
+
+    components = list(nx.connected_components(G_sep))
+    cmap = plt.cm.Set2(np.linspace(0, 1, max(len(components), 1)))
+
+    for ci, comp in enumerate(components):
+        color = cmap[ci % len(cmap)][:3]
+        sub = G_sep.subgraph(comp)
+        for u, v in sub.edges():
+            ax.plot([u[1], v[1]], [u[0], v[0]], color=color, linewidth=1.0, alpha=0.8)
+        arr = np.array(list(comp))
+        ax.scatter(arr[:, 1], arr[:, 0], c=[color], s=6, zorder=5,
+                   label=f"Room {ci} [{len(comp)}]", edgecolors="none")
+
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.9)
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_axis_off()
+
+
+def plot_room_object_graph(ax, occ, inflated, G_sep, rog, objects, title):
+    """
+    Rooms coloured by component, objects plotted as labelled markers,
+    room centres marked with stars.
+    """
+    rgb = np.ones((*occ.shape, 3)) * 0.95
+    rgb[inflated != 0] = [0.90, 0.90, 0.90]
+    rgb[occ != 0] = [0.2, 0.2, 0.2]
+    ax.imshow(rgb, interpolation="nearest")
+
+    components = list(nx.connected_components(G_sep))
+    cmap_rooms = plt.cm.Set2(np.linspace(0, 1, max(len(components), 1)))
+
+    # Draw room Voronoi edges (thin, muted)
+    for ci, comp in enumerate(components):
+        color = cmap_rooms[ci % len(cmap_rooms)][:3]
+        sub = G_sep.subgraph(comp)
+        for u, v in sub.edges():
+            ax.plot([u[1], v[1]], [u[0], v[0]], color=color,
+                    linewidth=0.5, alpha=0.35)
+
+    # Room centre stars
+    for rname in get_room_nodes(rog):
+        rd = rog.nodes[rname]
+        rc, cc = rd["pos_map"]
+        room_id = rd["room_id"]
+        color = cmap_rooms[room_id % len(cmap_rooms)][:3]
+        ax.plot(cc, rc, marker="*", color=color, markersize=14,
+                markeredgecolor="k", markeredgewidth=0.5, zorder=7)
+        ax.annotate(rname, (cc, rc), fontsize=7, fontweight="bold",
+                    color=color, ha="left", va="bottom",
+                    xytext=(4, 4), textcoords="offset points")
+
+    # Objects as labelled dots, coloured by room
+    for obj in objects:
+        if obj.room_id is None or obj.room_id < 0:
+            continue
+        color = cmap_rooms[obj.room_id % len(cmap_rooms)][:3]
+        r, c = obj.position
+        ax.plot(c, r, "o", color=color, markersize=7,
+                markeredgecolor="k", markeredgewidth=0.6, zorder=6)
+        ax.annotate(obj.name, (c, r), fontsize=6,
+                    ha="left", va="top", color="k",
+                    xytext=(3, -3), textcoords="offset points")
+
+        # Thin line from object to its closest Voronoi node
+        if obj.closest_vor_node is not None:
+            vr, vc = obj.closest_vor_node
+            ax.plot([c, vc], [r, vr], ":", color=color,
+                    linewidth=0.7, alpha=0.5)
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_axis_off()
+
+
+def plot_voronoi_cells(ax, occ, title):
+    """Voronoi tessellation: each wall segment and furniture piece gets its own cell."""
+    H, W = occ.shape
+    occ_bool = occ != 0
+
+    _, idx = distance_transform_edt(~occ_bool, return_indices=True)
+    tessellation = occ[idx[0], idx[1]]
+    tessellation[occ_bool] = 0
+
+    n_labels = int(occ.max())
+    cmap = plt.cm.tab20(np.linspace(0, 1, max(n_labels, 1)))
+    rgb = np.ones((H, W, 3)) * 0.95
+    for i in range(1, n_labels + 1):
+        rgb[tessellation == i] = cmap[(i - 1) % len(cmap)][:3]
+
+    boundary = np.zeros((H, W), dtype=bool)
+    boundary[1:, :] |= tessellation[1:, :] != tessellation[:-1, :]
+    boundary[:, 1:] |= tessellation[:, 1:] != tessellation[:, :-1]
+    rgb[boundary & ~occ_bool] = [0.35, 0.35, 0.35]
+
+    rgb[occ_bool] = [0.2, 0.2, 0.2]
+
+    ax.imshow(rgb, interpolation="nearest")
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_axis_off()
+
+
 # ================================= MAIN ====================================
 
 def main():
     resolution = 0.05  # 5 cm per cell
 
-    # Step 0: Synthetic occupancy
+    # ── Step 0: Synthetic occupancy ──
     print("Creating synthetic apartment occupancy...")
     occ = create_apartment_occupancy(shape=(200, 300))
-    print(f"  Grid: {occ.shape},  occupied cells: {occ.sum()}")
+    print(f"  Grid: {occ.shape},  occupied cells: {(occ != 0).sum()}")
 
-    # Step 1: Inflation
+    # ── Step 1: Inflation ──
     print("Running inflation...")
     t0 = time.perf_counter()
     inflated = inflate_occupancy(occ, resolution=resolution,
@@ -244,21 +386,21 @@ def main():
     t_inflate = time.perf_counter() - t0
     print(f"  Inflation: {t_inflate*1000:.1f} ms")
 
-    # Step 2: SDF
+    # ── Step 2: SDF ──
     print("Computing SDF...")
     t0 = time.perf_counter()
     sdf = compute_sdf(inflated, resolution=resolution)
     t_sdf = time.perf_counter() - t0
     print(f"  SDF: {t_sdf*1000:.1f} ms,  range: [{sdf.min():.3f}, {sdf.max():.3f}] m")
 
-    # Step 3: Boundary cost field
+    # ── Step 3: Boundary cost field ──
     print("Computing boundary cost field...")
     t0 = time.perf_counter()
     cost = boundary_cost_field(inflated, resolution=resolution, distance_scale_m=1.5)
     t_cost = time.perf_counter() - t0
     print(f"  Cost field: {t_cost*1000:.1f} ms")
 
-    # Step 4: Voronoi topology
+    # ── Step 4: Voronoi topology ──
     print("Extracting Voronoi topology graph...")
     t0 = time.perf_counter()
     G = extract_voronoi_graph(inflated, resolution=resolution,
@@ -267,19 +409,53 @@ def main():
                                                     sparsify_dist_m=0.3,
                                                     min_component=4))
     t_vor = time.perf_counter() - t0
+    print(f"  Voronoi: {t_vor*1000:.1f} ms  |  "
+          f"Nodes: {len(G.nodes)},  Edges: {len(G.edges)}")
 
-    junctions = get_junctions(G)
-    dead_ends = get_dead_ends(G)
-    components = list(nx.connected_components(G))
-    print(f"  Voronoi: {t_vor*1000:.1f} ms")
-    print(f"  Nodes: {len(G.nodes)},  Edges: {len(G.edges)}")
-    print(f"  Junctions: {len(junctions)},  Dead-ends: {len(dead_ends)}")
-    print(f"  Connected components: {len(components)}")
-    print(f"  Total pipeline: {(t_inflate + t_sdf + t_cost + t_vor)*1000:.1f} ms")
+    # ── Step 5: Room separation ──
+    doors = create_apartment_doors()
+    print("Separating rooms via door probability...")
+    t0 = time.perf_counter()
+    G_sep, door_field = separate_rooms(
+        G, grid_shape=occ.shape, doors=doors, resolution=resolution,
+        params=RoomSeparationParams(edge_score_threshold=0.05, min_component=4),
+    )
+    t_sep = time.perf_counter() - t0
+    room_components = list(nx.connected_components(G_sep))
+    print(f"  Room separation: {t_sep*1000:.1f} ms  |  "
+          f"Rooms found: {len(room_components)}")
+
+    # ── Step 6: Room–object graph ──
+    objects = create_apartment_objects()
+    print("Building room–object graph...")
+    t0 = time.perf_counter()
+    assign_objects_to_rooms(objects, G_sep)
+    rog = build_room_object_graph(G_sep, objects)
+    t_rog = time.perf_counter() - t0
+
+    total_ms = (t_inflate + t_sdf + t_cost + t_vor + t_sep + t_rog) * 1000
+    print(f"  Room–object graph: {t_rog*1000:.1f} ms")
+    print(f"  Total pipeline: {total_ms:.1f} ms\n")
+
+    # Print the room–object hierarchy
+    print("Room–Object Hierarchy")
+    print("=" * 40)
+    for rname in sorted(get_room_nodes(rog)):
+        rd = rog.nodes[rname]
+        obj_names = get_objects_in_room(rog, rd["room_id"])
+        print(f"  {rname}  (centre: {rd['pos_map']})")
+        if obj_names:
+            for oname in obj_names:
+                od = rog.nodes[oname]
+                print(f"    ├─ {oname:15s}  class={od['semantic_class']:12s}  "
+                      f"pos={od['pos_map']}")
+        else:
+            print(f"    └─ (no objects)")
+    print()
 
     out_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Figure 1: Pipeline stages 1–6
+    # ── Figure 1: Core pipeline stages 1–6 ──
     fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
     fig1.suptitle("Topology Pipeline: Occupancy → Inflation → SDF → Voronoi",
                   fontsize=14, fontweight="bold")
@@ -295,20 +471,24 @@ def main():
     fig1.tight_layout()
     out1 = os.path.join(out_dir, "topology_pipeline_test.png")
     fig1.savefig(out1, dpi=150, bbox_inches="tight")
-    print(f"\nSaved pipeline plot to: {out1}")
+    print(f"Saved pipeline plot       → {out1}")
 
-    # Figure 2: Graph + Tessellation side by side
-    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
-    fig2.suptitle("Voronoi Graph & Tessellation",
+    # ── Figure 2: Room separation + Room–object graph ──
+    fig2, axes2 = plt.subplots(1, 3, figsize=(21, 6))
+    fig2.suptitle("Room Separation & Object Assignment",
                   fontsize=14, fontweight="bold")
 
-    plot_components(axes2[0], occ, inflated, G, "Voronoi Graph + Inflation")
-    plot_voronoi_cells(axes2[1], occ, "Voronoi Tessellation")
+    plot_door_field(axes2[0], occ, door_field, doors,
+                    "7. Door Probability Field")
+    plot_room_components(axes2[1], occ, inflated, G_sep,
+                         "8. Separated Rooms")
+    plot_room_object_graph(axes2[2], occ, inflated, G_sep, rog, objects,
+                           "9. Room–Object Graph")
 
     fig2.tight_layout()
-    out2 = os.path.join(out_dir, "topology_voronoi_comparison.png")
+    out2 = os.path.join(out_dir, "topology_room_objects.png")
     fig2.savefig(out2, dpi=150, bbox_inches="tight")
-    print(f"Saved comparison plot to: {out2}")
+    print(f"Saved room-object plot    → {out2}")
 
     plt.show()
 
