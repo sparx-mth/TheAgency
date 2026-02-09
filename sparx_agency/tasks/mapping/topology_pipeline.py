@@ -31,6 +31,7 @@ for _mod in ["sensor_msgs", "sensor_msgs.msg",
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from sparx_agency.core.mapping.costmap.inflation import inflate_occupancy, InflationParams
 from sparx_agency.core.mapping.costmap.sdf import compute_sdf, boundary_cost_field
@@ -43,20 +44,23 @@ from sparx_agency.core.mapping.topology import (
 def create_apartment_occupancy(shape=(200, 300)) -> np.ndarray:
     """
     Draw a synthetic apartment: outer walls, 4 rooms, a corridor,
-    door openings, and furniture.  Returns binary uint8 grid (0=free, 1=occ).
+    door openings, and furniture.  Returns uint8 grid where 0=free
+    and each nonzero value is a unique object ID (wall segment or furniture).
     """
     H, W = shape
     occ = np.zeros((H, W), dtype=np.uint8)
     wall = 2
+    _id = [0]
 
     def box(r1, r2, c1, c2):
-        occ[r1:r2, c1:c2] = 1
+        _id[0] += 1
+        occ[r1:r2, c1:c2] = _id[0]
 
-    # Outer walls
-    box(0, wall, 0, W)
-    box(H - wall, H, 0, W)
-    box(0, H, 0, wall)
-    box(0, H, W - wall, W)
+    # Outer walls (4 separate segments)
+    box(0, wall, 0, W)          # top wall
+    box(H - wall, H, 0, W)      # bottom wall
+    box(0, H, 0, wall)           # left wall
+    box(0, H, W - wall, W)       # right wall
 
     # Vertical divider at col 140
     div_c = 140
@@ -69,10 +73,10 @@ def create_apartment_occupancy(shape=(200, 300)) -> np.ndarray:
     box(corr_top, corr_top + wall, div_c, W)
 
     # Door openings (gaps)
-    occ[corr_top:corr_top + wall, 45:60] = 0   # living → corridor
-    occ[corr_bot:corr_bot + wall, 45:60] = 0   # corridor → bathroom
-    occ[40:55, div_c:div_c + wall] = 0          # living → bedroom
-    occ[130:145, div_c:div_c + wall] = 0        # kitchen → right side
+    occ[corr_top:corr_top + wall, 45:60] = 0
+    occ[corr_bot:corr_bot + wall, 45:60] = 0
+    occ[40:55, div_c:div_c + wall] = 0
+    occ[130:145, div_c:div_c + wall] = 0
 
     # Furniture — Living room
     box(25, 35, 15, 25)     # TV
@@ -99,7 +103,7 @@ def create_apartment_occupancy(shape=(200, 300)) -> np.ndarray:
 # ============================== VISUALIZATION ===============================
 
 def plot_occupancy(ax, occ, title):
-    ax.imshow(occ, cmap="gray_r", interpolation="nearest")
+    ax.imshow(occ != 0, cmap="gray_r", interpolation="nearest")
     ax.set_title(title, fontsize=11, fontweight="bold")
     ax.set_axis_off()
 
@@ -160,34 +164,62 @@ def plot_voronoi_graph(ax, occ, G, title):
     ax.set_axis_off()
 
 
+def plot_voronoi_cells(ax, occ, title):
+    """Voronoi tessellation: each wall segment and furniture piece gets its own cell."""
+    H, W = occ.shape
+    occ_bool = occ != 0
+
+    # occ already has unique IDs per object — propagate to free space
+    _, idx = distance_transform_edt(~occ_bool, return_indices=True)
+    tessellation = occ[idx[0], idx[1]]
+    tessellation[occ_bool] = 0
+
+    n_labels = int(occ.max())
+    cmap = plt.cm.tab20(np.linspace(0, 1, max(n_labels, 1)))
+    rgb = np.ones((H, W, 3)) * 0.95
+    for i in range(1, n_labels + 1):
+        rgb[tessellation == i] = cmap[(i - 1) % len(cmap)][:3]
+
+    # Cell boundaries
+    boundary = np.zeros((H, W), dtype=bool)
+    boundary[1:, :] |= tessellation[1:, :] != tessellation[:-1, :]
+    boundary[:, 1:] |= tessellation[:, 1:] != tessellation[:, :-1]
+    rgb[boundary & ~occ_bool] = [0.35, 0.35, 0.35]
+
+    rgb[occ_bool] = [0.2, 0.2, 0.2]
+
+    ax.imshow(rgb, interpolation="nearest")
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_axis_off()
+
+
 def plot_components(ax, occ, inflated, G, title):
     rgb = np.ones((*occ.shape, 3)) * 0.95
     rgb[inflated != 0] = [0.85, 0.85, 0.85]
-    rgb[occ != 0] = [0.15, 0.15, 0.15]
+    rgb[occ != 0] = [0.2, 0.2, 0.2]
     ax.imshow(rgb, interpolation="nearest")
 
-    components = list(nx.connected_components(G))
-    junctions = get_junctions(G)
-    dead_ends = get_dead_ends(G)
+    if len(G.nodes) == 0:
+        ax.set_title(title + " (empty)", fontsize=11, fontweight="bold")
+        ax.set_axis_off()
+        return
 
-    if components:
-        colors = plt.cm.tab10(np.linspace(0, 1, max(len(components), 2)))
-        for ci, comp in enumerate(components):
-            c = colors[ci % len(colors)]
-            for u, v in G.edges():
-                if u in comp:
-                    ax.plot([u[1], v[1]], [u[0], v[0]], color=c, linewidth=1.0, alpha=0.8)
-            arr = np.array(list(comp))
-            ax.scatter(arr[:, 1], arr[:, 0], c=[c], s=5, zorder=4)
+    junctions = set(get_junctions(G))
+    dead_ends = set(get_dead_ends(G))
+    passthrough = set(G.nodes) - junctions - dead_ends
 
-    if junctions:
-        jarr = np.array(junctions)
-        ax.scatter(jarr[:, 1], jarr[:, 0], c="red", s=40, zorder=6,
-                   marker="*", label=f"Junctions ({len(junctions)})")
-    if dead_ends:
-        darr = np.array(dead_ends)
-        ax.scatter(darr[:, 1], darr[:, 0], c="lime", s=25, zorder=6,
-                   marker="^", label=f"Dead-ends ({len(dead_ends)})")
+    for u, v in G.edges():
+        ax.plot([u[1], v[1]], [u[0], v[0]], color="#4488cc", linewidth=0.6, alpha=0.7)
+
+    def scatter_set(nodes, color, size, label):
+        if nodes:
+            arr = np.array(list(nodes))
+            ax.scatter(arr[:, 1], arr[:, 0], c=color, s=size, zorder=5,
+                       label=label, edgecolors="none")
+
+    scatter_set(passthrough, "#4488cc", 3, f"Pass-through [{len(passthrough)}]")
+    scatter_set(junctions, "#ff3333", 30, f"Junctions (deg≥3) [{len(junctions)}]")
+    scatter_set(dead_ends, "#33cc33", 18, f"Dead-ends (deg=1) [{len(dead_ends)}]")
 
     ax.legend(loc="upper right", fontsize=7, framealpha=0.9)
     ax.set_title(title, fontsize=11, fontweight="bold")
@@ -245,24 +277,39 @@ def main():
     print(f"  Connected components: {len(components)}")
     print(f"  Total pipeline: {(t_inflate + t_sdf + t_cost + t_vor)*1000:.1f} ms")
 
-    # Plot all stages
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Topology Pipeline: Occupancy → Inflation → SDF → Voronoi",
-                 fontsize=14, fontweight="bold")
+    out_dir = os.path.dirname(os.path.abspath(__file__))
 
-    plot_occupancy(axes[0, 0], occ, "1. Raw Occupancy")
-    plot_inflated(axes[0, 1], occ, inflated, "2. Inflated Occupancy")
-    plot_sdf(axes[0, 2], sdf, "3. Signed Distance Field")
-    plot_boundary_cost(axes[1, 0], cost, "4. Boundary Cost Field")
-    plot_voronoi_graph(axes[1, 1], inflated, G, "5. Voronoi Graph")
-    plot_components(axes[1, 2], occ, inflated, G,
-                    f"6. Components ({len(components)}) + Junctions")
+    # Figure 1: Pipeline stages 1–6
+    fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
+    fig1.suptitle("Topology Pipeline: Occupancy → Inflation → SDF → Voronoi",
+                  fontsize=14, fontweight="bold")
 
-    plt.tight_layout()
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "topology_pipeline_test.png")
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    print(f"\nSaved plot to: {out_path}")
+    plot_occupancy(axes1[0, 0], occ, "1. Raw Occupancy")
+    plot_inflated(axes1[0, 1], occ, inflated, "2. Inflated Occupancy")
+    plot_sdf(axes1[0, 2], sdf, "3. Signed Distance Field")
+    plot_boundary_cost(axes1[1, 0], cost, "4. Boundary Cost Field")
+    plot_voronoi_graph(axes1[1, 1], inflated, G, "5. Voronoi Graph")
+    plot_components(axes1[1, 2], occ, inflated, G,
+                    "6. Voronoi Graph + Inflation")
+
+    fig1.tight_layout()
+    out1 = os.path.join(out_dir, "topology_pipeline_test.png")
+    fig1.savefig(out1, dpi=150, bbox_inches="tight")
+    print(f"\nSaved pipeline plot to: {out1}")
+
+    # Figure 2: Graph + Tessellation side by side
+    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+    fig2.suptitle("Voronoi Graph & Tessellation",
+                  fontsize=14, fontweight="bold")
+
+    plot_components(axes2[0], occ, inflated, G, "Voronoi Graph + Inflation")
+    plot_voronoi_cells(axes2[1], occ, "Voronoi Tessellation")
+
+    fig2.tight_layout()
+    out2 = os.path.join(out_dir, "topology_voronoi_comparison.png")
+    fig2.savefig(out2, dpi=150, bbox_inches="tight")
+    print(f"Saved comparison plot to: {out2}")
+
     plt.show()
 
 
