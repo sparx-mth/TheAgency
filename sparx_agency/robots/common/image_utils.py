@@ -98,6 +98,9 @@ def create_hist_image_with_objects(
         y = int(out_h - 1 - (hist[i] / hmax) * (out_h - 40))  # leave top margin for text
         pts.append((x, y))
     cv2.polylines(img, [np.array(pts, dtype=np.int32)], False, (230, 230, 230), 2)
+    print("vals:", vals.size,
+          "median:", np.median(vals),
+          "hist bins:", hist.sum())
 
     # helper to map depth->x
     def depth_to_x(d):
@@ -541,3 +544,45 @@ def hist_to_bgr_image(hist: np.ndarray,
         cv2.rectangle(img, (x1, y2), (x2, y1), (255, 255, 255), thickness=-1)
 
     return img
+
+def robust_depth_from_bbox_hist(
+    depth_m,
+    bbox,
+    min_depth=0.2,
+    max_depth=10.0,
+    bins=80,
+    min_frac=0.05,
+):
+    x1, y1, x2, y2 = bbox
+    patch = depth_m[y1:y2, x1:x2]
+
+    valid = np.isfinite(patch) & (patch > min_depth) & (patch < max_depth)
+    vals = patch[valid]
+    if vals.size < 30:
+        return None
+
+    hist, edges = np.histogram(vals, bins=bins, range=(min_depth, max_depth))
+    thresh = max(int(min_frac * vals.size), 10)
+
+    # Candidate bins: enough support
+    candidate_bins = np.where(hist >= thresh)[0]
+    if candidate_bins.size == 0:
+        return float(np.median(vals))
+
+    # Choose the CLOSEST bin (smallest depth)
+    i = int(candidate_bins[0])
+
+    lo, hi = edges[i], edges[i + 1]
+
+    # Tighten window: discard far tail inside bin
+    win = vals[(vals >= lo) & (vals <= hi)]
+    if win.size < 10:
+        return float(np.median(vals))
+
+    return float(np.median(win))
+
+
+def uvz_to_xyz_camera(u, v, z, fx, fy, cx, cy):
+    x = (u - cx) * z / fx
+    y = (v - cy) * z / fy
+    return np.array([x, y, z], dtype=np.float32)
