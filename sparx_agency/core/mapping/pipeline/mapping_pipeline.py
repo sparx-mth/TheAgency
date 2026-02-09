@@ -89,6 +89,19 @@ class PinholeCloudGenerator(CloudGenerator):
         z =  -(yv - intr.cy) * d / intr.fy
         x = d  # forward in optical
 
+        # TODO: integrate pitch and height, change the return
+        # # 2. Add Pitch and Height
+        # pitch_rad = np.radians(self.get_parameter('pitch_deg').value)
+        # sz = self.get_parameter('sensor_z').value
+        #
+        # # Create rotation matrix for pitch (rotation around Y-axis)
+        # R = rot_y(-pitch_rad)
+        #
+        # # Apply rotation and then add height offset
+        # pts_w = (pts_w_local @ R.T)
+        # pts_w[:, 2] += sz  # Add sensor height to the Z-axis
+        # return pts_w.astype(np.float32)
+
         return np.stack([x, y, z], axis=1).astype(np.float32)
 
     def angle_correction_translation(self, pts):
