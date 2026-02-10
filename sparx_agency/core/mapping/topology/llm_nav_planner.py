@@ -32,7 +32,54 @@ from typing import Callable, Dict, List, Optional, Tuple
 import networkx as nx
 import numpy as np
 
+import re
+
 from .room_object_graph import NodeType
+
+
+# ── JSON extraction helper ──────────────────────────────────────────────────
+
+def _extract_json_dict(text: str) -> Optional[Dict]:
+    """
+    Robustly extract a JSON dict from LLM output.
+
+    Handles: markdown fences, preamble/postamble text, trailing commas,
+    and other common LLM formatting quirks.
+    """
+    if not text or not text.strip():
+        return None
+
+    # 1. Try to extract from ```json ... ``` or ``` ... ``` blocks
+    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1)
+
+    # 2. Try to find the outermost { ... } in the text
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start != -1 and brace_end > brace_start:
+        candidate = text[brace_start : brace_end + 1]
+        # Remove trailing commas before closing braces/brackets (common LLM mistake)
+        candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Last resort: try parsing the whole stripped text
+    text = text.strip().strip("`")
+    if text.startswith("json"):
+        text = text[4:].strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    return None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -134,11 +181,20 @@ You are assisting a navigation robot. Its task is: {task}
 The robot has discovered the following rooms and objects:
 {room_objects}
 
-Remove objects that are clearly IRRELEVANT to this task.
-Keep any object that might serve as a landmark or is related to the task.
+Your job is to AGGRESSIVELY remove objects that are NOT relevant to this task.
+Only keep objects that are:
+  1. The target object itself, OR
+  2. In the SAME room as the target and useful for locating it (nearby landmarks only).
 
-Respond ONLY with a JSON object mapping each room to its filtered object list:
-{{"room_name": ["kept_obj1", "kept_obj2"], ...}}
+Remove everything else — objects in other rooms, unrelated furniture, etc.
+If a room has NO relevant objects, return an empty list for that room.
+
+IMPORTANT: Be strict. For example, if the task is "find the refrigerator",
+keep only the refrigerator/fridge and maybe 1-2 nearby kitchen objects.
+Do NOT keep objects in unrelated rooms like desks, chairs, toilets, etc.
+
+Respond with ONLY a JSON object (no explanation, no markdown, no backticks):
+{{"room_0": ["kept_obj1"], "room_1": [], ...}}
 """)
 
 
@@ -250,14 +306,16 @@ class NavPlanner:
         prompt = build_filter_prompt(rod, task)
         raw = self.llm_call(prompt)
 
-        # Parse JSON from response (tolerant of markdown fences)
-        raw = raw.strip().strip("`")
-        if raw.startswith("json"):
-            raw = raw[4:]
-        try:
-            kept = json.loads(raw)
-        except json.JSONDecodeError:
+        # Parse JSON from response (tolerant of markdown fences and preamble)
+        kept = _extract_json_dict(raw)
+        if kept is None:
             # If parsing fails, keep everything (safe fallback)
+            import sys
+            print(
+                "   ⚠ LLM filter response was not valid JSON — "
+                "keeping all objects (no filtering applied).",
+                file=sys.stderr,
+            )
             kept = rod
 
         return apply_filter_response(room_object_graph, kept)
