@@ -1,0 +1,24 @@
+# =============================================================================
+# Minimal Configuration - Copy and modify for your simulation
+# =============================================================================
+
+bridge:
+  server:
+    host: "localhost"
+    port: 8000
+
+inputs:
+  rgb:
+    topic: "/camera/rgb/image_raw"  # <- Change this
+  instruction:
+    topic: "/navigation/instruction"
+    default: "Navigate forward"
+
+outputs:
+  discrete:
+    topic: "/navigation/action"     # <- Change this
+    action_mapping:
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "left"
+      TURN_RIGHT: "right"
+      STOP: "stop"
