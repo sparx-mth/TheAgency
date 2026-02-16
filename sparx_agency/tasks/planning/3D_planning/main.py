@@ -23,11 +23,11 @@ import numpy as np
 
 from sparx_agency.core.common.types import Pose3D
 
-from logging_utils import pinfo, pok
-from gibson_io import load_gibson_mesh, sample_point_cloud
-from voxelmap import VoxelMapFromPointCloud
-from interaction import pick_and_adjust_point
-from final_window import run_final_window_plan_and_show, run_final_window_all_algorithms
+from .logging_utils import pinfo, pok
+from .gibson_io import load_gibson_mesh, sample_point_cloud
+from .voxelmap import VoxelMapFromPointCloud
+from .interaction import pick_and_adjust_point
+from .final_window import run_final_window_plan_and_show, run_final_window_all_algorithms
 
 
 def _parse_args() -> argparse.Namespace:
@@ -50,7 +50,8 @@ def _parse_args() -> argparse.Namespace:
 def main():
     args = _parse_args()
 
-    ROOT = Path("gibson/extracted/gibson_tiny")
+    HERE = Path(__file__).resolve().parent
+    ROOT = HERE / "gibson" / "extracted" / "gibson_tiny"
     SCENE = "Shelbyville"
 
     POINTS = 1_500_000
