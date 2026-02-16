@@ -43,9 +43,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from logging_utils import pinfo, pok, pwarn, perr
-from gibson_io import load_gibson_mesh, sample_point_cloud
-from tube import make_tube_from_polyline
+from .logging_utils import (pinfo, pok, pwarn, perr)
+from .gibson_io import (load_gibson_mesh, sample_point_cloud)
+from .tube import (make_tube_from_polyline)
 
 try:
     import open3d as o3d

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from logging_utils import pinfo, pok
+from .logging_utils import pinfo, pok
 
 
 def load_gibson_mesh(root: Path, scene: str) -> o3d.geometry.TriangleMesh:

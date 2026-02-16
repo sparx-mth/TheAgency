@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 import open3d as o3d
 
-from logging_utils import pinfo, pok
+from .logging_utils import pinfo, pok
 
 
 def pick_single_point(pcd: o3d.geometry.PointCloud, title: str) -> np.ndarray:
