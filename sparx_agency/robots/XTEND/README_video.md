@@ -29,6 +29,12 @@ sudo ip addr flush dev <iface>
 sudo ip link set <iface> up
 sudo ip addr add 192.0.0.100/24 dev <iface>
 sudo ip route replace 192.0.0.0/24 dev <iface>
+
+
+sudo ip addr flush dev enx00e04c680829 && \
+sudo ip link set enx00e04c680829 up && \
+sudo ip addr add 192.0.0.100/24 dev enx00e04c680829 && \
+ping -c 1 -I enx00e04c680829 192.0.0.15
 ```
 Verify connectivity
 ```bash
@@ -68,6 +74,55 @@ If you want a display:
 gst-launch-1.0 rtspsrc location=rtsp://192.0.0.15:8556/osd_snapshot latency=0 protocols=tcp \
   ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false
 ```
+display without overlay of specific drone XT42B drone_id = drnb177ede2
+```bash 
+gst-launch-1.0 -v rtspsrc location=rtsp://192.0.0.15:8510/drone_video/drnb177ede2/low latency=0 protocols=tcp   ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false 
+```
+to see with port and drone id are connect run 
+```bash 
+python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/test_video.py
+``` 
+return something like when GCU is available: 
+```text
+ /home/user/GIT/TheAgency/myenv/bin/python /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4-XTEND_MapRoom/test_video.py
+connected ws://192.0.0.15:8000
+
+=== RESPONSE GET_PILOT_STATION_VIDEO_STREAM ===
+{
+  "content": {
+    "value": "rtsp://192.0.0.18:8510/active_drone_fpv"
+  },
+  "header": {
+    "command": "GET_PILOT_STATION_VIDEO_STREAM",
+    "timestamp": "2026-02-26T16:44:01Z"
+  }
+}
+
+=== RESPONSE GET_PILOT_STATION_VIDEO_STREAM ===
+{
+  "content": {
+    "value": "rtsp://192.0.0.18:8556/osd_snapshot"
+  },
+  "header": {
+    "command": "GET_PILOT_STATION_VIDEO_STREAM",
+    "timestamp": "2026-02-26T16:44:01Z"
+  }
+}
+
+=== RESPONSE GET_ROBOT_VIDEO_STREAMS ===
+{
+  "content": {
+    "data": [
+      "rtsp://192.0.0.18:8510/drone_video/drn77f3b8f5/low",
+      "rtsp://192.0.0.18:8510/drone_video/drnb177ede2/low"
+    ]
+  },
+  "header": {
+    "command": "GET_ROBOT_VIDEO_STREAMS",
+    "timestamp": "2026-02-26T16:44:01Z"
+  }
+}
+```
 
 ## 5) Combined Probe Script (Video + Telemetry)
 
@@ -78,7 +133,7 @@ python3 robots/XTEND/get_xtend_probe.py \
   --host 192.0.0.15 \
   --port 8000 \
   --robot-uid drn77f3b8f5 \
-  --rtsp-uri rtsp://192.0.0.15:8556/osd_snapshot \
+  --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv \
   --show-video
 ```
 

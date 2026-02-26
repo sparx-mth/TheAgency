@@ -211,6 +211,7 @@ class XtendProbe:
         raw_dump_seconds: float = 0.0,
         print_robot_status_only: bool = False,
     ):
+        self._printed_schema = False
         self._printed_hf_once = False
         self.ws_uri = ws_uri
         self.robot_uid = robot_uid
@@ -415,11 +416,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="XTEND probe: RTSP video + WS telemetry dump")
     p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--robot-uid", required=True)
+    p.add_argument("--robot-uid", default="drn77f3b8f5")
     p.add_argument("--frequency-hz", type=float, default=10.0)
     p.add_argument("--mode", choices=["send", "listen", "both"], default="both")
 
-    p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8556/osd_snapshot")
+    p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     p.add_argument("--rtsp-latency-ms", type=int, default=0)
 
     p.add_argument("--show-video", action="store_true", help="Open a cv2 window (press q to quit)")
