@@ -22,6 +22,7 @@ from sparx_agency.core.mapping.depth.depth_bbox_fusion import (
 from sparx_agency.core.mapping.vlm_semantic.nanoowl_parser import (
     parse_nanoowl_json_detections,
 )
+from sparx_agency.robots.common.spatial_math import quat_to_rot
 
 
 def camera_info_to_intrinsics(msg: CameraInfo):
@@ -45,16 +46,8 @@ def transform_to_matrix(t):
     qw = t.transform.rotation.w
 
     # quaternion to rotation matrix
-    # (standard, right-handed)
-    xx, yy, zz = qx*qx, qy*qy, qz*qz
-    xy, xz, yz = qx*qy, qx*qz, qy*qz
-    wx, wy, wz = qw*qx, qw*qy, qw*qz
 
-    R = np.array([
-        [1 - 2*(yy + zz),     2*(xy - wz),       2*(xz + wy)],
-        [2*(xy + wz),         1 - 2*(xx + zz),   2*(yz - wx)],
-        [2*(xz - wy),         2*(yz + wx),       1 - 2*(xx + yy)],
-    ], dtype=np.float64)
+    R = quat_to_rot(qx, qy, qz, qw)
 
     T = np.eye(4, dtype=np.float64)
     T[:3, :3] = R
