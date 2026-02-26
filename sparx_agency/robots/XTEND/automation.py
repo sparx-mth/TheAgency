@@ -72,7 +72,14 @@ class ControllerAutomation:
                 scenario_task = asyncio.create_task(self.create_scenario())
                 
                 # Wait for both tasks
-                await asyncio.gather(send_task, receive_task, scenario_task)
+                try:
+                    # Wait only for scenario to finish (success or error)
+                    await scenario_task
+                finally:
+                    # Stop background loops cleanly
+                    for t in (send_task, receive_task):
+                        t.cancel()
+                    await asyncio.gather(send_task, receive_task, return_exceptions=True)
                     
         except websockets.exceptions.WebSocketException as e:
             print(f"✗ WebSocket error: {e}")
