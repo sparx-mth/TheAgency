@@ -27,25 +27,22 @@ def angle_step(cur: float, prev: float) -> float:
     return abs(normalize_angle(cur - prev))
 
 
-def fmt_num(v: Optional[float], width: int = 6, prec: int = 2) -> str:
-    # filename-safe; keep sign; replace '.' with 'p'
+def fmt_num(v, width: int = 6, prec: int = 2) -> str:
     if v is None or not np.isfinite(v):
         return "na"
     s = f"{v:+0{width}.{prec}f}"
     return s.replace(".", "p")
 
 
-def make_filename(seq: int, x: Optional[float], y: Optional[float], z: Optional[float], yaw_rad: Optional[float]) -> str:
+def make_filename(seq: int, x, y, z, yaw_rad) -> str:
     yaw_deg = yaw_rad * 180.0 / math.pi if yaw_rad is not None else None
-    # style: 0000x0000y0000z0000yaw.jpg (using separators for readability)
     return (
         f"{seq:04d}"
-        f"x{fmt_num(x, width=6, prec=2)}"
-        f"y{fmt_num(y, width=6, prec=2)}"
-        f"z{fmt_num(z, width=6, prec=2)}"
-        f"yaw{fmt_num(yaw_deg, width=6, prec=1)}.jpg"
+        f"x{fmt_num(x)}"
+        f"y{fmt_num(y)}"
+        f"z{fmt_num(z)}"
+        f"yaw{fmt_num(yaw_deg, prec=1)}.jpg"
     )
-
 class ScenarioDone(Exception):
     pass
 
@@ -117,7 +114,7 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
                 await asyncio.sleep(0.02)
                 cur = float(self.current_yaw)
                 step = angle_step(cur, last)
-                if step < 0.7:  # reject glitches
+                if step < 0.4:  # reject glitches
                     acc += step
                 last = cur
         finally:
@@ -202,42 +199,53 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
             await asyncio.sleep(0.005)
 
     async def create_scenario(self):
-        """
-        Scenario + capture combined.
-        Capture starts first, then the scenario runs, then capture stops.
-        """
-        await asyncio.sleep(2.0)  # let telemetry settle
+        sleep_time = 3
+        land_sleep_time = 5
 
-        await self._start_capture()
+        await asyncio.sleep(2)  # let telemetry stabilize
+        await self._start_capture()   # your capture start
         try:
             scenario = [
                 self.disarm_robot,
                 self.arm_robot,
-                self.takeoff,  # time-based in your base class
-                self.move_forward(400),
-                self.move_backward(400),
-                self.rotate_left(3000),#lambda: self.rotate_degrees(360.0, direction=+1, yaw_cmd=1000),
+                self.takeoff,
+                lambda: self.rotate_degrees(360.0, direction=+1, yaw_cmd=1000),
                 self.land,
                 self.disarm_robot,
             ]
 
-            for step in scenario:
-                await step()
-                await asyncio.sleep(self.sleep_time)
+            for step_fn in scenario:
+                await step_fn()
+                if step_fn == self.land:
+                    await asyncio.sleep(land_sleep_time)  # let it sink into landing
+                else:
+                    await asyncio.sleep(sleep_time)
 
+        except Exception as e:
+            print(f"[scenario] error: {e}")
+            # fallthrough to finally for landing/disarm
         finally:
+            # HARD SAFETY: always try to land+disarm even if something broke
+            try:
+                await self.land()
+            except Exception as e:
+                print(f"[scenario] land failed: {e}")
+            try:
+                await self.disarm_robot()
+            except Exception as e:
+                print(f"[scenario] disarm failed: {e}")
+
             await self._stop_capture()
-        raise ScenarioDone("scenario complete")
 
 def parse_args():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--frequency", type=float, default=30.0)
-    p.add_argument("--robot-uid", required=True)
+    p.add_argument("--robot-uid", default="drn77f3b8f5")
 
-    p.add_argument("--rtsp-uri", default="rtsp://127.0.0.1:8556/osd_snapshot")
+    p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     p.add_argument("--rtsp-latency-ms", type=int, default=0)
 
     p.add_argument("--out-dir", default="./xtend_capture_out")

@@ -129,6 +129,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myenv/
 
 # Spyder project settings
 .spyderproject
@@ -173,6 +174,7 @@ sparx_agency/robots/src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/csv/*
 sparx_agency/robots/src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/__pycache__/
 sparx_agency/robots/src/interfaces/ROBOTICAN/examples/src/paths/*
 src/room_mapping/2025_12_25___09_40_51/
+xtend_capture_out/*
 
 gz-sim-environment
 ROBOTICAN/examples
