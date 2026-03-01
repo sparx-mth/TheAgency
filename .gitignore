@@ -184,4 +184,7 @@ sparx_agency/install/
 
 sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 
+*.db3 
+*.yaml
 myenv/
+sparx_agency/tasks/localization/ros2/depth_optical/orbslam_results/myvenv/
