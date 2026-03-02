@@ -75,6 +75,9 @@ GT Pose Error & RMS Drift
 ### 1. Depth Estimation
 
 ```bash
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+
 python3 -m sparx_agency.tasks.mapping.create_map_from_video \
   --ros-args \
   -p use_sim_time:=true \
@@ -90,28 +93,35 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
   --ros-args -p use_sim_time:=true -p show_debug:=true
 ```
 
-### 3. Pose Evaluation
+### 3. velocity_integrator:
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_pose_eval_node \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrator \
   --ros-args \
   -p use_sim_time:=true \
-  -p target_frame:=/simple_drone/odom \
+  -p target_frame:=/simple_drone/odom
+```
+
+### 4. Pose Evaluation
+
+```bash
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.pose_evaluator \
+  --ros-args \
+  -p use_sim_time:=true \
   -p csv_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/pose_eval_run1.csv \
   -p est_tum_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/est_tum.txt \
   -p gt_tum_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/gt_tum.txt
-
 ```
 
 ### 4. Play Rosbag
 
 ```bash
-ros2 bag play rosbag2_2026_01_20-09_37_20/ --clock --rate 0.1
+cd ~/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/bags_files
+ros2 bag play rosbag2_2026_03_01-11_02_57_line_0.35val --clock --rate 0.5
 ```
 
 if you want to record
 ```bash
-
 ros2 bag record   /clock   /simple_drone/front/image_raw   /simple_drone/front/camera_info   /simple_drone/gt_pose   /simple_drone/gt_vel   /simple_drone/odom   /simple_drone/imu   /tf   /tf_static
 
 sudo apt update
