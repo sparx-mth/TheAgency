@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-
 import numpy as np
 import cv2
 import rclpy
 from rclpy.node import Node
-
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Vector3Stamped
 from cv_bridge import CvBridge
@@ -41,13 +39,13 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_corners", 30)
 
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
-        self.declare_parameter("max_depth", 50.0)   # reject crazy values
+        self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
 
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
 
-        #  LK params
+        #  LK params (Lucas-Kanade optical flow)
         self.declare_parameter("lk_win", 21) # window size
         self.declare_parameter("lk_levels", 3) # pyramid levels
 
@@ -112,14 +110,15 @@ class FlowDepthVelocityNode(Node):
     # ---------- callbacks ----------
     def caminfo_callback(self, msg: CameraInfo):
         K = msg.k
-        self.fx = float(K[0])
-        self.fy = float(K[4])
-        self.cx = float(K[2])
-        self.cy = float(K[5])
+        self.fx = float(K[0]) # focal length x in pixels
+        self.fy = float(K[4]) # focal length y in pixels
+        self.cx = float(K[2]) # principal point x in pixels
+        self.cy = float(K[5]) # principal point y in pixels
 
     def depth_callback(self, msg: Image):
         try:
             depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="32FC1")
+            # 32FC1 means 32-bit float, single channel (depth in meters or normalized)
         except Exception as e:
             self.get_logger().error(f"Depth convert failed: {e}")
             return
@@ -145,10 +144,12 @@ class FlowDepthVelocityNode(Node):
         if flow_res is None:
             return
 
+        # compute velocity from flow + depth
         vx_mps, vy_mps, n_used = self.velocity_from_flow_and_depth(
             flow_res.good_old, flow_res.good_new, self.latest_depth, flow_res.dt
         )
 
+        # publish velocity as Vector3Stamped (x=forward, y=sideways, z=0)
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = msg.header.stamp
         vel_msg.header.frame_id = self.camera_frame
@@ -157,6 +158,7 @@ class FlowDepthVelocityNode(Node):
         vel_msg.vector.z = 0.0
         self.vel_pub.publish(vel_msg)
 
+        # debug visualization of flow vectors colored by depth
         if self.show_debug:
             vis = frame.copy()
             self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
