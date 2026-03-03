@@ -206,8 +206,11 @@ class FlowDepthVelocityNode(Node):
             return 0.0, 0.0, 0
 
         # Convert to m/s using per-point depth
-        vx = Z[valid] * (du[valid] / self.fx)
-        vy = Z[valid] * (dv[valid] / self.fy)
+        # NOTE: Mapping optical flow coordinates to world frame
+        # Image v (row/down) -> world X axis
+        # Image u (col/right) -> world Y axis
+        vx = Z[valid] * (dv[valid] / self.fy)   # dv (row) -> X
+        vy = Z[valid] * (du[valid] / self.fx)   # du (col) -> Y
 
         # Robust summary
         vx_mps = float(np.median(vx))
