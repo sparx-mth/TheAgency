@@ -48,7 +48,7 @@ def cam_info_to_intrinsics(ci: CameraInfo) -> Intrinsics:
         fx=fx, fy=fy, cx=cx, cy=cy
     )
 
-def costmap_to_occupancygrid(costmap, stamp, frame_id: str) -> OccupancyGrid:
+def costmap_to_occupancygrid(costmap, stamp, frame_id: str, pot_grid=None) -> OccupancyGrid:
     """
     Convert ROS-free costmap (ProbabilisticGridCostmap) into nav_msgs/OccupancyGrid.
     """
@@ -68,7 +68,8 @@ def costmap_to_occupancygrid(costmap, stamp, frame_id: str) -> OccupancyGrid:
     msg.info.origin.orientation.y = 0.0
     msg.info.origin.orientation.z = 0.0
     msg.info.origin.orientation.w = 1.0
-
+    if pot_grid is not None:
+        grid = pot_grid
     msg.data = np.array(grid, dtype=np.int8).flatten().tolist()
 
     return msg
