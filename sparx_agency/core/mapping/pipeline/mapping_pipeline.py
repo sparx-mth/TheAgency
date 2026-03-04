@@ -8,12 +8,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-import matplotlib
-
 from sparx_agency.robots.common.spatial_math import rpy_deg_to_R_base
-
-matplotlib.use("Agg")  # MUST be before importing pyplot
-from matplotlib import pyplot as plt
+# matplotlib imports moved inside methods to avoid global initialization issues
+# in environments with numpy/system library mismatches.
 
 from sparx_agency.core.common.types import Observation, Intrinsics
 from sparx_agency.core.mapping.interfaces.depth_model import DepthModel
@@ -254,6 +251,10 @@ class MappingPipeline:
         self.frame_count += 1
         if self.frame_count % self.save_interval != 0:
             return
+
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
 
         fig, axs = plt.subplots(2, 2, figsize=(15, 12))
         fig.suptitle(f"Depth Geometry Analysis - Frame {self.frame_count}")

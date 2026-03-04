@@ -39,4 +39,26 @@ The mapping package integrates closely with the localization and planning module
 - Obstacle detection and avoidance
 - Mission planning assistance
 
-For implementation details and API documentation, refer to the source code documentation.
+## Depth-to-Potential-Field Pipeline
+
+A specialized pipeline for real-time obstacle avoidance using monocular depth and repulsive potential fields.
+
+### Components
+
+- **DepthEngineTRT**: TensorRT-accelerated DepthAnything V3 inference.
+- **PotentialMapper**: Orchestrates depth back-projection, EMA-decay occupancy mapping, and potential field computation.
+- **PotentialFieldLayer**: Logic for distance transforms and Gaussian repulsive potentials.
+
+### Usage Demo
+
+Run the side-by-side visualization demo:
+
+```bash
+# Using HuggingFace fallback (no GPU/Engine required)
+python sparx_agency/tasks/mapping/demo_depth_potential_field.py --source 0
+
+# Using TensorRT Engine (Performance mode)
+python sparx_agency/tasks/mapping/demo_depth_potential_field.py --source 0 --engine path/to/model.engine
+```
+
+For more details, see the [Implementation Plan](file:///home/daphnaa/.gemini/antigravity/brain/fb6b3545-dba2-456c-a5e8-1d7054d6b702/implementation_plan.md).
