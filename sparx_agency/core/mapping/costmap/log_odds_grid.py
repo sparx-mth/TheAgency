@@ -104,3 +104,94 @@ class LogOddsGridCostmap(Costmap):
             grid[self._seen] = np.clip(p[self._seen] * 100.0, 0.0, 100.0).astype(np.int8)
 
         return spec, grid
+
+    def get_prob(self, unknown: float = np.nan) -> np.ndarray:
+        """
+        Returns p_occ in [0,1] with unknown as NaN.
+        """
+        p = 1.0 / (1.0 + np.exp(-self._L))
+        out = p.astype(np.float32, copy=False)
+        if unknown is not None:
+            out = out.copy()
+            out[~self._seen] = np.float32(unknown)
+        return out
+
+    def extract_window(self, center_x: float, center_y: float, size_m: float) -> tuple[GridSpec, np.ndarray]:
+        """
+        Extract a square window around (center_x, center_y), returns (spec, p_occ_window).
+        """
+        half = 0.5 * float(size_m)
+
+        x0 = center_x - half
+        y0 = center_y - half
+        x1 = center_x + half
+        y1 = center_y + half
+
+        gx0, gy0 = self._world_to_grid(np.array([x0]), np.array([y0]))
+        gx1, gy1 = self._world_to_grid(np.array([x1]), np.array([y1]))
+
+        gx0 = int(np.clip(gx0[0], 0, self.width))
+        gy0 = int(np.clip(gy0[0], 0, self.height))
+        gx1 = int(np.clip(gx1[0], 0, self.width))
+        gy1 = int(np.clip(gy1[0], 0, self.height))
+
+        # ensure ordering
+        if gx1 < gx0: gx0, gx1 = gx1, gx0
+        if gy1 < gy0: gy0, gy1 = gy1, gy0
+
+        p = self.get_prob()
+        win = p[gy0:gy1, gx0:gx1].copy()
+
+        spec = GridSpec(
+            resolution_m=self.cfg.resolution_m,
+            width=win.shape[1],
+            height=win.shape[0],
+            origin_x=self.origin_x + gx0 * self.cfg.resolution_m,
+            origin_y=self.origin_y + gy0 * self.cfg.resolution_m,
+            frame_id=self.cfg.frame_id,
+        )
+        return spec, win
+
+    def update_from_cloud(self, cloud_xyz: np.ndarray, sensor_origin: np.ndarray) -> None:
+        """
+        Satisfies Costmap ABC.
+
+        This is a hit-only integration (no raytrace):
+          - uses XY of points
+          - classifies occupied by Z band (configurable)
+        """
+        if cloud_xyz is None or cloud_xyz.shape[0] == 0:
+            return
+
+        pts = np.asarray(cloud_xyz, dtype=np.float32).reshape((-1, 3))
+        if pts.shape[0] == 0:
+            return
+
+        # Optional: filter invalid
+        m = np.isfinite(pts).all(axis=1)
+        pts = pts[m]
+        if pts.shape[0] == 0:
+            return
+
+        # Decide occupied based on height band (you can tune these in your cfg)
+        # If your config already has names, use them. Otherwise add defaults.
+        z = pts[:, 2]
+        z_min = getattr(self.cfg, "min_height_obstacle", -0.2)
+        z_max = getattr(self.cfg, "max_height_obstacle", 1.5)
+        is_occ = (z >= z_min) & (z <= z_max)
+
+        # If your class already has update_from_points_xy(x, y, is_occ, stamp_sec)
+        # use that. Otherwise implement update via your existing logic.
+        if hasattr(self, "update_from_points_xy"):
+            # signature could vary; try the common one
+            try:
+                self.update_from_points_xy(pts[:, 0], pts[:, 1], is_occ)
+            except TypeError:
+                # fallback if your method wants (N,2)
+                xy = pts[:, :2]
+                self.update_from_points_xy(xy)
+        else:
+            # Minimal fallback: if you store _lo/_seen like the other costmaps,
+            # you should implement the same internal update here.
+            raise NotImplementedError(
+                "LogOddsGridCostmap has no update_from_points_xy; add it or implement update here.")
