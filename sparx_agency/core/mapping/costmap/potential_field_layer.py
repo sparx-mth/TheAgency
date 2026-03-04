@@ -75,7 +75,10 @@ class PotentialFieldLayer:
 
         # Repulsive potential (Gaussian falloff from obstacles)
         sigma2 = self.sigma_m * self.sigma_m
-        U = (self.k_rep * np.exp(-(d_m * d_m) / (2.0 * sigma2))).astype(np.float32)
+        with np.errstate(under='ignore', over='ignore', divide='ignore'):
+            U = (self.k_rep * np.exp(-(d_m * d_m) / (2.0 * sigma2))).astype(np.float32)
+
+
 
         # Hard inflation near obstacles (optional)
         if self.inflation_radius_m > 0.0:

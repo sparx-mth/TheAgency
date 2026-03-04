@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 from PIL import Image
 import numpy as np
-from matplotlib import pyplot as plt
+# matplotlib moved inside visualize_depth_raw_data to avoid global import errors
 
 from sparx_agency.core.mapping.interfaces.depth_model import DepthModel
 
@@ -110,6 +110,7 @@ class DepthAnythingV2DepthModel(DepthModel):
             return
 
         # Create a single plot
+        from matplotlib import pyplot as plt
         fig, ax = plt.subplots(1, 1, figsize=(10, 8))
         fig.suptitle(f"Raw Depth Distribution - Frame {self.frame_count}")
 
