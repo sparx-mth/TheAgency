@@ -106,7 +106,7 @@ class FlowDepthVelocityNode(Node):
         self.latest_gyro = np.array([0.0, 0.0, 0.0])
 
         # IMU topic
-        self.declare_parameter("imu_topic", "/simple_drone/imu")
+        self.declare_parameter("imu_topic", "/simple_drone/imu/out")
         imu_topic = self.get_parameter("imu_topic").get_parameter_value().string_value
         
         # pubs/subs
@@ -153,9 +153,13 @@ class FlowDepthVelocityNode(Node):
         if flow_res is None:
             return
 
-        # compute velocity from flow + depth
+        # compute velocity from flow + depth + IMU
         vx_mps, vy_mps, n_used = self.velocity_from_flow_and_depth(
-            flow_res.good_old, flow_res.good_new, self.latest_depth, flow_res.dt
+            flow_res.good_old, 
+            flow_res.good_new, 
+            self.latest_depth, 
+            flow_res.dt,
+            self.latest_gyro 
         )
 
         # publish velocity as Vector3Stamped (x=forward, y=sideways, z=0)
@@ -178,10 +182,13 @@ class FlowDepthVelocityNode(Node):
 
 
     def imu_callback(self, msg: Imu):
-        # store latest gyro 
-        self.latest_gyro[0] = msg.angular_velocity.x
-        self.latest_gyro[1] = msg.angular_velocity.y
-        self.latest_gyro[2] = msg.angular_velocity.z
+
+        roll_rate = msg.angular_velocity.x  
+        pitch_rate = msg.angular_velocity.y 
+        yaw_rate = msg.angular_velocity.z   
+        self.latest_gyro[0] = -pitch_rate
+        self.latest_gyro[1] = -yaw_rate
+        self.latest_gyro[2] = roll_rate
    
     # ---------- core helpers ----------
 
