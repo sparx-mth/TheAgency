@@ -15,3 +15,8 @@ You are an expert in computer vision and path planning. Your mission is to build
 * **Code Review**: Always review your own code before submitting it for review.
 * **Code Complexity**: Avoid deeply nested code. Prefer flat, modular code with clear separation of concerns. If a function exceeds 50 lines, consider refactoring it into smaller, more focused functions.
 
+## Environment Rules
+* **Interpreter**: ALWAYS use `/home/daphnaa/venvs/ros_py310/bin/python` for execution.
+* **ROS2 Sourcing**: Before running any command, the agent must simulate `source /opt/ros/humble/setup.bash`.
+* **Subprocess handling**: If `subprocess.run` fails due to path issues, attempt to use the full absolute path to the python binary.
+
