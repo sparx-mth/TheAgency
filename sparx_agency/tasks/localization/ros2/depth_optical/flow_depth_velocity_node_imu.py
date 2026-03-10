@@ -65,8 +65,6 @@ class FlowDepthVelocityNode(Node):
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
 
-        max_corners = int(self.get_parameter("max_corners").value)
-        min_corners = int(self.get_parameter("min_corners").value)
         lk_win = int(self.get_parameter("lk_win").get_parameter_value().integer_value)
         lk_levels = int(self.get_parameter("lk_levels").get_parameter_value().integer_value)
 
@@ -153,29 +151,29 @@ class FlowDepthVelocityNode(Node):
         if flow_res is None:
             return
 
-        # compute velocity from flow + depth + IMU
-        vx_mps, vy_mps, n_used = self.velocity_from_flow_and_depth(
-            flow_res.good_old, 
-            flow_res.good_new, 
-            self.latest_depth, 
+        # compute velocity from flow + depth + IMU (3-DOF least-squares)
+        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
+            flow_res.good_old,
+            flow_res.good_new,
+            self.latest_depth,
             flow_res.dt,
-            self.latest_gyro 
+            self.latest_gyro
         )
 
-        # publish velocity as Vector3Stamped (x=forward, y=sideways, z=0)
+        # Publish in front_cam_link frame (Xl=forward, Yl=left, Zl=up).
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = msg.header.stamp
         vel_msg.header.frame_id = self.camera_frame
         vel_msg.vector.x = float(vx_mps)
         vel_msg.vector.y = float(vy_mps)
-        vel_msg.vector.z = 0.0
+        vel_msg.vector.z = float(vz_mps)
         self.vel_pub.publish(vel_msg)
 
         # debug visualization of flow vectors colored by depth
         if self.show_debug:
             vis = frame.copy()
             self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
-            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} used={n_used}"
+            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
             cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             cv2.imshow("Flow+Depth Velocity", vis)
             cv2.waitKey(1)
@@ -218,9 +216,18 @@ class FlowDepthVelocityNode(Node):
         u_c = u - self.cx
         v_c = v - self.cy
 
-        # rotational flow in pixels/sec (from angular velocity)
-        du_rot = -wy * self.fx + wz * v_c + (wx * u_c * v_c) / self.fx - wy * (u_c**2) / self.fx
-        dv_rot =  wx * self.fy - wz * u_c + (wy * u_c * v_c) / self.fy - wx * (v_c**2) / self.fy
+        # Rotational flow in pixels/sec (standard pinhole model, optical frame).
+        # wx, wy, wz are angular rates in the camera optical frame.
+        #
+        # Standard formula (Trucco & Verri / image-based visual servoing):
+        #   du_rot =  (u_c*v_c/fx)*wx  -  (fx + u_c²/fx)*wy  +  v_c*wz
+        #   dv_rot =  (fy + v_c²/fy)*wx  -  (u_c*v_c/fy)*wy  -  u_c*wz
+        #
+        # Previous dv_rot had two sign errors:
+        #   v_c² coefficient was -(v_c²/fy) instead of +(v_c²/fy)
+        #   u_c*v_c coefficient was +(u_c*v_c/fy) instead of -(u_c*v_c/fy)
+        du_rot = (u_c * v_c / self.fx) * wx - (self.fx + u_c**2 / self.fx) * wy + v_c * wz
+        dv_rot = (self.fy + v_c**2 / self.fy) * wx - (u_c * v_c / self.fy) * wy - u_c * wz
 
         # translational flow is total flow minus rotational flow
         du_trans = du_total - du_rot
@@ -241,19 +248,43 @@ class FlowDepthVelocityNode(Node):
         valid = valid & np.isfinite(Z) & (Z > self.min_depth) & (Z < self.max_depth)
 
         if not np.any(valid):
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0.0, 0
 
-        # Convert to m/s using per-point depth
-        # NOTE: Mapping optical flow coordinates to world frame
-        # Image v (row/down) -> world X axis
-        # Image u (col/right) -> world Y axis
-        vx = Z[valid] * (dv_trans[valid] / self.fy)   # dv (row) -> X
-        vy = Z[valid] * (du_trans[valid] / self.fx)   # du (col) -> Y
+        # Solve for 3-DOF translational velocity using the same least-squares
+        # formulation as the base node, applied to the rotation-compensated flow.
+        #
+        # Full model per point i (translational part only, after subtracting du_rot):
+        #   du_trans_i * Z_i = -fx * Vx_optical  +  u_c_i * Vz_optical
+        #   dv_trans_i * Z_i = -fy * Vy_optical  +  v_c_i * Vz_optical
+        #
+        # Output in front_cam_link (Xl=forward, Yl=left, Zl=up):
+        #   Vx_link =  Vz_optical   (forward)
+        #   Vy_link = -Vx_optical   (leftward)
+        #   Vz_link = -Vy_optical   (upward)
+        MIN_POINTS = 8
+        nv = int(np.sum(valid))
+        if nv < MIN_POINTS:
+            return 0.0, 0.0, 0.0, 0
 
-        # Robust summary
-        vx_mps = float(np.median(vx))
-        vy_mps = float(np.median(vy))
-        return vx_mps, vy_mps, int(np.sum(valid))
+        # Use old-point coordinates for u_c, v_c (same as where rotation was computed)
+        u_c_v = good_old[valid, 0].astype(np.float64) - self.cx
+        v_c_v = good_old[valid, 1].astype(np.float64) - self.cy
+        Zv    = Z[valid].astype(np.float64)
+        du_v  = du_trans[valid].astype(np.float64)
+        dv_v  = dv_trans[valid].astype(np.float64)
+
+        A = np.zeros((2 * nv, 3), dtype=np.float64)
+        B = np.zeros((2 * nv,),   dtype=np.float64)
+        A[0::2, 0] = -self.fx;  A[0::2, 2] = u_c_v;  B[0::2] = du_v * Zv
+        A[1::2, 1] = -self.fy;  A[1::2, 2] = v_c_v;  B[1::2] = dv_v * Zv
+
+        try:
+            vel, *_ = np.linalg.lstsq(A, B, rcond=None)
+        except np.linalg.LinAlgError:
+            return 0.0, 0.0, 0.0, nv
+
+        Vx_o, Vy_o, Vz_o = float(vel[0]), float(vel[1]), float(vel[2])
+        return Vz_o, -Vx_o, -Vy_o, nv
 
     def draw_debug(self, vis_bgr, good_old, good_new, depth_map):
         H, W = depth_map.shape[:2]

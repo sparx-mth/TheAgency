@@ -49,30 +49,16 @@ class DepthAnythingV2DepthModel(DepthModel):
         self.save_interval = 100
 
     def infer_depth(self, rgb: np.ndarray) -> np.ndarray:
-        # 1. Get raw disparity from model (0-255 or 0-N)
+        # The model is the metric variant (Depth-Anything-V2-Metric-*).
+        # The HuggingFace pipeline returns TWO keys:
+        #   out["depth"]            → PIL Image (uint8 visualization, 0-255, NOT metres)
+        #   out["predicted_depth"]  → torch.Tensor with actual metric depth in metres
+        # We must use "predicted_depth"; "depth" is only for display.
         out = self.pipe(Image.fromarray(rgb))
-        raw_disparity = np.array(out["depth"]).astype(np.float32)
+        depth_m = np.array(out["predicted_depth"]).astype(np.float32)
         if self.cfg.debug:
-            self.visualize_depth_raw_data(raw_disparity)
-        # 2. Normalize to 0.0 - 1.0
-        d_min = raw_disparity.min()
-        d_max = raw_disparity.max()
-        den = max(d_max - d_min, 1e-6)
-
-        # depth = (raw_disparity - d_min) / (d_max - d_min) * 255.0
-        # depth_m = depth.astype(np.uint8)
-
-        depth_norm = (raw_disparity - d_min) / den
-
-        # 3. To see a person clearly, the points must have a wide Z-range.
-        # Person should be at ~2.0m, Background at ~15.0m.
-        max_range = 5.0
-        min_range = 0.5  # Objects start 0.5m in front of camera
-        # depth_inverted = 1.0 - depth_norm
-        # depth_m = depth_inverted * (max_range - min_range) + min_range
-        depth_m = depth_norm * (max_range - min_range) + min_range
-
-        # depth_m = (d_max - raw_disparity)/50
+            self.visualize_depth_raw_data(depth_m)
+        depth_m = np.clip(depth_m, 0.0, self.cfg.max_range_m)
         return depth_m
 
 

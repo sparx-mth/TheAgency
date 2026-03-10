@@ -188,3 +188,4 @@ sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 *.yaml
 myenv/
 sparx_agency/tasks/localization/ros2/depth_optical/orbslam_results/myvenv/
+sparx_agency/tasks/localization/CLAUDE.md
