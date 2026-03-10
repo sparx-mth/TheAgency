@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
+
+def sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+def update_ray_logodds(L, r0, c0, r1, c1, lo_free, lo_occ):
+    """Update log-odds grid L along a ray from (r0,c0) to (r1,c1)."""
+    last_r = None
+    last_c = None
+
+    for r, c in bresenham(r0, c0, r1, c1):
+        last_r, last_c = r, c
+        L[r, c] += lo_free  # mark as free for now
+
+    # overwrite endpoint to occupied (undo free + add occ)
+    if last_r is not None:
+        L[last_r, last_c] += (lo_occ - lo_free)
+
 def bresenham(x0: int, y0: int, x1: int, y1: int):
     """Integer grid traversal from (x0,y0) to (x1,y1) inclusive."""
     dx = abs(x1 - x0)
