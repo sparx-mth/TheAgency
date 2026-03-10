@@ -144,25 +144,25 @@ class FlowDepthVelocityNode(Node):
         if flow_res is None:
             return
 
-        # compute velocity from flow + depth
-        vx_mps, vy_mps, n_used = self.velocity_from_flow_and_depth(
+        # compute velocity from flow + depth (3-DOF least-squares)
+        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
             flow_res.good_old, flow_res.good_new, self.latest_depth, flow_res.dt
         )
 
-        # publish velocity as Vector3Stamped (x=forward, y=sideways, z=0)
+        # Publish in front_cam_link frame (Xl=forward, Yl=left, Zl=up).
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = msg.header.stamp
         vel_msg.header.frame_id = self.camera_frame
         vel_msg.vector.x = float(vx_mps)
         vel_msg.vector.y = float(vy_mps)
-        vel_msg.vector.z = 0.0
+        vel_msg.vector.z = float(vz_mps)
         self.vel_pub.publish(vel_msg)
 
         # debug visualization of flow vectors colored by depth
         if self.show_debug:
             vis = frame.copy()
             self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
-            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} used={n_used}"
+            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
             cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             cv2.imshow("Flow+Depth Velocity", vis)
             cv2.waitKey(1)
@@ -172,50 +172,78 @@ class FlowDepthVelocityNode(Node):
 
     def velocity_from_flow_and_depth(self, good_old, good_new, depth_map, dt: float):
         """
-        good_old/new: [N,2] float pixel coords
-        depth_map: [H,W] float32 depth (relative or scaled)
-        dt: seconds
+        Solve for the 3-DOF camera translational velocity in the optical frame
+        using a least-squares formulation of the brightness-constancy equation.
 
-        Returns:
-          (vx_mps, vy_mps, n_used) as robust medians over valid points
+        Full optical-flow model (per point i):
+            du_i * Z_i = -fx * Vx_optical  +  u_c_i * Vz_optical
+            dv_i * Z_i = -fy * Vy_optical  +  v_c_i * Vz_optical
+
+        Written as A @ V = B with V = [Vx_optical, Vy_optical, Vz_optical]:
+            A[2i,   :] = [-fx,   0,  u_c_i]
+            A[2i+1, :] = [  0, -fy,  v_c_i]
+            B[2i  ]    = du_i * Z_i
+            B[2i+1]    = dv_i * Z_i
+
+        The simplified formula (vz = Z*dv/fy) is a degenerate case that drops
+        the u_c*Vz and v_c*Vz terms, contaminating lateral/vertical estimates
+        with forward motion when features are not symmetric around the image centre.
+
+        Output in front_cam_link frame (Xl=forward, Yl=left, Zl=up):
+            Vx_link =  Vz_optical   (forward)
+            Vy_link = -Vx_optical   (leftward)
+            Vz_link = -Vy_optical   (upward)
+
+        Returns (Vx_link, Vy_link, Vz_link, n_used).
         """
-        H, W = depth_map.shape[:2] # height, width of depth map
+        MIN_POINTS = 8
+        H, W = depth_map.shape[:2]
 
-        # pixel velocities px/s of the tracked points in the optical flow
         du = (good_new[:, 0] - good_old[:, 0]) / dt  # px/s
         dv = (good_new[:, 1] - good_old[:, 1]) / dt  # px/s
 
-        # sample depth at new locations
-        u = np.rint(good_new[:, 0]).astype(np.int32)
-        v = np.rint(good_new[:, 1]).astype(np.int32)
+        u_idx = np.rint(good_new[:, 0]).astype(np.int32)
+        v_idx = np.rint(good_new[:, 1]).astype(np.int32)
 
-        valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
-        if not np.any(valid):
-            return 0.0, 0.0, 0
+        valid = (u_idx >= 0) & (u_idx < W) & (v_idx >= 0) & (v_idx < H)
+        if int(np.sum(valid)) < MIN_POINTS:
+            return 0.0, 0.0, 0.0, 0
 
-        Z = np.zeros_like(du, dtype=np.float32)
-        Z[valid] = depth_map[v[valid], u[valid]] # sample depth map
+        Z = np.zeros(len(du), dtype=np.float64)
+        Z[valid] = depth_map[v_idx[valid], u_idx[valid]]
 
-        # filter bad depth
         valid = valid & np.isfinite(Z)
-
         if not self.use_depth_norm:
             valid = valid & (Z > self.min_depth) & (Z < self.max_depth)
 
-        if not np.any(valid):
-            return 0.0, 0.0, 0
+        n = int(np.sum(valid))
+        if n < MIN_POINTS:
+            return 0.0, 0.0, 0.0, 0
 
-        # Convert to m/s using per-point depth
-        # NOTE: Mapping optical flow coordinates to world frame
-        # Image v (row/down) -> world X axis
-        # Image u (col/right) -> world Y axis
-        vx = Z[valid] * (dv[valid] / self.fy)   # dv (row) -> X
-        vy = Z[valid] * (du[valid] / self.fx)   # du (col) -> Y
+        u_c = good_new[valid, 0].astype(np.float64) - self.cx
+        v_c = good_new[valid, 1].astype(np.float64) - self.cy
+        Zv  = Z[valid]
+        duv = du[valid].astype(np.float64)
+        dvv = dv[valid].astype(np.float64)
 
-        # Robust summary
-        vx_mps = float(np.median(vx))
-        vy_mps = float(np.median(vy))
-        return vx_mps, vy_mps, int(np.sum(valid))
+        # Build the 2N×3 linear system
+        A = np.zeros((2 * n, 3), dtype=np.float64)
+        B = np.zeros((2 * n,),   dtype=np.float64)
+        A[0::2, 0] = -self.fx;  A[0::2, 2] = u_c;  B[0::2] = duv * Zv
+        A[1::2, 1] = -self.fy;  A[1::2, 2] = v_c;  B[1::2] = dvv * Zv
+
+        try:
+            vel, *_ = np.linalg.lstsq(A, B, rcond=None)
+        except np.linalg.LinAlgError:
+            return 0.0, 0.0, 0.0, n
+
+        Vx_o, Vy_o, Vz_o = float(vel[0]), float(vel[1]), float(vel[2])
+
+        # Rotate optical → front_cam_link
+        Vx_link =  Vz_o   # forward
+        Vy_link = -Vx_o   # leftward
+        Vz_link = -Vy_o   # upward
+        return Vx_link, Vy_link, Vz_link, n
 
     def draw_debug(self, vis_bgr, good_old, good_new, depth_map):
         H, W = depth_map.shape[:2]
