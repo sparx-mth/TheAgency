@@ -216,7 +216,30 @@ class PotentialMapper:
         # make the public gradient be the total one
         self._grad = self._grad_total.copy()
 
+    def update(self, point_cloud: np.ndarray) -> None:
+        """
+        Directly update the map using an existing 3D point cloud (DA3 style).
+        """
+        # Reshape if (H, W, 3) -> (N, 3)
+        pts = point_cloud.reshape(-1, 3) if len(point_cloud.shape) == 3 else point_cloud
 
+        # 1. Filter by range and height band (z_band)
+        pts_filtered = self._filter_cloud(pts)
+
+        # 2. Bin into temporary map (M_temp)
+        self._M_temp = self._build_temp_map(pts_filtered)
+
+        # 3. EMA accumulation (Memory)
+        self._M_acc = (1.0 - self.cfg.alpha) * self._M_acc + self.cfg.alpha * self._M_temp
+
+        # 4. Detect walls and compute potential
+        self._M_walls = self._detect_walls_and_clean()
+        U_rep, D = self._potential.compute_from_prob_grid(self._M_acc, self.cfg.resolution_m)
+        self._U_rep = U_rep
+        self._D_obs = D
+
+        self._compute_total_potential_and_gradient()
+        self._grad = self._grad_total.copy()
 
     def reset(self) -> None:
         """Zero all internal maps and the navigation goal."""
