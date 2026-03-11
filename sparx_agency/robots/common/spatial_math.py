@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import yaml
 
 from sparx_agency.core.common.types import Intrinsics
 
@@ -57,6 +58,20 @@ def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: floa
         fy=float(fy),
         cx=float(cx),
         cy=float(cy)
+    )
+
+
+def load_intrinsics_from_yaml(yaml_path: str) -> Intrinsics:
+    with open(yaml_path, 'r') as f:
+        data = yaml.safe_load(f)
+
+    return Intrinsics(
+        fx=float(data['fx']),
+        fy=float(data['fy']),
+        cx=float(data['cx']),
+        cy=float(data['cy']),
+        width=int(data['image_width']),
+        height=int(data['image_height'])
     )
 
 def rpy_deg_to_R_base(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
