@@ -42,6 +42,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
+        self.declare_parameter("depth_scale", 0.4)  # Calibrated for Depth Anything V2 + Gazebo
 
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
@@ -61,6 +62,7 @@ class FlowDepthVelocityNode(Node):
         self.min_depth = float(self.get_parameter("min_depth").get_parameter_value().double_value)
         self.max_depth = float(self.get_parameter("max_depth").get_parameter_value().double_value)
         self.use_depth_norm = bool(self.get_parameter("use_depth_norm").get_parameter_value().bool_value)
+        self.depth_scale = float(self.get_parameter("depth_scale").get_parameter_value().double_value)
 
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
@@ -87,8 +89,8 @@ class FlowDepthVelocityNode(Node):
 
         # tracker module (fixed)
         self.tracker = OpticalFlowTracker(
-            max_corners=max_corners,
-            min_corners=min_corners,
+            max_corners=self.max_corners,
+            min_corners=self.min_corners,
             lk_win=lk_win,
             lk_levels=lk_levels,
         )
@@ -121,6 +123,12 @@ class FlowDepthVelocityNode(Node):
         self.fy = float(K[4]) # focal length y in pixels
         self.cx = float(K[2]) # principal point x in pixels
         self.cy = float(K[5]) # principal point y in pixels
+        
+        # Log camera intrinsics (only once)
+        if not hasattr(self, '_caminfo_logged'):
+            self.get_logger().info(f"[CamInfo] fx={self.fx:.2f}, fy={self.fy:.2f}, cx={self.cx:.2f}, cy={self.cy:.2f}")
+            self.get_logger().info(f"[CamInfo] K matrix: {list(K)}")
+            self._caminfo_logged = True
 
     def depth_callback(self, msg: Image):
         try:
@@ -242,7 +250,7 @@ class FlowDepthVelocityNode(Node):
             return 0.0, 0.0, 0
 
         Z = np.zeros_like(du_total, dtype=np.float32)
-        Z[valid] = depth_map[v_int[valid], u_int[valid]] # sample depth map
+        Z[valid] = depth_map[v_int[valid], u_int[valid]] * self.depth_scale  # sample depth map and apply scale
 
         # filter bad depth
         valid = valid & np.isfinite(Z) & (Z > self.min_depth) & (Z < self.max_depth)
@@ -284,6 +292,20 @@ class FlowDepthVelocityNode(Node):
             return 0.0, 0.0, 0.0, nv
 
         Vx_o, Vy_o, Vz_o = float(vel[0]), float(vel[1]), float(vel[2])
+        
+        # Debug: Check rotational vs translational components
+        if not hasattr(self, '_debug_count'):
+            self._debug_count = 0
+        self._debug_count += 1
+        if self._debug_count % 50 == 0:  # Print every 50 frames
+            du_rot_mean = np.mean(du_rot[valid]) if len(du_rot) > 0 else 0
+            dv_rot_mean = np.mean(dv_rot[valid]) if len(dv_rot) > 0 else 0
+            du_trans_mean = np.mean(du_trans[valid]) if len(du_trans) > 0 else 0
+            dv_trans_mean = np.mean(dv_trans[valid]) if len(dv_trans) > 0 else 0
+            self.get_logger().info(f"[DEBUG] du_rot={du_rot_mean:.3f} dv_rot={dv_rot_mean:.3f} | du_trans={du_trans_mean:.3f} dv_trans={dv_trans_mean:.3f}")
+            self.get_logger().info(f"[DEBUG] Vx_o={Vx_o:.3f} Vy_o={Vy_o:.3f} Vz_o={Vz_o:.3f} | Output: Vx={Vz_o:.3f} Vy={-Vx_o:.3f} Vz={-Vy_o:.3f}")
+            self.get_logger().info(f"[DEBUG] Gyro: {self.latest_gyro}")
+        
         return Vz_o, -Vx_o, -Vy_o, nv
 
     def draw_debug(self, vis_bgr, good_old, good_new, depth_map):
