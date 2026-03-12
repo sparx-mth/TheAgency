@@ -13,6 +13,9 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 
 from geometry_msgs.msg import Pose, PoseStamped
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import numpy as np
 
 
 @dataclass
@@ -31,6 +34,7 @@ class PoseEvaluatorNode(Node):
 
         self.declare_parameter("est_pose_topic", "/flow_depth/pose_est")
         self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
+        self.declare_parameter("depth_topic", "/depth_anything/depth")
 
         self.declare_parameter("gt_queue_size", 5000)
         self.declare_parameter("gt_max_time_diff", 1.00)
@@ -38,11 +42,13 @@ class PoseEvaluatorNode(Node):
         self.declare_parameter("csv_path", "")
         self.declare_parameter("est_tum_path", "")
         self.declare_parameter("gt_tum_path", "")
+        self.declare_parameter("depth_comparison_csv", "")
         self.declare_parameter("flush_every_n", 200)
         self.declare_parameter("print_every_sec", 1.0)
 
         est_topic = self.get_parameter("est_pose_topic").value
         gt_topic = self.get_parameter("gt_pose_topic").value
+        depth_topic = self.get_parameter("depth_topic").value
 
         self.gt_queue_size = int(self.get_parameter("gt_queue_size").value)
         self.gt_max_time_diff = float(self.get_parameter("gt_max_time_diff").value)
@@ -51,15 +57,21 @@ class PoseEvaluatorNode(Node):
         self.csv_path = self.get_parameter("csv_path").value
         self.est_tum_path = self.get_parameter("est_tum_path").value
         self.gt_tum_path = self.get_parameter("gt_tum_path").value
+        self.depth_comparison_csv = self.get_parameter("depth_comparison_csv").value
         self.flush_every_n = int(self.get_parameter("flush_every_n").value)
 
         self.get_logger().info(f"[Eval] est_pose: {est_topic}")
         self.get_logger().info(f"[Eval] gt_pose: {gt_topic}")
+        self.get_logger().info(f"[Eval] depth: {depth_topic}")
 
         # State
         self.gt_queue: Deque[GTSample] = deque(maxlen=self.gt_queue_size)
         self.err_hist = deque(maxlen=5000)
         self.last_print_time = self.get_clock().now()
+        
+        # Latest depth for comparison
+        self.latest_depth = None
+        self.bridge = CvBridge()
 
         # Files setup
         self.csv_file = None
@@ -69,6 +81,13 @@ class PoseEvaluatorNode(Node):
             self.csv_writer = csv.writer(self.csv_file)
             self.csv_writer.writerow(["t_sec", "est_x", "est_y", "est_z", "gt_x", "gt_y", "gt_z", "err_m", "gt_dt"])
 
+        self.depth_comparison_file = None
+        self.depth_comparison_writer = None
+        if self.depth_comparison_csv:
+            self.depth_comparison_file = open(self.depth_comparison_csv, "w", newline="", encoding="utf-8")
+            self.depth_comparison_writer = csv.writer(self.depth_comparison_file)
+            self.depth_comparison_writer.writerow(["t_sec", "center_depth", "min_depth", "max_depth", "mean_depth", "std_depth"])
+
         self.est_tum_file = open(self.est_tum_path, "w", encoding="utf-8") if self.est_tum_path else None
         self.gt_tum_file = open(self.gt_tum_path, "w", encoding="utf-8") if self.gt_tum_path else None
         self._tum_write_count = 0
@@ -76,9 +95,10 @@ class PoseEvaluatorNode(Node):
         # Pubs / Subs
         self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, qos_profile_sensor_data)
         self.est_sub = self.create_subscription(PoseStamped, est_topic, self.est_pose_cb, qos_profile_sensor_data)
+        self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_cb, qos_profile_sensor_data)
 
     def destroy_node(self):
-        for f in [self.csv_file, self.est_tum_file, self.gt_tum_file]:
+        for f in [self.csv_file, self.est_tum_file, self.gt_tum_file, self.depth_comparison_file]:
             if f:
                 try:
                     f.flush()
@@ -93,6 +113,13 @@ class PoseEvaluatorNode(Node):
     def gt_pose_cb(self, msg: Pose):
         t = self.get_clock().now()
         self.gt_queue.append(GTSample(t=t, pose=msg))
+
+    def depth_cb(self, msg: Image):
+        """Callback to capture depth map for statistics"""
+        try:
+            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert depth: {e}")
 
     def find_closest_gt(self, t: Time) -> Tuple[Optional[Pose], float]:
         if not self.gt_queue:
@@ -127,8 +154,23 @@ class PoseEvaluatorNode(Node):
 
         self._tum_write_count += 1
         if self.flush_every_n > 0 and (self._tum_write_count % self.flush_every_n) == 0:
-            for f in [self.est_tum_file, self.gt_tum_file, self.csv_file]:
+            for f in [self.est_tum_file, self.gt_tum_file, self.csv_file, self.depth_comparison_file]:
                 if f: f.flush()
+        
+        # Write depth statistics
+        if self.depth_comparison_writer and self.latest_depth is not None:
+            valid_depth = self.latest_depth[np.isfinite(self.latest_depth) & (self.latest_depth > 0)]
+            h, w = self.latest_depth.shape
+            center_depth = self.latest_depth[h//2, w//2] if np.isfinite(self.latest_depth[h//2, w//2]) else -1.0
+            if len(valid_depth) > 0:
+                self.depth_comparison_writer.writerow([
+                    t_sec,
+                    center_depth,
+                    np.min(valid_depth),
+                    np.max(valid_depth),
+                    np.mean(valid_depth),
+                    np.std(valid_depth)
+                ])
 
         # CSV and Error Calculation
         if have_good_gt:
