@@ -26,6 +26,7 @@ class PotentialFieldLayer:
         occ_thresh: float = 0.65,
         sigma_m: float = 0.6,
         k_rep: float = 1.0,
+        repulse_radius_m: float = 1.0,
         inflation_radius_m: float = 0.35,
         u_max: float = 1.0,
         unknown_as_obstacle: bool = False,
@@ -44,6 +45,10 @@ class PotentialFieldLayer:
 
         if self.sigma_m <= 0.0:
             raise ValueError("sigma_m must be > 0")
+
+        self.repulse_radius_m = float(repulse_radius_m)
+        if self.repulse_radius_m <= 0.0:
+            raise ValueError("repulse_radius_m must be > 0")
 
     def compute_from_prob_grid(self, p_occ: np.ndarray, resolution_m: float) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -74,13 +79,21 @@ class PotentialFieldLayer:
         d_m = d_pix.astype(np.float32) * res
 
         # Repulsive potential (Gaussian falloff from obstacles)
-        sigma2 = self.sigma_m * self.sigma_m
-        with np.errstate(under='ignore', over='ignore', divide='ignore'):
-            U = (self.k_rep * np.exp(-(d_m * d_m) / (2.0 * sigma2))).astype(np.float32)
+        # Repulsive potential (Khatib-style inverse-distance with finite influence radius)
+        d0 = float(self.repulse_radius_m)  # influence radius in meters
+        eps = 1e-3  # avoid div by zero
 
+        U = np.zeros_like(d_m, dtype=np.float32)
 
+        mask = d_m < d0
+        inv_d = 1.0 / np.maximum(d_m, eps)
+        inv_d0 = 1.0 / d0
 
-        # Hard inflation near obstacles (optional)
+        # 0.5 * eta * (1/d - 1/d0)^2
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            U[mask] = (0.5 * self.k_rep * (inv_d[mask] - inv_d0) ** 2).astype(np.float32)
+
+        # Optional: hard keep-out radius (makes obstacles appear "fatter")
         if self.inflation_radius_m > 0.0:
             U[d_m <= self.inflation_radius_m] = self.u_max
 
