@@ -24,10 +24,10 @@ def parse_args():
                    default="/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_laptop.yaml")
     p.add_argument("--res-m", type=float, default=0.05)
     p.add_argument("--size-m", type=float, default=10.0)
-    p.add_argument("--sigma-m", type=float, default=0.10)
+    p.add_argument("--sigma-m", type=float, default=0.05)
     p.add_argument("--zeta", type=float, default=0.5)
-    p.add_argument("--goal-fwd", type=float, default=6.0)
-    p.add_argument("--goal-left", type=float, default=-4.0)
+    p.add_argument("--goal-fwd", type=float, default=3.0)
+    p.add_argument("--goal-left", type=float, default=-2.0)
     return p.parse_args()
 
 
@@ -62,10 +62,12 @@ def main():
 
         # 3. Coordinate Mapping
         def world_to_screen(f, l):
-            scale = PANE / args.size_m
-            # Forward is -Y (Up), Left is -X (Left)
+            # y: forward-positive goes up on screen
             sy = PANE - int(((f - potential_mapper._origin) / args.size_m) * PANE)
+
+            # x: left-positive goes left on screen  (HORIZONTAL FLIP)
             sx = PANE - int(((l - potential_mapper._origin) / args.size_m) * PANE)
+
             return (sx, sy)
 
         # 4. Dashboard Panes
@@ -75,15 +77,17 @@ def main():
         vis_depth = cv2.resize(cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET), (PANE, PANE))
 
         # OCCUPANCY: Removed flip(0) to fix inversion
-        prob_map = potential_mapper.get_prob_map()
+        prob_map = np.flipud(potential_mapper.get_prob_map())
         vis_prob = cv2.resize(cv2.applyColorMap((prob_map * 255).astype(np.uint8), cv2.COLORMAP_HOT), (PANE, PANE))
 
         # POTENTIAL: Using Viridis-like logic with clear obstacle contrast
-        pot_norm = cv2.normalize(U_total, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        vis_pot = cv2.resize(cv2.applyColorMap(255 - pot_norm, cv2.COLORMAP_VIRIDIS), (PANE, PANE))
+        U_total_vis = np.flipud(U_total)
+        pot_norm = cv2.normalize(U_total_vis, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        vis_pot = cv2.resize(cv2.applyColorMap(pot_norm, cv2.COLORMAP_VIRIDIS), (PANE, PANE))
 
         # 5. Field Arrows (Subsampled)
         grad = potential_mapper.get_total_gradient()
+
         step = max(1, n // 12)
         for r in range(0, n, step):
             for c in range(0, n, step):
@@ -91,8 +95,8 @@ def main():
                 l_val = (c * args.res_m) + potential_mapper._origin
                 sx, sy = world_to_screen(f_val, l_val)
                 v = grad[r, c]
-                # Negative gradient for "downhill" flow
-                dx, dy = int(v[1] * 12), int(v[0] * 12)
+                dx = int(v[1] * 12)  # left -> screen x (depends if you display +Right)
+                dy = int(-v[0] * 12)  # forward -> screen y is inverted
                 if 0 <= sx < PANE and 0 <= sy < PANE:
                     cv2.arrowedLine(vis_pot, (sx, sy), (sx + dx, sy + dy), (200, 200, 0), 1, tipLength=0.3)
 
@@ -105,7 +109,8 @@ def main():
 
         # Decision Arrow (Red)
         rv = grad[n // 2, n // 2]
-        cv2.arrowedLine(vis_pot, (rx, ry), (rx + int(rv[1] * 40), ry + int(rv[0] * 40)), (0, 0, 255), 2)
+        print("rv fwd,left:", rv)
+        cv2.arrowedLine(vis_pot, (rx, ry), (rx + int(rv[1] * 40), ry + int(-rv[0] * 40)), (0, 0, 255), 2)
 
         # Final Stack
         top = np.hstack((vis_rgb, vis_depth))

@@ -69,6 +69,7 @@ class DA3TensorRTModel(DepthModel):
         # --- 2. Execute TensorRT ---
         for i in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(i)
+            print(i, name, self.engine.get_tensor_shape(name), self.engine.get_tensor_mode(name))
             self.context.set_tensor_address(name, self.bindings[i])
 
         self.inputs[0]['host'] = np.ascontiguousarray(img)
@@ -81,10 +82,18 @@ class DA3TensorRTModel(DepthModel):
         self.stream.synchronize()
 
         # --- 3. Post-process Depth ---
-        out_name = self.outputs[0]['name']
-        out_shape = tuple(self.engine.get_tensor_shape(out_name))
-        # out_shape might be (1,1,H,W) or (1,H,W)
-        # handle common cases:
+        # Find the depth output by name (safer than outputs[0])
+        depth_out = None
+        for out in self.outputs:
+            if "depth" in out["name"].lower():
+                depth_out = out
+                break
+        if depth_out is None:
+            depth_out = self.outputs[0]  # fallback
+
+        out_shape = tuple(self.engine.get_tensor_shape(depth_out["name"]))
+
+        # Common cases: (1,1,H,W) or (1,H,W) or (H,W)
         if len(out_shape) == 4:
             _, _, h, w = out_shape
         elif len(out_shape) == 3:
@@ -92,10 +101,10 @@ class DA3TensorRTModel(DepthModel):
         elif len(out_shape) == 2:
             h, w = out_shape
         else:
-            raise ValueError(f"Unexpected output shape: {out_shape}")
+            raise ValueError(f"Unexpected depth output shape: {out_shape} for tensor {depth_out['name']}")
 
-        depth_map = self.outputs[0]['host'].reshape(h, w)
-
+        depth_map = depth_out["host"].reshape(h, w).astype(np.float32)
+        print("Depth output tensor:", depth_out["name"], "shape:", out_shape, "depth_map:", depth_map.shape)
         # --- 4. Vectorized Point Cloud Projection with Scaled Intrinsics ---
         h, w = depth_map.shape
         # Scale intrinsics from original frame (640x480) to depth map size (504x280)
