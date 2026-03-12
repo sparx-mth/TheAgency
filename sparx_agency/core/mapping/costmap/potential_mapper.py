@@ -52,10 +52,11 @@ class PotentialMapperConfig:
     """
     resolution_m: float = 0.10
     size_m: float = 40.0
-    alpha: float = 0.30
+    alpha: float = 0.50
     occ_thresh: float = 0.55
-    sigma_m: float = 0.2          # Sharper decay for tighter navigation
-    inflation_radius_m: float = 0.20 # Reduced to allow passing through doorways
+    sigma_m: float = 0.25          # Sharper decay for tighter navigation
+    repulse_radius_m: float = 1.0
+    inflation_radius_m: float = 0.15 # Reduced to allow passing through doorways
     z_band: Tuple[float, float] = (0.05, 2.0) # Lowered to 0.05 to catch low chairs
     range_min_m: float = 0.2          # Lowered to 0.2 for close objects
     range_max_m: float = 15.0
@@ -70,7 +71,7 @@ class PotentialMapperConfig:
     max_wall_gap_m: float = 0.15    # Max gap to merge collinear segments
 
     # Log-odds raycasting update
-    lo_occ: float = 1.2  # occupied evidence
+    lo_occ: float = 2.0  # occupied evidence
     lo_free: float = -0.7  # free evidence
     lo_min: float = -3.5
     lo_max: float = 3.5
@@ -78,7 +79,7 @@ class PotentialMapperConfig:
     # Attraction weight
     k_att: float = 1.0
     # Repulsion weight (if you want it)
-    k_rep: float = 1.0
+    k_rep: float = 3.0
 
     # Ray stride (optional): raycast only every Nth point endpoint for speed
     ray_endpoint_stride: int = 1
@@ -145,6 +146,7 @@ class PotentialMapper:
         self._U_rep: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
         self._D_obs: np.ndarray = np.full((n_cells, n_cells), np.inf, dtype=np.float32)
         self._grad: np.ndarray = np.zeros((n_cells, n_cells, 2), dtype=np.float32)
+        self._grad_rep = None
 
         # Ray cache
         self._rays: Optional[np.ndarray] = None
@@ -165,6 +167,7 @@ class PotentialMapper:
             occ_thresh=self.cfg.occ_thresh,
             sigma_m=self.cfg.sigma_m,
             k_rep=5.0, # Increased from 1.0 to 5.0 for stronger avoidance
+            repulse_radius_m=self.cfg.repulse_radius_m,
             inflation_radius_m=self.cfg.inflation_radius_m,
             u_max=1.0,
             unknown_as_obstacle=False,
@@ -198,7 +201,8 @@ class PotentialMapper:
         self._M_temp = self._build_temp_map(pts_filtered)
 
         # EMA accumulation
-        self._M_acc = (1.0 - self.cfg.alpha) * self._M_acc + self.cfg.alpha * self._M_temp
+        mask = np.isfinite(self._M_temp)
+        self._M_acc[mask] = (1.0 - self.cfg.alpha) * self._M_acc[mask] + self.cfg.alpha * self._M_temp[mask]
 
         # 5. Wall Segmentation (Revision 5)
         self._M_walls = self._detect_walls_and_clean()
@@ -209,6 +213,10 @@ class PotentialMapper:
         U_rep, D = self._potential.compute_from_prob_grid(M_combined, self.cfg.resolution_m)
         self._U_rep = U_rep
         self._D_obs = D
+
+        # repulsive gradient (optional debug)
+        g_row, g_col = np.gradient(self._U_rep, self.cfg.resolution_m)
+        self._grad_rep = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
 
         # build total potential + total descent direction
         self._compute_total_potential_and_gradient()
@@ -230,7 +238,8 @@ class PotentialMapper:
         self._M_temp = self._build_temp_map(pts_filtered)
 
         # 3. EMA accumulation (Memory)
-        self._M_acc = (1.0 - self.cfg.alpha) * self._M_acc + self.cfg.alpha * self._M_temp
+        mask = np.isfinite(self._M_temp)
+        self._M_acc[mask] = (1.0 - self.cfg.alpha) * self._M_acc[mask] + self.cfg.alpha * self._M_temp[mask]
 
         # 4. Detect walls and compute potential
         self._M_walls = self._detect_walls_and_clean()
@@ -238,6 +247,11 @@ class PotentialMapper:
         self._U_rep = U_rep
         self._D_obs = D
 
+        # repulsive gradient (optional debug)
+        g_row, g_col = np.gradient(self._U_rep, self.cfg.resolution_m)
+        self._grad_rep = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
+        print("U_rep min/max", float(np.min(U_rep)), float(np.max(U_rep)))
+        print("D_obs min/max", float(np.min(D)), float(np.max(D[np.isfinite(D)])))
         self._compute_total_potential_and_gradient()
         self._grad = self._grad_total.copy()
 
@@ -252,7 +266,8 @@ class PotentialMapper:
         self._goal_world = None
         self._wall_segments = np.array([])
 
-
+    def get_repulsive_gradient(self) -> np.ndarray:
+        return self._grad_rep.copy()
 
     def get_prob_map(self) -> np.ndarray:
         """Return the accumulated probability map M_acc.
@@ -302,45 +317,8 @@ class PotentialMapper:
         self._goal_world = (fwd, left)
 
     def get_total_gradient(self) -> np.ndarray:
-        """Compute combined gradient: Repulsive (Away) + Attractive (Toward Goal).
-        
-        Total Gradient = Repulsive_Grad_Away + zeta * (Goal - Position)
-        This combines the avoidance vector with a pulling vector to the goal.
-        """
-        gv = self._grad.copy()
-        if self._goal_world is None:
-            return gv
-
-        # current coordinates of every cell in the HxW grid
-        rows = np.arange(self._n)
-        cols = np.arange(self._n)
-        
-        # Row (Vertical) = Forward (gz)
-        # origin is at -size/2
-        fwd_coords = rows * self.cfg.resolution_m + self._origin
-        
-        # Col (Horizontal) = Left/Right (gl)
-        # gl=0 is Left (origin_left), gl=N is Right (origin)
-        origin_left = -self._origin
-        left_coords = origin_left - cols * self.cfg.resolution_m
-        
-        target_fwd, target_left = self._goal_world
-        
-        # Conic Attraction: Normalized unit vector toward goal * zeta
-        dist_fwd = target_fwd - fwd_coords[:, np.newaxis]
-        dist_left = target_left - left_coords[np.newaxis, :]
-        
-        dist_total = np.sqrt(dist_fwd**2 + dist_left**2)
-        # Avoid division by zero
-        dist_total[dist_total == 0] = 1e-6
-        
-        att_fwd = self.cfg.zeta * (dist_fwd / dist_total)
-        att_left = self.cfg.zeta * (dist_left / dist_total)
-        
-        gv[..., 0] += att_fwd
-        gv[..., 1] += att_left
-        
-        return gv.astype(np.float32)
+        """Return the combined descent direction field (-∇U_total)."""
+        return self._grad_total.copy()
 
 
     def get_distance_to_obstacle(self) -> np.ndarray:
@@ -375,29 +353,22 @@ class PotentialMapper:
         self._U_att = np.sqrt(df * df + dl * dl).astype(np.float32)
 
     def _compute_total_potential_and_gradient(self) -> None:
-        """
-        U_total = k_rep * U_rep + k_att * U_att
-        grad_total = -∇U_total  (NEGATIVE gradient = direction to move)
-        """
+        self._compute_attractive_potential()
+        U_att_n = self._U_att / (float(np.nanmax(self._U_att)) + 1e-6)  # 0..1
+        self._U_total = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * U_att_n).astype(np.float32)
+
+        g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
+        self._grad_total[..., 0] = (-g_row).astype(np.float32)
+        self._grad_total[..., 1] = (-g_col).astype(np.float32)
+
+        # debug AFTER
         if self._goal_world is not None:
             r0 = c0 = self._n // 2
             gr, gc = self._goal_to_cell(*self._goal_world)
             print("U_rep start/goal", self._U_rep[r0, c0], self._U_rep[gr, gc],
                   "U_att start/goal", self._U_att[r0, c0], self._U_att[gr, gc],
                   "U_tot start/goal", self._U_total[r0, c0], self._U_total[gr, gc])
-            print("grad_total at start", self._grad_total[r0, c0], "grad_rep at start", self._grad[r0, c0])
-        self._compute_attractive_potential()
-
-        self._U_total = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * self._U_att).astype(np.float32)
-
-        # np.gradient returns [dU/drow, dU/dcol]
-        g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
-
-        # Convert to (grad_fwd, grad_left) for a motion direction:
-        # row corresponds to forward axis, col corresponds to left axis.
-        # We want DESCENT direction => negative gradient.
-        self._grad_total[..., 0] = (-g_row).astype(np.float32)  # toward decreasing potential
-        self._grad_total[..., 1] = (-g_col).astype(np.float32)
+            print("grad_total at start", self._grad_total[r0, c0])
 
     def get_total_potential(self) -> np.ndarray:
         """Return total potential U_total."""
@@ -607,7 +578,7 @@ class PotentialMapper:
         """
         n = self._n
         M_temp = np.zeros((n, n), dtype=np.float32)
-
+        seen = np.zeros((n, n), dtype=bool)
         if pts.shape[0] == 0:
             return M_temp
 
@@ -642,16 +613,20 @@ class PotentialMapper:
         c0 = n // 2
 
         for r1, c1 in zip(gz, gl):
-            update_ray_logodds(
-                L, r0, c0, int(r1), int(c1),
-                lo_free=self.cfg.lo_free,
-                lo_occ=self.cfg.lo_occ
-            )
+            update_ray_logodds(L, r0, c0, int(r1), int(c1),
+                               lo_free=self.cfg.lo_free,
+                               lo_occ=self.cfg.lo_occ)
+
+            # mark all traversed cells as seen (free or occ)
+            for rr, cc in bresenham(r0, c0, int(r1), int(c1)):
+                if 0 <= rr < n and 0 <= cc < n:
+                    seen[rr, cc] = True
 
         np.clip(L, self.cfg.lo_min, self.cfg.lo_max, out=L)
 
         # Convert log-odds -> probability
         M_temp = sigmoid(L).astype(np.float32)
+        M_temp[~seen] = np.nan
         return M_temp
 
 
