@@ -157,9 +157,9 @@ Example:
 ---
 ## Demo
 
-<p align="center">
-  <video src="assets/depth_optical.mp4" controls width="800"></video>
-</p>
+## Demo
+
+[Watch the demo video](assets/depth_optical.mp4)
 
 Example run of the **Depth + Optical Flow localization pipeline**  
 showing depth inference, optical flow tracking, and velocity integration.
