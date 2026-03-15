@@ -11,16 +11,6 @@ from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalF
 from sensor_msgs.msg import Imu
 
 class FlowDepthVelocityNode(Node):
-    """
-    SPARX ROS2 node:
-      - subscribes to RGB + Depth map (32FC1) + CameraInfo
-      - tracks features with LK optical flow
-      - samples depth for each tracked point
-      - converts pixel flow to meters/sec using per-point depth:
-            vx = Z * (du/dt)/fx
-            vy = Z * (dv/dt)/fy
-      - publishes robust (median) velocity
-    """
 
     def __init__(self):
         super().__init__("flow_depth_velocity_node")

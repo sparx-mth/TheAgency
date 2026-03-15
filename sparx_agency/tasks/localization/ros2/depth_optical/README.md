@@ -89,14 +89,14 @@ python3 -m sparx_agency.tasks.mapping.create_map_from_video \
 ### 2. Flow + Depth Velocity
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_imu \
   --ros-args -p use_sim_time:=true -p show_debug:=true
 ```
 
-### 3. velocity_integrator:
+### 3. velocity_integrator
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrator \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrator \
   --ros-args \
   -p use_sim_time:=true \
   -p target_frame:=/simple_drone/odom
@@ -155,3 +155,11 @@ Example:
 - err_rms: accumulated drift
 
 ---
+## Demo
+
+<p align="center">
+  <video src="assets/depth_optical.mp4" controls width="800"></video>
+</p>
+
+Example run of the **Depth + Optical Flow localization pipeline**  
+showing depth inference, optical flow tracking, and velocity integration.
