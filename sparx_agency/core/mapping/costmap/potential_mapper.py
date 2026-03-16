@@ -52,14 +52,15 @@ class PotentialMapperConfig:
     """
     resolution_m: float = 0.10
     size_m: float = 40.0
-    alpha: float = 0.50
-    occ_thresh: float = 0.55
+    alpha: float = 0.30
+    occ_thresh: float = 0.7
     sigma_m: float = 0.25          # Sharper decay for tighter navigation
-    repulse_radius_m: float = 1.0
-    inflation_radius_m: float = 0.15 # Reduced to allow passing through doorways
+    repulse_radius_m: float = 0.35
+    inflation_radius_m: float = 0.01 # Reduced to allow passing through doorways
     z_band: Tuple[float, float] = (0.05, 2.0) # Lowered to 0.05 to catch low chairs
     range_min_m: float = 0.2          # Lowered to 0.2 for close objects
     range_max_m: float = 15.0
+    robot_clearance_m: float = 0.15 # Ignore points within this radius of robot centre
 
     stride: int = 2
     pitch_deg: float = 0.0
@@ -79,7 +80,7 @@ class PotentialMapperConfig:
     # Attraction weight
     k_att: float = 1.0
     # Repulsion weight (if you want it)
-    k_rep: float = 3.0
+    k_rep: float = 2.5
 
     # Ray stride (optional): raycast only every Nth point endpoint for speed
     ray_endpoint_stride: int = 1
@@ -113,16 +114,16 @@ class PotentialMapper:
     """Orchestrates the full RGB → depth → occupancy → potential pipeline.
 
     The mapper maintains two internal probability maps (float32 H×W):
-      - ``_M_acc``: accumulated map updated with EMA each ``step()`` call.
-      - ``_M_temp``: single-frame map rebuilt from scratch each ``step()`` call.
+      - ``_M_acc``: accumulated map updated with EMA each ``update()`` call.
+      - ``_M_temp``: single-frame map rebuilt from scratch each ``update()`` call.
 
-    After each ``step()``, ``_U_rep`` (H×W) and ``_grad`` (H×W×2) are recomputed.
+    After each ``update()``, ``_U_rep`` (H×W) and ``_grad`` (H×W×2) are recomputed.
 
     Usage::
 
         mapper = PotentialMapper(PotentialMapperConfig())
         depth_m = depth_model.infer_depth(rgb)
-        mapper.step(depth_m, intrinsics)
+        mapper.update(point_cloud)
         prob  = mapper.get_prob_map()       # (H, W) float32
         U     = mapper.get_potential_map()  # (H, W) float32
         grad  = mapper.get_gradient_field() # (H, W, 2) float32
@@ -136,7 +137,10 @@ class PotentialMapper:
 
         n_cells = int(round(self.cfg.size_m / self.cfg.resolution_m))
         self._n = n_cells  # grid is n×n
-        self._origin = -0.5 * self.cfg.size_m  # world origin (m) for both axes
+        # Forward axis: row 0 = robot (fwd=0), row n-1 = far (fwd=size_m)
+        self._origin_fwd = 0.0
+        # Left axis: col 0 = far-left, col n//2 = centre, col n-1 = far-right
+        self._origin_left = 0.5 * self.cfg.size_m
 
         # Float-space EMA maps
         self._M_acc: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
@@ -166,63 +170,12 @@ class PotentialMapper:
         self._potential = PotentialFieldLayer(
             occ_thresh=self.cfg.occ_thresh,
             sigma_m=self.cfg.sigma_m,
-            k_rep=5.0, # Increased from 1.0 to 5.0 for stronger avoidance
+            k_rep=1.5,  # keep inside-layer repulsion moderate
             repulse_radius_m=self.cfg.repulse_radius_m,
             inflation_radius_m=self.cfg.inflation_radius_m,
             u_max=1.0,
             unknown_as_obstacle=False,
         )
-
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def step(self, depth_m: np.ndarray, intrinsics: Intrinsics) -> None:
-        """Process one depth frame.
-
-        1. Back-project ``depth_m`` → 3-D point cloud (base frame).
-        2. Filter by range and height band.
-        3. Bin XY hits into ``M_temp`` (probability per cell).
-        4. Apply EMA: ``M_acc = (1-α)*M_acc + α*M_temp``.
-        5. Recompute ``U_rep`` and ``∇U_rep`` from ``M_acc``.
-
-        Args:
-            depth_m: HxW float32 depth map in metres.
-            intrinsics: Camera intrinsics with (fx, fy, cx, cy).
-
-        Complexity: O(H*W/stride²) for backprojection +
-                    O(n²) for potential field distance transform.
-        """
-        depth_m = np.asarray(depth_m, dtype=np.float32)
-
-        pts_base = self._backproject(depth_m, intrinsics)
-        pts_filtered = self._filter_cloud(pts_base)
-        self._M_temp = self._build_temp_map(pts_filtered)
-
-        # EMA accumulation
-        mask = np.isfinite(self._M_temp)
-        self._M_acc[mask] = (1.0 - self.cfg.alpha) * self._M_acc[mask] + self.cfg.alpha * self._M_temp[mask]
-
-        # 5. Wall Segmentation (Revision 5)
-        self._M_walls = self._detect_walls_and_clean()
-
-        # 6. Potential field from CLEANED wall map (prevents merging artifacts)
-        # We blend the walls + the points to preserve both straight lines and chairs
-        M_combined = self._M_acc
-        U_rep, D = self._potential.compute_from_prob_grid(M_combined, self.cfg.resolution_m)
-        self._U_rep = U_rep
-        self._D_obs = D
-
-        # repulsive gradient (optional debug)
-        g_row, g_col = np.gradient(self._U_rep, self.cfg.resolution_m)
-        self._grad_rep = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
-
-        # build total potential + total descent direction
-        self._compute_total_potential_and_gradient()
-
-        # make the public gradient be the total one
-        self._grad = self._grad_total.copy()
 
     def update(self, point_cloud: np.ndarray) -> None:
         """
@@ -244,15 +197,64 @@ class PotentialMapper:
         # 4. Detect walls and compute potential
         self._M_walls = self._detect_walls_and_clean()
         U_rep, D = self._potential.compute_from_prob_grid(self._M_acc, self.cfg.resolution_m)
+
+        # Smooth U_rep to kill "laser" gradients caused by hard boundaries
+        try:
+            import cv2
+            U_rep = cv2.GaussianBlur(U_rep.astype(np.float32), (0, 0), sigmaX=1.0)
+        except Exception:
+            pass
+
         self._U_rep = U_rep
         self._D_obs = D
 
-        # repulsive gradient (optional debug)
+        # Repulsive gradient (optional debug / inspection)
         g_row, g_col = np.gradient(self._U_rep, self.cfg.resolution_m)
         self._grad_rep = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
-        print("U_rep min/max", float(np.min(U_rep)), float(np.max(U_rep)))
-        print("D_obs min/max", float(np.min(D)), float(np.max(D[np.isfinite(D)])))
-        self._compute_total_potential_and_gradient()
+
+        # # Clamp repulsive magnitude to prevent extreme spikes dominating the blend
+        # rep_norm = np.sqrt(self._grad_rep[..., 0] ** 2 + self._grad_rep[..., 1] ** 2) + 1e-6
+        # max_rep = 5.0  # tune 2..10
+        # scale = np.minimum(1.0, max_rep / rep_norm).astype(np.float32)
+        # self._grad_rep = self._grad_rep * scale[..., None]
+
+        # Attractive unit vector field toward goal
+        if self._goal_world is None:
+            v_att = np.zeros((self._n, self._n, 2), dtype=np.float32)
+        else:
+            goal_fwd, goal_left = self._goal_world
+
+            rows = np.arange(self._n, dtype=np.float32)
+            cols = np.arange(self._n, dtype=np.float32)
+
+            # World coords for each cell center
+            fwd = self._origin_fwd + rows[:, None] * self.cfg.resolution_m
+            left = self._origin_left - cols[None, :] * self.cfg.resolution_m
+
+            df = goal_fwd - fwd
+            dl = goal_left - left
+            norm = np.sqrt(df * df + dl * dl) + 1e-6
+            v_att = np.stack([df / norm, dl / norm], axis=-1).astype(np.float32)  # (n,n,2)
+
+        # Repulsive direction (already computed): points away from obstacles
+        v_rep = self._grad_rep if self._grad_rep is not None else np.zeros_like(v_att)
+
+        # Weight repulsion by distance-to-obstacle: strong near obstacles, fades far
+        d0 = float(self.cfg.repulse_radius_m)  # influence radius
+        d = self._D_obs
+        # Near-obstacle weight: 1 near obstacle, 0 far away
+        w_near = np.clip((d0 - d) / (d0 + 1e-6), 0.0, 1.0).astype(np.float32)
+        w_near = w_near[..., None]  # (n,n,1)
+        # Far field: weak goal only
+        v_far = 0.01 * v_att
+        # Near field: weighted sum of both
+        v_near = (self.cfg.k_att* v_att) + (self.cfg.k_rep * v_rep)
+        # Blend by distance
+        v = (1.0 - w_near) * v_far + w_near * v_near
+
+        # Blend and normalize
+        v_norm = np.sqrt(v[..., 0] ** 2 + v[..., 1] ** 2) + 1e-6
+        self._grad_total = (v / v_norm[..., None]).astype(np.float32)
         self._grad = self._grad_total.copy()
 
     def reset(self) -> None:
@@ -308,7 +310,7 @@ class PotentialMapper:
         Returns:
             (H, W, 2) float32 where [..., 0] = grad_fwd, [..., 1] = grad_left.
 
-        Complexity: O(1) — gradient is pre-computed in ``step()``.
+        Complexity: O(1) — gradient is pre-computed in ``update()``.
         """
         return self._grad.copy()
 
@@ -343,9 +345,8 @@ class PotentialMapper:
         rows = np.arange(self._n, dtype=np.float32)
         cols = np.arange(self._n, dtype=np.float32)
 
-        fwd_coords = rows * self.cfg.resolution_m + self._origin  # shape (n,)
-        origin_left = -self._origin
-        left_coords = origin_left - cols * self.cfg.resolution_m  # shape (n,)
+        fwd_coords = rows * self.cfg.resolution_m + self._origin_fwd  # shape (n,)
+        left_coords = self._origin_left - cols * self.cfg.resolution_m  # shape (n,)
 
         df = goal_fwd - fwd_coords[:, None]  # (n,1) broadcast to (n,n)
         dl = goal_left - left_coords[None, :]  # (1,n) broadcast to (n,n)
@@ -363,7 +364,8 @@ class PotentialMapper:
 
         # debug AFTER
         if self._goal_world is not None:
-            r0 = c0 = self._n // 2
+            r0 = 0
+            c0 = self._n // 2
             gr, gc = self._goal_to_cell(*self._goal_world)
             print("U_rep start/goal", self._U_rep[r0, c0], self._U_rep[gr, gc],
                   "U_att start/goal", self._U_att[r0, c0], self._U_att[gr, gc],
@@ -385,10 +387,8 @@ class PotentialMapper:
         n = self._n
         res = self.cfg.resolution_m
 
-        gr = int((goal_fwd_m - self._origin) / res)
-
-        origin_left = -self._origin
-        gc = int((origin_left - goal_left_m) / res)
+        gr = int((goal_fwd_m - self._origin_fwd) / res)
+        gc = int((self._origin_left - goal_left_m) / res)
 
         gr = max(0, min(n - 1, gr))
         gc = max(0, min(n - 1, gc))
@@ -467,9 +467,9 @@ class PotentialMapper:
         segments = []
         min_len_cells = self.cfg.min_wall_length_m / self.cfg.resolution_m
         
-        # Camera is at the center of the grid 
+        # Camera is at row 0, centre column (robot position)
         cam_col = self._n / 2.0
-        cam_row = self._n / 2.0
+        cam_row = 0.0
         
         # We filter segments that are roughly parallel to the camera ray (flying pixels)
         # Cosine of 25 degrees (to be safe and catch slightly curved artifacts)
@@ -513,7 +513,7 @@ class PotentialMapper:
                             continue
                             
                     # Draw only the valid segment into the cleaned mask
-                    cv2.line(clean_binary, (p1[0], p1[1]), (p2[0], p2[1]), 255, thickness=8)
+                    cv2.line(clean_binary, (p1[0], p1[1]), (p2[0], p2[1]), 255, thickness=2)
 
         # Now apply HoughLinesP on the clean_binary mask to merge collinear segments correctly!
         max_gap = int(self.cfg.max_wall_gap_m / self.cfg.resolution_m)
@@ -531,7 +531,7 @@ class PotentialMapper:
             for line in self._wall_segments:
                 x1, y1, x2, y2 = line
                 # Draw the final merged straight walls into the probability map with thickness
-                cv2.line(m_walls, (x1, y1), (x2, y2), 1.0, thickness=8)
+                cv2.line(m_walls, (x1, y1), (x2, y2), 1.0, thickness=1)
         else:
             self._wall_segments = np.array([])
 
@@ -586,9 +586,17 @@ class PotentialMapper:
         zf = pts[:, 2]  # Forward
         xl = pts[:, 0]  # Left
 
-        gz = ((zf - self._origin) / self.cfg.resolution_m).astype(np.int32)
-        origin_left = -self._origin
-        gl = ((origin_left - xl) / self.cfg.resolution_m).astype(np.int32)
+        # 0. Filter points too close to robot centre (self-repulsion prevention)
+        dist_sq = xl*xl + zf*zf
+        mask_far = dist_sq > (self.cfg.robot_clearance_m ** 2)
+        zf = zf[mask_far]
+        xl = xl[mask_far]
+
+        if zf.size == 0:
+            return M_temp
+
+        gz = ((zf - self._origin_fwd) / self.cfg.resolution_m).astype(np.int32)
+        gl = ((self._origin_left - xl) / self.cfg.resolution_m).astype(np.int32)
 
         inb = (gz >= 0) & (gz < n) & (gl >= 0) & (gl < n)
         gz = gz[inb]
@@ -607,10 +615,11 @@ class PotentialMapper:
         gz = (idx // n).astype(np.int32)
         gl = (idx % n).astype(np.int32)
 
+
         # Log-odds temp grid
         L = np.zeros((n, n), dtype=np.float32)
-        r0 = n // 2
-        c0 = n // 2
+        r0 = 0       # robot at row 0 (forward = 0)
+        c0 = n // 2   # robot at centre column
 
         for r1, c1 in zip(gz, gl):
             update_ray_logodds(L, r0, c0, int(r1), int(c1),
