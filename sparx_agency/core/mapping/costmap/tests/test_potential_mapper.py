@@ -372,5 +372,66 @@ class TestWallSegmentation:
         assert m_walls[10, 4] == 0.0 or m_walls[10, 4] < 1.0, "Doorway was incorrectly bridged by ray-aligned false wall!"
 
 
+# ---------------------------------------------------------------------------
+# Robot Position (Bottom-Centre POV)
+# ---------------------------------------------------------------------------
 
+class TestRobotPosition:
+    """Verify that the robot origin sits at grid (n-1, n//2) — bottom-centre."""
 
+    def test_build_temp_map_raycasting_origin(self):
+        """_build_temp_map must raycast from row 0 (robot), not the far edge."""
+        cfg = PotentialMapperConfig(
+            size_m=10.0, resolution_m=1.0,
+            range_min_m=0.1, range_max_m=30.0,
+            z_band=(-3.0, 3.0),
+        )
+        mapper = PotentialMapper(cfg)
+        n = mapper._n
+
+        # Target: Forward=3.0, Left=0.0
+        # In the new coordinate system:
+        # gz = (zf - _origin_fwd) / res = (3.0 - 0) / 1.0 = 3
+        # gl = (origin_left - xl) / res = (5.0 - 0) / 1.0 = 5
+        fwd, left = 3.0, 0.0
+        expected_row = 3
+        expected_col = 5
+
+        pts = np.array([[left, 1.0, fwd]], dtype=np.float32)  # [Left, Up, Forward]
+        M_temp = mapper._build_temp_map(pts)
+
+        # The endpoint cell should have high probability
+        assert M_temp[expected_row, expected_col] > 0.5, (
+            f"Endpoint cell ({expected_row}, {expected_col}) should be occupied, "
+            f"got {M_temp[expected_row, expected_col]}"
+        )
+
+        # The robot cell (row 0, col n//2) should be free (≤0.5 or NaN).
+        robot_val = M_temp[0, n // 2]
+        assert np.isnan(robot_val) or robot_val <= 0.5, (
+            f"Robot cell (row 0, col {n//2}) should be free, got {robot_val}"
+        )
+
+    def test_world_to_screen_bottom_centre(self):
+        """world_to_screen(0,0) must map to (PANE_W//2, PANE_H-1)."""
+        PANE_W = 320
+        PANE_H = 240  # example aspect ratio
+        map_size = 6.5
+        half = 0.5 * map_size
+
+        def world_to_screen(fwd, left):
+            fwd = max(0.0, min(map_size, fwd))
+            left = max(-half, min(half, left))
+            sy = int((1.0 - fwd / map_size) * (PANE_H - 1))
+            sx = int((0.5 - left / map_size) * (PANE_W - 1))
+            return sx, sy
+
+        sx, sy = world_to_screen(0.0, 0.0)
+        # int(0.5 * (PANE_W - 1)) = 159 due to truncation; accept ±1
+        assert abs(sx - PANE_W // 2) <= 1, f"Expected sx≈{PANE_W // 2}, got {sx}"
+        assert sy == PANE_H - 1, f"Expected sy={PANE_H - 1}, got {sy}"
+
+        # Far edge (forward=map_size, left=0) should be top-centre
+        sx_far, sy_far = world_to_screen(map_size, 0.0)
+        assert abs(sx_far - PANE_W // 2) <= 1, f"Expected sx≈{PANE_W // 2}, got {sx_far}"
+        assert sy_far == 0, f"Expected sy=0, got {sy_far}"
