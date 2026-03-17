@@ -133,9 +133,6 @@ class PotentialMapper:
     ) -> None:
         """
         Update maps from a 3D cloud in the current robot frame.
-
-        The accumulated map is first warped by the supplied ego-motion delta,
-        then blended with the current-frame temporary map.
         """
         pts = point_cloud.reshape(-1, 3) if len(point_cloud.shape) == 3 else point_cloud
         pts_filtered = self._filter_cloud(pts)
@@ -170,36 +167,60 @@ class PotentialMapper:
         self._U_rep = u_rep
         self._D_obs = d_obs
 
-        g_row, g_col = np.gradient(self._U_rep, self.cfg.resolution_m)
-        self._grad_rep = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
+        # --- Compute attractive potential ---
+        self._compute_attractive_potential()
 
-        if self._goal_world is None:
-            v_att = np.zeros((self._n, self._n, 2), dtype=np.float32)
-        else:
-            goal_fwd, goal_left = self._goal_world
-            rows = np.arange(self._n, dtype=np.float32)
-            cols = np.arange(self._n, dtype=np.float32)
-            fwd = self._origin_fwd + rows[:, None] * self.cfg.resolution_m
-            left = self._origin_left - cols[None, :] * self.cfg.resolution_m
-            df = goal_fwd - fwd
-            dl = goal_left - left
-            norm = np.sqrt(df * df + dl * dl) + 1e-6
-            v_att = np.stack([df / norm, dl / norm], axis=-1).astype(np.float32)
+        # --- Normalize BOTH potentials to [0, 1] before combining ---
+        # This ensures attraction and repulsion have comparable magnitude
+        rep_max = float(np.max(self._U_rep)) + 1e-8
+        att_max = float(np.max(self._U_att)) + 1e-8
+        u_rep_norm = self._U_rep / rep_max   # 0..1
+        u_att_norm = self._U_att / att_max   # 0..1
 
-        v_rep = self._grad_rep if self._grad_rep is not None else np.zeros_like(v_att)
+        self._U_total = (
+            self.cfg.k_rep * u_rep_norm + self.cfg.k_att * u_att_norm
+        ).astype(np.float32)
 
-        d0 = float(self.cfg.repulse_radius_m)
-        d = self._D_obs
-        # Smooth blend factor: 1.0 at obstacle surface, 0.0 beyond d0
-        w_rep = np.clip((d0 - d) / (d0 + 1e-6), 0.0, 1.0).astype(np.float32)[..., None]
+        # --- Single gradient: -∇U_total ---
+        g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
+        raw_grad = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
 
-        # Always show meaningful attraction; repulsion overrides near obstacles
-        v = self.cfg.k_att * v_att + w_rep * self.cfg.k_rep * v_rep
-
-        v_norm = np.sqrt(v[..., 0] ** 2 + v[..., 1] ** 2) + 1e-6
-        self._grad_total = (v / v_norm[..., None]).astype(np.float32)
+        # Normalize to unit direction vectors
+        mag = np.sqrt(raw_grad[..., 0] ** 2 + raw_grad[..., 1] ** 2) + 1e-8
+        self._grad_total = (raw_grad / mag[..., None]).astype(np.float32)
         self._grad = self._grad_total.copy()
-        self._compute_total_potential_and_gradient()
+
+        # Keep repulsive-only gradient for inspection
+        g_row_r, g_col_r = np.gradient(self._U_rep, self.cfg.resolution_m)
+        self._grad_rep = np.stack([-g_row_r, -g_col_r], axis=-1).astype(np.float32)
+
+        # if self._goal_world is None:
+        #     v_att = np.zeros((self._n, self._n, 2), dtype=np.float32)
+        # else:
+        #     goal_fwd, goal_left = self._goal_world
+        #     rows = np.arange(self._n, dtype=np.float32)
+        #     cols = np.arange(self._n, dtype=np.float32)
+        #     fwd = self._origin_fwd + rows[:, None] * self.cfg.resolution_m
+        #     left = self._origin_left - cols[None, :] * self.cfg.resolution_m
+        #     df = goal_fwd - fwd
+        #     dl = goal_left - left
+        #     norm = np.sqrt(df * df + dl * dl) + 1e-6
+        #     v_att = np.stack([df / norm, dl / norm], axis=-1).astype(np.float32)
+        #
+        # v_rep = self._grad_rep if self._grad_rep is not None else np.zeros_like(v_att)
+        #
+        # d0 = float(self.cfg.repulse_radius_m)
+        # d = self._D_obs
+        # # Smooth blend factor: 1.0 at obstacle surface, 0.0 beyond d0
+        # w_rep = np.clip((d0 - d) / (d0 + 1e-6), 0.0, 1.0).astype(np.float32)[..., None]
+        #
+        # # Always show meaningful attraction; repulsion overrides near obstacles
+        # v = self.cfg.k_att * v_att + w_rep * self.cfg.k_rep * v_rep
+        #
+        # v_norm = np.sqrt(v[..., 0] ** 2 + v[..., 1] ** 2) + 1e-6
+        # self._grad_total = (v / v_norm[..., None]).astype(np.float32)
+        # self._grad = self._grad_total.copy()
+        # self._compute_total_potential_and_gradient()
 
     def get_nav_map(self) -> np.ndarray:
         """Return the fused occupancy grid used for potential-field generation."""
@@ -366,24 +387,24 @@ class PotentialMapper:
         self._compute_attractive_potential()
         return self._U_att.copy()
 
-    def _compute_total_potential_and_gradient(self) -> None:
-        self._compute_attractive_potential()
-        U_att_n = self._U_att / (float(np.nanmax(self._U_att)) + 1e-6)  # 0..1
-        self._U_total = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * U_att_n).astype(np.float32)
-
-        g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
-        self._grad_total[..., 0] = (-g_row).astype(np.float32)
-        self._grad_total[..., 1] = (-g_col).astype(np.float32)
-
-        # debug AFTER
-        if self._goal_world is not None:
-            r0 = 0
-            c0 = self._n // 2
-            gr, gc = self._goal_to_cell(*self._goal_world)
-            print("U_rep start/goal", self._U_rep[r0, c0], self._U_rep[gr, gc],
-                  "U_att start/goal", self._U_att[r0, c0], self._U_att[gr, gc],
-                  "U_tot start/goal", self._U_total[r0, c0], self._U_total[gr, gc])
-            print("grad_total at start", self._grad_total[r0, c0])
+    # def _compute_total_potential_and_gradient(self) -> None:
+    #     self._compute_attractive_potential()
+    #     U_att_n = self._U_att / (float(np.nanmax(self._U_att)) + 1e-6)  # 0..1
+    #     self._U_total = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * U_att_n).astype(np.float32)
+    #
+    #     g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
+    #     self._grad_total[..., 0] = (-g_row).astype(np.float32)
+    #     self._grad_total[..., 1] = (-g_col).astype(np.float32)
+    #
+    #     # debug AFTER
+    #     if self._goal_world is not None:
+    #         r0 = 0
+    #         c0 = self._n // 2
+    #         gr, gc = self._goal_to_cell(*self._goal_world)
+    #         print("U_rep start/goal", self._U_rep[r0, c0], self._U_rep[gr, gc],
+    #               "U_att start/goal", self._U_att[r0, c0], self._U_att[gr, gc],
+    #               "U_tot start/goal", self._U_total[r0, c0], self._U_total[gr, gc])
+    #         print("grad_total at start", self._grad_total[r0, c0])
 
     def get_total_potential(self) -> np.ndarray:
         """Return total potential U_total."""
