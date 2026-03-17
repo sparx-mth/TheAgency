@@ -66,100 +66,116 @@ def main():
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret: break
+        if not ret:
+            break
 
         frame_h, frame_w = frame.shape[:2]
         PANE_H = int(PANE_W * frame_h / frame_w)
 
-        # 1. Depth & Mapping
         depth_raw, point_cloud = depth_model.infer_all(frame)
         potential_mapper.update(point_cloud)
 
-        # 2. Potential Calculation
-        U_total = potential_mapper.get_total_potential()
-        U_rep = potential_mapper.get_potential_map()
+        u_total = potential_mapper.get_total_potential()
+        u_rep = potential_mapper.get_potential_map()
+        m_temp = np.flipud(potential_mapper.get_temp_map())
+        m_acc = np.flipud(potential_mapper.get_prob_map())
+        m_nav = np.flipud(potential_mapper.get_nav_map())
         n = potential_mapper.grid_shape[0]
 
-        # 3. Coordinate Mapping
         map_size = potential_mapper.cfg.size_m
         half = 0.5 * map_size
 
         def world_to_screen(fwd, left):
             fwd = max(0.0, min(map_size, fwd))
             left = max(-half, min(half, left))
-            sy = int((1.0 - fwd / map_size) * (PANE_H - 1))
-            sx = int((0.5 - left / map_size) * (PANE_W - 1))
-            return sx, sy
+            y_px = int((1.0 - fwd / map_size) * (PANE_H - 1))
+            x_px = int((0.5 - left / map_size) * (PANE_W - 1))
+            return x_px, y_px
 
-        # 4. Dashboard Panes
         vis_rgb = cv2.resize(frame, (PANE_W, PANE_H))
         depth_norm = cv2.normalize(depth_raw, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         vis_depth = cv2.resize(cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET), (PANE_W, PANE_H))
 
-        # OCCUPANCY: Use flipud so row 0 (robot) is at screen bottom
-        prob_map_raw = potential_mapper.get_prob_map()
-        prob_map = np.flipud(prob_map_raw)
-        p_vis = np.nan_to_num(prob_map, nan=0.0)
-        vis_prob = cv2.resize(cv2.applyColorMap((p_vis * 255).astype(np.uint8), cv2.COLORMAP_HOT), (PANE_W, PANE_H))
+        temp_vis = np.nan_to_num(m_temp, nan=0.0)
+        acc_vis = np.nan_to_num(m_acc, nan=0.0)
+        nav_vis = np.nan_to_num(m_nav, nan=0.0)
 
-        # POTENTIAL: use flipud
-        U_vis = 0.7 * U_total + 0.3 * U_rep
-        U_total_vis = np.flipud(U_vis)
-        pot_norm = cv2.normalize(U_total_vis, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        vis_temp = cv2.resize(cv2.applyColorMap((temp_vis * 255).astype(np.uint8), cv2.COLORMAP_HOT), (PANE_W, PANE_H))
+        vis_acc = cv2.resize(cv2.applyColorMap((acc_vis * 255).astype(np.uint8), cv2.COLORMAP_BONE), (PANE_W, PANE_H))
+
+        u_vis = 0.7 * u_total + 0.3 * u_rep
+        u_total_vis = np.flipud(u_vis)
+        pot_norm = cv2.normalize(u_total_vis, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         vis_pot = cv2.resize(cv2.applyColorMap(pot_norm, cv2.COLORMAP_VIRIDIS), (PANE_W, PANE_H))
 
-        # 5. Fixed-Length Arrows
+        occ = nav_vis > potential_mapper.cfg.occ_thresh
+        yellow_layer = np.zeros_like(vis_pot)
+        occ_img = cv2.resize(occ.astype(np.uint8) * 255, (PANE_W, PANE_H), interpolation=cv2.INTER_NEAREST)
+        yellow_layer[occ_img > 0] = (0, 255, 255)
+        vis_pot = cv2.addWeighted(vis_pot, 1.0, yellow_layer, 0.6, 0)
+
         grad = potential_mapper.get_total_gradient()
         res = potential_mapper.cfg.resolution_m
         step = max(1, n // 18)
-        ARROW_LEN = 10.0 # Fixed display length (pixels)
+        arrow_len = 10.0
 
         for r in range(0, n, step):
             for c in range(0, n, step):
                 f_val = r * res
-                l_val = half - c * res # col 0 is far-left
+                l_val = half - c * res
                 sx, sy = world_to_screen(f_val, l_val)
                 v = grad[r, c]
                 mag = np.hypot(v[0], v[1])
-                if mag < 0.2: continue # Ignore weak fields for clarity
-
-                # Normalized direction
-                dx = int(-v[1] * ARROW_LEN)
-                dy = int(-v[0] * ARROW_LEN)
+                if mag < 0.2:
+                    continue
+                dx = int(-v[1] * arrow_len)
+                dy = int(-v[0] * arrow_len)
                 if 0 <= sx < PANE_W and 0 <= sy < PANE_H:
                     cv2.arrowedLine(vis_pot, (sx, sy), (sx + dx, sy + dy), (255, 255, 0), 1, tipLength=0.3)
 
-        # 6. Navigation Overlays (Alpha-Transparent Yellow)
         gx, gy = world_to_screen(args.goal_fwd, args.goal_left)
         rx, ry = world_to_screen(0.0, 0.0)
-        
-        occ = np.nan_to_num(prob_map, nan=0.0) > potential_mapper.cfg.occ_thresh
-        yellow_layer = np.zeros_like(vis_pot)
-        occ_img = cv2.resize(occ.astype(np.uint8) * 255, (PANE_W, PANE_H), interpolation=cv2.INTER_NEAREST)
-        yellow_layer[occ_img > 0] = (0, 255, 255)
-        vis_pot = cv2.addWeighted(vis_pot, 1.0, yellow_layer, 0.6, 0) # Alpha overlay
-
         cv2.drawMarker(vis_pot, (rx, ry), (0, 0, 255), cv2.MARKER_CROSS, 20, 1)
         cv2.drawMarker(vis_pot, (gx, gy), (255, 255, 255), cv2.MARKER_TILTED_CROSS, 30, 2)
         cv2.circle(vis_pot, (rx, ry), 4, (255, 0, 0), -1)
 
-        # Decision Arrow (Red) - using robot cell (0, n//2)
         rv = grad[0, n // 2]
         dec_dx = int(-rv[1] * 40)
         dec_dy = int(-rv[0] * 40)
         cv2.arrowedLine(vis_pot, (rx, ry), (rx + dec_dx, ry + dec_dy), (0, 0, 255), 2)
 
-        # Calibration Print
-        if click_pt:
-            cv2.putText(vis_pot, f"Last Click: {click_pt[0]:.2f}m, {click_pt[1]:.2f}m", (10, PANE_H - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(vis_rgb, "RGB", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(vis_depth, "Depth", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(vis_temp, "Temp occupancy", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(vis_acc, "Accumulated occupancy", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        u_att = np.flipud(potential_mapper.get_attractive_potential())
+        att_norm = cv2.normalize(u_att, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        vis_att = cv2.resize(cv2.applyColorMap(att_norm, cv2.COLORMAP_COOL), (PANE_W, PANE_H))
+        # Draw goal + robot markers on attractive pane too
+        cv2.drawMarker(vis_att, (rx, ry), (0, 0, 255), cv2.MARKER_CROSS, 20, 1)
+        cv2.drawMarker(vis_att, (gx, gy), (255, 255, 255), cv2.MARKER_TILTED_CROSS, 30, 2)
+        cv2.putText(vis_att, "Attractive Field", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        # Final Stack
+        cv2.putText(vis_pot, "Nav Potential (att+rep)", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        if click_pt is not None:
+            cv2.putText(
+                vis_pot,
+                f"Last Click: {click_pt[0]:.2f}m, {click_pt[1]:.2f}m",
+                (10, PANE_H - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 255, 255),
+                1,
+            )
+
         top = np.hstack((vis_rgb, vis_depth))
-        bottom = np.hstack((vis_prob, vis_pot))
-        cv2.imshow("Sparx Navigator", np.vstack((top, bottom)))
+        middle = np.hstack((vis_temp, vis_acc))
+        bottom = np.hstack((vis_att, vis_pot))
+        cv2.imshow("Sparx Navigator", np.vstack((top, middle, bottom)))
 
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
     cap.release()
     cv2.destroyAllWindows()
