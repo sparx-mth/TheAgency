@@ -31,62 +31,33 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid_config import sigmoid,
 
 @dataclass
 class PotentialMapperConfig:
-    """Configuration for ``PotentialMapper``.
-
-    Args:
-        resolution_m: Grid cell size in metres.
-        size_m: Side length of the square map in metres.
-        alpha: EMA blending factor in (0, 1].
-            α = 1.0 means no decay (each frame completely replaces the past).
-            α ≈ 0.3 gives smooth, slow-decaying memory.
-        occ_thresh: Probability threshold above which a cell is treated as
-            occupied when computing the potential field.
-        sigma_m: Gaussian sigma (metres) for the repulsive potential falloff.
-        inflation_radius_m: Hard inflation zone around obstacles (metres).
-        z_band: (z_min, z_max) in the base frame; only points within this band
-            are classified as obstacles for 2-D mapping.
-        range_min_m: Minimum depth for valid cloud points.
-        range_max_m: Maximum depth for valid cloud points.
-        stride: Pixel sampling stride when back-projecting depth to a cloud.
-            stride=2 gives 4× speedup over full-resolution.
-    """
     resolution_m: float = 0.10
     size_m: float = 40.0
     alpha: float = 0.30
     occ_thresh: float = 0.7
-    sigma_m: float = 0.25          # Sharper decay for tighter navigation
+    sigma_m: float = 0.25
     repulse_radius_m: float = 0.35
-    inflation_radius_m: float = 0.01 # Reduced to allow passing through doorways
-    z_band: Tuple[float, float] = (0.05, 2.0) # Lowered to 0.05 to catch low chairs
-    range_min_m: float = 0.2          # Lowered to 0.2 for close objects
+    inflation_radius_m: float = 0.01
+    z_band: Tuple[float, float] = (0.05, 2.0)
+    range_min_m: float = 0.2
     range_max_m: float = 15.0
-    robot_clearance_m: float = 0.15 # Ignore points within this radius of robot centre
-
+    robot_clearance_m: float = 0.15
     stride: int = 2
     pitch_deg: float = 0.0
     height_m: float = 1.0
-    zeta: float = 0.5           # Navigation gain (normalized attraction strength)
-    
-    # Wall Segmentation (Revision 5)
-    min_wall_length_m: float = 0.3 # Min length to be a "wall" segment
-    max_wall_gap_m: float = 0.15    # Max gap to merge collinear segments
-
-    # Log-odds raycasting update
-    lo_occ: float = 2.0  # occupied evidence
-    lo_free: float = -0.7  # free evidence
+    zeta: float = 0.5
+    min_wall_length_m: float = 0.3
+    max_wall_gap_m: float = 0.15
+    lo_occ: float = 2.0
+    lo_free: float = -0.7
     lo_min: float = -3.5
     lo_max: float = 3.5
-
-    # Attraction weight
     k_att: float = 1.0
-    # Repulsion weight (if you want it)
     k_rep: float = 2.5
-
-    # Ray stride (optional): raycast only every Nth point endpoint for speed
     ray_endpoint_stride: int = 1
-
-
-
+    nav_memory_weight: float = 0.60
+    unknown_decay: float = 0.995
+    use_temp_for_navigation: bool = True
 
     def __post_init__(self) -> None:
         if not (0.0 < self.alpha <= 1.0):
@@ -104,167 +75,204 @@ class PotentialMapperConfig:
         z_min, z_max = self.z_band
         if z_max <= z_min:
             raise ValueError("z_band[1] must be > z_band[0].")
-
+        if not (0.0 <= self.nav_memory_weight <= 1.0):
+            raise ValueError("nav_memory_weight must be in [0, 1].")
+        if not (0.0 < self.unknown_decay <= 1.0):
+            raise ValueError("unknown_decay must be in (0, 1].")
 
 # ---------------------------------------------------------------------------
 # Mapper
 # ---------------------------------------------------------------------------
 
 class PotentialMapper:
-    """Orchestrates the full RGB → depth → occupancy → potential pipeline.
-
-    The mapper maintains two internal probability maps (float32 H×W):
-      - ``_M_acc``: accumulated map updated with EMA each ``update()`` call.
-      - ``_M_temp``: single-frame map rebuilt from scratch each ``update()`` call.
-
-    After each ``update()``, ``_U_rep`` (H×W) and ``_grad`` (H×W×2) are recomputed.
-
-    Usage::
-
-        mapper = PotentialMapper(PotentialMapperConfig())
-        depth_m = depth_model.infer_depth(rgb)
-        mapper.update(point_cloud)
-        prob  = mapper.get_prob_map()       # (H, W) float32
-        U     = mapper.get_potential_map()  # (H, W) float32
-        grad  = mapper.get_gradient_field() # (H, W, 2) float32
-
-    Args:
-        cfg: Mapper configuration.
-    """
-
     def __init__(self, cfg: Optional[PotentialMapperConfig] = None) -> None:
         self.cfg = cfg or PotentialMapperConfig()
 
         n_cells = int(round(self.cfg.size_m / self.cfg.resolution_m))
-        self._n = n_cells  # grid is n×n
-        # Forward axis: row 0 = robot (fwd=0), row n-1 = far (fwd=size_m)
+        self._n = n_cells
         self._origin_fwd = 0.0
-        # Left axis: col 0 = far-left, col n//2 = centre, col n-1 = far-right
         self._origin_left = 0.5 * self.cfg.size_m
 
-        # Float-space EMA maps
         self._M_acc: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
         self._M_temp: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
+        self._M_nav: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
 
-        # Derived outputs (computed lazily after step)
         self._U_rep: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
         self._D_obs: np.ndarray = np.full((n_cells, n_cells), np.inf, dtype=np.float32)
         self._grad: np.ndarray = np.zeros((n_cells, n_cells, 2), dtype=np.float32)
         self._grad_rep = None
 
-        # Ray cache
         self._rays: Optional[np.ndarray] = None
         self._last_intrinsics: Optional[Intrinsics] = None
 
-        self._goal_world: Optional[Tuple[float, float]] = None # (fwd, left) in metres
-        
-        # Wall segments (Revision 5)
-        self._wall_segments: np.ndarray = np.array([]) # [N, 4] for (x1, y1, x2, y2) in grid coords
+        self._goal_world: Optional[Tuple[float, float]] = None
+        self._wall_segments: np.ndarray = np.array([])
         self._M_walls: np.ndarray = np.zeros((n_cells, n_cells), dtype=np.float32)
 
         self._U_att = np.zeros((self._n, self._n), dtype=np.float32)
         self._U_total = np.zeros((self._n, self._n), dtype=np.float32)
         self._grad_total = np.zeros((self._n, self._n, 2), dtype=np.float32)
 
-        # Potential layer
         self._potential = PotentialFieldLayer(
             occ_thresh=self.cfg.occ_thresh,
             sigma_m=self.cfg.sigma_m,
-            k_rep=1.5,  # keep inside-layer repulsion moderate
+            k_rep=1.5,
             repulse_radius_m=self.cfg.repulse_radius_m,
             inflation_radius_m=self.cfg.inflation_radius_m,
             u_max=1.0,
             unknown_as_obstacle=False,
         )
 
-    def update(self, point_cloud: np.ndarray) -> None:
+    def update(
+        self,
+        point_cloud: np.ndarray,
+        *,
+        delta_fwd_m: float = 0.0,
+        delta_left_m: float = 0.0,
+        delta_yaw_deg: float = 0.0,
+    ) -> None:
         """
-        Directly update the map using an existing 3D point cloud (DA3 style).
+        Update maps from a 3D cloud in the current robot frame.
+
+        The accumulated map is first warped by the supplied ego-motion delta,
+        then blended with the current-frame temporary map.
         """
-        # Reshape if (H, W, 3) -> (N, 3)
         pts = point_cloud.reshape(-1, 3) if len(point_cloud.shape) == 3 else point_cloud
-
-        # 1. Filter by range and height band (z_band)
         pts_filtered = self._filter_cloud(pts)
-
-        # 2. Bin into temporary map (M_temp)
         self._M_temp = self._build_temp_map(pts_filtered)
 
-        # 3. EMA accumulation (Memory)
+        self._M_acc = self._warp_probability_grid(
+            self._M_acc,
+            delta_fwd_m=delta_fwd_m,
+            delta_left_m=delta_left_m,
+            delta_yaw_deg=delta_yaw_deg,
+        )
+        self._M_acc *= self.cfg.unknown_decay
+
         mask = np.isfinite(self._M_temp)
-        self._M_acc[mask] = (1.0 - self.cfg.alpha) * self._M_acc[mask] + self.cfg.alpha * self._M_temp[mask]
+        self._M_acc[mask] = (
+            (1.0 - self.cfg.alpha) * self._M_acc[mask]
+            + self.cfg.alpha * self._M_temp[mask]
+        )
 
-        # 4. Detect walls and compute potential
+        self._M_nav = self._compose_navigation_map()
         self._M_walls = self._detect_walls_and_clean()
-        U_rep, D = self._potential.compute_from_prob_grid(self._M_acc, self.cfg.resolution_m)
 
-        # Smooth U_rep to kill "laser" gradients caused by hard boundaries
+        nav_grid = np.maximum(self._M_nav, self._M_walls)
+        u_rep, d_obs = self._potential.compute_from_prob_grid(nav_grid, self.cfg.resolution_m)
+
         try:
             import cv2
-            U_rep = cv2.GaussianBlur(U_rep.astype(np.float32), (0, 0), sigmaX=1.0)
-        except Exception:
+            u_rep = cv2.GaussianBlur(u_rep.astype(np.float32), (0, 0), sigmaX=1.0)
+        except ImportError:
             pass
 
-        self._U_rep = U_rep
-        self._D_obs = D
+        self._U_rep = u_rep
+        self._D_obs = d_obs
 
-        # Repulsive gradient (optional debug / inspection)
         g_row, g_col = np.gradient(self._U_rep, self.cfg.resolution_m)
         self._grad_rep = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
 
-        # # Clamp repulsive magnitude to prevent extreme spikes dominating the blend
-        # rep_norm = np.sqrt(self._grad_rep[..., 0] ** 2 + self._grad_rep[..., 1] ** 2) + 1e-6
-        # max_rep = 5.0  # tune 2..10
-        # scale = np.minimum(1.0, max_rep / rep_norm).astype(np.float32)
-        # self._grad_rep = self._grad_rep * scale[..., None]
-
-        # Attractive unit vector field toward goal
         if self._goal_world is None:
             v_att = np.zeros((self._n, self._n, 2), dtype=np.float32)
         else:
             goal_fwd, goal_left = self._goal_world
-
             rows = np.arange(self._n, dtype=np.float32)
             cols = np.arange(self._n, dtype=np.float32)
-
-            # World coords for each cell center
             fwd = self._origin_fwd + rows[:, None] * self.cfg.resolution_m
             left = self._origin_left - cols[None, :] * self.cfg.resolution_m
-
             df = goal_fwd - fwd
             dl = goal_left - left
             norm = np.sqrt(df * df + dl * dl) + 1e-6
-            v_att = np.stack([df / norm, dl / norm], axis=-1).astype(np.float32)  # (n,n,2)
+            v_att = np.stack([df / norm, dl / norm], axis=-1).astype(np.float32)
 
-        # Repulsive direction (already computed): points away from obstacles
         v_rep = self._grad_rep if self._grad_rep is not None else np.zeros_like(v_att)
 
-        # Weight repulsion by distance-to-obstacle: strong near obstacles, fades far
-        d0 = float(self.cfg.repulse_radius_m)  # influence radius
+        d0 = float(self.cfg.repulse_radius_m)
         d = self._D_obs
-        # Near-obstacle weight: 1 near obstacle, 0 far away
-        w_near = np.clip((d0 - d) / (d0 + 1e-6), 0.0, 1.0).astype(np.float32)
-        w_near = w_near[..., None]  # (n,n,1)
-        # Far field: weak goal only
-        v_far = 0.01 * v_att
-        # Near field: weighted sum of both
-        v_near = (self.cfg.k_att* v_att) + (self.cfg.k_rep * v_rep)
-        # Blend by distance
-        v = (1.0 - w_near) * v_far + w_near * v_near
+        # Smooth blend factor: 1.0 at obstacle surface, 0.0 beyond d0
+        w_rep = np.clip((d0 - d) / (d0 + 1e-6), 0.0, 1.0).astype(np.float32)[..., None]
 
-        # Blend and normalize
+        # Always show meaningful attraction; repulsion overrides near obstacles
+        v = self.cfg.k_att * v_att + w_rep * self.cfg.k_rep * v_rep
+
         v_norm = np.sqrt(v[..., 0] ** 2 + v[..., 1] ** 2) + 1e-6
         self._grad_total = (v / v_norm[..., None]).astype(np.float32)
         self._grad = self._grad_total.copy()
+        self._compute_total_potential_and_gradient()
+
+    def get_nav_map(self) -> np.ndarray:
+        """Return the fused occupancy grid used for potential-field generation."""
+        return self._M_nav.copy()
+
+    def _compose_navigation_map(self) -> np.ndarray:
+        """
+        Fuse current-frame evidence with accumulated memory.
+
+        Fresh obstacles from M_temp dominate.
+        Memory from M_acc fills in regions not currently observed.
+        """
+        m_nav = (self.cfg.nav_memory_weight * self._M_acc).astype(np.float32)
+
+        if not self.cfg.use_temp_for_navigation:
+            return m_nav
+
+        valid_temp = np.isfinite(self._M_temp)
+        m_nav[valid_temp] = np.maximum(m_nav[valid_temp], self._M_temp[valid_temp]).astype(np.float32)
+        return m_nav
+
+    def _warp_probability_grid(
+            self,
+            grid: np.ndarray,
+            *,
+            delta_fwd_m: float,
+            delta_left_m: float,
+            delta_yaw_deg: float,
+    ) -> np.ndarray:
+        """
+        Warp previous egocentric occupancy into the current robot frame.
+
+        Positive delta_fwd_m means the robot moved forward.
+        Positive delta_left_m means the robot moved left.
+        Positive delta_yaw_deg means CCW yaw in the map plane.
+        """
+        if not np.any(np.isfinite(grid)):
+            return grid.copy()
+
+        try:
+            import cv2
+        except ImportError:
+            return grid.copy()
+
+        h, w = grid.shape
+        center = ((w - 1) * 0.5, 0.0)
+
+        shift_x = -delta_left_m / self.cfg.resolution_m
+        shift_y = -delta_fwd_m / self.cfg.resolution_m
+
+        rot = cv2.getRotationMatrix2D(center, -delta_yaw_deg, 1.0)
+        rot[:, 2] += np.array([shift_x, shift_y], dtype=np.float32)
+
+        warped = cv2.warpAffine(grid.astype(np.float32),
+                                rot.astype(np.float32),
+                                (w, h),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0.0,)
+        return warped.astype(np.float32)
 
     def reset(self) -> None:
         """Zero all internal maps and the navigation goal."""
         self._M_acc.fill(0.0)
         self._M_temp.fill(0.0)
+        self._M_nav.fill(0.0)
         self._M_walls.fill(0.0)
         self._U_rep.fill(0.0)
         self._D_obs.fill(np.inf)
         self._grad.fill(0.0)
+        self._U_total.fill(0.0)
+        self._grad_total.fill(0.0)
+        self._grad_rep = None
         self._goal_world = None
         self._wall_segments = np.array([])
 
@@ -352,6 +360,11 @@ class PotentialMapper:
         dl = goal_left - left_coords[None, :]  # (1,n) broadcast to (n,n)
 
         self._U_att = np.sqrt(df * df + dl * dl).astype(np.float32)
+
+    def get_attractive_potential(self) -> np.ndarray:
+        """Return the attractive potential field U_att."""
+        self._compute_attractive_potential()
+        return self._U_att.copy()
 
     def _compute_total_potential_and_gradient(self) -> None:
         self._compute_attractive_potential()
