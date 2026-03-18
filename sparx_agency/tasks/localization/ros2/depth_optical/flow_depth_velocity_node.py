@@ -41,7 +41,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
-
+        self.declare_parameter("depth_scale", 0.4)  # Calibrated for Depth Anything V2 + Gazebo
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
 
@@ -60,6 +60,7 @@ class FlowDepthVelocityNode(Node):
         self.min_depth = float(self.get_parameter("min_depth").get_parameter_value().double_value)
         self.max_depth = float(self.get_parameter("max_depth").get_parameter_value().double_value)
         self.use_depth_norm = bool(self.get_parameter("use_depth_norm").get_parameter_value().bool_value)
+        self.depth_scale = float(self.get_parameter("depth_scale").get_parameter_value().double_value)
 
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
@@ -210,7 +211,7 @@ class FlowDepthVelocityNode(Node):
             return 0.0, 0.0, 0.0, 0
 
         Z = np.zeros(len(du), dtype=np.float64)
-        Z[valid] = depth_map[v_idx[valid], u_idx[valid]]
+        Z[valid] = depth_map[v_idx[valid], u_idx[valid]] * self.depth_scale  # Apply scale here
 
         valid = valid & np.isfinite(Z)
         if not self.use_depth_norm:
