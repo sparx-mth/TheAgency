@@ -18,6 +18,9 @@ class DA3TensorRTModel(DepthModel):
                 self.engine = runtime.deserialize_cuda_engine(f.read())
         except Exception as e:
             print(e)
+        # if cuda.get_device_count() > 0:
+        #     self.device = cuda.Device(0)
+        #     self.ctx = self.device.make_context()
 
         self.context = self.engine.create_execution_context()
         self.inputs, self.outputs, self.bindings, self.stream = self._allocate_buffers()

@@ -92,7 +92,6 @@ def main():
         potential_mapper.update(point_cloud)
 
         u_total = potential_mapper.get_total_potential()
-        u_rep = potential_mapper.get_potential_map()
         m_temp = np.flipud(potential_mapper.get_temp_map())
         m_acc = np.flipud(potential_mapper.get_prob_map())
         m_nav = np.flipud(potential_mapper.get_nav_map())

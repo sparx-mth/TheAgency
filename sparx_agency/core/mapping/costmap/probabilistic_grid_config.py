@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from numba import njit
 import numpy as np
 
 
@@ -41,6 +42,76 @@ def bresenham(x0: int, y0: int, x1: int, y1: int):
             err += dx
             y += sy
 
+# @njit
+# def fast_update_ray_logodds(L, r0, c0, r1, c1, lo_free, lo_occ, lo_min, lo_max):
+#     """Numba-accelerated raycasting (Bresenham logic)."""
+#     dx = abs(r1 - r0)
+#     dy = abs(c1 - c0)
+#     sr = 1 if r0 < r1 else -1
+#     sc = 1 if c0 < c1 else -1
+#     err = dx - dy
+#
+#     curr_r, curr_c = r0, c0
+#
+#     while True:
+#         # Update current cell (Free)
+#         L[curr_r, curr_c] = max(lo_min, L[curr_r, curr_c] + lo_free)
+#
+#         if curr_r == r1 and curr_c == c1:
+#             break
+#
+#         e2 = 2 * err
+#         if e2 > -dy:
+#             err -= dy
+#             curr_r += sr
+#         if e2 < dx:
+#             err += dx
+#             curr_c += sc
+#
+#     # Overwrite endpoint with occupancy
+#     L[r1, c1] = min(lo_max, L[r1, c1] + (lo_occ - lo_free))
+
+
+@njit
+def fast_process_endpoints(L, seen, r0, c0, gz, gl, lo_free, lo_occ, lo_min, lo_max):
+    """
+    Numba kernel to handle all raycasting in one pass.
+    Updates both Log-Odds (L) and the 'seen' mask.
+    """
+    n_pts = gz.shape[0]
+    H, W = L.shape
+
+    for i in range(n_pts):
+        r1, c1 = gz[i], gl[i]
+
+        # Inline Bresenham for maximum speed
+        dx = abs(r1 - r0)
+        dy = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        err = dx - dy
+
+        curr_r, curr_c = r0, c0
+        while True:
+            # Mark visibility and update free-space evidence
+            if 0 <= curr_r < H and 0 <= curr_c < W:
+                seen[curr_r, curr_c] = True
+                L[curr_r, curr_c] = max(lo_min, L[curr_r, curr_c] + lo_free)
+
+            if curr_r == r1 and curr_c == c1:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                curr_r += sr
+            if e2 < dx:
+                err += dx
+                curr_c += sc
+
+        # Correct the endpoint (was marked free, now mark as occupied)
+        if 0 <= r1 < H and 0 <= c1 < W:
+            L[r1, c1] = min(lo_max, L[r1, c1] - lo_free + lo_occ)
 
 @dataclass
 class ProbabilisticGridConfig:

@@ -22,7 +22,8 @@ import numpy as np
 
 from sparx_agency.core.common.types import Intrinsics  # re-exported from types.perception
 from sparx_agency.core.mapping.costmap.potential_field_layer import PotentialFieldLayer
-from sparx_agency.core.mapping.costmap.probabilistic_grid_config import sigmoid, bresenham, update_ray_logodds
+from sparx_agency.core.mapping.costmap.probabilistic_grid_config import sigmoid, bresenham, update_ray_logodds, \
+    fast_process_endpoints
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ class PotentialMapperConfig:
     k_att: float = 1.0
     k_rep: float = 2.5
     ray_endpoint_stride: int = 1
+    reference_scale: float = 1.0
     nav_memory_weight: float = 0.60
     unknown_decay: float = 0.995
     use_temp_for_navigation: bool = True
@@ -156,71 +158,35 @@ class PotentialMapper:
         self._M_walls = self._detect_walls_and_clean()
 
         nav_grid = np.maximum(self._M_nav, self._M_walls)
-        u_rep, d_obs = self._potential.compute_from_prob_grid(nav_grid, self.cfg.resolution_m)
-
-        try:
-            import cv2
-            u_rep = cv2.GaussianBlur(u_rep.astype(np.float32), (0, 0), sigmaX=1.0)
-        except ImportError:
-            pass
-
-        self._U_rep = u_rep
+        # 2. Compute the repulsive potential
+        u_rep_raw, d_obs = self._potential.compute_from_prob_grid(nav_grid, self.cfg.resolution_m)
+        self._U_rep = u_rep_raw
         self._D_obs = d_obs
 
-        # --- Compute attractive potential ---
+        # 3. Compute the attractive potential
         self._compute_attractive_potential()
-
-        # --- Normalize BOTH potentials to [0, 1] before combining ---
-        # This ensures attraction and repulsion have comparable magnitude
-        rep_max = float(np.max(self._U_rep)) + 1e-8
-        att_max = float(np.max(self._U_att)) + 1e-8
-        u_rep_norm = self._U_rep / rep_max   # 0..1
-        u_att_norm = self._U_att / att_max   # 0..1
-
-        self._U_total = (
-            self.cfg.k_rep * u_rep_norm + self.cfg.k_att * u_att_norm
-        ).astype(np.float32)
-
-        # --- Single gradient: -∇U_total ---
+        # 4. COMBINE AND SATURATE
+        # Note: k_rep and k_att should be tuned so that at "danger" distance,
+        # they sum to a value around 1.0 to 3.0 before tanh.
+        u_combined = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * self._U_att)
+        # Apply tanh to normalize everything to [0, 1] stably
+        self._U_total = np.tanh(u_combined / self.cfg.reference_scale).astype(np.float32)
+        # 5. COMPUTE GRADIENT FROM THE SATURATED FIELD
+        # We use negative gradient because we want to move TOWARDS lower potential
+        # Single gradient: -∇U_total
         g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
+        # Negative gradient points toward lower potential (safe areas/goal
         raw_grad = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
 
-        # Normalize to unit direction vectors
-        mag = np.sqrt(raw_grad[..., 0] ** 2 + raw_grad[..., 1] ** 2) + 1e-8
-        self._grad_total = (raw_grad / mag[..., None]).astype(np.float32)
+        # 6. Smooth Magnitude Scaling
+        # Instead of normalizing to 1.0 everywhere, we clip the max force.
+        # This keeps steering 'gentle' when far from obstacles.
+        mag = np.linalg.norm(raw_grad, axis=-1) + 1e-8
+        max_force = 1.0
+        scale = np.minimum(1.0, max_force / mag)
+        self._grad_total = (raw_grad * scale[..., None]).astype(np.float32)
         self._grad = self._grad_total.copy()
-
-        # Keep repulsive-only gradient for inspection
-        g_row_r, g_col_r = np.gradient(self._U_rep, self.cfg.resolution_m)
-        self._grad_rep = np.stack([-g_row_r, -g_col_r], axis=-1).astype(np.float32)
-
-        # if self._goal_world is None:
-        #     v_att = np.zeros((self._n, self._n, 2), dtype=np.float32)
-        # else:
-        #     goal_fwd, goal_left = self._goal_world
-        #     rows = np.arange(self._n, dtype=np.float32)
-        #     cols = np.arange(self._n, dtype=np.float32)
-        #     fwd = self._origin_fwd + rows[:, None] * self.cfg.resolution_m
-        #     left = self._origin_left - cols[None, :] * self.cfg.resolution_m
-        #     df = goal_fwd - fwd
-        #     dl = goal_left - left
-        #     norm = np.sqrt(df * df + dl * dl) + 1e-6
-        #     v_att = np.stack([df / norm, dl / norm], axis=-1).astype(np.float32)
-        #
-        # v_rep = self._grad_rep if self._grad_rep is not None else np.zeros_like(v_att)
-        #
-        # d0 = float(self.cfg.repulse_radius_m)
-        # d = self._D_obs
-        # # Smooth blend factor: 1.0 at obstacle surface, 0.0 beyond d0
-        # w_rep = np.clip((d0 - d) / (d0 + 1e-6), 0.0, 1.0).astype(np.float32)[..., None]
-        #
-        # # Always show meaningful attraction; repulsion overrides near obstacles
-        # v = self.cfg.k_att * v_att + w_rep * self.cfg.k_rep * v_rep
-        #
-        # v_norm = np.sqrt(v[..., 0] ** 2 + v[..., 1] ** 2) + 1e-6
-        # self._grad_total = (v / v_norm[..., None]).astype(np.float32)
-        # self._grad = self._grad_total.copy()
-        # self._compute_total_potential_and_gradient()
+        
 
     def get_nav_map(self) -> np.ndarray:
         """Return the fused occupancy grid used for potential-field generation."""
@@ -386,25 +352,6 @@ class PotentialMapper:
         """Return the attractive potential field U_att."""
         self._compute_attractive_potential()
         return self._U_att.copy()
-
-    # def _compute_total_potential_and_gradient(self) -> None:
-    #     self._compute_attractive_potential()
-    #     U_att_n = self._U_att / (float(np.nanmax(self._U_att)) + 1e-6)  # 0..1
-    #     self._U_total = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * U_att_n).astype(np.float32)
-    #
-    #     g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
-    #     self._grad_total[..., 0] = (-g_row).astype(np.float32)
-    #     self._grad_total[..., 1] = (-g_col).astype(np.float32)
-    #
-    #     # debug AFTER
-    #     if self._goal_world is not None:
-    #         r0 = 0
-    #         c0 = self._n // 2
-    #         gr, gc = self._goal_to_cell(*self._goal_world)
-    #         print("U_rep start/goal", self._U_rep[r0, c0], self._U_rep[gr, gc],
-    #               "U_att start/goal", self._U_att[r0, c0], self._U_att[gr, gc],
-    #               "U_tot start/goal", self._U_total[r0, c0], self._U_total[gr, gc])
-    #         print("grad_total at start", self._grad_total[r0, c0])
 
     def get_total_potential(self) -> np.ndarray:
         """Return total potential U_total."""
@@ -603,71 +550,42 @@ class PotentialMapper:
         )
         return pts[mask]
 
-
     def _build_temp_map(self, pts: np.ndarray) -> np.ndarray:
-        """
-        Build a temporary probability map using log-odds + raycasting.
-
-        This preserves door openings because rays mark FREE space up to the hit.
-        """
         n = self._n
-        M_temp = np.zeros((n, n), dtype=np.float32)
+        L = np.zeros((n, n), dtype=np.float32)
         seen = np.zeros((n, n), dtype=bool)
+
         if pts.shape[0] == 0:
-            return M_temp
+            return np.full((n, n), np.nan, dtype=np.float32)
 
-        # Convert points -> grid endpoints (gz=row=fwd, gl=col=left)
-        zf = pts[:, 2]  # Forward
-        xl = pts[:, 0]  # Left
-
-        # 0. Filter points too close to robot centre (self-repulsion prevention)
-        dist_sq = xl*xl + zf*zf
-        mask_far = dist_sq > (self.cfg.robot_clearance_m ** 2)
-        zf = zf[mask_far]
-        xl = xl[mask_far]
+        # 1. Spatial Filtering
+        zf, xl = pts[:, 2], pts[:, 0]
+        mask_far = (xl ** 2 + zf ** 2) > (self.cfg.robot_clearance_m ** 2)
+        zf, xl = zf[mask_far], xl[mask_far]
 
         if zf.size == 0:
-            return M_temp
+            return np.full((n, n), np.nan, dtype=np.float32)
 
+        # 2. Grid Projection
         gz = ((zf - self._origin_fwd) / self.cfg.resolution_m).astype(np.int32)
         gl = ((self._origin_left - xl) / self.cfg.resolution_m).astype(np.int32)
 
+        # 3. Bounds & Uniqueness
         inb = (gz >= 0) & (gz < n) & (gl >= 0) & (gl < n)
-        gz = gz[inb]
-        gl = gl[inb]
-        if gz.size == 0:
-            return M_temp
+        gz, gl = gz[inb], gl[inb]
+        idx = np.unique(gz * n + gl)  # Only raycast once per unique cell
+        gz, gl = (idx // n).astype(np.int32), (idx % n).astype(np.int32)
 
-        # Optional endpoint downsampling for speed
-        s = max(1, int(getattr(self.cfg, "ray_endpoint_stride", 1)))
-        if s > 1:
-            gz = gz[::s]
-            gl = gl[::s]
+        # 4. Fast Numba Execution
+        fast_process_endpoints(
+            L, seen,
+            0, n // 2,  # Robot origin
+            gz, gl,
+            self.cfg.lo_free, self.cfg.lo_occ,
+            self.cfg.lo_min, self.cfg.lo_max
+        )
 
-        # Unique endpoints (speedup)
-        idx = np.unique(gz * n + gl)
-        gz = (idx // n).astype(np.int32)
-        gl = (idx % n).astype(np.int32)
-
-
-        # Log-odds temp grid
-        L = np.zeros((n, n), dtype=np.float32)
-        r0 = 0       # robot at row 0 (forward = 0)
-        c0 = n // 2   # robot at centre column
-
-        for r1, c1 in zip(gz, gl):
-            update_ray_logodds(L, r0, c0, int(r1), int(c1),
-                               lo_free=self.cfg.lo_free,
-                               lo_occ=self.cfg.lo_occ)
-
-            # mark all traversed cells as seen (free or occ)
-            for rr, cc in bresenham(r0, c0, int(r1), int(c1)):
-                if 0 <= rr < n and 0 <= cc < n:
-                    seen[rr, cc] = True
-
-        np.clip(L, self.cfg.lo_min, self.cfg.lo_max, out=L)
-
-        # Convert log-odds -> probability
+        # 5. Conversion (keep the NaN for unknown space)
         M_temp = sigmoid(L).astype(np.float32)
         M_temp[~seen] = np.nan
         return M_temp
