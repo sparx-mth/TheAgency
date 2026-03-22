@@ -154,6 +154,16 @@ Example:
 - err_last: current position error
 - err_rms: accumulated drift
 
+
+use the EVO tool:
+```bash
+cd /home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/
+source .venv/bin/activate
+evo_traj tum est_tum.txt --ref=gt_tum.txt -p --plot_mode=xyz
+evo_ape tum est_tum.txt gt_tum.txt -p --plot_mode=xyz
+
+```
+
 ---
 ## Demo
 
