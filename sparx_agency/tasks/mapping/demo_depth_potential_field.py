@@ -18,9 +18,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--source", type=str, default="0")# --source "/home/daphnaa/Videos/pp.mp4"
     p.add_argument("--engine", type=str,
-                   default="/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine")
+                   default="/home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine")
     p.add_argument("--yaml", type=str,
-                   default="/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_laptop.yaml")
+                   default="/home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_example.yaml")
     p.add_argument("--res-m", type=float, default=0.03)
     p.add_argument("--size-m", type=float, default=6.5)
     p.add_argument("--sigma-m", type=float, default=0.02)
