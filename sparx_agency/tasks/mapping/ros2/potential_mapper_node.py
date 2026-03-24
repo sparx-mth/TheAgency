@@ -64,23 +64,53 @@ class PotentialMapperNode(Node):
         t.transform.rotation.w = 1.0
         self.tf_static_broadcaster.sendTransform(t)
 
+        self.last_pose = None
+        self.last_time = None
+
     def get_odometry_delta(self, target_time):
-        """
-        Calculates robot movement (delta x, delta yaw) since last frame using TF.
-        Essential for the mapper's _warp_probability_grid function.
-        """
         try:
-            # Get current pose relative to odom
+            # 1. Lookup current transform (Odom -> Base)
             trans = self.tf_buffer.lookup_transform(
                 self.get_parameter('odom_frame').value,
                 self.get_parameter('base_frame').value,
                 target_time,
-                timeout=rclpy.duration.Duration(seconds=0.1)
+                timeout=rclpy.duration.Duration(seconds=0.05)
             )
-            # Logic here to compare with 'self.last_pose' and return delta_fwd, delta_yaw
-            # For simplicity in this snippet, returning 0
-            return 0.0, 0.0, 0.0
-        except Exception:
+
+            curr_pos = trans.transform.translation
+            curr_rot = trans.transform.rotation
+
+            # 2. Convert Quaternion to Yaw (Euler)
+            import math
+            siny_cosp = 2 * (curr_rot.w * curr_rot.z + curr_rot.x * curr_rot.y)
+            cosy_cosp = 1 - 2 * (curr_rot.y * curr_rot.y + curr_rot.z * curr_rot.z)
+            curr_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+            if self.last_pose is None:
+                self.last_pose = (curr_pos.x, curr_pos.y, curr_yaw)
+                return 0.0, 0.0, 0.0
+
+            # 3. Calculate Deltas in Global Frame
+            dx = curr_pos.x - self.last_pose[0]
+            dy = curr_pos.y - self.last_pose[1]
+            dyaw = curr_yaw - self.last_pose[2]
+
+            # 4. Transform Global Delta to Robot-Local (Fwd/Left)
+            # PotentialMapper expects deltas relative to the robot's heading
+            cos_y = math.cos(self.last_pose[2])
+            sin_y = math.sin(self.last_pose[2])
+
+            delta_fwd = dx * cos_y + dy * sin_y
+            delta_left = -dx * sin_y + dy * cos_y
+            delta_yaw_deg = math.degrees(dyaw)
+
+            # Update for next frame
+            self.last_pose = (curr_pos.x, curr_pos.y, curr_yaw)
+
+            return delta_fwd, delta_left, delta_yaw_deg
+
+        except Exception as e:
+            self.get_logger().warn(f"TF Lookup failed: {e}")
             return 0.0, 0.0, 0.0
 
     def image_callback(self, img_msg, info_msg):
@@ -92,7 +122,8 @@ class PotentialMapperNode(Node):
         _, point_cloud = self.depth_model.infer_all(cv_image)
 
         # C. Get Odometry Delta for Grid Warping
-        df, dl, dy = self.get_odometry_delta(img_msg.header.stamp)
+        target_time = rclpy.time.Time()
+        df, dl, dy = self.get_odometry_delta(target_time=target_time)
 
         # D. Update Mapper (Using the stabilized Tanh + Numba logic)
         self.mapper.update(
