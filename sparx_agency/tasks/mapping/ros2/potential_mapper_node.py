@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid
 from cv_bridge import CvBridge
@@ -10,7 +10,10 @@ import numpy as np
 import tf2_ros
 
 from tf2_ros import StaticTransformBroadcaster
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PointStamped
+from geometry_msgs.msg import PoseStamped, Vector3Stamped
+from std_msgs.msg import Float32
+import math
 
 from sparx_agency.core.mapping.costmap.potential_mapper import PotentialMapper, PotentialMapperConfig
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
@@ -21,8 +24,9 @@ class PotentialMapperNode(Node):
         super().__init__('potential_mapper_node')
 
         # 1. Parameters
-        self.declare_parameter('engine_path', '/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine')
-        self.declare_parameter('config_yaml', '/home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml')
+
+        self.declare_parameter('engine_path', '/home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine')
+        self.declare_parameter('config_yaml', '/home/user1/GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('odom_frame', 'odom')
 
@@ -38,26 +42,58 @@ class PotentialMapperNode(Node):
         self.depth_model = DA3TensorRTModel(engine_path, yaml_path)
         self.mapper = PotentialMapper(PotentialMapperConfig(resolution_m=0.05, size_m=20.0))
 
+        self.click_target = None
+        self.target_u = None
+        self.target_v = None
         # 3. Subscribers (Synchronized)
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+
 
         self.sub_image = message_filters.Subscriber(self, Image, '/simple_drone/front/image_raw', qos_profile=qos)
         self.sub_info = message_filters.Subscriber(self, CameraInfo, '/simple_drone/front/camera_info', qos_profile=qos)
 
+        self.sub_target_pixel = self.create_subscription(
+            PointStamped,
+            '/planner_target_pixel',
+            self.target_pixel_callback,
+            10
+        )
+
+        self.sub_clicked_point = self.create_subscription(
+            PointStamped,
+            '/clicked_point',
+            self.clicked_point_callback,
+            10
+        )
         # TimeSynchronizer ensures we pair the image with the correct metadata
         self.ts = message_filters.TimeSynchronizer([self.sub_image, self.sub_info], 10)
         self.ts.registerCallback(self.image_callback)
 
+        qos = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
+        )
         # 4. Publishers
-        self.pub_grid = self.create_publisher(OccupancyGrid, '/map_local', 10)
+        self.pub_grid = self.create_publisher(OccupancyGrid, '/map_local', qos_profile=qos)
+        self.pub_nav_vector = self.create_publisher(
+            Vector3Stamped,
+            '/local_nav_vector',
+            10
+        )
 
+        self.pub_nav_heading = self.create_publisher(
+            Float32,
+            '/local_nav_heading',
+            10
+        )
         self.get_logger().info("Potential Mapper Node Started with Synchronized Callbacks.")
 
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = 'map'
-        t.child_frame_id = 'base_link'
+        t.child_frame_id = self.get_parameter('base_frame').value
         t.transform.translation.x = 0.0
         t.transform.translation.y = 0.0
         t.transform.translation.z = 0.0
@@ -134,11 +170,106 @@ class PotentialMapperNode(Node):
         )
 
         # E. Publish OccupancyGrid for RViz
+        if self.click_target is not None:
+            self.get_logger().debug(f"Target pixel: u={self.click_target[0]:.1f}, v={self.click_target[1]:.1f}")
+            self.mapper.set_goal(self.click_target[0], self.click_target[1])
+        else:
+            local_target = self.get_local_target_from_pixel()
+            if local_target is not None:
+                goal_fwd, goal_left = local_target
+                self.mapper.set_goal(goal_fwd, goal_left)
+
         self.publish_occupancy_grid(img_msg.header)
+        self.publish_local_nav(img_msg.header)
+
+    def target_pixel_callback(self, msg):
+        self.target_u = float(msg.point.x)
+        self.target_v = float(msg.point.y)
+        self.get_logger().debug(f"Target pixel: u={self.target_u:.1f}, v={self.target_v:.1f}")
+
+    def clicked_point_callback(self, msg: PointStamped):
+        """
+        RViz Publish Point callback.
+        Converts clicked world point into local target in base frame:
+          forward = x
+          left = y
+        """
+        try:
+            base_frame = self.get_parameter('base_frame').value
+
+            if msg.header.frame_id == base_frame:
+                x_b = float(msg.point.x)
+                y_b = float(msg.point.y)
+            else:
+                tf = self.tf_buffer.lookup_transform(
+                    base_frame,
+                    msg.header.frame_id,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1),
+                )
+
+                tx = tf.transform.translation.x
+                ty = tf.transform.translation.y
+                q = tf.transform.rotation
+
+                yaw = math.atan2(
+                    2.0 * (q.w * q.z + q.x * q.y),
+                    1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                )
+
+                # clicked point in source frame
+                px = float(msg.point.x)
+                py = float(msg.point.y)
+
+                # transform 2D point into base frame
+                x_b = tx + math.cos(yaw) * px - math.sin(yaw) * py
+                y_b = ty + math.sin(yaw) * px + math.cos(yaw) * py
+
+            # local convention: forward=x, left=y
+            self.click_target = (x_b, y_b)
+            self.get_logger().info(
+                f"Clicked target in {base_frame}: fwd={x_b:.2f}, left={y_b:.2f}"
+            )
+
+        except Exception as e:
+            self.get_logger().warn(f"Failed to transform clicked point: {e}")
+
+    def get_local_target_from_pixel(self) -> tuple[float, float] | None:
+        """
+        Convert target pixel (u,v) into a local attractive direction (forward, left).
+
+        We do not estimate metric distance here.
+        We only create a normalized steering direction:
+          - forward always positive
+          - left depends on horizontal pixel offset
+        """
+        if self.target_u is None or self.target_v is None:
+            return None
+
+        intr = self.depth_model.intrinsics
+        if intr is None:
+            return None
+
+        # Pixel -> normalized image ray
+        x_img = (self.target_u - intr.cx) / intr.fx
+        # y_img available if later you want vertical control:
+        # y_img = (self.target_v - intr.cy) / intr.fy
+
+        # Attractive direction in your local convention:
+        # forward = x axis of command
+        # left    = y axis of command
+        v_fwd = 1.0
+        v_left = -float(x_img)
+
+        norm = math.sqrt(v_fwd * v_fwd + v_left * v_left)
+        if norm < 1e-6:
+            return 1.0, 0.0
+
+        return v_fwd / norm, v_left / norm
 
     def publish_occupancy_grid(self, header):
         grid_msg = OccupancyGrid()
-        grid_msg.header = header
+        grid_msg.header.stamp = self.get_clock().now().to_msg()
         grid_msg.header.frame_id = self.get_parameter('base_frame').value
 
         # Map metadata
@@ -167,6 +298,51 @@ class PotentialMapperNode(Node):
         grid_msg.data = ros_data.flatten().tolist()
         self.get_logger().info(f"Publishing Occupancy Grid with unique values: {np.unique(grid_msg.data)}")
         self.pub_grid.publish(grid_msg)
+
+    def publish_local_nav(self, header):
+        n = self.mapper._n
+        cr = n - 1
+        cc = n // 2
+
+        # Repulsive / obstacle-aware local direction from mapper
+        grad = self.mapper.get_total_gradient()
+        v_rep = grad[cr, cc]  # [forward, left]
+
+        # Attractive direction from target pixel
+        local_target = self.get_local_target_from_pixel()
+        if local_target is not None:
+            v_att = np.array(local_target, dtype=np.float32)
+        else:
+            v_att = np.array([1.0, 0.0], dtype=np.float32)  # default straight ahead
+
+        # Weighting: mostly attraction, repulsion only where mapper says so
+        # You can tune these
+        k_att = 1.0
+        k_rep = 1.5
+
+        v = k_att * v_att + k_rep * np.array(v_rep, dtype=np.float32)
+
+        norm = float(np.linalg.norm(v))
+        if norm > 1e-6:
+            v = v / norm
+        else:
+            v = np.array([0.0, 0.0], dtype=np.float32)
+
+        v_fwd = float(v[0])
+        v_left = float(v[1])
+        heading = math.atan2(v_left, v_fwd)
+
+        vec_msg = Vector3Stamped()
+        vec_msg.header.stamp = self.get_clock().now().to_msg()
+        vec_msg.header.frame_id = self.get_parameter('base_frame').value
+        vec_msg.vector.x = v_fwd
+        vec_msg.vector.y = v_left
+        vec_msg.vector.z = 0.0
+        self.pub_nav_vector.publish(vec_msg)
+
+        heading_msg = Float32()
+        heading_msg.data = float(heading)
+        self.pub_nav_heading.publish(heading_msg)
 
 
 def main(args=None):
