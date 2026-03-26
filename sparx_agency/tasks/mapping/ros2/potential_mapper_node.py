@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import cv2
+from pathlib import Path
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
@@ -26,9 +28,14 @@ class PotentialMapperNode(Node):
 
         # 1. Parameters
 
-
-        self.declare_parameter('engine_path', '/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine')
-        self.declare_parameter('config_yaml', '/home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml')
+        self.declare_parameter(
+            'engine_path',
+            str(Path.home() / 'depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine')
+        )
+        self.declare_parameter(
+            'config_yaml',
+            str(Path.home() / 'GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml')
+        )
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('odom_frame', 'odom')
 
@@ -345,7 +352,7 @@ class PotentialMapperNode(Node):
         ros_data = (np.nan_to_num(nav_data, nan=0.0) * 100).astype(np.int8)
 
         # # Flip so OpenCV-style becomes map-style / Rviz-style
-        ros_data = np.flip(ros_data)
+        # ros_data = np.flip(ros_data)
 
         grid_msg.data = ros_data.flatten().tolist()
         # self.get_logger().info(f"Publishing Occupancy Grid with unique values: {np.unique(grid_msg.data)}")

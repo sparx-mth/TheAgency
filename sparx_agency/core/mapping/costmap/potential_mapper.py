@@ -93,7 +93,7 @@ class PotentialMapperConfig:
 class PotentialMapper:
     def __init__(self, cfg: Optional[PotentialMapperConfig] = None) -> None:
         self.cfg = cfg or PotentialMapperConfig()
-
+        print("RUNNING POTENTIAL_MAPPER FROM:", __file__)
         n_cells = int(round(self.cfg.size_m / self.cfg.resolution_m))
         self._n = n_cells
         self._origin_fwd = 0.0
@@ -179,8 +179,7 @@ class PotentialMapper:
         # Note: k_rep and k_att should be tuned so that at "danger" distance,
         # they sum to a value around 1.0 to 3.0 before tanh.
         u_combined = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * self._U_att)
-        # Apply tanh to normalize everything to [0, 1] stably
-        self._U_total = np.tanh(u_combined / self.cfg.reference_scale).astype(np.float32)
+        self._U_total = u_combined.astype(np.float32)
         # 5. COMPUTE GRADIENT FROM THE SATURATED FIELD
         # We use negative gradient because we want to move TOWARDS lower potential
         # Single gradient: -∇U_total
@@ -190,7 +189,6 @@ class PotentialMapper:
     def compute_gradient_from_potential(self, potential: np.ndarray) -> np.ndarray:
         """Compute descent direction from potential field in [forward, left]."""
         g_row, g_col = np.gradient(potential, self.cfg.resolution_m)
-
         # row axis matches forward directly
         grad_fwd = -g_row
         grad_left = +g_col
@@ -365,7 +363,8 @@ class PotentialMapper:
         r = float(self.cfg.att_radius_m)
 
         # method A: goal is a LOW-potential basin
-        self._U_att = np.minimum(dist / max(r, 1e-6), 1.0).astype(np.float32)
+        u_att = dist / (dist + self.cfg.att_radius_m)
+        self._U_att = u_att.astype(np.float32)
 
     def get_attractive_potential(self) -> np.ndarray:
         """Return the attractive potential field U_att."""
