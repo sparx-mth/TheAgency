@@ -72,7 +72,7 @@ class DA3TensorRTModel(DepthModel):
         # --- 2. Execute TensorRT ---
         for i in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(i)
-            print(i, name, self.engine.get_tensor_shape(name), self.engine.get_tensor_mode(name))
+            # print(i, name, self.engine.get_tensor_shape(name), self.engine.get_tensor_mode(name))
             self.context.set_tensor_address(name, self.bindings[i])
 
         self.inputs[0]['host'] = np.ascontiguousarray(img)
@@ -107,7 +107,7 @@ class DA3TensorRTModel(DepthModel):
             raise ValueError(f"Unexpected depth output shape: {out_shape} for tensor {depth_out['name']}")
 
         depth_map = depth_out["host"].reshape(h, w).astype(np.float32)
-        print("Depth output tensor:", depth_out["name"], "shape:", out_shape, "depth_map:", depth_map.shape)
+        # print("Depth output tensor:", depth_out["name"], "shape:", out_shape, "depth_map:", depth_map.shape)
         # --- 4. Vectorized Point Cloud Projection with Scaled Intrinsics ---
         h, w = depth_map.shape
         # Scale intrinsics from original frame (640x480) to depth map size (504x280)

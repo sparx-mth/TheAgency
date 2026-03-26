@@ -46,20 +46,22 @@ class PotentialMapperConfig:
     stride: int = 2
     pitch_deg: float = 0.0
     height_m: float = 1.0
-    zeta: float = 0.5
+    zeta: float = 1.0
     min_wall_length_m: float = 0.3
     max_wall_gap_m: float = 0.15
     lo_occ: float = 2.0
     lo_free: float = -0.7
     lo_min: float = -3.5
     lo_max: float = 3.5
+    att_radius_m: float = 2.5
     k_att: float = 1.0
-    k_rep: float = 2.5
+    k_rep: float = 3.5
     ray_endpoint_stride: int = 1
     reference_scale: float = 1.0
     nav_memory_weight: float = 0.60
     unknown_decay: float = 0.995
     use_temp_for_navigation: bool = True
+
 
     def __post_init__(self) -> None:
         if not (0.0 < self.alpha <= 1.0):
@@ -81,6 +83,8 @@ class PotentialMapperConfig:
             raise ValueError("nav_memory_weight must be in [0, 1].")
         if not (0.0 < self.unknown_decay <= 1.0):
             raise ValueError("unknown_decay must be in (0, 1].")
+        if self.att_radius_m <= 0.0:
+            raise ValueError("att_radius_m must be > 0.")
 
 # ---------------------------------------------------------------------------
 # Mapper
@@ -118,7 +122,7 @@ class PotentialMapper:
         self._potential = PotentialFieldLayer(
             occ_thresh=self.cfg.occ_thresh,
             sigma_m=self.cfg.sigma_m,
-            k_rep=1.5,
+            k_rep=3.5,
             repulse_radius_m=self.cfg.repulse_radius_m,
             inflation_radius_m=self.cfg.inflation_radius_m,
             u_max=1.0,
@@ -161,10 +165,16 @@ class PotentialMapper:
         # 2. Compute the repulsive potential
         u_rep_raw, d_obs = self._potential.compute_from_prob_grid(nav_grid, self.cfg.resolution_m)
         self._U_rep = u_rep_raw
+        self._grad_rep = self.compute_gradient_from_potential(u_rep_raw)
         self._D_obs = d_obs
 
         # 3. Compute the attractive potential
         self._compute_attractive_potential()
+
+        if self._goal_world is not None:
+            gr, gc = self._goal_to_cell(*self._goal_world)
+            print("U_att at goal cell =", float(self._U_att[gr, gc]))
+            print("U_att min/max =", float(self._U_att.min()), float(self._U_att.max()))
         # 4. COMBINE AND SATURATE
         # Note: k_rep and k_att should be tuned so that at "danger" distance,
         # they sum to a value around 1.0 to 3.0 before tanh.
@@ -174,19 +184,23 @@ class PotentialMapper:
         # 5. COMPUTE GRADIENT FROM THE SATURATED FIELD
         # We use negative gradient because we want to move TOWARDS lower potential
         # Single gradient: -∇U_total
-        g_row, g_col = np.gradient(self._U_total, self.cfg.resolution_m)
-        # Negative gradient points toward lower potential (safe areas/goal
-        raw_grad = np.stack([-g_row, -g_col], axis=-1).astype(np.float32)
-
-        # 6. Smooth Magnitude Scaling
-        # Instead of normalizing to 1.0 everywhere, we clip the max force.
-        # This keeps steering 'gentle' when far from obstacles.
-        mag = np.linalg.norm(raw_grad, axis=-1) + 1e-8
-        max_force = 1.0
-        scale = np.minimum(1.0, max_force / mag)
-        self._grad_total = (raw_grad * scale[..., None]).astype(np.float32)
+        self._grad_total = self.compute_gradient_from_potential(self._U_total)
         self._grad = self._grad_total.copy()
-        
+
+    def compute_gradient_from_potential(self, potential: np.ndarray) -> np.ndarray:
+        """Compute descent direction from potential field in [forward, left]."""
+        g_row, g_col = np.gradient(potential, self.cfg.resolution_m)
+
+        # row axis matches forward directly
+        grad_fwd = -g_row
+        grad_left = +g_col
+
+        raw_grad = np.stack([grad_fwd, grad_left], axis=-1).astype(np.float32)
+
+        # mag = np.linalg.norm(raw_grad, axis=-1) + 1e-8
+        # max_force = 1.0
+        # scale = np.minimum(1.0, max_force / mag)
+        return raw_grad
 
     def get_nav_map(self) -> np.ndarray:
         """Return the fused occupancy grid used for potential-field generation."""
@@ -199,6 +213,9 @@ class PotentialMapper:
         Fresh obstacles from M_temp dominate.
         Memory from M_acc fills in regions not currently observed.
         """
+        if self.cfg.use_temp_for_navigation:
+            return self._M_temp.copy()
+
         m_nav = (self.cfg.nav_memory_weight * self._M_acc).astype(np.float32)
 
         if not self.cfg.use_temp_for_navigation:
@@ -329,24 +346,26 @@ class PotentialMapper:
         return self._D_obs.copy()
 
     def _compute_attractive_potential(self) -> None:
-        """Compute U_att as Euclidean distance-to-goal on the grid."""
         if self._goal_world is None:
             self._U_att.fill(0.0)
             return
 
         goal_fwd, goal_left = self._goal_world
 
-        # Cell center coordinates (fwd, left) for each (row, col)
         rows = np.arange(self._n, dtype=np.float32)
         cols = np.arange(self._n, dtype=np.float32)
 
-        fwd_coords = rows * self.cfg.resolution_m + self._origin_fwd  # shape (n,)
-        left_coords = self._origin_left - cols * self.cfg.resolution_m  # shape (n,)
+        fwd_coords = rows * self.cfg.resolution_m + self._origin_fwd
+        left_coords = self._origin_left - cols * self.cfg.resolution_m
 
-        df = goal_fwd - fwd_coords[:, None]  # (n,1) broadcast to (n,n)
-        dl = goal_left - left_coords[None, :]  # (1,n) broadcast to (n,n)
+        df = goal_fwd - fwd_coords[:, None]
+        dl = goal_left - left_coords[None, :]
 
-        self._U_att = np.sqrt(df * df + dl * dl).astype(np.float32)
+        dist = np.sqrt(df * df + dl * dl).astype(np.float32)
+        r = float(self.cfg.att_radius_m)
+
+        # method A: goal is a LOW-potential basin
+        self._U_att = np.minimum(dist / max(r, 1e-6), 1.0).astype(np.float32)
 
     def get_attractive_potential(self) -> np.ndarray:
         """Return the attractive potential field U_att."""
