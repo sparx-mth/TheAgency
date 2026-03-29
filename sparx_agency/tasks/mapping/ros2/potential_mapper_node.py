@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
+import sys
+
 import cv2
 from pathlib import Path
 
 import rclpy
+from rclpy.executors import MultiThreadedExecutor, ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import Path as PathRos
 from cv_bridge import CvBridge
 import message_filters
 import numpy as np
@@ -38,9 +42,16 @@ class PotentialMapperNode(Node):
         )
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('odom_frame', 'odom')
-
-        self.declare_parameter('size_m', 6.5)  # From demo_depth
+        self.declare_parameter('size_m', 6.5)
         self.declare_parameter('show_gui', True)
+
+        # --- Watchdog Initialization ---
+        self.last_image_time = None
+        self.last_wall_receipt_time = None
+        self.watchdog_timeout = 15.0  # seconds
+        self.create_timer(1.0, self.watchdog_callback)  # Check every second
+        # -------------------------------
+
         self.bridge = CvBridge()
         self.latest_rgb = None
         self.click_target = None
@@ -48,11 +59,9 @@ class PotentialMapperNode(Node):
         self.last_point_cloud = None
 
         # 2. Initialize Core Logic
-        self.bridge = CvBridge()
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # Perception & Mapping
         engine_path = self.get_parameter('engine_path').value
         yaml_path = self.get_parameter('config_yaml').value
 
@@ -60,80 +69,95 @@ class PotentialMapperNode(Node):
         self.mapper = PotentialMapper(PotentialMapperConfig(resolution_m=0.05, size_m=20.0))
 
         self.MAP_SIZE = self.get_parameter('size_m').value
-        self.PANE_W = 320
-        self.PANE_H = 320
-        self.click_target = None
-        self.latest_frame = None
         self.target_u = None
 
         # 3. Subscribers (Synchronized)
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
 
-
         self.sub_image = message_filters.Subscriber(self, Image, '/simple_drone/front/image_raw', qos_profile=qos)
         self.sub_info = message_filters.Subscriber(self, CameraInfo, '/simple_drone/front/camera_info', qos_profile=qos)
 
-        self.sub_target_pixel = self.create_subscription(
-            PointStamped,
-            '/planner_target_pixel',
-            self.target_pixel_callback,
-            10
-        )
+        self.sub_target_pixel = self.create_subscription(PointStamped, '/planner_target_pixel',
+                                                         self.target_pixel_callback, 10)
+        self.sub_clicked_point = self.create_subscription(PointStamped, '/clicked_point', self.clicked_point_callback,
+                                                          10)
 
-        self.sub_clicked_point = self.create_subscription(
-            PointStamped,
-            '/clicked_point',
-            self.clicked_point_callback,
-            10
-        )
-        # TimeSynchronizer ensures we pair the image with the correct metadata
         self.ts = message_filters.TimeSynchronizer([self.sub_image, self.sub_info], 10)
         self.ts.registerCallback(self.image_callback)
 
-        qos = QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
-        )
         # 4. Publishers
-        self.pub_grid = self.create_publisher(OccupancyGrid, '/map_local', qos_profile=qos)
-        self.pub_nav_vector = self.create_publisher(
-            Vector3Stamped,
-            '/local_nav_vector',
-            10
-        )
-
-        self.pub_nav_heading = self.create_publisher(
-            Float32,
-            '/local_nav_heading',
-            10
-        )
+        qos_latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_grid = self.create_publisher(OccupancyGrid, '/map_local', qos_profile=qos_latched)
+        self.pub_nav_vector = self.create_publisher(Vector3Stamped, '/local_nav_vector', 10)
+        self.pub_nav_heading = self.create_publisher(Float32, '/local_nav_heading', 10)
         self.pub_pf_debug = self.create_publisher(Image, '/potential_field_debug', 10)
         self.pub_depth_debug = self.create_publisher(Image, '/depth_debug', 10)
-        self.get_logger().info("Potential Mapper Node Started with Synchronized Callbacks.")
+        self.pub_path = self.create_publisher(PathRos, '/potential_field_path', 10)
+        self.pub_path_straight = self.create_publisher(PathRos, '/potential_field_path_straight', 10)
+
+        self.get_logger().info("Potential Mapper Node Started with 5s Image Watchdog.")
 
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = 'map'
-        t.child_frame_id = self.get_parameter('base_frame').value
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.0
-        t.transform.translation.z = 0.0
-        t.transform.rotation.w = 1.0
-        self.tf_static_broadcaster.sendTransform(t)
-
         self.last_pose = None
-        self.last_time = None
-        self.latest_rgb = None
         self.display_rgb = None
 
         if self.get_parameter('show_gui').value:
             cv2.namedWindow("Sparx Click Interface", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Sparx Click Interface", 960, 540)
             cv2.setMouseCallback("Sparx Click Interface", self.on_rgb_click)
-            cv2.waitKey(1)
             self.create_timer(0.033, self.cv_refresh_callback)
+
+    def watchdog_callback(self):
+        # 1. Ignore if we haven't received anything yet
+        if self.last_image_time is None:
+            return
+
+        # 2. Calculate time since last image using Sim Time
+        now = self.get_clock().now()
+        diff_ns = (now - self.last_image_time).nanoseconds
+        elapsed_seconds = diff_ns / 1e9
+
+        if elapsed_seconds > self.watchdog_timeout:
+            self.get_logger().error(f"WATCHDOG: No image for {elapsed_seconds:.2f}s. Exiting.")
+            # Trigger a clean exit
+            raise SystemExit
+
+    def image_callback(self, img_msg, info_msg):
+        # Update watchdog timestamp
+        self.last_image_time = self.get_clock().now()
+        node_time = self.get_clock().now().to_msg().sec
+        img_time = img_msg.header.stamp.sec
+        self.last_wall_receipt_time = time.time()
+        # A. Convert ROS Image to OpenCV
+        cv_image = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
+
+        self.latest_rgb = cv_image
+        self.display_rgb = cv_image.copy()
+
+        # B. Run Perception
+        depth_map, point_cloud = self.depth_model.infer_all(cv_image)
+        self.last_point_cloud = point_cloud.copy()
+
+        # C. Get Odometry Delta
+        df, dl, dy = self.get_odometry_delta(target_time=rclpy.time.Time())
+
+        # D. Update Mapper logic
+        if self.click_target:
+            self.mapper.set_goal(*self.click_target)
+        elif self.target_u is not None:
+            local_target = self.get_local_target_from_pixel()
+            if local_target: self.mapper.set_goal(*local_target)
+
+        self.mapper.update(point_cloud, delta_fwd_m=df, delta_left_m=dl, delta_yaw_deg=dy)
+
+        # E. Publications
+        self.publish_occupancy_grid(img_msg.header)
+        self.publish_local_nav(img_msg.header)
+        self.publish_potential_field_debug(img_msg.header)
+        self.publish_depth_debug(depth_map, img_msg.header)
+        self.publish_trajectory(img_msg.header)
+        self.publish_straight_line_path(img_msg.header)
 
     def get_odometry_delta(self, target_time):
         try:
@@ -180,41 +204,6 @@ class PotentialMapperNode(Node):
         except Exception as e:
             self.get_logger().warn(f"TF Lookup failed: {e}")
             return 0.0, 0.0, 0.0
-
-    def image_callback(self, img_msg, info_msg):
-        # A. Convert ROS Image to OpenCV
-        cv_image = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
-        # Save for GUI display and click reference
-        self.latest_rgb = cv_image
-        self.display_rgb = cv_image.copy()
-        # B. Run Perception (DepthAnything V3)
-        # Returns (H, W, 3) point cloud in Camera Frame
-        depth_map, point_cloud = self.depth_model.infer_all(cv_image)
-        self.last_point_cloud = point_cloud.copy()
-        # C. Get Odometry Delta for Grid Warping
-        target_time = rclpy.time.Time()
-        df, dl, dy = self.get_odometry_delta(target_time=target_time)
-
-        # D. Publish OccupancyGrid for RViz
-        if self.click_target:
-            self.mapper.set_goal(*self.click_target)
-        elif self.target_u is not None:
-            local_target = self.get_local_target_from_pixel()
-            self.get_logger().info(f"Target pixel: u={self.target_u:.1f}, v={self.target_v:.1f}")
-            if local_target: self.mapper.set_goal(*local_target)
-
-        # E. Update Mapper (Using the stabilized Tanh + Numba logic)
-        self.mapper.update(
-            point_cloud,
-            delta_fwd_m=df,
-            delta_left_m=dl,
-            delta_yaw_deg=dy
-        )
-
-        self.publish_occupancy_grid(img_msg.header)
-        self.publish_local_nav(img_msg.header)
-        self.publish_potential_field_debug(img_msg.header)
-        self.publish_depth_debug(depth_map, img_msg.header)
 
     def target_pixel_callback(self, msg):
         self.target_u = float(msg.point.x)
@@ -348,12 +337,15 @@ class PotentialMapperNode(Node):
         # Convert M_nav [0..1] to ROS [0..100]
         # Use -1 for NaNs (Unknown)
         # Use the probability map (0 to 1) and scale to ROS (0 to 100)
-        nav_data = self.mapper.get_potential_map()
+        nav_data = self.mapper.get_nav_map()
         ros_data = (np.nan_to_num(nav_data, nan=0.0) * 100).astype(np.int8)
 
-        # # Flip so OpenCV-style becomes map-style / Rviz-style
-        # ros_data = np.flip(ros_data)
+        # mapper layout: nav_data[row=fwd, col=left]
+        # ROS OccupancyGrid expects row-major map[y, x]
+        # x = forward, y = left  -> convert with transpose + flipud
+        ros_grid = np.flipud(nav_data.T)
 
+        ros_data = (np.clip(ros_grid, 0.0, 1.0) * 100).astype(np.int8)
         grid_msg.data = ros_data.flatten().tolist()
         # self.get_logger().info(f"Publishing Occupancy Grid with unique values: {np.unique(grid_msg.data)}")
         self.pub_grid.publish(grid_msg)
@@ -524,6 +516,62 @@ class PotentialMapperNode(Node):
         msg.header.frame_id = header.frame_id
         self.pub_depth_debug.publish(msg)
 
+    def publish_trajectory(self, header):
+        start_fwd = 0.0
+        start_left = 0.0
+
+        traj = self.mapper.rollout_trajectory_to_goal(
+            start_fwd=start_fwd,
+            start_left=start_left,
+            step_m=0.05,
+            max_steps=200,
+            goal_tol_m=0.25,
+            obstacle_margin_m=0.15,
+        )
+
+        path_msg = PathRos()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = self.get_parameter('base_frame').value
+
+        for fwd, left in traj:
+            ps = PoseStamped()
+            ps.header = path_msg.header
+            ps.pose.position.x = float(fwd)
+            ps.pose.position.y = float(left)
+            ps.pose.position.z = 0.0
+            ps.pose.orientation.w = 1.0
+            path_msg.poses.append(ps)
+
+        self.pub_path.publish(path_msg)
+
+    def publish_straight_line_path(self, header):
+        if self.click_target is None:
+            return
+
+        goal_fwd, goal_left = self.click_target
+        start_fwd, start_left = 0.0, 0.0
+
+        num_points = 50
+
+        path_msg = PathRos()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = self.get_parameter('base_frame').value
+
+        for i in range(num_points + 1):
+            t = i / float(num_points)
+            fwd = (1.0 - t) * start_fwd + t * goal_fwd
+            left = (1.0 - t) * start_left + t * goal_left
+
+            ps = PoseStamped()
+            ps.header = path_msg.header
+            ps.pose.position.x = float(fwd)
+            ps.pose.position.y = float(left)
+            ps.pose.position.z = 0.0
+            ps.pose.orientation.w = 1.0
+            path_msg.poses.append(ps)
+
+        self.pub_path_straight.publish(path_msg)
+
     def on_rgb_click(self, event, u, v, flags, param):
         """
         Translates pixel (u,v) to metric (fwd, left) using camera intrinsics.
@@ -566,13 +614,51 @@ class PotentialMapperNode(Node):
 
         cv2.waitKey(1)
 
+
+import time
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = PotentialMapperNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
 
+    # Track wall-clock for the watchdog
+    last_wall_time = time.time()
+
+    try:
+        while rclpy.ok():
+            # 1. Process ROS callbacks (image_cb, timer_cb)
+            rclpy.spin_once(node, timeout_sec=0.001)
+
+            # 2. Watchdog Logic (Wall-clock based)
+            if node.last_image_time is not None:
+                # Use system time, not ROS sim time, to detect bag finish
+                if (time.time() - node.last_wall_receipt_time) > node.watchdog_timeout:
+                    node.get_logger().error("WATCHDOG: Bag finished or stream died. Shutting down.")
+                    break
+
+            # 3. Stable GUI Loop (Always on Main Thread)
+            if node.display_rgb is not None:
+                vis_img = node.display_rgb.copy()
+
+                # Draw marker and path here strictly on the copy
+                if node.last_click_pixel:
+                    u, v = node.last_click_pixel
+                    cv2.circle(vis_img, (u, v), 5, (0, 0, 255), -1)
+                    cv2.putText(vis_img, "Target Set", (u + 10, v),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+                cv2.imshow("Sparx Click Interface", vis_img)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cv2.destroyAllWindows()
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

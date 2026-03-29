@@ -360,10 +360,17 @@ class PotentialMapper:
         dl = goal_left - left_coords[None, :]
 
         dist = np.sqrt(df * df + dl * dl).astype(np.float32)
-        r = float(self.cfg.att_radius_m)
+        # Implementation of the "Smooth" Combined Potential:
+        # 1. Quadratic near the goal (smooth basin)
+        # 2. Conic far from the goal (constant pull)
+        d0 = self.cfg.att_radius_m  # The "transition" distance
 
-        # method A: goal is a LOW-potential basin
-        u_att = dist / (dist + self.cfg.att_radius_m)
+        u_att = np.where(
+            dist <= d0,
+            0.5 * (dist ** 2),  # Quadratic basin
+            d0 * dist - 0.5 * (d0 ** 2)  # Linear cone
+        )
+
         self._U_att = u_att.astype(np.float32)
 
     def get_attractive_potential(self) -> np.ndarray:
@@ -392,6 +399,74 @@ class PotentialMapper:
         gr = max(0, min(n - 1, gr))
         gc = max(0, min(n - 1, gc))
         return gr, gc
+
+    def rollout_trajectory_to_goal(
+            self,
+            start_fwd: float,
+            start_left: float,
+            step_m: float = 0.05,
+            max_steps: int = 200,
+            goal_tol_m: float = 0.25,
+            obstacle_margin_m: float = 0.15,
+            min_speed: float = 1e-3,
+    ) -> np.ndarray:
+        """
+        Roll out a trajectory by following the total vector field.
+
+        Returns:
+            np.ndarray of shape (N, 2), each row = [fwd, left]
+        """
+        if self._goal_world is None:
+            return np.array([[start_fwd, start_left]], dtype=np.float32)
+
+        goal_fwd, goal_left = self._goal_world
+        traj = []
+        visited = []
+
+        fwd = float(start_fwd)
+        left = float(start_left)
+
+        for _ in range(max_steps):
+            traj.append([fwd, left])
+
+            # goal reached
+            dg = np.hypot(goal_fwd - fwd, goal_left - left)
+            if dg <= goal_tol_m:
+                break
+
+            # obstacle / invalid area check
+            if self.is_occupied_metric(fwd, left, margin_m=obstacle_margin_m):
+                break
+
+            # get local vector
+            k1 = self.sample_total_vector_metric(fwd, left)
+            speed1 = float(np.linalg.norm(k1))
+            if speed1 < min_speed:
+                break
+            k1 = k1 / speed1
+
+            mid_fwd = fwd + 0.5 * step_m * float(k1[0])
+            mid_left = left + 0.5 * step_m * float(k1[1])
+
+            k2 = self.sample_total_vector_metric(mid_fwd, mid_left)
+            speed2 = float(np.linalg.norm(k2))
+            if speed2 < min_speed:
+                break
+            k2 = k2 / speed2
+
+            # integrate one step with midpoint direction
+            fwd_next = fwd + step_m * float(k2[0])
+            left_next = left + step_m * float(k2[1])
+
+            # loop / oscillation check
+            for pf, pl in visited[-15:]:
+                if np.hypot(fwd_next - pf, left_next - pl) < 0.5 * step_m:
+                    return np.array(traj, dtype=np.float32)
+
+            visited.append((fwd, left))
+            fwd, left = fwd_next, left_next
+
+        return np.array(traj, dtype=np.float32)
 
 
     @property
@@ -608,5 +683,63 @@ class PotentialMapper:
         M_temp[~seen] = np.nan
         return M_temp
 
+    def metric_to_cell(self, fwd: float, left: float) -> tuple[int, int] | None:
+        r = int((fwd - self._origin_fwd) / self.cfg.resolution_m)
+        c = int((self._origin_left - left) / self.cfg.resolution_m)
+
+        if r < 0 or r >= self._n or c < 0 or c >= self._n:
+            return None
+        return r, c
+
+    def sample_total_vector_metric(self, fwd: float, left: float) -> np.ndarray:
+        """
+        Sample the SAME total vector field used for debug visualization,
+        using bilinear interpolation in metric coordinates.
+        """
+        if self._grad_total is None:
+            return np.zeros(2, dtype=np.float32)
+
+        rf = (fwd - self._origin_fwd) / self.cfg.resolution_m
+        cf = (self._origin_left - left) / self.cfg.resolution_m
+
+        if rf < 0 or cf < 0 or rf >= self._n - 1 or cf >= self._n - 1:
+            return np.zeros(2, dtype=np.float32)
+
+        r0 = int(np.floor(rf))
+        c0 = int(np.floor(cf))
+        r1 = r0 + 1
+        c1 = c0 + 1
+
+        dr = rf - r0
+        dc = cf - c0
+
+        v00 = self._grad_total[r0, c0]
+        v01 = self._grad_total[r0, c1]
+        v10 = self._grad_total[r1, c0]
+        v11 = self._grad_total[r1, c1]
+
+        v_top = (1.0 - dc) * v00 + dc * v01
+        v_bot = (1.0 - dc) * v10 + dc * v11
+        v = (1.0 - dr) * v_top + dr * v_bot
+
+        return v.astype(np.float32)
+
+    def is_occupied_metric(self, fwd: float, left: float, margin_m: float = 0.15) -> bool:
+        rc = self.metric_to_cell(fwd, left)
+        if rc is None:
+            return True
+
+        r, c = rc
+        margin_cells = max(1, int(round(margin_m / self.cfg.resolution_m)))
+
+        r0 = max(0, r - margin_cells)
+        r1 = min(self._n, r + margin_cells + 1)
+        c0 = max(0, c - margin_cells)
+        c1 = min(self._n, c + margin_cells + 1)
+
+        patch = self._M_nav[r0:r1, c0:c1]
+        patch = np.nan_to_num(patch, nan=0.0)
+
+        return np.any(patch > self.cfg.occ_thresh)
 
 
