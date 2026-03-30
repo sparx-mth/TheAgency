@@ -24,6 +24,9 @@ import math
 
 from sparx_agency.core.mapping.costmap.potential_mapper import PotentialMapper, PotentialMapperConfig
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
+from pathlib import Path
+import csv
+import matplotlib.pyplot as plt
 
 
 class PotentialMapperNode(Node):
@@ -107,6 +110,10 @@ class PotentialMapperNode(Node):
             cv2.resizeWindow("Sparx Click Interface", 960, 540)
             cv2.setMouseCallback("Sparx Click Interface", self.on_rgb_click)
             self.create_timer(0.033, self.cv_refresh_callback)
+
+        self.debug_dir = Path("/tmp/pf_debug")
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
+        self.debug_rollout_idx = 0
 
     def watchdog_callback(self):
         # 1. Ignore if we haven't received anything yet
@@ -371,6 +378,7 @@ class PotentialMapperNode(Node):
         v_left = float(v[1])
         heading = math.atan2(v_left, v_fwd)
 
+
         vec_msg = Vector3Stamped()
         vec_msg.header.stamp = self.get_clock().now().to_msg()
         vec_msg.header.frame_id = self.get_parameter('base_frame').value
@@ -516,18 +524,83 @@ class PotentialMapperNode(Node):
         msg.header.frame_id = header.frame_id
         self.pub_depth_debug.publish(msg)
 
+    def save_rollout_debug_plots(self, debug_rows, prefix: str):
+        if not debug_rows:
+            return
+
+        steps = [r["step"] for r in debug_rows]
+        hdg1 = [r["hdg1_deg"] for r in debug_rows]
+        hdg2 = [r["hdg2_deg"] for r in debug_rows]
+        dhdg = [r["dhdg1_deg"] for r in debug_rows]
+        speed1 = [r["speed1"] for r in debug_rows]
+        speed2 = [r["speed2"] for r in debug_rows]
+        # u_att = [r["u_att"] for r in debug_rows]
+        # u_rep = [r["u_rep"] for r in debug_rows]
+        # u_total = [r["u_total"] for r in debug_rows]
+        u_att_w = [r["u_att_w"] for r in debug_rows]
+        u_rep_w = [r["u_rep_w"] for r in debug_rows]
+        rep_att_ratio = [r["rep_att_ratio"] for r in debug_rows]
+
+        d_obs = [r["d_obs"] for r in debug_rows]
+
+        fig = plt.figure(figsize=(10, 10))
+
+        ax1 = fig.add_subplot(4, 1, 1)
+        ax1.plot(steps, hdg1, label="hdg1_deg")
+        ax1.plot(steps, hdg2, label="hdg2_deg")
+        ax1.set_ylabel("heading [deg]")
+        ax1.grid(True)
+        ax1.legend()
+
+        ax2 = fig.add_subplot(4, 1, 2)
+        ax2.plot(steps, dhdg, label="dhdg1_deg")
+        ax2.set_ylabel("delta heading [deg]")
+        ax2.grid(True)
+        ax2.legend()
+
+        ax3 = fig.add_subplot(4, 1, 3)
+        ax3.plot(steps, speed1, label="speed1")
+        ax3.plot(steps, speed2, label="speed2")
+        ax3.set_ylabel("speed")
+        ax3.grid(True)
+        ax3.legend()
+
+        ax4 = fig.add_subplot(4, 1, 4)
+
+        ax4.plot(steps, u_att_w, label="k_att * U_att")
+        ax4.plot(steps, u_rep_w, label="k_rep * U_rep")
+        ax4.plot(steps, rep_att_ratio, label="rep/att ratio")
+        ax4.set_xlabel("step")
+        ax4.grid(True)
+        ax4.legend()
+
+        fig.tight_layout()
+        fig.savefig(self.debug_dir / f"{prefix}_plots.png")
+        plt.close(fig)
+
+        with open(self.debug_dir / f"{prefix}_rows.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=debug_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(debug_rows)
+
     def publish_trajectory(self, header):
         start_fwd = 0.0
         start_left = 0.0
 
-        traj = self.mapper.rollout_trajectory_to_goal(
-            start_fwd=start_fwd,
-            start_left=start_left,
+        traj, debug_rows = self.mapper.rollout_trajectory_to_goal(
+            start_fwd=0.0,
+            start_left=0.0,
             step_m=0.05,
             max_steps=200,
             goal_tol_m=0.25,
             obstacle_margin_m=0.15,
+            return_debug=True,
         )
+
+        prefix = f"rollout_{self.debug_rollout_idx:04d}"
+        self.save_rollout_debug_plots(debug_rows, prefix)
+        self.debug_rollout_idx += 1
+
 
         path_msg = PathRos()
         path_msg.header.stamp = self.get_clock().now().to_msg()

@@ -15,9 +15,11 @@ Complexity notes are per call unless otherwise stated.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+import cv2
 import numpy as np
 
 from sparx_agency.core.common.types import Intrinsics  # re-exported from types.perception
@@ -37,8 +39,8 @@ class PotentialMapperConfig:
     alpha: float = 0.30
     occ_thresh: float = 0.7
     sigma_m: float = 0.25
-    repulse_radius_m: float = 0.35
-    inflation_radius_m: float = 0.01
+    repulse_radius_m: float = 0.75
+    inflation_radius_m: float = 0.15
     z_band: Tuple[float, float] = (0.05, 2.0)
     range_min_m: float = 0.2
     range_max_m: float = 15.0
@@ -164,7 +166,8 @@ class PotentialMapper:
         nav_grid = np.maximum(self._M_nav, self._M_walls)
         # 2. Compute the repulsive potential
         u_rep_raw, d_obs = self._potential.compute_from_prob_grid(nav_grid, self.cfg.resolution_m)
-        self._U_rep = u_rep_raw
+        u_rep_smooth = cv2.GaussianBlur(u_rep_raw.astype(np.float32), (5, 5), 1.0)
+        self._U_rep = u_rep_smooth
         self._grad_rep = self.compute_gradient_from_potential(u_rep_raw)
         self._D_obs = d_obs
 
@@ -179,7 +182,10 @@ class PotentialMapper:
         # Note: k_rep and k_att should be tuned so that at "danger" distance,
         # they sum to a value around 1.0 to 3.0 before tanh.
         u_combined = (self.cfg.k_rep * self._U_rep + self.cfg.k_att * self._U_att)
-        self._U_total = u_combined.astype(np.float32)
+        u_total_smooth = cv2.GaussianBlur(u_combined.astype(np.float32), (5, 5), 1.0)
+
+        self._U_total = u_total_smooth
+        # self._U_total = u_combined.astype(np.float32)
         # 5. COMPUTE GRADIENT FROM THE SATURATED FIELD
         # We use negative gradient because we want to move TOWARDS lower potential
         # Single gradient: -∇U_total
@@ -409,41 +415,43 @@ class PotentialMapper:
             goal_tol_m: float = 0.25,
             obstacle_margin_m: float = 0.15,
             min_speed: float = 1e-3,
-    ) -> np.ndarray:
-        """
-        Roll out a trajectory by following the total vector field.
-
-        Returns:
-            np.ndarray of shape (N, 2), each row = [fwd, left]
-        """
+            return_debug: bool = False,
+    ):
         if self._goal_world is None:
-            return np.array([[start_fwd, start_left]], dtype=np.float32)
+            traj = np.array([[start_fwd, start_left]], dtype=np.float32)
+            return (traj, []) if return_debug else traj
 
         goal_fwd, goal_left = self._goal_world
         traj = []
+        debug_rows = []
         visited = []
 
         fwd = float(start_fwd)
         left = float(start_left)
+        prev_hdg = None
 
-        for _ in range(max_steps):
+        for i in range(max_steps):
             traj.append([fwd, left])
 
-            # goal reached
-            dg = np.hypot(goal_fwd - fwd, goal_left - left)
+            dg = float(np.hypot(goal_fwd - fwd, goal_left - left))
             if dg <= goal_tol_m:
                 break
 
-            # obstacle / invalid area check
             if self.is_occupied_metric(fwd, left, margin_m=obstacle_margin_m):
                 break
 
-            # get local vector
             k1 = self.sample_total_vector_metric(fwd, left)
             speed1 = float(np.linalg.norm(k1))
             if speed1 < min_speed:
                 break
             k1 = k1 / speed1
+
+            hdg1 = math.degrees(math.atan2(float(k1[1]), float(k1[0])))
+            if prev_hdg is None:
+                dhdg1 = 0.0
+            else:
+                a = math.radians(hdg1 - prev_hdg)
+                dhdg1 = math.degrees(math.atan2(math.sin(a), math.cos(a)))
 
             mid_fwd = fwd + 0.5 * step_m * float(k1[0])
             mid_left = left + 0.5 * step_m * float(k1[1])
@@ -454,19 +462,47 @@ class PotentialMapper:
                 break
             k2 = k2 / speed2
 
-            # integrate one step with midpoint direction
+            hdg2 = math.degrees(math.atan2(float(k2[1]), float(k2[0])))
+            u_att_val = self.sample_scalar_metric(self._U_att, fwd, left)
+            u_rep_val = self.sample_scalar_metric(self._U_rep, fwd, left)
+            u_total_val = self.sample_scalar_metric(self._U_total, fwd, left)
+
+            u_att_w = self.cfg.k_att * u_att_val
+            u_rep_w = self.cfg.k_rep * u_rep_val
+
+            debug_rows.append({
+                "step": i,
+                "fwd": fwd,
+                "left": left,
+                "mid_fwd": mid_fwd,
+                "mid_left": mid_left,
+                "speed1": speed1,
+                "speed2": speed2,
+                "hdg1_deg": hdg1,
+                "hdg2_deg": hdg2,
+                "dhdg1_deg": dhdg1,
+                "u_att": u_att_val,
+                "u_rep": u_rep_val,
+                "u_total": u_total_val,
+                "u_att_w": u_att_w,
+                "u_rep_w": u_rep_w,
+                "rep_att_ratio": u_rep_w / max(u_att_w, 1e-6),
+                "d_obs": self.sample_scalar_metric(self._D_obs, fwd, left),
+            })
+
             fwd_next = fwd + step_m * float(k2[0])
             left_next = left + step_m * float(k2[1])
 
-            # loop / oscillation check
             for pf, pl in visited[-15:]:
                 if np.hypot(fwd_next - pf, left_next - pl) < 0.5 * step_m:
-                    return np.array(traj, dtype=np.float32)
+                    break
 
             visited.append((fwd, left))
             fwd, left = fwd_next, left_next
+            prev_hdg = hdg2
 
-        return np.array(traj, dtype=np.float32)
+        traj = np.array(traj, dtype=np.float32)
+        return (traj, debug_rows) if return_debug else traj
 
 
     @property
@@ -692,10 +728,6 @@ class PotentialMapper:
         return r, c
 
     def sample_total_vector_metric(self, fwd: float, left: float) -> np.ndarray:
-        """
-        Sample the SAME total vector field used for debug visualization,
-        using bilinear interpolation in metric coordinates.
-        """
         if self._grad_total is None:
             return np.zeros(2, dtype=np.float32)
 
@@ -718,11 +750,49 @@ class PotentialMapper:
         v10 = self._grad_total[r1, c0]
         v11 = self._grad_total[r1, c1]
 
-        v_top = (1.0 - dc) * v00 + dc * v01
-        v_bot = (1.0 - dc) * v10 + dc * v11
-        v = (1.0 - dr) * v_top + dr * v_bot
+        v0 = (1.0 - dc) * v00 + dc * v01
+        v1 = (1.0 - dc) * v10 + dc * v11
+        v = (1.0 - dr) * v0 + dr * v1
+
+        # temporary debug
+        hdg = math.degrees(math.atan2(float(v[1]), float(v[0])))
+        if fwd > 1.25 and left > 0.70:
+            print(f"[sample] pos=({fwd:.3f},{left:.3f}) rf={rf:.3f} cf={cf:.3f}")
+            print(f"         cells r0={r0} c0={c0} r1={r1} c1={c1} dr={dr:.3f} dc={dc:.3f}")
+            print(f"         v00={v00} hdg00={math.degrees(math.atan2(float(v00[1]), float(v00[0]))):.2f}")
+            print(f"         v01={v01} hdg01={math.degrees(math.atan2(float(v01[1]), float(v01[0]))):.2f}")
+            print(f"         v10={v10} hdg10={math.degrees(math.atan2(float(v10[1]), float(v10[0]))):.2f}")
+            print(f"         v11={v11} hdg11={math.degrees(math.atan2(float(v11[1]), float(v11[0]))):.2f}")
+            print(f"         v_interp={v} hdg={hdg:.2f}")
 
         return v.astype(np.float32)
+
+    def sample_scalar_metric(self, grid: np.ndarray, fwd: float, left: float) -> float:
+        if grid is None:
+            return float("nan")
+
+        rf = (fwd - self._origin_fwd) / self.cfg.resolution_m
+        cf = (self._origin_left - left) / self.cfg.resolution_m
+
+        if rf < 0 or cf < 0 or rf >= self._n - 1 or cf >= self._n - 1:
+            return float("nan")
+
+        r0 = int(np.floor(rf))
+        c0 = int(np.floor(cf))
+        r1 = r0 + 1
+        c1 = c0 + 1
+
+        dr = rf - r0
+        dc = cf - c0
+
+        v00 = float(grid[r0, c0])
+        v01 = float(grid[r0, c1])
+        v10 = float(grid[r1, c0])
+        v11 = float(grid[r1, c1])
+
+        v0 = (1.0 - dc) * v00 + dc * v01
+        v1 = (1.0 - dc) * v10 + dc * v11
+        return float((1.0 - dr) * v0 + dr * v1)
 
     def is_occupied_metric(self, fwd: float, left: float, margin_m: float = 0.15) -> bool:
         rc = self.metric_to_cell(fwd, left)
