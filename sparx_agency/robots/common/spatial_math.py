@@ -39,6 +39,20 @@ def quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     ], dtype=np.float32)
 
 
+def get_euler(q):
+    # Quaternion to Euler (Roll, Pitch, Yaw)
+    sinr_cosp = 2 * (q.w * q.x + q.y * q.z)
+    cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2 * (q.w * q.y - q.z * q.x)
+    pitch = math.asin(sinp) if abs(sinp) <= 1 else math.copysign(math.pi / 2, sinp)
+    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
+
+
+
 def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: float) -> Intrinsics:
     """Converts FOV angles to a pinhole camera intrinsic matrix."""
     hfov = math.radians(float(hfov_deg))

@@ -98,6 +98,7 @@ class PotentialMapperNode(Node):
         self.pub_depth_debug = self.create_publisher(Image, '/depth_debug', 10)
         self.pub_path = self.create_publisher(PathRos, '/potential_field_path', 10)
         self.pub_path_straight = self.create_publisher(PathRos, '/potential_field_path_straight', 10)
+        self.pub_depth_raw = self.create_publisher(Image, '/sparx/depth/da3_raw', 10)
 
         self.get_logger().info("Potential Mapper Node Started with 5s Image Watchdog.")
 
@@ -145,7 +146,7 @@ class PotentialMapperNode(Node):
         # B. Run Perception
         depth_map, point_cloud = self.depth_model.infer_all(cv_image)
         self.last_point_cloud = point_cloud.copy()
-
+        self.publish_raw_depth(depth_map, img_msg.header)
         # C. Get Odometry Delta
         df, dl, dy = self.get_odometry_delta(target_time=rclpy.time.Time())
 
@@ -644,6 +645,12 @@ class PotentialMapperNode(Node):
             path_msg.poses.append(ps)
 
         self.pub_path_straight.publish(path_msg)
+
+    def publish_raw_depth(self, depth_map, header):
+        # depth_map is already float32 from DA3 model
+        msg = self.bridge.cv2_to_imgmsg(depth_map.astype(np.float32), encoding='32FC1')
+        msg.header = header
+        self.pub_depth_raw.publish(msg)
 
     def on_rgb_click(self, event, u, v, flags, param):
         """
