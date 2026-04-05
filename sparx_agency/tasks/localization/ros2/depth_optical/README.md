@@ -122,7 +122,7 @@ ros2 bag play rosbag2_2026_03_01-11_02_57_line_0.35val --clock --rate 0.5
 
 if you want to record
 ```bash
-ros2 bag record   /clock   /simple_drone/front/image_raw   /simple_drone/front/camera_info   /simple_drone/gt_pose   /simple_drone/gt_vel   /simple_drone/odom   /simple_drone/imu   /tf   /tf_static
+ros2 bag record   /clock   /simple_drone/front/image_raw   /simple_drone/front/camera_info   /simple_drone/gt_pose   /simple_drone/gt_vel   /simple_drone/odom   /simple_drone/imu/out   /tf   /tf_static
 
 sudo apt update
 apt-get install -y \
