@@ -129,6 +129,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myenv/
 
 # Spyder project settings
 .spyderproject
@@ -173,6 +174,7 @@ sparx_agency/robots/src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/csv/*
 sparx_agency/robots/src/interfaces/ROBOTICAN/examples/src/keyboard_contorl/__pycache__/
 sparx_agency/robots/src/interfaces/ROBOTICAN/examples/src/paths/*
 src/room_mapping/2025_12_25___09_40_51/
+xtend_capture_out/*
 
 gz-sim-environment
 ROBOTICAN/examples
@@ -182,3 +184,4 @@ ORB-SLAM3-ROS2-Docker
 sparx_agency/build/
 sparx_agency/log/
 sparx_agency/install/
+sparx_agency/tasks/planning/3D_planning/gibson/extracted/*

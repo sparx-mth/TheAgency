@@ -72,7 +72,14 @@ class ControllerAutomation:
                 scenario_task = asyncio.create_task(self.create_scenario())
                 
                 # Wait for both tasks
-                await asyncio.gather(send_task, receive_task, scenario_task)
+                try:
+                    # Wait only for scenario to finish (success or error)
+                    await scenario_task
+                finally:
+                    # Stop background loops cleanly
+                    for t in (send_task, receive_task):
+                        t.cancel()
+                    await asyncio.gather(send_task, receive_task, return_exceptions=True)
                     
         except websockets.exceptions.WebSocketException as e:
             print(f"✗ WebSocket error: {e}")
@@ -119,7 +126,12 @@ class ControllerAutomation:
                         for robot in content['robots']:
                             if robot['robot_uid'] == self.robot_uid:
                                 self.update_robot_telemetry(robot['telemetry']['details']['bearing'])
-                                break
+                                
+                            lt = robot.get("local_telemetry", {})
+                            self.x = lt.get("x", None)
+                            self.y = lt.get("y", None)
+                            self.z = lt.get("z", None)
+                            break
 
                 except json.JSONDecodeError:
                     print(f"[RECV] Received non-JSON message")
@@ -174,7 +186,7 @@ class ControllerAutomation:
         print(f"Landed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 0
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)
 
     async def move_forward(self, duration: float):
         """Move the robot forward"""

@@ -4,8 +4,6 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from sensor_msgs.msg import Image
-
 _POSE_NAME_RES = [
     re.compile(
         r".*?/x(?P<x>-?\d{1,6})y(?P<y>-?\d{1,6})z(?P<z>-?\d{1,6})yaw(?P<yaw>-?\d{1,9})(?:__[^/]+)?\.[A-Za-z0-9]+$"
