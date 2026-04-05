@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
 
 
@@ -79,4 +79,19 @@ class Observation:
     rgb: Optional[RGBFrame] = None
     depth: Optional[DepthFrame] = None
     cloud: Optional[PointCloud] = None
+
+@dataclass
+class Detection2D:
+    label: str
+    score: float
+    bbox_xyxy: Tuple[int, int, int, int]  # x1,y1,x2,y2
+    frame_w: int
+    frame_h: int
+
+@dataclass
+class Detection3D:
+    label: str
+    score: float
+    xyz_world: Tuple[float, float, float]
+    xyz_cam: Optional[Tuple[float, float, float]] = None
 

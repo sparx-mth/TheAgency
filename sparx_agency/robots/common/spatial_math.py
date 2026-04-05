@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import yaml
 
 from sparx_agency.core.common.types import Intrinsics
 
@@ -38,6 +39,20 @@ def quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     ], dtype=np.float32)
 
 
+def get_euler(q):
+    # Quaternion to Euler (Roll, Pitch, Yaw)
+    sinr_cosp = 2 * (q.w * q.x + q.y * q.z)
+    cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2 * (q.w * q.y - q.z * q.x)
+    pitch = math.asin(sinp) if abs(sinp) <= 1 else math.copysign(math.pi / 2, sinp)
+    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
+
+
+
 def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: float) -> Intrinsics:
     """Converts FOV angles to a pinhole camera intrinsic matrix."""
     hfov = math.radians(float(hfov_deg))
@@ -57,6 +72,20 @@ def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: floa
         fy=float(fy),
         cx=float(cx),
         cy=float(cy)
+    )
+
+
+def load_intrinsics_from_yaml(yaml_path: str) -> Intrinsics:
+    with open(yaml_path, 'r') as f:
+        data = yaml.safe_load(f)
+
+    return Intrinsics(
+        fx=float(data['fx']),
+        fy=float(data['fy']),
+        cx=float(data['cx']),
+        cy=float(data['cy']),
+        width=int(data['image_width']),
+        height=int(data['image_height'])
     )
 
 def rpy_deg_to_R_base(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
@@ -98,5 +127,28 @@ def rot_y(deg: float) -> np.ndarray:
         [0.0, 1.0, 0.0],
         [-s, 0.0,  c],
     ], dtype=np.float32)
+
+
+def pose_xyz_yaw_to_T(x: float, y: float, z: float, yaw: float) -> np.ndarray:
+    """
+    Create a 4x4 homogeneous transform matrix from position (x,y,z) and yaw (rad).
+    Assumes:
+      - yaw around +Z axis
+      - right-handed coordinate system
+    """
+    c = math.cos(yaw)
+    s = math.sin(yaw)
+
+    T = np.eye(4, dtype=np.float32)
+    T[0, 0] = c
+    T[0, 1] = -s
+    T[1, 0] = s
+    T[1, 1] = c
+
+    T[0, 3] = x
+    T[1, 3] = y
+    T[2, 3] = z
+
+    return T
 
 

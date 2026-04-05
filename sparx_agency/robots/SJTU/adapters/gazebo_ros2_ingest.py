@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 
 import rclpy
-from depth_anything_v2.dpt import DepthAnythingV2
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
@@ -26,7 +25,7 @@ from sparx_agency.core.common.types.perception import (
     Observation,
 )
 
-from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
+from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
 from sparx_agency.robots.common.helpers import make_depth_grid_vis, depth_to_vis_u8
 # ROS-free mapping pipeline
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, PinholeCloudGenerator, \
@@ -108,6 +107,12 @@ class GazeboRos2Ingestor(Node):
         self.declare_parameter("size_x_m", 40.0)
         self.declare_parameter("size_y_m", 40.0)
 
+        # --- New DA3 Parameters ---
+        self.declare_parameter("engine_path",
+                               "/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine")
+        self.declare_parameter("camera_yaml_path",
+                               "/home/daphnaa/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_laptop.yaml")
+
         self.rgb_topic = str(self.get_parameter("rgb_topic").value)
         self.camera_info_topic = str(self.get_parameter("camera_info_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
@@ -135,17 +140,25 @@ class GazeboRos2Ingestor(Node):
         self.pub_cloud = self.create_publisher(PointCloud2, "/debug/cloud_global", 1)  # PointCloud2
         self.pub_depth_grid = self.create_publisher(Image, "/debug/depth_grid_vis", 1)
 
+        # Load DA3 Specific Paths
+        engine_path = str(self.get_parameter("engine_path").value)
+        yaml_path = str(self.get_parameter("camera_yaml_path").value)
+
         self._img_count = 0
         self._latest = LatestState()
 
-        self.costmap = costmap #ProbabilisticGridCostmap(ProbabilisticGridConfig())
+        self.costmap = costmap
         # self.costmap = SanityCheckCostmap()
-        self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
+        # --- SWAP: Initializing DA3 instead of DA2 ---
+        self.get_logger().info(f"Initializing DepthAnything V3 with engine: {engine_path}")
+        self.depth_model = DA3TensorRTModel(engine_path=engine_path, yaml_path=yaml_path)
+        #self.depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
 
         self.cloud_generator = PinholeCloudGenerator()
         self.pipeline_cfg = MappingPipelineConfig()
 
         self.pipeline = pipeline
+        self.pipeline.depth_model = self.depth_model
 
         # --- QoS ---
         sensor_qos = QoSProfile(
