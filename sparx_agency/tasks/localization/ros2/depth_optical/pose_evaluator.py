@@ -43,7 +43,7 @@ class PoseEvaluatorNode(Node):
         self.declare_parameter("est_tum_path", "")
         self.declare_parameter("gt_tum_path", "")
         self.declare_parameter("depth_comparison_csv", "")
-        self.declare_parameter("flush_every_n", 200)
+        self.declare_parameter("flush_every_n", 20)
         self.declare_parameter("print_every_sec", 1.0)
 
         est_topic = self.get_parameter("est_pose_topic").value
@@ -94,7 +94,7 @@ class PoseEvaluatorNode(Node):
 
         # Pubs / Subs
         self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, qos_profile_sensor_data)
-        self.est_sub = self.create_subscription(PoseStamped, est_topic, self.est_pose_cb, qos_profile_sensor_data)
+        self.est_sub = self.create_subscription(PoseStamped, est_topic, self.est_pose_cb, 10)
         self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_cb, qos_profile_sensor_data)
 
     def destroy_node(self):

@@ -9,6 +9,7 @@ from geometry_msgs.msg import Vector3Stamped
 from cv_bridge import CvBridge
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
 from sensor_msgs.msg import Imu
+import message_filters
 
 class FlowDepthVelocityNode(Node):
 
@@ -27,16 +28,16 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("output_topic", "/flow_depth/velocity")
 
         self.declare_parameter("max_corners", 300)
-        self.declare_parameter("min_corners", 30)
+        self.declare_parameter("min_corners", 70)
 
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
-        self.declare_parameter("depth_scale", 0.4)  # Calibrated for Depth Anything V2 + Gazebo
-
+        self.declare_parameter("depth_scale", 0.1)  # Calibrated for Depth Anything V2 + Gazebo
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
-
+        self.declare_parameter("imu_topic", "/simple_drone/imu/out")
+        
         #  LK params (Lucas-Kanade optical flow)
         self.declare_parameter("lk_win", 21) # window size
         self.declare_parameter("lk_levels", 3) # pyramid levels
@@ -45,6 +46,7 @@ class FlowDepthVelocityNode(Node):
         depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
         caminfo_topic = self.get_parameter("camera_info_topic").get_parameter_value().string_value
         output_topic = self.get_parameter("output_topic").get_parameter_value().string_value
+        imu_topic = self.get_parameter("imu_topic").get_parameter_value().string_value
 
         self.max_corners = int(self.get_parameter("max_corners").get_parameter_value().integer_value)
         self.min_corners = int(self.get_parameter("min_corners").get_parameter_value().integer_value)
@@ -95,16 +97,24 @@ class FlowDepthVelocityNode(Node):
         # IMU state
         self.latest_gyro = np.array([0.0, 0.0, 0.0])
 
-        # IMU topic
-        self.declare_parameter("imu_topic", "/simple_drone/imu/out")
-        imu_topic = self.get_parameter("imu_topic").get_parameter_value().string_value
-        
+
         # pubs/subs
         self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, 10)
-        self.rgb_sub = self.create_subscription(Image, image_topic, self.rgb_callback, 10)
-        self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, 10)
+        
+        #self.rgb_sub = self.create_subscription(Image, image_topic, self.rgb_callback, 10)
+        #self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, 10)
+        self.rgb_sub = message_filters.Subscriber(self, Image, image_topic)
+        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
+
         self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
         self.imu_sub = self.create_subscription(Imu, imu_topic, self.imu_callback, 10)
+
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.rgb_sub, self.depth_sub],
+            queue_size=50,
+            slop=0.15
+        )
+        self.ts.registerCallback(self.sync_callback)
 
     # ---------- callbacks ----------
     def caminfo_callback(self, msg: CameraInfo):
@@ -185,6 +195,52 @@ class FlowDepthVelocityNode(Node):
         self.latest_gyro[0] = -pitch_rate
         self.latest_gyro[1] = -yaw_rate
         self.latest_gyro[2] = roll_rate
+
+    def sync_callback(self, rgb_msg: Image, depth_msg: Image):
+        if self.fx is None or self.fy is None:
+            return
+
+        try:
+            depth_cv = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
+        except Exception as e:
+            self.get_logger().error(f"Depth convert failed: {e}")
+            return
+        
+        depth_map = np.asarray(depth_cv, dtype=np.float32)
+
+        try:
+            frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
+        except Exception as e:
+            self.get_logger().error(f"RGB convert failed: {e}")
+            return
+
+        flow_res = self.tracker.process(frame, rgb_msg.header.stamp)
+        if flow_res is None:
+            return
+
+        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
+            flow_res.good_old,
+            flow_res.good_new,
+            depth_map,
+            flow_res.dt,
+            self.latest_gyro
+        )
+
+        vel_msg = Vector3Stamped()
+        vel_msg.header.stamp = rgb_msg.header.stamp
+        vel_msg.header.frame_id = self.camera_frame
+        vel_msg.vector.x = float(vx_mps)
+        vel_msg.vector.y = float(vy_mps)
+        vel_msg.vector.z = float(vz_mps)
+        self.vel_pub.publish(vel_msg)
+
+        if self.show_debug:
+            vis = frame.copy()
+            self.draw_debug(vis, flow_res.good_old, flow_res.good_new, depth_map)
+            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
+            cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+            cv2.imshow("Flow+Depth Velocity", vis)
+            cv2.waitKey(1) 
    
     # ---------- core helpers ----------
 
