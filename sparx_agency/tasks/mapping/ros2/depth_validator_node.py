@@ -44,10 +44,12 @@ class DepthValidatorNode(Node):
         # Open file once and keep it open for performance
         self.csv_fp = open(self.log_file, mode='w', newline='')
         self.csv_writer = csv.writer(self.csv_fp)
-        header = ['ts', 'roll', 'pitch', 'yaw', 'mae', 'rmse', 'jitter']
         # Create headers like pt0_err, pt1_err, etc.
-        header += [f'pt{i}_err' for i in range(self.n_points)]
-        header += [f'gt_depth_{i}' for i in range(self.n_points)]
+        pt_err_cols = [f"pt{i}_err" for i in range(16)]
+        pt_jitter_cols = [f"pt{i}_jitter" for i in range(16)]
+        gt_cols = [f"gt_depth_{i}" for i in range(16)]
+
+        header = ["ts", "roll", "pitch", "yaw", "mae", "rmse"] + pt_err_cols + pt_jitter_cols + gt_cols
         self.csv_writer.writerow(header)
 
         # Subscribers
