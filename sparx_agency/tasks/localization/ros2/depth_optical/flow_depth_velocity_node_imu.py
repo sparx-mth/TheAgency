@@ -28,12 +28,12 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("output_topic", "/flow_depth/velocity")
 
         self.declare_parameter("max_corners", 300)
-        self.declare_parameter("min_corners", 70)
+        self.declare_parameter("min_corners", 160)
 
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
-        self.declare_parameter("depth_scale", 0.2)  # Calibrated for Depth Anything V2 + Gazebo
+        self.declare_parameter("depth_scale", 0.4)  # Depth Anything V2 Metric is already in meters - NO scaling!
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
         self.declare_parameter("imu_topic", "/simple_drone/imu/out")
@@ -109,8 +109,11 @@ class FlowDepthVelocityNode(Node):
         self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
         self.imu_sub = self.create_subscription(Imu, imu_topic, self.imu_callback, 10)
 
+        # Add IMU subscription for synchronization
+        self.imu_sub_sync = message_filters.Subscriber(self, Imu, imu_topic)
+
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub],
+            [self.rgb_sub, self.depth_sub, self.imu_sub_sync],
             queue_size=50,
             slop=0.15
         )
@@ -142,53 +145,56 @@ class FlowDepthVelocityNode(Node):
         self.latest_depth_stamp = msg.header.stamp
 
     def rgb_callback(self, msg: Image):
-        # Need cam intrinsics + depth
-        if self.fx is None or self.fy is None:
-            return
-        if self.latest_depth is None:
-            return
-
-        # Convert RGB
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except Exception as e:
-            self.get_logger().error(f"RGB convert failed: {e}")
-            return
-
-        flow_res = self.tracker.process(frame, msg.header.stamp)
-        if flow_res is None:
-            return
-
-        # compute velocity from flow + depth + IMU (3-DOF least-squares)
-        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
-            flow_res.good_old,
-            flow_res.good_new,
-            self.latest_depth,
-            flow_res.dt,
-            self.latest_gyro
-        )
-
-        # Publish in front_cam_link frame (Xl=forward, Yl=left, Zl=up).
-        vel_msg = Vector3Stamped()
-        vel_msg.header.stamp = msg.header.stamp
-        vel_msg.header.frame_id = self.camera_frame
-        vel_msg.vector.x = float(vx_mps)
-        vel_msg.vector.y = float(vy_mps)
-        vel_msg.vector.z = float(vz_mps)
-        self.vel_pub.publish(vel_msg)
-
-        # debug visualization of flow vectors colored by depth
-        if self.show_debug:
-            vis = frame.copy()
-            self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
-            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
-            cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-            cv2.imshow("Flow+Depth Velocity", vis)
-            cv2.waitKey(1)
+        # DISABLED: Using sync_callback instead for proper RGB+Depth+IMU synchronization
+        pass
+        #
+        # # Need cam intrinsics + depth
+        # if self.fx is None or self.fy is None:
+        #     return
+        # if self.latest_depth is None:
+        #     return
+        #
+        # # Convert RGB
+        # try:
+        #     frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        # except Exception as e:
+        #     self.get_logger().error(f"RGB convert failed: {e}")
+        #     return
+        #
+        # flow_res = self.tracker.process(frame, msg.header.stamp)
+        # if flow_res is None:
+        #     return
+        #
+        # # compute velocity from flow + depth + IMU (3-DOF least-squares)
+        # vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
+        #     flow_res.good_old,
+        #     flow_res.good_new,
+        #     self.latest_depth,
+        #     flow_res.dt,
+        #     self.latest_gyro
+        # )
+        #
+        # # Publish in front_cam_link frame (Xl=forward, Yl=left, Zl=up).
+        # vel_msg = Vector3Stamped()
+        # vel_msg.header.stamp = msg.header.stamp
+        # vel_msg.header.frame_id = self.camera_frame
+        # vel_msg.vector.x = float(vx_mps)
+        # vel_msg.vector.y = float(vy_mps)
+        # vel_msg.vector.z = float(vz_mps)
+        # self.vel_pub.publish(vel_msg)
+        #
+        # # debug visualization of flow vectors colored by depth
+        # if self.show_debug:
+        #     vis = frame.copy()
+        #     self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
+        #     txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
+        #     cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        #     cv2.imshow("Flow+Depth Velocity", vis)
+        #     cv2.waitKey(1)
 
 
     def imu_callback(self, msg: Imu):
-
+        # Keep this for fallback, but prioritize synced IMU in sync_callback
         roll_rate = msg.angular_velocity.x  
         pitch_rate = msg.angular_velocity.y 
         yaw_rate = msg.angular_velocity.z   
@@ -196,7 +202,7 @@ class FlowDepthVelocityNode(Node):
         self.latest_gyro[1] = -yaw_rate
         self.latest_gyro[2] = roll_rate
 
-    def sync_callback(self, rgb_msg: Image, depth_msg: Image):
+    def sync_callback(self, rgb_msg: Image, depth_msg: Image, imu_msg: Imu):
         if self.fx is None or self.fy is None:
             return
 
@@ -214,6 +220,16 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().error(f"RGB convert failed: {e}")
             return
 
+        # Use synchronized IMU data
+        roll_rate = imu_msg.angular_velocity.x  
+        pitch_rate = imu_msg.angular_velocity.y 
+        yaw_rate = imu_msg.angular_velocity.z   
+        gyro_sync = np.array([
+            -pitch_rate,  # wx
+            -yaw_rate,    # wy
+            roll_rate     # wz
+        ])
+
         flow_res = self.tracker.process(frame, rgb_msg.header.stamp)
         if flow_res is None:
             return
@@ -223,7 +239,7 @@ class FlowDepthVelocityNode(Node):
             flow_res.good_new,
             depth_map,
             flow_res.dt,
-            self.latest_gyro
+            gyro_sync
         )
 
         vel_msg = Vector3Stamped()
@@ -240,7 +256,7 @@ class FlowDepthVelocityNode(Node):
             txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
             cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             cv2.imshow("Flow+Depth Velocity", vis)
-            cv2.waitKey(1) 
+            cv2.waitKey(1)
    
     # ---------- core helpers ----------
 
@@ -327,30 +343,42 @@ class FlowDepthVelocityNode(Node):
         du_v  = du_trans[valid].astype(np.float64)
         dv_v  = dv_trans[valid].astype(np.float64)
 
+        # Linear least-squares setup: A @ [Vx_optical, Vy_optical, Vz_optical] = B
         A = np.zeros((2 * nv, 3), dtype=np.float64)
         B = np.zeros((2 * nv,),   dtype=np.float64)
+        
+        # NO weighting - use the equations as-is:
+        #   du_trans_i * Z_i = -fx * Vx_optical + u_c_i * Vz_optical
+        #   dv_trans_i * Z_i = -fy * Vy_optical + v_c_i * Vz_optical
         A[0::2, 0] = -self.fx;  A[0::2, 2] = u_c_v;  B[0::2] = du_v * Zv
         A[1::2, 1] = -self.fy;  A[1::2, 2] = v_c_v;  B[1::2] = dv_v * Zv
 
         try:
-            vel, *_ = np.linalg.lstsq(A, B, rcond=None)
+            vel, residuals, rank, s = np.linalg.lstsq(A, B, rcond=None)
         except np.linalg.LinAlgError:
             return 0.0, 0.0, 0.0, nv
 
         Vx_o, Vy_o, Vz_o = float(vel[0]), float(vel[1]), float(vel[2])
         
-        # Debug: Check rotational vs translational components
+        # Debug: Check condition number and residuals
         if not hasattr(self, '_debug_count'):
             self._debug_count = 0
         self._debug_count += 1
-        if self._debug_count % 50 == 0:  # Print every 50 frames
+        if self._debug_count % 30 == 0:  # Print every 30 frames
             du_rot_mean = np.mean(du_rot[valid]) if len(du_rot) > 0 else 0
             dv_rot_mean = np.mean(dv_rot[valid]) if len(dv_rot) > 0 else 0
             du_trans_mean = np.mean(du_trans[valid]) if len(du_trans) > 0 else 0
             dv_trans_mean = np.mean(dv_trans[valid]) if len(dv_trans) > 0 else 0
+            Z_mean = np.mean(Z[valid]) if np.any(valid) else 0
+            Z_std = np.std(Z[valid]) if np.any(valid) else 0
+            
+            # Calculate residual and condition number
+            residual_norm = np.linalg.norm(B - A @ vel)
+            cond_num = s[0] / s[-1] if len(s) > 0 else float('inf')
+            
+            self.get_logger().info(f"[DEBUG] Frame {self._debug_count} | Z_mean={Z_mean:.3f}±{Z_std:.3f} | nv={nv} | cond={cond_num:.2e} | residual={residual_norm:.2f}")
             self.get_logger().info(f"[DEBUG] du_rot={du_rot_mean:.3f} dv_rot={dv_rot_mean:.3f} | du_trans={du_trans_mean:.3f} dv_trans={dv_trans_mean:.3f}")
             self.get_logger().info(f"[DEBUG] Vx_o={Vx_o:.3f} Vy_o={Vy_o:.3f} Vz_o={Vz_o:.3f} | Output: Vx={Vz_o:.3f} Vy={-Vx_o:.3f} Vz={-Vy_o:.3f}")
-            self.get_logger().info(f"[DEBUG] Gyro: {self.latest_gyro}")
         
         return Vz_o, -Vx_o, -Vy_o, nv
 
