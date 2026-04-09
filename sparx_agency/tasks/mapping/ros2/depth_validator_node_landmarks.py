@@ -17,7 +17,12 @@ from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 
 from sparx_agency.robots.common.spatial_math import get_euler, quat_to_rot, euler_to_rot_zyx
-from sparx_agency.tasks.mapping.common.validator_landmarks import LANDMARK_OBJECTS
+from sparx_agency.tasks.mapping.common.validator_markers import MARKER_OBJECTS
+
+def wrap_hue_interval(hsv_h: np.ndarray, low: int, high: int) -> np.ndarray:
+    if low <= high:
+        return (hsv_h >= low) & (hsv_h <= high)
+    return (hsv_h >= low) | (hsv_h <= high)
 
 
 class DepthValidatorNode(Node):
@@ -25,10 +30,10 @@ class DepthValidatorNode(Node):
         super().__init__('depth_validator_node')
 
         self.bridge = CvBridge()
-        self.prev_depth_by_landmark = {}
+        self.prev_depth_by_marker = {}
         self.frame_saved = False
         self.camera_info_msg = None
-        self.landmarks_world = self._build_world_landmarks(LANDMARK_OBJECTS)
+        self.markers = MARKER_OBJECTS
         self.visible_landmarks_last = []
 
         # Parameters
@@ -42,6 +47,12 @@ class DepthValidatorNode(Node):
         self.declare_parameter('min_gt_depth_m', 0.1)
         self.declare_parameter('max_depth_m', 10.0)
         self.declare_parameter('camera_frame_mode', 'front_cam_x_forward')
+        self.declare_parameter('min_blob_area_px', 30)
+        self.declare_parameter('max_blob_area_px', 20000)
+        self.declare_parameter('association_max_px', 90.0)
+        self.declare_parameter('morph_kernel_px', 5)
+
+
 
         self.da3_topic = self.get_parameter('da3_topic').value
         self.gt_topic = self.get_parameter('gt_topic').value
@@ -53,21 +64,27 @@ class DepthValidatorNode(Node):
         self.min_gt_depth_m = float(self.get_parameter('min_gt_depth_m').value)
         self.max_depth_m = float(self.get_parameter('max_depth_m').value)
         self.camera_frame_mode = str(self.get_parameter('camera_frame_mode').value)
+        self.min_blob_area_px = int(self.get_parameter('min_blob_area_px').value)
+        self.max_blob_area_px = int(self.get_parameter('max_blob_area_px').value)
+        self.association_max_px = float(self.get_parameter('association_max_px').value)
+        self.morph_kernel_px = int(self.get_parameter('morph_kernel_px').value)
 
         log_dir = Path.home() / 'Documents' / 'depth_validator_csv'
         log_dir.mkdir(parents=True, exist_ok=True)
         log_time = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.log_file = str(log_dir / f'da3_landmarks_{log_time}.csv')
+        self.log_file = str(log_dir / f'da3_markers_{log_time}.csv')
         self.image_save_path = str(log_dir / f'{log_time}_rgb_landmarks.jpg')
 
         self.csv_fp = open(self.log_file, mode='w', newline='')
         self.csv_writer = csv.writer(self.csv_fp)
         self.csv_writer.writerow([
-            'ts', 'object_id', 'landmark_id',
-            'px', 'py',
+            'ts', 'marker_id', 'color',
+            'det_u', 'det_v', 'gt_u', 'gt_v', 'pixel_err_px',
             'roll_deg', 'pitch_deg', 'yaw_deg',
-            'gt_depth_m', 'da3_depth_m', 'abs_err_m', 'jitter_m',
-            'gt_x_cam_m', 'gt_y_cam_m', 'gt_z_cam_m'
+            'gt_depth_geom_m', 'gt_depth_img_m', 'da3_depth_m',
+            'abs_err_m', 'jitter_m',
+            'gt_x_cam_m', 'gt_y_cam_m', 'gt_z_cam_m',
+            'blob_area_px', 'detected'
         ])
 
         # Subscribers
@@ -88,7 +105,7 @@ class DepthValidatorNode(Node):
         self.ts.registerCallback(self.sync_callback)
 
         self.get_logger().info(f'Validator Started. Logging to {self.log_file}')
-        self.get_logger().info(f'Loaded {len(self.landmarks_world)} world landmarks.')
+        self.get_logger().info(f'Loaded {len(self.markers)} markers.')
 
     def camera_info_cb(self, msg: CameraInfo):
         self.camera_info_msg = msg
@@ -116,9 +133,10 @@ class DepthValidatorNode(Node):
         t_world_base = np.array([pos.x, pos.y, pos.z], dtype=np.float32)
         R_world_base = quat_to_rot(quat.x, quat.y, quat.z, quat.w)
 
-        # Fallback: assume front camera is collocated with base and looks forward.
-        # If later you want, we can add exact extrinsics here.
-        t_world_cam = t_world_base.copy()
+        # front camera mounted 0.2m forward of base
+        t_base_cam = np.array([0.20, 0.0, 0.0], dtype=np.float32)
+
+        t_world_cam = t_world_base + (R_world_base @ t_base_cam.reshape(3, 1)).reshape(3)
         R_world_cam = R_world_base.copy()
         return R_world_cam, t_world_cam
 
@@ -135,6 +153,7 @@ class DepthValidatorNode(Node):
 
         u = cx - fx * (y_left / x_fwd)
         v = cy - fy * (z_up / x_fwd)
+        # self.get_logger().info(f"sample u={u} v={v} types=({type(u)}, {type(v)})")
 
         if not (0 <= u < width and 0 <= v < height):
             return None
@@ -148,16 +167,63 @@ class DepthValidatorNode(Node):
 
     def _sample_patch_median(self, img, u, v):
         h, w = img.shape[:2]
-        r = self.patch_radius
-        x0 = max(0, u - r)
-        x1 = min(w, u + r + 1)
-        y0 = max(0, v - r)
-        y1 = min(h, v + r + 1)
+        r = int(self.patch_radius)
+
+        uc = int(round(u))
+        vc = int(round(v))
+
+        x0 = max(0, uc - r)
+        x1 = min(w, uc + r + 1)
+        y0 = max(0, vc - r)
+        y1 = min(h, vc + r + 1)
+
         patch = img[y0:y1, x0:x1]
         vals = patch[np.isfinite(patch)]
         if vals.size == 0:
             return np.nan
         return float(np.median(vals))
+
+    def _detect_color_blob(self, hsv_img, marker, proj_u_rgb, proj_v_rgb):
+        cfg = marker['hsv']
+        h = hsv_img[:, :, 0]
+        s = hsv_img[:, :, 1]
+        v = hsv_img[:, :, 2]
+
+        hue_ok = wrap_hue_interval(h, cfg['h_low'], cfg['h_high'])
+        mask = hue_ok & (s >= cfg['s_min']) & (v >= cfg['v_min'])
+        mask = (mask.astype(np.uint8) * 255)
+
+        k = max(1, int(self.morph_kernel_px))
+        kernel = np.ones((k, k), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+        best = None
+        best_score = None
+
+        for label in range(1, num_labels):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < self.min_blob_area_px or area > self.max_blob_area_px:
+                continue
+
+            cx, cy = centroids[label]
+            dist = float(np.hypot(cx - proj_u_rgb, cy - proj_v_rgb))
+            if dist > self.association_max_px:
+                continue
+
+            score = dist
+            if best is None or score < best_score:
+                best = {
+                    'u_rgb': float(cx),
+                    'v_rgb': float(cy),
+                    'area': area,
+                    'dist_to_gt_px': dist,
+                }
+                best_score = score
+
+        return best
 
     def sync_callback(self, da3_msg, gt_msg, rgb_msg, odom_msg):
         if self.camera_info_msg is None:
@@ -167,6 +233,8 @@ class DepthValidatorNode(Node):
             cv_da3 = self.bridge.imgmsg_to_cv2(da3_msg, 'passthrough').astype(np.float32)
             cv_gt_raw = self.bridge.imgmsg_to_cv2(gt_msg, 'passthrough').astype(np.float32)
             cv_rgb = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
+
+            hsv = cv2.cvtColor(cv_rgb, cv2.COLOR_BGR2HSV)
 
             h, w = cv_da3.shape
             cv_gt = cv2.resize(cv_gt_raw, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -195,51 +263,76 @@ class DepthValidatorNode(Node):
             vis_rows = []
             abs_errs = []
 
-            for lm in self.landmarks_world:
+            for marker in self.markers:
                 proj = self._project_world_point(
-                    lm['p_world'], R_world_cam, t_world_cam,
+                    marker['center_world'], R_world_cam, t_world_cam,
                     fx, fy, cx, cy, w, h
                 )
                 if proj is None:
                     continue
 
-                u = proj['u']
-                v = proj['v']
-                gt_depth_geom = float(proj['gt_depth_m'])
-                gt_depth_img = self._sample_patch_median(cv_gt, u, v)
-                da3_depth = self._sample_patch_median(cv_da3, u, v)
+                gt_u = proj['u']
+                gt_v = proj['v']
+                gt_u_rgb = gt_u / sx
+                gt_v_rgb = gt_v / sy
 
+                gt_depth_geom = float(proj['gt_depth_m'])
+                gt_depth_img = self._sample_patch_median(cv_gt, gt_u, gt_v)
+
+                det = self._detect_color_blob(hsv, marker, gt_u_rgb, gt_v_rgb)
+                if det is None:
+                    self.csv_writer.writerow([
+                        ts, marker['id'], marker['color'],
+                        np.nan, np.nan, gt_u, gt_v, np.nan,
+                        roll_deg, pitch_deg, yaw_deg,
+                        gt_depth_geom, gt_depth_img, np.nan,
+                        np.nan, np.nan,
+                        float(proj['p_cam'][0]), float(proj['p_cam'][1]), float(proj['p_cam'][2]),
+                        0, 0
+                    ])
+                    continue
+
+                det_u = det['u_rgb'] * sx
+                det_v = det['v_rgb'] * sy
+
+                da3_depth = self._sample_patch_median(cv_da3, det_u, det_v)
                 if not np.isfinite(da3_depth):
                     continue
 
-                # Prefer geometry GT; keep depth image only as a sanity source.
-                gt_depth = gt_depth_geom
-                if gt_depth <= self.min_gt_depth_m or gt_depth > self.max_depth_m:
+                if gt_depth_geom <= self.min_gt_depth_m or gt_depth_geom > self.max_depth_m:
                     continue
 
-                abs_err = abs(da3_depth - gt_depth)
-                key = (lm['object_id'], lm['landmark_id'])
-                prev_depth = self.prev_depth_by_landmark.get(key)
+                abs_err = abs(da3_depth - gt_depth_geom)
+
+                key = marker['id']
+                prev_depth = self.prev_depth_by_marker.get(key)
                 jitter = abs(da3_depth - prev_depth) if prev_depth is not None else 0.0
-                self.prev_depth_by_landmark[key] = da3_depth
+                self.prev_depth_by_marker[key] = da3_depth
+
+                pixel_err = float(np.hypot(det_u - gt_u, det_v - gt_v))
 
                 self.csv_writer.writerow([
-                    ts,
-                    lm['object_id'], lm['landmark_id'],
-                    u, v,
+                    ts, marker['id'], marker['color'],
+                    det_u, det_v, gt_u, gt_v, pixel_err,
                     roll_deg, pitch_deg, yaw_deg,
-                    gt_depth, da3_depth, abs_err, jitter,
+                    gt_depth_geom, gt_depth_img, da3_depth,
+                    abs_err, jitter,
                     float(proj['p_cam'][0]), float(proj['p_cam'][1]), float(proj['p_cam'][2]),
+                    det['area'], 1
                 ])
 
                 vis_rows.append({
-                    'u': u, 'v': v,
-                    'object_id': lm['object_id'],
-                    'landmark_id': lm['landmark_id'],
-                    'gt_depth': gt_depth,
+                    'det_u': det_u,
+                    'det_v': det_v,
+                    'gt_u': gt_u,
+                    'gt_v': gt_v,
+                    'marker_id': marker['id'],
+                    'color': marker['color'],
+                    'gt_depth': gt_depth_geom,
                     'gt_depth_img': gt_depth_img,
                     'da3_depth': da3_depth,
                     'abs_err': abs_err,
+                    'pixel_err': pixel_err,
                 })
                 abs_errs.append(abs_err)
 
@@ -249,13 +342,16 @@ class DepthValidatorNode(Node):
             if not self.frame_saved and vis_rows:
                 rgb_save = cv_rgb.copy()
                 for row in vis_rows:
-                    cv2.circle(rgb_save, (row['u'], row['v']), 5, (0, 255, 0), -1)
+                    cv2.circle(rgb_save, (int(round(row['det_u'] / sx)), int(round(row['det_v'] / sy))), 6, (0, 255, 0),
+                               -1)
+                    cv2.circle(rgb_save, (int(round(row['gt_u'] / sx)), int(round(row['gt_v'] / sy))), 6, (0, 0, 255),
+                               2)
                     cv2.putText(
                         rgb_save,
-                        f"{row['object_id']}:{row['landmark_id']}",
-                        (row['u'] + 4, row['v'] - 4),
+                        row['marker_id'],
+                        (int(round(row['det_u'] / sx)) + 6, int(round(row['det_v'] / sy)) - 6),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.35,
+                        0.4,
                         (0, 255, 0),
                         1,
                     )
@@ -270,7 +366,7 @@ class DepthValidatorNode(Node):
         except Exception as e:
             self.get_logger().error(f'Sync error: {e}')
 
-    def visualize(self, da3_img, gt_img, landmarks, mae, rpy):
+    def visualize(self, da3_img, gt_img, markers, mae, rpy):
         def colorize(img):
             depth_clipped = np.clip(img, 0.1, self.max_depth_m)
             depth_norm = depth_clipped / self.max_depth_m
@@ -280,18 +376,26 @@ class DepthValidatorNode(Node):
         vis_da3 = colorize(da3_img)
         vis_gt = colorize(gt_img)
 
-        for row in landmarks:
-            px = row['u']
-            py = row['v']
-            color = (0, 255, 0)
-            cv2.circle(vis_da3, (px, py), 4, color, -1)
-            cv2.circle(vis_gt, (px, py), 4, color, -1)
-            label = row['landmark_id']
-            cv2.putText(vis_da3, label, (px + 4, py - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-            cv2.putText(vis_gt, label, (px + 4, py - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+        for row in markers:
+            du = int(round(row['det_u']))
+            dv = int(round(row['det_v']))
+            gu = int(round(row['gt_u']))
+            gv = int(round(row['gt_v']))
+
+            cv2.circle(vis_da3, (du, dv), 4, (0, 255, 0), -1)
+            cv2.circle(vis_gt, (du, dv), 4, (0, 255, 0), -1)
+
+            cv2.circle(vis_da3, (gu, gv), 4, (0, 0, 255), 1)
+            cv2.circle(vis_gt, (gu, gv), 4, (0, 0, 255), 1)
+
+            cv2.putText(vis_da3, row['marker_id'], (du + 4, dv - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+            cv2.putText(vis_gt, row['marker_id'], (du + 4, dv - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
 
         combined = np.hstack((vis_da3, vis_gt))
-        info_str = f'Landmarks: {len(landmarks)} | MAE: {mae:.3f}m | Pitch: {rpy[1]:.1f}deg'
+        info_str = f'Markers: {len(markers)} | MAE: {mae:.3f}m | Pitch: {rpy[1]:.1f}deg'
+
         cv2.putText(combined, info_str, (20, combined.shape[0] - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 

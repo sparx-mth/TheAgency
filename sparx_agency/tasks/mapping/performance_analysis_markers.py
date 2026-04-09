@@ -1,11 +1,10 @@
-
 from pathlib import Path
 import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-def load_landmark_csvs(data_dir: Path, glob_pattern: str):
+def load_marker_csvs(data_dir: Path, glob_pattern: str):
     files = sorted(data_dir.glob(glob_pattern))
     all_dfs = []
     for i, f in enumerate(files, start=1):
@@ -17,7 +16,7 @@ def load_landmark_csvs(data_dir: Path, glob_pattern: str):
             "roll_deg", "pitch_deg", "yaw_deg"
         }
         if not required.issubset(df.columns):
-            print(f"Skipping {f.name}: not a landmark CSV")
+            print(f"Skipping {f.name}: not a marker CSV")
             continue
         df["run"] = i
         df["run_name"] = f.stem
@@ -33,17 +32,16 @@ def save_plot(fig, out_path: Path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=str(Path.home() / "Documents" / "depth_validator_csv"))
-    parser.add_argument("--glob", default="da3_landmarks_*.csv")
+    parser.add_argument("--glob", default="da3_markers_*.csv")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).expanduser()
-    df = load_landmark_csvs(data_dir, args.glob)
+    df = load_marker_csvs(data_dir, args.glob)
 
     if df.empty:
-        print("No landmark CSVs found.")
+        print("No marker CSVs found.")
         return
 
-    # Per-frame summary
     frame_df = (
         df.groupby(["run", "run_name", "ts"], as_index=False)
         .agg(
@@ -58,44 +56,38 @@ def main():
         )
     )
 
-    run_stats = (
-        df.groupby(["run", "run_name"], as_index=False)
-        .agg(
-            mean_mae=("abs_err_m", "mean"),
-            mean_rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
-            mean_jitter=("jitter_m", "mean"),
-            rows=("marker_id", "count"),
-        )
-    )
+    run_aggs = {
+        "mean_mae": ("abs_err_m", "mean"),
+        "mean_rmse": ("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+        "mean_jitter": ("jitter_m", "mean"),
+        "rows": ("marker_id", "count"),
+    }
+    if "detected" in df.columns:
+        run_aggs["detection_rate"] = ("detected", "mean")
+
+    run_stats = df.groupby(["run", "run_name"], as_index=False).agg(**run_aggs)
     print("\nRun stats:")
     print(run_stats.to_string(index=False))
 
-    obj_stats = (
-        df.groupby(["marker_id"], as_index=False)
-        .agg(
-            mean_abs_err_m=("abs_err_m", "mean"),
-            p95_abs_err_m=("abs_err_m", lambda s: np.nanpercentile(s.dropna(), 95) if len(s.dropna()) else np.nan),
-            mean_jitter_m=("jitter_m", "mean"),
-            mean_gt_depth_m=("gt_depth_geom_m", "mean"),
-        )
+    marker_aggs = {
+        "mean_abs_err_m": ("abs_err_m", "mean"),
+        "p95_abs_err_m": ("abs_err_m", lambda s: np.nanpercentile(s.dropna(), 95) if len(s.dropna()) else np.nan),
+        "mean_jitter_m": ("jitter_m", "mean"),
+        "mean_gt_depth_m": ("gt_depth_geom_m", "mean"),
+    }
+    if "pixel_err_px" in df.columns:
+        marker_aggs["mean_pixel_err_px"] = ("pixel_err_px", "mean")
+    if "detected" in df.columns:
+        marker_aggs["detection_rate"] = ("detected", "mean")
+
+    marker_stats = (
+        df.groupby(["marker_id", "color"], as_index=False)
+        .agg(**marker_aggs)
         .sort_values("mean_abs_err_m")
     )
-    print("\nPer-object stats:")
-    print(obj_stats.to_string(index=False))
+    print("\nPer-marker stats:")
+    print(marker_stats.to_string(index=False))
 
-    lmk_stats = (
-        df.groupby(["marker_id"], as_index=False)
-        .agg(
-            mean_abs_err_m=("abs_err_m", "mean"),
-            mean_jitter_m=("jitter_m", "mean"),
-            mean_gt_depth_m=("gt_depth_m", "mean"),
-        )
-        .sort_values(["marker_id"])
-    )
-    print("\nPer-landmark stats:")
-    print(lmk_stats.to_string(index=False))
-
-    # MAE over time
     fig = plt.figure(figsize=(12, 6))
     for run in frame_df["run"].unique():
         subset = frame_df[frame_df["run"] == run]
@@ -105,9 +97,8 @@ def main():
     plt.ylabel("MAE (m)")
     plt.grid(True)
     plt.legend()
-    save_plot(fig, data_dir / "landmarks_mae_over_time.png")
+    save_plot(fig, data_dir / "markers_mae_over_time.png")
 
-    # Jitter over time
     fig = plt.figure(figsize=(12, 6))
     for run in frame_df["run"].unique():
         subset = frame_df[frame_df["run"] == run]
@@ -117,36 +108,42 @@ def main():
     plt.ylabel("Jitter (m)")
     plt.grid(True)
     plt.legend()
-    save_plot(fig, data_dir / "landmarks_jitter_over_time.png")
+    save_plot(fig, data_dir / "markers_jitter_over_time.png")
 
-    # Error vs GT depth by object
     fig = plt.figure(figsize=(10, 6))
-    for object_id, subset in df.groupby("marker_id"):
-        plt.scatter(subset["gt_depth_geom_m"], subset["abs_err_m"], s=8, alpha=0.3, label=object_id)
+    for marker_id, subset in df.groupby("marker_id"):
+        plt.scatter(subset["gt_depth_geom_m"], subset["abs_err_m"], s=8, alpha=0.3, label=marker_id)
     plt.title("Absolute Error vs GT Depth")
     plt.xlabel("GT Depth (m)")
     plt.ylabel("Absolute Error (m)")
     plt.grid(True)
     plt.legend()
-    save_plot(fig, data_dir / "landmarks_err_vs_gt_depth.png")
+    save_plot(fig, data_dir / "markers_err_vs_gt_depth.png")
 
-    # Error vs yaw
     fig = plt.figure(figsize=(10, 6))
     plt.scatter(df["yaw_deg"], df["abs_err_m"], s=8, alpha=0.25)
     plt.title("Absolute Error vs Yaw")
     plt.xlabel("Yaw (deg)")
     plt.ylabel("Absolute Error (m)")
     plt.grid(True)
-    save_plot(fig, data_dir / "landmarks_err_vs_yaw.png")
+    save_plot(fig, data_dir / "markers_err_vs_yaw.png")
 
-    # Per-object bar chart
+    if "pixel_err_px" in df.columns:
+        fig = plt.figure(figsize=(10, 6))
+        plt.scatter(df["pixel_err_px"], df["abs_err_m"], s=8, alpha=0.25)
+        plt.title("Absolute Error vs Pixel Error")
+        plt.xlabel("Pixel Error (px)")
+        plt.ylabel("Absolute Error (m)")
+        plt.grid(True)
+        save_plot(fig, data_dir / "markers_err_vs_pixel_err.png")
+
     fig = plt.figure(figsize=(10, 6))
-    plt.bar(obj_stats["marker_id"], obj_stats["mean_abs_err_m"])
-    plt.title("Mean Absolute Error per Object")
+    plt.bar(marker_stats["marker_id"], marker_stats["mean_abs_err_m"])
+    plt.title("Mean Absolute Error per Marker")
     plt.ylabel("Mean Abs Error (m)")
     plt.xticks(rotation=20, ha="right")
     plt.grid(axis="y")
-    save_plot(fig, data_dir / "landmarks_mae_per_object.png")
+    save_plot(fig, data_dir / "markers_mae_per_marker.png")
 
 if __name__ == "__main__":
     main()

@@ -9,10 +9,11 @@ st.set_page_config(page_title="DA3 Landmark Analysis", layout="wide")
 st.title("📊 DA3 Landmark Validator")
 
 LANDMARK_COLUMNS = {
-    "ts", "object_id", "landmark_id", "px", "py",
+    "ts", "marker_id", "color",
+    "det_u", "det_v", "gt_u", "gt_v",
     "roll_deg", "pitch_deg", "yaw_deg",
-    "gt_depth_m", "da3_depth_m", "abs_err_m", "jitter_m",
-    "gt_x_cam_m", "gt_y_cam_m", "gt_z_cam_m",
+    "gt_depth_geom_m", "da3_depth_m",
+    "abs_err_m", "jitter_m"
 }
 
 
@@ -48,7 +49,7 @@ def load_and_prepare_data(directory: str) -> pd.DataFrame:
                         mae=("abs_err_m", "mean"),
                         rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
                         jitter=("jitter_m", "mean"),
-                        n_landmarks=("landmark_id", "count"),
+                        n_markers=("marker_id", "count"),
                         roll_deg=("roll_deg", "first"),
                         pitch_deg=("pitch_deg", "first"),
                         yaw_deg=("yaw_deg", "first"),
@@ -161,7 +162,7 @@ if selected_format == "landmarks":
 
     with tab_obj:
         obj_df = (
-            filtered_df.groupby(["run_name", "object_id", "rel_time"], as_index=False)
+            filtered_df.groupby(["run_name", "marker_id", "rel_time"], as_index=False)
             .agg(
                 mae=("abs_err_m", "mean"),
                 jitter=("jitter_m", "mean"),
@@ -194,7 +195,7 @@ if selected_format == "landmarks":
         st.dataframe(obj_summary, use_container_width=True)
 
     with tab_lmk:
-        landmark_keys = sorted(filtered_df["object_id"].astype(str) + "/" + filtered_df["landmark_id"].astype(str))
+        landmark_keys = sorted(filtered_df["marker_id"].astype(str))
         selected_landmarks = st.multiselect("Landmarks", landmark_keys, default=landmark_keys[: min(8, len(landmark_keys))])
         plot_df = filtered_df.copy()
         plot_df["landmark_key"] = plot_df["object_id"].astype(str) + "/" + plot_df["landmark_id"].astype(str)
@@ -212,10 +213,10 @@ if selected_format == "landmarks":
 
         fig2 = px.scatter(
             plot_df,
-            x="px",
-            y="py",
+            x="det_u",
+            y="det_v",
             color="abs_err_m",
-            hover_data=["landmark_key", "gt_depth_m", "da3_depth_m"],
+            hover_data=["marker_id", "gt_depth_geom_m", "da3_depth_m"],
             facet_col="run_name",
             template="plotly_dark",
             title="Projected landmark locations colored by error",
@@ -224,13 +225,13 @@ if selected_format == "landmarks":
         st.plotly_chart(fig2, use_container_width=True)
 
     with tab_dist:
-        plot_df = filtered_df.dropna(subset=["gt_depth_m", "da3_depth_m", "abs_err_m"]).copy()
-        plot_df["signed_err_m"] = plot_df["da3_depth_m"] - plot_df["gt_depth_m"]
+        plot_df = filtered_df.dropna(subset=["gt_depth_geom_m", "da3_depth_m", "abs_err_m"]).copy()
+        plot_df["signed_err_m"] = plot_df["da3_depth_m"] - plot_df["gt_depth_geom_m"]
         plot_df["landmark_key"] = plot_df["object_id"].astype(str) + "/" + plot_df["landmark_id"].astype(str)
 
         fig = px.scatter(
             plot_df,
-            x="gt_depth_m",
+            x="gt_depth_geom_m",
             y="signed_err_m",
             color="object_id",
             hover_data=["landmark_key", "run_name"],
@@ -253,8 +254,8 @@ if selected_format == "landmarks":
         st.plotly_chart(fig2, use_container_width=True)
 
         if len(plot_df) >= 2:
-            clean = plot_df[["da3_depth_m", "gt_depth_m"]].dropna()
-            m, b = np.polyfit(clean["da3_depth_m"], clean["gt_depth_m"], 1)
+            clean = plot_df[["da3_depth_m", "gt_depth_geom_m"]].dropna()
+            m, b = np.polyfit(clean["gt_depth_geom_m"], clean["gt_depth_geom_m"], 1)
             st.success(f"Calibration fit: gt_depth ≈ {m:.4f} * da3_depth + {b:.4f}")
 
     with tab_axes:
