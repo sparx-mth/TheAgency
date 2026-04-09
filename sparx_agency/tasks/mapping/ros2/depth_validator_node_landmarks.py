@@ -69,6 +69,14 @@ class DepthValidatorNode(Node):
         self.association_max_px = float(self.get_parameter('association_max_px').value)
         self.morph_kernel_px = int(self.get_parameter('morph_kernel_px').value)
 
+        # ===== Calibration (from CSV) =====
+        self.lin_m = 0.5005
+        self.lin_b = 0.6114
+
+        self.quad_a = 0.05296
+        self.quad_b = 0.1069
+        self.quad_c = 1.1834
+
         log_dir = Path.home() / 'Documents' / 'depth_validator_csv'
         log_dir.mkdir(parents=True, exist_ok=True)
         log_time = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -81,8 +89,10 @@ class DepthValidatorNode(Node):
             'ts', 'marker_id', 'color',
             'det_u', 'det_v', 'gt_u', 'gt_v', 'pixel_err_px',
             'roll_deg', 'pitch_deg', 'yaw_deg',
-            'gt_depth_geom_m', 'gt_depth_img_m', 'da3_depth_m',
-            'abs_err_m', 'jitter_m',
+            'gt_depth_geom_m', 'gt_depth_img_m',
+            'da3_raw_m', 'da3_lin_m', 'da3_quad_m',
+            'err_raw_m', 'err_lin_m', 'err_quad_m',
+            'jitter_m',
             'gt_x_cam_m', 'gt_y_cam_m', 'gt_z_cam_m',
             'blob_area_px', 'detected'
         ])
@@ -96,6 +106,10 @@ class DepthValidatorNode(Node):
         self.camera_info_sub = self.create_subscription(
             CameraInfo, self.camera_info_topic, self.camera_info_cb, 10
         )
+
+        self.pub_raw = self.create_publisher(Image, '/sparx/depth/da3_raw_dbg', 10)
+        self.pub_lin = self.create_publisher(Image, '/sparx/depth/da3_linear', 10)
+        self.pub_quad = self.create_publisher(Image, '/sparx/depth/da3_quadratic', 10)
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.da3_sub, self.gt_sub, self.rgb_sub, self.odom_sub],
@@ -225,6 +239,12 @@ class DepthValidatorNode(Node):
 
         return best
 
+    def scale_linear(self, d):
+        return self.lin_m * d + self.lin_b
+
+    def scale_quadratic(self, d):
+        return self.quad_a * d * d + self.quad_b * d + self.quad_c
+
     def sync_callback(self, da3_msg, gt_msg, rgb_msg, odom_msg):
         if self.camera_info_msg is None:
             return
@@ -295,19 +315,26 @@ class DepthValidatorNode(Node):
                 det_u = det['u_rgb'] * sx
                 det_v = det['v_rgb'] * sy
 
-                da3_depth = self._sample_patch_median(cv_da3, det_u, det_v)
-                if not np.isfinite(da3_depth):
+                da3_raw = self._sample_patch_median(cv_da3, det_u, det_v)
+                if not np.isfinite(da3_raw):
+                    continue
+
+                da3_lin = self.scale_linear(da3_raw)
+                da3_quad = self.scale_quadratic(da3_raw)
+                if not np.isfinite(da3_raw):
                     continue
 
                 if gt_depth_geom <= self.min_gt_depth_m or gt_depth_geom > self.max_depth_m:
                     continue
 
-                abs_err = abs(da3_depth - gt_depth_geom)
+                err_raw = abs(da3_raw - gt_depth_geom)
+                err_lin = abs(da3_lin - gt_depth_geom)
+                err_quad = abs(da3_quad - gt_depth_geom)
 
                 key = marker['id']
                 prev_depth = self.prev_depth_by_marker.get(key)
-                jitter = abs(da3_depth - prev_depth) if prev_depth is not None else 0.0
-                self.prev_depth_by_marker[key] = da3_depth
+                jitter = abs(da3_raw - prev_depth) if prev_depth is not None else 0.0
+                self.prev_depth_by_marker[key] = da3_raw
 
                 pixel_err = float(np.hypot(det_u - gt_u, det_v - gt_v))
 
@@ -315,8 +342,10 @@ class DepthValidatorNode(Node):
                     ts, marker['id'], marker['color'],
                     det_u, det_v, gt_u, gt_v, pixel_err,
                     roll_deg, pitch_deg, yaw_deg,
-                    gt_depth_geom, gt_depth_img, da3_depth,
-                    abs_err, jitter,
+                    gt_depth_geom, gt_depth_img,
+                    da3_raw, da3_lin, da3_quad,
+                    err_raw, err_lin, err_quad,
+                    jitter,
                     float(proj['p_cam'][0]), float(proj['p_cam'][1]), float(proj['p_cam'][2]),
                     det['area'], 1
                 ])
@@ -330,11 +359,13 @@ class DepthValidatorNode(Node):
                     'color': marker['color'],
                     'gt_depth': gt_depth_geom,
                     'gt_depth_img': gt_depth_img,
-                    'da3_depth': da3_depth,
-                    'abs_err': abs_err,
+                    'da3_raw': da3_raw,
+                    'da3_quad': da3_quad,
+                    'err_raw': err_raw,
+                    'err_quad': err_quad,
                     'pixel_err': pixel_err,
                 })
-                abs_errs.append(abs_err)
+                abs_errs.append(abs_errs)
 
             self.csv_fp.flush()
             self.visible_landmarks_last = vis_rows
@@ -360,13 +391,14 @@ class DepthValidatorNode(Node):
                 self.frame_saved = True
 
             if self.show_viz:
-                mae = float(np.mean(abs_errs)) if abs_errs else float('nan')
-                self.visualize(cv_da3, cv_gt, vis_rows, mae, (roll_deg, pitch_deg, yaw_deg))
+                mae_raw = float(np.mean([r['err_raw'] for r in vis_rows])) if vis_rows else float('nan')
+                mae_quad = float(np.mean([r['err_quad'] for r in vis_rows])) if vis_rows else float('nan')
+                self.visualize(cv_da3, cv_gt, vis_rows, mae_raw, mae_quad, (roll_deg, pitch_deg, yaw_deg))
 
         except Exception as e:
             self.get_logger().error(f'Sync error: {e}')
 
-    def visualize(self, da3_img, gt_img, markers, mae, rpy):
+    def visualize(self, da3_img, gt_img, markers, mae_raw, mae_quad, rpy):
         def colorize(img):
             depth_clipped = np.clip(img, 0.1, self.max_depth_m)
             depth_norm = depth_clipped / self.max_depth_m
@@ -394,7 +426,7 @@ class DepthValidatorNode(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
 
         combined = np.hstack((vis_da3, vis_gt))
-        info_str = f'Markers: {len(markers)} | MAE: {mae:.3f}m | Pitch: {rpy[1]:.1f}deg'
+        info_str = f'Markers: {len(markers)} | MAE raw: {mae_raw:.3f} | MAE quad: {mae_quad:.3f}'
 
         cv2.putText(combined, info_str, (20, combined.shape[0] - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
