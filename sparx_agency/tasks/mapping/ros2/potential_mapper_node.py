@@ -99,6 +99,7 @@ class PotentialMapperNode(Node):
         self.pub_path = self.create_publisher(PathRos, '/potential_field_path', 10)
         self.pub_path_straight = self.create_publisher(PathRos, '/potential_field_path_straight', 10)
         self.pub_depth_raw = self.create_publisher(Image, '/sparx/depth/da3_raw', 10)
+        self.pub_u_rep = self.create_publisher(Image, '/potential_field/u_rep', qos_profile=qos_latched)
 
         self.get_logger().info("Potential Mapper Node Started with 5s Image Watchdog.")
 
@@ -161,6 +162,7 @@ class PotentialMapperNode(Node):
 
         # E. Publications
         self.publish_occupancy_grid(img_msg.header)
+        self.publish_u_rep(img_msg.header)
         self.publish_local_nav(img_msg.header)
         self.publish_potential_field_debug(img_msg.header)
         self.publish_depth_debug(depth_map, img_msg.header)
@@ -357,6 +359,19 @@ class PotentialMapperNode(Node):
         grid_msg.data = ros_data.flatten().tolist()
         # self.get_logger().info(f"Publishing Occupancy Grid with unique values: {np.unique(grid_msg.data)}")
         self.pub_grid.publish(grid_msg)
+
+    def publish_u_rep(self, header):
+        """Publish the precomputed repulsive potential as a 32FC1 image.
+
+        Same spatial layout as /map_local (transpose + flipud) so subscribers
+        can reuse the OccupancyGrid origin/resolution for coordinate conversion.
+        """
+        u_rep = self.mapper.get_potential_map()              # (n, n) float32
+        u_rep_ros = np.flipud(u_rep.T).astype(np.float32)   # same warp as OccGrid
+        msg = self.bridge.cv2_to_imgmsg(u_rep_ros, encoding='32FC1')
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.get_parameter('base_frame').value
+        self.pub_u_rep.publish(msg)
 
     def publish_local_nav(self, header):
         n = self.mapper._n
