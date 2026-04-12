@@ -20,10 +20,10 @@ def process_depth_data(input_csv, output_csv):
     df = df.sort_values(by=['color', 'ts'])
     
     # ==========================================
-    # FILTER PARAMETERS (Feel free to tune these)
+    # FILTER PARAMETERS 
     # ==========================================
-    MEDIAN_WINDOW = 5  # Removes sudden spikes (outliers). Higher = more robust but might cut corners.
-    EMA_ALPHA = 0.15   # Smooths the noise. Lower = smoother but adds delay/lag. Higher = more responsive.
+    MEDIAN_WINDOW = 15  # Removes sudden spikes (outliers). Higher = more robust but might cut corners.
+    EMA_ALPHA = 0.1   # Smooths the noise. Lower = smoother but adds delay/lag. Higher = more responsive.
     
     print(f"Applying filters... (Median Window: {MEDIAN_WINDOW}, EMA Alpha: {EMA_ALPHA})")
     
@@ -109,7 +109,7 @@ def process_depth_data(input_csv, output_csv):
 
 if __name__ == "__main__":
     # Define input and output filenames
-    INPUT_FILE = '/home/user/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/depth_validator_csv/da3_markers_20260409_162405.csv'
+    INPUT_FILE = '/home/user/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/depth_validator_csv/da3_markers_20260412_152728.csv'
     OUTPUT_FILE = '/home/user/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/depth_validator_csv/da3_markers_smoothed_output.csv'
 
     # Run the processing pipeline
