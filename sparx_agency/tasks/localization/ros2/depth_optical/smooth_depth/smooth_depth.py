@@ -23,7 +23,7 @@ def process_depth_data(input_csv, output_csv):
     # FILTER PARAMETERS 
     # ==========================================
     MEDIAN_WINDOW = 15  # Removes sudden spikes (outliers). Higher = more robust but might cut corners.
-    EMA_ALPHA = 0.1   # Smooths the noise. Lower = smoother but adds delay/lag. Higher = more responsive.
+    EMA_ALPHA = 0.3   # Smooths the noise. Lower = smoother but adds delay/lag. Higher = more responsive.
     
     print(f"Applying filters... (Median Window: {MEDIAN_WINDOW}, EMA Alpha: {EMA_ALPHA})")
     
