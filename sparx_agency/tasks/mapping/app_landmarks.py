@@ -10,12 +10,23 @@ st.title("📊 DA3 Landmark Validator")
 
 LANDMARK_COLUMNS = {
     "ts", "marker_id", "color",
-    "det_u", "det_v", "gt_u", "gt_v",
+    "det_u", "det_v", "gt_u", "gt_v", "pixel_err_px",
     "roll_deg", "pitch_deg", "yaw_deg",
-    "gt_depth_geom_m", "da3_depth_m",
-    "abs_err_m", "jitter_m"
+    "gt_depth_geom_m", "gt_depth_img_m", "da3_depth_m",
+    "da3_lin_m", "da3_quad_m",
+    "err_raw_m", "err_lin_m", "err_quad_m", "jitter_m",
+    "gt_x_cam_m", "gt_y_cam_m", "gt_z_cam_m", "blob_area_px", "detected"
 }
 
+
+COLOR_MAP = {
+    "red": "#ff0000",
+    "green": "#00ff00",
+    "yellow": "#ffff00",
+    "orange": "#ff8800",
+    "purple": "#aa00ff",
+    "cyan": "#00ffff",
+}
 
 @st.cache_data
 def load_and_prepare_data(directory: str) -> pd.DataFrame:
@@ -32,6 +43,7 @@ def load_and_prepare_data(directory: str) -> pd.DataFrame:
                           "roll": "roll_deg", "pitch": "pitch_deg", "yaw": "yaw_deg"}
             df.rename(columns=rename_map, inplace=True)
 
+            print(f"Columns are {df.columns}")
             # Detect format
             is_landmark = LANDMARK_COLUMNS.issubset(df.columns)
             df["run_name"] = f.stem
@@ -39,15 +51,15 @@ def load_and_prepare_data(directory: str) -> pd.DataFrame:
             df["format"] = "landmarks" if is_landmark else "legacy"
 
             if is_landmark:
-                numeric_cols = [c for c in df.columns if c not in {"object_id", "landmark_id", "run_name", "format"}]
+                numeric_cols = [c for c in df.columns if c not in {"object_id", "marker_id", "run_name", "format"}]
                 df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
                 # Per-frame global metrics for convenience
                 per_frame = (
                     df.groupby(["run_name", "ts"], as_index=False)
                     .agg(
                         rel_time=("rel_time", "first"),
-                        mae=("abs_err_m", "mean"),
-                        rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+                        mae=("err_raw_m", "mean"),
+                        rmse=("err_raw_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
                         jitter=("jitter_m", "mean"),
                         n_markers=("marker_id", "count"),
                         roll_deg=("roll_deg", "first"),
@@ -118,18 +130,17 @@ for idx, run in enumerate(selected_runs):
             st.info(f"No image found for {run}")
 
 if selected_format == "landmarks":
-    tab_glob, tab_obj, tab_lmk, tab_dist, tab_axes = st.tabs([
-        "Global", "By Object", "By Landmark", "Distance / Calibration", "Orientation"
+    tab_glob, tab_obj, tab_lmk, tab_dist, tab_axes, tab_jitter = st.tabs([
+        "Global", "By Object", "By Landmark", "Distance / Calibration", "Orientation", "Stability"
     ])
-
     frame_df = (
         filtered_df.groupby(["run_name", "ts"], as_index=False)
         .agg(
             rel_time=("rel_time", "first"),
-            mae=("abs_err_m", "mean"),
-            rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+            mae=("err_raw_m", "mean"),
+            rmse=("err_raw_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
             jitter=("jitter_m", "mean"),
-            n_landmarks=("landmark_id", "count"),
+            n_landmarks=("marker_id", "count"),
             roll_deg=("roll_deg", "first"),
             pitch_deg=("pitch_deg", "first"),
             yaw_deg=("yaw_deg", "first"),
@@ -152,30 +163,32 @@ if selected_format == "landmarks":
         summary_df = (
             filtered_df.groupby(["run_name"], as_index=False)
             .agg(
-                mean_mae=("abs_err_m", "mean"),
-                mean_rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+                mean_mae=("err_raw_m", "mean"),
+                mean_rmse=("err_raw_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
                 mean_jitter=("jitter_m", "mean"),
-                rows=("landmark_id", "count"),
+                rows=("marker_id", "count"),
             )
         )
         st.dataframe(summary_df, use_container_width=True)
 
     with tab_obj:
         obj_df = (
-            filtered_df.groupby(["run_name", "marker_id", "rel_time"], as_index=False)
+            filtered_df.groupby(["run_name", "marker_id", "color", "rel_time"], as_index=False)
             .agg(
-                mae=("abs_err_m", "mean"),
+                mae=("err_raw_m", "mean"),
                 jitter=("jitter_m", "mean"),
-                gt_depth_m=("gt_depth_m", "mean"),
+                gt_depth_geom_m=("gt_depth_geom_m", "mean"),
                 da3_depth_m=("da3_depth_m", "mean"),
             )
         )
-        metric = st.selectbox("Object metric", ["mae", "jitter", "gt_depth_m", "da3_depth_m"])
+
+        metric = st.selectbox("Object metric", ["mae", "jitter", "gt_depth_geom_m", "da3_depth_m"])
         fig = px.line(
             obj_df,
             x="rel_time",
             y=metric,
-            color="object_id",
+            color="color",
+            hover_data=["marker_id"],
             facet_col="run_name",
             template="plotly_dark",
             title=f"{metric} by object",
@@ -183,12 +196,12 @@ if selected_format == "landmarks":
         st.plotly_chart(fig, use_container_width=True)
 
         obj_summary = (
-            filtered_df.groupby(["object_id"], as_index=False)
+            filtered_df.groupby(["marker_id", "color"], as_index=False)
             .agg(
-                mean_abs_err_m=("abs_err_m", "mean"),
-                p95_abs_err_m=("abs_err_m", lambda s: np.nanpercentile(s.dropna(), 95) if len(s.dropna()) else np.nan),
+                mean_abs_err_m=("err_raw_m", "mean"),
+                p95_abs_err_m=("err_raw_m", lambda s: np.nanpercentile(s.dropna(), 95) if len(s.dropna()) else np.nan),
                 mean_jitter_m=("jitter_m", "mean"),
-                mean_gt_depth_m=("gt_depth_m", "mean"),
+                mean_gt_depth_m=("gt_depth_geom_m", "mean"),
             )
             .sort_values("mean_abs_err_m")
         )
@@ -198,13 +211,14 @@ if selected_format == "landmarks":
         landmark_keys = sorted(filtered_df["marker_id"].astype(str))
         selected_landmarks = st.multiselect("Landmarks", landmark_keys, default=landmark_keys[: min(8, len(landmark_keys))])
         plot_df = filtered_df.copy()
-        plot_df["landmark_key"] = plot_df["object_id"].astype(str) + "/" + plot_df["landmark_id"].astype(str)
+        plot_df["landmark_key"] = plot_df["run_name"].astype(str) + " / " + plot_df["marker_id"].astype(str)
         plot_df = plot_df[plot_df["landmark_key"].isin(selected_landmarks)]
         fig = px.line(
             plot_df,
             x="rel_time",
-            y="abs_err_m",
-            color="landmark_key",
+            y="err_raw_m",
+            color="color",
+            color_discrete_map=COLOR_MAP,
             facet_col="run_name",
             template="plotly_dark",
             title="Absolute error by landmark",
@@ -215,7 +229,7 @@ if selected_format == "landmarks":
             plot_df,
             x="det_u",
             y="det_v",
-            color="abs_err_m",
+            color="err_raw_m",
             hover_data=["marker_id", "gt_depth_geom_m", "da3_depth_m"],
             facet_col="run_name",
             template="plotly_dark",
@@ -225,16 +239,17 @@ if selected_format == "landmarks":
         st.plotly_chart(fig2, use_container_width=True)
 
     with tab_dist:
-        plot_df = filtered_df.dropna(subset=["gt_depth_geom_m", "da3_depth_m", "abs_err_m"]).copy()
+        plot_df = filtered_df.dropna(subset=["gt_depth_geom_m", "da3_depth_m", "err_raw_m"]).copy()
         plot_df["signed_err_m"] = plot_df["da3_depth_m"] - plot_df["gt_depth_geom_m"]
-        plot_df["landmark_key"] = plot_df["object_id"].astype(str) + "/" + plot_df["landmark_id"].astype(str)
+        plot_df["landmark_key"] = plot_df["run_name"].astype(str) + " / " + plot_df["marker_id"].astype(str)
 
         fig = px.scatter(
             plot_df,
             x="gt_depth_geom_m",
             y="signed_err_m",
-            color="object_id",
-            hover_data=["landmark_key", "run_name"],
+            color="color",
+            color_discrete_map=COLOR_MAP,
+            hover_data=["marker_id", "run_name"],
             template="plotly_dark",
             trendline="ols",
             title="Signed error vs GT depth",
@@ -245,33 +260,103 @@ if selected_format == "landmarks":
             plot_df,
             x="da3_depth_m",
             y="signed_err_m",
-            color="object_id",
-            hover_data=["landmark_key", "run_name"],
+            color="color",
+            color_discrete_map=COLOR_MAP,
+            hover_data=["marker_id", "run_name"],
             template="plotly_dark",
             trendline="ols",
             title="Signed error vs DA3 depth",
         )
         st.plotly_chart(fig2, use_container_width=True)
 
+        plot_df["scale_ratio"] = plot_df["da3_depth_m"] / plot_df["gt_depth_geom_m"]
+
+        fig_ratio = px.scatter(
+            plot_df,
+            x="gt_depth_geom_m",
+            y="scale_ratio",
+            color="run_name",
+            symbol="color",
+            template="plotly_dark",
+            title="DA3 / GT vs Distance (by wall)",
+            trendline="ols"
+        )
+
+        st.plotly_chart(fig_ratio, use_container_width=True)
+
+        if "da3_quad_m" in plot_df.columns:
+            plot_df["ratio_quad"] = plot_df["da3_quad_m"] / plot_df["gt_depth_geom_m"]
+
+            fig_quad = px.scatter(
+                plot_df,
+                x="gt_depth_geom_m",
+                y="ratio_quad",
+                color="run_name",
+                template="plotly_dark",
+                title="Calibrated DA3 / GT"
+            )
+            st.plotly_chart(fig_quad, use_container_width=True)
+
         if len(plot_df) >= 2:
             clean = plot_df[["da3_depth_m", "gt_depth_geom_m"]].dropna()
-            m, b = np.polyfit(clean["gt_depth_geom_m"], clean["gt_depth_geom_m"], 1)
+            m, b = np.polyfit(clean["da3_depth_m"], clean["gt_depth_geom_m"], 1)
             st.success(f"Calibration fit: gt_depth ≈ {m:.4f} * da3_depth + {b:.4f}")
 
     with tab_axes:
         axis = st.selectbox("Orientation axis", ["pitch_deg", "roll_deg", "yaw_deg"])
-        ymetric = st.selectbox("Response", ["abs_err_m", "jitter_m", "gt_depth_m"])
+        ymetric = st.selectbox("Response", ["err_raw_m", "jitter_m", "gt_depth_geom_m"])
         fig = px.scatter(
             filtered_df,
             x=axis,
             y=ymetric,
-            color="object_id",
-            hover_data=["landmark_id", "run_name"],
+            color="color",
+            color_discrete_map=COLOR_MAP,
+            hover_data=["marker_id", "run_name"],
             template="plotly_dark",
             trendline="ols",
             title=f"{ymetric} vs {axis}",
         )
         st.plotly_chart(fig, use_container_width=True)
+
+    with tab_jitter:
+        st.subheader("Temporal Stability (Jitter)")
+
+        plot_df = filtered_df.dropna(subset=["jitter_m", "gt_depth_geom_m"]).copy()
+
+        fig = px.line(
+            plot_df,
+            x="rel_time",
+            y="jitter_m",
+            color="color",
+            line_group="marker_id",
+            facet_col="run_name",
+            color_discrete_map=COLOR_MAP,
+            template="plotly_dark",
+            title="Jitter vs Time",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        fig2 = px.scatter(
+            plot_df,
+            x="gt_depth_geom_m",
+            y="jitter_m",
+            color="color",
+            color_discrete_map=COLOR_MAP,
+            template="plotly_dark",
+            title="Jitter vs Distance",
+            trendline="ols"
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+        summary = (
+            plot_df.groupby(["run_name", "marker_id"], as_index=False)
+            .agg(
+                mean_jitter=("jitter_m", "mean"),
+                p95_jitter=("jitter_m", lambda s: np.nanpercentile(s, 95)),
+            )
+        )
+
+        st.dataframe(summary, use_container_width=True)
 
 else:
     st.warning("This app now expects landmark CSVs. The selected data looks like the old random-pixel format.")
