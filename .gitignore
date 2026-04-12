@@ -189,3 +189,5 @@ sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 myenv/
 sparx_agency/tasks/localization/ros2/depth_optical/orbslam_results/myvenv/
 sparx_agency/tasks/localization/CLAUDE.md
+
+xtend_capture_out/  
