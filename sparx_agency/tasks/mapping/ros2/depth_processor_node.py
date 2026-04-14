@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,9 +19,9 @@ class DepthProcessorNode(Node):
         self.bridge = CvBridge()
 
         # ===== Parameters =====
-        self.declare_parameter('engine_path', '')
-        self.declare_parameter('config_yaml', '')
-        self.declare_parameter('rgb_topic', '/camera/image_raw')
+        self.declare_parameter('engine_path', str(Path.home() / 'depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine'))
+        self.declare_parameter('config_yaml', str(Path.home() / 'GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml'))
+        self.declare_parameter('rgb_topic', '/simple_drone/front/image_raw')
         self.declare_parameter('pub_depth_topic', '/sparx/depth/da3_raw')
         self.declare_parameter('pub_debug_topic', '/sparx/depth/da3_debug')
         self.declare_parameter('publish_debug', True)

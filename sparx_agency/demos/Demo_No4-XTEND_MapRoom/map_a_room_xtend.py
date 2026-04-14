@@ -90,6 +90,7 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
         self._yaw_last: Optional[float] = None
         self._yaw_travel = 0.0
         self._next_bucket: Optional[float] = None
+        self.current_yaw: Optional[float] = None
 
         # Telemetry placeholders: fill later when you parse x/y/z
         self.x: Optional[float] = None
@@ -201,6 +202,7 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
     async def create_scenario(self):
         sleep_time = 3
         land_sleep_time = 5
+        finally_sleep_time = 2
 
         await asyncio.sleep(2)  # let telemetry stabilize
         await self._start_capture()   # your capture start
@@ -228,14 +230,17 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
             # HARD SAFETY: always try to land+disarm even if something broke
             try:
                 await self.land()
+                await asyncio.sleep(finally_sleep_time)
             except Exception as e:
                 print(f"[scenario] land failed: {e}")
             try:
                 await self.disarm_robot()
+                await asyncio.sleep(finally_sleep_time)
             except Exception as e:
                 print(f"[scenario] disarm failed: {e}")
 
             await self._stop_capture()
+            await asyncio.sleep(finally_sleep_time // 2)
 
 def parse_args():
     p = argparse.ArgumentParser()
