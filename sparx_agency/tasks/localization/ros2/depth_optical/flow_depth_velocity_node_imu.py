@@ -400,7 +400,67 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"[DEBUG] du_rot={du_rot_mean:.3f} dv_rot={dv_rot_mean:.3f} | du_trans={du_trans_mean:.3f} dv_trans={dv_trans_mean:.3f}")
             self.get_logger().info(f"[DEBUG] Vx_o={Vx_o:.3f} Vy_o={Vy_o:.3f} Vz_o={Vz_o:.3f} | Output: Vx={Vz_o:.3f} Vy={-Vx_o:.3f} Vz={-Vy_o:.3f}")
             self.get_logger().info(f"[DEBUG] Gyro: {self.latest_gyro}")
+
+# ====================================================================
+        # ====================================================================
+        if not hasattr(self, '_zone_debug_count'):
+            self._zone_debug_count = 0
+        self._zone_debug_count += 1
         
+        if self._zone_debug_count % 30 == 0 and nv >= 30:
+            dist_from_center = np.sqrt(u_c_v**2 + v_c_v**2)
+            idx_center_group = np.argsort(dist_from_center)[:15]
+            idx_right_group = np.argsort(u_c_v)[-15:]
+            
+            def solve_for_indices(indices):
+                A_sub = np.zeros((2 * len(indices), 3), dtype=np.float64)
+                B_sub = np.zeros((2 * len(indices),), dtype=np.float64)
+                
+                A_sub[0::2, 0] = -self.fx
+                A_sub[0::2, 2] = u_c_v[indices]
+                B_sub[0::2] = du_v[indices] * Zv[indices]
+                
+                A_sub[1::2, 1] = -self.fy
+                A_sub[1::2, 2] = v_c_v[indices]
+                B_sub[1::2] = dv_v[indices] * Zv[indices]
+                
+                try:
+                    vel_sub, *_ = np.linalg.lstsq(A_sub, B_sub, rcond=None)
+                    return float(vel_sub[2]), float(-vel_sub[0]), float(-vel_sub[1])
+                except:
+                    return 0.0, 0.0, 0.0
+
+            center_vx, center_vy, center_vz = solve_for_indices(idx_center_group)
+            right_vx, right_vy, right_vz = solve_for_indices(idx_right_group)
+            global_vx, global_vy, global_vz = Vz_o, -Vx_o, -Vy_o  
+            
+            self.get_logger().info("=========================================")
+            self.get_logger().info(f"--- ZONE VELOCITY LOGGING (Frame {self._zone_debug_count}) ---")
+            self.get_logger().info(f"Global Vx : {global_vx:.3f} m/s")
+            self.get_logger().info(f"Center Vx : {center_vx:.3f} m/s")
+            self.get_logger().info(f"Right Vx  : {right_vx:.3f} m/s")
+            
+            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" 
+            file_exists = os.path.isfile(csv_filename)
+            
+            try:
+                with open(csv_filename, mode='a', newline='') as file:
+                    writer = csv.writer(file)
+                    if not file_exists:
+                        writer.writerow(["Frame", 
+                                         "Global_Vx", "Global_Vy", "Global_Vz",
+                                         "Center_Vx", "Center_Vy", "Center_Vz",
+                                         "Right_Vx", "Right_Vy", "Right_Vz"])
+                    
+                    writer.writerow([
+                        self._zone_debug_count,
+                        global_vx, global_vy, global_vz,
+                        center_vx, center_vy, center_vz,
+                        right_vx, right_vy, right_vz
+                    ])
+            except Exception as e:
+                self.get_logger().error(f"Failed to write to CSV: {e}")
+
         return Vz_o, -Vx_o, -Vy_o, nv
 
     def draw_debug(self, vis_bgr, good_old, good_new, depth_map):
