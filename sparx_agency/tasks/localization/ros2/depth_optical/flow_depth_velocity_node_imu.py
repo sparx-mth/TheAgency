@@ -10,6 +10,8 @@ from cv_bridge import CvBridge
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
 from sensor_msgs.msg import Imu
 import message_filters
+import csv
+import os
 
 class FlowDepthVelocityNode(Node):
 
@@ -338,6 +340,53 @@ class FlowDepthVelocityNode(Node):
             return 0.0, 0.0, 0.0, nv
 
         Vx_o, Vy_o, Vz_o = float(vel[0]), float(vel[1]), float(vel[2])
+
+        if not hasattr(self, '_pred_debug_count'):
+            self._pred_debug_count = 0
+        self._pred_debug_count += 1
+        
+        if self._pred_debug_count % 30 == 0 and nv > 0:
+            dist_from_center = np.sqrt(u_c_v**2 + v_c_v**2)
+            idx_center = np.argmin(dist_from_center)
+            idx_right = np.argmax(u_c_v)
+            
+            du_pred_center = (-self.fx * Vx_o + u_c_v[idx_center] * Vz_o) / Zv[idx_center]
+            dv_pred_center = (-self.fy * Vy_o + v_c_v[idx_center] * Vz_o) / Zv[idx_center]
+            
+            du_pred_right = (-self.fx * Vx_o + u_c_v[idx_right] * Vz_o) / Zv[idx_right]
+            dv_pred_right = (-self.fy * Vy_o + v_c_v[idx_right] * Vz_o) / Zv[idx_right]
+
+            err_du_center = abs(du_v[idx_center] - du_pred_center)
+            err_dv_center = abs(dv_v[idx_center] - dv_pred_center)
+            err_du_right = abs(du_v[idx_right] - du_pred_right)
+            err_dv_right = abs(dv_v[idx_right] - dv_pred_right)
+
+            self.get_logger().info("=========================================")
+            self.get_logger().info(f"--- PREDICTION vs REALITY (Frame {self._pred_debug_count}) ---")
+            self.get_logger().info(f"Final Drone Velocity: Vx={Vx_o:.3f}, Vy={Vy_o:.3f}, Vz={Vz_o:.3f}")
+            self.get_logger().info(f"[CENTER] Error du: {err_du_center:.2f} px/s")
+            self.get_logger().info(f"[RIGHT]  Error du: {err_du_right:.2f} px/s")
+            self.get_logger().info("=========================================")
+
+            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/residuals_log.csv" 
+            file_exists = os.path.isfile(csv_filename)
+            
+            try:
+                with open(csv_filename, mode='a', newline='') as file:
+                    writer = csv.writer(file)
+                    if not file_exists:
+                        writer.writerow(["Frame", "Vx", "Vy", "Vz", 
+                                         "Center_uc", "Center_Z", "Center_Err_du", "Center_Err_dv",
+                                         "Right_uc", "Right_Z", "Right_Err_du", "Right_Err_dv"])
+                    
+                    writer.writerow([
+                        self._pred_debug_count, Vx_o, Vy_o, Vz_o,
+                        u_c_v[idx_center], Zv[idx_center], err_du_center, err_dv_center,
+                        u_c_v[idx_right], Zv[idx_right], err_du_right, err_dv_right
+                    ])
+            except Exception as e:
+                self.get_logger().error(f"Failed to write to CSV: {e}")
+
         
         # Debug: Check rotational vs translational components
         if not hasattr(self, '_debug_count'):
