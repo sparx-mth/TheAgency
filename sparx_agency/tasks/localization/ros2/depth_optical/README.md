@@ -74,6 +74,15 @@ GT Pose Error & RMS Drift
 
 ### 1. Depth Estimation
 
+* for Depth Anything V3:
+```bash
+cd ~/GIT/TheAgency
+source ~/depth_anything_ws/src/ros2-depth-anything-v3-trt/da3_venv/bin/activate
+
+ python3 -m sparx_agency.tasks.mapping.ros2.depth_processor_node   --ros-args   -p use_sim_time:=true   -p engine_path:=$HOME/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine   -p config_yaml:=$HOME/GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml   -r /camera/image_raw:=/simple_drone/front/image_raw   -r /sparx/depth/da3_raw:=/depth_anything/depth   -r /sparx/depth/da3_debug:=/depth_anything/depth_vis
+```
+
+* for Depth Anything V2:
 ```bash
 cd ~/GIT/TheAgency
 source .venv/bin/activate

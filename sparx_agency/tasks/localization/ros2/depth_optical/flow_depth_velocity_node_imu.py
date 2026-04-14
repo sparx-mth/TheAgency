@@ -33,7 +33,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
-        self.declare_parameter("depth_scale", 0.2)  # Calibrated for Depth Anything V2 + Gazebo
+        self.declare_parameter("depth_scale", 1.0)  # Calibrated for Depth Anything V2 + Gazebo
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
         self.declare_parameter("imu_topic", "/simple_drone/imu/out")
