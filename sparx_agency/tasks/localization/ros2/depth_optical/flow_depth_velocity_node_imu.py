@@ -12,6 +12,7 @@ from sensor_msgs.msg import Imu
 import message_filters
 import csv
 import os
+from geometry_msgs.msg import Twist
 
 class FlowDepthVelocityNode(Node):
 
@@ -60,6 +61,10 @@ class FlowDepthVelocityNode(Node):
 
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
+
+        self.latest_gt_vx = 0.0
+        self.latest_gt_vy = 0.0
+        self.latest_gt_vz = 0.0 
 
         lk_win = int(self.get_parameter("lk_win").get_parameter_value().integer_value)
         lk_levels = int(self.get_parameter("lk_levels").get_parameter_value().integer_value)
@@ -111,6 +116,13 @@ class FlowDepthVelocityNode(Node):
         self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
         self.imu_sub = self.create_subscription(Imu, imu_topic, self.imu_callback, 10)
 
+
+        self.create_subscription(
+            Twist, #  -TwistStamped or Odometry 
+            '/simple_drone/gt_vel', 
+            self.gt_vel_callback, 
+            10
+        )
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub],
             queue_size=50,
@@ -244,6 +256,11 @@ class FlowDepthVelocityNode(Node):
             cv2.imshow("Flow+Depth Velocity", vis)
             cv2.waitKey(1) 
    
+    def gt_vel_callback(self, msg):
+        self.latest_gt_vx = msg.linear.x
+        self.latest_gt_vy = msg.linear.y
+        self.latest_gt_vz = msg.linear.z
+
     # ---------- core helpers ----------
 
     def velocity_from_flow_and_depth(self, good_old, good_new, depth_map, dt: float, gyro: np.ndarray):
@@ -368,7 +385,7 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"[RIGHT]  Error du: {err_du_right:.2f} px/s")
             self.get_logger().info("=========================================")
 
-            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/residuals_log.csv" 
+            csv_filename = "/home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/residuals_log.csv" 
             file_exists = os.path.isfile(csv_filename)
             
             try:
@@ -440,7 +457,7 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"Center Vx : {center_vx:.3f} m/s")
             self.get_logger().info(f"Right Vx  : {right_vx:.3f} m/s")
             
-            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" 
+            csv_filename = "/home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" 
             file_exists = os.path.isfile(csv_filename)
             
             try:
@@ -448,19 +465,21 @@ class FlowDepthVelocityNode(Node):
                     writer = csv.writer(file)
                     if not file_exists:
                         writer.writerow(["Frame", 
+                                         "GT_Vx", "GT_Vy", "GT_Vz",
                                          "Global_Vx", "Global_Vy", "Global_Vz",
                                          "Center_Vx", "Center_Vy", "Center_Vz",
                                          "Right_Vx", "Right_Vy", "Right_Vz"])
                     
                     writer.writerow([
                         self._zone_debug_count,
+                        self.latest_gt_vx, self.latest_gt_vy, self.latest_gt_vz, # <--- נתוני האמת מגזיבו
                         global_vx, global_vy, global_vz,
                         center_vx, center_vy, center_vz,
                         right_vx, right_vy, right_vz
                     ])
             except Exception as e:
                 self.get_logger().error(f"Failed to write to CSV: {e}")
-
+        
         return Vz_o, -Vx_o, -Vy_o, nv
 
     def draw_debug(self, vis_bgr, good_old, good_new, depth_map):

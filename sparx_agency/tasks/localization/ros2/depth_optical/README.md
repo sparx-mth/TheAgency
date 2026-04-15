@@ -188,3 +188,8 @@ showing depth inference, optical flow tracking, and velocity integration.
 ## Results:
 
 [ape and traj results](assets/table.png)
+
+# for checking the velocity estimation vs GT and the center zone vs Right zone:
+```bash
+ python3 /home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/plot_zones.py
+```
