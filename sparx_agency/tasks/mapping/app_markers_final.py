@@ -23,7 +23,7 @@ COLOR_MAP = {
 }
 
 DEPTH_VARIANTS = {
-    "Raw": ("da3_depth_m", "err_raw_m"),
+    "Raw": ("da3_raw_m", "err_raw_m"),
     "Linear": ("da3_lin_m", "err_lin_m"),
     "Quadratic": ("da3_quad_m", "err_quad_m"),
 }
@@ -275,6 +275,7 @@ with tab_marker:
     st.dataframe(marker_summary, use_container_width=True)
 
 with tab_dist:
+    print(filtered_df.columns)
     depth_mode = st.selectbox("Depth mode", [k for k, (dcol, _) in DEPTH_VARIANTS.items() if DEPTH_VARIANTS[k][0] in filtered_df.columns])
 
     depth_col, err_col = DEPTH_VARIANTS[depth_mode]
