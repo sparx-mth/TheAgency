@@ -187,7 +187,7 @@ sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 *.db3 
 *.yaml
 myenv/
-sparx_agency/tasks/localization/ros2/depth_optical/orbslam_results/myvenv/
+sparx_agency/tasks/localization/ros2/depth_optical/results/orbslam_results
 sparx_agency/tasks/localization/CLAUDE.md
 
 xtend_capture_out/  

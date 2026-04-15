@@ -36,7 +36,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
-        self.declare_parameter("depth_scale", 1.0)  # Calibrated for Depth Anything V2 + Gazebo
+        self.declare_parameter("depth_scale", 0.4)  # Calibrated for Depth Anything V2 + Gazebo
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
         self.declare_parameter("imu_topic", "/simple_drone/imu/out")
@@ -346,18 +346,44 @@ class FlowDepthVelocityNode(Node):
         du_v  = du_trans[valid].astype(np.float64)
         dv_v  = dv_trans[valid].astype(np.float64)
 
+        # Initialize the prediction matrix (A) and observation vector (B)
         A = np.zeros((2 * nv, 3), dtype=np.float64)
         B = np.zeros((2 * nv,),   dtype=np.float64)
         A[0::2, 0] = -self.fx;  A[0::2, 2] = u_c_v;  B[0::2] = du_v * Zv
         A[1::2, 1] = -self.fy;  A[1::2, 2] = v_c_v;  B[1::2] = dv_v * Zv
 
+
+# --- WEIGHTED LEAST SQUARES (WLS) IMPLEMENTATION ---
+        
+        # 1. Calculate the squared distance from the center for each point
+        dist_sq = u_c_v**2 + v_c_v**2
+        
+        # 2. Define the theoretical maximum squared distance (image corners)
+        max_dist_sq = self.cx**2 + self.cy**2
+        
+        # 3. Calculate Gaussian weights
+        # Decay factor controls how aggressively weights drop towards the edge.
+        # Smaller value = faster drop-off (more weight to the absolute center).
+        decay_factor = 0.2
+        weights = np.exp(-dist_sq / (decay_factor * max_dist_sq))
+        
+        # 4. Construct the weight vector matching the size of A and B (2 equations per point)
+        W_vec = np.zeros((2 * nv,), dtype=np.float64)
+        W_vec[0::2] = weights  # Weights for the horizontal (u) equations
+        W_vec[1::2] = weights  # Weights for the vertical (v) equations
+        
+        # 5. Apply weights to the matrix and vector using numpy broadcasting
+        A_w = A * W_vec[:, np.newaxis]
+        B_w = B * W_vec
+
+        # 6. Solve the weighted system
         try:
-            vel, *_ = np.linalg.lstsq(A, B, rcond=None)
+            vel, *_ = np.linalg.lstsq(A_w, B_w, rcond=None)
         except np.linalg.LinAlgError:
             return 0.0, 0.0, 0.0, nv
 
+        # Extract raw velocities in the optical frame
         Vx_o, Vy_o, Vz_o = float(vel[0]), float(vel[1]), float(vel[2])
-
         if not hasattr(self, '_pred_debug_count'):
             self._pred_debug_count = 0
         self._pred_debug_count += 1
