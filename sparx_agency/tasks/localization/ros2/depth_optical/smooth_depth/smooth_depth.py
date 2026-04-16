@@ -13,7 +13,7 @@ def process_depth_data(input_csv, output_csv):
     df = pd.read_csv(input_csv)
     
     # 2. Clean the data (Drop rows where depth or Ground Truth are missing)
-    df = df.dropna(subset=['da3_depth_m', 'gt_depth_geom_m'])
+    df = df.dropna(subset=['da3_depth_m', 'gt_dept`h_geom_m'])
     
     # 3. Sort the data chronologically for each color/marker
     # This is CRITICAL for time-series operations like rolling windows and EMA
