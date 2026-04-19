@@ -38,4 +38,4 @@ def plot_absolute_velocity_comparison(csv_path):
 
 if __name__ == "__main__":
     # Update with your actual CSV path
-    plot_absolute_velocity_comparison("/home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv")
+    plot_absolute_velocity_comparison("/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv")

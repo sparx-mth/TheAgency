@@ -36,7 +36,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)   # reject 0 / invalid
         self.declare_parameter("max_depth", 30.0)   # reject crazy values
         self.declare_parameter("use_depth_norm", False)  # if depth is 0..1 relative, keep as-is
-        self.declare_parameter("depth_scale", 0.4)  # Calibrated for Depth Anything V2 + Gazebo
+        self.declare_parameter("depth_scale", 1.0)  # Calibrated for Depth Anything V2 + Gazebo
         self.declare_parameter("show_debug", False)
         self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
         self.declare_parameter("imu_topic", "/simple_drone/imu/out")
@@ -45,6 +45,19 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("lk_win", 21) # window size
         self.declare_parameter("lk_levels", 3) # pyramid levels
 
+        # ==========================================
+        # Depth Smoothing Parameters
+        # ==========================================
+        self.declare_parameter("depth_median_window", 5)
+        self.declare_parameter("depth_ema_alpha", 0.15)
+        
+        self.median_window = int(self.get_parameter("depth_median_window").get_parameter_value().integer_value)
+        self.ema_alpha = float(self.get_parameter("depth_ema_alpha").get_parameter_value().double_value)
+        
+        self.depth_history = []
+        self.last_smoothed_depth = None
+        # ==========================================
+        
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
         caminfo_topic = self.get_parameter("camera_info_topic").get_parameter_value().string_value
@@ -126,9 +139,36 @@ class FlowDepthVelocityNode(Node):
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub],
             queue_size=50,
-            slop=0.15
+            slop=0.05
         )
         self.ts.registerCallback(self.sync_callback)
+
+    # ==========================================
+    # Depth Smoothing Function
+    # ==========================================
+    def smooth_depth_map(self, raw_depth_map: np.ndarray) -> np.ndarray:
+        """
+        Applies Median Filter and EMA to a full dense depth map to reduce temporal jitter.
+        """
+        # 1. Update history
+        self.depth_history.append(raw_depth_map)
+        if len(self.depth_history) > self.median_window:
+            self.depth_history.pop(0)
+            
+        # 2. Median Filter over time (removes spikes)
+        # Using axis=0 means taking the median across the time dimension for every single pixel
+        current_median = np.median(self.depth_history, axis=0)
+        
+        # 3. EMA Filter (smooths continuous noise)
+        if self.last_smoothed_depth is None:
+            self.last_smoothed_depth = current_median
+        else:
+            self.last_smoothed_depth = (self.ema_alpha * current_median) + \
+                                       ((1.0 - self.ema_alpha) * self.last_smoothed_depth)
+                                       
+        return self.last_smoothed_depth.astype(np.float32)
+    # ==========================================
+
 
     # ---------- callbacks ----------
     def caminfo_callback(self, msg: CameraInfo):
@@ -221,6 +261,9 @@ class FlowDepthVelocityNode(Node):
             return
         
         depth_map = np.asarray(depth_cv, dtype=np.float32)
+
+        # Apply smoothing to the depth map before using it for velocity estimation
+        depth_map = self.smooth_depth_map(depth_map)
 
         try:
             frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
@@ -373,8 +416,9 @@ class FlowDepthVelocityNode(Node):
         W_vec[1::2] = weights  # Weights for the vertical (v) equations
         
         # 5. Apply weights to the matrix and vector using numpy broadcasting
-        A_w = A * W_vec[:, np.newaxis]
-        B_w = B * W_vec
+        sqrt_w = np.sqrt(W_vec)
+        A_w = A * sqrt_w[:, np.newaxis]
+        B_w = B * sqrt_w
 
         # 6. Solve the weighted system
         try:
@@ -406,12 +450,12 @@ class FlowDepthVelocityNode(Node):
 
             self.get_logger().info("=========================================")
             self.get_logger().info(f"--- PREDICTION vs REALITY (Frame {self._pred_debug_count}) ---")
-            self.get_logger().info(f"Final Drone Velocity: Vx={Vx_o:.3f}, Vy={Vy_o:.3f}, Vz={Vz_o:.3f}")
+            self.get_logger().info(f"Final Drone Velocity: Vx={Vz_o:.3f}, Vy={-Vx_o:.3f}, Vz={-Vy_o:.3f}")
             self.get_logger().info(f"[CENTER] Error du: {err_du_center:.2f} px/s")
             self.get_logger().info(f"[RIGHT]  Error du: {err_du_right:.2f} px/s")
             self.get_logger().info("=========================================")
 
-            csv_filename = "/home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/residuals_log.csv" 
+            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/residuals_log.csv" 
             file_exists = os.path.isfile(csv_filename)
             
             try:
@@ -483,7 +527,7 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"Center Vx : {center_vx:.3f} m/s")
             self.get_logger().info(f"Right Vx  : {right_vx:.3f} m/s")
             
-            csv_filename = "/home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" 
+            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" 
             file_exists = os.path.isfile(csv_filename)
             
             try:
@@ -498,7 +542,7 @@ class FlowDepthVelocityNode(Node):
                     
                     writer.writerow([
                         self._zone_debug_count,
-                        self.latest_gt_vx, self.latest_gt_vy, self.latest_gt_vz, # <--- נתוני האמת מגזיבו
+                        self.latest_gt_vx, self.latest_gt_vy, self.latest_gt_vz, 
                         global_vx, global_vy, global_vz,
                         center_vx, center_vy, center_vz,
                         right_vx, right_vy, right_vz
