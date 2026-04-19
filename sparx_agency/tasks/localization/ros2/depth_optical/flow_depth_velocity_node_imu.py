@@ -155,22 +155,12 @@ class FlowDepthVelocityNode(Node):
     # ==========================================
     def smooth_depth_map(self, raw_depth_map: np.ndarray) -> np.ndarray:
         """
-        Applies Median Filter and EMA to a full dense depth map to reduce temporal jitter.
+        Applies Fast EMA to the depth map. Skips median to preserve real-time performance.
         """
-        # 1. Update history
-        self.depth_history.append(raw_depth_map)
-        if len(self.depth_history) > self.median_window:
-            self.depth_history.pop(0)
-            
-        # 2. Median Filter over time (removes spikes)
-        # Using axis=0 means taking the median across the time dimension for every single pixel
-        current_median = np.median(self.depth_history, axis=0)
-        
-        # 3. EMA Filter (smooths continuous noise)
         if self.last_smoothed_depth is None:
-            self.last_smoothed_depth = current_median
+            self.last_smoothed_depth = raw_depth_map
         else:
-            self.last_smoothed_depth = (self.ema_alpha * current_median) + \
+            self.last_smoothed_depth = (self.ema_alpha * raw_depth_map) + \
                                        ((1.0 - self.ema_alpha) * self.last_smoothed_depth)
                                        
         return self.last_smoothed_depth.astype(np.float32)
@@ -190,62 +180,6 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"[CamInfo] fx={self.fx:.2f}, fy={self.fy:.2f}, cx={self.cx:.2f}, cy={self.cy:.2f}")
             self.get_logger().info(f"[CamInfo] K matrix: {list(K)}")
             self._caminfo_logged = True
-
-    def depth_callback(self, msg: Image):
-        try:
-            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="32FC1")
-            # 32FC1 means 32-bit float, single channel (depth in meters or normalized)
-        except Exception as e:
-            self.get_logger().error(f"Depth convert failed: {e}")
-            return
-
-        self.latest_depth = np.asarray(depth, dtype=np.float32)
-        self.latest_depth_stamp = msg.header.stamp
-
-    def rgb_callback(self, msg: Image):
-        # Need cam intrinsics + depth
-        if self.fx is None or self.fy is None:
-            return
-        if self.latest_depth is None:
-            return
-
-        # Convert RGB
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except Exception as e:
-            self.get_logger().error(f"RGB convert failed: {e}")
-            return
-
-        flow_res = self.tracker.process(frame, msg.header.stamp)
-        if flow_res is None:
-            return
-
-        # compute velocity from flow + depth + IMU (3-DOF least-squares)
-        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
-            flow_res.good_old,
-            flow_res.good_new,
-            self.latest_depth,
-            flow_res.dt,
-            self.latest_gyro
-        )
-
-        # Publish in front_cam_link frame (Xl=forward, Yl=left, Zl=up).
-        vel_msg = Vector3Stamped()
-        vel_msg.header.stamp = msg.header.stamp
-        vel_msg.header.frame_id = self.camera_frame
-        vel_msg.vector.x = float(vx_mps)
-        vel_msg.vector.y = float(vy_mps)
-        vel_msg.vector.z = float(vz_mps)
-        self.vel_pub.publish(vel_msg)
-
-        # debug visualization of flow vectors colored by depth
-        if self.show_debug:
-            vis = frame.copy()
-            self.draw_debug(vis, flow_res.good_old, flow_res.good_new, self.latest_depth)
-            txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
-            cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-            cv2.imshow("Flow+Depth Velocity", vis)
-            cv2.waitKey(1)
 
 
     def imu_callback(self, msg: Imu):
@@ -465,22 +399,6 @@ class FlowDepthVelocityNode(Node):
             csv_filename = self.csv_filename
             file_exists = os.path.isfile(csv_filename)
             
-            try:
-                with open(csv_filename, mode='a', newline='') as file:
-                    writer = csv.writer(file)
-                    if not file_exists:
-                        writer.writerow(["Frame", "Vx", "Vy", "Vz", 
-                                         "Center_uc", "Center_Z", "Center_Err_du", "Center_Err_dv",
-                                         "Right_uc", "Right_Z", "Right_Err_du", "Right_Err_dv"])
-                    
-                    writer.writerow([
-                        self._pred_debug_count, Vx_o, Vy_o, Vz_o,
-                        u_c_v[idx_center], Zv[idx_center], err_du_center, err_dv_center,
-                        u_c_v[idx_right], Zv[idx_right], err_du_right, err_dv_right
-                    ])
-            except Exception as e:
-                self.get_logger().error(f"Failed to write to CSV: {e}")
-
         
         # Debug: Check rotational vs translational components
         if not hasattr(self, '_debug_count'):
@@ -534,7 +452,7 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"Center Vx : {center_vx:.3f} m/s")
             self.get_logger().info(f"Right Vx  : {right_vx:.3f} m/s")
             
-            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" 
+            csv_filename = self.csv_filename
             file_exists = os.path.isfile(csv_filename)
             
             try:

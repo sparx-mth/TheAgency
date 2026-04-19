@@ -55,7 +55,7 @@ class VelocityIntegratorNode(Node):
         self.declare_parameter("init_from_gt", True)
         self.declare_parameter("min_dt", 1e-3)
         self.declare_parameter("max_dt", 2.0)
-        self.declare_parameter("gt_max_time_diff", 1.00)
+        self.declare_parameter("gt_max_time_diff", 1.05)
         
         self.declare_parameter("tf_cache_sec", 20.0)
         self.declare_parameter("tf_timeout_sec", 0.05)
@@ -126,11 +126,12 @@ class VelocityIntegratorNode(Node):
             raise
 
     def vel_cb(self, msg: Vector3Stamped):
-        t_vel = Time.from_msg(msg.header.stamp)
+        t_vel_stamp = Time.from_msg(msg.header.stamp)
+        t_vel_arrival = self.get_clock().now()
 
         # Init from GT if required
         if not self.have_est and self.init_from_gt:
-            gt_pose, gt_dt = self.find_closest_gt(t_vel)
+            gt_pose, gt_dt = self.find_closest_gt(t_vel_arrival)
             if gt_pose is None or gt_dt > self.gt_max_time_diff:
                 self._gt_warn_counter += 1
                 if self._gt_warn_counter % 50 == 0:
@@ -141,13 +142,13 @@ class VelocityIntegratorNode(Node):
             self.get_logger().info(f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s).")
 
         if self.last_vel_time is None:
-            self.last_vel_time = t_vel
+            self.last_vel_time = t_vel_stamp
             if not self.init_from_gt:
                 self.have_est = True
             return
 
-        dt = (t_vel - self.last_vel_time).nanoseconds * 1e-9
-        self.last_vel_time = t_vel
+        dt = (t_vel_stamp - self.last_vel_time).nanoseconds * 1e-9
+        self.last_vel_time = t_vel_stamp
 
         if not (self.min_dt <= dt <= self.max_dt):
             return
@@ -157,7 +158,7 @@ class VelocityIntegratorNode(Node):
             source_frame = norm_frame(msg.header.frame_id)
             if not source_frame:
                 return
-            tf = self.lookup_tf(self.target_frame, source_frame, t_vel)
+            tf = self.lookup_tf(self.target_frame, source_frame, t_vel_stamp)
             v_body = np.array([msg.vector.x, msg.vector.y, msg.vector.z], dtype=np.float64)
             v_world = rotate_vector_3d(v_body, tf.transform.rotation)
             v_x, v_y, v_z = float(v_world[0]), float(v_world[1]), float(v_world[2])
@@ -172,7 +173,7 @@ class VelocityIntegratorNode(Node):
 
         # Publish
         est_msg = PoseStamped()
-        est_msg.header.stamp = msg.header.stamp
+        est_msg.header.stamp = self.get_clock().now().to_msg()
         est_msg.header.frame_id = self.target_frame
         est_msg.pose.position.x = self.est_x
         est_msg.pose.position.y = self.est_y

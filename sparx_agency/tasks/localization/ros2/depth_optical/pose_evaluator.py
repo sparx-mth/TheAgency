@@ -133,7 +133,7 @@ class PoseEvaluatorNode(Node):
         return best_pose, best_dt
 
     def est_pose_cb(self, msg: PoseStamped):
-        t_est = Time.from_msg(msg.header.stamp)
+        t_est = self.get_clock().now()
         t_sec = self.time_to_sec(t_est)
         
         est_x, est_y, est_z = msg.pose.position.x, msg.pose.position.y, msg.pose.position.z
