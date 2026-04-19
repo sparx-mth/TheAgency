@@ -50,6 +50,11 @@ class FlowDepthVelocityNode(Node):
         # ==========================================
         self.declare_parameter("depth_median_window", 5)
         self.declare_parameter("depth_ema_alpha", 0.15)
+
+        self.declare_parameter(
+        "csv_filename",
+        "/tmp/zone_velocities_log.csv"  # default fallback
+        )
         
         self.median_window = int(self.get_parameter("depth_median_window").get_parameter_value().integer_value)
         self.ema_alpha = float(self.get_parameter("depth_ema_alpha").get_parameter_value().double_value)
@@ -82,6 +87,8 @@ class FlowDepthVelocityNode(Node):
         lk_win = int(self.get_parameter("lk_win").get_parameter_value().integer_value)
         lk_levels = int(self.get_parameter("lk_levels").get_parameter_value().integer_value)
 
+        self.csv_filename = self.get_parameter("csv_filename").get_parameter_value().string_value
+        
         # log params
         self.get_logger().info(f"[FlowDepth] RGB: {image_topic}")
         self.get_logger().info(f"[FlowDepth] Depth: {depth_topic}")
@@ -455,7 +462,7 @@ class FlowDepthVelocityNode(Node):
             self.get_logger().info(f"[RIGHT]  Error du: {err_du_right:.2f} px/s")
             self.get_logger().info("=========================================")
 
-            csv_filename = "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/residuals_log.csv" 
+            csv_filename = self.csv_filename
             file_exists = os.path.isfile(csv_filename)
             
             try:

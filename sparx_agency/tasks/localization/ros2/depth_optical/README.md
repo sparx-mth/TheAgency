@@ -99,7 +99,7 @@ python3 -m sparx_agency.tasks.mapping.create_map_from_video \
 
 ```bash
 python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_imu \
-  --ros-args -p use_sim_time:=true -p show_debug:=true
+  --ros-args -p use_sim_time:=true -p show_debug:=true   -p csv_filename:="/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv"
 ```
 
 ### 3. velocity_integrator
