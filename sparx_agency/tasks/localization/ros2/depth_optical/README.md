@@ -191,5 +191,7 @@ showing depth inference, optical flow tracking, and velocity integration.
 
 # for checking the velocity estimation vs GT and the center zone vs Right zone:
 ```bash
- python3 /home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/plot_zones.py
+cd sparx_agency/tasks/localization/ros2/depth_optical/assets
+python3 plot_zones.py   --csv /home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv
+
 ```

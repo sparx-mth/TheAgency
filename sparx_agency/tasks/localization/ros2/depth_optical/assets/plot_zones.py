@@ -1,6 +1,8 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+import argparse
+
 
 def plot_absolute_velocity_comparison(csv_path):
     if not os.path.exists(csv_path):
@@ -18,24 +20,35 @@ def plot_absolute_velocity_comparison(csv_path):
     global_speed = df['Global_Vx'].abs()
     right_speed = df['Right_Vx'].abs()
 
-    # 1. Ground Truth (Absolute) - Black line
+    # 1. Ground Truth (Absolute)
     plt.plot(df['Frame'], gt_speed, label='Ground Truth Speed', color='black', linewidth=3, zorder=5)
 
     # 2. Estimated speeds
-    plt.plot(df['Frame'], center_speed, marker='o', label='Center Zone Speed', color='#2ca02c', linewidth=2, alpha=0.8)
-    plt.plot(df['Frame'], global_speed, marker='s', label='Global Speed (WLS)', color='#1f77b4', linewidth=2, alpha=0.8)
-    plt.plot(df['Frame'], right_speed, marker='x', label='Right Edge Speed', color='#d62728', linewidth=1.5, linestyle='--', alpha=0.5)
+    plt.plot(df['Frame'], center_speed, marker='o', label='Center Zone Speed', linewidth=2, alpha=0.8)
+    plt.plot(df['Frame'], global_speed, marker='s', label='Global Speed (WLS)', linewidth=2, alpha=0.8)
+    plt.plot(df['Frame'], right_speed, marker='x', label='Right Edge Speed', linestyle='--', alpha=0.5)
 
-    # Styling and labels
+    # Styling
     plt.title('Velocity Magnitude Comparison: Algorithm vs. Ground Truth', fontsize=16, pad=15)
-    plt.xlabel('Frame Number', fontsize=12)
-    plt.ylabel('Speed (m/s)', fontsize=12)
-    plt.legend(fontsize=11, loc='best')
+    plt.xlabel('Frame Number')
+    plt.ylabel('Speed (m/s)')
+    plt.legend()
     plt.grid(True, linestyle=':', alpha=0.7)
-    
+
     plt.tight_layout()
     plt.show()
 
+
 if __name__ == "__main__":
-    # Update with your actual CSV path
-    plot_absolute_velocity_comparison("/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv")
+    parser = argparse.ArgumentParser(description="Plot velocity comparison from CSV")
+    
+    parser.add_argument(
+        "--csv",
+        type=str,
+        required=True,
+        help="Path to CSV file"
+    )
+
+    args = parser.parse_args()
+
+    plot_absolute_velocity_comparison(args.csv)
