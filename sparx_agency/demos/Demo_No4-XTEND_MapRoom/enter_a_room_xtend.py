@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,9 @@ def fmt_num(v, width: int = 6, prec: int = 2) -> str:
 
 def make_filename(seq: int, x, y, z, yaw_rad) -> str:
     yaw_deg = yaw_rad * 180.0 / math.pi if yaw_rad is not None else None
+    x = np.random.randint(0, 1000)
+    y = np.random.randint(0, 1000)
+    z = np.random.randint(0, 1000)
     return (
         f"{seq:04d}"
         f"x{fmt_num(x)}"
@@ -69,6 +73,9 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
         self.rtsp_latency_ms = rtsp_latency_ms
 
         self.out_dir = Path(out_dir)
+        time_now = time.strftime('%Y%m%d_%H%M%S')
+        self.out_dir = self.out_dir / time_now
+
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.capture_interval_sec = float(capture_interval_sec)
@@ -152,6 +159,7 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
     async def _capture_loop(self):
         assert self._rtsp is not None
 
+
         while True:
             out = self._rtsp.get_latest()
             if out is None:
@@ -183,6 +191,7 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
 
             if time_due or bucket_due:
                 fname = make_filename(self._seq, self.x, self.y, self.z, yaw)
+
                 path = self.out_dir / fname
                 cv2.imwrite(str(path), bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(self.jpeg_quality)])
                 self._seq += 1
@@ -208,20 +217,38 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
         await self._start_capture()   # your capture start
         try:
             scenario = [
-                self.disarm_robot,
-                self.arm_robot,
-                self.takeoff,
-                lambda: self.rotate_degrees(360.0, direction=+1, yaw_cmd=1000),
-                self.land,
-                self.disarm_robot,
+                self.disarm_robot(),
+                self.arm_robot(),
+                self.takeoff(),
+                self.move_down(500),
+                self.move_forward(4000),
+                # self.move_backward(400),
+                # self.move_left(100),
+                # self.move_right(100),
+                # self.move_up(100),
+
+                # self.rotate_left(3000),
+                self.rotate_right(2000),
+                self.move_forward(2500),
+                # self.full_rotation(1),
+                # self.full_rotation(-1),
+                self.move_down(400),
+                self.land(),
+                self.disarm_robot(),
             ]
 
-            for step_fn in scenario:
-                await step_fn()
-                if step_fn == self.land:
-                    await asyncio.sleep(land_sleep_time)  # let it sink into landing
-                else:
-                    await asyncio.sleep(sleep_time)
+            # for step_fn in scenario:
+            #     await step_fn()
+            #     if step_fn == self.land:
+            #         await asyncio.sleep(land_sleep_time)  # let it sink into landing
+            #     else:
+            #         await asyncio.sleep(sleep_time)
+
+            for step in scenario:
+                await step
+                print("before sleep")
+                await asyncio.sleep(sleep_time)
+                print("after sleep")
 
         except Exception as e:
             print(f"[scenario] error: {e}")

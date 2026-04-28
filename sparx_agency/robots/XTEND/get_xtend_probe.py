@@ -304,16 +304,20 @@ class XtendProbe:
             print(f"  {k}: {v}")
 
         if self.last_robot_status is None:
-            print(f"\n[SUMMARY] No ROBOT_STATUS for robot_uid={self.robot_uid} yet.")
-            print("-" * 80)
+            # print(f"\n[SUMMARY] No ROBOT_STATUS for robot_uid={self.robot_uid} yet.")
+            # print("-" * 80)
             return
 
         r = self.last_robot_status
-        print(f"\n[SUMMARY] Latest robot block for {self.robot_uid}:")
+        # print(f"\n[SUMMARY] Latest robot block for {self.robot_uid}:")
         # Print top-level keys
-        print("  top-level keys:", sorted(list(r.keys())))
+        # print("  top-level keys:", sorted(list(r.keys())))
 
         telemetry = r.get("telemetry", {})
+        if not telemetry:
+            print("  telemetry: None")
+            return
+
         details = telemetry.get("details", {}) if isinstance(telemetry, dict) else {}
 
         # Common fields you already saw:
@@ -321,17 +325,18 @@ class XtendProbe:
         if isinstance(details, dict):
             bearing = details.get("bearing")
 
+
         if bearing is not None:
             print(f"  telemetry.details.bearing (yaw rad?): {bearing}")
 
         # Show a key-path summary so you can discover fields safely
         print("\n  Key paths (depth=3) inside telemetry:")
         for kp in summarize_dict_keys(telemetry, depth=3):
-            print("   -", kp)
+            print("   -", kp, telemetry.get(kp))
 
         print("\n  Key paths (depth=3) inside telemetry.details:")
         for kp in summarize_dict_keys(details, depth=3):
-            print("   -", kp)
+            print("   -", kp, details.get(kp))
 
         print("-" * 80)
 
@@ -365,7 +370,7 @@ async def main_async(args: argparse.Namespace) -> None:
             return
         except Exception as e:
             print(f"[WS] Error: {e}")
-            stop_evt.set()
+            # stop_evt.set()
 
     async def ui_task():
         last_summary_t = time.time()
@@ -416,7 +421,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="XTEND probe: RTSP video + WS telemetry dump")
     p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--robot-uid", default="drn77f3b8f5")
+    p.add_argument("--robot-uid", default="drnb177ede2")
     p.add_argument("--frequency-hz", type=float, default=10.0)
     p.add_argument("--mode", choices=["send", "listen", "both"], default="both")
 

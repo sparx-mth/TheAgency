@@ -2,11 +2,12 @@
 import argparse
 import asyncio
 import time
+from pathlib import Path
 
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, MappingPipelineConfig  # :contentReference[oaicite:2]{index=2}
 from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridCostmap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
-from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
+from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
 from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
 from sparx_agency.robots.XTEND.adapters.xtend_robot_adapter import XtendRobotAdapter
 
@@ -34,7 +35,10 @@ async def run_xtend_mapping(args: argparse.Namespace) -> None:
 
     # 3) Pipeline
     costmap = ProbabilisticGridCostmap(ProbabilisticGridConfig())
-    depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config()) # vits
+    depth_model = DA3TensorRTModel(
+        engine_path=args.engine_path,
+        yaml_path=args.config_yaml,
+    )
     pipeline = MappingPipeline(
         costmap=costmap,
         depth_model=depth_model,
@@ -76,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--robot-uid", required=True)
 
-    p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8556/osd_snapshot")
+    p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     p.add_argument("--rtsp-latency-ms", type=int, default=0)
 
     p.add_argument("--ws-frequency-hz", type=float, default=10.0)
@@ -88,9 +92,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hfov-deg", type=float, default=130.0)
     p.add_argument("--vfov-deg", type=float, default=90.0)
 
-    # DepthAnything
-    p.add_argument("--depth-model-id", default="depth-anything/Depth-Anything-V2-Metric-Indoor-Small")
-    p.add_argument("--device", default="cuda:0")
+    # DepthAnything V3 TensorRT
+    p.add_argument(
+        "--engine-path",
+        default=str(
+            Path.home()
+            / "depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine"
+        ),
+        help="Path to the DA3 TensorRT .engine file.",
+    )
+    p.add_argument(
+        "--config-yaml",
+        default=str(
+            Path.home()
+            / "depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_example.yaml"
+        ),
+        help="Path to camera intrinsics YAML used by DA3TensorRTModel.",
+    )
 
     # Pipeline filtering
     p.add_argument("--stride", type=int, default=2)
