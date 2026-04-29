@@ -8,6 +8,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import pandas as pd
 import yaml
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
@@ -263,15 +264,15 @@ def main() -> None:
     )
 
     metadata_path = output_dir / "metadata_depth.csv"
+    df_metadata_path = input_dir.parent/  "metadata.csv"
 
     with open(metadata_path, "w", newline="") as fp:
         writer = csv.writer(fp)
         writer.writerow([
+            "stamp_sec",
             "frame_idx",
+            "bearing",
             "input_path",
-            "rgb_rectified_path",
-            "depth_npy_path",
-            "depth_vis_path",
             "input_width",
             "input_height",
             "output_width",
@@ -282,7 +283,7 @@ def main() -> None:
             "depth_median_m",
             "depth_mean_m",
             "depth_max_m",
-        ])
+                        ])
 
         for idx, image_path in enumerate(image_paths):
             bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -334,12 +335,14 @@ def main() -> None:
 
             dmin, dmedian, dmean, dmax = finite_depth_stats(depth_m)
 
+            df_metadata = pd.read_csv(df_metadata_path)
+            stamp_sec = df_metadata.iloc[idx]["stamp_sec"]
+            bearing = df_metadata.iloc[idx]["bearing"]
             writer.writerow([
+                stamp_sec,
                 idx,
+                bearing,
                 str(image_path),
-                str(rgb_out_path),
-                str(depth_npy_path),
-                str(depth_vis_path),
                 input_w,
                 input_h,
                 out_w,

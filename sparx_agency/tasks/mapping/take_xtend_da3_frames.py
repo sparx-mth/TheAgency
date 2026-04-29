@@ -253,7 +253,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--xtend-frequency-hz",
         type=float,
-        default=10.0,
+        default=20.0,
         help="Frequency for neutral VIRTUAL_CONTROLLER heartbeat messages.",
     )
     p.add_argument(
@@ -285,7 +285,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--capture-hz",
         type=float,
-        default=1.0,
+        default=20.0,
         help="Capture rate in Hz.",
     )
     p.add_argument(
