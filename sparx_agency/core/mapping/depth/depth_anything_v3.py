@@ -106,7 +106,13 @@ class DA3TensorRTModel(DepthModel):
         else:
             raise ValueError(f"Unexpected depth output shape: {out_shape} for tensor {depth_out['name']}")
 
-        depth_map = depth_out["host"].reshape(h, w).astype(np.float32)
+        raw_output = depth_out["host"].reshape(h, w).astype(np.float32)
+
+        # 2. Calculate average focal length (using the original intrinsics)
+        focal_avg = (self.intrinsics.fx + self.intrinsics.fy) / 2.0
+
+        # 3. Apply the DA3 Metric conversion
+        depth_map = (focal_avg * raw_output) / 300.0
         # print("Depth output tensor:", depth_out["name"], "shape:", out_shape, "depth_map:", depth_map.shape)
         # --- 4. Vectorized Point Cloud Projection with Scaled Intrinsics ---
         h, w = depth_map.shape
