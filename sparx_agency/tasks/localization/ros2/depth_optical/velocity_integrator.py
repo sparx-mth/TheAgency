@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple, Deque
+import math
 
 import numpy as np
 import rclpy
@@ -85,6 +86,12 @@ class VelocityIntegratorNode(Node):
         # State
         self.have_est = False
         self.est_x, self.est_y, self.est_z = 0.0, 0.0, 0.0
+        
+        # --- Variables to track total distance ---
+        self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
+        self.path_length = 0.0 # Accumulated distance step-by-step
+        # -----------------------------------------
+
         self.last_vel_time: Optional[Time] = None
 
         # GT queue for initialization only
@@ -138,13 +145,20 @@ class VelocityIntegratorNode(Node):
                     self.get_logger().warn(f"[Integrator] Waiting for GT near first vel. closest_dt={gt_dt:.3f}s")
                 return
             self.est_x, self.est_y, self.est_z = gt_pose.position.x, gt_pose.position.y, gt_pose.position.z
+            
+            # --- Save starting position ---
+            self.start_x, self.start_y, self.start_z = self.est_x, self.est_y, self.est_z
+            # ------------------------------
+            
             self.have_est = True
-            self.get_logger().info(f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s).")
+            self.get_logger().info(f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s). Start pos: ({self.start_x:.2f}, {self.start_y:.2f}, {self.start_z:.2f})")
 
         if self.last_vel_time is None:
             self.last_vel_time = t_vel_stamp
             if not self.init_from_gt:
                 self.have_est = True
+                # --- If not using GT, save starting position as 0,0,0 ---
+                self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
             return
 
         dt = (t_vel_stamp - self.last_vel_time).nanoseconds * 1e-9
@@ -167,9 +181,18 @@ class VelocityIntegratorNode(Node):
             return
 
         # Integrate
-        self.est_x += v_x * dt
-        self.est_y += v_y * dt
-        self.est_z += v_z * dt
+        dx = v_x * dt
+        dy = v_y * dt
+        dz = v_z * dt
+        
+        self.est_x += dx
+        self.est_y += dy
+        self.est_z += dz
+        
+        # --- Accumulate step-by-step path length ---
+        step_distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        self.path_length += step_distance
+        # -------------------------------------------
 
         # Publish
         est_msg = PoseStamped()
@@ -181,15 +204,43 @@ class VelocityIntegratorNode(Node):
         est_msg.pose.orientation.w = 1.0
         self.pose_pub.publish(est_msg)
 
+    def print_final_stats(self):
+        """Prints the total distance traveled when the node shuts down."""
+        if not self.have_est:
+            print("\n[Integrator] No velocity data was integrated.")
+            return
+
+        # Calculate straight-line distance from start to finish
+        straight_line_dist = math.sqrt(
+            (self.est_x - self.start_x)**2 + 
+            (self.est_y - self.start_y)**2 + 
+            (self.est_z - self.start_z)**2
+        )
+
+        # Using standard Python print() to avoid ROS logging errors during shutdown
+        print("\n=========================================")
+        print("          INTEGRATION SUMMARY            ")
+        print("=========================================")
+        print(f"Start Position: ({self.start_x:.3f}, {self.start_y:.3f}, {self.start_z:.3f})")
+        print(f"Final Position: ({self.est_x:.3f}, {self.est_y:.3f}, {self.est_z:.3f})")
+        print(f"Straight-Line Displacement: {straight_line_dist:.3f} meters")
+        print(f"Total Path Length Accumulated: {self.path_length:.3f} meters")
+        print("=========================================\n")
+
 def main():
     rclpy.init()
     node = VelocityIntegratorNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    rclpy.shutdown()
+        # Standard print ignores the ROS shutdown state
+        print("\n[Integrator] Shutting down... calculating final distance.")
+    finally:
+        node.print_final_stats()
+        node.destroy_node()
+        # Prevent double-shutdown error in newer ROS 2 versions
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
