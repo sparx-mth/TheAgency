@@ -209,10 +209,9 @@ class FlowDepthVelocityNode(Node):
         self.prev_vx, self.prev_vy, self.prev_vz = vx_mps, vy_mps, vz_mps
 
 
-        threshold = 0.03 # Velocities below this threshold will be set to zero to reduce noise
-        if abs(vx_mps) < threshold: vx_mps = 0.0
-        if abs(vy_mps) < threshold: vy_mps = 0.0
-        if abs(vz_mps) < threshold: vz_mps = 0.0
+        if abs(vx_mps) < 0.02: vx_mps = 0.0
+        if abs(vy_mps) < 0.2: vy_mps = 0.0
+        if abs(vz_mps) < 0.2: vz_mps = 0.0
 
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = rgb_msg.header.stamp
