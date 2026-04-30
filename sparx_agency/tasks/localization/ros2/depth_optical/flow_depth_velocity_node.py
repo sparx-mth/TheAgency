@@ -40,7 +40,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_corners", 70) 
 
         self.declare_parameter("min_depth", 0.05)
-        self.declare_parameter("max_depth", 30.0)
+        self.declare_parameter("max_depth", 10.0)
         self.declare_parameter("use_depth_norm", False)
         self.declare_parameter("depth_scale", 1.0) 
         self.declare_parameter("show_debug", False)
@@ -50,13 +50,14 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("lk_levels", 3)
 
         self.declare_parameter("depth_median_window", 5)
-        self.declare_parameter("depth_ema_alpha", 0.15)
+        self.declare_parameter("depth_ema_alpha", 0.15) # EMA alpha for depth smoothing, between 0 and 1. Higher means more smoothing but more lag.
         self.declare_parameter("csv_filename", "/tmp/zone_velocities_log_no_imu.csv")
         
         self.median_window = int(self.get_parameter("depth_median_window").get_parameter_value().integer_value)
         self.ema_alpha = float(self.get_parameter("depth_ema_alpha").get_parameter_value().double_value)
         
         self.last_smoothed_depth = None
+        self.center_depth = 0.0
         
         # === Variables for the Real-Time Minimap ===
         self.debug_path = [(0.0, 0.0)]  # Start at origin
@@ -81,6 +82,9 @@ class FlowDepthVelocityNode(Node):
         self.latest_gt_vx = 0.0
         self.latest_gt_vy = 0.0
         self.latest_gt_vz = 0.0 
+
+        self.prev_vx, self.prev_vy, self.prev_vz = 0.0, 0.0, 0.0
+        self.vel_alpha = 0.2
 
         lk_win = int(self.get_parameter("lk_win").get_parameter_value().integer_value)
         lk_levels = int(self.get_parameter("lk_levels").get_parameter_value().integer_value)
@@ -174,6 +178,19 @@ class FlowDepthVelocityNode(Node):
         # Apply smoothing to the depth map
         depth_map = self.smooth_depth_map(np.asarray(depth_cv, dtype=np.float32))
 
+
+        # Extract the depth value at the center of the image for use in velocity scaling and as a fallback depth estimate
+        half_side = 2 
+        u_idx = int(self.cx)
+        v_idx = int(self.cy)
+
+        center_region = depth_map[v_idx-half_side : v_idx+half_side+1, 
+                                u_idx-half_side : u_idx+half_side+1]
+
+        valid_center_depths = center_region[np.isfinite(center_region) & (center_region > 0)]
+        if valid_center_depths.size > 0:
+            self.center_depth = np.mean(valid_center_depths) * self.depth_scale
+
         # Run the optical flow tracker and compute velocity
         flow_res = self.tracker.process(frame, rgb_msg.header.stamp)
         if flow_res is None:
@@ -183,6 +200,19 @@ class FlowDepthVelocityNode(Node):
         vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
             flow_res.good_old, flow_res.good_new, depth_map, flow_res.dt
         )
+
+        # Apply simple low-pass filtering to the velocity estimates to reduce noise
+        vx_mps = self.vel_alpha * vx_mps + (1 - self.vel_alpha) * self.prev_vx
+        vy_mps = self.vel_alpha * vy_mps + (1 - self.vel_alpha) * self.prev_vy
+        vz_mps = self.vel_alpha * vz_mps + (1 - self.vel_alpha) * self.prev_vz
+
+        self.prev_vx, self.prev_vy, self.prev_vz = vx_mps, vy_mps, vz_mps
+
+
+        threshold = 0.03 # Velocities below this threshold will be set to zero to reduce noise
+        if abs(vx_mps) < threshold: vx_mps = 0.0
+        if abs(vy_mps) < threshold: vy_mps = 0.0
+        if abs(vz_mps) < threshold: vz_mps = 0.0
 
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = rgb_msg.header.stamp
@@ -201,10 +231,16 @@ class FlowDepthVelocityNode(Node):
             vel_txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
             cv2.putText(vis, vel_txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             
+            
             dist_txt = f"Distance: {self.current_distance:.2f} m"
             (tw, th), _ = cv2.getTextSize(dist_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
             cv2.rectangle(vis, (8, 35), (12 + tw, 45 + th), (0, 0, 0), -1) 
             cv2.putText(vis, dist_txt, (10, 40 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+          #  wall_dist_txt = f"Wall Dist (Center): {self.center_depth:.2f} m"
+          #  cv2.putText(vis, wall_dist_txt, (10, 80 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 100, 0), 2)
+
+           # cv2.drawMarker(vis, (u_idx, v_idx), (255, 100, 0), cv2.MARKER_CROSS, 15, 2)
             # --------------------------------------
 
             cv2.imshow("Flow+Depth Velocity", vis)
@@ -245,7 +281,7 @@ class FlowDepthVelocityNode(Node):
 
         # Weights based on distance from the center of the image (optional, can help reduce noise from features near the edges)
         dist_sq = u_c_v**2 + v_c_v**2
-        weights = np.exp(-dist_sq / (0.2 * (self.cx**2 + self.cy**2)))
+        weights = np.exp(-dist_sq / (0.05 * (self.cx**2 + self.cy**2)))
         W_vec = np.zeros((2 * nv,), dtype=np.float64)
         W_vec[0::2], W_vec[1::2] = weights, weights
         
