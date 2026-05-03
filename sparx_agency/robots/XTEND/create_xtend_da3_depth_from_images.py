@@ -326,7 +326,10 @@ def main() -> None:
             depth_npy_path = depth_npy_dir / f"{frame_name}.npy"
             depth_vis_path = depth_vis_dir / f"{frame_name}.png"
 
-            depth_m = depth_model.infer_depth(bgr_out).astype(np.float32)
+            raw_depth = depth_model.infer_depth(bgr_out).astype(np.float32)
+            f_avg = (depth_model.intrinsics.fx + depth_model.intrinsics.fy) / 2.0
+            depth_m = (f_avg * raw_depth) / 300.0
+
             depth_vis = colorize_depth(depth_m, max_depth_m=args.max_depth_m)
 
             cv2.imwrite(str(rgb_out_path), bgr_out)
