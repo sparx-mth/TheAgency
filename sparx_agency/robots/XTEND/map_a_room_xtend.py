@@ -212,6 +212,7 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
                 self.arm_robot,
                 self.takeoff,
                 lambda: self.rotate_degrees(360.0, direction=+1, yaw_cmd=1000),
+                lambda : self.move_down(500),
                 self.land,
                 self.disarm_robot,
             ]
