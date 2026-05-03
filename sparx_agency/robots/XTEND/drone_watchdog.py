@@ -8,7 +8,7 @@ from sparx_agency.robots.XTEND.automation import ControllerAutomation
 DRONE_HOST = "192.0.0.15"
 DRONE_PORT = 8000
 ROBOT_UID = "drnb177ede2"
-TARGET_SCRIPT = "enter_a_room_xtend.py"
+TARGET_SCRIPT = "xtend_dome_main.py"
 
 
 # ---------------------
@@ -46,6 +46,11 @@ class SafetyWatchdog(ControllerAutomation):
                 print(f"⚠️ ALERT: {TARGET_SCRIPT} not found! Initiating Emergency Recovery...")
 
                 # Execute your automation class methods
+                await self.move_down(500)
+                await asyncio.sleep(2)
+                await self.move_down(300)
+                await asyncio.sleep(2)
+                self.main_script_running = False
                 await self.land()
                 await asyncio.sleep(2)
                 await self.disarm_robot()

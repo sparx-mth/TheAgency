@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-XTEND dome demo launcher with Robotican-style capture output.
+XTEND dome demo launcher with capture output.
 
 Output per captured frame:
   <base_dir>/<session_id>/<drone_id>_YYYYmmdd_HHMMSS_D.jpg
@@ -31,7 +31,7 @@ except Exception:
     update_sidecar_json = None
 
 
-class XtendDomeTaskWithRoboticanCapture(XtendMapRoomTaskWithCapture):
+class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
     """XTEND task that keeps the XTEND movement API but saves captures like ImageStateBuffer."""
 
     def __init__(
@@ -45,6 +45,9 @@ class XtendDomeTaskWithRoboticanCapture(XtendMapRoomTaskWithCapture):
 
         # In the parent class, out_dir was used as the final capture directory.
         # Here it is the base directory, matching ImageStateBuffer.base_dir.
+        self._last_bearing_print_time = 0.0
+        self.current_bearing_raw = None
+        self.current_yaw_deg = None
         self.base_dir = Path(self.out_dir).absolute()
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,11 +100,26 @@ class XtendDomeTaskWithRoboticanCapture(XtendMapRoomTaskWithCapture):
             return b
         return math.degrees(b)
 
-    def update_robot_telemetry(self, yaw: float):
-        """Store current yaw in radians for rotate_degrees()."""
-        yaw_rad = self._bearing_to_rad(yaw)
-        if yaw_rad is not None:
-            self.current_yaw = yaw_rad
+    def update_robot_telemetry(self, bearing: float):
+        self.current_bearing_raw = float(bearing)
+        yaw_rad = self._bearing_to_rad(bearing)
+        yaw_deg = self._bearing_to_deg(bearing)
+
+        self.current_yaw = yaw_rad
+        self.current_yaw_deg = yaw_deg
+
+        now = time.time()
+        last_print_time = getattr(self, "_last_bearing_print_time", 0.0)
+
+        if last_print_time is None:
+            last_print_time = 0.0
+
+        if now - last_print_time >= 1.0:
+            raw_txt = f"{self.current_bearing_raw:.5f}"
+            rad_txt = "na" if yaw_rad is None else f"{yaw_rad:.5f}"
+            deg_txt = "na" if yaw_deg is None else f"{yaw_deg:.5f}"
+            print(f"[bearing] raw={raw_txt}  yaw_rad={rad_txt}  yaw_deg={deg_txt}")
+            self._last_bearing_print_time = now
 
     def extract_pose_from_xtend_state(self, state: Optional[dict[str, Any]]) -> dict[str, float]:
         """
@@ -196,7 +214,7 @@ class XtendDomeTaskWithRoboticanCapture(XtendMapRoomTaskWithCapture):
         except Exception as exc:
             print(f"[capture] Failed to create symlink {latest_link}: {exc}")
 
-    def save_robotican_style_capture(self, bgr, t_sec: float):
+    def save_capture(self, bgr, t_sec: float):
         pose = self.extract_pose_from_xtend_state(self.last_xtend_state)
 
         decisec = int(round((t_sec % 1), 1) * 10) % 10
@@ -263,7 +281,7 @@ class XtendDomeTaskWithRoboticanCapture(XtendMapRoomTaskWithCapture):
             )
 
             if time_due or bucket_due:
-                self.save_robotican_style_capture(bgr, t_sec)
+                self.save_capture(bgr, t_sec)
                 self._seq += 1
 
                 if time_due:
@@ -281,7 +299,7 @@ class XtendDomeTaskWithRoboticanCapture(XtendMapRoomTaskWithCapture):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run XTEND dome demo with Robotican-style JPG+JSON capture output.",
+        description="Run XTEND dome demo with JPG+JSON capture output.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -317,7 +335,7 @@ def main():
     if args.frequency <= 0:
         raise ValueError("--frequency must be greater than 0")
 
-    task = XtendDomeTaskWithRoboticanCapture(
+    task = XtendDomeTaskWithCapture(
         host=args.host,
         port=args.port,
         frequency=args.frequency,

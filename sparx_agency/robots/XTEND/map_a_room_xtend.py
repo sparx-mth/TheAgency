@@ -200,29 +200,40 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
             await asyncio.sleep(0.005)
 
     async def create_scenario(self):
+        """Create XTEND dome scenario."""
         sleep_time = 3
-        land_sleep_time = 5
-        finally_sleep_time = 2
 
-        await asyncio.sleep(2)  # let telemetry stabilize
-        await self._start_capture()   # your capture start
+        print("Creating scenario... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+
+        await asyncio.sleep(5)
+        print("Scenario created... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         try:
             scenario = [
-                self.disarm_robot,
-                self.arm_robot,
-                self.takeoff,
-                lambda: self.rotate_degrees(360.0, direction=+1, yaw_cmd=1000),
-                lambda : self.move_down(500),
-                self.land,
-                self.disarm_robot,
+                self.disarm_robot(),
+                self.arm_robot(),
+                self.takeoff(),
+
+                # Start capture only after takeoff.
+                self._start_capture(),
+
+                # Dome capture.
+                self.rotate_left(5000),
+                self.rotate_left(5000),
+
+                # Stop capture before moving down / landing.
+                self._stop_capture(),
+
+                self.move_down(500),
+                self.move_down(400),
+                self.land(),
+                self.disarm_robot(),
             ]
 
-            for step_fn in scenario:
-                await step_fn()
-                if step_fn == self.land:
-                    await asyncio.sleep(land_sleep_time)  # let it sink into landing
-                else:
-                    await asyncio.sleep(sleep_time)
+            for step in scenario:
+                await step
+                print("before sleep")
+                await asyncio.sleep(sleep_time)
+                print("after sleep")
 
         except Exception as e:
             print(f"[scenario] error: {e}")
@@ -231,17 +242,17 @@ class XtendMapRoomTaskWithCapture(ControllerAutomation):
             # HARD SAFETY: always try to land+disarm even if something broke
             try:
                 await self.land()
-                await asyncio.sleep(finally_sleep_time)
+                await asyncio.sleep(sleep_time)
             except Exception as e:
                 print(f"[scenario] land failed: {e}")
             try:
                 await self.disarm_robot()
-                await asyncio.sleep(finally_sleep_time)
+                await asyncio.sleep(sleep_time)
             except Exception as e:
                 print(f"[scenario] disarm failed: {e}")
 
             await self._stop_capture()
-            await asyncio.sleep(finally_sleep_time // 2)
+            await asyncio.sleep(sleep_time // 2)
 
 def parse_args():
     p = argparse.ArgumentParser()
