@@ -6,6 +6,7 @@ def make_intrinsic_from_image(
     width: int,
     height: int,
     hfov_deg: float = 90.0,
+    vfov_deg: float = 45.0,
 ) -> o3d.camera.PinholeCameraIntrinsic:
     """
     Create a PinholeCameraIntrinsic object based on image properties.
@@ -23,14 +24,15 @@ def make_intrinsic_from_image(
         The height of the image in pixels.
     hfov_deg : float, optional
         The horizontal field of view in degrees. Defaults to 90.0.
-
+    vfov_deg : float, optional
+        The vertical field of view in degrees. Defaults to 45.0.
     Returns:
     o3d.camera.PinholeCameraIntrinsic
         A PinholeCameraIntrinsic object with computed parameters for the given
         image dimensions and field of view.
     """
     fx = (width / 2.0) / np.tan(np.deg2rad(hfov_deg) / 2.0)
-    fy = fx
+    fy = (height / 2.0) / np.tan(np.deg2rad(vfov_deg) / 2.0)
     cx = width / 2.0
     cy = height / 2.0
 

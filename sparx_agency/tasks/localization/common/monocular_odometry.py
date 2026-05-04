@@ -59,6 +59,7 @@ def main(args):
         width=width,
         height=height,
         hfov_deg=args.hfov_deg,
+        vfov_deg=args.vfov_deg
     )
 
     print(f"[intrinsic] width={width}, height={height}, hfov_deg={args.hfov_deg}")
@@ -99,5 +100,6 @@ if __name__ == "__main__":
     parser.add_argument("--in-dir", default=Path.home() / "Pictures/rgbd_exports")
     parser.add_argument("--out-file", default=(work_dir / "outputs" / "odometry.txt").as_posix())
     parser.add_argument("--hfov-deg", type=float, default=130.0)
+    parser.add_argument("--vfov-deg", type=float, default=90.0)
     args = parser.parse_args()
     main(args)

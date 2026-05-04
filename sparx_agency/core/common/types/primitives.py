@@ -68,3 +68,43 @@ class Vec3:
 
     def as_tuple(self) -> Tuple[float, float, float]:
         return self.x, self.y, self.z
+
+
+@dataclass(frozen=True)
+class Duration:
+    """
+    Represents a time duration with various unit conversion methods.
+
+    The Duration class encapsulates a time duration specified in seconds,
+    offering methods to convert the duration into microseconds, milliseconds,
+    and nanoseconds. Once created, instances of this class are immutable.
+
+    Attributes:
+        seconds (float): The time duration in seconds.
+
+    Methods:
+        as_seconds() -> float:
+            Returns the duration value in seconds.
+        as_milliseconds() -> float:
+            Converts the duration from seconds to milliseconds and returns
+            the result.
+        as_nanoseconds() -> float:
+            Converts the duration from seconds to nanoseconds and returns
+            the result.
+        as_microseconds() -> float:
+            Converts the duration from seconds to microseconds and returns
+            the result.
+    """
+    seconds: float
+
+    def __post_init__(self):
+        _assert_finite("Duration.seconds", self.seconds)
+
+    def as_seconds(self) -> float:
+        return self.seconds
+    def as_milliseconds(self) -> float:
+        return self.seconds * 1e3
+    def as_nanoseconds(self) -> float:
+        return self.seconds * 1e9
+    def as_microseconds(self) -> float:
+        return self.seconds * 1e6
