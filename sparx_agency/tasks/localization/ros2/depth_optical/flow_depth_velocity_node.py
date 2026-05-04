@@ -135,7 +135,7 @@ class FlowDepthVelocityNode(Node):
         self.current_distance = math.sqrt(x**2 + y**2 + z**2)
 
         self.trajectory_history.append({
-            "image": f"frame_{len(self.trajectory_history):06d}.jpg", # שם וירטואלי שיתאים לסקריפט הציור
+            "image": f"frame_{len(self.trajectory_history):06d}.jpg", 
             "pose": {
                 "x": float(x),
                 "y": float(y),
