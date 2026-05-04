@@ -1,0 +1,38 @@
+# Camera Metadata
+image_width: 640
+image_height: 360
+camera_name: front_cam
+distortion_model: plumb_bob
+
+# Derived Intrinsics (Used by PotentialMapper/DA3 scripts)
+fx: 185.69090062304812
+fy: 185.69090062304812
+cx: 320.5
+cy: 180.5
+
+# Standard ROS Camera Matrices
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [185.69090062304812, 0.0, 320.5, 
+         0.0, 185.69090062304812, 180.5, 
+         0.0, 0.0, 1.0]
+
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0, 
+         0.0, 1.0, 0.0, 
+         0.0, 0.0, 1.0]
+
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [185.69090062304812, 0.0, 320.5, -12.99836304361337, 
+         0.0, 185.69090062304812, 180.5, 0.0, 
+         0.0, 0.0, 1.0, 0.0]
