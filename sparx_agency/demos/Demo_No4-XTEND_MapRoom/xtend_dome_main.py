@@ -54,7 +54,7 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         self.drone_id = drone_id
         self.bearing_unit = bearing_unit
         self.unique_out_dir = time.strftime("%Y_%m_%d___%H_%M_%S", time.localtime())
-        self.out_dir = self.base_dir / self.unique_out_dir
+        self.out_dir = self.base_dir / self.drone_id/ self.unique_out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.last_xtend_state: Optional[dict[str, Any]] = None

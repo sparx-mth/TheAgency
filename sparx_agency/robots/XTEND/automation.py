@@ -169,85 +169,85 @@ class ControllerAutomation:
 
         print(f"Robot disarmed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
-    async def takeoff(self):
+    async def takeoff(self,  duration=3.3, value=1000,):
         """Get the robot status"""
         print(f"Taking off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = 1000
+        self.send_command['axes'][1] = value
         # await asyncio.sleep(3.1)  original from Tamir xtend
-        await asyncio.sleep(3.3) # + 0.2 sec
+        await asyncio.sleep(duration) # + 0.2 sec
         print(f"Taken off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         self.send_command['axes'][1] = 0
 
-    async def land(self):
+    async def land(self, duration=4.1):
         """Land the robot"""
         print(f"Landing... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 1
         # await asyncio.sleep(3.1) original from Tamir xtend
-        await asyncio.sleep(4.1) # +1 sec
+        await asyncio.sleep(duration) # +1 sec
         print(f"Landed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 0
 
         await asyncio.sleep(2.0)
 
-    async def move_forward(self, duration: float):
+    async def move_forward(self, duration: float, value=500):
         """Move the robot forward"""
 
         print(f"Moving forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][2] = 500 # original from Tamir Xtend 700
+        self.send_command['axes'][2] = value # original from Tamir Xtend 700
         await asyncio.sleep(duration * 0.001)
         print(f"Moved forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][2] = 0
 
         await asyncio.sleep(2)
     
-    async def move_backward(self, duration: float):
+    async def move_backward(self, duration: float, value=700):
         """Move the robot backward"""
         
         print(f"Moving forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][2] = -700
+        self.send_command['axes'][2] = -value
         await asyncio.sleep(duration * 0.001)
         print(f"Moved forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][2] = 0
 
         await asyncio.sleep(2)
     
-    async def move_left(self, duration: float):
+    async def move_left(self, duration: float, value=700):
         """Move the robot left"""
 
         print(f"Moving left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][0] = -700
+        self.send_command['axes'][0] = -value
         await asyncio.sleep(duration * 0.001)
         self.send_command['axes'][0] = 0
     
-    async def move_right(self, duration: float):
+    async def move_right(self, duration: float, value=700):
         """Move the robot right"""
         print(f"Moving right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][0] = 700
+        self.send_command['axes'][0] = value
         await asyncio.sleep(duration * 0.001)
         print(f"Moved right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][0] = 0
     
-    async def move_up(self, duration: float):
+    async def move_up(self, duration: float, value=700):
         """Move the robot up"""
         print(f"Moving up... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = 700
+        self.send_command['axes'][1] = value
         await asyncio.sleep(duration * 0.001)
         print(f"Moved up... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][1] = 0
     
-    async def move_down(self, duration: float):
+    async def move_down(self, duration: float, value=500):
         """Move the robot down"""
         print(f"Moving down... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = -700
+        self.send_command['axes'][1] = -value
         await asyncio.sleep(duration * 0.001)
         print(f"Moved down... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][1] = 0
     
-    async def rotate_left(self, duration: float = 0.0):
+    async def rotate_left(self, duration: float = 0.0, value=1000):
         """Rotate the robot left"""
         print(f"Rotating left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][3] = -1000
+        self.send_command['axes'][3] = -value
         if duration == 0:
             starting_yaw = self.current_yaw
             while starting_yaw != self.current_yaw:
@@ -257,11 +257,11 @@ class ControllerAutomation:
         print(f"Rotated left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][3] = 0
     
-    async def rotate_right(self, duration: float = 0.0):
+    async def rotate_right(self, duration: float = 0.0, value=1000):
         """Rotate the robot right"""
         
         print(f"Rotating right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][3] = 1000
+        self.send_command['axes'][3] = value
         if duration == 0:
             starting_yaw = self.current_yaw
             while starting_yaw != self.current_yaw:

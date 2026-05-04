@@ -338,26 +338,26 @@ def main() -> None:
 
             dmin, dmedian, dmean, dmax = finite_depth_stats(depth_m)
 
-            df_metadata = pd.read_csv(df_metadata_path)
-            stamp_sec = df_metadata.iloc[idx]["stamp_sec"]
-            bearing = df_metadata.iloc[idx]["bearing"]
-            writer.writerow([
-                stamp_sec,
-                idx,
-                bearing,
-                str(image_path),
-                input_w,
-                input_h,
-                out_w,
-                out_h,
-                int(depth_m.shape[1]),
-                int(depth_m.shape[0]),
-                dmin,
-                dmedian,
-                dmean,
-                dmax,
-            ])
-            fp.flush()
+            # df_metadata = pd.read_csv(df_metadata_path)
+            # stamp_sec = df_metadata.iloc[idx]["stamp_sec"]
+            # bearing = df_metadata.iloc[idx]["bearing"]
+            # writer.writerow([
+            #     stamp_sec,
+            #     idx,
+            #     bearing,
+            #     str(image_path),
+            #     input_w,
+            #     input_h,
+            #     out_w,
+            #     out_h,
+            #     int(depth_m.shape[1]),
+            #     int(depth_m.shape[0]),
+            #     dmin,
+            #     dmedian,
+            #     dmean,
+            #     dmax,
+            # ])
+            # fp.flush()
 
             print(
                 f"[depth] {idx + 1}/{len(image_paths)} {image_path.name} "
