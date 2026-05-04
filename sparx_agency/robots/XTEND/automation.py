@@ -173,7 +173,8 @@ class ControllerAutomation:
         """Get the robot status"""
         print(f"Taking off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][1] = 1000
-        await asyncio.sleep(3.1)
+        # await asyncio.sleep(3.1)  original from Tamir xtend
+        await asyncio.sleep(3.3) # + 0.2 sec
         print(f"Taken off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         self.send_command['axes'][1] = 0
@@ -182,7 +183,8 @@ class ControllerAutomation:
         """Land the robot"""
         print(f"Landing... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 1
-        await asyncio.sleep(3.1)
+        # await asyncio.sleep(3.1) original from Tamir xtend
+        await asyncio.sleep(4.1) # +1 sec
         print(f"Landed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 0
 
@@ -192,7 +194,7 @@ class ControllerAutomation:
         """Move the robot forward"""
 
         print(f"Moving forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][2] = 700
+        self.send_command['axes'][2] = 500 # original from Tamir Xtend 700
         await asyncio.sleep(duration * 0.001)
         print(f"Moved forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][2] = 0

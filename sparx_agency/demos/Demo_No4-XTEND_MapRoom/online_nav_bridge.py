@@ -3,22 +3,21 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 import json
+import websockets
 
-# Importing the base class from your automation.py
-from automation import ControllerAutomation
+from sparx_agency.robots.XTEND.automation import ControllerAutomation
 
 
 class OnlineNavBridge(ControllerAutomation):
     def __init__(self, host, port, frequency, robot_uid):
         super().__init__(host, port, frequency, robot_uid)
 
-        # Initialize an asynchronous queue for incoming commands
-        self.cmd_queue = asyncio.Queue()
+        # 1. Capture the main asyncio loop while we are in the main thread
+        self.loop = asyncio.get_event_loop()
 
-        # ROS 2 Node setup
+        self.cmd_queue = asyncio.Queue()
         self.ros_node = rclpy.create_node('drone_bridge_node')
 
-        # Subscriber for direction and time (assumed JSON string for this example)
         self.subscription = self.ros_node.create_subscription(
             String,
             '/drone/cmd_nav',
@@ -27,33 +26,41 @@ class OnlineNavBridge(ControllerAutomation):
         )
 
     def ros_callback(self, msg):
-        """
-        Receives direction and time from the point-cloud controller.
-        Expected format: {"action": "forward", "value": 1500} (time in ms)
-        """
+        """Thread-safe callback to move data from ROS thread to Asyncio thread."""
         try:
             data = json.loads(msg.data)
-            # Use thread-safe method to push to the asyncio queue
-            asyncio.get_event_loop().call_soon_threadsafe(self.cmd_queue.put_nowait, data)
+            # 2. Use call_soon_threadsafe to interact with the queue from the ROS thread
+            self.loop.call_soon_threadsafe(self.cmd_queue.put_nowait, data)
+            self.ros_node.get_logger().info(f"Queued: {data.get('action')}")
         except Exception as e:
-            self.ros_node.get_logger().error(f"Failed to parse nav command: {e}")
+            self.ros_node.get_logger().error(f"Callback Error: {e}")
+
+    async def run_connection(self):
+        """Maintains the drone heartbeat/telemetry without a fixed scenario."""
+        try:
+            async with websockets.connect(self.uri) as websocket:
+                print(f"✓ Connected to {self.uri}")
+
+                # Use the existing logic from automation.py for sending/receiving
+                send_task = asyncio.create_task(self.send_message(websocket))
+                receive_task = asyncio.create_task(self.receive_message(websocket))
+
+                await asyncio.gather(send_task, receive_task)
+        except Exception as e:
+            print(f"Connection Error: {e}")
 
     async def dynamic_executor(self):
-        """
-        Consumes commands from the queue and executes them in real-time.
-        Replaces the static create_scenario method.
-        """
-        print("ONLINE MODE: Waiting for navigation commands...")
+        """Listens to the queue and executes drone movements as they arrive."""
+        print("ONLINE MODE: Ready for commands...")
         while True:
-            # Wait for the next command from the ROS controller
             command = await self.cmd_queue.get()
-
             action = command.get("action")
-            value = command.get("value")  # duration in ms or degrees
+            value = command.get("value")
 
-            print(f"Executing: {action} with value {value}")
-
-            if action == "forward":
+            if action == "takeoff":
+                await self.arm_robot()
+                await self.takeoff()
+            elif action == "forward":
                 await self.move_forward(value)
             elif action == "backward":
                 await self.move_backward(value)
@@ -67,23 +74,25 @@ class OnlineNavBridge(ControllerAutomation):
                 await self.rotate_right(value)
             elif action == "land":
                 await self.land()
+                await self.disarm_robot()
                 break
 
             self.cmd_queue.task_done()
 
     async def run_bridge(self):
-        """
-        Overriding the execution loop to include ROS 2 spinning.
-        """
-        # Start the ROS 2 executor in a separate thread to avoid blocking asyncio
+        """Runs the ROS 2 node and Drone logic in parallel."""
+        # Spin ROS 2 in a background thread
         ros_thread = asyncio.to_thread(rclpy.spin, self.ros_node)
 
-        # Run the standard communication loops from ControllerAutomation
-        await asyncio.gather(
-            self.run(),  # Includes send_message and receive_message
-            self.dynamic_executor(),  # Our new dynamic command loop
-            ros_thread
-        )
+        try:
+            await asyncio.gather(
+                self.run_connection(),
+                self.dynamic_executor(),
+                ros_thread
+            )
+        finally:
+            self.ros_node.destroy_node()
+            rclpy.shutdown()
 
 
 async def main():
@@ -96,9 +105,8 @@ async def main():
     )
     try:
         await bridge.run_bridge()
-    finally:
-        bridge.ros_node.destroy_node()
-        rclpy.shutdown()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
