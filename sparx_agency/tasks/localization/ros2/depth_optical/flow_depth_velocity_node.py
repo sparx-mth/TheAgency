@@ -53,6 +53,11 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("depth_ema_alpha", 0.15) # EMA alpha for depth smoothing, between 0 and 1. Higher means more smoothing but more lag.
         self.declare_parameter("csv_filename", "/tmp/zone_velocities_log_no_imu.csv")
         
+        self.declare_parameter("json_out_path", "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json")
+        self.json_out_path = self.get_parameter("json_out_path").get_parameter_value().string_value
+
+        self.trajectory_history = []
+
         self.median_window = int(self.get_parameter("depth_median_window").get_parameter_value().integer_value)
         self.ema_alpha = float(self.get_parameter("depth_ema_alpha").get_parameter_value().double_value)
         
@@ -128,6 +133,16 @@ class FlowDepthVelocityNode(Node):
         
         # Calculate the distance from the start point (0,0) to the current position (x,y) and update current_distance
         self.current_distance = math.sqrt(x**2 + y**2 + z**2)
+
+        self.trajectory_history.append({
+            "image": f"frame_{len(self.trajectory_history):06d}.jpg", # שם וירטואלי שיתאים לסקריפט הציור
+            "pose": {
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+                "yaw": 0.0  
+            }
+        })
     # ---------------------------------
 
     def smooth_depth_map(self, raw_depth_map: np.ndarray) -> np.ndarray:
@@ -353,6 +368,19 @@ class FlowDepthVelocityNode(Node):
         cv2.putText(vis, "Trajectory Map", (w - map_size - margin + 10, margin + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
+
+    def destroy_node(self):
+            if self.trajectory_history:
+                try:
+                    import json
+                    with open(self.json_out_path, 'w', encoding='utf-8') as f:
+                        json.dump(self.trajectory_history, f, indent=4)
+                    self.get_logger().info(f"[JSON] Saved {len(self.trajectory_history)} poses to {self.json_out_path}")
+                except Exception as e:
+                    self.get_logger().error(f"Failed to save JSON: {e}")
+                    
+            super().destroy_node()
+
 def main():
     rclpy.init()
     node = FlowDepthVelocityNode()
@@ -362,7 +390,8 @@ def main():
         pass
     node.destroy_node()
     cv2.destroyAllWindows()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
