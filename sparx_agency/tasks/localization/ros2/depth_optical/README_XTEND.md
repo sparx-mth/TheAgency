@@ -13,7 +13,17 @@ The pipeline consists of 5 main components running concurrently:
 
 ## 🚀 Execution Guide
 
-To run the full pipeline, open **5 separate terminals**. 
+
+to run you can run the ros launch file- 
+
+
+```bash
+cd ~/GIT/TheAgency
+ros2 launch sparx_agency/tasks/localization/ros2/depth_optical/optical_depth_pipeline.launch.py
+```
+
+
+OR -to run the full pipeline, open **5 separate terminals**. 
 
 ### Terminal 1: Flow Depth Velocity Node
 Calculates the velocity based on RGB and computed depth topics.
