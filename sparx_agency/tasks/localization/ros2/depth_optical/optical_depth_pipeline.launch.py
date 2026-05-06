@@ -1,14 +1,23 @@
 import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import ExecuteProcess
-from launch.actions import ExecuteProcess, TimerAction
+from launch.actions import ExecuteProcess, DeclareLaunchArgument, TimerAction
+from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
+    rgb_dir_arg = DeclareLaunchArgument(
+        'rgb_dir',
+        default_value=os.path.expanduser('~/Documents/xtend_da3_takes/xtend_rectified_depth_take_003_20260429_160647/rgb_rectified'),
+        description='Path to the RGB images directory'
+    )
+
     main_venv_python = os.path.expanduser("~/GIT/TheAgency/.venv/bin/python3")
     da3_venv_python = os.path.expanduser("~/depth_anything_ws/src/ros2-depth-anything-v3-trt/da3_venv/bin/python3")
 
+    rgb_dir_config = LaunchConfiguration('rgb_dir')
+
     return LaunchDescription([
+        rgb_dir_arg,
         # 1. Flow Depth Velocity Node
         Node(
             executable=main_venv_python,
@@ -49,7 +58,7 @@ def generate_launch_description():
             ]
         ),
 
-# 4. Live Depth Processor (TensorRT)
+        # 4. Live Depth Processor
         Node(
             executable=da3_venv_python,
             arguments=['-m', 'sparx_agency.tasks.mapping.ros2.depth_processor_node'],
@@ -71,7 +80,7 @@ def generate_launch_description():
                 ExecuteProcess(
                     cmd=[
                         main_venv_python, '-m', 'sparx_agency.tasks.localization.common.publish_rgb_from_files',
-                        '--rgb-dir', os.path.expanduser('~/Documents/xtend_da3_takes/xtend_rectified_depth_take_003_20260429_160647/rgb_rectified'),
+                        '--rgb-dir', rgb_dir_config, 
                         '--publish-hz', '10.0'
                     ],
                     output='screen'
