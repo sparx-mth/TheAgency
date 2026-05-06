@@ -309,34 +309,22 @@ class XtendProbe:
             return
 
         r = self.last_robot_status
-        # print(f"\n[SUMMARY] Latest robot block for {self.robot_uid}:")
-        # Print top-level keys
-        # print("  top-level keys:", sorted(list(r.keys())))
 
+        # 1. Extract Local Telemetry (x, y, z)
+        local_telemetry = r.get("local_telemetry", {})
+        x = local_telemetry.get("x", 0.0)
+        y = local_telemetry.get("y", 0.0)
+        z = local_telemetry.get("z", 0.0)
+
+        # 2. Extract Bearing/Yaw
         telemetry = r.get("telemetry", {})
-        if not telemetry:
-            print("  telemetry: None")
-            return
+        details = telemetry.get("details", {})
+        bearing = details.get("bearing", 0.0)
 
-        details = telemetry.get("details", {}) if isinstance(telemetry, dict) else {}
-
-        # Common fields you already saw:
-        bearing = None
-        if isinstance(details, dict):
-            bearing = details.get("bearing")
-
-
-        if bearing is not None:
-            print(f"  telemetry.details.bearing (yaw rad?): {bearing}")
-
-        # Show a key-path summary so you can discover fields safely
-        print("\n  Key paths (depth=3) inside telemetry:")
-        for kp in summarize_dict_keys(telemetry, depth=3):
-            print("   -", kp, telemetry.get(kp))
-
-        print("\n  Key paths (depth=3) inside telemetry.details:")
-        for kp in summarize_dict_keys(details, depth=3):
-            print("   -", kp, details.get(kp))
+        # 3. Print the combined "Pose" data
+        print(f"\n[SUMMARY] Latest Pose for {self.robot_uid}:")
+        print(f"  Local Position -> X: {x:.3f}, Y: {y:.3f}, Z: {z:.3f}")
+        print(f"  Bearing (rad)  -> {bearing:.4f}")
 
         print("-" * 80)
 

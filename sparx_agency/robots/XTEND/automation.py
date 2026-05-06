@@ -4,7 +4,7 @@ WebSocket Virtual Controller Client
 Sends and/or receives virtual controller data via WebSocket at a configurable rate.
 Supports send-only, listen-only, and bidirectional modes.
 """
-
+import copy
 import json
 import math
 import asyncio
@@ -58,7 +58,7 @@ class ControllerAutomation:
             ]
         }
 
-        self.send_command = self.base_command
+        self.send_command = copy.deepcopy(self.base_command)
 
     async def run(self):
         

@@ -38,7 +38,7 @@ class OnlineNavBridgeCapture(ControllerAutomation):
 
         self.last_xtend_state = None
         self.jpeg_quality = 90
-        self.capture_interval_sec = 0.5  # Save a frame every 0.5s
+        self.capture_interval_sec = 10000  # Save a frame every 0.5s
 
     def ros_callback(self, msg):
         try:
@@ -108,32 +108,73 @@ class OnlineNavBridgeCapture(ControllerAutomation):
             await asyncio.sleep(0.01)
 
     async def dynamic_executor(self):
-        """Processes navigation commands one-by-one."""
-        print("ONLINE MODE: Ready for commands...")
+        """Consumes UI commands from /drone/cmd_nav and calls XTEND API methods."""
+        print("ONLINE MODE: Executing UI commands from /drone/cmd_nav.")
+
         while True:
             command = await self.cmd_queue.get()
             action = command.get("action")
-            value = command.get("value")
 
-            # Map UI actions to automation.py methods
-            if action == "arm":
-                await self.arm_robot()  # [cite: 3]
-            elif action == "disarm":
-                await self.disarm_robot()  # [cite: 3]
-            elif action == "takeoff":
-                await self.takeoff()  # [cite: 3]
-            elif action == "land":
-                await self.land()  # [cite: 3]
-            elif action == "forward":
-                await self.move_forward(value)  # [cite: 3]
-            elif action == "rotate_left":
-                await self.rotate_left(value)  # [cite: 3]
-            elif action == "rotate_right":
-                await self.rotate_right(value)  # [cite: 3]
-            elif action == "move_down":
-                await self.move_down(value)
+            # Backward compatibility with old UI:
+            # UI sends {"action": "...", "value": 1500}
+            # For movement, treat value as duration unless duration is explicitly provided.
+            value = command.get("value", 0)
+            duration = command.get("duration", None)
+            thrust = command.get("thrust", None)
 
-            self.cmd_queue.task_done()
+            if duration is None:
+                duration = value
+
+            if thrust is None:
+                thrust = 500
+
+            print(f"[cmd] action={action}, value={value}, duration={duration}, thrust={thrust}")
+
+            try:
+                if action == "arm":
+                    await self.arm_robot()
+
+                elif action == "disarm":
+                    await self.disarm_robot()
+
+                elif action == "takeoff":
+                    await self.takeoff()
+
+                elif action == "land":
+                    await self.land()
+
+                elif action == "stop":
+                    self.hover()
+
+                elif action == "forward":
+                    await self.move_forward(duration=duration, value=thrust)
+
+                elif action == "backward":
+                    await self.move_backward(duration=duration, value=thrust)
+
+                elif action == "left":
+                    await self.move_left(duration=duration, value=thrust)
+
+                elif action == "right":
+                    await self.move_right(duration=duration, value=thrust)
+
+                elif action == "up":
+                    await self.move_up(duration=duration, value=thrust)
+
+                elif action in ("down", "move_down"):
+                    await self.move_down(duration=duration, value=thrust)
+
+                elif action == "rotate_left":
+                    await self.rotate_left(duration=duration, value=1000)
+
+                elif action == "rotate_right":
+                    await self.rotate_right(duration=duration, value=1000)
+
+                else:
+                    print(f"[cmd] Unknown action: {action}")
+
+            finally:
+                self.cmd_queue.task_done()
 
     async def run_bridge(self):
         ros_thread = asyncio.to_thread(rclpy.spin, self.ros_node)
