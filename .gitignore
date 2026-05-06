@@ -190,3 +190,4 @@ sparx_agency/tasks/localization/ros2/depth_optical/results/orbslam_results
 sparx_agency/tasks/localization/CLAUDE.md
 
 xtend_capture_out/  
+sparx_agency/tasks/common/bearings_placeholder.csv
