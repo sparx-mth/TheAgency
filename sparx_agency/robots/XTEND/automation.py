@@ -109,36 +109,45 @@ class ControllerAutomation:
             raise
 
     async def receive_message(self, websocket):
+        """Receive XTEND telemetry, store latest state, and log telemetry."""
         try:
             async for message in websocket:
-                
                 try:
-                    # Parse the JSON message
                     data = json.loads(message)
-                    
-                    # Extract key information
-                    header = data.get('header', {})
-                    content = data.get('content', {})
-                    command = header.get('command', 'N/A')
+                    header = data.get("header", {}) or {}
+                    content = data.get("content", {}) or {}
 
-                    # Display the received message
-                    if command == "ROBOT_STATUS":
-                        for robot in content['robots']:
-                            if robot['robot_uid'] == self.robot_uid:
-                                self.update_robot_telemetry(robot['telemetry']['details']['bearing'])
-                                
-                            lt = robot.get("local_telemetry", {})
-                            self.x = lt.get("x", None)
-                            self.y = lt.get("y", None)
-                            self.z = lt.get("z", None)
-                            break
+                    if header.get("command") != "ROBOT_STATUS":
+                        continue
+
+                    for robot in content.get("robots", []) or []:
+                        if robot.get("robot_uid") != self.robot_uid:
+                            continue
+
+                        self.last_xtend_state = robot
+
+                        telemetry = robot.get("telemetry", {}) or {}
+                        details = telemetry.get("details", {}) or {}
+                        bearing = details.get("bearing")
+
+                        if bearing is not None:
+                            self.update_robot_telemetry(float(bearing))
+
+                        local = robot.get("local_telemetry", {}) or {}
+                        self.x = local.get("x", getattr(self, "x", None))
+                        self.y = local.get("y", getattr(self, "y", None))
+                        self.z = local.get("z", getattr(self, "z", None))
+
+                        self.log_telemetry(robot)
+                        break
 
                 except json.JSONDecodeError:
-                    print(f"[RECV] Received non-JSON message")
-                except Exception as e:
-                    print(f"[RECV] Error: {e}")
+                    print("[RECV] Received non-JSON message")
+                except Exception as exc:
+                    print(f"[RECV] Error: {exc}")
+
         except asyncio.CancelledError:
-            print(f"Receiver stopped.")
+            print("Receiver stopped.")
             raise
 
     async def arm_robot(self):

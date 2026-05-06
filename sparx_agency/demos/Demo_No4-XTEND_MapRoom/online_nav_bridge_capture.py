@@ -1,5 +1,6 @@
 import asyncio
 import rclpy
+from datetime import datetime
 from rclpy.node import Node
 from std_msgs.msg import String
 import json
@@ -47,6 +48,59 @@ class OnlineNavBridgeCapture(ControllerAutomation):
         except Exception as e:
             self.ros_node.get_logger().error(f"Callback Error: {e}")
 
+    def log_telemetry(self, robot: dict):
+        now = time.time()
+        iso_time = datetime.fromtimestamp(now).isoformat(timespec="milliseconds")
+
+        local = robot.get("local_telemetry", {}) or {}
+        telemetry = robot.get("telemetry", {}) or {}
+        details = telemetry.get("details", {}) or {}
+
+        axes = self.send_command.get("axes", [0, 0, 0, 0, 0])
+
+        self.telemetry_writer.writerow([
+            now,
+            iso_time,
+            robot.get("robot_uid", self.robot_uid),
+            local.get("x", ""),
+            local.get("y", ""),
+            local.get("z", ""),
+            details.get("bearing", ""),
+            self.active_action or "",
+            axes[0],
+            axes[1],
+            axes[2],
+            axes[3],
+            axes[4],
+        ])
+        self.telemetry_fp.flush()
+
+    def set_axes(self, lateral=0, vertical=0, forward=0, yaw=0, marker_vertical=0):
+        self.send_command["axes"][0] = int(lateral)
+        self.send_command["axes"][1] = int(vertical)
+        self.send_command["axes"][2] = int(forward)
+        self.send_command["axes"][3] = int(yaw)
+        self.send_command["axes"][4] = int(marker_vertical)
+
+    def stop_motion(self):
+        self.set_axes(0, 0, 0, 0, 0)
+
+    def hold_forward(self, thrust=500):
+        print(f"[hold] forward thrust={thrust}")
+        self.set_axes(forward=thrust, yaw=0)
+
+    def hold_backward(self, thrust=500):
+        print(f"[hold] backward thrust={thrust}")
+        self.set_axes(forward=-thrust, yaw=0)
+
+    def hold_turn_left(self, thrust=700):
+        print(f"[hold] turn_left thrust={thrust}")
+        self.set_axes(forward=0, yaw=-thrust)
+
+    def hold_turn_right(self, thrust=700):
+        print(f"[hold] turn_right thrust={thrust}")
+        self.set_axes(forward=0, yaw=thrust)
+
     def extract_pose(self):
         """Extracts {x, y, z, yaw} for the JSON sidecar."""
         pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
@@ -64,16 +118,46 @@ class OnlineNavBridgeCapture(ControllerAutomation):
         return pose
 
     async def receive_message(self, websocket):
-        """Standard receiver plus state tracking for sidecars[cite: 5]."""
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-                content = data.get("content", {}) or {}
-                for robot in content.get("robots", []):
-                    if robot.get("robot_uid") == self.robot_uid:
-                        self.last_xtend_state = robot  # Save for capture pose[cite: 5]
-            except Exception:
-                pass
+        """Receive XTEND telemetry, store latest state, and log telemetry."""
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    header = data.get("header", {}) or {}
+                    content = data.get("content", {}) or {}
+
+                    if header.get("command") != "ROBOT_STATUS":
+                        continue
+
+                    for robot in content.get("robots", []) or []:
+                        if robot.get("robot_uid") != self.robot_uid:
+                            continue
+
+                        self.last_xtend_state = robot
+
+                        telemetry = robot.get("telemetry", {}) or {}
+                        details = telemetry.get("details", {}) or {}
+                        bearing = details.get("bearing")
+
+                        if bearing is not None:
+                            self.update_robot_telemetry(float(bearing))
+
+                        local = robot.get("local_telemetry", {}) or {}
+                        self.x = local.get("x", getattr(self, "x", None))
+                        self.y = local.get("y", getattr(self, "y", None))
+                        self.z = local.get("z", getattr(self, "z", None))
+
+                        self.log_telemetry(robot)
+                        break
+
+                except json.JSONDecodeError:
+                    print("[RECV] Received non-JSON message")
+                except Exception as exc:
+                    print(f"[RECV] Error: {exc}")
+
+        except asyncio.CancelledError:
+            print("Receiver stopped.")
+            raise
 
     async def capture_loop(self):
         """Captures FPV frames and saves them with JSON pose sidecars[cite: 5]."""
@@ -108,67 +192,57 @@ class OnlineNavBridgeCapture(ControllerAutomation):
             await asyncio.sleep(0.01)
 
     async def dynamic_executor(self):
-        """Consumes UI commands from /drone/cmd_nav and calls XTEND API methods."""
-        print("ONLINE MODE: Executing UI commands from /drone/cmd_nav.")
+        """Consumes UI commands from /drone/cmd_nav and applies hold-style control."""
+        print("ONLINE MODE: hold-style commands from /drone/cmd_nav.")
 
         while True:
             command = await self.cmd_queue.get()
             action = command.get("action")
+            thrust = int(command.get("thrust", command.get("value", 500)))
 
-            # Backward compatibility with old UI:
-            # UI sends {"action": "...", "value": 1500}
-            # For movement, treat value as duration unless duration is explicitly provided.
-            value = command.get("value", 0)
-            duration = command.get("duration", None)
-            thrust = command.get("thrust", None)
-
-            if duration is None:
-                duration = value
-
-            if thrust is None:
-                thrust = 500
-
-            print(f"[cmd] action={action}, value={value}, duration={duration}, thrust={thrust}")
+            print(f"[cmd] action={action}, thrust={thrust}")
 
             try:
                 if action == "arm":
                     await self.arm_robot()
 
                 elif action == "disarm":
+                    self.stop_motion()
                     await self.disarm_robot()
 
                 elif action == "takeoff":
                     await self.takeoff()
 
                 elif action == "land":
+                    self.stop_motion()
                     await self.land()
 
                 elif action == "stop":
-                    self.hover()
+                    self.stop_motion()
 
                 elif action == "forward":
-                    await self.move_forward(duration=duration, value=thrust)
+                    self.hold_forward(thrust)
 
                 elif action == "backward":
-                    await self.move_backward(duration=duration, value=thrust)
+                    self.hold_backward(thrust)
+
+                elif action in ("turn_left", "rotate_left"):
+                    self.hold_turn_left(thrust)
+
+                elif action in ("turn_right", "rotate_right"):
+                    self.hold_turn_right(thrust)
 
                 elif action == "left":
-                    await self.move_left(duration=duration, value=thrust)
+                    self.set_axes(lateral=-thrust)
 
                 elif action == "right":
-                    await self.move_right(duration=duration, value=thrust)
-
-                elif action == "up":
-                    await self.move_up(duration=duration, value=thrust)
+                    self.set_axes(lateral=thrust)
 
                 elif action in ("down", "move_down"):
-                    await self.move_down(duration=duration, value=thrust)
+                    self.set_axes(vertical=-thrust)
 
-                elif action == "rotate_left":
-                    await self.rotate_left(duration=duration, value=1000)
-
-                elif action == "rotate_right":
-                    await self.rotate_right(duration=duration, value=1000)
+                elif action == "up":
+                    self.set_axes(vertical=thrust)
 
                 else:
                     print(f"[cmd] Unknown action: {action}")

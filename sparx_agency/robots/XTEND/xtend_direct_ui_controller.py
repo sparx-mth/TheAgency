@@ -6,7 +6,9 @@ import asyncio
 import time
 import tkinter as tk
 from tkinter import ttk
-
+import csv
+from datetime import datetime
+from pathlib import Path
 import websockets
 
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
@@ -14,14 +16,15 @@ from sparx_agency.robots.XTEND.automation import ControllerAutomation
 
 class XtendDirectUIController(ControllerAutomation):
     def __init__(
-        self,
-        host: str,
-        port: int,
-        frequency: float,
-        robot_uid: str,
-        forward_value: int = 500,
-        yaw_right_value: int = 700,
-        right_90_ms: int = 1500,
+            self,
+            host: str,
+            port: int,
+            frequency: float,
+            robot_uid: str,
+            forward_value: int = 500,
+            yaw_right_value: int = 1000,
+            right_90_ms: int = 1500,
+            log_dir: str = "xtend_ui_logs",
     ):
         super().__init__(host, port, frequency, robot_uid)
 
@@ -34,6 +37,7 @@ class XtendDirectUIController(ControllerAutomation):
         self.active_action = None
         self.active_action_start_t = None
         self.action_log = []
+        self.init_logs(log_dir)
 
         self.root = tk.Tk()
         self.root.title("XTEND Direct Drone Controller")
@@ -65,6 +69,56 @@ class XtendDirectUIController(ControllerAutomation):
         self.send_command["axes"][2] = int(forward)
         self.send_command["axes"][3] = int(yaw)
         self.send_command["axes"][4] = int(marker_vertical)
+
+    def init_logs(self, log_dir):
+        self.log_dir =Path.home() / "Documents" / log_dir
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        self.run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.telemetry_log_path = self.log_dir / f"xtend_telemetry_{self.run_stamp}.csv"
+        self.action_log_path = self.log_dir / f"xtend_actions_{self.run_stamp}.csv"
+
+        self.telemetry_fp = open(self.telemetry_log_path, "w", newline="", encoding="utf-8")
+        self.telemetry_writer = csv.writer(self.telemetry_fp)
+        self.telemetry_writer.writerow([
+            "time_sec",
+            "iso_time",
+            "robot_uid",
+            "x",
+            "y",
+            "z",
+            "bearing_raw",
+            "active_action",
+        ])
+
+        print(f"[log] telemetry: {self.telemetry_log_path}")
+        print(f"[log] actions:   {self.action_log_path}")
+
+
+
+    def save_action_log_csv(self):
+        with open(self.action_log_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.writer(fp)
+            writer.writerow([
+                "index",
+                "action",
+                "start_t",
+                "end_t",
+                "duration_sec",
+                "reason",
+            ])
+
+            for i, entry in enumerate(self.action_log):
+                writer.writerow([
+                    i,
+                    entry["action"],
+                    entry["start_t"],
+                    entry["end_t"],
+                    entry["duration_sec"],
+                    entry["reason"],
+                ])
+
+        print(f"[log] saved actions: {self.action_log_path}")
 
     def hold_forward(self):
         value = self.get_int_from_ui(
@@ -374,9 +428,13 @@ class XtendDirectUIController(ControllerAutomation):
             try:
                 await ui_task
             finally:
-                print("[ui] stopping motion and shutting down")
                 self.stop_motion()
+                self.end_action_timer(reason="shutdown")
                 self.print_action_summary()
+                self.save_action_log_csv()
+
+                if hasattr(self, "telemetry_fp") and not self.telemetry_fp.closed:
+                    self.telemetry_fp.close()
 
                 for task in (send_task, receive_task, worker_task):
                     task.cancel()
@@ -400,6 +458,12 @@ def parse_args():
     p.add_argument("--yaw-right-value", type=int, default=1000)
     p.add_argument("--right-90-ms", type=int, default=1500)
 
+    p.add_argument(
+        "--log-dir",
+        default="xtend_ui_logs",
+        help="Directory for telemetry/action logs.",
+    )
+
     return p.parse_args()
 
 
@@ -414,6 +478,7 @@ def main():
         forward_value=args.forward_value,
         yaw_right_value=args.yaw_right_value,
         right_90_ms=args.right_90_ms,
+        log_dir=args.log_dir,
     )
 
     try:
