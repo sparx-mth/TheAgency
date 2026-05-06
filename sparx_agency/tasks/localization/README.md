@@ -153,7 +153,7 @@ pip install opencv-python pupil-apriltags pyyaml
 ## Running the system (single image)
 
 ```bash
-python3 -m sparx_agency.tasks.tag_azimuth_node \
+python3 -m sparx_agency.tasks.localization.opencv.tag_azimuth_node \
   --tag_config_path sparx_agency/tasks/localization/config/tags_azimuth.yaml \
   --camera_calib_path sparx_agency/tasks/localization/config/front_camera_calib.yaml \
   --tag_size_m 0.08 \

@@ -44,7 +44,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("use_depth_norm", False)
         self.declare_parameter("depth_scale", 1.0) 
         self.declare_parameter("show_debug", False)
-        self.declare_parameter("camera_frame", "simple_drone/front_cam_link")
+        self.declare_parameter("camera_frame", "xtend_camera")
         
         self.declare_parameter("lk_win", 21)
         self.declare_parameter("lk_levels", 3)

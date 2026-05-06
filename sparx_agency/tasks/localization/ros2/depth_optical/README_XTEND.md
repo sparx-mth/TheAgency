@@ -52,7 +52,7 @@ Publishes the static transform between the local odometry frame and the camera l
 cd ~/GIT/TheAgency
 source .venv/bin/activate
 
-ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom simple_drone/front_cam_link
+ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom xtend_camera
 ```
 
 ### Terminal 4: Live Depth Processor (TensorRT)
