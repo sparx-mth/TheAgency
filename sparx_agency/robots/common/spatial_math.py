@@ -51,6 +51,13 @@ def get_euler(q):
     yaw = math.atan2(siny_cosp, cosy_cosp)
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
+def yaw_to_quaternion(yaw_rad: float):
+    """Quaternion for yaw-only rotation around Z."""
+    half = 0.5 * yaw_rad
+    qz = math.sin(half)
+    qw = math.cos(half)
+    return 0.0, 0.0, qz, qw
+
 
 
 def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: float) -> Intrinsics:

@@ -6,12 +6,13 @@ from tkinter import ttk
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-
+from geometry_msgs.msg import Twist
 
 class DroneControlUI(Node):
     def __init__(self):
         super().__init__("drone_gui_publisher")
-        self.publisher_ = self.create_publisher(String, "/drone/cmd_nav", 10)
+        self.cmd_nav_pub = self.create_publisher(String, "/drone/cmd_nav", 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
         self.active_action = None
         self.active_action_start_t = None
@@ -102,21 +103,19 @@ class DroneControlUI(Node):
 
     def handle_button(self, action: str):
         if action == "forward":
-            value = self.get_int_value(self.forward_value_var, 400, "forward thrust")
-            self.send_cmd("forward", value)
-            self.start_timer(f"forward_{value}")
+            self.send_twist(linear_x=1.0, angular_z=0.0)
+            self.start_timer("forward_twist")
 
         elif action == "turn_left":
-            value = self.get_int_value(self.turn_value_var, 1000, "turn thrust")
-            self.send_cmd("turn_left", value)
-            self.start_timer(f"turn_left_{value}")
+            self.send_twist(linear_x=0.0, angular_z=1.0)
+            self.start_timer("turn_left_twist")
 
         elif action == "turn_right":
-            value = self.get_int_value(self.turn_value_var, 1000, "turn thrust")
-            self.send_cmd("turn_right", value)
-            self.start_timer(f"turn_right_{value}")
+            self.send_twist(linear_x=0.0, angular_z=-1.0)
+            self.start_timer("turn_right_twist")
 
         elif action == "stop":
+            self.send_twist(0.0, 0.0)
             self.send_cmd("stop", 0)
             self.stop_timer("stop")
 
@@ -124,7 +123,12 @@ class DroneControlUI(Node):
             self.send_cmd(action, 0)
             self.stop_timer(action)
 
+        elif action in ("land", "disarm"):
+            self.send_twist(0.0, 0.0)
+            self.send_cmd(action, 0)
+            self.stop_timer(action)
         else:
+            # arm / takeoff
             self.send_cmd(action, 0)
 
     def send_cmd(self, action, value):
@@ -134,8 +138,18 @@ class DroneControlUI(Node):
             "value": int(value),
         }
         msg.data = json.dumps(command)
-        self.publisher_.publish(msg)
-        self.get_logger().info(f"Published: {msg.data}")
+        self.cmd_nav_pub.publish(msg)
+        self.get_logger().info(f"Published cmd_nav: {msg.data}")
+
+    def send_twist(self, linear_x=0.0, angular_z=0.0):
+        msg = Twist()
+        msg.linear.x = float(linear_x)
+        msg.angular.z = float(angular_z)
+        self.cmd_vel_pub.publish(msg)
+
+        self.get_logger().info(
+            f"Published Twist: linear.x={msg.linear.x:.3f}, angular.z={msg.angular.z:.3f}"
+        )
 
     def start_timer(self, action_name: str):
         self.active_action = action_name

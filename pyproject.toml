@@ -12,10 +12,10 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.10"
 tqdm = "^4.67.1"
 pygame = "^2.6.1"
-numpy = "^2.3.0"
+numpy = "^2.0.0"
 pandas = "^2.3.0"
 matplotlib = "^3.10.3"
 seaborn = "^0.13.2"
