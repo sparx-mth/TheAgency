@@ -7,7 +7,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     rgb_dir_arg = DeclareLaunchArgument(
         'rgb_dir',
-        default_value=os.path.expanduser('~/Documents/xtend_da3_takes/xtend_rectified_depth_take_003_20260429_160647/rgb_rectified'),
+        default_value=os.path.expanduser('~/Documents/xtend_da3_takes/2026_05_04___11_15_19_700_65sec_4m'),
         description='Path to the RGB images directory'
     )
 
