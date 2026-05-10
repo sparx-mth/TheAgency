@@ -1,0 +1,27 @@
+/**:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: false 
+    publish_tf: true
+
+    map_frame: map             
+    odom_frame: /simple_drone/odom           
+    base_link_frame: /simple_drone/base_link  
+    world_frame: /simple_drone/odom           
+
+    imu0: /simple_drone/imu/out
+    imu0_config: [false, false, false, # position
+                  true,  true,  true,  # orientation (roll, pitch, yaw)
+                  false, false, false, # velocity
+                  true,  true,  true,  # angular velocity
+                  true,  true,  true]  # acceleration
+    imu0_relative: true
+
+    twist0: /flow_depth/velocity 
+    twist0_config: [false, false, false, # position
+                    false, false, false, # orientation
+                    true,  true,  true,  # linear velocity (vx, vy, vz)
+                    false, false, false, # angular velocity
+                    false, false, false] # acceleration
+    twist0_relative: true
