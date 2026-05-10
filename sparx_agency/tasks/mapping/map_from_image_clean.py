@@ -12,7 +12,6 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenha
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
 from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
-from sparx_agency.robots.common.spatial_math import rot_y
 from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
 
 
@@ -309,178 +308,202 @@ def build_occupancy_raycast(
     debug: bool = True,
 ) -> np.ndarray:
     """
-    Better occupancy-from-single-view:
-    1) Project points onto floor plane coords (u,v).
-    2) Build per-cell max height grid.
-    3) Mark occupied cells by height threshold.
-    4) Raycast ONLY to occupied cells to carve free space.
-    Map size is computed dynamically from data + sensor.
-    """
+    Occupancy map from a single depth image.
 
-    # Signed distance to plane: positive = above floor
+    Required frame convention:
+      - pts, n, d, u, v, and sensor_origin must all be in the same frame.
+      - In this script we use base_xyz: X forward, Y left, Z up.
+
+    Output grid values:
+      -1  unknown
+       0  free
+      100 occupied
+    """
+    if pts.size == 0:
+        raise RuntimeError("No points were provided to build_occupancy_raycast().")
+
+    # Make the plane normal point upward so positive signed distance means height above floor.
     if n[2] < 0:
         n = -n
         d = -d
+
     signed = (pts @ n + d).astype(np.float32)
     height = signed.copy()
     height[height < 0.0] = 0.0
 
-    # Project points onto plane coords
+    # Project all points onto the estimated floor plane, then express them in floor coordinates.
     p_proj = pts - signed[:, None] * n[None, :]
-    xp = (p_proj @ u).astype(np.float32)
-    yp = (p_proj @ v).astype(np.float32)
+    xp = (p_proj @ u).astype(np.float32)  # lateral coordinate
+    yp = (p_proj @ v).astype(np.float32)  # forward coordinate
 
-
-
-    # Sensor origin projected onto plane
+    # Project the sensor origin to the same floor plane.
     o = sensor_origin.astype(np.float32)
-    p0 = o - (float(o @ n) + d) * n  # projection of origin onto plane
-    print("SENSOR origin:", o, "projected p0:", p0, "p0_z:", float(p0[2]))
-
+    p0 = o - (float(o @ n) + d) * n
     sx = float(p0 @ u)
     sy = float(p0 @ v)
 
+    if debug:
+        print("SENSOR origin:", o, "projected p0:", p0, "p0_z:", float(p0[2]))
+        print(f"SENSOR floor coords: sx={sx:.3f}, sy={sy:.3f}")
+
+    # Keep only points in front of the sensor on the floor plane.
     front = (yp - sy) > 0.0
     xp = xp[front]
     yp = yp[front]
     height = height[front]
-    # ---- Dynamic map bounds (include BOTH endpoints and sensor) ----
-    margin = 2.0  # meters
-    min_x = float(np.percentile(xp, 1))
-    max_x = float(np.percentile(xp, 99))
-    min_y = float(np.percentile(yp, 1))
-    max_y = float(np.percentile(yp, 99))
 
-    min_x = min(min_x, sx) - margin
-    max_x = max(max_x, sx) + margin
-    min_y = min(min_y, sy) - margin
-    max_y = max(max_y, sy) + margin
+    finite = np.isfinite(xp) & np.isfinite(yp) & np.isfinite(height)
+    xp = xp[finite]
+    yp = yp[finite]
+    height = height[finite]
 
-    span_x = max_x - min_x
-    span_y = max_y - min_y
+    if xp.size == 0:
+        raise RuntimeError("No projected points remain after front/finite filtering.")
 
-    gw = int(np.ceil(cfg.grid_width_m / cfg.resolution_m))
-    gh = int(np.ceil(cfg.grid_height_m / cfg.resolution_m))
+    # Dynamic bounds are used only to choose the center of the configured-size map.
+    margin = 1.0
+    dyn_min_x = min(float(np.percentile(xp, 1)), sx) - margin
+    dyn_max_x = max(float(np.percentile(xp, 99)), sx) + margin
+    dyn_min_y = min(float(np.percentile(yp, 1)), sy) - margin
+    dyn_max_y = max(float(np.percentile(yp, 99)), sy) + margin
 
-    # Center the configured map around the dynamic data/sensor area
-    cx_map = 0.5 * (min_x + max_x)
-    cy_map = 0.5 * (min_y + max_y)
+    cx_map = 0.5 * (dyn_min_x + dyn_max_x)
+    cy_map = 0.5 * (dyn_min_y + dyn_max_y)
 
     min_x = cx_map - 0.5 * cfg.grid_width_m
     max_x = cx_map + 0.5 * cfg.grid_width_m
     min_y = cy_map - 0.5 * cfg.grid_height_m
     max_y = cy_map + 0.5 * cfg.grid_height_m
 
-    # Safety cap (avoid accidental huge allocations)
-    max_cells = 2500  # -> 2500x2500 is already massive
+    gw = int(np.ceil(cfg.grid_width_m / cfg.resolution_m))
+    gh = int(np.ceil(cfg.grid_height_m / cfg.resolution_m))
+
+    # Safety cap against accidental huge allocations.
+    max_cells = 2500
     gw = int(np.clip(gw, 50, max_cells))
     gh = int(np.clip(gh, 50, max_cells))
-
-    print(f"BOUNDS: x [{min_x:.2f}, {max_x:.2f}] span={span_x:.2f}m -> gw={gw}")
-    print(f"BOUNDS: y [{min_y:.2f}, {max_y:.2f}] span={span_y:.2f}m -> gh={gh}")
-    print(f"MAP meters: {gw * cfg.resolution_m:.2f} x {gh * cfg.resolution_m:.2f}")
 
     origin_x = min_x
     origin_y = min_y
 
-    # Allocate
+    if debug:
+        print(
+            f"DYNAMIC BOUNDS: x [{dyn_min_x:.2f}, {dyn_max_x:.2f}] "
+            f"y [{dyn_min_y:.2f}, {dyn_max_y:.2f}]"
+        )
+        print(f"CONFIG MAP: {cfg.grid_width_m:.2f}m x {cfg.grid_height_m:.2f}m")
+        print(f"MAP meters: {gw * cfg.resolution_m:.2f} x {gh * cfg.resolution_m:.2f}")
+
     grid = np.full((gh, gw), -1, dtype=np.int8)
-    cell_max_h = np.zeros((gh, gw), dtype=np.float32)
     cell_hits = np.zeros((gh, gw), dtype=np.uint16)
     cell_sum_h = np.zeros((gh, gw), dtype=np.float32)
 
-    # Convert to cell indices
     ix = np.floor((xp - origin_x) / cfg.resolution_m).astype(np.int32)
     iy = np.floor((yp - origin_y) / cfg.resolution_m).astype(np.int32)
 
-    valid = (ix >= 0) & (ix < gw) & (iy >= 0) & (iy < gh) & np.isfinite(height)
+    valid = (ix >= 0) & (ix < gw) & (iy >= 0) & (iy < gh)
     ixv = ix[valid]
     iyv = iy[valid]
     hv = height[valid]
+
+    if ixv.size == 0:
+        raise RuntimeError("No projected points fall inside the configured occupancy map.")
+
     np.add.at(cell_hits, (iyv, ixv), 1)
     np.add.at(cell_sum_h, (iyv, ixv), hv)
 
-    # Sensor cell
     s_ix = int(np.floor((sx - origin_x) / cfg.resolution_m))
     s_iy = int(np.floor((sy - origin_y) / cfg.resolution_m))
 
     if debug:
-        print("MAP(ray2) dbg:")
+        print("MAP(ray) dbg:")
         print(f"  grid: {gw} x {gh} res: {cfg.resolution_m}")
-        print(f"  bounds x:[{origin_x:.3f},{(origin_x+gw*cfg.resolution_m):.3f}]  y:[{origin_y:.3f},{(origin_y+gh*cfg.resolution_m):.3f}]")
-        print(f"  sensor (u,v): ({sx:.3f}, {sy:.3f}) -> cell ({s_ix},{s_iy}) in-bounds={0 <= s_ix < gw and 0 <= s_iy < gh}")
-        print(f"  valid points: {ixv.size} / {ix.size}")
-        print(f"  height(valid) p50/p90/p99: ({float(np.percentile(hv,50)):.3f}, {float(np.percentile(hv,90)):.3f}, {float(np.percentile(hv,99)):.3f})")
+        print(
+            f"  bounds x:[{origin_x:.3f},{(origin_x + gw * cfg.resolution_m):.3f}] "
+            f"y:[{origin_y:.3f},{(origin_y + gh * cfg.resolution_m):.3f}]"
+        )
+        print(
+            f"  sensor (u,v): ({sx:.3f}, {sy:.3f}) -> cell ({s_ix},{s_iy}) "
+            f"in-bounds={0 <= s_ix < gw and 0 <= s_iy < gh}"
+        )
+        print(f"  valid projected points: {ixv.size} / {ix.size}")
+        print(
+            f"  height(valid) p50/p90/p99: "
+            f"({float(np.percentile(hv, 50)):.3f}, "
+            f"{float(np.percentile(hv, 90)):.3f}, "
+            f"{float(np.percentile(hv, 99)):.3f})"
+        )
 
     if not (0 <= s_ix < gw and 0 <= s_iy < gh):
-        # This should not happen with the bounds logic, but keep safe.
-        if debug:
-            print("  Sensor out of bounds even after bounds include it; check plane orientation.")
-        return grid
+        raise RuntimeError("Sensor origin is outside the occupancy map. Increase grid size or check frame convention.")
 
-    # ---- 1) Per-cell max height (this is the key improvement) ----
-    maxH = np.full((gh, gw), -np.inf, dtype=np.float32)
-    np.maximum.at(maxH, (iyv, ixv), hv)
+    max_h = np.full((gh, gw), -np.inf, dtype=np.float32)
+    np.maximum.at(max_h, (iyv, ixv), hv)
+    observed = np.isfinite(max_h)
 
-    observed = np.isfinite(maxH)
+    mean_h = np.zeros_like(cell_sum_h)
+    hit_mask = cell_hits > 0
+    mean_h[hit_mask] = cell_sum_h[hit_mask] / cell_hits[hit_mask]
 
-    min_hits_for_occ = 3  # try 2..6 (0.1m usually 3-5)
-    min_hits_for_free = 10  # optional
-    meanH = np.zeros_like(cell_sum_h)
-    mask = cell_hits > 0
-    meanH[mask] = cell_sum_h[mask] / cell_hits[mask]
-    occ_cells = observed & (cell_hits >= min_hits_for_occ) & (meanH >= cfg.occupied_height_m)
-    free_cells = observed & (cell_hits >= min_hits_for_free) & (maxH <= cfg.free_height_m)
+    min_hits_for_occ = 3
+    min_hits_for_free = 5
 
-    # Seed floor-ish cells as free (optional but helpful)
-    grid[free_cells] = 0
+    occ_cells = observed & (cell_hits >= min_hits_for_occ) & (mean_h >= cfg.occupied_height_m)
+    floor_cells = observed & (cell_hits >= min_hits_for_free) & (max_h <= cfg.free_height_m)
 
-    # ---- 2) Raycast ONLY to occupied cells ----
-    occ_y, occ_x = np.where(occ_cells)
+    # Seed directly observed floor cells as free.
+    grid[floor_cells] = 0
 
+    # Carve free space along rays to every observed cell, not only to occupied cells.
+    obs_y, obs_x = np.where(observed)
     free_written = int((grid == 0).sum())
-    occ_written = 0
-    rays = 0
+    observed_rays = 0
 
-    for ex, ey in zip(occ_x.tolist(), occ_y.tolist()):
-        rays += 1
+    for ex, ey in zip(obs_x.tolist(), obs_y.tolist()):
+        observed_rays += 1
         cells = list(bresenham(s_ix, s_iy, ex, ey))
         if not cells:
             continue
 
-        # Free along ray except endpoint
         for cx, cy in cells[:-1]:
-            if grid[cy, cx] == -1:
+            if 0 <= cx < gw and 0 <= cy < gh and grid[cy, cx] == -1:
                 grid[cy, cx] = 0
                 free_written += 1
 
-        # Endpoint occupied
-        lx, ly = cells[-1]
-        if grid[ly, lx] != 100:
-            grid[ly, lx] = 100
-            occ_written += 1
+    # Mark occupied endpoints after free-space carving.
+    occ_y, occ_x = np.where(occ_cells)
+    occ_written = 0
+
+    for ex, ey in zip(occ_x.tolist(), occ_y.tolist()):
+        if 0 <= ex < gw and 0 <= ey < gh:
+            if grid[ey, ex] != 100:
+                occ_written += 1
+            grid[ey, ex] = 100
+
     if debug:
         uniq, cnt = np.unique(grid, return_counts=True)
-        print("=========== Before filter ============")
-        print(f"  occupied targets: {occ_x.size} rays:{rays} free_written:{free_written} occ_written:{occ_written}")
-        print("  GRID unique:", list(zip(uniq.tolist(), cnt.tolist())))
         h = cell_hits[observed]
+        print("=========== Before occupied close ============")
         print(
-            f"  hits(observed) p50/p90/p99: ({int(np.percentile(h, 50))}, {int(np.percentile(h, 90))}, {int(np.percentile(h, 99))})")
+            f"  observed cells:{obs_x.size} observed_rays:{observed_rays} "
+            f"occupied cells:{occ_x.size} free_written:{free_written} occ_written:{occ_written}"
+        )
+        print("  GRID unique:", list(zip(uniq.tolist(), cnt.tolist())))
+        print(
+            f"  hits(observed) p50/p90/p99: "
+            f"({int(np.percentile(h, 50))}, {int(np.percentile(h, 90))}, {int(np.percentile(h, 99))})"
+        )
 
+    # Lightly connect fragmented obstacle pixels.
     occ_img = (grid == 100).astype(np.uint8) * 255
     kernel = np.ones((3, 3), np.uint8)
     occ_img = cv2.morphologyEx(occ_img, cv2.MORPH_CLOSE, kernel, iterations=1)
-    grid[(occ_img > 0)] = 100
+    grid[occ_img > 0] = 100
 
     if debug:
-        print("=========== After filter ============")
         uniq, cnt = np.unique(grid, return_counts=True)
-        print(f"  occupied targets: {occ_x.size} rays:{rays} free_written:{free_written} occ_written:{occ_written}")
+        print("=========== After occupied close ============")
         print("  GRID unique:", list(zip(uniq.tolist(), cnt.tolist())))
-        h = cell_hits[observed]
-        print(
-            f"  hits(observed) p50/p90/p99: ({int(np.percentile(h, 50))}, {int(np.percentile(h, 90))}, {int(np.percentile(h, 99))})")
 
     return grid
 
@@ -641,11 +664,6 @@ def main():
     overlay_depth_grid_xyz_base(depth_m, intr, grid_n=15, out_path=os.path.join(args.out_dir,"depth_grid_xyz.png"), max_z=35.0)
 
     pts = cloud_generator.depth_to_cloud_to_base_xyz(depth_m, intr)
-    R = rot_y(-30.0)  # 30 deg down
-    t = np.array([0.0, 0.0, 10.0], np.float32)  # camera at +10m in Z-up world
-
-    pts_w = cloud_generator.transform_points(pts, R, t)
-    cam_o_w = t.copy()  # camera origin in world
     print(f"PTS: total={pts.shape[0]} stride={cfg.stride} (inf={cfg.inference_width}x{cfg.inference_height})")
 
     # Assume pts are in base_xyz: x forward, y left, z up.
@@ -679,7 +697,7 @@ def main():
         raise RuntimeError("Floor plane fit failed (no good hypothesis).")
 
     n0, d0, inliers0 = plane
-    if n0[1] > 0:
+    if n0[2] < 0:
         n0 = -n0
         d0 = -d0
     med0 = float(np.median(np.abs(pts_floor[inliers0] @ n0 + d0)))
@@ -687,7 +705,7 @@ def main():
 
     # refine with SVD on inliers
     n, d = refine_plane_svd(pts_floor[inliers0])
-    if n[1] > 0:
+    if n[2] < 0:
         n = -n
         d = -d
     med = float(np.median(np.abs(pts_floor[inliers0] @ n + d)))
@@ -716,6 +734,7 @@ def main():
     z = float(depth_m[cy_pix, cx_pix])
 
     if np.isfinite(z) and z > 1e-6:
+        # base_xyz convention: X forward, Y left, Z up
         X = z
         Y = -(cx_pix - intr.cx) * z / intr.fx
         Z = -(cy_pix - intr.cy) * z / intr.fy
@@ -727,29 +746,63 @@ def main():
         yp_c = float(p_proj_c @ v)
 
         print(f"SANITY center depth z: {z} finite: True")
-        print(f"SANITY center pixel -> p={p}  (u,v)=({xp_c:.3f},{yp_c:.3f})  signed={signed_c:.3f}")
+        print(f"SANITY center pixel -> base p={p}  (u,v)=({xp_c:.3f},{yp_c:.3f})  signed={signed_c:.3f}")
         print("SANITY yp>0 means forward:", yp_c > 0.0)
     else:
         print("SANITY center depth invalid:", z)
     print("PTS base xyz min:", np.nanmin(pts, axis=0), "max:", np.nanmax(pts, axis=0))
-    print("PTS world xyz min:", np.nanmin(pts_w, axis=0), "max:", np.nanmax(pts_w, axis=0))
-    print("cam_o_w:", cam_o_w)
-    cam_o_base = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
-    occ = build_occupancy_raycast(
-        pts,
-        n,
-        d,
-        u,
-        v,
-        cfg,
-        sensor_origin=cam_o_base,
-        debug=True,
-    )
+    # Keep occupancy generation in base_xyz. Do not mix base-frame points with world-frame sensor origin.
+    cam_o_base = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    occ = build_occupancy_raycast(pts, n, d, u, v, cfg, sensor_origin=cam_o_base, debug=True)
+
+    import json
+
+    # Save raw occupancy grid.
+    # Shape is (height_cells, width_cells), indexed as grid[row, col].
+    np.save(os.path.join(args.out_dir, "occ_grid_int8.npy"), occ)
+
+    occ_float = np.full(occ.shape, 0.5, dtype=np.float32)
+    occ_float[occ == 0] = 0.0
+    occ_float[occ >= 50] = 1.0
+    np.save(os.path.join(args.out_dir, "occ_grid_float.npy"), occ_float)
+
+    metadata = {
+        "format": "local_floor_plane_occupancy_grid",
+        "grid_shape_hw": [int(occ.shape[0]), int(occ.shape[1])],
+        "height_cells": int(occ.shape[0]),
+        "width_cells": int(occ.shape[1]),
+        "resolution_m_per_cell": float(cfg.resolution_m),
+        "width_m": float(occ.shape[1] * cfg.resolution_m),
+        "height_m": float(occ.shape[0] * cfg.resolution_m),
+        "values_int8": {
+            "-1": "unknown",
+            "0": "free",
+            "100": "occupied"
+        },
+        "values_float": {
+            "0.0": "free",
+            "0.5": "unknown",
+            "1.0": "occupied"
+        },
+        "coordinate_frame": "local_floor_plane",
+        "image_convention": {
+            "occ_grid_int8.npy": "row-major grid[row, col], row increases forward in internal map before png flip",
+            "occ_map.png": "visualization only, flipped vertically for display"
+        },
+        "note": "Use the .npy grid and this metadata for metric distances. Do not measure from the PNG unless using the same resolution and flip convention."
+    }
+
+    with open(os.path.join(args.out_dir, "occ_metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
 
     png = occ_to_png(occ)
     png = np.flipud(png)
     cv2.imwrite(os.path.join(args.out_dir, "occ_map.png"), png)
+
+    scale = 6
+    png_big = cv2.resize(png, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite(os.path.join(args.out_dir, "occ_map_big.png"), png_big)
     print("Saved outputs to:", args.out_dir)
 
 

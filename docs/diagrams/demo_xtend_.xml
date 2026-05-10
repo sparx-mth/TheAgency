@@ -1,6 +1,6 @@
 <mxfile host="app.diagrams.net">
   <diagram id="xtend-arch-1" name="XTEND Pipeline">
-    <mxGraphModel dx="1581" dy="939" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+    <mxGraphModel dx="1312" dy="1281" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -13,7 +13,7 @@
         <mxCell id="depth" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" value="&lt;b&gt;Depth Processor&lt;/b&gt;&lt;br&gt;Depth Anything / DA3&lt;br&gt;Sub: /xtend/image_raw&lt;br&gt;Pub: /xtend/depth_m" vertex="1">
           <mxGeometry height="120" width="220" x="720" y="70" as="geometry" />
         </mxCell>
-        <mxCell id="optflow" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" value="&lt;b&gt;Optical Flow + Localization&lt;/b&gt;&lt;br&gt;online_rgbd_localization_node.py&lt;br&gt;Sub: /xtend/image_raw, /xtend/depth_m, /xtend/camera_info, /xtend/local_telemetry&lt;br&gt;Pub: /flow_depth/pose_est (or /odom)" vertex="1">
+        <mxCell id="optflow" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" value="&lt;b&gt;Optical Flow + Localization&lt;/b&gt;&lt;br&gt;flow_depth_velocity_node.py,&amp;nbsp;&lt;div&gt;Sub: /xtend/image_raw, /xtend/depth_m, /xtend/camera_info, /xtend/local_telemetry&lt;br&gt;Pub: /flow_depth/pose_est (or /odom)&lt;/div&gt;" vertex="1">
           <mxGeometry height="150" width="270" x="720" y="270" as="geometry" />
         </mxCell>
         <mxCell id="planner" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" value="&lt;b&gt;Planner&lt;/b&gt;&lt;br&gt;Occupancy / Path Planning (Falcon)&lt;br&gt;Sub: /xtend/image_raw, /xtend/depth_m, /flow_depth/pose_est&lt;br&gt;Pub: /cmd_vel (Twist)" vertex="1">
