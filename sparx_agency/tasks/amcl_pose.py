@@ -7,11 +7,11 @@ from typing import Any
 import numpy as np
 from numpy import dtype, ndarray, float64
 
-from tasks.sim.grid import generate_world, sample_robot_location, sample_robot_orientation
+from tasks.localization.amcl import ray_cast_lut_pose, amcl_estimator
+from tasks.sim.grid import generate_world, sample_robot_location, sample_robot_orientation, ray_cast_from_pose
 
 SENSOR_MAX_RANGE = 60
 SENSOR_NOISE_SCALE = 0.0
-SIGMA = 0.5
 FOV_DEG = 120.0
 NUM_ANGLES = 32
 NUM_BEAMS = 64
@@ -70,258 +70,6 @@ def make_fov_angles(fov_rad: float, num_beams: int = 9) -> ndarray[tuple[Any, ..
     if num_beams <= 0:
         raise ValueError("Number of beams must be positive.")
     return np.linspace(-fov_rad / 2, fov_rad / 2, num_beams)
-
-
-def ray_cast_from_pose(i, j, theta, grid, beam_angles, max_range, step: float=0.1, noise_scale: float = 0.0):
-    """
-    Performs ray casting from a given pose on a grid map.
-
-    This function simulates the process of ray casting, allowing one to evaluate
-    distances to obstacles in a grid-based environment. It loops through a set of
-    beam angles, projecting rays until either an obstacle is encountered or the
-    maximum range is exceeded. Optionally, it adds Gaussian noise to the simulated
-    measurements for more realistic scenarios.
-
-    Parameters:
-        i (int): The x-coordinate of the pose in the grid map.
-        j (int): The y-coordinate of the pose in the grid map.
-        theta (float): The orientation of the pose in radians.
-        grid (ndarray): 2D array representing the environment grid, where values
-            of 1 represent obstacles and values of 0 represent free space.
-        beam_angles (Iterable[float]): A list of relative beam angles (radians)
-            to cast rays from the pose.
-        max_range (float): The maximum sensing range for the rays.
-        step (float): Step size along each ray for incremental checking; must
-            be greater than 0. Defaults to 0.1.
-        noise_scale (float): Standard deviation of the Gaussian noise added to
-            measurements; defaults to 0.0.
-
-    Returns:
-        ndarray: A 1D array of distances measured along each ray, representing
-            the distance to the nearest obstacle for each beam angle, up to
-            the maximum range.
-
-    Raises:
-        ValueError: If the `step` size is not positive.
-        ValueError: If `max_range` is not positive.
-    """
-    if step <= 0:
-        raise ValueError("Step size must be positive.")
-    if max_range <= 0:
-        raise ValueError("Max range must be positive.")
-
-    m, n = grid.shape
-    distances = []
-    for rel_angle in beam_angles:
-        angle = theta + rel_angle
-        dist = 0.0
-        while dist < max_range:
-            x = int(round(i + dist * math.cos(angle)))
-            y = int(round(j + dist * math.sin(angle)))
-
-            if x < 0 or y < 0 or x >= m or y >= n:
-                dist += max_range
-                break
-            if grid[x, y] == 1:
-                break
-
-            dist += step
-
-        distances.append(dist)
-    z_measured_pose = np.array(distances)
-    noise = np.random.normal(0, noise_scale, size=z_measured_pose.shape)
-    z_measured_pose += noise
-    return z_measured_pose
-
-
-def ray_cast_lut_pose(grid, orientations, beam_angles, max_range, step=0.1):
-    """
-    Calculates a ray-casting lookup table (LUT) for a grid that approximates the distance from each cell to its nearest
-    obstacle along specified orientations and beam angles.
-
-    Parameters:
-    grid: ndarray
-        2D numpy array representing the occupancy grid. Cells with a value of 1 indicate obstacles, and cells
-        with a value of 0 indicate free space.
-    orientations: Sequence[float]
-        A sequence of angles in radians specifying the orientations to consider for ray-casting.
-    beam_angles: Sequence[float]
-        A sequence of relative beam angles in radians to be used for ray-casting relative to each orientation.
-    max_range: float
-        The maximum distance to consider for a ray before it is terminated if no obstacle is encountered.
-    step: float, optional
-        The incremental step along the ray (in grid units). Default is 0.1.
-
-    Returns:
-    ndarray
-        A 4D numpy array representing the ray-casting lookup table (LUT). The shape of the array is
-        (grid_height, grid_width, len(orientations), len(beam_angles)), where each entry indicates the
-        distance from the corresponding grid cell to the nearest obstacle along the associated orientation
-        and beam angle. If no obstacle is encountered within `max_range`, the value will be set to infinity.
-    Raises:
-    ValueError
-        If `step` is non-positive or if `max_range` is non-positive.
-    """
-    if step <= 0:
-        raise ValueError("Step size must be positive.")
-    if max_range <= 0:
-        raise ValueError("Max range must be positive.")
-
-    m, n = grid.shape
-
-    lut = np.ones((m, n, len(orientations), len(beam_angles)), dtype=np.float32) * np.inf
-
-    for i in range(m):
-        for j in range(n):
-            if grid[i, j] == 1:
-                continue
-
-            for k, theta in enumerate(orientations):
-                for b, rel in enumerate(beam_angles):
-                    angle = theta + rel
-                    dist = 0.0
-
-                    while dist < max_range:
-                        x = int(round(i + dist * math.cos(angle)))
-                        y = int(round(j + dist * math.sin(angle)))
-
-                        if x < 0 or y < 0 or x >= m or y >= n:
-                            dist += max_range
-                            break
-                        if grid[x, y] == 1:
-                            break
-
-                        dist += step
-
-                    lut[i, j, k, b] = dist
-
-    return lut
-
-
-def range_likelihood_lut(z, lut, sigma):
-    """
-    Computes the likelihood values for a given range measurement 'z' using a look-up
-    table 'lut' and a standard deviation 'sigma'. The function evaluates the
-    Gaussian likelihood over a set of errors derived from the differences
-    between the input measurement and the LUT values along the last axis.
-
-    Parameters:
-    z : np.ndarray
-        Input range measurement array.
-    lut : np.ndarray
-        Look-up table containing reference values.
-    sigma : np.ndarray
-        Standard deviation for the Gaussian likelihood computation.
-
-    Returns:
-    np.ndarray
-        The computed likelihood values as a NumPy array.
-    Raises:
-    ValueError
-        If `sigma` is non-positive.
-    """
-    if sigma <= 0:
-        raise ValueError("Sigma must be positive.")
-    err = lut - z[None, None, None, :]
-    return np.exp(-0.5 * np.sum((err / sigma) ** 2, axis=3))
-
-
-def measurement_update_pose(bel, lut, z, sigma, occupancy):
-    """
-    Updates the belief of the pose based on a measurement using a likelihood function.
-
-    The function computes the updated belief by incorporating the measurement's
-    likelihood into the prior belief and normalizing the result. The likelihood
-    for each pose is determined using a precomputed lookup table (LUT) and a
-    given measurement. Any poses marked as occupied are assigned a likelihood of 0.
-
-    Parameters:
-    ----------
-    bel : numpy.ndarray
-        The prior belief distribution for the pose.
-
-    lut : numpy.ndarray
-        Precomputed lookup table used to compute the measurement likelihood.
-
-    z : float
-        The actual measurement value.
-
-    sigma : float
-        The standard deviation used in the likelihood computation.
-
-    occupancy : numpy.ndarray
-        A binary mask marking positions that are occupied (1) or free (0).
-
-    Returns:
-    -------
-    numpy.ndarray
-        The updated belief distribution for the pose.
-    """
-    likelihood = range_likelihood_lut(z, lut, sigma)
-    likelihood[occupancy == 1] = 0.0
-
-    bel_new = bel * likelihood
-    s = bel_new.sum()
-    if s > 0:
-        bel_new /= s
-    return bel_new
-
-
-def init_belief(args,
-                orientations: ndarray[tuple[Any, ...], dtype[float64]],
-                robot_loc_pred: ndarray[tuple[Any, ...], dtype[float64]],
-                robot_orientation_pred: float) -> ndarray[tuple[int, ...], dtype[float64]]:
-    """
-    Initializes the belief state of a robot's location and orientation on a discrete grid map, using
-    a Gaussian distribution centered around a predicted position and orientation.
-
-    Parameters:
-        args: A namespace or object containing the necessary attributes such as `map_lat`, `map_long`,
-            `num_angles`, `pred_offset_y`, and `pred_offset_x`. These attributes define the grid
-            map's dimensions, angular discretization, and spatial prediction offset factors.
-        orientations (ndarray[tuple[Any, ...], dtype[float64]]): Array of possible orientation
-            angles for the robot, used to determine the angular prediction index.
-        robot_loc_pred (ndarray[tuple[Any, ...], dtype[float64]]): Predicted [y, x] location of the
-            robot on the grid.
-        robot_orientation_pred (float): Predicted orientation of the robot in radians.
-
-    Returns:
-        ndarray[tuple[int, ...], dtype[float64]]: A 3-dimensional belief tensor of size
-        (map_lat, map_long, num_angles), representing the robot's belief state over all
-        possible positions and orientations. The tensor is normalized so that its sum is 1.
-    """
-    belief = np.zeros((args.map_lat, args.map_long, args.num_angles))
-
-    # Find the orientation index closest to prediction
-    orientation_diffs = np.abs(orientations - robot_orientation_pred)
-    orientation_pred_idx = np.argmin(orientation_diffs)
-
-    # Apply gaussian around prediction
-    sigma_spatial = np.array([args.pred_offset_y * 2, args.pred_offset_x * 2])
-    sigma_angular = 1.0
-
-    for i in range(args.map_lat):
-        for j in range(args.map_long):
-            for k in range(args.num_angles):
-                # Spatial distance
-                offset = np.array([i - robot_loc_pred[0], j - robot_loc_pred[1]])
-                # spatial_dist = np.sqrt((i - robot_loc_pred[0]) ** 2 + (j - robot_loc_pred[1]) ** 2)
-
-                # Angular distance (handle wrapping)
-                angular_dist = min(abs(k - orientation_pred_idx),
-                                   args.num_angles - abs(k - orientation_pred_idx))
-
-                # Gaussian weights
-                spatial_weight = np.linalg.norm(np.exp(-0.5 * (offset / sigma_spatial) ** 2))
-                # spatial_weight = np.exp(-0.5 * (spatial_dist / sigma_spatial) ** 2)
-                angular_weight = np.exp(-0.5 * (angular_dist / sigma_angular) ** 2)
-
-                belief[i, j, k] = spatial_weight * angular_weight
-
-    belief /= belief.sum()
-    return belief
-
-
 
 
 def randomize_scenario(args, orientations: ndarray[tuple[Any, ...], dtype[float64]]) -> tuple[
@@ -395,19 +143,15 @@ def main(args):
             noise_scale=args.noise_scale
         )
 
-        belief = init_belief(args, orientations, prediction, robot_orientation_gt)
-
-        belief = measurement_update_pose(
-            belief, lut, z_measured_pose, sigma=args.sigma, occupancy=world
-        )
-
-        idx = np.unravel_index(np.argmax(belief), belief.shape)
+        robot_loc_estimate, robot_orientation_estimate = amcl_estimator(lut, orientations, prediction,
+                                                                        robot_orientation_gt, world, z_measured_pose,
+                                                                        prediction_uncertainty=(args.pred_offset_y*2, args.pred_offset_x*2))
 
         logger.info(f"Prediction: {prediction.tolist()}")
-        logger.info(f"MAP {[int(e) for e in idx[:2]]} θ (deg): {math.degrees(orientations[idx[2]])}")
+        logger.info(f"MAP {robot_loc_estimate.tolist()} θ (deg): {math.degrees(robot_orientation_estimate)}")
         logger.info(f"GT {robot_loc_gt} θ (deg): {math.degrees(robot_orientation_gt):.2f}")
-        correct = int(np.allclose(robot_loc_gt, np.array(idx[:2]))) and np.isclose(robot_orientation_gt,
-                                                                                   orientations[idx[2]])
+        correct = (int(np.allclose(robot_loc_gt, robot_loc_estimate))
+                   and np.isclose(robot_orientation_gt, robot_orientation_estimate))
         logger.info(f"Correct: {correct}")
         correct_estimates += correct
         failed_estimates = run - correct_estimates + 1
@@ -460,8 +204,6 @@ def parse_args():
                         help=f'Maximum range for ray casting (default: {SENSOR_MAX_RANGE})')
     parser.add_argument('--noise-scale', type=float, default=SENSOR_NOISE_SCALE,
                         help=f'Noise level added to ray casting (default: {SENSOR_NOISE_SCALE})')
-    parser.add_argument('--sigma', type=float, default=SIGMA,
-                        help=f'Sigma for likelihood calculation (default: {SIGMA})')
     parser.add_argument('--pred-offset-x', type=float, default=PREDICTION_OFFSET_X,
                         help=f'prediction error (default: {PREDICTION_OFFSET_X})')
     parser.add_argument('--pred-offset-y', type=float, default=PREDICTION_OFFSET_Y,

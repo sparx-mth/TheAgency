@@ -200,3 +200,65 @@ if __name__ == "__main__":
     loc = sample_robot_location(world)
     orientation = sample_robot_orientation(np.linspace(-math.pi, math.pi, 32, endpoint=False))
     show_world_map(world, location=(loc[0], loc[1]), orientation=orientation, title='World Map with Robot')
+
+
+def ray_cast_from_pose(i, j, theta, grid, beam_angles, max_range, step: float=0.1, noise_scale: float = 0.0):
+    """
+    Performs ray casting from a given pose on a grid map.
+
+    This function simulates the process of ray casting, allowing one to evaluate
+    distances to obstacles in a grid-based environment. It loops through a set of
+    beam angles, projecting rays until either an obstacle is encountered or the
+    maximum range is exceeded. Optionally, it adds Gaussian noise to the simulated
+    measurements for more realistic scenarios.
+
+    Parameters:
+        i (int): The x-coordinate of the pose in the grid map.
+        j (int): The y-coordinate of the pose in the grid map.
+        theta (float): The orientation of the pose in radians.
+        grid (ndarray): 2D array representing the environment grid, where values
+            of 1 represent obstacles and values of 0 represent free space.
+        beam_angles (Iterable[float]): A list of relative beam angles (radians)
+            to cast rays from the pose.
+        max_range (float): The maximum sensing range for the rays.
+        step (float): Step size along each ray for incremental checking; must
+            be greater than 0. Defaults to 0.1.
+        noise_scale (float): Standard deviation of the Gaussian noise added to
+            measurements; defaults to 0.0.
+
+    Returns:
+        ndarray: A 1D array of distances measured along each ray, representing
+            the distance to the nearest obstacle for each beam angle, up to
+            the maximum range.
+
+    Raises:
+        ValueError: If the `step` size is not positive.
+        ValueError: If `max_range` is not positive.
+    """
+    if step <= 0:
+        raise ValueError("Step size must be positive.")
+    if max_range <= 0:
+        raise ValueError("Max range must be positive.")
+
+    m, n = grid.shape
+    distances = []
+    for rel_angle in beam_angles:
+        angle = theta + rel_angle
+        dist = 0.0
+        while dist < max_range:
+            x = int(round(i + dist * math.cos(angle)))
+            y = int(round(j + dist * math.sin(angle)))
+
+            if x < 0 or y < 0 or x >= m or y >= n:
+                dist += max_range
+                break
+            if grid[x, y] == 1:
+                break
+
+            dist += step
+
+        distances.append(dist)
+    z_measured_pose = np.array(distances)
+    noise = np.random.normal(0, noise_scale, size=z_measured_pose.shape)
+    z_measured_pose += noise
+    return z_measured_pose
