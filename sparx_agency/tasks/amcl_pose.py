@@ -8,7 +8,8 @@ import numpy as np
 from numpy import dtype, ndarray, float64
 
 from tasks.localization.amcl import ray_cast_lut_pose, amcl_estimator
-from tasks.sim.grid import generate_world, sample_robot_location, sample_robot_orientation, ray_cast_from_pose
+from tasks.sim.grid import generate_world, sample_robot_location, sample_robot_orientation, ray_cast_from_pose, \
+    show_world_map
 
 SENSOR_MAX_RANGE = 60
 SENSOR_NOISE_SCALE = 0.0
@@ -17,9 +18,10 @@ NUM_ANGLES = 32
 NUM_BEAMS = 64
 MAP_LATERAL_SIZE = 16
 MAP_LONGITUDE_SIZE = 64
-NUM_SIMULATION_RUNS = 1000
+NUM_SIMULATION_RUNS = 1
 PREDICTION_OFFSET_X = MAP_LONGITUDE_SIZE // 8
 PREDICTION_OFFSET_Y = MAP_LATERAL_SIZE // 8
+SHOW_MAP = True
 
 
 def make_orientations(num_angles: int) -> ndarray[tuple[Any, ...], dtype[float64]]:
@@ -167,12 +169,15 @@ def main(args):
         #     show_world_map(world, location=idx[:2], orientation=orientations[idx[2]],title='World Map with Robot Estimated')
         #     print()
 
+        if SHOW_MAP:
+            show_world_map(world, location=(robot_loc_gt[0], robot_loc_gt[1]), orientation=robot_orientation_gt, title='World Map with Robot GT')
+            show_world_map(world, location=(robot_loc_estimate[0], robot_loc_estimate[1]), orientation=robot_orientation_estimate, title='World Map with Robot Estimated')
+
     logger.info(f"Correct estimates: {correct_estimates}")
     logger.info(f"Failed estimates: {failed_estimates}")
     logger.info(f"Accuracy: {correct_estimates / num_runs * 100:.2f}%")
 
-    # show_world_map(world, location=robot_loc_gt, title='World Map with Robot GT')
-    # show_world_map(world, location=robot_map_estimate, title='World Map with Robot Estimated')
+
 
 
 def get_logger(name, level):
