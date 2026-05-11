@@ -1,5 +1,7 @@
 import numpy as np
 import cv2
+import yaml
+from sensor_msgs.msg import CameraInfo
 
 def depth_to_vis_u8(depth_m: np.ndarray, clip_min=0.3, clip_max=50.0) -> np.ndarray:
     d = depth_m.copy().astype(np.float32)
@@ -36,3 +38,21 @@ def make_depth_grid_vis(depth_m: np.ndarray, grid_w: int, grid_h: int,
         cv2.line(colored, (0, y), (W - 1, y), (50, 50, 50), 1)
 
     return colored
+
+def load_camera_info_from_yaml(yaml_path: str, frame_id: str) -> CameraInfo:
+    with open(yaml_path, "r") as f:
+        data = yaml.safe_load(f)
+
+    msg = CameraInfo()
+    msg.header.frame_id = frame_id
+
+    msg.width = int(data["image_width"])
+    msg.height = int(data["image_height"])
+
+    msg.distortion_model = data.get("distortion_model", "plumb_bob")
+    msg.d = list(data["distortion_coefficients"]["data"])
+    msg.k = list(data["camera_matrix"]["data"])
+    msg.r = list(data["rectification_matrix"]["data"])
+    msg.p = list(data["projection_matrix"]["data"])
+
+    return msg

@@ -7,15 +7,16 @@ from pathlib import Path
 
 import rclpy
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
-from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image, CameraInfo
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sparx_agency.robots.XTEND.xtend_online_bridge_base import OnlineXtendBridgeBase
 from sparx_agency.robots.XTEND.xtend_rtsp_image_publisher import LatestFrameGrabber
+from sparx_agency.robots.common.helpers import load_camera_info_from_yaml
 
 
 class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
-    """Online XTEND bridge that publishes cropped RTSP frames to /xtend/image_raw."""
+    """Online XTEND bridge that publishes cropped RTSP frames and matching CameraInfo."""
 
     def __init__(
         self,
@@ -25,7 +26,9 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         robot_uid: str,
         rtsp_uri: str,
         *,
-        image_topic: str = "/xtend/image_raw",
+        image_topic: str = "/xtend/rgb",
+        camera_info_topic: str = "/xtend/camera_info",
+        camera_info_yaml: str | Path = "",
         frame_id: str = "xtend_camera",
         backend: str = "gstreamer",
         crop_left: int = 108,
@@ -52,6 +55,8 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
         self.rtsp_uri = rtsp_uri
         self.image_topic = image_topic
+        self.camera_info_topic = camera_info_topic
+        self.camera_info_yaml = Path(camera_info_yaml).expanduser()
         self.frame_id = frame_id
 
         self.crop_left = int(crop_left)
@@ -60,10 +65,35 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         self.crop_height = int(crop_height)
 
         self.bridge = CvBridge()
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+
+        camera_info_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+
         self.image_pub = self.ros_node.create_publisher(
             Image,
             self.image_topic,
-            qos_profile_sensor_data,
+            image_qos,
+        )
+
+        self.camera_info_pub = self.ros_node.create_publisher(
+            CameraInfo,
+            self.camera_info_topic,
+            camera_info_qos,
+        )
+        if not self.camera_info_yaml.exists():
+            raise FileNotFoundError(f"CameraInfo YAML not found: {self.camera_info_yaml}")
+
+        self.camera_info_msg = load_camera_info_from_yaml(
+            yaml_path=str(self.camera_info_yaml),
+            frame_id=self.frame_id,
         )
 
         self.grabber = LatestFrameGrabber(rtsp_uri, backend=backend)
@@ -71,10 +101,12 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
         print(f"[image] RTSP: {self.rtsp_uri}")
         print(f"[image] topic: {self.image_topic}")
+        print(f"[image] camera_info topic: {self.camera_info_topic}")
         print(
             f"[image] crop: x={self.crop_left}:{self.crop_left + self.crop_width}, "
             f"y={self.crop_top}:{self.crop_top + self.crop_height}"
         )
+
 
     async def image_publish_loop(self):
         sleep_time = 1.0 / max(self.frequency, 1e-6)
@@ -92,10 +124,16 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
                 if x0 < w and y0 < h and x1 > x0 and y1 > y0:
                     frame = frame[y0:y1, x0:x1].copy()
+                now_msg = self.ros_node.get_clock().now().to_msg()
 
                 msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-                msg.header.stamp = self.ros_node.get_clock().now().to_msg()
+                msg.header.stamp = now_msg
                 msg.header.frame_id = self.frame_id
+
+                self.camera_info_msg.header.stamp = now_msg
+                self.camera_info_msg.header.frame_id = self.frame_id
+
+                self.camera_info_pub.publish(self.camera_info_msg)
                 self.image_pub.publish(msg)
 
             await asyncio.sleep(sleep_time)
@@ -111,11 +149,13 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--frequency", type=float, default=15.0)
+    p.add_argument("--frequency", type=float, default=10.0)
     p.add_argument("--robot-uid", default="drnb177ede2")
     p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
 
-    p.add_argument("--image-topic", default="/xtend/image_raw")
+    p.add_argument("--image-topic", default="/xtend/rgb")
+    p.add_argument("--camera-info-topic", default="/xtend/camera_info")
+    p.add_argument("--camera-info-yaml", default="")
     p.add_argument("--frame-id", default="xtend_camera")
     p.add_argument("--backend", choices=["ffmpeg", "gstreamer", "default"], default="gstreamer")
 
@@ -147,6 +187,8 @@ async def async_main():
         robot_uid=args.robot_uid,
         rtsp_uri=args.rtsp_uri,
         image_topic=args.image_topic,
+        camera_info_topic=args.camera_info_topic,
+        camera_info_yaml=args.camera_info_yaml,
         frame_id=args.frame_id,
         backend=args.backend,
         crop_left=args.crop_left,

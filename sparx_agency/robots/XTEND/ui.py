@@ -11,7 +11,7 @@ from geometry_msgs.msg import Twist
 class DroneControlUI(Node):
     def __init__(self):
         super().__init__("drone_gui_publisher")
-        self.cmd_nav_pub = self.create_publisher(String, "/drone/cmd_nav", 10)
+        self.cmd_nav_pub = self.create_publisher(String, "/xtend/cmd_nav", 10)
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
         self.active_action = None

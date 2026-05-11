@@ -57,15 +57,8 @@ def invert_T(T: np.ndarray) -> np.ndarray:
 def make_detector(tag_family: str, nthreads: int = 2) -> Detector:
     if not tag_family:
         raise ValueError("tag_family is empty")
+    return Detector(families=tag_family, nthreads=int(nthreads),   quad_decimate=1.0,quad_sigma=0.8,refine_edges=True,decode_sharpening=0.6)
 
-    return Detector(
-        families=tag_family,
-        nthreads=int(nthreads),
-        quad_decimate=1.0,
-        quad_sigma=0.8,
-        refine_edges=True,
-        decode_sharpening=0.6,
-    )
 def solvepnp_ippe_square(
     corners_2d: np.ndarray,
     obj_pts_3d: np.ndarray,

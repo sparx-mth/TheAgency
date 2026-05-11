@@ -9,10 +9,9 @@ import numpy as np
 import yaml
 
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenham
-from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
-from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
-from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
+from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
+
 
 
 @dataclass
@@ -296,6 +295,11 @@ def overlay_depth_grid_xyz_base(
     cv2.imwrite(out_path, img)
     return img
 
+def colorize_depth_for_debug(depth_m: np.ndarray, max_depth_m: float) -> np.ndarray:
+    depth_clean = np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0)
+    depth_clipped = np.clip(depth_clean, 0.0, max_depth_m)
+    depth_norm = (depth_clipped / max_depth_m * 255.0).astype(np.uint8)
+    return cv2.applyColorMap(depth_norm, cv2.COLORMAP_MAGMA)
 
 def build_occupancy_raycast(
     pts: np.ndarray,
@@ -559,6 +563,10 @@ def main():
     ap.add_argument("--image", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--engine-path", required=True)
+    ap.add_argument("--calib-yaml", required=True)
+    ap.add_argument("--min-depth-m", type=float, default=0.20)
+    ap.add_argument("--max-depth-m", type=float, default=7.0)
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -578,57 +586,44 @@ def main():
     rgb_inf = cv2.resize(rgb, (cfg.inference_width, cfg.inference_height), interpolation=cv2.INTER_AREA)
     intr = resize_intrinsics(intr_full, cfg.inference_width, cfg.inference_height)
 
-    depth_model = DepthAnythingV2DepthModel(DepthAnythingV2Config())
+    print(f"[DA3] Loading engine: {args.engine_path}")
+    print(f"[DA3] Loading camera YAML: {args.calib_yaml}")
 
-    # ---- Full depth ----
-    depth_full_m = depth_model.infer_depth(rgb_inf).astype(np.float32)
-
-    # ---- Tiled depth ----
-    tile_cfg = TileCfg(
-        tile_w=640,
-        tile_h=384,
-        overlap_div=4,  # 25% overlap
-        model_w=518,
-        model_h=518,
-        global_norm_from_full_pass=True,
-    )
-    print(tile_cfg.tile_w, tile_cfg.tile_h, tile_cfg.overlap_x, tile_cfg.overlap_y, tile_cfg.step_x, tile_cfg.step_y)
-
-    depth_tiled_m, tiled_dbg = infer_depth_tiled(
-        rgb_full=rgb_inf,
-        intr_full=intr,  # only needed if your tiler does intrinsics per tile; ok to pass
-        depth_model=depth_model,
-        cfg=tile_cfg,
+    depth_model = DA3TensorRTModel(
+        engine_path=args.engine_path,
+        yaml_path=args.calib_yaml,
     )
 
-    # Choose which depth you use downstream for occupancy:
-    depth_m = depth_tiled_m  # or depth_full_m if you want baseline
+    # DA3 wrapper expects BGR in your existing XTEND DA3 script.
+    # Infer on the original-size BGR image, then resize depth to mapping inference size.
+    depth_raw_m = depth_model.infer_depth(bgr).astype(np.float32)
 
-    # ---- Comparison report (before masking) ----
-    # optional: compare only in valid range to avoid near-max clipped zones dominating
-    max_r = DepthAnythingV2Config().max_range_m
-    min_r = DepthAnythingV2Config().min_range_m
-    valid_for_compare = (
-            np.isfinite(depth_full_m) & np.isfinite(depth_tiled_m) &
-            (depth_full_m > (min_r + 0.05)) & (depth_full_m < (max_r - 0.5)) &
-            (depth_tiled_m > (min_r + 0.05)) & (depth_tiled_m < (max_r - 0.5))
+    if depth_raw_m.shape[:2] != (cfg.inference_height, cfg.inference_width):
+        depth_m = cv2.resize(
+            depth_raw_m,
+            (cfg.inference_width, cfg.inference_height),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(np.float32)
+    else:
+        depth_m = depth_raw_m.astype(np.float32)
+
+    # Keep RGB/intrinsics consistent with the depth resolution used for mapping.
+    rgb_inf = cv2.resize(
+        rgb,
+        (cfg.inference_width, cfg.inference_height),
+        interpolation=cv2.INTER_AREA,
     )
-    depth_compare_report(depth_full_m, depth_tiled_m, valid_mask=valid_for_compare, name_a="full", name_b="tiled")
+    intr = resize_intrinsics(intr_full, cfg.inference_width, cfg.inference_height)
 
-    # save visuals for both depth maps
-    vis_full, _ = depth_vis_u8(depth_full_m)
-    vis_tiled, _ = depth_vis_u8(depth_tiled_m)
-    cv2.imwrite(os.path.join(args.out_dir, "depth_full_vis.png"), vis_full)
-    cv2.imwrite(os.path.join(args.out_dir, "depth_tiled_vis.png"), vis_tiled)
-    save_depth_diff_visuals(args.out_dir, depth_full_m, depth_tiled_m, max_abs_m=2.0)
-
-    max_r = DepthAnythingV2Config().max_range_m
-    min_r = DepthAnythingV2Config().min_range_m
+    cv2.imwrite(
+        os.path.join(args.out_dir, "depth_da3_vis_raw.png"),
+        colorize_depth_for_debug(depth_m, max_depth_m=args.max_depth_m),
+    )
 
     valid_depth = (
             np.isfinite(depth_m) &
-            (depth_m > (min_r + 0.05)) &
-            (depth_m < (max_r - 0.5))
+            (depth_m > args.min_depth_m) &
+            (depth_m < args.max_depth_m)
     )
 
     raw_invalid_pct = float((~valid_depth).mean()) * 100.0
@@ -659,7 +654,6 @@ def main():
         print("DEPTH: all values are NaN/invalid")
 
     vis, vis_dbg = depth_vis_u8(depth_m)
-    print("DEPTH dbg:", vis_dbg)
     cv2.imwrite(os.path.join(args.out_dir, "depth_vis.png"), vis)
     overlay_depth_grid_xyz_base(depth_m, intr, grid_n=15, out_path=os.path.join(args.out_dir,"depth_grid_xyz.png"), max_z=35.0)
 

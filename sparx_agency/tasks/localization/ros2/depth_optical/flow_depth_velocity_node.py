@@ -118,7 +118,7 @@ class FlowDepthVelocityNode(Node):
         self.rgb_sub = message_filters.Subscriber(self, Image, image_topic)
         self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub], queue_size=50, slop=0.05
+            [self.rgb_sub, self.depth_sub], queue_size=50, slop=1.5
         )
         self.ts.registerCallback(self.sync_callback)
 

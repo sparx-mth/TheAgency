@@ -13,26 +13,9 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from sensor_msgs.srv import SetCameraInfo
-from rclpy.qos import qos_profile_sensor_data
 
-
-def load_camera_info_from_yaml(yaml_path: str, frame_id: str) -> CameraInfo:
-    with open(yaml_path, "r") as f:
-        data = yaml.safe_load(f)
-
-    msg = CameraInfo()
-    msg.header.frame_id = frame_id
-
-    msg.width = int(data["image_width"])
-    msg.height = int(data["image_height"])
-
-    msg.distortion_model = data.get("distortion_model", "plumb_bob")
-    msg.d = list(data["distortion_coefficients"]["data"])
-    msg.k = list(data["camera_matrix"]["data"])
-    msg.r = list(data["rectification_matrix"]["data"])
-    msg.p = list(data["projection_matrix"]["data"])
-
-    return msg
+from sparx_agency.robots.common.helpers import load_camera_info_from_yaml
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 class LatestFrameGrabber:
     def __init__(self, uri: str, backend: str):
@@ -48,14 +31,16 @@ class LatestFrameGrabber:
 
         self.cap = None
 
+        self.gst_lock = threading.Lock()
         self.gst_pipeline = None
         self.gst_appsink = None
         self.gst_available = False
-
-        if backend == "gstreamer":
-            self.open_gstreamer_native(uri)
-        else:
-            self.cap = self.open_capture(uri, backend)
+        self.Gst = None
+        #
+        # if backend == "gstreamer":
+        #     self.open_gstreamer_native(uri)
+        # else:
+        #     self.cap = self.open_capture(uri, backend)
 
     def open_capture(self, uri: str, backend: str):
         if backend == "ffmpeg":
@@ -82,42 +67,57 @@ class LatestFrameGrabber:
         Gst.init(None)
 
         pipeline_str = (
-            f"rtspsrc location={uri} latency=0 protocols=tcp ! "
+            f"rtspsrc location={uri} latency=100 protocols=tcp drop-on-latency=true ! "
             "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! "
             "video/x-raw,format=BGR ! "
             "appsink name=appsink emit-signals=false sync=false max-buffers=1 drop=true"
         )
 
-        # Retry loop to wait for the drone
-        connected = False
-        while not connected:
+        while True:
             pipeline = Gst.parse_launch(pipeline_str)
             appsink = pipeline.get_by_name("appsink")
 
+            if appsink is None:
+                pipeline.set_state(Gst.State.NULL)
+                raise RuntimeError("Failed to create appsink element")
+
             ret = pipeline.set_state(Gst.State.PLAYING)
 
-            # Check if the pipeline actually started
             if ret != Gst.StateChangeReturn.FAILURE:
+                with self.gst_lock:
+                    self.Gst = Gst
+                    self.gst_pipeline = pipeline
+                    self.gst_appsink = appsink
+                    self.gst_available = True
+
                 print(f"✓ GStreamer connected to {uri}")
-                connected = True
-                self.Gst = Gst
-                self.gst_pipeline = pipeline
-                self.gst_appsink = appsink
-                self.gst_available = True
-            else:
-                pipeline.set_state(Gst.State.NULL)
-                print(f"Waiting for drone RTSP stream at {uri}...")
-                time.sleep(2.0)  # Wait before retrying
+                return
+
+            pipeline.set_state(Gst.State.NULL)
+            print(f"[RTSP] Waiting for drone RTSP stream at {uri}...")
+            time.sleep(2.0)
 
     def start(self):
+        if self.running:
+            print("[RTSP] grabber already running")
+            return
+
         self.running = True
 
         if self.backend == "gstreamer":
-            self.thread = threading.Thread(target=self.gstreamer_loop, daemon=True)
+            self.open_gstreamer_native(self.uri)
+            self.thread = threading.Thread(
+                target=self.gstreamer_loop,
+                daemon=True,
+            )
+            self.thread.start()
         else:
-            self.thread = threading.Thread(target=self.opencv_loop, daemon=True)
-
-        self.thread.start()
+            self.cap = self.open_capture(self.uri, self.backend)
+            self.thread = threading.Thread(
+                target=self.opencv_loop,
+                daemon=True,
+            )
+            self.thread.start()
 
     def opencv_loop(self):
         while self.running:
@@ -132,27 +132,29 @@ class LatestFrameGrabber:
                 self.latest_stamp = time.time()
 
     def gstreamer_loop(self):
-        """Modified loop with a non-blocking check and auto-reconnect."""
         last_frame_time = time.time()
+        timeout_ns = int(0.5 * 1e9)
         print("Starting GStreamer frame consumer loop...")
 
         while self.running:
-            # We use 'try-pull-sample' with a timeout in nanoseconds (e.g., 0.1s)
-            # This prevents the loop from hanging if the drone is off
-            timeout_ns = 100 * 1000 * 1000  # 100ms
-            sample = self.gst_appsink.emit("try-pull-sample", timeout_ns)
+            with self.gst_lock:
+                appsink = self.gst_appsink
 
-            if sample is None:
-                # If no frame for 3 seconds, the stream is likely dead/not started
-                if time.time() - last_frame_time > 3.0:
-                    print(f"[Watchdog] No RTSP data for 3s. Re-triggering pipeline...")
-                    self.gst_pipeline.set_state(self.Gst.State.NULL)
-                    time.sleep(0.5)
-                    self.gst_pipeline.set_state(self.Gst.State.PLAYING)
-                    last_frame_time = time.time()  # Reset watchdog to wait for next attempt
+            if appsink is None:
+                time.sleep(0.1)
                 continue
 
-            # Frame found! Process it.
+            sample = appsink.emit("try-pull-sample", timeout_ns)
+
+            if sample is None:
+                if time.time() - last_frame_time > 3.0:
+                    print("[Watchdog] No RTSP data for 3s. Restarting pipeline...")
+                    self.reconnect_gstreamer()
+                    last_frame_time = time.time()
+                else:
+                    time.sleep(0.01)
+                continue
+
             buf = sample.get_buffer()
             caps = sample.get_caps()
             structure = caps.get_structure(0)
@@ -160,32 +162,45 @@ class LatestFrameGrabber:
             height = int(structure.get_value("height"))
 
             ok, mapinfo = buf.map(self.Gst.MapFlags.READ)
-            if ok:
-                try:
-                    data = np.frombuffer(mapinfo.data, dtype=np.uint8)
-                    frame = data.reshape((height, width, 3)).copy()
+            if not ok:
+                continue
 
-                    with self.lock:
-                        self.latest_frame = frame
-                        self.latest_stamp = time.time()
+            try:
+                data = np.frombuffer(mapinfo.data, dtype=np.uint8)
+                frame = data.reshape((height, width, 3)).copy()
 
-                    # Update watchdog
-                    last_frame_time = time.time()
-                finally:
-                    buf.unmap(mapinfo)
+                with self.lock:
+                    self.latest_frame = frame
+                    self.latest_stamp = time.time()
+
+                last_frame_time = time.time()
+
+            finally:
+                buf.unmap(mapinfo)
 
     def reconnect_gstreamer(self):
         """Cleanly stops and restarts the pipeline."""
         if self.gst_pipeline:
             self.gst_pipeline.set_state(self.Gst.State.NULL)
 
-        time.sleep(1.0)  # Small breather
+        print("[RTSP] Restarting GStreamer pipeline...")
 
-        try:
-            self.gst_pipeline.set_state(self.Gst.State.PLAYING)
-            print("GStreamer pipeline signaled to restart.")
-        except Exception as e:
-            print(f"Reconnect failed: {e}")
+        self.close_gstreamer_native()
+        time.sleep(0.5)
+        self.open_gstreamer_native(self.uri)
+
+    def close_gstreamer_native(self):
+        with self.gst_lock:
+            pipeline = self.gst_pipeline
+            self.gst_pipeline = None
+            self.gst_appsink = None
+            self.gst_available = False
+
+        if pipeline is not None:
+            try:
+                pipeline.set_state(self.Gst.State.NULL)
+            except Exception as exc:
+                print(f"[RTSP] Failed to close GStreamer pipeline: {exc}")
 
     def get_latest(self) -> Tuple[Optional[np.ndarray], float]:
         with self.lock:
@@ -220,16 +235,22 @@ class RtspImagePublisher(Node):
 
         self.args = args
         self.bridge = CvBridge()
+
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
         self.pub = self.create_publisher(
             Image,
             args.image_topic,
-            qos_profile_sensor_data,
+            qos,
         )
 
         self.camera_info_pub = self.create_publisher(
             CameraInfo,
             args.camera_info_topic,
-            qos_profile_sensor_data,
+            qos,
         )
 
         self.camera_info_msg = load_camera_info_from_yaml(

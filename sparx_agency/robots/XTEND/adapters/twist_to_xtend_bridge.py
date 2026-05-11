@@ -21,7 +21,7 @@ class TwistToXtendBridge(Node):
             10
         )
 
-        self.publisher_ = self.create_publisher(String, '/drone/cmd_nav', 10)
+        self.publisher_ = self.create_publisher(String, 'xtend/cmd_nav', 10)
         self.get_logger().info("Twist Bridge started: Mapping intensity to thrust and duration.")
 
     def twist_callback(self, msg):

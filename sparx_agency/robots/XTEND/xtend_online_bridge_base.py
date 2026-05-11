@@ -48,7 +48,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         frequency: float,
         robot_uid: str,
         *,
-        cmd_topic: str = "/drone/cmd_nav",
+        cmd_topic: str = "/xtend/cmd_nav",
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
         telemetry_frame_id: str = "odom",
@@ -390,7 +390,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         return False
 
     async def dynamic_executor(self):
-        print("ONLINE MODE: hold-style commands from /drone/cmd_nav")
+        print(f"ONLINE MODE: hold-style commands from {self.cmd_topic}")
 
         while True:
             command = await self.cmd_queue.get()
