@@ -65,7 +65,7 @@ class DepthProcessorNode(Node):
         #qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
+            depth=50,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
