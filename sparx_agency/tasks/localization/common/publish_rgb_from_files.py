@@ -10,6 +10,8 @@ import yaml
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+
 
 def load_camera_info_from_yaml(yaml_path: str, frame_id: str) -> CameraInfo:
     yaml_path = Path(yaml_path).expanduser()
@@ -117,11 +119,18 @@ class RgbFilePublisher(Node):
 
         if not self.rgb_paths:
             raise RuntimeError("No frames left after start/end/step filtering.")
+        
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
 
-        self.rgb_pub = self.create_publisher(Image, args.rgb_topic, 10)
+
+        self.rgb_pub = self.create_publisher(Image, args.rgb_topic, image_qos)
 
         # CameraInfo Publisher and Message Setup
-        self.cam_info_pub = self.create_publisher(CameraInfo, args.camera_info_topic, 10)
+        self.cam_info_pub = self.create_publisher(CameraInfo, args.camera_info_topic, image_qos)
 
         # Load CameraInfo from YAML instead of hard-coding calibration values
         self.cam_info_msg = load_camera_info_from_yaml(
@@ -142,6 +151,7 @@ class RgbFilePublisher(Node):
         self.idx = 0
         self.finished_once = False
 
+
         period = 1.0 / max(args.publish_hz, 1e-6)
         self.timer = self.create_timer(period, self.timer_cb)
 
@@ -150,6 +160,8 @@ class RgbFilePublisher(Node):
         self.get_logger().info(f"RGB topic: {args.rgb_topic}")
         self.get_logger().info(f"Publish Hz: {args.publish_hz}")
         self.get_logger().info(f"Loop: {args.loop}")
+
+
 
     def timer_cb(self):
         if self.idx >= len(self.rgb_paths):

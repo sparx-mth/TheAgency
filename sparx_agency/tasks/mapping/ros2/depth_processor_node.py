@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 import message_filters
@@ -62,21 +62,26 @@ class DepthProcessorNode(Node):
         self.apply_metric_focal_scaling = bool(self.get_parameter('apply_metric_focal_scaling').value)
         self.metric_scale_divisor = float(self.get_parameter('metric_scale_divisor').value)
 
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        #qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
 
         # ===== Model =====
         self.depth_model = DA3TensorRTModel(self.engine_path, self.config_yaml)
 
         # ===== Publishers =====
-        self.pub_depth = self.create_publisher(Image, self.pub_depth_topic, qos)
-        self.pub_debug = self.create_publisher(Image, self.pub_debug_topic, qos)
+        self.pub_depth = self.create_publisher(Image, self.pub_depth_topic, image_qos)
+        self.pub_debug = self.create_publisher(Image, self.pub_debug_topic, image_qos)
 
         # ===== Subscriber =====
         self.sub_image = self.create_subscription(
             Image,
             self.rgb_topic,
             self.image_callback,
-            qos
+            image_qos
         )
 
         self.get_logger().info('DepthProcessorNode started')

@@ -28,7 +28,7 @@ def generate_launch_description():
                 'csv_filename': "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv",
                 'image_topic': '/xtend/rgb',
                 'depth_topic': '/xtend/depth_m',
-                'camera_info_topic': '/xtend/camera_info',
+                'camera_calib_path': 'sparx_agency/tasks/localization/config/front_camera_calib.yaml',
                 'depth_scale': 0.8
             }],
             output='screen'

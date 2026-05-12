@@ -8,11 +8,13 @@ from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped 
 from cv_bridge import CvBridge
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import message_filters
 import csv
 import os
 import math  
 import yaml
+
 
 class FlowDepthVelocityNode(Node):
     """
@@ -121,19 +123,27 @@ class FlowDepthVelocityNode(Node):
             lk_levels=lk_levels,
         )
 
-        self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, 10)
-        #self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
-        self.create_subscription(Twist, '/simple_drone/gt_vel', self.gt_vel_callback, 10)
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
 
-        self.pose_sub = self.create_subscription(PoseStamped, pose_est_topic, self.pose_est_callback, 10)
+
+        self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, image_qos)
+        #self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
+        self.create_subscription(Twist, '/simple_drone/gt_vel', self.gt_vel_callback, image_qos)
+
+        self.pose_sub = self.create_subscription(PoseStamped, pose_est_topic, self.pose_est_callback, image_qos)
         # ------------------------------------------------
 
-        self.rgb_sub = message_filters.Subscriber(self, Image, image_topic)
-        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
+        self.rgb_sub = message_filters.Subscriber(self, Image, image_topic,qos_profile=image_qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic,qos_profile=image_qos)
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub], queue_size=50, slop=0.05
         )
         self.ts.registerCallback(self.sync_callback)
+
 
     
     def pose_est_callback(self, msg: PoseStamped):
