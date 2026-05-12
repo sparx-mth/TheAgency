@@ -16,7 +16,7 @@ from sensor_msgs.srv import SetCameraInfo
 
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from sparx_agency.robots.common.image_utils import pad_width_center
+from sparx_agency.robots.common.image_utils import pad_width_center, center_crop_resize
 
 
 class LatestFrameGrabber:
@@ -275,7 +275,16 @@ class RtspImagePublisher(Node):
         age_ms = (time.time() - capture_stamp) * 1000.0
 
         try:
-            frame = pad_width_center(frame, self.args.pad_to_width)
+            # DA3 LARGEMETRIC MODEL: 728*420
+            # frame = pad_width_center(frame, self.args.pad_to_width)
+            # DA3 SMALL MODEL 504*392
+            frame = center_crop_resize(
+                frame,
+                crop_width=self.args.crop_width,
+                crop_height=self.args.crop_height,
+                output_width=self.args.output_width,
+                output_height=self.args.output_height,
+            )
         except ValueError as exc:
             self.get_logger().error(str(exc), throttle_duration_sec=2.0)
             return
@@ -332,7 +341,10 @@ def parse_args():
         default="/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_280_center_crop.yaml",
     )
 
-    parser.add_argument("--pad-to-width", type=int, default=728)
+    parser.add_argument("--crop-width", type=int, default=540)
+    parser.add_argument("--crop-height", type=int, default=420)
+    parser.add_argument("--output-width", type=int, default=504)
+    parser.add_argument("--output-height", type=int, default=392)
 
     return parser.parse_args()
 

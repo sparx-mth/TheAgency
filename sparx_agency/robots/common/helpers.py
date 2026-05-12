@@ -98,6 +98,40 @@ def padded_camera_info(
 
     return out
 
+def crop_resize_camera_info(
+    base: CameraInfo,
+    crop_left: int,
+    crop_top: int,
+    crop_width: int,
+    crop_height: int,
+    new_width: int,
+    new_height: int,
+) -> CameraInfo:
+    out = copy_camera_info(base)
+
+    sx = float(new_width) / float(crop_width)
+    sy = float(new_height) / float(crop_height)
+
+    out.width = int(new_width)
+    out.height = int(new_height)
+
+    # K
+    out.k[0] = float(base.k[0]) * sx
+    out.k[2] = (float(base.k[2]) - float(crop_left)) * sx
+    out.k[4] = float(base.k[4]) * sy
+    out.k[5] = (float(base.k[5]) - float(crop_top)) * sy
+
+    # P
+    out.p[0] = float(base.p[0]) * sx
+    out.p[2] = (float(base.p[2]) - float(crop_left)) * sx
+    out.p[3] = float(base.p[3]) * sx
+
+    out.p[5] = float(base.p[5]) * sy
+    out.p[6] = (float(base.p[6]) - float(crop_top)) * sy
+    out.p[7] = float(base.p[7]) * sy
+
+    return out
+
 
 def resized_camera_info(
     base: CameraInfo,

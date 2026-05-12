@@ -10,7 +10,7 @@ from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
-from sparx_agency.robots.common.helpers import load_camera_info_from_yaml, padded_camera_info
+from sparx_agency.robots.common.helpers import load_camera_info_from_yaml, padded_camera_info, crop_resize_camera_info
 
 
 class DepthProcessorNode(Node):
@@ -44,7 +44,7 @@ class DepthProcessorNode(Node):
         )
         self.declare_parameter(
             "config_yaml",
-            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_crop_504_280.yaml"),
+            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml"),
         )
 
 
@@ -101,13 +101,23 @@ class DepthProcessorNode(Node):
             frame_id="xtend_camera",
         )
 
-
-        self.camera_info_msg  = padded_camera_info(
+        # DA3 LARGEMETRIC MODEL: 728*420
+        # self.camera_info_msg  = padded_camera_info(
+        #     base=base_info,
+        #     pad_left=4,
+        #     pad_top=0,
+        #     new_width=728,
+        #     new_height=420,
+        # )
+        # DA3 SMALL MODEL 504*392
+        self.camera_info_msg = crop_resize_camera_info(
             base=base_info,
-            pad_left=4,
-            pad_top=0,
-            new_width=728,
-            new_height=420,
+            crop_left=90,
+            crop_top=0,
+            crop_width=540,
+            crop_height=420,
+            new_width=504,
+            new_height=392,
         )
 
         self.get_logger().info("DepthProcessorNode started")

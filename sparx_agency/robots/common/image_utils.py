@@ -611,3 +611,38 @@ def pad_width_center(frame, target_width: int):
         borderType=cv2.BORDER_CONSTANT,
         value=(0, 0, 0),
     )
+
+def center_crop_resize(
+    frame,
+    crop_width: int,
+    crop_height: int,
+    output_width: int,
+    output_height: int,
+):
+    h, w = frame.shape[:2]
+
+    if crop_width <= 0 or crop_height <= 0:
+        raise ValueError("crop_width and crop_height must be positive")
+
+    if output_width <= 0 or output_height <= 0:
+        raise ValueError("output_width and output_height must be positive")
+
+    if crop_width > w or crop_height > h:
+        raise ValueError(
+            f"Crop {crop_width}x{crop_height} is larger than frame {w}x{h}"
+        )
+
+    x0 = (w - crop_width) // 2
+    y0 = (h - crop_height) // 2
+    x1 = x0 + crop_width
+    y1 = y0 + crop_height
+
+    cropped = frame[y0:y1, x0:x1]
+
+    resized = cv2.resize(
+        cropped,
+        (output_width, output_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    return resized

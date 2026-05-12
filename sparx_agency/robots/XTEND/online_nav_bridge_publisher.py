@@ -13,7 +13,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sparx_agency.robots.XTEND.xtend_online_bridge_base import OnlineXtendBridgeBase
 from sparx_agency.robots.XTEND.xtend_rtsp_image_publisher import LatestFrameGrabber
 from sparx_agency.robots.common.helpers import load_camera_info_from_yaml
-from sparx_agency.robots.common.image_utils import pad_width_center
+from sparx_agency.robots.common.image_utils import pad_width_center, center_crop_resize
 
 
 class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
@@ -33,6 +33,10 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         frame_id: str = "xtend_camera",
         backend: str = "gstreamer",
         pad_to_width: int = 728,
+        crop_width: int = 540,
+        crop_height: int = 420,
+        output_width: int = 504,
+        output_height: int = 392,
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
         telemetry_frame_id: str = "odom",
@@ -58,6 +62,10 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         self.frame_id = frame_id
 
         self.pad_to_width = int(pad_to_width)
+        self.crop_width = int(crop_width)
+        self.crop_height = int(crop_height)
+        self.output_width = int(output_width)
+        self.output_height = int(output_height)
 
         self.bridge = CvBridge()
         image_qos = QoSProfile(
@@ -96,7 +104,7 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
         print(f"[image] RTSP: {self.rtsp_uri}")
         print(f"[image] topic: {self.image_topic}")
-        print(f"[image] no crop, pad_to_width={self.pad_to_width}")
+        # print(f"[image] no crop, pad_to_width={self.pad_to_width}")
 
 
     async def image_publish_loop(self):
@@ -108,7 +116,16 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
             if frame is not None:
                 h, w = frame.shape[:2]
-                frame = pad_width_center(frame, self.pad_to_width)
+                # DA3 LARGEMETRIC: 728*420
+                # frame = pad_width_center(frame, self.pad_to_width)
+                # DA3 SMALL 504*392
+                frame = center_crop_resize(
+                    frame,
+                    crop_width=self.crop_width,
+                    crop_height=self.crop_height,
+                    output_width=self.output_width,
+                    output_height=self.output_height,
+                )
 
                 now_msg = self.ros_node.get_clock().now().to_msg()
 
@@ -147,6 +164,7 @@ def parse_args():
 
     p.add_argument("--pad-to-width", type=int, default=728)
 
+
     p.add_argument("--telemetry-topic", default="/xtend/local_telemetry")
     p.add_argument("--bearing-topic", default="/xtend/bearing")
     p.add_argument("--telemetry-frame-id", default="odom")
@@ -174,10 +192,6 @@ async def async_main():
         camera_info_yaml=args.camera_info_yaml,
         frame_id=args.frame_id,
         backend=args.backend,
-        crop_left=args.crop_left,
-        crop_top=args.crop_top,
-        crop_width=args.crop_width,
-        crop_height=args.crop_height,
         log_dir=args.log_dir,
     )
 
