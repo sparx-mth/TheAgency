@@ -6,9 +6,80 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rclpy
+import yaml
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
+
+def load_camera_info_from_yaml(yaml_path: str, frame_id: str) -> CameraInfo:
+    yaml_path = Path(yaml_path).expanduser()
+
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Camera YAML file does not exist: {yaml_path}")
+
+    with open(yaml_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        raise ValueError(f"Camera YAML is empty: {yaml_path}")
+
+    msg = CameraInfo()
+    msg.header.frame_id = frame_id
+
+    # Image resolution
+    msg.width = int(cfg.get("image_width", 0))
+    msg.height = int(cfg.get("image_height", 0))
+
+    if msg.width <= 0 or msg.height <= 0:
+        raise ValueError(
+            f"Invalid image_width/image_height in camera YAML: {yaml_path}"
+        )
+
+    # Distortion model
+    msg.distortion_model = cfg.get("distortion_model", "plumb_bob")
+
+    # Distortion coefficients D
+    if "distortion_coefficients" in cfg and "data" in cfg["distortion_coefficients"]:
+        msg.d = [float(x) for x in cfg["distortion_coefficients"]["data"]]
+    else:
+        msg.d = [
+            float(cfg.get("k1", 0.0)),
+            float(cfg.get("k2", 0.0)),
+            float(cfg.get("p1", 0.0)),
+            float(cfg.get("p2", 0.0)),
+            float(cfg.get("k3", 0.0)),
+        ]
+
+    # Camera matrix K
+    if "camera_matrix" not in cfg or "data" not in cfg["camera_matrix"]:
+        raise ValueError(f"Missing camera_matrix.data in YAML: {yaml_path}")
+    msg.k = [float(x) for x in cfg["camera_matrix"]["data"]]
+
+    if len(msg.k) != 9:
+        raise ValueError(f"camera_matrix.data must contain 9 values: {yaml_path}")
+
+    # Rectification matrix R
+    if "rectification_matrix" in cfg and "data" in cfg["rectification_matrix"]:
+        msg.r = [float(x) for x in cfg["rectification_matrix"]["data"]]
+    else:
+        msg.r = [
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ]
+
+    if len(msg.r) != 9:
+        raise ValueError(f"rectification_matrix.data must contain 9 values: {yaml_path}")
+
+    # Projection matrix P
+    if "projection_matrix" not in cfg or "data" not in cfg["projection_matrix"]:
+        raise ValueError(f"Missing projection_matrix.data in YAML: {yaml_path}")
+    msg.p = [float(x) for x in cfg["projection_matrix"]["data"]]
+
+    if len(msg.p) != 12:
+        raise ValueError(f"projection_matrix.data must contain 12 values: {yaml_path}")
+
+    return msg
 
 
 def find_rgb_files(rgb_dir: Path, extensions: list[str]) -> list[Path]:
@@ -51,33 +122,22 @@ class RgbFilePublisher(Node):
 
         # CameraInfo Publisher and Message Setup
         self.cam_info_pub = self.create_publisher(CameraInfo, args.camera_info_topic, 10)
-        self.cam_info_msg = CameraInfo()
-        self.cam_info_msg.header.frame_id = self.args.frame_id
-        
-        # Image resolution
-        self.cam_info_msg.width = 720
-        self.cam_info_msg.height = 420
-        
-        # Distortion model
-        self.cam_info_msg.distortion_model = "plumb_bob"
-        self.cam_info_msg.d = [-0.2971784717997778, 0.08010222870361268, -0.0037003783730540046, -0.000627696838234576, 0.0]
-        
-        # Camera matrix (K)
-        self.cam_info_msg.k = [
-            460.9072976392783, 0.0, 345.80685226685307,
-            0.0, 461.9847581630249, 128.61455823829436,
-            0.0, 0.0, 1.0
-        ]
-        
-        # Rectification matrix (R)
-        self.cam_info_msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-        
-        # Projection matrix (P)
-        self.cam_info_msg.p = [
-            361.52381185798737, 0.0, 337.3434895805878, 0.0,
-            0.0, 410.764442594862, 116.76308616209292, 0.0,
-            0.0, 0.0, 1.0, 0.0
-        ]
+
+        # Load CameraInfo from YAML instead of hard-coding calibration values
+        self.cam_info_msg = load_camera_info_from_yaml(
+            args.camera_config_yaml,
+            args.frame_id,
+        )
+
+        self.get_logger().info(f"Loaded CameraInfo from YAML: {args.camera_config_yaml}")
+        self.get_logger().info(
+            f"CameraInfo: width={self.cam_info_msg.width}, "
+            f"height={self.cam_info_msg.height}, "
+            f"fx={self.cam_info_msg.p[0]:.2f}, "
+            f"fy={self.cam_info_msg.p[5]:.2f}, "
+            f"cx={self.cam_info_msg.p[2]:.2f}, "
+            f"cy={self.cam_info_msg.p[6]:.2f}"
+        )
 
         self.idx = 0
         self.finished_once = False
@@ -88,7 +148,6 @@ class RgbFilePublisher(Node):
         self.get_logger().info(f"RGB dir: {self.rgb_dir}")
         self.get_logger().info(f"Publishing {len(self.rgb_paths)} RGB frames")
         self.get_logger().info(f"RGB topic: {args.rgb_topic}")
-        self.get_logger().info(f"CamInfo topic: {args.camera_info_topic}")
         self.get_logger().info(f"Publish Hz: {args.publish_hz}")
         self.get_logger().info(f"Loop: {args.loop}")
 
@@ -156,6 +215,12 @@ def parse_args():
     parser.add_argument(
         "--camera-info-topic",
         default="/xtend/camera_info",
+    )
+
+    parser.add_argument(
+        "--camera-config-yaml",
+        default="/home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml",
+        help="Path to camera calibration YAML file.",
     )
     
     parser.add_argument(

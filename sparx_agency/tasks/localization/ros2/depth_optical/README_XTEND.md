@@ -38,7 +38,7 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
   -p csv_filename:="/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv" \
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
-  -p camera_info_topic:=/xtend/camera_info \
+  -p camera_config_yaml:=/home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
   -p depth_scale:=0.8
 ```
 

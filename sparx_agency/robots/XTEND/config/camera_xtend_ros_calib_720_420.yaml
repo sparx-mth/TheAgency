@@ -11,27 +11,32 @@
 #   width: 720
 #   height: 420
 #
-# Notes:
-# - This calibration was produced as mono pinhole/plumb_bob calibration.
-# - For DA3 + Open3D rectified-image workflow, prefer using the projection_matrix
-#   values as the effective pinhole intrinsics:
-#     fx = 361.52381185798737
-#     fy = 410.764442594862
-#     cx = 337.3434895805878
-#     cy = 116.76308616209292
-
 
 # Image resolution
 image_width: 720
 image_height: 420
 
+# Notes:
+# - This calibration was produced as mono pinhole/plumb_bob calibration.
+# - For DA3 + Open3D rectified-image workflow, prefer using the projection_matrix
+#   values as the effective pinhole intrinsics:
+fx: 361.52381185798737
+fy: 410.764442594862
+cx: 337.3434895805878
+cy: 116.76308616209292
+
+
+# Image resolution
+#image_width: 720
+#image_height: 420
+
 # Raw camera intrinsic parameters from calibration
 # fx, fy: focal length
 # cx, cy: principal point
-fx: 460.9072976392783
-fy: 461.9847581630249
-cx: 345.80685226685307
-cy: 128.61455823829436
+#fx: 460.9072976392783
+#fy: 461.9847581630249
+#cx: 345.80685226685307
+#cy: 128.61455823829436
 
 # Distortion model from ROS calibration
 distortion_model: "plumb_bob"
