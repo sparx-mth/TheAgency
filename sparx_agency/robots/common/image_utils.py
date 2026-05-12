@@ -586,3 +586,28 @@ def uvz_to_xyz_camera(u, v, z, fx, fy, cx, cy):
     x = (u - cx) * z / fx
     y = (v - cy) * z / fy
     return np.array([x, y, z], dtype=np.float32)
+
+
+
+def pad_width_center(frame, target_width: int):
+    h, w = frame.shape[:2]
+
+    if target_width <= 0 or w == target_width:
+        return frame
+
+    if w > target_width:
+        raise ValueError(f"Frame width {w} is larger than target_width {target_width}")
+
+    pad_total = target_width - w
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+
+    return cv2.copyMakeBorder(
+        frame,
+        0,
+        0,
+        pad_left,
+        pad_right,
+        borderType=cv2.BORDER_CONSTANT,
+        value=(0, 0, 0),
+    )

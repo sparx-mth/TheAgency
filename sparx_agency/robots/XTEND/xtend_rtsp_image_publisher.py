@@ -14,8 +14,10 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from sensor_msgs.srv import SetCameraInfo
 
-from sparx_agency.robots.common.helpers import load_camera_info_from_yaml
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+
+from sparx_agency.robots.common.image_utils import pad_width_center
+
 
 class LatestFrameGrabber:
     def __init__(self, uri: str, backend: str):
@@ -238,7 +240,7 @@ class RtspImagePublisher(Node):
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
         self.pub = self.create_publisher(
@@ -247,21 +249,6 @@ class RtspImagePublisher(Node):
             qos,
         )
 
-        self.camera_info_pub = self.create_publisher(
-            CameraInfo,
-            args.camera_info_topic,
-            qos,
-        )
-
-        self.camera_info_msg = load_camera_info_from_yaml(
-            args.camera_yaml,
-            args.frame_id,
-        )
-        self.set_camera_info_srv = self.create_service(
-            SetCameraInfo,
-            "/camera/set_camera_info",
-            self.handle_set_camera_info,
-        )
 
         self.grabber = LatestFrameGrabber(args.rtsp_uri, args.backend)
         self.grabber.start()
@@ -277,12 +264,6 @@ class RtspImagePublisher(Node):
         self.get_logger().info(f"Publishing latest frame to: {args.image_topic}")
         self.get_logger().info(f"Frame ID: {args.frame_id}")
         self.get_logger().info(f"Publish Hz: {args.publish_hz}")
-        self.get_logger().info("Serving /camera/set_camera_info")
-
-    def handle_set_camera_info(self, request, response):
-        response.success = True
-        response.status_message = "Accepted by dummy calibration service"
-        return response
 
     def publish_latest(self):
         frame, capture_stamp = self.grabber.get_latest()
@@ -293,35 +274,17 @@ class RtspImagePublisher(Node):
 
         age_ms = (time.time() - capture_stamp) * 1000.0
 
-        # Crop frame if crop parameters are enabled.
-        if self.args.crop_width > 0 and self.args.crop_height > 0:
-            x0 = self.args.crop_left
-            y0 = self.args.crop_top
-            x1 = x0 + self.args.crop_width
-            y1 = y0 + self.args.crop_height
-
-            h, w = frame.shape[:2]
-            if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
-                self.get_logger().error(
-                    f"Invalid crop: x={x0}:{x1}, y={y0}:{y1}, frame={w}x{h}",
-                    throttle_duration_sec=2.0,
-                )
-                return
-
-            frame = frame[y0:y1, x0:x1]
+        try:
+            frame = pad_width_center(frame, self.args.pad_to_width)
+        except ValueError as exc:
+            self.get_logger().error(str(exc), throttle_duration_sec=2.0)
+            return
 
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.args.frame_id
 
         self.pub.publish(msg)
-
-        # Publish matching CameraInfo with the same timestamp.
-        cam_info = self.camera_info_msg
-        cam_info.header.stamp = msg.header.stamp
-        cam_info.header.frame_id = msg.header.frame_id
-        self.camera_info_pub.publish(cam_info)
-
         self.frame_count += 1
 
         log_every = max(int(round(self.args.publish_hz)), 1)
@@ -365,19 +328,11 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--camera-info-topic",
-        default="/xtend/camera_info",
-    )
-
-    parser.add_argument(
         "--camera-yaml",
         default="/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_280_center_crop.yaml",
     )
 
-    parser.add_argument("--crop-left", type=int, default=108)
-    parser.add_argument("--crop-top", type=int, default=70)
-    parser.add_argument("--crop-width", type=int, default=504)
-    parser.add_argument("--crop-height", type=int, default=280)
+    parser.add_argument("--pad-to-width", type=int, default=728)
 
     return parser.parse_args()
 

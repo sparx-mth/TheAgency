@@ -13,6 +13,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sparx_agency.robots.XTEND.xtend_online_bridge_base import OnlineXtendBridgeBase
 from sparx_agency.robots.XTEND.xtend_rtsp_image_publisher import LatestFrameGrabber
 from sparx_agency.robots.common.helpers import load_camera_info_from_yaml
+from sparx_agency.robots.common.image_utils import pad_width_center
 
 
 class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
@@ -31,10 +32,7 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         camera_info_yaml: str | Path = "",
         frame_id: str = "xtend_camera",
         backend: str = "gstreamer",
-        crop_left: int = 108,
-        crop_top: int = 70,
-        crop_width: int = 504,
-        crop_height: int = 280,
+        pad_to_width: int = 728,
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
         telemetry_frame_id: str = "odom",
@@ -59,23 +57,20 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         self.camera_info_yaml = Path(camera_info_yaml).expanduser()
         self.frame_id = frame_id
 
-        self.crop_left = int(crop_left)
-        self.crop_top = int(crop_top)
-        self.crop_width = int(crop_width)
-        self.crop_height = int(crop_height)
+        self.pad_to_width = int(pad_to_width)
 
         self.bridge = CvBridge()
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
-        camera_info_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=5,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-        )
+        # camera_info_qos = QoSProfile(
+        #     history=HistoryPolicy.KEEP_LAST,
+        #     depth=5,
+        #     reliability=ReliabilityPolicy.BEST_EFFORT,
+        # )
 
         self.image_pub = self.ros_node.create_publisher(
             Image,
@@ -83,29 +78,25 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             image_qos,
         )
 
-        self.camera_info_pub = self.ros_node.create_publisher(
-            CameraInfo,
-            self.camera_info_topic,
-            camera_info_qos,
-        )
-        if not self.camera_info_yaml.exists():
-            raise FileNotFoundError(f"CameraInfo YAML not found: {self.camera_info_yaml}")
-
-        self.camera_info_msg = load_camera_info_from_yaml(
-            yaml_path=str(self.camera_info_yaml),
-            frame_id=self.frame_id,
-        )
+        # self.camera_info_pub = self.ros_node.create_publisher(
+        #     CameraInfo,
+        #     self.camera_info_topic,
+        #     camera_info_qos,
+        # )
+        # if not self.camera_info_yaml.exists():
+        #     raise FileNotFoundError(f"CameraInfo YAML not found: {self.camera_info_yaml}")
+        #
+        # self.camera_info_msg = load_camera_info_from_yaml(
+        #     yaml_path=str(self.camera_info_yaml),
+        #     frame_id=self.frame_id,
+        # )
 
         self.grabber = LatestFrameGrabber(rtsp_uri, backend=backend)
         self.grabber.start()
 
         print(f"[image] RTSP: {self.rtsp_uri}")
         print(f"[image] topic: {self.image_topic}")
-        print(f"[image] camera_info topic: {self.camera_info_topic}")
-        print(
-            f"[image] crop: x={self.crop_left}:{self.crop_left + self.crop_width}, "
-            f"y={self.crop_top}:{self.crop_top + self.crop_height}"
-        )
+        print(f"[image] no crop, pad_to_width={self.pad_to_width}")
 
 
     async def image_publish_loop(self):
@@ -117,23 +108,18 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
             if frame is not None:
                 h, w = frame.shape[:2]
-                x0 = self.crop_left
-                y0 = self.crop_top
-                x1 = min(x0 + self.crop_width, w)
-                y1 = min(y0 + self.crop_height, h)
+                frame = pad_width_center(frame, self.pad_to_width)
 
-                if x0 < w and y0 < h and x1 > x0 and y1 > y0:
-                    frame = frame[y0:y1, x0:x1].copy()
                 now_msg = self.ros_node.get_clock().now().to_msg()
 
                 msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
                 msg.header.stamp = now_msg
                 msg.header.frame_id = self.frame_id
 
-                self.camera_info_msg.header.stamp = now_msg
-                self.camera_info_msg.header.frame_id = self.frame_id
+                # self.camera_info_msg.header.stamp = now_msg
+                # self.camera_info_msg.header.frame_id = self.frame_id
 
-                self.camera_info_pub.publish(self.camera_info_msg)
+                # self.camera_info_pub.publish(self.camera_info_msg)
                 self.image_pub.publish(msg)
 
             await asyncio.sleep(sleep_time)
@@ -159,10 +145,7 @@ def parse_args():
     p.add_argument("--frame-id", default="xtend_camera")
     p.add_argument("--backend", choices=["ffmpeg", "gstreamer", "default"], default="gstreamer")
 
-    p.add_argument("--crop-left", type=int, default=108)
-    p.add_argument("--crop-top", type=int, default=70)
-    p.add_argument("--crop-width", type=int, default=504)
-    p.add_argument("--crop-height", type=int, default=280)
+    p.add_argument("--pad-to-width", type=int, default=728)
 
     p.add_argument("--telemetry-topic", default="/xtend/local_telemetry")
     p.add_argument("--bearing-topic", default="/xtend/bearing")

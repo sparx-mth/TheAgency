@@ -9,7 +9,7 @@ import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 from rclpy.time import Time
 
@@ -98,12 +98,18 @@ class VelocityIntegratorNode(Node):
         self.gt_queue: Deque[GTSample] = deque(maxlen=5000)
         self._gt_warn_counter = 0
 
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+
         # Pubs / Subs
-        self.pose_pub = self.create_publisher(PoseStamped, pose_topic, 10)
-        self.vel_sub = self.create_subscription(Vector3Stamped, vel_topic, self.vel_cb, qos_profile_sensor_data)
+        self.pose_pub = self.create_publisher(PoseStamped, pose_topic, image_qos)
+        self.vel_sub = self.create_subscription(Vector3Stamped, vel_topic, self.vel_cb, image_qos)
         
         if self.init_from_gt:
-            self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, qos_profile_sensor_data)
+            self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
 
     def gt_pose_cb(self, msg: Pose):
         if not self.have_est:

@@ -56,3 +56,78 @@ def load_camera_info_from_yaml(yaml_path: str, frame_id: str) -> CameraInfo:
     msg.p = list(data["projection_matrix"]["data"])
 
     return msg
+
+def copy_camera_info(msg: CameraInfo) -> CameraInfo:
+    out = CameraInfo()
+    out.header = msg.header
+    out.width = msg.width
+    out.height = msg.height
+    out.distortion_model = msg.distortion_model
+    out.d = list(msg.d)
+    out.k = list(msg.k)
+    out.r = list(msg.r)
+    out.p = list(msg.p)
+    return out
+
+
+def padded_camera_info(
+    base: CameraInfo,
+    pad_left: int,
+    pad_top: int,
+    new_width: int,
+    new_height: int,
+) -> CameraInfo:
+    out = copy_camera_info(base)
+
+    out.width = int(new_width)
+    out.height = int(new_height)
+
+    # K:
+    # [fx  0 cx]
+    # [ 0 fy cy]
+    # [ 0  0  1]
+    out.k[2] = float(base.k[2]) + float(pad_left)
+    out.k[5] = float(base.k[5]) + float(pad_top)
+
+    # P:
+    # [fx  0 cx Tx]
+    # [ 0 fy cy Ty]
+    # [ 0  0  1  0]
+    out.p[2] = float(base.p[2]) + float(pad_left)
+    out.p[6] = float(base.p[6]) + float(pad_top)
+
+    return out
+
+
+def resized_camera_info(
+    base: CameraInfo,
+    new_width: int,
+    new_height: int,
+) -> CameraInfo:
+    out = copy_camera_info(base)
+
+    old_width = float(base.width)
+    old_height = float(base.height)
+
+    sx = float(new_width) / old_width
+    sy = float(new_height) / old_height
+
+    out.width = int(new_width)
+    out.height = int(new_height)
+
+    # Scale K
+    out.k[0] = float(base.k[0]) * sx  # fx
+    out.k[2] = float(base.k[2]) * sx  # cx
+    out.k[4] = float(base.k[4]) * sy  # fy
+    out.k[5] = float(base.k[5]) * sy  # cy
+
+    # Scale P
+    out.p[0] = float(base.p[0]) * sx  # fx
+    out.p[2] = float(base.p[2]) * sx  # cx
+    out.p[3] = float(base.p[3]) * sx  # Tx, usually 0
+
+    out.p[5] = float(base.p[5]) * sy  # fy
+    out.p[6] = float(base.p[6]) * sy  # cy
+    out.p[7] = float(base.p[7]) * sy  # Ty, usually 0
+
+    return out

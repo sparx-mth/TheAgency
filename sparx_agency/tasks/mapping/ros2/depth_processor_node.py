@@ -5,11 +5,12 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
+from sparx_agency.robots.common.helpers import load_camera_info_from_yaml, padded_camera_info
 
 
 class DepthProcessorNode(Node):
@@ -35,7 +36,7 @@ class DepthProcessorNode(Node):
         super().__init__("depth_processor_node")
 
         self.bridge = CvBridge()
-        self.latest_camera_info: CameraInfo | None = None
+        self.camera_info_msg: CameraInfo | None = None
 
         self.declare_parameter(
             "engine_path",
@@ -46,10 +47,11 @@ class DepthProcessorNode(Node):
             str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_crop_504_280.yaml"),
         )
 
+
         self.declare_parameter("image_topic", "/xtend/rgb")
         self.declare_parameter("camera_info_topic", "/xtend/camera_info")
         self.declare_parameter("depth_topic", "/xtend/depth_m")
-        self.declare_parameter("debug_topic", "/xtend/depth_vis")
+        # self.declare_parameter("debug_topic", "/xtend/depth_vis")
 
         self.declare_parameter("publish_debug", False)
         self.declare_parameter("clip_min_m", 0.0)
@@ -59,11 +61,10 @@ class DepthProcessorNode(Node):
 
         self.engine_path = self.get_parameter("engine_path").value
         self.config_yaml = self.get_parameter("config_yaml").value
-
         self.image_topic = self.get_parameter("image_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
-        self.debug_topic = self.get_parameter("debug_topic").value
+        # self.debug_topic = self.get_parameter("debug_topic").value
 
         self.publish_debug = bool(self.get_parameter("publish_debug").value)
         self.clip_min_m = float(self.get_parameter("clip_min_m").value)
@@ -71,37 +72,50 @@ class DepthProcessorNode(Node):
         self.apply_metric_focal_scaling = bool(self.get_parameter("apply_metric_focal_scaling").value)
         self.metric_scale_divisor = float(self.get_parameter("metric_scale_divisor").value)
 
-        qos = QoSProfile(
-            depth=5,
+        rgb_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+
+        depth_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
         )
 
         self.depth_model = DA3TensorRTModel(self.engine_path, self.config_yaml)
 
-        self.pub_depth = self.create_publisher(Image, self.depth_topic, qos)
-        self.pub_debug = self.create_publisher(Image, self.debug_topic, qos)
+        self.pub_depth = self.create_publisher(Image, self.depth_topic, depth_qos)
+        # self.pub_debug = self.create_publisher(Image, self.debug_topic, depth_qos)
 
         self.sub_image = self.create_subscription(
             Image,
             self.image_topic,
             self.image_callback,
-            qos,
+            rgb_qos,
         )
-        self.sub_camera_info = self.create_subscription(
-            CameraInfo,
-            self.camera_info_topic,
-            self.camera_info_callback,
-            qos,
+
+        base_info = load_camera_info_from_yaml(
+            yaml_path=self.config_yaml,
+            frame_id="xtend_camera",
+        )
+
+
+        self.camera_info_msg  = padded_camera_info(
+            base=base_info,
+            pad_left=4,
+            pad_top=0,
+            new_width=728,
+            new_height=420,
         )
 
         self.get_logger().info("DepthProcessorNode started")
         self.get_logger().info(f"Image topic: {self.image_topic}")
         self.get_logger().info(f"CameraInfo topic: {self.camera_info_topic}")
         self.get_logger().info(f"Depth topic: {self.depth_topic}")
-        self.get_logger().info(f"Debug topic: {self.debug_topic}")
+        # self.get_logger().info(f"Debug topic: {self.debug_topic}")
 
-    def camera_info_callback(self, msg: CameraInfo):
-        self.latest_camera_info = msg
 
     def sanitize_depth(self, depth: np.ndarray) -> np.ndarray:
         depth = depth.astype(np.float32, copy=False)
@@ -111,14 +125,24 @@ class DepthProcessorNode(Node):
         return depth
 
     def get_focal_px(self) -> float:
-        if self.latest_camera_info is not None:
-            fx = float(self.latest_camera_info.k[0])
-            fy = float(self.latest_camera_info.k[4])
-            focal_px = 0.5 * (fx + fy)
-            if focal_px > 0.0:
-                return focal_px
+        if self.camera_info_msg is None:
+            raise RuntimeError("CameraInfo was not loaded from config")
 
-        return 0.5 * (self.depth_model.intrinsics.fx + self.depth_model.intrinsics.fy)
+        # Prefer projection matrix P for rectified images.
+        fx = float(self.camera_info_msg.p[0])
+        fy = float(self.camera_info_msg.p[5])
+
+        if fx <= 0.0 or fy <= 0.0:
+            # Fallback to raw camera matrix K.
+            fx = float(self.camera_info_msg.k[0])
+            fy = float(self.camera_info_msg.k[4])
+
+        focal_px = 0.5 * (fx + fy)
+
+        if focal_px <= 0.0:
+            raise ValueError(f"Invalid focal length from config: focal_px={focal_px}")
+
+        return focal_px
 
     def convert_to_metric_depth(self, net_output: np.ndarray) -> np.ndarray:
         if not self.apply_metric_focal_scaling:
@@ -150,11 +174,11 @@ class DepthProcessorNode(Node):
             depth_m = self.sanitize_depth(depth_m)
             self.publish_depth(depth_m, msg.header)
 
-            if self.publish_debug:
-                dbg = self.depth_to_debug(depth_m)
-                dbg_msg = self.bridge.cv2_to_imgmsg(dbg, encoding="bgr8")
-                dbg_msg.header = msg.header
-                self.pub_debug.publish(dbg_msg)
+            # if self.publish_debug:
+            #     dbg = self.depth_to_debug(depth_m)
+            #     dbg_msg = self.bridge.cv2_to_imgmsg(dbg, encoding="bgr8")
+            #     dbg_msg.header = msg.header
+            #     self.pub_debug.publish(dbg_msg)
 
         except Exception as e:
             self.get_logger().error(f"Processing failed: {e}")

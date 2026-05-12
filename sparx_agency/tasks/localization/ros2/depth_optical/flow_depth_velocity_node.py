@@ -8,15 +8,19 @@ from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped 
 from cv_bridge import CvBridge
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import message_filters
 import csv
 import os
 import math  
+import yaml
+
 
 class FlowDepthVelocityNode(Node):
     """
     SPARX ROS2 node:
-      - Subscribes to RGB + Depth + CameraInfo
+      - Subscribes to RGB + Depth
+      - Loads camera intrinsics from YAML config
       - WLS Optical Flow + Depth Smoothing
       - Publishes velocity
       - Listens to pose updates from VelocityIntegrator to draw the minimap
@@ -32,7 +36,14 @@ class FlowDepthVelocityNode(Node):
         # params
         self.declare_parameter("image_topic", "/simple_drone/front/image_raw")
         self.declare_parameter("depth_topic", "/depth_anything/depth")
-        self.declare_parameter("camera_info_topic", "/simple_drone/front/camera_info")
+
+        # Read the camera_config_yaml parameter to get the camera_info
+        self.declare_parameter(
+            "camera_config_yaml",
+            "/home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml"
+        )
+        # read the camera_info from the topic instead of from the YAML
+        #self.declare_parameter("camera_info_topic", "/simple_drone/front/camera_info")
         self.declare_parameter("output_topic", "/flow_depth/velocity")
         self.declare_parameter("pose_est_topic", "/flow_depth/pose_est") 
 
@@ -65,13 +76,14 @@ class FlowDepthVelocityNode(Node):
         self.center_depth = 0.0
         
         # === Variables for the Real-Time Minimap ===
+        self.pose_origin = None
         self.debug_path = [(0.0, 0.0)]  # Start at origin
         self.current_distance = 0.0     # This will track the total distance traveled from the start point (0,0)
         # ===========================================
 
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
-        caminfo_topic = self.get_parameter("camera_info_topic").get_parameter_value().string_value
+        #caminfo_topic = self.get_parameter("camera_info_topic").get_parameter_value().string_value
         output_topic = self.get_parameter("output_topic").get_parameter_value().string_value
         pose_est_topic = self.get_parameter("pose_est_topic").get_parameter_value().string_value
 
@@ -101,6 +113,9 @@ class FlowDepthVelocityNode(Node):
         self.bridge = CvBridge()
         self.fx, self.fy, self.cx, self.cy = None, None, None, None
 
+        camera_config_yaml = self.get_parameter("camera_config_yaml").get_parameter_value().string_value
+        self.load_camera_intrinsics_from_yaml(camera_config_yaml)
+
         self.tracker = OpticalFlowTracker(
             max_corners=self.max_corners,
             min_corners=self.min_corners,
@@ -108,21 +123,29 @@ class FlowDepthVelocityNode(Node):
             lk_levels=lk_levels,
         )
 
-        self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, 10)
-        self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
-        self.create_subscription(Twist, '/simple_drone/gt_vel', self.gt_vel_callback, 10)
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
 
-        self.pose_sub = self.create_subscription(PoseStamped, pose_est_topic, self.pose_est_callback, 10)
+
+        self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, image_qos)
+        #self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
+        self.create_subscription(Twist, '/simple_drone/gt_vel', self.gt_vel_callback, image_qos)
+
+        self.pose_sub = self.create_subscription(PoseStamped, pose_est_topic, self.pose_est_callback, image_qos)
         # ------------------------------------------------
 
-        self.rgb_sub = message_filters.Subscriber(self, Image, image_topic)
-        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
+        self.rgb_sub = message_filters.Subscriber(self, Image, image_topic,qos_profile=image_qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic,qos_profile=image_qos)
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub], queue_size=50, slop=1.5
         )
         self.ts.registerCallback(self.sync_callback)
 
-    
+
+
     def pose_est_callback(self, msg: PoseStamped):
         # unpack the position from the PoseStamped message
         x = msg.pose.position.x
@@ -135,15 +158,62 @@ class FlowDepthVelocityNode(Node):
         self.current_distance = math.sqrt(x**2 + y**2 + z**2)
 
         self.trajectory_history.append({
-            "image": f"frame_{len(self.trajectory_history):06d}.jpg", 
+            "image": f"frame_{len(self.trajectory_history):06d}.jpg",
             "pose": {
                 "x": float(x),
                 "y": float(y),
                 "z": float(z),
-                "yaw": 0.0  
+                "yaw": 0.0
             }
         })
     # ---------------------------------
+
+
+    def load_camera_intrinsics_from_yaml(self, yaml_path: str):
+        if not os.path.exists(yaml_path):
+            raise FileNotFoundError(f"Camera YAML not found: {yaml_path}")
+
+        with open(yaml_path, "r") as f:
+            cfg = yaml.safe_load(f)
+
+        # Prefer projection_matrix P, because this is the effective pinhole model
+        # after rectification / undistortion.
+        if "projection_matrix" in cfg and "data" in cfg["projection_matrix"]:
+            P = cfg["projection_matrix"]["data"]
+
+            if len(P) < 12 or P[0] == 0.0:
+                raise ValueError(f"Invalid projection_matrix in YAML: {yaml_path}")
+
+            self.fx = float(P[0])
+            self.fy = float(P[5])
+            self.cx = float(P[2])
+            self.cy = float(P[6])
+
+            self.get_logger().info(
+                f"[Camera YAML] Loaded intrinsics from projection_matrix: "
+                f"fx={self.fx:.2f}, fy={self.fy:.2f}, "
+                f"cx={self.cx:.2f}, cy={self.cy:.2f}"
+            )
+            return
+
+        # Fallback to direct fx/fy/cx/cy
+        required = ["fx", "fy", "cx", "cy"]
+        if all(k in cfg for k in required):
+            self.fx = float(cfg["fx"])
+            self.fy = float(cfg["fy"])
+            self.cx = float(cfg["cx"])
+            self.cy = float(cfg["cy"])
+
+            self.get_logger().info(
+                f"[Camera YAML] Loaded raw intrinsics: "
+                f"fx={self.fx:.2f}, fy={self.fy:.2f}, "
+                f"cx={self.cx:.2f}, cy={self.cy:.2f}"
+            )
+            return
+
+        raise ValueError(
+            f"Could not find projection_matrix or fx/fy/cx/cy in YAML: {yaml_path}"
+        )
 
     def smooth_depth_map(self, raw_depth_map: np.ndarray) -> np.ndarray:
         if self.last_smoothed_depth is None:
@@ -154,6 +224,7 @@ class FlowDepthVelocityNode(Node):
                                        ((1.0 - self.ema_alpha) * self.last_smoothed_depth)
         return self.last_smoothed_depth.astype(np.float32)
 
+    """
     def caminfo_callback(self, msg: CameraInfo):
         # Try to extract intrinsics from the CameraInfo message
         P = msg.p
@@ -172,6 +243,7 @@ class FlowDepthVelocityNode(Node):
         if not hasattr(self, '_caminfo_logged'):
             self.get_logger().info(f"[CamInfo] fx={self.fx:.2f}, fy={self.fy:.2f}, cx={self.cx:.2f}, cy={self.cy:.2f}")
             self._caminfo_logged = True
+    """
 
     def gt_vel_callback(self, msg):
         self.latest_gt_vx = msg.linear.x
@@ -378,7 +450,7 @@ class FlowDepthVelocityNode(Node):
                     self.get_logger().info(f"[JSON] Saved {len(self.trajectory_history)} poses to {self.json_out_path}")
                 except Exception as e:
                     self.get_logger().error(f"Failed to save JSON: {e}")
-                    
+
             super().destroy_node()
 
 def main():
