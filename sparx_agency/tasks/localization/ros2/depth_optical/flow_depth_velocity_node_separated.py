@@ -6,6 +6,7 @@ import json
 import math
 import os
 from typing import Deque, Dict, Optional, Tuple, Any
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -63,7 +64,7 @@ class FlowDepthVelocityNode(Node):
 
         self.declare_parameter(
             "camera_config_yaml",
-            "/home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml",
+            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml")
         )
 
         self.declare_parameter("camera_frame", "xtend_camera")
@@ -112,7 +113,7 @@ class FlowDepthVelocityNode(Node):
 
         self.declare_parameter(
             "json_out_path",
-            "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json",
+            str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json"),
         )
 
         self.declare_parameter("log_vel_csv_path", "/tmp/velocity_log.csv")
