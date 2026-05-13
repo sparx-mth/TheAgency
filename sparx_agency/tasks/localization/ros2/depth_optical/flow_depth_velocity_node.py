@@ -9,6 +9,8 @@ from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped
 from cv_bridge import CvBridge
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from pathlib import Path
+
 import message_filters
 import csv
 import os
@@ -37,10 +39,9 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("image_topic", "/simple_drone/front/image_raw")
         self.declare_parameter("depth_topic", "/depth_anything/depth")
         
-        # Read the camera_config_yaml parameter to get the camera_info 
         self.declare_parameter(
             "camera_config_yaml",
-            "/home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml"
+            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml")
         )
         # read the camera_info from the topic instead of from the YAML
         #self.declare_parameter("camera_info_topic", "/simple_drone/front/camera_info")
@@ -64,7 +65,11 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("depth_ema_alpha", 0.15) # EMA alpha for depth smoothing, between 0 and 1. Higher means more smoothing but more lag.
         self.declare_parameter("csv_filename", "/tmp/zone_velocities_log_no_imu.csv")
         
-        self.declare_parameter("json_out_path", "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json")
+        self.declare_parameter(
+            "json_out_path",
+            str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json"),
+        )
+        
         self.json_out_path = self.get_parameter("json_out_path").get_parameter_value().string_value
 
         self.trajectory_history = []

@@ -92,7 +92,7 @@ class FlowDepthVelocityNode(Node):
         # Manual matching parameters.
         # max_wait_for_depth_sec: maximum accepted time difference between the
         # current RGB/flow timestamp and the Depth timestamp.
-        self.declare_parameter("max_wait_for_depth_sec", 0.35)
+        self.declare_parameter("max_wait_for_depth_sec", 0.5)
 
         # Sometimes the Depth header stamp may be a few ms earlier than the RGB
         # stamp because of timestamp jitter. Allow a small negative difference.
