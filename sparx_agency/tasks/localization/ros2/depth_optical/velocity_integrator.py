@@ -45,6 +45,7 @@ class VelocityIntegratorNode(Node):
     Integrates /flow_depth/velocity into pose.
     Handles TF rotations and optionally initializes the starting pose from GT.
     """
+
     def __init__(self):
         super().__init__("velocity_integrator_node")
 
@@ -52,12 +53,12 @@ class VelocityIntegratorNode(Node):
         self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
         self.declare_parameter("target_frame", "simple_drone/odom")
         self.declare_parameter("publish_pose_topic", "/flow_depth/pose_est")
-        
+
         self.declare_parameter("init_from_gt", True)
         self.declare_parameter("min_dt", 1e-3)
         self.declare_parameter("max_dt", 2.0)
         self.declare_parameter("gt_max_time_diff", 1.05)
-        
+
         self.declare_parameter("tf_cache_sec", 20.0)
         self.declare_parameter("tf_timeout_sec", 0.05)
         self.declare_parameter("tf_fallback_to_latest", True)
@@ -86,10 +87,10 @@ class VelocityIntegratorNode(Node):
         # State
         self.have_est = False
         self.est_x, self.est_y, self.est_z = 0.0, 0.0, 0.0
-        
+
         # --- Variables to track total distance ---
         self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
-        self.path_length = 0.0 # Accumulated distance step-by-step
+        self.path_length = 0.0  # Accumulated distance step-by-step
         # -----------------------------------------
 
         self.last_vel_time: Optional[Time] = None
@@ -101,13 +102,13 @@ class VelocityIntegratorNode(Node):
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
         # Pubs / Subs
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, image_qos)
         self.vel_sub = self.create_subscription(Vector3Stamped, vel_topic, self.vel_cb, image_qos)
-        
+
         if self.init_from_gt:
             self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
 
@@ -151,13 +152,14 @@ class VelocityIntegratorNode(Node):
                     self.get_logger().warn(f"[Integrator] Waiting for GT near first vel. closest_dt={gt_dt:.3f}s")
                 return
             self.est_x, self.est_y, self.est_z = gt_pose.position.x, gt_pose.position.y, gt_pose.position.z
-            
+
             # --- Save starting position ---
             self.start_x, self.start_y, self.start_z = self.est_x, self.est_y, self.est_z
             # ------------------------------
-            
+
             self.have_est = True
-            self.get_logger().info(f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s). Start pos: ({self.start_x:.2f}, {self.start_y:.2f}, {self.start_z:.2f})")
+            self.get_logger().info(
+                f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s). Start pos: ({self.start_x:.2f}, {self.start_y:.2f}, {self.start_z:.2f})")
 
         if self.last_vel_time is None:
             self.last_vel_time = t_vel_stamp
@@ -190,13 +192,13 @@ class VelocityIntegratorNode(Node):
         dx = v_x * dt
         dy = v_y * dt
         dz = v_z * dt
-        
+
         self.est_x += dx
         self.est_y += dy
         self.est_z += dz
-        
+
         # --- Accumulate step-by-step path length ---
-        step_distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        step_distance = math.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
         self.path_length += step_distance
         # -------------------------------------------
 
@@ -218,9 +220,9 @@ class VelocityIntegratorNode(Node):
 
         # Calculate straight-line distance from start to finish
         straight_line_dist = math.sqrt(
-            (self.est_x - self.start_x)**2 + 
-            (self.est_y - self.start_y)**2 + 
-            (self.est_z - self.start_z)**2
+            (self.est_x - self.start_x) ** 2 +
+            (self.est_y - self.start_y) ** 2 +
+            (self.est_z - self.start_z) ** 2
         )
 
         # Using standard Python print() to avoid ROS logging errors during shutdown
@@ -232,6 +234,7 @@ class VelocityIntegratorNode(Node):
         print(f"Straight-Line Displacement: {straight_line_dist:.3f} meters")
         print(f"Total Path Length Accumulated: {self.path_length:.3f} meters")
         print("=========================================\n")
+
 
 def main():
     rclpy.init()
@@ -247,6 +250,7 @@ def main():
         # Prevent double-shutdown error in newer ROS 2 versions
         if rclpy.ok():
             rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

@@ -10,8 +10,13 @@ from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from std_msgs.msg import String
 
-FORWARD_VALUE = 400
-TURN_VALUE = 1000
+FORWARD_REF_VEL = 0.3
+FORWARD_REF_VALUE = 400
+FORWARD_MAX_VALUE = 600
+
+TURN_REF_ANGULAR = 0.65
+TURN_REF_VALUE = 1000
+TURN_MAX_VALUE = 1000
 
 class XtendTwistToCmdNav(Node):
     def __init__(
@@ -63,10 +68,15 @@ class XtendTwistToCmdNav(Node):
         self.last_action = key
         self.get_logger().info(f"Published: {msg.data}")
 
-    def scale_axis(self, value: float, max_value: int) -> int:
+    def scale_translation_axis(self, value: float) -> int:
         value_abs = abs(float(value))
-        value_abs = max(0.0, min(1.0, value_abs))
-        return int(value_abs * max_value)
+        axis = int(round((value_abs / FORWARD_REF_VEL) * FORWARD_REF_VALUE))
+        return max(0, min(FORWARD_MAX_VALUE, axis))
+
+    def scale_yaw_axis(self, angular_z: float) -> int:
+        value_abs = abs(float(angular_z))
+        axis = int(round((value_abs / TURN_REF_ANGULAR) * TURN_REF_VALUE))
+        return max(0, min(TURN_MAX_VALUE, axis))
 
     def choose_cmd_from_twist(self, msg: Twist) -> tuple[str, int]:
         lx = float(msg.linear.x)
@@ -75,29 +85,29 @@ class XtendTwistToCmdNav(Node):
         az = float(msg.angular.z)
 
         if az > self.angular_delta:
-            return "turn_left", self.scale_axis(az, TURN_VALUE)
+            return "turn_left", self.scale_yaw_axis(az)
 
         if az < -self.angular_delta:
-            return "turn_right", self.scale_axis(az, TURN_VALUE)
+            return "turn_right", self.scale_yaw_axis(az)
 
         if lx > self.linear_delta:
-            return "forward", self.scale_axis(lx, FORWARD_VALUE)
+            return "forward", self.scale_translation_axis(lx)
 
         if lx < -self.linear_delta:
-            return "backward", self.scale_axis(lx, FORWARD_VALUE)
+            return "backward", self.scale_translation_axis(lx)
 
         if self.allow_multi_axes:
             if lz > self.linear_delta:
-                return "up", self.scale_axis(lz, FORWARD_VALUE)
+                return "up", self.scale_translation_axis(lz)
 
             if lz < -self.linear_delta:
-                return "down", self.scale_axis(lz, FORWARD_VALUE)
+                return "down", self.scale_translation_axis(lz)
 
             if ly > self.linear_delta:
-                return "left", self.scale_axis(ly, FORWARD_VALUE)
+                return "left", self.scale_translation_axis(ly)
 
             if ly < -self.linear_delta:
-                return "right", self.scale_axis(ly, FORWARD_VALUE)
+                return "right", self.scale_translation_axis(ly)
 
         return "stop", 0
 
@@ -120,13 +130,13 @@ class XtendTwistToCmdNav(Node):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--cmd-vel-topic", default="/cmd_vel")
-    p.add_argument("--cmd-nav-topic", default="/drone/cmd_nav")
+    p.add_argument("--cmd-nav-topic", default="/xtend/cmd_nav")
 
     # Planner thresholds
     p.add_argument("--angular-delta", type=float, default=0.5)
     p.add_argument("--linear-delta", type=float, default=0.05)
 
-    p.add_argument("--timeout-sec", type=float, default=0.3)
+    p.add_argument("--timeout-sec", type=float, default=1.5)
     p.add_argument("--no-stop-on-timeout", action="store_true")
     return p.parse_args()
 

@@ -86,7 +86,7 @@ class DepthProcessorNode(Node):
 
         self.depth_model = DA3TensorRTModel(self.engine_path, self.config_yaml)
 
-        self.pub_depth = self.create_publisher(Image, self.depth_topic, depth_qos)
+        self.pub_depth = self.create_publisher(Image, self.depth_topic, rgb_qos)
         # self.pub_debug = self.create_publisher(Image, self.debug_topic, depth_qos)
 
         self.sub_image = self.create_subscription(

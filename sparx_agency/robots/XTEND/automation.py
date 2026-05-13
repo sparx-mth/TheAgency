@@ -138,7 +138,6 @@ class ControllerAutomation:
                         self.y = local.get("y", getattr(self, "y", None))
                         self.z = local.get("z", getattr(self, "z", None))
 
-                        self.log_telemetry(robot)
                         break
 
                 except json.JSONDecodeError:

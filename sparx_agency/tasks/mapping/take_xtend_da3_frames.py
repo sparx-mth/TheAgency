@@ -267,7 +267,7 @@ def parse_args() -> argparse.Namespace:
         "--engine-path",
         default=str(
             Path.home()
-            / "depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine"
+            / "depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine"
         ),
         help="Path to DA3 TensorRT .engine file.",
     )

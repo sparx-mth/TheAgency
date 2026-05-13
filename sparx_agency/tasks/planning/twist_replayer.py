@@ -40,7 +40,7 @@ class TwistReplayer(Node):
 
         self.declare_parameter('log_path', 'cmd_log_20260512_113700 1.jsonl')
         self.declare_parameter('topic',    '/cmd_vel')
-        self.declare_parameter('speed',    1.0) # 1= 20Hz 0.25 = 5Hz
+        self.declare_parameter('speed',    0.2) # 1= 20Hz 0.25 = 5Hz
         self.declare_parameter('loop',     False)
 
         log_path  = self.get_parameter('log_path').value
