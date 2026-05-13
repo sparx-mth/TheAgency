@@ -16,6 +16,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped
 from cv_bridge import CvBridge
 import yaml
+import csv
 
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
 
@@ -113,6 +114,26 @@ class FlowDepthVelocityNode(Node):
             "json_out_path",
             "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json",
         )
+
+        self.declare_parameter("log_vel_csv_path", "/tmp/velocity_log.csv")
+        self.declare_parameter("log_pose_csv_path", "/tmp/pose_log.csv")
+
+        self.vel_csv_path = self.get_parameter("log_vel_csv_path").get_parameter_value().string_value
+        self.pose_csv_path = self.get_parameter("log_pose_csv_path").get_parameter_value().string_value
+
+        self.vel_log_file = open(self.vel_csv_path, 'w', newline='')
+        self.vel_csv_writer = csv.writer(self.vel_log_file)
+        self.vel_csv_writer.writerow([
+            'timestamp', 'dt', 
+            'raw_vx', 'raw_vy', 'raw_vz', 
+            'filtered_vx', 'filtered_vy', 'filtered_vz', 
+            'pub_vx', 'pub_vy', 'pub_vz', 
+            'features_used', 'center_depth'
+        ])
+
+        self.pose_log_file = open(self.pose_csv_path, 'w', newline='')
+        self.pose_csv_writer = csv.writer(self.pose_log_file)
+        self.pose_csv_writer.writerow(['timestamp', 'x', 'y', 'z'])
 
         # ============================================================
         # Read parameters
@@ -335,7 +356,6 @@ class FlowDepthVelocityNode(Node):
         raise ValueError(
             f"Could not find projection_matrix or fx/fy/cx/cy in YAML: {yaml_path}"
         )
-
     # ============================================================
     # RGB callback: compute Optical Flow immediately
     # ============================================================
@@ -546,6 +566,17 @@ class FlowDepthVelocityNode(Node):
         self.vel_pub.publish(vel_msg)
 
         self.published_count += 1
+
+        rgb_stamp_sec = flow_item["rgb_stamp_sec"]
+        self.vel_csv_writer.writerow([
+            f"{rgb_stamp_sec:.6f}", f"{dt:.4f}",
+            f"{raw_vx_mps:.4f}", f"{raw_vy_mps:.4f}", f"{raw_vz_mps:.4f}",
+            f"{filtered_vx_mps:.4f}", f"{filtered_vy_mps:.4f}", f"{filtered_vz_mps:.4f}",
+            f"{vx_mps:.4f}", f"{vy_mps:.4f}", f"{vz_mps:.4f}",
+            n_used, f"{self.center_depth:.4f}"
+        ])
+        self.vel_log_file.flush()  # Ensure data is written to disk promptly
+
 
         self.print_velocity_estimate(
             flow_item=flow_item,
@@ -796,6 +827,13 @@ class FlowDepthVelocityNode(Node):
             },
         })
 
+        stamp_sec = self.stamp_to_sec(msg.header.stamp)
+        self.pose_csv_writer.writerow([
+            f"{stamp_sec:.6f}", 
+            f"{x:.4f}", f"{y:.4f}", f"{z:.4f}"
+        ])
+        self.pose_log_file.flush()
+
     # ============================================================
     # Debug drawing
     # ============================================================
@@ -941,9 +979,18 @@ class FlowDepthVelocityNode(Node):
         )
 
     # ============================================================
-    # Shutdown
+    # Shutdown tasks: save trajectory history to JSON
     # ============================================================
     def destroy_node(self):
+        
+        if hasattr(self, 'vel_log_file') and not self.vel_log_file.closed:
+            self.vel_log_file.close()
+            self.get_logger().info(f"[CSV] Saved velocity log to {self.vel_csv_path}")
+            
+        if hasattr(self, 'pose_log_file') and not self.pose_log_file.closed:
+            self.pose_log_file.close()
+            self.get_logger().info(f"[CSV] Saved pose log to {self.pose_csv_path}")
+
         if self.trajectory_history:
             try:
                 with open(self.json_out_path, "w", encoding="utf-8") as f:
