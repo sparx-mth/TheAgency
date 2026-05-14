@@ -65,12 +65,34 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("depth_ema_alpha", 0.15) # EMA alpha for depth smoothing, between 0 and 1. Higher means more smoothing but more lag.
         self.declare_parameter("csv_filename", "/tmp/zone_velocities_log_no_imu.csv")
         
+        self.declare_parameter("log_vel_csv_path", "/tmp/velocity_log.csv")
+        self.declare_parameter("log_pose_csv_path", "/tmp/pose_log.csv")
+        
         self.declare_parameter(
             "json_out_path",
             str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json"),
         )
         
         self.json_out_path = self.get_parameter("json_out_path").get_parameter_value().string_value
+
+        self.vel_csv_path = self.get_parameter("log_vel_csv_path").get_parameter_value().string_value
+        self.pose_csv_path = self.get_parameter("log_pose_csv_path").get_parameter_value().string_value
+
+        # Initialize velocity CSV file
+        self.vel_log_file = open(self.vel_csv_path, 'w', newline='')
+        self.vel_csv_writer = csv.writer(self.vel_log_file)
+        self.vel_csv_writer.writerow([
+            'timestamp', 'dt', 
+           # 'raw_vx', 'raw_vy', 'raw_vz', 
+           # 'filtered_vx', 'filtered_vy', 'filtered_vz', 
+            'pub_vx', 'pub_vy', 'pub_vz', 
+            'features_used'
+        ])
+
+        # Initialize pose CSV file
+        self.pose_log_file = open(self.pose_csv_path, 'w', newline='')
+        self.pose_csv_writer = csv.writer(self.pose_log_file)
+        self.pose_csv_writer.writerow(['timestamp', 'x', 'y', 'z'])
 
         self.trajectory_history = []
 
@@ -171,6 +193,14 @@ class FlowDepthVelocityNode(Node):
                 "yaw": 0.0  
             }
         })
+
+        # Log pose to CSV
+        stamp_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        self.pose_csv_writer.writerow([
+            f"{stamp_sec:.6f}", 
+            f"{x:.4f}", f"{y:.4f}", f"{z:.4f}"
+        ])
+        self.pose_log_file.flush()
     # ---------------------------------
 
 
@@ -289,17 +319,19 @@ class FlowDepthVelocityNode(Node):
             return
 
         # Compute velocity from flow and depth
-        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
+        raw_vx_mps, raw_vy_mps, raw_vz_mps, n_used = self.velocity_from_flow_and_depth(
             flow_res.good_old, flow_res.good_new, depth_map, flow_res.dt
         )
 
         # Apply simple low-pass filtering to the velocity estimates to reduce noise
-        vx_mps = self.vel_alpha * vx_mps + (1 - self.vel_alpha) * self.prev_vx
-        vy_mps = self.vel_alpha * vy_mps + (1 - self.vel_alpha) * self.prev_vy
-        vz_mps = self.vel_alpha * vz_mps + (1 - self.vel_alpha) * self.prev_vz
+        filtered_vx_mps = self.vel_alpha * raw_vx_mps + (1 - self.vel_alpha) * self.prev_vx
+        filtered_vy_mps = self.vel_alpha * raw_vy_mps + (1 - self.vel_alpha) * self.prev_vy
+        filtered_vz_mps = self.vel_alpha * raw_vz_mps + (1 - self.vel_alpha) * self.prev_vz
 
-        self.prev_vx, self.prev_vy, self.prev_vz = vx_mps, vy_mps, vz_mps
+        self.prev_vx, self.prev_vy, self.prev_vz = filtered_vx_mps, filtered_vy_mps, filtered_vz_mps
 
+        # Copy for publishing
+        vx_mps, vy_mps, vz_mps = filtered_vx_mps, filtered_vy_mps, filtered_vz_mps
 
         if abs(vx_mps) < 0.02: vx_mps = 0.0
         if abs(vy_mps) < 0.2: vy_mps = 0.0
@@ -310,6 +342,17 @@ class FlowDepthVelocityNode(Node):
         vel_msg.header.frame_id = self.camera_frame
         vel_msg.vector.x, vel_msg.vector.y, vel_msg.vector.z = float(vx_mps), float(vy_mps), float(vz_mps)
         self.vel_pub.publish(vel_msg)
+
+        # Log velocity to CSV
+        rgb_stamp_sec = float(rgb_msg.header.stamp.sec) + float(rgb_msg.header.stamp.nanosec) * 1e-9
+        self.vel_csv_writer.writerow([
+            f"{rgb_stamp_sec:.6f}", f"{flow_res.dt:.4f}",
+           # f"{raw_vx_mps:.4f}", f"{raw_vy_mps:.4f}", f"{raw_vz_mps:.4f}",
+           # f"{filtered_vx_mps:.4f}", f"{filtered_vy_mps:.4f}", f"{filtered_vz_mps:.4f}",
+            f"{vx_mps:.4f}", f"{vy_mps:.4f}", f"{vz_mps:.4f}",
+            n_used
+        ])
+        self.vel_log_file.flush()  # Ensure data is written to disk promptly
 
         # Visual Debug
         if self.show_debug:
@@ -447,6 +490,14 @@ class FlowDepthVelocityNode(Node):
 
 
     def destroy_node(self):
+            if hasattr(self, 'vel_log_file') and not self.vel_log_file.closed:
+                self.vel_log_file.close()
+                self.get_logger().info(f"[CSV] Saved velocity log to {self.vel_csv_path}")
+            
+            if hasattr(self, 'pose_log_file') and not self.pose_log_file.closed:
+                self.pose_log_file.close()
+                self.get_logger().info(f"[CSV] Saved pose log to {self.pose_csv_path}")
+
             if self.trajectory_history:
                 try:
                     import json

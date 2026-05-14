@@ -128,10 +128,10 @@ class FlowDepthVelocityNode(Node):
         self.vel_csv_writer = csv.writer(self.vel_log_file)
         self.vel_csv_writer.writerow([
             'timestamp', 'dt', 
-            'raw_vx', 'raw_vy', 'raw_vz', 
-            'filtered_vx', 'filtered_vy', 'filtered_vz', 
+            #'raw_vx', 'raw_vy', 'raw_vz', 
+            #'filtered_vx', 'filtered_vy', 'filtered_vz', 
             'pub_vx', 'pub_vy', 'pub_vz', 
-            'features_used', 'center_depth'
+            'features_used'
         ])
 
         self.pose_log_file = open(self.pose_csv_path, 'w', newline='')
@@ -573,10 +573,10 @@ class FlowDepthVelocityNode(Node):
         rgb_stamp_sec = flow_item["rgb_stamp_sec"]
         self.vel_csv_writer.writerow([
             f"{rgb_stamp_sec:.6f}", f"{dt:.4f}",
-            f"{raw_vx_mps:.4f}", f"{raw_vy_mps:.4f}", f"{raw_vz_mps:.4f}",
-            f"{filtered_vx_mps:.4f}", f"{filtered_vy_mps:.4f}", f"{filtered_vz_mps:.4f}",
+            #f"{raw_vx_mps:.4f}", f"{raw_vy_mps:.4f}", f"{raw_vz_mps:.4f}",
+            #f"{filtered_vx_mps:.4f}", f"{filtered_vy_mps:.4f}", f"{filtered_vz_mps:.4f}",
             f"{vx_mps:.4f}", f"{vy_mps:.4f}", f"{vz_mps:.4f}",
-            n_used, f"{self.center_depth:.4f}"
+            n_used
         ])
         self.vel_log_file.flush()  # Ensure data is written to disk promptly
 
@@ -767,26 +767,49 @@ class FlowDepthVelocityNode(Node):
         du_v = du[valid].astype(np.float64)
         dv_v = dv[valid].astype(np.float64)
 
-        A = np.zeros((2 * nv, 3), dtype=np.float64)
-        B = np.zeros((2 * nv,), dtype=np.float64)
+        #  Outlier Rejection use RANSAC 
+        vx_estimates = - (du_v * Zv) / float(self.fx)
+        vy_estimates = - (dv_v * Zv) / float(self.fy)
+
+        median_vx = np.median(vx_estimates)
+        median_vy = np.median(vy_estimates)
+
+        dev_x = np.abs(vx_estimates - median_vx)
+        dev_y = np.abs(vy_estimates - median_vy)
+
+        threshold = 0.3  # Tunable threshold for outlier rejection
+        good_inliers = (dev_x < threshold) & (dev_y < threshold)
+
+        nv_inliers = int(np.sum(good_inliers))
+        if nv_inliers < 8:
+            return 0.0, 0.0, 0.0, 0
+
+        u_c_v_in = u_c_v[good_inliers]
+        v_c_v_in = v_c_v[good_inliers]
+        Zv_in = Zv[good_inliers]
+        du_v_in = du_v[good_inliers]
+        dv_v_in = dv_v[good_inliers]
+
+
+
+        A = np.zeros((2 * nv_inliers, 3), dtype=np.float64)
+        B = np.zeros((2 * nv_inliers,), dtype=np.float64)
 
         A[0::2, 0] = -float(self.fx)
-        A[0::2, 2] = u_c_v
-        B[0::2] = du_v * Zv
+        A[0::2, 2] = u_c_v_in
+        B[0::2] = du_v_in * Zv_in
 
         A[1::2, 1] = -float(self.fy)
-        A[1::2, 2] = v_c_v
-        B[1::2] = dv_v * Zv
+        A[1::2, 2] = v_c_v_in
+        B[1::2] = dv_v_in * Zv_in
 
-        # Center weighting: points closer to the image center are usually more stable.
-        dist_sq = u_c_v**2 + v_c_v**2
+        dist_sq = u_c_v_in**2 + v_c_v_in**2
         denom = 0.05 * (float(self.cx) ** 2 + float(self.cy) ** 2)
         weights = np.exp(-dist_sq / max(denom, 1e-9))
 
-        W_vec = np.zeros((2 * nv,), dtype=np.float64)
+        W_vec = np.zeros((2 * nv_inliers,), dtype=np.float64)
         W_vec[0::2] = weights
         W_vec[1::2] = weights
-
         sqrt_w = np.sqrt(W_vec)
 
         try:
@@ -796,13 +819,13 @@ class FlowDepthVelocityNode(Node):
                 rcond=None,
             )
         except np.linalg.LinAlgError:
-            return 0.0, 0.0, 0.0, nv
+            return 0.0, 0.0, 0.0, nv_inliers
 
         Vx_o = float(vel[0])
         Vy_o = float(vel[1])
         Vz_o = float(vel[2])
 
-        return Vz_o, -Vx_o, -Vy_o, nv
+        return Vz_o, -Vx_o, -Vy_o, nv_inliers
 
     # ============================================================
     # Extra callbacks
