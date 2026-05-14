@@ -87,12 +87,14 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("min_depth", 0.05)
         self.declare_parameter("max_depth", 10.0)
         self.declare_parameter("depth_scale", 1.0)
-        self.declare_parameter("depth_ema_alpha", 0.15)
+        # Reduced EMA alpha from 0.15 to 0.05 to reduce lag between features and smoothed depth
+        self.declare_parameter("depth_ema_alpha", 0.05)
 
         # Manual matching parameters.
         # max_wait_for_depth_sec: maximum accepted time difference between the
         # current RGB/flow timestamp and the Depth timestamp.
-        self.declare_parameter("max_wait_for_depth_sec", 0.5)
+        # Reduced from 0.5 to 0.1 to avoid feature staleness and desynchronization.
+        self.declare_parameter("max_wait_for_depth_sec", 0.1)
 
         # Sometimes the Depth header stamp may be a few ms earlier than the RGB
         # stamp because of timestamp jitter. Allow a small negative difference.
