@@ -46,21 +46,28 @@ class DepthProcessorNode(Node):
             "config_yaml",
             str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml"),
         )
-
+        self.declare_parameter("small_lut_path", str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/mapping/config/lut_small_depth.npz"),)
 
         self.declare_parameter("image_topic", "/xtend/rgb")
         self.declare_parameter("camera_info_topic", "/xtend/camera_info")
+        self.declare_parameter("camera_info_mode", "crop_resize")
+        # options: base, padded, crop_resize
         self.declare_parameter("depth_topic", "/xtend/depth_m")
         # self.declare_parameter("debug_topic", "/xtend/depth_vis")
 
         self.declare_parameter("publish_debug", False)
         self.declare_parameter("clip_min_m", 0.0)
         self.declare_parameter("clip_max_m", 20.0)
+        self.declare_parameter("model_type", "small_lut")  # large_metric or small_lut
+
+        self.declare_parameter("small_lut_clip_min_m", 0.2)
+        self.declare_parameter("small_lut_clip_max_m", 10.0)
         self.declare_parameter("apply_metric_focal_scaling", True)
         self.declare_parameter("metric_scale_divisor", 300.0)
 
         self.engine_path = self.get_parameter("engine_path").value
         self.config_yaml = self.get_parameter("config_yaml").value
+        self.camera_info_mode = self.get_parameter("camera_info_mode").value
         self.image_topic = self.get_parameter("image_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
@@ -69,6 +76,10 @@ class DepthProcessorNode(Node):
         self.publish_debug = bool(self.get_parameter("publish_debug").value)
         self.clip_min_m = float(self.get_parameter("clip_min_m").value)
         self.clip_max_m = float(self.get_parameter("clip_max_m").value)
+        self.model_type = self.get_parameter("model_type").value
+        self.small_lut_path = self.get_parameter("small_lut_path").value
+        self.small_lut_clip_min_m = float(self.get_parameter("small_lut_clip_min_m").value)
+        self.small_lut_clip_max_m = float(self.get_parameter("small_lut_clip_max_m").value)
         self.apply_metric_focal_scaling = bool(self.get_parameter("apply_metric_focal_scaling").value)
         self.metric_scale_divisor = float(self.get_parameter("metric_scale_divisor").value)
 
@@ -83,6 +94,14 @@ class DepthProcessorNode(Node):
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
         )
+
+        self.small_lut_raw = None
+        self.small_lut_meters = None
+
+        if self.model_type == "small_lut":
+            self.load_small_lut(self.small_lut_path)
+        elif self.model_type != "large_metric":
+            raise ValueError(f"Unsupported model_type: {self.model_type}")
 
         self.depth_model = DA3TensorRTModel(self.engine_path, self.config_yaml)
 
@@ -101,24 +120,31 @@ class DepthProcessorNode(Node):
             frame_id="xtend_camera",
         )
 
-        # DA3 LARGEMETRIC MODEL: 728*420
-        # self.camera_info_msg  = padded_camera_info(
-        #     base=base_info,
-        #     pad_left=4,
-        #     pad_top=0,
-        #     new_width=728,
-        #     new_height=420,
-        # )
-        # DA3 SMALL MODEL 504*392
-        self.camera_info_msg = crop_resize_camera_info(
-            base=base_info,
-            crop_left=90,
-            crop_top=0,
-            crop_width=540,
-            crop_height=420,
-            new_width=504,
-            new_height=392,
-        )
+        if self.camera_info_mode == "base":
+            self.camera_info_msg = base_info
+
+        elif self.camera_info_mode == "padded":
+            self.camera_info_msg = padded_camera_info(
+                base=base_info,
+                pad_left=4,
+                pad_top=0,
+                new_width=728,
+                new_height=420,
+            )
+
+        elif self.camera_info_mode == "crop_resize":
+            self.camera_info_msg = crop_resize_camera_info(
+                base=base_info,
+                crop_left=90,
+                crop_top=0,
+                crop_width=540,
+                crop_height=420,
+                new_width=504,
+                new_height=392,
+            )
+
+        else:
+            raise ValueError(f"Unsupported camera_info_mode: {self.camera_info_mode}")
 
         self.get_logger().info("DepthProcessorNode started")
         self.get_logger().info(f"Image topic: {self.image_topic}")
@@ -133,6 +159,23 @@ class DepthProcessorNode(Node):
         if self.clip_max_m > self.clip_min_m:
             depth = np.clip(depth, self.clip_min_m, self.clip_max_m)
         return depth
+
+    def load_small_lut(self, lut_path: str):
+        if not lut_path:
+            raise ValueError("model_type=small_lut requires small_lut_path")
+
+        data = np.load(lut_path)
+
+        raw = data["raw"].astype(np.float32)
+        meters = data["meters"].astype(np.float32)
+
+        order = np.argsort(raw)
+        self.small_lut_raw = raw[order]
+        self.small_lut_meters = meters[order]
+
+        self.get_logger().info("Loaded small depth LUT:")
+        for r, z in zip(self.small_lut_raw, self.small_lut_meters):
+            self.get_logger().info(f"  raw={r:.6f} -> meters={z:.3f}")
 
     def get_focal_px(self) -> float:
         if self.camera_info_msg is None:
@@ -154,16 +197,57 @@ class DepthProcessorNode(Node):
 
         return focal_px
 
+    def convert_small_lut_to_metric_depth(self, net_output: np.ndarray) -> np.ndarray:
+        if self.small_lut_raw is None or self.small_lut_meters is None:
+            raise RuntimeError("Small LUT was not loaded")
+
+        raw = net_output.astype(np.float32, copy=False)
+
+        x = self.small_lut_raw.astype(np.float32)
+        y = self.small_lut_meters.astype(np.float32)
+
+        # Normal interpolation inside LUT range.
+        depth_m = np.interp(raw, x, y).astype(np.float32)
+
+        # Linear extrapolation below LUT range using first segment.
+        low_mask = raw < x[0]
+        if np.any(low_mask):
+            dx = max(float(x[1] - x[0]), 1e-6)
+            slope_low = float(y[1] - y[0]) / dx
+            depth_m[low_mask] = y[0] + slope_low * (raw[low_mask] - x[0])
+
+        # Linear extrapolation above LUT range using last segment.
+        high_mask = raw > x[-1]
+        if np.any(high_mask):
+            dx = max(float(x[-1] - x[-2]), 1e-6)
+            slope_high = float(y[-1] - y[-2]) / dx
+            depth_m[high_mask] = y[-1] + slope_high * (raw[high_mask] - x[-1])
+
+        # Safety clamp. Use wider than calibration range if you want extrapolation.
+        depth_m = np.clip(
+            depth_m,
+            self.small_lut_clip_min_m,
+            self.small_lut_clip_max_m,
+        )
+
+        return depth_m.astype(np.float32)
+
     def convert_to_metric_depth(self, net_output: np.ndarray) -> np.ndarray:
-        if not self.apply_metric_focal_scaling:
-            return net_output.astype(np.float32, copy=False)
+        if self.model_type == "small_lut":
+            return self.convert_small_lut_to_metric_depth(net_output)
 
-        focal_px = self.get_focal_px()
-        if focal_px <= 0.0:
-            raise ValueError(f"Invalid focal length: focal_px={focal_px}")
+        if self.model_type == "large_metric":
+            if not self.apply_metric_focal_scaling:
+                return net_output.astype(np.float32, copy=False)
 
-        metric_depth = (focal_px * net_output) / self.metric_scale_divisor
-        return metric_depth.astype(np.float32, copy=False)
+            focal_px = self.get_focal_px()
+            if focal_px <= 0.0:
+                raise ValueError(f"Invalid focal length: focal_px={focal_px}")
+
+            metric_depth = (focal_px * net_output) / self.metric_scale_divisor
+            return metric_depth.astype(np.float32, copy=False)
+
+        raise ValueError(f"Unsupported model_type: {self.model_type}")
 
     def depth_to_debug(self, depth: np.ndarray) -> np.ndarray:
         depth_norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
