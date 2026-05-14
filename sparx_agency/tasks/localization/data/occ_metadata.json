@@ -1,0 +1,28 @@
+{
+  "format": "local_floor_plane_occupancy_grid",
+  "grid_shape_hw": [
+    200,
+    100
+  ],
+  "height_cells": 200,
+  "width_cells": 100,
+  "resolution_m_per_cell": 0.05,
+  "width_m": 5.0,
+  "height_m": 10.0,
+  "values_int8": {
+    "-1": "unknown",
+    "0": "free",
+    "100": "occupied"
+  },
+  "values_float": {
+    "0.0": "free",
+    "0.5": "unknown",
+    "1.0": "occupied"
+  },
+  "coordinate_frame": "local_floor_plane",
+  "image_convention": {
+    "occ_grid_int8.npy": "row-major grid[row, col], row increases forward in internal map before png flip",
+    "occ_map.png": "visualization only, flipped vertically for display"
+  },
+  "note": "Use the .npy grid and this metadata for metric distances. Do not measure from the PNG unless using the same resolution and flip convention."
+}
