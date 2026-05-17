@@ -485,7 +485,7 @@ source /opt/ros/humble/setup.bash
 source theagency_venv/bin/activate
 export PYTHONPATH=$PWD:$PYTHONPATH
 
-python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/online_nav_bridge_publisher.py
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/online_nav_bridge_publisher.py
 ```
 
 ### Terminal 2: run the UI

@@ -245,7 +245,7 @@ source /opt/ros/humble/setup.bash
 source theagency_venv/bin/activate
 export PYTHONPATH=/home/user1/GIT/TheAgency:$PYTHONPATH
 
-python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/online_nav_bridge_capture.py
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/online_nav_bridge_capture.py
 ```
 
 Publish commands:
@@ -283,13 +283,13 @@ cd /home/user1/GIT/TheAgency
 source theagency_venv/bin/activate
 export PYTHONPATH=/home/user1/GIT/TheAgency:$PYTHONPATH
 
-python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --drone-id 42B   --out-dir /home/user/jetson-containers/data   --capture-hz 1   --yaw-bucket-deg 0
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --drone-id 42B   --out-dir /home/user/jetson-containers/data   --capture-hz 1   --yaw-bucket-deg 0
 ```
 
 Recommended after movement is stable:
 
 ```bash
-python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --drone-id R1   --out-dir /home/user/jetson-containers/data   --capture-every-ms 500   --yaw-bucket-deg 0
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --drone-id R1   --out-dir /home/user/jetson-containers/data   --capture-every-ms 500   --yaw-bucket-deg 0
 ```
 
 Expected output:
@@ -481,7 +481,7 @@ python3 sparx_agency/tasks/mapping/take_xtend_da3_frames.py   --capture-hz 5   -
 ### Workflow B: dome capture then offline DA3
 
 ```bash
-python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/xtend_dome_main.py   --drone-id 42B   --out-dir /home/user/jetson-containers/data   --capture-hz 1   --yaw-bucket-deg 0
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --drone-id 42B   --out-dir /home/user/jetson-containers/data   --capture-hz 1   --yaw-bucket-deg 0
 ```
 
 ```bash
