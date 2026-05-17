@@ -7,7 +7,7 @@ import math
 import os
 from typing import Deque, Dict, Optional, Tuple, Any
 from pathlib import Path
-
+from std_msgs.msg import Float32
 import cv2
 import numpy as np
 import rclpy
@@ -61,6 +61,8 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("output_topic", "/flow_depth/velocity")
         self.declare_parameter("pose_est_topic", "/flow_depth/pose_est")
         self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
+        self.declare_parameter("bearing_topic", "/xtend/bearing")
+        self.declare_parameter("turn_rate_threshold_deg", 10.0)
 
         self.declare_parameter(
             "camera_config_yaml",
@@ -151,6 +153,9 @@ class FlowDepthVelocityNode(Node):
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
 
+        self.bearing_topic = self.get_parameter("bearing_topic").get_parameter_value().string_value
+        self.turn_rate_threshold_rad = math.radians(self.get_parameter("turn_rate_threshold_deg").get_parameter_value().double_value)
+
         self.print_velocity_debug = bool(
             self.get_parameter("print_velocity_debug").get_parameter_value().bool_value
         )
@@ -231,6 +236,10 @@ class FlowDepthVelocityNode(Node):
         self.no_flow_for_depth_count = 0
         self.no_match_count = 0
 
+        self.last_bearing = None
+        self.last_bearing_time = None
+        self.is_turning = False
+
         # ============================================================
         # Camera intrinsics and tracker
         # ============================================================
@@ -284,6 +293,13 @@ class FlowDepthVelocityNode(Node):
             image_qos,
         )
 
+        self.bearing_sub = self.create_subscription(
+            Float32,
+            self.bearing_topic,
+            self.bearing_callback,
+            10
+        )
+
         self.get_logger().info("============================================================")
         self.get_logger().info("[FlowDepth] Started: RGB computes Flow now, Depth completes metric velocity later")
         self.get_logger().info(f"[FlowDepth] RGB topic: {self.image_topic}")
@@ -312,6 +328,21 @@ class FlowDepthVelocityNode(Node):
         if self.sync_time_mode == "arrival":
             return arrival_time_sec
         return self.stamp_to_sec(msg.header.stamp)
+    
+    def bearing_callback(self, msg: Float32):
+        current_time = self.now_sec()
+        current_bearing = msg.data 
+
+        if self.last_bearing is not None and self.last_bearing_time is not None:
+            dt = current_time - self.last_bearing_time
+            if dt > 0.0:
+                diff = (current_bearing - self.last_bearing + math.pi) % (2 * math.pi) - math.pi
+                turn_rate = abs(diff) / dt
+
+                self.is_turning = (turn_rate > self.turn_rate_threshold_rad)
+
+        self.last_bearing = current_bearing
+        self.last_bearing_time = current_time
 
     # ============================================================
     # Camera intrinsics
@@ -532,33 +563,46 @@ class FlowDepthVelocityNode(Node):
         dt = flow_item["dt"]
         rgb_stamp = flow_item["rgb_stamp"]
 
-        raw_vx_mps, raw_vy_mps, raw_vz_mps, n_used = self.velocity_from_flow_and_depth(
-            good_old=good_old,
-            good_new=good_new,
-            depth_map=depth_map,
-            dt=dt,
-        )
+        n_used = 0
+        raw_vx_mps, raw_vy_mps, raw_vz_mps = 0.0, 0.0, 0.0
+        filtered_vx_mps, filtered_vy_mps, filtered_vz_mps = 0.0, 0.0, 0.0
 
-        # Low-pass filter to reduce frame-to-frame jumps.
-        filtered_vx_mps = self.vel_alpha * raw_vx_mps + (1.0 - self.vel_alpha) * self.prev_vx
-        filtered_vy_mps = self.vel_alpha * raw_vy_mps + (1.0 - self.vel_alpha) * self.prev_vy
-        filtered_vz_mps = self.vel_alpha * raw_vz_mps + (1.0 - self.vel_alpha) * self.prev_vz
+        # ===  (Rotation Suppression) ===
+        if self.is_turning:
+            vx_mps, vy_mps, vz_mps = 0.0, 0.0, 0.0
+            
+            self.prev_vx = 0.0
+            self.prev_vy = 0.0
+            self.prev_vz = 0.0
 
-        self.prev_vx = filtered_vx_mps
-        self.prev_vy = filtered_vy_mps
-        self.prev_vz = filtered_vz_mps
+            if self.published_count % 10 == 0:
+                self.get_logger().info("🚨 [Turn Detected] Pausing Velocity to prevent drift!")
+                
+        else:
+            raw_vx_mps, raw_vy_mps, raw_vz_mps, n_used = self.velocity_from_flow_and_depth(
+                good_old=good_old,
+                good_new=good_new,
+                depth_map=depth_map,
+                dt=dt,
+            )
 
-        # Dead band to suppress tiny noise in the published velocity.
-        vx_mps = filtered_vx_mps
-        vy_mps = filtered_vy_mps
-        vz_mps = filtered_vz_mps
+            # Low-pass filter
+            filtered_vx_mps = self.vel_alpha * raw_vx_mps + (1.0 - self.vel_alpha) * self.prev_vx
+            filtered_vy_mps = self.vel_alpha * raw_vy_mps + (1.0 - self.vel_alpha) * self.prev_vy
+            filtered_vz_mps = self.vel_alpha * raw_vz_mps + (1.0 - self.vel_alpha) * self.prev_vz
 
-        if abs(vx_mps) < 0.02:
-            vx_mps = 0.0
-        if abs(vy_mps) < 0.2:
-            vy_mps = 0.0
-        if abs(vz_mps) < 0.2:
-            vz_mps = 0.0
+            self.prev_vx = filtered_vx_mps
+            self.prev_vy = filtered_vy_mps
+            self.prev_vz = filtered_vz_mps
+
+            vx_mps = filtered_vx_mps
+            vy_mps = filtered_vy_mps
+            vz_mps = filtered_vz_mps
+
+            # Dead band
+            if abs(vx_mps) < 0.02: vx_mps = 0.0
+            if abs(vy_mps) < 0.2: vy_mps = 0.0
+            if abs(vz_mps) < 0.2: vz_mps = 0.0
 
         vel_msg = Vector3Stamped()
         vel_msg.header.stamp = rgb_stamp
@@ -573,13 +617,10 @@ class FlowDepthVelocityNode(Node):
         rgb_stamp_sec = flow_item["rgb_stamp_sec"]
         self.vel_csv_writer.writerow([
             f"{rgb_stamp_sec:.6f}", f"{dt:.4f}",
-            #f"{raw_vx_mps:.4f}", f"{raw_vy_mps:.4f}", f"{raw_vz_mps:.4f}",
-            #f"{filtered_vx_mps:.4f}", f"{filtered_vy_mps:.4f}", f"{filtered_vz_mps:.4f}",
             f"{vx_mps:.4f}", f"{vy_mps:.4f}", f"{vz_mps:.4f}",
-            n_used
+            n_used, self.is_turning
         ])
-        self.vel_log_file.flush()  # Ensure data is written to disk promptly
-
+        self.vel_log_file.flush()
 
         self.print_velocity_estimate(
             flow_item=flow_item,
@@ -612,7 +653,6 @@ class FlowDepthVelocityNode(Node):
                 depth_stamp_sec=depth_stamp_sec,
                 depth_arrival_sec=depth_arrival_sec,
             )
-
 
     def print_velocity_estimate(
         self,
