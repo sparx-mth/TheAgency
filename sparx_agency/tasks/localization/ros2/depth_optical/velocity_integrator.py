@@ -12,6 +12,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 from rclpy.time import Time
+from std_msgs.msg import Float32
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -61,12 +62,14 @@ class VelocityIntegratorNode(Node):
         self.declare_parameter("tf_cache_sec", 20.0)
         self.declare_parameter("tf_timeout_sec", 0.05)
         self.declare_parameter("tf_fallback_to_latest", True)
+        self.declare_parameter("bearing_topic", "/xtend/bearing")
 
         vel_topic = self.get_parameter("vel_topic").value
         gt_topic = self.get_parameter("gt_pose_topic").value
         self.target_frame = norm_frame(self.get_parameter("target_frame").value)
         pose_topic = self.get_parameter("publish_pose_topic").value
-
+        bearing_topic = self.get_parameter("bearing_topic").value
+        
         self.init_from_gt = bool(self.get_parameter("init_from_gt").value)
         self.min_dt = float(self.get_parameter("min_dt").value)
         self.max_dt = float(self.get_parameter("max_dt").value)
@@ -78,6 +81,7 @@ class VelocityIntegratorNode(Node):
         self.get_logger().info(f"[Integrator] vel: {vel_topic}")
         self.get_logger().info(f"[Integrator] target_frame: {self.target_frame}")
         self.get_logger().info(f"[Integrator] publish pose: {pose_topic}")
+        self.get_logger().info(f"[Integrator] bearing topic: {bearing_topic}")
 
         # TF
         self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=float(self.get_parameter("tf_cache_sec").value)))
@@ -86,6 +90,8 @@ class VelocityIntegratorNode(Node):
         # State
         self.have_est = False
         self.est_x, self.est_y, self.est_z = 0.0, 0.0, 0.0
+
+        self.current_yaw = 0.0
         
         # --- Variables to track total distance ---
         self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
@@ -108,8 +114,13 @@ class VelocityIntegratorNode(Node):
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, image_qos)
         self.vel_sub = self.create_subscription(Vector3Stamped, vel_topic, self.vel_cb, image_qos)
         
+        self.bearing_sub = self.create_subscription(Float32, bearing_topic, self.bearing_cb, 10)
+
         if self.init_from_gt:
             self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
+
+    def bearing_cb(self, msg: Float32):
+        self.current_yaw = msg.data
 
     def gt_pose_cb(self, msg: Pose):
         if not self.have_est:
@@ -186,7 +197,7 @@ class VelocityIntegratorNode(Node):
             self.get_logger().warn(f"[Integrator] TF lookup failed: {e}")
             return
 
-        # Integrate
+        # Integrate Position
         dx = v_x * dt
         dy = v_y * dt
         dz = v_z * dt
@@ -200,14 +211,27 @@ class VelocityIntegratorNode(Node):
         self.path_length += step_distance
         # -------------------------------------------
 
+        # Convert Yaw (from Bearing) to Quaternion
+        half_yaw = self.current_yaw / 2.0
+        qw = math.cos(half_yaw)
+        qz = math.sin(half_yaw)
+
         # Publish
         est_msg = PoseStamped()
         est_msg.header.stamp = self.get_clock().now().to_msg()
         est_msg.header.frame_id = self.target_frame
+        
+        # Position
         est_msg.pose.position.x = self.est_x
         est_msg.pose.position.y = self.est_y
         est_msg.pose.position.z = self.est_z
-        est_msg.pose.orientation.w = 1.0
+        
+        # Orientation (Yaw applied)
+        est_msg.pose.orientation.x = 0.0
+        est_msg.pose.orientation.y = 0.0
+        est_msg.pose.orientation.z = qz
+        est_msg.pose.orientation.w = qw
+        
         self.pose_pub.publish(est_msg)
 
     def print_final_stats(self):
