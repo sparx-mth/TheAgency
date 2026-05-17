@@ -92,6 +92,7 @@ class VelocityIntegratorNode(Node):
         self.est_x, self.est_y, self.est_z = 0.0, 0.0, 0.0
 
         self.current_yaw = 0.0
+        self.initial_yaw = None 
         
         # --- Variables to track total distance ---
         self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
@@ -120,7 +121,15 @@ class VelocityIntegratorNode(Node):
             self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
 
     def bearing_cb(self, msg: Float32):
-        self.current_yaw = msg.data
+        raw_yaw = msg.data
+
+        if self.initial_yaw is None:
+            self.initial_yaw = raw_yaw
+            self.get_logger().info(f"[Integrator] Initial Yaw set to {math.degrees(self.initial_yaw):.2f} deg. This is now our 0.0 straight ahead.")
+
+        relative_yaw = raw_yaw - self.initial_yaw
+
+        self.current_yaw = (relative_yaw + math.pi) % (2 * math.pi) - math.pi
 
     def gt_pose_cb(self, msg: Pose):
         if not self.have_est:
