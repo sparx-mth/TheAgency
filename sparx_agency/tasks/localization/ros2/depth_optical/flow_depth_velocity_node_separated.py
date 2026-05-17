@@ -44,19 +44,11 @@ class FlowDepthVelocityNode(Node):
     def __init__(self):
         super().__init__("flow_depth_velocity_node")
 
-        # Keep the same default behavior as your current scripts.
-        self.set_parameters([
-            rclpy.parameter.Parameter(
-                "use_sim_time",
-                rclpy.parameter.Parameter.Type.BOOL,
-                True,
-            )
-        ])
 
         # ============================================================
         # Parameters
         # ============================================================
-        self.declare_parameter("image_topic", "/simple_drone/front/image_raw")
+        self.declare_parameter("image_topic", "/xtend/rgb")
         self.declare_parameter("depth_topic", "/depth_anything/depth")
         self.declare_parameter("output_topic", "/flow_depth/velocity")
         self.declare_parameter("pose_est_topic", "/flow_depth/pose_est")
@@ -297,7 +289,7 @@ class FlowDepthVelocityNode(Node):
             Float32,
             self.bearing_topic,
             self.bearing_callback,
-            10
+            10, 
         )
 
         self.get_logger().info("============================================================")
