@@ -15,12 +15,18 @@ Roi = Tuple[int, int, int, int]  # x, y, w, h
 
 def parse_distance_from_dir_name(name: str) -> float:
     """
-    Converts folder names like:
-      5_0 -> 5.0
-      4_5 -> 4.5
-      1_0 -> 1.0
+    Supports:
+      4_0          -> 4.0
+      4_0_seg00    -> 4.0
+      2_5_seg08    -> 2.5
+      0_5_seg12    -> 0.5
     """
-    return float(name.replace("_", "."))
+    m = re.match(r"^(\d+)_(\d+)", name)
+
+    if m is None:
+        raise ValueError(f"Could not parse distance from folder name: {name}")
+
+    return float(f"{m.group(1)}.{m.group(2)}")
 
 
 def list_distance_dirs(root_dir: Path):
@@ -30,7 +36,7 @@ def list_distance_dirs(root_dir: Path):
         if not p.is_dir():
             continue
 
-        if re.fullmatch(r"\d+_\d+", p.name):
+        if re.fullmatch(r"\d+_\d+(?:_seg\d+)?", p.name):
             dirs.append(p)
 
     dirs.sort(key=lambda d: parse_distance_from_dir_name(d.name), reverse=True)
@@ -69,45 +75,6 @@ def find_matching_depth_npy(image_path: Path, rgb_root: Path, depth_root: Path) 
         return npys[0]
 
     return None
-
-import re
-from pathlib import Path
-
-
-def parse_distance_from_dir_name(name: str) -> float:
-    """
-    Converts:
-      5_0 -> 5.0
-      4_5 -> 4.5
-      1_0 -> 1.0
-    """
-    return float(name.replace("_", "."))
-
-
-def list_distance_dirs(rgb_root: Path):
-    """
-    Finds distance folders under rgb root:
-      rgb/5_0
-      rgb/4_5
-      rgb/4_0
-      ...
-    """
-    dirs = []
-
-    for p in rgb_root.iterdir():
-        if not p.is_dir():
-            continue
-
-        if re.fullmatch(r"\d+_\d+", p.name):
-            dirs.append(p)
-
-    # Sort far to near: 5_0, 4_5, ..., 1_0
-    dirs.sort(
-        key=lambda d: parse_distance_from_dir_name(d.name),
-        reverse=True,
-    )
-
-    return dirs
 
 
 def list_rgb_images(folder: Path):
@@ -394,6 +361,12 @@ def main():
         help="If chessboard detection fails, open a window and let user select ROI once per folder.",
     )
 
+    parser.add_argument(
+        "--force-manual-roi",
+        action="store_true",
+        help="Always open a window and select ROI manually once per folder/segment.",
+    )
+
     args = parser.parse_args()
 
     rgb_root = Path(args.rgb_root).expanduser()
@@ -441,6 +414,20 @@ def main():
             if args.reuse_folder_roi and folder_roi is not None:
                 roi = folder_roi
 
+            elif args.force_manual_roi:
+                print(f"[{dist_name}] Opening manual ROI window on {img_path.name}...")
+                roi = select_manual_roi_for_folder(dist_name, image_bgr)
+
+                if roi is None:
+                    failures.append((dist_name, img_path.name, "manual_roi_cancelled"))
+                    print(f"[{dist_name}] Manual ROI cancelled. Skipping this folder.")
+                    break
+
+                print(f"[{dist_name}] Manual ROI selected: {roi}")
+
+                if args.reuse_folder_roi:
+                    folder_roi = roi
+
             else:
                 roi = detect_chessboard_roi(
                     image_bgr,
@@ -464,11 +451,9 @@ def main():
 
                         if args.reuse_folder_roi:
                             folder_roi = roi
-
                     else:
                         failures.append((dist_name, img_path.name, "failed_detect_chessboard"))
                         continue
-
                 else:
                     if args.reuse_folder_roi:
                         folder_roi = roi
