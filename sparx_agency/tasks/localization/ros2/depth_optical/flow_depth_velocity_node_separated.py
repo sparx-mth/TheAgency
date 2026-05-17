@@ -692,6 +692,9 @@ class FlowDepthVelocityNode(Node):
         published_speed = math.sqrt(
             published_vx_mps**2 + published_vy_mps**2 + published_vz_mps**2
         )
+        
+        turning_str = "YES (Velocity Paused)" if getattr(self, 'is_turning', False) else "NO"
+        bearing_deg = math.degrees(self.last_bearing) if getattr(self, 'last_bearing', None) is not None else 0.0
 
         self.get_logger().info(
             "\n"
@@ -703,6 +706,8 @@ class FlowDepthVelocityNode(Node):
             f"  pending_flow_queue  : {len(self.pending_flow_queue)}\n"
             f"  features_used       : {n_used}\n"
             f"  center_depth        : {self.center_depth:.3f} m\n"
+            f"  is_turning          : {turning_str}\n"                       
+            f"  current_bearing     : {bearing_deg:.1f} deg\n"              
             f"  raw_velocity        : vx={raw_vx_mps:+.4f}, vy={raw_vy_mps:+.4f}, vz={raw_vz_mps:+.4f}, |v|={raw_speed:.4f} m/s\n"
             f"  filtered_velocity   : vx={filtered_vx_mps:+.4f}, vy={filtered_vy_mps:+.4f}, vz={filtered_vz_mps:+.4f}, |v|={filtered_speed:.4f} m/s\n"
             f"  published_velocity  : vx={published_vx_mps:+.4f}, vy={published_vy_mps:+.4f}, vz={published_vz_mps:+.4f}, |v|={published_speed:.4f} m/s"
