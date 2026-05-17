@@ -25,6 +25,11 @@ class DroneControlUI(Node):
         self.turn_value_var = tk.StringVar(value="1000")
         self.timer_text = tk.StringVar(value="Current action: none")
 
+        self.active_twist_linear_x = 0.0
+        self.active_twist_angular_z = 0.0
+        self.twist_publish_period_sec = 0.1  # 10 Hz
+        self.last_twist_publish_t = 0.0
+
         self.build_ui()
 
     def build_ui(self):
@@ -103,18 +108,22 @@ class DroneControlUI(Node):
 
     def handle_button(self, action: str):
         if action == "forward":
-            self.send_twist(linear_x=1.0, angular_z=0.0)
+            self.set_active_twist(linear_x=0.3, angular_z=0.0, name="forward_twist")
             self.start_timer("forward_twist")
 
         elif action == "turn_left":
-            self.send_twist(linear_x=0.0, angular_z=1.0)
+            self.set_active_twist(linear_x=0.0, angular_z=0.65, name="turn_left_twist")
             self.start_timer("turn_left_twist")
 
         elif action == "turn_right":
-            self.send_twist(linear_x=0.0, angular_z=-1.0)
+            self.set_active_twist(linear_x=0.0, angular_z=-0.65, name="turn_right_twist")
             self.start_timer("turn_right_twist")
 
+
+
         elif action == "stop":
+            self.active_twist_linear_x = 0.0
+            self.active_twist_angular_z = 0.0
             self.send_twist(0.0, 0.0)
             self.send_cmd("stop", 0)
             self.stop_timer("stop")
@@ -167,6 +176,12 @@ class DroneControlUI(Node):
         self.active_action_start_t = None
         self.timer_text.set("Current action: none")
 
+    def set_active_twist(self, linear_x: float, angular_z: float, name: str):
+        self.active_twist_linear_x = float(linear_x)
+        self.active_twist_angular_z = float(angular_z)
+        self.send_twist(self.active_twist_linear_x, self.active_twist_angular_z)
+        self.start_timer(name)
+
     def update_timer_label(self):
         if self.active_action is None or self.active_action_start_t is None:
             return
@@ -176,6 +191,16 @@ class DroneControlUI(Node):
 
     def run(self):
         while rclpy.ok():
+            now = time.time()
+
+            if self.active_action is not None:
+                if now - self.last_twist_publish_t >= self.twist_publish_period_sec:
+                    self.send_twist(
+                        self.active_twist_linear_x,
+                        self.active_twist_angular_z,
+                    )
+                    self.last_twist_publish_t = now
+
             self.update_timer_label()
             self.root.update_idletasks()
             self.root.update()

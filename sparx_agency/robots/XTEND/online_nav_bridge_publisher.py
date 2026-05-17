@@ -163,6 +163,10 @@ def parse_args():
     p.add_argument("--backend", choices=["ffmpeg", "gstreamer", "default"], default="gstreamer")
 
     p.add_argument("--pad-to-width", type=int, default=728)
+    p.add_argument("--crop-width", type=int, default=540)
+    p.add_argument("--crop-height", type=int, default=420)
+    p.add_argument("--output-width", type=int, default=504)
+    p.add_argument("--output-height", type=int, default=392)
 
 
     p.add_argument("--telemetry-topic", default="/xtend/local_telemetry")
@@ -192,6 +196,11 @@ async def async_main():
         camera_info_yaml=args.camera_info_yaml,
         frame_id=args.frame_id,
         backend=args.backend,
+        pad_to_width=args.pad_to_width,
+        crop_width=args.crop_width,
+        crop_height=args.crop_height,
+        output_width=args.output_width,
+        output_height=args.output_height,
         log_dir=args.log_dir,
     )
 
