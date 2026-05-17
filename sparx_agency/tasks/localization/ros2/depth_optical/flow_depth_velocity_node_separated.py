@@ -62,7 +62,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("pose_est_topic", "/flow_depth/pose_est")
         self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
         self.declare_parameter("bearing_topic", "/xtend/bearing")
-        self.declare_parameter("turn_rate_threshold_deg", 75.0)
+        self.declare_parameter("turn_rate_threshold_deg", 20.0)
 
         self.declare_parameter(
             "camera_config_yaml",
