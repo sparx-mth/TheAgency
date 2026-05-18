@@ -53,7 +53,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("depth_topic", "/depth_anything/depth")
         self.declare_parameter("output_topic", "/flow_depth/velocity")
         self.declare_parameter("pose_est_topic", "/flow_depth/pose_est")
-        self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
+        #self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
         self.declare_parameter("bearing_topic", "/xtend/bearing")
         self.declare_parameter("turn_rate_threshold_deg", 20.0)
         self.declare_parameter("demo_mode_topic", "/xtend/demo_mode")
@@ -140,7 +140,7 @@ class FlowDepthVelocityNode(Node):
         self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
         self.output_topic = self.get_parameter("output_topic").get_parameter_value().string_value
         self.pose_est_topic = self.get_parameter("pose_est_topic").get_parameter_value().string_value
-        self.gt_vel_topic = self.get_parameter("gt_vel_topic").get_parameter_value().string_value
+        #self.gt_vel_topic = self.get_parameter("gt_vel_topic").get_parameter_value().string_value
         self.camera_config_yaml = self.get_parameter("camera_config_yaml").get_parameter_value().string_value
 
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
@@ -277,12 +277,12 @@ class FlowDepthVelocityNode(Node):
             image_qos,
         )
 
-        self.create_subscription(
-            Twist,
-            self.gt_vel_topic,
-            self.gt_vel_callback,
-            image_qos,
-        )
+       # self.create_subscription(
+        #    Twist,
+         #   self.gt_vel_topic,
+         #   self.gt_vel_callback,
+         #   image_qos,
+        #)
 
         self.pose_sub = self.create_subscription(
             PoseStamped,
@@ -922,10 +922,10 @@ class FlowDepthVelocityNode(Node):
     # ============================================================
     # Extra callbacks
     # ============================================================
-    def gt_vel_callback(self, msg: Twist):
-        self.latest_gt_vx = msg.linear.x
-        self.latest_gt_vy = msg.linear.y
-        self.latest_gt_vz = msg.linear.z
+    #def gt_vel_callback(self, msg: Twist):
+     #   self.latest_gt_vx = msg.linear.x
+     #   self.latest_gt_vy = msg.linear.y
+     #  self.latest_gt_vz = msg.linear.z
 
     def pose_est_callback(self, msg: PoseStamped):
         x = msg.pose.position.x
