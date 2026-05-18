@@ -13,7 +13,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 try:
     from sparx_agency.demos.Demo_No4_XTEND_MapRoom.demo_modes import DemoMode
@@ -39,12 +39,10 @@ class XtendDroneDemoManager(Node):
     - Send land/disarm sequence when FINISH is requested.
 
     First-version scope:
-    - Launch/takeoff is owned by the AUTO launcher, not this state machine.
-    - IDLE means all systems may be up, but no demo-motion behavior is active.
-    - FLY_STRAIGHT means planner/localization are in normal forward-flight mode.
-    - TURNING is declared so localization can disable/down-weight optical flow.
-    - VISUAL_SERVOING is declared only; implementation will come later.
-    - FINISH sends stop, land, wait, disarm.
+    - FLY_STRAIGHT: declared only.
+    - TURNING: declared so localization can disable/down-weight optical flow.
+    - VISUAL_SERVOING: declared only; implementation will come later.
+    - FINISH: stop, land, wait, disarm.
     """
 
     def __init__(
@@ -52,6 +50,8 @@ class XtendDroneDemoManager(Node):
         request_topic: str,
         mode_topic: str,
         cmd_nav_topic: str,
+        reset_odom_topic: str,
+        cmd_nav_state_sub_topic: str,
         disarm_delay_sec: float,
         publish_period_sec: float,
         initial_mode: DemoMode,
@@ -61,6 +61,8 @@ class XtendDroneDemoManager(Node):
         self.request_topic = request_topic
         self.mode_topic = mode_topic
         self.cmd_nav_topic = cmd_nav_topic
+        self.reset_odom_topic = reset_odom_topic
+        self.cmd_nav_state_sub_topic = cmd_nav_state_sub_topic
         self.disarm_delay_sec = float(disarm_delay_sec)
 
         self.current_mode = initial_mode
@@ -83,6 +85,7 @@ class XtendDroneDemoManager(Node):
 
         self.mode_pub = self.create_publisher(String, self.mode_topic, mode_qos)
         self.cmd_nav_pub = self.create_publisher(String, self.cmd_nav_topic, default_qos)
+        self.reset_odom_pub = self.create_publisher(Empty, self.reset_odom_topic, default_qos)
 
         self.request_sub = self.create_subscription(
             String,
@@ -99,6 +102,8 @@ class XtendDroneDemoManager(Node):
         self.get_logger().info(f"Mode request topic: {self.request_topic}")
         self.get_logger().info(f"Current mode topic: {self.mode_topic}")
         self.get_logger().info(f"Command topic:      {self.cmd_nav_topic}")
+        self.get_logger().info(f"Command watch topic:{self.cmd_nav_state_sub_topic}")
+        self.get_logger().info(f"Reset odom topic:   {self.reset_odom_topic}")
         self.get_logger().info(f"Initial mode:       {self.current_mode.value}")
 
         self.publish_current_mode()
@@ -141,6 +146,42 @@ class XtendDroneDemoManager(Node):
 
         self.set_mode(event.mode, source=event.source, reason=event.reason)
 
+    def parse_cmd_nav_action(self, raw: str) -> str | None:
+        text = str(raw).strip()
+
+        if not text:
+            return None
+
+        if text.startswith("{"):
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                self.get_logger().warn(f"Invalid cmd_nav JSON: {text}")
+                return None
+
+            action = str(data.get("action", "")).strip().lower()
+            return action or None
+
+        return text.lower()
+
+    def cmd_nav_state_cb(self, msg: String) -> None:
+        action = self.parse_cmd_nav_action(msg.data)
+
+        if action not in ("land", "disarm"):
+            return
+
+        if self.current_mode == DemoMode.IDLE:
+            return
+
+        self.get_logger().warn(
+            f"Observed cmd_nav action={action}; returning demo mode to IDLE"
+        )
+        self.set_mode(
+            DemoMode.IDLE,
+            source="cmd_nav_observer",
+            reason=f"observed {action}",
+        )
+
     def set_mode(self, new_mode: DemoMode, source: str = "unknown", reason: str = "") -> None:
         if new_mode == self.current_mode:
             self.publish_current_mode()
@@ -178,10 +219,10 @@ class XtendDroneDemoManager(Node):
             self.on_enter_finish()
 
     def on_enter_idle(self) -> None:
-        self.get_logger().info("IDLE mode active: waiting for planner/demo readiness")
+        self.get_logger().info("IDLE mode active")
 
     def on_enter_fly_straight(self) -> None:
-        self.get_logger().info("FLY_STRAIGHT mode active: normal planner motion / optical flow enabled")
+        self.get_logger().info("FLY_STRAIGHT mode active")
 
     def on_enter_turning(self) -> None:
         self.get_logger().info(
@@ -207,6 +248,16 @@ class XtendDroneDemoManager(Node):
         msg.data = json.dumps({"action": action, "value": int(value)})
         self.cmd_nav_pub.publish(msg)
         self.get_logger().info(f"Published cmd_nav: {msg.data}")
+
+    def publish_reset_odom(self) -> None:
+        """Publish reset odometry request.
+
+        This is intentionally not called automatically yet.
+        Later we can call this on a chosen transition, for example
+        IDLE -> FLY_STRAIGHT, or from a dedicated reset command.
+        """
+        self.reset_odom_pub.publish(Empty())
+        self.get_logger().warn(f"Published reset odom on {self.reset_odom_topic}")
 
     def start_finish_sequence(self) -> None:
         if self.finish_started:
@@ -240,6 +291,8 @@ def parse_args():
     parser.add_argument("--request-topic", default="/xtend/demo_mode_request")
     parser.add_argument("--mode-topic", default="/xtend/demo_mode")
     parser.add_argument("--cmd-nav-topic", default="/xtend/cmd_nav")
+    parser.add_argument("--reset-odom-topic", default="/xtend/reset_odom")
+    parser.add_argument("--cmd-nav-state-sub-topic", default="/xtend/cmd_nav")
     parser.add_argument("--disarm-delay-sec", type=float, default=8.0)
     parser.add_argument("--publish-period-sec", type=float, default=1.0)
     parser.add_argument("--initial-mode", default=DemoMode.IDLE.value)
@@ -258,6 +311,8 @@ def main():
         request_topic=args.request_topic,
         mode_topic=args.mode_topic,
         cmd_nav_topic=args.cmd_nav_topic,
+        reset_odom_topic=args.reset_odom_topic,
+        cmd_nav_state_sub_topic=args.cmd_nav_state_sub_topic,
         disarm_delay_sec=args.disarm_delay_sec,
         publish_period_sec=args.publish_period_sec,
         initial_mode=initial_mode,

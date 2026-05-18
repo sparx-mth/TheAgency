@@ -30,6 +30,19 @@ class DroneControlUI(Node):
         self.twist_publish_period_sec = 0.1  # 10 Hz
         self.last_twist_publish_t = 0.0
 
+        # Safety helpers:
+        # 1. If LAND was sent and DISARM was not sent after land_disarm_delay_sec,
+        #    send DISARM automatically.
+        # 2. If ARM was sent but no TAKEOFF or movement command followed within
+        #    arm_idle_disarm_delay_sec, send DISARM automatically.
+        self.land_pending_disarm = False
+        self.land_sent_t = 0.0
+        self.land_disarm_delay_sec = 10.0
+
+        self.arm_pending_activity = False
+        self.arm_sent_t = 0.0
+        self.arm_idle_disarm_delay_sec = 30.0
+
         self.build_ui()
 
     def build_ui(self):
@@ -108,18 +121,19 @@ class DroneControlUI(Node):
 
     def handle_button(self, action: str):
         if action == "forward":
+            self.clear_arm_idle_guard("forward")
             self.set_active_twist(linear_x=0.3, angular_z=0.0, name="forward_twist")
             self.start_timer("forward_twist")
 
         elif action == "turn_left":
+            self.clear_arm_idle_guard("turn_left")
             self.set_active_twist(linear_x=0.0, angular_z=0.65, name="turn_left_twist")
             self.start_timer("turn_left_twist")
 
         elif action == "turn_right":
+            self.clear_arm_idle_guard("turn_right")
             self.set_active_twist(linear_x=0.0, angular_z=-0.65, name="turn_right_twist")
             self.start_timer("turn_right_twist")
-
-
 
         elif action == "stop":
             self.active_twist_linear_x = 0.0
@@ -128,17 +142,87 @@ class DroneControlUI(Node):
             self.send_cmd("stop", 0)
             self.stop_timer("stop")
 
-        elif action in ("land", "disarm"):
-            self.send_cmd(action, 0)
-            self.stop_timer(action)
+        elif action == "arm":
+            self.send_cmd("arm", 0)
+            self.start_arm_idle_guard()
 
-        elif action in ("land", "disarm"):
+        elif action == "takeoff":
+            self.clear_arm_idle_guard("takeoff")
+            self.send_cmd("takeoff", 0)
+
+        elif action == "land":
+            self.active_twist_linear_x = 0.0
+            self.active_twist_angular_z = 0.0
             self.send_twist(0.0, 0.0)
-            self.send_cmd(action, 0)
-            self.stop_timer(action)
+            self.send_cmd("land", 0)
+            self.start_land_disarm_guard()
+            self.stop_timer("land")
+
+        elif action == "disarm":
+            self.active_twist_linear_x = 0.0
+            self.active_twist_angular_z = 0.0
+            self.send_twist(0.0, 0.0)
+            self.send_cmd("disarm", 0)
+            self.clear_all_safety_guards("manual_disarm")
+            self.stop_timer("disarm")
+
         else:
-            # arm / takeoff
             self.send_cmd(action, 0)
+
+    def start_land_disarm_guard(self):
+        self.land_pending_disarm = True
+        self.land_sent_t = time.time()
+        self.get_logger().warn(
+            f"LAND safety guard armed: will send DISARM after "
+            f"{self.land_disarm_delay_sec:.1f}s if no DISARM is sent."
+        )
+
+    def start_arm_idle_guard(self):
+        self.arm_pending_activity = True
+        self.arm_sent_t = time.time()
+        self.get_logger().warn(
+            f"ARM idle guard armed: will send DISARM after "
+            f"{self.arm_idle_disarm_delay_sec:.1f}s if no TAKEOFF or movement starts."
+        )
+
+    def clear_arm_idle_guard(self, reason: str):
+        if self.arm_pending_activity:
+            self.get_logger().info(f"ARM idle guard cleared: {reason}")
+        self.arm_pending_activity = False
+        self.arm_sent_t = 0.0
+
+    def clear_all_safety_guards(self, reason: str):
+        if self.land_pending_disarm or self.arm_pending_activity:
+            self.get_logger().info(f"Safety guards cleared: {reason}")
+
+        self.land_pending_disarm = False
+        self.land_sent_t = 0.0
+        self.arm_pending_activity = False
+        self.arm_sent_t = 0.0
+
+    def check_safety_guards(self):
+        now = time.time()
+
+        if self.land_pending_disarm:
+            elapsed = now - self.land_sent_t
+            if elapsed >= self.land_disarm_delay_sec:
+                self.get_logger().warn(
+                    f"LAND safety guard triggered after {elapsed:.1f}s: sending DISARM."
+                )
+                self.send_cmd("disarm", 0)
+                self.land_pending_disarm = False
+                self.land_sent_t = 0.0
+
+        if self.arm_pending_activity:
+            elapsed = now - self.arm_sent_t
+            if elapsed >= self.arm_idle_disarm_delay_sec:
+                self.get_logger().warn(
+                    f"ARM idle guard triggered after {elapsed:.1f}s without "
+                    f"TAKEOFF or movement: sending DISARM."
+                )
+                self.send_cmd("disarm", 0)
+                self.arm_pending_activity = False
+                self.arm_sent_t = 0.0
 
     def send_cmd(self, action, value):
         msg = String()
@@ -201,6 +285,7 @@ class DroneControlUI(Node):
                     )
                     self.last_twist_publish_t = now
 
+            self.check_safety_guards()
             self.update_timer_label()
             self.root.update_idletasks()
             self.root.update()

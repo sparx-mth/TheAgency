@@ -41,6 +41,11 @@ class XtendTwistToCmdNav(Node):
         self.last_action = None
         self.allow_multi_axes = False
 
+        # Planner may publish short zero Twist messages between yaw commands.
+        # XTEND commands are hold-style, so do not stop on the first zero Twist.
+        self.zero_stop_count = 0
+        self.zero_stop_required_count = 2
+
         # ROS2 publishers and subscribers
         self.pub = self.create_publisher(String, cmd_nav_topic, 10)
         self.sub = self.create_subscription(Twist, cmd_vel_topic, self.twist_cb, 10)
@@ -115,6 +120,25 @@ class XtendTwistToCmdNav(Node):
         self.last_twist_time = time.time()
 
         action, value = self.choose_cmd_from_twist(msg)
+
+        if action == "stop":
+            self.zero_stop_count += 1
+
+            # Ignore the first zero/stop Twist after an active hold command.
+            # Stop only after repeated zero Twist messages.
+            if (
+                self.last_action is not None
+                and self.last_action[0] != "stop"
+                and self.zero_stop_count < self.zero_stop_required_count
+            ):
+                self.get_logger().debug(
+                    f"Ignoring transient stop Twist "
+                    f"({self.zero_stop_count}/{self.zero_stop_required_count})"
+                )
+                return
+        else:
+            self.zero_stop_count = 0
+
         self.publish_action(action, value)
 
     def watchdog_cb(self):

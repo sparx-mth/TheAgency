@@ -9,6 +9,7 @@ Safety:
 """
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import tkinter as tk
@@ -75,62 +76,15 @@ wait_for_topic_rate() {
     local timeout_sec="$2"
     local reliability="${3:-best_effort}"
     echo "[AUTO] Waiting for messages on: ${topic} (${timeout_sec}s, qos=${reliability})"
-
     timeout "${timeout_sec}" ros2 topic hz "${topic}" >/tmp/xtend_wait_topic_hz.log 2>&1 || true
-
     if grep -q "average rate" /tmp/xtend_wait_topic_hz.log 2>/dev/null; then
         echo "[AUTO] Topic has messages: ${topic}"
         cat /tmp/xtend_wait_topic_hz.log || true
         return 0
     fi
-
     echo "[AUTO][WARN] No messages confirmed on: ${topic}"
     cat /tmp/xtend_wait_topic_hz.log || true
     return 1
-}
-
-fail_and_hold() {
-    local msg="$1"
-    local session="${2:-}"
-
-    echo "[AUTO][ERROR] ${msg}"
-
-    if [ -n "${session}" ]; then
-        echo "[AUTO][DEBUG] Last output from tmux session: ${session}"
-        tmux capture-pane -t "${session}" -p -S -200 || true
-    fi
-
-    echo
-    echo "[AUTO] Press Enter to close this auto session..."
-    read
-    exit 1
-}
-
-require_topic_name() {
-    local topic="$1"
-    local timeout_sec="$2"
-    local debug_session="${3:-}"
-
-    wait_for_topic_name "${topic}" "${timeout_sec}" || \
-        fail_and_hold "Topic did not appear: ${topic}" "${debug_session}"
-}
-
-require_topic_rate() {
-    local topic="$1"
-    local timeout_sec="$2"
-    local reliability="${3:-best_effort}"
-    local debug_session="${4:-}"
-
-    wait_for_topic_rate "${topic}" "${timeout_sec}" "${reliability}" || \
-        fail_and_hold "No messages confirmed on topic: ${topic}" "${debug_session}"
-}
-
-optional_topic_rate() {
-    local topic="$1"
-    local timeout_sec="$2"
-    local reliability="${3:-best_effort}"
-
-    wait_for_topic_rate "${topic}" "${timeout_sec}" "${reliability}" || true
 }
 
 send_xtend_cmd() {
@@ -145,20 +99,7 @@ start_tmux() {
     local command="$2"
     echo "[AUTO] Starting tmux session: ${session}"
     tmux kill-session -t "${session}" 2>/dev/null || true
-
-    local wrapped_command="
-set +e
-echo '[${session}] started'
-${command}
-status=\$?
-echo
-echo '[${session}] exited with status' \$status
-echo 'Press Enter to close this session...'
-read
-"
-
-    tmux new-session -d -s "${session}" "bash -lc $(printf '%q' "${wrapped_command}")"
-    tmux set-option -t "${session}" remain-on-exit on || true
+    tmux new-session -d -s "${session}" "bash -lc $(printf '%q' "${command}")"
 }
 
 echo "[AUTO] Step 1: start online bridge + RGB"
@@ -173,8 +114,9 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_pub
   --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml
 '
 
-require_topic_name /xtend/rgb 20 xtend_bridge
-optional_topic_rate /xtend/rgb 20 best_effort
+wait_for_topic_name /xtend/rgb 20
+wait_for_topic_rate /xtend/bearing 20 best_effort || true
+wait_for_topic_rate /xtend/rgb 20 best_effort || true
 
 echo "[AUTO] Step 2: start DA3 Small depth"
 start_tmux xtend_depth '
@@ -197,8 +139,8 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p small_lut_clip_max_m:=8.0
 '
 
-require_topic_name /xtend/depth_m 30 xtend_depth
-require_topic_rate /xtend/depth_m 60 best_effort xtend_depth
+wait_for_topic_name /xtend/depth_m 30
+wait_for_topic_rate /xtend/depth_m 60 best_effort
 
 echo "[AUTO] Step 3: start Twist converter"
 start_tmux xtend_twist_converter '
@@ -226,6 +168,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend
   --request-topic /xtend/demo_mode_request \
   --mode-topic /xtend/demo_mode \
   --cmd-nav-topic /xtend/cmd_nav \
+  --cmd-nav-state-sub-topic /xtend/cmd_nav \
   --reset-odom-topic /xtend/reset_odom \
   --initial-mode idle \
   --disarm-delay-sec 8.0
@@ -242,7 +185,7 @@ echo "[AUTO] Waiting 30 seconds for takeoff/stabilization"
 sleep 30
 
 echo "[AUTO] Re-check depth before localization"
-require_topic_rate /xtend/depth_m 30 best_effort xtend_depth
+wait_for_topic_rate /xtend/depth_m 30 best_effort
 
 echo "[AUTO] Step 6: start localization"
 start_tmux xtend_flow_depth '
@@ -281,8 +224,8 @@ export ROS_DOMAIN_ID=5
 ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom xtend_camera
 '
 
-wait_for_topic_name /flow_depth/pose_est 30 || true
-optional_topic_rate /flow_depth/pose_est 30 best_effort
+wait_for_topic_name /xtend/pose_est 30 || true
+wait_for_topic_rate /xtend/pose_est 30 best_effort || true
 
 echo "[AUTO] Step 7: check planner containers"
 docker ps --format '{{.Names}}' | tee /tmp/xtend_docker_names.txt
@@ -291,38 +234,11 @@ grep -qx ros1_bridge /tmp/xtend_docker_names.txt || echo "[AUTO][WARN] ros1_brid
 grep -qx roscore /tmp/xtend_docker_names.txt || echo "[AUTO][WARN] roscore container is not running"
 
 echo "[AUTO] Step 8: launch FALCON planner inside falcon container"
-planner_started=0
-
 if docker ps --format '{{.Names}}' | grep -qx falcon; then
     tmux kill-session -t planner_falcon 2>/dev/null || true
-
-    tmux new-session -d -s planner_falcon "bash -lc '
-    docker exec -i falcon bash -lc \"source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && cd /catkin_ws && roslaunch falcon_adapter real_drone.launch map_name:=office\"
-    status=\$?
-    echo
-    echo \"[planner_falcon] exited with status \$status\"
-    echo \"Press Enter to close...\"
-    read
-    '"
-
-    tmux set-option -t planner_falcon remain-on-exit on || true
-    sleep 2
-
-    if tmux has-session -t planner_falcon 2>/dev/null; then
-        planner_started=1
-    else
-        echo "[AUTO][WARN] planner_falcon tmux session did not stay alive"
-    fi
+    tmux new-session -d -s planner_falcon "docker exec -it falcon bash -lc 'roslaunch falcon_adapter real_drone.launch map_name:=office'"
 else
     echo "[AUTO][WARN] Skipping planner launch because falcon container is not running"
-fi
-
-if [ "${planner_started}" -eq 1 ]; then
-    echo "[AUTO] Step 9: switch demo mode to FLY_STRAIGHT"
-    ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String \
-      "{data: '{\"mode\":\"fly_straight\", \"source\":\"auto_launcher\", \"reason\":\"pipeline ready after takeoff and planner launch\"}'}" || true
-else
-    echo "[AUTO][WARN] Not switching to FLY_STRAIGHT because planner did not start"
 fi
 
 echo "[AUTO] Optional display commands:"
@@ -392,11 +308,13 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm. Also prepares /xtend/reset_odom publisher but does not call it yet.",
         command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \\
-  --request-topic /xtend/demo_mode_request \\
-  --mode-topic /xtend/demo_mode \\
-  --cmd-nav-topic /xtend/cmd_nav \\
-  --initial-mode idle \\
+python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
+  --request-topic /xtend/demo_mode_request \
+  --mode-topic /xtend/demo_mode \
+  --cmd-nav-topic /xtend/cmd_nav \
+  --cmd-nav-state-sub-topic /xtend/cmd_nav \
+  --reset-odom-topic /xtend/reset_odom \
+  --initial-mode idle \
   --disarm-delay-sec 8.0
 """,
     ),
@@ -429,7 +347,7 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
   -p csv_filename:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv \
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
-  -p depth_scale:=0.8 \
+  -p depth_scale:=1.2 \
   -p turn_rate_threshold_deg:=4.0
 """,
     ),
@@ -477,7 +395,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
         tmux_name="planner_falcon",
         description="Run inside the planner container.",
         enabled_by_default=False,
-        command="""docker exec -it falcon bash -lc 'source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && cd /catkin_ws && roslaunch falcon_adapter real_drone.launch map_name:=office'"""
+        command="roslaunch falcon_adapter real_drone.launch map_name:=office",
     ),
     LaunchItem(
         name="12. Planner ROS bridge docker",
@@ -521,7 +439,7 @@ def wrap_with_env(machine: str, command: str) -> str:
 class XtendPipelineLauncher(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("XTEND Pipeline Launcher - with Demo Manager")
+        self.title("XTEND Pipeline Launcher")
         self.geometry("1260x780")
         self.jetson_ssh_var = tk.StringVar(value=JETSON_SSH_DEFAULT)
         self.status_var = tk.StringVar(value="Ready.")
@@ -539,6 +457,15 @@ class XtendPipelineLauncher(tk.Tk):
         ttk.Button(top, text="Start checked Jetson core", command=self.start_checked_jetson).pack(side="left", padx=4)
         ttk.Button(top, text="AUTO full flight pipeline", command=self.start_auto_pipeline).pack(side="left", padx=4)
         ttk.Button(top, text="Stop all known tmux", command=self.stop_all_known).pack(side="left", padx=4)
+
+        mode_row = ttk.Frame(self)
+        mode_row.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(mode_row, text="Demo mode:").pack(side="left")
+        ttk.Button(mode_row, text="IDLE", command=lambda: self.publish_demo_mode("idle")).pack(side="left", padx=4)
+        ttk.Button(mode_row, text="FLY_STRAIGHT", command=lambda: self.publish_demo_mode("fly_straight")).pack(side="left", padx=4)
+        ttk.Button(mode_row, text="TURNING", command=lambda: self.publish_demo_mode("turning")).pack(side="left", padx=4)
+        ttk.Button(mode_row, text="VISUAL_SERVOING", command=lambda: self.publish_demo_mode("visual_servoing")).pack(side="left", padx=4)
+        ttk.Button(mode_row, text="FINISH", command=lambda: self.publish_demo_mode("finish", confirm=True)).pack(side="left", padx=4)
 
         main = ttk.PanedWindow(self, orient="horizontal")
         main.pack(fill="both", expand=True, padx=10, pady=6)
@@ -643,6 +570,52 @@ class XtendPipelineLauncher(tk.Tk):
         if self.selected_item is not None:
             self._start_jetson_tmux(self.selected_item)
 
+    def publish_demo_mode(self, mode: str, confirm: bool = False):
+        if confirm and not messagebox.askyesno(
+            "Confirm demo mode change",
+            f"Publish demo mode request: {mode}?\n\nFINISH will trigger stop -> land -> disarm if the manager is running.",
+        ):
+            return
+
+        ssh_target = self.jetson_ssh_var.get().strip()
+
+        # Do not pre-escape the JSON quotes.
+        # String.data should contain normal JSON, e.g.:
+        # {"mode":"fly_straight","source":"launcher_ui_manual","reason":"manual mode button"}
+        mode_json = json.dumps(
+            {
+                "mode": mode,
+                "source": "launcher_ui_manual",
+                "reason": "manual mode button",
+            }
+        )
+        payload = f"{{data: '{mode_json}'}}"
+
+        remote_cmd = (
+            "cd /home/user/GIT/TheAgency && "
+            "source /opt/ros/humble/setup.bash && "
+            "source /home/user/GIT/TheAgency/theagency_venv/bin/activate && "
+            "export ROS_DOMAIN_ID=5 && "
+            f"ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String {shlex.quote(payload)}"
+        )
+
+        result = subprocess.run(
+            ["ssh", ssh_target, remote_cmd],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            messagebox.showerror(
+                "Mode publish failed",
+                result.stderr.strip() or result.stdout.strip() or f"Failed to publish mode: {mode}",
+            )
+            self.status_var.set(f"Failed to publish demo mode: {mode}")
+            return
+
+        self.status_var.set(f"Published demo mode request: {mode}")
+
     def start_auto_pipeline(self):
         if not messagebox.askyesno(
             "Start AUTO full flight pipeline?",
@@ -693,7 +666,6 @@ read
         remote_cmd = (
             f"tmux kill-session -t {shlex.quote(item.tmux_name)} 2>/dev/null || true; "
             f"tmux new-session -d -s {shlex.quote(item.tmux_name)} {shlex.quote(tmux_cmd)}; "
-            f"tmux set-option -t {shlex.quote(item.tmux_name)} remain-on-exit on; "
             "tmux ls"
         )
         result = subprocess.run(["ssh", ssh_target, remote_cmd], text=True, capture_output=True, check=False)
