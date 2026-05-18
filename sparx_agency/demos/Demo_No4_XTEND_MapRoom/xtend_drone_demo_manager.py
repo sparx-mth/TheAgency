@@ -39,10 +39,12 @@ class XtendDroneDemoManager(Node):
     - Send land/disarm sequence when FINISH is requested.
 
     First-version scope:
-    - FLY_STRAIGHT: declared only.
-    - TURNING: declared so localization can disable/down-weight optical flow.
-    - VISUAL_SERVOING: declared only; implementation will come later.
-    - FINISH: stop, land, wait, disarm.
+    - Launch/takeoff is owned by the AUTO launcher, not this state machine.
+    - IDLE means all systems may be up, but no demo-motion behavior is active.
+    - FLY_STRAIGHT means planner/localization are in normal forward-flight mode.
+    - TURNING is declared so localization can disable/down-weight optical flow.
+    - VISUAL_SERVOING is declared only; implementation will come later.
+    - FINISH sends stop, land, wait, disarm.
     """
 
     def __init__(
@@ -176,10 +178,10 @@ class XtendDroneDemoManager(Node):
             self.on_enter_finish()
 
     def on_enter_idle(self) -> None:
-        self.get_logger().info("IDLE mode active")
+        self.get_logger().info("IDLE mode active: waiting for planner/demo readiness")
 
     def on_enter_fly_straight(self) -> None:
-        self.get_logger().info("FLY_STRAIGHT mode active")
+        self.get_logger().info("FLY_STRAIGHT mode active: normal planner motion / optical flow enabled")
 
     def on_enter_turning(self) -> None:
         self.get_logger().info(
