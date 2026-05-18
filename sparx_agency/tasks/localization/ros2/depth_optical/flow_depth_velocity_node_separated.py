@@ -16,6 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped
 from cv_bridge import CvBridge
+from std_msgs.msg import Empty
 import yaml
 import csv
 
@@ -196,7 +197,7 @@ class FlowDepthVelocityNode(Node):
         demo_mode_topic = self.get_parameter("demo_mode_topic").value
         self.current_mode = "idle"
         self.is_turning = False
-        self.mission_started = False
+        self.mission_started = True
 
         # ============================================================
         # State
@@ -300,6 +301,8 @@ class FlowDepthVelocityNode(Node):
 
         self.mode_sub = self.create_subscription(String, demo_mode_topic, self.demo_mode_cb, 10)
 
+        self.reset_sub = self.create_subscription(Empty, "/xtend/reset_odom", self.reset_cb, 10)
+
         self.get_logger().info("============================================================")
         self.get_logger().info("[FlowDepth] Started: RGB computes Flow now, Depth completes metric velocity later")
         self.get_logger().info(f"[FlowDepth] RGB topic: {self.image_topic}")
@@ -373,6 +376,17 @@ class FlowDepthVelocityNode(Node):
             self.is_turning = False
             
         self.current_mode = new_mode
+    
+    def reset_cb(self, msg: Empty):
+        self.get_logger().info("RESET COMMAND RECEIVED! Clearing trajectory maps and velocity filters.")
+        
+        self.prev_vx = 0.0
+        self.prev_vy = 0.0
+        self.prev_vz = 0.0
+        
+        self.debug_path = [(0.0, 0.0)]
+        self.trajectory_history = []
+        self.current_distance = 0.0
 
     # ============================================================
     # Camera intrinsics

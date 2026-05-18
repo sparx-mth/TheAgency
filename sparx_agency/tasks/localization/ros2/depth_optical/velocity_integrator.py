@@ -5,7 +5,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple, Deque
 import math
-
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -13,7 +12,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 from rclpy.time import Time
 from std_msgs.msg import Float32
-
+from std_msgs.msg import Empty
 import tf2_ros
 from tf2_ros import TransformException
 
@@ -117,6 +116,13 @@ class VelocityIntegratorNode(Node):
         
         self.bearing_sub = self.create_subscription(Float32, bearing_topic, self.bearing_cb, 10)
 
+        self.reset_sub = self.create_subscription(
+            Empty, 
+            "/xtend/reset_odom", 
+            self.reset_cb, 
+            10
+        )
+
         if self.init_from_gt:
             self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
 
@@ -130,6 +136,18 @@ class VelocityIntegratorNode(Node):
         relative_yaw = raw_yaw - self.initial_yaw
 
         self.current_yaw = (relative_yaw + math.pi) % (2 * math.pi) - math.pi
+
+    def reset_cb(self, msg: Empty):
+        self.get_logger().info("RESET COMMAND RECEIVED! Resetting position to (0,0,0) and bearing reference.")
+        
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        
+        self.initial_yaw = None
+        self.current_yaw = 0.0
+        
+        self.last_time = None
 
     def gt_pose_cb(self, msg: Pose):
         if not self.have_est:
