@@ -49,7 +49,7 @@ class VelocityIntegratorNode(Node):
         super().__init__("velocity_integrator_node")
 
         self.declare_parameter("vel_topic", "/flow_depth/velocity")
-        self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
+        #self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
         self.declare_parameter("target_frame", "simple_drone/odom")
         self.declare_parameter("publish_pose_topic", "/flow_depth/pose_est")
         

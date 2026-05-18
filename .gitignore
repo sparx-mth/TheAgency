@@ -191,4 +191,4 @@ sparx_agency/tasks/localization/CLAUDE.md
 
 xtend_capture_out/  
 sparx_agency/tasks/common/bearings_placeholder.csv
-sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json
+sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval
