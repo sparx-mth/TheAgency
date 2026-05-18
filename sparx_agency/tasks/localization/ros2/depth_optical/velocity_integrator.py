@@ -138,14 +138,17 @@ class VelocityIntegratorNode(Node):
     def reset_cb(self, msg: Empty):
         self.get_logger().info("RESET COMMAND RECEIVED! Resetting position to (0,0,0) and bearing reference.")
         
-        self.x = 0.0
-        self.y = 0.0
-        self.z = 0.0
+        self.est_x = 0.0
+        self.est_y = 0.0
+        self.est_z = 0.0
         
         self.initial_yaw = None
         self.current_yaw = 0.0
         
-        self.last_time = None
+        self.last_vel_time = None
+
+        self.path_length = 0.0
+        self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
 
     def gt_pose_cb(self, msg: Pose):
         if not self.have_est:
@@ -187,11 +190,7 @@ class VelocityIntegratorNode(Node):
                     self.get_logger().warn(f"[Integrator] Waiting for GT near first vel. closest_dt={gt_dt:.3f}s")
                 return
             self.est_x, self.est_y, self.est_z = gt_pose.position.x, gt_pose.position.y, gt_pose.position.z
-            
-            # --- Save starting position ---
             self.start_x, self.start_y, self.start_z = self.est_x, self.est_y, self.est_z
-            # ------------------------------
-            
             self.have_est = True
             self.get_logger().info(f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s). Start pos: ({self.start_x:.2f}, {self.start_y:.2f}, {self.start_z:.2f})")
 
@@ -199,7 +198,6 @@ class VelocityIntegratorNode(Node):
             self.last_vel_time = t_vel_stamp
             if not self.init_from_gt:
                 self.have_est = True
-                # --- If not using GT, save starting position as 0,0,0 ---
                 self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
             return
 
@@ -209,7 +207,7 @@ class VelocityIntegratorNode(Node):
         if not (self.min_dt <= dt <= self.max_dt):
             return
 
-        # Transform velocity
+        # Transform velocity 
         try:
             source_frame = norm_frame(msg.header.frame_id)
             if not source_frame:
@@ -222,9 +220,15 @@ class VelocityIntegratorNode(Node):
             self.get_logger().warn(f"[Integrator] TF lookup failed: {e}")
             return
 
+        # ==========================================
+        yaw_offset = self.initial_yaw if self.initial_yaw is not None else 0.0
+        
+        v_x_relative = v_x * math.cos(yaw_offset) + v_y * math.sin(yaw_offset)
+        v_y_relative = -v_x * math.sin(yaw_offset) + v_y * math.cos(yaw_offset)
+
         # Integrate Position
-        dx = v_x * dt
-        dy = v_y * dt
+        dx = v_x_relative * dt
+        dy = v_y_relative * dt
         dz = v_z * dt
         
         self.est_x += dx
@@ -234,7 +238,6 @@ class VelocityIntegratorNode(Node):
         # --- Accumulate step-by-step path length ---
         step_distance = math.sqrt(dx**2 + dy**2 + dz**2)
         self.path_length += step_distance
-        # -------------------------------------------
 
         # Convert Yaw (from Bearing) to Quaternion
         half_yaw = self.current_yaw / 2.0
