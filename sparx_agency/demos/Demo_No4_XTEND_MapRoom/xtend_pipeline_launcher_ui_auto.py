@@ -251,7 +251,7 @@ source /opt/ros/humble/setup.bash
 source /home/user/GIT/TheAgency/theagency_venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_separted \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_separated \
   --ros-args \
   -p use_sim_time:=false \
   -p show_debug:=false \
@@ -396,7 +396,6 @@ python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend
   --request-topic /xtend/demo_mode_request \\
   --mode-topic /xtend/demo_mode \\
   --cmd-nav-topic /xtend/cmd_nav \\
-  --reset-odom-topic /xtend/reset_odom \\
   --initial-mode idle \\
   --disarm-delay-sec 8.0
 """,
@@ -423,7 +422,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
         tmux_name="xtend_flow_depth",
         description="Subscribes to RGB/depth and estimates velocity from optical flow + depth.",
         command="""
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_separted \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_separated \
   --ros-args \
   -p use_sim_time:=false \
   -p show_debug:=false \

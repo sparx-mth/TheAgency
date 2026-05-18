@@ -133,7 +133,7 @@ def parse_args():
     p.add_argument("--cmd-nav-topic", default="/xtend/cmd_nav")
 
     # Planner thresholds
-    p.add_argument("--angular-delta", type=float, default=0.5)
+    p.add_argument("--angular-delta", type=float, default=0.05)
     p.add_argument("--linear-delta", type=float, default=0.05)
 
     p.add_argument("--timeout-sec", type=float, default=1.5)
