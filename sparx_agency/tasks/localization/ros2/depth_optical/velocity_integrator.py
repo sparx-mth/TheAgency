@@ -5,7 +5,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple, Deque
 import math
-
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -13,7 +12,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 from rclpy.time import Time
 from std_msgs.msg import Float32
-
+from std_msgs.msg import Empty
 import tf2_ros
 from tf2_ros import TransformException
 
@@ -46,7 +45,6 @@ class VelocityIntegratorNode(Node):
     Integrates /flow_depth/velocity into pose.
     Handles TF rotations and optionally initializes the starting pose from GT.
     """
-
     def __init__(self):
         super().__init__("velocity_integrator_node")
 
@@ -54,12 +52,12 @@ class VelocityIntegratorNode(Node):
         self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
         self.declare_parameter("target_frame", "simple_drone/odom")
         self.declare_parameter("publish_pose_topic", "/flow_depth/pose_est")
-
+        
         self.declare_parameter("init_from_gt", True)
         self.declare_parameter("min_dt", 1e-3)
         self.declare_parameter("max_dt", 2.0)
         self.declare_parameter("gt_max_time_diff", 1.05)
-
+        
         self.declare_parameter("tf_cache_sec", 20.0)
         self.declare_parameter("tf_timeout_sec", 0.05)
         self.declare_parameter("tf_fallback_to_latest", True)
@@ -70,7 +68,7 @@ class VelocityIntegratorNode(Node):
         self.target_frame = norm_frame(self.get_parameter("target_frame").value)
         pose_topic = self.get_parameter("publish_pose_topic").value
         bearing_topic = self.get_parameter("bearing_topic").value
-
+        
         self.init_from_gt = bool(self.get_parameter("init_from_gt").value)
         self.min_dt = float(self.get_parameter("min_dt").value)
         self.max_dt = float(self.get_parameter("max_dt").value)
@@ -93,11 +91,11 @@ class VelocityIntegratorNode(Node):
         self.est_x, self.est_y, self.est_z = 0.0, 0.0, 0.0
 
         self.current_yaw = 0.0
-        self.initial_yaw = None
-
+        self.initial_yaw = None 
+        
         # --- Variables to track total distance ---
         self.start_x, self.start_y, self.start_z = 0.0, 0.0, 0.0
-        self.path_length = 0.0  # Accumulated distance step-by-step
+        self.path_length = 0.0 # Accumulated distance step-by-step
         # -----------------------------------------
 
         self.last_vel_time: Optional[Time] = None
@@ -115,8 +113,15 @@ class VelocityIntegratorNode(Node):
         # Pubs / Subs
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, image_qos)
         self.vel_sub = self.create_subscription(Vector3Stamped, vel_topic, self.vel_cb, image_qos)
-
+        
         self.bearing_sub = self.create_subscription(Float32, bearing_topic, self.bearing_cb, 10)
+
+        self.reset_sub = self.create_subscription(
+            Empty, 
+            "/xtend/reset_odom", 
+            self.reset_cb, 
+            10
+        )
 
         if self.init_from_gt:
             self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
@@ -126,12 +131,23 @@ class VelocityIntegratorNode(Node):
 
         if self.initial_yaw is None:
             self.initial_yaw = raw_yaw
-            self.get_logger().info(
-                f"[Integrator] Initial Yaw set to {math.degrees(self.initial_yaw):.2f} deg. This is now our 0.0 straight ahead.")
+            self.get_logger().info(f"[Integrator] Initial Yaw set to {math.degrees(self.initial_yaw):.2f} deg. This is now our 0.0 straight ahead.")
 
         relative_yaw = raw_yaw - self.initial_yaw
 
         self.current_yaw = (relative_yaw + math.pi) % (2 * math.pi) - math.pi
+
+    def reset_cb(self, msg: Empty):
+        self.get_logger().info("RESET COMMAND RECEIVED! Resetting position to (0,0,0) and bearing reference.")
+        
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        
+        self.initial_yaw = None
+        self.current_yaw = 0.0
+        
+        self.last_time = None
 
     def gt_pose_cb(self, msg: Pose):
         if not self.have_est:
@@ -173,14 +189,13 @@ class VelocityIntegratorNode(Node):
                     self.get_logger().warn(f"[Integrator] Waiting for GT near first vel. closest_dt={gt_dt:.3f}s")
                 return
             self.est_x, self.est_y, self.est_z = gt_pose.position.x, gt_pose.position.y, gt_pose.position.z
-
+            
             # --- Save starting position ---
             self.start_x, self.start_y, self.start_z = self.est_x, self.est_y, self.est_z
             # ------------------------------
-
+            
             self.have_est = True
-            self.get_logger().info(
-                f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s). Start pos: ({self.start_x:.2f}, {self.start_y:.2f}, {self.start_z:.2f})")
+            self.get_logger().info(f"[Integrator] Initialized estimate from GT (dt={gt_dt:.3f}s). Start pos: ({self.start_x:.2f}, {self.start_y:.2f}, {self.start_z:.2f})")
 
         if self.last_vel_time is None:
             self.last_vel_time = t_vel_stamp
@@ -213,13 +228,13 @@ class VelocityIntegratorNode(Node):
         dx = v_x * dt
         dy = v_y * dt
         dz = v_z * dt
-
+        
         self.est_x += dx
         self.est_y += dy
         self.est_z += dz
-
+        
         # --- Accumulate step-by-step path length ---
-        step_distance = math.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+        step_distance = math.sqrt(dx**2 + dy**2 + dz**2)
         self.path_length += step_distance
         # -------------------------------------------
 
@@ -232,18 +247,18 @@ class VelocityIntegratorNode(Node):
         est_msg = PoseStamped()
         est_msg.header.stamp = self.get_clock().now().to_msg()
         est_msg.header.frame_id = self.target_frame
-
+        
         # Position
         est_msg.pose.position.x = self.est_x
         est_msg.pose.position.y = self.est_y
         est_msg.pose.position.z = self.est_z
-
+        
         # Orientation (Yaw applied)
         est_msg.pose.orientation.x = 0.0
         est_msg.pose.orientation.y = 0.0
         est_msg.pose.orientation.z = qz
         est_msg.pose.orientation.w = qw
-
+        
         self.pose_pub.publish(est_msg)
 
     def print_final_stats(self):
@@ -254,9 +269,9 @@ class VelocityIntegratorNode(Node):
 
         # Calculate straight-line distance from start to finish
         straight_line_dist = math.sqrt(
-            (self.est_x - self.start_x) ** 2 +
-            (self.est_y - self.start_y) ** 2 +
-            (self.est_z - self.start_z) ** 2
+            (self.est_x - self.start_x)**2 + 
+            (self.est_y - self.start_y)**2 + 
+            (self.est_z - self.start_z)**2
         )
 
         # Using standard Python print() to avoid ROS logging errors during shutdown
@@ -268,7 +283,6 @@ class VelocityIntegratorNode(Node):
         print(f"Straight-Line Displacement: {straight_line_dist:.3f} meters")
         print(f"Total Path Length Accumulated: {self.path_length:.3f} meters")
         print("=========================================\n")
-
 
 def main():
     rclpy.init()
@@ -284,7 +298,6 @@ def main():
         # Prevent double-shutdown error in newer ROS 2 versions
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()

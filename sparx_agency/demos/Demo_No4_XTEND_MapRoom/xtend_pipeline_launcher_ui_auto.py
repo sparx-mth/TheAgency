@@ -387,7 +387,22 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_
 """,
     ),
     LaunchItem(
-        name="4. Optional Twist replayer",
+        name="4. XTEND demo mode manager",
+        machine="jetson",
+        tmux_name="xtend_demo_manager",
+        description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm. Also prepares /xtend/reset_odom publisher but does not call it yet.",
+        command="""
+python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \\
+  --request-topic /xtend/demo_mode_request \\
+  --mode-topic /xtend/demo_mode \\
+  --cmd-nav-topic /xtend/cmd_nav \\
+  --reset-odom-topic /xtend/reset_odom \\
+  --initial-mode idle \\
+  --disarm-delay-sec 8.0
+""",
+    ),
+    LaunchItem(
+        name="5. Optional Twist replayer",
         machine="jetson",
         tmux_name="xtend_twist_replayer",
         description="Optional: replays a JSONL Twist log onto /cmd_vel. Edit LOG_PATH before running.",
@@ -507,7 +522,7 @@ def wrap_with_env(machine: str, command: str) -> str:
 class XtendPipelineLauncher(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("XTEND Pipeline Launcher")
+        self.title("XTEND Pipeline Launcher - with Demo Manager")
         self.geometry("1260x780")
         self.jetson_ssh_var = tk.StringVar(value=JETSON_SSH_DEFAULT)
         self.status_var = tk.StringVar(value="Ready.")
@@ -525,15 +540,6 @@ class XtendPipelineLauncher(tk.Tk):
         ttk.Button(top, text="Start checked Jetson core", command=self.start_checked_jetson).pack(side="left", padx=4)
         ttk.Button(top, text="AUTO full flight pipeline", command=self.start_auto_pipeline).pack(side="left", padx=4)
         ttk.Button(top, text="Stop all known tmux", command=self.stop_all_known).pack(side="left", padx=4)
-
-        mode_row = ttk.Frame(self)
-        mode_row.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Label(mode_row, text="Demo mode:").pack(side="left")
-        ttk.Button(mode_row, text="IDLE", command=lambda: self.publish_demo_mode("idle")).pack(side="left", padx=4)
-        ttk.Button(mode_row, text="FLY_STRAIGHT", command=lambda: self.publish_demo_mode("fly_straight")).pack(side="left", padx=4)
-        ttk.Button(mode_row, text="TURNING", command=lambda: self.publish_demo_mode("turning")).pack(side="left", padx=4)
-        ttk.Button(mode_row, text="VISUAL_SERVOING", command=lambda: self.publish_demo_mode("visual_servoing")).pack(side="left", padx=4)
-        ttk.Button(mode_row, text="FINISH", command=lambda: self.publish_demo_mode("finish", confirm=True)).pack(side="left", padx=4)
 
         main = ttk.PanedWindow(self, orient="horizontal")
         main.pack(fill="both", expand=True, padx=10, pady=6)
@@ -637,47 +643,6 @@ class XtendPipelineLauncher(tk.Tk):
     def run_jetson_tmux(self):
         if self.selected_item is not None:
             self._start_jetson_tmux(self.selected_item)
-
-    def publish_demo_mode(self, mode: str, confirm: bool = False):
-        if confirm and not messagebox.askyesno(
-            "Confirm demo mode change",
-            f"Publish demo mode request: {mode}?\n\nFINISH will trigger stop -> land -> disarm if the manager is running.",
-        ):
-            return
-
-        ssh_target = self.jetson_ssh_var.get().strip()
-        payload = (
-            "{data: '{"
-            f"\\\"mode\\\":\\\"{mode}\\\", "
-            "\\\"source\\\":\\\"launcher_ui_manual\\\", "
-            "\\\"reason\\\":\\\"manual mode button\\\""
-            "}'}"
-        )
-
-        remote_cmd = (
-            "cd /home/user/GIT/TheAgency && "
-            "source /opt/ros/humble/setup.bash && "
-            "source /home/user/GIT/TheAgency/theagency_venv/bin/activate && "
-            "export ROS_DOMAIN_ID=5 && "
-            f"ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String {shlex.quote(payload)}"
-        )
-
-        result = subprocess.run(
-            ["ssh", ssh_target, remote_cmd],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        if result.returncode != 0:
-            messagebox.showerror(
-                "Mode publish failed",
-                result.stderr.strip() or result.stdout.strip() or f"Failed to publish mode: {mode}",
-            )
-            self.status_var.set(f"Failed to publish demo mode: {mode}")
-            return
-
-        self.status_var.set(f"Published demo mode request: {mode}")
 
     def start_auto_pipeline(self):
         if not messagebox.askyesno(

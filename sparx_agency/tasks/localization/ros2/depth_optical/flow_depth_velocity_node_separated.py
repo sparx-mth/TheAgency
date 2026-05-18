@@ -7,8 +7,7 @@ import math
 import os
 from typing import Deque, Dict, Optional, Tuple, Any
 from pathlib import Path
-
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 import cv2
 import numpy as np
 import rclpy
@@ -17,6 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped
 from cv_bridge import CvBridge
+from std_msgs.msg import Empty
 import yaml
 import csv
 
@@ -45,26 +45,18 @@ class FlowDepthVelocityNode(Node):
     def __init__(self):
         super().__init__("flow_depth_velocity_node")
 
-        # Keep the same default behavior as your current scripts.
-        self.set_parameters([
-            rclpy.parameter.Parameter(
-                "use_sim_time",
-                rclpy.parameter.Parameter.Type.BOOL,
-                False,
-            )
-        ])
 
         # ============================================================
         # Parameters
         # ============================================================
-        self.declare_parameter("image_topic", "/simple_drone/front/image_raw")
+        self.declare_parameter("image_topic", "/xtend/rgb")
         self.declare_parameter("depth_topic", "/depth_anything/depth")
         self.declare_parameter("output_topic", "/flow_depth/velocity")
         self.declare_parameter("pose_est_topic", "/flow_depth/pose_est")
-        self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
+        #self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
         self.declare_parameter("bearing_topic", "/xtend/bearing")
-        self.declare_parameter("turn_rate_threshold_deg", 75.0)
-
+        self.declare_parameter("turn_rate_threshold_deg", 20.0)
+        self.declare_parameter("demo_mode_topic", "/xtend/demo_mode")
         self.declare_parameter(
             "camera_config_yaml",
             str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml")
@@ -130,11 +122,11 @@ class FlowDepthVelocityNode(Node):
         self.vel_log_file = open(self.vel_csv_path, 'w', newline='')
         self.vel_csv_writer = csv.writer(self.vel_log_file)
         self.vel_csv_writer.writerow([
-            'timestamp', 'dt',
-            # 'raw_vx', 'raw_vy', 'raw_vz',
-            # 'filtered_vx', 'filtered_vy', 'filtered_vz',
-            'pub_vx', 'pub_vy', 'pub_vz',
-            'features_used'
+            'timestamp', 'dt', 
+            #'raw_vx', 'raw_vy', 'raw_vz', 
+            #'filtered_vx', 'filtered_vy', 'filtered_vz', 
+            'pub_vx', 'pub_vy', 'pub_vz', 
+            'features_used', 'is_turning'
         ])
 
         self.pose_log_file = open(self.pose_csv_path, 'w', newline='')
@@ -148,15 +140,14 @@ class FlowDepthVelocityNode(Node):
         self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
         self.output_topic = self.get_parameter("output_topic").get_parameter_value().string_value
         self.pose_est_topic = self.get_parameter("pose_est_topic").get_parameter_value().string_value
-        self.gt_vel_topic = self.get_parameter("gt_vel_topic").get_parameter_value().string_value
+        #self.gt_vel_topic = self.get_parameter("gt_vel_topic").get_parameter_value().string_value
         self.camera_config_yaml = self.get_parameter("camera_config_yaml").get_parameter_value().string_value
 
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
 
         self.bearing_topic = self.get_parameter("bearing_topic").get_parameter_value().string_value
-        self.turn_rate_threshold_rad = math.radians(
-            self.get_parameter("turn_rate_threshold_deg").get_parameter_value().double_value)
+        self.turn_rate_threshold_rad = math.radians(self.get_parameter("turn_rate_threshold_deg").get_parameter_value().double_value)
 
         self.print_velocity_debug = bool(
             self.get_parameter("print_velocity_debug").get_parameter_value().bool_value
@@ -203,6 +194,11 @@ class FlowDepthVelocityNode(Node):
         )
         self.json_out_path = self.get_parameter("json_out_path").get_parameter_value().string_value
 
+        demo_mode_topic = self.get_parameter("demo_mode_topic").value
+        self.current_mode = "idle"
+        self.is_turning = False
+        self.mission_started = True
+
         # ============================================================
         # State
         # ============================================================
@@ -241,9 +237,6 @@ class FlowDepthVelocityNode(Node):
         self.last_bearing = None
         self.last_bearing_time = None
         self.is_turning = False
-        self.is_turning_mem = []
-        self.is_turning_mem_size = 5
-        self.is_turning_mem_ratio = 0.6
 
         # ============================================================
         # Camera intrinsics and tracker
@@ -284,12 +277,12 @@ class FlowDepthVelocityNode(Node):
             image_qos,
         )
 
-        self.create_subscription(
-            Twist,
-            self.gt_vel_topic,
-            self.gt_vel_callback,
-            image_qos,
-        )
+       # self.create_subscription(
+        #    Twist,
+         #   self.gt_vel_topic,
+         #   self.gt_vel_callback,
+         #   image_qos,
+        #)
 
         self.pose_sub = self.create_subscription(
             PoseStamped,
@@ -297,13 +290,18 @@ class FlowDepthVelocityNode(Node):
             self.pose_est_callback,
             image_qos,
         )
-
+        """
         self.bearing_sub = self.create_subscription(
             Float32,
             self.bearing_topic,
             self.bearing_callback,
-            10
+            10, 
         )
+        """
+
+        self.mode_sub = self.create_subscription(String, demo_mode_topic, self.demo_mode_cb, 10)
+
+        self.reset_sub = self.create_subscription(Empty, "/xtend/reset_odom", self.reset_cb, 10)
 
         self.get_logger().info("============================================================")
         self.get_logger().info("[FlowDepth] Started: RGB computes Flow now, Depth completes metric velocity later")
@@ -326,49 +324,69 @@ class FlowDepthVelocityNode(Node):
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     def now_sec(self) -> float:
-        now = self.get_clock().now()
-        now_msg = now.to_msg()
+        now_msg = self.get_clock().now().to_msg()
         return self.stamp_to_sec(now_msg)
 
     def get_match_time(self, msg: Image, arrival_time_sec: float) -> float:
         if self.sync_time_mode == "arrival":
             return arrival_time_sec
         return self.stamp_to_sec(msg.header.stamp)
-
+    
+    """
     def bearing_callback(self, msg: Float32):
         current_time = self.now_sec()
-        current_bearing = msg.data
-
-        self.get_logger().info(f"[bearing callback] current time: {current_time}")
-        self.get_logger().info(f"[bearing callback] last bearing time: {self.last_bearing_time}")
-        self.get_logger().info(f"[bearing callback] current bearing: {current_bearing}")
-        self.get_logger().info(f"[bearing callback] last bearing: {self.last_bearing}")
-
+        current_bearing = msg.data 
 
         if self.last_bearing is not None and self.last_bearing_time is not None:
             dt = current_time - self.last_bearing_time
-            self.get_logger().info(f"[bearing callback] bearing delta time: {dt:.3f}")
             if dt > 0.0:
                 diff = (current_bearing - self.last_bearing + math.pi) % (2 * math.pi) - math.pi
-
-                self.get_logger().info(f"[bearing callback] bearing diff: {diff:.3f}")
                 turn_rate = abs(diff) / dt
-                self.get_logger().info(f"[bearing callback] turn rate: {turn_rate:.3f}")
-                self.get_logger().info(f"[bearing callback] turn rate threshold: {self.turn_rate_threshold_rad:.3f}")
 
-                self.check_if_turning(turn_rate)
+                self.is_turning = (turn_rate > self.turn_rate_threshold_rad)
 
         self.last_bearing = current_bearing
         self.last_bearing_time = current_time
+    """
 
-    def check_if_turning(self, turn_rate: Any):
-        is_turning = (turn_rate > self.turn_rate_threshold_rad)
-        self.is_turning_mem.append(is_turning)
-        if len(self.is_turning_mem) > self.is_turning_mem_size:
-            self.is_turning_mem = self.is_turning_mem[-self.is_turning_mem_size:]
-        self.is_turning = float(
-            (np.array(self.is_turning_mem).sum()) / float(len(self.is_turning_mem))) > self.is_turning_mem_ratio
-        self.get_logger().info(f"[bearing callback] is turning: {self.is_turning:.3f}")
+    def demo_mode_cb(self, msg: String):
+        new_mode = msg.data.lower()
+
+        if new_mode == "fly_straight" and not self.mission_started:
+            self.get_logger().info("Planner: First FLY_STRAIGHT! Starting velocity estimation from (0,0,0).")
+            self.mission_started = True
+            self.is_turning = False
+            self.prev_vx = 0.0
+            self.prev_vy = 0.0
+            self.prev_vz = 0.0
+
+        if not self.mission_started:
+            self.current_mode = new_mode
+            return
+        
+        if new_mode == "turning" and not self.is_turning:
+            self.get_logger().info("Planner: TURNING. Freezing and resetting filters.")
+            self.is_turning = True
+            self.prev_vx = 0.0
+            self.prev_vy = 0.0
+            self.prev_vz = 0.0
+            
+        elif new_mode == "fly_straight" and self.is_turning:
+            self.get_logger().info("Planner: FLY_STRAIGHT. Resuming.")
+            self.is_turning = False
+            
+        self.current_mode = new_mode
+    
+    def reset_cb(self, msg: Empty):
+        self.get_logger().info("RESET COMMAND RECEIVED! Clearing trajectory maps and velocity filters.")
+        
+        self.prev_vx = 0.0
+        self.prev_vy = 0.0
+        self.prev_vz = 0.0
+        
+        self.debug_path = [(0.0, 0.0)]
+        self.trajectory_history = []
+        self.current_distance = 0.0
 
     # ============================================================
     # Camera intrinsics
@@ -416,7 +434,6 @@ class FlowDepthVelocityNode(Node):
         raise ValueError(
             f"Could not find projection_matrix or fx/fy/cx/cy in YAML: {yaml_path}"
         )
-
     # ============================================================
     # RGB callback: compute Optical Flow immediately
     # ============================================================
@@ -578,12 +595,12 @@ class FlowDepthVelocityNode(Node):
     # Flow + Depth processing
     # ============================================================
     def process_flow_with_depth(
-            self,
-            flow_item: Dict[str, Any],
-            depth_map: np.ndarray,
-            depth_stamp_sec: float,
-            depth_arrival_sec: float,
-            match_age_sec: float,
+        self,
+        flow_item: Dict[str, Any],
+        depth_map: np.ndarray,
+        depth_stamp_sec: float,
+        depth_arrival_sec: float,
+        match_age_sec: float,
     ):
         good_old = flow_item["good_old"]
         good_new = flow_item["good_new"]
@@ -595,16 +612,19 @@ class FlowDepthVelocityNode(Node):
         filtered_vx_mps, filtered_vy_mps, filtered_vz_mps = 0.0, 0.0, 0.0
 
         # ===  (Rotation Suppression) ===
+        if not self.mission_started:
+            vx_mps, vy_mps, vz_mps = 0.0, 0.0, 0.0
+            
+            if self.published_count % 30 == 0:
+                self.get_logger().info("[IDLE] Waiting for first FLY_STRAIGHT to start...")
+
         if self.is_turning:
             vx_mps, vy_mps, vz_mps = 0.0, 0.0, 0.0
 
-            self.prev_vx = 0.0
-            self.prev_vy = 0.0
-            self.prev_vz = 0.0
-
             if self.published_count % 10 == 0:
-                self.get_logger().info("🚨 [Turn Detected] Pausing Velocity to prevent drift!")
-
+                self.get_logger().info("[Turn Detected] Pausing Velocity to prevent drift!")
+            
+                
         else:
             raw_vx_mps, raw_vy_mps, raw_vz_mps, n_used = self.velocity_from_flow_and_depth(
                 good_old=good_old,
@@ -682,21 +702,21 @@ class FlowDepthVelocityNode(Node):
             )
 
     def print_velocity_estimate(
-            self,
-            flow_item: Dict[str, Any],
-            match_age_sec: float,
-            depth_arrival_sec: float,
-            dt: float,
-            raw_vx_mps: float,
-            raw_vy_mps: float,
-            raw_vz_mps: float,
-            filtered_vx_mps: float,
-            filtered_vy_mps: float,
-            filtered_vz_mps: float,
-            published_vx_mps: float,
-            published_vy_mps: float,
-            published_vz_mps: float,
-            n_used: int,
+        self,
+        flow_item: Dict[str, Any],
+        match_age_sec: float,
+        depth_arrival_sec: float,
+        dt: float,
+        raw_vx_mps: float,
+        raw_vy_mps: float,
+        raw_vz_mps: float,
+        filtered_vx_mps: float,
+        filtered_vy_mps: float,
+        filtered_vz_mps: float,
+        published_vx_mps: float,
+        published_vy_mps: float,
+        published_vz_mps: float,
+        n_used: int,
     ):
         """
         Text-only debug tool for velocity estimation.
@@ -712,16 +732,16 @@ class FlowDepthVelocityNode(Node):
 
         rgb_arrival_to_depth_arrival = depth_arrival_sec - flow_item["rgb_arrival_sec"]
 
-        raw_speed = math.sqrt(raw_vx_mps ** 2 + raw_vy_mps ** 2 + raw_vz_mps ** 2)
+        raw_speed = math.sqrt(raw_vx_mps**2 + raw_vy_mps**2 + raw_vz_mps**2)
         filtered_speed = math.sqrt(
-            filtered_vx_mps ** 2 + filtered_vy_mps ** 2 + filtered_vz_mps ** 2
+            filtered_vx_mps**2 + filtered_vy_mps**2 + filtered_vz_mps**2
         )
         published_speed = math.sqrt(
-            published_vx_mps ** 2 + published_vy_mps ** 2 + published_vz_mps ** 2
+            published_vx_mps**2 + published_vy_mps**2 + published_vz_mps**2
         )
-
+        
         turning_str = "YES (Velocity Paused)" if getattr(self, 'is_turning', False) else "NO"
-        bearing_deg = math.degrees(self.last_bearing) if getattr(self, 'last_bearing', None) is not None else 0.0
+        #bearing_deg = math.degrees(self.last_bearing) if getattr(self, 'last_bearing', None) is not None else 0.0
 
         self.get_logger().info(
             "\n"
@@ -733,8 +753,8 @@ class FlowDepthVelocityNode(Node):
             f"  pending_flow_queue  : {len(self.pending_flow_queue)}\n"
             f"  features_used       : {n_used}\n"
             f"  center_depth        : {self.center_depth:.3f} m\n"
-            f"  is_turning          : {turning_str}\n"
-            f"  current_bearing     : {bearing_deg:.1f} deg\n"
+            f"  is_turning          : {turning_str}\n"                       
+            #f"  current_bearing     : {bearing_deg:.1f} deg\n"              
             f"  raw_velocity        : vx={raw_vx_mps:+.4f}, vy={raw_vy_mps:+.4f}, vz={raw_vz_mps:+.4f}, |v|={raw_speed:.4f} m/s\n"
             f"  filtered_velocity   : vx={filtered_vx_mps:+.4f}, vy={filtered_vy_mps:+.4f}, vz={filtered_vz_mps:+.4f}, |v|={filtered_speed:.4f} m/s\n"
             f"  published_velocity  : vx={published_vx_mps:+.4f}, vy={published_vy_mps:+.4f}, vz={published_vz_mps:+.4f}, |v|={published_speed:.4f} m/s"
@@ -755,8 +775,8 @@ class FlowDepthVelocityNode(Node):
             self.last_smoothed_depth = raw_depth_map
         else:
             self.last_smoothed_depth = (
-                    self.ema_alpha * raw_depth_map
-                    + (1.0 - self.ema_alpha) * self.last_smoothed_depth
+                self.ema_alpha * raw_depth_map
+                + (1.0 - self.ema_alpha) * self.last_smoothed_depth
             )
 
         return self.last_smoothed_depth.astype(np.float32)
@@ -781,7 +801,7 @@ class FlowDepthVelocityNode(Node):
         center_region = depth_map[y0:y1, x0:x1]
         valid_center_depths = center_region[
             np.isfinite(center_region) & (center_region > 0)
-            ]
+        ]
 
         if valid_center_depths.size > 0:
             self.center_depth = float(np.mean(valid_center_depths) * self.depth_scale)
@@ -811,8 +831,8 @@ class FlowDepthVelocityNode(Node):
         v_int = np.rint(good_new[:, 1]).astype(np.int32)
 
         valid = (
-                (u_int >= 0) & (u_int < W) &
-                (v_int >= 0) & (v_int < H)
+            (u_int >= 0) & (u_int < W) &
+            (v_int >= 0) & (v_int < H)
         )
 
         if not np.any(valid):
@@ -822,10 +842,10 @@ class FlowDepthVelocityNode(Node):
         Z[valid] = depth_map[v_int[valid], u_int[valid]] * self.depth_scale
 
         valid = (
-                valid &
-                np.isfinite(Z) &
-                (Z > self.min_depth) &
-                (Z < self.max_depth)
+            valid &
+            np.isfinite(Z) &
+            (Z > self.min_depth) &
+            (Z < self.max_depth)
         )
 
         nv = int(np.sum(valid))
@@ -839,7 +859,7 @@ class FlowDepthVelocityNode(Node):
         du_v = du[valid].astype(np.float64)
         dv_v = dv[valid].astype(np.float64)
 
-        #  Outlier Rejection use RANSAC
+        #  Outlier Rejection use RANSAC 
         vx_estimates = - (du_v * Zv) / float(self.fx)
         vy_estimates = - (dv_v * Zv) / float(self.fy)
 
@@ -862,6 +882,8 @@ class FlowDepthVelocityNode(Node):
         du_v_in = du_v[good_inliers]
         dv_v_in = dv_v[good_inliers]
 
+
+
         A = np.zeros((2 * nv_inliers, 3), dtype=np.float64)
         B = np.zeros((2 * nv_inliers,), dtype=np.float64)
 
@@ -873,7 +895,7 @@ class FlowDepthVelocityNode(Node):
         A[1::2, 2] = v_c_v_in
         B[1::2] = dv_v_in * Zv_in
 
-        dist_sq = u_c_v_in ** 2 + v_c_v_in ** 2
+        dist_sq = u_c_v_in**2 + v_c_v_in**2
         denom = 0.05 * (float(self.cx) ** 2 + float(self.cy) ** 2)
         weights = np.exp(-dist_sq / max(denom, 1e-9))
 
@@ -900,10 +922,10 @@ class FlowDepthVelocityNode(Node):
     # ============================================================
     # Extra callbacks
     # ============================================================
-    def gt_vel_callback(self, msg: Twist):
-        self.latest_gt_vx = msg.linear.x
-        self.latest_gt_vy = msg.linear.y
-        self.latest_gt_vz = msg.linear.z
+    #def gt_vel_callback(self, msg: Twist):
+     #   self.latest_gt_vx = msg.linear.x
+     #   self.latest_gt_vy = msg.linear.y
+     #  self.latest_gt_vz = msg.linear.z
 
     def pose_est_callback(self, msg: PoseStamped):
         x = msg.pose.position.x
@@ -911,7 +933,7 @@ class FlowDepthVelocityNode(Node):
         z = msg.pose.position.z
 
         self.debug_path.append((x, y))
-        self.current_distance = math.sqrt(x ** 2 + y ** 2 + z ** 2)
+        self.current_distance = math.sqrt(x**2 + y**2 + z**2)
 
         self.trajectory_history.append({
             "image": f"frame_{len(self.trajectory_history):06d}.jpg",
@@ -925,7 +947,7 @@ class FlowDepthVelocityNode(Node):
 
         stamp_sec = self.stamp_to_sec(msg.header.stamp)
         self.pose_csv_writer.writerow([
-            f"{stamp_sec:.6f}",
+            f"{stamp_sec:.6f}", 
             f"{x:.4f}", f"{y:.4f}", f"{z:.4f}"
         ])
         self.pose_log_file.flush()
@@ -934,18 +956,18 @@ class FlowDepthVelocityNode(Node):
     # Debug drawing
     # ============================================================
     def draw_visual_debug(
-            self,
-            frame,
-            good_old,
-            good_new,
-            depth_map,
-            vx_mps,
-            vy_mps,
-            vz_mps,
-            n_used,
-            match_age_sec,
-            depth_stamp_sec,
-            depth_arrival_sec,
+        self,
+        frame,
+        good_old,
+        good_new,
+        depth_map,
+        vx_mps,
+        vy_mps,
+        vz_mps,
+        n_used,
+        match_age_sec,
+        depth_stamp_sec,
+        depth_arrival_sec,
     ):
         vis = frame.copy()
         self.draw_debug(vis, good_old, good_new, depth_map)
@@ -1078,11 +1100,11 @@ class FlowDepthVelocityNode(Node):
     # Shutdown tasks: save trajectory history to JSON
     # ============================================================
     def destroy_node(self):
-
+        
         if hasattr(self, 'vel_log_file') and not self.vel_log_file.closed:
             self.vel_log_file.close()
             self.get_logger().info(f"[CSV] Saved velocity log to {self.vel_csv_path}")
-
+            
         if hasattr(self, 'pose_log_file') and not self.pose_log_file.closed:
             self.pose_log_file.close()
             self.get_logger().info(f"[CSV] Saved pose log to {self.pose_csv_path}")
