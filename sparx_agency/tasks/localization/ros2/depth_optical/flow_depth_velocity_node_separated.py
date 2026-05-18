@@ -7,7 +7,7 @@ import math
 import os
 from typing import Deque, Dict, Optional, Tuple, Any
 from pathlib import Path
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 import cv2
 import numpy as np
 import rclpy
@@ -55,7 +55,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("gt_vel_topic", "/simple_drone/gt_vel")
         self.declare_parameter("bearing_topic", "/xtend/bearing")
         self.declare_parameter("turn_rate_threshold_deg", 20.0)
-
+        self.declare_parameter("demo_mode_topic", "/xtend/demo_mode")
         self.declare_parameter(
             "camera_config_yaml",
             str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml")
@@ -125,7 +125,7 @@ class FlowDepthVelocityNode(Node):
             #'raw_vx', 'raw_vy', 'raw_vz', 
             #'filtered_vx', 'filtered_vy', 'filtered_vz', 
             'pub_vx', 'pub_vy', 'pub_vz', 
-            'features_used'
+            'features_used', 'is_turning'
         ])
 
         self.pose_log_file = open(self.pose_csv_path, 'w', newline='')
@@ -192,6 +192,11 @@ class FlowDepthVelocityNode(Node):
             self.get_parameter("store_debug_frames").get_parameter_value().bool_value
         )
         self.json_out_path = self.get_parameter("json_out_path").get_parameter_value().string_value
+
+        demo_mode_topic = self.get_parameter("demo_mode_topic").value
+        self.current_mode = "idle"
+        self.is_turning = False
+        self.mission_started = False
 
         # ============================================================
         # State
@@ -284,13 +289,16 @@ class FlowDepthVelocityNode(Node):
             self.pose_est_callback,
             image_qos,
         )
-
+        """
         self.bearing_sub = self.create_subscription(
             Float32,
             self.bearing_topic,
             self.bearing_callback,
             10, 
         )
+        """
+
+        self.mode_sub = self.create_subscription(String, demo_mode_topic, self.demo_mode_cb, 10)
 
         self.get_logger().info("============================================================")
         self.get_logger().info("[FlowDepth] Started: RGB computes Flow now, Depth completes metric velocity later")
@@ -321,6 +329,7 @@ class FlowDepthVelocityNode(Node):
             return arrival_time_sec
         return self.stamp_to_sec(msg.header.stamp)
     
+    """
     def bearing_callback(self, msg: Float32):
         current_time = self.now_sec()
         current_bearing = msg.data 
@@ -335,6 +344,35 @@ class FlowDepthVelocityNode(Node):
 
         self.last_bearing = current_bearing
         self.last_bearing_time = current_time
+    """
+
+    def demo_mode_cb(self, msg: String):
+        new_mode = msg.data.lower()
+
+        if new_mode == "fly_straight" and not self.mission_started:
+            self.get_logger().info("Planner: First FLY_STRAIGHT! Starting velocity estimation from (0,0,0).")
+            self.mission_started = True
+            self.is_turning = False
+            self.prev_vx = 0.0
+            self.prev_vy = 0.0
+            self.prev_vz = 0.0
+
+        if not self.mission_started:
+            self.current_mode = new_mode
+            return
+        
+        if new_mode == "turning" and not self.is_turning:
+            self.get_logger().info("Planner: TURNING. Freezing and resetting filters.")
+            self.is_turning = True
+            self.prev_vx = 0.0
+            self.prev_vy = 0.0
+            self.prev_vz = 0.0
+            
+        elif new_mode == "fly_straight" and self.is_turning:
+            self.get_logger().info("Planner: FLY_STRAIGHT. Resuming.")
+            self.is_turning = False
+            
+        self.current_mode = new_mode
 
     # ============================================================
     # Camera intrinsics
@@ -560,15 +598,18 @@ class FlowDepthVelocityNode(Node):
         filtered_vx_mps, filtered_vy_mps, filtered_vz_mps = 0.0, 0.0, 0.0
 
         # ===  (Rotation Suppression) ===
-        if self.is_turning:
+        if not self.mission_started:
             vx_mps, vy_mps, vz_mps = 0.0, 0.0, 0.0
             
-            self.prev_vx = 0.0
-            self.prev_vy = 0.0
-            self.prev_vz = 0.0
+            if self.published_count % 30 == 0:
+                self.get_logger().info("[IDLE] Waiting for first FLY_STRAIGHT to start...")
+
+        if self.is_turning:
+            vx_mps, vy_mps, vz_mps = 0.0, 0.0, 0.0
 
             if self.published_count % 10 == 0:
-                self.get_logger().info("🚨 [Turn Detected] Pausing Velocity to prevent drift!")
+                self.get_logger().info("[Turn Detected] Pausing Velocity to prevent drift!")
+            
                 
         else:
             raw_vx_mps, raw_vy_mps, raw_vz_mps, n_used = self.velocity_from_flow_and_depth(
@@ -686,7 +727,7 @@ class FlowDepthVelocityNode(Node):
         )
         
         turning_str = "YES (Velocity Paused)" if getattr(self, 'is_turning', False) else "NO"
-        bearing_deg = math.degrees(self.last_bearing) if getattr(self, 'last_bearing', None) is not None else 0.0
+        #bearing_deg = math.degrees(self.last_bearing) if getattr(self, 'last_bearing', None) is not None else 0.0
 
         self.get_logger().info(
             "\n"
@@ -699,7 +740,7 @@ class FlowDepthVelocityNode(Node):
             f"  features_used       : {n_used}\n"
             f"  center_depth        : {self.center_depth:.3f} m\n"
             f"  is_turning          : {turning_str}\n"                       
-            f"  current_bearing     : {bearing_deg:.1f} deg\n"              
+            #f"  current_bearing     : {bearing_deg:.1f} deg\n"              
             f"  raw_velocity        : vx={raw_vx_mps:+.4f}, vy={raw_vy_mps:+.4f}, vz={raw_vz_mps:+.4f}, |v|={raw_speed:.4f} m/s\n"
             f"  filtered_velocity   : vx={filtered_vx_mps:+.4f}, vy={filtered_vy_mps:+.4f}, vz={filtered_vz_mps:+.4f}, |v|={filtered_speed:.4f} m/s\n"
             f"  published_velocity  : vx={published_vx_mps:+.4f}, vy={published_vy_mps:+.4f}, vz={published_vz_mps:+.4f}, |v|={published_speed:.4f} m/s"
