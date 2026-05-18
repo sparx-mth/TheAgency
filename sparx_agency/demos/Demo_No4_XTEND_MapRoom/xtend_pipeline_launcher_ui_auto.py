@@ -215,7 +215,25 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_
 
 sleep 2
 
-echo "[AUTO] Step 4: arm and takeoff"
+echo "[AUTO] Step 4: start XTEND demo mode manager"
+start_tmux xtend_demo_manager '
+cd /home/user/GIT/TheAgency
+source /opt/ros/humble/setup.bash
+source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+export ROS_DOMAIN_ID=5
+export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
+python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
+  --request-topic /xtend/demo_mode_request \
+  --mode-topic /xtend/demo_mode \
+  --cmd-nav-topic /xtend/cmd_nav \
+  --reset-odom-topic /xtend/reset_odom \
+  --initial-mode idle \
+  --disarm-delay-sec 8.0
+'
+
+wait_for_topic_name /xtend/demo_mode 15 || true
+
+echo "[AUTO] Step 5: arm and takeoff"
 send_xtend_cmd arm 0
 sleep 3
 send_xtend_cmd takeoff 0
@@ -226,7 +244,7 @@ sleep 30
 echo "[AUTO] Re-check depth before localization"
 require_topic_rate /xtend/depth_m 30 best_effort xtend_depth
 
-echo "[AUTO] Step 5: start localization"
+echo "[AUTO] Step 6: start localization"
 start_tmux xtend_flow_depth '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -266,16 +284,18 @@ ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom xtend_camera
 wait_for_topic_name /flow_depth/pose_est 30 || true
 optional_topic_rate /flow_depth/pose_est 30 best_effort
 
-echo "[AUTO] Step 6: check planner containers"
+echo "[AUTO] Step 7: check planner containers"
 docker ps --format '{{.Names}}' | tee /tmp/xtend_docker_names.txt
 grep -qx falcon /tmp/xtend_docker_names.txt || echo "[AUTO][WARN] falcon container is not running"
 grep -qx ros1_bridge /tmp/xtend_docker_names.txt || echo "[AUTO][WARN] ros1_bridge container is not running"
 grep -qx roscore /tmp/xtend_docker_names.txt || echo "[AUTO][WARN] roscore container is not running"
 
-echo "[AUTO] Step 7: launch FALCON planner inside falcon container"
+echo "[AUTO] Step 8: launch FALCON planner inside falcon container"
+planner_started=0
+
 if docker ps --format '{{.Names}}' | grep -qx falcon; then
     tmux kill-session -t planner_falcon 2>/dev/null || true
-    tmux kill-session -t planner_falcon 2>/dev/null || true
+
     tmux new-session -d -s planner_falcon "bash -lc '
     docker exec -i falcon bash -lc \"source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && cd /catkin_ws && roslaunch falcon_adapter real_drone.launch map_name:=office\"
     status=\$?
@@ -284,9 +304,25 @@ if docker ps --format '{{.Names}}' | grep -qx falcon; then
     echo \"Press Enter to close...\"
     read
     '"
+
     tmux set-option -t planner_falcon remain-on-exit on || true
+    sleep 2
+
+    if tmux has-session -t planner_falcon 2>/dev/null; then
+        planner_started=1
+    else
+        echo "[AUTO][WARN] planner_falcon tmux session did not stay alive"
+    fi
 else
     echo "[AUTO][WARN] Skipping planner launch because falcon container is not running"
+fi
+
+if [ "${planner_started}" -eq 1 ]; then
+    echo "[AUTO] Step 9: switch demo mode to FLY_STRAIGHT"
+    ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String \
+      "{data: '{\"mode\":\"fly_straight\", \"source\":\"auto_launcher\", \"reason\":\"pipeline ready after takeoff and planner launch\"}'}" || true
+else
+    echo "[AUTO][WARN] Not switching to FLY_STRAIGHT because planner did not start"
 fi
 
 echo "[AUTO] Optional display commands:"
@@ -367,7 +403,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
 """,
     ),
     LaunchItem(
-        name="5. Optical-flow depth velocity node",
+        name="6. Optical-flow depth velocity node",
         machine="jetson",
         tmux_name="xtend_flow_depth",
         description="Subscribes to RGB/depth and estimates velocity from optical flow + depth.",
@@ -384,7 +420,7 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
 """,
     ),
     LaunchItem(
-        name="6. Velocity integrator",
+        name="7. Velocity integrator",
         machine="jetson",
         tmux_name="xtend_velocity_integrator",
         description="Integrates velocity estimate into pose/odom.",
@@ -397,21 +433,21 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrato
 """,
     ),
     LaunchItem(
-        name="7. Static transform odom -> xtend_camera",
+        name="8. Static transform odom -> xtend_camera",
         machine="jetson",
         tmux_name="xtend_static_tf",
         description="Publishes static transform odom -> xtend_camera.",
         command="ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom xtend_camera",
     ),
     LaunchItem(
-        name="8. PC manual UI",
+        name="9. PC manual UI",
         machine="pc",
         tmux_name="xtend_pc_ui",
         description="Manual ARM/TAKEOFF/LAND/DISARM/STOP UI. Movement can publish Twist.",
         command="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/ui.py",
     ),
     LaunchItem(
-        name="9. Planner: hospital world",
+        name="10. Planner: hospital world",
         machine="manual",
         tmux_name="planner_hospital",
         description="Manual planner step on Jetson/container: starts hospital environment.",
@@ -422,7 +458,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
 """,
     ),
     LaunchItem(
-        name="10. Planner container: FALCON adapter",
+        name="11. Planner container: FALCON adapter",
         machine="manual",
         tmux_name="planner_falcon",
         description="Run inside the planner container.",
@@ -430,7 +466,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
         command="""docker exec -it falcon bash -lc 'source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && cd /catkin_ws && roslaunch falcon_adapter real_drone.launch map_name:=office'"""
     ),
     LaunchItem(
-        name="11. Planner ROS bridge docker",
+        name="12. Planner ROS bridge docker",
         machine="manual",
         tmux_name="planner_ros_bridge",
         description="Manual ROS bridge step.",
@@ -441,7 +477,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
 """,
     ),
     LaunchItem(
-        name="12. FALCON RViz display",
+        name="13. FALCON RViz display",
         machine="manual",
         tmux_name="planner_rviz",
         description="Optional display command inside falcon container.",
@@ -449,7 +485,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
         command="docker exec -it falcon bash -lc 'roslaunch exploration_manager rviz.launch'",
     ),
     LaunchItem(
-        name="13. BEV click goal UI",
+        name="14. BEV click goal UI",
         machine="manual",
         tmux_name="planner_bev_goal",
         description="Optional click-goal command inside falcon container.",
@@ -713,6 +749,7 @@ read
         for item in LAUNCH_ITEMS:
             if item.machine == "jetson":
                 self._stop_tmux(item.tmux_name, quiet=True)
+        self._stop_tmux("xtend_demo_manager", quiet=True)
         self._stop_tmux("xtend_auto_launch", quiet=True)
         self._stop_tmux("planner_falcon", quiet=True)
         self.status_var.set("Requested stop for all known Jetson tmux sessions.")
