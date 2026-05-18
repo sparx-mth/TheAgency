@@ -49,7 +49,6 @@ class VelocityIntegratorNode(Node):
         super().__init__("velocity_integrator_node")
 
         self.declare_parameter("vel_topic", "/flow_depth/velocity")
-        #self.declare_parameter("gt_pose_topic", "/simple_drone/gt_pose")
         self.declare_parameter("target_frame", "simple_drone/odom")
         self.declare_parameter("publish_pose_topic", "/flow_depth/pose_est")
         
@@ -64,7 +63,6 @@ class VelocityIntegratorNode(Node):
         self.declare_parameter("bearing_topic", "/xtend/bearing")
 
         vel_topic = self.get_parameter("vel_topic").value
-        gt_topic = self.get_parameter("gt_pose_topic").value
         self.target_frame = norm_frame(self.get_parameter("target_frame").value)
         pose_topic = self.get_parameter("publish_pose_topic").value
         bearing_topic = self.get_parameter("bearing_topic").value
