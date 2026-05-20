@@ -189,7 +189,7 @@ class XtendAMCLNode(Node):
         # --- INITIAL POSE SETUP (CONSTANT Y AND YAW) ---
         self.start_x_meters = 0.0  
         self.constant_y_meters =  0.0 
-        self.constant_yaw_rad = 0.0   
+        self.constant_yaw_rad = math.pi / 2.0  
         
         self.current_pose_gt_meters = np.array([self.start_x_meters, self.constant_y_meters])
         self.current_yaw_gt = self.constant_yaw_rad
@@ -219,10 +219,13 @@ class XtendAMCLNode(Node):
         # KINEMATIC PREDICTION STEP (Constant Velocity on X-Axis)
         # ------------------------------------------------------------------
         distance_moved_m = ROBOT_SPEED_MPS * DT  # ~0.0615 meters per frame
+
+        predicted_y_m = self.current_pose_gt_meters[1] + distance_moved_m
+        self.current_pose_gt_meters[1] = predicted_y_m
         
-        predicted_x_m = self.current_pose_gt_meters[0] + distance_moved_m
+        #predicted_x_m = self.current_pose_gt_meters[0] + distance_moved_m
         
-        self.current_pose_gt_meters[0] = predicted_x_m
+        #self.current_pose_gt_meters[0] = predicted_x_m
         
         try:
             depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
@@ -255,7 +258,7 @@ class XtendAMCLNode(Node):
             self.constant_yaw_rad, 
             self.world_binary, 
             z_measured_cells,
-            prediction_uncertainty=(8.0, 0.1) 
+            prediction_uncertainty=(0.1, 8.0) 
         )
 
         if robot_loc_estimate_cells[0] == 0 and robot_loc_estimate_cells[1] == 0:
@@ -270,7 +273,7 @@ class XtendAMCLNode(Node):
         est_world_y_m = self.constant_y_meters
         robot_orientation_estimate = self.constant_yaw_rad
 
-        self.get_logger().info(f"[AMCL] Est X: {est_world_x_m:.2f}m (Predicted: {predicted_x_m:.2f}m)")
+        self.get_logger().info(f"[AMCL] Est X: {est_world_x_m:.2f}m (Predicted: {predicted_y_m:.2f}m)")
         
         # Update state for the next frame with the AMCL corrected pose
         self.current_pose_gt_meters = np.array([est_world_x_m, est_world_y_m])
