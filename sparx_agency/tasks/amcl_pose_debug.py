@@ -161,7 +161,6 @@ def amcl_estimator(lut: ndarray,
     robot_orientation_estimate = orientations[idx[2]]
     return robot_loc_estimate, robot_orientation_estimate
 
-
 # ==============================================================================
 # ROS 2 AMCL Node
 # ==============================================================================
