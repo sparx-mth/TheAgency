@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -35,6 +36,7 @@ class DepthProcessorNode(Node):
     def __init__(self):
         super().__init__("depth_processor_node")
 
+        self.save_image = True
         self.bridge = CvBridge()
         self.camera_info_msg: CameraInfo | None = None
 
@@ -254,6 +256,11 @@ class DepthProcessorNode(Node):
         return cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
 
     def publish_depth(self, depth: np.ndarray, header):
+        if self.save_image:
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            np.save(f"/home/user/Pictures/depth{time_str}.npy", depth)
+            self.save_image = False
+            
         msg = self.bridge.cv2_to_imgmsg(depth.astype(np.float32), encoding="32FC1")
         msg.header = header
         self.pub_depth.publish(msg)
