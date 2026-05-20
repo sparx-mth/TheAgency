@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
-
+from sparx_agency.robots.common.image_utils import center_crop_resize
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
@@ -138,6 +138,11 @@ def main() -> None:
                 continue
 
             bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            crop_width: int = 540
+            crop_height: int = 420
+            output_width: int = 504
+            output_height: int = 392
+            bgr_crop = center_crop_resize(bgr,crop_width,crop_height,output_width,output_height)
             if bgr is None:
                 print(f"[offline-da3][WARN] failed to read image: {image_path}")
                 continue

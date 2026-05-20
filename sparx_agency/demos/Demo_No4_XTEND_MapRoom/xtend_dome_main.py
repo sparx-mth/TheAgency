@@ -312,7 +312,7 @@ def parse_args():
     parser.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     parser.add_argument("--rtsp-latency-ms", type=int, default=0)
 
-    parser.add_argument("--out-dir", default="./xtend_dome_capture")
+    parser.add_argument("--out-dir", default="/home/user/Documents/xtend_dome_capture")
     parser.add_argument("--capture-interval-sec", type=float, default=0.5)
     parser.add_argument("--yaw-bucket-deg", type=float, default=30.0)
     parser.add_argument("--jpeg-quality", type=int, default=90)
