@@ -26,10 +26,10 @@ NUM_BEAMS = 64
 SHOW_MAP = True
 LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_small_map.npy')
 GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
-SIGMA = 5.0  
+SIGMA = 8.0  
 
 # --- Motion Model Hyperparameters ---
-ROBOT_SPEED_MPS = 3.0 / 7.0  # ~0.465 m/s
+ROBOT_SPEED_MPS = 3.0 / 7.5  # ~0.465 m/s
 SENSOR_FREQ_HZ = 10.0        
 DT = 1.0 / SENSOR_FREQ_HZ    # 0.1 seconds per frame
 
@@ -353,6 +353,15 @@ class XtendAMCLNode(Node):
 
         sigma_x_cells = sigma_x_m / self.map_resolution
         sigma_y_cells = sigma_y_m / self.map_resolution
+
+        self.get_logger().info(
+            f"[AMCL INPUT] "
+            f"odom_cells={odom_cells}, "
+            f"amcl_pred_cells={prediction_cells}, "
+            f"sigma_cells=({sigma_x_cells:.2f}, {sigma_y_cells:.2f}), "
+            f"search_window_x=±{3*sigma_x_cells:.1f} cells, "
+            f"search_window_y=±{3*sigma_y_cells:.1f} cells"
+        )
                 
         # --- Execute AMCL with 1D Constraint ---
         robot_loc_estimate_cells, _ = amcl_estimator(
@@ -363,6 +372,16 @@ class XtendAMCLNode(Node):
             self.world_binary, 
             z_measured_cells,
             prediction_uncertainty=(sigma_x_cells, sigma_y_cells)
+        )
+
+        dx_cells = robot_loc_estimate_cells[0] - prediction_cells[0]
+        dy_cells = robot_loc_estimate_cells[1] - prediction_cells[1]
+
+        self.get_logger().info(
+            f"[AMCL OUTPUT] "
+            f"corrected={robot_loc_estimate_cells}, "
+            f"delta_cells=({dx_cells}, {dy_cells}), "
+            f"delta_m=({dx_cells*self.map_resolution:.2f}, {dy_cells*self.map_resolution:.2f})"
         )
 
         if robot_loc_estimate_cells[0] == 0 and robot_loc_estimate_cells[1] == 0:
