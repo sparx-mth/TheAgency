@@ -59,7 +59,7 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("demo_mode_topic", "/xtend/demo_mode")
         self.declare_parameter(
             "camera_config_yaml",
-            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml")
+            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml")
         )
 
         self.declare_parameter("camera_frame", "xtend_camera")

@@ -111,7 +111,7 @@ export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml
+  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml
 '
 
 wait_for_topic_name /xtend/rgb 20
@@ -131,9 +131,9 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
   -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml \
+  -p camera_info_mode:=base \
   -p model_type:=small_lut \
-  -p camera_info_mode:=crop_resize \
   -p apply_metric_focal_scaling:=false \
   -p small_lut_clip_min_m:=0.2 \
   -p small_lut_clip_max_m:=8.0
@@ -268,7 +268,7 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 crop-resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
         command="""
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml
+  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml
 """,
     ),
     LaunchItem(
@@ -282,7 +282,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
   -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml \
   -p model_type:=small_lut \
   -p camera_info_mode:=crop_resize \
   -p apply_metric_focal_scaling:=false \
@@ -347,7 +347,7 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
   -p csv_filename:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv \
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
-  -p depth_scale:=1.2 \
+  -p depth_scale:=1.0 \
   -p turn_rate_threshold_deg:=4.0
 """,
     ),
