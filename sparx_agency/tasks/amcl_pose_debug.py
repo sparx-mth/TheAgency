@@ -29,32 +29,93 @@ GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy
 SIGMA = 5.0  
 
 # --- Motion Model Hyperparameters ---
-ROBOT_SPEED_MPS = 4.0 / 6.5  # ~0.615 m/s
+ROBOT_SPEED_MPS = 3.0 / 7.0  # ~0.465 m/s
 SENSOR_FREQ_HZ = 10.0        
 DT = 1.0 / SENSOR_FREQ_HZ    # 0.1 seconds per frame
 
 # ==============================================================================
 # Visualization Helper Function
 # ==============================================================================
-def show_world_map(world_binary: np.ndarray, location: tuple, orientation: float, title='AMCL 1D Tracking w/ Velocity'):
+def show_world_map(
+    world_binary,
+    loc_pred,
+    loc_amcl,
+    orientation,
+    odom_trajectory=None,
+    amcl_trajectory=None,
+    title='AMCL Tracking Debug'
+):
     plt.clf()
-    
     plt.imshow(world_binary, cmap='gray_r', origin='lower')
-    
-    if location is not None and location[0] > 0 and location[1] > 0:
-        x, y = location
-        plt.plot(x, y, 'rx', markersize=10, markeredgewidth=2)
-        
-        if orientation is not None:
-            arrow_length = 8.0 
-            dx = math.cos(orientation) * arrow_length
-            dy = math.sin(orientation) * arrow_length
-            plt.arrow(x, y, dx, dy, head_width=3, head_length=4, fc='blue', ec='blue')
-            
+
+    # -----------------------------
+    # Odometry trajectory
+    # -----------------------------
+    if odom_trajectory is not None and len(odom_trajectory) > 1:
+        odom_traj = np.array(odom_trajectory)
+
+        plt.plot(
+            odom_traj[:, 1],
+            odom_traj[:, 0],
+            'b-',
+            linewidth=2,
+            label='Odometry Trajectory'
+        )
+
+        plt.plot(
+            odom_traj[-1, 1],
+            odom_traj[-1, 0],
+            'bo',
+            markersize=6,
+            label='Current Odom'
+        )
+
+    # -----------------------------
+    # AMCL corrected trajectory
+    # -----------------------------
+    if amcl_trajectory is not None and len(amcl_trajectory) > 1:
+        amcl_traj = np.array(amcl_trajectory)
+
+        plt.plot(
+            amcl_traj[:, 1],
+            amcl_traj[:, 0],
+            'r-',
+            linewidth=2,
+            label='AMCL Trajectory'
+        )
+
+        plt.plot(
+            amcl_traj[-1, 1],
+            amcl_traj[-1, 0],
+            'rx',
+            markersize=8,
+            markeredgewidth=2,
+            label='Current AMCL'
+        )
+
+    # Current prediction point
+    plt.plot(
+        loc_pred[1],
+        loc_pred[0],
+        'c.',
+        markersize=8,
+        label='Kinematic Pred'
+    )
+
+    # Current AMCL corrected point
+    plt.plot(
+        loc_amcl[1],
+        loc_amcl[0],
+        'mx',
+        markersize=10,
+        markeredgewidth=2,
+        label='AMCL Corrected Now'
+    )
+
+    plt.legend()
     plt.title(title)
     plt.draw()
     plt.pause(0.001)
-
 
 # ==============================================================================
 # Core AMCL Mathematical Functions
@@ -182,16 +243,28 @@ class XtendAMCLNode(Node):
         self.world_binary = np.where(raw_grid == 100, 1, 0).astype(np.int8)
 
         # 2. Map Origin Configuration
-        # -2 * 0.05 and -21 *0.05 
-        self.map_origin_x = -0.1 
-        self.map_origin_y = -1.05  
+        # -2 * 0.05 = -0.1 and -21 *0.05 = -1.05
+        self.map_origin_x = -1.0
+        self.map_origin_y = -1.0  
 
         # --- INITIAL POSE SETUP (CONSTANT Y AND YAW) ---
-        self.start_x_meters = 0.0  
-        self.constant_y_meters =  0.0 
-        self.constant_yaw_rad = math.pi / 2.0  
-        
-        self.current_pose_gt_meters = np.array([self.start_x_meters, self.constant_y_meters])
+        self.start_x_meters = 0.0
+        self.constant_y_meters = 0.0
+        self.constant_yaw_rad = math.pi / 2.0
+
+        self.odom_pose_meters = np.array([
+            self.start_x_meters,
+            self.constant_y_meters
+        ], dtype=float)
+
+        self.amcl_pose_meters = np.array([
+            self.start_x_meters,
+            self.constant_y_meters
+        ], dtype=float)
+
+        self.odom_trajectory_cells = []
+        self.amcl_trajectory_cells = []
+
         self.current_yaw_gt = self.constant_yaw_rad
 
         # 3. Load or Generate LUT
@@ -218,10 +291,42 @@ class XtendAMCLNode(Node):
         # ------------------------------------------------------------------
         # KINEMATIC PREDICTION STEP (Constant Velocity on X-Axis)
         # ------------------------------------------------------------------
-        distance_moved_m = ROBOT_SPEED_MPS * DT  # ~0.0615 meters per frame
+        distance_moved_m = ROBOT_SPEED_MPS * DT
 
-        predicted_y_m = self.current_pose_gt_meters[1] + distance_moved_m
-        self.current_pose_gt_meters[1] = predicted_y_m
+        # ============================================================
+        # Pure odometry prediction - never corrected by AMCL
+        # ============================================================
+        self.odom_pose_meters[0] += distance_moved_m
+        self.odom_pose_meters[1] = self.constant_y_meters
+
+        odom_x_m = self.odom_pose_meters[0]
+
+        odom_map_x_m = self.odom_pose_meters[0] - self.map_origin_x
+        odom_map_y_m = self.odom_pose_meters[1] - self.map_origin_y
+
+        odom_x_cells = int(odom_map_x_m / self.map_resolution)
+        odom_y_cells = int(odom_map_y_m / self.map_resolution)
+
+        odom_cells = np.array([odom_x_cells, odom_y_cells])
+
+        self.odom_trajectory_cells.append(odom_cells.copy())
+
+        # ============================================================
+        # AMCL prediction - starts from previous AMCL corrected pose
+        # ============================================================
+        amcl_pred_pose_meters = self.amcl_pose_meters.copy()
+        amcl_pred_pose_meters[0] += distance_moved_m
+        amcl_pred_pose_meters[1] = self.constant_y_meters
+
+        amcl_pred_x_m = amcl_pred_pose_meters[0]
+
+        map_x_m = amcl_pred_pose_meters[0] - self.map_origin_x
+        map_y_m = amcl_pred_pose_meters[1] - self.map_origin_y
+
+        pred_x_cells = int(map_x_m / self.map_resolution)
+        pred_y_cells = int(map_y_m / self.map_resolution)
+
+        prediction_cells = np.array([pred_x_cells, pred_y_cells])
         
         #predicted_x_m = self.current_pose_gt_meters[0] + distance_moved_m
         
@@ -242,14 +347,13 @@ class XtendAMCLNode(Node):
         z_measured_meters = np.nan_to_num(z_measured_meters, nan=SENSOR_MAX_RANGE_METERS, posinf=SENSOR_MAX_RANGE_METERS)
         z_measured_cells = z_measured_meters / self.map_resolution
 
-        # --- Convert Prediction to Map Cells ---
-        map_x_m = self.current_pose_gt_meters[0] - self.map_origin_x
-        map_y_m = self.current_pose_gt_meters[1] - self.map_origin_y
-        
-        pred_x_cells = int(map_x_m / self.map_resolution)
-        pred_y_cells = int(map_y_m / self.map_resolution)
-        prediction_cells = np.array([pred_x_cells, pred_y_cells])
-        
+    
+        sigma_x_m = 0.4   # X almost fixed
+        sigma_y_m = 0.05   # Y has more uncertainty
+
+        sigma_x_cells = sigma_x_m / self.map_resolution
+        sigma_y_cells = sigma_y_m / self.map_resolution
+                
         # --- Execute AMCL with 1D Constraint ---
         robot_loc_estimate_cells, _ = amcl_estimator(
             self.lut, 
@@ -258,33 +362,40 @@ class XtendAMCLNode(Node):
             self.constant_yaw_rad, 
             self.world_binary, 
             z_measured_cells,
-            prediction_uncertainty=(0.1, 8.0) 
+            prediction_uncertainty=(sigma_x_cells, sigma_y_cells)
         )
 
         if robot_loc_estimate_cells[0] == 0 and robot_loc_estimate_cells[1] == 0:
-            self.get_logger().error("AMCL failed to converge. Trusting prediction only.")
-            return
+            self.get_logger().warn("AMCL failed. Keeping AMCL prediction.")
 
-        # --- Convert Correction to World Meters ---
-        est_map_x_m = float(robot_loc_estimate_cells[0] * self.map_resolution)
-        est_world_x_m = est_map_x_m + self.map_origin_x
+            robot_loc_estimate_cells = prediction_cells.copy()
+            self.amcl_pose_meters = amcl_pred_pose_meters.copy()
 
-        # FORCE Y AND YAW TO REMAIN CONSTANT
-        est_world_y_m = self.constant_y_meters
-        robot_orientation_estimate = self.constant_yaw_rad
+        else:
+            est_map_x_m = float(robot_loc_estimate_cells[0] * self.map_resolution)
+            est_world_x_m = est_map_x_m + self.map_origin_x
 
-        self.get_logger().info(f"[AMCL] Est X: {est_world_x_m:.2f}m (Predicted: {predicted_y_m:.2f}m)")
-        
-        # Update state for the next frame with the AMCL corrected pose
-        self.current_pose_gt_meters = np.array([est_world_x_m, est_world_y_m])
+            est_world_y_m = self.constant_y_meters
+
+            self.amcl_pose_meters = np.array([
+                est_world_x_m,
+                est_world_y_m
+            ], dtype=float)
+
+        self.amcl_trajectory_cells.append(robot_loc_estimate_cells.copy())
+
+    
 
         # --- Visualization ---
         if SHOW_MAP:
             show_world_map(
-                self.world_binary, 
-                location=(robot_loc_estimate_cells[0], robot_loc_estimate_cells[1]), 
-                orientation=robot_orientation_estimate, 
-                title='AMCL 1D Tracking w/ Velocity'
+                self.world_binary,
+                loc_pred=odom_cells,
+                loc_amcl=robot_loc_estimate_cells,
+                orientation=self.constant_yaw_rad,
+                odom_trajectory=self.odom_trajectory_cells,
+                amcl_trajectory=self.amcl_trajectory_cells,
+                title=f'Odom={odom_cells}, AMCL={robot_loc_estimate_cells}'
             )
 
 def main():
