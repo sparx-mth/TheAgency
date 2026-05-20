@@ -129,7 +129,7 @@ def ray_cast_lut_pose(grid, orientations, beam_angles, max_range, step=0.1):
 
 def range_likelihood_lut(z, lut, sigma):
     err = lut - z[None, None, None, :]
-    return np.exp(-0.5 * np.sum((err / sigma) ** 2, axis=3))
+    return np.exp(-0.5 * np.mean((err / sigma) ** 2, axis=3))
 
 
 def measurement_update_pose(bel, lut, z, sigma, occupancy):
@@ -183,12 +183,12 @@ class XtendAMCLNode(Node):
         self.world_binary = np.where(raw_grid == 100, 1, 0).astype(np.int8)
 
         # 2. Map Origin Configuration
-        self.map_origin_x = -57.2  
-        self.map_origin_y = -4.4   
+        self.map_origin_x = -2.2  
+        self.map_origin_y = -2.4  
 
         # --- INITIAL POSE SETUP (CONSTANT Y AND YAW) ---
-        self.start_x_meters = -55.0  
-        self.constant_y_meters = -2.0 
+        self.start_x_meters = 0.0  
+        self.constant_y_meters =  0.0 
         self.constant_yaw_rad = 0.0   
         
         self.current_pose_gt_meters = np.array([self.start_x_meters, self.constant_y_meters])

@@ -25,7 +25,7 @@ NUM_ANGLES = 32
 NUM_BEAMS = 64
 SHOW_MAP = True
 LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut.npy')
-GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/rotated_occ_grid_int8.npy'
+GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/occ_grid_int8.npy'
 SIGMA = 5.0  # Increased for realistic sensor noise tolerance to prevent math crashes
 MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if needed)
 
@@ -276,10 +276,11 @@ class XtendAMCLNode(Node):
 
     def odom_callback(self, msg: PoseStamped):
         """Callback to store the current raw world position from the tracking node."""
-        self.current_pose_gt_meters[0] = msg.pose.position.x
-        self.current_pose_gt_meters[1] = msg.pose.position.y
+        self.current_pose_gt_meters[0] = -msg.pose.position.y
+        self.current_pose_gt_meters[1] = msg.pose.position.x
 
-        self.current_yaw_gt = get_yaw_from_quaternion(msg.pose.orientation)
+        raw_yaw = get_yaw_from_quaternion(msg.pose.orientation)
+        self.current_yaw_gt = raw_yaw + (math.pi / 2.0)
         self.has_odom = True
 
 
