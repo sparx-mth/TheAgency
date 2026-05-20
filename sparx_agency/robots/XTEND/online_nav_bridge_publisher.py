@@ -5,6 +5,8 @@ import argparse
 import asyncio
 from pathlib import Path
 
+import numpy as np
+
 import rclpy
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, CameraInfo
@@ -37,6 +39,11 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         crop_height: int = 420,
         output_width: int = 504,
         output_height: int = 392,
+        drop_bad_frames: bool = True,
+        bad_frame_mean_min: float = 2.0,
+        bad_frame_std_min: float = 1.0,
+        bad_frame_sample_step: int = 16,
+        bad_frame_log_every: int = 30,
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
         telemetry_frame_id: str = "odom",
@@ -66,6 +73,14 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         self.crop_height = int(crop_height)
         self.output_width = int(output_width)
         self.output_height = int(output_height)
+
+        self.drop_bad_frames = bool(drop_bad_frames)
+        self.bad_frame_mean_min = float(bad_frame_mean_min)
+        self.bad_frame_std_min = float(bad_frame_std_min)
+        self.bad_frame_sample_step = max(1, int(bad_frame_sample_step))
+        self.bad_frame_log_every = max(1, int(bad_frame_log_every))
+        self.bad_frame_count = 0
+        self.good_frame_count = 0
 
         self.bridge = CvBridge()
         image_qos = QoSProfile(
@@ -104,40 +119,120 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
 
         print(f"[image] RTSP: {self.rtsp_uri}")
         print(f"[image] topic: {self.image_topic}")
+        print(
+            "[image] bad-frame guard: "
+            f"enabled={self.drop_bad_frames}, "
+            f"mean_min={self.bad_frame_mean_min}, "
+            f"std_min={self.bad_frame_std_min}, "
+            f"sample_step={self.bad_frame_sample_step}"
+        )
         # print(f"[image] no crop, pad_to_width={self.pad_to_width}")
 
+
+    def is_bad_frame(self, frame) -> tuple[bool, str]:
+        """Return True for empty/flat frames that should not enter the pipeline."""
+        if frame is None:
+            return True, "frame is None"
+
+        if not isinstance(frame, np.ndarray):
+            return True, f"not ndarray: {type(frame).__name__}"
+
+        if frame.size == 0:
+            return True, "zero-size ndarray"
+
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            return True, f"unexpected shape: {frame.shape}"
+
+        h, w = frame.shape[:2]
+        if h <= 0 or w <= 0:
+            return True, f"invalid shape: {frame.shape}"
+
+        small = frame[:: self.bad_frame_sample_step, :: self.bad_frame_sample_step]
+
+        if not np.isfinite(small).all():
+            return True, "contains non-finite values"
+
+        mean_val = float(small.mean())
+        std_val = float(small.std())
+
+        if mean_val < self.bad_frame_mean_min:
+            return True, f"too dark/empty: mean={mean_val:.3f}"
+
+        if std_val < self.bad_frame_std_min:
+            return True, f"too flat/empty: std={std_val:.3f}"
+
+        return False, f"mean={mean_val:.3f}, std={std_val:.3f}"
+
+    def should_publish_frame(self, frame) -> bool:
+        if not self.drop_bad_frames:
+            return True
+
+        is_bad, reason = self.is_bad_frame(frame)
+        if is_bad:
+            self.bad_frame_count += 1
+            self.good_frame_count = 0
+
+            if self.bad_frame_count == 1 or self.bad_frame_count % self.bad_frame_log_every == 0:
+                print(f"[image][drop] bad frame #{self.bad_frame_count}: {reason}")
+
+            return False
+
+        self.good_frame_count += 1
+        if self.bad_frame_count > 0:
+            print(
+                f"[image] recovered after {self.bad_frame_count} dropped bad frame(s); "
+                f"first good frame: {reason}"
+            )
+            self.bad_frame_count = 0
+
+        return True
 
     async def image_publish_loop(self):
         sleep_time = 1.0 / max(self.frequency, 1e-6)
         print("✓ Image publisher active")
 
         while True:
-            frame, _stamp = self.grabber.get_latest()
+            latest = self.grabber.get_latest()
+            if latest is None:
+                await asyncio.sleep(sleep_time)
+                continue
 
-            if frame is not None:
-                h, w = frame.shape[:2]
-                # DA3 LARGEMETRIC: 728*420
-                # frame = pad_width_center(frame, self.pad_to_width)
-                # DA3 SMALL 504*392
-                frame = center_crop_resize(
-                    frame,
-                    crop_width=self.crop_width,
-                    crop_height=self.crop_height,
-                    output_width=self.output_width,
-                    output_height=self.output_height,
-                )
+            frame, _stamp = latest
 
-                now_msg = self.ros_node.get_clock().now().to_msg()
+            if frame is None:
+                await asyncio.sleep(sleep_time)
+                continue
 
-                msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-                msg.header.stamp = now_msg
-                msg.header.frame_id = self.frame_id
+            if not self.should_publish_frame(frame):
+                await asyncio.sleep(sleep_time)
+                continue
 
-                # self.camera_info_msg.header.stamp = now_msg
-                # self.camera_info_msg.header.frame_id = self.frame_id
+            # DA3 LARGEMETRIC: 728*420
+            # frame = pad_width_center(frame, self.pad_to_width)
+            # DA3 SMALL 504*392
+            frame = center_crop_resize(
+                frame,
+                crop_width=self.crop_width,
+                crop_height=self.crop_height,
+                output_width=self.output_width,
+                output_height=self.output_height,
+            )
 
-                # self.camera_info_pub.publish(self.camera_info_msg)
-                self.image_pub.publish(msg)
+            if not self.should_publish_frame(frame):
+                await asyncio.sleep(sleep_time)
+                continue
+
+            now_msg = self.ros_node.get_clock().now().to_msg()
+
+            msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            msg.header.stamp = now_msg
+            msg.header.frame_id = self.frame_id
+
+            # self.camera_info_msg.header.stamp = now_msg
+            # self.camera_info_msg.header.frame_id = self.frame_id
+
+            # self.camera_info_pub.publish(self.camera_info_msg)
+            self.image_pub.publish(msg)
 
             await asyncio.sleep(sleep_time)
 
@@ -168,6 +263,11 @@ def parse_args():
     p.add_argument("--output-width", type=int, default=504)
     p.add_argument("--output-height", type=int, default=392)
 
+    p.add_argument("--no-drop-bad-frames", action="store_true")
+    p.add_argument("--bad-frame-mean-min", type=float, default=2.0)
+    p.add_argument("--bad-frame-std-min", type=float, default=1.0)
+    p.add_argument("--bad-frame-sample-step", type=int, default=16)
+    p.add_argument("--bad-frame-log-every", type=int, default=30)
 
     p.add_argument("--telemetry-topic", default="/xtend/local_telemetry")
     p.add_argument("--bearing-topic", default="/xtend/bearing")
@@ -201,6 +301,11 @@ async def async_main():
         crop_height=args.crop_height,
         output_width=args.output_width,
         output_height=args.output_height,
+        drop_bad_frames=not args.no_drop_bad_frames,
+        bad_frame_mean_min=args.bad_frame_mean_min,
+        bad_frame_std_min=args.bad_frame_std_min,
+        bad_frame_sample_step=args.bad_frame_sample_step,
+        bad_frame_log_every=args.bad_frame_log_every,
         log_dir=args.log_dir,
     )
 
