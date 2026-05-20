@@ -183,8 +183,9 @@ class XtendAMCLNode(Node):
         self.world_binary = np.where(raw_grid == 100, 1, 0).astype(np.int8)
 
         # 2. Map Origin Configuration
-        self.map_origin_x = -2.0  
-        self.map_origin_y = -21.0  
+        # -2 * 0.05 and -21 *0.05 
+        self.map_origin_x = -0.1 
+        self.map_origin_y = -1.05  
 
         # --- INITIAL POSE SETUP (CONSTANT Y AND YAW) ---
         self.start_x_meters = 0.0  
