@@ -1,0 +1,30 @@
+camera:
+  width: 504
+  height: 392
+
+  # Original 720x420 intrinsics, adjusted for center crop:
+  # crop x0 = (720 - 504) / 2 = 108
+  # crop y0 = (420 - 392) / 2 = 14
+  fx: 460.9072976392783
+  fy: 461.9847581630249
+  cx: 237.80685226685307   # 345.80685226685307 - 108
+  cy: 114.61455823829436   # 128.61455823829436 - 14
+
+mapping:
+  resolution_m: 0.05
+  grid_width_m: 5.0
+  grid_height_m: 10.0
+
+  inference_width: 504
+  inference_height: 392
+  stride: 4
+
+  floor_ransac_iters: 200
+  floor_dist_thresh: 0.05
+
+  free_height_m: 0.10
+  occupied_height_m: 0.5
+
+  floor_bottom_frac: 0.45
+  min_plane_inliers: 600
+  normal_gate_abs_z: 0.0

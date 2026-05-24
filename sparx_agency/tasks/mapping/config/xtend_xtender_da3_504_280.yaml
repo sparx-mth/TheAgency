@@ -1,0 +1,23 @@
+camera:
+  width: 504
+  height: 280
+
+  fx: 322.6351083474948
+  fy: 307.98983877534994
+  cx: 166.46475047529548
+  cy: 39.07638470372513
+
+mapping:
+  resolution_m: 0.05
+  grid_width_m: 5.0
+  grid_height_m: 10.0
+
+  inference_width: 504
+  inference_height: 280
+  stride: 4
+
+  floor_ransac_iters: 200
+  floor_dist_thresh: 0.05
+
+  free_height_m: 0.10
+  occupied_height_m: 0.5

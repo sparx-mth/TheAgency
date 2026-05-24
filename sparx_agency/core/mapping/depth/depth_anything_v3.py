@@ -133,4 +133,10 @@ class DA3TensorRTModel(DepthModel):
 
         point_cloud = np.stack((x_left, y_up, z_fwd), axis=-1).astype(np.float32)
 
+
+        print("[MAPPING] resized intr:")
+        print(f"  width={w} height={h}")
+        print(f"  fx={fx:.3f} fy={fy:.3f}")
+        print(f"  cx={cx:.3f} cy={cy:.3f}")
+
         return depth_map, point_cloud
