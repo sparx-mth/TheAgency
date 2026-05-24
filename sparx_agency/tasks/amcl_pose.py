@@ -23,11 +23,13 @@ import matplotlib.pyplot as plt
 SENSOR_MAX_RANGE_METERS = 10.0
 NUM_ANGLES = 32
 NUM_BEAMS = 64
+#NUM_ANGLES = 64
+#NUM_BEAMS = 128
 SHOW_MAP = True
-LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut.npy')
-GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/occ_grid_int8.npy'
-#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy')
-#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
+#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut.npy')
+#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/occ_grid_int8.npy'
+LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy')
+GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
 SIGMA = 2.0  # Increased for realistic sensor noise tolerance to prevent math crashes
 MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if needed)
 
@@ -47,7 +49,7 @@ def show_world_map(world_binary: np.ndarray,
     and its current orientation.
     """
     plt.clf()  
-    plt.imshow(world_binary, cmap='gray_r', origin='lower')
+    plt.imshow(world_binary.T, cmap='gray_r', origin='lower')
     
     # 1. Plot the Raw Odometry Trajectory (Green dashed line)
     if len(odom_history) > 0:
@@ -267,13 +269,18 @@ class XtendAMCLNode(Node):
         # In occ_grid_int8.npy: 100 is occupied, 0 is free, -1 is unknown.
         self.world_binary = np.where(raw_grid == 100, 1, 0).astype(np.int8)
 
+        self.world_binary = self.world_binary.T
+
         # ------------------------------------------------------------------
         # 2. Map Origin Configuration
         # ------------------------------------------------------------------
-        # mapping to matrix cell (44, 48). 44*0.05 and 48*0.05
+        # mapping to matrix cell (44, 48). 44*0.05 and 48*0.05 = -2.2 , -2.4 
+        #self.map_origin_x = -2.2   
+        #self.map_origin_y = -2.4   
+        # for cropped map (2,21) == -0.1, -1.05 and flip x and y 
         # map_origin = World_Position - (Cell_Index * Resolution)
-        self.map_origin_x = -2.2   
-        self.map_origin_y = -2.4   
+        self.map_origin_x = -1.050
+        self.map_origin_y = -0.100  
 
         # Internal State Variables (Living in real-world meters)
 
@@ -302,6 +309,8 @@ class XtendAMCLNode(Node):
         if LUT_FILE_PATH.exists():
             self.get_logger().info(f"Found pre-computed LUT at {LUT_FILE_PATH}. Loading it instantly...")
             self.lut = np.load(LUT_FILE_PATH)
+
+            self.lut = self.lut.transpose((1, 0, 2, 3))
             self.get_logger().info("LUT Loaded successfully from disk! Ready to go.")
         else:
             self.get_logger().info("No saved LUT found. Generating a new Ray-Cast LUT...")
@@ -338,8 +347,8 @@ class XtendAMCLNode(Node):
         self.odom_pose_meters[1] = msg.pose.position.x
 
 
-        map_w = self.world_binary.shape[1] * self.map_resolution
-        map_h = self.world_binary.shape[0] * self.map_resolution
+        map_w = self.world_binary.shape[0] * self.map_resolution
+        map_h = self.world_binary.shape[1] * self.map_resolution
         self.odom_pose_meters[0] = np.clip(self.odom_pose_meters[0], self.map_origin_x, self.map_origin_x + map_w)
         self.odom_pose_meters[1] = np.clip(self.odom_pose_meters[1], self.map_origin_y, self.map_origin_y + map_h)
 
@@ -378,7 +387,8 @@ class XtendAMCLNode(Node):
         
         pred_x_cells = int(map_x_m / self.map_resolution)
         pred_y_cells = int(map_y_m / self.map_resolution)
-        prediction_cells = np.array([pred_y_cells, pred_x_cells])
+
+        prediction_cells = np.array([pred_x_cells, pred_y_cells])
 
         self.get_logger().info(f"[DEBUG] Feeding to AMCL -> Cells: X={pred_x_cells}, Y={pred_y_cells}, Yaw={math.degrees(self.odom_yaw):.1f}")
 
@@ -391,15 +401,15 @@ class XtendAMCLNode(Node):
         # Execute AMCL ---
         robot_loc_estimate_cells, robot_orientation_estimate = amcl_estimator_optimized(
             self.lut, self.orientations, prediction_cells, self.odom_yaw, 
-            self.world_binary, z_measured_cells, prediction_uncertainty=(8, 8) 
+            self.world_binary, z_measured_cells, prediction_uncertainty=(3, 3) 
         )
 
         # Safety Check
-        y_est, x_est = robot_loc_estimate_cells[0], robot_loc_estimate_cells[1]
+        x_est, y_est = robot_loc_estimate_cells[0], robot_loc_estimate_cells[1]
         amcl_failed = (
             x_est <= 0 or y_est <= 0 or
             x_est >= self.world_binary.shape[0] or y_est >= self.world_binary.shape[1] or
-            self.world_binary[y_est, x_est] == 1
+            self.world_binary[x_est, y_est] == 1
         )
 
         if not amcl_failed:
