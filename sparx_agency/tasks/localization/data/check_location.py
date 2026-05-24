@@ -1,5 +1,5 @@
 import numpy as np
-grid = np.load('/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy')
+grid = np.load('/home/shirb/GIT/TheAgency/sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy')
 free_space_indices = np.where(grid == 0)
 rows = free_space_indices[0]
 cols = free_space_indices[1]
