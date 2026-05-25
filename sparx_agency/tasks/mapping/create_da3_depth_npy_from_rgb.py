@@ -138,17 +138,18 @@ def main() -> None:
                 continue
 
             bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if bgr is None:
+                print(f"[offline-da3][WARN] failed to read image: {image_path}")
+                continue
             crop_width: int = 540
             crop_height: int = 420
             output_width: int = 504
             output_height: int = 392
             bgr_crop = center_crop_resize(bgr,crop_width,crop_height,output_width,output_height)
-            if bgr is None:
-                print(f"[offline-da3][WARN] failed to read image: {image_path}")
-                continue
+
 
             t0 = time.time()
-            depth = depth_model.infer_depth(bgr).astype(np.float32)
+            depth = depth_model.infer_depth(bgr_crop).astype(np.float32)
             depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
 
             if args.clip_max_depth_m > args.clip_min_depth_m:
@@ -173,8 +174,8 @@ def main() -> None:
                 str(image_path),
                 str(depth_npy_path),
                 depth_vis_str,
-                int(bgr.shape[0]),
-                int(bgr.shape[1]),
+                int(bgr_crop.shape[0]),
+                int(bgr_crop.shape[1]),
                 int(depth.shape[0]),
                 int(depth.shape[1]),
                 depth_min,
@@ -191,7 +192,7 @@ def main() -> None:
                 "rgb_path": str(image_path),
                 "depth_npy_path": str(depth_npy_path),
                 "depth_vis_path": depth_vis_str,
-                "rgb_shape_hw": [int(bgr.shape[0]), int(bgr.shape[1])],
+                "rgb_shape_hw": [int(bgr_crop.shape[0]), int(bgr_crop.shape[1])],
                 "depth_shape_hw": [int(depth.shape[0]), int(depth.shape[1])],
                 "depth_min": depth_min,
                 "depth_max": depth_max,
