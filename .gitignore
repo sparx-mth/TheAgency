@@ -194,3 +194,6 @@ sparx_agency/tasks/common/bearings_placeholder.csv
 sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json
 sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/
 *.npy
+sparx_agency/tasks/localization/data/MAMAD/
+
+

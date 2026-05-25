@@ -21,15 +21,21 @@ import matplotlib.pyplot as plt
 # Global Configuration & Hyperparameters
 # ==============================================================================
 SENSOR_MAX_RANGE_METERS = 10.0
-#NUM_ANGLES = 32
-#NUM_BEAMS = 64
-NUM_ANGLES = 64
-NUM_BEAMS = 128
+NUM_ANGLES = 32
+NUM_BEAMS = 64
+#NUM_ANGLES = 64
+#NUM_BEAMS = 128
 SHOW_MAP = True
 #LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut.npy')
 #GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/occ_grid_int8.npy'
-LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_bigger_lut.npy')
-GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
+#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy')
+#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
+#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_bigger_lut.npy')
+#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
+
+LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/MAMAD/global_saved_lut.npy')
+GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/MAMAD/global_occ_int8.npy'
+
 SIGMA = 2.0  # Increased for realistic sensor noise tolerance to prevent math crashes
 MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if needed)
 
@@ -279,8 +285,8 @@ class XtendAMCLNode(Node):
         #self.map_origin_y = -2.4   
         # for cropped map (2,21) == -0.1, -1.05 and flip x and y 
         # map_origin = World_Position - (Cell_Index * Resolution)
-        self.map_origin_x = -1.050
-        self.map_origin_y = -0.100  
+        self.map_origin_x = -4.000
+        self.map_origin_y = -4.000  
 
         # Internal State Variables (Living in real-world meters)
 
@@ -310,8 +316,25 @@ class XtendAMCLNode(Node):
             self.get_logger().info(f"Found pre-computed LUT at {LUT_FILE_PATH}. Loading it instantly...")
             self.lut = np.load(LUT_FILE_PATH)
 
-            self.lut = self.lut.transpose((1, 0, 2, 3))
+            self.get_logger().info(f"world_binary shape: {self.world_binary.shape}")
+            self.get_logger().info(f"loaded LUT shape before fix: {self.lut.shape}")
+
+            if self.lut.shape[:2] == self.world_binary.shape:
+                self.get_logger().info("LUT shape already matches world_binary. No transpose needed.")
+
+            elif self.lut.transpose((1, 0, 2, 3)).shape[:2] == self.world_binary.shape:
+                self.get_logger().warn("LUT shape is reversed. Applying transpose.")
+                self.lut = self.lut.transpose((1, 0, 2, 3))
+
+            else:
+                raise ValueError(
+                    f"LUT/map shape mismatch: LUT spatial={self.lut.shape[:2]}, "
+                    f"world={self.world_binary.shape}. Delete the LUT and regenerate it."
+                )
+
+            self.get_logger().info(f"LUT final shape: {self.lut.shape}")
             self.get_logger().info("LUT Loaded successfully from disk! Ready to go.")
+
         else:
             self.get_logger().info("No saved LUT found. Generating a new Ray-Cast LUT...")
             self.get_logger().warn("⚠️ THIS MIGHT TAKE 10-20 MINUTES. PLEASE DO NOT CLOSE THE PROGRAM. ⚠️")
