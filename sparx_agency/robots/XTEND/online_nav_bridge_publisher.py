@@ -19,7 +19,11 @@ from sparx_agency.robots.common.image_utils import pad_width_center, center_crop
 
 
 class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
-    """Online XTEND bridge that publishes cropped RTSP frames and matching CameraInfo."""
+    """Online XTEND bridge that publishes preprocessed RTSP frames and matching CameraInfo.
+
+    preprocess_mode="pad"         — pad width to pad_to_width (DA3 METRIC LARGE, default)
+    preprocess_mode="crop_resize" — center-crop then resize to output_width x output_height
+    """
 
     def __init__(
         self,
@@ -34,6 +38,7 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         camera_info_yaml: str | Path = "",
         frame_id: str = "xtend_camera",
         backend: str = "gstreamer",
+        preprocess_mode: str = "pad",
         pad_to_width: int = 728,
         crop_width: int = 540,
         crop_height: int = 420,
@@ -62,11 +67,15 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             log_dir=log_dir,
         )
 
+        if preprocess_mode not in ("pad", "crop_resize"):
+            raise ValueError(f"preprocess_mode must be 'pad' or 'crop_resize', got: {preprocess_mode!r}")
+
         self.rtsp_uri = rtsp_uri
         self.image_topic = image_topic
         self.camera_info_topic = camera_info_topic
-        self.camera_info_yaml = Path(camera_info_yaml).expanduser()
+        self.camera_info_yaml = Path(camera_info_yaml).expanduser() if camera_info_yaml else None
         self.frame_id = frame_id
+        self.preprocess_mode = preprocess_mode
 
         self.pad_to_width = int(pad_to_width)
         self.crop_width = int(crop_width)
@@ -83,17 +92,17 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         self.good_frame_count = 0
 
         self.bridge = CvBridge()
+
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
-
-        # camera_info_qos = QoSProfile(
-        #     history=HistoryPolicy.KEEP_LAST,
-        #     depth=5,
-        #     reliability=ReliabilityPolicy.BEST_EFFORT,
-        # )
+        camera_info_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
 
         self.image_pub = self.ros_node.create_publisher(
             Image,
@@ -101,24 +110,32 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             image_qos,
         )
 
-        # self.camera_info_pub = self.ros_node.create_publisher(
-        #     CameraInfo,
-        #     self.camera_info_topic,
-        #     camera_info_qos,
-        # )
-        # if not self.camera_info_yaml.exists():
-        #     raise FileNotFoundError(f"CameraInfo YAML not found: {self.camera_info_yaml}")
-        #
-        # self.camera_info_msg = load_camera_info_from_yaml(
-        #     yaml_path=str(self.camera_info_yaml),
-        #     frame_id=self.frame_id,
-        # )
+        self.camera_info_pub = None
+        self.camera_info_msg: CameraInfo | None = None
+        if self.camera_info_yaml is not None:
+            if not self.camera_info_yaml.exists():
+                raise FileNotFoundError(f"CameraInfo YAML not found: {self.camera_info_yaml}")
+            self.camera_info_msg = load_camera_info_from_yaml(
+                yaml_path=str(self.camera_info_yaml),
+                frame_id=self.frame_id,
+            )
+            self.camera_info_pub = self.ros_node.create_publisher(
+                CameraInfo,
+                self.camera_info_topic,
+                camera_info_qos,
+            )
 
         self.grabber = LatestFrameGrabber(rtsp_uri, backend=backend)
         self.grabber.start()
 
         print(f"[image] RTSP: {self.rtsp_uri}")
         print(f"[image] topic: {self.image_topic}")
+        print(f"[image] preprocess_mode: {self.preprocess_mode}")
+        if self.preprocess_mode == "pad":
+            print(f"[image] pad_to_width={self.pad_to_width}")
+        else:
+            print(f"[image] crop={self.crop_width}x{self.crop_height} -> {self.output_width}x{self.output_height}")
+        print(f"[image] camera_info: {'enabled' if self.camera_info_pub else 'disabled (no YAML)'}")
         print(
             "[image] bad-frame guard: "
             f"enabled={self.drop_bad_frames}, "
@@ -126,8 +143,17 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             f"std_min={self.bad_frame_std_min}, "
             f"sample_step={self.bad_frame_sample_step}"
         )
-        # print(f"[image] no crop, pad_to_width={self.pad_to_width}")
 
+    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
+        if self.preprocess_mode == "pad":
+            return pad_width_center(frame, self.pad_to_width)
+        return center_crop_resize(
+            frame,
+            crop_width=self.crop_width,
+            crop_height=self.crop_height,
+            output_width=self.output_width,
+            output_height=self.output_height,
+        )
 
     def is_bad_frame(self, frame) -> tuple[bool, str]:
         """Return True for empty/flat frames that should not enter the pipeline."""
@@ -192,33 +218,16 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         print("✓ Image publisher active")
 
         while True:
-            latest = self.grabber.get_latest()
-            if latest is None:
-                await asyncio.sleep(sleep_time)
-                continue
-
-            frame, _stamp = latest
-
-            if frame is None:
-                await asyncio.sleep(sleep_time)
-                continue
+            frame, _stamp = self.grabber.get_latest()
 
             if not self.should_publish_frame(frame):
                 await asyncio.sleep(sleep_time)
                 continue
 
-            # DA3 LARGEMETRIC: 728*420
-            # frame = pad_width_center(frame, self.pad_to_width)
-            # DA3 SMALL 504*392
-            frame = center_crop_resize(
-                frame,
-                crop_width=self.crop_width,
-                crop_height=self.crop_height,
-                output_width=self.output_width,
-                output_height=self.output_height,
-            )
-
-            if not self.should_publish_frame(frame):
+            try:
+                frame = self._preprocess(frame)
+            except ValueError as exc:
+                print(f"[image][preprocess] {exc}")
                 await asyncio.sleep(sleep_time)
                 continue
 
@@ -227,12 +236,12 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             msg.header.stamp = now_msg
             msg.header.frame_id = self.frame_id
-
-            # self.camera_info_msg.header.stamp = now_msg
-            # self.camera_info_msg.header.frame_id = self.frame_id
-
-            # self.camera_info_pub.publish(self.camera_info_msg)
             self.image_pub.publish(msg)
+
+            if self.camera_info_pub is not None and self.camera_info_msg is not None:
+                self.camera_info_msg.header.stamp = now_msg
+                self.camera_info_msg.header.frame_id = self.frame_id
+                self.camera_info_pub.publish(self.camera_info_msg)
 
             await asyncio.sleep(sleep_time)
 
@@ -257,6 +266,12 @@ def parse_args():
     p.add_argument("--frame-id", default="xtend_camera")
     p.add_argument("--backend", choices=["ffmpeg", "gstreamer", "default"], default="gstreamer")
 
+    p.add_argument(
+        "--preprocess-mode",
+        choices=["pad", "crop_resize"],
+        default="pad",
+        help="'pad': pad width to pad-to-width (DA3 LARGE, default). 'crop_resize': center-crop then resize.",
+    )
     p.add_argument("--pad-to-width", type=int, default=728)
     p.add_argument("--crop-width", type=int, default=540)
     p.add_argument("--crop-height", type=int, default=420)
@@ -296,6 +311,7 @@ async def async_main():
         camera_info_yaml=args.camera_info_yaml,
         frame_id=args.frame_id,
         backend=args.backend,
+        preprocess_mode=args.preprocess_mode,
         pad_to_width=args.pad_to_width,
         crop_width=args.crop_width,
         crop_height=args.crop_height,

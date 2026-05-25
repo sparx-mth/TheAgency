@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -20,23 +19,18 @@ class DepthProcessorNode(Node):
 
     Inputs:
       image_topic        sensor_msgs/Image
-      camera_info_topic  sensor_msgs/CameraInfo
 
     Outputs:
       depth_topic        sensor_msgs/Image, encoding 32FC1
-      debug_topic        sensor_msgs/Image, encoding bgr8
 
-    For DA3METRIC models:
+    For DA3METRIC LARGE:
       metric_depth_m = focal_px * net_output / metric_scale_divisor
-
-    focal_px is taken from CameraInfo when available. If no CameraInfo was
-    received yet, the fallback is the calibration loaded by DA3TensorRTModel.
+      (apply_metric_focal_scaling=True, metric_scale_divisor=300.0)
     """
 
     def __init__(self):
         super().__init__("depth_processor_node")
 
-        self.save_image = True
         self.bridge = CvBridge()
         self.camera_info_msg: CameraInfo | None = None
 
@@ -60,7 +54,7 @@ class DepthProcessorNode(Node):
         self.declare_parameter("publish_debug", False)
         self.declare_parameter("clip_min_m", 0.0)
         self.declare_parameter("clip_max_m", 20.0)
-        self.declare_parameter("model_type", "small_lut")  # large_metric or small_lut
+        self.declare_parameter("model_type", "large_metric")  # large_metric or small_lut
 
         self.declare_parameter("small_lut_clip_min_m", 0.2)
         self.declare_parameter("small_lut_clip_max_m", 10.0)
@@ -256,20 +250,15 @@ class DepthProcessorNode(Node):
         return cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
 
     def publish_depth(self, depth: np.ndarray, header):
-        if self.save_image:
-            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            np.save(f"/home/user/Pictures/depth{time_str}.npy", depth)
-            self.save_image = False
-            
         msg = self.bridge.cv2_to_imgmsg(depth.astype(np.float32), encoding="32FC1")
         msg.header = header
         self.pub_depth.publish(msg)
 
     def image_callback(self, msg: Image):
         try:
-            rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
-            net_output, _ = self.depth_model.infer_all(rgb)
+            net_output = self.depth_model.infer_all(bgr)
 
             depth_m = self.convert_to_metric_depth(net_output)
             depth_m = self.sanitize_depth(depth_m)
@@ -282,7 +271,7 @@ class DepthProcessorNode(Node):
             #     self.pub_debug.publish(dbg_msg)
 
         except Exception as e:
-            self.get_logger().error(f"Processing failed: {e}")
+            self.get_logger().error(f"Processing failed: {e}", throttle_duration_sec=2.0)
 
 
 def main(args=None):
