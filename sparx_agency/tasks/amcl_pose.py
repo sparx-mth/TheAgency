@@ -23,15 +23,15 @@ import matplotlib.pyplot as plt
 SENSOR_MAX_RANGE_METERS = 10.0
 #NUM_ANGLES = 32
 #NUM_BEAMS = 64
-NUM_ANGLES = 64
-NUM_BEAMS = 128
+NUM_ANGLES = 32
+NUM_BEAMS = 64
 SHOW_MAP = True
 #LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut.npy')
 #GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/occ_grid_int8.npy'
 #LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy')
 #GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
-LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_bigger_lut.npy')
-GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
+LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_res_0_1.npy')
+GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8_res_0_1.npy'
 SIGMA = 2.0  # Increased for realistic sensor noise tolerance to prevent math crashes
 MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if needed)
 
@@ -107,7 +107,7 @@ def show_world_map(world_binary: np.ndarray,
 # Core AMCL Mathematical Functions
 # ==============================================================================
 
-def get_local_window_bounds(pred_loc, map_shape, window_size_cells=100):
+def get_local_window_bounds(pred_loc, map_shape, window_size_cells=50):
 
     half_w = window_size_cells // 2
     
@@ -121,9 +121,11 @@ def get_local_window_bounds(pred_loc, map_shape, window_size_cells=100):
 
 
 def init_belief_vectorized(local_map_shape, orientations, local_robot_pred, robot_orientation_pred, loc_uncertainty):
-    shape_x, shape_y = local_map_shape
+    # Vectorized initialization of the belief distribution over the local window.
+    shape_x, shape_y = local_map_shape 
     num_angles = len(orientations)
     
+    # Create 3D grids for x, y, and theta indices
     x_idx = np.arange(shape_x)
     y_idx = np.arange(shape_y)
     theta_idx = np.arange(num_angles)
@@ -252,7 +254,9 @@ class XtendAMCLNode(Node):
         super().__init__("xtend_amcl_node")
         
         self.bridge = CvBridge()
-        self.map_resolution = 0.05  # 5cm per cell
+        #self.map_resolution = 0.05  # 5cm per cell
+        self.map_resolution = 0.1  # 10cm per cell
+
         self.fov_rad = math.radians(75.98) # Based on camera calibration
         
         # Enable interactive mode for matplotlib if SHOW_MAP is true
