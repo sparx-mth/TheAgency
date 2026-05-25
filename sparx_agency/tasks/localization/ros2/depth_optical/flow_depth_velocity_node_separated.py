@@ -538,6 +538,7 @@ class FlowDepthVelocityNode(Node):
         self.process_flow_with_depth(
             flow_item=best_flow,
             depth_map=depth_map,
+            depth_stamp=depth_msg.header.stamp,
             depth_stamp_sec=depth_stamp_sec,
             depth_arrival_sec=arrival_time_sec,
             match_age_sec=age_sec,
@@ -605,6 +606,7 @@ class FlowDepthVelocityNode(Node):
         self,
         flow_item: Dict[str, Any],
         depth_map: np.ndarray,
+        depth_stamp,
         depth_stamp_sec: float,
         depth_arrival_sec: float,
         match_age_sec: float,
@@ -659,7 +661,7 @@ class FlowDepthVelocityNode(Node):
             if abs(vz_mps) < 0.2: vz_mps = 0.0
 
         vel_msg = Vector3Stamped()
-        vel_msg.header.stamp = rgb_stamp
+        vel_msg.header.stamp = depth_stamp
         vel_msg.header.frame_id = self.camera_frame
         vel_msg.vector.x = float(vx_mps)
         vel_msg.vector.y = float(vy_mps)
