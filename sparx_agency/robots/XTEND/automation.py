@@ -50,10 +50,10 @@ class ControllerAutomation:
                 0,  # Joystick - off
             ],
             "axes": [
-                0,   # Joystick Horizontal 
+                0,   # Joystick Horizontal
                 0,   # Joystick Vertical
                 0,   # Trigger
-                0,   # Marker Horizontal 
+                0,   # Marker Horizontal
                 0    # Marker Vertical
             ]
         }
@@ -94,12 +94,8 @@ class ControllerAutomation:
     async def send_message(self, websocket):
         try:
             while True:
-
                 self.virtual_controller['content'] = self.send_command
-                # Convert to JSON
-                message_json = json.dumps(self.virtual_controller, indent=2)
-                
-                # Send message
+                message_json = json.dumps(self.virtual_controller, separators=(',', ':'))
                 await websocket.send(message_json)
                 
                 # Wait for next interval
@@ -221,35 +217,34 @@ class ControllerAutomation:
         await asyncio.sleep(2)
     
     async def move_left(self, duration: float, value=700):
-        """Move the robot left"""
-
-        print(f"Moving left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        """Move the robot left. duration in milliseconds."""
+        print(f"Moving left...")
         self.send_command['axes'][0] = -value
         await asyncio.sleep(duration * 0.001)
         self.send_command['axes'][0] = 0
-    
+
     async def move_right(self, duration: float, value=700):
-        """Move the robot right"""
-        print(f"Moving right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        """Move the robot right. duration in milliseconds."""
+        print(f"Moving right...")
         self.send_command['axes'][0] = value
         await asyncio.sleep(duration * 0.001)
-        print(f"Moved right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"Moved right.")
         self.send_command['axes'][0] = 0
-    
+
     async def move_up(self, duration: float, value=700):
-        """Move the robot up"""
-        print(f"Moving up... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        """Move the robot up. duration in milliseconds."""
+        print(f"Moving up...")
         self.send_command['axes'][1] = value
         await asyncio.sleep(duration * 0.001)
-        print(f"Moved up... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"Moved up.")
         self.send_command['axes'][1] = 0
-    
+
     async def move_down(self, duration: float, value=500):
-        """Move the robot down"""
-        print(f"Moving down... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        """Move the robot down. duration in milliseconds."""
+        print(f"Moving down...")
         self.send_command['axes'][1] = -value
         await asyncio.sleep(duration * 0.001)
-        print(f"Moved down... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"Moved down.")
         self.send_command['axes'][1] = 0
     
     async def rotate_left(self, duration: float = 0.0, value=1000):
@@ -287,11 +282,10 @@ class ControllerAutomation:
             await self.rotate_right()
         else:
             raise ValueError("Invalid direction. Must be 1 or -1.")
-        pass
 
     def hover(self):
         """Hover the robot"""
-        self.send_command = self.base_command
+        self.send_command = copy.deepcopy(self.base_command)
 
     def update_robot_telemetry(self, yaw: float):
         """Update the robot telemetry with the given yaw"""

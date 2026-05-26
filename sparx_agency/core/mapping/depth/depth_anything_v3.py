@@ -17,10 +17,7 @@ class DA3TensorRTModel(DepthModel):
             with open(engine_path, "rb") as f, trt.Runtime(self.logger) as runtime:
                 self.engine = runtime.deserialize_cuda_engine(f.read())
         except Exception as e:
-            print(e)
-        # if cuda.get_device_count() > 0:
-        #     self.device = cuda.Device(0)
-        #     self.ctx = self.device.make_context()
+            raise RuntimeError(f"Failed to load TensorRT engine from {engine_path}: {e}") from e
 
         self.context = self.engine.create_execution_context()
         self.inputs, self.outputs, self.bindings, self.stream = self._allocate_buffers()
@@ -56,11 +53,10 @@ class DA3TensorRTModel(DepthModel):
 
     def infer_depth(self, rgb: np.ndarray) -> np.ndarray:
         """Implements abstract method: Returns Metric Depth Map"""
-        depth, _ = self.infer_all(rgb)
-        return depth
+        return self.infer_all(rgb)
 
-    def infer_all(self, frame: np.ndarray):
-        """Returns (Depth Map, Point Cloud)"""
+    def infer_all(self, frame: np.ndarray) -> np.ndarray:
+        """Returns depth map (H, W) float32. BGR input."""
         # --- 1. Pre-process ---
         input_name = self.engine.get_tensor_name(0)
         input_shape = self.engine.get_tensor_shape(input_name)[2:]  # e.g. (518, 518)
@@ -75,7 +71,8 @@ class DA3TensorRTModel(DepthModel):
             # print(i, name, self.engine.get_tensor_shape(name), self.engine.get_tensor_mode(name))
             self.context.set_tensor_address(name, self.bindings[i])
 
-        self.inputs[0]['host'] = np.ascontiguousarray(img)
+        # Copy into the existing pinned buffer — do NOT replace it with a new array.
+        np.copyto(self.inputs[0]['host'], img)
         cuda.memcpy_htod_async(self.inputs[0]['device'], self.inputs[0]['host'], self.stream)
 
         # Execute and sync
@@ -106,15 +103,15 @@ class DA3TensorRTModel(DepthModel):
         else:
             raise ValueError(f"Unexpected depth output shape: {out_shape} for tensor {depth_out['name']}")
 
-        depth_map = depth_out["host"].reshape(h, w).astype(np.float32)
-        # print("Depth output tensor:", depth_out["name"], "shape:", out_shape, "depth_map:", depth_map.shape)
-        # --- 4. Vectorized Point Cloud Projection with Scaled Intrinsics ---
+        return depth_out["host"].reshape(h, w).astype(np.float32)
+
+    def infer_pointcloud(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Returns (depth_map, point_cloud) in [Left, Up, Forward] convention."""
+        depth_map = self.infer_all(frame)
         h, w = depth_map.shape
-        # Scale intrinsics from original frame (640x480) to depth map size (504x280)
-        # Note: Use frame.shape[1] for width, [0] for height
+
         scale_x = w / frame.shape[1]
         scale_y = h / frame.shape[0]
-
         fx = self.intrinsics.fx * scale_x
         fy = self.intrinsics.fy * scale_y
         cx = self.intrinsics.cx * scale_x
@@ -122,21 +119,8 @@ class DA3TensorRTModel(DepthModel):
 
         i, j = np.indices((h, w))
         z = depth_map
-        # Using the same coordinate logic as your C++ snippet
         x = (j - cx) * z / fx
         y = (i - cy) * z / fy
 
-        # optical -> mapper convention: [Left, Up, Forward]
-        x_left = -x  # left = -right
-        y_up = -y  # up   = -down
-        z_fwd = z
-
-        point_cloud = np.stack((x_left, y_up, z_fwd), axis=-1).astype(np.float32)
-
-
-        print("[MAPPING] resized intr:")
-        print(f"  width={w} height={h}")
-        print(f"  fx={fx:.3f} fy={fy:.3f}")
-        print(f"  cx={cx:.3f} cy={cy:.3f}")
-
+        point_cloud = np.stack((-x, -y, z), axis=-1).astype(np.float32)
         return depth_map, point_cloud

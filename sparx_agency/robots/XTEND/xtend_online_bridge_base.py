@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
-from std_msgs.msg import String
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
 import math
@@ -335,7 +334,6 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             axes[3],
             axes[4],
         ])
-        self.telemetry_fp.flush()
 
 
     async def timed_async_action(self, action_name: str, coro):
@@ -456,24 +454,61 @@ class OnlineXtendBridgeBase(ControllerAutomation):
     def on_shutdown(self) -> None:
         pass
 
+    async def _ros_spin_loop(self):
+        """Spin ROS callbacks in the event loop without blocking it."""
+        executor = rclpy.executors.SingleThreadedExecutor()
+        executor.add_node(self.ros_node)
+        try:
+            while True:
+                executor.spin_once(timeout_sec=0)
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            executor.shutdown()
+
+    async def _telemetry_flush_loop(self):
+        """Flush the telemetry CSV at 1 Hz instead of on every message."""
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                if hasattr(self, "telemetry_fp") and not self.telemetry_fp.closed:
+                    self.telemetry_fp.flush()
+        except asyncio.CancelledError:
+            pass
+
     async def run_bridge(self):
         self.loop = asyncio.get_running_loop()
-        ros_thread = asyncio.to_thread(rclpy.spin, self.ros_node)
         tasks: list[asyncio.Task] = []
 
         try:
-            async with websockets.connect(self.uri) as websocket:
-                print(f"✓ Connected to XTEND at {self.uri}")
+            while True:
+                try:
+                    async with websockets.connect(self.uri) as websocket:
+                        print(f"✓ Connected to XTEND at {self.uri}")
 
-                tasks = [
-                    asyncio.create_task(self.send_message(websocket)),
-                    asyncio.create_task(self.receive_message(websocket)),
-                    asyncio.create_task(self.dynamic_executor()),
-                    asyncio.create_task(ros_thread),
-                ]
-                tasks.extend(self.create_extra_tasks())
+                        tasks = [
+                            asyncio.create_task(self.send_message(websocket)),
+                            asyncio.create_task(self.receive_message(websocket)),
+                            asyncio.create_task(self.dynamic_executor()),
+                            asyncio.create_task(self._ros_spin_loop()),
+                            asyncio.create_task(self._telemetry_flush_loop()),
+                        ]
+                        tasks.extend(self.create_extra_tasks())
 
-                await asyncio.gather(*tasks)
+                        await asyncio.gather(*tasks)
+
+                except (websockets.exceptions.WebSocketException, OSError) as exc:
+                    print(f"[bridge] WebSocket disconnected: {exc}. Reconnecting in 3s...")
+                    for task in tasks:
+                        task.cancel()
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    tasks = []
+                    await asyncio.sleep(3.0)
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
 
         finally:
             print("[shutdown] stopping motion and closing resources")
@@ -496,6 +531,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
             try:
                 if hasattr(self, "telemetry_fp") and not self.telemetry_fp.closed:
+                    self.telemetry_fp.flush()
                     self.telemetry_fp.close()
                     print(f"[log] closed telemetry: {self.telemetry_log_path}")
             except Exception as exc:
