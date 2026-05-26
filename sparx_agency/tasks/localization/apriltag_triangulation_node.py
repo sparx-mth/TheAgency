@@ -248,10 +248,18 @@ class TagTriangulationOpenCVTask:
                     continue
 
                 corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
-               # print("corners:", corners)
+
                # for i, (u, v) in enumerate(corners):
-                #    cv2.putText(frame, str(i), (int(u), int(v)),
-                 #               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                #    cv2.circle(frame, (int(u), int(v)), 6, (0, 0, 255), -1)
+                 #   cv2.putText(
+                  #      frame,
+                   #     str(i),
+                    #    (int(u) + 8, int(v) - 8),
+                     #   cv2.FONT_HERSHEY_SIMPLEX,
+                      #  0.4,
+                       # (0, 0, 255),
+                        #1,
+                    #)
 
                 camera_T_tag = solvepnp_ippe_square(
                     corners_2d=corners,
@@ -263,10 +271,10 @@ class TagTriangulationOpenCVTask:
                             continue
                 
 
-                tag_T_camera = invert_T(camera_T_tag)
+               # tag_T_camera = invert_T(camera_T_tag)
 
                 print_transform_debug("camera_T_tag directly after solvePnP", camera_T_tag)
-                print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
+                #print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
 
                 print("[DEBUG] camera_T_tag:")
                 print(camera_T_tag)
@@ -408,10 +416,15 @@ class TagTriangulationOpenCVTask:
                 line2 = f"world pose: x={x:.2f} y={y:.2f} z={z:.2f}"
                 line3 = f"quat: [{qx:.3f}, {qy:.3f}, {qz:.3f}, {qw:.3f}]"
 
+                yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+                yaw_deg = math.degrees(yaw_rad)
+                line4 = f"yaw: {yaw_deg:.1f} deg"
+
                 cv2.putText(frame, line1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(frame, line2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(frame, line3, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
+                cv2.putText(frame, line4, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                
                 cv2.imshow("tag_triangulation", frame)
                 k = cv2.waitKey(0) & 0xFF
                 if k in (27, ord("q")):
