@@ -25,10 +25,6 @@ class TagWorldPose:
 
 @dataclass(frozen=True)
 class TagObservation:
-    """
-    Observation from camera to a tag.
-    cam_T_tag: 4x4 homogeneous transform from camera frame to tag frame.
-    """
     tag_id: int
     cam_T_tag: np.ndarray  # shape (4,4)
 
@@ -130,6 +126,57 @@ def quaternion_from_matrix(M: np.ndarray) -> List[float]:
     return [float(x), float(y), float(z), float(w)]
 
 
+def rpy_from_rotation_matrix(R: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Extract roll, pitch, yaw from rotation matrix using the same convention:
+    R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    Returns radians.
+    """
+    sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
+
+    singular = sy < 1e-6
+
+    if not singular:
+        roll = math.atan2(R[2, 1], R[2, 2])
+        pitch = math.atan2(-R[2, 0], sy)
+        yaw = math.atan2(R[1, 0], R[0, 0])
+    else:
+        roll = math.atan2(-R[1, 2], R[1, 1])
+        pitch = math.atan2(-R[2, 0], sy)
+        yaw = 0.0
+
+    return roll, pitch, yaw
+
+
+def print_transform_debug(name: str, T: np.ndarray):
+    R = T[:3, :3]
+    t = T[:3, 3]
+
+    roll, pitch, yaw = rpy_from_rotation_matrix(R)
+
+    print(f"\n========== {name} ==========")
+    print("T:")
+    print(np.array2string(T, precision=4, suppress_small=True))
+
+    print(f"translation: x={t[0]:.4f}, y={t[1]:.4f}, z={t[2]:.4f}")
+
+    print(
+        "rpy rad: "
+        f"roll={roll:.4f}, pitch={pitch:.4f}, yaw={yaw:.4f}"
+    )
+    print(
+        "rpy deg: "
+        f"roll={math.degrees(roll):.2f}, "
+        f"pitch={math.degrees(pitch):.2f}, "
+        f"yaw={math.degrees(yaw):.2f}"
+    )
+
+    # Columns of R are the local frame axes expressed in the parent frame
+    print(f"{name} local X axis in parent frame: {R[:, 0]}")
+    print(f"{name} local Y axis in parent frame: {R[:, 1]}")
+    print(f"{name} local Z axis in parent frame: {R[:, 2]}")
+    print("====================================")
+
 def world_T_tag_from_pose(pose: TagWorldPose) -> np.ndarray:
     (x, y, z) = pose.xyz
     (roll, pitch, yaw) = pose.rpy
@@ -149,12 +196,28 @@ def estimate_world_T_cam_from_single_tag(
     cam_T_tag: np.ndarray,
 ) -> np.ndarray:
     """
-    world_T_cam = world_T_tag * inv(cam_T_tag)
+    Important:
+    In your current pipeline, cam_T_tag is actually camera_T_tag from solvePnP:
+        X_camera = camera_T_tag @ X_tag
+
+    Therefore:
+        tag_T_camera = inv(camera_T_tag)
+        world_T_camera = world_T_tag @ tag_T_camera
     """
     world_T_tag = world_T_tag_from_pose(tag_world_pose)
-    tag_T_cam = np.linalg.inv(cam_T_tag)
-    world_T_cam = world_T_tag @ tag_T_cam
-    return world_T_cam
+
+    camera_T_tag = cam_T_tag
+    tag_T_camera = np.linalg.inv(camera_T_tag)
+
+    world_T_camera = world_T_tag @ tag_T_camera
+    
+    print_transform_debug("world_T_tag", world_T_tag)
+    print_transform_debug("camera_T_tag from solvePnP", camera_T_tag)
+    print_transform_debug("tag_T_camera = inv(camera_T_tag)", tag_T_camera)
+    print_transform_debug("world_T_camera = world_T_tag @ tag_T_camera", world_T_camera)
+
+
+    return world_T_camera
 
 
 def fuse_world_T_cam(

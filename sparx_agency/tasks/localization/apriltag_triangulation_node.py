@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from operator import inv
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,8 @@ from sparx_agency.core.localization.tag_triangulation import (
     TagObservation,
     estimate_camera_pose_from_tags,
     matrix_to_pose,
+    print_transform_debug,
+    world_T_tag_from_pose,
 )
 
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
@@ -114,6 +117,15 @@ class TagTriangulationOpenCVTask:
         nthreads: int = 2,
     ):
         self.tag_map = load_tag_world_map(tag_map_path)
+        for tag_id, pose in self.tag_map.items():
+            print(f"\n[DEBUG] Loaded tag {tag_id}")
+            print(f"xyz: {pose.xyz}")
+            print(f"rpy input rad: {pose.rpy}")
+            print(f"rpy input deg: {[math.degrees(v) for v in pose.rpy]}")
+
+            world_T_tag = world_T_tag_from_pose(pose)
+            print_transform_debug(f"world_T_tag for tag {tag_id}", world_T_tag)
+            
         self.calib = load_camera_calib_yaml(camera_calib_path)
         self.obj_pts = tag_object_points(float(tag_size_m))
 
@@ -236,26 +248,31 @@ class TagTriangulationOpenCVTask:
                     continue
 
                 corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+               # print("corners:", corners)
+               # for i, (u, v) in enumerate(corners):
+                #    cv2.putText(frame, str(i), (int(u), int(v)),
+                 #               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-                # tag_T_cam: TAG -> CAM
-                tag_T_cam = solvepnp_ippe_square(
+                camera_T_tag = solvepnp_ippe_square(
                     corners_2d=corners,
                     obj_pts_3d=self.obj_pts,
                     K=self.calib.K,
                     D=self.calib.D,
                 )
-                if tag_T_cam is None:
-                    continue
+                if camera_T_tag is None:
+                            continue
                 
-                
-                #cam_T_tag = tag_T_cam
 
+                tag_T_camera = invert_T(camera_T_tag)
 
-                # Core expects cam_T_tag (CAM -> TAG)
-                cam_T_tag = invert_T(tag_T_cam)
+                print_transform_debug("camera_T_tag directly after solvePnP", camera_T_tag)
+                print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
 
-                # IMPORTANT: feed the inverted matrix (cam_T_tag)
-                observations.append(TagObservation(tag_id=tag_id, cam_T_tag=cam_T_tag))
+                print("[DEBUG] camera_T_tag:")
+                print(camera_T_tag)
+                print("camera_T_tag translation:", camera_T_tag[:3, 3])
+
+                observations.append(TagObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
 
                 area = float(cv2.contourArea(corners.astype(np.float32)))
                 detections_info.append(
@@ -310,8 +327,29 @@ class TagTriangulationOpenCVTask:
                     }
                 )
                 continue
+                
 
-            (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+           # (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+
+            cv_to_ros = np.array([
+                [ 0.0, -1.0,  0.0,  0.0],
+                [ 0.0,  0.0, -1.0,  0.0],
+                [ 1.0,  0.0,  0.0,  0.0],
+                [ 0.0,  0.0,  0.0,  1.0]
+            ], dtype=float)
+
+            world_T_ros = est.world_T_cam @ cv_to_ros
+
+            (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(world_T_ros)
+
+            print(f"\n[DEBUG] Detected {len(observations)} tags")
+            #print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")
+            print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")
+
+            print(f"[DEBUG] camera position: x={x:.3f}, y={y:.3f}, z={z:.3f}")
+            print(f"[DEBUG] used_tag_ids: {est.used_tag_ids}")
+            for obs in observations:
+                print(f"[DEBUG]   tag {obs.tag_id} world pos: {self.tag_map[obs.tag_id].xyz}")
 
             out_pose = {
                 "position_xyz_m": [float(x), float(y), float(z)],
