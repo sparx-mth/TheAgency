@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +52,7 @@ class DepthProcessorNode(Node):
         self.declare_parameter("camera_info_mode", "crop_resize")
         # options: base, padded, crop_resize
         self.declare_parameter("depth_topic", "/xtend/depth_m")
+        self.declare_parameter("depth_encoding", "32FC1")  # options: 32FC1, 16UC1
         # self.declare_parameter("debug_topic", "/xtend/depth_vis")
 
         self.declare_parameter("publish_debug", False)
@@ -69,6 +71,7 @@ class DepthProcessorNode(Node):
         self.image_topic = self.get_parameter("image_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
+        self.depth_encoding = str(self.get_parameter("depth_encoding").value)
         # self.debug_topic = self.get_parameter("debug_topic").value
 
         self.publish_debug = bool(self.get_parameter("publish_debug").value)
@@ -81,17 +84,12 @@ class DepthProcessorNode(Node):
         self.apply_metric_focal_scaling = bool(self.get_parameter("apply_metric_focal_scaling").value)
         self.metric_scale_divisor = float(self.get_parameter("metric_scale_divisor").value)
 
-        rgb_qos = QoSProfile(
+        image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
-        depth_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
 
         self.small_lut_raw = None
         self.small_lut_meters = None
@@ -101,16 +99,23 @@ class DepthProcessorNode(Node):
         elif self.model_type != "large_metric":
             raise ValueError(f"Unsupported model_type: {self.model_type}")
 
-        self.depth_model = DA3TensorRTModel(self.engine_path, self.config_yaml)
+        if self.depth_encoding not in ("32FC1", "16UC1"):
+            raise ValueError(f"Unsupported depth_encoding: {self.depth_encoding}")
 
-        self.pub_depth = self.create_publisher(Image, self.depth_topic, rgb_qos)
-        # self.pub_debug = self.create_publisher(Image, self.debug_topic, depth_qos)
+        self.depth_model = DA3TensorRTModel(
+            self.engine_path,
+            self.config_yaml,
+            log_fn=self.get_logger().info,
+        )
+
+        self.pub_depth = self.create_publisher(Image, self.depth_topic, image_qos)
+        # self.pub_debug = self.create_publisher(Image, self.debug_topic, image_qos)
 
         self.sub_image = self.create_subscription(
             Image,
             self.image_topic,
             self.image_callback,
-            rgb_qos,
+            image_qos,
         )
 
         base_info = load_camera_info_from_yaml(
@@ -148,6 +153,7 @@ class DepthProcessorNode(Node):
         self.get_logger().info(f"Image topic: {self.image_topic}")
         self.get_logger().info(f"CameraInfo topic: {self.camera_info_topic}")
         self.get_logger().info(f"Depth topic: {self.depth_topic}")
+        self.get_logger().info(f"Depth encoding: {self.depth_encoding}")
         # self.get_logger().info(f"Debug topic: {self.debug_topic}")
 
 
@@ -251,25 +257,63 @@ class DepthProcessorNode(Node):
         depth_norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         return cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
 
-    def publish_depth(self, depth: np.ndarray, header):
+    def publish_depth(self, depth_m: np.ndarray, header):
         if self.save_image:
             time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            np.save(f"/home/user/Pictures/depth{time_str}.npy", depth)
+            np.save(f"/home/user/Pictures/depth{time_str}.npy", depth_m)
             self.save_image = False
-            
-        msg = self.bridge.cv2_to_imgmsg(depth.astype(np.float32), encoding="32FC1")
+
+        if self.depth_encoding == "32FC1":
+            msg = self.bridge.cv2_to_imgmsg(
+                depth_m.astype(np.float32, copy=False),
+                encoding="32FC1",
+            )
+
+        elif self.depth_encoding == "16UC1":
+            # ROS convention: 16UC1 depth is usually millimeters.
+            depth_mm = np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_mm = np.clip(depth_mm * 1000.0, 0.0, 65535.0).astype(np.uint16)
+
+            msg = self.bridge.cv2_to_imgmsg(
+                depth_mm,
+                encoding="16UC1",
+            )
+
+        else:
+            raise ValueError(f"Unsupported depth_encoding: {self.depth_encoding}")
+
         msg.header = header
         self.pub_depth.publish(msg)
 
     def image_callback(self, msg: Image):
+        t0 = time.perf_counter()
+
         try:
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            t1 = time.perf_counter()
 
             net_output = self.depth_model.infer_all(bgr)
+            t2 = time.perf_counter()
 
             depth_m = self.convert_to_metric_depth(net_output)
+            t3 = time.perf_counter()
+
             depth_m = self.sanitize_depth(depth_m)
+            t4 = time.perf_counter()
+
             self.publish_depth(depth_m, msg.header)
+            t5 = time.perf_counter()
+
+            self.get_logger().info(
+                "depth_node timing ms: "
+                f"cv_bridge={(t1 - t0) * 1000.0:.1f}, "
+                f"infer={(t2 - t1) * 1000.0:.1f}, "
+                f"metric={(t3 - t2) * 1000.0:.1f}, "
+                f"sanitize={(t4 - t3) * 1000.0:.1f}, "
+                f"publish={(t5 - t4) * 1000.0:.1f}, "
+                f"total={(t5 - t0) * 1000.0:.1f}",
+                throttle_duration_sec=1.0,
+            )
 
             # if self.publish_debug:
             #     dbg = self.depth_to_debug(depth_m)
