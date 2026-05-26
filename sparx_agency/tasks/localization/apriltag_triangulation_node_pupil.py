@@ -23,7 +23,7 @@ Usage example:
 """
 
 from __future__ import annotations
-
+import os
 import argparse
 import json
 import math
@@ -50,7 +50,7 @@ from sparx_agency.core.localization.tag_triangulation import (
     TagObservation,
     estimate_camera_pose_from_tags,
     matrix_to_pose,
-    print_transform_debug,
+    #print_transform_debug,
     world_T_tag_from_pose,
 )
 
@@ -60,6 +60,7 @@ from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     make_detector,
     invert_T,
     solvepnp_ippe_square,
+    make_T,
 )
 
 
@@ -117,17 +118,18 @@ class TagTriangulationOpenCVTask:
         nthreads: int = 2,
     ):
         self.tag_map = load_tag_world_map(tag_map_path)
-        for tag_id, pose in self.tag_map.items():
-            print(f"\n[DEBUG] Loaded tag {tag_id}")
-            print(f"xyz: {pose.xyz}")
-            print(f"rpy input rad: {pose.rpy}")
-            print(f"rpy input deg: {[math.degrees(v) for v in pose.rpy]}")
+        #for tag_id, pose in self.tag_map.items():
+       #     print(f"\n[DEBUG] Loaded tag {tag_id}")
+       #     print(f"xyz: {pose.xyz}")
+       #     print(f"rpy input rad: {pose.rpy}")
+       #     print(f"rpy input deg: {[math.degrees(v) for v in pose.rpy]}")
 
-            world_T_tag = world_T_tag_from_pose(pose)
-            print_transform_debug(f"world_T_tag for tag {tag_id}", world_T_tag)
+            #world_T_tag = world_T_tag_from_pose(pose)
+         #   print_transform_debug(f"world_T_tag for tag {tag_id}", world_T_tag)
             
         self.calib = load_camera_calib_yaml(camera_calib_path)
-        self.obj_pts = tag_object_points(float(tag_size_m))
+        self.tag_size_m = float(tag_size_m)
+        self.obj_pts = tag_object_points(self.tag_size_m)
 
         self.detector = make_detector(tag_family, nthreads=nthreads)
 
@@ -150,12 +152,10 @@ class TagTriangulationOpenCVTask:
         self.latest_ros_stamp = None
 
         rclpy.init()
+        os.environ['QT_LOGGING_RULES'] = 'qt.qpa.fontdb=false'
         self.ros_node = rclpy.create_node('opencv_ros_hybrid')
         self.bridge = CvBridge()
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
-
-        self.filtered_x = None
-        self.alpha = 0.2
         
         if self.use_ros_image:
             self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, 10)
@@ -239,8 +239,21 @@ class TagTriangulationOpenCVTask:
                 "source_type": src_type,
             }
 
+            frame = cv2.undistort(frame, self.calib.K, self.calib.D)
+
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            dets = self.detector.detect(gray)
+
+            fx = self.calib.K[0, 0]
+            fy = self.calib.K[1, 1]
+            cx = self.calib.K[0, 2]
+            cy = self.calib.K[1, 2]
+
+            dets = self.detector.detect(
+                gray, 
+                estimate_tag_pose=True, 
+                camera_params=(fx, fy, cx, cy), 
+                tag_size=self.tag_size_m
+            )
 
             observations: List[TagObservation] = []
             detections_info = []
@@ -248,9 +261,13 @@ class TagTriangulationOpenCVTask:
             for d in dets:
                 tag_id = int(d.tag_id)
                 margin = d.decision_margin
-                
-                if margin < 44:
+                if margin < 40:
                     print(f"[DEBUG] Skipping tag {tag_id} - Margin {margin:.2f} too low")
+                    continue
+                pose_err = d.pose_err
+                print (f"[DEBUG] Detected tag {tag_id} with margin {margin:.2f} and pose error {pose_err:.3f}")
+                if pose_err is not None and pose_err > 0.1:
+                    print(f"[DEBUG] Skipping tag {tag_id} - Pose error {pose_err:.3f} too high")
                     continue
                 if tag_id not in self.tag_map:
                     continue
@@ -269,27 +286,21 @@ class TagTriangulationOpenCVTask:
                         #1,
                     #)
 
-                camera_T_tag = solvepnp_ippe_square(
-                    corners_2d=corners,
-                    obj_pts_3d=self.obj_pts,
-                    K=self.calib.K,
-                    D=self.calib.D,
-                )
+                if d.pose_R is None or d.pose_t is None:
+                    continue
+
+                camera_T_tag = make_T(d.pose_R, d.pose_t)
+
                 if camera_T_tag is None:
                             continue
                 
+                tag_T_camera = invert_T(camera_T_tag)
 
-               # tag_T_camera = invert_T(camera_T_tag)
-
-                print_transform_debug("camera_T_tag directly after solvePnP", camera_T_tag)
-                #print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
-
-                print("[DEBUG] camera_T_tag:")
-                print(camera_T_tag)
-                print("camera_T_tag translation:", camera_T_tag[:3, 3])
+              # print_transform_debug("camera_T_tag from pupil_apriltags", camera_T_tag)
+               # print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
 
                 observations.append(TagObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
-
+                
                 area = float(cv2.contourArea(corners.astype(np.float32)))
                 detections_info.append(
                     {
@@ -345,6 +356,8 @@ class TagTriangulationOpenCVTask:
                 continue
                 
 
+           # (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+
             cv_to_ros = np.array([
                 [ 0.0, -1.0,  0.0,  0.0],
                 [ 0.0,  0.0, -1.0,  0.0],
@@ -356,27 +369,17 @@ class TagTriangulationOpenCVTask:
 
             (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(world_T_ros)
 
-            if self.filtered_x is None:
-                self.filtered_x, self.filtered_y, self.filtered_z = x, y, z
-
-            else:
-                self.filtered_x = self.alpha * x + (1 - self.alpha) * self.filtered_x
-                self.filtered_y = self.alpha * y + (1 - self.alpha) * self.filtered_y
-                self.filtered_z = self.alpha * z + (1 - self.alpha) * self.filtered_z
-
-            x, y, z = self.filtered_x, self.filtered_y, self.filtered_z
-
-            print(f"\n[DEBUG] Detected {len(observations)} tags")
+           # print(f"\n[DEBUG] Detected {len(observations)} tags")
             #print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")
-            print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")
+            #print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")
 
-            print(f"[DEBUG] camera position: x={self.filtered_x:.3f}, y={self.filtered_y:.3f}, z={self.filtered_z:.3f}")
-            print(f"[DEBUG] used_tag_ids: {est.used_tag_ids}")
-            for obs in observations:
-                print(f"[DEBUG]   tag {obs.tag_id} world pos: {self.tag_map[obs.tag_id].xyz}")
+           # print(f"[DEBUG] camera position: x={x:.3f}, y={y:.3f}, z={z:.3f}")
+           # print(f"[DEBUG] used_tag_ids: {est.used_tag_ids}")
+            #for obs in observations:
+            #    print(f"[DEBUG]   tag {obs.tag_id} world pos: {self.tag_map[obs.tag_id].xyz}")
 
             out_pose = {
-                "position_xyz_m": [float(self.filtered_x), float(self.filtered_y), float(self.filtered_z)],
+                "position_xyz_m": [float(x), float(y), float(z)],
                 "quat_xyzw": [float(qx), float(qy), float(qz), float(qw)],
             }
 
@@ -412,10 +415,8 @@ class TagTriangulationOpenCVTask:
                 used_set = set(used_ids)
                 for d in dets:
                     tid = int(d.tag_id)
-                    print(f"[DEBUG] Detected tag {tid} with margin {margin:.2f}")
                     if tid not in used_set:
                         continue
-
                     corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
                     cv2.polylines(frame, [corners.astype(np.int32)], True, (0, 255, 0), 2)
                     cx = int(np.mean(corners[:, 0]))
