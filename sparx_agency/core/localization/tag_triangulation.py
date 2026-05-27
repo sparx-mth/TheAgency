@@ -211,10 +211,10 @@ def estimate_world_T_cam_from_single_tag(
 
     world_T_camera = world_T_tag @ tag_T_camera
     
-    print_transform_debug("world_T_tag", world_T_tag)
-    print_transform_debug("camera_T_tag from solvePnP", camera_T_tag)
-    print_transform_debug("tag_T_camera = inv(camera_T_tag)", tag_T_camera)
-    print_transform_debug("world_T_camera = world_T_tag @ tag_T_camera", world_T_camera)
+    #print_transform_debug("world_T_tag", world_T_tag)
+    #print_transform_debug("camera_T_tag from solvePnP", camera_T_tag)
+    #print_transform_debug("tag_T_camera = inv(camera_T_tag)", tag_T_camera)
+    #print_transform_debug("world_T_camera = world_T_tag @ tag_T_camera", world_T_camera)
 
 
     return world_T_camera
