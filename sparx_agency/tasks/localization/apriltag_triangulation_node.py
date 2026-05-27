@@ -249,7 +249,7 @@ class TagTriangulationOpenCVTask:
                 tag_id = int(d.tag_id)
                 margin = d.decision_margin
                 
-                if margin < 44:
+                if margin < 30:
                     print(f"[DEBUG] Skipping tag {tag_id} - Margin {margin:.2f} too low")
                     continue
                 if tag_id not in self.tag_map:

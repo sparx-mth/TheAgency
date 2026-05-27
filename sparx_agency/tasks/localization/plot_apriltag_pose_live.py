@@ -155,9 +155,9 @@ class AprilTagPosePlotter(Node):
             )
 
         # Keep fixed limits between 0 and 5 meters
-        self.ax_3d.set_xlim(0, 1.5)
-        self.ax_3d.set_ylim(0, 1.5)
-        self.ax_3d.set_zlim(0, 1.5)
+        self.ax_3d.set_xlim(0, 3)
+        self.ax_3d.set_ylim(0, 3 )
+        self.ax_3d.set_zlim(0, 3)
 
         self.ax_3d.set_xlabel("X [m]")
         self.ax_3d.set_ylabel("Y [m]")
