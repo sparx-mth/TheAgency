@@ -1,180 +1,51 @@
-# AprilTag-Based Camera Azimuth Estimation (OpenCV, No ROS)
+# AprilTag Localization & Triangulation Pipeline
 
-## High-level idea
-
-**This system estimates the camera’s absolute azimuth (heading) in the world from a single image, by observing an AprilTag whose orientation in the world is known.**
-
-The system performs a **single-shot computation**:
-> **Image → Azimuth (degrees)**
+This repository provides a robust localization pipeline for cameras and drones, utilizing AprilTag detection to estimate 6-DOF poses within a known world frame. The system leverages pre-defined tag poses (via YAML) and camera intrinsics to perform real-time triangulation.
 
 ---
 
-## What does this code compute?
+## 🚀 Running the Pipeline
 
-This code computes:
-
-> **The absolute azimuth (yaw) of the camera in world coordinates (0–360°)**
-
-based on:
-- A detected AprilTag in the image
-- The known orientation of that tag in the world
-
-Only **orientation (yaw / azimuth)** is computed — not position, not mapping.
+Ensure your environment is set up and your configuration files (YAMLs) are correctly pointing to your local paths.
 
 
-## Step-by-step explanation
 
-### 1️⃣ What is known in advance (Ground Truth)
-
-#### a) Tag orientation in the world
-
-Defined in a YAML configuration file:
-
-```yaml
-tags:
-  10: 0
-  11: 90
-  12: 180
-  13: 270
-```
-
-
-#### b) Physical size of the tag
-
-Provided as a command-line argument:
+### Option 1: Live ROS Mode (Real-time Drone Feed)
+This mode subscribes to a live ROS image topic. The pipeline will process frames as they arrive and publish the estimated PoseStamped message.
 
 ```bash
---tag_size_m 0.08
+python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
+  --tag_map_path $HOME/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --camera_calib_path $HOME/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
+  --tag_size_m 0.13 \
+  --source ros
 ```
 
-Meaning:
-- The real-world edge length of the square AprilTag is known (meters)
+Default Topic: /xtend/rgb
+
+Output: The calculated pose is published to /xtend/april_tag_pose (geometry_msgs/PoseStamped).
 
 
-#### c) Camera calibration
-
-Provided via a standard camera calibration YAML file.
-
-The intrinsic matrix:
-
-```
-K = [[fx,  0, cx],
-     [ 0, fy, cy],
-     [ 0,  0,  1]]
-```
-
-Describes:
-- Pixel-to-angle projection
-- Optical center
-- Field-of-view geometry
-
-Distortion coefficients (`D`) are supported but optional.
-
-
-### 2️⃣ What is measured from the image
-
-Using the AprilTag detector (`pupil-apriltags`):
-
-```python
-corners_2d = [
-  (u1, v1),
-  (u2, v2),
-  (u3, v3),
-  (u4, v4)
-]
-```
-
-These are the four detected tag corners in **pixel coordinates**.
-
-Only tags that appear in the YAML configuration are considered valid.
-
----
-
-### 3️⃣ What `solvePnP` computes (core geometry)
-
-The question:
-
-> Which 3D pose of a square produces exactly these pixel projections?
-
-`cv2.solvePnP` computes:
-
-#### Translation vector
-
-```python
-tvec = [tx, ty, tz]
-```
-
-In the **camera optical frame**:
-- `tx`: left / right offset
-- `tz`: forward distance
-
-Only `tx` and `tz` are needed for azimuth.
-
-
-### 4️⃣ Relative yaw computation
-
-```python
-relative_yaw = atan2(-tx, tz)
-```
-
-This is the **relative horizontal angle** between camera and tag.
-
----
-
-### 5️⃣ Absolute azimuth estimation
-
-```python
-camera_azimuth = wall_azimuth + relative_yaw
-```
-
-Because the wall orientation of the tag is known, the camera’s absolute orientation can be recovered.
-
-The result is normalized to **0–360 degrees**.
-
----
-
-## Final summary
-
-**By detecting an AprilTag with known world orientation and measuring its relative angle in a single image, the system infers the camera’s absolute azimuth.**
-
----
-
-## Installation
+### Option 2: Offline Mode (Processing from Image Directory)
+Use this mode to process a sequence of saved images. Useful for debugging and offline evaluation.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install opencv-python pupil-apriltags pyyaml
+python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
+  --tag_map_path $HOME/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --camera_calib_path $HOME/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
+  --tag_size_m 0.13 \
+  --image_dir $HOME/Pictures/xtend_da3_take_20260527_124147
 ```
 
----
 
-## Running the system (single image)
-
+### Live Visualization Tools
+Run these in a separate terminal while the localization node is active to visualize the trajectory.
+#### 2D Trajectory & Yaw
 ```bash
-python3 -m sparx_agency.tasks.localization.opencv.tag_azimuth_node \
-  --tag_config_path sparx_agency/tasks/localization/config/tags_azimuth.yaml \
-  --camera_calib_path sparx_agency/tasks/localization/config/front_camera_calib.yaml \
-  --tag_size_m 0.08 \
-  --image path/to/image.png
+python3 -m sparx_agency.tasks.localization.plot_apriltag_pose_live_2D
 ```
 
-### Output
-
-```text
-123.456789
+#### 3D Spatial Trajectory
+```bash
+python3 -m sparx_agency.tasks.localization.plot_apriltag_pose_live
 ```
-
----
-
-## Failure behavior
-
-The program **fails fast** and exits if:
-- Tag configuration is missing or empty
-- Camera calibration is invalid
-- AprilTag detector cannot be created
-- No known tag is detected in the image
-- Pose estimation fails
-
-This makes it suitable for **service-style request/response systems**.
