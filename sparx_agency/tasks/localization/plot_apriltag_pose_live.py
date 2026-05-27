@@ -72,9 +72,9 @@ class AprilTagPosePlotter(Node):
         self.ax_3d.set_zlabel("Z [m]")
 
         # Fixed axis limits: 0 to 5 meters
-        self.ax_3d.set_xlim(0, 5)
-        self.ax_3d.set_ylim(0, 5)
-        self.ax_3d.set_zlim(0, 5)
+        self.ax_3d.set_xlim(0, 6)
+        self.ax_3d.set_ylim(0, 6)
+        self.ax_3d.set_zlim(0, 6)
 
         # Optional: nicer initial view angle
         self.ax_3d.view_init(elev=25, azim=-60)
