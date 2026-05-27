@@ -136,7 +136,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   --ros-args \
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
   -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
@@ -144,7 +144,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p metric_scale_divisor:=300.0 \
   -p clip_min_m:=0.2 \
   -p clip_max_m:=8.0 \
-  -p depth_encoding:=16UC1
+  -p depth_encoding:=32FC1
 '
 
 wait_for_topic_name /xtend/depth_m 30

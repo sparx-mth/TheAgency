@@ -1,0 +1,8 @@
+-c constraints.txt
+
+numpy==1.26.4
+opencv-python==4.11.0.86
+pupil-apriltags==1.0.4.post11
+PyYAML>=6.0
+requests>=2.27,<3
+Pillow>=10.4.0
