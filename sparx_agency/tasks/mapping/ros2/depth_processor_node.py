@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import time
-from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -8,7 +7,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from cv_bridge import CvBridge
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
@@ -33,7 +32,6 @@ class DepthProcessorNode(Node):
     def __init__(self):
         super().__init__("depth_processor_node")
 
-        self.save_image = True
         self.bridge = CvBridge()
         self.camera_info_msg: CameraInfo | None = None
 
@@ -56,6 +54,8 @@ class DepthProcessorNode(Node):
         # self.declare_parameter("debug_topic", "/xtend/depth_vis")
 
         self.declare_parameter("publish_debug", False)
+        self.declare_parameter("publish_cloud", False)
+        self.declare_parameter("pointcloud_topic", "/rgbd/pointcloud")
         self.declare_parameter("clip_min_m", 0.0)
         self.declare_parameter("clip_max_m", 20.0)
         self.declare_parameter("model_type", "large_metric")  # large_metric or small_lut
@@ -75,6 +75,8 @@ class DepthProcessorNode(Node):
         # self.debug_topic = self.get_parameter("debug_topic").value
 
         self.publish_debug = bool(self.get_parameter("publish_debug").value)
+        self.publish_cloud = bool(self.get_parameter("publish_cloud").value)
+        self.pointcloud_topic = self.get_parameter("pointcloud_topic").value
         self.clip_min_m = float(self.get_parameter("clip_min_m").value)
         self.clip_max_m = float(self.get_parameter("clip_max_m").value)
         self.model_type = self.get_parameter("model_type").value
@@ -109,6 +111,10 @@ class DepthProcessorNode(Node):
         )
 
         self.pub_depth = self.create_publisher(Image, self.depth_topic, image_qos)
+        self.pub_cloud = (
+            self.create_publisher(PointCloud2, self.pointcloud_topic, image_qos)
+            if self.publish_cloud else None
+        )
         # self.pub_debug = self.create_publisher(Image, self.debug_topic, image_qos)
 
         self.sub_image = self.create_subscription(
@@ -258,11 +264,6 @@ class DepthProcessorNode(Node):
         return cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
 
     def publish_depth(self, depth_m: np.ndarray, header):
-        if self.save_image:
-            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            np.save(f"/home/user/Pictures/depth{time_str}.npy", depth_m)
-            self.save_image = False
-
         if self.depth_encoding == "32FC1":
             msg = self.bridge.cv2_to_imgmsg(
                 depth_m.astype(np.float32, copy=False),
@@ -285,6 +286,45 @@ class DepthProcessorNode(Node):
         msg.header = header
         self.pub_depth.publish(msg)
 
+    def _backproject_metric_depth(self, depth_m: np.ndarray) -> np.ndarray:
+        """Backproject (H,W) metric depth to (N,3) float32 points in camera optical frame.
+
+        Intrinsics from camera_info_msg are scaled to match the depth output resolution.
+        """
+        h, w = depth_m.shape
+        cam_w = self.camera_info_msg.width or w
+        cam_h = self.camera_info_msg.height or h
+        sx = w / cam_w
+        sy = h / cam_h
+        fx = float(self.camera_info_msg.p[0]) * sx
+        fy = float(self.camera_info_msg.p[5]) * sy
+        cx = float(self.camera_info_msg.p[2]) * sx
+        cy = float(self.camera_info_msg.p[6]) * sy
+
+        u, v = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+        z = depth_m.flatten()
+        valid = (z > 0.01) & (z < self.clip_max_m)
+        x = (u.flatten() - cx) * z / fx
+        y = (v.flatten() - cy) * z / fy
+        return np.stack([x[valid], y[valid], z[valid]], axis=1).astype(np.float32)
+
+    def _make_pc2_msg(self, points: np.ndarray, header) -> PointCloud2:
+        msg = PointCloud2()
+        msg.header = header
+        msg.height = 1
+        msg.width = len(points)
+        msg.fields = [
+            PointField(name="x", offset=0,  datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4,  datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8,  datatype=PointField.FLOAT32, count=1),
+        ]
+        msg.is_bigendian = False
+        msg.point_step = 12
+        msg.row_step = 12 * len(points)
+        msg.is_dense = True
+        msg.data = points.tobytes()
+        return msg
+
     def image_callback(self, msg: Image):
         t0 = time.perf_counter()
 
@@ -303,6 +343,10 @@ class DepthProcessorNode(Node):
 
             self.publish_depth(depth_m, msg.header)
             t5 = time.perf_counter()
+
+            if self.pub_cloud is not None:
+                pts = self._backproject_metric_depth(depth_m)
+                self.pub_cloud.publish(self._make_pc2_msg(pts, msg.header))
 
             self.get_logger().info(
                 "depth_node timing ms: "

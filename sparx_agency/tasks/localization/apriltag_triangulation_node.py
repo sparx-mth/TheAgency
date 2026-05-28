@@ -43,7 +43,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Int32MultiArray
-from cv_bridge import CvBridge
 
 
 from sparx_agency.core.localization.tag_triangulation import (
@@ -115,6 +114,7 @@ class TagTriangulationOpenCVTask:
         tag_size_m: float,
         video_source: Union[int, str] = 0,
         ros_topic: str = "",
+        pose_topic: str = "/xtend/april_tag_pose",
         tag_family: str = "tag36h11",
         visualize: bool = False,
         out_json_path: str = "",
@@ -157,8 +157,7 @@ class TagTriangulationOpenCVTask:
 
         rclpy.init()
         self.ros_node = rclpy.create_node('opencv_ros_hybrid')
-        self.bridge = CvBridge()
-        self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
+        self.pose_pub = self.ros_node.create_publisher(PoseStamped, pose_topic, 10)
 
         self.filtered_x = None
         self.alpha = 0.2
@@ -181,10 +180,13 @@ class TagTriangulationOpenCVTask:
 
     def ros_image_cb(self, msg: Image):
         try:
-            self.latest_ros_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+            if msg.encoding in ("rgb8", "RGB8"):
+                frame = frame[:, :, ::-1]
+            self.latest_ros_image = frame
             self.latest_ros_stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         except Exception as e:
-            print(f"CV Bridge error: {e}")
+            print(f"Image decode error: {e}")
 
     def _log_json(self, record: dict):
         if self._json_f is None:
@@ -482,7 +484,10 @@ class TagTriangulationOpenCVTask:
             if self._json_f is not None:
                 self._json_f.close()
                 self._json_f = None
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
             print("Cleaned up resources, exiting.")
 
 
@@ -499,6 +504,7 @@ def main():
     ap.add_argument("--out_json", default="", help="Path to output JSONL log (one JSON per frame).")
     ap.add_argument("--fuse_method", default="avg_translation_keep_first_rotation")
     ap.add_argument("--image_topic", default="/xtend/rgb", help="ROS image topic to listen to")
+    ap.add_argument("--pose_topic", default="/xtend/april_tag_pose", help="ROS topic to publish camera pose on")
     args = ap.parse_args()
 
     src: Union[int, str]
@@ -513,6 +519,7 @@ def main():
         tag_size_m=args.tag_size_m,
         video_source=src,
         ros_topic=args.image_topic,
+        pose_topic=args.pose_topic,
         tag_family=args.tag_family,
         visualize=(not args.no_vis),
         out_json_path=args.out_json,
