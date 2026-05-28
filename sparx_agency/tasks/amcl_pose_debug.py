@@ -21,21 +21,17 @@ import matplotlib.pyplot as plt
 # Global Configuration & Hyperparameters
 # ==============================================================================
 SENSOR_MAX_RANGE_METERS = 10.0
+#NUM_ANGLES = 32
+#NUM_BEAMS = 64
 NUM_ANGLES = 32
 NUM_BEAMS = 64
-#NUM_ANGLES = 64
-#NUM_BEAMS = 128
 SHOW_MAP = True
 #LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut.npy')
 #GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/occ_grid_int8.npy'
-#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy')
-#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
-#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_bigger_lut.npy')
-#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
-
-LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/MAMAD/global_saved_lut.npy')
-GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/MAMAD/global_occ_int8.npy'
-
+LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy')
+GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
+#LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_res_0_1.npy')
+#GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8_res_0_1.npy'
 SIGMA = 2.0  # Increased for realistic sensor noise tolerance to prevent math crashes
 MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if needed)
 
@@ -45,6 +41,7 @@ MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if nee
 def show_world_map(world_binary: np.ndarray, 
                    odom_history: list, 
                    amcl_history: list, 
+                   apriltag_history: list,
                    current_loc: tuple, 
                    orientation: float,
                    success_count: int = 0,
@@ -67,8 +64,13 @@ def show_world_map(world_binary: np.ndarray,
     if len(amcl_history) > 0:
         ax, ay = zip(*amcl_history)
         plt.plot(ax, ay, 'r-', label='AMCL Corrected Path', linewidth=2.0)
+
+    # 3. Plot the AprilTag Ground Truth (Blue stars)
+    if len(apriltag_history) > 0:
+        tx, ty = zip(*apriltag_history)
+        plt.plot(tx, ty, 'b*', label='AprilTag (GT)', markersize=8, alpha=0.8)
     
-    # 3. Plot Current Position and Orientation
+    # 4. Plot Current Position and Orientation
     if current_loc is not None and current_loc[0] > 0 and current_loc[1] > 0:
         x, y = current_loc
         plt.plot(x, y, 'rx', markersize=10, markeredgewidth=2, label='Current Pos')
@@ -111,7 +113,7 @@ def show_world_map(world_binary: np.ndarray,
 # Core AMCL Mathematical Functions
 # ==============================================================================
 
-def get_local_window_bounds(pred_loc, map_shape, window_size_cells=100):
+def get_local_window_bounds(pred_loc, map_shape, window_size_cells=50):
 
     half_w = window_size_cells // 2
     
@@ -125,9 +127,11 @@ def get_local_window_bounds(pred_loc, map_shape, window_size_cells=100):
 
 
 def init_belief_vectorized(local_map_shape, orientations, local_robot_pred, robot_orientation_pred, loc_uncertainty):
-    shape_x, shape_y = local_map_shape
+    # Vectorized initialization of the belief distribution over the local window.
+    shape_x, shape_y = local_map_shape 
     num_angles = len(orientations)
     
+    # Create 3D grids for x, y, and theta indices
     x_idx = np.arange(shape_x)
     y_idx = np.arange(shape_y)
     theta_idx = np.arange(num_angles)
@@ -256,7 +260,9 @@ class XtendAMCLNode(Node):
         super().__init__("xtend_amcl_node")
         
         self.bridge = CvBridge()
-        self.map_resolution = 0.05  # 5cm per cell
+        #self.map_resolution = 0.05  # 5cm per cell
+        self.map_resolution = 0.1  # 10cm per cell
+
         self.fov_rad = math.radians(75.98) # Based on camera calibration
         
         # Enable interactive mode for matplotlib if SHOW_MAP is true
@@ -285,8 +291,8 @@ class XtendAMCLNode(Node):
         #self.map_origin_y = -2.4   
         # for cropped map (2,21) == -0.1, -1.05 and flip x and y 
         # map_origin = World_Position - (Cell_Index * Resolution)
-        self.map_origin_x = -4.000
-        self.map_origin_y = -4.000  
+        self.map_origin_x = -1.050
+        self.map_origin_y = -0.100  
 
         # Internal State Variables (Living in real-world meters)
 
@@ -304,6 +310,8 @@ class XtendAMCLNode(Node):
         # History Lists for Visualization ---
         self.odom_history_cells = []
         self.amcl_history_cells = []
+
+        self.apriltag_history_cells = []
 
         # ------------------------------------------------------------------
         # 3. Load or Generate LUT
@@ -363,6 +371,21 @@ class XtendAMCLNode(Node):
             Image, "/xtend/depth_m", self.depth_callback, image_qos
         )
 
+        self.apriltag_sub = self.create_subscription(
+            PoseStamped, "/xtend/april_tag_pose", self.apriltag_callback, image_qos
+        )
+
+    def apriltag_callback(self, msg: PoseStamped):
+        """Callback to store the Ground Truth position when an AprilTag is seen."""
+        gt_x_m = -msg.pose.position.y
+        gt_y_m = msg.pose.position.x
+        
+        gt_x_cells = int((gt_x_m - self.map_origin_x) / self.map_resolution)
+        gt_y_cells = int((gt_y_m - self.map_origin_y) / self.map_resolution)
+        
+        self.apriltag_history_cells.append((gt_x_cells, gt_y_cells))
+        if len(self.apriltag_history_cells) > MAX_HISTORY:
+            self.apriltag_history_cells.pop(0)
 
     def odom_callback(self, msg: PoseStamped):
         """Callback to store the current raw world position from the tracking node."""
@@ -462,6 +485,7 @@ class XtendAMCLNode(Node):
                 self.world_binary,
                 odom_history=self.odom_history_cells,
                 amcl_history=self.amcl_history_cells,
+                apriltag_history=self.apriltag_history_cells,
                 current_loc=current_loc,
                 orientation=orientation,
                 success_count=self.amcl_success_count,

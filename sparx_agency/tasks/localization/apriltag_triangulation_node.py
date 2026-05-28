@@ -195,7 +195,9 @@ class TagTriangulationOpenCVTask:
             # Use the custom QoS profile instead of the default '10'
             self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, qos_profile)
 
-        if isinstance(video_source, str) and video_source.startswith("dir:"):
+        if self.use_ros_image:
+            pass # ROS subscription is already handled above, skip OpenCV VideoCapture
+        elif isinstance(video_source, str) and video_source.startswith("dir:"):
             self.image_dir = Path(video_source[4:]).expanduser().resolve()
             if not self.image_dir.exists():
                 raise FileNotFoundError(f"Image dir does not exist: {self.image_dir}")
@@ -353,15 +355,9 @@ class TagTriangulationOpenCVTask:
                         )
                         cv2.imshow("tag_triangulation", frame)
                         
-                        exit_requested = False
-                        while True:
-                            k = cv2.waitKey(50) & 0xFF
-                            if k == 32: 
-                                break
-                            elif k in (27, ord("q")):  
-                                exit_requested = True
-                                break
-                        if exit_requested:
+                        # Wait 1ms to refresh the display. Press 'q' or 'ESC' to quit.
+                        k = cv2.waitKey(1) & 0xFF
+                        if k in (27, ord("q")):
                             break
 
                     self._log_json(
@@ -500,15 +496,8 @@ class TagTriangulationOpenCVTask:
                     
                     cv2.imshow("tag_triangulation", frame)
                     
-                    exit_requested = False
-                    while True:
-                        k = cv2.waitKey(50) & 0xFF
-                        if k == 32: 
-                            break
-                        elif k in (27, ord("q")): 
-                            exit_requested = True
-                            break
-                    if exit_requested:
+                    k = cv2.waitKey(1) & 0xFF
+                    if k in (27, ord("q")):
                         break
                 else:
                     print(f"[{stamp_sec:.3f}] world(x,y,z)=({x:.2f},{y:.2f},{z:.2f}) used={used_ids}")
