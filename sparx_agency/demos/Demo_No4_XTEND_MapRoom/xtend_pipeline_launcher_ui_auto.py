@@ -111,14 +111,20 @@ export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml
+  --frequency 10.0 \
+  --image-topic /xtend/rgb \
+  --camera-info-topic /xtend/camera_info \
+  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  --preprocess-mode resize \
+  --output-width 504 \
+  --output-height 294
 '
 
 wait_for_topic_name /xtend/rgb 20
 wait_for_topic_rate /xtend/bearing 20 best_effort || true
 wait_for_topic_rate /xtend/rgb 20 best_effort || true
 
-echo "[AUTO] Step 2: start DA3 Small depth"
+echo "[AUTO] Step 2: start DA3 Large Metric 504x294 depth"
 start_tmux xtend_depth '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -130,13 +136,15 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   --ros-args \
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p camera_info_mode:=base \
-  -p model_type:=small_lut \
-  -p apply_metric_focal_scaling:=false \
-  -p small_lut_clip_min_m:=0.2 \
-  -p small_lut_clip_max_m:=8.0
+  -p model_type:=large_metric \
+  -p apply_metric_focal_scaling:=true \
+  -p metric_scale_divisor:=300.0 \
+  -p clip_min_m:=0.2 \
+  -p clip_max_m:=8.0 \
+  -p depth_encoding:=32FC1
 '
 
 wait_for_topic_name /xtend/depth_m 30
@@ -265,30 +273,38 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + RGB publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 crop-resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
+        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x294 full-FOV resized frames, /xtend/camera_info, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
         command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml
-""",
+                python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
+                --frequency 10.0 \
+                --image-topic /xtend/rgb \
+                --camera-info-topic /xtend/camera_info \
+                --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+                --preprocess-mode resize \
+                --output-width 504 \
+                --output-height 294
+                """,
     ),
     LaunchItem(
-        name="2. DA3 Small depth processor",
+        name="2. DA3 Large Metric 504x294 depth processor",
         machine="jetson",
         tmux_name="xtend_depth",
-        description="Subscribes to /xtend/rgb 504x392, runs DA3-SMALL, converts raw depth to meters using LUT, publishes /xtend/depth_m.",
+        description="Subscribes to /xtend/rgb 504x294, runs DA3METRIC-LARGE depth-only FP16, applies focal metric scaling, publishes /xtend/depth_m. Default output encoding: 16UC1 millimeters.",
         command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
-  --ros-args \
-  -p image_topic:=/xtend/rgb \
-  -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/calib_small_depth.yaml \
-  -p model_type:=small_lut \
-  -p camera_info_mode:=crop_resize \
-  -p apply_metric_focal_scaling:=false \
-  -p small_lut_clip_min_m:=0.2 \
-  -p small_lut_clip_max_m:=8.0
-""",
+                python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
+                  --ros-args \
+                  -p image_topic:=/xtend/rgb \
+                  -p depth_topic:=/xtend/depth_m \
+                  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+                  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+                  -p camera_info_mode:=base \
+                  -p model_type:=large_metric \
+                  -p apply_metric_focal_scaling:=true \
+                  -p metric_scale_divisor:=300.0 \
+                  -p clip_min_m:=0.2 \
+                  -p clip_max_m:=8.0 \
+                  -p depth_encoding:=16UC1
+                """,
     ),
     LaunchItem(
         name="3. Twist -> XTEND command converter",

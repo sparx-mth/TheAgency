@@ -5,6 +5,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 import rclpy
@@ -67,8 +68,10 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             log_dir=log_dir,
         )
 
-        if preprocess_mode not in ("pad", "crop_resize"):
-            raise ValueError(f"preprocess_mode must be 'pad' or 'crop_resize', got: {preprocess_mode!r}")
+        if preprocess_mode not in ("pad", "crop_resize", "resize"):
+            raise ValueError(
+                f"preprocess_mode must be 'pad', 'crop_resize', or 'resize', got: {preprocess_mode!r}"
+            )
 
         self.rtsp_uri = rtsp_uri
         self.image_topic = image_topic
@@ -133,8 +136,13 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         print(f"[image] preprocess_mode: {self.preprocess_mode}")
         if self.preprocess_mode == "pad":
             print(f"[image] pad_to_width={self.pad_to_width}")
+        elif self.preprocess_mode == "resize":
+            print(f"[image] resize -> {self.output_width}x{self.output_height}")
         else:
-            print(f"[image] crop={self.crop_width}x{self.crop_height} -> {self.output_width}x{self.output_height}")
+            print(
+                f"[image] crop={self.crop_width}x{self.crop_height} "
+                f"-> {self.output_width}x{self.output_height}"
+            )
         print(f"[image] camera_info: {'enabled' if self.camera_info_pub else 'disabled (no YAML)'}")
         print(
             "[image] bad-frame guard: "
@@ -147,6 +155,12 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
         if self.preprocess_mode == "pad":
             return pad_width_center(frame, self.pad_to_width)
+        elif self.preprocess_mode == "resize":
+            return cv2.resize(
+                frame,
+                (self.output_width, self.output_height),
+                interpolation=cv2.INTER_AREA,
+            )
         return center_crop_resize(
             frame,
             crop_width=self.crop_width,
@@ -268,15 +282,15 @@ def parse_args():
 
     p.add_argument(
         "--preprocess-mode",
-        choices=["pad", "crop_resize"],
-        default="pad",
+        choices=["pad", "crop_resize", "resize"],
+        default="resize",
         help="'pad': pad width to pad-to-width (DA3 LARGE, default). 'crop_resize': center-crop then resize.",
     )
     p.add_argument("--pad-to-width", type=int, default=728)
     p.add_argument("--crop-width", type=int, default=540)
     p.add_argument("--crop-height", type=int, default=420)
     p.add_argument("--output-width", type=int, default=504)
-    p.add_argument("--output-height", type=int, default=392)
+    p.add_argument("--output-height", type=int, default=294)
 
     p.add_argument("--no-drop-bad-frames", action="store_true")
     p.add_argument("--bad-frame-mean-min", type=float, default=2.0)

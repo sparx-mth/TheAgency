@@ -249,7 +249,7 @@ class VelocityIntegratorNode(Node):
 
         # Publish
         est_msg = PoseStamped()
-        est_msg.header.stamp = self.get_clock().now().to_msg()
+        est_msg.header.stamp = msg.header.stamp
         est_msg.header.frame_id = self.target_frame
 
         # Position
