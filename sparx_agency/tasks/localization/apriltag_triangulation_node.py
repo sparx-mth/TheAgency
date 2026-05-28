@@ -186,7 +186,6 @@ class TagTriangulationOpenCVTask:
         except Exception as e:
             print(f"CV Bridge error: {e}")
 
-
     def _log_json(self, record: dict):
         if self._json_f is None:
             return
@@ -198,7 +197,6 @@ class TagTriangulationOpenCVTask:
         files.sort()
         return files
 
- 
     def run(self):
         processed: set[str] = set()
 
@@ -279,16 +277,24 @@ class TagTriangulationOpenCVTask:
                     )
                     if camera_T_tag is None:
                         continue
-                    
-                    observations.append(TagObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
 
+                    # Calculate the area of the tag in pixels to use as a confidence weight
                     area = float(cv2.contourArea(corners.astype(np.float32)))
+
+                    # Append observation with the calculated weight
+                    observations.append(TagObservation(
+                        tag_id=tag_id,
+                        cam_T_tag=camera_T_tag,
+                        weight=area
+                    ))
+
                     detections_info.append(
                         {
                             "tag_id": tag_id,
                             "area_px2": area,
                             "corners_px": [[float(x), float(y)] for (x, y) in corners],
                         }
+
                     )
 
                 if not observations:
@@ -303,13 +309,13 @@ class TagTriangulationOpenCVTask:
                             2,
                         )
                         cv2.imshow("tag_triangulation", frame)
-                        
+
                         exit_requested = False
                         while True:
                             k = cv2.waitKey(50) & 0xFF
-                            if k == 32: 
+                            if k == 32:
                                 break
-                            elif k in (27, ord("q")):  
+                            elif k in (27, ord("q")):
                                 exit_requested = True
                                 break
                         if exit_requested:
@@ -343,12 +349,12 @@ class TagTriangulationOpenCVTask:
                         }
                     )
                     continue
-                    
+
                 cv_to_ros = np.array([
-                    [ 0.0, -1.0,  0.0,  0.0],
-                    [ 0.0,  0.0, -1.0,  0.0],
-                    [ 1.0,  0.0,  0.0,  0.0],
-                    [ 0.0,  0.0,  0.0,  1.0]
+                    [0.0, -1.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]
                 ], dtype=float)
 
                 world_T_ros = est.world_T_cam @ cv_to_ros
@@ -376,9 +382,12 @@ class TagTriangulationOpenCVTask:
                     margin = d.decision_margin
                     if tid in est.used_tag_ids:
                         size = self.tag_sizes.get(tid, self.default_tag_size)
-                        print(f"  -> ID: {tid} | Margin: {margin:.1f} | Size: {size}m")
+                        # Calculate the area again specifically for the printout
+                        corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+                        area = float(cv2.contourArea(corners.astype(np.float32)))
+                        print(f"  -> ID: {tid} | Margin: {margin:.1f} | Size: {size}m | Weight: {area:.0f}px")
                 print("-----------------------------------")
-                
+
                 out_pose = {
                     "position_xyz_m": [float(self.filtered_x), float(self.filtered_y), float(self.filtered_z)],
                     "quat_xyzw": [float(qx), float(qy), float(qz), float(qw)],
@@ -390,7 +399,7 @@ class TagTriangulationOpenCVTask:
                 pose_msg.header.frame_id = "world"
                 pose_msg.header.stamp.sec = int(stamp_sec)
                 pose_msg.header.stamp.nanosec = int((stamp_sec - int(stamp_sec)) * 1e9)
-                
+
                 pose_msg.pose.position.x = float(x)
                 pose_msg.pose.position.y = float(y)
                 pose_msg.pose.position.z = float(z)
@@ -398,7 +407,7 @@ class TagTriangulationOpenCVTask:
                 pose_msg.pose.orientation.y = float(qy)
                 pose_msg.pose.orientation.z = float(qz)
                 pose_msg.pose.orientation.w = float(qw)
-                
+
                 self.pose_pub.publish(pose_msg)
 
                 self._log_json(
@@ -415,7 +424,7 @@ class TagTriangulationOpenCVTask:
                     used_set = set(used_ids)
                     for d in dets:
                         tid = int(d.tag_id)
-                        #print(f"[DEBUG] Detected tag {tid} with margin {margin:.2f}")
+                        # print(f"[DEBUG] Detected tag {tid} with margin {margin:.2f}")
                         if tid not in used_set:
                             continue
 
@@ -445,15 +454,15 @@ class TagTriangulationOpenCVTask:
                     cv2.putText(frame, line2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                     cv2.putText(frame, line3, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     cv2.putText(frame, line4, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    
+
                     cv2.imshow("tag_triangulation", frame)
-                    
+
                     exit_requested = False
                     while True:
                         k = cv2.waitKey(50) & 0xFF
-                        if k == 32: 
+                        if k == 32:
                             break
-                        elif k in (27, ord("q")): 
+                        elif k in (27, ord("q")):
                             exit_requested = True
                             break
                     if exit_requested:
