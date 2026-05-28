@@ -27,6 +27,7 @@ class TagWorldPose:
 class TagObservation:
     tag_id: int
     cam_T_tag: np.ndarray  # shape (4,4)
+    weight: float = 1.0    # pixel area or confidence — used by weighted fusion
 
 
 @dataclass(frozen=True)
