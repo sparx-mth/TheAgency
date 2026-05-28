@@ -60,7 +60,7 @@ def generate_launch_description():
                               description="TensorRT engine for DepthProcessorNode"),
         DeclareLaunchArgument("config_yaml", default_value=_DEFAULT_YAML,
                               description="Camera calibration YAML"),
-        DeclareLaunchArgument("max_depth_m", default_value="8.0",
+        DeclareLaunchArgument("max_depth_m", default_value="5.0",
                               description="Max depth for cloud clipping and octomap ray range"),
         # Octomap sensor model — tune these for environment:
         #   indoor tight space: hit=0.75 miss=0.45 → faster occupancy buildup

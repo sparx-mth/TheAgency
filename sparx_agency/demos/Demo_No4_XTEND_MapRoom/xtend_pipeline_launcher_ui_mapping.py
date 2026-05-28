@@ -152,7 +152,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p apply_metric_focal_scaling:=true \
   -p metric_scale_divisor:=300.0 \
   -p clip_min_m:=0.2 \
-  -p clip_max_m:=8.0 \
+  -p clip_max_m:=5.0 \
   -p depth_encoding:=32FC1 \
   -p publish_cloud:=true \
   -p pointcloud_topic:=/xtend/pointcloud
@@ -256,7 +256,7 @@ ros2 run octomap_server octomap_server_node \
   --ros-args \
   -p resolution:=0.05 \
   -p frame_id:=map \
-  -p sensor_model/max_range:=8.0 \
+  -p sensor_model/max_range:=5.0 \
   -p sensor_model/hit:=0.70 \
   -p sensor_model/miss:=0.40 \
   -p occupancy_thres:=0.50 \
@@ -339,7 +339,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p apply_metric_focal_scaling:=true \
   -p metric_scale_divisor:=300.0 \
   -p clip_min_m:=0.2 \
-  -p clip_max_m:=8.0 \
+  -p clip_max_m:=5.0 \
   -p depth_encoding:=32FC1 \
   -p publish_cloud:=true \
   -p pointcloud_topic:=/xtend/pointcloud
@@ -456,7 +456,7 @@ ros2 run octomap_server octomap_server_node \
   --ros-args \
   -p resolution:=0.05 \
   -p frame_id:=map \
-  -p sensor_model/max_range:=8.0 \
+  -p sensor_model/max_range:=5.0 \
   -p sensor_model/hit:=0.70 \
   -p sensor_model/miss:=0.40 \
   -p occupancy_thres:=0.50 \
