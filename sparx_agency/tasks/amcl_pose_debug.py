@@ -68,7 +68,7 @@ def show_world_map(world_binary: np.ndarray,
     # 3. Plot the AprilTag Ground Truth (Blue stars)
     if len(apriltag_history) > 0:
         tx, ty = zip(*apriltag_history)
-        plt.plot(tx, ty, 'b*', label='AprilTag (GT)', markersize=8, alpha=0.8)
+        plt.plot(tx, ty, 'b*', label='AprilTag (GT)', markersize=5, alpha=0.6)
     
     # 4. Plot Current Position and Orientation
     if current_loc is not None and current_loc[0] > 0 and current_loc[1] > 0:
@@ -214,7 +214,7 @@ def amcl_estimator_optimized(lut: ndarray,
                              world: ndarray,
                              z_measured_pose: ndarray,
                              prediction_uncertainty: tuple[int, int],
-                             window_size: int = 100):
+                             window_size: int = 20):
 
     x_min, x_max, y_min, y_max = get_local_window_bounds(robot_loc_prediction, world.shape, window_size)
     
@@ -260,8 +260,8 @@ class XtendAMCLNode(Node):
         super().__init__("xtend_amcl_node")
         
         self.bridge = CvBridge()
-        #self.map_resolution = 0.05  # 5cm per cell
-        self.map_resolution = 0.1  # 10cm per cell
+        self.map_resolution = 0.05  # 5cm per cell
+        #self.map_resolution = 0.1  # 10cm per cell
 
         self.fov_rad = math.radians(75.98) # Based on camera calibration
         
@@ -291,8 +291,11 @@ class XtendAMCLNode(Node):
         #self.map_origin_y = -2.4   
         # for cropped map (2,21) == -0.1, -1.05 and flip x and y 
         # map_origin = World_Position - (Cell_Index * Resolution)
-        self.map_origin_x = -1.050
-        self.map_origin_y = -0.100  
+
+        # Starting point: Centered in X (cell 23), 4.5m behind the front wall (cell 22)
+        # map_origin = 0.0 - (Cell_Index * Resolution)
+        self.map_origin_x = -1.150  # 0 - (23 * 0.05)
+        self.map_origin_y = -1.100  # 0 - (22 * 0.05)
 
         # Internal State Variables (Living in real-world meters)
 
@@ -447,7 +450,7 @@ class XtendAMCLNode(Node):
         # Execute AMCL ---
         robot_loc_estimate_cells, robot_orientation_estimate = amcl_estimator_optimized(
             self.lut, self.orientations, prediction_cells, self.odom_yaw, 
-            self.world_binary, z_measured_cells, prediction_uncertainty=(3, 3) 
+            self.world_binary, z_measured_cells, prediction_uncertainty=(2, 2) 
         )
 
         # Safety Check
