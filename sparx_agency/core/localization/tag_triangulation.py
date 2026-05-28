@@ -27,6 +27,7 @@ class TagWorldPose:
 class TagObservation:
     tag_id: int
     cam_T_tag: np.ndarray  # shape (4,4)
+    weight: float = 1.0    # Weight for fusion (e.g., tag area in pixels)
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,6 @@ class PoseEstimate:
     """
     world_T_cam: np.ndarray
     used_tag_ids: List[int]
-
 
 # -------------------------
 # Math utilities
@@ -222,6 +222,7 @@ def estimate_world_T_cam_from_single_tag(
 
 def fuse_world_T_cam(
     world_T_cam_list: List[np.ndarray],
+    weights: Optional[List[float]] = None,
     method: str = "avg_translation_keep_first_rotation",
 ) -> np.ndarray:
     """
@@ -235,14 +236,30 @@ def fuse_world_T_cam(
 
     if len(world_T_cam_list) == 1:
         return world_T_cam_list[0]
+    
+    # Fallback to equal weights if none are provided
+    if weights is None or len(weights) != len(world_T_cam_list):
+        weights = [1.0] * len(world_T_cam_list)
+
+    # Normalize weights so they sum to 1.0
+    total_weight = sum(weights)
+    if total_weight == 0:
+        normalized_weights = [1.0 / len(weights)] * len(weights)
+    else:
+        normalized_weights = [w / total_weight for w in weights]
+
+    # Calculate weighted average for translation (X, Y, Z)
+    avg_t = np.zeros(3)
+    for T, w in zip(world_T_cam_list, normalized_weights):
+        avg_t += T[:3, 3] * w
 
     if method != "avg_translation_keep_first_rotation":
         raise ValueError(f"Unsupported fuse method: {method}")
 
-    translations = np.array([M[:3, 3] for M in world_T_cam_list], dtype=float)
-    avg_t = np.mean(translations, axis=0)
+    # Select the rotation matrix from the tag with the highest weight
+    max_weight_idx = int(np.argmax(weights))
+    R = world_T_cam_list[max_weight_idx][:3, :3]
 
-    R = world_T_cam_list[0][:3, :3]
     out = np.eye(4, dtype=float)
     out[:3, :3] = R
     out[:3, 3] = avg_t
@@ -257,10 +274,11 @@ def estimate_camera_pose_from_tags(
     """
     Main entry point:
     - For each observation: compute world_T_cam using known world pose of that tag
-    - Fuse multiple tags
+    - Collect weights and fuse multiple tags
     """
     world_poses: List[np.ndarray] = []
     used_ids: List[int] = []
+    weights: List[float] = []
 
     for obs in observations:
         if obs.tag_id not in tag_map:
@@ -269,13 +287,24 @@ def estimate_camera_pose_from_tags(
             wTc = estimate_world_T_cam_from_single_tag(tag_map[obs.tag_id], obs.cam_T_tag)
             world_poses.append(wTc)
             used_ids.append(obs.tag_id)
+            weights.append(obs.weight)
         except Exception:
             continue
 
     if not world_poses:
         return None
+    
+    if len(world_poses) > 1:
+        print("\n[DEBUG FUSION] --- Multiple Tags Detected ---")
+        total_w = sum(weights)
+        for tid, w in zip(used_ids, weights):
+            norm_w = (w / total_w) * 100 if total_w > 0 else 0
+            print(f"  -> Tag ID: {tid} | Area: {w:.0f}px | Power: {norm_w:.1f}%")
+        print("---------------------------------------------")
+    
 
-    fused = fuse_world_T_cam(world_poses, method=fuse_method)
+    # Pass the collected weights to the fusion function
+    fused = fuse_world_T_cam(world_poses, weights=weights, method=fuse_method)
     return PoseEstimate(world_T_cam=fused, used_tag_ids=used_ids)
 
 

@@ -274,16 +274,24 @@ class TagTriangulationOpenCVTask:
                     )
                     if camera_T_tag is None:
                         continue
-                    
-                    observations.append(TagObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
 
+                    # Calculate the area of the tag in pixels to use as a confidence weight
                     area = float(cv2.contourArea(corners.astype(np.float32)))
+                    
+                    # Append observation with the calculated weight
+                    observations.append(TagObservation(
+                        tag_id=tag_id, 
+                        cam_T_tag=camera_T_tag,
+                        weight=area
+                    ))
+
                     detections_info.append(
                         {
                             "tag_id": tag_id,
                             "area_px2": area,
                             "corners_px": [[float(x), float(y)] for (x, y) in corners],
                         }
+                    
                     )
 
                 if not observations:
@@ -371,7 +379,10 @@ class TagTriangulationOpenCVTask:
                     margin = d.decision_margin
                     if tid in est.used_tag_ids:
                         size = self.tag_sizes.get(tid, self.default_tag_size)
-                        print(f"  -> ID: {tid} | Margin: {margin:.1f} | Size: {size}m")
+                        # Calculate the area again specifically for the printout
+                        corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+                        area = float(cv2.contourArea(corners.astype(np.float32)))
+                        print(f"  -> ID: {tid} | Margin: {margin:.1f} | Size: {size}m | Weight: {area:.0f}px")
                 print("-----------------------------------")
                 
                 out_pose = {
