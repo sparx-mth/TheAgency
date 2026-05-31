@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-
-from pathlib import Path
-
 import numpy as np
 import cv2
 import rclpy
@@ -10,21 +7,21 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped 
 from cv_bridge import CvBridge
-
-from sparx_agency.robots.common.helpers import load_camera_info_from_yaml, padded_camera_info, crop_resize_camera_info
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from pathlib import Path
+
+import message_filters
 import csv
 import os
 import math  
 import yaml
-from collections import deque
 
 
 class FlowDepthVelocityNode(Node):
     """
     SPARX ROS2 node:
-      - Subscribes to RGB + Depth
+      - Subscribes to RGB + Depth 
       - Loads camera intrinsics from YAML config
       - WLS Optical Flow + Depth Smoothing
       - Publishes velocity
@@ -33,31 +30,19 @@ class FlowDepthVelocityNode(Node):
 
     def __init__(self):
         super().__init__("flow_depth_velocity_node")
+
+        self.set_parameters([rclpy.parameter.Parameter(
+            "use_sim_time", rclpy.parameter.Parameter.Type.BOOL, True
+        )])
+
         # params
         self.declare_parameter("image_topic", "/simple_drone/front/image_raw")
         self.declare_parameter("depth_topic", "/depth_anything/depth")
-
-        # Read the camera_config_yaml parameter to get the camera_info
+        
         self.declare_parameter(
             "camera_config_yaml",
-            str(Path.home()  / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml")
+            str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml")
         )
-
-
-        self.declare_parameter("use_padded_camera_info", False)
-        self.declare_parameter("pad_left", 4)
-        self.declare_parameter("pad_top", 0)
-        self.declare_parameter("padded_width", 728)
-        self.declare_parameter("padded_height", 420)
-
-        self.declare_parameter("use_crop_resize_camera_info", True)
-        self.declare_parameter("crop_left", 90)
-        self.declare_parameter("crop_top", 0)
-        self.declare_parameter("crop_width", 540)
-        self.declare_parameter("crop_height", 420)
-        self.declare_parameter("output_width", 504)
-        self.declare_parameter("output_height", 392)
-
         # read the camera_info from the topic instead of from the YAML
         #self.declare_parameter("camera_info_topic", "/simple_drone/front/camera_info")
         self.declare_parameter("output_topic", "/flow_depth/velocity")
@@ -79,16 +64,35 @@ class FlowDepthVelocityNode(Node):
         self.declare_parameter("depth_median_window", 5)
         self.declare_parameter("depth_ema_alpha", 0.15) # EMA alpha for depth smoothing, between 0 and 1. Higher means more smoothing but more lag.
         self.declare_parameter("csv_filename", "/tmp/zone_velocities_log_no_imu.csv")
+        
+        self.declare_parameter("log_vel_csv_path", "/tmp/velocity_log.csv")
+        self.declare_parameter("log_pose_csv_path", "/tmp/pose_log.csv")
+        
         self.declare_parameter(
             "json_out_path",
             str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/estimated_trajectory.json"),
         )
-        self.declare_parameter("max_depth_age_sec", 1.5)
-        self.declare_parameter("max_depth_stamp_diff_sec", 10.0)
-        self.declare_parameter("log_status_every_sec", 2.0)
-        self.declare_parameter("max_rgb_depth_stamp_diff_sec", 0.10)
-
+        
         self.json_out_path = self.get_parameter("json_out_path").get_parameter_value().string_value
+
+        self.vel_csv_path = self.get_parameter("log_vel_csv_path").get_parameter_value().string_value
+        self.pose_csv_path = self.get_parameter("log_pose_csv_path").get_parameter_value().string_value
+
+        # Initialize velocity CSV file
+        self.vel_log_file = open(self.vel_csv_path, 'w', newline='')
+        self.vel_csv_writer = csv.writer(self.vel_log_file)
+        self.vel_csv_writer.writerow([
+            'timestamp', 'dt', 
+           # 'raw_vx', 'raw_vy', 'raw_vz', 
+           # 'filtered_vx', 'filtered_vy', 'filtered_vz', 
+            'pub_vx', 'pub_vy', 'pub_vz', 
+            'features_used'
+        ])
+
+        # Initialize pose CSV file
+        self.pose_log_file = open(self.pose_csv_path, 'w', newline='')
+        self.pose_csv_writer = csv.writer(self.pose_log_file)
+        self.pose_csv_writer.writerow(['timestamp', 'x', 'y', 'z'])
 
         self.trajectory_history = []
 
@@ -119,22 +123,6 @@ class FlowDepthVelocityNode(Node):
         self.show_debug = bool(self.get_parameter("show_debug").get_parameter_value().bool_value)
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
 
-        self.max_depth_age_sec = float(
-            self.get_parameter("max_depth_age_sec").get_parameter_value().double_value
-        )
-        self.max_depth_stamp_diff_sec = float(
-            self.get_parameter("max_depth_stamp_diff_sec").get_parameter_value().double_value
-        )
-        self.log_status_every_sec = float(
-            self.get_parameter("log_status_every_sec").get_parameter_value().double_value
-        )
-
-        self.max_rgb_depth_stamp_diff_sec = float(
-            self.get_parameter("max_rgb_depth_stamp_diff_sec")
-            .get_parameter_value()
-            .double_value
-        )
-
         self.latest_gt_vx = 0.0
         self.latest_gt_vy = 0.0
         self.latest_gt_vz = 0.0 
@@ -154,6 +142,7 @@ class FlowDepthVelocityNode(Node):
 
         camera_config_yaml = self.get_parameter("camera_config_yaml").get_parameter_value().string_value
         self.load_camera_intrinsics_from_yaml(camera_config_yaml)
+
         self.tracker = OpticalFlowTracker(
             max_corners=self.max_corners,
             min_corners=self.min_corners,
@@ -163,54 +152,27 @@ class FlowDepthVelocityNode(Node):
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-        )
-
-        general_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
+            depth=5,
             reliability=ReliabilityPolicy.RELIABLE,
         )
 
 
-        self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, general_qos)
+        self.vel_pub = self.create_publisher(Vector3Stamped, output_topic, image_qos)
         #self.caminfo_sub = self.create_subscription(CameraInfo, caminfo_topic, self.caminfo_callback, 10)
-        self.create_subscription(Twist, '/simple_drone/gt_vel', self.gt_vel_callback, general_qos)
+        self.create_subscription(Twist, '/simple_drone/gt_vel', self.gt_vel_callback, image_qos)
 
-        self.pose_sub = self.create_subscription(PoseStamped, pose_est_topic, self.pose_est_callback, general_qos)
+        self.pose_sub = self.create_subscription(PoseStamped, pose_est_topic, self.pose_est_callback, image_qos)
         # ------------------------------------------------
 
-        self.latest_depth_map = None
-        self.latest_depth_stamp = None
-        self.latest_depth_arrival_time = None
-
-        self.rgb_buffer = deque(maxlen=200)
-        self.max_rgb_depth_stamp_diff_sec = 0.10
-
-        self.rgb_count = 0
-        self.depth_count = 0
-        self.vel_pub_count = 0
-        self.match_fail_count = 0
-        self.depth_count = 0
-        self.depth_stale_count = 0
-        self.last_status_log_time = self.get_clock().now()
-
-        self.rgb_sub = self.create_subscription(
-            Image,
-            image_topic,
-            self.rgb_callback,
-            image_qos,
+        self.rgb_sub = message_filters.Subscriber(self, Image, image_topic,qos_profile=image_qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic,qos_profile=image_qos)
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.rgb_sub, self.depth_sub], queue_size=50, slop=0.05
         )
-
-        self.depth_sub = self.create_subscription(
-            Image,
-            depth_topic,
-            self.depth_callback,
-            general_qos,
-        )
+        self.ts.registerCallback(self.sync_callback)
 
 
+    
     def pose_est_callback(self, msg: PoseStamped):
         # unpack the position from the PoseStamped message
         x = msg.pose.position.x
@@ -223,15 +185,70 @@ class FlowDepthVelocityNode(Node):
         self.current_distance = math.sqrt(x**2 + y**2 + z**2)
 
         self.trajectory_history.append({
-            "image": f"frame_{len(self.trajectory_history):06d}.jpg",
+            "image": f"frame_{len(self.trajectory_history):06d}.jpg", 
             "pose": {
                 "x": float(x),
                 "y": float(y),
                 "z": float(z),
-                "yaw": 0.0
+                "yaw": 0.0  
             }
         })
+
+        # Log pose to CSV
+        stamp_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        self.pose_csv_writer.writerow([
+            f"{stamp_sec:.6f}", 
+            f"{x:.4f}", f"{y:.4f}", f"{z:.4f}"
+        ])
+        self.pose_log_file.flush()
     # ---------------------------------
+
+
+    def load_camera_intrinsics_from_yaml(self, yaml_path: str):
+        if not os.path.exists(yaml_path):
+            raise FileNotFoundError(f"Camera YAML not found: {yaml_path}")
+        
+        with open(yaml_path, "r") as f:
+            cfg = yaml.safe_load(f)
+
+        # Prefer projection_matrix P, because this is the effective pinhole model
+        # after rectification / undistortion.
+        if "projection_matrix" in cfg and "data" in cfg["projection_matrix"]:
+            P = cfg["projection_matrix"]["data"]
+
+            if len(P) < 12 or P[0] == 0.0:
+                raise ValueError(f"Invalid projection_matrix in YAML: {yaml_path}")
+
+            self.fx = float(P[0])
+            self.fy = float(P[5])
+            self.cx = float(P[2])
+            self.cy = float(P[6])
+
+            self.get_logger().info(
+                f"[Camera YAML] Loaded intrinsics from projection_matrix: "
+                f"fx={self.fx:.2f}, fy={self.fy:.2f}, "
+                f"cx={self.cx:.2f}, cy={self.cy:.2f}"
+            )
+            return
+
+        # Fallback to direct fx/fy/cx/cy
+        required = ["fx", "fy", "cx", "cy"]
+        if all(k in cfg for k in required):
+            self.fx = float(cfg["fx"])
+            self.fy = float(cfg["fy"])
+            self.cx = float(cfg["cx"])
+            self.cy = float(cfg["cy"])
+
+            self.get_logger().info(
+                f"[Camera YAML] Loaded raw intrinsics: "
+                f"fx={self.fx:.2f}, fy={self.fy:.2f}, "
+                f"cx={self.cx:.2f}, cy={self.cy:.2f}"
+            )
+            return
+
+        raise ValueError(
+            f"Could not find projection_matrix or fx/fy/cx/cy in YAML: {yaml_path}"
+        )
 
     def smooth_depth_map(self, raw_depth_map: np.ndarray) -> np.ndarray:
         if self.last_smoothed_depth is None:
@@ -268,261 +285,74 @@ class FlowDepthVelocityNode(Node):
         self.latest_gt_vy = msg.linear.y
         self.latest_gt_vz = msg.linear.z
 
-    def depth_callback(self, depth_msg: Image):
+    def sync_callback(self, rgb_msg: Image, depth_msg: Image):
         if self.fx is None or self.fy is None:
             return
 
-        self.depth_count += 1
-
         try:
+            # Convert ROS Image messages to OpenCV format
             depth_cv = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
-        except Exception as e:
-            self.get_logger().error(f"Depth convert failed: {e}")
-            return
-
-        depth_stamp = rclpy.time.Time.from_msg(depth_msg.header.stamp)
-        rgb_item, match_dt = self.find_closest_rgb(depth_stamp)
-
-        if rgb_item is None or match_dt > self.max_rgb_depth_stamp_diff_sec:
-            self.match_fail_count += 1
-            self.get_logger().warn(
-                f"No close RGB for depth. match_dt={match_dt:.3f}s, "
-                f"rgb_buffer={len(self.rgb_buffer)}, "
-                f"rgb_count={self.rgb_count}, depth_count={self.depth_count}",
-                throttle_duration_sec=2.0,
-            )
-            return
-
-        frame = rgb_item["frame"]
-        header = rgb_item["header"]
-
-        depth_map = np.asarray(depth_cv, dtype=np.float32)
-
-        if depth_map.shape[:2] != frame.shape[:2]:
-            self.get_logger().warn(
-                f"RGB/depth shape mismatch: rgb={frame.shape[:2]}, depth={depth_map.shape[:2]}. resizing depth.",
-                throttle_duration_sec=2.0,
-            )
-            depth_map = cv2.resize(
-                depth_map,
-                (frame.shape[1], frame.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-
-        depth_map = self.smooth_depth_map(depth_map)
-
-        if not hasattr(self, "_match_logged"):
-            self.get_logger().info(
-                f"First RGB/depth match: match_dt={match_dt:.6f}s, "
-                f"rgb_shape={frame.shape[:2]}, depth_shape={depth_map.shape[:2]}, "
-                f"rgb_stamp={header.stamp.sec}.{header.stamp.nanosec}, "
-                f"depth_stamp={depth_msg.header.stamp.sec}.{depth_msg.header.stamp.nanosec}"
-            )
-            self._match_logged = True
-
-        self.process_frame_with_depth(
-            frame=frame,
-            depth_map=depth_map,
-            header=header,
-        )
-
-    def rgb_callback(self, rgb_msg: Image):
-        try:
             frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
         except Exception as e:
-            self.get_logger().error(f"RGB convert failed: {e}")
+            self.get_logger().error(f"Convert failed: {e}")
             return
+        
+        # Apply smoothing to the depth map
+        depth_map = self.smooth_depth_map(np.asarray(depth_cv, dtype=np.float32))
 
-        stamp = rclpy.time.Time.from_msg(rgb_msg.header.stamp)
 
-        self.rgb_buffer.append({
-            "stamp": stamp,
-            "header": rgb_msg.header,
-            "frame": frame,
-        })
-
-        self.rgb_count += 1
-
-    def find_closest_rgb(self, target_stamp: rclpy.time.Time):
-        if not self.rgb_buffer:
-            return None, float("inf")
-
-        best = None
-        best_dt = float("inf")
-
-        for item in self.rgb_buffer:
-            dt = abs((item["stamp"] - target_stamp).nanoseconds) * 1e-9
-            if dt < best_dt:
-                best_dt = dt
-                best = item
-
-        if best is None:
-            return None, float("inf")
-
-        return best, best_dt
-
-    def process_frame_with_depth(self, frame, depth_map, header):
-        half_side = 2
+        # Extract the depth value at the center of the image for use in velocity scaling and as a fallback depth estimate
+        half_side = 2 
         u_idx = int(self.cx)
         v_idx = int(self.cy)
 
-        center_region = depth_map[
-            v_idx - half_side: v_idx + half_side + 1,
-            u_idx - half_side: u_idx + half_side + 1,
-        ]
+        center_region = depth_map[v_idx-half_side : v_idx+half_side+1, 
+                                u_idx-half_side : u_idx+half_side+1]
 
-        valid_center_depths = center_region[
-            np.isfinite(center_region) & (center_region > 0)
-            ]
-
+        valid_center_depths = center_region[np.isfinite(center_region) & (center_region > 0)]
         if valid_center_depths.size > 0:
             self.center_depth = np.mean(valid_center_depths) * self.depth_scale
 
-        flow_res = self.tracker.process(frame, header.stamp)
+        # Run the optical flow tracker and compute velocity
+        flow_res = self.tracker.process(frame, rgb_msg.header.stamp)
         if flow_res is None:
             return
 
-        vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
-            flow_res.good_old,
-            flow_res.good_new,
-            depth_map,
-            flow_res.dt,
+        # Compute velocity from flow and depth
+        raw_vx_mps, raw_vy_mps, raw_vz_mps, n_used = self.velocity_from_flow_and_depth(
+            flow_res.good_old, flow_res.good_new, depth_map, flow_res.dt
         )
 
-        vx_mps = self.vel_alpha * vx_mps + (1 - self.vel_alpha) * self.prev_vx
-        vy_mps = self.vel_alpha * vy_mps + (1 - self.vel_alpha) * self.prev_vy
-        vz_mps = self.vel_alpha * vz_mps + (1 - self.vel_alpha) * self.prev_vz
+        # Apply simple low-pass filtering to the velocity estimates to reduce noise
+        filtered_vx_mps = self.vel_alpha * raw_vx_mps + (1 - self.vel_alpha) * self.prev_vx
+        filtered_vy_mps = self.vel_alpha * raw_vy_mps + (1 - self.vel_alpha) * self.prev_vy
+        filtered_vz_mps = self.vel_alpha * raw_vz_mps + (1 - self.vel_alpha) * self.prev_vz
 
-        self.prev_vx, self.prev_vy, self.prev_vz = vx_mps, vy_mps, vz_mps
+        self.prev_vx, self.prev_vy, self.prev_vz = filtered_vx_mps, filtered_vy_mps, filtered_vz_mps
 
-        if abs(vx_mps) < 0.02:
-            vx_mps = 0.0
-        if abs(vy_mps) < 0.2:
-            vy_mps = 0.0
-        if abs(vz_mps) < 0.2:
-            vz_mps = 0.0
+        # Copy for publishing
+        vx_mps, vy_mps, vz_mps = filtered_vx_mps, filtered_vy_mps, filtered_vz_mps
+
+        if abs(vx_mps) < 0.02: vx_mps = 0.0
+        if abs(vy_mps) < 0.2: vy_mps = 0.0
+        if abs(vz_mps) < 0.2: vz_mps = 0.0
 
         vel_msg = Vector3Stamped()
-        vel_msg.header.stamp = header.stamp
+        vel_msg.header.stamp = rgb_msg.header.stamp
         vel_msg.header.frame_id = self.camera_frame
-        vel_msg.vector.x = float(vx_mps)
-        vel_msg.vector.y = float(vy_mps)
-        vel_msg.vector.z = float(vz_mps)
-
+        vel_msg.vector.x, vel_msg.vector.y, vel_msg.vector.z = float(vx_mps), float(vy_mps), float(vz_mps)
         self.vel_pub.publish(vel_msg)
-        self.vel_pub_count += 1
 
-        self.get_logger().info(
-            f"[vel] published={self.vel_pub_count}, "
-            f"vx={vx_mps:.3f}, vy={vy_mps:.3f}, vz={vz_mps:.3f}, used={n_used}",
-            throttle_duration_sec=1.0,
-        )
-
-        if self.show_debug:
-            vis = frame.copy()
-            self.draw_debug(vis, flow_res.good_old, flow_res.good_new, depth_map)
-            self.draw_minimap(vis, self.debug_path)
-
-            vel_txt = f"vx={vx_mps:.3f} vy={vy_mps:.3f} vz={vz_mps:.3f} used={n_used}"
-            cv2.putText(vis, vel_txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-
-            cv2.imshow("Flow+Depth Velocity", vis)
-            cv2.waitKey(1)
-
-    def sync_callback(self, rgb_msg: Image):
-        if self.fx is None or self.fy is None:
-            return
-
-        self.rgb_count += 1
-
-        try:
-            frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
-        except Exception as e:
-            self.get_logger().error(f"RGB convert failed: {e}")
-            return
-
-        if self.latest_depth_map is None or self.latest_depth_stamp is None:
-            self.maybe_log_status("waiting_for_depth")
-            self.get_logger().info(f"waiting_for_depth rgb count: {self.rgb_count} and depth count: {self.depth_count}")
-            return
-        self.get_logger().debug(f"rgb_count: {self.rgb_count}")
-        now = self.get_clock().now()
-        rgb_stamp = rclpy.time.Time.from_msg(rgb_msg.header.stamp)
-
-        depth_age_sec = (now - self.latest_depth_stamp).nanoseconds * 1e-9
-        depth_arrival_age_sec = (
-            (now - self.latest_depth_arrival_time).nanoseconds * 1e-9
-            if self.latest_depth_arrival_time is not None
-            else float("inf")
-        )
-        stamp_diff_sec = abs((rgb_stamp - self.latest_depth_stamp).nanoseconds) * 1e-9
-        self.get_logger().info(f"depth_age_sec: {depth_age_sec}")
-        self.get_logger().info(f"depth_arrival_age_sec: {depth_arrival_age_sec}")
-        self.get_logger().info(f"stamp_diff_sec: {stamp_diff_sec}")
-        self.get_logger().info(f"==========================================")
-        if depth_arrival_age_sec > self.max_depth_age_sec:
-            self.depth_stale_count += 1
-            self.maybe_log_status(
-                f"depth_arrival_stale age={depth_arrival_age_sec:.3f}s"
-            )
-            self.get_logger().info(f"depth_arrival_stale count: {self.depth_stale_count}")
-            return
-
-        if stamp_diff_sec > self.max_depth_stamp_diff_sec:
-            self.depth_stale_count += 1
-            self.maybe_log_status(
-                f"depth_stamp_too_far diff={stamp_diff_sec:.3f}s"
-            )
-            self.get_logger().info(f"depth_stamp_too_far count: {self.depth_stale_count}")
-            return
-
-        depth_map = self.smooth_depth_map(self.latest_depth_map.copy())
-        try:
-        # Extract the depth value at the center of the image for use in velocity scaling and as a fallback depth estimate
-            half_side = 2
-            u_idx = int(self.cx)
-            v_idx = int(self.cy)
-
-            center_region = depth_map[v_idx-half_side : v_idx+half_side+1,
-                                    u_idx-half_side : u_idx+half_side+1]
-
-            valid_center_depths = center_region[np.isfinite(center_region) & (center_region > 0)]
-            if valid_center_depths.size > 0:
-                self.center_depth = np.mean(valid_center_depths) * self.depth_scale
-
-            # Run the optical flow tracker and compute velocity
-            flow_res = self.tracker.process(frame, rgb_msg.header.stamp)
-            if flow_res is None:
-                self.flow_fail_count += 1
-                self.maybe_log_status("flow_failed")
-                return
-            # Compute velocity from flow and depth
-            vx_mps, vy_mps, vz_mps, n_used = self.velocity_from_flow_and_depth(
-                flow_res.good_old, flow_res.good_new, depth_map, flow_res.dt
-            )
-
-            # Apply simple low-pass filtering to the velocity estimates to reduce noise
-            vx_mps = self.vel_alpha * vx_mps + (1 - self.vel_alpha) * self.prev_vx
-            vy_mps = self.vel_alpha * vy_mps + (1 - self.vel_alpha) * self.prev_vy
-            vz_mps = self.vel_alpha * vz_mps + (1 - self.vel_alpha) * self.prev_vz
-
-            self.prev_vx, self.prev_vy, self.prev_vz = vx_mps, vy_mps, vz_mps
-
-
-            if abs(vx_mps) < 0.02: vx_mps = 0.0
-            if abs(vy_mps) < 0.2: vy_mps = 0.0
-            if abs(vz_mps) < 0.2: vz_mps = 0.0
-
-            vel_msg = Vector3Stamped()
-            vel_msg.header.stamp = rgb_msg.header.stamp
-            vel_msg.header.frame_id = self.camera_frame
-            vel_msg.vector.x, vel_msg.vector.y, vel_msg.vector.z = float(vx_mps), float(vy_mps), float(vz_mps)
-            self.vel_pub.publish(vel_msg)
-            self.vel_pub_count += 1
-            self.maybe_log_status("ok")
-        except Exception as e:
-            self.maybe_log_status("error")
-            self.get_logger().error(e)
+        # Log velocity to CSV
+        rgb_stamp_sec = float(rgb_msg.header.stamp.sec) + float(rgb_msg.header.stamp.nanosec) * 1e-9
+        self.vel_csv_writer.writerow([
+            f"{rgb_stamp_sec:.6f}", f"{flow_res.dt:.4f}",
+           # f"{raw_vx_mps:.4f}", f"{raw_vy_mps:.4f}", f"{raw_vz_mps:.4f}",
+           # f"{filtered_vx_mps:.4f}", f"{filtered_vy_mps:.4f}", f"{filtered_vz_mps:.4f}",
+            f"{vx_mps:.4f}", f"{vy_mps:.4f}", f"{vz_mps:.4f}",
+            n_used
+        ])
+        self.vel_log_file.flush()  # Ensure data is written to disk promptly
 
         # Visual Debug
         if self.show_debug:
@@ -658,148 +488,16 @@ class FlowDepthVelocityNode(Node):
         cv2.putText(vis, "Trajectory Map", (w - map_size - margin + 10, margin + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-    def load_camera_intrinsics_from_yaml(self, yaml_path: str):
-        base_info = load_camera_info_from_yaml(
-            yaml_path=yaml_path,
-            frame_id=self.camera_frame,
-        )
-
-        use_padded = bool(
-            self.get_parameter("use_padded_camera_info")
-            .get_parameter_value()
-            .bool_value
-        )
-        use_crop_resize = bool(
-            self.get_parameter("use_crop_resize_camera_info")
-            .get_parameter_value()
-            .bool_value
-        )
-
-        if use_padded:
-            pad_left = int(
-                self.get_parameter("pad_left")
-                .get_parameter_value()
-                .integer_value
-            )
-            pad_top = int(
-                self.get_parameter("pad_top")
-                .get_parameter_value()
-                .integer_value
-            )
-            padded_width = int(
-                self.get_parameter("padded_width")
-                .get_parameter_value()
-                .integer_value
-            )
-            padded_height = int(
-                self.get_parameter("padded_height")
-                .get_parameter_value()
-                .integer_value
-            )
-
-            camera_info = padded_camera_info(
-                base=base_info,
-                pad_left=pad_left,
-                pad_top=pad_top,
-                new_width=padded_width,
-                new_height=padded_height,
-            )
-
-
-            self.get_logger().info(
-                f"[Camera YAML] Using padded CameraInfo: "
-                f"{base_info.width}x{base_info.height} -> "
-                f"{camera_info.width}x{camera_info.height}, "
-                f"pad_left={pad_left}, pad_top={pad_top}"
-            )
-        elif use_crop_resize:
-            crop_left = int(self.get_parameter("crop_left").value)
-            crop_top = int(self.get_parameter("crop_top").value)
-            crop_width = int(self.get_parameter("crop_width").value)
-            crop_height = int(self.get_parameter("crop_height").value)
-            output_width = int(self.get_parameter("output_width").value)
-            output_height = int(self.get_parameter("output_height").value)
-
-            camera_info = crop_resize_camera_info(
-                base=base_info,
-                crop_left=crop_left,
-                crop_top=crop_top,
-                crop_width=crop_width,
-                crop_height=crop_height,
-                new_width=output_width,
-                new_height=output_height,
-            )
-
-            self.get_logger().info(
-                f"[Camera YAML] Using crop+resize CameraInfo: "
-                f"{base_info.width}x{base_info.height} -> "
-                f"crop=({crop_left},{crop_top},{crop_width},{crop_height}) -> "
-                f"{camera_info.width}x{camera_info.height}"
-            )
-
-        else:
-            camera_info = base_info
-
-            self.get_logger().info(
-                f"[Camera YAML] Using base CameraInfo: "
-                f"{camera_info.width}x{camera_info.height}"
-            )
-
-        # Prefer P because it is the effective rectified pinhole model.
-        if len(camera_info.p) >= 12 and float(camera_info.p[0]) > 0.0:
-            self.fx = float(camera_info.p[0])
-            self.fy = float(camera_info.p[5])
-            self.cx = float(camera_info.p[2])
-            self.cy = float(camera_info.p[6])
-            source = "projection_matrix P"
-        elif len(camera_info.k) >= 9 and float(camera_info.k[0]) > 0.0:
-            self.fx = float(camera_info.k[0])
-            self.fy = float(camera_info.k[4])
-            self.cx = float(camera_info.k[2])
-            self.cy = float(camera_info.k[5])
-            source = "camera_matrix K"
-        else:
-            raise ValueError(f"Invalid CameraInfo loaded from YAML: {yaml_path}")
-
-        self.camera_width = int(camera_info.width)
-        self.camera_height = int(camera_info.height)
-
-        self.get_logger().info(
-            f"[Camera YAML] Intrinsics from {source}: "
-            f"size={self.camera_width}x{self.camera_height}, "
-            f"fx={self.fx:.2f}, fy={self.fy:.2f}, "
-            f"cx={self.cx:.2f}, cy={self.cy:.2f}"
-        )
-
-    def maybe_log_status(self, reason: str = ""):
-        now = self.get_clock().now()
-        dt = (now - self.last_status_log_time).nanoseconds * 1e-9
-
-        if dt < self.log_status_every_sec:
-            return
-
-        self.last_status_log_time = now
-
-        depth_age = float("inf")
-        depth_stamp_age = float("inf")
-
-        if self.latest_depth_arrival_time is not None:
-            depth_age = (now - self.latest_depth_arrival_time).nanoseconds * 1e-9
-
-        if self.latest_depth_stamp is not None:
-            depth_stamp_age = (now - self.latest_depth_stamp).nanoseconds * 1e-9
-
-        self.get_logger().info(
-            f"[FlowDepth status] reason={reason}, "
-            f"rgb={self.rgb_count}, depth={self.depth_count}, "
-            f"vel={self.vel_pub_count}, flow_fail={self.flow_fail_count}, "
-            f"depth_stale={self.depth_stale_count}, "
-            f"depth_arrival_age={depth_age:.3f}s, "
-            f"depth_stamp_age={depth_stamp_age:.3f}s"
-        )
-
 
     def destroy_node(self):
+            if hasattr(self, 'vel_log_file') and not self.vel_log_file.closed:
+                self.vel_log_file.close()
+                self.get_logger().info(f"[CSV] Saved velocity log to {self.vel_csv_path}")
+            
+            if hasattr(self, 'pose_log_file') and not self.pose_log_file.closed:
+                self.pose_log_file.close()
+                self.get_logger().info(f"[CSV] Saved pose log to {self.pose_csv_path}")
+
             if self.trajectory_history:
                 try:
                     import json
@@ -808,7 +506,7 @@ class FlowDepthVelocityNode(Node):
                     self.get_logger().info(f"[JSON] Saved {len(self.trajectory_history)} poses to {self.json_out_path}")
                 except Exception as e:
                     self.get_logger().error(f"Failed to save JSON: {e}")
-
+                    
             super().destroy_node()
 
 def main():

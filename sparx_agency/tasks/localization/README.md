@@ -19,6 +19,7 @@ python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
   --camera_calib_path $HOME/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
   --tag_size_m 0.13 \
   --source ros
+  --min_margin 15.0
 ```
 
 Default Topic: /xtend/rgb

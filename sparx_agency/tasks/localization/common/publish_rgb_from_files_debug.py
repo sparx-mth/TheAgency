@@ -123,7 +123,7 @@ class RgbFilePublisher(Node):
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
         )
 
 

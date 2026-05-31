@@ -7,7 +7,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     rgb_dir_arg = DeclareLaunchArgument(
         'rgb_dir',
-        default_value=os.path.expanduser('~/Documents/xtend_da3_takes/xtend_rectified_depth_take_003_20260429_160647/rgb_rectified'),
+        default_value=os.path.expanduser('~/Documents/xtend_da3_takes/2026_05_04___11_15_19_700_65sec_4m'),
         description='Path to the RGB images directory'
     )
 
@@ -25,10 +25,10 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': False,
                 'show_debug': True,
-                'csv_filename': "/home/daphnaa/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv",
+                'csv_filename': "/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv",
                 'image_topic': '/xtend/rgb',
                 'depth_topic': '/xtend/depth_m',
-                'camera_info_topic': '/xtend/camera_info',
+                'camera_calib_path': 'sparx_agency/tasks/localization/config/front_camera_calib.yaml',
                 'depth_scale': 0.8
             }],
             output='screen'

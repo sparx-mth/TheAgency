@@ -1,4 +1,4 @@
-# Depth + Optical Flow Localization (ROS2)
+# Depth + Optical Flow Localization (ROS2) with Kalman filter
 
 This project demonstrates monocular localization using a combination of:
 
@@ -21,8 +21,8 @@ The pipeline is composed of three main stages:
 2. Motion Estimation (Flow + Depth)  
    Combine optical flow with depth to estimate metric velocity.
 
-3. Pose Integration & Evaluation  
-   Integrate velocity over time to estimate position and compare against GT pose.
+3. Kalman Filter Fusion & Evaluation  
+   Fuse Flow+Depth velocity with IMU measurements using robot_localization EKF, then export the estimated odometry to TUM format and compare against GT pose.
 
 ---
 
@@ -30,33 +30,45 @@ The pipeline is composed of three main stages:
 
 RGB Image  
 ↓  
-Depth Anything V2  
+Depth Anything V3  
 ↓  
 Depth Map + Visualization  
 ↓  
 Optical Flow + Depth  
 ↓  
-Metric Velocity  
+Metric Linear Velocity `/flow_depth/velocity`  
 ↓  
-Pose Integration  
+IMU + Flow/Depth Velocity Fusion  
 ↓  
-GT Pose Error & RMS Drift
+`robot_localization` EKF / Kalman Filter  
+↓  
+Estimated Odometry  
+↓  
+TUM Export  
+↓  
+EVO Evaluation vs Ground Truth
 
 ---
 
 ## ROS Topics
 
 ### Input
-- /simple_drone/front/image_raw
-- /simple_drone/front/camera_info
-- /simple_drone/odom
-- /clock
+- `/simple_drone/front/image_raw`
+- `/simple_drone/front/camera_info`
+- `/simple_drone/imu/out`
+- `/simple_drone/odom`
+- `/clock`
 
 ### Output
 - /depth_anything/depth
 - /depth_anything/depth_vis
 - /flow_depth/velocity
 - Console pose error logs
+
+
+### EKF / Kalman Output
+- `/odometry/filtered`
+- `/tf`
 
 ---
 
@@ -95,34 +107,56 @@ python3 -m sparx_agency.tasks.mapping.create_map_from_video \
   -r /debug/cloud_global:=/depth_anything/cloud
 ```
 
-### 2. Flow + Depth Velocity
+### 2. Flow + Depth Velocity Publisher
+
+This node estimates linear velocity from Optical Flow + Depth Anything and publishes it as `TwistWithCovarianceStamped` on `/flow_depth/velocity`.
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_imu \
-  --ros-args -p use_sim_time:=true -p show_debug:=true -p camera_config_yaml:=/home/user1/GIT/TheAgency/sparx_agency/localization/config/front_camera_calib.yaml  -p csv_filename:="/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv"
-```
+cd ~/GIT/TheAgency
+source .venv/bin/activate
 
-### 3. velocity_integrator
-
-```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrator \
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_imu_kalman \
   --ros-args \
   -p use_sim_time:=true \
-  -p target_frame:=/simple_drone/odom
+  -p show_debug:=true \
+  -p camera_frame:="/simple_drone/base_link" \
+  -p csv_filename:="/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv"
 ```
 
-### 4. Pose Evaluation
+
+### 3. Run EKF / Kalman Filter
+
+The EKF fuses the IMU measurements with the Flow+Depth linear velocity estimate.
+
+Configuration file:
 
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.pose_evaluator \
+sparx_agency/tasks/localization/ros2/depth_optical/assets/ekf_params.yaml
+
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+
+ros2 run robot_localization ekf_node \
   --ros-args \
   -p use_sim_time:=true \
-  -p csv_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/csv_results/pose_eval_run1.csv \
-  -p est_tum_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/est_tum.txt \
-  -p gt_tum_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/gt_tum.txt
+  --params-file /home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/ekf_params.yaml \
+  --log-level debug
 ```
 
-### 4. Play Rosbag
+### 4. Export Odometry to TUM Format
+
+After running the EKF, export the estimated odometry into TUM format for EVO evaluation.
+
+```bash
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+python3 -m sparx_agency.core.localization.odom_to_tum
+
+```
+
+
+
+### 5. Play Rosbag
 
 ```bash
 cd ~/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/bags_files
@@ -170,7 +204,14 @@ use the EVO tool:
 ```bash
 cd sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/
 source .venv/bin/activate
-evo_traj tum est_tum.txt --ref=gt_tum.txt -p --plot_mode=xyz
+cd ~/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results
+
+evo_traj tum est_tum.txt est_tum_kalman.txt \
+  --ref=gt_tum.txt \
+  -p \
+  -a \
+  --plot_mode=xyz
+  
 evo_ape tum gt_tum.txt est_tum.txt -p --plot_mode=xyz
 
 ```

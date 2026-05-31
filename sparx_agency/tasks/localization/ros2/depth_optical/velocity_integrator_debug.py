@@ -105,7 +105,7 @@ class VelocityIntegratorNode(Node):
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
         )
 
         # Pubs / Subs
@@ -246,7 +246,7 @@ class VelocityIntegratorNode(Node):
 
         # Publish
         est_msg = PoseStamped()
-        est_msg.header.stamp = msg.header.stamp
+        est_msg.header.stamp = self.get_clock().now().to_msg()
         est_msg.header.frame_id = self.target_frame
         
         # Position
