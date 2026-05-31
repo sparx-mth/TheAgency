@@ -190,7 +190,6 @@ class TagTriangulationOpenCVTask:
         
 
         if self.use_ros_image:
-           
             # Use the custom QoS profile instead of the default '10'
             self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, qos_profile)
 
@@ -241,8 +240,9 @@ class TagTriangulationOpenCVTask:
         try:
             while True:
                 # --- get frame ---
+                rclpy.spin_once(self.ros_node, timeout_sec=0.01)
+
                 if self.use_ros_image:
-                    rclpy.spin_once(self.ros_node, timeout_sec=0.02)
                     if self.latest_ros_image is None:
                         continue
                     frame = self.latest_ros_image.copy()
