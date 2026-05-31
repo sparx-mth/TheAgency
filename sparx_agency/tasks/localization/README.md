@@ -12,7 +12,7 @@ This document summarizes the main README files under:
 
 | README File                          | Main Topic                               | Purpose                                                                                                      |
 | ------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `README.md`                          | AprilTag Localization & Triangulation    | Full 6-DOF camera/drone pose estimation using known AprilTag world poses                                     |
+| `README_apriltag.md`                          | AprilTag Localization & Triangulation    | Full 6-DOF camera/drone pose estimation using known AprilTag world poses                                     |
 | `README_azimuth_apriltag.md`         | AprilTag Azimuth Estimation              | Single-image absolute camera heading estimation using AprilTag orientation                                   |
 | `README_AMCL.md`                     | Vision-Based AMCL Localization           | Fusion of Optical Flow odometry, Depth Anything V3, and grid-based Markov localization                       |
 | `ros2/depth_optical/README.md`       | Depth + Optical Flow Localization        | ROS2 visual odometry pipeline using Depth Anything, optical flow, velocity integration, and GT evaluation    |
