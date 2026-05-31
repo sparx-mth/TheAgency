@@ -196,44 +196,21 @@ echo "[AUTO] Re-check depth before localization"
 wait_for_topic_rate /xtend/depth_m 30 best_effort
 
 echo "[AUTO] Step 6: start localization"
-start_tmux xtend_flow_depth '
+start_tmux xtend_april_tag '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
 source /home/user/GIT/TheAgency/theagency_venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_separated \
-  --ros-args \
-  -p use_sim_time:=false \
-  -p show_debug:=false \
-  -p csv_filename:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv \
-  -p image_topic:=/xtend/rgb \
-  -p depth_topic:=/xtend/depth_m \
-  -p depth_scale:=0.8 \
-  -p turn_rate_threshold_deg:=4.0
+python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_size_m 0.13 \
+  --source ros \
+  --image_topic /xtend/rgb \
+  --no_vis
 '
-
-start_tmux xtend_velocity_integrator '
-cd /home/user/GIT/TheAgency
-source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
-export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrator \
-  --ros-args \
-  -p use_sim_time:=false \
-  -p target_frame:=odom \
-  -p init_from_gt:=false
-'
-
-start_tmux xtend_static_tf '
-source /opt/ros/humble/setup.bash
-export ROS_DOMAIN_ID=5
-ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom xtend_camera
-'
-
-wait_for_topic_name /xtend/pose_est 30 || true
-wait_for_topic_rate /xtend/pose_est 30 best_effort || true
+wait_for_topic_name /xtend/april_tag_pose 30 || true
+wait_for_topic_rate /xtend/april_tag_pose best_effort || true
 
 echo "[AUTO] Step 7: check planner containers"
 docker ps --format '{{.Names}}' | tee /tmp/xtend_docker_names.txt
@@ -350,8 +327,28 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
   -p loop:=false
 """,
     ),
+
+LaunchItem(
+        name="6. AprilTag triangulation (pose estimation)",
+        machine="jetson",
+        tmux_name="xtend_apriltag",
+        description=(
+            "Detects tag36h11 AprilTags in /xtend/rgb, estimates 6-DOF camera pose in map frame "
+            "via solvePnP + known tag world positions. "
+            "Publishes /xtend/april_tag_pose (PoseStamped). "
+            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
+        ),
+        command="""
+python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_size_m 0.13 \
+  --source ros \
+  --image_topic /xtend/rgb \
+  --no_vis
+""",
+    ),
     LaunchItem(
-        name="6. Optical-flow depth velocity node",
+        name="7. Optical-flow depth velocity node",
         machine="jetson",
         tmux_name="xtend_flow_depth",
         description="Subscribes to RGB/depth and estimates velocity from optical flow + depth.",
@@ -368,7 +365,7 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocit
 """,
     ),
     LaunchItem(
-        name="7. Velocity integrator",
+        name="8. Velocity integrator",
         machine="jetson",
         tmux_name="xtend_velocity_integrator",
         description="Integrates velocity estimate into pose/odom.",
@@ -381,21 +378,21 @@ python3 -m sparx_agency.tasks.localization.ros2.depth_optical.velocity_integrato
 """,
     ),
     LaunchItem(
-        name="8. Static transform odom -> xtend_camera",
+        name="9. Static transform odom -> xtend_camera",
         machine="jetson",
         tmux_name="xtend_static_tf",
         description="Publishes static transform odom -> xtend_camera.",
         command="ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 odom xtend_camera",
     ),
     LaunchItem(
-        name="9. PC manual UI",
+        name="10. PC manual UI",
         machine="pc",
         tmux_name="xtend_pc_ui",
         description="Manual ARM/TAKEOFF/LAND/DISARM/STOP UI. Movement can publish Twist.",
         command="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/ui.py",
     ),
     LaunchItem(
-        name="10. Planner: hospital world",
+        name="11. Planner: hospital world",
         machine="manual",
         tmux_name="planner_hospital",
         description="Manual planner step on Jetson/container: starts hospital environment.",
@@ -406,7 +403,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
 """,
     ),
     LaunchItem(
-        name="11. Planner container: FALCON adapter",
+        name="12. Planner container: FALCON adapter",
         machine="manual",
         tmux_name="planner_falcon",
         description="Run inside the planner container.",
@@ -414,7 +411,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
         command="roslaunch falcon_adapter real_drone.launch map_name:=office",
     ),
     LaunchItem(
-        name="12. Planner ROS bridge docker",
+        name="13. Planner ROS bridge docker",
         machine="manual",
         tmux_name="planner_ros_bridge",
         description="Manual ROS bridge step.",
@@ -425,7 +422,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
 """,
     ),
     LaunchItem(
-        name="13. FALCON RViz display",
+        name="14. FALCON RViz display",
         machine="manual",
         tmux_name="planner_rviz",
         description="Optional display command inside falcon container.",
@@ -433,7 +430,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
         command="docker exec -it falcon bash -lc 'roslaunch exploration_manager rviz.launch'",
     ),
     LaunchItem(
-        name="14. BEV click goal UI",
+        name="15. BEV click goal UI",
         machine="manual",
         tmux_name="planner_bev_goal",
         description="Optional click-goal command inside falcon container.",
