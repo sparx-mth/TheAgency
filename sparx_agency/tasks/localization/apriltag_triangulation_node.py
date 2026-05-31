@@ -122,6 +122,7 @@ class TagTriangulationOpenCVTask:
         fuse_method: str = "avg_translation_keep_first_rotation",
         nthreads: int = 2,
         qos_policy: str = "best_effort",
+        min_margin: float = 10.0,
     ):
         self.default_tag_size = float(tag_size_m)
         self.tag_map, self.tag_sizes = load_tag_world_map(tag_map_path, self.default_tag_size)
@@ -187,6 +188,7 @@ class TagTriangulationOpenCVTask:
 
         self.filtered_x = None
         self.alpha = 0.2
+        self.min_margin = float(min_margin)
         
 
         if self.use_ros_image:
@@ -302,7 +304,7 @@ class TagTriangulationOpenCVTask:
                     tag_id = int(d.tag_id)
                     margin = d.decision_margin
                     
-                    if margin < 35:
+                    if margin < self.min_margin:
                         print(f"[DEBUG] Skipping tag {tag_id} - Margin {margin:.2f} too low")
                         continue
                     if tag_id not in self.tag_map:
@@ -532,6 +534,7 @@ def main():
     ap.add_argument("--fuse_method", default="avg_translation_keep_first_rotation")
     ap.add_argument("--image_topic", default="/xtend/rgb", help="ROS image topic to listen to")
     ap.add_argument("--qos", choices=["best_effort", "reliable"], default="best_effort", help="QoS reliability policy for ROS subscription")
+    ap.add_argument("--min_margin", type=float, default=10.0, help="Minimum decision margin to accept a tag")
     args = ap.parse_args()
 
     src: Union[int, str]
@@ -553,6 +556,7 @@ def main():
         fuse_method=args.fuse_method,
         nthreads=args.nthreads,
         qos_policy=args.qos,
+        min_margin=args.min_margin,
     )
     task.run()
 
