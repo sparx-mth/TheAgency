@@ -521,7 +521,7 @@ class TagTriangulationOpenCVTask:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag_map_path", required=True, help="YAML: tag_id -> {xyz:[...], rpy:[...]} (radians)")
-    ap.add_argument("--camera_calib_path", required=True, help="YAML camera intrinsics/distortion. If empty, listens to ROS camera_info")
+    ap.add_argument("--camera_calib_path", default="", help="YAML camera intrinsics/distortion. If empty, listens to ROS camera_info")
     ap.add_argument("--camera_info_topic", default="/xtend/camera_info", help="ROS topic for CameraInfo")
     ap.add_argument("--tag_size_m", type=float, required=True)
     ap.add_argument("--source", default="0", help="camera index (0) or video path")
