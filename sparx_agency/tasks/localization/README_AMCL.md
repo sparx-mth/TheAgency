@@ -18,6 +18,9 @@ To run the full localization pipeline, open separate terminal windows and execut
 ### 1. Depth Processor Node (Depth Anything V3)
 Generates metric depth maps from RGB images using a TensorRT engine.
 ```bash
+cd ~/GIT/TheAgency
+source ~/depth_anything_ws/src/ros2-depth-anything-v3-trt/da3_venv/bin/activate
+
 python3 -m sparx_agency.tasks.mapping.ros2.depth_processor_node_debug \
   --ros-args \
   -p use_sim_time:=false \

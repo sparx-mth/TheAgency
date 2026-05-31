@@ -13,6 +13,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from geometry_msgs.msg import TwistStamped
 
 # Import Matplotlib for the live visualization
 import matplotlib.pyplot as plt
@@ -317,6 +318,11 @@ class XtendAMCLNode(Node):
         self.amcl_history_cells = []
 
         self.apriltag_history_cells = []
+        self.last_timestamp = None
+        self.odom_pose_meters = np.array([0.0, 0.0])  
+        self.odom_yaw = 0.0
+        self.has_odom = False
+
 
         # ------------------------------------------------------------------
         # 3. Load or Generate LUT
@@ -369,9 +375,10 @@ class XtendAMCLNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
         )
         
-        self.odom_sub = self.create_subscription(
-            PoseStamped, "/flow_depth/pose_est", self.odom_callback, image_qos
+        self.vel_sub = self.create_subscription(
+            TwistStamped, "/flow_depth/velocity", self.velocity_callback, 10
         )
+
         self.depth_sub = self.create_subscription(
             Image, "/xtend/depth_m", self.depth_callback, image_qos
         )
@@ -379,6 +386,37 @@ class XtendAMCLNode(Node):
         self.apriltag_sub = self.create_subscription(
             PoseStamped, "/xtend/april_tag_pose", self.apriltag_callback, image_qos
         )
+    
+    def velocity_callback(self, msg: TwistStamped):
+        """Callback to integrate velocity into a predicted position."""
+        current_time = msg.header.stamp.sec + (msg.header.stamp.nanosec * 1e-9)
+
+        if self.last_timestamp is None:
+            self.last_timestamp = current_time
+            return
+
+        dt = current_time - self.last_timestamp
+        self.last_timestamp = current_time
+
+        if dt > 0.5:  
+            self.get_logger().warn(f"Large dt detected: {dt:.2f}s. Skipping integration.")
+            return
+
+        v_x_map = -msg.twist.linear.y
+        v_y_map = msg.twist.linear.x
+        
+        v_yaw = msg.twist.angular.z 
+
+        self.odom_pose_meters[0] += v_x_map * dt
+        self.odom_pose_meters[1] += v_y_map * dt
+        self.odom_yaw += v_yaw * dt
+
+        map_w = self.world_binary.shape[0] * self.map_resolution
+        map_h = self.world_binary.shape[1] * self.map_resolution
+        self.odom_pose_meters[0] = np.clip(self.odom_pose_meters[0], self.map_origin_x, self.map_origin_x + map_w)
+        self.odom_pose_meters[1] = np.clip(self.odom_pose_meters[1], self.map_origin_y, self.map_origin_y + map_h)
+
+        self.has_odom = True
 
     def apriltag_callback(self, msg: PoseStamped):
         """Callback to store the Ground Truth position when an AprilTag is seen."""
@@ -479,6 +517,10 @@ class XtendAMCLNode(Node):
 
             self.amcl_pose_meters = np.array([est_world_x_m, est_world_y_m])
             self.amcl_yaw = robot_orientation_estimate
+            
+            self.odom_pose_meters = self.amcl_pose_meters.copy()
+            self.odom_yaw = self.amcl_yaw
+
         else:
             self.amcl_fail_count += 1
             self.get_logger().warn(f"❌ [AMCL FAILED] Estimate invalid! Total Fails: {self.amcl_fail_count}")
