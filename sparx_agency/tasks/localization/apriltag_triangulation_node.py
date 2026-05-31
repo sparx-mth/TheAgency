@@ -137,6 +137,13 @@ class TagTriangulationOpenCVTask:
         # 1. Initialize ROS Node FIRST (Always required for publishers/subscribers)
         rclpy.init()
         self.ros_node = rclpy.create_node('opencv_ros_hybrid')
+
+        reliability = QoSReliabilityPolicy.RELIABLE if qos_policy == "reliable" else QoSReliabilityPolicy.BEST_EFFORT
+        qos_profile = QoSProfile(
+            reliability=reliability,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
             
         self.calib_ready = False
         self.K = None
@@ -150,7 +157,7 @@ class TagTriangulationOpenCVTask:
             print(f"[DEBUG] Loaded camera calibration from YAML: {camera_calib_path}")
         else:
             print(f"[DEBUG] No calibration YAML provided. Waiting for CameraInfo on topic: {camera_info_topic}...")
-            self.ros_node.create_subscription(CameraInfo, camera_info_topic, self.camera_info_cb, 10)
+            self.ros_node.create_subscription(CameraInfo, camera_info_topic, self.camera_info_cb, qos_profile)
 
         #self.obj_pts = tag_object_points(float(tag_size_m))
 
@@ -174,7 +181,7 @@ class TagTriangulationOpenCVTask:
         self.latest_ros_image = None
         self.latest_ros_stamp = None
 
-        self.ros_node = rclpy.create_node('opencv_ros_hybrid')
+        #self.ros_node = rclpy.create_node('opencv_ros_hybrid')
         self.bridge = CvBridge()
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
 
@@ -183,15 +190,7 @@ class TagTriangulationOpenCVTask:
         
 
         if self.use_ros_image:
-            # Create QoS profile based on user input
-            reliability = QoSReliabilityPolicy.RELIABLE if qos_policy == "reliable" else QoSReliabilityPolicy.BEST_EFFORT
-            qos_profile = QoSProfile(
-                reliability=reliability,
-                history=QoSHistoryPolicy.KEEP_LAST,
-                depth=10
-            )
-            
-            
+           
             # Use the custom QoS profile instead of the default '10'
             self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, qos_profile)
 
