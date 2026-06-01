@@ -296,8 +296,13 @@ class XtendAMCLNode(Node):
         # map_origin = 0.0 - (Cell_Index * Resolution)
         #self.map_origin_x = -1.150  # 0 - (23 * 0.05)
         #self.map_origin_y = -1.100  # 0 - (22 * 0.05)
-        self.map_origin_x = -1.050
-        self.map_origin_y = -0.100  
+        #self.map_origin_x = -1.050
+        #self.map_origin_y = -0.100  
+
+               # Starting point: Centered in X (cell 23), 4.5m behind the front wall (cell 22)
+        # map_origin = 0.0 - (Cell_Index * Resolution)
+        self.map_origin_x = -1.150  # 0 - (23 * 0.05)
+        self.map_origin_y = -1.100  # 0 - (22 * 0.05)
 
         # Internal State Variables (Living in real-world meters)
 
@@ -452,7 +457,7 @@ class XtendAMCLNode(Node):
         # Execute AMCL ---
         robot_loc_estimate_cells, robot_orientation_estimate = amcl_estimator_optimized(
             self.lut, self.orientations, prediction_cells, self.odom_yaw, 
-            self.world_binary, z_measured_cells, prediction_uncertainty=(2, 2) 
+            self.world_binary, z_measured_cells, prediction_uncertainty=(5, 5) 
         )
 
         # Safety Check

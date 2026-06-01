@@ -13,7 +13,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import Vector3Stamped
 
 # Import Matplotlib for the live visualization
 import matplotlib.pyplot as plt
@@ -295,10 +295,9 @@ class XtendAMCLNode(Node):
 
         # Starting point: Centered in X (cell 23), 4.5m behind the front wall (cell 22)
         # map_origin = 0.0 - (Cell_Index * Resolution)
-        #self.map_origin_x = -1.150  # 0 - (23 * 0.05)
-        #self.map_origin_y = -1.100  # 0 - (22 * 0.05)
-        self.map_origin_x = -1.050
-        self.map_origin_y = -0.100  
+        self.map_origin_x = -1.150  # 0 - (23 * 0.05)
+        self.map_origin_y = -1.100  # 0 - (22 * 0.05)
+     
 
         # Internal State Variables (Living in real-world meters)
 
@@ -376,7 +375,7 @@ class XtendAMCLNode(Node):
         )
         
         self.vel_sub = self.create_subscription(
-            TwistStamped, "/flow_depth/velocity", self.velocity_callback, 10
+            Vector3Stamped, "/flow_depth/velocity", self.velocity_callback, 10
         )
 
         self.depth_sub = self.create_subscription(
@@ -387,7 +386,7 @@ class XtendAMCLNode(Node):
             PoseStamped, "/xtend/april_tag_pose", self.apriltag_callback, image_qos
         )
     
-    def velocity_callback(self, msg: TwistStamped):
+    def velocity_callback(self, msg: Vector3Stamped):
         """Callback to integrate velocity into a predicted position."""
         current_time = msg.header.stamp.sec + (msg.header.stamp.nanosec * 1e-9)
 
@@ -402,10 +401,10 @@ class XtendAMCLNode(Node):
             self.get_logger().warn(f"Large dt detected: {dt:.2f}s. Skipping integration.")
             return
 
-        v_x_map = -msg.twist.linear.y
-        v_y_map = msg.twist.linear.x
+        v_x_map = -msg.vector.y
+        v_y_map = msg.vector.x
         
-        v_yaw = msg.twist.angular.z 
+        v_yaw = msg.vector.z
 
         self.odom_pose_meters[0] += v_x_map * dt
         self.odom_pose_meters[1] += v_y_map * dt
