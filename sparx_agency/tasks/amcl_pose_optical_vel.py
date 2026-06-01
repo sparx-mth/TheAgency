@@ -59,7 +59,7 @@ def show_world_map(world_binary: np.ndarray,
     if len(odom_history) > 0:
         # Unzip the list of (x,y) tuples into separate x and y lists
         ox, oy = zip(*odom_history)
-        plt.plot(ox, oy, 'g--', label='Raw Odom (Optical Flow)', linewidth=1.5, alpha=0.7)
+        plt.plot(ox, oy, 'g--', label='Raw Odom (Optical Flow)', linewidth=4.5, alpha=0.7)
 
     # 2. Plot the Corrected AMCL Trajectory (Red solid line)
     if len(amcl_history) > 0:
@@ -69,7 +69,7 @@ def show_world_map(world_binary: np.ndarray,
     # 3. Plot the AprilTag Ground Truth (Blue stars)
     if len(apriltag_history) > 0:
         tx, ty = zip(*apriltag_history)
-        plt.plot(tx, ty, 'b*', label='AprilTag (GT)', markersize=5, alpha=0.6)
+        plt.plot(tx, ty, 'b*', label='AprilTag (GT)', markersize=3, alpha=0.6)
     
     # 4. Plot Current Position and Orientation
     if current_loc is not None and current_loc[0] > 0 and current_loc[1] > 0:
@@ -387,7 +387,9 @@ class XtendAMCLNode(Node):
         )
     
     def velocity_callback(self, msg: Vector3Stamped):
-        """Callback to integrate velocity into a predicted position."""
+        """Callback to integrate velocity into a predicted position (1D Forward Only)."""
+        
+        self.get_logger().info("!!! RUNNING NEW 1D CODE !!!")
         current_time = msg.header.stamp.sec + (msg.header.stamp.nanosec * 1e-9)
 
         if self.last_timestamp is None:
@@ -401,15 +403,30 @@ class XtendAMCLNode(Node):
             self.get_logger().warn(f"Large dt detected: {dt:.2f}s. Skipping integration.")
             return
 
-        v_x_map = -msg.vector.y
-        v_y_map = msg.vector.x
+        # =================================================================
+        # 1D OPTICAL FLOW INTEGRATION (FORWARD MOTION ONLY)
+        # =================================================================
         
-        v_yaw = msg.vector.z
+        # Pull the forward velocity. 
+        # Based on the mapping: Y-axis of the message represents backwards/forwards
+        # We negate it so moving forward is positive X in our map.
+        v_forward = -msg.vector.y
+        
+        # Force side-to-side and rotation velocities to absolute zero
+        v_side = 0.0
+        v_yaw = 0.0 
 
-        self.odom_pose_meters[0] += v_x_map * dt
-        self.odom_pose_meters[1] += v_y_map * dt
-        self.odom_yaw += v_yaw * dt
+        # We calculate how much the robot moved forward in meters
+        forward_step = v_forward * dt
 
+        # Apply the step strictly in the direction the robot is currently facing
+        # Since we forced v_yaw=0, self.odom_yaw will never change from its initial state (e.g. 0.0 rad)
+        # Thus, it will always just walk straight along the map's X axis!
+        self.odom_pose_meters[0] += forward_step * math.cos(self.odom_yaw)
+        self.odom_pose_meters[1] += forward_step * math.sin(self.odom_yaw)
+        self.odom_yaw += v_yaw * dt # (This adds 0.0)
+
+        # Keep within map bounds
         map_w = self.world_binary.shape[0] * self.map_resolution
         map_h = self.world_binary.shape[1] * self.map_resolution
         self.odom_pose_meters[0] = np.clip(self.odom_pose_meters[0], self.map_origin_x, self.map_origin_x + map_w)
@@ -489,7 +506,7 @@ class XtendAMCLNode(Node):
         # Execute AMCL ---
         robot_loc_estimate_cells, robot_orientation_estimate = amcl_estimator_optimized(
             self.lut, self.orientations, prediction_cells, self.odom_yaw, 
-            self.world_binary, z_measured_cells, prediction_uncertainty=(2, 2) 
+            self.world_binary, z_measured_cells, prediction_uncertainty=(10, 10) 
         )
 
         # Safety Check

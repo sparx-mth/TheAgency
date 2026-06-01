@@ -457,7 +457,7 @@ class XtendAMCLNode(Node):
         # Execute AMCL ---
         robot_loc_estimate_cells, robot_orientation_estimate = amcl_estimator_optimized(
             self.lut, self.orientations, prediction_cells, self.odom_yaw, 
-            self.world_binary, z_measured_cells, prediction_uncertainty=(5, 5) 
+            self.world_binary, z_measured_cells, prediction_uncertainty=(2, 2) 
         )
 
         # Safety Check
