@@ -35,7 +35,7 @@ _DEFAULT_ENGINE = os.path.expanduser(
     "~/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16.v2.engine"
 )
 _DEFAULT_YAML = os.path.expanduser(
-    "~/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml"
+    "~/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_728_420_padded.yaml"
 )
 _DEFAULT_TAG_MAP = os.path.expanduser(
     "~/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml"

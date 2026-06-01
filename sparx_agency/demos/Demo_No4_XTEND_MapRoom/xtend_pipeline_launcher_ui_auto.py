@@ -280,7 +280,7 @@ LAUNCH_ITEMS: list[LaunchItem] = [
                   -p metric_scale_divisor:=300.0 \
                   -p clip_min_m:=0.2 \
                   -p clip_max_m:=8.0 \
-                  -p depth_encoding:=16UC1
+                  -p depth_encoding:=32FC1
                 """,
     ),
     LaunchItem(
