@@ -508,10 +508,15 @@ def main():
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--out", default="/tmp/da3_metric_compare")
     parser.add_argument("--depth-encoding", choices=["32FC1", "16UC1"], default="32FC1")
+    parser.add_argument("--max-images", type=int, default=None,
+                        help="Cap the number of images used (default: all)")
 
     args = parser.parse_args()
 
     files = find_images(args.images)
+    if args.max_images and len(files) > args.max_images:
+        step = len(files) // args.max_images
+        files = files[::step][: args.max_images]
 
     print(f"Images: {args.images}")
     print(f"Found: {len(files)}")

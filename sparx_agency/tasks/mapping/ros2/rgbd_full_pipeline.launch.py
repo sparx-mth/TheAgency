@@ -11,7 +11,7 @@ Launches the full RGBD mapping pipeline (per-frame, TRT DA3METRIC-LARGE):
 
 Namespace
   xtend_ns (default: xtend) controls the /xtend/ topic prefix for multi-drone support.
-  All drone-side topics are /{xtend_ns}/…  Pipeline-internal topics stay on /rgbd/…
+  All drone-side topics are /{xtend_ns}/…  Pipeline-internal topics stay on /xtend/…
 
 Octomap log-odds thresholds (tunable via launch args):
   sensor_model/hit   = 0.70  → P(occupied | ray_hit),   adds  +0.85 log-odds
@@ -27,7 +27,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
-_ROS_PY = os.path.expanduser("~/venvs/ros_py310/bin/python")
+_ROS_PY = os.path.expanduser("~/GIT/TheAgency/theagency_venv/bin/python")
 _DA3_PY = os.path.expanduser(
     "~/depth_anything_ws/src/ros2-depth-anything-v3-trt/da3_venv/bin/python3"
 )
@@ -94,8 +94,8 @@ def generate_launch_description():
             "source_topic":       source_topic,
             "camera_config_yaml": LaunchConfiguration("config_yaml"),
             "publish_hz":         LaunchConfiguration("publish_hz"),
-            "rgb_topic":          "/rgbd/rgb",
-            "camera_info_topic":  "/rgbd/camera_info",
+            "rgb_topic":          "/xtend/rgb",
+            "camera_info_topic":  "/xtend/camera_info",
             "frame_id":           "xtend_camera",
             "loop":               False,
         }],
@@ -114,20 +114,20 @@ def generate_launch_description():
             parameters=[{
                 "engine_path":      LaunchConfiguration("engine_path"),
                 "config_yaml":      LaunchConfiguration("config_yaml"),
-                "image_topic":      "/rgbd/rgb",
-                "depth_topic":      "/rgbd/depth_m",
+                "image_topic":      "/xtend/rgb",
+                "depth_topic":      "/xtend/depth_m",
                 "depth_encoding":   "32FC1",
                 "camera_info_mode": "crop_resize",
                 "clip_max_m":       LaunchConfiguration("max_depth_m"),
                 "publish_cloud":    True,
-                "pointcloud_topic": "/rgbd/pointcloud",
+                "pointcloud_topic": "/xtend/pointcloud",
             }],
             output="screen",
         )],
     )
 
     # ── Node 3: Octomap Server ────────────────────────────────────────────────
-    # Subscribes to /rgbd/pointcloud (xtend_camera frame).
+    # Subscribes to /xtend/pointcloud (xtend_camera frame).
     # Raycasts from sensor origin (resolved via TF) to each point:
     #   - marks voxels along ray as FREE  (log-odds -= 0.41)
     #   - marks endpoint voxel as HIT     (log-odds += 0.85)
@@ -146,7 +146,7 @@ def generate_launch_description():
             "occupancy_max_z":        LaunchConfiguration("max_z"),
             "filter_ground":          False,
         }],
-        remappings=[("cloud_in", "/rgbd/pointcloud")],
+        remappings=[("cloud_in", "/xtend/pointcloud")],
         output="screen",
     )
 
@@ -166,7 +166,7 @@ def generate_launch_description():
 
     # ── Node 5: AprilTag triangulation ───────────────────────────────────────
     # Uses argparse (not ROS2 params) → ExecuteProcess.
-    # mock mode: subscribes to /rgbd/rgb (relay from frame_source_node)
+    # mock mode: subscribes to /xtend/rgb (relay from frame_source_node)
     # live mode: subscribes to /{xtend_ns}/rgb directly (set image_topic arg)
     # Publishes camera pose to /{xtend_ns}/april_tag_pose
     apriltag = TimerAction(
@@ -179,8 +179,7 @@ def generate_launch_description():
                 "--camera_calib_path", _DEFAULT_YAML,
                 "--tag_size_m",        "0.13",
                 "--source",            "ros",
-                "--image_topic",       "/rgbd/rgb",
-                "--pose_topic",        april_pose_topic,
+                "--image_topic",       "/xtend/rgb",
                 "--no_vis",
             ],
             output="screen",
