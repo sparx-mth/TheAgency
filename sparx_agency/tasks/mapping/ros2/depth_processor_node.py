@@ -64,6 +64,7 @@ class DepthProcessorNode(Node):
         self.declare_parameter("small_lut_clip_max_m", 10.0)
         self.declare_parameter("apply_metric_focal_scaling", True)
         self.declare_parameter("metric_scale_divisor", 300.0)
+        self.declare_parameter("metric_output_scale", 1.0)  # e.g. 0.88 for DA2-metric-indoor-small
 
         self.engine_path = self.get_parameter("engine_path").value
         self.config_yaml = self.get_parameter("config_yaml").value
@@ -85,6 +86,7 @@ class DepthProcessorNode(Node):
         self.small_lut_clip_max_m = float(self.get_parameter("small_lut_clip_max_m").value)
         self.apply_metric_focal_scaling = bool(self.get_parameter("apply_metric_focal_scaling").value)
         self.metric_scale_divisor = float(self.get_parameter("metric_scale_divisor").value)
+        self.metric_output_scale = float(self.get_parameter("metric_output_scale").value)
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -191,14 +193,14 @@ class DepthProcessorNode(Node):
         if self.camera_info_msg is None:
             raise RuntimeError("CameraInfo was not loaded from config")
 
-        # Prefer projection matrix P for rectified images.
-        fx = float(self.camera_info_msg.p[0])
-        fy = float(self.camera_info_msg.p[5])
+        # DA3 spec: focal from intrinsic matrix K (not P which may differ for rectified images).
+        fx = float(self.camera_info_msg.k[0])
+        fy = float(self.camera_info_msg.k[4])
 
         if fx <= 0.0 or fy <= 0.0:
-            # Fallback to raw camera matrix K.
-            fx = float(self.camera_info_msg.k[0])
-            fy = float(self.camera_info_msg.k[4])
+            # Fallback to projection matrix P.
+            fx = float(self.camera_info_msg.p[0])
+            fy = float(self.camera_info_msg.p[5])
 
         focal_px = 0.5 * (fx + fy)
 
