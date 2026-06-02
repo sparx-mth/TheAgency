@@ -39,6 +39,9 @@ class AprilTagPosePlotter(Node):
         self.xs = []
         self.ys = []
         self.yaws = []
+
+        self.prev_raw_yaw = None
+        self.yaw_offset = 0.0
         
 
         self.frame_count = 0 
@@ -105,7 +108,18 @@ class AprilTagPosePlotter(Node):
         qw = msg.pose.orientation.w
 
         yaw_rad = yaw_from_quaternion(qx, qy, qz, qw)
-        yaw_deg = math.degrees(yaw_rad)
+        raw_yaw_deg = math.degrees(yaw_rad)
+
+        if self.prev_raw_yaw is not None:
+            delta = raw_yaw_deg - self.prev_raw_yaw
+            if delta > 180:
+                self.yaw_offset -= 360
+            elif delta < -180:
+                self.yaw_offset += 360
+
+        self.prev_raw_yaw = raw_yaw_deg
+        
+        yaw_deg = raw_yaw_deg + self.yaw_offset
 
         self.frames.append(self.frame_count)
         self.xs.append(x)
