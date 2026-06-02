@@ -39,6 +39,7 @@ class AprilTagPosePlotter(Node):
         self.xs = []
         self.ys = []
         self.yaws = []
+        
 
         self.frame_count = 0 
 
@@ -152,7 +153,7 @@ class AprilTagPosePlotter(Node):
         
         # Dynamically adjust Yaw plot limits (show trailing window of 100 frames)
         current_frame = self.frames[-1]
-        self.ax_yaw.set_xlim(max(0, current_frame - 100), max(50, current_frame + 10))
+        self.ax_yaw.set_xlim(0, max(50, current_frame + 10))
         
         if self.yaws:
             min_yaw = min(self.yaws)
