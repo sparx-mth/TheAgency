@@ -70,8 +70,8 @@ class AprilTagPosePlotter(Node):
         self.ax_xy.set_ylabel("Y [m]")
 
         # Fixed axis limits: -4 to 4 meters
-        self.ax_xy.set_xlim(-4, 4)
-        self.ax_xy.set_ylim(-4, 4)
+        self.ax_xy.set_xlim(-1, 4)
+        self.ax_xy.set_ylim(-4, 1)
         self.ax_xy.grid(True)
         self.ax_xy.legend()
 

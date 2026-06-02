@@ -32,7 +32,7 @@ LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped.npy
 GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8.npy'
 #LUT_FILE_PATH = Path('sparx_agency/tasks/localization/data/saved_lut_cropped_res_0_1.npy')
 #GRID_FILE_PATH = 'sparx_agency/tasks/localization/data/cropped_occ_grid_int8_res_0_1.npy'
-SIGMA = 2.0  # Increased for realistic sensor noise tolerance to prevent math crashes
+SIGMA = 3.0  # Increased for realistic sensor noise tolerance to prevent math crashes
 MAX_HISTORY = 1000  # Max number of past poses to keep for visualization (if needed)
 
 # ==============================================================================
@@ -457,7 +457,7 @@ class XtendAMCLNode(Node):
         # Execute AMCL ---
         robot_loc_estimate_cells, robot_orientation_estimate = amcl_estimator_optimized(
             self.lut, self.orientations, prediction_cells, self.odom_yaw, 
-            self.world_binary, z_measured_cells, prediction_uncertainty=(2, 2) 
+            self.world_binary, z_measured_cells, prediction_uncertainty=(10, 10) 
         )
 
         # Safety Check

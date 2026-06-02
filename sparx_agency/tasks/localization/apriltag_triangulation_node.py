@@ -187,7 +187,7 @@ class TagTriangulationOpenCVTask:
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
 
         self.filtered_x = None
-        self.alpha = 0.2
+        self.alpha = 0.1
         self.min_margin = float(min_margin)
         
 
