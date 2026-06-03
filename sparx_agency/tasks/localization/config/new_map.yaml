@@ -1,0 +1,63 @@
+# the drone is located at the origin (0, 0, 1) , in 4.5 meters there is a wall with tag 12, in the end of the hallway.
+tags:
+
+ # the first one
+  5:
+    xyz: [4.5, 0, 0.65]
+    rpy: [-1.5708, 0, -1.5708]
+    size: 0.28
+
+
+#
+  1:
+    xyz: [2.55, -2.3, 0.97]
+    rpy: [-1.5708, 0,  -3.0752]
+    size: 0.28
+
+
+#
+  10:
+    xyz: [3.13, -0.82, 1.0]
+    rpy: [-1.5708,  0, -1.5708]
+    size: 0.2
+
+
+ # the first one
+  3:
+    xyz: [1.45, -2.07, 1.07]
+    rpy: [-1.5708, 0, -3.1416]
+    size: 0.28
+
+
+#  near the table ( turn right -90 degrees+ -90 degrees = 180 degrees)
+#  6:
+#    xyz: [-1.50, -1.50, 1.1]
+#    rpy: [-1.5708,  0, 1.5708]
+#    size: 0.195
+
+ # the first one
+  9:
+    xyz: [-1.50, -1.50, 1.1]
+    rpy: [-1.5708,  0, 1.3734]
+    size: 0.28
+
+ # the first one
+  8:
+    xyz: [0.15, -4.7, 1.0]
+    rpy: [-1.5708,  0, -3.1416]
+    size: 0.195
+
+
+ # the first one
+  0:
+    xyz: [1.50, -3.3, 1.15]
+    rpy: [-1.5708, 0, -1.5708]
+    size: 0.2
+
+ # the first one
+  2:
+    xyz: [1.7, 0.75, 1.0]
+    rpy: [-1.5708, 0, 0]
+    size: 0.2
+
+

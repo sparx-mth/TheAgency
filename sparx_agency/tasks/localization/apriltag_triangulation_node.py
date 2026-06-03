@@ -45,7 +45,6 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Int32MultiArray
 from cv_bridge import CvBridge
 
-
 from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
     TagObservation,
@@ -84,13 +83,13 @@ def load_tag_world_map(path: str, default_size: float) -> Tuple[Dict[int, TagWor
 
     out_poses: Dict[int, TagWorldPose] = {}
     out_sizes: Dict[int, float] = {}
-    
+
     for k, v in tags.items():
         tid = int(k)
         xyz = tuple(float(x) for x in v["xyz"])
         rpy = tuple(float(x) for x in v["rpy"])
         out_poses[tid] = TagWorldPose(xyz=xyz, rpy=rpy)
-        
+
         # Pull size from YAML, fallback to default_size if not specified
         out_sizes[tid] = float(v.get("size", default_size))
 
@@ -109,20 +108,20 @@ class TagTriangulationOpenCVTask:
     """
 
     def __init__(
-        self,
-        tag_map_path: str,
-        camera_calib_path: str = "",
-        tag_size_m: float= 0.13,
-        video_source: Union[int, str] = 0,
-        ros_topic: str = "",
-        camera_info_topic: str = "/xtend/camera_info",
-        tag_family: str = "tag36h11",
-        visualize: bool = True,
-        out_json_path: str = "",
-        fuse_method: str = "avg_translation_keep_first_rotation",
-        nthreads: int = 2,
-        qos_policy: str = "best_effort",
-        min_margin: float = 10.0,
+            self,
+            tag_map_path: str,
+            camera_calib_path: str = "",
+            tag_size_m: float = 0.13,
+            video_source: Union[int, str] = 0,
+            ros_topic: str = "",
+            camera_info_topic: str = "/xtend/camera_info",
+            tag_family: str = "tag36h11",
+            visualize: bool = True,
+            out_json_path: str = "",
+            fuse_method: str = "avg_translation_keep_first_rotation",
+            nthreads: int = 2,
+            qos_policy: str = "best_effort",
+            min_margin: float = 10.0,
     ):
         self.default_tag_size = float(tag_size_m)
         self.tag_map, self.tag_sizes = load_tag_world_map(tag_map_path, self.default_tag_size)
@@ -134,7 +133,7 @@ class TagTriangulationOpenCVTask:
 
             world_T_tag = world_T_tag_from_pose(pose)
             print_transform_debug(f"world_T_tag for tag {tag_id}", world_T_tag)
-        
+
         # 1. Initialize ROS Node FIRST (Always required for publishers/subscribers)
         rclpy.init()
         self.ros_node = rclpy.create_node('opencv_ros_hybrid')
@@ -145,7 +144,7 @@ class TagTriangulationOpenCVTask:
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
-            
+
         self.calib_ready = False
         self.K = None
         self.D = None
@@ -160,7 +159,7 @@ class TagTriangulationOpenCVTask:
             print(f"[DEBUG] No calibration YAML provided. Waiting for CameraInfo on topic: {camera_info_topic}...")
             self.ros_node.create_subscription(CameraInfo, camera_info_topic, self.camera_info_cb, qos_profile)
 
-        #self.obj_pts = tag_object_points(float(tag_size_m))
+        # self.obj_pts = tag_object_points(float(tag_size_m))
 
         self.detector = make_detector(tag_family, nthreads=nthreads)
 
@@ -182,21 +181,22 @@ class TagTriangulationOpenCVTask:
         self.latest_ros_image = None
         self.latest_ros_stamp = None
 
-        #self.ros_node = rclpy.create_node('opencv_ros_hybrid')
+        # self.ros_node = rclpy.create_node('opencv_ros_hybrid')
         self.bridge = CvBridge()
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
 
         self.filtered_x = None
-        self.alpha = 0.2
+        self.filtered_q = None
+
+        self.alpha = 0.1
         self.min_margin = float(min_margin)
-        
 
         if self.use_ros_image:
             # Use the custom QoS profile instead of the default '10'
             self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, qos_profile)
 
         if self.use_ros_image:
-            pass # ROS subscription is already handled above, skip OpenCV VideoCapture
+            pass  # ROS subscription is already handled above, skip OpenCV VideoCapture
         elif isinstance(video_source, str) and video_source.startswith("dir:"):
             self.image_dir = Path(video_source[4:]).expanduser().resolve()
             if not self.image_dir.exists():
@@ -212,7 +212,7 @@ class TagTriangulationOpenCVTask:
             self.latest_ros_stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         except Exception as e:
             print(f"CV Bridge error: {e}")
-    
+
     def camera_info_cb(self, msg: CameraInfo):
         """ Callback to extract K and D matrices directly from ROS """
         if not self.calib_ready:
@@ -222,7 +222,6 @@ class TagTriangulationOpenCVTask:
             self.D = np.array(msg.d, dtype=np.float64)
             self.calib_ready = True
             print("[DEBUG] Received CameraInfo from ROS! Calibration is ready.")
-
 
     def _log_json(self, record: dict):
         if self._json_f is None:
@@ -235,7 +234,6 @@ class TagTriangulationOpenCVTask:
         files.sort()
         return files
 
- 
     def run(self):
         processed: set[str] = set()
 
@@ -294,7 +292,6 @@ class TagTriangulationOpenCVTask:
                     # Skip frame processing until we get the camera calibration
                     continue
 
-
                 dets = self.detector.detect(gray)
 
                 observations: List[TagObservation] = []
@@ -303,7 +300,7 @@ class TagTriangulationOpenCVTask:
                 for d in dets:
                     tag_id = int(d.tag_id)
                     margin = d.decision_margin
-                    
+
                     if margin < self.min_margin:
                         print(f"[DEBUG] Skipping tag {tag_id} - Margin {margin:.2f} too low")
                         continue
@@ -326,10 +323,10 @@ class TagTriangulationOpenCVTask:
 
                     # Calculate the area of the tag in pixels to use as a confidence weight
                     area = float(cv2.contourArea(corners.astype(np.float32)))
-                    
+
                     # Append observation with the calculated weight
                     observations.append(TagObservation(
-                        tag_id=tag_id, 
+                        tag_id=tag_id,
                         cam_T_tag=camera_T_tag,
                         weight=area
                     ))
@@ -340,7 +337,7 @@ class TagTriangulationOpenCVTask:
                             "area_px2": area,
                             "corners_px": [[float(x), float(y)] for (x, y) in corners],
                         }
-                    
+
                     )
 
                 if not observations:
@@ -355,7 +352,7 @@ class TagTriangulationOpenCVTask:
                             2,
                         )
                         cv2.imshow("tag_triangulation", frame)
-                        
+
                         # Wait 1ms to refresh the display. Press 'q' or 'ESC' to quit.
                         k = cv2.waitKey(1) & 0xFF
                         if k in (27, ord("q")):
@@ -389,12 +386,12 @@ class TagTriangulationOpenCVTask:
                         }
                     )
                     continue
-                    
+
                 cv_to_ros = np.array([
-                    [ 0.0, -1.0,  0.0,  0.0],
-                    [ 0.0,  0.0, -1.0,  0.0],
-                    [ 1.0,  0.0,  0.0,  0.0],
-                    [ 0.0,  0.0,  0.0,  1.0]
+                    [0.0, -1.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]
                 ], dtype=float)
 
                 world_T_ros = est.world_T_cam @ cv_to_ros
@@ -410,8 +407,26 @@ class TagTriangulationOpenCVTask:
 
                 x, y, z = self.filtered_x, self.filtered_y, self.filtered_z
 
+                q_raw = np.array([qx, qy, qz, qw])
+                if self.filtered_q is None:
+                    self.filtered_q = q_raw
+                else:
+                    if np.dot(self.filtered_q, q_raw) < 0.0:
+                        q_raw = -q_raw
+
+                    self.filtered_q = self.alpha * q_raw + (1 - self.alpha) * self.filtered_q
+                    self.filtered_q /= np.linalg.norm(self.filtered_q)
+
+                qx, qy, qz, qw = self.filtered_q
+
                 # --- Format and print clean summary ---
-                yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+                # yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+
+                yaw_rad = math.atan2(
+                    2.0 * (qw * qz + qx * qy),
+                    1.0 - 2.0 * (qy * qy + qz * qz)
+                )
+
                 yaw_deg = math.degrees(yaw_rad)
 
                 print(f"\n--- Pose Update [{stamp_sec:.2f}] ---")
@@ -427,7 +442,7 @@ class TagTriangulationOpenCVTask:
                         area = float(cv2.contourArea(corners.astype(np.float32)))
                         print(f"  -> ID: {tid} | Margin: {margin:.1f} | Size: {size}m | Weight: {area:.0f}px")
                 print("-----------------------------------")
-                
+
                 out_pose = {
                     "position_xyz_m": [float(self.filtered_x), float(self.filtered_y), float(self.filtered_z)],
                     "quat_xyzw": [float(qx), float(qy), float(qz), float(qw)],
@@ -439,7 +454,7 @@ class TagTriangulationOpenCVTask:
                 pose_msg.header.frame_id = "world"
                 pose_msg.header.stamp.sec = int(stamp_sec)
                 pose_msg.header.stamp.nanosec = int((stamp_sec - int(stamp_sec)) * 1e9)
-                
+
                 pose_msg.pose.position.x = float(x)
                 pose_msg.pose.position.y = float(y)
                 pose_msg.pose.position.z = float(z)
@@ -447,7 +462,7 @@ class TagTriangulationOpenCVTask:
                 pose_msg.pose.orientation.y = float(qy)
                 pose_msg.pose.orientation.z = float(qz)
                 pose_msg.pose.orientation.w = float(qw)
-                
+
                 self.pose_pub.publish(pose_msg)
 
                 self._log_json(
@@ -464,7 +479,7 @@ class TagTriangulationOpenCVTask:
                     used_set = set(used_ids)
                     for d in dets:
                         tid = int(d.tag_id)
-                        #print(f"[DEBUG] Detected tag {tid} with margin {margin:.2f}")
+                        # print(f"[DEBUG] Detected tag {tid} with margin {margin:.2f}")
                         if tid not in used_set:
                             continue
 
@@ -494,9 +509,9 @@ class TagTriangulationOpenCVTask:
                     cv2.putText(frame, line2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                     cv2.putText(frame, line3, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     cv2.putText(frame, line4, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    
+
                     cv2.imshow("tag_triangulation", frame)
-                    
+
                     k = cv2.waitKey(1) & 0xFF
                     if k in (27, ord("q")):
                         break
@@ -522,7 +537,8 @@ class TagTriangulationOpenCVTask:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag_map_path", required=True, help="YAML: tag_id -> {xyz:[...], rpy:[...]} (radians)")
-    ap.add_argument("--camera_calib_path", default="", help="YAML camera intrinsics/distortion. If empty, listens to ROS camera_info")
+    ap.add_argument("--camera_calib_path", default="",
+                    help="YAML camera intrinsics/distortion. If empty, listens to ROS camera_info")
     ap.add_argument("--camera_info_topic", default="/xtend/camera_info", help="ROS topic for CameraInfo")
     ap.add_argument("--tag_size_m", type=float, required=True)
     ap.add_argument("--source", default="0", help="camera index (0) or video path")
@@ -533,7 +549,8 @@ def main():
     ap.add_argument("--out_json", default="", help="Path to output JSONL log (one JSON per frame).")
     ap.add_argument("--fuse_method", default="avg_translation_keep_first_rotation")
     ap.add_argument("--image_topic", default="/xtend/rgb", help="ROS image topic to listen to")
-    ap.add_argument("--qos", choices=["best_effort", "reliable"], default="best_effort", help="QoS reliability policy for ROS subscription")
+    ap.add_argument("--qos", choices=["best_effort", "reliable"], default="best_effort",
+                    help="QoS reliability policy for ROS subscription")
     ap.add_argument("--min_margin", type=float, default=10.0, help="Minimum decision margin to accept a tag")
     args = ap.parse_args()
 

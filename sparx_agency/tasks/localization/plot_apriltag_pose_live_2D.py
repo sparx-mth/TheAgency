@@ -35,12 +35,15 @@ class AprilTagPosePlotter(Node):
             10
         )
 
-        self.frames = [] 
+        self.frames = []
         self.xs = []
         self.ys = []
         self.yaws = []
 
-        self.frame_count = 0 
+        self.prev_raw_yaw = None
+        self.yaw_offset = 0.0
+
+        self.frame_count = 0
 
         # How many orientation arrows to draw on the X-Y trajectory
         self.arrow_every_n = 5
@@ -70,8 +73,8 @@ class AprilTagPosePlotter(Node):
         self.ax_xy.set_ylabel("Y [m]")
 
         # Fixed axis limits: -4 to 4 meters
-        self.ax_xy.set_xlim(-4, 4)
-        self.ax_xy.set_ylim(-4, 4)
+        self.ax_xy.set_xlim(-1, 4)
+        self.ax_xy.set_ylim(-4, 1)
         self.ax_xy.grid(True)
         self.ax_xy.legend()
 
@@ -85,7 +88,7 @@ class AprilTagPosePlotter(Node):
         # --- Setup Yaw Plot ---
         self.yaw_line, = self.ax_yaw.plot([], [], color='orange', linewidth=2)
         self.ax_yaw.set_title("Yaw Angle Over Frames")
-        self.ax_yaw.set_xlabel("Frame Index") 
+        self.ax_yaw.set_xlabel("Frame Index")
         self.ax_yaw.set_ylabel("Yaw [deg]")
         self.ax_yaw.grid(True)
 
@@ -93,7 +96,7 @@ class AprilTagPosePlotter(Node):
         plt.show(block=False)
 
     def pose_callback(self, msg: PoseStamped):
-        self.frame_count += 1 
+        self.frame_count += 1
 
         x = msg.pose.position.x
         y = msg.pose.position.y
@@ -104,7 +107,18 @@ class AprilTagPosePlotter(Node):
         qw = msg.pose.orientation.w
 
         yaw_rad = yaw_from_quaternion(qx, qy, qz, qw)
-        yaw_deg = math.degrees(yaw_rad)
+        raw_yaw_deg = math.degrees(yaw_rad)
+
+        if self.prev_raw_yaw is not None:
+            delta = raw_yaw_deg - self.prev_raw_yaw
+            if delta > 180:
+                self.yaw_offset -= 360
+            elif delta < -180:
+                self.yaw_offset += 360
+
+        self.prev_raw_yaw = raw_yaw_deg
+
+        yaw_deg = raw_yaw_deg + self.yaw_offset
 
         self.frames.append(self.frame_count)
         self.xs.append(x)
@@ -149,11 +163,11 @@ class AprilTagPosePlotter(Node):
 
         # --- Update Yaw Plot ---
         self.yaw_line.set_data(self.frames, self.yaws)
-        
+
         # Dynamically adjust Yaw plot limits (show trailing window of 100 frames)
         current_frame = self.frames[-1]
-        self.ax_yaw.set_xlim(max(0, current_frame - 100), max(50, current_frame + 10))
-        
+        self.ax_yaw.set_xlim(0, max(50, current_frame + 10))
+
         if self.yaws:
             min_yaw = min(self.yaws)
             max_yaw = max(self.yaws)
