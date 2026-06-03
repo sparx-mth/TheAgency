@@ -425,8 +425,16 @@ class TagTriangulationOpenCVTask:
                 qx, qy, qz, qw = self.filtered_q
 
                 # --- Format and print clean summary ---
-                yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+                #yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+
+                yaw_rad = math.atan2(
+                    2.0 * (qw * qz + qx * qy),
+                    1.0 - 2.0 * (qy * qy + qz * qz)
+                )
+
                 yaw_deg = math.degrees(yaw_rad)
+
+
 
                 print(f"\n--- Pose Update [{stamp_sec:.2f}] ---")
                 print(f"Position: X={x:.3f}, Y={y:.3f}, Z={z:.3f} | Yaw={yaw_deg:.1f} deg")
