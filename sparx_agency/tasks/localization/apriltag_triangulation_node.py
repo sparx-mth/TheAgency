@@ -187,6 +187,8 @@ class TagTriangulationOpenCVTask:
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
 
         self.filtered_x = None
+        self.filtered_q = None
+
         self.alpha = 0.1
         self.min_margin = float(min_margin)
         
@@ -409,6 +411,18 @@ class TagTriangulationOpenCVTask:
                     self.filtered_z = self.alpha * z + (1 - self.alpha) * self.filtered_z
 
                 x, y, z = self.filtered_x, self.filtered_y, self.filtered_z
+
+                q_raw = np.array([qx, qy, qz, qw])
+                if self.filtered_q is None:
+                    self.filtered_q = q_raw
+                else:
+                    if np.dot(self.filtered_q, q_raw) < 0.0:
+                        q_raw = -q_raw
+                        
+                    self.filtered_q = self.alpha * q_raw + (1 - self.alpha) * self.filtered_q
+                    self.filtered_q /= np.linalg.norm(self.filtered_q)
+
+                qx, qy, qz, qw = self.filtered_q
 
                 # --- Format and print clean summary ---
                 yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
