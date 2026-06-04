@@ -1,28 +1,28 @@
 # the drone is located at the origin (0, 0, 1) , in 4.5 meters there is a wall with tag 12, in the end of the hallway.
 tags:
 
- # the first one
+ # Door towards the exit, the first one
   5:
     xyz: [4.5, 0, 0.65]
     rpy: [-1.5708, 0, -1.5708]
     size: 0.28
 
 
-#
+# Communication room
   1:
     xyz: [2.55, -2.3, 0.97]
     rpy: [-1.5708, 0,  -3.0752]
     size: 0.28
 
 
-#
+# Enther the hallway to the right towards the MAMAD, same orientation as tag 5
   10:
     xyz: [3.13, -0.82, 1.0]
     rpy: [-1.5708,  0, -1.5708]
     size: 0.2
 
 
- # the first one
+ # MAMAD Door
   3:
     xyz: [1.45, -2.07, 1.07]
     rpy: [-1.5708, 0, -3.1416]
@@ -35,29 +35,31 @@ tags:
 #    rpy: [-1.5708,  0, 1.5708]
 #    size: 0.195
 
- # the first one
+ # Inside the MAMAD, above the desk, facing the MAMAD's entrance
   9:
     xyz: [-1.50, -1.50, 1.1]
     rpy: [-1.5708,  0, 1.3734]
     size: 0.28
 
- # the first one
+ # Below SPARX logo, currently near the fridge, below window. orientation like the MAMAD door
   8:
     xyz: [0.15, -4.7, 1.0]
     rpy: [-1.5708,  0, -3.1416]
     size: 0.195
 
 
- # the first one
+ # inside the MAMAD, near the weapon, orientation like exit office door
   0:
     xyz: [1.50, -3.3, 1.15]
     rpy: [-1.5708, 0, -1.5708]
     size: 0.2
 
- # the first one
+ # Inbal's Office
   2:
     xyz: [1.7, 0.75, 1.0]
     rpy: [-1.5708, 0, 0]
     size: 0.2
+
+ # Tag 4, near the screen inside the MAMAD, same wall as tag 9
 
 
