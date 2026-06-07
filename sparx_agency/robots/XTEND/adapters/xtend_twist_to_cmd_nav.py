@@ -39,7 +39,7 @@ class XtendTwistToCmdNav(Node):
 
         self.last_twist_time = 0.0
         self.last_action = None
-        self.allow_multi_axes = False
+        self.allow_multi_axes = True
 
         # Planner may publish short zero Twist messages between yaw commands.
         # XTEND commands are hold-style, so do not stop on the first zero Twist.
