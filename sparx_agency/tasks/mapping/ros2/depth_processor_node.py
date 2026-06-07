@@ -8,6 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from std_msgs.msg import Header, String
 from cv_bridge import CvBridge
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
@@ -46,6 +47,7 @@ class DepthProcessorNode(Node):
         self.declare_parameter("small_lut_path", str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/mapping/config/lut_small_depth.npz"),)
 
         self.declare_parameter("image_topic", "/xtend/rgb")
+        self.declare_parameter("frame_path_topic", "")
         self.declare_parameter("camera_info_topic", "/xtend/camera_info")
         self.declare_parameter("camera_info_mode", "crop_resize")
         # options: base, padded, crop_resize
@@ -70,6 +72,7 @@ class DepthProcessorNode(Node):
         self.config_yaml = self.get_parameter("config_yaml").value
         self.camera_info_mode = self.get_parameter("camera_info_mode").value
         self.image_topic = self.get_parameter("image_topic").value
+        self.frame_path_topic = str(self.get_parameter("frame_path_topic").value).strip()
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
         self.depth_encoding = str(self.get_parameter("depth_encoding").value)
@@ -126,6 +129,14 @@ class DepthProcessorNode(Node):
             image_qos,
         )
 
+        if self.frame_path_topic:
+            self.create_subscription(
+                String,
+                self.frame_path_topic,
+                self.frame_path_callback,
+                image_qos,
+            )
+
         base_info = load_camera_info_from_yaml(
             yaml_path=self.config_yaml,
             frame_id="xtend_camera",
@@ -159,6 +170,8 @@ class DepthProcessorNode(Node):
 
         self.get_logger().info("DepthProcessorNode started")
         self.get_logger().info(f"Image topic: {self.image_topic}")
+        if self.frame_path_topic:
+            self.get_logger().info(f"Frame path topic: {self.frame_path_topic} (overrides image_topic)")
         self.get_logger().info(f"CameraInfo topic: {self.camera_info_topic}")
         self.get_logger().info(f"Depth topic: {self.depth_topic}")
         self.get_logger().info(f"Depth encoding: {self.depth_encoding}")
@@ -327,11 +340,37 @@ class DepthProcessorNode(Node):
         msg.data = points.tobytes()
         return msg
 
-    def image_callback(self, msg: Image):
-        t0 = time.perf_counter()
-
+    def frame_path_callback(self, msg: String):
+        """
+        Callback for the file-path-based RGB input (from OnlineNavBridgeDirPublisher).
+        Message format: "{abs_path} {sec} {nanosec}"
+        Reads the JPEG from disk, runs depth inference, and publishes with the
+        original RGB stamp so downstream nodes see matching timestamps.
+        """
         try:
-            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            parts = msg.data.rsplit(" ", 2)
+            path = parts[0]
+            sec = int(parts[1]) if len(parts) >= 3 else 0
+            nanosec = int(parts[2]) if len(parts) >= 3 else 0
+        except Exception as e:
+            self.get_logger().error(f"[frame_path] bad message format: {e}")
+            return
+
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            self.get_logger().error(f"[frame_path] cv2.imread failed: {path}", throttle_duration_sec=2.0)
+            return
+
+        header = Header()
+        header.frame_id = self.camera_info_msg.header.frame_id
+        header.stamp.sec = sec
+        header.stamp.nanosec = nanosec
+
+        self._run_inference_and_publish(bgr, header)
+
+    def _run_inference_and_publish(self, bgr: np.ndarray, header):
+        t0 = time.perf_counter()
+        try:
             t1 = time.perf_counter()
 
             net_output = self.depth_model.infer_all(bgr)
@@ -343,16 +382,15 @@ class DepthProcessorNode(Node):
             depth_m = self.sanitize_depth(depth_m)
             t4 = time.perf_counter()
 
-            self.publish_depth(depth_m, msg.header)
+            self.publish_depth(depth_m, header)
             t5 = time.perf_counter()
 
             if self.pub_cloud is not None:
                 pts = self._backproject_metric_depth(depth_m)
-                self.pub_cloud.publish(self._make_pc2_msg(pts, msg.header))
+                self.pub_cloud.publish(self._make_pc2_msg(pts, header))
 
             self.get_logger().info(
                 "depth_node timing ms: "
-                f"cv_bridge={(t1 - t0) * 1000.0:.1f}, "
                 f"infer={(t2 - t1) * 1000.0:.1f}, "
                 f"metric={(t3 - t2) * 1000.0:.1f}, "
                 f"sanitize={(t4 - t3) * 1000.0:.1f}, "
@@ -360,15 +398,16 @@ class DepthProcessorNode(Node):
                 f"total={(t5 - t0) * 1000.0:.1f}",
                 throttle_duration_sec=1.0,
             )
-
-            # if self.publish_debug:
-            #     dbg = self.depth_to_debug(depth_m)
-            #     dbg_msg = self.bridge.cv2_to_imgmsg(dbg, encoding="bgr8")
-            #     dbg_msg.header = msg.header
-            #     self.pub_debug.publish(dbg_msg)
-
         except Exception as e:
             self.get_logger().error(f"Processing failed: {e}", throttle_duration_sec=2.0)
+
+    def image_callback(self, msg: Image):
+        try:
+            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as e:
+            self.get_logger().error(f"cv_bridge failed: {e}", throttle_duration_sec=2.0)
+            return
+        self._run_inference_and_publish(bgr, msg.header)
 
 
 def main(args=None):

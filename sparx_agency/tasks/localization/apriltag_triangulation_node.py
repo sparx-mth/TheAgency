@@ -42,7 +42,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Int32MultiArray
+from std_msgs.msg import Int32MultiArray, String
 from cv_bridge import CvBridge
 
 from sparx_agency.core.localization.tag_triangulation import (
@@ -114,6 +114,7 @@ class TagTriangulationOpenCVTask:
             tag_size_m: float = 0.13,
             video_source: Union[int, str] = 0,
             ros_topic: str = "",
+            frame_path_topic: str = "",
             camera_info_topic: str = "/xtend/camera_info",
             tag_family: str = "tag36h11",
             visualize: bool = True,
@@ -181,6 +182,9 @@ class TagTriangulationOpenCVTask:
         self.latest_ros_image = None
         self.latest_ros_stamp = None
 
+        self.frame_path_topic = frame_path_topic.strip()
+        self.latest_frame_path: Optional[str] = None
+
         # self.ros_node = rclpy.create_node('opencv_ros_hybrid')
         self.bridge = CvBridge()
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
@@ -195,8 +199,11 @@ class TagTriangulationOpenCVTask:
             # Use the custom QoS profile instead of the default '10'
             self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, qos_profile)
 
-        if self.use_ros_image:
-            pass  # ROS subscription is already handled above, skip OpenCV VideoCapture
+        if self.frame_path_topic:
+            self.ros_node.create_subscription(String, self.frame_path_topic, self.frame_path_cb, qos_profile)
+
+        if self.use_ros_image or self.frame_path_topic:
+            pass  # input handled via ROS subscription, skip OpenCV VideoCapture
         elif isinstance(video_source, str) and video_source.startswith("dir:"):
             self.image_dir = Path(video_source[4:]).expanduser().resolve()
             if not self.image_dir.exists():
@@ -212,6 +219,10 @@ class TagTriangulationOpenCVTask:
             self.latest_ros_stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         except Exception as e:
             print(f"CV Bridge error: {e}")
+
+    def frame_path_cb(self, msg: String):
+        # Format from bridge: "{abs_path} {sec} {nanosec}" — extract path only
+        self.latest_frame_path = msg.data.rsplit(" ", 2)[0]
 
     def camera_info_cb(self, msg: CameraInfo):
         """ Callback to extract K and D matrices directly from ROS """
@@ -250,6 +261,19 @@ class TagTriangulationOpenCVTask:
                     src_name = self.ros_topic
                     src_type = "ros"
                     self.latest_ros_image = None
+
+                elif self.frame_path_topic:
+                    if self.latest_frame_path is None:
+                        continue
+                    path = self.latest_frame_path
+                    self.latest_frame_path = None
+                    frame = cv2.imread(path, cv2.IMREAD_COLOR)
+                    if frame is None:
+                        print(f"[frame_path] failed to read: {path}")
+                        continue
+                    stamp_sec = float(time.time())
+                    src_name = Path(path).name
+                    src_type = "file_path"
 
                 elif self.image_dir is not None:
                     files = self._iter_images_in_dir()
@@ -549,6 +573,7 @@ def main():
     ap.add_argument("--out_json", default="", help="Path to output JSONL log (one JSON per frame).")
     ap.add_argument("--fuse_method", default="avg_translation_keep_first_rotation")
     ap.add_argument("--image_topic", default="/xtend/rgb", help="ROS image topic to listen to")
+    ap.add_argument("--frame_path_topic", default="", help="ROS String topic that publishes saved frame file paths (e.g. /xtend/frame_path)")
     ap.add_argument("--qos", choices=["best_effort", "reliable"], default="best_effort",
                     help="QoS reliability policy for ROS subscription")
     ap.add_argument("--min_margin", type=float, default=10.0, help="Minimum decision margin to accept a tag")
@@ -566,6 +591,7 @@ def main():
         tag_size_m=args.tag_size_m,
         video_source=src,
         ros_topic=args.image_topic,
+        frame_path_topic=args.frame_path_topic,
         camera_info_topic=args.camera_info_topic,
         tag_family=args.tag_family,
         visualize=(not args.no_vis),
