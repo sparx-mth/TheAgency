@@ -12,11 +12,19 @@ Pipeline (each stage is gated by BevConfig; disable one to isolate it):
   2. 3D neighbour confirm drop isolated occupied voxels (floaters)
   3. door protection      keep openings free where the flight band is clear
   4. wall completion      bridge one-cell gaps in continuous walls
-  5. compose + dilate      OCC > FREE > UNK, optional safety inflation
+  5. temporal hysteresis  optional Schmitt filter over frames (off by default)
+  6. compose              OCC > FREE > UNK, then stamp caller `force_occ` cells
+  7. dilate               optional safety inflation (force_occ cells seed it too)
 
 Output matches the costmap convention: (GridSpec, int8 (H,W)) with values
-{UNKNOWN:-1, FREE:0, OCCUPIED:100}. The projector is STATELESS across calls --
-FALCON owns the temporal fusion.
+{UNKNOWN:-1, FREE:0, OCCUPIED:100}. The projector is STATELESS across calls
+EXCEPT when cfg.temporal_filter is on, in which case it holds the small
+per-cell evidence accumulator -- FALCON otherwise owns the temporal fusion.
+
+`force_occ` lets the caller stamp hard, env-specific obstacles (manual walls,
+a virtual back-wall from /map_config) as OCCUPIED after compose and before
+dilation, exactly as the legacy node did -- so those cells inflate with the
+rest. Keeping it a generic mask keeps map-specific knowledge out of core.
 
 NB: this deliberately does NOT implement the Costmap ABC. That interface
 models incremental single-sensor integration
@@ -25,7 +33,7 @@ occupied+free voxel pair in one shot, so the contract genuinely differs.
 """
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -44,13 +52,19 @@ class BevProjector:
         self.cfg = cfg
         self.lattice = BevLattice(cfg)
         self.last_stats: Dict[str, int] = {}
+        # temporal-hysteresis state (used only when cfg.temporal_filter)
+        self._ev = np.zeros((self.lattice.H, self.lattice.W), np.float32)
+        self._occ_state = np.zeros((self.lattice.H, self.lattice.W), bool)
 
-    def project(self, occupied_xyz: np.ndarray,
-                free_xyz: np.ndarray) -> Tuple[GridSpec, np.ndarray]:
+    def project(self, occupied_xyz: np.ndarray, free_xyz: np.ndarray,
+                force_occ: Optional[np.ndarray] = None
+                ) -> Tuple[GridSpec, np.ndarray]:
         """
         Args:
             occupied_xyz: (N,3) occupied voxel centres in the world frame.
             free_xyz:     (M,3) known-free voxel centres in the world frame.
+            force_occ:    optional (H,W) bool mask of cells to force OCCUPIED
+                          after compose and before dilation (e.g. manual walls).
         Returns:
             (spec, grid_int8) with grid shape (H,W) and values {-1, 0, 100}.
         """
@@ -91,13 +105,24 @@ class BevProjector:
             mode=cfg.wall_fill_mode, n_neighbors=cfg.wall_fill_neighbors,
             iters=cfg.wall_fill_iters)
 
-        # 6) compose label grid (OCC > FREE > UNK), keep openings free
+        # 6) temporal hysteresis (optional, stateful): Schmitt filter on occ
+        if cfg.temporal_filter:
+            self._ev += cfg.t_inc * occ - cfg.t_dec * (observed_free & ~occ)
+            np.clip(self._ev, 0.0, cfg.t_max, out=self._ev)
+            self._occ_state = ((self._occ_state & ~(self._ev <= cfg.t_off))
+                               | (self._ev >= cfg.t_on))
+            occ = self._occ_state.copy()
+
+        # 7) compose label grid (OCC > FREE > UNK), keep openings free,
+        #    then stamp caller-forced obstacles (manual/back walls) as OCC
         grid = np.full((lat.H, lat.W), UNKNOWN, np.int8)
         grid[observed_free] = FREE
         grid[occ] = OCCUPIED
         grid[protected] = FREE
+        if force_occ is not None and force_occ.any():
+            grid[force_occ] = OCCUPIED
 
-        # 7) optional safety dilation (never seal a protected opening)
+        # 8) optional safety dilation (never seal a protected opening)
         if cfg.occ_dilate_cells > 0:
             occ_all = grid == OCCUPIED
             new = morph.dilate4(occ_all, cfg.occ_dilate_cells) & ~occ_all & ~protected

@@ -1,0 +1,127 @@
+<launch>
+  <!--
+    real_drone.launch — wrapper that points the same nav stack at a
+    real drone instead of Gazebo.
+
+    Architecture (only one new node vs. the Gazebo path):
+
+       <real pose topic, e.g. PoseStamped>
+                  │
+                  ▼
+            pose_adapter   (this launch)
+                  │   bare Pose
+                  ▼
+           /<drone_ns>/gt_pose
+                  │
+                  └──► everything downstream is identical to
+                        the Gazebo run — sensor_gate / falcon_adapter /
+                        astar_planner / waypoint_follower / bev_click_goal
+                        all see the same topic name and message type
+                        they always saw.
+
+    camera_info is intentionally NOT bridged for real-drone runs
+    (bridge_camera_info defaults to false in nav_stack.launch).
+    Camera intrinsics are passed as args below and loaded into rosparam,
+    where FALCON's exploration_node reads them.
+
+    Defaults match the xtend drone:
+      pose : /flow_depth/pose_est (PoseStamped)
+      depth: /xtend/depth_m       (32FC1, 504x392)
+      P    : fx=390.715302 fy=395.828430 cx=222.273390 cy=108.547631
+             (from projection_matrix in camera_xtend_ros_calib_504_392_*.yaml
+              — the rectified intrinsics; FALCON does no undistortion)
+
+    Run example:
+      roslaunch falcon_adapter real_drone.launch
+  -->
+
+  <!-- ── Forwarded to the included nav launch ─────────────────── -->
+  <arg name="map_name" default="office" />
+  <arg name="drone_ns" default="" />
+  <arg name="gated_ns" default="/gated_drone" />
+
+  <!-- ── Real-drone localization ──────────────────────────────── -->
+  <arg name="real_pose_topic" default="/xtend/april_tag_pose_1" />
+<!--   <arg name="real_pose_topic" default="/flow_depth/pose_est" /> -->
+  <arg name="real_pose_type"  default="pose_stamped" />
+
+  <!-- ── Real-drone depth ──────────────────────────────────────── -->
+  <arg name="real_depth_topic" default="/xtend/depth_m" />
+
+  <!-- ── Camera intrinsics (xtend K-matrix defaults for 504x392) ──
+       MUST match the actual depth stream. If image_width/image_height
+       don't match what the drone publishes, exploration_node silently
+       drops frames. Override on the command line for a different camera:
+         cam_fx:=... cam_fy:=... cam_cx:=... cam_cy:=...
+         cam_width:=... cam_height:=... -->
+  <arg name="cam_fx"        default="253.066668300591147" />
+  <arg name="cam_fy"        default="287.535109816403349" />
+  <arg name="cam_cx"        default="236.140442706411449" />
+  <arg name="cam_cy"        default="81.734160313465040" />
+  <arg name="cam_width"     default="504" />
+  <arg name="cam_height"    default="294" />
+<!--   <arg name="cam_fx"        default="241.01587457199156" /> -->
+<!--   <arg name="cam_fy"        default="273.842961729908" /> -->
+<!--   <arg name="cam_cx"        default="224.89565972039185" /> -->
+<!--   <arg name="cam_cy"        default="77.84205744139527" /> -->
+<!--   <arg name="cam_width"     default="480" /> -->
+<!--   <arg name="cam_height"    default="280" /> -->
+  <arg name="cam_min_depth" default="0.1" />
+  <arg name="cam_max_depth" default="10.0" />
+
+  <!-- ── Optional flight-tuning overrides ────────────────────────-->
+  <arg name="vel_x"     default="0.3" />
+  <arg name="cruise_z"  default="1.0" />
+  <arg name="goal_x"    default="4.0" />
+  <arg name="goal_y"    default="0.0" />
+
+  <arg name="publish_mapping_inputs" value="false" />
+  <!-- ══════════════════════════════════════════════════════════════
+       Pose adapter — converts the real-drone localization message
+       into the bare geometry_msgs/Pose every consumer expects on
+       /<drone_ns>/gt_pose.
+       ══════════════════════════════════════════════════════════════ -->
+  <node pkg="falcon_adapter" type="pose_adapter.py"
+        name="pose_adapter" output="screen">
+    <param name="in_topic"  value="$(arg real_pose_topic)" />
+    <param name="in_type"   value="$(arg real_pose_type)" />
+    <param name="out_topic" value="$(arg drone_ns)/gt_pose" />
+  </node>
+
+  <node pkg="falcon_adapter" type="mapping_sync_node.py" name="mapping_sync" output="screen">
+    <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/april_tag_pose -->
+    <param name="depth_topic"        value="$(arg gated_ns)/front_depth/depth/image_raw" />
+    <param name="out_pose_topic"     value="/map_ros/pose" />
+    <param name="out_depth_topic"    value="/map_ros/depth" />
+    <param name="sync_tolerance"     value="0.05" />
+    <param name="max_interp_gap"     value="0.12" />   <!-- 0 = strict nearest-only -->
+    <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
+    <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
+  </node>
+  <!-- ══════════════════════════════════════════════════════════════
+       The actual nav stack — same launch as Gazebo, just with the
+       real-drone depth topic and camera intrinsics passed in.
+       ══════════════════════════════════════════════════════════════ -->
+  <include file="$(find falcon_adapter)/launch/nav_stack.launch">
+    <arg name="map_name"      value="$(arg map_name)" />
+    <arg name="drone_ns"      value="$(arg drone_ns)" />
+    <arg name="gated_ns"      value="$(arg gated_ns)" />
+    <arg name="publish_mapping_inputs" value="$(arg publish_mapping_inputs)" />
+    <arg name="depth_topic"   value="$(arg real_depth_topic)" />
+
+    <arg name="cam_fx"        value="$(arg cam_fx)" />
+    <arg name="cam_fy"        value="$(arg cam_fy)" />
+    <arg name="cam_cx"        value="$(arg cam_cx)" />
+    <arg name="cam_cy"        value="$(arg cam_cy)" />
+    <arg name="cam_width"     value="$(arg cam_width)" />
+    <arg name="cam_height"    value="$(arg cam_height)" />
+    <arg name="cam_min_depth" value="$(arg cam_min_depth)" />
+    <arg name="cam_max_depth" value="$(arg cam_max_depth)" />
+
+    <arg name="vel_x"         value="$(arg vel_x)" />
+    <arg name="cruise_z"      value="$(arg cruise_z)" />
+    <arg name="goal_x"        value="$(arg goal_x)" />
+    <arg name="goal_y"        value="$(arg goal_y)" />
+  </include>
+
+</launch>

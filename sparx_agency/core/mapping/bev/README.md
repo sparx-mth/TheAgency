@@ -8,15 +8,18 @@ Pure numpy, no ROS, stateless (FALCON owns the temporal fusion).
 
 ## Files
 
-- **`projector.py`** — `BevProjector`. The 5-stage pipeline and the only entry point:
-  `project(occupied_xyz, free_xyz) -> (GridSpec, grid)`. Exposes `.last_stats`.
+- **`projector.py`** — `BevProjector`. The pipeline and the only entry point:
+  `project(occupied_xyz, free_xyz, force_occ=None) -> (GridSpec, grid)`. Exposes
+  `.last_stats`. Stateless unless `temporal_filter` is on (then it holds the
+  evidence accumulator). `force_occ` is an optional `(H,W)` bool mask the caller
+  stamps as occupied after compose / before dilation (manual walls etc.).
 - **`config.py`** — `BevConfig`. Every spatial parameter (below), validated on init.
 - **`lattice.py`** — `BevLattice`. The fixed grid + z-layers + voxelisation (world points → dense 3D/2D arrays).
 - **`morphology.py`** — pure-numpy operators: 3D neighbour count, 2D shift, wall-bridge, dilation.
 - **`__init__.py`** — exports `BevConfig`, `BevProjector`, `UNKNOWN/FREE/OCCUPIED`.
 
 The ROS1 node that wraps this inside FALCON's container lives in
-`tasks/mapping/falcon_adapter/bev_publisher_node.py`.
+`tasks/planning/falcon/adapter/scripts/bev_publisher_node.py`.
 
 ## Usage
 
@@ -63,5 +66,11 @@ spec, grid = proj.project(occupied_xyz, free_xyz)   # (N,3) world-frame voxel ce
 - `wall_fill_neighbors` (5) — count mode: occupied 8-neighbours required to fill.
 - `wall_fill_iters` (1) — max bridge width; keep small (1–2).
 
+**Temporal hysteresis** (stage 5 — optional, makes the projector stateful)
+- `temporal_filter` (False) — FALCON already fuses in time, so usually off.
+- `t_inc`/`t_dec` (1.0/1.0) — per-frame evidence added for OCC / removed for FREE.
+- `t_max` (5.0) — evidence ceiling; `t_on`/`t_off` (2.0/0.5) — Schmitt on/off thresholds.
+
 To isolate one stage, set its gate to the disabling value (`confirm_3d=False`,
-`protect_openings=False`, `wall_fill_mode="off"`, `occ_dilate_cells=0`).
+`protect_openings=False`, `wall_fill_mode="off"`, `temporal_filter=False`,
+`occ_dilate_cells=0`).

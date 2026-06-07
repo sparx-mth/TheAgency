@@ -1,0 +1,401 @@
+<launch>
+  <!--
+    nav_stack.launch  (v8 — bev_publisher v4 wiring)
+
+    Shared FALCON nav-stack core. Used directly for the Gazebo sim, and
+    included by real_drone.launch (which only adds the pose/depth bridge
+    nodes in front of it) for the real drone.
+    ════════════════════════════════════════════════════════════════════
+    v8 vs v7:
+      - bev_publisher upgraded to v4: height-weighted column projection,
+        3D neighbour confirm, door/window protection, and wall completion.
+        Every pipeline stage is now a bev_* arg; the defaults already
+        de-noise the map, so overriding any of them is optional.
+      - bev_publish_hz 2.0 -> 10.0. The publish timer caps how often the
+        grid is recomputed and republished, so 10 Hz is needed to meet the
+        mapping-loop rate.
+      - Removed the dead z_slab_min / z_slab_max params. v4 uses the full
+        weighted column (z_floor / z_ceil / z_peak) instead of a thin slab.
+        bev_z_peak defaults to cruise_z so the weighting peak always tracks
+        the flight altitude.
+      - Dropped the redundant occ_topic / free_topic params from the bev
+        node — it already defaults to exactly those two FALCON topics.
+
+    v7 vs v5:
+      - Camera intrinsics are now <arg>s (cam_fx, cam_fy, cam_cx, cam_cy,
+        cam_width, cam_height, cam_min_depth, cam_max_depth). Defaults
+        are the xtend drone K-matrix values for the 504x392 stream.
+        Override from real_drone.launch or the command line per camera.
+
+    v5 vs v4:
+      - Added `bridge_camera_info` arg (default false). sensor_gate
+        will neither subscribe to camera_info nor republish it. FALCON
+        reads camera intrinsics from rosparam below, so the topic was
+        redundant. Set to true to restore the v4 behaviour.
+
+    v4 vs v3:
+      - Added `pose_topic`, `depth_topic`, `camera_info_topic` args.
+      - sensor_gate receives those topic names via private params.
+  -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       USER-FACING ARGS
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="map_name" default="hospital" />
+  <arg name="drone_ns" default="/simple_drone" />
+  <arg name="gated_ns" default="/gated_drone" />
+
+  <!-- v4: input topic overrides. Defaults preserve the v3 sjtu_drone
+       layout, so leaving these unset gives identical Gazebo behaviour. -->
+  <arg name="pose_topic"
+       default="$(arg drone_ns)/gt_pose" />
+  <arg name="depth_topic"
+       default="$(arg drone_ns)/front_depth/depth/image_raw" />
+  <arg name="camera_info_topic"
+       default="$(arg drone_ns)/front_depth/depth/camera_info" />
+
+  <!-- v5: when false, sensor_gate ignores camera_info entirely. -->
+  <arg name="bridge_camera_info" default="false" />
+
+  <!-- Camera intrinsics — loaded from a camera_calibration_parsers
+       YAML (camera_config_file) when set; the cam_* args below act as
+       both the literal fallback (when camera_config_file:='') and the
+       CLI override path (`roslaunch ... cam_fx:=...`).
+
+       Source is the YAML's `projection_matrix.data` (the rectified
+       3x4 P matrix), NOT camera_matrix.data. Reason: after image
+       rectification and crop, the principal point and effective focal
+       length live in the upper-left 3x3 block of P; K still describes
+       the unrectified raw sensor. Falcon consumes the rectified
+       stream, so it needs P-derived intrinsics.
+
+       P is a 12-element row-major array. The mapping is:
+         fx = P[0]   cx = P[2]
+         fy = P[5]   cy = P[6]
+       The rest of P encodes the (zero here) stereo baseline and the
+       0/0/0/1 homogeneous row, which we ignore for monocular use.
+
+       Fallback literals match projection_matrix.data from
+       config/camera_xtend_ros_calib_504_392_crop_resize.yaml.
+       MUST match the actual depth stream — if image_width /
+       image_height don't match, frames are silently dropped. -->
+  <arg name="camera_config_file"
+       default="$(find falcon_adapter)/config/camera_xtend_ros_calib_504_392_crop_resize.yaml"
+       doc="Path to a camera_calibration_parsers YAML. Empty disables YAML loading." />
+<!--   <arg name="cam_fx"        default="241.01587457199156" /> -->
+<!--   <arg name="cam_fy"        default="273.842961729908" /> -->
+<!--   <arg name="cam_cx"        default="224.89565972039185" /> -->
+<!--   <arg name="cam_cy"        default="77.84205744139527" /> -->
+<!--   <arg name="cam_width"     default="480" /> -->
+<!--   <arg name="cam_height"    default="280" /> -->
+<!--   <arg name="cam_min_depth" default="0.1" /> -->
+<!--   <arg name="cam_max_depth" default="10.0" /> -->
+  <arg name="cam_fx"        default="253.066668300591147" />
+  <arg name="cam_fy"        default="287.535109816403349" />
+  <arg name="cam_cx"        default="236.140442706411449" />
+  <arg name="cam_cy"        default="81.734160313465040" />
+  <arg name="cam_width"     default="504" />
+  <arg name="cam_height"    default="294" />
+  <arg name="cam_min_depth" default="0.1" />
+  <arg name="cam_max_depth" default="10.0" />
+
+  <!-- Goal -->
+  <arg name="goal_x" default="4.0" />
+  <arg name="goal_y" default="0.0" />
+
+  <!-- Speeds & radii -->
+  <arg name="vel_x"                  default="0.3" />
+  <arg name="yaw_rate"               default="0.7" />
+  <arg name="pos_acquisition_radius" default="0.3" />
+  <arg name="yaw_acquisition_radius" default="0.2" />
+  <arg name="yaw_lead_pct"           default="10.0" />
+
+  <!-- A* / path -->
+  <arg name="waypoint_spacing_m"    default="1.5" />
+  <arg name="inflate_radius_m"      default="0.1" />
+  <arg name="unknown_blocked"       default="false" />
+  <arg name="unknown_cost"          default="1.0" />
+  <arg name="los_smoothing"         default="true" />
+  <arg name="turn_penalty"          default="0.0" />
+  <arg name="replan_on_collision"   default="true" />
+  <arg name="replan_on_bev"         default="false" />
+  <arg name="replan_period_s"       default="0.0" />
+
+  <!-- Takeoff & cruise -->
+  <arg name="auto_takeoff"      default="false" />
+  <arg name="cruise_z"          default="1.0" />
+  <arg name="freeze_during_yaw" default="true" />
+  <arg name="maintain_altitude" default="true" />
+  <arg name="use_posctrl"       default="true" />
+  <arg name="ctrl_rate_hz"      default="5.0" />
+
+  <arg name="forward_only"      default="true" />
+  <arg name="cmd_log_path"      default="/tmp/cmd_log_{ts}.jsonl" />
+
+  <!-- ══════════════════════════════════════════════════════════════
+       BEV  (bev_publisher.py v4 — height-weighted column projection +
+       3D neighbour reasoning + opening protection + wall completion).
+       Each stage is a toggle; set a gate to its "off" value to isolate
+       one idea. The defaults already de-noise the map out of the box.
+       ══════════════════════════════════════════════════════════════ -->
+  <!-- geometry / IO -->
+  <arg name="bev_resolution"  default="0.15" />   <!-- m / cell; match FALCON's voxel size -->
+  <arg name="bev_xmin"        default="-12.0" />
+  <arg name="bev_ymin"        default="-12.0" />
+  <arg name="bev_xmax"        default="12.0" />
+  <arg name="bev_ymax"        default="12.0" />
+  <arg name="bev_bbox_margin" default="1.0" />    <!-- only used if the bbox_* args are removed (bounds then come from /map_config) -->
+  <arg name="bev_publish_hz"  default="10.0" />   <!-- was 2.0; caps the recompute+publish rate -->
+  <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
+
+  <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
+  <arg name="bev_z_floor"           default="0.30" />            <!-- column z-range considered -->
+  <arg name="bev_z_ceil"            default="2.20" />
+  <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
+  <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
+  <arg name="bev_weight_sigma"      default="0.50" />            <!-- gaussian width (profile=gaussian) -->
+  <arg name="bev_voxel_size"        default="$(arg bev_resolution)" />  <!-- z-layer thickness -->
+  <arg name="bev_occ_weight_thresh" default="1.2" />             <!-- min weighted column mass for OCC -->
+  <arg name="bev_min_occ_voxels"    default="2" />               <!-- AND min raw voxel count for OCC -->
+  <arg name="bev_min_free_voxels"   default="1" />               <!-- min voxels for a cell to read FREE -->
+
+  <!-- 3D neighbour confirm (stage 2) — drops isolated DA3 speckle -->
+  <arg name="bev_confirm_3d"           default="true" />
+  <arg name="bev_neighbors_3d"         default="6" />            <!-- 6 | 18 | 26 -->
+  <arg name="bev_min_occ_neighbors_3d" default="1" />            <!-- raise (e.g. 2) with conn=26 to kill streaks -->
+
+  <!-- door / window protection (stage 3) — never wall an opening that is open at flight height -->
+  <arg name="bev_protect_openings"  default="true" />
+  <arg name="bev_door_band_m"       default="0.60" />           <!-- z-band around z_peak inspected for openness -->
+  <arg name="bev_door_free_voxels"  default="2" />              <!-- free voxels in the band => it's an opening -->
+  <arg name="bev_door_occ_tol"      default="0" />              <!-- max occupied voxels tolerated in the band -->
+
+  <!-- wall completion (stage 4) — bridge FOV / occlusion gaps in wall lines -->
+  <arg name="bev_wall_fill_mode"      default="directional" />  <!-- off | directional | count -->
+  <arg name="bev_wall_fill_neighbors" default="5" />            <!-- count mode only -->
+  <arg name="bev_wall_fill_iters"     default="1" />            <!-- max bridge width; keep small (1-2) -->
+
+  <!-- temporal hysteresis (stage 5, optional — FALCON already fuses, so off) -->
+  <arg name="bev_temporal_filter" default="false" />
+  <arg name="bev_t_inc" default="1.0" />
+  <arg name="bev_t_dec" default="1.0" />
+  <arg name="bev_t_max" default="5.0" />
+  <arg name="bev_t_on"  default="2.0" />
+  <arg name="bev_t_off" default="0.5" />
+
+  <!-- runtime -->
+  <arg name="bev_always_recompute"       default="false" />     <!-- recompute every tick vs only on a new cloud -->
+  <arg name="bev_skip_unchanged_publish" default="true" />
+
+  <!-- FALCON speed / safety / frontier -->
+  <arg name="max_vel"     default="0.25" />
+  <arg name="max_acc"     default="0.25" />
+  <arg name="max_yaw_vel" default="0.6" />
+  <arg name="max_yaw_acc" default="0.5" />
+
+  <arg name="obstacles_inflation"        default="0.85" />
+  <arg name="safe_distance"              default="0.85" />
+  <arg name="frontier_min_clearance"     default="0.50" />
+  <arg name="frontier_min_occ_clearance" default="0.75" />
+  <arg name="frontier_candidate_rmin"    default="1.0" />
+  <arg name="frontier_candidate_rmax"    default="5.5" />
+
+  <arg name="fsm_replan_thresh1"   default="2.0" />
+  <arg name="fsm_replan_thresh2"   default="2.0" />
+  <arg name="fsm_replan_thresh3"   default="2.0" />
+  <arg name="fsm_replan_time"      default="60.0" />
+  <arg name="fsm_thresh_replan"    default="60.0" />
+  <arg name="fsm_thresh_no_replan" default="60.0" />
+
+  <arg name="publish_mapping_inputs" default="true" />          <!-- sim keeps true -->
+  <!-- ══════════════════════════════════════════════════════════════
+       LOAD FALCON CONFIG
+       ══════════════════════════════════════════════════════════════ -->
+  <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+  <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+  <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+  <rosparam command="load" file="$(find pathfinding)/config/astar.yaml"/>
+  <rosparam command="load" file="$(find fast_planner)/config/fast_planner.yaml"/>
+  <rosparam command="load" file="$(find exploration_preprocessing)/config/frontier_finder.yaml"/>
+  <rosparam command="load" file="$(find exploration_preprocessing)/config/hgrid.yaml"/>
+  <rosparam command="load" file="$(find exploration_utils)/config/perception_utils.yaml"/>
+  <rosparam command="load" file="$(find exploration_manager)/config/exploration_manager.yaml"/>
+
+  <!-- Camera intrinsics: the cam_* args are now fully resolved
+       (either from the YAML's camera_matrix.data via $(eval) above,
+       or from literal fallbacks / CLI overrides), so a flat
+       arg-to-param mapping is all that's needed here. -->
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="$(arg cam_fx)" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fy" value="$(arg cam_fy)" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cx" value="$(arg cam_cx)" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cy" value="$(arg cam_cy)" />
+  <param name="/uav_model/sensing_parameters/image_width"  value="$(arg cam_width)" />
+  <param name="/uav_model/sensing_parameters/image_height" value="$(arg cam_height)" />
+  <param name="/uav_model/sensing_parameters/min_depth"    value="$(arg cam_min_depth)" />
+  <param name="/uav_model/sensing_parameters/max_depth"    value="$(arg cam_max_depth)" />
+
+  <!-- Transformer -->
+  <param name="/transformer/pose_topic_type"     value="pose" />
+  <param name="/transformer/timestamp_tolerance" value="0.02" />
+
+  <!-- Speed limits -->
+  <param name="/uav_model/dynamics_parameters/max_linear_velocity"     value="$(arg max_vel)" />
+  <param name="/uav_model/dynamics_parameters/max_linear_acceleration" value="$(arg max_acc)" />
+  <param name="/uav_model/dynamics_parameters/max_yaw_velocity"        value="$(arg max_yaw_vel)" />
+  <param name="/uav_model/dynamics_parameters/max_yaw_acceleration"    value="$(arg max_yaw_acc)" />
+
+  <param name="/voxel_mapping/obstacles_inflation" value="$(arg obstacles_inflation)" />
+  <param name="/bspline_opt/safe_distance"         value="$(arg safe_distance)" />
+
+  <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)" />
+  <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)" />
+  <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)" />
+  <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)" />
+
+  <param name="/fsm/replan_thresh1"   value="$(arg fsm_replan_thresh1)" />
+  <param name="/fsm/replan_thresh2"   value="$(arg fsm_replan_thresh2)" />
+  <param name="/fsm/replan_thresh3"   value="$(arg fsm_replan_thresh3)" />
+  <param name="/fsm/replan_time"      value="$(arg fsm_replan_time)" />
+  <param name="/fsm/thresh_replan"    value="$(arg fsm_thresh_replan)" />
+  <param name="/fsm/thresh_no_replan" value="$(arg fsm_thresh_no_replan)" />
+
+  <param name="/traj_server/init_dx" value="0.0" />
+  <param name="/traj_server/init_dy" value="0.0" />
+  <param name="/traj_server/init_dz" value="0.0" />
+
+  <!-- ══════════════════════════════════════════════════════════════
+       NODES
+       ══════════════════════════════════════════════════════════════ -->
+
+  <node pkg="falcon_adapter" type="sensor_gate.py"
+        name="sensor_gate" output="screen">
+    <param name="in_ns"              value="$(arg drone_ns)" />
+    <param name="out_ns"             value="$(arg gated_ns)" />
+    <param name="pose_topic"         value="$(arg pose_topic)" />
+    <param name="depth_topic"        value="$(arg depth_topic)" />
+    <param name="camera_info_topic"  value="$(arg camera_info_topic)" />
+    <param name="bridge_camera_info" value="$(arg bridge_camera_info)" />
+    <param name="replay_hz"          value="30.0" />
+  </node>
+
+  <node pkg="falcon_adapter" type="falcon_adapter.py"
+        name="falcon_adapter" output="screen">
+    <param name="drone_ns"     value="$(arg gated_ns)" />
+    <param name="world_frame"  value="world" />
+    <param name="body_frame"   value="body" />
+    <param name="cam_frame"    value="camera" />
+    <param name="cam_offset_x" value="0.2" />
+    <param name="odom_min_dt"  value="0.04" />
+    <param name="depth_min_dt" value="0.04" />
+    <param name="publish_mapping_inputs" value="$(arg publish_mapping_inputs)" />
+  </node>
+
+  <node pkg="exploration_manager" name="exploration_node" type="exploration_node"
+        output="screen" respawn="false">
+    <remap from="/odom_world"                    to="/odom_world"/>
+    <remap from="/voxel_mapping/depth_image"     to="/map_ros/depth"/>
+    <remap from="/transformer/sensor_pose_topic" to="/map_ros/pose"/>
+  </node>
+
+  <node pkg="falcon_adapter" type="bev_publisher_node.py"
+        name="bev_publisher" output="screen">
+    <param name="frame_id"               value="world" />
+    <!-- geometry / IO -->
+    <param name="resolution"             value="$(arg bev_resolution)" />
+    <param name="bbox_xmin"              value="$(arg bev_xmin)" />
+    <param name="bbox_ymin"              value="$(arg bev_ymin)" />
+    <param name="bbox_xmax"              value="$(arg bev_xmax)" />
+    <param name="bbox_ymax"              value="$(arg bev_ymax)" />
+    <param name="bbox_margin_m"          value="$(arg bev_bbox_margin)" />
+    <param name="publish_hz"             value="$(arg bev_publish_hz)" />
+    <param name="occ_dilate_cells"       value="$(arg bev_occ_dilate)" />
+    <!-- vertical column + height weighting -->
+    <param name="z_floor"                value="$(arg bev_z_floor)" />
+    <param name="z_ceil"                 value="$(arg bev_z_ceil)" />
+    <param name="z_peak"                 value="$(arg bev_z_peak)" />
+    <param name="weight_profile"         value="$(arg bev_weight_profile)" />
+    <param name="weight_sigma"           value="$(arg bev_weight_sigma)" />
+    <param name="voxel_size_m"           value="$(arg bev_voxel_size)" />
+    <param name="occ_weight_thresh"      value="$(arg bev_occ_weight_thresh)" />
+    <param name="min_occ_voxels"         value="$(arg bev_min_occ_voxels)" />
+    <param name="min_free_voxels"        value="$(arg bev_min_free_voxels)" />
+    <!-- 3D neighbour confirm -->
+    <param name="confirm_3d"             value="$(arg bev_confirm_3d)" />
+    <param name="neighbors_3d"           value="$(arg bev_neighbors_3d)" />
+    <param name="min_occ_neighbors_3d"   value="$(arg bev_min_occ_neighbors_3d)" />
+    <!-- door / window protection -->
+    <param name="protect_openings"       value="$(arg bev_protect_openings)" />
+    <param name="door_band_m"            value="$(arg bev_door_band_m)" />
+    <param name="door_free_voxels"       value="$(arg bev_door_free_voxels)" />
+    <param name="door_occ_tol"           value="$(arg bev_door_occ_tol)" />
+    <!-- wall completion -->
+    <param name="wall_fill_mode"         value="$(arg bev_wall_fill_mode)" />
+    <param name="wall_fill_neighbors"    value="$(arg bev_wall_fill_neighbors)" />
+    <param name="wall_fill_iters"        value="$(arg bev_wall_fill_iters)" />
+    <!-- temporal hysteresis (optional) -->
+    <param name="temporal_filter"        value="$(arg bev_temporal_filter)" />
+    <param name="t_inc"                  value="$(arg bev_t_inc)" />
+    <param name="t_dec"                  value="$(arg bev_t_dec)" />
+    <param name="t_max"                  value="$(arg bev_t_max)" />
+    <param name="t_on"                   value="$(arg bev_t_on)" />
+    <param name="t_off"                  value="$(arg bev_t_off)" />
+    <!-- runtime -->
+    <param name="always_recompute"       value="$(arg bev_always_recompute)" />
+    <param name="skip_unchanged_publish" value="$(arg bev_skip_unchanged_publish)" />
+    <!-- output topic (input topics use the node's defaults:
+         /voxel_mapping/occupancy_grid_occupied and .../_free) -->
+    <param name="out_topic"              value="/falcon/bev_2d" />
+  </node>
+
+  <node pkg="falcon_adapter" type="astar_planner.py"
+        name="astar_planner" output="screen">
+    <param name="drone_ns"           value="$(arg drone_ns)" />
+    <param name="bev_topic"          value="/falcon/bev_2d" />
+    <param name="path_topic"         value="/path/waypoints" />
+    <param name="goal_topic"         value="/waypoint_nav/goal" />
+    <param name="goal_x"             value="$(arg goal_x)" />
+    <param name="goal_y"             value="$(arg goal_y)" />
+    <param name="waypoint_spacing_m" value="$(arg waypoint_spacing_m)" />
+    <param name="inflate_radius_m"      value="$(arg inflate_radius_m)" />
+    <param name="unknown_blocked"       value="$(arg unknown_blocked)" />
+    <param name="unknown_cost"          value="$(arg unknown_cost)" />
+    <param name="los_smoothing"         value="$(arg los_smoothing)" />
+    <param name="turn_penalty"          value="$(arg turn_penalty)" />
+    <param name="replan_on_collision"   value="$(arg replan_on_collision)" />
+    <param name="replan_on_bev"         value="$(arg replan_on_bev)" />
+    <param name="replan_period_s"       value="$(arg replan_period_s)" />
+    <param name="frame_id"              value="world" />
+  </node>
+
+  <node pkg="falcon_adapter" type="waypoint_follower.py"
+        name="waypoint_follower" output="screen">
+    <param name="drone_ns"               value="$(arg drone_ns)" />
+    <param name="vel_x"                  value="$(arg vel_x)" />
+    <param name="yaw_rate"               value="$(arg yaw_rate)" />
+    <param name="pos_acquisition_radius" value="$(arg pos_acquisition_radius)" />
+    <param name="yaw_acquisition_radius" value="$(arg yaw_acquisition_radius)" />
+    <param name="yaw_lead_pct"           value="$(arg yaw_lead_pct)" />
+    <param name="auto_takeoff"           value="$(arg auto_takeoff)" />
+    <param name="cruise_z"               value="$(arg cruise_z)" />
+    <param name="use_posctrl"            value="$(arg use_posctrl)" />
+    <param name="freeze_during_yaw"      value="$(arg freeze_during_yaw)" />
+    <param name="maintain_altitude"      value="$(arg maintain_altitude)" />
+    <param name="ctrl_rate_hz"           value="$(arg ctrl_rate_hz)" />
+    <param name="forward_only"           value="$(arg forward_only)" />
+    <param name="cmd_log_path"           value="$(arg cmd_log_path)" />
+  </node>
+
+  <node pkg="falcon_adapter" type="voxel_reset_watcher.py"
+        name="voxel_reset_watcher" output="screen">
+    <param name="topic"     value="/voxel_mapping/occupancy_grid_occupied" />
+    <param name="drop_frac" value="0.5" />
+    <param name="min_prev"  value="500" />
+    <param name="print_hz"  value="0.5" />
+  </node>
+
+  <node pkg="odom_visualization" name="odom_visualization"
+        type="odom_visualization" output="screen">
+    <remap from="~odometry" to="/odom_world"/>
+  </node>
+
+</launch>
