@@ -33,6 +33,7 @@ falcon/
     ├── scripts/          #   FALCON adapter nodes (rospy) — import the algorithms from core
     │   ├── bev_publisher_node.py   # FALCON voxel clouds -> 2D OccupancyGrid (core.mapping.bev)
     │   ├── mapping_sync_node.py    # depth<->pose pairing + gate (core.localization)
+    │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
     └── launch/
@@ -42,7 +43,8 @@ falcon/
 
 These nodes are **FALCON-specific adapters** (FALCON topics, `/map_config`,
 frame conventions), so they live with FALCON. The **reusable, ROS-free**
-algorithms they call live in `core/` (`core/mapping/bev`, `core/localization`).
+algorithms they call live in `core/` (`core/mapping/bev`,
+`core/planning/planners/astar`, `core/localization`).
 `run_falcon.sh` mounts the repo read-only at `/opt/sparx_agency` with
 `PYTHONPATH=/opt` so `import sparx_agency.core...` resolves; `cloud_utils` is
 imported as a sibling. Adding a node = drop it in `scripts/`, list it in
@@ -104,5 +106,6 @@ roslaunch falcon_adapter nav_stack.launch map_name:=hospital
 - Only the two launch files we use are kept (`nav_stack.launch`, `real_drone.launch`);
   the original `gazebo_exploration.launch`, `playback_exploration.launch`, and
   `visual_servoing.launch` were dropped.
-- The import chain for the nodes (`core.mapping.bev`, `core.localization`) is
-  numpy-only — no torch/scipy/ROS in any `__init__.py` — so they load in Noetic.
+- The import chain for the nodes (`core.mapping.bev`,
+  `core.planning.planners.astar`, `core.localization`) is numpy-only — no
+  torch/scipy/OMPL/ROS pulled in at import time — so they load in Noetic.
