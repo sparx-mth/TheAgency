@@ -184,6 +184,7 @@ class TagTriangulationOpenCVTask:
 
         self.frame_path_topic = frame_path_topic.strip()
         self.latest_frame_path: Optional[str] = None
+        self.latest_frame_stamp_sec: Optional[float] = None
 
         # self.ros_node = rclpy.create_node('opencv_ros_hybrid')
         self.bridge = CvBridge()
@@ -221,8 +222,13 @@ class TagTriangulationOpenCVTask:
             print(f"CV Bridge error: {e}")
 
     def frame_path_cb(self, msg: String):
-        # Format from bridge: "{abs_path} {sec} {nanosec}" — extract path only
-        self.latest_frame_path = msg.data.rsplit(" ", 2)[0]
+        # Format from bridge: "{abs_path} {sec} {nanosec}"
+        parts = msg.data.rsplit(" ", 2)
+        self.latest_frame_path = parts[0]
+        if len(parts) == 3:
+            self.latest_frame_stamp_sec = int(parts[1]) + int(parts[2]) * 1e-9
+        else:
+            self.latest_frame_stamp_sec = None
 
     def camera_info_cb(self, msg: CameraInfo):
         """ Callback to extract K and D matrices directly from ROS """
@@ -266,12 +272,13 @@ class TagTriangulationOpenCVTask:
                     if self.latest_frame_path is None:
                         continue
                     path = self.latest_frame_path
+                    stamp_sec = self.latest_frame_stamp_sec or float(time.time())
                     self.latest_frame_path = None
+                    self.latest_frame_stamp_sec = None
                     frame = cv2.imread(path, cv2.IMREAD_COLOR)
                     if frame is None:
                         print(f"[frame_path] failed to read: {path}")
                         continue
-                    stamp_sec = float(time.time())
                     src_name = Path(path).name
                     src_type = "file_path"
 
