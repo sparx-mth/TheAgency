@@ -22,7 +22,7 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import PointCloud2
 
 from sparx_agency.core.mapping.bev import BevConfig, BevProjector, OCCUPIED
-from cloud_utils import cloud_to_xyz
+from cloud_utils import cloud_to_xyz   # sibling module in this scripts/ dir
 
 
 class BevPublisherNode:
@@ -68,12 +68,21 @@ class BevPublisherNode:
             wall_fill_mode=str(G("~wall_fill_mode", "directional")),
             wall_fill_neighbors=int(G("~wall_fill_neighbors", 5)),
             wall_fill_iters=int(G("~wall_fill_iters", 1)),
+            temporal_filter=bool(G("~temporal_filter", False)),
+            t_inc=float(G("~t_inc", 1.0)),
+            t_dec=float(G("~t_dec", 1.0)),
+            t_max=float(G("~t_max", 5.0)),
+            t_on=float(G("~t_on", 2.0)),
+            t_off=float(G("~t_off", 0.5)),
         )
         self.projector = BevProjector(self.cfg)
         self.spec = self.projector.lattice.spec()
         self.walls = self._load_walls()
         bw = rospy.get_param("/map_config/behind_wall_x", None)
         self.behind_wall_x = None if bw is None else float(bw)
+        # Static env obstacles -> a force-occupied mask stamped each frame
+        # before dilation (so manual/back walls inflate, as in the legacy node).
+        self.force_occ = self._build_force_occ()
 
         self._occ = np.empty((0, 3), np.float32)
         self._free = np.empty((0, 3), np.float32)
@@ -119,27 +128,31 @@ class BevPublisherNode:
         self._free = cloud_to_xyz(msg); self._hb["free"] += 1; self._dirty = True
 
     # -- per-map overrides (env-specific; kept out of core) -------------------
-    def _apply_overrides(self, grid):
+    def _build_force_occ(self):
+        """Static (H,W) bool mask: virtual back-wall + manual walls, or None."""
         s = self.spec
+        if self.behind_wall_x is None and not self.walls:
+            return None
+        mask = np.zeros((s.height, s.width), bool)
         if self.behind_wall_x is not None:
             cx = min(s.width, int((self.behind_wall_x - s.origin_x) / s.resolution_m))
             if cx > 0:
-                grid[:, :cx] = OCCUPIED
+                mask[:, :cx] = True
         for x0, x1, y0, y1 in self.walls:
             cx0 = max(0, int(np.floor((x0 - s.origin_x) / s.resolution_m)))
             cx1 = min(s.width, int(np.ceil((x1 - s.origin_x) / s.resolution_m)))
             cy0 = max(0, int(np.floor((y0 - s.origin_y) / s.resolution_m)))
             cy1 = min(s.height, int(np.ceil((y1 - s.origin_y) / s.resolution_m)))
             if cx1 > cx0 and cy1 > cy0:
-                grid[cy0:cy1, cx0:cx1] = OCCUPIED
-        return grid
+                mask[cy0:cy1, cx0:cx1] = True
+        return mask
 
     # -- publish --------------------------------------------------------------
     def _tick(self, _evt):
         if self._dirty or self._grid is None or self.always_recompute:
             self._dirty = False
-            _, grid = self.projector.project(self._occ, self._free)
-            self._grid = self._apply_overrides(grid)
+            _, self._grid = self.projector.project(
+                self._occ, self._free, force_occ=self.force_occ)
             self._publish()
         elif not self.skip_unchanged:
             self._publish()
@@ -167,6 +180,17 @@ class BevPublisherNode:
                       st.get("raw", 0), st.get("confirmed", 0), st.get("occ", 0),
                       st.get("free", 0), st.get("unknown", 0),
                       st.get("openings", 0), st.get("fill", 0))
+        # Loud warning when most occupied points fall outside the BEV bounds
+        # (a strong hint the bbox / map_size is wrong for this environment).
+        if self._occ.shape[0]:
+            _, _, inb = self.projector.lattice.world_to_cell(self._occ)
+            n_tot, n_in = int(self._occ.shape[0]), int(inb.sum())
+            if n_tot > 100 and n_in < 0.9 * n_tot:
+                c = self.cfg
+                rospy.logwarn_throttle(
+                    20.0, "bev: %d/%d occ points OUTSIDE bbox x=[%.1f,%.1f] "
+                    "y=[%.1f,%.1f] -- bounds may be wrong",
+                    n_tot - n_in, n_tot, c.x_min, c.x_max, c.y_min, c.y_max)
         self._hb = dict(occ=0, free=0, pub=0)
 
     def _banner(self, sx0, sx1, sy0, sy1):
@@ -220,6 +244,7 @@ if __name__ == "__main__":
 #   3D confirm: ~confirm_3d (true) ~neighbors_3d (6) ~min_occ_neighbors_3d (1)
 #   doors: ~protect_openings (true) ~door_band_m (.60) ~door_free_voxels (2) ~door_occ_tol (0)
 #   walls: ~wall_fill_mode (directional) ~wall_fill_neighbors (5) ~wall_fill_iters (1)
+#   temporal (optional): ~temporal_filter (false) ~t_inc (1) ~t_dec (1) ~t_max (5) ~t_on (2) ~t_off (0.5)
 #   dilation: ~occ_dilate_cells (0)
 #   per-map overrides (node-side, from /map_config): behind_wall_x, walls[]
 #

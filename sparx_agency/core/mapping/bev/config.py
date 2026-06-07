@@ -60,6 +60,14 @@ class BevConfig:
         wall_fill_mode: "off" | "directional" | "count".
         wall_fill_neighbors: (count mode) occupied 8-neighbours to fill.
         wall_fill_iters: Max bridge width; keep small (1-2).
+
+    Temporal hysteresis (stage 5, optional, STATEFUL):
+        temporal_filter: Smooth occupancy over frames. FALCON already fuses in
+            time, so this is usually off; on, it makes BevProjector stateful.
+        t_inc, t_dec: Per-frame evidence added for OCC / removed for FREE.
+        t_max: Evidence saturation ceiling.
+        t_on, t_off: Schmitt thresholds; a cell turns OCC at >=t_on and only
+            clears below <=t_off.
     """
 
     # geometry / IO
@@ -100,10 +108,19 @@ class BevConfig:
     wall_fill_neighbors: int = 5
     wall_fill_iters: int = 1
 
+    # temporal hysteresis (optional, stateful)
+    temporal_filter: bool = False
+    t_inc: float = 1.0
+    t_dec: float = 1.0
+    t_max: float = 5.0
+    t_on: float = 2.0
+    t_off: float = 0.5
+
     def __post_init__(self) -> None:
         for name in ("resolution_m", "x_min", "x_max", "y_min", "y_max",
                      "z_floor", "z_ceil", "z_peak", "weight_sigma",
-                     "occ_weight_thresh", "door_band_m"):
+                     "occ_weight_thresh", "door_band_m",
+                     "t_inc", "t_dec", "t_max", "t_on", "t_off"):
             _assert_finite(f"BevConfig.{name}", float(getattr(self, name)))
 
         if self.resolution_m <= 0:
@@ -127,3 +144,10 @@ class BevConfig:
             self.voxel_size_m = self.resolution_m
         elif self.voxel_size_m <= 0:
             raise ValueError(f"voxel_size_m must be > 0, got {self.voxel_size_m}")
+
+        if self.temporal_filter:
+            if self.t_max <= 0:
+                raise ValueError(f"t_max must be > 0, got {self.t_max}")
+            if self.t_on < self.t_off:
+                raise ValueError(f"t_on must be >= t_off, got "
+                                 f"[{self.t_off},{self.t_on}]")
