@@ -81,7 +81,7 @@
        into the bare geometry_msgs/Pose every consumer expects on
        /<drone_ns>/gt_pose.
        ══════════════════════════════════════════════════════════════ -->
-  <node pkg="falcon_adapter" type="pose_adapter.py"
+  <node pkg="falcon_adapter" type="pose_adapter_node.py"
         name="pose_adapter" output="screen">
     <param name="in_topic"  value="$(arg real_pose_topic)" />
     <param name="in_type"   value="$(arg real_pose_type)" />

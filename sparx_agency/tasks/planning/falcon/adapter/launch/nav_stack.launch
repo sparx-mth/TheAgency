@@ -272,7 +272,7 @@
        NODES
        ══════════════════════════════════════════════════════════════ -->
 
-  <node pkg="falcon_adapter" type="sensor_gate.py"
+  <node pkg="falcon_adapter" type="sensor_gate_node.py"
         name="sensor_gate" output="screen">
     <param name="in_ns"              value="$(arg drone_ns)" />
     <param name="out_ns"             value="$(arg gated_ns)" />
@@ -283,7 +283,7 @@
     <param name="replay_hz"          value="30.0" />
   </node>
 
-  <node pkg="falcon_adapter" type="falcon_adapter.py"
+  <node pkg="falcon_adapter" type="falcon_adapter_node.py"
         name="falcon_adapter" output="screen">
     <param name="drone_ns"     value="$(arg gated_ns)" />
     <param name="world_frame"  value="world" />
@@ -395,6 +395,8 @@
     <param name="cmd_log_path"           value="$(arg cmd_log_path)" />
   </node>
 
+  <!-- voxel_reset_watcher: intentionally NOT transferred (diagnostics only).
+       Re-add the node here if scripts/voxel_reset_watcher.py is ever ported.
   <node pkg="falcon_adapter" type="voxel_reset_watcher.py"
         name="voxel_reset_watcher" output="screen">
     <param name="topic"     value="/voxel_mapping/occupancy_grid_occupied" />
@@ -402,6 +404,7 @@
     <param name="min_prev"  value="500" />
     <param name="print_hz"  value="0.5" />
   </node>
+  -->
 
   <node pkg="odom_visualization" name="odom_visualization"
         type="odom_visualization" output="screen">
