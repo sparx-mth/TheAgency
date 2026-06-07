@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import io
 import time
 from pathlib import Path
 
@@ -53,6 +54,10 @@ class DepthProcessorNode(Node):
         # options: base, padded, crop_resize
         self.declare_parameter("depth_topic", "/xtend/depth_m")
         self.declare_parameter("depth_encoding", "32FC1")  # options: 32FC1, 16UC1
+        self.declare_parameter("depth_path_topic", "/xtend/depth_frame_path")
+        self.declare_parameter("depth_dir", "/tmp/xtend_depth")
+        self.declare_parameter("max_depth_kept", 30)
+        self.declare_parameter("publish_depth_ros", True)
         # self.declare_parameter("debug_topic", "/xtend/depth_vis")
 
         self.declare_parameter("publish_debug", False)
@@ -76,6 +81,10 @@ class DepthProcessorNode(Node):
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
         self.depth_encoding = str(self.get_parameter("depth_encoding").value)
+        self.depth_path_topic = str(self.get_parameter("depth_path_topic").value).strip()
+        self.depth_dir = Path(str(self.get_parameter("depth_dir").value)).expanduser().resolve()
+        self.max_depth_kept = int(self.get_parameter("max_depth_kept").value)
+        self.publish_depth_ros = bool(self.get_parameter("publish_depth_ros").value)
         # self.debug_topic = self.get_parameter("debug_topic").value
 
         self.publish_debug = bool(self.get_parameter("publish_debug").value)
@@ -115,25 +124,39 @@ class DepthProcessorNode(Node):
             log_fn=self.get_logger().info,
         )
 
-        self.pub_depth = self.create_publisher(Image, self.depth_topic, image_qos)
+        self.pub_depth = (
+            self.create_publisher(Image, self.depth_topic, image_qos)
+            if self.publish_depth_ros else None
+        )
         self.pub_cloud = (
             self.create_publisher(PointCloud2, self.pointcloud_topic, image_qos)
             if self.publish_cloud else None
         )
+        
+        self._depth_seq = 0
+        self.pub_depth_path: "rclpy.publisher.Publisher | None" = None
+        if self.depth_path_topic:
+            self.depth_dir.mkdir(parents=True, exist_ok=True)
+            for f in self.depth_dir.glob("depth_*.npy"):
+                f.unlink(missing_ok=True)
+            for f in self.depth_dir.glob("depth_*.tmp"):
+                f.unlink(missing_ok=True)
+            self.pub_depth_path = self.create_publisher(String, self.depth_path_topic, 10)
+            self.get_logger().info(f"Depth dir publisher: {self.depth_dir} -> {self.depth_path_topic}")
         # self.pub_debug = self.create_publisher(Image, self.debug_topic, image_qos)
-
-        self.sub_image = self.create_subscription(
-            Image,
-            self.image_topic,
-            self.image_callback,
-            image_qos,
-        )
 
         if self.frame_path_topic:
             self.create_subscription(
                 String,
                 self.frame_path_topic,
                 self.frame_path_callback,
+                image_qos,
+            )
+        else:
+            self.create_subscription(
+                Image,
+                self.image_topic,
+                self.image_callback,
                 image_qos,
             )
 
@@ -279,6 +302,8 @@ class DepthProcessorNode(Node):
         return cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
 
     def publish_depth(self, depth_m: np.ndarray, header):
+        if self.pub_depth is None:
+            return
         if self.depth_encoding == "32FC1":
             msg = self.bridge.cv2_to_imgmsg(
                 depth_m.astype(np.float32, copy=False),
@@ -366,9 +391,10 @@ class DepthProcessorNode(Node):
         header.stamp.sec = sec
         header.stamp.nanosec = nanosec
 
-        self._run_inference_and_publish(bgr, header)
+        rgb_stem = Path(path).stem  # e.g. "frame_00000216"
+        self._run_inference_and_publish(bgr, header, rgb_stem=rgb_stem)
 
-    def _run_inference_and_publish(self, bgr: np.ndarray, header):
+    def _run_inference_and_publish(self, bgr: np.ndarray, header, rgb_stem: str = ""):
         t0 = time.perf_counter()
         try:
             t1 = time.perf_counter()
@@ -382,8 +408,29 @@ class DepthProcessorNode(Node):
             depth_m = self.sanitize_depth(depth_m)
             t4 = time.perf_counter()
 
-            self.publish_depth(depth_m, header)
+            if self.publish_depth_ros:
+                self.publish_depth(depth_m, header)
             t5 = time.perf_counter()
+
+            if self.pub_depth_path is not None:
+                if rgb_stem:
+                    stem = rgb_stem
+                else:
+                    self._depth_seq += 1
+                    stem = f"depth_{self._depth_seq:08d}"
+                final_path = self.depth_dir / f"{stem}.npy"
+                tmp_path = final_path.with_suffix(".tmp")
+                buf = io.BytesIO()
+                np.save(buf, depth_m)
+                tmp_path.write_bytes(buf.getvalue())
+                tmp_path.rename(final_path)
+                if self.max_depth_kept > 0:
+                    existing = sorted(self.depth_dir.glob("*.npy"))
+                    for old in existing[: max(0, len(existing) - self.max_depth_kept)]:
+                        old.unlink(missing_ok=True)
+                path_msg = String()
+                path_msg.data = f"{final_path} {header.stamp.sec} {header.stamp.nanosec}"
+                self.pub_depth_path.publish(path_msg)
 
             if self.pub_cloud is not None:
                 pts = self._backproject_metric_depth(depth_m)

@@ -3,7 +3,7 @@
 Offline frame replay publisher.
 
 Reads saved JPEG/PNG frames from an input directory and replays them through
-the same /xtend/frame_path topic used by OnlineNavBridgeDirPublisher, so the
+the same /xtend/rgb_frame_path topic used by OnlineNavBridgeDirPublisher, so the
 full downstream pipeline (depth node, AprilTag, etc.) runs identically without
 a live drone or RTSP feed.
 
@@ -40,7 +40,7 @@ def _collect_frames(input_dir: Path) -> list[Path]:
 
 class OfflineFrameDirPublisher(Node):
     """
-    Replays frames from a saved directory through /xtend/frame_path at a
+    Replays frames from a saved directory through /xtend/rgb_frame_path at a
     configurable rate. Copies each frame to out_dir before publishing so the
     same rolling-cleanup mechanism as the online bridge applies.
     """
@@ -133,7 +133,7 @@ class OfflineFrameDirPublisher(Node):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Replay saved frames through /xtend/frame_path for offline pipeline testing."
+        description="Replay saved frames through /xtend/rgb_frame_path for offline pipeline testing."
     )
     p.add_argument(
         "--input-dir", required=True,
@@ -143,7 +143,7 @@ def parse_args():
         "--out-dir", default="/tmp/xtend_frames",
         help="Working directory where frame copies are written (same as online bridge).",
     )
-    p.add_argument("--path-topic", default="/xtend/frame_path")
+    p.add_argument("--path-topic", default="/xtend/rgb_frame_path")
     p.add_argument("--frequency", type=float, default=10.0, help="Replay rate in Hz")
     p.add_argument("--loop", action="store_true", help="Loop the frame sequence indefinitely")
     p.add_argument(

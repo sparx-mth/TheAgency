@@ -573,7 +573,7 @@ def main():
     ap.add_argument("--out_json", default="", help="Path to output JSONL log (one JSON per frame).")
     ap.add_argument("--fuse_method", default="avg_translation_keep_first_rotation")
     ap.add_argument("--image_topic", default="/xtend/rgb", help="ROS image topic to listen to")
-    ap.add_argument("--frame_path_topic", default="", help="ROS String topic that publishes saved frame file paths (e.g. /xtend/frame_path)")
+    ap.add_argument("--frame_path_topic", default="", help="ROS String topic that publishes saved frame file paths (e.g. /xtend/rgb_frame_path)")
     ap.add_argument("--qos", choices=["best_effort", "reliable"], default="best_effort",
                     help="QoS reliability policy for ROS subscription")
     ap.add_argument("--min_margin", type=float, default=10.0, help="Minimum decision margin to accept a tag")

@@ -40,7 +40,7 @@ class OnlineNavBridgeDirPublisher(OnlineXtendBridgeBase):
         rtsp_uri: str,
         *,
         out_dir: str | Path = "./frames",
-        path_topic: str = "/xtend/frame_path",
+        path_topic: str = "/xtend/rgb_frame_path",
         frame_id: str = "xtend_camera",
         backend: str = "gstreamer",
         jpeg_quality: int = 90,
@@ -220,7 +220,7 @@ def parse_args():
     p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
 
     p.add_argument("--out-dir", default="./frames")
-    p.add_argument("--path-topic", default="/xtend/frame_path")
+    p.add_argument("--path-topic", default="/xtend/rgb_frame_path")
     p.add_argument("--no-clear-on-start", action="store_true", help="Keep existing frames from a previous run")
     p.add_argument("--max-frames-kept", type=int, default=30, help="Rolling window: delete oldest frames beyond this count (0=keep all)")
     p.add_argument("--frame-id", default="xtend_camera")
