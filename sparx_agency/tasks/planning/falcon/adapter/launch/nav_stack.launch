@@ -117,6 +117,11 @@
   <arg name="unknown_cost"          default="1.0" />
   <arg name="los_smoothing"         default="true" />
   <arg name="turn_penalty"          default="0.0" />
+  <arg name="connectivity"          default="8" />
+  <arg name="search_margin_m"       default="3.0" />
+  <arg name="start_skip_m"          default="0.4" />
+  <arg name="goal_snap_radius_m"    default="2.0" />
+  <arg name="min_free_cells_to_plan" default="80" />
   <arg name="replan_on_collision"   default="true" />
   <arg name="replan_on_bev"         default="false" />
   <arg name="replan_period_s"       default="0.0" />
@@ -347,7 +352,7 @@
     <param name="out_topic"              value="/falcon/bev_2d" />
   </node>
 
-  <node pkg="falcon_adapter" type="astar_planner.py"
+  <node pkg="falcon_adapter" type="astar_planner_node.py"
         name="astar_planner" output="screen">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
@@ -361,6 +366,11 @@
     <param name="unknown_cost"          value="$(arg unknown_cost)" />
     <param name="los_smoothing"         value="$(arg los_smoothing)" />
     <param name="turn_penalty"          value="$(arg turn_penalty)" />
+    <param name="connectivity"          value="$(arg connectivity)" />
+    <param name="search_margin_m"       value="$(arg search_margin_m)" />
+    <param name="start_skip_m"          value="$(arg start_skip_m)" />
+    <param name="goal_snap_radius_m"    value="$(arg goal_snap_radius_m)" />
+    <param name="min_free_cells_to_plan" value="$(arg min_free_cells_to_plan)" />
     <param name="replan_on_collision"   value="$(arg replan_on_collision)" />
     <param name="replan_on_bev"         value="$(arg replan_on_bev)" />
     <param name="replan_period_s"       value="$(arg replan_period_s)" />
