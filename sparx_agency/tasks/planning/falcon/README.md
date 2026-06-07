@@ -31,11 +31,15 @@ falcon/
 │   └── ignore_cuda_pkgs.sh         # CATKIN_IGNORE CUDA / sim-only packages
 └── adapter/              # the falcon_adapter catkin package (the FALCON task's ROS1 nodes)
     ├── scripts/          #   FALCON adapter nodes (rospy) — import the algorithms from core
+    │   ├── falcon_adapter_node.py  # drone pose+depth -> FALCON topics + TF (core dead-reckoning + depth noise)
+    │   ├── sensor_gate_node.py     # freezable pose+depth pass-through (core.planning.sensor_freeze_policy)
     │   ├── bev_publisher_node.py   # FALCON voxel clouds -> 2D OccupancyGrid (core.mapping.bev)
     │   ├── mapping_sync_node.py    # depth<->pose pairing + gate (core.localization)
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
+    │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
+    │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common crop)
     │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
     └── launch/
         ├── nav_stack.launch    # shared nav core (Gazebo sim)
@@ -43,10 +47,18 @@ falcon/
 ```
 
 These nodes are **FALCON-specific adapters** (FALCON topics, `/map_config`,
-frame conventions), so they live with FALCON. The **reusable, ROS-free**
-algorithms they call live in `core/` (`core/mapping/bev`,
-`core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`,
-`core/localization`).
+frame conventions), so the thin ROS1 entrypoints live with FALCON (they are the
+only thing the Docker build context can bake into the image). The **pure,
+ROS-free algorithms** they call live in `core/`, each in its own domain:
+
+- `core/mapping/bev`, `core/mapping/depth_noise`
+- `core/localization` (incl. `se3`, `temporal_transform_buffer`,
+  `dead_reckoning_noise`)
+- `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`,
+  `core/planning/sensor_freeze_policy` (the planner's "don't fuse the map
+  while rotating" decision)
+- `core/common/principal_point_crop` (a general image utility)
+
 `run_falcon.sh` mounts the repo read-only at `/opt/sparx_agency` with
 `PYTHONPATH=/opt` so `import sparx_agency.core...` resolves; `cloud_utils` is
 imported as a sibling. Adding a node = drop it in `scripts/`, list it in
