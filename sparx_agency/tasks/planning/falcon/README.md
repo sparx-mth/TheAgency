@@ -29,6 +29,11 @@ falcon/
 │   ├── fix_falcon_depth_overflow.sh# depthToPointcloud buffer overflow
 │   ├── fix_falcon_sop.sh           # SOP timeout 1s -> 10s (rebuild)
 │   └── ignore_cuda_pkgs.sh         # CATKIN_IGNORE CUDA / sim-only packages
+├── bridge/              # ROS1<->ROS2 bridge (parameter_bridge, QoS-aware) — see bridge/README.md
+│   ├── Dockerfile           #   builds ros1_bridge:noetic-foxy
+│   ├── bridge.yaml          #   bridged topics + per-topic QoS (sensor streams = best_effort)
+│   ├── run_bridge.sh        #   build-if-missing + run
+│   └── verify_bridge.sh     #   topic-flow health check
 └── adapter/              # the falcon_adapter catkin package (the FALCON task's ROS1 nodes)
     ├── scripts/          #   FALCON adapter nodes (rospy) — import the algorithms from core
     │   ├── falcon_adapter_node.py  # drone pose+depth -> FALCON topics + TF (core dead-reckoning + depth noise)
@@ -110,6 +115,22 @@ Example — Gazebo sim:
 # inside the container:
 roslaunch falcon_adapter nav_stack.launch map_name:=hospital
 ```
+
+## Talking to a ROS2 sim / drone — the bridge
+
+FALCON is ROS1; the SJTU Gazebo sim and the real XTEND are ROS2. The
+`bridge/` subdir holds the ROS1↔ROS2 bridge that connects them — lift it
+alongside the FALCON container:
+
+```bash
+./run_falcon.sh hospital          # ROS1 FALCON (its roslaunch provides roscore)
+bridge/run_bridge.sh              # ROS1<->ROS2 bridge (separate terminal)
+# then start the ROS2 sim / power the drone, and: bridge/verify_bridge.sh
+```
+
+The bridge does **all** ROS1↔ROS2 message passing (the adapters never bridge);
+its `bridge.yaml` is pinned to exactly this stack's topics. See
+[`bridge/README.md`](bridge/README.md).
 
 ## Notes
 
