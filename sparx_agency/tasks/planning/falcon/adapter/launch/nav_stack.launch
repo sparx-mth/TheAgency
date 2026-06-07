@@ -377,7 +377,7 @@
     <param name="frame_id"              value="world" />
   </node>
 
-  <node pkg="falcon_adapter" type="waypoint_follower.py"
+  <node pkg="falcon_adapter" type="waypoint_follower_node.py"
         name="waypoint_follower" output="screen">
     <param name="drone_ns"               value="$(arg drone_ns)" />
     <param name="vel_x"                  value="$(arg vel_x)" />
