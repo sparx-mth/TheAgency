@@ -175,15 +175,15 @@ class OnlineNavBridgeDirPublisher(OnlineXtendBridgeBase):
             final_path = self.out_dir / f"frame_{self._frame_seq:08d}.jpg"
             tmp_path = final_path.with_suffix(".tmp")
 
-            ok = cv2.imwrite(
-                str(tmp_path),
-                frame,
+            ok, buf = cv2.imencode(
+                ".jpg", frame,
                 [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
             )
-            if not ok:
-                print(f"[dir_pub] imwrite failed for seq {self._frame_seq}")
+            if not ok or buf is None:
+                print(f"[dir_pub] imencode failed for seq {self._frame_seq}")
                 await asyncio.sleep(sleep_time)
                 continue
+            tmp_path.write_bytes(buf.tobytes())
 
             # Atomic rename: subscribers only see the file once it is complete
             tmp_path.rename(final_path)

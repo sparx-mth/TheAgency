@@ -68,6 +68,9 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             log_dir=log_dir,
         )
 
+        self.bad_frame_mean_min = bad_frame_mean_min
+        self.bad_frame_std_min = bad_frame_std_min
+        self.bad_frame_sample_step = bad_frame_sample_step
         if preprocess_mode not in ("pad", "crop_resize", "resize"):
             raise ValueError(
                 f"preprocess_mode must be 'pad', 'crop_resize', or 'resize', got: {preprocess_mode!r}"
