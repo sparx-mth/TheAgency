@@ -123,7 +123,8 @@ class AxisModel:
 
     @staticmethod
     def _clamp(v: float) -> float:
-        return max(MIN_AXIS, min(MAX_AXIS, v))
+        from sparx_agency.robots.common.helpers import clamp
+        return clamp(v, MIN_AXIS, MAX_AXIS)
 
 
 # ---------------------------------------------------------------------------
