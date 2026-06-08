@@ -90,13 +90,27 @@
 
   <node pkg="falcon_adapter" type="mapping_sync_node.py" name="mapping_sync" output="screen">
     <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/april_tag_pose -->
-    <param name="depth_topic"        value="$(arg gated_ns)/front_depth/depth/image_raw" />
+    <!-- RAW depth, NOT the sensor_gate output. mapping_sync is the SOLE voxel
+         feeder here (falcon_adapter runs with publish_mapping_inputs=false) and
+         owns the authoritative rotation freeze below, so it must see true capture
+         stamps: the raw /xtend/depth_m shares its stamp with /xtend/april_tag_pose
+         (which is stamped from the depth it was computed on), so they pair exactly.
+         Feeding the GATED depth instead would mix in sensor_gate's replay frames
+         (restamped to now()), which would pair a held pre-turn frame with the live
+         rotating pose and smear the map (the very thing the freeze prevents). -->
+    <param name="depth_topic"        value="$(arg real_depth_topic)" />              <!-- /xtend/depth_m -->
     <param name="out_pose_topic"     value="/map_ros/pose" />
     <param name="out_depth_topic"    value="/map_ros/depth" />
     <param name="sync_tolerance"     value="0.05" />
     <param name="max_interp_gap"     value="0.12" />   <!-- 0 = strict nearest-only -->
     <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
     <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
+    <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
+         /xtend/demo_mode == turning, and drop the stale in-flight turn frame on
+         resume, all in the capture clock. -->
+    <param name="demo_mode_topic"      value="/xtend/demo_mode" />
+    <param name="turning_mode_name"    value="turning" />
+    <param name="resume_settle_sec"    value="0.0" />
   </node>
   <!-- ══════════════════════════════════════════════════════════════
        The actual nav stack — same launch as Gazebo, just with the
