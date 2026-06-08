@@ -252,7 +252,7 @@ class OpticalFlowLocalizationProvider(BaseLocalizationProvider):
             pose=Pose3D(x=self._x, y=self._y, z=self._z, yaw=self._current_yaw),
             source=self.source_name,
             confidence=confidence,
-            stamp_sec=stamp_sec,
+            stamp_sec=flow["stamp_sec"],  # use RGB frame timestamp, not depth arrival time
             pos_std_m=max(0.05, 0.1 * (1.0 - confidence)),
             yaw_std_rad=0.1,
         )
