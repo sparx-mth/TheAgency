@@ -40,11 +40,13 @@ from sparx_agency.core.localization.base import BaseLocalizationProvider, Locali
 from sparx_agency.core.localization.providers import (
     AprilTagLocalizationProvider,
     OpticalFlowLocalizationProvider,
+    AmclLocalizationProvider,
 )
 
 _PROVIDERS = {
     "apriltag": AprilTagLocalizationProvider,
     "optical_flow": OpticalFlowLocalizationProvider,
+    "amcl": AmclLocalizationProvider,
 }
 
 _OUTPUT_TOPIC = "/xtend/localization"
@@ -97,6 +99,15 @@ class LocalizationNode(Node):
         self.declare_parameter("deadband_vx", 0.02)
         self.declare_parameter("deadband_vy", 0.20)
         self.declare_parameter("deadband_vz", 0.20)
+        # amcl params
+        self.declare_parameter("map_dir", "")
+        self.declare_parameter("amcl_orientations_n", 32)
+        self.declare_parameter("amcl_beams_n", 64)
+        self.declare_parameter("amcl_max_range_m", 8.0)
+        self.declare_parameter("amcl_window_m", 5.0)
+        self.declare_parameter("amcl_initial_loc_m_json", "")
+        self.declare_parameter("amcl_initial_orientation_rad", 0.0)
+        self.declare_parameter("amcl_uncertainty_cells", 5)
 
         provider_type = self.get_parameter("provider_type").value
         if provider_type not in _PROVIDERS:
@@ -125,7 +136,7 @@ class LocalizationNode(Node):
         self._pub_pose = self.create_publisher(PoseStamped, _OUTPUT_TOPIC, 10)
         self._pub_source = self.create_publisher(String, _SOURCE_TOPIC, 10)
 
-        if provider_type == "optical_flow":
+        if provider_type in ("optical_flow", "amcl"):
             self._setup_optical_flow_subs(qos)
         else:
             self._setup_single_stream_subs(qos)
@@ -201,6 +212,25 @@ class LocalizationNode(Node):
                 deadband_vx=float(self.get_parameter("deadband_vx").value),
                 deadband_vy=float(self.get_parameter("deadband_vy").value),
                 deadband_vz=float(self.get_parameter("deadband_vz").value),
+            )
+        if provider_type == "amcl":
+            map_dir = self.get_parameter("map_dir").value
+            calib = self.get_parameter("camera_calib_path").value
+            if not map_dir:
+                raise ValueError("amcl provider requires map_dir.")
+            if not calib:
+                raise ValueError("amcl provider requires camera_calib_path.")
+            return AmclLocalizationProvider(
+                map_dir=map_dir,
+                camera_calib_path=calib,
+                num_orientations=int(self.get_parameter("amcl_orientations_n").value),
+                num_beams=int(self.get_parameter("amcl_beams_n").value),
+                max_range_m=float(self.get_parameter("amcl_max_range_m").value),
+                window_m=float(self.get_parameter("amcl_window_m").value),
+                initial_loc_m_json=self.get_parameter("amcl_initial_loc_m_json").value,
+                initial_orientation_rad=float(self.get_parameter("amcl_initial_orientation_rad").value),
+                prediction_uncertainty_cells=int(self.get_parameter("amcl_uncertainty_cells").value),
+                max_wait_for_depth_sec=float(self.get_parameter("max_wait_for_depth_sec").value),
             )
         raise ValueError(f"No builder for provider_type: {provider_type}")
 
