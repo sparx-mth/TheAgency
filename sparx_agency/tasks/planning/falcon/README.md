@@ -37,9 +37,9 @@ falcon/
 └── adapter/              # the falcon_adapter catkin package (the FALCON task's ROS1 nodes)
     ├── scripts/          #   FALCON adapter nodes (rospy) — import the algorithms from core
     │   ├── falcon_adapter_node.py  # drone pose+depth -> FALCON topics + TF (core dead-reckoning + depth noise)
-    │   ├── sensor_gate_node.py     # freezable pose+depth pass-through (core.planning.sensor_freeze_policy)
+    │   ├── sensor_gate_node.py     # rotation-aware freezable pose+depth gate (core.mapping.depth_fusion_gate)
     │   ├── bev_publisher_node.py   # FALCON voxel clouds -> 2D OccupancyGrid (core.mapping.bev)
-    │   ├── mapping_sync_node.py    # depth<->pose pairing + gate (core.localization)
+    │   ├── mapping_sync_node.py    # depth<->pose pairing + localization gate + authoritative rotation freeze (core.localization + core.mapping.depth_fusion_gate)
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
@@ -57,11 +57,17 @@ only thing the Docker build context can bake into the image). The **pure,
 ROS-free algorithms** they call live in `core/`, each in its own domain:
 
 - `core/mapping/bev`, `core/mapping/depth_noise`
+- `core/mapping/sensor_freeze_policy` + `core/mapping/depth_fusion_gate`
+  (the mapping "don't fuse the map while rotating, and drop the stale in-flight
+  frame on resume" decision). Applied at the node that forms the (depth, pose)
+  pair fed to the voxels: `mapping_sync_node` is the AUTHORITATIVE voxel freeze
+  on the real-drone path (it pairs gated depth with an un-gated pose, so the
+  freeze must live there, in the capture clock); `sensor_gate_node` applies the
+  same gate to the pure-Gazebo `falcon_adapter` path (where pose+depth are both
+  gated and co-frozen).
 - `core/localization` (incl. `se3`, `temporal_transform_buffer`,
   `dead_reckoning_noise`)
-- `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`,
-  `core/planning/sensor_freeze_policy` (the planner's "don't fuse the map
-  while rotating" decision)
+- `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`
 - `core/common/intrinsic_remap` (resample a render to a target camera's
   intrinsics — sim_adapter uses it to hit the XTEND's anisotropic fx≠fy;
   `principal_point_crop` is the older crop-only special case)

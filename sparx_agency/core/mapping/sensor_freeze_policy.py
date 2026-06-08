@@ -1,10 +1,10 @@
-"""Mode-authoritative sensor-freeze policy (pure stdlib, ROS-free).
+"""Mode-authoritative map-freeze decision (pure stdlib, ROS-free).
 
-A *planning* decision: while the platform is rotating in place, both depth and
-localization are unreliable, so the planner chooses NOT to fuse them into the
-voxel map (it freezes the sensor stream — holds it on its last value — until
-the turn finishes, so the map does not smear). This module decides whether to
-freeze, from two inputs:
+A *mapping* decision: while the platform is rotating in place, both depth and
+localization are unreliable, so the mapper chooses NOT to fuse the live sensor
+stream into the map (it freezes the stream — holds it on its last value — until
+the turn finishes, so the map does not smear). This module decides ONLY whether
+to freeze, from two inputs:
 
   1. The system-wide demo mode (e.g. ``"turning"``). This is the
      AUTHORITATIVE signal for whether the platform is really turning.
@@ -20,8 +20,13 @@ mode is downstream of everyone's requests and is the only signal that knows
 what was actually granted, so trusting it removes that whole class of stuck
 state.
 
-The policy is pure decision logic — the ROS node owns the topics, the replay
-timer and the heartbeat, and calls :meth:`decide` to act.
+This module answers only "is the map frozen right now?". The richer
+per-frame question — given the freeze state and a depth frame's capture time,
+should THIS frame be fused (including dropping the stale in-flight frame that
+was captured *during* the rotation) — lives in
+:class:`sparx_agency.core.mapping.depth_fusion_gate.DepthFusionGate`, which
+composes this policy. The ROS node owns the topics, the replay timer and the
+heartbeat, and drives both.
 """
 from __future__ import annotations
 
