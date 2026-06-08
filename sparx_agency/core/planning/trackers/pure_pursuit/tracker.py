@@ -6,17 +6,19 @@ Pure Pursuit tracker (2D and 3D).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Callable, List, Optional
 
 import numpy as np
 
 from sparx_agency.core.common.types import (
     ControlCommand,
     KinematicLimits,
-    State3D,
-    Trajectory,
     TrajectoryPoint,
+)
+from sparx_agency.core.planning.interfaces.tracker import (
+    TrackerRequest,
+    TrackerResult,
 )
 
 from . import algorithm as alg
@@ -24,41 +26,7 @@ from .params import PurePursuitParams, PurePursuitParams3D
 
 
 # =============================================================================
-# Tracker interfaces
-# =============================================================================
-
-@dataclass(frozen=True)
-class TrackerRequest:
-    """Input to tracker (2D/3D)."""
-    state: State3D
-    trajectory: Trajectory
-    t: float
-    limits: Optional[KinematicLimits] = None
-    options: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class TrackerResult:
-    """Output of tracker step."""
-    command: ControlCommand
-    reference: Optional[TrajectoryPoint] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@runtime_checkable
-class BaseTracker(Protocol):
-    """Tracker protocol."""
-    name: str
-
-    def reset(self) -> None:
-        ...
-
-    def step(self, request: TrackerRequest) -> TrackerResult:
-        ...
-
-
-# =============================================================================
-# 2D Pure Pursuit Tracker (unchanged)
+# 2D Pure Pursuit Tracker
 # =============================================================================
 
 @dataclass

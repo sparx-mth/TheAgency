@@ -13,7 +13,9 @@ from .planner import (
 )
 from .smoother import (
     SmootherRequest,
+    SmootherRequest3D,
     BaseSmoother,
+    BaseSmoother3D,
 )
 from .tracker import (
     TrackerRequest,
@@ -29,5 +31,7 @@ from .exploration import (
 
 __all__ = [
     "PlanRequest", "PlanRequest3D", "BasePlanner", "BasePlanner3D",
+    "SmootherRequest", "SmootherRequest3D", "BaseSmoother", "BaseSmoother3D",
+    "TrackerRequest", "TrackerResult", "BaseTracker",
     "ExplorationContext", "ExplorationDecision", "ExplorationPolicy",
 ]
