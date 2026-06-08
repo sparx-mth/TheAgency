@@ -67,6 +67,34 @@ def test_watermark_uses_wall_clock_when_mode_signal_overtakes_frames():
     assert g.should_fuse(12.5) == (True, FUSE)
 
 
+def test_frames_tracked_while_frozen_guard_resume_when_the_clock_lags():
+    # The gate must be fed EVERY frame even while frozen (its documented
+    # contract) so _max_seen_stamp tracks how far the turn's depth reached. Then
+    # the resume watermark = max(newest-seen, now), which still rejects a
+    # during-turn frame even when the "now" passed at the edge LAGS the depth
+    # (e.g. a localization pose that fell behind because the tag left the FOV).
+    g = _gate()
+    g.note_mode(True, now=2.0)
+    assert g.should_fuse(8.0) == (False, FROZEN_ROTATING)
+    assert g.should_fuse(10.0) == (False, FROZEN_ROTATING)   # newest during-turn frame
+    g.note_mode(False, now=7.0)      # lagging clock -> watermark = max(10.0, 7.0)
+    assert g.should_fuse(9.0) == (False, STALE_AFTER_ROTATION)
+    assert g.should_fuse(10.0) == (False, STALE_AFTER_ROTATION)
+    assert g.should_fuse(10.5) == (True, FUSE)
+
+
+def test_should_fuse_while_frozen_does_not_clear_a_pending_resume_guard():
+    # A frozen call only advances _max_seen_stamp; it must never retire the
+    # resume watermark (only a fresh frame after the turn may).
+    g = _gate()
+    g.note_mode(True, now=1.0)
+    g.should_fuse(2.0)
+    g.note_mode(False, now=2.0)      # watermark armed at 2.0
+    g.note_mode(True, now=2.1)       # turning again; guard dropped, frozen
+    assert g.should_fuse(5.0) == (False, FROZEN_ROTATING)
+    assert g.awaiting_fresh_frame is False
+
+
 def test_resume_settle_margin_extends_the_watermark():
     g = _gate(resume_settle_sec=0.5)
     g.note_mode(True, now=1.0)

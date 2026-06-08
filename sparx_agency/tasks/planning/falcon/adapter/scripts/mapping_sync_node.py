@@ -51,7 +51,8 @@ from std_msgs.msg import String
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.localization.temporal_transform_buffer import (
     MultiSourceTemporalMatcher, EXACT, NEAREST)
-from sparx_agency.core.mapping.depth_fusion_gate import DepthFusionGate
+from sparx_agency.core.mapping.depth_fusion_gate import (
+    DepthFusionGate, FROZEN_ROTATING)
 from sparx_agency.core.mapping.sensor_freeze_policy import SensorFreezePolicy
 
 
@@ -184,17 +185,23 @@ class MappingSyncNode:
     def _depth_cb(self, msg):
         td = msg.header.stamp.to_sec()
         self._n_depth += 1
-        # Rotation freeze (authoritative for the voxel pair). While turning, emit
-        # NOTHING (no smear). On resume, drop the stale in-flight turn frame until
-        # one captured strictly after the turn ends arrives. Skip should_fuse while
-        # frozen so the watermark is not polluted by upstream replay stamps.
+        # Rotation freeze (authoritative for the voxel pair). Feed EVERY frame's
+        # capture stamp to the gate -- even while turning -- so the resume
+        # watermark tracks how far the turn's depth actually reached (this is the
+        # RAW /xtend/depth_m, true capture stamps, so there is nothing to
+        # pollute). Otherwise the watermark would collapse to the newest pose
+        # stamp alone, and a during-turn frame could slip through on resume when
+        # the localization pose lags the depth (e.g. the tag leaves the FOV).
+        # While turning the gate emits NOTHING (no smear); on resume it drops the
+        # stale in-flight turn frame until one captured strictly after the turn
+        # ends arrives. should_fuse never clears the watermark while frozen.
         with self._lock:
-            if self.gate.frozen:
-                self._n_drop_frozen += 1
-                return
-            fuse, _ = self.gate.should_fuse(td)
+            fuse, reason = self.gate.should_fuse(td)
             if not fuse:
-                self._n_drop_stale += 1
+                if reason == FROZEN_ROTATING:
+                    self._n_drop_frozen += 1
+                else:
+                    self._n_drop_stale += 1
                 return
         if self.depth_min_dt > 0.0 and self._prev_intake_t is not None:
             if (td - self._prev_intake_t) < self.depth_min_dt:
