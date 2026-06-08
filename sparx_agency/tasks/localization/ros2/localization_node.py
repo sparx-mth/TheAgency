@@ -114,6 +114,14 @@ class LocalizationNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
+        existing = self.count_publishers(_OUTPUT_TOPIC)
+        if existing > 0:
+            self.get_logger().warn(
+                f"CONFLICT: {existing} publisher(s) already active on {_OUTPUT_TOPIC}. "
+                f"Only one localization provider should run at a time. "
+                f"Stop the other node or poses will be overwritten."
+            )
+
         self._pub_pose = self.create_publisher(PoseStamped, _OUTPUT_TOPIC, 10)
         self._pub_source = self.create_publisher(String, _SOURCE_TOPIC, 10)
 
