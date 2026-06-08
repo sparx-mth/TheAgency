@@ -3,10 +3,10 @@ Minimal SE(3) / quaternion helpers (pure numpy, ROS-free).
 
 Quaternions are ``[x, y, z, w]`` (same order as ROS geometry_msgs and
 tf.transformations) so adapters can feed message fields straight through.
-Transforms are 4x4 homogeneous matrices. This exists so the temporal pose
-alignment in :mod:`temporal_transform_buffer` stays importable without a ROS
-environment (the FALCON adapter runs in a container that has neither tf nor
-scipy guaranteed on the Python path).
+Transforms are 4x4 homogeneous matrices. These helpers are shared across the
+stack (temporal pose alignment in localization, the FALCON planning adapters)
+and stay importable without a ROS environment (the FALCON adapter runs in a
+container that has neither tf nor scipy guaranteed on the Python path).
 """
 from __future__ import annotations
 
