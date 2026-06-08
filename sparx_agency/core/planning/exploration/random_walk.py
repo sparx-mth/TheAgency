@@ -24,7 +24,7 @@ from sparx_agency.core.planning.interfaces.exploration import (
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class RandomWalkParams:
     """
     Parameters for random-walk exploration.

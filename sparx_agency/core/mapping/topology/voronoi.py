@@ -20,7 +20,7 @@ from sparx_agency.core.mapping.costmap.sdf import boundary_cost_field
 from sparx_agency.core.mapping.topology.graph_utils import merge_short_edges, sparsify_graph
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TopologyParams:
     """
     Parameters for Voronoi topology extraction.

@@ -7,7 +7,7 @@ from sparx_agency.core.planning.trackers.pure_pursuit.params import PurePursuitP
 from sparx_agency.core.planning.trackers.pure_pursuit.tracker import PurePursuitTracker
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TrackerFactory:
     name: str
     create: Callable[[], object]

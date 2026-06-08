@@ -25,7 +25,7 @@ else:
     _SCIPY_IMPORT_ERROR = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class InflationParams:
     """
     Parameters for obstacle inflation.

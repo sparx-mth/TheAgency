@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class AStarParams:
     """
     Parameters for A* planning on grids.
@@ -18,7 +18,7 @@ class AStarParams:
     max_expansions: int | None = 200_000
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class WeightedAStarParams:
     """
     Parameters for the weighted 2D A* planner on an OccupancyGrid2D.
@@ -60,7 +60,7 @@ class WeightedAStarParams:
     max_expansions: int | None = 200_000
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class AStar3DParams:
     """
     Parameters for voxel-grid A* (3D).
