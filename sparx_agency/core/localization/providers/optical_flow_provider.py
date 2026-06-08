@@ -149,7 +149,16 @@ class OpticalFlowLocalizationProvider(BaseLocalizationProvider):
         allow_depth_before_flow_sec: float = 0.03,
         flow_queue_size: int = 200,
         depth_scale: float = 1.0,
+        deadband_vx: float = 0.02,
+        deadband_vy: float = 0.20,
+        deadband_vz: float = 0.20,
     ) -> None:
+        # Deadband explanation:
+        #   After EMA filtering, velocities below these thresholds are zeroed.
+        #   Prevents noise from accumulating as position drift when stationary.
+        #   Tune per axis — vx (forward) is typically the most accurate;
+        #   vy/vz are noisier and need higher thresholds for live flight.
+        #   For offline calm footage, lower all three toward 0.0.
         self._fx, self._fy, self._cx, self._cy = _load_flow_intrinsics(camera_calib_path)
         self._tracker = OpticalFlowTracker(
             max_corners=max_corners, min_corners=min_corners,
@@ -162,6 +171,9 @@ class OpticalFlowLocalizationProvider(BaseLocalizationProvider):
         self._vel_alpha = vel_alpha
         self._max_wait = max_wait_for_depth_sec
         self._allow_before = allow_depth_before_flow_sec
+        self._deadband_vx = float(deadband_vx)
+        self._deadband_vy = float(deadband_vy)
+        self._deadband_vz = float(deadband_vz)
         self._pending: Deque[Dict[str, Any]] = deque(maxlen=flow_queue_size)
         self._last_depth: Optional[np.ndarray] = None
         self._prev_vx = self._prev_vy = self._prev_vz = 0.0
@@ -225,9 +237,9 @@ class OpticalFlowLocalizationProvider(BaseLocalizationProvider):
         vz = self._vel_alpha * raw_vz + (1.0 - self._vel_alpha) * self._prev_vz
         self._prev_vx, self._prev_vy, self._prev_vz = vx, vy, vz
 
-        if abs(vx) < 0.02: vx = 0.0
-        if abs(vy) < 0.20: vy = 0.0
-        if abs(vz) < 0.20: vz = 0.0
+        if abs(vx) < self._deadband_vx: vx = 0.0
+        if abs(vy) < self._deadband_vy: vy = 0.0
+        if abs(vz) < self._deadband_vz: vz = 0.0
 
         yaw_off = self._initial_yaw if self._initial_yaw is not None else 0.0
         dt = flow["dt"]

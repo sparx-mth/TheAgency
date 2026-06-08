@@ -202,7 +202,7 @@ python3 /home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_proces
   -p depth_encoding:=32FC1 \
   -p depth_path_topic:=/xtend/depth_frame_path \
   -p depth_dir:=/tmp/xtend_depth \
-  -p max_depth_kept:=30 \
+  -p max_depth_kept:=0 \
   -p publish_depth_ros:=false
 '
 
@@ -430,7 +430,7 @@ python3 /home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_proces
   -p depth_encoding:=32FC1 \
   -p depth_path_topic:=/xtend/depth_frame_path \
   -p depth_dir:=/tmp/xtend_depth \
-  -p max_depth_kept:=30 \
+  -p max_depth_kept:=0 \
   -p publish_depth_ros:=false
 '
 
@@ -532,7 +532,7 @@ python3 /home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_proces
   -p depth_encoding:=32FC1 \
   -p depth_path_topic:=/xtend/depth_frame_path \
   -p depth_dir:=/tmp/xtend_depth \
-  -p max_depth_kept:=30 \
+  -p max_depth_kept:=0 \
   -p publish_depth_ros:=false
 """,
     ),
@@ -597,6 +597,33 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   -p tag_map_path:=/home/daphnaa/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   -p camera_calib_path:=/home/daphnaa/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p tag_size_m:=0.13
+""",
+    ),
+    LaunchItem(
+        name="6b. Localization node (OpticalFlow provider)",
+        machine="jetson",
+        tmux_name="xtend_flow_loc",
+        description=(
+            "Generic localization node with provider_type=optical_flow. "
+            "Reads RGB from /xtend/rgb_frame_path and depth from /xtend/depth_frame_path. "
+            "Publishes /xtend/localization. No bearing needed for offline use. "
+            "max_wait_for_depth_sec=5.0 accommodates slow offline depth inference. "
+            "Deadbands tuned for calm offline footage (lower than live-flight defaults)."
+        ),
+        enabled_by_default=False,
+        command="""
+python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+  --ros-args \
+  -p provider_type:=optical_flow \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
+  -p depth_frame_path_topic:=/xtend/depth_frame_path \
+  -p camera_calib_path:=/home/daphnaa/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p bearing_topic:=/xtend/bearing \
+  -p demo_mode_topic:=/xtend/demo_mode \
+  -p max_wait_for_depth_sec:=5.0 \
+  -p deadband_vx:=0.01 \
+  -p deadband_vy:=0.05 \
+  -p deadband_vz:=0.05
 """,
     ),
     LaunchItem(

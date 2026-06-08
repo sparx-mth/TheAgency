@@ -90,6 +90,13 @@ class LocalizationNode(Node):
         self.declare_parameter("depth_ema_alpha", 0.05)
         self.declare_parameter("vel_alpha", 0.2)
         self.declare_parameter("max_wait_for_depth_sec", 0.1)
+        # Velocity deadbands: zero out velocities below these thresholds (m/s).
+        # Prevents noise from integrating into position drift when near-stationary.
+        # Lower toward 0.0 for slow/calm flights; raise for vibrating live platforms.
+        # vx=forward, vy=lateral, vz=vertical — vy/vz are typically noisier.
+        self.declare_parameter("deadband_vx", 0.02)
+        self.declare_parameter("deadband_vy", 0.20)
+        self.declare_parameter("deadband_vz", 0.20)
 
         provider_type = self.get_parameter("provider_type").value
         if provider_type not in _PROVIDERS:
@@ -182,9 +189,10 @@ class LocalizationNode(Node):
                 max_depth=float(self.get_parameter("max_depth").value),
                 depth_ema_alpha=float(self.get_parameter("depth_ema_alpha").value),
                 vel_alpha=float(self.get_parameter("vel_alpha").value),
-                max_wait_for_depth_sec=float(
-                    self.get_parameter("max_wait_for_depth_sec").value
-                ),
+                max_wait_for_depth_sec=float(self.get_parameter("max_wait_for_depth_sec").value),
+                deadband_vx=float(self.get_parameter("deadband_vx").value),
+                deadband_vy=float(self.get_parameter("deadband_vy").value),
+                deadband_vz=float(self.get_parameter("deadband_vz").value),
             )
         raise ValueError(f"No builder for provider_type: {provider_type}")
 
