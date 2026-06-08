@@ -13,7 +13,10 @@ from std_msgs.msg import Header, String
 from cv_bridge import CvBridge
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
-from sparx_agency.robots.common.helpers import load_camera_info_from_yaml, padded_camera_info, crop_resize_camera_info
+from sparx_agency.robots.common.helpers import (
+    load_camera_info_from_yaml, padded_camera_info, crop_resize_camera_info,
+    sanitize_depth,
+)
 
 
 class DepthProcessorNode(Node):
@@ -202,11 +205,8 @@ class DepthProcessorNode(Node):
 
 
     def sanitize_depth(self, depth: np.ndarray) -> np.ndarray:
-        depth = depth.astype(np.float32, copy=False)
-        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-        if self.clip_max_m > self.clip_min_m:
-            depth = np.clip(depth, self.clip_min_m, self.clip_max_m)
-        return depth
+        clip_max = self.clip_max_m if self.clip_max_m > self.clip_min_m else None
+        return sanitize_depth(depth, clip_min=self.clip_min_m, clip_max=clip_max)
 
     def load_small_lut(self, lut_path: str):
         if not lut_path:

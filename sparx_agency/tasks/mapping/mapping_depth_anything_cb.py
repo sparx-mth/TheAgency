@@ -15,7 +15,7 @@ from sparx_agency.core.common.types import PoseSE3, Observation, RGBFrame
 from sparx_agency.robots.common.adapters.ros2.uav_state_adapter import UAVStateToPoseAdapter
 from sparx_agency.robots.common.helpers import depth_to_vis_u8
 
-from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+from sparx_agency.robots.common.spatial_math import fov_to_intrinsics
 from sparx_agency.robots.common.state_converter import costmap_to_occupancygrid
 from sparx_agency.robots.common.txt_utils import  stamp_to_sec
 from sparx_agency.robots.common.image_utils import ros_image_to_rgb_np, numpy_to_image_msg
@@ -37,7 +37,7 @@ class MappingTask(Node):
         self.pipeline = pipeline
         self.drone_id = drone_id
 
-        self.intr = intrinsics_from_fov(width, height, hfov_deg, vfov_deg)
+        self.intr = fov_to_intrinsics(width, height, hfov_deg, vfov_deg)
         self.pose_adapter = UAVStateToPoseAdapter()
 
         self.last_img: Optional[Image] | None = None

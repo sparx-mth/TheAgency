@@ -49,10 +49,11 @@ from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
     TagObservation,
     estimate_camera_pose_from_tags,
-    matrix_to_pose,
+    transform_to_pose,
     print_transform_debug,
     world_T_tag_from_pose,
 )
+from sparx_agency.core.common.filters import ExponentialMovingAverage
 
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     load_camera_calib_yaml,
@@ -190,10 +191,9 @@ class TagTriangulationOpenCVTask:
         self.bridge = CvBridge()
         self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
 
-        self.filtered_x = None
-        self.filtered_q = None
-
         self.alpha = 0.1
+        self._pos_ema = ExponentialMovingAverage(alpha=self.alpha)
+        self.filtered_q = None
         self.min_margin = float(min_margin)
 
         if self.use_ros_image:
@@ -427,16 +427,9 @@ class TagTriangulationOpenCVTask:
 
                 world_T_ros = est.world_T_cam @ cv_to_ros
 
-                (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(world_T_ros)
+                (x, y, z), (qx, qy, qz, qw) = transform_to_pose(world_T_ros)
 
-                if self.filtered_x is None:
-                    self.filtered_x, self.filtered_y, self.filtered_z = x, y, z
-                else:
-                    self.filtered_x = self.alpha * x + (1 - self.alpha) * self.filtered_x
-                    self.filtered_y = self.alpha * y + (1 - self.alpha) * self.filtered_y
-                    self.filtered_z = self.alpha * z + (1 - self.alpha) * self.filtered_z
-
-                x, y, z = self.filtered_x, self.filtered_y, self.filtered_z
+                x, y, z = self._pos_ema.update(np.array([x, y, z], dtype=float))
 
                 q_raw = np.array([qx, qy, qz, qw])
                 if self.filtered_q is None:
@@ -475,7 +468,7 @@ class TagTriangulationOpenCVTask:
                 print("-----------------------------------")
 
                 out_pose = {
-                    "position_xyz_m": [float(self.filtered_x), float(self.filtered_y), float(self.filtered_z)],
+                    "position_xyz_m": [float(x), float(y), float(z)],
                     "quat_xyzw": [float(qx), float(qy), float(qz), float(qw)],
                 }
 

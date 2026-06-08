@@ -9,7 +9,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 
 from sparx_agency.core.mapping.interfaces.depth_model import DepthModel
-from sparx_agency.robots.common.spatial_math import intrinsics_from_fov, load_intrinsics_from_yaml
+from sparx_agency.robots.common.spatial_math import fov_to_intrinsics, yaml_to_intrinsics
 
 
 class DA3TensorRTModel(DepthModel):
@@ -29,7 +29,7 @@ class DA3TensorRTModel(DepthModel):
 
         self.context = self.engine.create_execution_context()
         self.inputs, self.outputs, self.bindings, self.stream = self._allocate_buffers()
-        self.intrinsics = load_intrinsics_from_yaml(yaml_path)
+        self.intrinsics = yaml_to_intrinsics(yaml_path)
 
         self.input_name = self.engine.get_tensor_name(0)
         input_shape = self.engine.get_tensor_shape(self.input_name)

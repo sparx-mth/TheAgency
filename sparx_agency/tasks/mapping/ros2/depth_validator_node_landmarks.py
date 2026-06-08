@@ -16,7 +16,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 
-from sparx_agency.robots.common.spatial_math import get_euler, quat_to_rot, euler_to_rot_zyx
+from sparx_agency.robots.common.spatial_math import quat_msg_to_rpy_deg, quat_to_rot, euler_to_rot_zyx
 from sparx_agency.tasks.mapping.common.validator_markers import MARKER_OBJECTS
 
 def wrap_hue_interval(hsv_h: np.ndarray, low: int, high: int) -> np.ndarray:
@@ -277,7 +277,7 @@ class DepthValidatorNode(Node):
             R_world_cam, t_world_cam = self._camera_pose_from_odom(odom_msg)
 
             q = odom_msg.pose.pose.orientation
-            roll_deg, pitch_deg, yaw_deg = get_euler(q)
+            roll_deg, pitch_deg, yaw_deg = quat_msg_to_rpy_deg(q)
             ts = da3_msg.header.stamp.sec + da3_msg.header.stamp.nanosec * 1e-9
 
             vis_rows = []

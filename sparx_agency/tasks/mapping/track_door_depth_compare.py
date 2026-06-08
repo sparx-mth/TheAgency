@@ -16,27 +16,11 @@ from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
 Roi = Tuple[float, float, float, float]  # x, y, w, h
 
 
+from sparx_agency.robots.common.helpers import load_intrinsics_from_yaml as _load_intrinsics
+
 def load_intrinsics_from_yaml(path: str, prefer_projection: bool = True):
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-
-    if prefer_projection and "projection_matrix" in cfg:
-        p = np.array(cfg["projection_matrix"]["data"], dtype=np.float32).reshape(3, 4)
-        fx = float(p[0, 0])
-        fy = float(p[1, 1])
-        cx = float(p[0, 2])
-        cy = float(p[1, 2])
-    elif "camera_matrix" in cfg:
-        k = np.array(cfg["camera_matrix"]["data"], dtype=np.float32).reshape(3, 3)
-        fx = float(k[0, 0])
-        fy = float(k[1, 1])
-        cx = float(k[0, 2])
-        cy = float(k[1, 2])
-    else:
-        raise ValueError(f"Could not find projection_matrix or camera_matrix in {path}")
-
-    focal = 0.5 * (fx + fy)
-    return fx, fy, cx, cy, focal
+    fx, fy, cx, cy = _load_intrinsics(path, prefer_projection=prefer_projection)
+    return fx, fy, cx, cy, 0.5 * (fx + fy)
 
 
 def list_images(image_dir: str):

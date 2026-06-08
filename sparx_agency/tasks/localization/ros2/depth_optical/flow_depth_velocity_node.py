@@ -16,6 +16,7 @@ import csv
 import os
 import math  
 import yaml
+from sparx_agency.robots.common.helpers import valid_depth_mask
 
 
 class FlowDepthVelocityNode(Node):
@@ -399,7 +400,7 @@ class FlowDepthVelocityNode(Node):
         # Get the depth values at the new feature locations
         Z = np.zeros_like(du, dtype=np.float32)
         Z[valid] = depth_map[v_int[valid], u_int[valid]] * self.depth_scale
-        valid = valid & np.isfinite(Z) & (Z > self.min_depth) & (Z < self.max_depth)
+        valid = valid & valid_depth_mask(Z, min_depth=self.min_depth, max_depth=self.max_depth)
 
         nv = int(np.sum(valid))
         if nv < 8: return 0.0, 0.0, 0.0, 0

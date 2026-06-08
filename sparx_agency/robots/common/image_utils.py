@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 from sensor_msgs.msg import Image
 
+from sparx_agency.robots.common.helpers import valid_depth_mask
+
 
 class BadFrameGuard:
     """
@@ -141,7 +143,7 @@ def create_hist_image_with_objects(
     out_h: int = 400,
 ):
     depth = np.asarray(depth_map, dtype=np.float32)
-    valid = np.isfinite(depth) & (depth > 0) & (depth >= min_dist) & (depth <= max_dist)
+    valid = valid_depth_mask(depth, min_depth=min_dist, max_depth=max_dist)
     vals = depth[valid]
     img = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
@@ -257,7 +259,7 @@ def get_objects_via_histogram(
     depth = np.asarray(depth_img).astype(np.float32)
 
     # 1) Valid mask
-    valid = np.isfinite(depth) & (depth > 0) & (depth >= min_dist) & (depth <= max_dist)
+    valid = valid_depth_mask(depth, min_depth=min_dist, max_depth=max_dist)
     if valid.sum() < 100:  # not enough data
         return []
 
@@ -381,7 +383,7 @@ def get_objects_via_histogram(
     return final
 
 def _finite_mask(depth_m: np.ndarray) -> np.ndarray:
-    return np.isfinite(depth_m) & (depth_m > 0)
+    return valid_depth_mask(depth_m, min_depth=0.0)
 
 def estimate_floor_mask_from_bottom_band(
     depth_m: np.ndarray,
@@ -618,7 +620,7 @@ def robust_depth_from_bbox_hist(
     x1, y1, x2, y2 = bbox
     patch = depth_m[y1:y2, x1:x2]
 
-    valid = np.isfinite(patch) & (patch > min_depth) & (patch < max_depth)
+    valid = valid_depth_mask(patch, min_depth=min_depth, max_depth=max_depth)
     vals = patch[valid]
     if vals.size < 30:
         return None

@@ -8,13 +8,13 @@ from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline,
 from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridCostmap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
-from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+from sparx_agency.robots.common.spatial_math import fov_to_intrinsics
 from sparx_agency.robots.XTEND.adapters.xtend_robot_adapter import XtendRobotAdapter
 
 
 async def run_xtend_mapping(args: argparse.Namespace) -> None:
     # 1) Intrinsics (XTEND stream is 1280x720 in your probe; make configurable)
-    intr = intrinsics_from_fov(
+    intr = fov_to_intrinsics(
         width=args.width,
         height=args.height,
         hfov_deg=args.hfov_deg,

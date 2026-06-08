@@ -95,10 +95,10 @@ class XtendPlugin:
 
     def build_runner(self, args: argparse.Namespace, pipeline: MappingPipeline, costmap: ProbabilisticGridCostmap) -> RunnerFn:
         async def _run():
-            from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+            from sparx_agency.robots.common.spatial_math import fov_to_intrinsics
             from sparx_agency.robots.XTEND.adapters.xtend_robot_adapter import XtendRobotAdapter
 
-            intr = intrinsics_from_fov(
+            intr = fov_to_intrinsics(
                 width=args.width,
                 height=args.height,
                 hfov_deg=args.hfov_deg,
@@ -170,10 +170,10 @@ class RoosterPlugin:
 
     def build_runner(self, args: argparse.Namespace, pipeline: MappingPipeline, costmap: ProbabilisticGridCostmap) -> RunnerFn:
         def _run():
-            from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+            from sparx_agency.robots.common.spatial_math import fov_to_intrinsics
             from sparx_agency.robots.ROBOTICAN.adapters import RoosterIngestor
 
-            intr = intrinsics_from_fov(
+            intr = fov_to_intrinsics(
                 width=args.width,
                 height=args.height,
                 hfov_deg=args.hfov_deg,

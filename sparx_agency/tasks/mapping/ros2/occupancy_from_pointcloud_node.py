@@ -11,7 +11,7 @@ from std_msgs.msg import Header
 
 from sparx_agency.core.mapping.costmap.integrated_map import IntegratedMap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
-from sparx_agency.robots.common.spatial_math import rot_y, intrinsics_from_fov
+from sparx_agency.robots.common.spatial_math import rot_y_deg, fov_to_intrinsics
 
 
 class OccupancyNode(Node):
@@ -25,7 +25,7 @@ class OccupancyNode(Node):
         self.height = 480
         self.hfov = 130.0
         self.vfov = 90.0
-        self.intr = intrinsics_from_fov(self.width, self.height, self.hfov, self.vfov)
+        self.intr = fov_to_intrinsics(self.width, self.height, self.hfov, self.vfov)
 
         # 2. Parameters
         self.declare_parameter('pitch_deg', 0.0)
@@ -63,7 +63,7 @@ class OccupancyNode(Node):
         sz = self.get_parameter('sensor_z').value
 
         # R rotates the points around the lateral Y axis
-        R = rot_y(-pitch_rad)
+        R = rot_y_deg(-pitch_rad)
         pts_transformed = (pts_w_local @ R.T)
 
         # 4. Lift to sensor height

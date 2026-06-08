@@ -15,7 +15,7 @@ import csv
 from datetime import datetime
 
 # Importing your specific math class
-from sparx_agency.robots.common.spatial_math import get_euler
+from sparx_agency.robots.common.spatial_math import quat_msg_to_rpy_deg
 
 
 class DepthValidatorNode(Node):
@@ -109,7 +109,7 @@ class DepthValidatorNode(Node):
 
             # 6. Logging for Report
             q = odom_msg.pose.pose.orientation
-            r, p, y = get_euler(q)
+            r, p, y = quat_msg_to_rpy_deg(q)
             ts = da3_msg.header.stamp.sec + da3_msg.header.stamp.nanosec * 1e-9
 
             # Logging the new 'jitter' metric

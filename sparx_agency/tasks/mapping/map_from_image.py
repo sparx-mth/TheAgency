@@ -12,7 +12,7 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenha
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
 from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
-from sparx_agency.robots.common.spatial_math import rot_y
+from sparx_agency.robots.common.spatial_math import rot_y_deg
 from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
 
 
@@ -641,7 +641,7 @@ def main():
     overlay_depth_grid_xyz_base(depth_m, intr, grid_n=15, out_path=os.path.join(args.out_dir,"depth_grid_xyz.png"), max_z=35.0)
 
     pts = cloud_generator.depth_to_cloud_to_base_xyz(depth_m, intr)
-    R = rot_y(-30.0)  # 30 deg down
+    R = rot_y_deg(-30.0)  # 30 deg down
     t = np.array([0.0, 0.0, 10.0], np.float32)  # camera at +10m in Z-up world
 
     pts_w = cloud_generator.transform_points(pts, R, t)

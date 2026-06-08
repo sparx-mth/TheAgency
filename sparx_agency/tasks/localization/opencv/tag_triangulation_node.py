@@ -41,7 +41,7 @@ from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
     TagObservation,
     estimate_camera_pose_from_tags,
-    matrix_to_pose,
+    transform_to_pose,
 )
 
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
@@ -267,7 +267,7 @@ class TagTriangulationOpenCVTask:
                 )
                 continue
 
-            (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+            (x, y, z), (qx, qy, qz, qw) = transform_to_pose(est.world_T_cam)
 
             out_pose = {
                 "position_xyz_m": [float(x), float(y), float(z)],
