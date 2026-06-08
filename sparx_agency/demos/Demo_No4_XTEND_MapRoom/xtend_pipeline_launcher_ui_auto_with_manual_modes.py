@@ -254,23 +254,24 @@ sleep 30
 echo "[AUTO] Re-check depth before localization"
 require_topic_rate /xtend/depth_m 30 best_effort xtend_depth
 
-echo "[AUTO] Step 6: start AprilTag localization"
+echo "[AUTO] Step 6: start localization node (AprilTag provider)"
 start_tmux xtend_april_tag '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
 source /home/user/GIT/TheAgency/theagency_venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
-  --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  --tag_size_m 0.13 \
-  --frame_path_topic /xtend/rgb_frame_path \
-  --no_vis
+python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+  --ros-args \
+  -p provider_type:=apriltag \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
+  -p tag_map_path:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_size_m:=0.13
 '
 
-wait_for_topic_name /xtend/april_tag_pose 30 || true
-optional_topic_rate /xtend/april_tag_pose 30 best_effort
+wait_for_topic_name /xtend/localization 30 || true
+optional_topic_rate /xtend/localization 30 best_effort
 
 echo "[AUTO] Step 7: check planner containers"
 docker ps --format '{{.Names}}' | tee /tmp/xtend_docker_names.txt
@@ -437,23 +438,24 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
 wait_for_topic_name /xtend/depth_m 60
 optional_topic_rate /xtend/depth_m 30
 
-echo "[OFFLINE] Step 3: start AprilTag localization"
+echo "[OFFLINE] Step 3: start localization node (AprilTag provider)"
 start_tmux xtend_april_tag '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
 source /home/user/GIT/TheAgency/theagency_venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
-  --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  --tag_size_m 0.13 \
-  --frame_path_topic /xtend/rgb_frame_path \
-  --no_vis
+python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+  --ros-args \
+  -p provider_type:=apriltag \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
+  -p tag_map_path:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_size_m:=0.13
 '
 
-wait_for_topic_name /xtend/april_tag_pose 30 || true
-optional_topic_rate /xtend/april_tag_pose 15
+wait_for_topic_name /xtend/localization 30 || true
+optional_topic_rate /xtend/localization 15
 
 echo "[OFFLINE] Pipeline running. Active sessions:"
 tmux ls || true
@@ -574,21 +576,23 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
 """,
     ),
     LaunchItem(
-        name="6. AprilTag triangulation (pose estimation)",
+        name="6. Localization node (AprilTag provider)",
         machine="jetson",
         tmux_name="xtend_apriltag",
         description=(
+            "Generic localization node with provider_type=apriltag. "
             "Reads frames from /xtend/rgb_frame_path, detects tag36h11 AprilTags, estimates 6-DOF camera pose "
-            "via solvePnP + known tag world positions. Publishes /xtend/april_tag_pose (PoseStamped). "
+            "via solvePnP + EMA smoothing. Publishes /xtend/localization (PoseStamped). "
             "Tag map: new_map.yaml. Calibration: 504x294 resize."
         ),
         command="""
-python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
-  --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  --tag_size_m 0.13 \
-  --frame_path_topic /xtend/rgb_frame_path \
-  --no_vis
+python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+  --ros-args \
+  -p provider_type:=apriltag \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
+  -p tag_map_path:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_size_m:=0.13
 """,
     ),
     LaunchItem(
