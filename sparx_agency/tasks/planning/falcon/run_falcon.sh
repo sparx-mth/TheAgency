@@ -22,11 +22,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ARCH=$(uname -m)
 if [ "${ARCH}" = "aarch64" ]; then
-  # Jetson image tag built by `docker compose build falcon-jetson`.
-  IMAGE="${IMAGE:-falcon-ros:jetson}"
+  # Change to your custom Jetson image tag
+  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
 else
-  # x86 image tag built by `docker compose build falcon-hospital`.
-  IMAGE="${IMAGE:-falcon-ros:noetic}"
+  # Change to your custom x86 image tag
+  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
 fi
 echo "[INFO] Arch: ${ARCH}   Image: ${IMAGE}"
 

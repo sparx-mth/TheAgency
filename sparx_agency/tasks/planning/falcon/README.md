@@ -44,7 +44,7 @@ falcon/
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
-    │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common crop)
+    │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common.intrinsic_remap + wall-clock restamp)
     │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
     └── launch/
         ├── nav_stack.launch    # shared nav core (Gazebo sim)
@@ -62,7 +62,9 @@ ROS-free algorithms** they call live in `core/`, each in its own domain:
 - `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`,
   `core/planning/sensor_freeze_policy` (the planner's "don't fuse the map
   while rotating" decision)
-- `core/common/principal_point_crop` (a general image utility)
+- `core/common/intrinsic_remap` (resample a render to a target camera's
+  intrinsics — sim_adapter uses it to hit the XTEND's anisotropic fx≠fy;
+  `principal_point_crop` is the older crop-only special case)
 
 `run_falcon.sh` mounts the repo read-only at `/opt/sparx_agency` with
 `PYTHONPATH=/opt` so `import sparx_agency.core...` resolves; `cloud_utils` is
