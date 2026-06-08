@@ -73,6 +73,21 @@ class AStarPlannerNode:
         self.replan_on_bev = bool(G("~replan_on_bev", False))
         self.replan_period_s = float(G("~replan_period_s", 0.0))
 
+        # Collision-replan debounce. A single noisy depth frame can paint a
+        # spurious occupied cell across the path; reacting on the first frame
+        # makes the slow platform veer away and then veer back when the noise
+        # clears -- a costly oscillation. So a collision must persist over
+        # ~replan_collision_confirm consecutive BEV frames ("wait for more depth
+        # to confirm the obstacle") before we replan. A real obstacle persists
+        # and clears the gate within a frame or two, while the 0.4m inflation
+        # buffer in path_collides keeps that brief, frame-bounded delay safe.
+        # The streak resets after each replan, so this also caps the sustained
+        # replan rate WITHOUT ever holding a known-colliding path (a time-based
+        # cooldown would do the latter and is unsafe here: replanning is the
+        # only obstacle avoidance). Set confirm=1 for the legacy behavior.
+        self.replan_collision_confirm = max(1, int(G("~replan_collision_confirm", 2)))
+        self._collision_streak = 0       # consecutive colliding BEV frames
+
         # Map-warmup gate: refuse to plan until the BEV holds at least this many
         # genuine FREE cells. FREE comes only from FALCON's real depth fusion, so
         # it is a true "the map has warmed up" signal -- without it an all-UNKNOWN
@@ -120,6 +135,7 @@ class AStarPlannerNode:
         # An explicit click always forces a fresh plan: clear state + cost cache.
         self.goal = new
         self.has_plan = False
+        self._collision_streak = 0
         self.planner.invalidate_cache()
         if not self._try_plan():
             rospy.logwarn("astar_planner: click goal (%.2f, %.2f) accepted but no "
@@ -138,11 +154,8 @@ class AStarPlannerNode:
             self._try_plan()
         elif self.replan_on_bev:
             self._try_plan()
-        elif self.replan_on_collision and self.planner.path_collides(self.grid, self.last_points):
-            rospy.logwarn("astar_planner: published path now crosses an occupied "
-                          "cell -- replanning")
-            self.has_plan = False
-            self._try_plan()
+        elif self.replan_on_collision:
+            self._collision_replan_check()
 
     # ─── Decode ──────────────────────────────────────────────────
     def _decode(self, msg):
@@ -162,6 +175,39 @@ class AStarPlannerNode:
         return OccupancyGrid2D(data, params, values=BEV_VALUES)
 
     # ─── Planning ────────────────────────────────────────────────
+    def _collision_replan_check(self):
+        """Replan only on a *confirmed* path collision, not single-frame noise.
+
+        Transient depth noise can briefly paint an occupied cell across the
+        published path. Replanning on the first such frame makes the slow
+        platform turn away, and when the noise clears it turns back -- an
+        oscillation. So the collision must hold for ``replan_collision_confirm``
+        consecutive BEV frames (the "wait for more depth" gate) before we act.
+        A genuine obstacle persists and clears the gate within a frame or two,
+        while the 0.4m inflation buffer in ``path_collides`` keeps that brief,
+        frame-bounded delay safe. We never *hold* a confirmed colliding path:
+        once confirmed we replan immediately (replanning is the only avoidance).
+        """
+        if not self.planner.path_collides(self.grid, self.last_points):
+            if self._collision_streak:
+                rospy.loginfo("astar_planner: path clear again after %d colliding "
+                              "frame(s) -- treated as noise, no replan",
+                              self._collision_streak)
+            self._collision_streak = 0
+            return
+
+        self._collision_streak += 1
+        if self._collision_streak < self.replan_collision_confirm:
+            rospy.loginfo("astar_planner: path collision unconfirmed %d/%d -- "
+                          "waiting for more depth before replanning",
+                          self._collision_streak, self.replan_collision_confirm)
+            return
+
+        rospy.logwarn("astar_planner: path blocked on %d consecutive BEV frame(s) "
+                      "-- replanning", self._collision_streak)
+        self.has_plan = False
+        self._try_plan()      # resets _collision_streak on success
+
     def _try_plan(self):
         if self.grid is None:
             self.fail_reason = "no BEV yet"; return False
@@ -186,6 +232,7 @@ class AStarPlannerNode:
         self.last_points = res.path.points
         self._publish(res.path.points, (rospy.Time.now() - t0).to_sec())
         self.has_plan = True
+        self._collision_streak = 0    # every fresh path starts its debounce clean
         self.fail_reason = "(success)"
         return True
 
@@ -246,6 +293,7 @@ class AStarPlannerNode:
           p.waypoint_spacing_m, p.los_smoothing, p.turn_penalty)
         L("  search_margin=%.1fm start_skip=%.2fm snap=%.1fm collision_replan=%s",
           p.search_margin_m, p.start_skip_m, p.goal_snap_radius_m, self.replan_on_collision)
+        L("  collision replan confirm=%d frame(s)", self.replan_collision_confirm)
         L("=" * 64)
 
 
@@ -274,5 +322,9 @@ if __name__ == "__main__":
 #       ~los_smoothing (true) ~waypoint_spacing_m (3.0) ~goal_snap_radius_m (2.0)
 #       ~start_skip_m (0.4) ~max_expansions (200000)
 #   replanning: ~replan_on_collision (true) ~replan_on_bev (false) ~replan_period_s (0.0)
+#       ~replan_collision_confirm (2; consecutive colliding BEV frames required
+#         before a collision replan -- debounces single-frame depth noise and,
+#         since the streak resets after each replan, caps the sustained replan
+#         rate; 1 = legacy replan-on-first-frame)
 #   warmup gate: ~min_free_cells_to_plan (80; 0 disables)
 # ============================================================================
