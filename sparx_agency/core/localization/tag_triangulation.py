@@ -2,46 +2,15 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-
-# -------------------------
-# Data models (ROS-agnostic)
-# -------------------------
-
-@dataclass(frozen=True)
-class TagWorldPose:
-    """
-    Known tag pose in the world frame.
-    xyz: (x,y,z) in meters
-    rpy: (roll,pitch,yaw) in radians
-    """
-    xyz: Tuple[float, float, float]
-    rpy: Tuple[float, float, float]
-
-
-@dataclass(frozen=True)
-class TagObservation:
-    """
-    Observation from camera to a tag.
-    cam_T_tag: 4x4 homogeneous transform from camera frame to tag frame.
-    """
-    tag_id: int
-    cam_T_tag: np.ndarray  # shape (4,4)
-
-
-@dataclass(frozen=True)
-class PoseEstimate:
-    """
-    Estimated camera pose in world frame.
-    world_T_cam: 4x4 homogeneous transform
-    used_tag_ids: list of tag ids used for estimation
-    """
-    world_T_cam: np.ndarray
-    used_tag_ids: List[int]
+from .types.tag_triangulation import (
+    TagWorldPose,
+    TagTransformObservation,
+    PoseEstimate,
+)
 
 
 # -------------------------
@@ -187,7 +156,7 @@ def fuse_world_T_cam(
 
 
 def estimate_camera_pose_from_tags(
-    observations: List[TagObservation],
+    observations: List[TagTransformObservation],
     tag_map: Dict[int, TagWorldPose],
     fuse_method: str = "avg_translation_keep_first_rotation",
 ) -> Optional[PoseEstimate]:

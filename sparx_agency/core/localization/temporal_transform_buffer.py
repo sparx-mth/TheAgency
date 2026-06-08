@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from . import se3
+from ..common.math import se3
 
 # lookup() result kinds
 EXACT, NEAREST, INTERP = "exact", "nearest", "interp"

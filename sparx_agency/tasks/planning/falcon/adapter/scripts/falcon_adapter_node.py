@@ -39,9 +39,11 @@ from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 
-from sparx_agency.core.localization import se3
+from sparx_agency.core.common.math import se3
 from sparx_agency.core.localization.dead_reckoning_noise import (
-    AXES, DeadReckoningNoiseModel, DeadReckoningNoiseParams)
+    DeadReckoningNoiseModel)
+from sparx_agency.core.localization.types.dead_reckoning import (
+    AXES, DeadReckoningNoiseParams)
 from sparx_agency.core.mapping.depth_noise import DepthNoiseParams, add_depth_noise
 
 POS_AXES = ("x", "y", "z")

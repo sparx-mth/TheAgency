@@ -3,10 +3,12 @@ import math
 
 import numpy as np
 
-from sparx_agency.core.localization import se3
+from sparx_agency.core.common.math import se3
 from sparx_agency.core.localization.dead_reckoning_noise import (
-    AXES,
     DeadReckoningNoiseModel,
+)
+from sparx_agency.core.localization.types.dead_reckoning import (
+    AXES,
     DeadReckoningNoiseParams,
 )
 
