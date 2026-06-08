@@ -125,6 +125,7 @@
   <arg name="replan_on_collision"   default="true" />
   <arg name="replan_on_bev"         default="false" />
   <arg name="replan_period_s"       default="0.0" />
+  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
 
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
@@ -374,6 +375,7 @@
     <param name="replan_on_collision"   value="$(arg replan_on_collision)" />
     <param name="replan_on_bev"         value="$(arg replan_on_bev)" />
     <param name="replan_period_s"       value="$(arg replan_period_s)" />
+    <param name="replan_collision_confirm" value="$(arg replan_collision_confirm)" />
     <param name="frame_id"              value="world" />
   </node>
 
