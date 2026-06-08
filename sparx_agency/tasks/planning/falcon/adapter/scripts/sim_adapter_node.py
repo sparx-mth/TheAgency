@@ -74,7 +74,7 @@ class SimAdapterNode:
         self.in_cmd_t = G("~in_cmd_topic", "/cmd_vel")
         self.out_rgb_t = G("~out_rgb_topic", "/xtend/rgb")
         self.out_depth_t = G("~out_depth_topic", "/xtend/depth_m")
-        self.out_pose_t = G("~out_pose_topic", "/flow_depth/pose_est")
+        self.out_pose_t = G("~out_pose_topic", "/xtend/april_tag_pose")
         self.out_cmd_t = G("~out_cmd_topic", "/simple_drone/cmd_vel")
         self.pose_frame = G("~pose_frame_id", "world")
 
