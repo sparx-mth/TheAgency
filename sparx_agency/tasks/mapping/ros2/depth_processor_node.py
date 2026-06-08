@@ -51,7 +51,7 @@ class DepthProcessorNode(Node):
         self.declare_parameter("small_lut_path", str(Path.home() / "GIT/TheAgency/sparx_agency/tasks/mapping/config/lut_small_depth.npz"),)
 
         self.declare_parameter("image_topic", "/xtend/rgb")
-        self.declare_parameter("frame_path_topic", "")
+        self.declare_parameter("frame_path_topic", "/xtend/rgb_frame_path")
         self.declare_parameter("camera_info_topic", "/xtend/camera_info")
         self.declare_parameter("camera_info_mode", "crop_resize")
         # options: base, padded, crop_resize
