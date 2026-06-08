@@ -138,6 +138,12 @@ class AmclLocalizationProvider(BaseLocalizationProvider):
         pred_loc, pred_yaw = motion_predict(
             self._last_loc_grid, self._last_orientation, vx, vy, flow["dt"], self._m_per_cell
         )
+        # Clamp displacement to at most one window radius so noisy or wrong-sign
+        # optical flow cannot fly pred_loc off the map and pin it at a corner.
+        delta = pred_loc - self._last_loc_grid
+        disp = float(np.linalg.norm(delta))
+        if disp > self._window_cells:
+            pred_loc = self._last_loc_grid + delta * (self._window_cells / disp)
         pred_loc = np.clip(pred_loc, [0, 0],
                            [self._world.shape[0] - 1, self._world.shape[1] - 1])
         return self._map_update(pred_loc, pred_yaw, depth_map, n, flow["stamp_sec"])

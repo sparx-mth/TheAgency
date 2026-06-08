@@ -105,7 +105,9 @@ class LocalizationNode(Node):
         self.declare_parameter("amcl_beams_n", 64)
         self.declare_parameter("amcl_max_range_m", 8.0)
         self.declare_parameter("amcl_window_m", 5.0)
-        self.declare_parameter("amcl_initial_loc_m_json", "")
+        # Initial position in metres. Default -1 = use map centre.
+        self.declare_parameter("amcl_initial_x_m", -1.0)
+        self.declare_parameter("amcl_initial_y_m", -1.0)
         self.declare_parameter("amcl_initial_orientation_rad", 0.0)
         self.declare_parameter("amcl_uncertainty_cells", 5)
 
@@ -227,7 +229,10 @@ class LocalizationNode(Node):
                 num_beams=int(self.get_parameter("amcl_beams_n").value),
                 max_range_m=float(self.get_parameter("amcl_max_range_m").value),
                 window_m=float(self.get_parameter("amcl_window_m").value),
-                initial_loc_m_json=self.get_parameter("amcl_initial_loc_m_json").value,
+                initial_loc_m_json=_amcl_loc_json(
+                    float(self.get_parameter("amcl_initial_x_m").value),
+                    float(self.get_parameter("amcl_initial_y_m").value),
+                ),
                 initial_orientation_rad=float(self.get_parameter("amcl_initial_orientation_rad").value),
                 prediction_uncertainty_cells=int(self.get_parameter("amcl_uncertainty_cells").value),
                 max_wait_for_depth_sec=float(self.get_parameter("max_wait_for_depth_sec").value),
@@ -293,6 +298,13 @@ class LocalizationNode(Node):
         src_msg = String()
         src_msg.data = estimate.source
         self._pub_source.publish(src_msg)
+
+
+def _amcl_loc_json(x_m: float, y_m: float) -> str:
+    """Return JSON loc string for AmclLocalizationProvider, or '' for map centre."""
+    if x_m < 0 or y_m < 0:
+        return ""
+    return f"[{x_m}, {y_m}]"
 
 
 def _to_pose_stamped(est: LocalizationEstimate) -> PoseStamped:

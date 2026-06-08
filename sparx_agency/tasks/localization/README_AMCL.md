@@ -1,4 +1,4 @@
-# Vision-Based AMCL Localization Pipeline (XTEND)
+﻿# Vision-Based AMCL Localization Pipeline (XTEND)
 
 This repository contains a real-time, vision-based localization pipeline for the XTEND robot. It integrates **Optical Flow** for continuous odometry and **Depth Anything V3** with a custom **Dense Grid-Based Markov Localization (AMCL)** algorithm.
 
@@ -70,5 +70,4 @@ python3 -m sparx_agency.tasks.localization.common.publish_rgb_from_files_all \
   --rgb-dir ~/Documents/xtend_da3_takes/2026_05_04___11_15_19_700_65sec_4m_ \
   --publish-hz 10.0
 ```
-
 
