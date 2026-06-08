@@ -31,7 +31,7 @@ def _neighbors_8(gx: int, gy: int) -> List[Index2D]:
     ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class FrontierParams:
     """
     Parameters for frontier extraction.

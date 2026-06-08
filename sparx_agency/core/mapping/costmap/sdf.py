@@ -22,7 +22,7 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SDFParams:
     """
     Parameters for signed-distance-field computation.

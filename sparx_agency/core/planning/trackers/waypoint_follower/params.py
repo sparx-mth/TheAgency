@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from math import radians
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class WaypointFollowerParams:
     """Tuning for :class:`WaypointFollower`.
 

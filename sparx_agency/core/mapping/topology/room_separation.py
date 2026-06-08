@@ -20,7 +20,7 @@ import numpy as np
 from scipy.stats import multivariate_normal
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class DoorInfo:
     """
     Single door descriptor in **map (pixel)** coordinates.
@@ -38,7 +38,7 @@ class DoorInfo:
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class RoomSeparationParams:
     """
     Parameters for door-based room separation.
