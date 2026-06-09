@@ -1,15 +1,15 @@
+#!/usr/bin/env python3
+import numpy as np
 import rclpy
 from rclpy.node import Node
-import numpy as np
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
-from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import Header
+from geometry_msgs.msg import PoseStamped
+from scipy.spatial.transform import Rotation as Rot
 
 from sparx_agency.core.mapping.costmap.integrated_map import IntegratedMap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
-from sparx_agency.core.common.spatial_math import rot_y, intrinsics_from_fov
 
 
 class OccupancyNode(Node):
@@ -18,91 +18,101 @@ class OccupancyNode(Node):
         self.cfg = ProbabilisticGridConfig()
         self.map = IntegratedMap(self.cfg)
 
-        # 1. Build Intrinsics
-        self.width = 640
-        self.height = 480
-        self.hfov = 130.0
-        self.vfov = 90.0
-        self.intr = intrinsics_from_fov(self.width, self.height, self.hfov, self.vfov)
-
-        # 2. Parameters
-        self.declare_parameter('pitch_deg', 0.0)
         self.declare_parameter('sensor_z', 1.0)
         self.declare_parameter('accumulate', True)
+        self.declare_parameter('pointcloud_topic', '/xtend/pointcloud')
+        self.declare_parameter('pose_topic', '/xtend/april_tag_pose')
+        self.declare_parameter('cloud_out_topic', '/xtend/pointcloud_world')
+        self.declare_parameter('occupancy_topic', '/xtend/occupancy_grid')
 
-        sensor_qos = QoSProfile(
+        self._world_R: np.ndarray | None = None  # 3x3 rotation world_T_body
+        self._world_t: np.ndarray | None = None  # 3, translation world_T_body
+
+        best_effort_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
 
-        self.sub = self.create_subscription(PointCloud2, '/video/point_cloud', self.cb, sensor_qos)
-        self.pub_2d = self.create_publisher(OccupancyGrid, '/map_2d', 10)
-        self.pub_transformed_cloud = self.create_publisher(PointCloud2, '/video/point_cloud_transformed', 10)
+        cloud_topic   = str(self.get_parameter('pointcloud_topic').value)
+        pose_topic    = str(self.get_parameter('pose_topic').value)
+        cloud_out     = str(self.get_parameter('cloud_out_topic').value)
+        occupancy_out = str(self.get_parameter('occupancy_topic').value)
 
-    def cb(self, msg):
-        # 1. Read 'rgb' and 'xyz'
-        pts_struct = point_cloud2.read_points(msg, field_names=("x", "y", "z", "rgb"), skip_nans=True)
-        pts_np = np.array(list(pts_struct))
-        if pts_np.size == 0: return
+        self.create_subscription(PointCloud2, cloud_topic, self._cloud_cb, best_effort_qos)
+        self.create_subscription(PoseStamped, pose_topic, self._pose_cb, 10)
+        self.pub_cloud = self.create_publisher(PointCloud2, cloud_out, best_effort_qos)
+        self.pub_occ   = self.create_publisher(OccupancyGrid, occupancy_out, 10)
 
-        # 2. Correct Axis Mapping (Flipping Z to put floor at the bottom)
-        world_x = pts_np['z']  # Depth -> Forward
-        world_y = -pts_np['x']  # Horizontal -> Lateral
-        world_z = pts_np['y']  # Vertical Down -> Vertical Up (Negative flips it)
+        self.get_logger().info(f"cloud in:  {cloud_topic}")
+        self.get_logger().info(f"pose in:   {pose_topic}")
+        self.get_logger().info(f"cloud out: {cloud_out}")
+        self.get_logger().info(f"occ out:   {occupancy_out}")
 
-        pts_w_local = np.stack([world_x, world_y, world_z], axis=1).astype(np.float32)
+    def _pose_cb(self, msg: PoseStamped) -> None:
+        q = msg.pose.orientation
+        p = msg.pose.position
+        self._world_R = Rot.from_quat([q.x, q.y, q.z, q.w]).as_matrix().astype(np.float32)
+        self._world_t = np.array([p.x, p.y, p.z], dtype=np.float32)
 
-        # 3. Apply Pitch (Rotation around Y)
-        # If the floor and ceiling were swapped, the rotation was likely
-        # tilting the wrong way. Ensure the sign of pitch matches your camera tilt.
-        pitch_rad = np.radians(self.get_parameter('pitch_deg').value)
-        sz = self.get_parameter('sensor_z').value
+    def _cloud_cb(self, msg: PointCloud2) -> None:
+        pts_raw = self._read_xyz(msg)
+        if pts_raw is None or len(pts_raw) == 0:
+            return
 
-        # R rotates the points around the lateral Y axis
-        R = rot_y(-pitch_rad)
-        pts_transformed = (pts_w_local @ R.T)
+        # Camera optical (X=right, Y=down, Z=forward) → body (X=forward, Y=left, Z=up)
+        pts_body = np.stack([
+             pts_raw[:, 2],   # body X = cam Z (forward)
+            -pts_raw[:, 0],   # body Y = -cam X (left)
+            -pts_raw[:, 1],   # body Z = -cam Y (up)
+        ], axis=1).astype(np.float32)
 
-        # 4. Lift to sensor height
-        pts_transformed[:, 2] += sz
+        sensor_z = float(self.get_parameter('sensor_z').value)
 
-        # 5. Republish
-        self.republish_rgb_cloud(pts_transformed, pts_np['rgb'], msg.header)
+        if self._world_R is not None:
+            pts_world  = (pts_body @ self._world_R.T) + self._world_t
+            sensor_pos = self._world_t.copy()
+        else:
+            pts_world  = pts_body.copy()
+            pts_world[:, 2] += sensor_z
+            sensor_pos = np.array([0.0, 0.0, sensor_z], dtype=np.float32)
 
-        # 6. Update Map
-        t = np.array([0.0, 0.0, sz], np.float32)
-        self.map.update(pts_transformed, t, accumulate=True)
-        self.publish_viz(msg.header.frame_id)
+        self._publish_cloud(pts_world, msg.header.stamp)
 
-    def republish_rgb_cloud(self, pts, packed_colors, original_header):
-        # Use the exact fields found in your incoming message
-        fields = [
-            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name='rgb', offset=16, datatype=PointField.FLOAT32, count=1),  # Match offset 16
+        accumulate = bool(self.get_parameter('accumulate').value)
+        self.map.update(pts_world, sensor_pos, accumulate=accumulate)
+        self._publish_occupancy(msg.header.stamp)
+
+    def _read_xyz(self, msg: PointCloud2) -> np.ndarray | None:
+        if msg.width == 0:
+            return None
+        pts = np.frombuffer(msg.data, dtype=np.float32).reshape(-1, 3)
+        valid = np.isfinite(pts).all(axis=1) & (pts[:, 2] > 0)
+        return pts[valid]
+
+    def _publish_cloud(self, pts: np.ndarray, stamp) -> None:
+        msg = PointCloud2()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "map"
+        msg.height = 1
+        msg.width = len(pts)
+        msg.fields = [
+            PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
         ]
+        msg.is_bigendian = False
+        msg.point_step = 12
+        msg.row_step = 12 * len(pts)
+        msg.is_dense = True
+        msg.data = pts.astype(np.float32).tobytes()
+        self.pub_cloud.publish(msg)
 
-        header = Header()
-        header.stamp = original_header.stamp
-        header.frame_id = original_header.frame_id
-
-        merged_data = []
-        for i in range(len(pts)):
-            merged_data.append([
-                float(pts[i, 0]),
-                float(pts[i, 1]),
-                float(pts[i, 2]),
-                float(packed_colors[i])
-            ])
-
-        cloud_msg = point_cloud2.create_cloud(header, fields, merged_data)
-        self.pub_transformed_cloud.publish(cloud_msg)
-
-    def publish_viz(self, frame_id):
+    def _publish_occupancy(self, stamp) -> None:
         grid = OccupancyGrid()
-        grid.header.frame_id = frame_id
+        grid.header.frame_id = "map"
+        grid.header.stamp = stamp
         grid.info.resolution = self.map.res
         grid.info.width = self.map.width
         grid.info.height = self.map.height
@@ -110,19 +120,10 @@ class OccupancyNode(Node):
         grid.info.origin.position.y = self.map.origin_y
         data = np.full((self.map.height, self.map.width), -1, dtype=np.int8)
         lo, seen, _ = self.map.get_viz_data()
-        data[seen & (lo <= 0)] = 20
-        data[seen & (lo > 0.5)] = 100
+        data[seen & (lo <= 0)]   = 20
+        data[seen & (lo > 0.5)]  = 100
         grid.data = data.flatten().tolist()
-        self.pub_2d.publish(grid)
-
-    def republish_cloud(self, pts, original_header):
-        header = Header()
-        header.stamp = original_header.stamp
-        header.frame_id = original_header.frame_id  # Usually 'map' or 'odom'
-
-        # Create and publish the new cloud message
-        cloud_msg = point_cloud2.create_cloud_xyz32(header, pts.tolist())
-        self.pub_transformed_cloud.publish(cloud_msg)
+        self.pub_occ.publish(grid)
 
 
 def main():
