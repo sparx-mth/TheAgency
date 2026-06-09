@@ -27,10 +27,13 @@ class TagTransformObservation:
     Attributes:
         tag_id: Detected tag identifier.
         cam_T_tag: 4x4 homogeneous transform from camera frame to tag frame.
+        weight: Confidence weight used when fusing multiple tags (e.g. the tag's
+            pixel area). Defaults to 1.0 for callers that do not weight detections.
     """
 
     tag_id: int
     cam_T_tag: np.ndarray  # shape (4, 4)
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)
