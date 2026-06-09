@@ -11,7 +11,7 @@ tags:
 # Communication room
   1:
     xyz: [2.55, -2.3, 0.97]
-    rpy: [-1.5708, 0,  -3.0752]
+    rpy: [-1.5708, 0, -3.1416]
     size: 0.28
 
 
@@ -37,8 +37,8 @@ tags:
 
  # Inside the MAMAD, above the desk, facing the MAMAD's entrance
   9:
-    xyz: [-1.50, -1.50, 1.1]
-    rpy: [-1.5708,  0, 1.3734]
+    xyz: [-1.55, -1.64, 1.11]
+    rpy: [-1.5708,  0, 1.5708]
     size: 0.28
 
  # Below SPARX logo, currently near the fridge, below window. orientation like the MAMAD door
