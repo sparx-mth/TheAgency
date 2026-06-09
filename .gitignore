@@ -190,5 +190,9 @@ sparx_agency/tasks/planning/3D_planning/gibson/extracted/*
 rosbag2_*/
 *.mcap
 *.yaml
+
+sparx_agency/tasks/common/bearings_placeholder.csv
+sparx_agency/tasks/localization/data/
+sparx_agency/tasks/localization/ros2/depth_optical/
 sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 /sparx_agency/theagency_venv/*
