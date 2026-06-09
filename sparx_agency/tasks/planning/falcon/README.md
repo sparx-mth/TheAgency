@@ -41,6 +41,7 @@ falcon/
     │   ├── bev_publisher_node.py   # FALCON voxel clouds -> 2D OccupancyGrid (core.mapping.bev)
     │   ├── mapping_sync_node.py    # depth<->pose pairing + localization gate + authoritative rotation freeze (core.localization + core.mapping.depth_fusion_gate)
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
+    │   ├── navdp_click_node.py     # click an RGB pixel -> NavDP point-goal policy -> world Path (core.planning.navdp); A* replacement
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
@@ -68,6 +69,8 @@ ROS-free algorithms** they call live in `core/`, each in its own domain:
 - `core/localization` (incl. `se3`, `temporal_transform_buffer`,
   `dead_reckoning_noise`)
 - `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`
+- `core/planning/navdp` (point-goal geometry + NavDP HTTP client used by
+  `navdp_click_node`)
 - `core/common/intrinsic_remap` (resample a render to a target camera's
   intrinsics — sim_adapter uses it to hit the XTEND's anisotropic fx≠fy;
   `principal_point_crop` is the older crop-only special case)
@@ -123,6 +126,49 @@ Example — Gazebo sim:
 # inside the container:
 roslaunch falcon_adapter nav_stack.launch map_name:=hospital
 ```
+
+## NavDP click-to-go (replacing A*)
+
+[NavDP](https://github.com/InternRobotics/NavDP) is a point-goal navigation
+policy. With `use_navdp:=true`, `navdp_click_node` runs **instead of**
+`astar_planner`: instead of A* searching the BEV grid to a clicked *map* goal, you
+click a pixel in the live **camera** image, NavDP returns a body-frame trajectory,
+and the node anchors it at the current pose and publishes it as a world-frame
+`nav_msgs/Path` on the same `/path/waypoints` topic. So `waypoint_follower` flies
+it and `bev_click_goal` draws it on the BEV — both unchanged. A new inference runs
+only when you click again and press ENTER; until then the follower keeps flying
+the last published path.
+
+```bash
+# 0. Start the NavDP HTTP server on the GPU box (default 127.0.0.1:8888) — see
+#    the NavDP repo's eval_*_wheeled.py. navdp_click_node only POSTs to it.
+# 1. Real XTEND (bring up the bridge so /xtend/rgb + /xtend/depth_m flow):
+roslaunch falcon_adapter real_drone.launch map_name:=office use_navdp:=true
+# or, to auto-sync intrinsics from the bridged camera_info:
+roslaunch falcon_adapter real_drone.launch use_navdp:=true \
+    navdp_camera_info_topic:=/xtend/camera_info
+# 2. Gazebo sim (point it at the sim camera + sim intrinsics):
+roslaunch falcon_adapter nav_stack.launch use_navdp:=true \
+    navdp_rgb_topic:=/simple_drone/front/image_raw \
+    navdp_depth_topic:=/simple_drone/front_depth/depth/image_raw \
+    navdp_fx:=320.0 navdp_fy:=320.0 navdp_cx:=320.5 navdp_cy:=240.5 \
+    navdp_img_width:=640 navdp_img_height:=480
+```
+
+In the **NavDP click** window: LEFT-CLICK the RGB panel (a readout shows the goal
+in metres), then ENTER/SPACE to send it and publish the path; `r` clears, `q`
+quits.
+
+> **Intrinsics must match the RGB/depth stream NavDP receives** — the *raw*
+> camera, not the further-cropped stream FALCON's mapping uses. The `navdp_*`
+> intrinsic args default to the XTEND `/xtend/rgb` projection-matrix values; pass
+> the right ones for any other camera (or a `navdp_camera_info_topic`). Wrong
+> intrinsics distort both the pixel→goal mapping and the on-image overlay.
+>
+> The node imports `cv2`, and at runtime `requests` + `Pillow` (lazy, only when it
+> calls the server). Install them in the container if missing
+> (`pip install requests pillow opencv-python`), as with `bev_click_goal`'s
+> matplotlib.
 
 ## Talking to a ROS2 sim / drone — the bridge
 

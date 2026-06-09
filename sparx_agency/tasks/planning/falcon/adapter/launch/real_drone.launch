@@ -84,6 +84,14 @@
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-2.0" />
 
+  <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
+       use_navdp:=true swaps astar_planner for navdp_click. The XTEND
+       /xtend/rgb + /xtend/depth_m defaults and intrinsics already live in
+       nav_stack.launch; set navdp_camera_info_topic:=/xtend/camera_info to
+       auto-sync intrinsics from the (bridged) camera_info instead. -->
+  <arg name="use_navdp"               default="false" />
+  <arg name="navdp_camera_info_topic" default="" />
+
   <arg name="publish_mapping_inputs" value="false" />
   <!-- ══════════════════════════════════════════════════════════════
        Pose adapter — converts the real-drone localization message
@@ -161,6 +169,10 @@
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
+
+    <arg name="use_navdp"               value="$(arg use_navdp)" />
+    <arg name="navdp_depth_topic"       value="$(arg real_depth_topic)" />
+    <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
   </include>
 
 </launch>
