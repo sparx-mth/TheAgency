@@ -103,7 +103,7 @@ topics:
       reliability: reliable
       durability: transient_local
 
-  - topic: /xtend/demo_mode_request
+  - topic: /xtend/demo_mode_request_
     type: std_msgs/msg/String
     queue_size: 10
     qos:

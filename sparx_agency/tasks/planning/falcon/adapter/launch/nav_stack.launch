@@ -146,17 +146,17 @@
        ══════════════════════════════════════════════════════════════ -->
   <!-- geometry / IO -->
   <arg name="bev_resolution"  default="0.15" />   <!-- m / cell; match FALCON's voxel size -->
-  <arg name="bev_xmin"        default="-12.0" />
-  <arg name="bev_ymin"        default="-12.0" />
-  <arg name="bev_xmax"        default="12.0" />
-  <arg name="bev_ymax"        default="12.0" />
+  <arg name="bev_xmin"        default="-6.0" />
+  <arg name="bev_ymin"        default="-6.0" />
+  <arg name="bev_xmax"        default="6.0" />
+  <arg name="bev_ymax"        default="6.0" />
   <arg name="bev_bbox_margin" default="1.0" />    <!-- only used if the bbox_* args are removed (bounds then come from /map_config) -->
   <arg name="bev_publish_hz"  default="10.0" />   <!-- was 2.0; caps the recompute+publish rate -->
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="0.30" />            <!-- column z-range considered -->
-  <arg name="bev_z_ceil"            default="2.20" />
+  <arg name="bev_z_floor"           default="0.40" />            <!-- column z-range considered -->
+  <arg name="bev_z_ceil"            default="1.70" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
   <arg name="bev_weight_sigma"      default="0.50" />            <!-- gaussian width (profile=gaussian) -->

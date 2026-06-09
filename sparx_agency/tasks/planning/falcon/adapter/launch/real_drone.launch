@@ -101,8 +101,24 @@
     <param name="depth_topic"        value="$(arg real_depth_topic)" />              <!-- /xtend/depth_m -->
     <param name="out_pose_topic"     value="/map_ros/pose" />
     <param name="out_depth_topic"    value="/map_ros/depth" />
-    <param name="sync_tolerance"     value="0.05" />
-    <param name="max_interp_gap"     value="0.12" />   <!-- 0 = strict nearest-only -->
+    <!-- Pairing tolerance. By design /xtend/depth_m and /xtend/april_tag_pose
+         carry the SAME capture stamp, so the ideal pair is an exact (dt==0) match.
+         These windows are kept NON-zero on purpose: depth and AprilTag pose are
+         independent consumers of the RGB stream running at DIFFERENT cadences
+         (depth on nearly every frame, the tag pose ONLY while a tag is in view),
+         so a given depth frame often has no byte-identical pose. sync_tolerance
+         lets it pair with the NEAREST pose within 50 ms; max_interp_gap lets it
+         SLERP a pose across a bracket up to 120 ms when none is near. This trades a
+         small, bounded pairing error (a depth frame may fuse a pose from a slightly
+         different instant) for keeping the voxel map fed when localization is not
+         in lockstep; without it, strict exact-only would DROP most depth frames.
+         To enforce the strict-timestamp architecture instead (exact-only, no
+         mis-pair, but frames without a co-stamped pose are dropped): set
+         sync_tolerance=0.0 AND max_interp_gap=0.0. Downstream FALCON pairing is
+         unaffected, since mapping_sync re-stamps the emitted pose to the depth
+         stamp, so /transformer (timestamp_tolerance 0.02) always matches exactly. -->
+    <param name="sync_tolerance"     value="0.05" />   <!-- 0 = exact-only (dt==0) -->
+    <param name="max_interp_gap"     value="0.12" />   <!-- 0 = no interpolation (nearest-only) -->
     <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
     <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
     <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
