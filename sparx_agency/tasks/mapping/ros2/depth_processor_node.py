@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import collections
+import json
 import time
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
@@ -55,7 +58,7 @@ class DepthProcessorNode(Node):
 
         self.declare_parameter("publish_debug", False)
         self.declare_parameter("publish_cloud", False)
-        self.declare_parameter("pointcloud_topic", "/rgbd/pointcloud")
+        self.declare_parameter("pointcloud_topic", "/xtend/pointcloud")
         self.declare_parameter("clip_min_m", 0.0)
         self.declare_parameter("clip_max_m", 20.0)
         self.declare_parameter("model_type", "large_metric")  # large_metric or small_lut
@@ -156,6 +159,18 @@ class DepthProcessorNode(Node):
 
         else:
             raise ValueError(f"Unsupported camera_info_mode: {self.camera_info_mode}")
+
+        self.declare_parameter("depth_smoothing_window", 3)
+        self.declare_parameter("cmd_nav_topic", "/xtend/cmd_nav")
+        smoothing_window = int(self.get_parameter("depth_smoothing_window").value)
+        cmd_nav_topic    = str(self.get_parameter("cmd_nav_topic").value).strip()
+
+        self._depth_buffer: collections.deque = collections.deque(maxlen=max(1, smoothing_window))
+        self._smoothing_enabled = smoothing_window >= 2
+        self._is_turning = False
+
+        if self._smoothing_enabled and cmd_nav_topic:
+            self.create_subscription(String, cmd_nav_topic, self._cmd_nav_cb, 10)
 
         self.get_logger().info("DepthProcessorNode started")
         self.get_logger().info(f"Image topic: {self.image_topic}")
@@ -327,6 +342,25 @@ class DepthProcessorNode(Node):
         msg.data = points.tobytes()
         return msg
 
+    def _cmd_nav_cb(self, msg: String) -> None:
+        try:
+            action = json.loads(msg.data).get("action", "")
+        except Exception:
+            return
+        turning = action in ("turn_left", "turn_right", "rotate_left", "rotate_right")
+        if turning != self._is_turning:
+            self._is_turning = turning
+            self._depth_buffer.clear()
+
+    def _apply_depth_smoothing(self, depth: np.ndarray) -> np.ndarray:
+        if not self._smoothing_enabled or self._is_turning:
+            self._depth_buffer.clear()
+            return depth
+        self._depth_buffer.append(depth)
+        if len(self._depth_buffer) < 2:
+            return depth
+        return np.mean(self._depth_buffer, axis=0).astype(np.float32)
+
     def image_callback(self, msg: Image):
         t0 = time.perf_counter()
 
@@ -341,6 +375,7 @@ class DepthProcessorNode(Node):
             t3 = time.perf_counter()
 
             depth_m = self.sanitize_depth(depth_m)
+            depth_m = self._apply_depth_smoothing(depth_m)
             t4 = time.perf_counter()
 
             self.publish_depth(depth_m, msg.header)
