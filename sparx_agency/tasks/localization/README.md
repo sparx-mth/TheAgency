@@ -15,7 +15,7 @@ This mode subscribes to a live ROS image topic. The pipeline will process frames
 
 ```bash
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path $HOME/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path $HOME/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --camera_calib_path $HOME/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
   --tag_size_m 0.13 \
   --source ros
@@ -32,7 +32,7 @@ Use this mode to process a sequence of saved images. Useful for debugging and of
 
 ```bash
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path $HOME/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path $HOME/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --camera_calib_path $HOME/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
   --tag_size_m 0.13 \
   --image_dir $HOME/Pictures/xtend_da3_take_20260527_124147

@@ -8,7 +8,7 @@ and keeps the full command list in one place.
 Safety:
 - Use the UI for ARM / TAKEOFF / LAND / DISARM.
 - Only online_nav_bridge_publisher.py should own the XTEND WebSocket.
-- Movement path: planner/replayer -> /cmd_vel -> xtend_twist_to_cmd_nav -> /xtend/cmd_nav -> online bridge -> drone.
+- Movement path: planner/replayer -> /cmd_vel -> online bridge (built-in Twist converter) -> drone.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + RGB publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 crop-resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
+        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 crop-resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav and /cmd_vel (Twist).",
         command="""
         python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
           --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
@@ -87,19 +87,7 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.0
-""",
-    ),
-    LaunchItem(
-        name="4. Optional Twist replayer",
+        name="3. Optional Twist replayer",
         machine="jetson",
         tmux_name="xtend_twist_replayer",
         description="Optional: replays a JSONL Twist log onto /cmd_vel. Edit LOG_PATH before running.",

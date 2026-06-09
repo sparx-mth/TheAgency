@@ -209,22 +209,7 @@ python3 /home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_proces
 require_topic_name /xtend/depth_m 30 xtend_depth
 require_topic_rate /xtend/depth_m 60 best_effort xtend_depth
 
-echo "[AUTO] Step 3: start Twist converter"
-start_tmux xtend_twist_converter '
-cd /home/daphnaa/GIT/TheAgency
-source /opt/ros/humble/setup.bash
-source /home/daphnaa/venvs/ros_py310/bin/activate
-export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/daphnaa/GIT/TheAgency:/home/daphnaa/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/daphnaa/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-'
-
-sleep 2
-
-echo "[AUTO] Step 4: start XTEND demo mode manager"
+echo "[AUTO] Step 3: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
 cd /home/daphnaa/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -537,19 +522,7 @@ python3 /home/daphnaa/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_proces
 """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/daphnaa/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-""",
-    ),
-    LaunchItem(
-        name="4. XTEND demo mode manager",
+        name="3. XTEND demo mode manager",
         machine="jetson",
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm. Also prepares /xtend/reset_odom publisher but does not call it yet.",

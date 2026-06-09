@@ -109,7 +109,7 @@ Displays: PointCloud2 (`/rgbd/pointcloud`), Octomap 3D (`/occupied_cells_vis_arr
 
 ## AprilTag Localization
 
-Tags are defined in `sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml` (world XYZ + RPY, tag family `tag36h11`, default size 0.13 m).
+Tags are defined in `sparx_agency/tasks/localization/config/new_map.yaml` (world XYZ + RPY, tag family `tag36h11`, default size 0.13 m).
 
 The node outputs `world_T_cam` in ROS body convention. `pose_to_tf_node` converts to optical frame convention before broadcasting `map → xtend_camera` TF, which octomap uses to correctly raycast each point cloud at the drone's current pose.
 
