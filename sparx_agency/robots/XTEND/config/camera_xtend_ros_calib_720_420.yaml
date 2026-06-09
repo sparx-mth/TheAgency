@@ -1,0 +1,88 @@
+# Camera intrinsic parameters configuration file (YAML format)
+# XTEND Xtender camera calibration
+# Calibrated using ROS2 camera_calibration / cameracalibrator
+#
+# Calibration command used:
+#   ros2 run camera_calibration cameracalibrator \
+#     --size 6x9 --square 0.025 \
+#     --ros-args -r image:=/xtend/image_raw
+#
+# Image size during calibration:
+#   width: 720
+#   height: 420
+#
+# Notes:
+# - This calibration was produced as mono pinhole/plumb_bob calibration.
+# - For DA3 + Open3D rectified-image workflow, prefer using the projection_matrix
+#   values as the effective pinhole intrinsics:
+#     fx = 361.52381185798737
+#     fy = 410.764442594862
+#     cx = 337.3434895805878
+#     cy = 116.76308616209292
+
+# Image resolution
+image_width: 720
+image_height: 420
+
+# Raw camera intrinsic parameters from calibration
+# fx, fy: focal length
+# cx, cy: principal point
+fx: 460.9072976392783
+fy: 461.9847581630249
+cx: 345.80685226685307
+cy: 128.61455823829436
+
+# Distortion model from ROS calibration
+distortion_model: "plumb_bob"
+
+# Distortion coefficients
+# D = [k1, k2, p1, p2, k3]
+k1: -0.2971784717997778
+k2: 0.08010222870361268
+p1: -0.0037003783730540046
+p2: -0.000627696838234576
+k3: 0.0
+
+# Camera matrix (3x3)
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [
+    460.9072976392783, 0.0, 345.80685226685307,
+    0.0, 461.9847581630249, 128.61455823829436,
+    0.0, 0.0, 1.0
+  ]
+
+# Distortion coefficients
+# plumb_bob model: [k1, k2, p1, p2, k3]
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [
+    -0.2971784717997778,
+    0.08010222870361268,
+    -0.0037003783730540046,
+    -0.000627696838234576,
+    0.0
+  ]
+
+# Rectification matrix
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0
+  ]
+
+# Projection matrix (3x4) from calibration
+# Use this as the effective K after rectification/undistortion.
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [
+    361.52381185798737, 0.0, 337.3434895805878, 0.0,
+    0.0, 410.764442594862, 116.76308616209292, 0.0,
+    0.0, 0.0, 1.0, 0.0
+  ]

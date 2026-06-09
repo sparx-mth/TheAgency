@@ -1,0 +1,238 @@
+# Depth + Optical Flow Localization (ROS2) with Kalman filter
+
+This project demonstrates monocular localization using a combination of:
+
+- Depth estimation (Depth Anything V2)
+- Optical Flow
+- Depth-scaled motion integration
+- Evaluation against Ground Truth (GT Pose)
+
+The system runs fully in ROS2, supports rosbag playback, and is designed for indoor drone scenarios.
+
+---
+
+## Overview
+
+The pipeline is composed of three main stages:
+
+1. Depth Estimation  
+   Infer dense depth from monocular RGB images.
+
+2. Motion Estimation (Flow + Depth)  
+   Combine optical flow with depth to estimate metric velocity.
+
+3. Kalman Filter Fusion & Evaluation  
+   Fuse Flow+Depth velocity with IMU measurements using robot_localization EKF, then export the estimated odometry to TUM format and compare against GT pose.
+
+---
+
+## Architecture
+
+RGB Image  
+↓  
+Depth Anything V3  
+↓  
+Depth Map + Visualization  
+↓  
+Optical Flow + Depth  
+↓  
+Metric Linear Velocity `/flow_depth/velocity`  
+↓  
+IMU + Flow/Depth Velocity Fusion  
+↓  
+`robot_localization` EKF / Kalman Filter  
+↓  
+Estimated Odometry  
+↓  
+TUM Export  
+↓  
+EVO Evaluation vs Ground Truth
+
+---
+
+## ROS Topics
+
+### Input
+- `/simple_drone/front/image_raw`
+- `/simple_drone/front/camera_info`
+- `/simple_drone/imu/out`
+- `/simple_drone/odom`
+- `/clock`
+
+### Output
+- /depth_anything/depth
+- /depth_anything/depth_vis
+- /flow_depth/velocity
+- Console pose error logs
+
+
+### EKF / Kalman Output
+- `/odometry/filtered`
+- `/tf`
+
+---
+
+## Prerequisites
+
+- ROS2 Humble
+- Python 3.10
+- DepthAnythingV2 installed
+- sparx_agency workspace built
+- Rosbag of sjtu drone containing RGB, CameraInfo, Odometry, TF 
+
+---
+
+## How to Run
+
+### 1. Depth Estimation
+
+* for Depth Anything V3:
+```bash
+cd ~/GIT/TheAgency
+source ~/depth_anything_ws/src/ros2-depth-anything-v3-trt/da3_venv/bin/activate
+
+ python3 -m sparx_agency.tasks.mapping.ros2.depth_processor_node  --ros-args   -p use_sim_time:=true   -p engine_path:=$HOME/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine   -p config_yaml:=$HOME/GIT/TheAgency/sparx_agency/tasks/mapping/config/simple_drone_front_cam.yaml   -r /camera/image_raw:=/simple_drone/front/image_raw   -r /sparx/depth/da3_raw:=/depth_anything/depth   -r /sparx/depth/da3_debug:=/depth_anything/depth_vis
+```
+
+* for Depth Anything V2:
+```bash
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+
+python3 -m sparx_agency.tasks.mapping.create_map_from_video \
+  --ros-args \
+  -p use_sim_time:=true \
+  -r /debug/depth_raw:=/depth_anything/depth \
+  -r /debug/depth_vis:=/depth_anything/depth_vis \
+  -r /debug/cloud_global:=/depth_anything/cloud
+```
+
+### 2. Flow + Depth Velocity Publisher
+
+This node estimates linear velocity from Optical Flow + Depth Anything and publishes it as `TwistWithCovarianceStamped` on `/flow_depth/velocity`.
+
+```bash
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+
+python3 -m sparx_agency.tasks.localization.ros2.depth_optical.flow_depth_velocity_node_imu_kalman \
+  --ros-args \
+  -p use_sim_time:=true \
+  -p show_debug:=true \
+  -p camera_frame:="/simple_drone/base_link" \
+  -p csv_filename:="/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv"
+```
+
+
+### 3. Run EKF / Kalman Filter
+
+The EKF fuses the IMU measurements with the Flow+Depth linear velocity estimate.
+
+Configuration file:
+
+```bash
+sparx_agency/tasks/localization/ros2/depth_optical/assets/ekf_params.yaml
+
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+
+ros2 run robot_localization ekf_node \
+  --ros-args \
+  -p use_sim_time:=true \
+  --params-file /home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/assets/ekf_params.yaml \
+  --log-level debug
+```
+
+### 4. Export Odometry to TUM Format
+
+After running the EKF, export the estimated odometry into TUM format for EVO evaluation.
+
+```bash
+cd ~/GIT/TheAgency
+source .venv/bin/activate
+python3 -m sparx_agency.core.localization.odom_to_tum
+
+```
+
+
+
+### 5. Play Rosbag
+
+```bash
+cd ~/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/bags_files
+ros2 bag play rosbag2_2026_03_01-11_02_57_line_0.35val --clock --rate 0.5
+```
+
+if you want to record
+```bash
+ros2 bag record --use-sim-time   /clock   /simple_drone/front/image_raw   /simple_drone/front/camera_info   /simple_drone/gt_pose   /simple_drone/gt_vel   /simple_drone/odom   /simple_drone/imu/out   /tf   /tf_static 
+
+
+
+sudo apt update
+apt-get install -y \
+  ros-humble-rosbag2 \
+  ros-humble-rosbag2-storage-default-plugins \
+  ros-humble-rosbag2-compression-zstd
+```
+---
+
+## RViz Setup
+
+- Fixed Frame: simple_drone/odom
+- Enable Use Sim Time
+- Add Image displays for:
+  - /simple_drone/front/image_raw
+  - /depth_anything/depth_vis
+- Add PointCloud2 for:
+  - /debug/cloud_global
+- Add map for:
+  - /occupancy_grid
+---
+
+## Evaluation Output
+
+Example:
+
+[PoseEval] err_last=0.86 m, err_rms(300)=0.73 m
+
+- err_last: current position error
+- err_rms: accumulated drift
+
+
+use the EVO tool:
+```bash
+cd sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results/
+source .venv/bin/activate
+cd ~/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/tum_results
+
+evo_traj tum est_tum.txt est_tum_kalman.txt \
+  --ref=gt_tum.txt \
+  -p \
+  -a \
+  --plot_mode=xyz
+  
+evo_ape tum gt_tum.txt est_tum.txt -p --plot_mode=xyz
+
+```
+
+---
+## Demo
+
+## Demo
+
+[Watch the demo video](assets/depth_optical.mp4)
+
+Example run of the **Depth + Optical Flow localization pipeline**  
+showing depth inference, optical flow tracking, and velocity integration.
+
+## Results:
+
+[ape and traj results](assets/table.png)
+
+# for checking the velocity estimation vs GT and the center zone vs Right zone:
+```bash
+cd sparx_agency/tasks/localization/ros2/depth_optical/assets
+python3 plot_zones.py   --csv /home/user1/GIT/TheAgency/sparx_agency/tasks/localization/ros2/depth_optical/csv_eval/zone_velocities_log.csv
+
+```

@@ -145,7 +145,6 @@ class TagAzimuthOpenCVTask:
             raise RuntimeError("Estimator failed to produce azimuth.")
 
         yaw_deg, _best_tag = result
-        yaw_deg = (-yaw_deg) % 360.0
         return float(yaw_deg)
 
 

@@ -51,6 +51,13 @@ def get_euler(q):
     yaw = math.atan2(siny_cosp, cosy_cosp)
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
+def yaw_to_quaternion(yaw_rad: float):
+    """Quaternion for yaw-only rotation around Z."""
+    half = 0.5 * yaw_rad
+    qz = math.sin(half)
+    qw = math.cos(half)
+    return 0.0, 0.0, qz, qw
+
 
 
 def intrinsics_from_fov(width: int, height: int, hfov_deg: float, vfov_deg: float) -> Intrinsics:
@@ -150,5 +157,57 @@ def pose_xyz_yaw_to_T(x: float, y: float, z: float, yaw: float) -> np.ndarray:
     T[2, 3] = z
 
     return T
+
+
+def open3d_pose_to_ros_pose(T_o3d: np.ndarray) -> np.ndarray:
+    """
+    Convert Open3D camera-coordinate trajectory to ROS/RViz-friendly coordinates.
+
+    Open3D/camera:
+      x = right
+      y = down
+      z = forward
+
+    ROS/RViz:
+      x = forward
+      y = left
+      z = up
+    """
+    R_o3d_to_ros = np.array([
+        [0.0, 0.0, 1.0],  # ros x = o3d z
+        [-1.0, 0.0, 0.0],  # ros y = -o3d x
+        [0.0, -1.0, 0.0],  # ros z = -o3d y
+    ], dtype=np.float64)
+
+    T_ros = np.eye(4, dtype=np.float64)
+    T_ros[:3, :3] = R_o3d_to_ros @ T_o3d[:3, :3]
+    T_ros[:3, 3] = R_o3d_to_ros @ T_o3d[:3, 3]
+
+    return T_ros
+
+
+def points_open3d_to_ros(points_o3d: np.ndarray, initial_height_m: float = 0.0) -> np.ndarray:
+    """
+    Convert points from Open3D/camera-world coordinates to ROS/RViz coordinates.
+
+    Open3D:
+      x = right
+      y = down
+      z = forward
+
+    ROS:
+      x = forward
+      y = left
+      z = up
+    """
+    R = np.array([
+        [0.0,  0.0,  1.0],
+        [-1.0, 0.0,  0.0],
+        [0.0, -1.0,  0.0],
+    ], dtype=np.float64)
+
+    pts_ros = (R @ points_o3d.T).T
+    pts_ros[:, 2] += float(initial_height_m)
+    return pts_ros
 
 

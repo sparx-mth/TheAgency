@@ -2,10 +2,10 @@ from __future__ import annotations
 import numpy as np
 
 from sparx_agency.core.common.types import PoseSE3, Intrinsics, Pose3D, State3D, Twist3D
-from sparx_agency.robots.common.spatial_math import euler_to_rot_zyx, quat_to_rot
+from sparx_agency.core.common.spatial_math import euler_to_rot_zyx, quat_to_rot
 
 from nav_msgs.msg import Odometry, OccupancyGrid
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import CameraInfo
 
 
 

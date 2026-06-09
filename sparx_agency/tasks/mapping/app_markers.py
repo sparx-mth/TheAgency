@@ -1,0 +1,354 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import numpy as np
+from pathlib import Path
+
+st.set_page_config(page_title="DA3 Marker Analysis", layout="wide")
+st.title("📊 DA3 Marker Validator")
+
+MARKER_COLUMNS = {
+    "ts", "marker_id", "color",
+    "det_u", "det_v", "gt_u", "gt_v",
+    "roll_deg", "pitch_deg", "yaw_deg",
+    "gt_depth_geom_m", "da3_depth_m",
+    "abs_err_m", "jitter_m"
+}
+
+COLOR_MAP = {
+    "red": "#ff0000",
+    "green": "#00ff00",
+    "blue": "#0000ff",
+    "yellow": "#ffff00",
+    "orange": "#ff8800",
+    "purple": "#aa00ff",
+    "cyan": "#00ffff",
+}
+
+@st.cache_data
+def load_and_prepare_data(directory: str) -> pd.DataFrame:
+    data_dir = Path(directory).expanduser()
+    files = sorted([f for f in data_dir.iterdir() if f.is_file() and f.suffix == ".csv"])
+    all_data = []
+
+    for f in files:
+        try:
+            df = pd.read_csv(f)
+
+            rename_map = {
+                "r": "roll_deg", "p": "pitch_deg", "y": "yaw_deg",
+                "roll": "roll_deg", "pitch": "pitch_deg", "yaw": "yaw_deg",
+            }
+            df.rename(columns=rename_map, inplace=True)
+
+            is_marker = MARKER_COLUMNS.issubset(df.columns)
+            df["run_name"] = f.stem
+
+            if "ts" in df.columns:
+                df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+                df["rel_time"] = df["ts"] - df["ts"].min()
+            else:
+                df["rel_time"] = np.nan
+
+            df["format"] = "markers" if is_marker else "legacy"
+
+            if is_marker:
+                non_numeric = {"marker_id", "color", "run_name", "format"}
+                numeric_cols = [c for c in df.columns if c not in non_numeric]
+                df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+
+                per_frame = (
+                    df.groupby(["run_name", "ts"], as_index=False)
+                    .agg(
+                        rel_time=("rel_time", "first"),
+                        mae=("abs_err_m", "mean"),
+                        rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+                        jitter=("jitter_m", "mean"),
+                        n_markers=("marker_id", "count"),
+                        roll_deg=("roll_deg", "first"),
+                        pitch_deg=("pitch_deg", "first"),
+                        yaw_deg=("yaw_deg", "first"),
+                    )
+                )
+                df = df.merge(per_frame, on=["run_name", "ts"], how="left", suffixes=("", "_frame"))
+            else:
+                cols_to_fix = [c for c in df.columns if c not in {"run_name", "format"}]
+                df[cols_to_fix] = df[cols_to_fix].apply(pd.to_numeric, errors="coerce")
+                jitter_cols = [c for c in df.columns if "jitter" in c and c != "jitter"]
+                err_cols = [c for c in df.columns if c.startswith("pt") and "_err" in c]
+                if jitter_cols and "jitter" not in df.columns:
+                    df["jitter"] = df[jitter_cols].mean(axis=1)
+                if err_cols and "spatial_std" not in df.columns:
+                    df["spatial_std"] = df[err_cols].std(axis=1)
+
+            all_data.append(df)
+        except Exception as e:
+            st.error(f"Error loading {f.name}: {e}")
+
+    return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
+
+
+def image_candidates(base_path: Path, run_name: str):
+    stamp = (
+        run_name.replace("da3_markers_", "")
+        .replace("da3_landmarks_", "")
+        .replace("da3_val_", "")
+    )
+    return [
+        base_path / f"{stamp}_rgb_markers.jpg",
+        base_path / f"{stamp}_rgb_landmarks.jpg",
+        base_path / f"{stamp}.jpg",
+        base_path / f"{run_name}.jpg",
+    ]
+
+
+st.sidebar.header("Data Control")
+path_input = st.sidebar.text_input("CSV Directory", "~/Documents/depth_validator_csv")
+base_path = Path(path_input).expanduser()
+df_all = load_and_prepare_data(path_input)
+
+if df_all.empty:
+    st.info("Please select a directory containing your CSV files.")
+    st.stop()
+
+formats = df_all["format"].dropna().unique().tolist()
+selected_format = st.sidebar.selectbox("Format", formats, index=0)
+df_all = df_all[df_all["format"] == selected_format]
+
+runs = df_all["run_name"].dropna().unique().tolist()
+selected_runs = st.sidebar.multiselect("Select Runs", runs, default=runs)
+filtered_df = df_all[df_all["run_name"].isin(selected_runs)].copy()
+
+if filtered_df.empty:
+    st.warning("No rows match the selected runs.")
+    st.stop()
+
+st.subheader("🖼️ Reference Frames")
+img_cols = st.columns(max(1, min(len(selected_runs), 4)))
+for idx, run in enumerate(selected_runs):
+    found = None
+    for cand in image_candidates(base_path, run):
+        if cand.exists():
+            found = cand
+            break
+    with img_cols[idx % len(img_cols)]:
+        if found:
+            st.image(str(found), caption=found.name, use_container_width=True)
+        else:
+            st.info(f"No image found for {run}")
+
+if selected_format == "markers":
+    st.sidebar.header("Marker Filters")
+    available_markers = sorted(filtered_df["marker_id"].dropna().unique().tolist())
+    selected_markers = st.sidebar.multiselect(
+        "Markers",
+        available_markers,
+        default=available_markers,
+    )
+
+    if selected_markers:
+        filtered_df = filtered_df[filtered_df["marker_id"].isin(selected_markers)].copy()
+
+    if filtered_df.empty:
+        st.warning("No rows match the selected marker selection.")
+        st.stop()
+
+    gt_valid = filtered_df["gt_depth_geom_m"].dropna()
+    if not gt_valid.empty:
+        depth_min = float(gt_valid.min())
+        depth_max = float(gt_valid.max())
+        selected_depth = st.sidebar.slider(
+            "GT depth range (m)",
+            min_value=depth_min,
+            max_value=depth_max,
+            value=(depth_min, depth_max),
+        )
+        filtered_df = filtered_df[
+            filtered_df["gt_depth_geom_m"].between(selected_depth[0], selected_depth[1])
+        ].copy()
+
+    if filtered_df.empty:
+        st.warning("No rows remain after depth filtering.")
+        st.stop()
+
+    tab_glob, tab_marker, tab_dist, tab_axes = st.tabs([
+        "Global", "By Marker", "Distance / Ratio", "Orientation"
+    ])
+
+    frame_df = (
+        filtered_df.groupby(["run_name", "ts"], as_index=False)
+        .agg(
+            rel_time=("rel_time", "first"),
+            mae=("abs_err_m", "mean"),
+            rmse=("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+            jitter=("jitter_m", "mean"),
+            n_markers=("marker_id", "count"),
+            roll_deg=("roll_deg", "first"),
+            pitch_deg=("pitch_deg", "first"),
+            yaw_deg=("yaw_deg", "first"),
+        )
+    )
+
+    with tab_glob:
+        metric = st.selectbox("Metric", ["mae", "rmse", "jitter", "n_markers"])
+        fig = px.line(
+            frame_df,
+            x="rel_time",
+            y=metric,
+            color="run_name",
+            markers=True,
+            template="plotly_dark",
+            title=f"{metric.upper()} over time",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        summary_aggs = {
+            "mean_mae": ("abs_err_m", "mean"),
+            "mean_rmse": ("abs_err_m", lambda s: float(np.sqrt(np.mean(np.square(s.dropna())))) if len(s.dropna()) else np.nan),
+            "mean_jitter": ("jitter_m", "mean"),
+            "rows": ("marker_id", "count"),
+        }
+        if "detected" in filtered_df.columns:
+            summary_aggs["detection_rate"] = ("detected", "mean")
+
+        summary_df = filtered_df.groupby(["run_name"], as_index=False).agg(**summary_aggs)
+        st.dataframe(summary_df, use_container_width=True)
+
+    with tab_marker:
+        marker_aggs = {
+            "mae": ("abs_err_m", "mean"),
+            "jitter": ("jitter_m", "mean"),
+            "gt_depth_geom_m": ("gt_depth_geom_m", "mean"),
+            "da3_depth_m": ("da3_depth_m", "mean"),
+        }
+        if "pixel_err_px" in filtered_df.columns:
+            marker_aggs["pixel_err_px"] = ("pixel_err_px", "mean")
+
+        marker_df = filtered_df.groupby(
+            ["run_name", "marker_id", "color", "rel_time"], as_index=False
+        ).agg(**marker_aggs)
+
+        metric_options = ["mae", "jitter", "gt_depth_geom_m", "da3_depth_m"]
+        if "pixel_err_px" in marker_df.columns:
+            metric_options.append("pixel_err_px")
+
+        metric = st.selectbox("Marker metric", metric_options)
+        fig = px.line(
+            marker_df,
+            x="rel_time",
+            y=metric,
+            color="color",
+            line_group="marker_id",
+            hover_data=["marker_id"],
+            color_discrete_map=COLOR_MAP,
+            facet_col="run_name",
+            template="plotly_dark",
+            title=f"{metric} by marker",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        marker_summary_aggs = {
+            "mean_abs_err_m": ("abs_err_m", "mean"),
+            "p95_abs_err_m": ("abs_err_m", lambda s: np.nanpercentile(s.dropna(), 95) if len(s.dropna()) else np.nan),
+            "mean_jitter_m": ("jitter_m", "mean"),
+            "mean_gt_depth_m": ("gt_depth_geom_m", "mean"),
+        }
+        if "pixel_err_px" in filtered_df.columns:
+            marker_summary_aggs["mean_pixel_err_px"] = ("pixel_err_px", "mean")
+        if "detected" in filtered_df.columns:
+            marker_summary_aggs["detection_rate"] = ("detected", "mean")
+
+        marker_summary = (
+            filtered_df.groupby(["marker_id", "color"], as_index=False)
+            .agg(**marker_summary_aggs)
+            .sort_values("mean_abs_err_m")
+        )
+        st.dataframe(marker_summary, use_container_width=True)
+
+        plot_df = filtered_df.copy()
+        fig = px.line(
+            plot_df,
+            x="rel_time",
+            y="abs_err_m",
+            color="color",
+            line_group="marker_id",
+            hover_data=["marker_id"],
+            color_discrete_map=COLOR_MAP,
+            facet_col="run_name",
+            template="plotly_dark",
+            title="Absolute error by marker",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        if {"det_u", "det_v"}.issubset(plot_df.columns):
+            fig2 = px.scatter(
+                plot_df,
+                x="det_u",
+                y="det_v",
+                color="abs_err_m",
+                hover_data=["marker_id", "gt_depth_geom_m", "da3_depth_m"],
+                facet_col="run_name",
+                template="plotly_dark",
+                title="Detected marker locations colored by error",
+            )
+            fig2.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig2, use_container_width=True)
+
+    with tab_dist:
+        plot_df = filtered_df.dropna(subset=["gt_depth_geom_m", "da3_depth_m"]).copy()
+        plot_df = plot_df[plot_df["gt_depth_geom_m"] > 1e-6].copy()
+        plot_df["scale_ratio"] = plot_df["da3_depth_m"] / plot_df["gt_depth_geom_m"]
+
+        fig1 = px.scatter(
+            plot_df,
+            x="gt_depth_geom_m",
+            y="scale_ratio",
+            color="color",
+            hover_data=["marker_id", "run_name", "da3_depth_m"],
+            color_discrete_map=COLOR_MAP,
+            template="plotly_dark",
+            trendline="ols",
+            title="DA3 / GT vs GT depth",
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+        ratio_time_df = (
+            plot_df.groupby(["run_name", "ts", "rel_time", "marker_id", "color"], as_index=False)
+            .agg(scale_ratio=("scale_ratio", "mean"))
+        )
+        fig2 = px.line(
+            ratio_time_df,
+            x="rel_time",
+            y="scale_ratio",
+            color="color",
+            line_group="marker_id",
+            hover_data=["marker_id", "run_name"],
+            color_discrete_map=COLOR_MAP,
+            facet_col="run_name",
+            template="plotly_dark",
+            title="DA3 / GT vs time",
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+        if len(plot_df) >= 2:
+            clean = plot_df[["da3_depth_m", "gt_depth_geom_m"]].dropna()
+            m, b = np.polyfit(clean["da3_depth_m"], clean["gt_depth_geom_m"], 1)
+            st.success(f"Selected-data fit: gt_depth ≈ {m:.4f} * da3_depth + {b:.4f}")
+
+    with tab_axes:
+        axis = st.selectbox("Orientation axis", ["pitch_deg", "roll_deg", "yaw_deg"])
+        ymetric = st.selectbox("Response", ["abs_err_m", "jitter_m", "gt_depth_geom_m"])
+        fig = px.scatter(
+            filtered_df,
+            x=axis,
+            y=ymetric,
+            color="color",
+            hover_data=["marker_id", "run_name"],
+            color_discrete_map=COLOR_MAP,
+            template="plotly_dark",
+            trendline="ols",
+            title=f"{ymetric} vs {axis}",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("This app now expects marker CSVs. The selected data looks like the old format.")

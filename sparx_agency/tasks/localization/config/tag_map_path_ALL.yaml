@@ -1,0 +1,53 @@
+# the drone is located at the origin (0, 0, 1) , in 4.5 meters there is a wall with tag 12, in the end of the hallway. 
+tags:
+ 
+ # 11:
+  #  xyz: [2.0, 0.0, 0.0]
+   # rpy: [0.0, 0.0, 3.14159]
+
+ # the first one 
+  11:
+    xyz: [1.40, -0.80, 1.5]
+    rpy: [-1.5708, 0, -1.5708]
+    size: 0.13
+
+ # on the wall in the end of the hallway
+  #12:
+  0:
+    xyz: [4.50, 0.0, 0.65]
+    rpy: [-1.5708,  0, -1.5708]
+    size: 0.2
+  
+  #12:
+   # xyz: [2.2, 0.0, 1.0] 
+   # rpy: [-1.5708,  0, -1.5708]
+  
+  # 7 is near 12
+  7:
+    xyz: [4.50, -0.25, 1.3] 
+    rpy: [-1.5708,  0, -1.5708] 
+    size: 0.15
+
+
+  # the enter to mamad - turn right (-90 degress)
+  10:
+    xyz: [2.5, -2.2, 1.15] 
+    rpy: [-1.5708, 0,  -3.1416] 
+    size: 0.2
+  
+  # near the table ( turn right -90 degrees+ -90 degrees = 180 degrees)
+  6:
+    xyz: [-1.5, -1.4, 1.13] 
+    rpy: [-1.5708,  0, 1.5708] 
+    size: 0.2
+  
+  # below the sparx logo ( turn left 90 degrees )
+  8:
+    xyz: [0.15, -4.7, 1.0] 
+    rpy: [-1.5708,  0, -3.1416] 
+    size: 0.2
+  
+  
+  
+
+  

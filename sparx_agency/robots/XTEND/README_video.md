@@ -80,7 +80,7 @@ gst-launch-1.0 -v rtspsrc location=rtsp://192.0.0.15:8510/drone_video/drnb177ede
 ```
 to see with port and drone id are connect run 
 ```bash 
-python3 sparx_agency/demos/Demo_No4-XTEND_MapRoom/test_video.py
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/test_video.py
 ``` 
 return something like when GCU is available: 
 ```text

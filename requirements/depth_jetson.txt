@@ -1,0 +1,14 @@
+-r prod.txt
+
+onnx>=1.16
+
+pycuda
+pytools
+platformdirs
+typing_extensions>=4.1.1
+
+# Do not add generic pip torch here on Jetson unless you are sure.
+# Torch should usually be installed from NVIDIA/Jetson-specific wheels.
+#
+# TensorRT Python usually comes from system packages:
+#   /usr/lib/python3.10/dist-packages/tensorrt

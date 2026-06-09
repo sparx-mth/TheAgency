@@ -8,16 +8,14 @@ import numpy as np
 import json
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
-from geometry_msgs.msg import PoseStamped
 
 from sparx_agency.core.common.utils import XYZAccumulator
-from sparx_agency.core.mapping.depth.depth_bbox_fusion import xyz_from_pointcloud_bbox, pointcloud2_to_xyz_image, \
-    pointcloud2_to_xyz_array, xyz_from_unorganized_cloud_bbox
+from sparx_agency.core.mapping.depth.depth_bbox_fusion import pointcloud2_to_xyz_array, xyz_from_unorganized_cloud_bbox
 from sparx_agency.robots.common.image_utils import (
     robust_depth_from_bbox_hist,
     uvz_to_xyz_camera,
 )
-from sparx_agency.robots.common.spatial_math import pose_xyz_yaw_to_T
+from sparx_agency.core.common.spatial_math import pose_xyz_yaw_to_T
 
 
 class DepthBBoxWorldTest(Node):

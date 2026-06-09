@@ -1,0 +1,122 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="xtend-arch-1" name="XTEND Pipeline">
+    <mxGraphModel dx="1312" dy="1281" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="drone" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;" value="&lt;b&gt;XTEND Drone&lt;/b&gt;&lt;br&gt;IP: 192.0.0.15" vertex="1">
+          <mxGeometry height="145" width="180" x="40" y="295" as="geometry" />
+        </mxCell>
+        <mxCell id="bridge" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" value="&lt;b&gt;XTEND Online Bridge&lt;/b&gt;&lt;br&gt;online_nav_bridge_publisher.py&lt;br&gt;&lt;i&gt;OnlineNavBridgePublisher / OnlineXtendBridgeBase&lt;/i&gt;&lt;br&gt;Publishes: /xtend/image_raw, /xtend/local_telemetry, /xtend/camera_info" vertex="1">
+          <mxGeometry height="160" width="250" x="360" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="depth" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" value="&lt;b&gt;Depth Processor&lt;/b&gt;&lt;br&gt;Depth Anything / DA3&lt;br&gt;Sub: /xtend/image_raw&lt;br&gt;Pub: /xtend/depth_m" vertex="1">
+          <mxGeometry height="120" width="220" x="720" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="optflow" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" value="&lt;b&gt;Optical Flow + Localization&lt;/b&gt;&lt;br&gt;flow_depth_velocity_node.py,&amp;nbsp;&lt;div&gt;Sub: /xtend/image_raw, /xtend/depth_m, /xtend/camera_info, /xtend/local_telemetry&lt;br&gt;Pub: /flow_depth/pose_est (or /odom)&lt;/div&gt;" vertex="1">
+          <mxGeometry height="150" width="270" x="720" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="planner" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" value="&lt;b&gt;Planner&lt;/b&gt;&lt;br&gt;Occupancy / Path Planning (Falcon)&lt;br&gt;Sub: /xtend/image_raw, /xtend/depth_m, /flow_depth/pose_est&lt;br&gt;Pub: /cmd_vel (Twist)" vertex="1">
+          <mxGeometry height="150" width="250" x="1070" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="twistconv" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" value="&lt;b&gt;Twist Converter&lt;/b&gt;&lt;br&gt;xtend_twist_to_cmd_nav.py&lt;br&gt;Sub: /cmd_vel&lt;br&gt;Pub: /drone/cmd_nav JSON&lt;br&gt;Examples: {&amp;quot;action&amp;quot;:&amp;quot;forward&amp;quot;,&amp;quot;value&amp;quot;:400}, {&amp;quot;action&amp;quot;:&amp;quot;turn_right&amp;quot;,&amp;quot;value&amp;quot;:1000}" vertex="1">
+          <mxGeometry height="150" width="260" x="1065" y="380" as="geometry" />
+        </mxCell>
+        <mxCell id="ui" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" value="&lt;b&gt;UI / Manual Control&lt;/b&gt;&lt;br&gt;ui.py&lt;br&gt;Publishes Twist for movement&lt;br&gt;Publishes /drone/cmd_nav for arm / takeoff / land / disarm" vertex="1">
+          <mxGeometry height="120" width="250" x="1070" y="570" as="geometry" />
+        </mxCell>
+        <mxCell id="legend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#999;dashed=1;fontSize=12;" value="&lt;b&gt;Recommended command path&lt;/b&gt;&lt;br&gt;Movement: UI or Planner -&amp;gt; /cmd_vel -&amp;gt; Twist Converter -&amp;gt; /drone/cmd_nav -&amp;gt; Online Bridge -&amp;gt; XTEND Drone&lt;br&gt;State commands: UI -&amp;gt; /drone/cmd_nav -&amp;gt; Online Bridge -&amp;gt; XTEND Drone&lt;br&gt;&lt;b&gt;Important:&lt;/b&gt; only one node should own the WebSocket connection to the drone." vertex="1">
+          <mxGeometry height="120" width="630" x="240" y="650" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="drone" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6c8ebf;strokeWidth=2;labelBackgroundColor=#dae8fc;" target="bridge" value="RTSP stream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="drone" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ff66b3;strokeWidth=2;dashed=1;labelBackgroundColor=#ffd6eb;exitX=1;exitY=0.25;exitDx=0;exitDy=0;" target="bridge" value="Robot status / telemetry">
+          <mxGeometry relative="1" x="-0.0492" y="20" as="geometry">
+            <mxPoint x="1" as="offset" />
+            <Array as="points">
+              <mxPoint x="260" y="331" />
+              <mxPoint x="260" y="310" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;strokeWidth=2;labelBackgroundColor=#f8cecc;" target="depth" value="/xtend/image_raw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="640" y="150" />
+              <mxPoint x="720" y="150" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;strokeWidth=2;labelBackgroundColor=#f8cecc;" target="optflow" value="/xtend/image_raw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#ff66b3;strokeWidth=2;labelBackgroundColor=#ffd6eb;dashed=1;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" target="optflow" value="/xtend/local_telemetry, /xtend/camera_info">
+          <mxGeometry relative="1" x="-0.0229" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="640" y="340" />
+              <mxPoint x="640" y="230" />
+              <mxPoint x="788" y="230" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;strokeWidth=2;labelBackgroundColor=#f8cecc;" target="planner" value="/xtend/image_raw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="640" y="200" />
+              <mxPoint x="1010" y="200" />
+              <mxPoint x="1070" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="depth" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;strokeWidth=2;labelBackgroundColor=#d5e8d4;" target="optflow" value="/xtend/depth_m">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="depth" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;strokeWidth=2;labelBackgroundColor=#d5e8d4;" target="planner" value="/xtend/depth_m">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="980" y="130" />
+              <mxPoint x="1020" y="130" />
+              <mxPoint x="1020" y="185" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" edge="1" parent="1" source="optflow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d6b656;strokeWidth=3;labelBackgroundColor=#fff2cc;" target="planner" value="/flow_depth/pose_est or /odom">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" edge="1" parent="1" source="planner" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9673a6;strokeWidth=2;labelBackgroundColor=#e1d5e7;" target="twistconv" value="/cmd_vel (Twist)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" edge="1" parent="1" source="ui" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;strokeWidth=2;labelBackgroundColor=#f5f5f5;" target="twistconv" value="/cmd_vel (Twist for movement)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" edge="1" parent="1" source="ui" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;strokeWidth=2;dashed=1;labelBackgroundColor=#f5f5f5;entryX=0.4;entryY=1;entryDx=0;entryDy=0;entryPerimeter=0;" target="bridge" value="/drone/cmd_nav (arm/takeoff/land/disarm)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="460" y="610" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e14" edge="1" parent="1" source="twistconv" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d79b00;strokeWidth=2;labelBackgroundColor=#ffe6cc;exitX=0;exitY=0.5;exitDx=0;exitDy=0;" target="bridge" value="/drone/cmd_nav JSON">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="485" y="455" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e15" edge="1" parent="1" source="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;strokeWidth=3;labelBackgroundColor=#f8cecc;entryX=1;entryY=0.75;entryDx=0;entryDy=0;exitX=0;exitY=0.75;exitDx=0;exitDy=0;" target="drone" value="WebSocket VIRTUAL_CONTROLLER">
+          <mxGeometry relative="1" x="0.4545" y="90" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="310" y="380" />
+              <mxPoint x="310" y="404" />
+            </Array>
+            <mxPoint x="370" y="430" as="sourcePoint" />
+            <mxPoint x="230" y="443.75" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
