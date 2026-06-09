@@ -42,8 +42,7 @@ class OccupancyNode(Node):
 
         self.create_subscription(PointCloud2, cloud_topic, self._cloud_cb, best_effort_qos)
         self.create_subscription(PoseStamped, pose_topic, self._pose_cb, 10)
-        # Use RELIABLE for world-frame cloud so RViz (which subscribes RELIABLE by default) receives it.
-        self.pub_cloud = self.create_publisher(PointCloud2, cloud_out, 10)
+        self.pub_cloud = self.create_publisher(PointCloud2, cloud_out, best_effort_qos)
         self.pub_occ   = self.create_publisher(OccupancyGrid, occupancy_out, 10)
 
         self.get_logger().info(f"cloud in:  {cloud_topic}")
@@ -117,9 +116,8 @@ class OccupancyNode(Node):
         grid.info.resolution = self.map.res
         grid.info.width = self.map.width
         grid.info.height = self.map.height
-        grid.info.origin.position.x    = self.map.origin_x
-        grid.info.origin.position.y    = self.map.origin_y
-        grid.info.origin.orientation.w = 1.0  # identity quaternion (ROS2 default is 0,0,0,0 — invalid)
+        grid.info.origin.position.x = self.map.origin_x
+        grid.info.origin.position.y = self.map.origin_y
         data = np.full((self.map.height, self.map.width), -1, dtype=np.int8)
         lo, seen, _ = self.map.get_viz_data()
         data[seen & (lo <= 0)]   = 20
