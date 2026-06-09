@@ -144,7 +144,8 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p metric_scale_divisor:=300.0 \
   -p clip_min_m:=0.2 \
   -p clip_max_m:=8.0 \
-  -p depth_encoding:=32FC1
+  -p depth_encoding:=32FC1 \
+  -p publish_cloud:=true
 '
 
 wait_for_topic_name /xtend/depth_m 30
@@ -280,7 +281,8 @@ LAUNCH_ITEMS: list[LaunchItem] = [
                   -p metric_scale_divisor:=300.0 \
                   -p clip_min_m:=0.2 \
                   -p clip_max_m:=8.0 \
-                  -p depth_encoding:=32FC1
+                  -p depth_encoding:=32FC1 \
+                  -p publish_cloud:=true
                 """,
     ),
     LaunchItem(
