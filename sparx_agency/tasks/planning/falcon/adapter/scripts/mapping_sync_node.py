@@ -14,6 +14,20 @@ Ordering-agnostic: both streams are buffered and a pair is emitted when its
 second half arrives (pose-leads OR pose-trails); a held depth with no pose ages
 out after ~match_hold_sec and is dropped.
 
+Why tolerant, not strictly exact: by design depth and the localization pose share
+the SAME capture stamp, so the ideal pair is dt==0 (kind EXACT). The match is kept
+DELIBERATELY tolerant -- ~sync_tolerance (nearest pose within a window, default
+50 ms), ~max_interp_gap (SLERP across a small bracket, default 120 ms) and the
+~match_hold_sec late-pose buffer -- because depth and the AprilTag pose are
+independent consumers of the RGB stream at DIFFERENT cadences (depth on nearly
+every frame; the tag pose ONLY while a tag is in view). A given depth frame
+therefore often has no byte-identical pose, and strict exact-only would DROP it,
+starving the voxel map. The cost is a small, bounded mis-pairing: a NEAREST or
+INTERP pair fuses a pose from a slightly different (or synthesized) instant, then
+re-stamps it to the depth stamp (so the error is invisible downstream). To enforce
+the strict-timestamp architecture instead -- no mis-pair, at the cost of dropping
+frames that lack a co-stamped pose -- set ~sync_tolerance=0.0 and ~max_interp_gap=0.0.
+
 Multi-source: ~pose_stamped_topics may list several topics (comma string or YAML
 list); order is PRIORITY (first with a co-temporal pose wins). All sources MUST
 share one world frame -- the node measures cross-source position disagreement on
