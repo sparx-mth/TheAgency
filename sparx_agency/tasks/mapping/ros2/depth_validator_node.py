@@ -10,12 +10,11 @@ from cv_bridge import CvBridge
 import message_filters
 import numpy as np
 import cv2
-import math
 import csv
 from datetime import datetime
 
 # Importing your specific math class
-from sparx_agency.robots.common.spatial_math import quat_msg_to_rpy_deg
+from sparx_agency.core.common.spatial_math import get_euler
 
 
 class DepthValidatorNode(Node):
@@ -109,7 +108,7 @@ class DepthValidatorNode(Node):
 
             # 6. Logging for Report
             q = odom_msg.pose.pose.orientation
-            r, p, y = quat_msg_to_rpy_deg(q)
+            r, p, y = get_euler(q)
             ts = da3_msg.header.stamp.sec + da3_msg.header.stamp.nanosec * 1e-9
 
             # Logging the new 'jitter' metric

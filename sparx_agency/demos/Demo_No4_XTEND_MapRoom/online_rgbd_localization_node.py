@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import argparse
 import math
 import struct
-from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -11,22 +9,53 @@ import message_filters
 import numpy as np
 import open3d as o3d
 import rclpy
+import yaml
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as RosPath
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation as Rot
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import Float64, Header
 
 from visualization_msgs.msg import Marker
 
-from sparx_agency.robots.common.spatial_math import open3d_pose_to_ros_pose
-from sparx_agency.robots.common.helpers import load_intrinsics_from_yaml as _load_intrinsics_tuple
+from sparx_agency.core.common.spatial_math import open3d_pose_to_ros_pose
 
 
 def load_intrinsics_from_yaml(camera_yaml: str, image_width: int, image_height: int):
-    fx, fy, cx, cy = _load_intrinsics_tuple(camera_yaml, depth_w=image_width, depth_h=image_height)
+    with open(camera_yaml, "r") as f:
+        data = yaml.safe_load(f)
+
+    yaml_w = int(data["image_width"])
+    yaml_h = int(data["image_height"])
+
+    if "projection_matrix" in data:
+        P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
+        fx = float(P[0, 0])
+        fy = float(P[1, 1])
+        cx = float(P[0, 2])
+        cy = float(P[1, 2])
+    elif "camera_matrix" in data:
+        K = np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
+        fx = float(K[0, 0])
+        fy = float(K[1, 1])
+        cx = float(K[0, 2])
+        cy = float(K[1, 2])
+    else:
+        fx = float(data["fx"])
+        fy = float(data["fy"])
+        cx = float(data["cx"])
+        cy = float(data["cy"])
+
+    sx = float(image_width) / float(yaml_w)
+    sy = float(image_height) / float(yaml_h)
+
+    fx *= sx
+    fy *= sy
+    cx *= sx
+    cy *= sy
+
     return o3d.camera.PinholeCameraIntrinsic(
         image_width,
         image_height,

@@ -1,7 +1,7 @@
 import numpy as np
 
 from sparx_agency.core.common.types import Pose3D, Twist3D, State3D, PoseSE3
-from sparx_agency.robots.common.spatial_math import euler_to_rot_zyx
+from sparx_agency.core.common.spatial_math import euler_to_rot_zyx
 
 
 def xtend_robot_block_to_pose_se3(robot_block: dict) -> PoseSE3:

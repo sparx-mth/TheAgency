@@ -12,12 +12,14 @@ from typing import Any
 import rclpy
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
-import math
 import websockets
 
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
-from sparx_agency.robots.common.spatial_math import yaw_to_quat
-from sparx_agency.robots.common.helpers import clamp_axis
+from sparx_agency.core.common.spatial_math import yaw_to_quaternion
+
+
+def clamp_axis(value: int, limit: int = 1000) -> int:
+    return max(-limit, min(limit, int(value)))
 
 
 class OnlineXtendBridgeBase(ControllerAutomation):
@@ -273,7 +275,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
         yaw_rad = self.bearing_to_yaw_rad(bearing_raw)
         if yaw_rad is not None:
-            qx, qy, qz, qw = yaw_to_quat(yaw_rad)
+            qx, qy, qz, qw = yaw_to_quaternion(yaw_rad)
             msg.pose.pose.orientation.x = qx
             msg.pose.pose.orientation.y = qy
             msg.pose.pose.orientation.z = qz

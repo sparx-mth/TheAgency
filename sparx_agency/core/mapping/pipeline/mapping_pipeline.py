@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from sparx_agency.robots.common.spatial_math import rpy_deg_to_rot
+from sparx_agency.core.common.spatial_math import rpy_deg_to_R_base
 # matplotlib imports moved inside methods to avoid global initialization issues
 # in environments with numpy/system library mismatches.
 
@@ -59,7 +59,7 @@ class PinholeCloudGenerator(CloudGenerator):
         self.t_base = np.array(t_base, dtype=np.float32)
 
         r, p, y = cam_rpy_deg
-        self.R_base = rpy_deg_to_rot(r, p, y)  # 3x3
+        self.R_base = rpy_deg_to_R_base(r, p, y)  # 3x3
 
     def depth_to_cloud_to_base_xyz(self, depth_m: np.ndarray, intr: Intrinsics) -> np.ndarray:
         if depth_m is None:
