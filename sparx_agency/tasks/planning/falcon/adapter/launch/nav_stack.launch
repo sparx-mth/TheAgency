@@ -127,6 +127,36 @@
   <arg name="replan_period_s"       default="0.0" />
   <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
 
+  <!-- ══════════════════════════════════════════════════════════════
+       NavDP (point-goal policy) — REPLACES A* when use_navdp:=true.
+       The operator clicks a pixel in the live RGB window; the NavDP
+       server returns a body-frame trajectory; navdp_click_node anchors
+       it at the current pose and publishes a world-frame Path on
+       /path/waypoints — the SAME topic A* used, so waypoint_follower and
+       bev_click_goal need no change. With use_navdp:=true the
+       astar_planner node is NOT launched.
+
+       Intrinsics MUST match the RGB/depth stream NavDP consumes (the RAW
+       camera), which is NOT the resampled stream FALCON's mapping uses —
+       hence the separate navdp_* intrinsics below (XTEND /xtend/rgb
+       projection-matrix defaults). Set navdp_camera_info_topic to auto-
+       sync them from a camera_info topic instead.
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="use_navdp"                default="false" />
+  <arg name="navdp_port"               default="8888" />
+  <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
+  <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
+  <arg name="navdp_pose_topic"         default="$(arg drone_ns)/gt_pose" />
+  <arg name="navdp_camera_info_topic"  default="" /><!-- e.g. /xtend/camera_info to auto-sync intrinsics; '' = use the navdp_* params below -->
+  <arg name="navdp_fx"                 default="390.715302" />
+  <arg name="navdp_fy"                 default="395.828430" />
+  <arg name="navdp_cx"                 default="222.273390" />
+  <arg name="navdp_cy"                 default="108.547631" />
+  <arg name="navdp_img_width"          default="504" />
+  <arg name="navdp_img_height"         default="392" />
+  <arg name="navdp_render_cam_height"  default="0.5" /><!-- overlay-only ground-plane height; <=0 tracks live altitude -->
+  <arg name="navdp_depth_max_m"        default="5.0" /><!-- depth clip before uint16 encoding (server contract; do NOT exceed 6.55) -->
+
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
   <arg name="cruise_z"          default="1.0" />
@@ -354,7 +384,7 @@
   </node>
 
   <node pkg="falcon_adapter" type="astar_planner_node.py"
-        name="astar_planner" output="screen">
+        name="astar_planner" output="screen" unless="$(arg use_navdp)">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
     <param name="path_topic"         value="/path/waypoints" />
@@ -377,6 +407,28 @@
     <param name="replan_period_s"       value="$(arg replan_period_s)" />
     <param name="replan_collision_confirm" value="$(arg replan_collision_confirm)" />
     <param name="frame_id"              value="world" />
+  </node>
+
+  <!-- NavDP click-to-go planner (replaces astar_planner when use_navdp:=true).
+       Publishes the SAME /path/waypoints world Path the follower consumes. -->
+  <node pkg="falcon_adapter" type="navdp_click_node.py"
+        name="navdp_click" output="screen" if="$(arg use_navdp)">
+    <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+    <param name="path_topic"        value="/path/waypoints" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg navdp_port)" />
+    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <param name="render_cam_height" value="$(arg navdp_render_cam_height)" />
   </node>
 
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"

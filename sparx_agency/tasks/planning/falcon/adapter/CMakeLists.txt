@@ -15,6 +15,7 @@ catkin_install_python(PROGRAMS
   scripts/mapping_sync_node.py
   scripts/bev_click_goal_node.py
   scripts/astar_planner_node.py
+  scripts/navdp_click_node.py
   scripts/waypoint_follower_node.py
   scripts/pose_adapter_node.py
   scripts/sim_adapter_node.py
