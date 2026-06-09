@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import argparse
 import math
 import struct
-from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -17,12 +15,12 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as RosPath
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation as Rot
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import Float64, Header
 
 from visualization_msgs.msg import Marker
 
-from sparx_agency.robots.common.spatial_math import open3d_pose_to_ros_pose
+from sparx_agency.core.common.spatial_math import open3d_pose_to_ros_pose
 
 
 def load_intrinsics_from_yaml(camera_yaml: str, image_width: int, image_height: int):

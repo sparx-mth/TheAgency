@@ -8,7 +8,7 @@ from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline,
 from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridCostmap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
 from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
-from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+from sparx_agency.core.common.spatial_math import intrinsics_from_fov
 from sparx_agency.robots.XTEND.adapters.xtend_robot_adapter import XtendRobotAdapter
 
 

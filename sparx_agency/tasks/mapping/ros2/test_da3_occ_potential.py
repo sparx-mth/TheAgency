@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import numpy as np
@@ -12,7 +11,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import PointCloud2, PointField
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import Header
 
 from tf2_ros import Buffer, TransformListener
 from geometry_msgs.msg import TransformStamped
@@ -21,7 +19,7 @@ from sparx_agency.core.mapping.costmap.log_odds_grid import LogOddsGridCostmap, 
 from sparx_agency.core.mapping.costmap.potential_field_layer import PotentialFieldLayer
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import optical_xyz_to_base_xyz
 from sparx_agency.robots.common import stamp_to_sec
-from sparx_agency.robots.common.spatial_math import quat_to_rot
+from sparx_agency.core.common.spatial_math import quat_to_rot
 from sparx_agency.robots.common.state_converter import costmap_to_occupancygrid
 
 

@@ -11,8 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
-from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, Any
+from typing import Callable, Protocol, Any
 
 import rclpy
 
@@ -95,7 +94,7 @@ class XtendPlugin:
 
     def build_runner(self, args: argparse.Namespace, pipeline: MappingPipeline, costmap: ProbabilisticGridCostmap) -> RunnerFn:
         async def _run():
-            from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+            from sparx_agency.core.common.spatial_math import intrinsics_from_fov
             from sparx_agency.robots.XTEND.adapters.xtend_robot_adapter import XtendRobotAdapter
 
             intr = intrinsics_from_fov(
@@ -170,7 +169,7 @@ class RoosterPlugin:
 
     def build_runner(self, args: argparse.Namespace, pipeline: MappingPipeline, costmap: ProbabilisticGridCostmap) -> RunnerFn:
         def _run():
-            from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+            from sparx_agency.core.common.spatial_math import intrinsics_from_fov
             from sparx_agency.robots.ROBOTICAN.adapters import RoosterIngestor
 
             intr = intrinsics_from_fov(

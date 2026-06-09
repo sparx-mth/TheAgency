@@ -12,11 +12,10 @@ from typing import Any
 import rclpy
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
-import math
 import websockets
 
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
-from sparx_agency.robots.common.spatial_math import yaw_to_quaternion
+from sparx_agency.core.common.spatial_math import yaw_to_quaternion
 
 
 def clamp_axis(value: int, limit: int = 1000) -> int:

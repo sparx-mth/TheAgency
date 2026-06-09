@@ -12,7 +12,7 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenha
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
 from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
-from sparx_agency.robots.common.spatial_math import rot_y
+from sparx_agency.core.common.spatial_math import rot_y
 from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
 
 

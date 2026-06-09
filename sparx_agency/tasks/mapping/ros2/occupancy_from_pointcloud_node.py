@@ -1,5 +1,3 @@
-import struct
-
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -11,7 +9,7 @@ from std_msgs.msg import Header
 
 from sparx_agency.core.mapping.costmap.integrated_map import IntegratedMap
 from sparx_agency.core.mapping.costmap.probabilistic_grid_config import ProbabilisticGridConfig
-from sparx_agency.robots.common.spatial_math import rot_y, intrinsics_from_fov
+from sparx_agency.core.common.spatial_math import rot_y, intrinsics_from_fov
 
 
 class OccupancyNode(Node):
