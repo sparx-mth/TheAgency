@@ -50,45 +50,82 @@ subgraph MAP["Mapping  ·  core/mapping/"]
 end
 
 %% ══════════════════════════════════════════════════════════
-%% PLANNING
+%% PLANNING & EXECUTION
 %% ══════════════════════════════════════════════════════════
-subgraph PLAN["Planning  ·  core/planning/"]
+subgraph PLAN["Planning & Execution  ·  core/planning/"]
     P_PLNR["Path Planner\nRRT* · BIT*"]
     P_SMTH["Smoother\nHermite · MinSnap"]
     P_TRKR["Tracker\nPID / MPC"]
-    P_PLNR --> P_SMTH --> P_TRKR
+    P_DEMO["Demo Manager\nxtend_demo_manager\nidle · fly_straight · turning\nvisual_servoing · finish"]
+    P_PLNR --> P_SMTH --> P_TRKR --> P_DEMO
 end
 
 %% ══════════════════════════════════════════════════════════
-%% ROBOT ADAPTERS
+%% XTEND ROBOT ADAPTER
 %% ══════════════════════════════════════════════════════════
-subgraph ROBOTS["Robot Adapters  ·  robots/"]
-    R_XT["XTEND\ncmd_nav → WebSocket"]
+subgraph XTEND_ADAPTER["XTEND Adapter  ·  robots/XTEND/"]
+
+    subgraph XTEND_ROS2["ROS2 Humble — Jetson Orin AGX"]
+        A_TWIST["xtend_twist_converter\nextend_twist_to_cmd_nav.py\n/cmd_vel → /xtend/cmd_nav JSON"]
+        A_BRIDGE["xtend_bridge\nonline_nav_bridge_dir_publisher\nWebSocket owner · bearing publisher"]
+    end
+
+    subgraph XTEND_DOCKER["Docker Stack — ROS1 Noetic  (Jetson)"]
+        D_ROSCORE["roscore"]
+        D_ROS1BR["ros1_bridge\nrun_bridge.sh\nROS1 ↔ ROS2  /cmd_vel"]
+        D_FALCON["falcon container\nfalcon_adapter\nreal_drone.launch"]
+        D_ROSCORE --> D_ROS1BR --> D_FALCON
+    end
+
+end
+
+%% ══════════════════════════════════════════════════════════
+%% OTHER ROBOT ADAPTERS
+%% ══════════════════════════════════════════════════════════
+subgraph OTHER_ROBOTS["Other Robot Adapters  ·  robots/"]
     R_RB["ROBOTICAN\ncmd_vel → ROS2"]
     R_SJ["SJTU / Gazebo\ncmd_vel → ROS2"]
+end
+
+%% ══════════════════════════════════════════════════════════
+%% XTEND DRONE (hardware)
+%% ══════════════════════════════════════════════════════════
+subgraph DRONE["XTEND Drone"]
+    DR_WS["WebSocket onboard\ntelemetry · bearing · IMU"]
+    DR_FC["Flight Controller\nARM · TAKEOFF · NAV\nLAND · DISARM"]
 end
 
 %% ══════════════════════════════════════════════════════════
 %% DATA FLOW
 %% ══════════════════════════════════════════════════════════
 
-%% RGB source → depth model + localization
+%% RGB source → depth + localization
 ONLINE  -->|"rgb_frame_path · bearing"| D_MODEL
 OFFLINE -->|"rgb_frame_path · bearing"| D_MODEL
 ONLINE  -->|"rgb_frame_path · bearing"| L_AT & L_OF
 OFFLINE -->|"rgb_frame_path · bearing"| L_AT & L_OF
 
-%% Depth → mapping + optical-flow / AMCL
+%% Depth → mapping + localization
 D_MODEL & D_NPY & D_3D -->|"depth_frame_path\n/xtend/pointcloud"| M_PC
 D_MODEL & D_NPY & D_3D -->|"depth_frame_path"| L_OF & L_AMCL
 
-%% Localization → mapping (TF for world-frame accumulation) + planning
+%% Localization → mapping (TF) + planning
 L_OUT -->|"TF · /xtend/localization"| MAP
 L_OUT -->|"/xtend/localization"| PLAN
 
 %% Map → planning
 M_2D & M_3D -->|"/xtend/occupancy_grid"| PLAN
 
-%% Planning → robot
-P_TRKR -->|"/cmd_vel"| ROBOTS
+%% Planning → adapters
+P_DEMO -->|"/cmd_vel  ROS2"| A_TWIST
+P_DEMO -->|"/cmd_vel  ROS2"| D_ROS1BR
+P_DEMO -->|"/cmd_vel"| OTHER_ROBOTS
+
+%% XTEND adapter → drone
+A_TWIST -->|"/xtend/cmd_nav  JSON"| A_BRIDGE
+A_BRIDGE -->|"WebSocket JSON"| DR_WS
+D_FALCON -->|"flight commands"| DR_FC
+
+%% Drone → online bridge (telemetry back)
+DR_WS -->|"bearing · IMU\ntelemetry"| ONLINE
 ```
