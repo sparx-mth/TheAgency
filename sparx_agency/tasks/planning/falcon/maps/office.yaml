@@ -18,9 +18,9 @@ map_config:
   # front of the drone with side walls so A* keeps the drone in the
   # corridor. Each entry: horizontal wall at given y, spanning x in
   # [x_min, x_max], with thickness in the y direction.
-  walls:
-    - { y:  0.8, x_min: -2.0, x_max: 1.7, thickness: 0.15 }   # left/top wall
-    - { y: -0.8, x_min: -2.0, x_max: 1.7, thickness: 0.15 }   # right/bottom wall
+#  walls:
+#    - { y:  0.8, x_min: -2.0, x_max: 1.7, thickness: 0.15 }   # left/top wall
+#    - { y: -0.8, x_min: -2.0, x_max: 1.7, thickness: 0.15 }   # right/bottom wall
 
   # ── Bounds ───────────────────────────────────────────────────────
   # Sized for a recording where the drone moves several metres along
