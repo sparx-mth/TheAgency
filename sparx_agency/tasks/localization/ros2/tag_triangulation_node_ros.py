@@ -21,7 +21,7 @@ from apriltag_msgs.msg import AprilTagDetectionArray
 
 from sparx_agency.core.localization.tag_triangulation import (
     estimate_camera_pose_from_tags,
-    matrix_to_pose,
+    transform_to_pose,
 )
 from sparx_agency.core.localization.types.tag_triangulation import (
     TagWorldPose,
@@ -304,7 +304,7 @@ class TagTriangulationNode(Node):
             self.last_seen_ids = current_ids
             return
 
-        (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+        (x, y, z), (qx, qy, qz, qw) = transform_to_pose(est.world_T_cam)
 
         pose_msg = PoseStamped()
         pose_msg.header.frame_id = self.world_frame
