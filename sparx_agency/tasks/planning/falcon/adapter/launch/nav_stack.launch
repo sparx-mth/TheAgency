@@ -136,25 +136,28 @@
        bev_click_goal need no change. With use_navdp:=true the
        astar_planner node is NOT launched.
 
-       Intrinsics MUST match the RGB/depth stream NavDP consumes (the RAW
-       camera), which is NOT the resampled stream FALCON's mapping uses —
-       hence the separate navdp_* intrinsics below (XTEND /xtend/rgb
-       projection-matrix defaults). Set navdp_camera_info_topic to auto-
-       sync them from a camera_info topic instead.
+       navdp_click consumes the SAME /xtend/depth_m (+ /xtend/rgb) stream
+       FALCON's mapping does, so its intrinsics MUST match that stream — the
+       navdp_* intrinsic args below therefore DEFAULT to the shared cam_*
+       (raw K on the real drone via real_drone.launch; sim_adapter's P-target
+       in sim). Override per camera, or set navdp_camera_info_topic to auto-
+       sync from a camera_info topic (K preferred; must describe the 504x294
+       stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
   <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
-  <arg name="navdp_pose_topic"         default="$(arg drone_ns)/gt_pose" />
+  <arg name="navdp_pose_topic"         default="/xtend/april_tag_pose" />
+  <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/april_tag_pose) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
   <arg name="navdp_camera_info_topic"  default="" /><!-- e.g. /xtend/camera_info to auto-sync intrinsics; '' = use the navdp_* params below -->
-  <arg name="navdp_fx"                 default="390.715302" />
-  <arg name="navdp_fy"                 default="395.828430" />
-  <arg name="navdp_cx"                 default="222.273390" />
-  <arg name="navdp_cy"                 default="108.547631" />
-  <arg name="navdp_img_width"          default="504" />
-  <arg name="navdp_img_height"         default="392" />
-  <arg name="navdp_render_cam_height"  default="0.5" /><!-- overlay-only ground-plane height; <=0 tracks live altitude -->
+  <arg name="navdp_fx"                 default="$(arg cam_fx)" />
+  <arg name="navdp_fy"                 default="$(arg cam_fy)" />
+  <arg name="navdp_cx"                 default="$(arg cam_cx)" />
+  <arg name="navdp_cy"                 default="$(arg cam_cy)" />
+  <arg name="navdp_img_width"          default="$(arg cam_width)" />
+  <arg name="navdp_img_height"         default="$(arg cam_height)" />
+  <arg name="navdp_render_cam_height"  default="0.0" /><!-- overlay-only ground-plane height; 0/<=0 tracks live altitude, >0 pins a fixed height -->
   <arg name="navdp_depth_max_m"        default="5.0" /><!-- depth clip before uint16 encoding (server contract; do NOT exceed 6.55) -->
 
   <!-- Takeoff & cruise -->
@@ -417,6 +420,7 @@
     <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
     <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
     <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
     <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
     <param name="path_topic"        value="/path/waypoints" />
     <param name="frame_id"          value="world" />

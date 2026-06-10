@@ -85,11 +85,13 @@
   <arg name="goal_y"    default="-2.0" />
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
-       use_navdp:=true swaps astar_planner for navdp_click. The XTEND
-       /xtend/rgb + /xtend/depth_m defaults and intrinsics already live in
-       nav_stack.launch; set navdp_camera_info_topic:=/xtend/camera_info to
-       auto-sync intrinsics from the (bridged) camera_info instead. -->
-  <arg name="use_navdp"               default="false" />
+       use_navdp:=true swaps astar_planner for navdp_click. It consumes the
+       same /xtend/rgb + /xtend/depth_m stream FALCON maps, so its intrinsics
+       inherit the cam_* (raw K) args above automatically — nothing to pass.
+       The overlay tracks the live pose altitude. Set
+       navdp_camera_info_topic:=/xtend/camera_info to auto-sync intrinsics from
+       the (bridged) camera_info (K; must describe the 504x294 stream) instead. -->
+  <arg name="use_navdp"               default="true" />
   <arg name="navdp_camera_info_topic" default="" />
 
   <arg name="publish_mapping_inputs" value="false" />

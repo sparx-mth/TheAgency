@@ -149,10 +149,11 @@ def body_point_to_pixel(x_fwd, y_left, intr, cam_height_m, min_fwd_m=0.05,
         u = fx * (-y_left)    / x_fwd + cx
         v = fy *  cam_height_m / x_fwd + cy
 
-    The line lands on the *true* floor only when ``cam_height_m`` equals the
-    camera's real height. A smaller value (e.g. NavDP's ~0.5 m training height)
-    keeps more near waypoints in-frame for visualization at the cost of floor
-    alignment -- useful because a drone flying at ~1 m otherwise pushes the first
+    The line lands on the *true* floor when ``cam_height_m`` equals the camera's
+    real height, so callers should pass the live altitude for a floor-accurate
+    overlay. A smaller fixed value (e.g. NavDP's ~0.5 m training height) is an
+    optional visualization trick that keeps more near waypoints in-frame at the
+    cost of floor alignment -- a drone flying at ~1 m otherwise pushes the first
     several waypoints below the image.
 
     Args:
