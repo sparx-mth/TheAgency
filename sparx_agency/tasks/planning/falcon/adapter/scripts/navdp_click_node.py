@@ -33,11 +33,19 @@ published path until then -- exactly the "click once, follow until I click again
 behaviour.
 
 IMPORTANT -- intrinsics must match the RGB/depth stream NavDP receives. NavDP
-consumes the RAW camera (``~rgb_topic`` / ``~depth_topic``), which on the XTEND is
-``/xtend/rgb`` + ``/xtend/depth_m`` at the rectified 504x392 ``projection_matrix``
-intrinsics (the ``~fx ~fy ~cx ~cy`` defaults below) -- NOT the further-cropped
-stream FALCON's mapping uses. If you point this at a different camera, pass the
-matching ``~fx ~fy ~cx ~cy ~img_width ~img_height`` (or a ``~camera_info_topic``).
+consumes the SAME ``/xtend/rgb`` + ``/xtend/depth_m`` stream FALCON's voxel
+mapping does, so it uses the SAME intrinsics (the launch wires ``~fx ~fy ~cx ~cy``
+to the shared ``cam_*`` args). On the real XTEND that stream is the RAW,
+unrectified depth at 504x294, so the correct focals are the ``camera_matrix`` (K)
+values -- the ``~fx ~fy ~cx ~cy`` defaults below -- NOT the rectified
+``projection_matrix`` (P), which over-scales every metric distance (the same
+K-vs-P trap documented in ``real_drone.launch``). In sim, ``sim_adapter``
+resamples the stream to its P-target intrinsics, so the launch's ``cam_*`` (and
+hence these) become those instead -- the rule is simply "match the live stream".
+Point this at a different camera by passing the matching ``~fx ~fy ~cx ~cy
+~img_width ~img_height`` (or a ``~camera_info_topic``). Because the click pixel
+indexes the depth array directly, ``/xtend/rgb`` and ``/xtend/depth_m`` MUST share
+one resolution -- the node fails loud at startup if they do not.
 
 Run:
     rosrun falcon_adapter navdp_click_node.py
@@ -77,10 +85,17 @@ class NavDPClickNode:
         rospy.init_node("navdp_click")
         G = rospy.get_param
 
-        self.drone_ns = G("~drone_ns", "/simple_drone")
+        self.drone_ns = G("~drone_ns", "")
         self.rgb_topic = G("~rgb_topic", "/xtend/rgb")
         self.depth_topic = G("~depth_topic", "/xtend/depth_m")
-        self.pose_topic = G("~pose_topic", self.drone_ns + "/gt_pose")
+        self.pose_topic = G("~pose_topic", "/xtend/april_tag_pose")
+        # Message type on ~pose_topic: "pose_stamped" (geometry_msgs/PoseStamped)
+        # or "pose" (geometry_msgs/Pose). The default localization
+        # /xtend/april_tag_pose is a PoseStamped -- present in bag playback, on the
+        # real drone, and from sim_adapter -- so the default is pose_stamped. Point
+        # this at the bare /gt_pose (pose_type:=pose) when running inside the nav
+        # stack. Mirrors pose_adapter's ~in_type and real_drone's real_pose_type.
+        self.pose_type = G("~pose_type", "pose_stamped")
         self.camera_info_topic = G("~camera_info_topic", "")  # "" -> use params
 
         # Output: world-frame path on the SAME topic the A* planner published,
@@ -88,22 +103,35 @@ class NavDPClickNode:
         self.path_topic = G("~path_topic", "/path/waypoints")
         self.frame_id = G("~frame_id", "world")
 
-        # Camera intrinsics matching the RGB/depth stream (XTEND 504x392 defaults).
+        # Camera intrinsics matching the /xtend/depth_m stream NavDP indexes.
+        # Defaults are the real-XTEND RAW K-matrix at 504x294 (the same values
+        # real_drone.launch hands FALCON). The launch overrides them with the
+        # shared cam_* args -- raw K on the real drone, sim_adapter's P-target in
+        # sim -- so navdp always tracks the live stream. Pass matching values for
+        # any other camera.
         self.intr = Intrinsics(
-            width=int(G("~img_width", 504)), height=int(G("~img_height", 392)),
-            fx=float(G("~fx", 390.715302)), fy=float(G("~fy", 395.828430)),
-            cx=float(G("~cx", 222.273390)), cy=float(G("~cy", 108.547631)))
+            width=int(G("~img_width", 504)),
+            height=int(G("~img_height", 294)),
+            fx=float(G("~fx", 322.6351083474948)),
+            fy=float(G("~fy", 323.3893307141174)),
+            cx=float(G("~cx", 242.06479658679714)),
+            cy=float(G("~cy", 90.03019076680604)))
 
-        # Client-side overlay camera height. The projection lands on the true floor
-        # only when this equals the drone's altitude; NavDP was trained on ground
-        # robots at ~0.5 m, so the default keeps more waypoints in-frame. Set <= 0
-        # to track the live altitude instead.
-        self.render_cam_height = float(G("~render_cam_height", 0.5))
+        # Client-side overlay camera height (3rd panel only). The trajectory
+        # projects onto the true floor when this equals the drone's altitude, so
+        # the default <= 0 tracks the live pose altitude. Set a fixed positive
+        # value (e.g. 0.5, NavDP's ~ground-robot training height) to pin the
+        # render and keep more near waypoints in-frame at the cost of floor
+        # alignment.
+        self.render_cam_height = float(G("~render_cam_height", 0.0))
 
+        # Kept so the depth panel can be colorized to exactly what NavDP receives
+        # (the client clips depth to this before encoding).
+        self.depth_max_m = float(G("~depth_max_m", 5.0))
         self.client = NavDPPointgoalClient(
             "http://127.0.0.1:%d" % int(G("~port", 8888)),
             timeout_s=float(G("~timeout_s", 30.0)),
-            depth_max_m=float(G("~depth_max_m", 5.0)),
+            depth_max_m=self.depth_max_m,
             logger=rospy.logwarn)
 
         # ── Shared sensor state (callbacks write, main loop reads) ──
@@ -119,7 +147,14 @@ class NavDPClickNode:
 
         rospy.Subscriber(self.rgb_topic, Image, self._rgb_cb, queue_size=2)
         rospy.Subscriber(self.depth_topic, Image, self._depth_cb, queue_size=2)
-        rospy.Subscriber(self.pose_topic, Pose, self._pose_cb, queue_size=10)
+        if self.pose_type == "pose_stamped":
+            rospy.Subscriber(self.pose_topic, PoseStamped,
+                             self._pose_stamped_cb, queue_size=10)
+        elif self.pose_type == "pose":
+            rospy.Subscriber(self.pose_topic, Pose, self._pose_cb, queue_size=10)
+        else:
+            raise ValueError("~pose_type must be 'pose' or 'pose_stamped', got %r"
+                             % self.pose_type)
         if self.camera_info_topic:
             rospy.Subscriber(self.camera_info_topic, CameraInfo,
                              self._cam_info_cb, queue_size=1)
@@ -143,6 +178,12 @@ class NavDPClickNode:
         elif msg.encoding == "16UC1":
             self.depth = (np.frombuffer(msg.data, np.uint16).reshape(
                 msg.height, msg.width).astype(np.float32) / 1000.0)
+        else:
+            # Warn loudly so the operator sees WHY "Waiting for RGB + depth"
+            # never clears, instead of silently dropping the frame.
+            rospy.logwarn_throttle(5.0, "navdp_click: unsupported depth encoding "
+                                   "%r (need 32FC1 or 16UC1); ignoring frame",
+                                   msg.encoding)
 
     def _pose_cb(self, msg):
         yaw = se3.yaw_from_quaternion((msg.orientation.x, msg.orientation.y,
@@ -150,18 +191,26 @@ class NavDPClickNode:
         self.pose_xyyaw = (float(msg.position.x), float(msg.position.y), yaw)
         self.altitude = float(msg.position.z)
 
+    def _pose_stamped_cb(self, msg):
+        self._pose_cb(msg.pose)
+
     def _cam_info_cb(self, msg):
         # ROS1 sensor_msgs/CameraInfo exposes UPPERCASE fields (K, P, R, D); ROS2
-        # lowercases them. This node is rospy, so use K/P. Prefer the rectified
-        # 3x4 projection matrix P (fx=P[0] fy=P[5] cx=P[2] cy=P[6]); FALCON
-        # consumes the rectified stream. Fall back to the 3x3 K (fx=K[0] fy=K[4]
-        # cx=K[2] cy=K[5]) -- different layout, different indices.
+        # lowercases them. This node is rospy, so use K/P. Prefer the RAW 3x3
+        # camera matrix K (fx=K[0] fy=K[4] cx=K[2] cy=K[5]): /xtend/depth_m is the
+        # raw, unrectified depth, so K -- not the rectified projection matrix P --
+        # back-projects it correctly (P over-scales metric distances; see the
+        # K-vs-P note in real_drone.launch). Fall back to P (fx=P[0] fy=P[5]
+        # cx=P[2] cy=P[6]) only if K is absent. The published info MUST describe
+        # the actual 504x294 /xtend stream -- valid on the real drone, never in
+        # sim (sim_adapter resamples the stream; nothing publishes a matching
+        # camera_info there).
         if self._reset_done:
             return                     # intrinsics latched at reset; ignore late
-        if any(msg.P):
-            fx, fy, cx, cy = msg.P[0], msg.P[5], msg.P[2], msg.P[6]
-        elif any(msg.K):
+        if any(msg.K):
             fx, fy, cx, cy = msg.K[0], msg.K[4], msg.K[2], msg.K[5]
+        elif any(msg.P):
+            fx, fy, cx, cy = msg.P[0], msg.P[5], msg.P[2], msg.P[6]
         else:
             return
         self.intr = Intrinsics(width=int(msg.width), height=int(msg.height),
@@ -236,7 +285,9 @@ class NavDPClickNode:
         return live
 
     def _draw_depth(self, depth):
-        vis = colorize_depth(depth)
+        # Colorize to the same ceiling NavDP sees (the client clips to depth_max_m
+        # before sending), so the panel shows the operator what the policy gets.
+        vis = colorize_depth(depth, self.depth_max_m)
         cv2.putText(vis, "Depth  (hover)", (8, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
         status = ""
@@ -303,6 +354,8 @@ class NavDPClickNode:
             time.sleep(0.1)
         if rospy.is_shutdown():
             return
+        if not self._validate_stream_resolution(self.rgb, self.depth):
+            return
         rospy.loginfo("Ready. Click the RGB panel, then press ENTER.")
 
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
@@ -360,6 +413,31 @@ class NavDPClickNode:
             return None
         return self._draw_snapshot(snap_rgb, traj, px, py)
 
+    def _validate_stream_resolution(self, rgb, depth):
+        """Fail loud if the RGB/depth stream geometry is inconsistent.
+
+        The click pixel is taken on the RGB panel and used to index the depth
+        array and back-project with ``self.intr`` (and to draw the overlay), so
+        all three must describe ONE image. A height mismatch would also crash the
+        side-by-side ``np.hstack`` in the render loop. Returns ``True`` when it is
+        safe to run.
+        """
+        rgb_hw, depth_hw = rgb.shape[:2], depth.shape[:2]
+        if rgb_hw != depth_hw:
+            rospy.logfatal(
+                "RGB %dx%d and depth %dx%d differ; navdp_click indexes depth at "
+                "the RGB click pixel and needs them aligned. Fix the stream.",
+                rgb_hw[1], rgb_hw[0], depth_hw[1], depth_hw[0])
+            return False
+        if rgb_hw != (self.intr.height, self.intr.width):
+            rospy.logwarn(
+                "Stream is %dx%d but intrinsics are %dx%d (fx=%.1f cx=%.1f "
+                "cy=%.1f); goals and overlay will be geometrically wrong -- pass "
+                "intrinsics matching the live stream.", rgb_hw[1], rgb_hw[0],
+                self.intr.width, self.intr.height, self.intr.fx, self.intr.cx,
+                self.intr.cy)
+        return True
+
     @staticmethod
     def _placeholder(live):
         third = np.zeros_like(live)
@@ -374,7 +452,7 @@ class NavDPClickNode:
         L("navdp_click (core NavDP point-goal -> world path)")
         L("  rgb   in  = %s", self.rgb_topic)
         L("  depth in  = %s", self.depth_topic)
-        L("  pose  in  = %s", self.pose_topic)
+        L("  pose  in  = %s  (%s)", self.pose_topic, self.pose_type)
         L("  navdp     = %s", self.client.url)
         L("  path  out = %s  (world frame, latched -> waypoint_follower)",
           self.path_topic)
@@ -405,12 +483,15 @@ if __name__ == "__main__":
 # window, click handling and publishing the world path.
 #
 #   IO: ~rgb_topic (/xtend/rgb) ~depth_topic (/xtend/depth_m)
-#       ~drone_ns (/simple_drone) ~pose_topic (<drone_ns>/gt_pose)
-#       ~camera_info_topic ('' = use the fx/fy/cx/cy params)
+#       ~drone_ns ('') ~pose_topic (/xtend/april_tag_pose)
+#       ~pose_type (pose_stamped ; 'pose' for a bare geometry_msgs/Pose, e.g.
+#         the nav stack's /gt_pose or Gazebo's /simple_drone/gt_pose)
+#       ~camera_info_topic ('' = use the fx/fy/cx/cy params; K preferred over P)
 #       ~path_topic (/path/waypoints) ~frame_id (world)
-#   camera (MUST match the RGB/depth stream): ~fx ~fy ~cx ~cy
-#       ~img_width (504) ~img_height (392)   [XTEND projection-matrix defaults]
+#   camera (MUST match the live /xtend/depth_m stream; the launch wires these to
+#       the shared cam_* args): ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
+#       [real-XTEND raw-K defaults; sim uses sim_adapter's P-target via cam_*]
 #   NavDP server: ~port (8888) ~timeout_s (30.0) ~depth_max_m (5.0)
-#   overlay/misc: ~render_cam_height (0.5; <=0 tracks altitude)
+#   overlay/misc: ~render_cam_height (0.0 tracks live altitude; >0 pins a height)
 #       ~default_altitude (0.8; used until the first pose arrives)
 # ============================================================================
