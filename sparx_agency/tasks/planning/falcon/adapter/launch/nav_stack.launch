@@ -100,8 +100,8 @@
   <arg name="cam_max_depth" default="10.0" />
 
   <!-- Goal -->
-  <arg name="goal_x" default="4.0" />
-  <arg name="goal_y" default="0.0" />
+  <arg name="goal_x" default="0.0" />
+  <arg name="goal_y" default="-3.0" />
 
   <!-- Speeds & radii -->
   <arg name="vel_x"                  default="0.3" />
@@ -109,23 +109,42 @@
   <arg name="pos_acquisition_radius" default="0.3" />
   <arg name="yaw_acquisition_radius" default="0.2" />
   <arg name="yaw_lead_pct"           default="10.0" />
+  <!-- Glide deadband: the follower flies straight to the next waypoint instead
+       of stopping to re-yaw whenever the heading change is under this many
+       radians. Raised from 0.25 (~14 deg) to 0.40 (~23 deg) so it only yaws for
+       genuine corners, not every small bend. Raise further for even straighter
+       flight (at the cost of more cross-track error), lower to hug corners. -->
+  <arg name="skip_yaw_thresh"        default="0.40" />
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
-  <arg name="inflate_radius_m"      default="0.1" />
+  <arg name="inflate_radius_m"      default="0.5" />
   <arg name="unknown_blocked"       default="false" />
-  <arg name="unknown_cost"          default="1.0" />
+  <!-- Gray (UNKNOWN) traversal cost. Keep > 1 + clearance_weight so the planner
+       prefers any known-free route and stops cutting illogical paths through the
+       gray it cannot see into. -->
+  <arg name="unknown_cost"          default="5.0" />
+  <!-- Corridor centering / wall standoff (route through the middle). -->
+  <arg name="clearance_weight"      default="3.0" />
+  <arg name="clearance_margin_m"    default="0.8" />
+  <arg name="path_simplify_m"       default="0.0" /><!-- 0 = auto (~1 cell) -->
   <arg name="los_smoothing"         default="true" />
-  <arg name="turn_penalty"          default="0.0" />
+  <arg name="turn_penalty"          default="0.5" />
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
   <arg name="start_skip_m"          default="0.4" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <arg name="replan_on_collision"   default="true" />
+  <!-- Replan ONLY when the committed path is actually blocked, confirmed over
+       replan_collision_confirm BEV frames. This collision check now runs every
+       frame regardless of replan_on_bev, so the confirm-gate is always active.
+       Keep replan_on_bev/replan_period_s OFF: replanning when nothing collides
+       just churns the path and makes the drone re-yaw and slow down. Turn one on
+       only if you want opportunistic refresh once the route is stable. -->
   <arg name="replan_on_bev"         default="true" />
-  <arg name="replan_period_s"       default="0.0" />
-  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
+  <arg name="replan_period_s"       default="1.0" />
+  <arg name="replan_collision_confirm" default="1" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
 
   <!-- ══════════════════════════════════════════════════════════════
        NavDP (point-goal policy) — REPLACES A* when use_navdp:=true.
@@ -398,6 +417,9 @@
     <param name="inflate_radius_m"      value="$(arg inflate_radius_m)" />
     <param name="unknown_blocked"       value="$(arg unknown_blocked)" />
     <param name="unknown_cost"          value="$(arg unknown_cost)" />
+    <param name="clearance_weight"      value="$(arg clearance_weight)" />
+    <param name="clearance_margin_m"    value="$(arg clearance_margin_m)" />
+    <param name="path_simplify_m"       value="$(arg path_simplify_m)" />
     <param name="los_smoothing"         value="$(arg los_smoothing)" />
     <param name="turn_penalty"          value="$(arg turn_penalty)" />
     <param name="connectivity"          value="$(arg connectivity)" />
@@ -443,6 +465,7 @@
     <param name="pos_acquisition_radius" value="$(arg pos_acquisition_radius)" />
     <param name="yaw_acquisition_radius" value="$(arg yaw_acquisition_radius)" />
     <param name="yaw_lead_pct"           value="$(arg yaw_lead_pct)" />
+    <param name="skip_yaw_thresh"        value="$(arg skip_yaw_thresh)" />
     <param name="auto_takeoff"           value="$(arg auto_takeoff)" />
     <param name="cruise_z"               value="$(arg cruise_z)" />
     <param name="use_posctrl"            value="$(arg use_posctrl)" />

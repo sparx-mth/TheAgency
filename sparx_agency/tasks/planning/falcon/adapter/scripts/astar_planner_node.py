@@ -58,7 +58,10 @@ class AStarPlannerNode:
             connectivity=int(G("~connectivity", 8)),
             inflate_radius_m=float(G("~inflate_radius_m", 0.4)),
             unknown_blocked=bool(G("~unknown_blocked", False)),
-            unknown_cost=float(G("~unknown_cost", 1.0)),
+            unknown_cost=float(G("~unknown_cost", 5.0)),
+            clearance_weight=float(G("~clearance_weight", 3.0)),
+            clearance_margin_m=float(G("~clearance_margin_m", 0.8)),
+            path_simplify_m=float(G("~path_simplify_m", 0.0)),
             search_margin_m=float(G("~search_margin_m", 3.0)),
             turn_penalty=float(G("~turn_penalty", 0.0)),
             los_smoothing=bool(G("~los_smoothing", True)),
@@ -152,10 +155,19 @@ class AStarPlannerNode:
                           i.origin.position.x, i.origin.position.y)
         if not self.has_plan:
             self._try_plan()
-        elif self.replan_on_bev:
+            return
+        # Collision replanning is the PRIMARY trigger and runs every BEV frame
+        # whenever it is enabled -- independent of the optional refreshers below
+        # -- so the replan_collision_confirm gate is always active. (Previously an
+        # if/elif chain let replan_on_bev shadow it, so the gate never ran and the
+        # planner replanned every frame instead of only on a confirmed collision.)
+        replanned = False
+        if self.replan_on_collision:
+            replanned = self._collision_replan_check()
+        # Optional opportunistic full replan on every BEV (default off). Skip it
+        # when a collision replan already fired this frame to avoid double work.
+        if self.replan_on_bev and not replanned:
             self._try_plan()
-        elif self.replan_on_collision:
-            self._collision_replan_check()
 
     # ─── Decode ──────────────────────────────────────────────────
     def _decode(self, msg):
@@ -184,9 +196,12 @@ class AStarPlannerNode:
         oscillation. So the collision must hold for ``replan_collision_confirm``
         consecutive BEV frames (the "wait for more depth" gate) before we act.
         A genuine obstacle persists and clears the gate within a frame or two,
-        while the 0.4m inflation buffer in ``path_collides`` keeps that brief,
+        while the inflation buffer in ``path_collides`` keeps that brief,
         frame-bounded delay safe. We never *hold* a confirmed colliding path:
         once confirmed we replan immediately (replanning is the only avoidance).
+
+        Returns:
+            True if a replan was triggered this frame, else False.
         """
         if not self.planner.path_collides(self.grid, self.last_points):
             if self._collision_streak:
@@ -194,19 +209,21 @@ class AStarPlannerNode:
                               "frame(s) -- treated as noise, no replan",
                               self._collision_streak)
             self._collision_streak = 0
-            return
+            return False
 
         self._collision_streak += 1
         if self._collision_streak < self.replan_collision_confirm:
-            rospy.loginfo("astar_planner: path collision unconfirmed %d/%d -- "
-                          "waiting for more depth before replanning",
-                          self._collision_streak, self.replan_collision_confirm)
-            return
+            rospy.logwarn_throttle(
+                1.0, "astar_planner: path collision unconfirmed %d/%d -- "
+                "waiting for more depth before replanning",
+                self._collision_streak, self.replan_collision_confirm)
+            return False
 
         rospy.logwarn("astar_planner: path blocked on %d consecutive BEV frame(s) "
                       "-- replanning", self._collision_streak)
         self.has_plan = False
         self._try_plan()      # resets _collision_streak on success
+        return True
 
     def _try_plan(self):
         if self.grid is None:
@@ -291,6 +308,9 @@ class AStarPlannerNode:
           p.connectivity, p.inflate_radius_m,
           "blocked" if p.unknown_blocked else "free x%.1f" % p.unknown_cost,
           p.waypoint_spacing_m, p.los_smoothing, p.turn_penalty)
+        L("  centering: clearance_weight=%.1f margin=%.2fm simplify=%s",
+          p.clearance_weight, p.clearance_margin_m,
+          "auto" if p.path_simplify_m <= 0 else "%.2fm" % p.path_simplify_m)
         L("  search_margin=%.1fm start_skip=%.2fm snap=%.1fm collision_replan=%s",
           p.search_margin_m, p.start_skip_m, p.goal_snap_radius_m, self.replan_on_collision)
         L("  collision replan confirm=%d frame(s)", self.replan_collision_confirm)
@@ -321,7 +341,20 @@ if __name__ == "__main__":
 #       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.0)
 #       ~los_smoothing (true) ~waypoint_spacing_m (3.0) ~goal_snap_radius_m (2.0)
 #       ~start_skip_m (0.4) ~max_expansions (200000)
-#   replanning: ~replan_on_collision (true) ~replan_on_bev (false) ~replan_period_s (0.0)
+#   centering / wall avoidance (route through corridor middles):
+#       ~clearance_weight (3.0; extra cost at the lethal boundary, fading to 0
+#         over the soft band -- higher = stronger centering, 0 = off)
+#       ~clearance_margin_m (0.8; width of the soft band beyond inflate_radius_m;
+#         routes centre in corridors up to ~2*(inflate_radius_m+margin) wide)
+#       ~path_simplify_m (0.0=auto ~1 cell; Douglas-Peucker tolerance that thins
+#         the path WITHOUT changing its shape, so centering is preserved)
+#   replanning: ~replan_on_collision (true; PRIMARY trigger -- the collision
+#         check runs every BEV frame whenever enabled, independent of the two
+#         optional refreshers below, so the confirm-gate is always active)
+#       ~replan_on_bev (false) ~replan_period_s (0.0) -- optional opportunistic
+#         full replans when nothing collides; leave OFF to stop path churn /
+#         re-yaw / slow-down. replan_on_bev is skipped on frames a collision
+#         replan already fired.
 #       ~replan_collision_confirm (2; consecutive colliding BEV frames required
 #         before a collision replan -- debounces single-frame depth noise and,
 #         since the streak resets after each replan, caps the sustained replan
