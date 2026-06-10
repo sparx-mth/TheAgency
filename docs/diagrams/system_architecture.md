@@ -6,30 +6,30 @@ Paste the Mermaid block into **[mermaid.live](https://mermaid.live)** or into **
 ---
 
 ```mermaid
-flowchart TD
+flowchart LR
 
-    SRC["Source\nOnline — RTSP + WebSocket\nOffline — recorded session"]
+    DEMO["Demo Manager\n─────────────\norchestrates mission\nTakeoff · Land\nrequest plan"]
 
-    DEPTH["Depth\nDA3 TRT · pre-computed .npy\nRGB → metric depth image"]
+    subgraph PERCEPTION["Perception"]
+        SRC["Source\nOnline — RTSP + WebSocket\nOffline — recorded session"]
+        DEPTH["Depth\nDA3 TRT · pre-computed .npy\nRGB → metric depth image"]
+        LOC["Localization\nAprilTag · Optical Flow · AMCL"]
+    end
 
-    LOC["Localization\nAprilTag · Optical Flow · AMCL"]
+    FALCON["Falcon  ROS1\n─────────────\n2D / 3D Occupancy\nRRT planner\n→ /cmd_vel Twist"]
 
-    MAP["Mapping / Perception\nPointcloud · 2D occupancy · 3D octomap"]
-
-    PLAN["Planning\nRRT* · BIT* · Smoother · Tracker\nDemo Manager"]
-
-    CTRL["Drone Control\ncmd_nav WebSocket\nROS1 bridge · Falcon adapter"]
+    BRIDGE["Online Bridge\n─────────────\nWebSocket  cmd_nav\n(single drone connection)"]
 
     DRONE(["Drone\nXTEND · ROBOTICAN · SJTU"])
 
-    SRC     -->|"rgb · bearing"| DEPTH
-    SRC     -->|"rgb · bearing"| LOC
-    DEPTH   -->|"depth"| LOC
-    DEPTH   -->|"depth · pointcloud"| MAP
-    LOC     -->|"pose · TF"| MAP
-    LOC     -->|"pose"| PLAN
-    MAP     -->|"occupancy"| PLAN
-    PLAN    -->|"cmd_vel"| CTRL
-    CTRL    --> DRONE
-    DRONE   -->|"telemetry"| SRC
+    SRC    -->|"rgb · bearing"| DEPTH & LOC
+    DEPTH  -->|"depth image"| FALCON
+    LOC    -->|"pose"| FALCON
+    FALCON -->|"cmd_vel"| BRIDGE
+    BRIDGE --> DRONE
+    DRONE  -->|"telemetry · bearing"| SRC
+
+    DEMO -.->|"request plan"| FALCON
+    DEMO -->|"ARM · TAKEOFF · LAND"| BRIDGE
+    DEMO -.->|"monitor"| PERCEPTION
 ```
