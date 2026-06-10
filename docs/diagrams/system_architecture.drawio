@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="JZY4OFSolO1SPTImLKfL">
+    <mxGraphModel dx="2620" dy="2573" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Demo Manager&#xa;─────────────&#xa;orchestrates mission&#xa;Takeoff · Land&#xa;request plan" vertex="1">
+          <mxGeometry height="150" width="207" x="20" y="151" as="geometry" />
+        </mxCell>
+        <mxCell id="3" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=#cdeb8b;strokeColor=#36393d;" value="Falcon  ROS1&#xa;─────────────&#xa;2D / 3D Occupancy&#xa;RRT planner&#xa;→ /cmd_vel Twist" vertex="1">
+          <mxGeometry height="150" width="207" x="367" y="293" as="geometry" />
+        </mxCell>
+        <mxCell id="4" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Online Bridge&#xa;─────────────&#xa;WebSocket  cmd_nav&#xa;(single drone connection)" vertex="1">
+          <mxGeometry height="126" width="243" x="490" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="6" edge="1" parent="1" source="12" style="curved=1;startArrow=none;endArrow=block;entryX=1;entryY=0.81;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;" target="3" value="pose">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="820" y="610" />
+              <mxPoint x="740" y="350" />
+            </Array>
+            <mxPoint x="1900" y="550" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="7" edge="1" parent="1" source="3" style="curved=1;startArrow=none;endArrow=block;exitX=0.7;exitY=0;entryX=0;entryY=0.41;rounded=0;" target="4" value="cmd_vel">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="300" y="50" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="8" edge="1" parent="1" source="2" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;exitX=0.94;exitY=1;entryX=0;entryY=0.5;rounded=0;" target="3" value="request plan">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="297" y="368" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="9" edge="1" parent="1" source="2" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.02;entryX=0;entryY=0.59;rounded=0;" target="4" value="ARM · TAKEOFF · LAND">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="297" y="105" />
+              <mxPoint x="350" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="10" edge="1" parent="1" source="2" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;rounded=0;" target="14" value="monitor">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="11" connectable="0" parent="1" style="group" value="" vertex="1">
+          <mxGeometry height="170" width="260" x="1190" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="12" parent="11" style="whiteSpace=wrap;strokeWidth=2;fillColor=#e1d5e7;strokeColor=#9673a6;verticalAlign=top;" value="Localization" vertex="1">
+          <mxGeometry height="170" width="260" as="geometry" />
+        </mxCell>
+        <mxCell id="13" parent="11" style="whiteSpace=wrap;strokeWidth=2;fillColor=#54237A;strokeColor=#3700CC;fontColor=#ffffff;" value="AprilTag&#xa;------------------------------------------ &#xa;Optical Flow &#xa;------------------------------------------ &#xa; AMCL" vertex="1">
+          <mxGeometry height="110" width="185" x="37.5" y="45" as="geometry" />
+        </mxCell>
+        <mxCell id="14" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=#fff2cc;strokeColor=#d6b656;" value="" vertex="1">
+          <mxGeometry height="310" width="493" x="1237" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="15" parent="1" style="strokeWidth=2;fillColor=#a0522d;strokeColor=#6D1F00;fontColor=#ffffff;" value="Source&#xa;&#xa;    🟢 Online — RTSP + WebSocket&#xa;&#xa;🔴 Offline — recorded session" vertex="1">
+          <mxGeometry height="102" width="210" x="1290" y="58.5" as="geometry" />
+        </mxCell>
+        <mxCell id="16" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=#f0a30a;strokeColor=#BD7000;fontColor=#000000;" value="Depth&#xa;DA3 TRT · pre-computed .npy&#xa;RGB → metric depth image" vertex="1">
+          <mxGeometry height="97" width="209" x="1485.5" y="196" as="geometry" />
+        </mxCell>
+        <mxCell id="17" parent="1" style="rounded=1;whiteSpace=wrap;arcSize=50;strokeWidth=2;fillColor=#fa6800;strokeColor=#C73500;fontColor=#000000;" value="Drone&#xa;XTEND · ROBOTICAN · SJTU" vertex="1">
+          <mxGeometry height="63" width="226" x="820" y="78" as="geometry" />
+        </mxCell>
+        <mxCell id="18" edge="1" parent="1" source="15" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0.5;entryY=0;rounded=0;entryDx=0;entryDy=0;" target="16" value="rgb · bearing">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1600" y="120" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="19" edge="1" parent="1" source="15" style="curved=1;startArrow=none;endArrow=block;exitX=0.7;exitY=1;entryX=0.5;entryY=0;rounded=0;entryDx=0;entryDy=0;" target="12" value="rgb · bearing">
+          <mxGeometry relative="1" x="0.1762" y="-58" as="geometry">
+            <mxPoint y="1" as="offset" />
+            <Array as="points">
+              <mxPoint x="1440" y="340" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="20" edge="1" parent="1" source="16" style="curved=1;startArrow=none;endArrow=block;exitX=0.13;exitY=1;entryX=1;entryY=0.24;rounded=0;" target="3" value="depth image">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1460" y="410" />
+              <mxPoint x="840" y="310" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="21" edge="1" parent="1" source="4" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.49;rounded=0;" target="17" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
