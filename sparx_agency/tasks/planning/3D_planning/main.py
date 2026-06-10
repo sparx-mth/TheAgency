@@ -23,11 +23,11 @@ import numpy as np
 
 from sparx_agency.core.common.types import Pose3D
 
-from logging_utils import pinfo, pok
-from gibson_io import load_gibson_mesh, sample_point_cloud
-from voxelmap import VoxelMapFromPointCloud
-from interaction import pick_and_adjust_point
-from final_window import run_final_window_plan_and_show, run_final_window_all_algorithms
+from .logging_utils import pinfo, pok
+from .gibson_io import load_gibson_mesh, sample_point_cloud
+from .voxelmap import VoxelMapFromPointCloud
+from .interaction import pick_and_adjust_point
+from .final_window import run_final_window_plan_and_show, run_final_window_all_algorithms
 
 
 def _parse_args() -> argparse.Namespace:
@@ -40,7 +40,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--all",
-        default=True,
+        default=False,
         action="store_true",
         help="Plan with ALL algorithms (BIT*, Informed RRT*, RRT*) and display all paths.",
     )
@@ -50,8 +50,9 @@ def _parse_args() -> argparse.Namespace:
 def main():
     args = _parse_args()
 
-    ROOT = Path("gibson/extracted/gibson_tiny")
-    SCENE = "Corozal"
+    HERE = Path(__file__).resolve().parent
+    ROOT = HERE / "gibson" / "extracted" / "gibson_tiny"
+    SCENE = "Shelbyville"
 
     POINTS = 1_500_000
     VOXEL = 0.12
@@ -80,8 +81,8 @@ def main():
     )
 
     rrtstar_params = RRTStarOmpl3DParams(
-        timeout=200.0,
-        use_clearance_objective=True,
+        timeout=60.0,
+        use_clearance_objective=False,
         clearance_weight=0.001,
         min_clearance_for_keep=ROBOT_RADIUS,
         interpolation_spacing=0.10,
@@ -99,7 +100,7 @@ def main():
 
     bitstar_params = BITStarParams(
         timeout=30.0,
-        use_clearance_objective=True,
+        use_clearance_objective=False,
         clearance_weight=0.01,
         min_clearance_for_keep=ROBOT_RADIUS,
         interpolation_spacing=0.10,
@@ -116,8 +117,8 @@ def main():
     )
 
     informed_params = InformedRRTStarParams(
-        timeout=100.0,
-        use_clearance_objective=True,
+        timeout=60.0,
+        use_clearance_objective=False,
         clearance_weight=0.001,
         min_clearance_for_keep=ROBOT_RADIUS,
         interpolation_spacing=0.10,

@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import open3d as o3d
 
-from logging_utils import pinfo, pok, pwarn, perr
-from tube import make_tube_from_polyline
+from .logging_utils import pinfo, pok, pwarn, perr
+from .tube import make_tube_from_polyline
 from sparx_agency.core.common.types import Pose3D, PlanStatus
 
 # NOTE: update these imports/paths if your project stores these elsewhere.

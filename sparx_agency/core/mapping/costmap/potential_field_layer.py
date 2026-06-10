@@ -78,24 +78,15 @@ class PotentialFieldLayer:
         d_pix = cv2.distanceTransform(free_mask, distanceType=cv2.DIST_L2, maskSize=5)
         d_m = d_pix.astype(np.float32) * res
 
-        # Repulsive potential (Gaussian falloff from obstacles)
-        # Repulsive potential (Khatib-style inverse-distance with finite influence radius)
-        d0 = float(self.repulse_radius_m)  # influence radius in meters
-        eps = 1e-3  # avoid div by zero
-
-        U = np.zeros_like(d_m, dtype=np.float32)
-
-        mask = d_m < d0
-        inv_d = 1.0 / np.maximum(d_m, eps)
-        inv_d0 = 1.0 / d0
-
-        # 0.5 * eta * (1/d - 1/d0)^2
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            U[mask] = (0.5 * self.k_rep * (inv_d[mask] - inv_d0) ** 2).astype(np.float32)
-
-        # Optional: hard keep-out radius (makes obstacles appear "fatter")
-        if self.inflation_radius_m > 0.0:
-            U[d_m <= self.inflation_radius_m] = self.u_max
-
-        np.clip(U, 0.0, self.u_max, out=U)
-        return U, d_m
+        # Repulsive potential: Gaussian sum over all nearby obstacles.
+        # Each free cell's value is a weighted sum of every wall within ~2.5σ,
+        # so ∇U_rep naturally reflects ALL nearby walls at once — corridor
+        # centres are local minima (opposing walls cancel), corners push
+        # diagonally, single walls push perpendicular to themselves.
+        obstacle = is_occ.astype(np.float32)
+        sigma_px = max(self.sigma_m / res, 1e-3)
+        U = cv2.GaussianBlur(obstacle, (0, 0), sigmaX=sigma_px, sigmaY=sigma_px)
+        u_peak = float(U.max())
+        if u_peak > 1e-6:
+            U *= (self.u_max / u_peak)      # normalise to [0, u_max]
+        return U.astype(np.float32), d_m

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class BITStarParams:
     """
     Configuration for BIT* (Batch Informed Trees) 3D planning.
@@ -14,7 +14,7 @@ class BITStarParams:
     - Provides asymptotic optimality with better performance than RRT*
     """
     timeout: float = 5.0
-    use_clearance_objective: bool = True
+    use_clearance_objective: bool = False
     clearance_weight: float = 10.0
     min_clearance_for_keep: float = 0.3
     interpolation_spacing: float = 0.2

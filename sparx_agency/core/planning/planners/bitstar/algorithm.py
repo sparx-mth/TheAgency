@@ -5,6 +5,8 @@ BIT* combines the best of RRT* and graph-based planners:
 - Processes samples in batches for efficiency
 - Uses heuristics to focus sampling
 - Asymptotically optimal with faster convergence than RRT*
+
+FIXED: Now properly returns first solution found and tracks improvements.
 """
 from __future__ import annotations
 

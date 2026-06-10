@@ -9,13 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
-from sparx_agency.core.common.types import Path2D, Trajectory, KinematicLimits
+from sparx_agency.core.common.types import Path2D, Path3D, Trajectory, KinematicLimits
 
 
 @dataclass(frozen=True)
 class SmootherRequest:
     """
-    Input to trajectory smoothers.
+    Input to 2D trajectory smoothers.
 
     Attributes:
         path: Geometric path to smooth.
@@ -23,6 +23,14 @@ class SmootherRequest:
         options: Algorithm-specific parameters (e.g., continuity order, speed).
     """
     path: Path2D
+    limits: Optional[KinematicLimits] = None
+    options: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SmootherRequest3D:
+    """Input to 3D trajectory smoothers (see :class:`SmootherRequest`)."""
+    path: Path3D
     limits: Optional[KinematicLimits] = None
     options: Dict[str, Any] = field(default_factory=dict)
 
@@ -47,4 +55,13 @@ class BaseSmoother(Protocol):
         Returns:
             Time-parameterized trajectory.
         """
+        ...
+
+
+@runtime_checkable
+class BaseSmoother3D(Protocol):
+    """Smoother protocol (3D): Path3D → Trajectory."""
+    name: str
+
+    def smooth(self, request: SmootherRequest3D, world: Any = None) -> Trajectory:
         ...

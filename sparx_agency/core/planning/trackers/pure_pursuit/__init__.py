@@ -1,12 +1,11 @@
 """Pure Pursuit tracker package (2D and 3D)."""
-from .params import PurePursuitParams, PurePursuitParams3D
-from .tracker import (
-    PurePursuitTracker,
-    PurePursuitTracker3D,
+from sparx_agency.core.planning.interfaces.tracker import (
     TrackerRequest,
     TrackerResult,
     BaseTracker,
 )
+from .params import PurePursuitParams, PurePursuitParams3D
+from .tracker import PurePursuitTracker, PurePursuitTracker3D
 
 __all__ = [
     # 2D (original)
