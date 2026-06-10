@@ -123,7 +123,7 @@
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <arg name="replan_on_collision"   default="true" />
-  <arg name="replan_on_bev"         default="false" />
+  <arg name="replan_on_bev"         default="true" />
   <arg name="replan_period_s"       default="0.0" />
   <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
 
@@ -145,7 +145,7 @@
        one idea. The defaults already de-noise the map out of the box.
        ══════════════════════════════════════════════════════════════ -->
   <!-- geometry / IO -->
-  <arg name="bev_resolution"  default="0.15" />   <!-- m / cell; match FALCON's voxel size -->
+  <arg name="bev_resolution"  default="0.10" />   <!-- m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1). 0.15 was COARSER than FALCON's 0.1 voxels and quantized narrow openings: each wall cell absorbs ~half a cell, so a true 0.68 m turn gap read ~0.45 m (3 cells of 0.15). 0.10 recovers it to ~0.60 m (6 cells). -->
   <arg name="bev_xmin"        default="-6.0" />
   <arg name="bev_ymin"        default="-6.0" />
   <arg name="bev_xmax"        default="6.0" />
