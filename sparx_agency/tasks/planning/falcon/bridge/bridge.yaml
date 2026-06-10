@@ -41,17 +41,17 @@ topics:
   # bridge_camera_info:=true on the ROS1 sensor_gate.
 #- topic: /flow_depth/pose_est
 #  - topic: /xtend/amcl_pose
-  - topic: /flow_depth/pose_est
-    type: geometry_msgs/msg/PoseStamped
-    queue_size: 10
-    qos:
-      history: keep_last
-      depth: 10
-      # Per your QoSProfile snippet: best_effort. If pose is published
-      # reliable on the drone, change this to reliable and the depth
-      # to a higher number (50) for catch-up after stalls.
-      reliability: best_effort
-      durability: volatile
+#  - topic: /flow_depth/pose_est
+#    type: geometry_msgs/msg/PoseStamped
+#    queue_size: 10
+#    qos:
+#      history: keep_last
+#      depth: 10
+#      # Per your QoSProfile snippet: best_effort. If pose is published
+#      # reliable on the drone, change this to reliable and the depth
+#      # to a higher number (50) for catch-up after stalls.
+#      reliability: best_effort
+#      durability: volatile
 
   - topic: /xtend/april_tag_pose
     type: geometry_msgs/msg/PoseStamped
@@ -127,41 +127,41 @@ topics:
 #  #     adds the header before republishing as PoseStamped on
 #  #     /flow_depth/pose_est.
 #
-  - topic: /simple_drone/front/image_raw
-    type: sensor_msgs/msg/Image
-    queue_size: 1
-    qos:
-      history: keep_last
-      depth: 1
-      reliability: reliable
-      durability: volatile
-
-  - topic: /simple_drone/front_depth/depth/image_raw
-    type: sensor_msgs/msg/Image
-    queue_size: 1
-    qos:
-      history: keep_last
-      depth: 1
-      reliability: reliable
-      durability: volatile
-
-  - topic: /simple_drone/gt_pose
-    type: geometry_msgs/msg/Pose
-    queue_size: 10
-    qos:
-      history: keep_last
-      depth: 10
-      reliability: reliable
-      durability: volatile
-
-  - topic: /simple_drone/cmd_vel
-    type: geometry_msgs/msg/Twist
-    queue_size: 10
-    qos:
-      history: keep_last
-      depth: 10
-      # Outbound: FALCON publishes /cmd_vel (ROS1). sim_adapter renames
-      # it to /simple_drone/cmd_vel (ROS1). This entry bridges
-      # /simple_drone/cmd_vel ROS1→ROS2 so Gazebo's sjtu_drone gets it.
-      reliability: reliable
-      durability: volatile
+#  - topic: /simple_drone/front/image_raw
+#    type: sensor_msgs/msg/Image
+#    queue_size: 1
+#    qos:
+#      history: keep_last
+#      depth: 1
+#      reliability: reliable
+#      durability: volatile
+#
+#  - topic: /simple_drone/front_depth/depth/image_raw
+#    type: sensor_msgs/msg/Image
+#    queue_size: 1
+#    qos:
+#      history: keep_last
+#      depth: 1
+#      reliability: reliable
+#      durability: volatile
+#
+#  - topic: /simple_drone/gt_pose
+#    type: geometry_msgs/msg/Pose
+#    queue_size: 10
+#    qos:
+#      history: keep_last
+#      depth: 10
+#      reliability: reliable
+#      durability: volatile
+#
+#  - topic: /simple_drone/cmd_vel
+#    type: geometry_msgs/msg/Twist
+#    queue_size: 10
+#    qos:
+#      history: keep_last
+#      depth: 10
+#      # Outbound: FALCON publishes /cmd_vel (ROS1). sim_adapter renames
+#      # it to /simple_drone/cmd_vel (ROS1). This entry bridges
+#      # /simple_drone/cmd_vel ROS1→ROS2 so Gazebo's sjtu_drone gets it.
+#      reliability: reliable
+#      durability: volatile

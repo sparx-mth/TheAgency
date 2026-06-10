@@ -18,6 +18,7 @@ catkin_install_python(PROGRAMS
   scripts/waypoint_follower_node.py
   scripts/pose_adapter_node.py
   scripts/sim_adapter_node.py
+  scripts/depth_debug.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
