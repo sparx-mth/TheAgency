@@ -49,7 +49,7 @@ from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
     TagTransformObservation,
     estimate_camera_pose_from_tags,
-    matrix_to_pose,
+    transform_to_pose,
     #print_transform_debug,
     world_T_tag_from_pose,
 )
@@ -356,7 +356,7 @@ class TagTriangulationOpenCVTask:
                 continue
                 
 
-           # (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+           # (x, y, z), (qx, qy, qz, qw) = transform_to_pose(est.world_T_cam)
 
             cv_to_ros = np.array([
                 [ 0.0, -1.0,  0.0,  0.0],
@@ -367,7 +367,7 @@ class TagTriangulationOpenCVTask:
 
             world_T_ros = est.world_T_cam @ cv_to_ros
 
-            (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(world_T_ros)
+            (x, y, z), (qx, qy, qz, qw) = transform_to_pose(world_T_ros)
 
            # print(f"\n[DEBUG] Detected {len(observations)} tags")
             #print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")
