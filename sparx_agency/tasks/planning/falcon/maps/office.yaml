@@ -12,45 +12,47 @@ map_config:
   # directly behind it; everything at world x < 0 is therefore not
   # explorable. bev_publisher forces those cells to OCC so the BEV
   # (and any planner using it) treats it as a hard wall.
-  behind_wall_x: -2.0
+  behind_wall_x: -3.0
 
   # Manual hallway walls (axis-aligned, thin). Extends the hallway in
   # front of the drone with side walls so A* keeps the drone in the
   # corridor. Each entry: horizontal wall at given y, spanning x in
   # [x_min, x_max], with thickness in the y direction.
-#  walls:
-#    - { y:  0.8, x_min: -2.0, x_max: 1.7, thickness: 0.15 }   # left/top wall
-#    - { y: -0.8, x_min: -2.0, x_max: 1.7, thickness: 0.15 }   # right/bottom wall
+  walls:
+    - { y:  0.8, x_min: -6.0, x_max: -3.0, thickness: 0.15 }   # left/top wall
+    - { y: -0.8, x_min: -6.0, x_max: -3.0, thickness: 0.15 }   # right/bottom wall
 
   # ── Bounds ───────────────────────────────────────────────────────
-  # Sized for a recording where the drone moves several metres along
-  # +x at floor height. Box covers ±10 m in x/y and z ∈ [-1, 3] so:
-  #   * the wall a few metres ahead of the drone stays inside the box
-  #     (recorded x reaches ~4.7 m → wall at ~7 m, was outside old ±5),
-  #   * depth rays going slightly downward (cy is high → the bottom
-  #     half of the image projects below the camera horizontal) don't
-  #     get clipped at z = 0.
+  # The office is a ±6 m room. `box` is the hard boundary FALCON maps
+  # and explores; `vbox` (virtual boundary) and `map` (global grid
+  # allocation) are the larger extents around it. Required ordering on
+  # every axis: map ⊇ vbox ⊇ box.
+  #
+  # Height is capped at z = 2.0 m on the box so the ceiling is NOT
+  # mapped — it only cluttered the voxel view and made the room hard to
+  # read. Walls up to flight height (~1 m) are kept; lower box_max_z
+  # further if the ceiling is below 2 m and still shows.
   map_size:
-    map_min_x: -20.0
-    map_min_y: -20.0
+    map_min_x: -10.0
+    map_min_y: -10.0
     map_min_z: -2.0
-    map_max_x:  20.0
-    map_max_y:  20.0
-    map_max_z:  4.0
+    map_max_x:  10.0
+    map_max_y:  10.0
+    map_max_z:  1.7
 
-    box_min_x: -10.0
-    box_min_y: -10.0
+    box_min_x: -6.0
+    box_min_y: -6.0
     box_min_z: -1.0
-    box_max_x:  10.0
-    box_max_y:  10.0
-    box_max_z:  3.0
+    box_max_x:  6.0
+    box_max_y:  6.0
+    box_max_z:  1.7
 
-    vbox_min_x: -12.0
-    vbox_min_y: -12.0
+    vbox_min_x: -8.0
+    vbox_min_y: -8.0
     vbox_min_z: -2.0
-    vbox_max_x:  12.0
-    vbox_max_y:  12.0
-    vbox_max_z:  4.0
+    vbox_max_x:  8.0
+    vbox_max_y:  8.0
+    vbox_max_z:  1.7
 
   scale: 1.0
 
