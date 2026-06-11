@@ -63,6 +63,7 @@ from sparx_agency.tasks.localization.common.apriltag_cv_common import (
 )
 
 
+
 def load_tag_world_map(path: str, default_size: float) -> Tuple[Dict[int, TagWorldPose], Dict[int, float]]:
     """
     YAML format:
