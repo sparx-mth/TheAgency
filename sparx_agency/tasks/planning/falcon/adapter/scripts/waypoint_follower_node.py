@@ -88,7 +88,7 @@ class WaypointFollowerNode:
             # Pulse -> settle -> re-measure yaw (slow turn, inertia, jumpy yaw).
             yaw_settle_dwell_s=float(G("~yaw_settle_dwell_s", 0.8)),
             yaw_settle_eps=float(G("~yaw_settle_eps", 0.05)),
-            yaw_burst_min_ticks=int(G("~yaw_burst_min_ticks", 2)),
+            min_motion_ticks=int(G("~min_motion_ticks", 2)),
             yaw_coast_rad=math.radians(float(G("~yaw_coast_deg", 15.0))),
             # Gentle predictive ADVANCE gate. The legacy ~yaw_acquisition_radius
             # (previously read by nobody) now feeds the cross-track tolerance.
@@ -453,7 +453,7 @@ if __name__ == "__main__":
 #       ~vel_xy_sat (1.25) ~yaw_rate_sat (2.4) ~accel_limit (1.5)
 #       ~yaw_accel_limit (3.5) ~forward_only (false) ~yaw_lead_pct (10, deprecated)
 #   yaw pulse->settle: ~yaw_settle_dwell_s (0.8) ~yaw_settle_eps (0.05)
-#       ~yaw_burst_min_ticks (2) ~yaw_coast_deg (15)
+#       ~min_motion_ticks (2; min consecutive ticks for forward OR yaw) ~yaw_coast_deg (15)
 #       ~yaw_acquisition_radius (0.20; cross-track ADVANCE tol, m) ~yaw_acquire_max_deg (35)
 #   prediction: ~predict_hz (2.0) ~predict_horizon_s (30) ~predict_yaw_tau_s (0.5)
 #       ~predict_vx_tau_s (0.3)

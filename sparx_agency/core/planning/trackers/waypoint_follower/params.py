@@ -49,8 +49,12 @@ class WaypointFollowerParams:
             re-measuring the heading (s).
         yaw_settle_eps: Yaw rate below which the post-burst coast is considered
             finished and the (unfrozen) dwell begins (rad/s).
-        yaw_burst_min_ticks: Minimum burst length in control ticks. Sets the
-            deadband floor so a burst always actually rotates the platform.
+        min_motion_ticks: Minimum number of consecutive control ticks for any
+            motion command, forward OR yaw. A single 5 Hz pulse cannot overcome
+            the platform's deadband/inertia (it neither turns nor moves), so the
+            follower never emits a lone motion tick: every yaw burst and every
+            forward advance lasts at least this many ticks (default 2). Set 1 to
+            disable.
         yaw_burst_max_ticks: Hard cap on a single burst (runaway guard).
         yaw_burst_max_rad: Hard cap on a single open-loop burst angle (rad);
             larger turns re-measure between bursts.
@@ -91,7 +95,7 @@ class WaypointFollowerParams:
     # Pulse -> settle -> re-measure (yaw inertia + jumpy localization).
     yaw_settle_dwell_s: float = 0.8
     yaw_settle_eps: float = 0.05
-    yaw_burst_min_ticks: int = 2
+    min_motion_ticks: int = 2          # min consecutive ticks for forward OR yaw
     yaw_burst_max_ticks: int = 30
     yaw_burst_max_rad: float = radians(135.0)
     yaw_coast_rad: float = radians(15.0)

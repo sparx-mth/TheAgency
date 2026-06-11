@@ -113,7 +113,7 @@
   <!-- Yaw: pulse -> settle -> re-measure (slow turn, strong inertia, jumpy yaw) -->
   <arg name="yaw_settle_dwell_s"  default="0.8" /><!-- dwell (s) after a burst coasts to a stop so AprilTag yaw re-converges before re-measuring -->
   <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
-  <arg name="yaw_burst_min_ticks" default="2" /><!-- min burst length in ctrl ticks (deadband floor so a burst always rotates) -->
+  <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
 
   <!-- Trajectory prediction (rollout of the follower) -> /path/predicted + score -->
@@ -124,7 +124,7 @@
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
-  <arg name="inflate_radius_m"      default="0.1" />
+  <arg name="inflate_radius_m"      default="0.2" />
   <arg name="unknown_blocked"       default="false" />
   <arg name="unknown_cost"          default="1.0" />
   <arg name="los_smoothing"         default="true" />
@@ -136,7 +136,7 @@
   <arg name="min_free_cells_to_plan" default="80" />
   <arg name="replan_on_collision"   default="true" />
   <arg name="replan_on_bev"         default="true" />
-  <arg name="replan_period_s"       default="0.0" />
+  <arg name="replan_period_s"       default="2.0" />
   <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
@@ -190,7 +190,7 @@
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
   <arg name="cruise_z"          default="1.0" />
-  <arg name="freeze_during_yaw" default="true" />
+  <arg name="freeze_during_yaw" default="false" />
   <arg name="maintain_altitude" default="true" />
   <arg name="use_posctrl"       default="true" />
   <arg name="ctrl_rate_hz"      default="5.0" />
@@ -481,7 +481,7 @@
     <param name="yaw_lead_pct"           value="$(arg yaw_lead_pct)" />
     <param name="yaw_settle_dwell_s"     value="$(arg yaw_settle_dwell_s)" />
     <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
-    <param name="yaw_burst_min_ticks"    value="$(arg yaw_burst_min_ticks)" />
+    <param name="min_motion_ticks"       value="$(arg min_motion_ticks)" />
     <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
     <param name="predict_hz"             value="$(arg predict_hz)" />
     <param name="predict_horizon_s"      value="$(arg predict_horizon_s)" />

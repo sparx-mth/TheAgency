@@ -47,6 +47,25 @@ def _states(recs):
     return [r["state"] for r in recs]
 
 
+def _motion_runs(recs, eps=1e-6):
+    """Maximal runs of the same motion label: F=forward, T=turn, S=stop."""
+    labels = []
+    for r in recs:
+        if abs(r["vx"]) > eps:
+            labels.append("F")
+        elif abs(r["wz"]) > eps:
+            labels.append("T")
+        else:
+            labels.append("S")
+    runs = []
+    for lab in labels:
+        if runs and runs[-1][0] == lab:
+            runs[-1][1] += 1
+        else:
+            runs.append([lab, 1])
+    return runs
+
+
 def test_no_extra_yaw_when_aligned():
     """A target dead ahead never enters a burst or YAW_SETTLE."""
     f = WaypointFollower()
@@ -168,6 +187,26 @@ def test_set_path_mid_burst_enters_settle():
     assert abs(f._last_wz) > 0.1
     f.set_path([Pose2D(0, 0), Pose2D(10, 0)], Pose2D(0, 0, 1.0))
     assert f.state == FollowerState.YAW_SETTLE
+
+
+def test_no_lone_motion_command_turn_or_forward():
+    """Every motion run (forward OR turn) is >= min_motion_ticks: a lone 5 Hz
+    pulse can't overcome the deadband, so the follower never emits just one."""
+    f = WaypointFollower()
+    minc = f.params.min_motion_ticks
+    recs, _ = _simulate(f, Pose2D(0, 0, 0.0),
+                        [(0, 0), (2, 0), (2, 2), (0, 2)], 600)
+    bad = [(lab, n) for lab, n in _motion_runs(recs) if lab in ("F", "T") and n < minc]
+    assert not bad, bad
+
+
+def test_forward_never_lone_tick_near_waypoint():
+    """A waypoint just past the capture radius (one tick would reach it) still
+    gets at least two forward commands, not a single wasted pulse."""
+    f = WaypointFollower()
+    recs, _ = _simulate(f, Pose2D(0, 0, 0.0), [(0, 0), (0.40, 0)], 40)
+    fwd = [n for lab, n in _motion_runs(recs) if lab == "F"]
+    assert fwd and all(n >= f.params.min_motion_ticks for n in fwd), _motion_runs(recs)
 
 
 def test_forward_only_never_settles():

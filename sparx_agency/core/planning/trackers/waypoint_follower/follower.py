@@ -66,6 +66,7 @@ class WaypointFollower:
         # Last pose measured while settled; sizes the next burst.
         self._settled_pose: Optional[Pose2D] = None
         self._advance_yaw_at_entry = 0.0
+        self._advance_ticks = 0          # forward ticks emitted this ADVANCE
 
     @property
     def state(self) -> FollowerState:
@@ -146,8 +147,8 @@ class WaypointFollower:
         eyaw = self._heading_error(meas)
         tx, ty = self._path[self._wp_idx]
         dist = hypot(tx - meas.x, ty - meas.y)
-        floor = alg.sweep_floor(p.yaw_rate, dt, p.yaw_burst_min_ticks)
-        accept = alg.yaw_accept_floor(p.yaw_rate, dt, p.yaw_burst_min_ticks,
+        floor = alg.sweep_floor(p.yaw_rate, dt, p.min_motion_ticks)
+        accept = alg.yaw_accept_floor(p.yaw_rate, dt, p.min_motion_ticks,
                                       p.yaw_coast_rad)
         if alg.advance_gate(eyaw, dist, p.yaw_capture_tol_m, accept,
                             p.yaw_acquire_max):
@@ -162,10 +163,14 @@ class WaypointFollower:
         return self._run_burst(dt)
 
     def _run_burst(self, dt: float) -> FollowerCommand:
-        """Execute one open-loop burst tick; ignores the noisy live pose."""
+        """Execute one open-loop burst tick; ignores the noisy live pose.
+
+        A burst always lasts at least ``min_motion_ticks`` ticks so it actually
+        overcomes the yaw deadband (a lone tick does not turn the platform)."""
         p = self.params
-        if (self._burst_swept >= self._burst_target
-                or self._burst_ticks >= p.yaw_burst_max_ticks):
+        reached = (self._burst_swept >= self._burst_target
+                   and self._burst_ticks >= p.min_motion_ticks)
+        if reached or self._burst_ticks >= p.yaw_burst_max_ticks:
             self._enter(FollowerState.YAW_SETTLE, None)
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=True)
         cmd = self._finalize(0.0, self._burst_sign * p.yaw_rate, dt)
@@ -192,6 +197,14 @@ class WaypointFollower:
 
     def _step_advance(self, pose: Pose2D, dt: float) -> FollowerCommand:
         p = self.params
+        # Minimum motion commitment: once advancing has started, keep advancing
+        # for at least min_motion_ticks so the command overcomes the forward
+        # deadband (a lone tick does not move the platform). The entry tick
+        # (count 0) still runs the normal checks, so an already-captured waypoint
+        # never triggers a pointless forward pulse.
+        if 0 < self._advance_ticks < p.min_motion_ticks:
+            return self._advance_forward(dt)
+
         tx, ty = self._path[self._wp_idx]
         cx, cy = pose.x, pose.y
         d = hypot(tx - cx, ty - cy)
@@ -217,7 +230,12 @@ class WaypointFollower:
             self._enter(FollowerState.BRAKE, pose)
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)
 
-        return self._emit(self._finalize(p.vel_x, 0.0, dt), freeze=False)
+        return self._advance_forward(dt)
+
+    def _advance_forward(self, dt: float) -> FollowerCommand:
+        """Emit one forward tick, counting it toward the motion commitment."""
+        self._advance_ticks += 1
+        return self._emit(self._finalize(self.params.vel_x, 0.0, dt), freeze=False)
 
     def _step_brake(self, pose: Pose2D, dt: float) -> FollowerCommand:
         p = self.params
@@ -275,8 +293,10 @@ class WaypointFollower:
         elif new == FollowerState.YAW_SETTLE:
             self._settle_unfrozen_s = 0.0
             self._settle_yaws = []
-        elif new == FollowerState.ADVANCE and pose is not None:
-            self._advance_yaw_at_entry = pose.yaw
+        elif new == FollowerState.ADVANCE:
+            self._advance_ticks = 0
+            if pose is not None:
+                self._advance_yaw_at_entry = pose.yaw
 
     def _finalize(self, vx: float, wz: float, dt: float):
         """Enforce the platform invariant, saturate and slew (vx=0 OR wz=0)."""
