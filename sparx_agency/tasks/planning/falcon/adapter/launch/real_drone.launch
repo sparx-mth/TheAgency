@@ -1,0 +1,181 @@
+<launch>
+  <!--
+    real_drone.launch — wrapper that points the same nav stack at a
+    real drone instead of Gazebo.
+
+    Architecture (only one new node vs. the Gazebo path):
+
+       <real pose topic, e.g. PoseStamped>
+                  │
+                  ▼
+            pose_adapter   (this launch)
+                  │   bare Pose
+                  ▼
+           /<drone_ns>/gt_pose
+                  │
+                  └──► everything downstream is identical to
+                        the Gazebo run — sensor_gate / falcon_adapter /
+                        astar_planner / waypoint_follower / bev_click_goal
+                        all see the same topic name and message type
+                        they always saw.
+
+    camera_info is intentionally NOT bridged for real-drone runs
+    (bridge_camera_info defaults to false in nav_stack.launch).
+    Camera intrinsics are passed as args below and loaded into rosparam,
+    where FALCON's exploration_node reads them.
+
+    Defaults match the xtend drone:
+      pose : /xtend/april_tag_pose (PoseStamped)
+      depth: /xtend/depth_m        (32FC1, 504x294)
+      K    : fx=322.635 fy=323.389 cx=242.065 cy=90.030
+             (RAW/unrectified intrinsics from the 504x294 calibration.
+              FALCON projects the RAW depth with NO undistortion, so the
+              correct focals are K's — NOT the rectified P matrix. P's
+              smaller, asymmetric fx (253 vs fy 287) over-scaled the cloud
+              ~27%, so a 90 cm corridor mapped as ~110 cm.)
+
+    Run example:
+      roslaunch falcon_adapter real_drone.launch
+  -->
+
+  <!-- ── Forwarded to the included nav launch ─────────────────── -->
+  <arg name="map_name" default="office" />
+  <arg name="drone_ns" default="" />
+  <arg name="gated_ns" default="/gated_drone" />
+
+  <!-- ── Real-drone localization ──────────────────────────────── -->
+  <arg name="real_pose_topic" default="/xtend/april_tag_pose" />
+<!--   <arg name="real_pose_topic" default="/flow_depth/pose_est" /> -->
+  <arg name="real_pose_type"  default="pose_stamped" />
+
+  <!-- ── Real-drone depth ──────────────────────────────────────── -->
+  <arg name="real_depth_topic" default="/xtend/depth_m" />
+
+  <!-- ── Camera intrinsics (xtend K-matrix defaults for 504x392) ──
+       MUST match the actual depth stream. If image_width/image_height
+       don't match what the drone publishes, exploration_node silently
+       drops frames. Override on the command line for a different camera:
+         cam_fx:=... cam_fy:=... cam_cx:=... cam_cy:=...
+         cam_width:=... cam_height:=... -->
+  <!-- K-matrix (raw, unrectified) intrinsics. FALCON projects the RAW depth
+       image with no undistortion, so the correct focals are K's (fx~=fy, as
+       expected for square pixels), NOT the rectified P matrix. Using P's
+       smaller fx (253) inflated every metric dimension by fx_K/fx_P ~= 1.27
+       (a 90 cm corridor read as ~110 cm). If you ever feed RECTIFIED depth
+       instead, switch these back to the P-matrix values. -->
+  <arg name="cam_fx"        default="322.6351083474948" />
+  <arg name="cam_fy"        default="323.3893307141174" />
+  <arg name="cam_cx"        default="242.06479658679714" />
+  <arg name="cam_cy"        default="90.03019076680604" />
+  <arg name="cam_width"     default="504" />
+  <arg name="cam_height"    default="294" />
+<!--   <arg name="cam_fx"        default="241.01587457199156" /> -->
+<!--   <arg name="cam_fy"        default="273.842961729908" /> -->
+<!--   <arg name="cam_cx"        default="224.89565972039185" /> -->
+<!--   <arg name="cam_cy"        default="77.84205744139527" /> -->
+<!--   <arg name="cam_width"     default="480" /> -->
+<!--   <arg name="cam_height"    default="280" /> -->
+  <arg name="cam_min_depth" default="0.1" />
+  <arg name="cam_max_depth" default="10.0" />
+
+
+  <!-- ── Optional flight-tuning overrides ────────────────────────-->
+  <arg name="vel_x"     default="0.3" />
+  <arg name="cruise_z"  default="1.0" />
+  <arg name="goal_x"    default="0.0" />
+  <arg name="goal_y"    default="-3.0" />
+
+  <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
+       use_navdp:=true swaps astar_planner for navdp_click. It consumes the
+       same /xtend/rgb + /xtend/depth_m stream FALCON maps, so its intrinsics
+       inherit the cam_* (raw K) args above automatically — nothing to pass.
+       The overlay tracks the live pose altitude. Set
+       navdp_camera_info_topic:=/xtend/camera_info to auto-sync intrinsics from
+       the (bridged) camera_info (K; must describe the 504x294 stream) instead. -->
+  <arg name="use_navdp"               default="false" />
+  <arg name="navdp_camera_info_topic" default="" />
+
+  <arg name="publish_mapping_inputs" value="false" />
+  <!-- ══════════════════════════════════════════════════════════════
+       Pose adapter — converts the real-drone localization message
+       into the bare geometry_msgs/Pose every consumer expects on
+       /<drone_ns>/gt_pose.
+       ══════════════════════════════════════════════════════════════ -->
+  <node pkg="falcon_adapter" type="pose_adapter_node.py"
+        name="pose_adapter" output="screen">
+    <param name="in_topic"  value="$(arg real_pose_topic)" />
+    <param name="in_type"   value="$(arg real_pose_type)" />
+    <param name="out_topic" value="$(arg drone_ns)/gt_pose" />
+  </node>
+
+  <node pkg="falcon_adapter" type="mapping_sync_node.py" name="mapping_sync" output="screen">
+    <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/april_tag_pose -->
+    <!-- RAW depth, NOT the sensor_gate output. mapping_sync is the SOLE voxel
+         feeder here (falcon_adapter runs with publish_mapping_inputs=false) and
+         owns the authoritative rotation freeze below, so it must see true capture
+         stamps: the raw /xtend/depth_m shares its stamp with /xtend/april_tag_pose
+         (which is stamped from the depth it was computed on), so they pair exactly.
+         Feeding the GATED depth instead would mix in sensor_gate's replay frames
+         (restamped to now()), which would pair a held pre-turn frame with the live
+         rotating pose and smear the map (the very thing the freeze prevents). -->
+    <param name="depth_topic"        value="$(arg real_depth_topic)" />              <!-- /xtend/depth_m -->
+    <param name="out_pose_topic"     value="/map_ros/pose" />
+    <param name="out_depth_topic"    value="/map_ros/depth" />
+    <!-- Pairing tolerance. By design /xtend/depth_m and /xtend/april_tag_pose
+         carry the SAME capture stamp, so the ideal pair is an exact (dt==0) match.
+         These windows are kept NON-zero on purpose: depth and AprilTag pose are
+         independent consumers of the RGB stream running at DIFFERENT cadences
+         (depth on nearly every frame, the tag pose ONLY while a tag is in view),
+         so a given depth frame often has no byte-identical pose. sync_tolerance
+         lets it pair with the NEAREST pose within 50 ms; max_interp_gap lets it
+         SLERP a pose across a bracket up to 120 ms when none is near. This trades a
+         small, bounded pairing error (a depth frame may fuse a pose from a slightly
+         different instant) for keeping the voxel map fed when localization is not
+         in lockstep; without it, strict exact-only would DROP most depth frames.
+         To enforce the strict-timestamp architecture instead (exact-only, no
+         mis-pair, but frames without a co-stamped pose are dropped): set
+         sync_tolerance=0.0 AND max_interp_gap=0.0. Downstream FALCON pairing is
+         unaffected, since mapping_sync re-stamps the emitted pose to the depth
+         stamp, so /transformer (timestamp_tolerance 0.02) always matches exactly. -->
+    <param name="sync_tolerance"     value="0.05" />   <!-- 0 = exact-only (dt==0) -->
+    <param name="max_interp_gap"     value="0.12" />   <!-- 0 = no interpolation (nearest-only) -->
+    <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
+    <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
+    <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
+         /xtend/demo_mode == turning, and drop the stale in-flight turn frame on
+         resume, all in the capture clock. -->
+    <param name="demo_mode_topic"      value="/xtend/demo_mode" />
+    <param name="turning_mode_name"    value="turning" />
+    <param name="resume_settle_sec"    value="0.0" />
+  </node>
+  <!-- ══════════════════════════════════════════════════════════════
+       The actual nav stack — same launch as Gazebo, just with the
+       real-drone depth topic and camera intrinsics passed in.
+       ══════════════════════════════════════════════════════════════ -->
+  <include file="$(find falcon_adapter)/launch/nav_stack.launch">
+    <arg name="map_name"      value="$(arg map_name)" />
+    <arg name="drone_ns"      value="$(arg drone_ns)" />
+    <arg name="gated_ns"      value="$(arg gated_ns)" />
+    <arg name="publish_mapping_inputs" value="$(arg publish_mapping_inputs)" />
+    <arg name="depth_topic"   value="$(arg real_depth_topic)" />
+
+    <arg name="cam_fx"        value="$(arg cam_fx)" />
+    <arg name="cam_fy"        value="$(arg cam_fy)" />
+    <arg name="cam_cx"        value="$(arg cam_cx)" />
+    <arg name="cam_cy"        value="$(arg cam_cy)" />
+    <arg name="cam_width"     value="$(arg cam_width)" />
+    <arg name="cam_height"    value="$(arg cam_height)" />
+    <arg name="cam_min_depth" value="$(arg cam_min_depth)" />
+    <arg name="cam_max_depth" value="$(arg cam_max_depth)" />
+
+    <arg name="vel_x"         value="$(arg vel_x)" />
+    <arg name="cruise_z"      value="$(arg cruise_z)" />
+    <arg name="goal_x"        value="$(arg goal_x)" />
+    <arg name="goal_y"        value="$(arg goal_y)" />
+
+    <arg name="use_navdp"               value="$(arg use_navdp)" />
+    <arg name="navdp_depth_topic"       value="$(arg real_depth_topic)" />
+    <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+  </include>
+
+</launch>

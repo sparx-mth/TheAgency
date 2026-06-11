@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class OccupancyThresholds:
     """
     Threshold configuration for converting a grayscale map image (0..255) into occupancy.

@@ -9,7 +9,7 @@ from typing import Tuple, Optional
 import numpy as np
 import open3d as o3d
 
-from logging_utils import pinfo, pok, pwarn
+from .logging_utils import pinfo, pok, pwarn
 
 
 @dataclass

@@ -1,0 +1,169 @@
+# =============================================================================
+# Rooster R1 InternNav Bridge - GROUND ROLL ONLY (No Flying!)
+# =============================================================================
+# FIXED VERSION: STOP action does not terminate navigation
+# =============================================================================
+# Uses x for forward/backward, r for yaw rotation
+# z should be 0 or very low - just enough for wheel traction, NOT for lift
+# =============================================================================
+
+bridge:
+  server:
+    host: "127.0.0.1"
+    port: 8023
+    protocol: "http"
+    timeout_sec: 30.0
+
+  control:
+    inference_rate: 2.0
+    continuous_inference: false
+    min_inference_interval: 0.5
+    # Handheld mode: no ARM, no keep_alive, no motor commands.
+    # Just inference + discrete action publishing. Carry the drone and follow the actions.
+    # Set to false for normal ground roll mode.
+    handheld: false
+
+# =============================================================================
+# INPUT CONFIGURATION
+# =============================================================================
+
+inputs:
+  rgb:
+    enabled: true
+    topic: "/R1/camera/image_raw"
+    msg_type: "sensor_msgs/Image"
+
+  depth:
+    enabled: false
+
+  instruction:
+    enabled: true
+    topic: "/R1/navigation/instruction"
+    default: "Explore forward safely"
+
+  odometry:
+    enabled: false
+
+  # NEW: Navigation control topic for explicit start/stop/pause
+  # Send "stop", "done", "pause", "resume", or "reset" to control navigation
+  nav_control:
+    enabled: true
+    topic: "/R1/navigation/control"
+
+outputs:
+  # Discrete actions - for logging/debugging only
+  discrete:
+    enabled: true
+    topic: "/R1/navigation/action"
+    action_mapping:
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "left"
+      TURN_RIGHT: "right"
+      STOP: "stop"
+
+  # Standard Twist output (disabled - using manual_control)
+  continuous:
+    enabled: false
+
+  # ManualControl for GROUND ROLL
+  # x: forward/backward (positive = forward)
+  # y: strafe left/right
+  # z: vertical thrust - KEEP LOW OR ZERO for ground roll!
+  # r: yaw rotation (positive = counter-clockwise/left)
+  manual_control:
+    enabled: true
+    topic: "/R1/manual_control"
+    publish_rate_hz: 80.0
+
+    # Action mapping for ground roll mode
+    # z provides base "force" to keep wheels engaged
+    # r controls yaw/turning
+    # x controls forward/backward
+    action_mapping:
+      MOVE_FORWARD:
+        x: 100.0      # Forward thrust
+        y: 0.0
+        z: 400.0
+        r: 0.0
+        buttons: 0
+        duration_sec: 0.4
+      TURN_LEFT:
+        x: 0.0
+        y: 0.0
+        z: 400.0
+        r: -250.0      # Yaw left (positive = CCW)
+        buttons: 0
+        duration_sec: 0.4
+
+      TURN_RIGHT:
+        x: 0.0
+        y: 0.0
+        z: 400.0
+        r: 250.0     # Yaw right (negative = CW)
+        buttons: 0
+        duration_sec: 0.4
+
+      STOP:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        r: 0.0
+        buttons: 0
+        duration_sec: 2.0
+      UNKNOWN:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        r: 0.0
+        buttons: 0
+        duration_sec: 2.0
+
+  # KeepAlive - Required to maintain control authority
+  keep_alive:
+    enabled: true
+    topic: "/R1/keep_alive"
+    publish_rate_hz: 1.0
+    is_active: true
+    # Flight modes: NONE=0, GROUND_ROLL=1, MANUAL=2, POSITION=3, ALTITUDE=4, etc.
+    requested_flight_mode: 1  # GROUND_ROLL
+    command_reboot: false
+
+  # State subscription for monitoring
+  state:
+    enabled: true
+    topic: "/R1/state"
+
+  # Feedback publisher
+  feedback:
+    enabled: true
+    topic: "/R1/navigation/feedback"
+
+  # Status publisher
+  status:
+    enabled: true
+    topic: "/R1/navigation/status"
+
+  # S2 waypoint publisher (auto-derived from discrete topic namespace)
+  # Publishes JSON {x, y, action} on /R1/navigation/waypoint
+  # Publishes annotated Image on /R1/navigation/waypoint_image
+  waypoint:
+    enabled: true
+
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+
+model:
+  variant: "internvla_n1"
+
+  input_format:
+    target_width: 640
+    target_height: 480
+
+  model_settings:
+    policy_name: "InternVLAN1_Policy"
+    device: "cuda:0"
+    width: 640
+    height: 480
+    resize_w: 384
+    resize_h: 384

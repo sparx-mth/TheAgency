@@ -1,0 +1,66 @@
+# =============================================================================
+# Simple Drone Configuration
+# =============================================================================
+
+bridge:
+  server:
+    host: "127.0.0.1"
+    port: 8023
+    timeout_sec: 30.0
+
+  control:
+    inference_rate: 4.0
+    min_inference_interval: 0.2
+
+inputs:
+  rgb:
+    enabled: true
+    topic: "/simple_drone/front/image_raw"
+
+  depth:
+    enabled: false
+
+  instruction:
+    enabled: true
+    topic: "/simple_drone/navigation/instruction"
+    default: "Fly forward and explore"
+
+  odometry:
+    enabled: true
+    topic: "/simple_drone/odom"
+
+outputs:
+  discrete:
+    enabled: true
+    topic: "/simple_drone/navigation/action"
+    action_mapping:
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "turn_left"
+      TURN_RIGHT: "turn_right"
+      STOP: "hover"
+
+  continuous:
+    enabled: true
+    topic: "/simple_drone/cmd_vel"
+    action_to_velocity:
+      MOVE_FORWARD: {linear_x: 0.5, angular_z: 0.0}
+      TURN_LEFT: {linear_x: 0.0, angular_z: 0.3}
+      TURN_RIGHT: {linear_x: 0.0, angular_z: -0.3}
+      STOP: {linear_x: 0.0, angular_z: 0.0}
+    limits:
+      max_linear: 1.0
+      max_angular: 0.5
+
+  feedback:
+    enabled: true
+    topic: "/simple_drone/navigation/feedback"
+
+  status:
+    enabled: true
+    topic: "/simple_drone/navigation/status"
+
+model:
+  variant: "internvla_n1"
+  input_format:
+    target_width: 640
+    target_height: 480

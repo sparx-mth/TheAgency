@@ -1,0 +1,96 @@
+# =============================================================================
+# InternNav Bridge Configuration
+# =============================================================================
+
+bridge:
+  server:
+    host: "localhost"
+    port: 8000
+    protocol: "http"
+    timeout_sec: 30.0
+
+  control:
+    inference_rate: 4.0      # Hz
+    continuous_inference: false
+    min_inference_interval: 0.1
+
+# =============================================================================
+# INPUTS - Modify topics to match your simulation
+# =============================================================================
+
+inputs:
+  rgb:
+    enabled: true
+    topic: "/camera/rgb/image_raw"
+    msg_type: "sensor_msgs/Image"  # or "sensor_msgs/CompressedImage"
+
+  depth:
+    enabled: false
+    topic: "/camera/depth/image_raw"
+
+  instruction:
+    enabled: true
+    topic: "/navigation/instruction"
+    default: "Navigate to the goal"
+
+  odometry:
+    enabled: false
+    topic: "/odom"
+
+# =============================================================================
+# OUTPUTS - Modify topics to match your simulation
+# =============================================================================
+
+outputs:
+  # Discrete action output (String messages)
+  discrete:
+    enabled: true
+    topic: "/navigation/action"
+    action_mapping:
+      MOVE_FORWARD: "forward"
+      TURN_LEFT: "left"
+      TURN_RIGHT: "right"
+      STOP: "stop"
+      LOOK_UP: "look_up"
+      LOOK_DOWN: "look_down"
+
+  # Continuous velocity output (Twist messages)
+  continuous:
+    enabled: false
+    topic: "/cmd_vel"
+    action_to_velocity:
+      MOVE_FORWARD: {linear_x: 0.25, angular_z: 0.0}
+      TURN_LEFT: {linear_x: 0.0, angular_z: 0.5}
+      TURN_RIGHT: {linear_x: 0.0, angular_z: -0.5}
+      STOP: {linear_x: 0.0, angular_z: 0.0}
+    limits:
+      max_linear: 1.0
+      max_angular: 1.0
+
+  feedback:
+    enabled: true
+    topic: "/navigation/feedback"
+
+  status:
+    enabled: true
+    topic: "/navigation/status"
+
+# =============================================================================
+# MODEL
+# =============================================================================
+
+model:
+  variant: "InternVLA-N1"
+  ckpt_path: ""
+  input_format:
+    target_width: 640
+    target_height: 480
+  # Model settings (these have sensible defaults, override if needed)
+  model_settings:
+    policy_name: "InternVLAN1_Policy"
+    # state_encoder: null  # Use default
+    device: "cuda:0"
+    width: 640
+    height: 480
+    resize_w: 384
+    resize_h: 384
