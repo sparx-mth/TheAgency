@@ -187,9 +187,6 @@ sparx_agency/install/
 sparx_agency/tasks/planning/3D_planning/gibson/extracted/*
 sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 /sparx_agency/theagency_venv/*
-/graphify-out/
-/.claude/
-
 
 # ROS2 Bags
 rosbag2_*/
@@ -199,3 +196,10 @@ rosbag2_*/
 sparx_agency/tasks/common/bearings_placeholder.csv
 sparx_agency/tasks/localization/data/
 sparx_agency/tasks/localization/ros2/depth_optical/
+/graphify-out/
+/.claude/
+
+sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
+/sparx_agency/theagency_venv/*
+/graphify-out/
+/.claude/

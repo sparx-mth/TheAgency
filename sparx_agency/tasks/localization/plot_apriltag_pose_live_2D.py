@@ -9,17 +9,7 @@ from geometry_msgs.msg import PoseStamped
 
 import matplotlib.pyplot as plt
 
-
-def yaw_from_quaternion(qx, qy, qz, qw):
-    """
-    Convert quaternion to yaw angle in radians.
-    Assumes ROS convention:
-      X forward, Y left, Z up
-    """
-    return math.atan2(
-        2.0 * (qw * qz + qx * qy),
-        1.0 - 2.0 * (qy * qy + qz * qz)
-    )
+from sparx_agency.core.common.spatial_math import quat_to_yaw as yaw_from_quaternion
 
 
 class AprilTagPosePlotter(Node):
