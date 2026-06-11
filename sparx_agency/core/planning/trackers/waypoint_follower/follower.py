@@ -13,9 +13,16 @@ flight controller) and all I/O live in the ROS adapter. The adapter tells the
 follower, each tick, whether the axis it currently needs has been confirmed;
 until then the follower holds zero and does not advance its state machine.
 
+Yaw is a discrete *pulse -> settle -> re-measure* loop, not a continuous
+controller: the platform turns slowly, coasts on yaw inertia, and its
+localization jumps while rotating but is accurate when still. ``YAW_ALIGN``
+sizes one open-loop burst from the last *settled* pose (ignoring the noisy live
+pose); ``YAW_SETTLE`` coasts to a stop (sensors frozen) then dwells in place
+(sensors live) so localization re-converges before the heading is re-measured.
+
 State machine::
 
-    YAW_ALIGN  -> ADVANCE -> (BRAKE -> YAW_ALIGN -> ADVANCE)* -> DONE
+    YAW_ALIGN <-> YAW_SETTLE ... -> ADVANCE -> (BRAKE -> YAW_SETTLE ...)* -> DONE
 """
 from __future__ import annotations
 
@@ -47,8 +54,17 @@ class WaypointFollower:
         self._time_in_state = 0.0
         self._last_vx = 0.0
         self._last_wz = 0.0
-        # Snapshots captured on state entry.
-        self._yaw_align_lead = 0.0
+        # YAW_ALIGN burst bookkeeping (one open-loop burst per YAW_ALIGN entry).
+        self._burst_active = False
+        self._burst_sign = 0.0
+        self._burst_target = 0.0
+        self._burst_swept = 0.0
+        self._burst_ticks = 0
+        # YAW_SETTLE dwell bookkeeping.
+        self._settle_unfrozen_s = 0.0
+        self._settle_yaws: List[float] = []
+        # Last pose measured while settled; sizes the next burst.
+        self._settled_pose: Optional[Pose2D] = None
         self._advance_yaw_at_entry = 0.0
 
     @property
@@ -76,6 +92,7 @@ class WaypointFollower:
         pts = [(float(p.x), float(p.y)) for p in waypoints]
         self._path = alg.reanchor_path(pts, pose, self.params.pos_radius)
         self._wp_idx = 0
+        self._settled_pose = pose
         self._enter(self._entry_state(pose), pose)
 
     def step(
@@ -104,6 +121,8 @@ class WaypointFollower:
         self._time_in_state += dt
         if self._state == FollowerState.YAW_ALIGN:
             return self._step_yaw_align(pose, dt)
+        if self._state == FollowerState.YAW_SETTLE:
+            return self._step_yaw_settle(pose, dt)
         if self._state == FollowerState.ADVANCE:
             return self._step_advance(pose, dt)
         if self._state == FollowerState.BRAKE:
@@ -112,25 +131,64 @@ class WaypointFollower:
 
     # ─── State bodies ────────────────────────────────────────────
     def _step_yaw_align(self, pose: Pose2D, dt: float) -> FollowerCommand:
-        p = self.params
         if not self._has_target():
             self._enter(FollowerState.ADVANCE, pose)
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)
+        if not self._burst_active:
+            return self._decide_yaw(pose, dt)
+        return self._run_burst(dt)
 
-        eyaw = self._heading_error(pose)
-        eyaw_lead = eyaw - copysign(self._yaw_align_lead, eyaw)
-        if abs(eyaw_lead) <= p.yaw_settle:
+    def _decide_yaw(self, pose: Pose2D, dt: float) -> FollowerCommand:
+        """First YAW_ALIGN tick: advance if aligned enough (predictive gate, read
+        from the last *settled* pose), else commit to one open-loop burst."""
+        p = self.params
+        meas = self._settled_pose or pose
+        eyaw = self._heading_error(meas)
+        tx, ty = self._path[self._wp_idx]
+        dist = hypot(tx - meas.x, ty - meas.y)
+        floor = alg.sweep_floor(p.yaw_rate, dt, p.yaw_burst_min_ticks)
+        accept = alg.yaw_accept_floor(p.yaw_rate, dt, p.yaw_burst_min_ticks,
+                                      p.yaw_coast_rad)
+        if alg.advance_gate(eyaw, dist, p.yaw_capture_tol_m, accept,
+                            p.yaw_acquire_max):
             self._enter(FollowerState.ADVANCE, pose)
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)
+        self._burst_active = True
+        self._burst_sign = copysign(1.0, eyaw)
+        self._burst_target = alg.burst_target_angle(
+            eyaw, p.yaw_coast_rad, floor, p.yaw_burst_max_rad)
+        self._burst_swept = 0.0
+        self._burst_ticks = 0
+        return self._run_burst(dt)
 
-        wz_now = self._last_wz
-        brake_d = alg.yaw_brake_distance(wz_now, p.yaw_accel_limit, dt)
-        same_sign = (wz_now * eyaw_lead) >= 0.0
-        if same_sign and abs(eyaw_lead) <= brake_d:
-            wz_target = 0.0
-        else:
-            wz_target = copysign(p.yaw_rate, eyaw_lead)
-        return self._emit(self._finalize(0.0, wz_target, dt), freeze=True)
+    def _run_burst(self, dt: float) -> FollowerCommand:
+        """Execute one open-loop burst tick; ignores the noisy live pose."""
+        p = self.params
+        if (self._burst_swept >= self._burst_target
+                or self._burst_ticks >= p.yaw_burst_max_ticks):
+            self._enter(FollowerState.YAW_SETTLE, None)
+            return self._emit(self._finalize(0.0, 0.0, dt), freeze=True)
+        cmd = self._finalize(0.0, self._burst_sign * p.yaw_rate, dt)
+        self._burst_swept += abs(self._last_wz) * dt
+        self._burst_ticks += 1
+        return self._emit(cmd, freeze=True)
+
+    def _step_yaw_settle(self, pose: Pose2D, dt: float) -> FollowerCommand:
+        """Coast to a stop (frozen, dwell clock held), then dwell in place (live)
+        collecting heading samples; hand a robust estimate back to YAW_ALIGN."""
+        p = self.params
+        cmd = self._finalize(0.0, 0.0, dt)  # keep slewing wz -> 0
+        if abs(self._last_wz) >= p.yaw_settle_eps:
+            self._settle_unfrozen_s = 0.0
+            self._settle_yaws = []
+            return self._emit(cmd, freeze=True)
+        self._settle_unfrozen_s += dt
+        self._settle_yaws.append(pose.yaw)
+        if self._settle_unfrozen_s >= p.yaw_settle_dwell_s:
+            yaw = alg.circular_mean(self._settle_yaws)
+            self._settled_pose = Pose2D(pose.x, pose.y, yaw)
+            self._enter(FollowerState.YAW_ALIGN, self._settled_pose)
+        return self._emit(cmd, freeze=False)
 
     def _step_advance(self, pose: Pose2D, dt: float) -> FollowerCommand:
         p = self.params
@@ -167,8 +225,13 @@ class WaypointFollower:
         stopped = abs(self._last_vx) < p.vx_brake_thresh
         timed_out = self._time_in_state > p.brake_timeout_s
         if stopped or timed_out:
-            nxt = (FollowerState.DONE if self._wp_idx >= len(self._path)
-                   else FollowerState.YAW_ALIGN)
+            if self._wp_idx >= len(self._path):
+                nxt = FollowerState.DONE
+            elif p.forward_only:
+                nxt = FollowerState.YAW_ALIGN   # _enter redirects to ADVANCE
+            else:
+                # Settle first so YAW_ALIGN measures a fresh, converged heading.
+                nxt = FollowerState.YAW_SETTLE
             self._enter(nxt, pose)
         return self._emit(cmd, freeze=False)
 
@@ -185,6 +248,11 @@ class WaypointFollower:
         """Pick the state to enter when a new path is adopted."""
         if not self._path or pose is None:
             return FollowerState.YAW_ALIGN
+        # If a path arrives mid-rotation, the live yaw is unreliable; settle
+        # first (coast + dwell), then decide from a converged heading.
+        if (not self.params.forward_only
+                and abs(self._last_wz) > self.params.yaw_settle_eps):
+            return FollowerState.YAW_SETTLE
         tx, ty = self._path[0]
         if hypot(tx - pose.x, ty - pose.y) < 1e-3:
             return FollowerState.YAW_ALIGN
@@ -197,16 +265,17 @@ class WaypointFollower:
 
     def _enter(self, new: FollowerState, pose: Optional[Pose2D]) -> None:
         # Forward-only mode never rotates in place: jump straight to ADVANCE.
-        if new == FollowerState.YAW_ALIGN and self.params.forward_only:
+        if self.params.forward_only and new in (
+                FollowerState.YAW_ALIGN, FollowerState.YAW_SETTLE):
             new = FollowerState.ADVANCE
         self._state = new
         self._time_in_state = 0.0
-        if new == FollowerState.YAW_ALIGN and pose is not None and self._has_target():
-            eyaw = self._heading_error(pose)
-            self._yaw_align_lead = alg.yaw_lead_offset(eyaw, self.params.yaw_lead_pct)
-        elif new == FollowerState.YAW_ALIGN:
-            self._yaw_align_lead = 0.0
-        if new == FollowerState.ADVANCE and pose is not None:
+        if new == FollowerState.YAW_ALIGN:
+            self._burst_active = False   # re-measure and re-decide on entry
+        elif new == FollowerState.YAW_SETTLE:
+            self._settle_unfrozen_s = 0.0
+            self._settle_yaws = []
+        elif new == FollowerState.ADVANCE and pose is not None:
             self._advance_yaw_at_entry = pose.yaw
 
     def _finalize(self, vx: float, wz: float, dt: float):

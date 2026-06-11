@@ -39,15 +39,18 @@ import os
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import Pose, Twist
+from geometry_msgs.msg import Pose, PoseStamped, Twist
 from nav_msgs.msg import Path
-from std_msgs.msg import Bool, Empty, Int8, String
+from std_msgs.msg import Bool, Empty, Float32, Int8, String
 
 from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.trackers.waypoint_follower import (
     ControlAxis,
+    MotionModelParams,
     WaypointFollower,
     WaypointFollowerParams,
+    predict_trajectory,
+    prediction_score,
 )
 
 # DemoMode payloads bridged over /xtend/demo_mode(_request). The core control
@@ -82,6 +85,15 @@ class WaypointFollowerNode:
             vx_brake_thresh=float(G("~vx_brake_thresh", 0.05)),
             brake_timeout_s=float(G("~brake_timeout_s", 2.0)),
             passed_bearing_rad=math.radians(float(G("~passed_bearing_deg", 100.0))),
+            # Pulse -> settle -> re-measure yaw (slow turn, inertia, jumpy yaw).
+            yaw_settle_dwell_s=float(G("~yaw_settle_dwell_s", 0.8)),
+            yaw_settle_eps=float(G("~yaw_settle_eps", 0.05)),
+            yaw_burst_min_ticks=int(G("~yaw_burst_min_ticks", 2)),
+            yaw_coast_rad=math.radians(float(G("~yaw_coast_deg", 15.0))),
+            # Gentle predictive ADVANCE gate. The legacy ~yaw_acquisition_radius
+            # (previously read by nobody) now feeds the cross-track tolerance.
+            yaw_capture_tol_m=float(G("~yaw_acquisition_radius", 0.20)),
+            yaw_acquire_max=math.radians(float(G("~yaw_acquire_max_deg", 35.0))),
             yaw_lead_pct=float(G("~yaw_lead_pct", 10.0)),
             vel_xy_sat=float(G("~vel_xy_sat", 1.25)),
             yaw_rate_sat=float(G("~yaw_rate_sat", 2.4)),
@@ -103,6 +115,19 @@ class WaypointFollowerNode:
         self.status_hz = float(G("~status_hz", 1.0))
         self.freeze_during_yaw = bool(G("~freeze_during_yaw", True))
         self.startup_hold_sec = float(G("~startup_hold_sec", 3.0))
+        self.frame_id = G("~frame_id", "world")
+
+        # Trajectory prediction (rollout) -> /path/predicted for the BEV viewer
+        # and the planner's dynamics-aware collision check.
+        self.predict_hz = float(G("~predict_hz", 2.0))
+        self.predict_horizon_s = float(G("~predict_horizon_s", 30.0))
+        self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
+        self.predicted_score_topic = G("~predicted_score_topic",
+                                       "/path/predicted_score")
+        self._motion = MotionModelParams(
+            yaw_tau_s=float(G("~predict_yaw_tau_s", 0.5)),
+            vx_tau_s=float(G("~predict_vx_tau_s", 0.3)))
+        self._path_pts = []
 
         # DemoMode handshake.
         self.demo_mode_topic = G("~demo_mode_topic", "/xtend/demo_mode")
@@ -143,6 +168,10 @@ class WaypointFollowerNode:
         self.freeze_pub = rospy.Publisher("/sensor_gate/freeze", Bool, queue_size=1, latch=True)
         self.demo_req_pub = rospy.Publisher(self.demo_mode_request_topic, String,
                                             queue_size=1, latch=True)
+        self.pred_path_pub = rospy.Publisher(self.predicted_path_topic, Path,
+                                             queue_size=1, latch=True)
+        self.pred_score_pub = rospy.Publisher(self.predicted_score_topic, Float32,
+                                              queue_size=1, latch=True)
 
         rospy.Subscriber(self.t_pose, Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.t_dstate, Int8, self._dstate_cb, queue_size=10)
@@ -153,6 +182,9 @@ class WaypointFollowerNode:
         rospy.on_shutdown(self._on_shutdown)
         rospy.Timer(rospy.Duration(self.dt), self._ctrl_loop)
         rospy.Timer(rospy.Duration(1.0 / self.status_hz), self._status)
+        if self.predict_hz > 0:
+            rospy.Timer(rospy.Duration(1.0 / self.predict_hz),
+                        lambda _e: self._publish_prediction())
         self._banner()
 
     # ─── Callbacks ───────────────────────────────────────────────
@@ -178,9 +210,11 @@ class WaypointFollowerNode:
             rospy.logwarn("waypoint_follower: ignoring path with %d waypoints", len(pts))
             return
         self.follower.set_path(pts, pose2d)
+        self._path_pts = pts
         self.have_path = True
         rospy.loginfo("[PATH] NEW PATH %d waypoints  start=(%.2f,%.2f) end=(%.2f,%.2f)",
                       len(pts), pts[0].x, pts[0].y, pts[-1].x, pts[-1].y)
+        self._publish_prediction()   # refresh the predicted trajectory at once
         if self.state == _Bringup.WAIT_PATH:
             self._enter(_Bringup.RUNNING)
 
@@ -241,6 +275,35 @@ class WaypointFollowerNode:
         q = self.cur_pose.orientation
         yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
         return Pose2D(self.cur_pose.position.x, self.cur_pose.position.y, yaw)
+
+    def _publish_prediction(self):
+        """Roll the follower forward from the current pose and publish the
+        predicted trajectory (+ a 0..1 quality score). Best-effort: the BEV
+        viewer draws it and the planner uses it for a dynamics-aware collision
+        check. No map here, so the score is dynamics-only (no clearance)."""
+        pose2d = self._pose2d()
+        if pose2d is None or len(self._path_pts) < 2:
+            return
+        try:
+            res = predict_trajectory(self.follower.params, pose2d, self._path_pts,
+                                     self.dt, self.predict_horizon_s,
+                                     motion=self._motion)
+        except ValueError:
+            return
+        if len(res.poses) < 2:
+            return
+        m = Path()
+        m.header.stamp = rospy.Time.now()
+        m.header.frame_id = self.frame_id
+        for p in res.poses:
+            ps = PoseStamped()
+            ps.header = m.header
+            ps.pose.position.x = float(p.x)
+            ps.pose.position.y = float(p.y)
+            ps.pose.orientation.w = 1.0
+            m.poses.append(ps)
+        self.pred_path_pub.publish(m)
+        self.pred_score_pub.publish(Float32(data=float(prediction_score(res))))
 
     def _do_takeoff(self):
         now = rospy.Time.now()
@@ -381,13 +444,19 @@ if __name__ == "__main__":
 # the freeze gate, the startup hold and the cmd_vel log.
 #
 #   IO: ~drone_ns (/simple_drone) [+/gt_pose +/state +/cmd_vel +/takeoff]
-#       ~path_topic (/path/waypoints)
+#       ~path_topic (/path/waypoints) ~frame_id (world)
+#       ~predicted_path_topic (/path/predicted) ~predicted_score_topic (/path/predicted_score)
 #       ~demo_mode_topic (/xtend/demo_mode) ~demo_mode_request_topic (/xtend/demo_mode_request)
 #   follower: ~vel_x (0.3) ~yaw_rate (0.7) ~pos_acquisition_radius (0.35)
 #       ~yaw_settle_thresh (0.05) ~yaw_drift_thresh (0.40) ~skip_yaw_thresh (0.25)
 #       ~vx_brake_thresh (0.05) ~brake_timeout_s (2.0) ~passed_bearing_deg (100)
-#       ~yaw_lead_pct (10) ~vel_xy_sat (1.25) ~yaw_rate_sat (2.4) ~accel_limit (1.5)
-#       ~yaw_accel_limit (3.5) ~forward_only (false)
+#       ~vel_xy_sat (1.25) ~yaw_rate_sat (2.4) ~accel_limit (1.5)
+#       ~yaw_accel_limit (3.5) ~forward_only (false) ~yaw_lead_pct (10, deprecated)
+#   yaw pulse->settle: ~yaw_settle_dwell_s (0.8) ~yaw_settle_eps (0.05)
+#       ~yaw_burst_min_ticks (2) ~yaw_coast_deg (15)
+#       ~yaw_acquisition_radius (0.20; cross-track ADVANCE tol, m) ~yaw_acquire_max_deg (35)
+#   prediction: ~predict_hz (2.0) ~predict_horizon_s (30) ~predict_yaw_tau_s (0.5)
+#       ~predict_vx_tau_s (0.3)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
 #   loop/gate: ~ctrl_rate_hz (5) ~status_hz (1) ~freeze_during_yaw (true)

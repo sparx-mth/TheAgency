@@ -60,18 +60,34 @@ class AStarPlannerNode:
             unknown_blocked=bool(G("~unknown_blocked", False)),
             unknown_cost=float(G("~unknown_cost", 1.0)),
             search_margin_m=float(G("~search_margin_m", 3.0)),
-            turn_penalty=float(G("~turn_penalty", 0.0)),
+            turn_penalty=float(G("~turn_penalty", 0.3)),
             los_smoothing=bool(G("~los_smoothing", True)),
             waypoint_spacing_m=float(G("~waypoint_spacing_m", 3.0)),
             goal_snap_radius_m=float(G("~goal_snap_radius_m", 2.0)),
             start_skip_m=float(G("~start_skip_m", 0.4)),
             max_expansions=int(G("~max_expansions", 200000)),
+            # Corner rounding -> gentler turns for the stop-and-turn follower.
+            corner_round=bool(G("~corner_round", True)),
+            corner_merge_rad=math.radians(float(G("~corner_merge_deg", 8.0))),
+            corner_max_turn_rad=math.radians(float(G("~corner_max_turn_deg", 14.0))),
+            corner_chamfer_max_rad=math.radians(float(G("~corner_chamfer_max_deg", 28.0))),
+            corner_chamfer_dist_m=float(G("~corner_chamfer_dist_m", 0.5)),
+            corner_min_runup_m=float(G("~corner_min_runup_m", 0.6)),
         )
         self.planner = WeightedAStarPlanner2D(self.params)
 
         self.replan_on_collision = bool(G("~replan_on_collision", True))
         self.replan_on_bev = bool(G("~replan_on_bev", False))
         self.replan_period_s = float(G("~replan_period_s", 0.0))
+
+        # Dynamics-aware replan: the follower publishes its predicted (stop-and-
+        # turn) trajectory; replan if THAT collides even when the geometric path
+        # does not (overshoot into a wall the straight path misses). Guarded by a
+        # freshness check, the same confirm streak, and a consecutive-replan cap.
+        self.replan_on_predicted_collision = bool(
+            G("~replan_on_predicted_collision", True))
+        self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
+        self.max_predicted_replans = int(G("~max_predicted_replans", 3))
 
         # Collision-replan debounce. A single noisy depth frame can paint a
         # spurious occupied cell across the path; reacting on the first frame
@@ -107,10 +123,19 @@ class AStarPlannerNode:
         self.last_points = ()     # tuple[Pose2D] of the published path
         self.fail_reason = "(not tried yet)"
 
+        self._last_plan_stamp = rospy.Time(0)     # stamp of the published path
+        self._predicted_points = ()               # tuple[Pose2D] from the follower
+        self._predicted_stamp = rospy.Time(0)
+        self._pred_collision_streak = 0
+        self._predicted_replans = 0               # consecutive; reset when clear
+
         self.pub_path = rospy.Publisher(self.path_topic, Path, queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
+        if self.replan_on_predicted_collision:
+            rospy.Subscriber(self.predicted_path_topic, Path, self._predicted_cb,
+                             queue_size=1)
 
         if self.replan_period_s > 0:
             rospy.Timer(rospy.Duration(self.replan_period_s), lambda _e: self._try_plan())
@@ -136,6 +161,8 @@ class AStarPlannerNode:
         self.goal = new
         self.has_plan = False
         self._collision_streak = 0
+        self._pred_collision_streak = 0
+        self._predicted_replans = 0
         self.planner.invalidate_cache()
         if not self._try_plan():
             rospy.logwarn("astar_planner: click goal (%.2f, %.2f) accepted but no "
@@ -156,6 +183,18 @@ class AStarPlannerNode:
             self._try_plan()
         elif self.replan_on_collision:
             self._collision_replan_check()
+        # Additional dynamics-aware check (skipped if a replan just fired: the
+        # prediction is then older than the new path and the freshness guard
+        # drops it).
+        if self.has_plan and self.replan_on_predicted_collision:
+            self._predicted_collision_check()
+
+    def _predicted_cb(self, msg):
+        """Store the follower's predicted trajectory (world Pose2D) + its stamp."""
+        self._predicted_points = tuple(
+            Pose2D(float(p.pose.position.x), float(p.pose.position.y))
+            for p in msg.poses)
+        self._predicted_stamp = msg.header.stamp
 
     # ─── Decode ──────────────────────────────────────────────────
     def _decode(self, msg):
@@ -208,6 +247,38 @@ class AStarPlannerNode:
         self.has_plan = False
         self._try_plan()      # resets _collision_streak on success
 
+    def _predicted_collision_check(self):
+        """Replan when the follower's *predicted* trajectory hits an obstacle.
+
+        The geometric path can be clear while the drone's real stop-and-turn
+        motion overshoots a corner into a wall. We run the same inflated-obstacle
+        line check on the predicted rollout. A freshness guard ignores a
+        prediction made against a now-superseded path; the same confirm streak
+        debounces depth noise; a consecutive-replan cap (reset once the
+        prediction is clear again) prevents a replan oscillation while leaving
+        the geometric collision replan fully active.
+        """
+        if (len(self._predicted_points) < 2
+                or self._predicted_stamp < self._last_plan_stamp):
+            return
+        if not self.planner.path_collides(self.grid, self._predicted_points):
+            self._pred_collision_streak = 0
+            self._predicted_replans = 0
+            return
+        self._pred_collision_streak += 1
+        if self._pred_collision_streak < self.replan_collision_confirm:
+            return
+        if self._predicted_replans >= self.max_predicted_replans:
+            rospy.logwarn_throttle(
+                5.0, "astar_planner: predicted-collision replan cap (%d) reached "
+                "-- holding (geometric replan still active)", self.max_predicted_replans)
+            return
+        rospy.logwarn("astar_planner: PREDICTED trajectory blocked on %d frame(s) "
+                      "-- dynamics-aware replan", self._pred_collision_streak)
+        self._predicted_replans += 1
+        self.has_plan = False
+        self._try_plan()
+
     def _try_plan(self):
         if self.grid is None:
             self.fail_reason = "no BEV yet"; return False
@@ -233,6 +304,7 @@ class AStarPlannerNode:
         self._publish(res.path.points, (rospy.Time.now() - t0).to_sec())
         self.has_plan = True
         self._collision_streak = 0    # every fresh path starts its debounce clean
+        self._pred_collision_streak = 0
         self.fail_reason = "(success)"
         return True
 
@@ -255,6 +327,7 @@ class AStarPlannerNode:
         m = Path()
         m.header.stamp = rospy.Time.now()
         m.header.frame_id = self.frame_id
+        self._last_plan_stamp = m.header.stamp   # freshness ref for predicted check
         for pt in points:
             ps = PoseStamped()
             ps.header = m.header
@@ -294,6 +367,13 @@ class AStarPlannerNode:
         L("  search_margin=%.1fm start_skip=%.2fm snap=%.1fm collision_replan=%s",
           p.search_margin_m, p.start_skip_m, p.goal_snap_radius_m, self.replan_on_collision)
         L("  collision replan confirm=%d frame(s)", self.replan_collision_confirm)
+        L("  corner_round=%s merge=%.0fdeg max_turn=%.0fdeg chamfer<=%.0fdeg "
+          "dist=%.2fm runup=%.2fm", p.corner_round, math.degrees(p.corner_merge_rad),
+          math.degrees(p.corner_max_turn_rad), math.degrees(p.corner_chamfer_max_rad),
+          p.corner_chamfer_dist_m, p.corner_min_runup_m)
+        L("  predicted-collision replan=%s cap=%d topic=%s",
+          self.replan_on_predicted_collision, self.max_predicted_replans,
+          self.predicted_path_topic)
         L("=" * 64)
 
 
@@ -318,13 +398,20 @@ if __name__ == "__main__":
 #       ~goal_topic (/waypoint_nav/goal) ~path_topic (/path/waypoints)
 #       ~frame_id (world) ~goal_x ~goal_y (initial goal; unset = wait for a click)
 #   planner: ~connectivity (8) ~inflate_radius_m (0.4) ~unknown_blocked (false)
-#       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.0)
+#       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.3)
 #       ~los_smoothing (true) ~waypoint_spacing_m (3.0) ~goal_snap_radius_m (2.0)
 #       ~start_skip_m (0.4) ~max_expansions (200000)
+#   corner rounding (gentler turns): ~corner_round (true) ~corner_merge_deg (8)
+#       ~corner_max_turn_deg (14) ~corner_chamfer_max_deg (28)
+#       ~corner_chamfer_dist_m (0.5) ~corner_min_runup_m (0.6)
 #   replanning: ~replan_on_collision (true) ~replan_on_bev (false) ~replan_period_s (0.0)
 #       ~replan_collision_confirm (2; consecutive colliding BEV frames required
 #         before a collision replan -- debounces single-frame depth noise and,
 #         since the streak resets after each replan, caps the sustained replan
 #         rate; 1 = legacy replan-on-first-frame)
+#       ~replan_on_predicted_collision (true; replan when the follower's predicted
+#         stop-and-turn trajectory on ~predicted_path_topic (/path/predicted)
+#         collides even if the geometric path does not -- dynamics-aware)
+#       ~max_predicted_replans (3; consecutive cap, reset once prediction is clear)
 #   warmup gate: ~min_free_cells_to_plan (80; 0 disables)
 # ============================================================================

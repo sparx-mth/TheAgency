@@ -107,8 +107,20 @@
   <arg name="vel_x"                  default="0.3" />
   <arg name="yaw_rate"               default="0.7" />
   <arg name="pos_acquisition_radius" default="0.3" />
-  <arg name="yaw_acquisition_radius" default="0.2" />
-  <arg name="yaw_lead_pct"           default="10.0" />
+  <arg name="yaw_acquisition_radius" default="0.2" /><!-- now LIVE: cross-track tolerance (m) for the gentle predictive ADVANCE gate (was previously read by nobody) -->
+  <arg name="yaw_lead_pct"           default="10.0" /><!-- deprecated (unused by the pulse->settle yaw loop); kept for config compatibility -->
+
+  <!-- Yaw: pulse -> settle -> re-measure (slow turn, strong inertia, jumpy yaw) -->
+  <arg name="yaw_settle_dwell_s"  default="0.8" /><!-- dwell (s) after a burst coasts to a stop so AprilTag yaw re-converges before re-measuring -->
+  <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
+  <arg name="yaw_burst_min_ticks" default="2" /><!-- min burst length in ctrl ticks (deadband floor so a burst always rotates) -->
+  <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
+
+  <!-- Trajectory prediction (rollout of the follower) -> /path/predicted + score -->
+  <arg name="predict_hz"          default="2.0" />
+  <arg name="predict_horizon_s"   default="30.0" />
+  <arg name="predict_yaw_tau_s"   default="0.5" /><!-- yaw inertia time constant used by the prediction motion model -->
+  <arg name="predict_vx_tau_s"    default="0.3" />
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
@@ -116,7 +128,7 @@
   <arg name="unknown_blocked"       default="false" />
   <arg name="unknown_cost"          default="1.0" />
   <arg name="los_smoothing"         default="true" />
-  <arg name="turn_penalty"          default="0.0" />
+  <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
   <arg name="start_skip_m"          default="0.4" />
@@ -126,6 +138,21 @@
   <arg name="replan_on_bev"         default="true" />
   <arg name="replan_period_s"       default="0.0" />
   <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
+
+  <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
+       into two half-angle turns, so the stop-and-turn follower can glide through
+       them instead of stopping to yaw. -->
+  <arg name="corner_round"           default="true" />
+  <arg name="corner_merge_deg"       default="8.0" /><!-- drop interior vertices that turn less than this -->
+  <arg name="corner_max_turn_deg"    default="14.0" /><!-- corners gentler than this are already glide-able (pair with skip_yaw_thresh) -->
+  <arg name="corner_chamfer_max_deg" default="28.0" /><!-- corners up to this are chamfered; sharper ones kept as genuine turns -->
+  <arg name="corner_chamfer_dist_m"  default="0.5" />
+  <arg name="corner_min_runup_m"     default="0.6" />
+
+  <!-- Dynamics-aware replan: replan when the follower's PREDICTED stop-and-turn
+       trajectory (/path/predicted) collides even if the geometric path does not. -->
+  <arg name="replan_on_predicted_collision" default="true" />
+  <arg name="max_predicted_replans"         default="3" />
 
   <!-- ══════════════════════════════════════════════════════════════
        NavDP (point-goal policy) — REPLACES A* when use_navdp:=true.
@@ -409,6 +436,15 @@
     <param name="replan_on_bev"         value="$(arg replan_on_bev)" />
     <param name="replan_period_s"       value="$(arg replan_period_s)" />
     <param name="replan_collision_confirm" value="$(arg replan_collision_confirm)" />
+    <param name="corner_round"          value="$(arg corner_round)" />
+    <param name="corner_merge_deg"      value="$(arg corner_merge_deg)" />
+    <param name="corner_max_turn_deg"   value="$(arg corner_max_turn_deg)" />
+    <param name="corner_chamfer_max_deg" value="$(arg corner_chamfer_max_deg)" />
+    <param name="corner_chamfer_dist_m" value="$(arg corner_chamfer_dist_m)" />
+    <param name="corner_min_runup_m"    value="$(arg corner_min_runup_m)" />
+    <param name="replan_on_predicted_collision" value="$(arg replan_on_predicted_collision)" />
+    <param name="max_predicted_replans" value="$(arg max_predicted_replans)" />
+    <param name="predicted_path_topic"  value="/path/predicted" />
     <param name="frame_id"              value="world" />
   </node>
 
@@ -443,6 +479,16 @@
     <param name="pos_acquisition_radius" value="$(arg pos_acquisition_radius)" />
     <param name="yaw_acquisition_radius" value="$(arg yaw_acquisition_radius)" />
     <param name="yaw_lead_pct"           value="$(arg yaw_lead_pct)" />
+    <param name="yaw_settle_dwell_s"     value="$(arg yaw_settle_dwell_s)" />
+    <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
+    <param name="yaw_burst_min_ticks"    value="$(arg yaw_burst_min_ticks)" />
+    <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
+    <param name="predict_hz"             value="$(arg predict_hz)" />
+    <param name="predict_horizon_s"      value="$(arg predict_horizon_s)" />
+    <param name="predict_yaw_tau_s"      value="$(arg predict_yaw_tau_s)" />
+    <param name="predict_vx_tau_s"       value="$(arg predict_vx_tau_s)" />
+    <param name="predicted_path_topic"   value="/path/predicted" />
+    <param name="predicted_score_topic"  value="/path/predicted_score" />
     <param name="auto_takeoff"           value="$(arg auto_takeoff)" />
     <param name="cruise_z"               value="$(arg cruise_z)" />
     <param name="use_posctrl"            value="$(arg use_posctrl)" />

@@ -27,6 +27,7 @@ from sparx_agency.core.planning.interfaces.planner import PlanRequest
 
 from .params import WeightedAStarParams
 from .algorithm_2d import astar_cost_grid_2d
+from ..common.corner_rounding_2d import round_corners_2d
 from ..common.grid_geometry_2d import (
     dilate_mask,
     line_of_sight_clear,
@@ -156,6 +157,10 @@ class WeightedAStarPlanner2D:
             cells = los_smooth_cells(cells, occ)
 
         pts = [Pose2D(*world.grid_to_world(cx, cy)) for cx, cy in cells]
+        # Round corners BEFORE splitting: chamfering needs the true leg lengths,
+        # which segment-splitting would hide behind collinear midpoints.
+        if p.corner_round:
+            pts = round_corners_2d(pts, p, clear_fn=self._clear_fn(world, occ))
         pts = split_long_segments_2d(pts, p.waypoint_spacing_m)
         pts = self._trim_start(pts, request.start, p.start_skip_m)
         if len(pts) < 2:
@@ -210,6 +215,24 @@ class WeightedAStarPlanner2D:
         ymin = max(0, min(sy, gy) - margin)
         ymax = min(h, max(sy, gy) + margin + 1)
         return xmin, xmax, ymin, ymax
+
+    @staticmethod
+    def _clear_fn(world: OccupancyGrid2D, occ: np.ndarray):
+        """Closure ``(a, b) -> bool``: is the world segment a->b obstacle-free?
+
+        Lets the ROS-free corner rounder reject a cut that would clip an
+        obstacle, without it knowing anything about the grid.
+        """
+        h, w = occ.shape
+
+        def clear(a: Pose2D, b: Pose2D) -> bool:
+            x0, y0 = world.world_to_grid(a.x, a.y)
+            x1, y1 = world.world_to_grid(b.x, b.y)
+            if not (0 <= x0 < w and 0 <= y0 < h and 0 <= x1 < w and 0 <= y1 < h):
+                return False
+            return line_of_sight_clear(occ, x0, y0, x1, y1)
+
+        return clear
 
     @staticmethod
     def _trim_start(

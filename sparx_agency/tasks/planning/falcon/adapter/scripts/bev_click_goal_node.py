@@ -3,8 +3,11 @@
 bev_click_goal_node.py -- interactive 2D BEV viewer with click-to-navigate.
 
 A matplotlib window (NOT RViz) showing the published BEV grid plus the drone
-pose, the current planned path, and the last clicked goal:
+pose, the current planned path, the predicted drone trajectory, and the last
+clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
+    blue path = planned (A*/NavDP)   orange dashed = predicted (stop-and-turn)
+The title shows the predicted-trajectory quality score (0..1) when available.
 
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
 picks it up, replans, and the new path is drawn within one BEV update. This node
@@ -17,6 +20,8 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
 
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
   in   ~path_topic (Path)           /path/waypoints
+  in   ~predicted_path_topic (Path) /path/predicted
+  in   ~predicted_score_topic (Float32) /path/predicted_score
   in   ~drone_ns + /gt_pose (Pose)
   in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/april_tag_pose
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
@@ -37,6 +42,7 @@ from matplotlib.animation import FuncAnimation
 
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
+from std_msgs.msg import Float32
 
 from sparx_agency.core.common.math import se3
 
@@ -50,6 +56,9 @@ class BevClickGoalNode:
         self.drone_ns = G("~drone_ns", "")
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
         self.path_topic = G("~path_topic", "/path/waypoints")
+        self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
+        self.predicted_score_topic = G("~predicted_score_topic",
+                                       "/path/predicted_score")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.pose_stamped_topic = G("~pose_stamped_topic", "")
         self.refresh_hz = float(G("~refresh_hz", 5.0))
@@ -64,6 +73,8 @@ class BevClickGoalNode:
         # Latest data + lock for cross-thread (ROS callbacks vs render) access
         self._bev = None
         self._path_xy = []
+        self._pred_xy = []              # predicted drone trajectory (rollout)
+        self._pred_score = None         # 0..1 "how good" score
         self._drone_p = None            # (x, y, yaw)
         self._goal_xy = None
         self._lock = threading.Lock()
@@ -71,6 +82,9 @@ class BevClickGoalNode:
         self.goal_pub = rospy.Publisher(self.goal_topic, Point, queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.path_topic, Path, self._path_cb, queue_size=1)
+        rospy.Subscriber(self.predicted_path_topic, Path, self._pred_cb, queue_size=1)
+        rospy.Subscriber(self.predicted_score_topic, Float32, self._pred_score_cb,
+                         queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         if self.pose_stamped_topic:
             rospy.Subscriber(self.pose_stamped_topic, PoseStamped,
@@ -87,7 +101,7 @@ class BevClickGoalNode:
         self.ax.grid(True, alpha=0.25)
 
         # Persistent artists (created lazily, updated in place)
-        self._im = self._path_line = None
+        self._im = self._path_line = self._pred_line = None
         self._drone_dot = self._drone_arrow = self._goal_marker = None
         self._limits_set = False        # axes window fixed on first render
 
@@ -111,6 +125,15 @@ class BevClickGoalNode:
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._path_xy = pts
+
+    def _pred_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._pred_xy = pts
+
+    def _pred_score_cb(self, msg):
+        with self._lock:
+            self._pred_score = float(msg.data)
 
     def _pose_cb(self, msg):
         o = msg.orientation
@@ -141,6 +164,7 @@ class BevClickGoalNode:
         with self._lock:
             bev, path = self._bev, list(self._path_xy)
             drone, goal = self._drone_p, self._goal_xy
+            pred, score = list(self._pred_xy), self._pred_score
 
         # Map background (optional): the drone is still drawn without it, so a
         # bridge+bag run with no bev_publisher up still shows where the drone is.
@@ -173,11 +197,14 @@ class BevClickGoalNode:
             self._limits_set = True
 
         if goal is not None:
-            self.ax.set_title("current goal: (%.2f, %.2f)" % goal)
+            title = "current goal: (%.2f, %.2f)" % goal
         elif bev is None:
-            self.ax.set_title("no BEV map yet -- showing drone pose only")
+            title = "no BEV map yet -- showing drone pose only"
         else:
-            self.ax.set_title("Left-click anywhere to set navigation goal")
+            title = "Left-click anywhere to set navigation goal"
+        if score is not None:
+            title += "   |  predicted quality: %.2f" % score
+        self.ax.set_title(title)
 
         # Path overlay
         if self._path_line is not None:
@@ -188,6 +215,16 @@ class BevClickGoalNode:
             self._path_line, = self.ax.plot(xs, ys, "-o", color="deepskyblue",
                                             linewidth=2.0, markersize=4,
                                             alpha=0.9, zorder=3)
+
+        # Predicted trajectory overlay: the path the drone will ACTUALLY fly given
+        # its stop-and-turn dynamics (orange dashed), vs the planned path (blue).
+        if self._pred_line is not None:
+            self._pred_line.remove()
+            self._pred_line = None
+        if len(pred) >= 2:
+            pxs, pys = [p[0] for p in pred], [p[1] for p in pred]
+            self._pred_line, = self.ax.plot(pxs, pys, "--", color="darkorange",
+                                            linewidth=2.0, alpha=0.9, zorder=4)
 
         # Drone marker + heading arrow
         for artist in ("_drone_dot", "_drone_arrow"):
