@@ -41,13 +41,13 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
-_PY = os.path.expanduser("~/venvs/ros_py310/bin/python")
+_PY = os.path.expanduser("~/GIT/TheAgency/venv/bin/python")
 _RVIZ = os.path.join(os.path.dirname(__file__),
                      "../../tasks/mapping/ros2/rgbd_mapping.rviz")
 
 _DEFAULT_CONFIG = os.path.expanduser(
     "~/GIT/TheAgency/sparx_agency/robots/XTEND/config"
-    "/camera_xtend_ros_calib_720_420.yaml"
+    "/camera_xtend_crop_504_280.yaml"
 )
 _DEFAULT_TAG_MAP = os.path.expanduser(
     "~/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml"
