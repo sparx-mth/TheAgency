@@ -1,0 +1,145 @@
+"""
+BevProjector -- collapse FALCON's 3D voxel map into a clean 2D BEV grid.
+
+FALCON publishes an already temporally-fused voxel map as two point clouds of
+voxel centres in the world frame: occupied and known-free. The job here is
+therefore purely SPATIAL (no raytracing, no log-odds, no sensor origin): turn
+those voxels into an OccupancyGrid-valued 2D grid the planner can use, while
+rejecting the monocular-depth speckle that FALCON's threshold lets through.
+
+Pipeline (each stage is gated by BevConfig; disable one to isolate it):
+  1. column projection   height-weighted occupied mass per (x,y) column
+  2. 3D neighbour confirm drop isolated occupied voxels (floaters)
+  3. door protection      keep openings free where the flight band is clear
+  4. wall completion      bridge one-cell gaps in continuous walls
+  5. temporal hysteresis  optional Schmitt filter over frames (off by default)
+  6. compose              OCC > FREE > UNK, then stamp caller `force_occ` cells
+  7. dilate               optional safety inflation (force_occ cells seed it too)
+
+Output matches the costmap convention: (GridSpec, int8 (H,W)) with values
+{UNKNOWN:-1, FREE:0, OCCUPIED:100}. The projector is STATELESS across calls
+EXCEPT when cfg.temporal_filter is on, in which case it holds the small
+per-cell evidence accumulator -- FALCON otherwise owns the temporal fusion.
+
+`force_occ` lets the caller stamp hard, env-specific obstacles (manual walls,
+a virtual back-wall from /map_config) as OCCUPIED after compose and before
+dilation, exactly as the legacy node did -- so those cells inflate with the
+rest. Keeping it a generic mask keeps map-specific knowledge out of core.
+
+NB: this deliberately does NOT implement the Costmap ABC. That interface
+models incremental single-sensor integration
+(update_from_cloud(cloud, sensor_origin)); BEV consumes a pre-fused
+occupied+free voxel pair in one shot, so the contract genuinely differs.
+"""
+from __future__ import annotations
+
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+
+from sparx_agency.core.mapping.interfaces.costmap import GridSpec
+from .config import BevConfig
+from .lattice import BevLattice
+from . import morphology as morph
+
+UNKNOWN, FREE, OCCUPIED = -1, 0, 100
+
+
+class BevProjector:
+    """Stateless 3D-voxel -> 2D-occupancy projector."""
+
+    def __init__(self, cfg: BevConfig):
+        self.cfg = cfg
+        self.lattice = BevLattice(cfg)
+        self.last_stats: Dict[str, int] = {}
+        # temporal-hysteresis state (used only when cfg.temporal_filter)
+        self._ev = np.zeros((self.lattice.H, self.lattice.W), np.float32)
+        self._occ_state = np.zeros((self.lattice.H, self.lattice.W), bool)
+
+    def project(self, occupied_xyz: np.ndarray, free_xyz: np.ndarray,
+                force_occ: Optional[np.ndarray] = None
+                ) -> Tuple[GridSpec, np.ndarray]:
+        """
+        Args:
+            occupied_xyz: (N,3) occupied voxel centres in the world frame.
+            free_xyz:     (M,3) known-free voxel centres in the world frame.
+            force_occ:    optional (H,W) bool mask of cells to force OCCUPIED
+                          after compose and before dilation (e.g. manual walls).
+        Returns:
+            (spec, grid_int8) with grid shape (H,W) and values {-1, 0, 100}.
+        """
+        cfg, lat = self.cfg, self.lattice
+        occ_xyz, free_xyz = _as_xyz(occupied_xyz), _as_xyz(free_xyz)
+
+        # 1) 3D occupied volume (+ optional neighbour confirm to kill floaters)
+        vol = lat.occupied_volume(occ_xyz)
+        n_raw = int(vol.sum())
+        if cfg.confirm_3d and n_raw:
+            vol &= morph.count_neighbors_3d(vol, cfg.neighbors_3d) >= cfg.min_occ_neighbors_3d
+        n_conf = int(vol.sum())
+
+        # 2) height-weighted column projection
+        occ_w = np.tensordot(lat.z_weights, vol.astype(np.float32), axes=([0], [0]))
+        occ_c = vol.sum(axis=0).astype(np.int32)
+        occ_band = (vol[lat.band_idx].sum(axis=0).astype(np.int32)
+                    if lat.band_idx.size else np.zeros_like(occ_c))
+        base_occ = (occ_w >= cfg.occ_weight_thresh) & (occ_c >= cfg.min_occ_voxels)
+
+        # 3) free evidence (whole column + flight band)
+        free_c = lat.column_count(free_xyz)
+        free_band = lat.column_count(free_xyz,
+                                     cfg.z_peak - 0.5 * cfg.door_band_m,
+                                     cfg.z_peak + 0.5 * cfg.door_band_m)
+        observed_free = free_c >= cfg.min_free_voxels
+
+        # 4) door / window protection: open at flight height => force FREE
+        protected = np.zeros_like(base_occ)
+        if cfg.protect_openings:
+            protected = (base_occ & (free_band >= cfg.door_free_voxels)
+                         & (occ_band <= cfg.door_occ_tol))
+            base_occ &= ~protected
+
+        # 5) wall completion (fill UNKNOWN gaps only, never free/openings)
+        occ, n_fill = morph.bridge_fill(
+            base_occ, observed_free | protected,
+            mode=cfg.wall_fill_mode, n_neighbors=cfg.wall_fill_neighbors,
+            iters=cfg.wall_fill_iters)
+
+        # 6) temporal hysteresis (optional, stateful): Schmitt filter on occ
+        if cfg.temporal_filter:
+            self._ev += cfg.t_inc * occ - cfg.t_dec * (observed_free & ~occ)
+            np.clip(self._ev, 0.0, cfg.t_max, out=self._ev)
+            self._occ_state = ((self._occ_state & ~(self._ev <= cfg.t_off))
+                               | (self._ev >= cfg.t_on))
+            occ = self._occ_state.copy()
+
+        # 7) compose label grid (OCC > FREE > UNK), keep openings free,
+        #    then stamp caller-forced obstacles (manual/back walls) as OCC
+        grid = np.full((lat.H, lat.W), UNKNOWN, np.int8)
+        grid[observed_free] = FREE
+        grid[occ] = OCCUPIED
+        grid[protected] = FREE
+        if force_occ is not None and force_occ.any():
+            grid[force_occ] = OCCUPIED
+
+        # 8) optional safety dilation (never seal a protected opening)
+        if cfg.occ_dilate_cells > 0:
+            occ_all = grid == OCCUPIED
+            new = morph.dilate4(occ_all, cfg.occ_dilate_cells) & ~occ_all & ~protected
+            grid[new] = OCCUPIED
+
+        self.last_stats = dict(
+            raw=n_raw, confirmed=n_conf, fill=n_fill,
+            occ=int((grid == OCCUPIED).sum()),
+            free=int((grid == FREE).sum()),
+            unknown=int((grid == UNKNOWN).sum()),
+            openings=int(protected.sum()))
+        return lat.spec(), grid
+
+
+def _as_xyz(pts: np.ndarray) -> np.ndarray:
+    """Coerce to finite (N,3) float32; empty-safe."""
+    if pts is None or len(pts) == 0:
+        return np.empty((0, 3), np.float32)
+    a = np.asarray(pts, np.float32).reshape(-1, 3)
+    return a[np.isfinite(a).all(axis=1)]
