@@ -8,6 +8,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import Vector3Stamped, Twist, PoseStamped 
 from cv_bridge import CvBridge
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
+from sparx_agency.robots.common.image_utils import _finite_mask
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # --- Added imports for concurrency and queue management ---
@@ -304,7 +305,7 @@ class FlowDepthVelocityNode(Node):
         if 0 <= v_idx-half_side and v_idx+half_side+1 <= depth_map.shape[0] and \
            0 <= u_idx-half_side and u_idx+half_side+1 <= depth_map.shape[1]:
             center_region = depth_map[v_idx-half_side : v_idx+half_side+1, u_idx-half_side : u_idx+half_side+1]
-            valid_center_depths = center_region[np.isfinite(center_region) & (center_region > 0)]
+            valid_center_depths = center_region[_finite_mask(center_region)]
             if valid_center_depths.size > 0:
                 self.center_depth = np.mean(valid_center_depths) * self.depth_scale
 
