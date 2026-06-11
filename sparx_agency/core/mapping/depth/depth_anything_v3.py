@@ -3,7 +3,6 @@ import time
 import cv2
 import numpy as np
 import tensorrt as trt
-import pycuda.autoinit
 import pycuda.driver as cuda
 
 from sparx_agency.core.mapping.interfaces.depth_model import DepthModel
