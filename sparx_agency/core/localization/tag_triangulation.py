@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from sparx_agency.robots.common.spatial_math import (
+from sparx_agency.core.common.spatial_math import (
     rpy_to_transform,
     rot_to_quat,
     rot_to_rpy,
