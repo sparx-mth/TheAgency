@@ -53,6 +53,7 @@ class VelocityIntegratorNode(Node):
         self.declare_parameter("publish_pose_topic", "/flow_depth/pose_est")
         
         self.declare_parameter("init_from_gt", True)
+        self.declare_parameter("gt_topic", "")
         self.declare_parameter("min_dt", 1e-3)
         self.declare_parameter("max_dt", 2.0)
         self.declare_parameter("gt_max_time_diff", 1.05)
@@ -68,6 +69,7 @@ class VelocityIntegratorNode(Node):
         bearing_topic = self.get_parameter("bearing_topic").value
         
         self.init_from_gt = bool(self.get_parameter("init_from_gt").value)
+        gt_topic = self.get_parameter("gt_topic").value
         self.min_dt = float(self.get_parameter("min_dt").value)
         self.max_dt = float(self.get_parameter("max_dt").value)
         self.gt_max_time_diff = float(self.get_parameter("gt_max_time_diff").value)
@@ -121,7 +123,7 @@ class VelocityIntegratorNode(Node):
             10
         )
 
-        if self.init_from_gt:
+        if self.init_from_gt and gt_topic:
             self.gt_sub = self.create_subscription(Pose, gt_topic, self.gt_pose_cb, image_qos)
 
     def bearing_cb(self, msg: Float32):
