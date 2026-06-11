@@ -11,10 +11,8 @@ import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
-from sparx_agency.core.localization.tag_azimuth_estimator import (
-    TagAzimuthEstimator,
-    TagObservation,
-)
+from sparx_agency.core.localization.tag_azimuth_estimator import TagAzimuthEstimator
+from sparx_agency.core.localization.types.tag_azimuth import TagBearingObservation
 from datetime import datetime
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     CameraCalib,
@@ -60,7 +58,7 @@ class TagAzimuthOpenCVTask:
     For each input frame:
       - detect tags
       - solvePnP(IPPE) to get tag translation in camera frame (tvec)
-      - convert to TagObservation and run TagAzimuthEstimator
+      - convert to TagBearingObservation and run TagAzimuthEstimator
     """
 
     def __init__(
@@ -123,7 +121,7 @@ class TagAzimuthOpenCVTask:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         dets = self.detector.detect(gray)
 
-        observations: list[TagObservation] = []
+        observations: list[TagBearingObservation] = []
         print(f"Detected {len(dets)} tags in image.")
         for d in dets:
             print(f"Detected tag id={d.tag_id}")

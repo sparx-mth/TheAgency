@@ -1,0 +1,48 @@
+# prison_instructions.yaml
+# 20 prison-themed navigation instructions for testing InternVLA-N1 (InternNav) in a prison-like environment.
+# Usage idea (ROS2 Foxy, in container):
+#   ros2 topic pub -1 /R1/navigation/instruction std_msgs/msg/String "{data: '<instruction>'}"
+
+scenario: "prison"
+language: "en"
+instructions:
+  - id: 1
+    text: "Enter the prison cell located on your left and stop once you reach the cell."
+  - id: 2
+    text: "Go into the nearest open cell and search inside."
+  - id: 3
+    text: "Enter the prison cell located on your right and stop once you reach the cell."
+  - id: 4
+    text: "Move forward until you reach an intersection, then turn left."
+  - id: 5
+    text: "Exit the room and find the weapon."
+  - id: 6
+    text: "Continue straight to the end of the hallway and then enter the room on the right."
+  - id: 7
+    text: "Go to the end of the corridor, then turn around and return to where you started."
+  - id: 8
+    text: "Exit the room, turn right, go to the end of the hallway and enter the room on the left."
+  - id: 9
+    text: "Approach the barred gate ahead and stop before reaching it."
+  - id: 10
+    text: "Go through the door and look for the cone."
+  - id: 11
+    text: "Go through the door and look for the iron bars."
+  - id: 12
+    text: "Enter the door and then look for the blue barrel."
+  - id: 13
+    text: "Take the next right opening you see and go inside."
+  - id: 14
+    text: "Scan the area for a doorway, then move toward it and enter."
+  - id: 15
+    text: "Explore the area ahead, then turn left and continue exploring."
+  - id: 16
+    text: "Go into a small room nearby and look around as if searching for keys."
+  - id: 17
+    text: "Move along the corridor and avoid getting too close to walls or obstacles."
+  - id: 18
+    text: "Enter the left cell, check the corners, then stop."
+  - id: 19
+    text: "Walk forward, turn right at the next opportunity, and continue forward."
+  - id: 20
+    text: "Find an open space, move into it, and explore until you decide to stop."

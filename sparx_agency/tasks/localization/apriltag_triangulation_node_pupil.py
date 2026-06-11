@@ -47,7 +47,7 @@ from cv_bridge import CvBridge
 
 from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
-    TagObservation,
+    TagTransformObservation,
     estimate_camera_pose_from_tags,
     transform_to_pose,
     #print_transform_debug,
@@ -255,7 +255,7 @@ class TagTriangulationOpenCVTask:
                 tag_size=self.tag_size_m
             )
 
-            observations: List[TagObservation] = []
+            observations: List[TagTransformObservation] = []
             detections_info = []
 
             for d in dets:
@@ -299,7 +299,7 @@ class TagTriangulationOpenCVTask:
               # print_transform_debug("camera_T_tag from pupil_apriltags", camera_T_tag)
                # print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
 
-                observations.append(TagObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
+                observations.append(TagTransformObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
                 
                 area = float(cv2.contourArea(corners.astype(np.float32)))
                 detections_info.append(

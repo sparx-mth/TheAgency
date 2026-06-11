@@ -14,10 +14,8 @@ from std_msgs.msg import Float32
 import tf2_ros
 from tf2_ros import TransformException
 
-from sparx_agency.core.localization.tag_azimuth_estimator import (
-    TagAzimuthEstimator,
-    TagObservation,
-)
+from sparx_agency.core.localization.tag_azimuth_estimator import TagAzimuthEstimator
+from sparx_agency.core.localization.types.tag_azimuth import TagBearingObservation
 
 
 class TagAzimuthNode(Node):
@@ -151,7 +149,7 @@ class TagAzimuthNode(Node):
     # Main loop
     # --------------------
     def _on_timer(self):
-        observations: List[TagObservation] = []
+        observations: List[TagBearingObservation] = []
         last_err: Optional[Exception] = None
 
         for tag_id in self.estimator.known_tag_ids:
@@ -173,7 +171,7 @@ class TagAzimuthNode(Node):
 
             # If tz is ~0, atan2 might still be defined, but can be noisy.
             # We keep it and let core handle edge cases.
-            observations.append(TagObservation(tag_id=tag_id, tx=tx, tz=tz))
+            observations.append(TagBearingObservation(tag_id=tag_id, tx=tx, tz=tz))
 
         if not observations:
             self.get_logger().warn(

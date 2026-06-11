@@ -38,10 +38,12 @@ import yaml
 from pupil_apriltags import Detector
 
 from sparx_agency.core.localization.tag_triangulation import (
-    TagWorldPose,
-    TagObservation,
     estimate_camera_pose_from_tags,
     transform_to_pose,
+)
+from sparx_agency.core.localization.types.tag_triangulation import (
+    TagWorldPose,
+    TagTransformObservation,
 )
 
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
@@ -187,7 +189,7 @@ class TagTriangulationOpenCVTask:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             dets = self.detector.detect(gray)
 
-            observations: List[TagObservation] = []
+            observations: List[TagTransformObservation] = []
             detections_info = []
 
             for d in dets:
@@ -211,7 +213,7 @@ class TagTriangulationOpenCVTask:
                 cam_T_tag = invert_T(tag_T_cam)
 
                 # IMPORTANT: feed the inverted matrix (cam_T_tag)
-                observations.append(TagObservation(tag_id=tag_id, cam_T_tag=cam_T_tag))
+                observations.append(TagTransformObservation(tag_id=tag_id, cam_T_tag=cam_T_tag))
 
                 area = float(cv2.contourArea(corners.astype(np.float32)))
                 detections_info.append(

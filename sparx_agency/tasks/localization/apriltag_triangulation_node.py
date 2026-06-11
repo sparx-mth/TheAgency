@@ -47,7 +47,7 @@ from cv_bridge import CvBridge
 
 from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
-    TagObservation,
+    TagTransformObservation,
     estimate_camera_pose_from_tags,
     matrix_to_pose,
     print_transform_debug,
@@ -294,7 +294,7 @@ class TagTriangulationOpenCVTask:
 
                 dets = self.detector.detect(gray)
 
-                observations: List[TagObservation] = []
+                observations: List[TagTransformObservation] = []
                 detections_info = []
 
                 for d in dets:
@@ -325,7 +325,7 @@ class TagTriangulationOpenCVTask:
                     area = float(cv2.contourArea(corners.astype(np.float32)))
 
                     # Append observation with the calculated weight
-                    observations.append(TagObservation(
+                    observations.append(TagTransformObservation(
                         tag_id=tag_id,
                         cam_T_tag=camera_T_tag,
                         weight=area
