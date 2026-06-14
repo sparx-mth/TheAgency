@@ -185,6 +185,20 @@ class WaypointFollowerNode:
         self._node_start_t = rospy.Time.now()
         self.dt = 1.0 / self.ctrl_rate_hz
 
+        # Command-commitment on the twist sent to the drone: each motion command
+        # (a turn, or forward) must be emitted at least ~cmd_commit_ticks times in
+        # a row before switching to a different command -- a single-tick command
+        # can't overcome the motor deadband, so the drone would ignore a lone turn
+        # then stop. A premature switch re-emits the under-committed motion until
+        # it reaches the floor, then the new command takes effect. The command
+        # "category" is the sign of (vx, wz); (0,0) is a stop and is never held.
+        # Applies to both FALCON and NavDP (both flow through this follower).
+        self.cmd_commit_ticks = int(G("~cmd_commit_ticks", 2))
+        self.cmd_stop_eps = float(G("~cmd_stop_eps", 1e-3))
+        self._cmd_cat = None          # last emitted command category (sx, sz)
+        self._cmd_run = 0             # consecutive emits of that category
+        self._cmd_vx = self._cmd_wz = 0.0   # last motion twist, repeated if held
+
         # ── Topics ──
         self.t_cmd_vel = self.drone_ns + "/cmd_vel"
         self.t_takeoff = self.drone_ns + "/takeoff"
@@ -440,6 +454,23 @@ class WaypointFollowerNode:
     def _publish_twist(self, vx, wz):
         """Assemble the Twist. linear.y = linear.z = 0 are hardwired here; the
         core has already enforced the invariant, saturated and slew-limited."""
+        # Command-commitment (see __init__): emit each motion >=cmd_commit_ticks
+        # times before switching, repeating an under-committed motion so a lone
+        # 1-tick turn/forward can't be followed straight into a stop.
+        eps = self.cmd_stop_eps
+        cat = (0 if abs(vx) < eps else (1 if vx > 0 else -1),
+               0 if abs(wz) < eps else (1 if wz > 0 else -1))
+        if cat == self._cmd_cat:
+            self._cmd_run += 1
+        elif (self._cmd_cat not in (None, (0, 0))
+              and self._cmd_run < self.cmd_commit_ticks):
+            vx, wz, cat = self._cmd_vx, self._cmd_wz, self._cmd_cat  # hold motion
+            self._cmd_run += 1
+        else:
+            self._cmd_cat, self._cmd_run = cat, 1
+        if cat != (0, 0):
+            self._cmd_vx, self._cmd_wz = vx, wz   # remember motion twist to repeat
+
         m = Twist()
         m.linear.x = vx
         m.linear.y = 0.0  # HARDWIRED -- no lateral movement, ever

@@ -115,6 +115,8 @@
   <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
   <arg name="yaw_burst_max_deg"   default="25.0" /><!-- per-burst increment: a big turn (e.g. 80deg) is split into ~25deg chunks, each followed by a stop + voxel update + re-measure, not one open-loop sweep -->
   <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
+  <arg name="cmd_commit_ticks"    default="2" /><!-- output guarantee: a stop (zero twist) never reaches the drone until the motion ran >=this many ticks; a lone motion->stop is held to the floor first -->
+  <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
 
   <!-- Trajectory prediction (rollout of the follower) -> /path/predicted + score -->
@@ -493,6 +495,8 @@
     <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
     <param name="yaw_burst_max_deg"      value="$(arg yaw_burst_max_deg)" />
     <param name="min_motion_ticks"       value="$(arg min_motion_ticks)" />
+    <param name="cmd_commit_ticks"       value="$(arg cmd_commit_ticks)" />
+    <param name="cmd_stop_eps"           value="$(arg cmd_stop_eps)" />
     <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
     <param name="predict_hz"             value="$(arg predict_hz)" />
     <param name="predict_horizon_s"      value="$(arg predict_horizon_s)" />
