@@ -103,6 +103,7 @@ class WaypointFollower:
         *,
         axis_confirmed: bool = True,
         hold: bool = False,
+        map_ready: bool = True,
     ) -> FollowerCommand:
         """Advance the state machine one tick and return the command.
 
@@ -114,6 +115,11 @@ class WaypointFollower:
                 transition.
             hold: External request to suppress all motion (e.g. a startup hold).
                 Same effect as an unconfirmed axis.
+            map_ready: Whether a fresh map/voxel update has been integrated since
+                the current stop began. While False, YAW_SETTLE keeps dwelling
+                (stopped, sensors live) and will NOT start the next rotation, so
+                the map always reflects post-stop data before the drone moves on.
+                The adapter supplies this (and a timeout); defaults True.
         """
         gating = hold or (self.required_axis() is not None and not axis_confirmed)
         if gating:
@@ -123,7 +129,7 @@ class WaypointFollower:
         if self._state == FollowerState.YAW_ALIGN:
             return self._step_yaw_align(pose, dt)
         if self._state == FollowerState.YAW_SETTLE:
-            return self._step_yaw_settle(pose, dt)
+            return self._step_yaw_settle(pose, dt, map_ready)
         if self._state == FollowerState.ADVANCE:
             return self._step_advance(pose, dt)
         if self._state == FollowerState.BRAKE:
@@ -178,9 +184,13 @@ class WaypointFollower:
         self._burst_ticks += 1
         return self._emit(cmd, freeze=True)
 
-    def _step_yaw_settle(self, pose: Pose2D, dt: float) -> FollowerCommand:
+    def _step_yaw_settle(self, pose: Pose2D, dt: float,
+                         map_ready: bool) -> FollowerCommand:
         """Coast to a stop (frozen, dwell clock held), then dwell in place (live)
-        collecting heading samples; hand a robust estimate back to YAW_ALIGN."""
+        collecting heading samples. Leaves only once the dwell has elapsed AND a
+        fresh map update has landed (``map_ready``), so the map reflects
+        post-stop data before the next rotation; hands a robust heading estimate
+        back to YAW_ALIGN."""
         p = self.params
         cmd = self._finalize(0.0, 0.0, dt)  # keep slewing wz -> 0
         if abs(self._last_wz) >= p.yaw_settle_eps:
@@ -189,7 +199,7 @@ class WaypointFollower:
             return self._emit(cmd, freeze=True)
         self._settle_unfrozen_s += dt
         self._settle_yaws.append(pose.yaw)
-        if self._settle_unfrozen_s >= p.yaw_settle_dwell_s:
+        if self._settle_unfrozen_s >= p.yaw_settle_dwell_s and map_ready:
             yaw = alg.circular_mean(self._settle_yaws)
             self._settled_pose = Pose2D(pose.x, pose.y, yaw)
             self._enter(FollowerState.YAW_ALIGN, self._settled_pose)

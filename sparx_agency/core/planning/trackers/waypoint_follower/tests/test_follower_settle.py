@@ -86,10 +86,12 @@ def test_burst_then_settle_then_advance_sequence():
     assert FollowerState.ADVANCE in states
     # The first YAW_SETTLE must come before the first ADVANCE.
     assert states.index(FollowerState.YAW_SETTLE) < states.index(FollowerState.ADVANCE)
-    # Each completed burst ends by entering YAW_SETTLE; expect a bounded number.
+    # A 90 deg turn is split into ~25 deg increments (yaw_burst_max_rad), so it
+    # takes several bursts, each ending by entering YAW_SETTLE (stop + voxel
+    # update + re-measure). Expect more than one, but a bounded number.
     bursts = sum(1 for a, b in zip(states[:-1], states[1:])
                  if a == FollowerState.YAW_ALIGN and b == FollowerState.YAW_SETTLE)
-    assert 1 <= bursts <= 2, bursts
+    assert 2 <= bursts <= 8, bursts
 
 
 def test_open_loop_burst_ignores_mid_rotation_pose():
@@ -140,6 +142,32 @@ def test_yaw_settle_coast_freezes_then_dwell_unfreezes():
             left_settle = True
             break
     assert saw_coast_freeze and saw_dwell_unfreeze and left_settle
+
+
+def test_yaw_settle_blocks_until_map_ready():
+    """YAW_SETTLE will not start the next rotation until map_ready is True, even
+    after the dwell elapses -- so the drone never moves on stale, pre-stop voxels."""
+    f = WaypointFollower()
+    f.set_path([Pose2D(0, 0), Pose2D(0, 6)], Pose2D(0, 0, 0.0))
+    yaw = 0.0
+    for _ in range(80):
+        c = f.step(Pose2D(0, 0, yaw), DT)
+        yaw = normalize_angle(yaw + c.wz * DT)
+        if f.state == FollowerState.YAW_SETTLE:
+            break
+    assert f.state == FollowerState.YAW_SETTLE
+    # Dwell far past yaw_settle_dwell_s with no map update: must stay settling.
+    for _ in range(40):
+        f.step(Pose2D(0, 0, yaw), DT, map_ready=False)
+    assert f.state == FollowerState.YAW_SETTLE
+    # Once the map update lands, it may continue.
+    left = False
+    for _ in range(10):
+        f.step(Pose2D(0, 0, yaw), DT, map_ready=True)
+        if f.state != FollowerState.YAW_SETTLE:
+            left = True
+            break
+    assert left
 
 
 def test_gentle_gate_advances_close_enough():

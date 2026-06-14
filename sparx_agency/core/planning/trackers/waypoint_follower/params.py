@@ -56,8 +56,11 @@ class WaypointFollowerParams:
             forward advance lasts at least this many ticks (default 2). Set 1 to
             disable.
         yaw_burst_max_ticks: Hard cap on a single burst (runaway guard).
-        yaw_burst_max_rad: Hard cap on a single open-loop burst angle (rad);
-            larger turns re-measure between bursts.
+        yaw_burst_max_rad: Maximum a single burst will rotate (rad) before
+            stopping to re-measure and let the map update. A large turn is split
+            into several bursts of at most this size -- each followed by a stop +
+            voxel update + re-measure -- instead of one big open-loop sweep. So
+            e.g. an 80 deg turn becomes a few ~25 deg chunks, not one 80 deg burst.
         yaw_coast_rad: Physical yaw the platform keeps sweeping after the burst
             command stops (inertia). The burst aims this much short to land on
             the target instead of overshooting.
@@ -97,7 +100,7 @@ class WaypointFollowerParams:
     yaw_settle_eps: float = 0.05
     min_motion_ticks: int = 2          # min consecutive ticks for forward OR yaw
     yaw_burst_max_ticks: int = 30
-    yaw_burst_max_rad: float = radians(135.0)
+    yaw_burst_max_rad: float = radians(25.0)   # per-burst increment; split big turns
     yaw_coast_rad: float = radians(15.0)
 
     # Gentle predictive ADVANCE gate.

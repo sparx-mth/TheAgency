@@ -113,6 +113,7 @@
   <!-- Yaw: pulse -> settle -> re-measure (slow turn, strong inertia, jumpy yaw) -->
   <arg name="yaw_settle_dwell_s"  default="0.8" /><!-- dwell (s) after a burst coasts to a stop so AprilTag yaw re-converges before re-measuring -->
   <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
+  <arg name="yaw_burst_max_deg"   default="25.0" /><!-- per-burst increment: a big turn (e.g. 80deg) is split into ~25deg chunks, each followed by a stop + voxel update + re-measure, not one open-loop sweep -->
   <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
 
@@ -121,6 +122,14 @@
   <arg name="predict_horizon_s"   default="30.0" />
   <arg name="predict_yaw_tau_s"   default="0.5" /><!-- yaw inertia time constant used by the prediction motion model -->
   <arg name="predict_vx_tau_s"    default="0.3" />
+
+  <!-- Map-settle: at bring-up and during every stop, hold in forward mode and
+       wait for a fresh BEV (voxel) update before moving (turn -> stop -> update
+       voxels -> turn). Proceeds after the timeout if none arrives. -->
+  <arg name="require_map_update"  default="true" />
+  <arg name="map_update_topic"    default="/falcon/bev_2d" /><!-- a fresh msg here = the map advanced -->
+  <arg name="map_wait_timeout_s"  default="3.0" /><!-- proceed anyway if no update lands (never hang) -->
+  <arg name="mapsettle_min_s"     default="0.5" /><!-- min bring-up settle before the first move -->
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
@@ -481,6 +490,7 @@
     <param name="yaw_lead_pct"           value="$(arg yaw_lead_pct)" />
     <param name="yaw_settle_dwell_s"     value="$(arg yaw_settle_dwell_s)" />
     <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
+    <param name="yaw_burst_max_deg"      value="$(arg yaw_burst_max_deg)" />
     <param name="min_motion_ticks"       value="$(arg min_motion_ticks)" />
     <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
     <param name="predict_hz"             value="$(arg predict_hz)" />
@@ -489,6 +499,10 @@
     <param name="predict_vx_tau_s"       value="$(arg predict_vx_tau_s)" />
     <param name="predicted_path_topic"   value="/path/predicted" />
     <param name="predicted_score_topic"  value="/path/predicted_score" />
+    <param name="require_map_update"     value="$(arg require_map_update)" />
+    <param name="map_update_topic"       value="$(arg map_update_topic)" />
+    <param name="map_wait_timeout_s"     value="$(arg map_wait_timeout_s)" />
+    <param name="mapsettle_min_s"        value="$(arg mapsettle_min_s)" />
     <param name="auto_takeoff"           value="$(arg auto_takeoff)" />
     <param name="cruise_z"               value="$(arg cruise_z)" />
     <param name="use_posctrl"            value="$(arg use_posctrl)" />
