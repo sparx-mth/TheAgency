@@ -10,6 +10,8 @@ Classes:
     SafetyStatus: Enum representing the outcome of safety checks.
     TrajectorySafetyParams: Configuration parameters for trajectory validation.
     SafetyCheckResult: Result container for trajectory safety checks.
+    TrajectoryCorrectionParams: Tuning for the potential-field trajectory corrector.
+    TrajectoryCorrectionResult: Result container for trajectory correction.
 
 Example:
     >>> from sparx_agency.core.planning.safety.types import (
@@ -28,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple
+
+import numpy as np
 
 
 class UnknownPolicy(str, Enum):
@@ -170,3 +174,86 @@ class SafetyCheckResult:
 
     first_hit_s: Optional[float] = None
     first_hit_point: Optional[Tuple[float, float, float]] = None
+
+
+@dataclass(frozen=True)
+class TrajectoryCorrectionParams:
+    """
+    Tuning parameters for :class:`TrajectorySafetyCorrector`.
+
+    The corrector nudges trajectory waypoints down the gradient of a repulsive
+    potential field so they drift away from walls and settle near the centre of
+    a corridor (where opposing-wall repulsion cancels). All distances are in
+    metres, in the same metric frame as the field passed to ``set_field``.
+
+    Attributes:
+        iterations: Number of gradient-descent passes over the waypoints.
+            Default: 5.
+        gain: Dimensionless step factor multiplying the (proximity-weighted)
+            field gradient each pass. Larger ⇒ more aggressive correction.
+            The real bound on motion is ``max_step_m``; treat this as a knob.
+            Default: 0.6.
+        step_decay: Per-pass multiplier on the step (``< 1`` anneals motion so
+            later passes only fine-tune). Default: 0.7.
+        max_step_m: Hard cap on how far a single waypoint may move in one pass.
+            Default: 0.25.
+        max_total_shift_m: Hard cap on the *total* displacement of any waypoint
+            from its input position, so the corrector nudges and never
+            replaces the path. Default: 0.6.
+        smoothing_passes: Number of 3-tap (0.25/0.5/0.25) smoothing passes
+            applied after correction to remove kinks. Endpoints are preserved.
+            Default: 2.
+        pin_first_k: Number of leading waypoints held fixed (waypoint 0 is the
+            robot's current pose and must not move). Default: 1.
+        pin_last: If True, the final waypoint is also held fixed (use when it is
+            the hard goal). Default False so the last *visible* waypoint can be
+            centred too. Default: False.
+        u_floor: Waypoints whose sampled potential is below this are considered
+            already clear of walls and left untouched. Default: 1e-3.
+        lateral_only: If True, the per-waypoint push is projected onto the
+            direction perpendicular to the local path tangent, so centring does
+            not slide waypoints fore/aft and corrupt path spacing. Default: True.
+        min_clearance_m: Optional best-effort clearance push. If ``> 0`` and a
+            distance field is supplied, each visible waypoint is pushed toward
+            this distance-to-obstacle along ``+∇D_obs``. Not a hard guarantee:
+            it is bounded by ``max_total_shift_m`` and stalls on distance-field
+            plateaus (corridors narrower than ``2·min_clearance_m`` or cells
+            inside a wall). 0 disables it. Default: 0.0.
+        clearance_iters: Max extra steps used to reach ``min_clearance_m`` per
+            waypoint. Default: 4.
+    """
+
+    iterations: int = 5
+    gain: float = 0.6
+    step_decay: float = 0.7
+    max_step_m: float = 0.25
+    max_total_shift_m: float = 0.6
+    smoothing_passes: int = 2
+    pin_first_k: int = 1
+    pin_last: bool = False
+    u_floor: float = 1e-3
+    lateral_only: bool = True
+    min_clearance_m: float = 0.0
+    clearance_iters: int = 4
+
+
+@dataclass(frozen=True)
+class TrajectoryCorrectionResult:
+    """
+    Result of a :class:`TrajectorySafetyCorrector` pass.
+
+    Attributes:
+        waypoints: ``(N, 2)`` float32 array of corrected ``(x, y)`` waypoints,
+            in the same metric frame as the input.
+        corrected_mask: ``(N,)`` bool array — True where the waypoint actually
+            moved (was visible *and* close enough to a wall to be nudged).
+        visible_mask: ``(N,)`` bool array — True where the waypoint fell inside
+            the observed field (the "what you can see right now" subset).
+            Waypoints outside the field/unknown cells are returned unchanged.
+        max_shift_m: Largest per-waypoint displacement applied (metres).
+    """
+
+    waypoints: np.ndarray
+    corrected_mask: np.ndarray
+    visible_mask: np.ndarray
+    max_shift_m: float
