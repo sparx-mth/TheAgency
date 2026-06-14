@@ -1,8 +1,8 @@
 tag_family: "36h11"
 
 tags:
-  10: 270.0 # North Fridge
-  11: 0.0 # East Window
-  12: 90.0  # South Desk
-  13: 180.0 # West Door
-
+  10: 0.0
+  11: 90.0
+  12: 180.0
+  13: 270.0
+  15: 0.0

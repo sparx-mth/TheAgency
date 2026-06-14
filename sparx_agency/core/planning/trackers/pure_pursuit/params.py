@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PurePursuitParams:
     """
     Pure Pursuit configuration (2D).
@@ -55,7 +55,7 @@ class PurePursuitParams:
     closest_search_forward: int = 120
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PurePursuitParams3D:
     """
     Pure Pursuit configuration (3D).

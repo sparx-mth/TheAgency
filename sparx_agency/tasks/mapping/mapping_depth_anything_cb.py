@@ -1,13 +1,11 @@
-import traceback
 from typing import Optional
 
 import numpy as np
-import rclpy
 from rclpy.node import Node
 
 from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import  OccupancyGrid
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2
+from sensor_msgs.msg import Image, PointCloud2
 from std_msgs.msg import Header
 from fcu_driver_interfaces.msg import UAVState
 
@@ -15,7 +13,7 @@ from sparx_agency.core.common.types import PoseSE3, Observation, RGBFrame
 from sparx_agency.robots.common.adapters.ros2.uav_state_adapter import UAVStateToPoseAdapter
 from sparx_agency.robots.common.helpers import depth_to_vis_u8
 
-from sparx_agency.robots.common.spatial_math import intrinsics_from_fov
+from sparx_agency.core.common.spatial_math import intrinsics_from_fov
 from sparx_agency.robots.common.state_converter import costmap_to_occupancygrid
 from sparx_agency.robots.common.txt_utils import  stamp_to_sec
 from sparx_agency.robots.common.image_utils import ros_image_to_rgb_np, numpy_to_image_msg

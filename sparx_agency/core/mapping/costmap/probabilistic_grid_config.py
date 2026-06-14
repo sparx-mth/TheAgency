@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
-from numba import njit
+os.environ.setdefault("NUMBA_DISABLE_COVERAGE", "1")
+
+try:
+    from numba import njit
+except Exception as e:
+    print(f"[costmap] Numba unavailable, using pure Python fallback: {e}")
+
+    def njit(func=None, **kwargs):
+        if func is None:
+            return lambda f: f
+        return func
+
 import numpy as np
 
 

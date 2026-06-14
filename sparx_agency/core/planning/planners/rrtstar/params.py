@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class RRTStarOmplParams:
     """
     Configuration for RRT* path planning (2D).
@@ -37,7 +37,7 @@ class RRTStarOmplParams:
     debug_max_print_validity: int = 200
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class RRTStarOmpl3DParams:
     """
     Configuration for RRT* path planning (3D).

@@ -3,21 +3,9 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-
-@dataclass(frozen=True)
-class TagObservation:
-    """
-    A single tag observation in the camera frame.
-
-    tx, tz are the translation components (meters) of the tag relative to camera.
-    Assumes optical convention: Z forward, X right (typical camera optical frame).
-    """
-    tag_id: int
-    tx: float
-    tz: float
+from .types.tag_azimuth import TagBearingObservation
 
 
 class TagAzimuthEstimator:
@@ -28,7 +16,7 @@ class TagAzimuthEstimator:
 
     Inputs:
       - tag_config_deg: mapping tag_id -> wall_azimuth_deg (clockwise from North=0)
-      - observations: list of TagObservation in camera frame
+      - observations: list of TagBearingObservation in camera frame
 
     Output:
       - yaw_deg: camera absolute azimuth (0..360)
@@ -63,7 +51,7 @@ class TagAzimuthEstimator:
         return math.degrees(math.atan2(-tx, tz))
     
     @staticmethod
-    def obs_from_tvec(tag_id: int, tvec) -> TagObservation:
+    def obs_from_tvec(tag_id: int, tvec) -> TagBearingObservation:
         """
         Convenience helper for adapters that use solvePnP:
         OpenCV returns tvec in camera frame: [tx, ty, tz].
@@ -71,11 +59,11 @@ class TagAzimuthEstimator:
         """
         tx = float(tvec[0])
         tz = float(tvec[2])
-        return TagObservation(tag_id=tag_id, tx=tx, tz=tz)
+        return TagBearingObservation(tag_id=tag_id, tx=tx, tz=tz)
 
 
     def estimate_from_observations(
-        self, observations: list[TagObservation]
+        self, observations: list[TagBearingObservation]
     ) -> Optional[Tuple[float, int]]:
         """
         Pick the best tag (closest to center => minimal abs(relative_yaw)),
@@ -110,7 +98,7 @@ class TagAzimuthEstimator:
         return yaw_deg, tag_id
 
     def update(
-        self, observations: list[TagObservation], stamp_sec: float
+        self, observations: list[TagBearingObservation], stamp_sec: float
     ) -> Optional[Tuple[float, int]]:
         """
         Estimate from observations and store in history.

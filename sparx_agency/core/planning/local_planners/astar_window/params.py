@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LocalAStarWindow2DParams:
     """
     Local A* params for 2D occupancy grids.
@@ -33,7 +33,7 @@ class LocalAStarWindow2DParams:
     min_goal_separation_m: float = 0.8
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LocalAStarWindow3DParams:
     """
     Local A* params for 3D voxel maps.

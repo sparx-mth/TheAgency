@@ -8,6 +8,7 @@ import yaml
 import cv2
 from pupil_apriltags import Detector
 
+
 @dataclass(frozen=True)
 class CameraCalib:
     K: np.ndarray  # (3,3)
@@ -38,7 +39,14 @@ def load_camera_calib_yaml(path: str) -> CameraCalib:
 
 def tag_object_points(tag_size_m: float) -> np.ndarray:
     s = tag_size_m / 2.0
-    return np.array([[-s,-s,0],[s,-s,0],[s,s,0],[-s,s,0]], dtype=np.float64)
+   # return np.array([[-s,-s,0],[s,-s,0],[s,s,0],[-s,s,0]], dtype=np.float64)
+    return np.array([
+        [-s,  s, 0], 
+        [ s,  s, 0], 
+        [ s, -s, 0], 
+        [-s, -s, 0]
+    ], dtype=np.float64)
+
 
 def make_T(R: np.ndarray, t: np.ndarray) -> np.ndarray:
     T = np.eye(4, dtype=float)
@@ -57,15 +65,8 @@ def invert_T(T: np.ndarray) -> np.ndarray:
 def make_detector(tag_family: str, nthreads: int = 2) -> Detector:
     if not tag_family:
         raise ValueError("tag_family is empty")
+    return Detector(families=tag_family, nthreads=int(nthreads),   quad_decimate=1.0,quad_sigma=0.0,refine_edges=True,decode_sharpening=0.25)
 
-    return Detector(
-        families=tag_family,
-        nthreads=int(nthreads),
-        quad_decimate=1.0,
-        quad_sigma=0.8,
-        refine_edges=True,
-        decode_sharpening=0.6,
-    )
 def solvepnp_ippe_square(
     corners_2d: np.ndarray,
     obj_pts_3d: np.ndarray,
@@ -88,5 +89,5 @@ def solvepnp_ippe_square(
         return None
 
     R, _ = cv2.Rodrigues(rvec.reshape(3, 1))
-    tag_T_cam = make_T(R, tvec.reshape(3, 1))  # maps TAG -> CAM
-    return tag_T_cam
+    cam_T_tag = make_T(R, tvec.reshape(3, 1))  # maps TAG -> CAM
+    return cam_T_tag

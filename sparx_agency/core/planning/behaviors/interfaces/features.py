@@ -31,7 +31,7 @@ from typing import Dict, Optional
 from sparx_agency.core.common.types import Pose2D
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Portal2D:
     """
     A traversable boundary in the environment.

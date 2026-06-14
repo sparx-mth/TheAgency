@@ -7,9 +7,9 @@ import glob
 import os
 
 
-data_dir = Path.home() / 'Documents' / 'IAI' / 'depth_validator_csv'
+data_dir = Path.home() / 'Documents' / 'depth_validator_csv'
 
-phase_a_files_list = list(data_dir.glob("phase_a*"))
+phase_a_files_list = list(data_dir.glob("static*"))
 files = [str(f) for f in phase_a_files_list]
 
 
@@ -69,7 +69,7 @@ plt.savefig('phase_a_jitter_boxplot.png')
 
 
 # 1. Setup and File Loading
-phase_a_files_list = list(data_dir.glob("phase_b*"))
+phase_a_files_list = list(data_dir.glob("static*"))
 files = [str(f) for f in phase_a_files_list]
 
 clean_dfs = []

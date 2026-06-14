@@ -2,46 +2,15 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-
-# -------------------------
-# Data models (ROS-agnostic)
-# -------------------------
-
-@dataclass(frozen=True)
-class TagWorldPose:
-    """
-    Known tag pose in the world frame.
-    xyz: (x,y,z) in meters
-    rpy: (roll,pitch,yaw) in radians
-    """
-    xyz: Tuple[float, float, float]
-    rpy: Tuple[float, float, float]
-
-
-@dataclass(frozen=True)
-class TagObservation:
-    """
-    Observation from camera to a tag.
-    cam_T_tag: 4x4 homogeneous transform from camera frame to tag frame.
-    """
-    tag_id: int
-    cam_T_tag: np.ndarray  # shape (4,4)
-
-
-@dataclass(frozen=True)
-class PoseEstimate:
-    """
-    Estimated camera pose in world frame.
-    world_T_cam: 4x4 homogeneous transform
-    used_tag_ids: list of tag ids used for estimation
-    """
-    world_T_cam: np.ndarray
-    used_tag_ids: List[int]
+from .types.tag_triangulation import (
+    TagWorldPose,
+    TagTransformObservation,
+    PoseEstimate,
+)
 
 
 # -------------------------
@@ -82,14 +51,14 @@ def quaternion_matrix(q: Iterable[float]) -> np.ndarray:
     z /= norm
     w /= norm
 
-    xx, yy, zz = x*x, y*y, z*z
-    xy, xz, yz = x*y, x*z, y*z
-    wx, wy, wz = w*x, w*y, w*z
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
 
     R = np.array([
-        [1 - 2*(yy + zz),     2*(xy - wz),         2*(xz + wy)],
-        [2*(xy + wz),         1 - 2*(xx + zz),     2*(yz - wx)],
-        [2*(xz - wy),         2*(yz + wx),         1 - 2*(xx + yy)],
+        [1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)],
+        [2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)],
+        [2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)],
     ], dtype=float)
 
     M = np.eye(4, dtype=float)
@@ -130,6 +99,58 @@ def quaternion_from_matrix(M: np.ndarray) -> List[float]:
     return [float(x), float(y), float(z), float(w)]
 
 
+def rpy_from_rotation_matrix(R: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Extract roll, pitch, yaw from rotation matrix using the same convention:
+    R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    Returns radians.
+    """
+    sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
+
+    singular = sy < 1e-6
+
+    if not singular:
+        roll = math.atan2(R[2, 1], R[2, 2])
+        pitch = math.atan2(-R[2, 0], sy)
+        yaw = math.atan2(R[1, 0], R[0, 0])
+    else:
+        roll = math.atan2(-R[1, 2], R[1, 1])
+        pitch = math.atan2(-R[2, 0], sy)
+        yaw = 0.0
+
+    return roll, pitch, yaw
+
+
+def print_transform_debug(name: str, T: np.ndarray):
+    R = T[:3, :3]
+    t = T[:3, 3]
+
+    roll, pitch, yaw = rpy_from_rotation_matrix(R)
+
+    print(f"\n========== {name} ==========")
+    print("T:")
+    print(np.array2string(T, precision=4, suppress_small=True))
+
+    print(f"translation: x={t[0]:.4f}, y={t[1]:.4f}, z={t[2]:.4f}")
+
+    print(
+        "rpy rad: "
+        f"roll={roll:.4f}, pitch={pitch:.4f}, yaw={yaw:.4f}"
+    )
+    print(
+        "rpy deg: "
+        f"roll={math.degrees(roll):.2f}, "
+        f"pitch={math.degrees(pitch):.2f}, "
+        f"yaw={math.degrees(yaw):.2f}"
+    )
+
+    # Columns of R are the local frame axes expressed in the parent frame
+    print(f"{name} local X axis in parent frame: {R[:, 0]}")
+    print(f"{name} local Y axis in parent frame: {R[:, 1]}")
+    print(f"{name} local Z axis in parent frame: {R[:, 2]}")
+    print("====================================")
+
+
 def world_T_tag_from_pose(pose: TagWorldPose) -> np.ndarray:
     (x, y, z) = pose.xyz
     (roll, pitch, yaw) = pose.rpy
@@ -145,21 +166,37 @@ def world_T_tag_from_pose(pose: TagWorldPose) -> np.ndarray:
 # -------------------------
 
 def estimate_world_T_cam_from_single_tag(
-    tag_world_pose: TagWorldPose,
-    cam_T_tag: np.ndarray,
+        tag_world_pose: TagWorldPose,
+        cam_T_tag: np.ndarray,
 ) -> np.ndarray:
     """
-    world_T_cam = world_T_tag * inv(cam_T_tag)
+    Important:
+    In your current pipeline, cam_T_tag is actually camera_T_tag from solvePnP:
+        X_camera = camera_T_tag @ X_tag
+
+    Therefore:
+        tag_T_camera = inv(camera_T_tag)
+        world_T_camera = world_T_tag @ tag_T_camera
     """
     world_T_tag = world_T_tag_from_pose(tag_world_pose)
-    tag_T_cam = np.linalg.inv(cam_T_tag)
-    world_T_cam = world_T_tag @ tag_T_cam
-    return world_T_cam
+
+    camera_T_tag = cam_T_tag
+    tag_T_camera = np.linalg.inv(camera_T_tag)
+
+    world_T_camera = world_T_tag @ tag_T_camera
+
+    # print_transform_debug("world_T_tag", world_T_tag)
+    # print_transform_debug("camera_T_tag from solvePnP", camera_T_tag)
+    # print_transform_debug("tag_T_camera = inv(camera_T_tag)", tag_T_camera)
+    # print_transform_debug("world_T_camera = world_T_tag @ tag_T_camera", world_T_camera)
+
+    return world_T_camera
 
 
 def fuse_world_T_cam(
-    world_T_cam_list: List[np.ndarray],
-    method: str = "avg_translation_keep_first_rotation",
+        world_T_cam_list: List[np.ndarray],
+        weights: Optional[List[float]] = None,
+        method: str = "avg_translation_keep_first_rotation",
 ) -> np.ndarray:
     """
     Fuse multiple world_T_cam transforms.
@@ -173,13 +210,29 @@ def fuse_world_T_cam(
     if len(world_T_cam_list) == 1:
         return world_T_cam_list[0]
 
+    # Fallback to equal weights if none are provided
+    if weights is None or len(weights) != len(world_T_cam_list):
+        weights = [1.0] * len(world_T_cam_list)
+
+    # Normalize weights so they sum to 1.0
+    total_weight = sum(weights)
+    if total_weight == 0:
+        normalized_weights = [1.0 / len(weights)] * len(weights)
+    else:
+        normalized_weights = [w / total_weight for w in weights]
+
+    # Calculate weighted average for translation (X, Y, Z)
+    avg_t = np.zeros(3)
+    for T, w in zip(world_T_cam_list, normalized_weights):
+        avg_t += T[:3, 3] * w
+
     if method != "avg_translation_keep_first_rotation":
         raise ValueError(f"Unsupported fuse method: {method}")
 
-    translations = np.array([M[:3, 3] for M in world_T_cam_list], dtype=float)
-    avg_t = np.mean(translations, axis=0)
+    # Select the rotation matrix from the tag with the highest weight
+    max_weight_idx = int(np.argmax(weights))
+    R = world_T_cam_list[max_weight_idx][:3, :3]
 
-    R = world_T_cam_list[0][:3, :3]
     out = np.eye(4, dtype=float)
     out[:3, :3] = R
     out[:3, 3] = avg_t
@@ -187,17 +240,18 @@ def fuse_world_T_cam(
 
 
 def estimate_camera_pose_from_tags(
-    observations: List[TagObservation],
+    observations: List[TagTransformObservation],
     tag_map: Dict[int, TagWorldPose],
     fuse_method: str = "avg_translation_keep_first_rotation",
 ) -> Optional[PoseEstimate]:
     """
     Main entry point:
     - For each observation: compute world_T_cam using known world pose of that tag
-    - Fuse multiple tags
+    - Collect weights and fuse multiple tags
     """
     world_poses: List[np.ndarray] = []
     used_ids: List[int] = []
+    weights: List[float] = []
 
     for obs in observations:
         if obs.tag_id not in tag_map:
@@ -206,13 +260,23 @@ def estimate_camera_pose_from_tags(
             wTc = estimate_world_T_cam_from_single_tag(tag_map[obs.tag_id], obs.cam_T_tag)
             world_poses.append(wTc)
             used_ids.append(obs.tag_id)
+            weights.append(obs.weight)
         except Exception:
             continue
 
     if not world_poses:
         return None
 
-    fused = fuse_world_T_cam(world_poses, method=fuse_method)
+    if len(world_poses) > 1:
+        print("\n[DEBUG FUSION] --- Multiple Tags Detected ---")
+        total_w = sum(weights)
+        for tid, w in zip(used_ids, weights):
+            norm_w = (w / total_w) * 100 if total_w > 0 else 0
+            print(f"  -> Tag ID: {tid} | Area: {w:.0f}px | Power: {norm_w:.1f}%")
+        print("---------------------------------------------")
+
+    # Pass the collected weights to the fusion function
+    fused = fuse_world_T_cam(world_poses, weights=weights, method=fuse_method)
     return PoseEstimate(world_T_cam=fused, used_tag_ids=used_ids)
 
 

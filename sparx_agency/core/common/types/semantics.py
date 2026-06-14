@@ -23,7 +23,7 @@ from .geometry import Pose2D, Pose3D
 SemanticId = str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Portal2D:
     """
     A 2D traversable boundary (doorway, gate, threshold).
@@ -43,7 +43,7 @@ class Portal2D:
     tags: Dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Portal3D:
     """
     A 3D traversable boundary.
@@ -63,7 +63,7 @@ class Portal3D:
     tags: Dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Region2D:
     """
     A 2D semantic region (room, zone, area).
@@ -81,7 +81,7 @@ class Region2D:
     tags: Dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Region3D:
     """
     A 3D semantic region (room, volume).

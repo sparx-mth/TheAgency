@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from sparx_agency.robots.common.spatial_math import rpy_deg_to_R_base
+from sparx_agency.core.common.spatial_math import rpy_deg_to_R_base
 # matplotlib imports moved inside methods to avoid global initialization issues
 # in environments with numpy/system library mismatches.
 

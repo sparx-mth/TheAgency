@@ -22,7 +22,7 @@ else:
     _SCIPY_IMPORT_ERROR = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class DistanceFieldParams:
     """
     Parameters for clearance (distance field) computation.

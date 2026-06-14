@@ -12,7 +12,7 @@ from sparx_agency.core.mapping.costmap.probabilistic_grid_config import bresenha
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel, DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import PinholeCloudGenerator
 from sparx_agency.core.mapping.depth.depth_tiling import TileCfg, infer_depth_tiled
-from sparx_agency.robots.common.spatial_math import rot_y
+from sparx_agency.core.common.spatial_math import rot_y
 from sparx_agency.tasks.mapping.common.helper import depth_compare_report, save_depth_diff_visuals
 
 
@@ -359,8 +359,17 @@ def build_occupancy_raycast(
     span_x = max_x - min_x
     span_y = max_y - min_y
 
-    gw = int(np.ceil(span_x / cfg.resolution_m))
-    gh = int(np.ceil(span_y / cfg.resolution_m))
+    gw = int(np.ceil(cfg.grid_width_m / cfg.resolution_m))
+    gh = int(np.ceil(cfg.grid_height_m / cfg.resolution_m))
+
+    # Center the configured map around the dynamic data/sensor area
+    cx_map = 0.5 * (min_x + max_x)
+    cy_map = 0.5 * (min_y + max_y)
+
+    min_x = cx_map - 0.5 * cfg.grid_width_m
+    max_x = cx_map + 0.5 * cfg.grid_width_m
+    min_y = cy_map - 0.5 * cfg.grid_height_m
+    max_y = cy_map + 0.5 * cfg.grid_height_m
 
     # Safety cap (avoid accidental huge allocations)
     max_cells = 2500  # -> 2500x2500 is already massive
@@ -486,6 +495,14 @@ def depth_vis_u8(depth_m: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
     finite = np.isfinite(depth_m)
     if not finite.any():
         raise RuntimeError("Depth is all non-finite (NaN/Inf).")
+    # else:
+    #     print("DEPTH:",
+    #          "shape", depth_m.shape,
+    #          "dtype", depth_m.dtype,
+    #          "finite_pct", float(finite.mean() * 100.0),
+    #          "min/max",
+    #          float(np.nanmin(depth_m)),
+    #          float(np.nanmax(depth_m)))
 
     d = depth_m.copy()
     p01 = float(np.percentile(d[finite], 1))
@@ -590,18 +607,33 @@ def main():
             (depth_m > (min_r + 0.05)) &
             (depth_m < (max_r - 0.5))
     )
-    H = depth_m.shape[0]
+
+    raw_invalid_pct = float((~valid_depth).mean()) * 100.0
+
     depth_m = depth_m.copy()
-    depth_m[: int(0.25 * H), :] = np.nan
-    # Apply mask
     depth_m[~valid_depth] = np.nan
 
-    sat_pct = float((~valid_depth).mean()) * 100.0
-    print(f"DEPTH invalid_or_sat_pct: {sat_pct:.2f}%")
-    print("DEPTH:",
-          "shape", depth_m.shape,
-          "dtype", depth_m.dtype,
-          "min/max", float(np.min(depth_m)), float(np.max(depth_m)))
+    H = depth_m.shape[0]
+    depth_m[: int(0.25 * H), :] = np.nan
+
+    finite = np.isfinite(depth_m)
+    final_invalid_pct = float((~finite).mean()) * 100.0
+
+    print(f"DEPTH raw_invalid_or_sat_pct: {raw_invalid_pct:.2f}%")
+    print(f"DEPTH final_invalid_pct: {final_invalid_pct:.2f}%")
+
+    if finite.any():
+        print(
+            "DEPTH:",
+            "shape", depth_m.shape,
+            "dtype", depth_m.dtype,
+            "finite_pct", float(finite.mean() * 100.0),
+            "min/max",
+            float(np.nanmin(depth_m)),
+            float(np.nanmax(depth_m)),
+        )
+    else:
+        print("DEPTH: all values are NaN/invalid")
 
     vis, vis_dbg = depth_vis_u8(depth_m)
     print("DEPTH dbg:", vis_dbg)
@@ -684,9 +716,10 @@ def main():
     z = float(depth_m[cy_pix, cx_pix])
 
     if np.isfinite(z) and z > 1e-6:
-        X = (cx_pix - intr.cx) * z / intr.fx
-        Y = (cy_pix - intr.cy) * z / intr.fy
-        p = np.array([X, Y, z], dtype=np.float32)
+        X = z
+        Y = -(cx_pix - intr.cx) * z / intr.fx
+        Z = -(cy_pix - intr.cy) * z / intr.fy
+        p = np.array([X, Y, Z], dtype=np.float32)
 
         signed_c = float(p @ n + d)
         p_proj_c = p - signed_c * n
@@ -698,8 +731,21 @@ def main():
         print("SANITY yp>0 means forward:", yp_c > 0.0)
     else:
         print("SANITY center depth invalid:", z)
+    print("PTS base xyz min:", np.nanmin(pts, axis=0), "max:", np.nanmax(pts, axis=0))
+    print("PTS world xyz min:", np.nanmin(pts_w, axis=0), "max:", np.nanmax(pts_w, axis=0))
+    print("cam_o_w:", cam_o_w)
+    cam_o_base = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
-    occ = build_occupancy_raycast(pts, n, d, u, v, cfg, sensor_origin=cam_o_w, debug=True)
+    occ = build_occupancy_raycast(
+        pts,
+        n,
+        d,
+        u,
+        v,
+        cfg,
+        sensor_origin=cam_o_base,
+        debug=True,
+    )
 
     png = occ_to_png(occ)
     png = np.flipud(png)

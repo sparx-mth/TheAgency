@@ -22,7 +22,7 @@ from sparx_agency.core.mapping.depth.depth_bbox_fusion import (
 from sparx_agency.core.mapping.vlm_semantic.nanoowl_parser import (
     parse_nanoowl_json_detections,
 )
-from sparx_agency.robots.common.spatial_math import quat_to_rot
+from sparx_agency.core.common.spatial_math import quat_to_rot
 
 
 def camera_info_to_intrinsics(msg: CameraInfo):

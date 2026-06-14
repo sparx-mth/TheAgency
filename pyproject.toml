@@ -1,29 +1,48 @@
 [tool.poetry]
-name = "sparx_agency"
+name = "sparx-agency"
 version = "0.1.0"
 description = ""
 authors = ["NadavCherry", "Shir Ben Ami", "Daphna Ashkenazi", "Moshe Beutel"]
-readme = ["README.md"]
+readme = "README.md"
 
 packages = [
-    { include = "core", from="sparx_agency"},
-    { include = "robots", from="sparx_agency"},
-    { include = "tasks", from="sparx_agency"}
+    { include = "core", from = "sparx_agency" },
+    { include = "robots", from = "sparx_agency" },
+    { include = "tasks", from = "sparx_agency" }
 ]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.10,<3.11"
+
+# Runtime core
+numpy = "==1.26.4"
+PyYAML = ">=6.0"
+requests = ">=2.27,<3"
+Pillow = ">=10.4.0"
+
+# Vision / AprilTags
+opencv-python = "==4.11.0.86"
+pupil-apriltags = "==1.0.4.post11"
+
+# General utilities
 tqdm = "^4.67.1"
-pygame = "^2.6.1"
-numpy = "^2.3.0"
+
+[tool.poetry.group.debug.dependencies]
 pandas = "^2.3.0"
 matplotlib = "^3.10.3"
-seaborn = "^0.13.2"
+plotly = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+ruff = "*"
+black = "*"
+
+[tool.poetry.group.planning.dependencies]
+pygame = "^2.6.1"
 
 [tool.poetry.scripts]
 benchmark = "sparx_agency.core.planning.evaluation.benchmark_runner:main"
 analyze = "sparx_agency.core.planning.evaluation.analyze_results:main"
-
 
 [build-system]
 requires = ["poetry-core"]
