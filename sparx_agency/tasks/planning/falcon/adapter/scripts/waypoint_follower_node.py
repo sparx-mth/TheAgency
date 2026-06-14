@@ -123,7 +123,10 @@ class WaypointFollowerNode:
         self.ctrl_rate_hz = float(G("~ctrl_rate_hz", 5.0))
         self.status_hz = float(G("~status_hz", 1.0))
         self.freeze_during_yaw = bool(G("~freeze_during_yaw", True))
-        self.startup_hold_sec = float(G("~startup_hold_sec", 3.0))
+        # Default 0: bring-up motion is gated event-driven by the MAP_SETTLE voxel
+        # warm-up, not by a fixed time hold. Set >0 only to force an extra blanket
+        # hold after node start.
+        self.startup_hold_sec = float(G("~startup_hold_sec", 0.0))
         self.frame_id = G("~frame_id", "world")
 
         # Trajectory prediction (rollout) -> /path/predicted for the BEV viewer
@@ -146,6 +149,10 @@ class WaypointFollowerNode:
         self.map_update_topic = G("~map_update_topic", "/falcon/bev_2d")
         self.map_wait_timeout_s = float(G("~map_wait_timeout_s", 3.0))
         self.mapsettle_min_s = float(G("~mapsettle_min_s", 0.5))
+        # Bring-up requires this many fresh voxel updates before the FIRST move,
+        # so the map is genuinely seeded (not a single frame) even if the goal is
+        # behind the drone. Running re-stops still need only one (see _map_ready).
+        self.mapsettle_min_updates = int(G("~mapsettle_min_updates", 2))
         self._bev_count = 0           # ++ on every BEV (voxel) update received
         self._await_map = False       # in a stop, waiting for a fresh update
         self._await_baseline = 0      # _bev_count when the current stop unfroze
@@ -203,7 +210,7 @@ class WaypointFollowerNode:
             rospy.Subscriber(self.map_update_topic, OccupancyGrid, self._bev_cb,
                              queue_size=1)
 
-        rospy.sleep(float(G("~startup_delay_sec", 1.0)))
+        rospy.sleep(float(G("~startup_delay_sec", 0.0)))  # 0: no fixed bring-up wait
         rospy.on_shutdown(self._on_shutdown)
         rospy.Timer(rospy.Duration(self.dt), self._ctrl_loop)
         rospy.Timer(rospy.Duration(1.0 / self.status_hz), self._status)
@@ -371,12 +378,13 @@ class WaypointFollowerNode:
         self._await_baseline = self._bev_count
         self._await_t0 = rospy.Time.now()
 
-    def _map_ready(self):
-        """True once a fresh BEV (voxel) update has landed since the stop unfroze,
-        or the wait timed out (so a mapping stall never hangs the drone)."""
+    def _map_ready(self, min_updates=1):
+        """True once ``min_updates`` fresh BEV (voxel) updates have landed since
+        the stop unfroze, or the wait timed out (so a mapping stall never hangs
+        the drone). Bring-up passes ~mapsettle_min_updates; running stops use 1."""
         if not self._await_map:
             return True
-        if self._bev_count > self._await_baseline:
+        if self._bev_count - self._await_baseline >= min_updates:
             return True
         if (rospy.Time.now() - self._await_t0).to_sec() > self.map_wait_timeout_s:
             rospy.logwarn_throttle(2.0, "[MAP] no voxel update within %.1fs -- "
@@ -389,7 +397,7 @@ class WaypointFollowerNode:
         (or timeout) -- the drone sends no motion before the map is current."""
         self._request_demo_mode(MODE_FORWARD)
         self._publish_twist(0.0, 0.0)
-        if self._t_in() >= self.mapsettle_min_s and self._map_ready():
+        if self._t_in() >= self.mapsettle_min_s and self._map_ready(self.mapsettle_min_updates):
             self._await_map = False
             self._enter(_Bringup.WAIT_PATH if not self.have_path else _Bringup.RUNNING)
 

@@ -122,6 +122,17 @@ class MappingSyncNode:
         self._newest_pose_stamp = None      # capture-clock "now" for the watermark
         self._last_mode_str = "(no msgs yet)"
 
+        # Startup warm-up. Force-fuse the first N depth/pose pairs regardless of
+        # demo_mode, so the voxel map ALWAYS seeds at pickup even when a stale
+        # /xtend/demo_mode == turning is latched (which would otherwise freeze the
+        # gate before the first frame and starve mapping -- the map-settle gate
+        # downstream then just burns its timeout). demo_mode freezes are ignored
+        # until warm-up completes; then the freeze is reset to a clean
+        # forward-flight baseline and only a genuine turning message re-arms it.
+        self.warmup_emits = int(G("~warmup_emits", 2))
+        self._n_warmup = 0
+        self._warming_up = self.warmup_emits > 0
+
         # Frame: incoming pose is body(FLU) and right-multiplied by T_b_c
         # (+cam offset) unless it is already the camera-in-world pose.
         self.pose_is_camera_frame = bool(G("~pose_is_camera_frame", False))
@@ -189,6 +200,11 @@ class MappingSyncNode:
         mode = (msg.data or "").strip().lower()
         with self._lock:
             self._last_mode_str = mode if mode else "(empty)"
+            if self._warming_up:
+                # Forward-flight reset at pickup: ignore demo_mode (including a
+                # stale latched 'turning') until the map has warmed up. The freeze
+                # is reset to a clean baseline when warm-up completes.
+                return
             # Arm/clear the freeze in the capture clock: at the turn->resume edge
             # the watermark becomes the newest pose stamp, so every frame
             # captured during the turn (stamp <= now) is rejected on resume.
@@ -211,6 +227,11 @@ class MappingSyncNode:
         # ends arrives. should_fuse never clears the watermark while frozen.
         with self._lock:
             fuse, reason = self.gate.should_fuse(td)
+            if self._warming_up:
+                # During warm-up force every frame through so the map seeds even
+                # if the gate is frozen by a stale latched mode. should_fuse is
+                # still called above to keep the newest-seen stamp current.
+                fuse = True
             if not fuse:
                 if reason == FROZEN_ROTATING:
                     self._n_drop_frozen += 1
@@ -294,6 +315,24 @@ class MappingSyncNode:
         for pose_msg, depth_msg in emits:
             self.pub_pose.publish(pose_msg)             # pose first
             self.pub_depth.publish(depth_msg)
+        if emits and self._warming_up:
+            self._note_warmup(len(emits))
+
+    def _note_warmup(self, n):
+        """Count fused pairs toward warm-up; on completion set a clean
+        forward-flight baseline so demo_mode freezing resumes from a known state."""
+        with self._lock:
+            if not self._warming_up:
+                return
+            self._n_warmup += n
+            if self._n_warmup >= self.warmup_emits:
+                self._warming_up = False
+                # Drop any freeze armed by a stale latched mode during warm-up; a
+                # genuine turning message after this re-arms the freeze normally.
+                self.gate.reset_freeze(now=self._newest_pose_stamp)
+                rospy.loginfo("mapping_sync: warm-up complete (%d voxel pairs "
+                              "fused) -- forward-flight baseline set; demo_mode "
+                              "freeze now active", self._n_warmup)
 
     # -- timers ---------------------------------------------------------------
     def _sweep_timer(self, _evt):
@@ -311,7 +350,9 @@ class MappingSyncNode:
             d_empty, d_far, d_thr = self._n_drop_empty, self._n_drop_far, self._n_drop_throttle
             d_frozen, d_stale = self._n_drop_frozen, self._n_drop_stale
             ndis, last_dis = self._n_disagree, self._last_disagree
-            if self.gate.frozen:
+            if self._warming_up:
+                gate_state = "WARMUP(%d/%d)" % (self._n_warmup, self.warmup_emits)
+            elif self.gate.frozen:
                 gate_state = "FROZEN"
             elif self.gate.awaiting_fresh_frame:
                 gate_state = "RESUME_WAIT"
@@ -361,6 +402,9 @@ class MappingSyncNode:
               self.gate.resume_settle_sec)
         else:
             L("  rotation freeze = OFF (freeze_on_turning_mode=false)")
+        if self._warming_up:
+            L("  warm-up = ON  (force-fuse first %d pairs, ignore demo_mode, then "
+              "reset to forward-flight baseline)", self.warmup_emits)
         L("  pose  out = %s   depth out = %s", self.out_pose_topic, self.out_depth_topic)
         L("  sync_tol=%.3fs interp_gap=%.3fs match_hold=%.3fs buffer=%.1fs",
           self.sync_tol, self.max_interp_gap, self.match_hold_sec, self.buffer_sec)

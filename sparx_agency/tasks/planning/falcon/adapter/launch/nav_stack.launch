@@ -130,6 +130,7 @@
   <arg name="map_update_topic"    default="/falcon/bev_2d" /><!-- a fresh msg here = the map advanced -->
   <arg name="map_wait_timeout_s"  default="3.0" /><!-- proceed anyway if no update lands (never hang) -->
   <arg name="mapsettle_min_s"     default="0.5" /><!-- min bring-up settle before the first move -->
+  <arg name="mapsettle_min_updates" default="2" /><!-- fresh voxel updates required before the FIRST move (running re-stops use 1) -->
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
@@ -503,6 +504,7 @@
     <param name="map_update_topic"       value="$(arg map_update_topic)" />
     <param name="map_wait_timeout_s"     value="$(arg map_wait_timeout_s)" />
     <param name="mapsettle_min_s"        value="$(arg mapsettle_min_s)" />
+    <param name="mapsettle_min_updates"  value="$(arg mapsettle_min_updates)" />
     <param name="auto_takeoff"           value="$(arg auto_takeoff)" />
     <param name="cruise_z"               value="$(arg cruise_z)" />
     <param name="use_posctrl"            value="$(arg use_posctrl)" />
