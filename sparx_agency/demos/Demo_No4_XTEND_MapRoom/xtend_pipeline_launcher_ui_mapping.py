@@ -31,7 +31,7 @@ JETSON_SSH_DEFAULT = "user@192.0.0.89"
 JETSON_ENV = """
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
@@ -55,7 +55,7 @@ echo "[AUTO] XTEND RGBD mapping pipeline auto launch started"
 
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
@@ -115,7 +115,7 @@ echo "[AUTO] Step 1: start online bridge + RGB"
 start_tmux xtend_bridge '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
@@ -137,7 +137,7 @@ echo "[AUTO] Step 2: start DA3 Large Metric 504x294 depth + point cloud"
 start_tmux xtend_depth '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
@@ -166,7 +166,7 @@ echo "[AUTO] Step 3: start Twist converter"
 start_tmux xtend_twist_converter '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
@@ -181,7 +181,7 @@ echo "[AUTO] Step 4: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
@@ -212,7 +212,7 @@ echo "[AUTO] Step 6: start AprilTag triangulation (pose estimation)"
 start_tmux xtend_apriltag '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
@@ -240,7 +240,7 @@ echo "[AUTO] Step 8: start pose-to-TF bridge (AprilTag pose -> TF)"
 start_tmux xtend_pose_to_tf '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.mapping.ros2.pose_to_tf_node \
@@ -685,7 +685,7 @@ class XtendPipelineLauncher(tk.Tk):
         remote_cmd = (
             "cd /home/user/GIT/TheAgency && "
             "source /opt/ros/humble/setup.bash && "
-            "source /home/user/GIT/TheAgency/theagency_venv/bin/activate && "
+            "source /home/user/GIT/TheAgency/venv/bin/activate && "
             "export ROS_DOMAIN_ID=5 && "
             f"ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String {shlex.quote(payload)}"
         )
