@@ -21,15 +21,16 @@ Pillow==10.2.0
 onnx==1.21.0
 pycuda==2026.1
 pytools==2026.1
-platformdirs==4.2.0
+platformdirs==4.3.6
 typing_extensions==4.15.0
 protobuf==7.34.1
 ml_dtypes==0.5.4
-tensorrt==10.13.3.9
+# tensorrt excluded: cu13 sub-dep is deprecated on PyPI; install separately:
+#   pip install tensorrt --extra-index-url https://pypi.nvidia.com
 
 # --- torch + vision ---
-torch==2.7.1
-torchvision==0.22.1
+torch==2.11.0
+torchvision==0.26.0
 triton==3.3.1
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cuda-cupti-cu12==12.6.80
