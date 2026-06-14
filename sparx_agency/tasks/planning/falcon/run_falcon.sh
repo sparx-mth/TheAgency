@@ -23,10 +23,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCH=$(uname -m)
 if [ "${ARCH}" = "aarch64" ]; then
   # Change to your custom Jetson image tag
-  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
+  IMAGE="${IMAGE:-falcon-ros-custom:v2}"
 else
   # Change to your custom x86 image tag
-  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
+  IMAGE="${IMAGE:-falcon-ros-custom:v2}"
 fi
 echo "[INFO] Arch: ${ARCH}   Image: ${IMAGE}"
 

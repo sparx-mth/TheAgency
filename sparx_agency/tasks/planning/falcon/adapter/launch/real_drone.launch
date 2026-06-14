@@ -92,7 +92,7 @@
        The overlay tracks the live pose altitude. Set
        navdp_camera_info_topic:=/xtend/camera_info to auto-sync intrinsics from
        the (bridged) camera_info (K; must describe the 504x294 stream) instead. -->
-  <arg name="use_navdp"               default="false" />
+  <arg name="use_navdp"               default="true" />
   <arg name="navdp_camera_info_topic" default="" />
 
   <arg name="publish_mapping_inputs" value="false" />

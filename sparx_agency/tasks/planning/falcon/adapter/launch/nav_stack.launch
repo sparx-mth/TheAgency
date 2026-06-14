@@ -183,7 +183,7 @@
        sync from a camera_info topic (K preferred; must describe the 504x294
        stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
-  <arg name="use_navdp"                default="false" />
+  <arg name="use_navdp"                default="true" />
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
   <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
@@ -227,14 +227,14 @@
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="0.40" />            <!-- column z-range considered -->
-  <arg name="bev_z_ceil"            default="1.70" />
+  <arg name="bev_z_floor"           default="0.80" />            <!-- column z-range considered -->
+  <arg name="bev_z_ceil"            default="1.50" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
   <arg name="bev_weight_sigma"      default="0.50" />            <!-- gaussian width (profile=gaussian) -->
   <arg name="bev_voxel_size"        default="$(arg bev_resolution)" />  <!-- z-layer thickness -->
-  <arg name="bev_occ_weight_thresh" default="1.2" />             <!-- min weighted column mass for OCC -->
-  <arg name="bev_min_occ_voxels"    default="2" />               <!-- AND min raw voxel count for OCC -->
+  <arg name="bev_occ_weight_thresh" default="2.0" />             <!-- min weighted column mass for OCC -->
+  <arg name="bev_min_occ_voxels"    default="4" />               <!-- AND min raw voxel count for OCC -->
   <arg name="bev_min_free_voxels"   default="1" />               <!-- min voxels for a cell to read FREE -->
 
   <!-- 3D neighbour confirm (stage 2) — drops isolated DA3 speckle -->
@@ -244,7 +244,7 @@
 
   <!-- door / window protection (stage 3) — never wall an opening that is open at flight height -->
   <arg name="bev_protect_openings"  default="true" />
-  <arg name="bev_door_band_m"       default="0.60" />           <!-- z-band around z_peak inspected for openness -->
+  <arg name="bev_door_band_m"       default="0.80" />           <!-- z-band around z_peak inspected for openness -->
   <arg name="bev_door_free_voxels"  default="2" />              <!-- free voxels in the band => it's an opening -->
   <arg name="bev_door_occ_tol"      default="0" />              <!-- max occupied voxels tolerated in the band -->
 
@@ -253,13 +253,20 @@
   <arg name="bev_wall_fill_neighbors" default="5" />            <!-- count mode only -->
   <arg name="bev_wall_fill_iters"     default="1" />            <!-- max bridge width; keep small (1-2) -->
 
-  <!-- temporal hysteresis (stage 5, optional — FALCON already fuses, so off) -->
-  <arg name="bev_temporal_filter" default="false" />
-  <arg name="bev_t_inc" default="1.0" />
-  <arg name="bev_t_dec" default="1.0" />
-  <arg name="bev_t_max" default="5.0" />
-  <arg name="bev_t_on"  default="2.0" />
-  <arg name="bev_t_off" default="0.5" />
+  <!-- temporal CONFIRMATION (now runs BEFORE wall completion; ON by default).
+       A cell only reads OCC after it has been seen occupied, with enough
+       confidence, across MULTIPLE clouds — this rejects the monocular-depth
+       speckle FALCON leaks into corridor openings the camera is not aimed at.
+       Was off on the assumption "FALCON already fuses in time"; that assumption
+       is exactly what fails for these view-dependent artifacts, so it is now on.
+       Set bev_temporal_filter:=false to restore the old single-frame behaviour. -->
+  <arg name="bev_temporal_filter" default="true" />
+  <arg name="bev_occ_conf_full" default="3.0" />  <!-- weighted column mass = full per-frame confidence; per-frame conf = occ_w/this clipped to [0,1]. MUST be > bev_occ_weight_thresh. RAISE to make persistent peripheral speckle harder to confirm. -->
+  <arg name="bev_t_inc" default="1.0" />   <!-- evidence added per cloud, scaled by confidence -->
+  <arg name="bev_t_dec" default="1.0" />   <!-- evidence bled per cloud a cell is seen FREE (opening recovery) -->
+  <arg name="bev_t_max" default="5.0" />   <!-- evidence cap (memory of a confirmed wall) -->
+  <arg name="bev_t_on"  default="2.0" />   <!-- evidence to confirm OCC; ~t_on/t_inc clouds of solid wall (~0.6s at FALCON's ~3Hz) -->
+  <arg name="bev_t_off" default="0.5" />   <!-- evidence to clear (Schmitt lower rail) -->
 
   <!-- runtime -->
   <arg name="bev_always_recompute"       default="false" />     <!-- recompute every tick vs only on a new cloud -->
@@ -410,8 +417,9 @@
     <param name="wall_fill_mode"         value="$(arg bev_wall_fill_mode)" />
     <param name="wall_fill_neighbors"    value="$(arg bev_wall_fill_neighbors)" />
     <param name="wall_fill_iters"        value="$(arg bev_wall_fill_iters)" />
-    <!-- temporal hysteresis (optional) -->
+    <!-- temporal confirmation (ON by default; runs before wall completion) -->
     <param name="temporal_filter"        value="$(arg bev_temporal_filter)" />
+    <param name="occ_conf_full"          value="$(arg bev_occ_conf_full)" />
     <param name="t_inc"                  value="$(arg bev_t_inc)" />
     <param name="t_dec"                  value="$(arg bev_t_dec)" />
     <param name="t_max"                  value="$(arg bev_t_max)" />
