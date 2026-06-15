@@ -27,14 +27,23 @@ case "${DEVICE}" in
     user@user-agx1|user@agx1|user@jetson*|user-agx1|agx1|jetson*)
         DEVICE_FILE="${DEVICE_REQ_DIR}/jetson_agx1_15w.txt"
         VENV_OPTS="--system-site-packages"
+        ROS_DISTRO="humble"
+        ROS_PYTHON_VER="3.10"
+        HAS_CUDA_LD="yes"
         ;;
     daphnaa@*|*daphna*|*laptop*)
         DEVICE_FILE="${DEVICE_REQ_DIR}/laptop_home_daphna.txt"
         VENV_OPTS=""
+        ROS_DISTRO="humble"
+        ROS_PYTHON_VER="3.10"
+        HAS_CUDA_LD="no"
         ;;
     user1@PCN87653|user1@*|PCN87653|*office*)
         DEVICE_FILE="${DEVICE_REQ_DIR}/office_pc.txt"
         VENV_OPTS=""
+        ROS_DISTRO="jazzy"
+        ROS_PYTHON_VER="3.12"
+        HAS_CUDA_LD="no"
         ;;
     *)
         echo "[setup_venv] Unknown device: '${DEVICE}'"
@@ -75,6 +84,53 @@ PYTHON_VER=$("${VENV_DIR}/bin/python3" -c 'import sys; print(f"{sys.version_info
 echo "${REPO_DIR}" > "${VENV_DIR}/lib/python${PYTHON_VER}/site-packages/theagency.pth"
 echo "[setup_venv] Added ${REPO_DIR} to venv sys.path (theagency.pth)"
 
+# --- write agency() shell function to ~/.bashrc ---
+echo "[setup_venv] Writing agency() function to ~/.bashrc ..."
+export _SETUP_REPO_DIR="${REPO_DIR}"
+export _SETUP_ROS_DISTRO="${ROS_DISTRO}"
+export _SETUP_ROS_PYTHON_VER="${ROS_PYTHON_VER}"
+export _SETUP_HAS_CUDA_LD="${HAS_CUDA_LD}"
+
+python3 - << 'PYEOF'
+import os, re, pathlib
+
+repo    = os.environ['_SETUP_REPO_DIR']
+distro  = os.environ['_SETUP_ROS_DISTRO']
+pyver   = os.environ['_SETUP_ROS_PYTHON_VER']
+cuda_ld = os.environ['_SETUP_HAS_CUDA_LD'] == 'yes'
+
+ros_base = f"/opt/ros/{distro}"
+lines = [
+    "agency() {",
+    f"    cd {repo}",
+    f"    source {ros_base}/setup.bash",
+    f"    source {repo}/venv/bin/activate",
+    "    export ROS_DOMAIN_ID=5",
+    "    export PYTHONUNBUFFERED=1",
+]
+if cuda_ld:
+    lines.append(
+        f"    export LD_LIBRARY_PATH={ros_base}/opt/rviz_ogre_vendor/lib:"
+        f"{ros_base}/lib/aarch64-linux-gnu:{ros_base}/lib:"
+        "/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+    )
+lines.append(
+    f"    export PYTHONPATH={ros_base}/lib/python{pyver}/site-packages:"
+    f"{ros_base}/local/lib/python{pyver}/dist-packages:"
+    f"{repo}:{repo}/sparx_agency:${{PYTHONPATH}}"
+)
+lines.append("}")
+func_text = "\n".join(lines)
+
+bashrc = pathlib.Path.home() / '.bashrc'
+text = bashrc.read_text(encoding='utf-8') if bashrc.exists() else ''
+text = re.sub(r'\nagency\(\) \{.*?\n\}', '', text, flags=re.DOTALL)
+text = text.rstrip('\n') + '\n\n' + func_text + '\n'
+bashrc.write_text(text, encoding='utf-8')
+print(f'[setup_venv] agency() written to ~/.bashrc  (ros={distro}, domain=5)')
+PYEOF
+
 echo ""
 echo "[setup_venv] Done."
 echo "[setup_venv] Activate with:  source ${VENV_DIR}/bin/activate"
+echo "[setup_venv] Then run:       agency"

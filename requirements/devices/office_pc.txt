@@ -31,7 +31,7 @@ ml_dtypes==0.5.4
 # --- torch + vision ---
 torch==2.11.0
 torchvision==0.26.0
-triton==3.3.1
+triton==3.6.0
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cuda-cupti-cu12==12.6.80
 nvidia-cuda-nvrtc-cu12==12.6.77
