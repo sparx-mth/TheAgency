@@ -38,12 +38,10 @@ import yaml
 from pupil_apriltags import Detector
 
 from sparx_agency.core.localization.tag_triangulation import (
-    estimate_camera_pose_from_tags,
-    transform_to_pose,
-)
-from sparx_agency.core.localization.types.tag_triangulation import (
     TagWorldPose,
     TagObservation,
+    estimate_camera_pose_from_tags,
+    transform_to_pose,
 )
 
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (

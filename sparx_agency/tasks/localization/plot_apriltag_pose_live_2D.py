@@ -9,7 +9,8 @@ from geometry_msgs.msg import PoseStamped
 
 import matplotlib.pyplot as plt
 
-from sparx_agency.core.common.spatial_math import quat_to_yaw as yaw_from_quaternion
+
+from sparx_agency.robots.common.spatial_math import quat_to_yaw as yaw_from_quaternion
 
 
 class AprilTagPosePlotter(Node):

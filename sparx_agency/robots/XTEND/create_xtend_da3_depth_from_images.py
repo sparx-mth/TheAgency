@@ -31,9 +31,7 @@ def colorize_depth(depth_m: np.ndarray, max_depth_m: float) -> np.ndarray:
     return cv2.applyColorMap(depth_norm, cv2.COLORMAP_MAGMA)
 
 
-def get_matrix(data: dict, key: str, shape: tuple[int, int]) -> np.ndarray:
-    values = data[key]["data"]
-    return np.array(values, dtype=np.float64).reshape(shape)
+from sparx_agency.robots.common.helpers import matrix_from_yaml_dict as get_matrix
 
 
 def create_rectified_da3_yaml(calib_yaml_path: Path, output_yaml_path: Path) -> dict:

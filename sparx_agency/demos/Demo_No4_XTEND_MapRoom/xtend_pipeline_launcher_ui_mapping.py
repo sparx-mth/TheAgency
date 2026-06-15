@@ -162,22 +162,7 @@ wait_for_topic_name /xtend/depth_m 30
 wait_for_topic_rate /xtend/depth_m 60 best_effort
 wait_for_topic_name /xtend/pointcloud 15
 
-echo "[AUTO] Step 3: start Twist converter"
-start_tmux xtend_twist_converter '
-cd /home/user/GIT/TheAgency
-source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
-export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-'
-
-sleep 2
-
-echo "[AUTO] Step 4: start XTEND demo mode manager"
+echo "[AUTO] Step 3: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -216,7 +201,7 @@ source /home/user/GIT/TheAgency/theagency_venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   --tag_size_m 0.13 \
   --source ros \
@@ -346,19 +331,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
 """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-""",
-    ),
-    LaunchItem(
-        name="4. XTEND demo mode manager",
+        name="3. XTEND demo mode manager",
         machine="jetson",
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm.",
@@ -397,11 +370,11 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
             "Detects tag36h11 AprilTags in /xtend/rgb, estimates 6-DOF camera pose in map frame "
             "via solvePnP + known tag world positions. "
             "Publishes /xtend/april_tag_pose (PoseStamped). "
-            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
+            "Tag map: new_map.yaml. Calibration: 504x294."
         ),
         command="""
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   --tag_size_m 0.13 \
   --source ros \

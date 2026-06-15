@@ -3,6 +3,7 @@ import time
 import cv2
 import numpy as np
 import tensorrt as trt
+import pycuda.autoinit  # noqa: F401 — initializes CUDA context before any pycuda.driver calls
 import pycuda.autoinit
 import pycuda.driver as cuda
 

@@ -20,12 +20,10 @@ from std_msgs.msg import Int32MultiArray
 from apriltag_msgs.msg import AprilTagDetectionArray
 
 from sparx_agency.core.localization.tag_triangulation import (
-    estimate_camera_pose_from_tags,
-    transform_to_pose,
-)
-from sparx_agency.core.localization.types.tag_triangulation import (
     TagWorldPose,
     TagObservation,
+    estimate_camera_pose_from_tags,
+    transform_to_pose,
 )
 
 

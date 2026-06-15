@@ -11,11 +11,11 @@ tags:
 # Communication room
   1:
     xyz: [2.55, -2.3, 0.97]
-    rpy: [-1.5708, 0,  -3.1416]
+    rpy: [-1.5708, 0, -3.1416]
     size: 0.28
 
 
-# Enther the hallway to the right towards the MAMAD, same orientation as tag 5
+# Enter the hallway to the right towards the MAMAD, same orientation as tag 5
   10:
     xyz: [3.13, -0.82, 1.0]
     rpy: [-1.5708,  0, -1.5708]

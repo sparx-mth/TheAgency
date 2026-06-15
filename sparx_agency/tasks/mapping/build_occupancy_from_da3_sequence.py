@@ -12,6 +12,7 @@ from sparx_agency.core.mapping.depth.depth_anything_v3 import DA3TensorRTModel
 
 # Put this script next to map_from_image_clean.py, or change this import to the correct module path.
 from map_from_image_clean import (
+from sparx_agency.robots.common.helpers import valid_depth_mask
     Intrinsics,
     MapCfg,
     load_yaml,
@@ -314,7 +315,7 @@ def process_one_frame(
                 f"{[float(np.nanpercentile(depth_m, p)) for p in [5, 50, 95]]}"
             )
 
-    valid = np.isfinite(depth_m) & (depth_m > min_depth_m) & (depth_m < max_depth_m)
+    valid = valid_depth_mask(depth_m, min_depth=min_depth_m, max_depth=max_depth_m)
     depth_m = depth_m.copy()
     depth_m[~valid] = np.nan
 
