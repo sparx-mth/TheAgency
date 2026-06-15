@@ -70,6 +70,11 @@ echo "[setup_venv] Upgrading pip ..."
 echo "[setup_venv] Installing requirements ..."
 "${VENV_DIR}/bin/pip" install -r "${ACTIVE_REQ}"
 
+# --- add repo root to sys.path via .pth file so 'import sparx_agency' works ---
+PYTHON_VER=$("${VENV_DIR}/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "${REPO_DIR}" > "${VENV_DIR}/lib/python${PYTHON_VER}/site-packages/theagency.pth"
+echo "[setup_venv] Added ${REPO_DIR} to venv sys.path (theagency.pth)"
+
 echo ""
 echo "[setup_venv] Done."
 echo "[setup_venv] Activate with:  source ${VENV_DIR}/bin/activate"
