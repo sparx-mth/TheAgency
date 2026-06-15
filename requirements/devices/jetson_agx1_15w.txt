@@ -1,0 +1,73 @@
+# Flat requirements for: jetson_agx1_15w (Jetson AGX Orin, 15W deployment)
+# Synced from: pip freeze on Jetson (theagency_venv, --system-site-packages)
+# Last synced: 2026-06-14
+#
+# Intentionally excluded:
+#   torch              — install from NVIDIA/Jetson-specific wheels separately
+#   tensorrt / tensorrt_dispatch / tensorrt_lean
+#                      — lives in depth_anything_ws env, not this venv
+#   colcon-* / catkin-* / rosdep-* / rosdistro-* / rospkg-* / vcstool / bloom
+#                      — managed by apt + rosdep, not pip
+#   OS/Ubuntu packages — apturl, dbus-python, systemd-python, python-apt, etc.
+
+# --- constraints (pinned for CUDA/ROS compat) ---
+numpy==1.26.4
+opencv-python==4.11.0.86
+
+# --- core ---
+pupil-apriltags==1.0.4.post11
+PyYAML==6.0.3
+requests==2.34.2
+Pillow==12.2.0
+
+# --- depth / CUDA pipeline ---
+onnx==1.21.0
+onnx-ir==0.1.15
+onnxscript==0.6.0
+onnxruntime-gpu==1.23.0
+pycuda==2026.1
+pytools==2026.1
+platformdirs==4.9.6
+typing_extensions==4.15.0
+flatbuffers==25.12.19
+protobuf==7.35.0
+ml_dtypes==0.5.4
+
+# --- viz / debug ---
+matplotlib==3.5.1
+scipy==1.8.0
+pandas==2.3.3
+plotly==6.7.0
+streamlit==1.57.0
+starlette==1.1.0
+dash==4.1.0
+Flask==3.1.3
+Werkzeug==3.1.8
+open3d==0.18.0
+altair==6.1.0
+pydeck==0.9.2
+
+# --- ML / AI ---
+huggingface-hub==0.36.0
+transformers==4.57.5
+safetensors==0.7.0
+tokenizers==0.22.2
+openai==2.16.0
+
+# --- networking ---
+websockets==16.0
+aiohttp==3.13.3
+aiortc==1.14.0
+websocket-client==1.9.0
+httpx==0.28.1
+uvicorn==0.48.0
+
+# --- Jetson-specific ---
+jetson-stats==4.3.2
+Jetson.GPIO==2.1.7
+nvidia-ml-py==13.590.48
+
+# --- dev tools ---
+pytest==6.2.5
+ruff==0.15.14
+black==26.5.1

@@ -18,16 +18,17 @@ from tkinter import messagebox, ttk
 from typing import Literal
 
 JETSON_SSH_DEFAULT = "user@192.0.0.89"
+JETSON_REPO = "/home/user/agency_ws"
 
 JETSON_ENV = """
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-"""
+""".replace("/home/user/GIT/TheAgency", JETSON_REPO)
 
 PC_ENV = """
 cd /home/user1/GIT/TheAgency
@@ -46,7 +47,7 @@ echo "[AUTO] XTEND full pipeline auto launch started"
 
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
@@ -106,7 +107,7 @@ echo "[AUTO] Step 1: start online bridge + RGB"
 start_tmux xtend_bridge '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
@@ -128,7 +129,7 @@ echo "[AUTO] Step 2: start DA3 Large Metric 504x294 depth"
 start_tmux xtend_depth '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
@@ -151,11 +152,26 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
 wait_for_topic_name /xtend/depth_m 30
 wait_for_topic_rate /xtend/depth_m 60 best_effort
 
-echo "[AUTO] Step 3: start XTEND demo mode manager"
+echo "[AUTO] Step 3: start Twist converter"
+start_tmux xtend_twist_converter '
+cd /home/user/GIT/TheAgency
+source /opt/ros/humble/setup.bash
+source /home/user/GIT/TheAgency/venv/bin/activate
+export ROS_DOMAIN_ID=5
+export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
+python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
+  --cmd-vel-topic /cmd_vel \
+  --cmd-nav-topic /xtend/cmd_nav \
+  --timeout-sec 1.5
+'
+
+sleep 2
+
+echo "[AUTO] Step 4: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
@@ -185,11 +201,11 @@ echo "[AUTO] Step 6: start localization"
 start_tmux xtend_april_tag '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
   --tag_size_m 0.13 \
   --source ros \
   --image_topic /xtend/rgb \
@@ -218,7 +234,7 @@ echo "  docker exec -it falcon bash -lc 'rosrun falcon_adapter bev_click_goal.py
 
 echo "[AUTO] Done. Active tmux sessions:"
 tmux ls || true
-"""
+""".replace("/home/user/GIT/TheAgency", JETSON_REPO)
 
 
 @dataclass(frozen=True)
@@ -271,7 +287,19 @@ LAUNCH_ITEMS: list[LaunchItem] = [
                 """,
     ),
     LaunchItem(
-        name="3. XTEND demo mode manager",
+        name="3. Twist -> XTEND command converter",
+        machine="jetson",
+        tmux_name="xtend_twist_converter",
+        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
+        command="""
+python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
+  --cmd-vel-topic /cmd_vel \
+  --cmd-nav-topic /xtend/cmd_nav \
+  --timeout-sec 1.5
+""",
+    ),
+    LaunchItem(
+        name="4. XTEND demo mode manager",
         machine="jetson",
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm. Also prepares /xtend/reset_odom publisher but does not call it yet.",
@@ -311,11 +339,11 @@ LaunchItem(
             "Detects tag36h11 AprilTags in /xtend/rgb, estimates 6-DOF camera pose in map frame "
             "via solvePnP + known tag world positions. "
             "Publishes /xtend/april_tag_pose (PoseStamped). "
-            "Tag map: new_map.yaml. Calibration: 504x294."
+            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
         ),
         command="""
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
   --tag_size_m 0.13 \
   --source ros \
   --image_topic /xtend/rgb \
@@ -421,6 +449,8 @@ def normalize_command(text: str) -> str:
 
 def wrap_with_env(machine: str, command: str) -> str:
     env = JETSON_ENV if machine == "jetson" else PC_ENV
+    if machine == "jetson":
+        command = command.replace("/home/user/GIT/TheAgency", JETSON_REPO)
     return normalize_command(env) + "\n" + normalize_command(command)
 
 
@@ -512,8 +542,9 @@ class XtendPipelineLauncher(tk.Tk):
         self.selected_item = item
         self.desc_text.delete("1.0", "end")
         self.desc_text.insert("end", f"{item.name}\nMachine: {item.machine}\nTmux: {item.tmux_name}\n\n{item.description}")
+        cmd = item.command.replace("/home/user/GIT/TheAgency", JETSON_REPO) if item.machine == "jetson" else item.command
         self.cmd_text.delete("1.0", "end")
-        self.cmd_text.insert("end", normalize_command(item.command))
+        self.cmd_text.insert("end", normalize_command(cmd))
 
     def get_command_text(self) -> str:
         return normalize_command(self.cmd_text.get("1.0", "end"))
@@ -580,9 +611,9 @@ class XtendPipelineLauncher(tk.Tk):
         payload = f"{{data: '{mode_json}'}}"
 
         remote_cmd = (
-            "cd /home/user/GIT/TheAgency && "
+            f"cd {JETSON_REPO} && "
             "source /opt/ros/humble/setup.bash && "
-            "source /home/user/GIT/TheAgency/theagency_venv/bin/activate && "
+            f"source {JETSON_REPO}/venv/bin/activate && "
             "export ROS_DOMAIN_ID=5 && "
             f"ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String {shlex.quote(payload)}"
         )

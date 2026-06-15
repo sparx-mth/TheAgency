@@ -146,6 +146,17 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         print(f"[log] telemetry: {self.telemetry_log_path}")
         print(f"[log] actions:   {self.action_log_path}")
 
+    def _twist_cb(self, msg: Twist) -> None:
+        result = self._twist_converter.process(
+            msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z
+        )
+        if result is None or self.loop is None:
+            return
+        action, value = result
+        self.loop.call_soon_threadsafe(
+            self.cmd_queue.put_nowait, {"action": action, "thrust": value}
+        )
+
     def ros_callback(self, msg: String) -> None:
         try:
             data = json.loads(msg.data)
@@ -469,31 +480,6 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             finally:
                 self.cmd_queue.task_done()
 
-    def _twist_cb(self, msg: Twist) -> None:
-        result = self._twist_converter.process(
-            msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z
-        )
-        if result is None:
-            return
-        action, value = result
-        if self.loop is None:
-            self.ros_node.get_logger().warn("Async loop not ready; dropping Twist command")
-            return
-        self.loop.call_soon_threadsafe(
-            self.cmd_queue.put_nowait, {"action": action, "value": value}
-        )
-
-    async def _twist_watchdog_loop(self):
-        try:
-            while True:
-                await asyncio.sleep(0.05)
-                result = self._twist_converter.check_timeout()
-                if result is not None:
-                    action, value = result
-                    await self.cmd_queue.put({"action": action, "value": value})
-        except asyncio.CancelledError:
-            pass
-
     def create_extra_tasks(self) -> list[asyncio.Task]:
         return []
 
@@ -512,6 +498,18 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             pass
         finally:
             executor.shutdown()
+
+    async def _twist_timeout_loop(self):
+        """Emit stop when /cmd_vel stream goes silent past the converter timeout."""
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                result = self._twist_converter.check_timeout()
+                if result is not None:
+                    action, value = result
+                    await self.cmd_queue.put({"action": action, "thrust": value})
+        except asyncio.CancelledError:
+            pass
 
     async def _telemetry_flush_loop(self):
         """Flush the telemetry CSV at 1 Hz instead of on every message."""
@@ -539,7 +537,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                             asyncio.create_task(self.dynamic_executor()),
                             asyncio.create_task(self._ros_spin_loop()),
                             asyncio.create_task(self._telemetry_flush_loop()),
-                            asyncio.create_task(self._twist_watchdog_loop()),
+                            asyncio.create_task(self._twist_timeout_loop()),
                         ]
                         tasks.extend(self.create_extra_tasks())
 

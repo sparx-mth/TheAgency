@@ -20,16 +20,17 @@ from tkinter import messagebox, ttk
 from typing import Literal
 
 JETSON_SSH_DEFAULT = "user@192.0.0.89"
+JETSON_REPO = "/home/user/agency_ws"
 
 JETSON_ENV = """
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-"""
+""".replace("/home/user/GIT/TheAgency", JETSON_REPO)
 
 PC_ENV = """
 cd /home/user1/GIT/TheAgency
@@ -184,6 +185,8 @@ def normalize_command(text: str) -> str:
 
 def wrap_with_env(machine: str, command: str) -> str:
     env = JETSON_ENV if machine == "jetson" else PC_ENV
+    if machine == "jetson":
+        command = command.replace("/home/user/GIT/TheAgency", JETSON_REPO)
     return normalize_command(env) + "\n" + normalize_command(command)
 
 
@@ -265,8 +268,9 @@ class XtendPipelineLauncher(tk.Tk):
         self.selected_item = item
         self.desc_text.delete("1.0", "end")
         self.desc_text.insert("end", f"{item.name}\nMachine: {item.machine}\nTmux: {item.tmux_name}\n\n{item.description}")
+        cmd = item.command.replace("/home/user/GIT/TheAgency", JETSON_REPO) if item.machine == "jetson" else item.command
         self.cmd_text.delete("1.0", "end")
-        self.cmd_text.insert("end", normalize_command(item.command))
+        self.cmd_text.insert("end", normalize_command(cmd))
 
     def get_command_text(self) -> str:
         return normalize_command(self.cmd_text.get("1.0", "end"))
