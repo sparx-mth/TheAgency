@@ -66,7 +66,7 @@ class XtendDroneDemoManager(Node):
         self.disarm_delay_sec = float(disarm_delay_sec)
 
         self.current_mode = initial_mode
-        self.previous_mode = DemoMode.IDLE
+        self.previous_mode = DemoMode.FLY_STRAIGHT
         self.finish_started = False
         self.disarm_timer = None
 
@@ -170,14 +170,14 @@ class XtendDroneDemoManager(Node):
         if action not in ("land", "disarm"):
             return
 
-        if self.current_mode == DemoMode.IDLE:
+        if self.current_mode == DemoMode.FLY_STRAIGHT:
             return
 
         self.get_logger().warn(
-            f"Observed cmd_nav action={action}; returning demo mode to IDLE"
+            f"Observed cmd_nav action={action}; returning demo mode to FLY_STRAIGHT"
         )
         self.set_mode(
-            DemoMode.IDLE,
+            DemoMode.FLY_STRAIGHT,
             source="cmd_nav_observer",
             reason=f"observed {action}",
         )
@@ -295,7 +295,7 @@ def parse_args():
     parser.add_argument("--cmd-nav-state-sub-topic", default="/xtend/cmd_nav")
     parser.add_argument("--disarm-delay-sec", type=float, default=8.0)
     parser.add_argument("--publish-period-sec", type=float, default=1.0)
-    parser.add_argument("--initial-mode", default=DemoMode.IDLE.value)
+    parser.add_argument("--initial-mode", default=DemoMode.FLY_STRAIGHT.value)
     return parser.parse_args()
 
 
