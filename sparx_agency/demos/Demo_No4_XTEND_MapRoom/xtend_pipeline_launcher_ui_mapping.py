@@ -629,8 +629,9 @@ class XtendPipelineLauncher(tk.Tk):
         self.selected_item = item
         self.desc_text.delete("1.0", "end")
         self.desc_text.insert("end", f"{item.name}\nMachine: {item.machine}\nTmux: {item.tmux_name}\n\n{item.description}")
+        cmd = item.command.replace("/home/user/GIT/TheAgency", JETSON_REPO) if item.machine == "jetson" else item.command
         self.cmd_text.delete("1.0", "end")
-        self.cmd_text.insert("end", normalize_command(item.command))
+        self.cmd_text.insert("end", normalize_command(cmd))
 
     def get_command_text(self) -> str:
         return normalize_command(self.cmd_text.get("1.0", "end"))
