@@ -18,6 +18,7 @@ from tkinter import messagebox, ttk
 from typing import Literal
 
 JETSON_SSH_DEFAULT = "user@192.0.0.89"
+JETSON_REPO = "/home/user/agency_ws"
 
 JETSON_ENV = """
 cd /home/user/GIT/TheAgency
@@ -27,7 +28,7 @@ export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-"""
+""".replace("/home/user/GIT/TheAgency", JETSON_REPO)
 
 PC_ENV = """
 cd /home/user1/GIT/TheAgency
@@ -233,7 +234,7 @@ echo "  docker exec -it falcon bash -lc 'rosrun falcon_adapter bev_click_goal.py
 
 echo "[AUTO] Done. Active tmux sessions:"
 tmux ls || true
-"""
+""".replace("/home/user/GIT/TheAgency", JETSON_REPO)
 
 
 @dataclass(frozen=True)
@@ -448,6 +449,8 @@ def normalize_command(text: str) -> str:
 
 def wrap_with_env(machine: str, command: str) -> str:
     env = JETSON_ENV if machine == "jetson" else PC_ENV
+    if machine == "jetson":
+        command = command.replace("/home/user/GIT/TheAgency", JETSON_REPO)
     return normalize_command(env) + "\n" + normalize_command(command)
 
 
@@ -607,9 +610,9 @@ class XtendPipelineLauncher(tk.Tk):
         payload = f"{{data: '{mode_json}'}}"
 
         remote_cmd = (
-            "cd /home/user/GIT/TheAgency && "
+            f"cd {JETSON_REPO} && "
             "source /opt/ros/humble/setup.bash && "
-            "source /home/user/GIT/TheAgency/venv/bin/activate && "
+            f"source {JETSON_REPO}/venv/bin/activate && "
             "export ROS_DOMAIN_ID=5 && "
             f"ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String {shlex.quote(payload)}"
         )
