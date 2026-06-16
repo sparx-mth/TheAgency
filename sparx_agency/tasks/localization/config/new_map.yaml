@@ -60,6 +60,16 @@ tags:
     rpy: [-1.5708, 0, 0]
     size: 0.2
 
+
+  # inside MAMAD, in front of mamad's door facing the window
+  7:
+    xyz: [ -0.25, -0.99, 1.23 ]
+    rpy: [ -1.5708, 0, 0 ]
+    size: 0.15
+
  # Tag 4, near the screen inside the MAMAD, same wall as tag 9
 
-
+  4:
+    xyz: [-1.55, -3.49, 1.36]
+    rpy: [-1.5708,  0, 1.5708]
+    size: 0.20
