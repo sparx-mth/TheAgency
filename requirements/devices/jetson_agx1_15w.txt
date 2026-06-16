@@ -63,7 +63,8 @@ httpx==0.28.1
 uvicorn==0.48.0
 
 # --- Jetson-specific ---
-jetson-stats==4.3.2
+# jetson-stats — install system-wide first: sudo pip3 install -U jetson-stats
+#                then available via --system-site-packages
 Jetson.GPIO==2.1.7
 nvidia-ml-py==13.590.48
 

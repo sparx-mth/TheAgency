@@ -1,0 +1,44 @@
+# Flat requirements for: jetson_agx2_ollama (Jetson AGX Orin — Ollama LLM server)
+# Last synced: 2026-06-16
+#
+# Intentionally excluded:
+#   torch / tensorrt / pycuda / onnx* — not needed; Ollama manages its own runtime
+#   colcon-* / catkin-* / rosdep-*    — managed by apt + rosdep
+
+# --- constraints ---
+numpy==1.26.4
+opencv-python==4.11.0.86
+
+# --- core ---
+PyYAML==6.0.3
+requests==2.34.2
+Pillow==12.2.0
+
+# --- LLM ---
+ollama==0.5.1
+openai==2.16.0
+huggingface-hub==0.36.0
+transformers==4.57.5
+tokenizers==0.22.2
+safetensors==0.7.0
+
+# --- web / UI ---
+Flask==3.1.3
+Werkzeug==3.1.8
+flask-cors==5.0.1
+pygame==2.6.1
+
+# --- networking ---
+websockets==16.0
+aiohttp==3.13.3
+httpx==0.28.1
+uvicorn==0.48.0
+
+# --- Jetson-specific ---
+# jetson-stats — install system-wide first: sudo pip3 install -U jetson-stats
+#                then available via --system-site-packages
+nvidia-ml-py==13.590.48
+
+# --- dev tools ---
+pytest==6.2.5
+ruff==0.15.14

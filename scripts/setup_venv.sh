@@ -9,7 +9,8 @@
 # requirements/devices/<name>.txt file.
 #
 # Known devices:
-#   user    @ user-agx1   → jetson_agx1_15w     (Jetson AGX Orin)
+#   user    @ user-agx1   → jetson_agx1_15w     (Jetson AGX Orin — depth/bridge)
+#   user    @ user-agx2   → jetson_agx2_ollama  (Jetson AGX Orin — Ollama LLM, ROS2 Jazzy/py3.12)
 #   user1   @ PCN87653    → office_pc            (office PC)
 #   daphnaa @ *           → laptop_home_daphna   (home laptop)
 
@@ -29,6 +30,13 @@ case "${DEVICE}" in
         VENV_OPTS="--system-site-packages"
         ROS_DISTRO="humble"
         ROS_PYTHON_VER="3.10"
+        HAS_CUDA_LD="yes"
+        ;;
+    user@user-agx2|user-agx2|agx2)
+        DEVICE_FILE="${DEVICE_REQ_DIR}/jetson_agx2_ollama.txt"
+        VENV_OPTS="--system-site-packages"
+        ROS_DISTRO="jazzy"
+        ROS_PYTHON_VER="3.12"
         HAS_CUDA_LD="yes"
         ;;
     daphnaa@*|*daphna*|*laptop*)
@@ -65,8 +73,9 @@ echo ""
 cp "${DEVICE_FILE}" "${ACTIVE_REQ}"
 echo "[setup_venv] Copied requirements -> ${ACTIVE_REQ}"
 
-# --- create venv if missing ---
-if [ ! -d "${VENV_DIR}" ]; then
+# --- create venv if missing or broken ---
+if [ ! -f "${VENV_DIR}/bin/pip" ]; then
+    [ -d "${VENV_DIR}" ] && echo "[setup_venv] Removing broken venv ..." && rm -rf "${VENV_DIR}"
     echo "[setup_venv] Creating venv ..."
     # shellcheck disable=SC2086
     python3 -m venv ${VENV_OPTS} "${VENV_DIR}"
