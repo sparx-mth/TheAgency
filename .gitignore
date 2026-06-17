@@ -205,3 +205,6 @@ sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
 
 /graphify-out/
 /.claude/
+
+/graphify-out/
+/.claude/
