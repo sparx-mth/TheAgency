@@ -200,14 +200,6 @@ def estimate_camera_pose_from_tags(
     if not world_poses:
         return None
 
-    if len(world_poses) > 1:
-        print("\n[DEBUG FUSION] --- Multiple Tags Detected ---")
-        total_w = sum(weights)
-        for tid, w in zip(used_ids, weights):
-            norm_w = (w / total_w) * 100 if total_w > 0 else 0
-            print(f"  -> Tag ID: {tid} | Area: {w:.0f}px | Power: {norm_w:.1f}%")
-        print("---------------------------------------------")
-
     # Pass the collected weights to the fusion function
     fused = fuse_world_T_cam(world_poses, weights=weights, method=fuse_method)
     return PoseEstimate(world_T_cam=fused, used_tag_ids=used_ids)
