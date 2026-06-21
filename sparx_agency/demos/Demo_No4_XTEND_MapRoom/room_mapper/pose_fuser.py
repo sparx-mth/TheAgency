@@ -79,11 +79,20 @@ class PoseFuser:
             import warnings
             warnings.warn("open3d not available — odometry disabled, AprilTag-only mode.")
 
+        self._depth_h = depth_h
+        self._depth_w = depth_w
+
         self._tag_world_T_cam: Optional[np.ndarray] = None
         self._odom_T_cam_at_fix: Optional[np.ndarray] = None
         self._n_fixes = 0
         self._last_tag_ids: List[int] = []
         self._last_tag_total_area: float = 0.0
+        self._last_observations: List = []
+
+        self._smoothed_depth_scale: Optional[float] = None
+        self._scale_ema_alpha: float = 0.1
+        _SCALE_MIN, _SCALE_MAX = 0.8, 1.5
+        self._scale_clamp = (_SCALE_MIN, _SCALE_MAX)
 
     @property
     def n_tag_fixes(self) -> int:
@@ -103,6 +112,11 @@ class PoseFuser:
         """World XYZ (3,) for each known tag — tags are on walls."""
         return {tid: np.array(p.xyz, dtype=np.float64)
                 for tid, p in self._tag_poses.items()}
+
+    @property
+    def last_depth_scale(self) -> Optional[float]:
+        """Smoothed DA3 depth scale factor from tag observations. None until first tag seen."""
+        return self._smoothed_depth_scale
 
     @property
     def odometry_available(self) -> bool:
@@ -128,6 +142,21 @@ class PoseFuser:
             self._tag_world_T_cam = tag_fix
             self._odom_T_cam_at_fix = odom_T_cam.copy() if odom_T_cam is not None else None
             self._n_fixes += 1
+            raw_scale = self._estimate_depth_scale(depth_m, bgr.shape[:2])
+            if raw_scale is not None:
+                lo, hi = self._scale_clamp
+                scale = float(np.clip(raw_scale, lo, hi))
+                if self._smoothed_depth_scale is None:
+                    self._smoothed_depth_scale = scale
+                else:
+                    self._smoothed_depth_scale = float(np.clip(
+                        self._scale_ema_alpha * scale
+                        + (1.0 - self._scale_ema_alpha) * self._smoothed_depth_scale,
+                        lo, hi,
+                    ))
+                if abs(raw_scale - scale) > 0.01:
+                    print(f"  [scale] raw={raw_scale:.3f} → clamped to {scale:.3f} "
+                          f"(ema={self._smoothed_depth_scale:.3f})")
 
         if self._tag_world_T_cam is None:
             return odom_T_cam   # None if no odometry, or raw odom pose if no tag ever seen
@@ -138,8 +167,53 @@ class PoseFuser:
         delta = np.linalg.inv(self._odom_T_cam_at_fix) @ odom_T_cam
         return self._tag_world_T_cam @ delta
 
+    def _estimate_depth_scale(
+        self, depth_m: np.ndarray, rgb_shape: Tuple[int, int]
+    ) -> Optional[float]:
+        """
+        Estimate DA3 metric scale by comparing observed depth at tag centers
+        to the expected Z distance from solvePnP (cam_T_tag[2,3]).
+
+        Returns median(expected_z / observed_z) across all visible tags,
+        or None if no reliable samples found.
+        """
+        rgb_h, rgb_w = rgb_shape
+        scales = []
+        for obs in self._last_observations:
+            p_cam = obs.cam_T_tag[:3, 3]
+            expected_z = float(p_cam[2])
+            if expected_z < 0.2:
+                continue
+
+            # Project tag center to depth image (same sensor, different resolution)
+            u_rgb = self._calib.K[0, 0] * p_cam[0] / p_cam[2] + self._calib.K[0, 2]
+            v_rgb = self._calib.K[1, 1] * p_cam[1] / p_cam[2] + self._calib.K[1, 2]
+            u_d = int(round(u_rgb * self._depth_w / rgb_w))
+            v_d = int(round(v_rgb * self._depth_h / rgb_h))
+
+            r = 5
+            u0 = max(0, u_d - r); u1 = min(self._depth_w,  u_d + r + 1)
+            v0 = max(0, v_d - r); v1 = min(self._depth_h, v_d + r + 1)
+            if u1 <= u0 or v1 <= v0:
+                continue
+
+            patch = depth_m[v0:v1, u0:u1]
+            valid = patch[np.isfinite(patch) & (patch > 0.1)]
+            if valid.size == 0:
+                continue
+
+            observed_z = float(np.median(valid))
+            if observed_z < 0.1:
+                continue
+
+            scales.append(expected_z / observed_z)
+
+        if not scales:
+            return None
+        return float(np.median(scales))
+
     def _detect_tag_fix(self, bgr: np.ndarray):
-        """Returns (world_T_cam or None, list_of_detected_tag_ids)."""
+        """Returns (world_T_cam or None, list_of_detected_tag_ids, total_area)."""
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         dets = self._detector.detect(gray)
         observations: List[TagObservation] = []
@@ -154,6 +228,7 @@ class PoseFuser:
                 continue
             area = float(cv2.contourArea(corners.astype(np.float32)))
             observations.append(TagObservation(tag_id=tid, cam_T_tag=cam_T_tag, weight=area))
+        self._last_observations = observations
         if not observations:
             return None, [], 0.0
         detected_ids = [obs.tag_id for obs in observations]

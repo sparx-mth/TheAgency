@@ -24,7 +24,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))  # project root
 
 from sparx_agency.core.mapping.costmap.log_odds_grid import LogOddsGridCostmap, LogOddsGridConfig
-from sparx_agency.core.mapping.costmap.depth_to_grid import update_grid_from_depth
+from sparx_agency.core.mapping.costmap.depth_to_grid import update_grid_from_depth, texture_confidence_mask
 from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.frame_reader import iter_frames
 from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.pose_fuser import PoseFuser
 from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.map_visualizer import (
@@ -68,8 +68,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--z-min",            type=float, default=0.0)
     p.add_argument("--z-max",            type=float, default=3.0)
     p.add_argument("--downsample",       type=int,   default=4)
-    p.add_argument("--cluster-radius",   type=float, default=1.5,
+    p.add_argument("--cluster-radius",   type=float, default=2.0,
                    help="Merge same-label object markers within this radius (m)")
+    p.add_argument("--texture-thresh",   type=float, default=0.0,
+                   help="Laplacian gradient threshold for depth confidence masking. "
+                        "0 = disabled. Try 6-12 to ignore white/featureless walls.")
+    p.add_argument("--no-scale-correction", action="store_true",
+                   help="Disable per-frame DA3 scale correction from AprilTags.")
     p.add_argument("--no-raytrace",      action="store_true",
                    help="Disable ray-cast free-space (faster but no wall contrast)")
     p.add_argument("--preview",          action="store_true",
@@ -133,6 +138,20 @@ def main() -> None:
         if world_T_cam is None:
             continue
 
+        # Keep raw depth for object placement (scale is calibrated at wall/tag distance,
+        # not at object depth — applying it to foreground objects would over-push them).
+        depth_raw = depth_m
+
+        # Per-frame DA3 scale correction from AprilTag ground truth (walls only)
+        if not args.no_scale_correction and fuser.last_depth_scale is not None:
+            depth_m = depth_m * fuser.last_depth_scale
+
+        conf_mask = None
+        if args.texture_thresh > 0.0:
+            conf_mask = texture_confidence_mask(
+                bgr, DEPTH_H, DEPTH_W, thresh=args.texture_thresh
+            )
+
         update_grid_from_depth(
             grid, depth_m, K_depth, world_T_cam,
             z_min_world=args.z_min,
@@ -140,6 +159,7 @@ def main() -> None:
             depth_max_m=args.depth_max,
             downsample=args.downsample,
             raytrace=not args.no_raytrace,
+            confidence_mask=conf_mask,
         )
 
         wx, wy = float(world_T_cam[0, 3]), float(world_T_cam[1, 3])
@@ -158,11 +178,12 @@ def main() -> None:
         prev_n_fixes = fuser.n_tag_fixes
 
         if args.labels:
-            depth_cache[rec.frame_idx] = depth_m.copy()
+            depth_cache[rec.frame_idx] = depth_raw.copy()
 
         if (i + 1) % 20 == 0:
+            scale_str = f"{fuser.last_depth_scale:.3f}" if fuser.last_depth_scale else "none"
             print(f"[mapper] {i+1}/{len(frames)}  tag_fixes={fuser.n_tag_fixes}  "
-                  f"traj_pts={len(trajectory)}")
+                  f"traj_pts={len(trajectory)}  depth_scale={scale_str}")
 
         if args.preview and (i + 1) % args.preview_interval == 0:
             title = f"Frame {rec.frame_idx}  fixes={fuser.n_tag_fixes}"
@@ -181,7 +202,7 @@ def main() -> None:
         objects = cluster_objects(objects, radius_m=args.cluster_radius)
         print(f"[mapper] After clustering ({args.cluster_radius}m): {len(objects)} objects")
         objects = flag_objects_beyond_tags(
-            objects, frame_poses, fuser.tag_world_xyz, frame_tag_ids, tolerance_m=0.1)
+            objects, frame_poses, fuser.tag_world_xyz, frame_tag_ids, tolerance_m=0.4)
         objects = flag_objects_outside_map(objects, grid)
         for obj in objects:
             print(f"         {obj.label:20s}  "

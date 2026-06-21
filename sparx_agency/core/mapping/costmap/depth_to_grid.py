@@ -39,6 +39,31 @@ def _raytrace_free(
     grid.apply_free_mask(free_mask.astype(bool))
 
 
+def texture_confidence_mask(
+    bgr: np.ndarray,
+    target_h: int,
+    target_w: int,
+    thresh: float = 8.0,
+    blur_ksize: int = 5,
+) -> np.ndarray:
+    """
+    Return a boolean mask (target_h, target_w) — True where texture is sufficient.
+
+    Uses Laplacian gradient magnitude on grayscale RGB.  Low-texture regions
+    (white walls, featureless surfaces) are masked out so their unreliable
+    DA3 depth doesn't poison the occupancy grid.
+    """
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
+    mag = np.abs(lap)
+    if blur_ksize > 1:
+        mag = cv2.blur(mag, (blur_ksize, blur_ksize))
+    mask = (mag > thresh).astype(np.uint8)
+    if mask.shape != (target_h, target_w):
+        mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    return mask.astype(bool)
+
+
 def update_grid_from_depth(
     grid: LogOddsGridCostmap,
     depth_m: np.ndarray,
@@ -52,6 +77,7 @@ def update_grid_from_depth(
     stamp_sec: Optional[float] = None,
     raytrace: bool = True,
     raytrace_stride: int = 4,
+    confidence_mask: Optional[np.ndarray] = None,
 ) -> int:
     """
     Backproject depth pixels to world frame, filter by height, update grid XY.
@@ -76,6 +102,8 @@ def update_grid_from_depth(
 
     z = depth_m[vv, uu]
     valid = np.isfinite(z) & (z >= depth_min_m) & (z <= depth_max_m)
+    if confidence_mask is not None:
+        valid &= confidence_mask[vv, uu]
     z, uu, vv = z[valid], uu[valid], vv[valid]
     if z.size == 0:
         return 0
