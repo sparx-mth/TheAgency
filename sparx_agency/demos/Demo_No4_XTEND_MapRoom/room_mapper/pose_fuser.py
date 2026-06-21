@@ -42,6 +42,10 @@ def _load_tag_map(path: str) -> Tuple[Dict[int, TagWorldPose], Dict[int, float]]
     return poses, sizes
 
 
+def _empty_tag_map() -> Tuple[Dict[int, TagWorldPose], Dict[int, float]]:
+    return {}, {}
+
+
 class PoseFuser:
     """
     Per-frame pose estimator combining AprilTag fixes and RGB-D odometry.
@@ -58,7 +62,7 @@ class PoseFuser:
 
     def __init__(
         self,
-        tag_map_path: str,
+        tag_map_path: Optional[str],
         rgb_calib_path: str,
         depth_calib_path: str,
         depth_h: int = 392,
@@ -67,7 +71,10 @@ class PoseFuser:
         tag_family: str = "tag36h11",
         nthreads: int = 2,
     ) -> None:
-        self._tag_poses, self._tag_sizes = _load_tag_map(tag_map_path)
+        if tag_map_path is not None:
+            self._tag_poses, self._tag_sizes = _load_tag_map(tag_map_path)
+        else:
+            self._tag_poses, self._tag_sizes = _empty_tag_map()
         self._calib = load_camera_calib_yaml(rgb_calib_path)
         self._detector = make_detector(tag_family, nthreads=nthreads)
         self._min_margin = float(min_margin)
@@ -91,7 +98,7 @@ class PoseFuser:
 
         self._smoothed_depth_scale: Optional[float] = None
         self._scale_ema_alpha: float = 0.1
-        _SCALE_MIN, _SCALE_MAX = 0.8, 1.5
+        _SCALE_MIN, _SCALE_MAX = 1.0, 1.5
         self._scale_clamp = (_SCALE_MIN, _SCALE_MAX)
 
     @property
@@ -214,6 +221,8 @@ class PoseFuser:
 
     def _detect_tag_fix(self, bgr: np.ndarray):
         """Returns (world_T_cam or None, list_of_detected_tag_ids, total_area)."""
+        if not self._tag_poses:
+            return None, [], 0.0
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         dets = self._detector.detect(gray)
         observations: List[TagObservation] = []

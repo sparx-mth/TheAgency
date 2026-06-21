@@ -43,12 +43,17 @@ def place_objects(
     K_depth: np.ndarray,
     frame_tag_ids: Optional[Dict[int, List[int]]] = None,
     frame_tag_areas: Optional[Dict[int, float]] = None,
+    frame_depth_scales: Optional[Dict[int, float]] = None,
+    tag_world_xyz: Optional[Dict[int, np.ndarray]] = None,
 ) -> List[ObjectMarker]:
     """
     Backproject each labelled bbox centre through depth to a world 3D position.
 
     bbox coords are in source_size space; scaled to depth resolution before sampling.
     tag_confidence is derived from total tag pixel area at the label frame.
+    frame_depth_scales + tag_world_xyz: if provided, object raw depth is capped to the
+    raw DA3 distance of the nearest aligned visible tag (tags are on walls — no object
+    can be further than the wall in the same direction).
     """
     fx, fy, cx, cy = K_depth[0, 0], K_depth[1, 1], K_depth[0, 2], K_depth[1, 2]
     markers: List[ObjectMarker] = []
@@ -71,16 +76,64 @@ def place_objects(
         u = max(0, min(u, dw - 1))
         v = max(0, min(v, dh - 1))
 
-        z = float(depth_m[v, u])
-        if not np.isfinite(z) or z < 0.1:
+        # Find the first coherent depth cluster in the bbox — the object surface.
+        # Sort depths ascending, find the first jump > gap_thresh (background starts there),
+        # use the median of everything before the jump.
+        half_w = max(1, int(bw * dw / src_w) // 4)
+        half_h = max(1, int(bh * dh / src_h) // 4)
+        u0 = max(0, u - half_w); u1 = min(dw, u + half_w + 1)
+        v0 = max(0, v - half_h); v1 = min(dh, v + half_h + 1)
+        patch = depth_m[v0:v1, u0:u1].ravel()
+        valid_px = np.sort(patch[np.isfinite(patch) & (patch > 0.1)])
+        if valid_px.size == 0:
             continue
+        # Object pixels are always closer than background wall pixels in raw DA3.
+        # Take the nearest 10% of the inner patch (min 3, max 25) and use their
+        # median — reliably lands on the object front surface for both large objects
+        # (fridge fills most of the patch) and thin ones (gun occupies ~10% of patch).
+        n_front = max(3, min(25, max(1, int(valid_px.size * 0.10))))
+        z = float(np.median(valid_px[:n_front]))
+
+        tids = frame_tag_ids.get(fidx, []) if frame_tag_ids else []
+
+        # Cap raw depth so the object can't be placed past the wall.
+        # Tags sit on walls — compute the raw DA3 equivalent distance to each visible
+        # tag and cap z to the minimum aligned one (minus a 5cm safety margin).
+        if frame_depth_scales and tag_world_xyz and tids:
+            scale = frame_depth_scales.get(fidx, 1.0)
+            if scale > 0:
+                world_T_cam = frame_poses[fidx]
+                cam_T_world = np.linalg.inv(world_T_cam)
+                obj_ray = np.array([(u - cx) / fx, (v - cy) / fy, 1.0])
+                obj_ray = obj_ray / np.linalg.norm(obj_ray)
+                z_cap = None
+                for t in tids:
+                    if t not in tag_world_xyz:
+                        continue
+                    tag_cam = (cam_T_world @ np.append(tag_world_xyz[t], 1.0))[:3]
+                    tag_metric = float(tag_cam[2])
+                    if tag_metric <= 0:
+                        continue
+                    tag_raw = tag_metric / scale
+                    tag_ray = tag_cam / np.linalg.norm(tag_cam)
+                    if float(np.dot(obj_ray, tag_ray)) >= 0.3:  # within ~72° of object direction
+                        if z_cap is None or tag_raw < z_cap:
+                            z_cap = tag_raw
+                if z_cap is not None and z > z_cap - 0.05:
+                    print(f"  [cap] '{entry['label']}' frame={fidx} "
+                          f"z={z:.2f}→{z_cap - 0.05:.2f} (tag_raw={z_cap:.2f})")
+                    z = z_cap - 0.05
 
         p_cam = np.array([(u - cx) * z / fx, (v - cy) * z / fy, z, 1.0])
         p_world = frame_poses[fidx] @ p_cam
 
-        tids = frame_tag_ids.get(fidx, []) if frame_tag_ids else []
         area = frame_tag_areas.get(fidx, 0.0) if frame_tag_areas else 0.0
         confidence = float(np.clip(area / _REFERENCE_TAG_AREA_PX2, 0.1, 1.0))
+
+        # Skip frames with no tag fix — pose is odometry-only (wrong coordinate frame)
+        if frame_tag_ids is not None and not tids:
+            print(f"  [skip] '{entry['label']}' frame={fidx} — no AprilTag visible, pose unreliable")
+            continue
 
         markers.append(ObjectMarker(
             label=entry["label"],

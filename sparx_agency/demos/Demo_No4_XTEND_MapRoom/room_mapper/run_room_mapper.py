@@ -58,7 +58,8 @@ def _load_depth_K(calib_path: str) -> np.ndarray:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Offline room mapper (RGB + DA3 depth).")
     p.add_argument("--data-dir",         required=True)
-    p.add_argument("--tag-map",          required=True)
+    p.add_argument("--tag-map",          default=None,
+                   help="AprilTag world map YAML. Omit for odometry-only (unscaled) mode.")
     p.add_argument("--output-dir",       default="./room_map_out")
     p.add_argument("--stride",           type=int,   default=5)
     p.add_argument("--labels",           default=None)
@@ -75,6 +76,13 @@ def _parse_args() -> argparse.Namespace:
                         "0 = disabled. Try 6-12 to ignore white/featureless walls.")
     p.add_argument("--no-scale-correction", action="store_true",
                    help="Disable per-frame DA3 scale correction from AprilTags.")
+    p.add_argument("--labels-only-grid",  action="store_true",
+                   help="Only update the occupancy grid for labeled frames. "
+                        "Guarantees objects are in front of their walls (same-frame DA3 consistency).")
+    p.add_argument("--no-convex-walls",  action="store_true",
+                   help="Disable convex-hull post-processing of free space. "
+                        "By default the free region is convex-hull-filled to fix "
+                        "diagonal DA3 corner smear in rectangular rooms.")
     p.add_argument("--no-raytrace",      action="store_true",
                    help="Disable ray-cast free-space (faster but no wall contrast)")
     p.add_argument("--preview",          action="store_true",
@@ -118,6 +126,26 @@ def main() -> None:
     depth_cache: Dict[int, np.ndarray] = {}
     _prev_tag_set: frozenset = frozenset()
 
+    labeled_frame_idxs: Optional[set] = None
+    # frame_idx → list of (x, y, w, h) bboxes in depth-image coordinates
+    frame_bbox_masks: Dict[int, List[Tuple[int, int, int, int]]] = {}
+    if args.labels and Path(args.labels).exists():
+        _raw_labels = load_labels(args.labels)
+        if args.labels_only_grid:
+            labeled_frame_idxs = {int(e["frame_idx"]) for e in _raw_labels}
+            print(f"[mapper] labels-only-grid: will update grid for "
+                  f"{len(labeled_frame_idxs)} labeled frames only")
+        # Build per-frame bbox list (scaled from source_size to depth resolution)
+        for _e in _raw_labels:
+            _fidx = int(_e["frame_idx"])
+            _bx, _by, _bw, _bh = _e["bbox"]
+            _sw, _sh = _e.get("source_size", [DEPTH_W, DEPTH_H])
+            _dx = int(_bx * DEPTH_W / _sw); _dy = int(_by * DEPTH_H / _sh)
+            _dw = int(_bw * DEPTH_W / _sw); _dh = int(_bh * DEPTH_H / _sh)
+            frame_bbox_masks.setdefault(_fidx, []).append((_dx, _dy, _dw, _dh))
+        print(f"[mapper] bbox masking: {len(frame_bbox_masks)} labeled frames will "
+              f"have object regions excluded from grid")
+
     frames = list(iter_frames(Path(args.data_dir), stride=args.stride))
     print(f"[mapper] {len(frames)} frames  stride={args.stride}  "
           f"raytrace={'off' if args.no_raytrace else 'on'}  "
@@ -146,21 +174,33 @@ def main() -> None:
         if not args.no_scale_correction and fuser.last_depth_scale is not None:
             depth_m = depth_m * fuser.last_depth_scale
 
-        conf_mask = None
-        if args.texture_thresh > 0.0:
-            conf_mask = texture_confidence_mask(
-                bgr, DEPTH_H, DEPTH_W, thresh=args.texture_thresh
-            )
+        if labeled_frame_idxs is None or rec.frame_idx in labeled_frame_idxs:
+            conf_mask = None
+            if args.texture_thresh > 0.0:
+                conf_mask = texture_confidence_mask(
+                    bgr, DEPTH_H, DEPTH_W, thresh=args.texture_thresh
+                )
 
-        update_grid_from_depth(
-            grid, depth_m, K_depth, world_T_cam,
-            z_min_world=args.z_min,
-            z_max_world=args.z_max,
-            depth_max_m=args.depth_max,
-            downsample=args.downsample,
-            raytrace=not args.no_raytrace,
-            confidence_mask=conf_mask,
-        )
+            # Mask out labeled-object bboxes so foreground objects don't create
+            # phantom wall cells in the occupancy grid at the object's depth.
+            bboxes = frame_bbox_masks.get(rec.frame_idx)
+            if bboxes:
+                obj_mask = np.ones((DEPTH_H, DEPTH_W), dtype=bool)
+                for bx, by, bw, bh in bboxes:
+                    x1, y1 = max(0, bx), max(0, by)
+                    x2, y2 = min(DEPTH_W, bx + bw), min(DEPTH_H, by + bh)
+                    obj_mask[y1:y2, x1:x2] = False
+                conf_mask = obj_mask if conf_mask is None else (conf_mask & obj_mask)
+
+            update_grid_from_depth(
+                grid, depth_m, K_depth, world_T_cam,
+                z_min_world=args.z_min,
+                z_max_world=args.z_max,
+                depth_max_m=args.depth_max,
+                downsample=args.downsample,
+                raytrace=not args.no_raytrace,
+                confidence_mask=conf_mask,
+            )
 
         wx, wy = float(world_T_cam[0, 3]), float(world_T_cam[1, 3])
 
@@ -201,8 +241,9 @@ def main() -> None:
         print(f"[mapper] Placed {len(objects)} raw object markers")
         objects = cluster_objects(objects, radius_m=args.cluster_radius)
         print(f"[mapper] After clustering ({args.cluster_radius}m): {len(objects)} objects")
-        objects = flag_objects_beyond_tags(
-            objects, frame_poses, fuser.tag_world_xyz, frame_tag_ids, tolerance_m=0.4)
+        if args.tag_map is not None:
+            objects = flag_objects_beyond_tags(
+                objects, frame_poses, fuser.tag_world_xyz, frame_tag_ids, tolerance_m=0.4)
         objects = flag_objects_outside_map(objects, grid)
         for obj in objects:
             print(f"         {obj.label:20s}  "
@@ -233,6 +274,7 @@ def main() -> None:
         output_path=str(out_dir / "map_with_objects.png"),
         title=map_title,
         tag_fixes=tag_fix_positions if tag_fix_positions else None,
+        convex_walls=not args.no_convex_walls,
     )
 
     if args.preview:
