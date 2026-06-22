@@ -101,6 +101,8 @@ class PoseFuser:
         _SCALE_MIN, _SCALE_MAX = 1.0, 1.5
         self._scale_clamp = (_SCALE_MIN, _SCALE_MAX)
 
+        self._last_wall_view_angle: Optional[float] = None  # degrees from perpendicular
+
     @property
     def n_tag_fixes(self) -> int:
         return self._n_fixes
@@ -129,6 +131,16 @@ class PoseFuser:
     def odometry_available(self) -> bool:
         return self._odom is not None
 
+    @property
+    def last_wall_view_angle(self) -> Optional[float]:
+        """Minimum viewing angle from wall-perpendicular across all tags detected last frame.
+
+        0° = camera looking straight at the wall (ideal for depth accuracy).
+        90° = camera looking along the wall surface (grazing, DA3 unreliable).
+        None if no tags were detected.
+        """
+        return self._last_wall_view_angle
+
     def update(self, bgr: np.ndarray, depth_m: np.ndarray) -> Optional[np.ndarray]:
         """
         Process one frame. Returns world_T_cam (4×4) or None if no pose available yet.
@@ -145,6 +157,22 @@ class PoseFuser:
         tag_fix, detected_ids, total_area = self._detect_tag_fix(bgr)
         self._last_tag_ids = detected_ids
         self._last_tag_total_area = total_area
+
+        # Compute viewing angle to wall for each detected tag.
+        # Tag Z-axis = wall outward normal; angle between viewing ray and normal gives
+        # how perpendicular the camera is to the wall (0° = ideal, 90° = grazing).
+        if self._last_observations:
+            angles = []
+            for obs in self._last_observations:
+                t = obs.cam_T_tag[:3, 3]
+                n = obs.cam_T_tag[:3, 2]          # tag Z-axis (wall normal) in cam frame
+                d = t / (np.linalg.norm(t) + 1e-9)
+                cos_a = float(np.clip(abs(np.dot(d, n)), 0.0, 1.0))
+                angles.append(float(np.degrees(np.arccos(cos_a))))
+            self._last_wall_view_angle = float(min(angles))
+        else:
+            self._last_wall_view_angle = None
+
         if tag_fix is not None:
             self._tag_world_T_cam = tag_fix
             self._odom_T_cam_at_fix = odom_T_cam.copy() if odom_T_cam is not None else None

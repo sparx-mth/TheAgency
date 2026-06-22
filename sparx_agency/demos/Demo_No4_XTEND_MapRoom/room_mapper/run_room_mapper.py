@@ -42,8 +42,8 @@ RGB_CALIB   = str(_CONFIG_DIR / "camera_xtend_ros_calib_720_420.yaml")
 DEPTH_CALIB = str(_CONFIG_DIR / "camera_xtend_ros_calib_504_392_crop_resize.yaml")
 DEPTH_H, DEPTH_W = 392, 504
 
-_TRAJ_MIN_MOVE_M = 0.10   # skip trajectory point if drone moved less than this
-_TRAJ_SMOOTH_WIN = 7      # rolling-average window for trajectory smoothing
+_TRAJ_MIN_MOVE_M = 0.05   # skip trajectory point if drone moved less than this
+_TRAJ_SMOOTH_WIN = 3      # rolling-average window for trajectory smoothing
 
 
 def _load_depth_K(calib_path: str) -> np.ndarray:
@@ -58,6 +58,10 @@ def _load_depth_K(calib_path: str) -> np.ndarray:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Offline room mapper (RGB + DA3 depth).")
     p.add_argument("--data-dir",         required=True)
+    p.add_argument("--rgb-subdir",       default="rgb_1",
+                   help="RGB image subdirectory (default: rgb_1)")
+    p.add_argument("--depth-subdir",     default="depth_npy_1",
+                   help="Depth .npy subdirectory (default: depth_npy_1)")
     p.add_argument("--tag-map",          default=None,
                    help="AprilTag world map YAML. Omit for odometry-only (unscaled) mode.")
     p.add_argument("--output-dir",       default="./room_map_out")
@@ -76,6 +80,11 @@ def _parse_args() -> argparse.Namespace:
                         "0 = disabled. Try 6-12 to ignore white/featureless walls.")
     p.add_argument("--no-scale-correction", action="store_true",
                    help="Disable per-frame DA3 scale correction from AprilTags.")
+    p.add_argument("--wall-angle-thresh",  type=float, default=None,
+                   help="Only update occupancy grid for frames where the camera views "
+                        "the wall within this many degrees of perpendicular (e.g. 10 for "
+                        "80-100 deg). Skipped frames still contribute to pose/trajectory. "
+                        "Requires --tag-map. Default: disabled (use all frames).")
     p.add_argument("--labels-only-grid",  action="store_true",
                    help="Only update the occupancy grid for labeled frames. "
                         "Guarantees objects are in front of their walls (same-frame DA3 consistency).")
@@ -83,6 +92,16 @@ def _parse_args() -> argparse.Namespace:
                    help="Disable convex-hull post-processing of free space. "
                         "By default the free region is convex-hull-filled to fix "
                         "diagonal DA3 corner smear in rectangular rooms.")
+    p.add_argument("--flip-y",           action="store_true",
+                   help="Flip Y axis in the output map image. Does not affect saved coordinates.")
+    p.add_argument("--north-up",         action="store_true",
+                   help="Rotate display so geographic north is up (display_x=−world_y, "
+                        "display_y=world_x). Use when the world frame has +X pointing north "
+                        "and CCW flight appears CW in the default view.")
+    p.add_argument("--show-traj",         action="store_true",
+                   help="Draw the drone trajectory on the map (hidden by default).")
+    p.add_argument("--show-tag-fixes",    action="store_true",
+                   help="Draw AprilTag fix stars on the map (hidden by default).")
     p.add_argument("--no-raytrace",      action="store_true",
                    help="Disable ray-cast free-space (faster but no wall contrast)")
     p.add_argument("--preview",          action="store_true",
@@ -146,7 +165,8 @@ def main() -> None:
         print(f"[mapper] bbox masking: {len(frame_bbox_masks)} labeled frames will "
               f"have object regions excluded from grid")
 
-    frames = list(iter_frames(Path(args.data_dir), stride=args.stride))
+    frames = list(iter_frames(Path(args.data_dir), stride=args.stride,
+                              rgb_subdir=args.rgb_subdir, depth_subdir=args.depth_subdir))
     print(f"[mapper] {len(frames)} frames  stride={args.stride}  "
           f"raytrace={'off' if args.no_raytrace else 'on'}  "
           f"preview={'on' if args.preview else 'off'}")
@@ -155,6 +175,7 @@ def main() -> None:
         cv2.namedWindow("Room Mapper", cv2.WINDOW_NORMAL)
 
     prev_n_fixes = 0
+    n_grid_frames = 0
     for i, rec in enumerate(frames):
         bgr     = rec.load_rgb()
         depth_m = rec.load_depth()
@@ -174,7 +195,14 @@ def main() -> None:
         if not args.no_scale_correction and fuser.last_depth_scale is not None:
             depth_m = depth_m * fuser.last_depth_scale
 
-        if labeled_frame_idxs is None or rec.frame_idx in labeled_frame_idxs:
+        # Check if this frame is near-perpendicular to the wall (angle filtering)
+        _angle_ok = True
+        if args.wall_angle_thresh is not None:
+            angle = fuser.last_wall_view_angle
+            _angle_ok = (angle is not None and angle <= args.wall_angle_thresh)
+
+        if _angle_ok and (labeled_frame_idxs is None or rec.frame_idx in labeled_frame_idxs):
+            n_grid_frames += 1
             conf_mask = None
             if args.texture_thresh > 0.0:
                 conf_mask = texture_confidence_mask(
@@ -231,7 +259,9 @@ def main() -> None:
                 print("[mapper] Preview quit by user.")
                 break
 
-    print(f"[mapper] Done. tag_fixes={fuser.n_tag_fixes}  frames_with_pose={len(frame_poses)}")
+    angle_str = f"  wall_angle_thresh={args.wall_angle_thresh}°  grid_frames={n_grid_frames}" \
+                if args.wall_angle_thresh is not None else ""
+    print(f"[mapper] Done. tag_fixes={fuser.n_tag_fixes}  frames_with_pose={len(frame_poses)}{angle_str}")
 
     objects: List[ObjectMarker] = []
     if args.labels and Path(args.labels).exists():
@@ -269,12 +299,14 @@ def main() -> None:
     map_title = f"Room Map — {Path(args.data_dir).name}"
     save_map_png(
         grid=grid,
-        trajectory_world=traj_smooth,
+        trajectory_world=traj_smooth if args.show_traj else [],
         objects=objects,
         output_path=str(out_dir / "map_with_objects.png"),
         title=map_title,
-        tag_fixes=tag_fix_positions if tag_fix_positions else None,
+        tag_fixes=tag_fix_positions if (args.show_tag_fixes and tag_fix_positions) else None,
         convex_walls=not args.no_convex_walls,
+        flip_y=args.flip_y,
+        north_up=args.north_up,
     )
 
     if args.preview:

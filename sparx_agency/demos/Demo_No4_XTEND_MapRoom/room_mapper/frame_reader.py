@@ -27,21 +27,26 @@ class FrameRecord:
         return arr.astype(np.float32)
 
 
-def iter_frames(data_dir: Path, stride: int = 1) -> Iterator[FrameRecord]:
+def iter_frames(
+    data_dir: Path,
+    stride: int = 1,
+    rgb_subdir: str = "rgb_1",
+    depth_subdir: str = "depth_npy_1",
+) -> Iterator[FrameRecord]:
     """
-    Yield paired FrameRecords from rgb_2/ + depth_npy_2/, sorted by frame index.
+    Yield paired FrameRecords from rgb_subdir/ + depth_subdir/, sorted by frame index.
 
     stride=N returns every Nth matched pair (use to reduce density).
     Raises FileNotFoundError if the expected subdirectories are absent.
     """
     data_dir = Path(data_dir)
-    rgb_dir = data_dir / "rgb_2"
-    depth_dir = data_dir / "depth_npy_2"
+    rgb_dir = data_dir / rgb_subdir
+    depth_dir = data_dir / depth_subdir
 
     if not rgb_dir.exists():
-        raise FileNotFoundError(f"rgb_2/ not found under {data_dir}")
+        raise FileNotFoundError(f"{rgb_subdir}/ not found under {data_dir}")
     if not depth_dir.exists():
-        raise FileNotFoundError(f"depth_npy_2/ not found under {data_dir}")
+        raise FileNotFoundError(f"{depth_subdir}/ not found under {data_dir}")
 
     depth_index = {p.stem: p for p in depth_dir.glob("*.npy")}
 
