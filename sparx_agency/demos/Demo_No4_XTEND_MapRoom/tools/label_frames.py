@@ -61,16 +61,19 @@ def _save(entries: list, output_path: Path) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Interactive frame labeler.")
-    p.add_argument("--data-dir", required=True, help="Recording dir with rgb_1/")
-    p.add_argument("--output",   default="labels.json", help="Output labels JSON path")
-    p.add_argument("--stride",   type=int, default=10,  help="Sample every Nth frame")
+    p.add_argument("--data-dir",     required=True, help="Recording dir containing rgb subdirs")
+    p.add_argument("--output",       default="labels.json", help="Output labels JSON path")
+    p.add_argument("--stride",       type=int, default=10,  help="Sample every Nth frame")
+    p.add_argument("--rgb-subdir",   default="rgb_1",       help="RGB subdirectory (default: rgb_1)")
+    p.add_argument("--depth-subdir", default="depth_npy_1", help="Depth subdirectory (default: depth_npy_1)")
     args = p.parse_args()
 
     output_path = Path(args.output)
     entries = _load_existing(output_path)
     labeled_frames = {e["frame_idx"] for e in entries}
 
-    frames = list(iter_frames(Path(args.data_dir), stride=args.stride))
+    frames = list(iter_frames(Path(args.data_dir), stride=args.stride,
+                              rgb_subdir=args.rgb_subdir, depth_subdir=args.depth_subdir))
     print(f"[labeler] {len(frames)} frames (stride={args.stride}). "
           f"Already labeled: {len(labeled_frames)}. "
           f"Press 'q' in the review window to quit and save.")

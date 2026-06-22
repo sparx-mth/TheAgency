@@ -95,26 +95,65 @@ def _build_fig(
     tag_fixes: Optional[List[Tuple[float, float]]],
     title: str,
     convex_walls: bool = True,
+    flip_y: bool = False,
+    north_up: bool = False,
 ) -> plt.Figure:
     spec, grid_int8 = grid.get_grid()
     x0, y0 = spec.origin_x, spec.origin_y
     x1 = x0 + spec.width  * spec.resolution_m
     y1 = y0 + spec.height * spec.resolution_m
 
+    def _tx(wx, wy):
+        """World → display X."""
+        if north_up:
+            return -wy
+        return wx
+
+    def _ty(wx, wy):
+        """World → display Y."""
+        if north_up:
+            return wx
+        return -wy if flip_y else wy
+
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(_build_rgb_image(grid_int8, convex_walls=convex_walls), origin="lower",
-              extent=[x0, x1, y0, y1], aspect="equal")
+    img = _build_rgb_image(grid_int8, convex_walls=convex_walls)
+    if north_up:
+        # display_x = -world_y, display_y = world_x
+        # Grid array rows ~ world_y, cols ~ world_x.
+        # np.rot90(k=1) maps old[row,col] → new[col, H-1-row],
+        # which puts world_x on the new row axis and -world_y on the new col axis.
+        img = np.rot90(img, k=1)
+        ext = [-y1, -y0, x0, x1]
+    elif flip_y:
+        img = img[::-1, :]
+        ext = [x0, x1, -y1, -y0]
+    else:
+        ext = [x0, x1, y0, y1]
+    ax.imshow(img, origin="lower", extent=ext, aspect="equal")
 
     legend_handles = []
     if trajectory_world:
-        xs, ys = zip(*trajectory_world)
+        xs = [_tx(p[0], p[1]) for p in trajectory_world]
+        ys = [_ty(p[0], p[1]) for p in trajectory_world]
         ax.plot(xs, ys, "b-", linewidth=1.5, zorder=3)
         ax.plot(xs[0], ys[0], "go", markersize=9, zorder=4)
         ax.plot(xs[-1], ys[-1], "r^", markersize=9, zorder=4)
+        # Directional arrows only when path spans > 1.5 m (suppressed for stationary yaw scans)
+        span = max(max(xs) - min(xs), max(ys) - min(ys))
+        n = len(xs)
+        if n >= 4 and span > 1.5:
+            step = max(1, n // 6)
+            for k in range(0, n - 1, step):
+                ax.annotate(
+                    "", xy=(xs[k + 1], ys[k + 1]), xytext=(xs[k], ys[k]),
+                    arrowprops=dict(arrowstyle="->", color="blue", lw=1.2),
+                    zorder=4,
+                )
         legend_handles.append(mpatches.Patch(color="blue", label="trajectory"))
 
     if tag_fixes:
-        fx_x, fx_y = zip(*tag_fixes)
+        fx_x = [_tx(p[0], p[1]) for p in tag_fixes]
+        fx_y = [_ty(p[0], p[1]) for p in tag_fixes]
         ax.plot(fx_x, fx_y, "y*", markersize=14, zorder=5)
         legend_handles.append(mpatches.Patch(color="yellow", label="AprilTag fix"))
 
@@ -125,14 +164,16 @@ def _build_fig(
     bucket_count: dict = {}
     for obj in objects:
         c = color_map[obj.label]
+        dx = _tx(obj.world_x, obj.world_y)
+        dy = _ty(obj.world_x, obj.world_y)
         if obj.suspicious:
-            ax.plot(obj.world_x, obj.world_y, "X", color="red", markersize=14,
+            ax.plot(dx, dy, "X", color="red", markersize=14,
                     markeredgecolor="darkred", markeredgewidth=1.5, zorder=7)
         else:
             ms = max(7, int(11 * obj.tag_confidence))
-            ax.plot(obj.world_x, obj.world_y, "D", color=c, markersize=ms,
+            ax.plot(dx, dy, "D", color=c, markersize=ms,
                     markeredgecolor="k", markeredgewidth=0.8, zorder=6)
-        bucket = (round(obj.world_x / 0.3), round(obj.world_y / 0.3))
+        bucket = (round(dx / 0.3), round(dy / 0.3))
         slot = bucket_count.get(bucket, 0)
         bucket_count[bucket] = slot + 1
         xoff = 7 + (slot % 2) * 35
@@ -142,7 +183,7 @@ def _build_fig(
         prefix = "[!] " if obj.suspicious else ""
         ax.annotate(
             f"{prefix}{obj.label}{tag_str}",
-            (obj.world_x, obj.world_y),
+            (dx, dy),
             textcoords="offset points", xytext=(xoff, yoff),
             fontsize=7, color=label_color, fontweight="bold" if obj.suspicious else "normal",
             arrowprops=dict(arrowstyle="-", color=label_color, lw=0.6) if slot > 0 else None,
@@ -153,8 +194,15 @@ def _build_fig(
     if legend_handles:
         ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
 
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    if north_up:
+        ax.set_xlabel("East →")
+        ax.set_ylabel("North →")
+    elif flip_y:
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("−Y (m)")
+    else:
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
     ax.set_title(title)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
@@ -169,9 +217,11 @@ def save_map_png(
     title: str = "Room Map",
     tag_fixes: Optional[List[Tuple[float, float]]] = None,
     convex_walls: bool = True,
+    flip_y: bool = False,
+    north_up: bool = False,
 ) -> None:
     fig = _build_fig(grid, trajectory_world, objects, tag_fixes, title,
-                     convex_walls=convex_walls)
+                     convex_walls=convex_walls, flip_y=flip_y, north_up=north_up)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -185,10 +235,12 @@ def render_map_rgb(
     tag_fixes: Optional[List[Tuple[float, float]]] = None,
     title: str = "Room Map",
     convex_walls: bool = True,
+    flip_y: bool = False,
+    north_up: bool = False,
 ) -> np.ndarray:
     """Render map to HxWx3 uint8 RGB array (for live cv2 preview)."""
     fig = _build_fig(grid, trajectory_world, objects, tag_fixes, title,
-                     convex_walls=convex_walls)
+                     convex_walls=convex_walls, flip_y=flip_y, north_up=north_up)
     fig.canvas.draw()
     w, h = fig.canvas.get_width_height()
     img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(h, w, 3)
