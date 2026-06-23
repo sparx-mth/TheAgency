@@ -1,3 +1,9 @@
+# ``from __future__ import annotations`` keeps the ``tuple[...]`` return
+# annotations from being evaluated at import time, so this module is importable
+# under Python 3.8 — the FALCON Noetic adapter imports it to build the repulsive
+# field that feeds TrajectorySafetyCorrector (see CLAUDE.md: core must stay 3.8).
+from __future__ import annotations
+
 import numpy as np
 
 try:
@@ -90,3 +96,55 @@ class PotentialFieldLayer:
         if u_peak > 1e-6:
             U *= (self.u_max / u_peak)      # normalise to [0, u_max]
         return U.astype(np.float32), d_m
+
+
+def occupancy_to_potential(
+    occ_grid: np.ndarray,
+    resolution_m: float = 0.10,
+    *,
+    sigma_m: float = 0.6,
+    occ_thresh: float = 0.65,
+    repulse_radius_m: float = 1.0,
+    smooth: bool = True,
+) -> tuple:
+    """
+    Convert an occupancy grid to a potential field + gradient.
+
+    Accepts any of these formats:
+      - float [0..1]   : probability grid (0=free, 1=occupied)
+      - binary 0/1     : obstacle mask
+      - int  [-1,0,100]: ROS OccupancyGrid convention (-1=unknown → treated as free)
+
+    Args:
+        occ_grid     : (H, W) array
+        resolution_m : metres per cell
+        sigma_m      : Gaussian spread of repulsion from obstacles
+        occ_thresh   : probability above which a cell is considered occupied
+        repulse_radius_m : max influence radius of obstacles
+        smooth       : apply a light Gaussian blur to U_rep after computation
+
+    Returns:
+        U_rep     : (H, W) float32  repulsive potential in [0, 1]
+        gradient  : (H, W, 2) float32  descent direction [fwd, left] per cell
+        D_obs_m   : (H, W) float32  distance to nearest obstacle in metres
+    """
+    grid = np.asarray(occ_grid, dtype=np.float32)
+
+    # Normalise ROS int format [-1, 0..100] → [NaN, 0..1]
+    if grid.max() > 1.0:
+        grid = np.where(grid < 0, np.nan, grid / 100.0)
+
+    layer = PotentialFieldLayer(
+        occ_thresh=occ_thresh,
+        sigma_m=sigma_m,
+        repulse_radius_m=repulse_radius_m,
+    )
+    U_rep, D_obs_m = layer.compute_from_prob_grid(grid, resolution_m)
+
+    if smooth and cv2 is not None:
+        U_rep = cv2.GaussianBlur(U_rep, (5, 5), 1.0)
+
+    g_row, g_col = np.gradient(U_rep, resolution_m)
+    gradient = np.stack([-g_row, g_col], axis=-1).astype(np.float32)
+
+    return U_rep, gradient, D_obs_m

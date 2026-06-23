@@ -3,10 +3,12 @@
 bev_click_goal_node.py -- interactive 2D BEV viewer with click-to-navigate.
 
 A matplotlib window (NOT RViz) showing the published BEV grid plus the drone
-pose, the current planned path, the predicted drone trajectory, and the last
-clicked goal:
+pose, the raw A* path, the APF-safe (recentred) path, the predicted drone
+trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
-    blue path = planned (A*/NavDP)   orange dashed = predicted (stop-and-turn)
+    red path   = raw A*  (shortest -- hugs walls / cuts corners)
+    green path = APF-safe (recentred toward free space -- the path flown)
+    orange dashed = predicted (stop-and-turn)
 The title shows the predicted-trajectory quality score (0..1) when available.
 
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
@@ -19,7 +21,8 @@ Run as a sidecar in the FALCON container:
 Requires matplotlib (apt-get install -y python3-matplotlib if missing).
 
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
-  in   ~path_topic (Path)           /path/waypoints
+  in   ~path_topic (Path)           /path/waypoints      (APF-safe; drawn green)
+  in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
   in   ~predicted_path_topic (Path) /path/predicted
   in   ~predicted_score_topic (Float32) /path/predicted_score
   in   ~drone_ns + /gt_pose (Pose)
@@ -56,6 +59,7 @@ class BevClickGoalNode:
         self.drone_ns = G("~drone_ns", "")
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
         self.path_topic = G("~path_topic", "/path/waypoints")
+        self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
                                        "/path/predicted_score")
@@ -72,7 +76,8 @@ class BevClickGoalNode:
 
         # Latest data + lock for cross-thread (ROS callbacks vs render) access
         self._bev = None
-        self._path_xy = []
+        self._path_xy = []              # APF-safe path (green) -- the path flown
+        self._raw_xy = []               # raw A* path (red) -- shortest, viz only
         self._pred_xy = []              # predicted drone trajectory (rollout)
         self._pred_score = None         # 0..1 "how good" score
         self._drone_p = None            # (x, y, yaw)
@@ -82,6 +87,7 @@ class BevClickGoalNode:
         self.goal_pub = rospy.Publisher(self.goal_topic, Point, queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.path_topic, Path, self._path_cb, queue_size=1)
+        rospy.Subscriber(self.raw_path_topic, Path, self._raw_path_cb, queue_size=1)
         rospy.Subscriber(self.predicted_path_topic, Path, self._pred_cb, queue_size=1)
         rospy.Subscriber(self.predicted_score_topic, Float32, self._pred_score_cb,
                          queue_size=1)
@@ -101,14 +107,15 @@ class BevClickGoalNode:
         self.ax.grid(True, alpha=0.25)
 
         # Persistent artists (created lazily, updated in place)
-        self._im = self._path_line = self._pred_line = None
+        self._im = self._raw_line = self._path_line = self._pred_line = None
         self._drone_dot = self._drone_arrow = self._goal_marker = None
         self._limits_set = False        # axes window fixed on first render
 
         rospy.loginfo("=" * 64)
         rospy.loginfo("bev_click_goal: ready")
         rospy.loginfo("  bev  in  = %s", self.bev_topic)
-        rospy.loginfo("  path in  = %s", self.path_topic)
+        rospy.loginfo("  path in  = %s   (APF-safe, green)", self.path_topic)
+        rospy.loginfo("  raw  in  = %s   (raw A*, red)", self.raw_path_topic)
         rospy.loginfo("  pose in  = %s/gt_pose", self.drone_ns)
         if self.pose_stamped_topic:
             rospy.loginfo("  pose in  = %s   (PoseStamped, direct)",
@@ -125,6 +132,11 @@ class BevClickGoalNode:
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._path_xy = pts
+
+    def _raw_path_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._raw_xy = pts
 
     def _pred_cb(self, msg):
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -154,7 +166,8 @@ class BevClickGoalNode:
         rospy.loginfo("bev_click_goal: click -> goal (%.2f, %.2f)", gx, gy)
         with self._lock:
             self._goal_xy = (gx, gy)
-            self._path_xy = []          # drop the stale path; replan redraws it
+            self._path_xy = []          # drop the stale safe path; replan redraws it
+            self._raw_xy = []           # and the stale raw A* path
         m = Point()
         m.x, m.y, m.z = gx, gy, 0.0
         self.goal_pub.publish(m)
@@ -163,6 +176,7 @@ class BevClickGoalNode:
     def _render(self, _frame):
         with self._lock:
             bev, path = self._bev, list(self._path_xy)
+            raw = list(self._raw_xy)
             drone, goal = self._drone_p, self._goal_xy
             pred, score = list(self._pred_xy), self._pred_score
 
@@ -206,18 +220,29 @@ class BevClickGoalNode:
             title += "   |  predicted quality: %.2f" % score
         self.ax.set_title(title)
 
-        # Path overlay
+        # Path overlays: raw A* (red, underneath) vs APF-safe path (green, on
+        # top). The green path is what the drone actually flies; the red shows
+        # how closely plain shortest-path A* hugged the walls before recentring.
+        if self._raw_line is not None:
+            self._raw_line.remove()
+            self._raw_line = None
+        if len(raw) >= 2:
+            rxs, rys = [p[0] for p in raw], [p[1] for p in raw]
+            self._raw_line, = self.ax.plot(rxs, rys, "-o", color="red",
+                                           linewidth=1.6, markersize=3,
+                                           alpha=0.75, zorder=2)
+
         if self._path_line is not None:
             self._path_line.remove()
             self._path_line = None
         if len(path) >= 2:
             xs, ys = [p[0] for p in path], [p[1] for p in path]
-            self._path_line, = self.ax.plot(xs, ys, "-o", color="deepskyblue",
-                                            linewidth=2.0, markersize=4,
-                                            alpha=0.9, zorder=3)
+            self._path_line, = self.ax.plot(xs, ys, "-o", color="limegreen",
+                                            linewidth=2.4, markersize=4,
+                                            alpha=0.95, zorder=3)
 
         # Predicted trajectory overlay: the path the drone will ACTUALLY fly given
-        # its stop-and-turn dynamics (orange dashed), vs the planned path (blue).
+        # its stop-and-turn dynamics (orange dashed), vs the planned green path.
         if self._pred_line is not None:
             self._pred_line.remove()
             self._pred_line = None

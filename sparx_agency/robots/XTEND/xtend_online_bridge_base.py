@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
 import websockets
 
+from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import TwistToCmdNavConverter
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
 from sparx_agency.core.common.spatial_math import yaw_to_quaternion
 
@@ -47,6 +49,11 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         robot_uid: str,
         *,
         cmd_topic: str = "/xtend/cmd_nav",
+        cmd_vel_topic: str = "/cmd_vel",
+        cmd_vel_angular_delta: float = 0.05,
+        cmd_vel_linear_delta: float = 0.05,
+        cmd_vel_timeout_sec: float = 1.5,
+        cmd_vel_stop_on_timeout: bool = True,
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
         telemetry_frame_id: str = "odom",
@@ -66,6 +73,21 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             self.ros_callback,
             10,
         )
+
+        self._twist_converter = TwistToCmdNavConverter(
+            angular_delta=cmd_vel_angular_delta,
+            linear_delta=cmd_vel_linear_delta,
+            timeout_sec=cmd_vel_timeout_sec,
+            publish_stop_on_timeout=cmd_vel_stop_on_timeout,
+        )
+        self._twist_sub = self.ros_node.create_subscription(
+            Twist,
+            cmd_vel_topic,
+            self._twist_cb,
+            10,
+        )
+        print(f"[bridge] cmd_vel topic:  {cmd_vel_topic}")
+
         self.telemetry_topic = telemetry_topic
         self.bearing_topic = bearing_topic
         self.telemetry_frame_id = telemetry_frame_id

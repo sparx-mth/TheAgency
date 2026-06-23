@@ -146,10 +146,15 @@
   <arg name="start_skip_m"          default="0.4" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
-  <arg name="replan_on_collision"   default="true" />
-  <arg name="replan_on_bev"         default="true" />
-  <arg name="replan_period_s"       default="2.0" />
-  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
+  <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
+       this timer (and on a goal click). The trajectory is frozen between ticks
+       so the follower is not chasing a path that shifts every BEV frame. -->
+  <arg name="plan_period_s"         default="3.0" />
+  <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
+       plan_period_s cycles. Set true to react to obstacles faster than that. -->
+  <arg name="replan_on_collision"   default="false" />
+  <arg name="replan_on_bev"         default="false" />
+  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
        into two half-angle turns, so the stop-and-turn follower can glide through
@@ -162,9 +167,22 @@
   <arg name="corner_min_runup_m"     default="0.6" />
 
   <!-- Dynamics-aware replan: replan when the follower's PREDICTED stop-and-turn
-       trajectory (/path/predicted) collides even if the geometric path does not. -->
-  <arg name="replan_on_predicted_collision" default="true" />
+       trajectory (/path/predicted) collides even if the geometric path does not.
+       OFF by default with the other mid-cycle replans (keeps the 3 s freeze). -->
+  <arg name="replan_on_predicted_collision" default="false" />
   <arg name="max_predicted_replans"         default="3" />
+
+  <!-- APF safety recentring: post-process the raw A* path off walls toward
+       corridor centres via the repulsive field U_rep, so a corridor turn stops
+       hugging the inside corner. The follower flies the corrected path on
+       /path/waypoints; the raw A* path is published on /path/waypoints_raw for
+       the BEV viewer (red = raw, green = safe). safety_correct:=false flies raw A*. -->
+  <arg name="safety_correct"        default="true" />
+  <arg name="apf_gain"              default="1.0" /><!-- repulsive-force scaling factor; raise for a stronger push toward free-space centre -->
+  <arg name="apf_max_total_shift_m" default="1.2" /><!-- hard cap on per-waypoint displacement; the main "visible shift" lever -->
+  <arg name="apf_min_clearance_m"   default="0.0" /><!-- >0 also pushes waypoints to a min distance-to-wall -->
+  <arg name="apf_debug"             default="true" /><!-- TEMP: per-waypoint orig/push/new logging each plan cycle -->
+  <arg name="apf_collision_recheck" default="true" /><!-- revert to raw A* if the corrected path collides under inflation; false to view it -->
 
   <!-- ══════════════════════════════════════════════════════════════
        NavDP (point-goal policy) — REPLACES A* when use_navdp:=true.
@@ -227,14 +245,14 @@
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="0.40" />            <!-- column z-range considered -->
-  <arg name="bev_z_ceil"            default="1.70" />
+  <arg name="bev_z_floor"           default="0.80" />            <!-- column z-range considered -->
+  <arg name="bev_z_ceil"            default="1.50" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
   <arg name="bev_weight_sigma"      default="0.50" />            <!-- gaussian width (profile=gaussian) -->
   <arg name="bev_voxel_size"        default="$(arg bev_resolution)" />  <!-- z-layer thickness -->
-  <arg name="bev_occ_weight_thresh" default="1.2" />             <!-- min weighted column mass for OCC -->
-  <arg name="bev_min_occ_voxels"    default="2" />               <!-- AND min raw voxel count for OCC -->
+  <arg name="bev_occ_weight_thresh" default="2.0" />             <!-- min weighted column mass for OCC -->
+  <arg name="bev_min_occ_voxels"    default="4" />               <!-- AND min raw voxel count for OCC -->
   <arg name="bev_min_free_voxels"   default="1" />               <!-- min voxels for a cell to read FREE -->
 
   <!-- 3D neighbour confirm (stage 2) — drops isolated DA3 speckle -->
@@ -244,7 +262,7 @@
 
   <!-- door / window protection (stage 3) — never wall an opening that is open at flight height -->
   <arg name="bev_protect_openings"  default="true" />
-  <arg name="bev_door_band_m"       default="0.60" />           <!-- z-band around z_peak inspected for openness -->
+  <arg name="bev_door_band_m"       default="0.80" />           <!-- z-band around z_peak inspected for openness -->
   <arg name="bev_door_free_voxels"  default="2" />              <!-- free voxels in the band => it's an opening -->
   <arg name="bev_door_occ_tol"      default="0" />              <!-- max occupied voxels tolerated in the band -->
 
@@ -253,13 +271,20 @@
   <arg name="bev_wall_fill_neighbors" default="5" />            <!-- count mode only -->
   <arg name="bev_wall_fill_iters"     default="1" />            <!-- max bridge width; keep small (1-2) -->
 
-  <!-- temporal hysteresis (stage 5, optional — FALCON already fuses, so off) -->
-  <arg name="bev_temporal_filter" default="false" />
-  <arg name="bev_t_inc" default="1.0" />
-  <arg name="bev_t_dec" default="1.0" />
-  <arg name="bev_t_max" default="5.0" />
-  <arg name="bev_t_on"  default="2.0" />
-  <arg name="bev_t_off" default="0.5" />
+  <!-- temporal CONFIRMATION (now runs BEFORE wall completion; ON by default).
+       A cell only reads OCC after it has been seen occupied, with enough
+       confidence, across MULTIPLE clouds — this rejects the monocular-depth
+       speckle FALCON leaks into corridor openings the camera is not aimed at.
+       Was off on the assumption "FALCON already fuses in time"; that assumption
+       is exactly what fails for these view-dependent artifacts, so it is now on.
+       Set bev_temporal_filter:=false to restore the old single-frame behaviour. -->
+  <arg name="bev_temporal_filter" default="true" />
+  <arg name="bev_occ_conf_full" default="3.0" />  <!-- weighted column mass = full per-frame confidence; per-frame conf = occ_w/this clipped to [0,1]. MUST be > bev_occ_weight_thresh. RAISE to make persistent peripheral speckle harder to confirm. -->
+  <arg name="bev_t_inc" default="1.0" />   <!-- evidence added per cloud, scaled by confidence -->
+  <arg name="bev_t_dec" default="1.0" />   <!-- evidence bled per cloud a cell is seen FREE (opening recovery) -->
+  <arg name="bev_t_max" default="5.0" />   <!-- evidence cap (memory of a confirmed wall) -->
+  <arg name="bev_t_on"  default="2.0" />   <!-- evidence to confirm OCC; ~t_on/t_inc clouds of solid wall (~0.6s at FALCON's ~3Hz) -->
+  <arg name="bev_t_off" default="0.5" />   <!-- evidence to clear (Schmitt lower rail) -->
 
   <!-- runtime -->
   <arg name="bev_always_recompute"       default="false" />     <!-- recompute every tick vs only on a new cloud -->
@@ -410,8 +435,9 @@
     <param name="wall_fill_mode"         value="$(arg bev_wall_fill_mode)" />
     <param name="wall_fill_neighbors"    value="$(arg bev_wall_fill_neighbors)" />
     <param name="wall_fill_iters"        value="$(arg bev_wall_fill_iters)" />
-    <!-- temporal hysteresis (optional) -->
+    <!-- temporal confirmation (ON by default; runs before wall completion) -->
     <param name="temporal_filter"        value="$(arg bev_temporal_filter)" />
+    <param name="occ_conf_full"          value="$(arg bev_occ_conf_full)" />
     <param name="t_inc"                  value="$(arg bev_t_inc)" />
     <param name="t_dec"                  value="$(arg bev_t_dec)" />
     <param name="t_max"                  value="$(arg bev_t_max)" />
@@ -444,9 +470,9 @@
     <param name="start_skip_m"          value="$(arg start_skip_m)" />
     <param name="goal_snap_radius_m"    value="$(arg goal_snap_radius_m)" />
     <param name="min_free_cells_to_plan" value="$(arg min_free_cells_to_plan)" />
+    <param name="plan_period_s"         value="$(arg plan_period_s)" />
     <param name="replan_on_collision"   value="$(arg replan_on_collision)" />
     <param name="replan_on_bev"         value="$(arg replan_on_bev)" />
-    <param name="replan_period_s"       value="$(arg replan_period_s)" />
     <param name="replan_collision_confirm" value="$(arg replan_collision_confirm)" />
     <param name="corner_round"          value="$(arg corner_round)" />
     <param name="corner_merge_deg"      value="$(arg corner_merge_deg)" />
@@ -458,6 +484,14 @@
     <param name="max_predicted_replans" value="$(arg max_predicted_replans)" />
     <param name="predicted_path_topic"  value="/path/predicted" />
     <param name="frame_id"              value="world" />
+    <!-- APF safety recentring (post-process A* off walls; follower flies the safe path) -->
+    <param name="safety_correct"        value="$(arg safety_correct)" />
+    <param name="raw_path_topic"        value="/path/waypoints_raw" />
+    <param name="apf_gain"              value="$(arg apf_gain)" />
+    <param name="apf_max_total_shift_m" value="$(arg apf_max_total_shift_m)" />
+    <param name="apf_min_clearance_m"   value="$(arg apf_min_clearance_m)" />
+    <param name="apf_debug"             value="$(arg apf_debug)" />
+    <param name="apf_collision_recheck" value="$(arg apf_collision_recheck)" />
   </node>
 
   <!-- NavDP click-to-go planner (replaces astar_planner when use_navdp:=true).

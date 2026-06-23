@@ -9,10 +9,10 @@ tags:
 
 
 # Communication room
-  1:
+  2:
     xyz: [2.55, -2.3, 0.97]
     rpy: [-1.5708, 0,  -3.1416]
-    size: 0.28
+    size: 0.2
 
 
 # Enther the hallway to the right towards the MAMAD, same orientation as tag 5
@@ -54,11 +54,11 @@ tags:
     rpy: [-1.5708, 0, -1.5708]
     size: 0.2
 
- # Inbal's Office
-  2:
-    xyz: [1.7, 0.75, 1.0]
-    rpy: [-1.5708, 0, 0]
-    size: 0.2
+# # Inbal's Office
+#  2:
+#    xyz: [1.7, 0.75, 1.0]
+#    rpy: [-1.5708, 0, 0]
+#    size: 0.2
 
  # Tag 4, near the screen inside the MAMAD, same wall as tag 9
 
