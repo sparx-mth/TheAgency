@@ -47,8 +47,8 @@ python3 sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
   --ros-args \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
-  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
+  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p apply_metric_focal_scaling:=true \
@@ -96,12 +96,12 @@ python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py \
 
 Output lands in:
 ```
-/home/user/jetson-containers/data/R1/R2/<YYYYmmdd_HHMMSS>/
+/home/user/jetson-containers/data/captures/<YYYYmmdd_HHMMSS>/
   R2_20260127_122951.jpg
   R2_20260127_122951.json   ← pose sidecar {x, y, z, yaw}
   R2_20260127_122951.npy    ← depth from DA3
   ...
-/home/user/jetson-containers/data/R1/latest  → symlink to session
+/home/user/jetson-containers/data/captures/latest  → symlink to session
 ```
 
 ---

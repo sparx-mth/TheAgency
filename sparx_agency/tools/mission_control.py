@@ -162,7 +162,7 @@ XTEND_SERVICES: list[Service] = [
         cmd=f"""python3 {JETSON_REPO}/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py \\
   --pose-topic /xtend/localization \\
   --depth-topic /xtend/depth_frame_path \\
-  --out-dir {JETSON_DATA}/R1""",
+  --out-dir {JETSON_DATA}/captures""",
     ),
     # ── Planner (Falcon) ──────────────────────────────────────────────────
     Service(
@@ -294,7 +294,7 @@ NANOOWL_SERVICES: list[Service] = [
         group="nanoowl",
         description="Web gallery at :8090. Browse latest captures with VLM captions.",
         env="nanoowl",
-        cmd=f"python3 display_server.py --root {JETSON_DATA}/R1 --host {VLLM_IP} --port 8090 --latest-only",
+        cmd=f"python3 display_server.py --root {JETSON_DATA}/captures --host {VLLM_IP} --port 8090 --latest-only",
         stop_extra="fuser -k 8090/tcp || true",
     ),
     Service(
@@ -306,7 +306,7 @@ NANOOWL_SERVICES: list[Service] = [
         cmd=(
             f"python3 comm_manager_vllm.py --profile xtend "
             f"--vllm-model espressor/meta-llama.Llama-3.2-3B-Instruct_W4A16 "
-            f"--captures-root {JETSON_DATA}/R1/ "
+            f"--captures-root {JETSON_DATA}/captures/ "
             f"--endpoint http://{VLLM_IP}:8080 --host {VLLM_IP} --force"
         ),
         stop_extra="fuser -k 5050/tcp || true",
@@ -506,8 +506,8 @@ with tab_xtend:
     # Demo mode quick actions
     st.markdown("#### Demo Mode")
     dm_cols = st.columns(6)
-    MODES = ["idle", "fly_straight", "turning", "visual_servoing", "finish"]
-    LABELS = ["⏸ IDLE", "➡ FLY", "🔄 TURNING", "👁 SERVO", "🛑 FINISH"]
+    MODES = [ "fly_straight", "turning", "visual_servoing", "finish"]
+    LABELS = [ "➡ FLY", "🔄 TURNING", "👁 SERVO", "🛑 FINISH"]
     for col, mode, label in zip(dm_cols, MODES, LABELS):
         with col:
             if st.button(label, use_container_width=True, key=f"dm_{mode}"):

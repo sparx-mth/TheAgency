@@ -170,7 +170,8 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         self.drone_id = drone_id
         self.bearing_unit = bearing_unit
         self.unique_out_dir = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        self.out_dir = self.base_dir / self.drone_id / self.unique_out_dir
+        # Session dir directly under base_dir — drone_id is already in each filename.
+        self.out_dir = self.base_dir / self.unique_out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.last_xtend_state: Optional[dict[str, Any]] = None
@@ -680,12 +681,12 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--frequency", type=float, default=30.0)
     parser.add_argument("--robot-uid", default="drnb177ede2")
-    parser.add_argument("--drone-id", default="R2")
+    parser.add_argument("--drone-id", default="xtend")
 
     parser.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     parser.add_argument("--rtsp-latency-ms", type=int, default=0)
 
-    parser.add_argument("--out-dir", default="/home/user/jetson-containers/data/R1")
+    parser.add_argument("--out-dir", default="/home/user/jetson-containers/data/captures")
     parser.add_argument("--capture-interval-sec", type=float, default=1.0,
                         help="Minimum seconds between frame captures.")
     parser.add_argument("--yaw-bucket-deg", type=float, default=30.0)

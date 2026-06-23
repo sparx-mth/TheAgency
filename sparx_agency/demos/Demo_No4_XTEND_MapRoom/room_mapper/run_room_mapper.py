@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -102,6 +103,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Draw the drone trajectory on the map (hidden by default).")
     p.add_argument("--show-tag-fixes",    action="store_true",
                    help="Draw AprilTag fix stars on the map (hidden by default).")
+    p.add_argument("--sidecar-pose",     action="store_true",
+                   help="Use pose from JSON sidecar files (x,y,z,yaw) instead of "
+                        "AprilTag/odometry re-estimation. Use when the capture session "
+                        "already has good live-flight poses saved alongside each frame.")
     p.add_argument("--no-raytrace",      action="store_true",
                    help="Disable ray-cast free-space (faster but no wall contrast)")
     p.add_argument("--preview",          action="store_true",
@@ -109,6 +114,31 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--preview-interval", type=int,   default=10,
                    help="Update preview every N processed frames")
     return p.parse_args()
+
+
+def _sidecar_pose_to_world_T_cam(pose: dict) -> np.ndarray:
+    """
+    Build a 4x4 world_T_cam matrix from a sidecar pose dict {x, y, z, yaw}.
+
+    Convention:
+      World frame  : ROS (X=east / forward, Y=left, Z=up)
+      Camera frame : OpenCV (Z=forward, X=right, Y=down)
+      yaw          : CCW rotation from +X, stored in DEGREES in the sidecar JSON
+                     (dome_main converts radians→degrees before saving)
+    """
+    x, y, z = pose["x"], pose["y"], pose["z"]
+    yaw = math.radians(pose["yaw"])   # sidecar stores degrees
+    c, s = np.cos(yaw), np.sin(yaw)
+    # Columns = camera X/Y/Z axes expressed in world coordinates
+    R = np.array([
+        [ s,  0,  c],   # world-X components of [X_cam, Y_cam, Z_cam]
+        [-c,  0,  s],   # world-Y components
+        [ 0, -1,  0],   # world-Z components
+    ], dtype=np.float64)
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R
+    T[:3, 3] = [x, y, z]
+    return T
 
 
 def _show_preview(
@@ -180,9 +210,14 @@ def main() -> None:
         bgr     = rec.load_rgb()
         depth_m = rec.load_depth()
 
-        world_T_cam = fuser.update(bgr, depth_m)
-        frame_tag_ids[rec.frame_idx] = list(fuser.last_tag_ids)
-        frame_tag_areas[rec.frame_idx] = fuser.last_tag_total_area
+        if args.sidecar_pose and rec.pose is not None:
+            world_T_cam = _sidecar_pose_to_world_T_cam(rec.pose)
+            frame_tag_ids[rec.frame_idx] = []
+            frame_tag_areas[rec.frame_idx] = 0.0
+        else:
+            world_T_cam = fuser.update(bgr, depth_m)
+            frame_tag_ids[rec.frame_idx] = list(fuser.last_tag_ids)
+            frame_tag_areas[rec.frame_idx] = fuser.last_tag_total_area
 
         if world_T_cam is None:
             continue
@@ -266,8 +301,12 @@ def main() -> None:
     objects: List[ObjectMarker] = []
     if args.labels and Path(args.labels).exists():
         labels = load_labels(args.labels)
+        # Sidecar poses come from the live AprilTag localization — they are already
+        # reliable, so suppress the per-frame tag-visibility check inside place_objects
+        # by passing frame_tag_ids=None (None means "skip reliability filter").
+        _ftids = None if args.sidecar_pose else frame_tag_ids
         objects = place_objects(labels, frame_poses, lambda fidx: depth_cache[fidx],
-                                K_depth, frame_tag_ids, frame_tag_areas)
+                                K_depth, _ftids, frame_tag_areas)
         print(f"[mapper] Placed {len(objects)} raw object markers")
         objects = cluster_objects(objects, radius_m=args.cluster_radius)
         print(f"[mapper] After clustering ({args.cluster_radius}m): {len(objects)} objects")
