@@ -8,6 +8,8 @@ trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
     red path   = raw A*  (shortest -- hugs walls / cuts corners)
     green path = APF-safe (recentred toward free space -- the path flown)
+    yellow arrows = repulsive force F_rep=-grad U_rep at each waypoint (obstacle push)
+    gold field    = F_rep across the free space (how hard each wall section pushes)
     orange dashed = predicted (stop-and-turn)
 The title shows the predicted-trajectory quality score (0..1) when available.
 
@@ -23,6 +25,7 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
   in   ~path_topic (Path)           /path/waypoints      (APF-safe; drawn green)
   in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
+  in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
   in   ~predicted_path_topic (Path) /path/predicted
   in   ~predicted_score_topic (Float32) /path/predicted_score
   in   ~drone_ns + /gt_pose (Pose)
@@ -46,6 +49,7 @@ from matplotlib.animation import FuncAnimation
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Float32
+from visualization_msgs.msg import Marker, MarkerArray
 
 from sparx_agency.core.common.math import se3
 
@@ -60,6 +64,7 @@ class BevClickGoalNode:
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
         self.path_topic = G("~path_topic", "/path/waypoints")
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
+        self.forces_topic = G("~forces_topic", "/path/forces")
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
                                        "/path/predicted_score")
@@ -78,6 +83,8 @@ class BevClickGoalNode:
         self._bev = None
         self._path_xy = []              # APF-safe path (green) -- the path flown
         self._raw_xy = []               # raw A* path (red) -- shortest, viz only
+        self._forces = []               # (x,y,dx,dy) per-waypoint force arrows (yellow)
+        self._field_arrows = []         # (x,y,dx,dy) coarse wall force-field (gold)
         self._pred_xy = []              # predicted drone trajectory (rollout)
         self._pred_score = None         # 0..1 "how good" score
         self._drone_p = None            # (x, y, yaw)
@@ -88,6 +95,7 @@ class BevClickGoalNode:
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.path_topic, Path, self._path_cb, queue_size=1)
         rospy.Subscriber(self.raw_path_topic, Path, self._raw_path_cb, queue_size=1)
+        rospy.Subscriber(self.forces_topic, MarkerArray, self._forces_cb, queue_size=1)
         rospy.Subscriber(self.predicted_path_topic, Path, self._pred_cb, queue_size=1)
         rospy.Subscriber(self.predicted_score_topic, Float32, self._pred_score_cb,
                          queue_size=1)
@@ -108,6 +116,8 @@ class BevClickGoalNode:
 
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
+        self._forces_artist = None      # quiver of per-waypoint force arrows
+        self._field_artist = None       # quiver of the coarse wall force-field
         self._drone_dot = self._drone_arrow = self._goal_marker = None
         self._limits_set = False        # axes window fixed on first render
 
@@ -116,6 +126,7 @@ class BevClickGoalNode:
         rospy.loginfo("  bev  in  = %s", self.bev_topic)
         rospy.loginfo("  path in  = %s   (APF-safe, green)", self.path_topic)
         rospy.loginfo("  raw  in  = %s   (raw A*, red)", self.raw_path_topic)
+        rospy.loginfo("  force in = %s   (F_rep arrows, yellow)", self.forces_topic)
         rospy.loginfo("  pose in  = %s/gt_pose", self.drone_ns)
         if self.pose_stamped_topic:
             rospy.loginfo("  pose in  = %s   (PoseStamped, direct)",
@@ -137,6 +148,20 @@ class BevClickGoalNode:
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._raw_xy = pts
+
+    def _forces_cb(self, msg):
+        """Split ARROW markers into per-waypoint (ns 'apf_forces') and the coarse
+        wall force-field (ns 'apf_field'); each as (x, y, dx, dy) start->tip."""
+        wp, field = [], []
+        for m in msg.markers:
+            if m.action == Marker.DELETEALL or len(m.points) < 2:
+                continue
+            s, e = m.points[0], m.points[1]
+            arrow = (s.x, s.y, e.x - s.x, e.y - s.y)
+            (field if m.ns == "apf_field" else wp).append(arrow)
+        with self._lock:
+            self._forces = wp
+            self._field_arrows = field
 
     def _pred_cb(self, msg):
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -168,6 +193,8 @@ class BevClickGoalNode:
             self._goal_xy = (gx, gy)
             self._path_xy = []          # drop the stale safe path; replan redraws it
             self._raw_xy = []           # and the stale raw A* path
+            self._forces = []           # and the stale force arrows
+            self._field_arrows = []     # and the stale wall force-field
         m = Point()
         m.x, m.y, m.z = gx, gy, 0.0
         self.goal_pub.publish(m)
@@ -177,6 +204,8 @@ class BevClickGoalNode:
         with self._lock:
             bev, path = self._bev, list(self._path_xy)
             raw = list(self._raw_xy)
+            forces = list(self._forces)
+            field_arrows = list(self._field_arrows)
             drone, goal = self._drone_p, self._goal_xy
             pred, score = list(self._pred_xy), self._pred_score
 
@@ -240,6 +269,37 @@ class BevClickGoalNode:
             self._path_line, = self.ax.plot(xs, ys, "-o", color="limegreen",
                                             linewidth=2.4, markersize=4,
                                             alpha=0.95, zorder=3)
+
+        # Coarse wall force-field (dim gold, thin): F_rep sampled across the free
+        # space, so every wall section's push is visible -- dense/strong by the
+        # walls, fading to nothing in open space.
+        if self._field_artist is not None:
+            self._field_artist.remove()
+            self._field_artist = None
+        if field_arrows:
+            qx = [a[0] for a in field_arrows]
+            qy = [a[1] for a in field_arrows]
+            qu = [a[2] for a in field_arrows]
+            qv = [a[3] for a in field_arrows]
+            self._field_artist = self.ax.quiver(
+                qx, qy, qu, qv, color="gold", angles="xy", scale_units="xy",
+                scale=1.0, width=0.003, alpha=0.55, zorder=5)
+
+        # Per-waypoint repulsive-force arrows (F_rep = -grad U_rep): bright yellow,
+        # length proportional to force magnitude, pointing away from the walls.
+        # Drawn in data units so they match the RViz MarkerArray arrows exactly.
+        if self._forces_artist is not None:
+            self._forces_artist.remove()
+            self._forces_artist = None
+        if forces:
+            fx = [a[0] for a in forces]
+            fy = [a[1] for a in forces]
+            fu = [a[2] for a in forces]
+            fv = [a[3] for a in forces]
+            self._forces_artist = self.ax.quiver(
+                fx, fy, fu, fv, color="yellow", angles="xy",
+                scale_units="xy", scale=1.0, width=0.006,
+                edgecolor="black", linewidth=0.4, zorder=6)
 
         # Predicted trajectory overlay: the path the drone will ACTUALLY fly given
         # its stop-and-turn dynamics (orange dashed), vs the planned green path.

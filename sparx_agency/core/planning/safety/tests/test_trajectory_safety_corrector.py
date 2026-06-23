@@ -451,3 +451,93 @@ class TestNavDpEntryPath:
         after = np.abs(result.waypoints[1:, 1] - centre_y)
         assert np.all(after < before)
         assert result.visible_mask.all()
+
+
+# ---------------------------------------------------------------------------
+# Line-search centring (centering="line_search")
+# ---------------------------------------------------------------------------
+class TestLineSearchCentring:
+    """The optimisation-style centring: move each waypoint to the lateral U_rep
+    minimum directly, instead of iterative gain-scaled descent."""
+
+    def _corridor_field(self):
+        h, w, res = 30, 120, 0.1
+        occ = _horizontal_corridor(h, w, wall=10)        # free band y in [1.0, 2.0]
+        u = _gaussian_repulsion(occ, sigma_px=6.0)
+        centre_y = (h / 2) * res                          # 1.5 m
+        return u, res, centre_y
+
+    def _hugging_path(self, centre_y):
+        off_y = centre_y - 0.3                            # hug the low-y wall
+        return np.array([[x * 0.1, off_y] for x in range(15, 105, 10)],
+                        dtype=np.float64)
+
+    def test_centres_with_zero_gain(self):
+        """line_search reaches the corridor centre even with gain=0 (it never
+        scales a gradient), so it needs none of the descent's force tuning."""
+        u, res, centre_y = self._corridor_field()
+        xy = self._hugging_path(centre_y)
+        c = TrajectorySafetyCorrector(TrajectoryCorrectionParams(
+            centering="line_search", gain=0.0, max_total_shift_m=1.0,
+            center_step_m=0.05))
+        c.set_field(u, res, 0.0, 0.0)
+        out = c.correct(xy).waypoints
+        mid = len(xy) // 2
+        assert abs(out[mid, 1] - centre_y) < 0.1         # central wp ~ on the centre-line
+        assert abs(out[mid, 1] - centre_y) < abs(xy[mid, 1] - centre_y)
+
+    def test_scale_independent(self):
+        """Scaling the field by a positive constant leaves the centred result the
+        same up to the sampling step -- it compares scores rather than multiplying
+        a gradient (the descent would shrink with the field). The clearance
+        objective is in physical metres and so exactly scale-free; this exercises
+        the ``-U_rep`` fallback, where float ties under scaling can nudge a waypoint
+        by at most one sample."""
+        u, res, centre_y = self._corridor_field()
+        xy = self._hugging_path(centre_y)
+
+        def run(field):
+            c = TrajectorySafetyCorrector(TrajectoryCorrectionParams(
+                centering="line_search", max_total_shift_m=1.0, center_step_m=0.05))
+            c.set_field(field, res, 0.0, 0.0)
+            return c.correct(xy).waypoints
+
+        out = run(u)
+        out_scaled = run(u * 1e-3)
+        assert np.allclose(out, out_scaled, atol=res)        # within one sampling cell
+
+    def test_wide_corridor_uniform_centring(self):
+        """In a corridor far wider than the Gaussian (U_rep flat in the middle),
+        the clearance/medial-axis objective still drives every interior waypoint to
+        the SAME centre-line. Guards the snapshot fix: normals are taken from the
+        input geometry, so moving an early waypoint cannot skew a later normal."""
+        from sparx_agency.core.mapping.costmap.potential_field_layer import (
+            PotentialFieldLayer)
+
+        res = 0.1
+        raw = np.full((50, 80), 0, dtype=np.int16)
+        raw[:5, :] = 100
+        raw[45:, :] = 100                                    # 4 m free band, centre y=2.5
+        p_occ = np.where(raw == 100, 1.0,
+                         np.where(raw == 0, 0.0, np.nan)).astype(np.float32)
+        u, d = PotentialFieldLayer(occ_thresh=0.65, sigma_m=0.6).compute_from_prob_grid(
+            p_occ, res)
+        c = TrajectorySafetyCorrector(TrajectoryCorrectionParams(
+            centering="line_search", max_total_shift_m=3.0, center_step_m=0.05,
+            pin_last=True))
+        c.set_field(u, res, res / 2, res / 2, d_obs=d, known_mask=raw != -1)
+        hug = np.array([[x, 0.8] for x in np.linspace(1.0, 7.0, 9)], dtype=np.float64)
+        out = c.correct(hug).waypoints
+        interior = out[1:-1, 1]
+        assert np.all(np.abs(interior - 2.5) < 0.1)          # all reach the centre
+        assert float(interior.max() - interior.min()) < 0.05  # and the SAME centre
+
+    def test_first_waypoint_pinned(self):
+        """Waypoint 0 (the drone) is never moved."""
+        u, res, centre_y = self._corridor_field()
+        xy = self._hugging_path(centre_y)
+        c = TrajectorySafetyCorrector(TrajectoryCorrectionParams(
+            centering="line_search", max_total_shift_m=1.0))
+        c.set_field(u, res, 0.0, 0.0)
+        out = c.correct(xy).waypoints
+        assert np.allclose(out[0], xy[0].astype(np.float32))

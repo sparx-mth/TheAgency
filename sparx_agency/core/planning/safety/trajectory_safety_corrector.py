@@ -33,6 +33,16 @@ Improvements over a plain gradient-descent corrector
   plateau (a corridor narrower than ``2·min_clearance_m``, or deep inside a
   wall) is left as clear as it could get. Treat the dedicated
   :class:`TrajectorySafetyChecker` as the hard collision gate.
+* **Two centring strategies** (``centering``). ``"descent"`` (default) is the
+  iterative, gain-scaled gradient descent described above. ``"line_search"``
+  samples along the path normal and moves each waypoint straight to the point of
+  MAXIMUM clearance -- the medial axis, equidistant from the surrounding walls
+  (the exact corridor centre and the farthest-from-walls line; it falls back to
+  the repulsion minimum when no distance field is supplied). It is
+  omnidirectional, single-pass and scale-free, dominates the A* path within the
+  search range, cannot push a waypoint into a wall (clearance only drops past the
+  centre), swings wide around corners (more so with ``corner_swing``), and needs
+  none of the descent's gain tuning.
 
 Frame contract
 --------------
@@ -101,6 +111,17 @@ class TrajectorySafetyCorrector:
     def set_sampler(self, field: PotentialFieldSampler) -> None:
         """Install a pre-built :class:`PotentialFieldSampler` directly."""
         self._field = field
+
+    @property
+    def field(self) -> Optional[PotentialFieldSampler]:
+        """The installed field sampler (``None`` until ``set_field``/``set_sampler``).
+
+        Exposed so callers can sample the same field the corrector uses -- e.g. the
+        repulsive force ``F_rep = -grad U_rep`` via ``field.descent(x, y)``, or the
+        clearance via ``field.clearance(x, y)`` -- at each waypoint, for diagnostics
+        and visualisation.
+        """
+        return self._field
 
     # ------------------------------------------------------------------
     # Public correction API
@@ -183,6 +204,16 @@ class TrajectorySafetyCorrector:
         Returns ``(corrected_xy, visible_mask, per_waypoint_shift)``.
         """
         visible = self._visibility(orig)
+        if self.p.centering == "line_search":
+            # Direct medial-axis centring. The search is per-waypoint bounded and
+            # lands on the smooth maximum-clearance line, so it needs neither the
+            # displacement clamp nor the smoothing pass -- both would only drag the
+            # path back toward the wall-hugging input. ``_freeze`` re-pins the
+            # fixed (pinned / unobserved) waypoints.
+            out = self._center_line_search(orig.copy(), visible)
+            self._freeze(out, orig, visible)
+            return out, visible, np.linalg.norm(out - orig, axis=1)
+
         out = self._descend(orig.copy(), visible)
         self._clamp_total_shift(out, orig)
         self._smooth(out, visible)
@@ -236,8 +267,8 @@ class TrajectorySafetyCorrector:
         return out
 
     @staticmethod
-    def _project_lateral(push: np.ndarray, pts: np.ndarray, i: int, n: int) -> np.ndarray:
-        """Remove the along-tangent component of ``push`` (keep only sideways)."""
+    def _unit_tangent(pts: np.ndarray, i: int, n: int) -> Optional[np.ndarray]:
+        """Unit tangent of the path at ``i`` (central difference), or None."""
         if 0 < i < n - 1:
             tan = pts[i + 1] - pts[i - 1]
         elif i + 1 < n:
@@ -245,12 +276,156 @@ class TrajectorySafetyCorrector:
         elif i > 0:
             tan = pts[i] - pts[i - 1]
         else:
-            return push
+            return None
         norm = float(np.hypot(tan[0], tan[1]))
         if norm < 1e-9:
+            return None
+        return tan / norm
+
+    @classmethod
+    def _project_lateral(cls, push: np.ndarray, pts: np.ndarray, i: int, n: int) -> np.ndarray:
+        """Remove the along-tangent component of ``push`` (keep only sideways)."""
+        t = cls._unit_tangent(pts, i, n)
+        if t is None:
             return push
-        t = tan / norm
         return push - float(np.dot(push, t)) * t
+
+    @classmethod
+    def _unit_normal(cls, pts: np.ndarray, i: int, n: int) -> Optional[np.ndarray]:
+        """Unit normal (left of travel) to the path tangent at ``i``, or None."""
+        t = cls._unit_tangent(pts, i, n)
+        if t is None:
+            return None
+        return np.array([-t[1], t[0]])
+
+    def _center_line_search(self, out: np.ndarray, visible: np.ndarray) -> np.ndarray:
+        """Move each visible waypoint laterally to the maximum-clearance point.
+
+        Along the path NORMAL, sample the distance-to-obstacle field and move the
+        waypoint to its MAXIMUM -- the medial axis: the point equidistant from the
+        surrounding walls (the exact corridor centre, and the farthest-from-walls
+        point on that line). A 3-point parabolic fit refines the discrete maximum.
+        This centres the path directly -- no gain, no convergence loop -- and, by
+        seeking clearance rather than a gradient, it dominates the A* path within
+        the search range, cannot push a waypoint into a wall (clearance only drops
+        past the centre), and at a corner the medial axis bulges away from the
+        inside wall so the path swings wide. With no distance field it falls back
+        to minimising the repulsive potential (same maths on ``-U_rep``), and is
+        scale-free either way. It walks outward to the NEAREST local maximum -- so
+        an already-centred waypoint stays put and a wide search range never makes a
+        waypoint jump to a farther, larger opening; an unobserved / off-map cell
+        stops the walk. The lateral range is widened at sharp corners
+        (``corner_swing``) so corners may swing wider than straight runs.
+        """
+        n = out.shape[0]
+        hi = n - 1 if self.p.pin_last else n
+        step = max(float(self.p.center_step_m), 1e-3)
+        use_clear = self._field.has_distance
+        # Snapshot the input geometry: normals are taken from the ORIGINAL path, not
+        # the partially-updated one. Otherwise moving an early waypoint skews the
+        # normal of later ones (a straight path turns "diagonal"), sending their
+        # lateral search the wrong way -- the main cause of erratic/weak centring.
+        ref = out.copy()
+        for i in range(self._pin_k(), hi):
+            if not visible[i]:
+                continue
+            nrm = self._unit_normal(ref, i, n)
+            if nrm is None:
+                continue
+            v0 = self._score(out[i, 0], out[i, 1], use_clear)
+            if v0 is None:
+                continue
+            span = float(self.p.max_total_shift_m) * self._corner_span_factor(ref, i, n)
+            n_side = max(1, int(span / step))
+            # Walk outward each way to the NEAREST local score maximum (the current
+            # corridor's medial axis), stopping at the first sustained decrease or
+            # an unobserved / off-map cell. Cost then scales with the corridor
+            # width, not the (possibly large) search range, and the waypoint never
+            # jumps down its normal to a farther, larger opening.
+            off_p, v_p = self._walk_local_max(out[i], nrm, +1.0, v0, n_side, step, use_clear)
+            off_m, v_m = self._walk_local_max(out[i], nrm, -1.0, v0, n_side, step, use_clear)
+            if v_p >= v_m and v_p > v0:
+                off = self._refine_peak(out[i], nrm, off_p, step, use_clear)
+            elif v_m > v0:
+                off = self._refine_peak(out[i], nrm, off_m, step, use_clear)
+            else:
+                off = 0.0                          # already at a local max -> stay put
+            if abs(off) < 1e-4:
+                continue
+            out[i] = out[i] + nrm * off
+        return out
+
+    def _walk_local_max(self, p, nrm, direction, v0, n_side, step, use_clear):
+        """Walk from ``p`` along ``direction*nrm`` to the nearest PROMINENT maximum.
+
+        Returns ``(best_offset, best_score)``. Stops once the score has fallen a
+        real fraction of its climb below the running peak -- so sub-cell ripples in
+        the (approximate) distance transform are ignored and the walk reaches the
+        true centre -- or at an unobserved / off-map cell, or the range limit. The
+        prominence fraction of the climb is scale-free, and the wall on the far
+        side (where clearance dips to ~0) guarantees the walk stops at the current
+        corridor's centre rather than running on to a larger opening beyond it.
+        """
+        best_off, best_v = 0.0, v0
+        for k in range(1, n_side + 1):
+            off = direction * k * step
+            x = p[0] + nrm[0] * off
+            y = p[1] + nrm[1] * off
+            if not self._field.is_observed(x, y):
+                break
+            v = self._score(x, y, use_clear)
+            if v is None:
+                break
+            if v > best_v:
+                best_v, best_off = v, off
+            else:
+                climb = best_v - v0
+                if climb > 1e-12 and v < best_v - 0.25 * climb:
+                    break                          # descended a real amount -> past the peak
+        return best_off, best_v
+
+    def _refine_peak(self, p, nrm, off, step, use_clear):
+        """3-point parabolic sub-sample refinement of a score maximum at ``off``."""
+        def s(o):
+            return self._score(p[0] + nrm[0] * o, p[1] + nrm[1] * o, use_clear)
+        vm, vc, vp = s(off - step), s(off), s(off + step)
+        if vm is None or vc is None or vp is None:
+            return off
+        denom = vm - 2.0 * vc + vp
+        # Concavity guard relative to the local magnitude, so the refinement fires
+        # identically at any field scale (the vertex ratio is already scale-free).
+        ref = max(abs(vm), abs(vc), abs(vp), 1e-30)
+        if denom < -1e-9 * ref:                     # concave (a genuine maximum)
+            return off + float(np.clip(0.5 * (vm - vp) / denom, -1.0, 1.0)) * step
+        return off
+
+    def _score(self, x: float, y: float, use_clear: bool):
+        """Centrality score at world ``(x, y)`` -- higher = more central.
+
+        Distance-to-obstacle (clearance) when a distance field is available, so the
+        maximum sits on the medial axis (and is in physical metres, hence scale
+        free); otherwise the negated repulsive potential, whose maximum is the
+        repulsion minimum. ``None`` outside the field.
+        """
+        if use_clear:
+            return self._field.clearance(x, y)
+        u = self._field.potential(x, y)
+        return None if u is None else -u
+
+    def _corner_span_factor(self, pts: np.ndarray, i: int, n: int) -> float:
+        """Lateral-search multiplier: 1.0 on a straight run, up to ``1+corner_swing``
+        at a >=90 deg turn, so sharp corners may swing wider than straights."""
+        if self.p.corner_swing <= 0.0 or not (0 < i < n - 1):
+            return 1.0
+        a = pts[i] - pts[i - 1]
+        b = pts[i + 1] - pts[i]
+        na = float(np.hypot(a[0], a[1]))
+        nb = float(np.hypot(b[0], b[1]))
+        if na < 1e-9 or nb < 1e-9:
+            return 1.0
+        cos_t = float(np.dot(a, b) / (na * nb))
+        turn = float(np.arccos(np.clip(cos_t, -1.0, 1.0)))      # 0=straight..pi=U-turn
+        return 1.0 + self.p.corner_swing * min(turn / (np.pi / 2.0), 1.0)
 
     def _enforce_clearance(self, out: np.ndarray, visible: np.ndarray) -> None:
         """Best-effort push of visible waypoints toward ``min_clearance_m``.

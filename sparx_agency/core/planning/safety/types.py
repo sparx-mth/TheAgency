@@ -221,6 +221,21 @@ class TrajectoryCorrectionParams:
             inside a wall). 0 disables it. Default: 0.0.
         clearance_iters: Max extra steps used to reach ``min_clearance_m`` per
             waypoint. Default: 4.
+        centering: Strategy for moving waypoints off walls. ``"descent"`` (default)
+            runs the iterative, gain-scaled gradient descent below. ``"line_search"``
+            instead samples the potential along the path normal over
+            +/-``max_total_shift_m`` and moves each waypoint straight to the
+            minimum -- the point where the pushes from all surrounding walls
+            balance (the corridor centre). It is omnidirectional, single-pass, and
+            scale-independent (it compares potentials, never multiplies a gradient),
+            so it centres a corridor without the descent's gain/step tuning and does
+            not slow down as parameters grow. Default: "descent".
+        center_step_m: Sample spacing (m) along the normal for ``line_search``
+            centering. Smaller is more precise but samples more points. Default: 0.05.
+        corner_swing: ``line_search`` only. Extra lateral search range at sharp
+            turns, as a fraction of ``max_total_shift_m`` per 90 deg of turn, so a
+            corner waypoint can swing wider than a straight-run waypoint (the path
+            "swings wide" around corners). ``0`` disables it. Default: 0.0.
     """
 
     iterations: int = 5
@@ -235,6 +250,9 @@ class TrajectoryCorrectionParams:
     lateral_only: bool = True
     min_clearance_m: float = 0.0
     clearance_iters: int = 4
+    centering: str = "descent"
+    center_step_m: float = 0.05
+    corner_swing: float = 0.0
 
 
 @dataclass(frozen=True)

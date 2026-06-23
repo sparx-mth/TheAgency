@@ -131,6 +131,8 @@ docker run -it --rm \
     --name "${CONTAINER}" \
     ${GPU_ARGS} \
     --env DISPLAY="${DISPLAY}" \
+    --env XAUTHORITY=/tmp/.docker.xauth \
+    --volume /tmp/.docker.xauth:/tmp/.docker.xauth \
     --env QT_X11_NO_MITSHM=1 \
     --shm-size=2g \
     --ulimit nofile=65536:65536 \

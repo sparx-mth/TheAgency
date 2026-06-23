@@ -48,8 +48,9 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
+from visualization_msgs.msg import Marker, MarkerArray
 
-from sparx_agency.core.common.types import Pose2D, PlanStatus
+from sparx_agency.core.common.types import Path2D, Pose2D, PlanStatus
 from sparx_agency.core.mapping.costmap.potential_field_layer import PotentialFieldLayer
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
@@ -106,6 +107,7 @@ class AStarPlannerNode:
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
         self._apf_layer = None
         self._corrector = None
+        self._pub_forces = None        # repulsive-force MarkerArray publisher (set below)
         if self.safety_correct:
             self._apf_layer = PotentialFieldLayer(
                 occ_thresh=float(G("~apf_occ_thresh", 0.65)),
@@ -115,18 +117,31 @@ class AStarPlannerNode:
                 sigma_m=float(G("~apf_sigma_m", 0.6)),
             )
             self._corrector = TrajectorySafetyCorrector(TrajectoryCorrectionParams(
-                iterations=int(G("~apf_iterations", 5)),
-                # ~apf_gain is the repulsive-force scaling factor: each descent
-                # step adds (-grad U_rep) * gain to the waypoint. Higher => stronger
-                # push toward the corridor centre. Raised to 1.0 (from 0.6) for a
-                # clearly visible shift; the field self-limits at the centre, so a
-                # higher gain reaches the centre faster but cannot overshoot far.
-                gain=float(G("~apf_gain", 1.0)),
-                # Displacement caps. max_total_shift_m is the main "visible shift"
-                # lever: it bounds how far a waypoint may move off the A* path, so a
-                # tight cap hides the push in a wide corridor. Raised to 1.2 m.
-                max_step_m=float(G("~apf_max_step_m", 0.4)),
-                max_total_shift_m=float(G("~apf_max_total_shift_m", 1.2)),
+                # Centering strategy. "line_search" (default) moves each waypoint
+                # straight to the lateral potential minimum -- it balances ALL
+                # surrounding walls (exact corridor centre), is independent of the
+                # field's absolute scale (so it needs NO gain tuning -- the old
+                # "scale apf_gain to ~10" hack is gone), and is single-pass (it does
+                # not slow down as the range grows). "descent" = legacy iterative
+                # gradient descent; gain/max_step below apply only to it.
+                centering=str(G("~apf_centering", "line_search")),
+                center_step_m=float(G("~apf_center_step_m", 0.05)),
+                # Corner aggressiveness: extra lateral search range per 90deg of
+                # turn (fraction of max_total_shift) so corners swing WIDE around
+                # the inside wall instead of cutting close. 0 disables it.
+                corner_swing=float(G("~apf_corner_swing", 1.0)),
+                iterations=int(G("~apf_iterations", 5)),         # descent mode only
+                gain=float(G("~apf_gain", 1.0)),                 # descent mode only
+                max_step_m=float(G("~apf_max_step_m", 0.4)),     # descent mode only
+                # max_total_shift_m bounds the displacement off the A* path. For
+                # line_search it is the lateral search half-range, so make it wide
+                # enough to reach the corridor centre from a wall-hugging path
+                # (>= corridor half-width). Raised to 2.0 m for a strong, dominant
+                # recentring; the medial-axis search self-limits at the centre and
+                # cannot run into a wall, so a large range is safe.
+                max_total_shift_m=float(G("~apf_max_total_shift_m", 2.0)),
+                # smoothing applies to DESCENT only; line_search lands on the smooth
+                # medial axis and skips it (smoothing would drag the path back).
                 smoothing_passes=int(G("~apf_smoothing_passes", 2)),
                 # >0 also pushes each waypoint to a minimum clearance (needs the
                 # distance field, which we always supply); 0 = pure centring.
@@ -145,6 +160,39 @@ class AStarPlannerNode:
             # in the viewer, set ~apf_collision_recheck:=false to SEE the corrected
             # path (debug only -- it may clip an inflated obstacle).
             self._apf_collision_recheck = bool(G("~apf_collision_recheck", True))
+
+            # Treat UNKNOWN cells as free (matches A*, which plans through unknown
+            # as free). When true (default) the corrector may recentre a waypoint
+            # that sits over unknown space, pushed only by the KNOWN walls; the
+            # repulsive field already ignores unknown cells. False restores the old
+            # "see-only-what-you-see" freeze (waypoints over unknown stay put).
+            self._apf_unknown_free = bool(G("~apf_treat_unknown_as_free", True))
+
+            # Unknown-area damping. Treating unknown as free means a half-mapped
+            # corridor has no opposing wall to balance the push, so the medial-axis
+            # correction over-shoots toward the unmapped side. Scale each waypoint's
+            # shift by the fraction of KNOWN cells around its corrected position
+            # (1.0 = fully mapped, walls both sides -> full correction; lower near
+            # unknown -> damped). As the map fills in, damping fades to none.
+            self._apf_unknown_damping = bool(G("~apf_unknown_damping", True))
+            self._apf_unknown_radius_m = float(G("~apf_unknown_radius_m", 0.75))
+
+            # Repulsive-force arrows: F_rep = -grad U_rep sampled at each waypoint,
+            # published as a visualization_msgs/MarkerArray of ARROW markers so RViz
+            # (and the BEV viewer) show how the obstacles push the path off the walls.
+            self._publish_force_markers = bool(G("~publish_forces", True))
+            self.forces_topic = G("~forces_topic", "/path/forces")
+            # Arrow length = force_arrow_scale * |F_rep| (proportional, made large
+            # for visibility); arrows are lifted to force_arrow_z in the world frame.
+            self.force_arrow_scale = float(G("~force_arrow_scale", 1.0))
+            self.force_arrow_z = float(G("~force_arrow_z", 0.0))
+            # Coarse field of F_rep over the free cells (every force_field_stride
+            # cells), so EVERY wall section's push is visible, not just at waypoints.
+            self._publish_force_field = bool(G("~publish_force_field", True))
+            self.force_field_stride = max(1, int(G("~force_field_stride", 4)))
+            if self._publish_force_markers:
+                self._pub_forces = rospy.Publisher(self.forces_topic, MarkerArray,
+                                                   queue_size=1, latch=True)
 
         # ── Planning cadence ─────────────────────────────────────────
         # A* -- and the APF post-process that runs once per A* path -- fire on a
@@ -399,8 +447,9 @@ class AStarPlannerNode:
                 self.goal.y, res.status.value, res.message)
             return False
 
-        raw_points = res.path.points
-        safe_points = self._apply_safety(res.path)
+        anchored = self._anchor_to_drone(res.path)   # path begins at the drone pose
+        raw_points = anchored.points
+        safe_points = self._apply_safety(anchored)
         # The follower flies -- and collision checks run against -- the SAFE path.
         self.last_points = safe_points
         self._publish(safe_points, (rospy.Time.now() - t0).to_sec())
@@ -412,45 +461,150 @@ class AStarPlannerNode:
         return True
 
     # ─── APF safety recentring ───────────────────────────────────
+    def _anchor_to_drone(self, path):
+        """Make the path originate exactly at the drone's current pose.
+
+        The A* planner trims waypoints within ~start_skip_m of the start and never
+        re-inserts the start pose, so the published path begins a step ahead of the
+        drone (it appears to "start at the second waypoint"). Prepend the live pose
+        as waypoint 0 -- or replace a near-coincident first point with it -- so both
+        the raw and the corrected path start exactly at the drone. The corrector
+        pins waypoint 0, so the origin stays fixed through correction.
+        """
+        pts = path.points
+        if self.pose is None:
+            return path
+        p0 = pts[0]
+        if math.hypot(p0.x - self.pose.x, p0.y - self.pose.y) < 0.15:
+            new_pts = (self.pose,) + tuple(pts[1:])   # replace near-coincident start
+        else:
+            new_pts = (self.pose,) + tuple(pts)       # prepend the true origin
+        return Path2D(points=new_pts, frame_id=path.frame_id,
+                      metadata=dict(path.metadata))
+
     def _apply_safety(self, raw_path):
         """Recentre the raw A* path away from walls; return the safe waypoints.
 
         Builds the repulsive field from the current BEV and runs
         ``TrajectorySafetyCorrector`` over the path. The corrector pushes against
-        a *softer* obstacle model (the Gaussian U_rep) than A*'s hard inflation,
-        so the recentred path is re-validated with the planner's own collision
-        gate: if recentring nudged a segment into an inflated obstacle we keep
-        the raw A* path (already validated). Hence the flown path is never less
-        safe than plain A*, and we never publish a corrected path that the very
-        next collision check would reject -- which would replan to the identical
-        path and loop. Any APF *failure* also falls back (loudly) to the raw path.
+        a *softer* obstacle model (the Gaussian U_rep) than A*'s hard inflation, so
+        the recentred path is re-validated against the planner's own collision
+        gate. That re-validation is now PER-WAYPOINT (``_clip_to_clear``): only the
+        waypoints whose corrected segment would clip an inflated obstacle are
+        pulled back toward raw, instead of reverting the whole path. The old
+        whole-path revert was goal-sensitive -- one corner-cut chord (whose exact
+        position depends on the goal) zeroed out the entire correction, so a tiny
+        goal shift could flip correction fully on/off. The flown path stays never
+        less safe than plain A*. Any APF *failure* falls back (loudly) to raw.
         """
         if not self.safety_correct:
             return raw_path.points
         try:
             self._build_field()
+            if self._pub_forces is not None:
+                self._publish_forces(raw_path.points)
             safe = self._corrector.correct_path(raw_path)
             if self._apf_debug:
                 self._log_apf_debug(raw_path.points, safe.points)
-            if self._apf_collision_recheck and self.planner.path_collides(
-                    self.grid, safe.points):
-                rospy.logwarn_throttle(
-                    5.0, "astar_planner: APF-corrected path collides under "
-                    "inflation -- publishing RAW A* (red==green) on %s. Lower "
-                    "~inflate_radius_m/~apf_max_total_shift_m, or set "
-                    "~apf_collision_recheck:=false to view the corrected path.",
-                    self.path_topic)
-                return raw_path.points
-            n_moved = int(safe.metadata.get("num_corrected", 0))
+            safe_pts = safe.points
+            if self._apf_unknown_damping:
+                # Damp the push where it heads into unknown (unbalanced) BEFORE the
+                # collision clip, so both only ever pull the path back toward raw.
+                safe_pts = self._dampen_unknown(raw_path.points, safe_pts)
+            pts = (self._clip_to_clear(raw_path.points, safe_pts)
+                   if self._apf_collision_recheck else safe_pts)
+            n_moved = sum(1 for r, s in zip(raw_path.points, pts)
+                          if math.hypot(s.x - r.x, s.y - r.y) > 1e-3)
             rospy.loginfo_throttle(
                 5.0, "astar_planner: APF recentred %d/%d waypoint(s)",
-                n_moved, len(safe.points))
-            return safe.points
+                n_moved, len(pts))
+            return pts
         except Exception as exc:                    # noqa: BLE001 -- stay flying
             rospy.logwarn_throttle(
                 5.0, "astar_planner: APF correction failed (%s) -- "
                 "publishing raw A* path on %s", exc, self.path_topic)
             return raw_path.points
+
+    def _map_confidence(self, x, y):
+        """Fraction of KNOWN cells in a disk of ~apf_unknown_radius_m around (x, y).
+
+        1.0 = fully mapped neighbourhood (walls observed on both sides, so the
+        repulsive forces balance); lower when (x, y) is in or near unknown space,
+        where the push is unbalanced. Used to scale down the correction there.
+        """
+        g = self.grid
+        rad = max(1, int(round(self._apf_unknown_radius_m / g.resolution)))
+        gx, gy = g.world_to_grid(x, y)
+        x0, x1 = max(0, gx - rad), min(g.width, gx + rad + 1)
+        y0, y1 = max(0, gy - rad), min(g.height, gy + rad + 1)
+        win = g.grid[y0:y1, x0:x1]
+        if win.size == 0:
+            return 1.0
+        return float(np.count_nonzero(win != g.values.unknown)) / float(win.size)
+
+    def _dampen_unknown(self, raw_points, corrected_points):
+        """Scale each waypoint's correction by the map confidence at its corrected
+        position, so a push into/near unknown space (no opposing wall to balance
+        it) is damped while a push to the centre of a fully-mapped corridor is kept
+        at full strength. ``final = raw + confidence * (corrected - raw)``.
+        """
+        out = []
+        for r, c in zip(raw_points, corrected_points):
+            conf = self._map_confidence(c.x, c.y)
+            if conf >= 1.0 - 1e-6:
+                out.append(c)
+            else:
+                out.append(Pose2D(r.x + conf * (c.x - r.x),
+                                   r.y + conf * (c.y - r.y), c.yaw))
+        return tuple(out)
+
+    def _clip_to_clear(self, raw_points, safe_points):
+        """Per-waypoint safety clip of the APF-corrected path against inflation.
+
+        Replaces the all-or-nothing revert (which republished the ENTIRE raw path
+        whenever a single corrected segment clipped an inflated obstacle, so a tiny
+        goal change could zero out every waypoint). Each interior waypoint is
+        pulled back toward its raw position only as far as needed to keep BOTH its
+        adjacent segments clear (bisection), so a single corner-cut reverts just
+        that waypoint while the rest stay centred. Never less safe than plain A*: a
+        waypoint that cannot be cleared falls back to its raw position.
+        """
+        out = list(safe_points)
+        n = len(out)
+        if n < 3:
+            return tuple(out)
+
+        def clear(a, b):
+            return not self.planner.path_collides(self.grid, (a, b))
+
+        # Re-evaluate EVERY interior waypoint to its most-centred clear position each
+        # sweep (not only colliding ones): pulling one waypoint back can later free a
+        # neighbour to return to full correction, so we recompute rather than latch a
+        # one-time revert. Converges in a few sweeps; endpoints stay pinned.
+        for _sweep in range(3):
+            changed = False
+            for i in range(1, n - 1):
+                full = safe_points[i]                # t=1: full correction
+                if clear(out[i - 1], full) and clear(full, out[i + 1]):
+                    new = full
+                else:
+                    rx, ry = raw_points[i].x, raw_points[i].y
+                    sx, sy = safe_points[i].x, safe_points[i].y
+                    lo, hi, best = 0.0, 1.0, raw_points[i]   # t: 0=raw .. 1=corrected
+                    for _ in range(6):           # bisect for the most-centred clear t
+                        t = 0.5 * (lo + hi)
+                        cand = Pose2D(rx + t * (sx - rx), ry + t * (sy - ry), full.yaw)
+                        if clear(out[i - 1], cand) and clear(cand, out[i + 1]):
+                            best, lo = cand, t
+                        else:
+                            hi = t
+                    new = best
+                if math.hypot(new.x - out[i].x, new.y - out[i].y) > 1e-6:
+                    out[i] = new
+                    changed = True
+            if not changed:
+                break
+        return tuple(out)
 
     def _log_apf_debug(self, raw_points, safe_points):
         """TEMP DEBUG (~apf_debug): prove the scaled APF push reaches the waypoints.
@@ -497,12 +651,17 @@ class AStarPlannerNode:
         g = self.grid
         raw = g.grid                                       # int16 (H,W) BEV values
         # BEV ints -> probability grid: occupied(100)->1, free(0)->0,
-        # unknown(-1)->NaN. ``known`` marks observed cells so the corrector
-        # freezes (never moves) any waypoint over unobserved space.
+        # unknown(-1)->NaN. PotentialFieldLayer treats NaN as FREE, so U_rep and
+        # D_obs already draw their repulsion ONLY from known walls -- unknown space
+        # is open (exactly like A* with unknown_blocked=False).
         p_occ = np.where(raw == g.values.occupied, 1.0,
                          np.where(raw == g.values.free, 0.0, np.nan)
                          ).astype(np.float32)
-        known = raw != g.values.unknown
+        # known_mask gates which waypoints the corrector may move. Default
+        # (apf_treat_unknown_as_free) passes None -> unknown counts as free, so a
+        # waypoint over unknown space is still recentred (pushed only by the known
+        # walls). Pass the observed mask to restore the old freeze-over-unknown.
+        known = None if self._apf_unknown_free else (raw != g.values.unknown)
         u_rep, d_obs = self._apf_layer.compute_from_prob_grid(p_occ, g.resolution)
         # Sample at cell CENTRES: OccupancyGrid2D -- and the A* path it produces
         # via grid_to_world -- places cell (gx,gy) at origin+(gx+0.5)*res, while
@@ -557,6 +716,109 @@ class AStarPlannerNode:
         """Publish the un-corrected A* path on ~raw_path_topic (red viz overlay)."""
         self.pub_raw_path.publish(self._path_msg(points))
 
+    def _publish_forces(self, points):
+        """Publish F_rep = -grad U_rep at each waypoint as bright-yellow ARROW
+        markers (visualization_msgs/MarkerArray) for RViz and the BEV viewer.
+
+        ``field.descent(x, y)`` is the gradient of the Gaussian-summed U_rep, i.e.
+        the repulsive force from ALL surrounding obstacles, so each arrow points
+        away from the nearby walls toward open space -- direct proof that the field
+        pushes the trajectory off the walls. Sampled at the raw A* waypoints, where
+        the path hugs the walls and the force is strongest and clearest. Arrow
+        length = ``force_arrow_scale`` * |F_rep| (proportional to magnitude).
+        """
+        field = self._corrector.field if self._corrector is not None else None
+        if field is None:
+            return
+        arr = MarkerArray()
+        wipe = Marker()                            # clear last plan's arrows first
+        wipe.header.frame_id = self.frame_id
+        wipe.ns = "apf_forces"
+        wipe.action = Marker.DELETEALL
+        arr.markers.append(wipe)
+        stamp = rospy.Time.now()
+        for idx, p in enumerate(points):
+            f = field.descent(p.x, p.y)            # -grad U_rep = F_rep, as [x, y]
+            if f is None:
+                continue
+            fx, fy = float(f[0]), float(f[1])
+            if math.hypot(fx, fy) < 1e-6:
+                continue                           # ~no force here -> skip zero arrow
+            m = Marker()
+            m.header.frame_id = self.frame_id
+            m.header.stamp = stamp
+            m.ns = "apf_forces"
+            m.id = idx + 1
+            m.type = Marker.ARROW
+            m.action = Marker.ADD
+            m.points = [
+                Point(p.x, p.y, self.force_arrow_z),
+                Point(p.x + fx * self.force_arrow_scale,
+                      p.y + fy * self.force_arrow_scale, self.force_arrow_z),
+            ]
+            m.scale.x = 0.05                       # shaft diameter
+            m.scale.y = 0.12                       # arrowhead diameter
+            m.scale.z = 0.0
+            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 1.0, 0.0, 0.95  # bright yellow
+            m.pose.orientation.w = 1.0             # identity (ARROW uses points[])
+            arr.markers.append(m)
+        if self._publish_force_field:
+            self._append_force_field(arr, stamp)
+        self._pub_forces.publish(arr)
+
+    def _append_force_field(self, arr, stamp):
+        """Append a coarse grid of F_rep arrows over the free cells (ns 'apf_field').
+
+        Sampling -grad U_rep across the free space -- not only at the waypoints --
+        makes it visually clear how much EACH wall section pushes: arrows are dense
+        and strong next to walls and fade to nothing in open space. Drawn dimmer and
+        thinner than the per-waypoint arrows so the trajectory's forces still stand
+        out. ``force_field_stride`` controls density; cells with negligible force
+        are skipped so only the wall-influenced region is drawn.
+        """
+        field = self._corrector.field if self._corrector is not None else None
+        if field is None or self.grid is None:
+            return
+        g = self.grid
+        cells = g.grid
+        wipe = Marker()                            # clear last plan's field arrows
+        wipe.header.frame_id = self.frame_id
+        wipe.ns = "apf_field"
+        wipe.action = Marker.DELETEALL
+        arr.markers.append(wipe)
+        stride = self.force_field_stride
+        mid = 0
+        for gy in range(0, g.height, stride):
+            for gx in range(0, g.width, stride):
+                if int(cells[gy, gx]) != g.values.free:
+                    continue                       # only sample observed FREE cells
+                x, y = g.grid_to_world(gx, gy)
+                f = field.descent(x, y)
+                if f is None:
+                    continue
+                fx, fy = float(f[0]), float(f[1])
+                if math.hypot(fx, fy) < 1e-2:
+                    continue                       # negligible push -> skip (open space)
+                m = Marker()
+                m.header.frame_id = self.frame_id
+                m.header.stamp = stamp
+                m.ns = "apf_field"
+                m.id = mid
+                mid += 1
+                m.type = Marker.ARROW
+                m.action = Marker.ADD
+                m.points = [
+                    Point(x, y, self.force_arrow_z),
+                    Point(x + fx * self.force_arrow_scale,
+                          y + fy * self.force_arrow_scale, self.force_arrow_z),
+                ]
+                m.scale.x = 0.025                  # thin shaft
+                m.scale.y = 0.06                   # small head
+                m.scale.z = 0.0
+                m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.75, 0.0, 0.55  # dim gold
+                m.pose.orientation.w = 1.0
+                arr.markers.append(m)
+
     def _status(self, _e):
         if self.has_plan:
             return
@@ -596,12 +858,19 @@ class AStarPlannerNode:
           self.predicted_path_topic)
         if self.safety_correct:
             cp = self._corrector.params
-            L("  APF recentre=ON  iters=%d gain=%.2f max_step=%.2fm "
-              "max_shift=%.2fm smooth=%d clearance=%.2fm lateral=%s pin_goal=%s",
-              cp.iterations, cp.gain, cp.max_step_m, cp.max_total_shift_m,
-              cp.smoothing_passes, cp.min_clearance_m, cp.lateral_only, cp.pin_last)
-            L("  APF debug=%s  collision_recheck=%s",
+            L("  APF recentre=ON  centering=%s  search=%.2fm corner_swing=%.2f "
+              "step=%.2fm pin_goal=%s",
+              cp.centering, cp.max_total_shift_m, cp.corner_swing,
+              cp.center_step_m, cp.pin_last)
+            L("  APF descent-only: iters=%d gain=%.2f max_step=%.2fm smooth=%d | "
+              "debug=%s recheck=%s",
+              cp.iterations, cp.gain, cp.max_step_m, cp.smoothing_passes,
               self._apf_debug, self._apf_collision_recheck)
+            L("  APF unknown: treat_free=%s damping=%s radius=%.2fm",
+              self._apf_unknown_free, self._apf_unknown_damping,
+              self._apf_unknown_radius_m)
+            L("  APF F_rep arrows: publish=%s scale=%.2f -> %s",
+              self._publish_force_markers, self.force_arrow_scale, self.forces_topic)
         else:
             L("  APF recentre=OFF (raw A* on both path topics)")
         L("=" * 64)
@@ -656,14 +925,35 @@ if __name__ == "__main__":
 #       ~safety_correct (true; false = fly raw A*, both topics carry it)
 #       ~apf_occ_thresh (0.65) ~apf_sigma_m (0.6; Gaussian repulsion spread --
 #         the only spatial PotentialFieldLayer field-generation knob)
-#       ~apf_iterations (5) ~apf_gain (1.0; repulsive-force scaling -- raise for a
-#         stronger push toward the corridor centre)
-#       ~apf_max_step_m (0.4; per-pass cap) ~apf_max_total_shift_m (1.2; total
-#         per-waypoint displacement cap -- the main "visible shift" lever)
-#       ~apf_smoothing_passes (2) ~apf_lateral_only (true; push ⊥ to path)
+#       ~apf_centering (line_search; moves each waypoint to the MAX-clearance
+#         medial axis -- the exact centre, farthest from walls, swinging wide at
+#         corners. "descent" = legacy gradient descent)
+#       ~apf_center_step_m (0.05; line_search normal-sample spacing)
+#       ~apf_corner_swing (1.0; line_search: extra lateral search range per 90deg
+#         of turn so corners swing wide instead of cutting close; 0 disables)
+#       ~apf_max_total_shift_m (2.0; line_search lateral search half-range = the
+#         max recentring -- make it >= the corridor half-width)
+#       ~apf_iterations (5) ~apf_gain (1.0) ~apf_max_step_m (0.4)
+#         ~apf_smoothing_passes (2) ~apf_lateral_only (true) -- DESCENT ONLY
 #       ~apf_pin_last (true; keep the goal click fixed)
 #       ~apf_min_clearance_m (0.0; >0 also pushes to a min distance-to-wall)
-#       ~apf_collision_recheck (true; revert to raw A* if the corrected path
-#         collides under inflation -- false to view a colliding corrected path)
+#       ~apf_collision_recheck (true; per-waypoint clip of the corrected path
+#         against inflation -- pulls back only the colliding waypoints, never the
+#         whole path; false disables the check)
+#       ~apf_treat_unknown_as_free (true; recentre waypoints over UNKNOWN cells too,
+#         pushed only by known walls -- matches A*. false = freeze them)
+#       ~apf_unknown_damping (true; scale each waypoint's correction by the fraction
+#         of KNOWN cells around its corrected position, so a push into/near unmapped
+#         space -- where no opposing wall balances it -- is damped. Full correction
+#         in fully-mapped corridors; fades back in as the map fills.)
+#       ~apf_unknown_radius_m (0.75; confidence-window radius in metres)
 #       ~apf_debug (true; TEMP per-waypoint orig/push/new logging each plan cycle)
+#   force arrows (F_rep = -grad U_rep at each waypoint -> RViz/BEV, proving the
+#     obstacle push direction): ~publish_forces (true) ~forces_topic (/path/forces;
+#     visualization_msgs/MarkerArray of bright-yellow ARROW markers)
+#       ~force_arrow_scale (1.0; arrow length = scale * |F_rep|)
+#       ~force_arrow_z (0.0; world-frame height of the arrows)
+#       ~publish_force_field (true; also a coarse F_rep field over the free cells --
+#         gold ARROW grid -- showing how hard EACH wall section pushes)
+#       ~force_field_stride (4; field-arrow spacing in cells)
 # ============================================================================
