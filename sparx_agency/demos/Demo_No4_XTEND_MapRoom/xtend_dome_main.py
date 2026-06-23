@@ -26,10 +26,13 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import signal as _signal
+
 try:
     import rclpy
     from geometry_msgs.msg import PoseStamped as RosPoseStamped
     from std_msgs.msg import String as RosString
+    from rclpy.executors import SingleThreadedExecutor as _RclpyExecutor
     _ROS2_AVAILABLE = True
 except ImportError:
     _ROS2_AVAILABLE = False
@@ -56,9 +59,10 @@ class _LocalizationListener:
         self._latest: Optional[dict[str, float]] = None
         self._lock = threading.Lock()
         self._node.create_subscription(RosPoseStamped, pose_topic, self._cb, 10)
-        self._thread = threading.Thread(
-            target=rclpy.spin, args=(self._node,), daemon=True
-        )
+        self._cmd_pub = self._node.create_publisher(RosString, "/xtend/cmd_nav", 10)
+        self._executor = _RclpyExecutor()
+        self._executor.add_node(self._node)
+        self._thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._thread.start()
         print(f"[localization] listening on {pose_topic}")
 
@@ -78,7 +82,16 @@ class _LocalizationListener:
         with self._lock:
             return dict(self._latest) if self._latest is not None else None
 
+    def pub_cmd(self, action: str, value: int = 0):
+        msg = RosString()
+        msg.data = json.dumps({"action": action, "value": value})
+        self._cmd_pub.publish(msg)
+
     def shutdown(self):
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
         try:
             self._node.destroy_node()
         except Exception:
@@ -97,9 +110,9 @@ class _DepthListener:
         self._latest_path: Optional[str] = None
         self._lock = threading.Lock()
         self._node.create_subscription(RosString, depth_topic, self._cb, 10)
-        self._thread = threading.Thread(
-            target=rclpy.spin, args=(self._node,), daemon=True
-        )
+        self._executor = _RclpyExecutor()
+        self._executor.add_node(self._node)
+        self._thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._thread.start()
         print(f"[depth] listening on {depth_topic}")
 
@@ -115,6 +128,10 @@ class _DepthListener:
             return self._latest_path
 
     def shutdown(self):
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
         try:
             self._node.destroy_node()
         except Exception:
@@ -157,6 +174,73 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.last_xtend_state: Optional[dict[str, Any]] = None
+        # When True, send_message() forwards frames so we can bypass the bridge.
+        self._direct_cmd_active = False
+
+    # ------------------------------------------------------------------
+    # Route drone commands through /xtend/cmd_nav (bridge executes them).
+    # land() and disarm_robot() also send direct WebSocket frames as a
+    # fallback so the drone is safe even if the bridge process is dead.
+    # ------------------------------------------------------------------
+
+    async def send_message(self, websocket):
+        """Normally silent — only sends when _direct_cmd_active is set."""
+        while True:
+            if self._direct_cmd_active:
+                self.virtual_controller['content'] = self.send_command
+                await websocket.send(
+                    json.dumps(self.virtual_controller, separators=(',', ':'))
+                )
+            await asyncio.sleep(self.interval)
+
+    def _pub_cmd(self, action: str, value: int = 0):
+        if self._loc_listener is not None:
+            self._loc_listener.pub_cmd(action, value)
+        else:
+            print(f"[cmd] no loc_listener — cannot publish cmd_nav '{action}'")
+
+    async def arm_robot(self):
+        print("Arming robot... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self._pub_cmd("arm")
+        await asyncio.sleep(1.0)
+        print("Robot armed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+
+    async def takeoff(self, duration=3.3, value=1000):
+        print("Taking off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self._pub_cmd("takeoff")
+        await asyncio.sleep(duration + 1.0)
+        print("Taken off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+
+    async def land(self, duration=4.1):
+        print("Landing... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self._pub_cmd("land")
+        # Direct WebSocket backup: works even if bridge is already dead.
+        self._direct_cmd_active = True
+        try:
+            self.send_command['buttons'][3] = 1
+            await asyncio.sleep(duration)
+            self.send_command['buttons'][3] = 0
+            await asyncio.sleep(2.0)
+        finally:
+            self._direct_cmd_active = False
+        print("Landed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+
+    async def disarm_robot(self):
+        print("Disarming robot... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self._pub_cmd("disarm")
+        # Direct WebSocket backup.
+        self._direct_cmd_active = True
+        try:
+            self.send_command['buttons'][0] = 1
+            await asyncio.sleep(0.1)
+            self.send_command['buttons'][0] = 0
+            await asyncio.sleep(0.1)
+            self.send_command['buttons'][0] = 1
+            await asyncio.sleep(0.1)
+            self.send_command['buttons'][0] = 0
+        finally:
+            self._direct_cmd_active = False
+        print("Robot disarmed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -436,21 +520,32 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
 
             if start_pose is not None:
                 last_rad = math.radians(start_pose["yaw"])
+                last_pose_yaw = last_rad  # track last NEW pose to detect stale
+                last_update_t = asyncio.get_event_loop().time()
                 acc = 0.0
-                self.send_command["axes"][3] = (-yaw_cmd if direction == +1 else +yaw_cmd)
+                chunk_deadline = asyncio.get_event_loop().time() + 30.0
+                rot_action = "rotate_left" if direction == +1 else "rotate_right"
+                self._pub_cmd(rot_action, yaw_cmd)
                 try:
                     while acc < chunk_rad:
+                        now = asyncio.get_event_loop().time()
+                        if now > chunk_deadline:
+                            print(f"[rotate] chunk timeout — proceeding after 30 s")
+                            break
                         await asyncio.sleep(0.02)
                         pose = self._loc_listener.get_pose()
                         if pose is None:
                             continue
                         cur_rad = math.radians(pose["yaw"])
+                        if cur_rad != last_pose_yaw:   # new localization update
+                            last_pose_yaw = cur_rad
+                            last_update_t = asyncio.get_event_loop().time()
                         step = angle_step(cur_rad, last_rad)
                         if step < 0.4:
                             acc += step
                         last_rad = cur_rad
                 finally:
-                    self.send_command["axes"][3] = 0
+                    self._pub_cmd("stop")
             else:
                 # Localization not available — fall back to XTEND bearing for this chunk.
                 print(f"[rotate] no localization pose — XTEND bearing fallback for {chunk_deg:.0f}°")
@@ -463,35 +558,30 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
 
     async def create_scenario(self):
         """360° dome sweep using yaw-integrated rotation."""
-        sleep_time = 3
+        sleep_time = self.sleep_time
 
         print("Creating scenario... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         await asyncio.sleep(5)
         print("Scenario created... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         try:
-            scenario = [
-                self.disarm_robot(),
-                self.arm_robot(),
-                self.takeoff(),
-
-                # Start capture only after takeoff.
-                self._start_capture(),
-
-                # Yaw-integrated 360° dome sweep.
-                self.rotate_degrees(360),
-
-                # Stop capture before moving down / landing.
-                self._stop_capture(),
-
-                self.move_down(500),
-                self.move_down(400),
-                self.land(),
-                self.disarm_robot(),
+            # Callables — coroutines created only when reached so un-run steps
+            # don't emit "coroutine was never awaited" on early exit.
+            steps = [
+                (self.disarm_robot,   ()),
+                (self.arm_robot,      ()),
+                (self.takeoff,        ()),
+                (self._start_capture, ()),
+                (self.rotate_degrees, (360,)),
+                (self._stop_capture,  ()),
+                (self.move_down,      (500,)),
+                (self.move_down,      (400,)),
+                (self.land,           ()),
+                (self.disarm_robot,   ()),
             ]
 
-            for step in scenario:
-                await step
+            for fn, fn_args in steps:
+                await fn(*fn_args)
                 print("before sleep")
                 await asyncio.sleep(sleep_time)
                 print("after sleep")
@@ -518,6 +608,68 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
             await asyncio.sleep(sleep_time // 2)
 
 
+    async def run(self):
+        """
+        Override automation.run() so that SIGTERM/SIGINT cancel scenario_task first
+        (firing the finally → land + disarm) before send_task is stopped.
+        Without this, tmux kill-session / systemctl stop terminate the process
+        immediately and the drone is left armed.
+        """
+        import websockets  # noqa: PLC0415 — avoids circular at module level
+
+        loop = asyncio.get_running_loop()
+        _stop = asyncio.Event()
+
+        def _on_signal():
+            print("[safety] Signal received — cancelling scenario (land+disarm will run in finally)...")
+            _stop.set()
+
+        loop.add_signal_handler(_signal.SIGTERM, _on_signal)
+        loop.add_signal_handler(_signal.SIGINT,  _on_signal)
+
+        try:
+            async with websockets.connect(self.uri) as websocket:
+                print(f"✓ Connected to {self.uri}")
+                # send_message is normally silent (_direct_cmd_active=False);
+                # it only transmits during land/disarm as a bridge-down fallback.
+                send_task     = asyncio.create_task(self.send_message(websocket))
+                receive_task  = asyncio.create_task(self.receive_message(websocket))
+                scenario_task = asyncio.create_task(self.create_scenario())
+                stop_task     = asyncio.create_task(_stop.wait())
+
+                done, _ = await asyncio.wait(
+                    [scenario_task, stop_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if stop_task in done:
+                    # Cancel scenario; its finally block publishes land+disarm
+                    # (cmd_nav + direct WebSocket) before we close.
+                    scenario_task.cancel()
+
+                stop_task.cancel()
+
+                # Wait for the scenario finally block to finish BEFORE closing comms.
+                await asyncio.gather(scenario_task, return_exceptions=True)
+
+                for t in (send_task, receive_task):
+                    t.cancel()
+                await asyncio.gather(send_task, receive_task, return_exceptions=True)
+
+        except websockets.exceptions.WebSocketException as e:
+            print(f"✗ WebSocket error: {e}")
+        except ConnectionRefusedError:
+            print(f"✗ Connection refused at {self.uri}")
+        except Exception as e:
+            print(f"✗ Unexpected error: {e}")
+        finally:
+            try:
+                loop.remove_signal_handler(_signal.SIGTERM)
+                loop.remove_signal_handler(_signal.SIGINT)
+            except Exception:
+                pass
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run XTEND dome demo with JPG+JSON capture output.",
@@ -533,7 +685,7 @@ def parse_args():
     parser.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     parser.add_argument("--rtsp-latency-ms", type=int, default=0)
 
-    parser.add_argument("--out-dir", default="/home/user/Documents/xtend_dome_capture")
+    parser.add_argument("--out-dir", default="/home/user/jetson-containers/data/R1")
     parser.add_argument("--capture-interval-sec", type=float, default=1.0,
                         help="Minimum seconds between frame captures.")
     parser.add_argument("--yaw-bucket-deg", type=float, default=30.0)

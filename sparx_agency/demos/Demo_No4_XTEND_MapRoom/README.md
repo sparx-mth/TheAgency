@@ -89,19 +89,19 @@ Arm, takeoff, rotate 360° in 90° chunks (guided by `/xtend/localization`), cap
 python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py \
   --pose-topic /xtend/localization \
   --depth-topic /xtend/depth_frame_path \
-  --out-dir /home/user/Documents/xtend_dome_capture \
+  --out-dir /home/user/jetson-containers/data/R1 \
   --capture-interval-sec 1.0 \
   --yaw-bucket-deg 30.0
 ```
 
 Output lands in:
 ```
-/home/user/Documents/xtend_dome_capture/R2/<YYYYmmdd_HHMMSS>/
+/home/user/jetson-containers/data/R1/R2/<YYYYmmdd_HHMMSS>/
   R2_20260127_122951.jpg
   R2_20260127_122951.json   ← pose sidecar {x, y, z, yaw}
   R2_20260127_122951.npy    ← depth from DA3
   ...
-/home/user/Documents/xtend_dome_capture/latest  → symlink to session
+/home/user/jetson-containers/data/R1/latest  → symlink to session
 ```
 
 ---
