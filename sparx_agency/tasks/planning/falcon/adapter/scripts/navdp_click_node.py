@@ -4,10 +4,18 @@
 A drop-in REPLACEMENT for ``astar_planner_node.py``. Instead of A* searching the
 BEV grid to a clicked map goal, this node lets the operator click a pixel in the
 live camera image; it asks the NavDP point-goal policy for a trajectory and
-publishes that trajectory as a world-frame ``nav_msgs/Path`` on the SAME topic
-the A* planner used (``/path/waypoints``). Everything downstream is unchanged:
-``waypoint_follower_node`` flies the path and ``bev_click_goal_node`` draws it on
-the BEV map.
+publishes that trajectory as a world-frame ``nav_msgs/Path``.
+
+Like A*, it publishes its RAW trajectory on its own planner topic
+(``~path_topic`` = ``/path/waypoints_navdp``), not directly on ``/path/waypoints``.
+This lets the same planner-agnostic ``path_corrector_node`` recentre the NavDP
+path off walls against the BEV (point its ``~input_path_topic`` at
+``/path/waypoints_navdp``) and republish the corrected, flown path on
+``/path/waypoints``. To fly NavDP UNcorrected, point the corrector's input
+elsewhere (or set its ``enabled:=false``, which passes the input through), or
+point ``~path_topic`` here straight at ``/path/waypoints``. Everything downstream
+(``waypoint_follower_node`` flying ``/path/waypoints``, ``bev_click_goal_node``
+drawing it) is unchanged.
 
 All the maths is ROS-free and unit-tested in ``core.planning.navdp``:
   * pixel + depth -> body-frame point-goal      (geometry.pixel_to_pointgoal)
@@ -98,9 +106,11 @@ class NavDPClickNode:
         self.pose_type = G("~pose_type", "pose_stamped")
         self.camera_info_topic = G("~camera_info_topic", "")  # "" -> use params
 
-        # Output: world-frame path on the SAME topic the A* planner published,
-        # so the existing waypoint_follower consumes it unchanged.
-        self.path_topic = G("~path_topic", "/path/waypoints")
+        # Output: world-frame raw NavDP path on its own planner topic, mirroring
+        # A* on /path/waypoints_astar. The path_corrector recentres it against the
+        # BEV and republishes /path/waypoints (the flown topic). Point this straight
+        # at /path/waypoints to fly NavDP uncorrected.
+        self.path_topic = G("~path_topic", "/path/waypoints_navdp")
         self.frame_id = G("~frame_id", "world")
 
         # Camera intrinsics matching the /xtend/depth_m stream NavDP indexes.
@@ -454,7 +464,7 @@ class NavDPClickNode:
         L("  depth in  = %s", self.depth_topic)
         L("  pose  in  = %s  (%s)", self.pose_topic, self.pose_type)
         L("  navdp     = %s", self.client.url)
-        L("  path  out = %s  (world frame, latched -> waypoint_follower)",
+        L("  path  out = %s  (raw NavDP, world frame, latched -> path_corrector)",
           self.path_topic)
         L("  intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f  (%dx%d)",
           self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
@@ -487,7 +497,9 @@ if __name__ == "__main__":
 #       ~pose_type (pose_stamped ; 'pose' for a bare geometry_msgs/Pose, e.g.
 #         the nav stack's /gt_pose or Gazebo's /simple_drone/gt_pose)
 #       ~camera_info_topic ('' = use the fx/fy/cx/cy params; K preferred over P)
-#       ~path_topic (/path/waypoints) ~frame_id (world)
+#       ~path_topic (/path/waypoints_navdp; raw NavDP -> path_corrector_node, which
+#         recentres it and republishes /path/waypoints. Point straight at
+#         /path/waypoints to fly NavDP uncorrected.) ~frame_id (world)
 #   camera (MUST match the live /xtend/depth_m stream; the launch wires these to
 #       the shared cam_* args): ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #       [real-XTEND raw-K defaults; sim uses sim_adapter's P-target via cam_*]

@@ -172,11 +172,13 @@
   <arg name="replan_on_predicted_collision" default="false" />
   <arg name="max_predicted_replans"         default="3" />
 
-  <!-- APF safety recentring: post-process the raw A* path off walls toward
+  <!-- APF safety recentring: recentre the planner's raw path off walls toward
        corridor centres via the repulsive field U_rep, so a corridor turn stops
-       hugging the inside corner. The follower flies the corrected path on
-       /path/waypoints; the raw A* path is published on /path/waypoints_raw for
-       the BEV viewer (red = raw, green = safe). safety_correct:=false flies raw A*. -->
+       hugging the inside corner. These args are consumed by the path_corrector
+       node (below), which works for ANY planner (A* or NavDP). The follower flies
+       the corrected path on /path/waypoints; the planner's raw path is echoed on
+       /path/waypoints_raw for the BEV viewer (red = raw, green = safe).
+       safety_correct:=false makes the corrector a passthrough (flies the raw path). -->
   <arg name="safety_correct"        default="true" />
   <arg name="apf_centering"         default="line_search" /><!-- line_search: move each waypoint to the lateral potential minimum (omnidirectional, scale-free, single-pass) | descent: legacy gradient descent -->
   <arg name="apf_gain"              default="0.5" /><!-- DESCENT MODE ONLY: repulsive-force scaling factor (line_search ignores it) -->
@@ -224,6 +226,21 @@
   <arg name="navdp_img_height"         default="$(arg cam_height)" />
   <arg name="navdp_render_cam_height"  default="0.0" /><!-- overlay-only ground-plane height; 0/<=0 tracks live altitude, >0 pins a fixed height -->
   <arg name="navdp_depth_max_m"        default="5.0" /><!-- depth clip before uint16 encoding (server contract; do NOT exceed 6.55) -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       PATH CORRECTOR (path_corrector_node) — planner-agnostic.
+       Subscribes to the active planner's RAW path, recentres it off
+       walls against the BEV (the repulsive potential field, by default)
+       and republishes the corrected, flown path on /path/waypoints.
+       The follower and BEV viewer are unchanged. ~enabled (=safety_correct)
+       false makes it a passthrough. The APF / force-viz args live in the
+       "APF safety recentring" block above and are consumed HERE now.
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy; raises on an unknown name -->
+  <!-- Which planner the corrector reads: NavDP when use_navdp, else A*. The
+       corrector ALWAYS owns /path/waypoints, so the follower reads one topic. -->
+  <arg name="planner_path_topic"
+       default="$(eval '/path/waypoints_navdp' if use_navdp else '/path/waypoints_astar')" />
 
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
@@ -463,7 +480,8 @@
         name="astar_planner" output="screen" unless="$(arg use_navdp)">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
-    <param name="path_topic"         value="/path/waypoints" />
+    <!-- Raw A* path; path_corrector recentres it and republishes /path/waypoints. -->
+    <param name="path_topic"         value="/path/waypoints_astar" />
     <param name="goal_topic"         value="/waypoint_nav/goal" />
     <param name="goal_x"             value="$(arg goal_x)" />
     <param name="goal_y"             value="$(arg goal_y)" />
@@ -492,9 +510,51 @@
     <param name="max_predicted_replans" value="$(arg max_predicted_replans)" />
     <param name="predicted_path_topic"  value="/path/predicted" />
     <param name="frame_id"              value="world" />
-    <!-- APF safety recentring (post-process A* off walls; follower flies the safe path) -->
-    <param name="safety_correct"        value="$(arg safety_correct)" />
+    <!-- Path correction (APF recentring + force viz) now runs in path_corrector,
+         which subscribes to /path/waypoints_astar; see that node below. -->
+  </node>
+
+  <!-- NavDP click-to-go planner (replaces astar_planner when use_navdp:=true).
+       Publishes its RAW path on /path/waypoints_navdp; path_corrector recentres
+       it (planner_path_topic auto-selects it when use_navdp) and republishes
+       /path/waypoints, the world Path the follower consumes. -->
+  <node pkg="falcon_adapter" type="navdp_click_node.py"
+        name="navdp_click" output="screen" if="$(arg use_navdp)">
+    <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+    <!-- Raw NavDP path; path_corrector recentres it and republishes /path/waypoints. -->
+    <param name="path_topic"        value="/path/waypoints_navdp" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg navdp_port)" />
+    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <param name="render_cam_height" value="$(arg navdp_render_cam_height)" />
+  </node>
+
+  <!-- Path corrector: recentres whichever planner's raw path against the BEV and
+       republishes the flown path on /path/waypoints (+ /path/waypoints_raw echo
+       and /path/forces arrows for the BEV viewer). Always launched; ~enabled
+       (=safety_correct) false makes it a verbatim passthrough. -->
+  <node pkg="falcon_adapter" type="path_corrector_node.py"
+        name="path_corrector" output="screen">
+    <param name="input_path_topic"      value="$(arg planner_path_topic)" />
+    <param name="bev_topic"             value="/falcon/bev_2d" />
+    <param name="path_topic"            value="/path/waypoints" />
     <param name="raw_path_topic"        value="/path/waypoints_raw" />
+    <param name="frame_id"              value="world" />
+    <param name="enabled"               value="$(arg safety_correct)" />
+    <param name="corrector"             value="$(arg corrector)" />
+    <!-- Match the planner's inflation so the collision clip uses the same model. -->
+    <param name="inflate_radius_m"      value="$(arg inflate_radius_m)" />
     <param name="apf_centering"         value="$(arg apf_centering)" />
     <param name="apf_gain"              value="$(arg apf_gain)" />
     <param name="apf_max_total_shift_m" value="$(arg apf_max_total_shift_m)" />
@@ -509,29 +569,6 @@
     <param name="force_arrow_scale"     value="$(arg force_arrow_scale)" />
     <param name="publish_force_field"   value="$(arg publish_force_field)" />
     <param name="force_field_stride"    value="$(arg force_field_stride)" />
-  </node>
-
-  <!-- NavDP click-to-go planner (replaces astar_planner when use_navdp:=true).
-       Publishes the SAME /path/waypoints world Path the follower consumes. -->
-  <node pkg="falcon_adapter" type="navdp_click_node.py"
-        name="navdp_click" output="screen" if="$(arg use_navdp)">
-    <param name="drone_ns"          value="$(arg drone_ns)" />
-    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
-    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
-    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
-    <param name="pose_type"         value="$(arg navdp_pose_type)" />
-    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
-    <param name="path_topic"        value="/path/waypoints" />
-    <param name="frame_id"          value="world" />
-    <param name="port"              value="$(arg navdp_port)" />
-    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
-    <param name="fx"                value="$(arg navdp_fx)" />
-    <param name="fy"                value="$(arg navdp_fy)" />
-    <param name="cx"                value="$(arg navdp_cx)" />
-    <param name="cy"                value="$(arg navdp_cy)" />
-    <param name="img_width"         value="$(arg navdp_img_width)" />
-    <param name="img_height"        value="$(arg navdp_img_height)" />
-    <param name="render_cam_height" value="$(arg navdp_render_cam_height)" />
   </node>
 
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"
