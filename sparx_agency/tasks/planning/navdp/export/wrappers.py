@@ -106,9 +106,20 @@ class DenoiseStepWrapper(nn.Module):
     ``(last_actions (N,24,3), time_token (N,1,384), goal_embed (N,1,384),
     rgbd_embed (N,128,384)) -> noise_pred (N,24,3)``. Uses a baked causal
     ``tgt_mask`` (finite -1e4); no memory mask.
+
+    Args:
+        policy: a loaded ``NavDP_Policy``.
+        causal_hint: when True, also pass ``tgt_is_causal=True`` to the decoder.
+            This is the one concrete optimization from the alternative export
+            script: it hints PyTorch's self-attention that the mask is causal so
+            it can take a faster SDPA kernel. The explicit finite ``tgt_mask`` is
+            still passed (correctness), unlike the alt script which paired the
+            hint with an ``-inf`` mask (an FP16 NaN hazard). The self-attention is
+            only 24 tokens, so any speedup is small -- this variant exists so it
+            can be measured, not assumed.
     """
 
-    def __init__(self, policy):
+    def __init__(self, policy, causal_hint=False):
         super().__init__()
         self.input_embed = policy.input_embed
         self.cond_pos_embed = policy.cond_pos_embed
@@ -116,6 +127,7 @@ class DenoiseStepWrapper(nn.Module):
         self.decoder = policy.decoder
         self.layernorm = policy.layernorm
         self.action_head = policy.action_head
+        self.causal_hint = bool(causal_hint)
         p = policy.predict_size
         causal = torch.triu(torch.ones(p, p), diagonal=1) > 0    # True above diagonal
         self.register_buffer("tgt_mask", torch.where(
@@ -127,7 +139,8 @@ class DenoiseStepWrapper(nn.Module):
         cond = torch.cat([time_token, goal_embed, goal_embed, goal_embed, rgbd_embed], dim=1)
         cond_embedding = cond + self.cond_pos_embed(cond)
         input_embedding = action_embeds + self.out_pos_embed(action_embeds)
-        out = self.decoder(input_embedding, cond_embedding, tgt_mask=self.tgt_mask)
+        extra = {"tgt_is_causal": True} if self.causal_hint else {}
+        out = self.decoder(input_embedding, cond_embedding, tgt_mask=self.tgt_mask, **extra)
         return self.action_head(self.layernorm(out))
 
 

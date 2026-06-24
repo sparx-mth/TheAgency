@@ -26,7 +26,7 @@ if [ "${ARCH}" = "aarch64" ]; then
   IMAGE="${IMAGE:-falcon-ros-custom:v2}"
 else
   # Change to your custom x86 image tag
-  IMAGE="${IMAGE:-falcon-ros-custom:v2}"
+  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
 fi
 echo "[INFO] Arch: ${ARCH}   Image: ${IMAGE}"
 

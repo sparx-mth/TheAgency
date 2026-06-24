@@ -25,7 +25,15 @@ IMG = 224       # image_size
 
 ENCODER = "navdp_encoder"
 DENOISE = "navdp_denoise"
+DENOISE_CAUSAL = "navdp_denoise_causal"   # variant: tgt_is_causal=True (A/B test)
 CRITIC = "navdp_critic"
+
+_DENOISE_IO = (
+    [DEN_IN_ACTIONS, DEN_IN_TIME, DEN_IN_GOAL, DEN_IN_RGBD], [DEN_OUT],
+    {DEN_IN_ACTIONS: (N, PREDICT, 3), DEN_IN_TIME: (N, 1, TOK),
+     DEN_IN_GOAL: (N, 1, TOK), DEN_IN_RGBD: (N, MEM_TOK, TOK),
+     DEN_OUT: (N, PREDICT, 3)},
+)
 
 # name -> (input_names, output_names, {name: shape})
 SPECS = {
@@ -34,12 +42,8 @@ SPECS = {
         {ENC_IN_IMAGES: (1, MEM, 3, IMG, IMG), ENC_IN_DEPTH: (1, 1, IMG, IMG),
          ENC_OUT: (1, MEM_TOK, TOK)},
     ),
-    DENOISE: (
-        [DEN_IN_ACTIONS, DEN_IN_TIME, DEN_IN_GOAL, DEN_IN_RGBD], [DEN_OUT],
-        {DEN_IN_ACTIONS: (N, PREDICT, 3), DEN_IN_TIME: (N, 1, TOK),
-         DEN_IN_GOAL: (N, 1, TOK), DEN_IN_RGBD: (N, MEM_TOK, TOK),
-         DEN_OUT: (N, PREDICT, 3)},
-    ),
+    DENOISE: _DENOISE_IO,
+    DENOISE_CAUSAL: _DENOISE_IO,           # identical IO, only the export hint differs
     CRITIC: (
         [CRI_IN_TRAJ, CRI_IN_RGBD], [CRI_OUT],
         {CRI_IN_TRAJ: (N, PREDICT, 3), CRI_IN_RGBD: (N, MEM_TOK, TOK),

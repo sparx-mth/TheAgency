@@ -217,10 +217,14 @@ def main():
           % (profile.gpu_name, profile.sm,
              profile.recommended_workspace_bytes / (1 << 30), profile.target_tag))
 
+    # Build every navdp_*.onnx present (picks up optional variants like the
+    # causal denoiser), skipping any without an IO spec.
+    keys = sorted(p.stem for p in onnx_dir.glob("navdp_*.onnx"))
+    keys = [k for k in keys if k in io_spec.SPECS] or list(ENGINE_KEYS)
     out_dir.mkdir(parents=True, exist_ok=True)
     with _cuda_context(needed=(args.precision == "int8")):
         calibrators = _load_calibrators(args.calib_npz) if args.precision == "int8" else {}
-        for key in ENGINE_KEYS:
+        for key in keys:
             path = build_one(key, onnx_dir / (key + ".onnx"), out_dir, profile,
                              args.precision, calibrator=calibrators.get(key))
             print("[ok] built", path.name)

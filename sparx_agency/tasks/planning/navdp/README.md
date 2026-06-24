@@ -96,6 +96,41 @@ passes the gate at **0% argmax-flip**, ~20 Hz end-to-end, and a full client
 round-trip returns a 24-waypoint trajectory. The Orin's all-FP16 TRT-10 build should
 match or beat this — re-run the gate there to confirm before flying.
 
+### Engine variants & A/B comparison
+
+The denoiser inner loop is the **measured bottleneck** (~71% of per-decision
+compute: ~3.9 ms/step × 10 steps vs ~12 ms for the encoder, on the 5070). So
+denoiser variants are worth A/B-testing. Export a variant alongside the baseline,
+build them together, and compare:
+
+```bash
+# 1) export the baseline + a tgt_is_causal denoiser variant
+python -m sparx_agency.tasks.planning.navdp.export.export_onnx \
+    --ckpt .../navdp-cross-modal.ckpt --navdp-repo $NAVDP_REPO \
+    --out-dir .../engines/onnx --with-causal-denoise
+
+# 2) build all engines found (encoder, denoise, denoise_causal, critic)
+python -m sparx_agency.tasks.planning.navdp.engine.build_engine \
+    --onnx-dir .../engines/onnx --precision fp16
+
+# 3) A/B every navdp_denoise*.engine: step latency + Hz + accuracy gate,
+#    writes selected.json to the fastest variant that still passes the gate
+python -m sparx_agency.tasks.planning.navdp.benchmark.compare_engines \
+    --engine-dir .../engines/<target_tag> --ckpt ... --navdp-repo ...
+```
+
+**`navdp_denoise_causal`** is the one concrete optimization from an alternative
+export script (`tgt_is_causal=True`, a causal-attention kernel hint) — but with
+our FP16-safe `-1e4` mask instead of its `-inf` (which risks NaN in FP16).
+Measured on the 5070 it was **identical accuracy (0% flip) and the same speed**
+(3.09 vs 3.08 ms/step) — the masked self-attention is only 24 tokens, so the hint
+doesn't move the needle. Re-measure on the Orin; it is unlikely to differ.
+
+The genuinely high-leverage win is **fewer sampler steps** (DDIM / DPM-Solver at
+2–4 steps vs 10 DDPM steps) — that attacks the 71% directly. It is a runtime
+change (same denoise engine, fewer calls), not an engine variant, and is not yet
+implemented.
+
 ### Stage 3 — run the drop-in server (FALCON host)
 
 The FALCON Noetic container has no TensorRT, so the server is a **host process**;
@@ -140,8 +175,8 @@ core/planning/navdp/trt/      engine_runner · scheduler · point_encoder · pos
 tasks/planning/navdp/
   export/    wrappers · build_policy · export_onnx · validate_parity · io_spec · gen_scheduler_golden
   hardware/  detect
-  engine/    inspect_onnx · calibrator · build_engine
-  benchmark/ bench
+  engine/    inspect_onnx · calibrator · build_engine · fp16_onnx
+  benchmark/ bench · compare_engines
   server/    trt_agent · navdp_trt_server
   configs/   build_policy.json          engines/  (gitignored output)
 ```

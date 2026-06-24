@@ -65,13 +65,20 @@ def _disable_mha_fastpath():
         pass
 
 
-def build_wrappers(policy):
-    """Return ``[(engine_key, module)]`` for the three exportable graphs."""
-    return [
+def build_wrappers(policy, with_causal_denoise=False):
+    """Return ``[(engine_key, module)]`` for the exportable graphs.
+
+    With ``with_causal_denoise`` also exports a second denoiser graph built with
+    ``tgt_is_causal=True`` (a separate engine for A/B testing against the baseline).
+    """
+    wraps = [
         (io_spec.ENCODER, EncoderWrapper(policy.rgbd_encoder)),
         (io_spec.DENOISE, DenoiseStepWrapper(policy)),
         (io_spec.CRITIC, CriticWrapper(policy)),
     ]
+    if with_causal_denoise:
+        wraps.append((io_spec.DENOISE_CAUSAL, DenoiseStepWrapper(policy, causal_hint=True)))
+    return wraps
 
 
 def _dummy_inputs(engine_key):
@@ -141,6 +148,8 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--navdp-repo", default=None)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--with-causal-denoise", action="store_true",
+                    help="also export a tgt_is_causal=True denoiser variant for A/B testing")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -151,7 +160,7 @@ def main():
 
     manifest = {"opset": OPSET, "ckpt_sha256": _sha256(args.ckpt),
                 "head_params": npz.name, "engines": {}}
-    for key, module in build_wrappers(policy):
+    for key, module in build_wrappers(policy, with_causal_denoise=args.with_causal_denoise):
         path = export_one(key, module, out_dir)
         manifest["engines"][key] = {
             "onnx": path.name, "onnx_sha256": _sha256(path),
