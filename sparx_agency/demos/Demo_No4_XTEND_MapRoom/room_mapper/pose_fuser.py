@@ -98,7 +98,7 @@ class PoseFuser:
 
         self._smoothed_depth_scale: Optional[float] = None
         self._scale_ema_alpha: float = 0.1
-        _SCALE_MIN, _SCALE_MAX = 1.0, 1.5
+        _SCALE_MIN, _SCALE_MAX = 0.4, 2.0
         self._scale_clamp = (_SCALE_MIN, _SCALE_MAX)
 
         self._last_wall_view_angle: Optional[float] = None  # degrees from perpendicular

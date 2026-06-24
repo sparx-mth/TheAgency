@@ -164,6 +164,18 @@ XTEND_SERVICES: list[Service] = [
   --depth-topic /xtend/depth_frame_path \\
   --out-dir {JETSON_DATA}/captures""",
     ),
+    # ── Room Mapper (offline post-flight) ────────────────────────────────
+    Service(
+        name="Room Mapper",
+        key="room_mapper",
+        group="room_mapper",
+        description="Post-flight: build occupancy map + place VLM-detected objects from latest session.",
+        cmd=f"""python3 -m sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.run_room_mapper \\
+  --data-dir {JETSON_DATA}/captures/latest \\
+  --tag-map {JETSON_REPO}/sparx_agency/tasks/localization/config/new_map.yaml \\
+  --stride 1 --no-scale-correction \\
+  --output-dir {JETSON_DATA}/captures/latest_room_map""",
+    ),
     # ── Planner (Falcon) ──────────────────────────────────────────────────
     Service(
         name="Hospital World",
@@ -536,6 +548,10 @@ with tab_xtend:
     st.markdown("#### Localization & Mapping")
     loc = [s for s in XTEND_SERVICES if s.group == "localization"]
     _service_cards(loc, states)
+
+    st.markdown("#### Room Mapper (offline)")
+    room_mapper = [s for s in XTEND_SERVICES if s.group == "room_mapper"]
+    _service_cards(room_mapper, states)
 
     with st.expander("🗺️  Planner (Falcon)", expanded=False):
         planner = [s for s in XTEND_SERVICES if s.group == "planner"]

@@ -32,8 +32,8 @@ from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.map_visualizer import
     save_map_png, render_map_rgb,
 )
 from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.object_placer import (
-    ObjectMarker, load_labels, place_objects, cluster_objects,
-    flag_objects_beyond_tags, flag_objects_outside_map,
+    ObjectMarker, load_labels, load_labels_from_session, place_objects, cluster_objects,
+    flag_objects_beyond_tags, flag_objects_outside_map, snap_objects_to_free_space,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -59,15 +59,21 @@ def _load_depth_K(calib_path: str) -> np.ndarray:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Offline room mapper (RGB + DA3 depth).")
     p.add_argument("--data-dir",         required=True)
-    p.add_argument("--rgb-subdir",       default="rgb_1",
-                   help="RGB image subdirectory (default: rgb_1)")
-    p.add_argument("--depth-subdir",     default="depth_npy_1",
-                   help="Depth .npy subdirectory (default: depth_npy_1)")
+    p.add_argument("--rgb-subdir",       default=".",
+                   help="RGB image subdirectory relative to data-dir (default: '.' = flat layout)")
+    p.add_argument("--depth-subdir",     default=".",
+                   help="Depth .npy subdirectory relative to data-dir (default: '.' = flat layout)")
     p.add_argument("--tag-map",          default=None,
                    help="AprilTag world map YAML. Omit for odometry-only (unscaled) mode.")
     p.add_argument("--output-dir",       default="./room_map_out")
-    p.add_argument("--stride",           type=int,   default=5)
-    p.add_argument("--labels",           default=None)
+    p.add_argument("--stride",           type=int,   default=1)
+    p.add_argument("--labels",           default=None,
+                   help="Path to labels JSON. If omitted, NanoOWL detections are loaded "
+                        "automatically from JSON sidecars in data-dir.")
+    p.add_argument("--min-score",        type=float, default=0.25,
+                   help="Min NanoOWL detection score when loading from session JSON sidecars.")
+    p.add_argument("--no-session-labels", action="store_true",
+                   help="Disable automatic label loading from JSON sidecars.")
     p.add_argument("--grid-size",        type=float, default=14.0)
     p.add_argument("--resolution",       type=float, default=0.05)
     p.add_argument("--depth-max",        type=float, default=5.0)
@@ -172,19 +178,31 @@ def main() -> None:
     frame_poses: Dict[int, np.ndarray] = {}
     frame_tag_ids: Dict[int, List[int]] = {}
     frame_tag_areas: Dict[int, float] = {}
+    frame_world_anchored: Dict[int, bool] = {}
     depth_cache: Dict[int, np.ndarray] = {}
     _prev_tag_set: frozenset = frozenset()
+
+    # Load detection labels — from explicit file, or auto from session JSON sidecars.
+    _raw_labels: list = []
+    if args.labels and Path(args.labels).exists():
+        _raw_labels = load_labels(args.labels)
+        print(f"[mapper] {len(_raw_labels)} labels from {args.labels}")
+    elif not args.no_session_labels:
+        _raw_labels = load_labels_from_session(
+            Path(args.data_dir), args.min_score, DEPTH_H, DEPTH_W)
+        if _raw_labels:
+            print(f"[mapper] {len(_raw_labels)} detections auto-loaded from session JSON sidecars "
+                  f"(min_score={args.min_score})")
+    _has_labels = bool(_raw_labels)
 
     labeled_frame_idxs: Optional[set] = None
     # frame_idx → list of (x, y, w, h) bboxes in depth-image coordinates
     frame_bbox_masks: Dict[int, List[Tuple[int, int, int, int]]] = {}
-    if args.labels and Path(args.labels).exists():
-        _raw_labels = load_labels(args.labels)
+    if _has_labels:
         if args.labels_only_grid:
             labeled_frame_idxs = {int(e["frame_idx"]) for e in _raw_labels}
             print(f"[mapper] labels-only-grid: will update grid for "
                   f"{len(labeled_frame_idxs)} labeled frames only")
-        # Build per-frame bbox list (scaled from source_size to depth resolution)
         for _e in _raw_labels:
             _fidx = int(_e["frame_idx"])
             _bx, _by, _bw, _bh = _e["bbox"]
@@ -192,8 +210,8 @@ def main() -> None:
             _dx = int(_bx * DEPTH_W / _sw); _dy = int(_by * DEPTH_H / _sh)
             _dw = int(_bw * DEPTH_W / _sw); _dh = int(_bh * DEPTH_H / _sh)
             frame_bbox_masks.setdefault(_fidx, []).append((_dx, _dy, _dw, _dh))
-        print(f"[mapper] bbox masking: {len(frame_bbox_masks)} labeled frames will "
-              f"have object regions excluded from grid")
+        if frame_bbox_masks:
+            print(f"[mapper] bbox masking: {len(frame_bbox_masks)} labeled frames")
 
     frames = list(iter_frames(Path(args.data_dir), stride=args.stride,
                               rgb_subdir=args.rgb_subdir, depth_subdir=args.depth_subdir))
@@ -222,11 +240,9 @@ def main() -> None:
         if world_T_cam is None:
             continue
 
-        # Keep raw depth for object placement (scale is calibrated at wall/tag distance,
-        # not at object depth — applying it to foreground objects would over-push them).
-        depth_raw = depth_m
-
-        # Per-frame DA3 scale correction from AprilTag ground truth (walls only)
+        # Per-frame DA3 scale correction from AprilTag ground truth.
+        # The same linear scale applies to objects and walls alike — the metric
+        # DA3 model has a proportional error that the tag-based scale corrects.
         if not args.no_scale_correction and fuser.last_depth_scale is not None:
             depth_m = depth_m * fuser.last_depth_scale
 
@@ -272,6 +288,7 @@ def main() -> None:
             trajectory.append((wx, wy))
 
         frame_poses[rec.frame_idx] = world_T_cam.copy()
+        frame_world_anchored[rec.frame_idx] = (fuser.n_tag_fixes > 0)
 
         # Only mark a star when the visible tag set changes (not every frame)
         current_tag_set = frozenset(fuser.last_tag_ids)
@@ -280,8 +297,8 @@ def main() -> None:
             _prev_tag_set = current_tag_set
         prev_n_fixes = fuser.n_tag_fixes
 
-        if args.labels:
-            depth_cache[rec.frame_idx] = depth_raw.copy()
+        if _has_labels:
+            depth_cache[rec.frame_idx] = depth_m.copy()
 
         if (i + 1) % 20 == 0:
             scale_str = f"{fuser.last_depth_scale:.3f}" if fuser.last_depth_scale else "none"
@@ -299,21 +316,38 @@ def main() -> None:
     print(f"[mapper] Done. tag_fixes={fuser.n_tag_fixes}  frames_with_pose={len(frame_poses)}{angle_str}")
 
     objects: List[ObjectMarker] = []
-    if args.labels and Path(args.labels).exists():
-        labels = load_labels(args.labels)
+    if _has_labels:
         # Sidecar poses come from the live AprilTag localization — they are already
         # reliable, so suppress the per-frame tag-visibility check inside place_objects
         # by passing frame_tag_ids=None (None means "skip reliability filter").
         _ftids = None if args.sidecar_pose else frame_tag_ids
-        objects = place_objects(labels, frame_poses, lambda fidx: depth_cache[fidx],
-                                K_depth, _ftids, frame_tag_areas)
+        _fanchored = None if args.sidecar_pose else frame_world_anchored
+        objects = place_objects(_raw_labels, frame_poses, lambda fidx: depth_cache[fidx],
+                                K_depth, _ftids, frame_tag_areas,
+                                frame_world_anchored=_fanchored)
         print(f"[mapper] Placed {len(objects)} raw object markers")
-        objects = cluster_objects(objects, radius_m=args.cluster_radius)
+
+        # In sidecar-pose mode all frames have confidence=0.1 (no tag fixes), which
+        # would expand the cluster radius to 5m and merge objects from opposite walls.
+        # Cap at 1x (base radius) so clustering stays local.
+        _max_r_scale = 1.0 if args.sidecar_pose else None
+        _cluster_kwargs = {"radius_m": args.cluster_radius}
+        if _max_r_scale is not None:
+            _cluster_kwargs["max_radius_scale"] = _max_r_scale
+
+        # Snap objects that DA3 pushed into wall cells back to free space, then cluster.
+        objects = snap_objects_to_free_space(objects, frame_poses, grid)
+        objects = cluster_objects(objects, **_cluster_kwargs)
         print(f"[mapper] After clustering ({args.cluster_radius}m): {len(objects)} objects")
-        if args.tag_map is not None:
+        if args.tag_map is not None and not args.sidecar_pose:
             objects = flag_objects_beyond_tags(
-                objects, frame_poses, fuser.tag_world_xyz, frame_tag_ids, tolerance_m=0.4)
+                objects, frame_poses, fuser.tag_world_xyz, frame_tag_ids, tolerance_m=1.0)
         objects = flag_objects_outside_map(objects, grid)
+        # Remove objects that landed outside the observed room volume.
+        n_before = len(objects)
+        objects = [o for o in objects if not o.suspicious]
+        if len(objects) < n_before:
+            print(f"[mapper] Removed {n_before - len(objects)} suspicious object(s) outside observed room")
         for obj in objects:
             print(f"         {obj.label:20s}  "
                   f"({obj.world_x:+.2f}, {obj.world_y:+.2f}, {obj.world_z:+.2f})m  "

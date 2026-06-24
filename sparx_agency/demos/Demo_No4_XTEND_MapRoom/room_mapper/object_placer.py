@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -36,6 +37,57 @@ def load_labels(labels_path: str) -> list:
         return json.load(f)
 
 
+def load_labels_from_session(
+    session_dir,
+    min_score: float = 0.25,
+    depth_h: int = 392,
+    depth_w: int = 504,
+) -> list:
+    """
+    Extract NanoOWL detections directly from JSON sidecar files in a flat session dir.
+
+    Iterates sorted JPGs that have a matching .npy (mirroring iter_frames with stride=1),
+    so frame_idx values align with those assigned by run_room_mapper.
+    """
+    from pathlib import Path as _Path
+
+    session_dir = _Path(session_dir)
+    depth_stems = {p.stem for p in session_dir.glob("*.npy")}
+    jpgs = sorted(
+        [p for p in session_dir.glob("*.jpg") if p.stem in depth_stems],
+        key=lambda p: p.stem,
+    )
+
+    labels = []
+    for frame_idx, jpg in enumerate(jpgs):
+        json_path = jpg.with_suffix(".json")
+        if not json_path.exists():
+            continue
+        try:
+            data = json.loads(json_path.read_text())
+        except Exception:
+            continue
+        nanoowl = data.get("nanoowl", {})
+        result = nanoowl.get("result", {})
+        dets = result.get("detections", [])
+        img_info = result.get("image", {})
+        src_w = img_info.get("width", depth_w)
+        src_h = img_info.get("height", depth_h)
+        for det in dets:
+            if det.get("score", 0) < min_score:
+                continue
+            x1, y1, x2, y2 = det["bbox"]
+            label = det.get("label", "object").removeprefix("a ").removeprefix("an ")
+            labels.append({
+                "frame_idx": frame_idx,
+                "label": label,
+                "bbox": [x1, y1, x2 - x1, y2 - y1],
+                "source_size": [src_w, src_h],
+                "score": round(float(det.get("score", 1.0)), 4),
+            })
+    return labels
+
+
 def place_objects(
     labels: list,
     frame_poses: Dict[int, np.ndarray],
@@ -45,6 +97,7 @@ def place_objects(
     frame_tag_areas: Optional[Dict[int, float]] = None,
     frame_depth_scales: Optional[Dict[int, float]] = None,
     tag_world_xyz: Optional[Dict[int, np.ndarray]] = None,
+    frame_world_anchored: Optional[Dict[int, bool]] = None,
 ) -> List[ObjectMarker]:
     """
     Backproject each labelled bbox centre through depth to a world 3D position.
@@ -130,10 +183,14 @@ def place_objects(
         area = frame_tag_areas.get(fidx, 0.0) if frame_tag_areas else 0.0
         confidence = float(np.clip(area / _REFERENCE_TAG_AREA_PX2, 0.1, 1.0))
 
-        # Skip frames with no tag fix — pose is odometry-only (wrong coordinate frame)
+        # Skip frames with no tag visible, unless the pose is world-anchored from a
+        # prior tag fix (odom-propagated over a few frames is still reliable).
         if frame_tag_ids is not None and not tids:
-            print(f"  [skip] '{entry['label']}' frame={fidx} — no AprilTag visible, pose unreliable")
-            continue
+            anchored = frame_world_anchored.get(fidx, False) if frame_world_anchored else False
+            if not anchored:
+                print(f"  [skip] '{entry['label']}' frame={fidx} — no tag ever seen, pose unreliable")
+                continue
+            print(f"  [odom] '{entry['label']}' frame={fidx} — odom-propagated (no tag this frame)")
 
         markers.append(ObjectMarker(
             label=entry["label"],
@@ -231,15 +288,93 @@ def flag_objects_outside_map(
     return markers
 
 
+def snap_objects_to_free_space(
+    markers: List[ObjectMarker],
+    frame_poses: Dict[int, np.ndarray],
+    grid,
+    step_m: float = 0.05,
+    min_free_run: int = 2,
+) -> List[ObjectMarker]:
+    """
+    Walk each object back along its camera ray until it sits in free space.
+
+    When DA3 depth is slightly overestimated (no tag scale correction), objects
+    land in wall cells or beyond the room.  This corrects them to the last free
+    cell before the nearest wall along that ray, ensuring every object is inside
+    the room and just in front of its wall.
+
+    Objects that are already in free space are not moved.
+    Objects whose camera pose is unknown are left unchanged.
+    """
+    for obj in markers:
+        fidx = obj.frame_idx
+        if fidx not in frame_poses:
+            continue
+
+        cam_x = float(frame_poses[fidx][0, 3])
+        cam_y = float(frame_poses[fidx][1, 3])
+        obj_x, obj_y = obj.world_x, obj.world_y
+
+        dx = obj_x - cam_x
+        dy = obj_y - cam_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 0.1:
+            continue
+        ux, uy = dx / dist, dy / dist
+
+        # Helper: is a world position inside the grid and in free or unknown space?
+        def _is_free(wx: float, wy: float) -> bool:
+            gxs, gys = grid._world_to_grid(np.array([wx]), np.array([wy]))
+            gxi, gyi = int(gxs[0]), int(gys[0])
+            if not (0 <= gxi < grid.width and 0 <= gyi < grid.height):
+                return False
+            # Free = seen AND negative log-odds; unknown = not seen (also acceptable)
+            return (not grid._seen[gyi, gxi]) or (grid._L[gyi, gxi] <= 0.0)
+
+        # If already in free space, nothing to do.
+        if _is_free(obj_x, obj_y):
+            continue
+
+        # Walk backward from object toward camera until we find min_free_run
+        # consecutive free cells, then place the object at the first free one.
+        best_x, best_y = None, None
+        free_run = 0
+        r = dist
+        while r > step_m:
+            r -= step_m
+            tx = cam_x + ux * r
+            ty = cam_y + uy * r
+            if _is_free(tx, ty):
+                if best_x is None:
+                    best_x, best_y = tx, ty
+                free_run += 1
+                if free_run >= min_free_run:
+                    break
+            else:
+                best_x, best_y = None, None
+                free_run = 0
+
+        if best_x is not None:
+            print(f"  [snap] '{obj.label}' ({obj.world_x:+.2f},{obj.world_y:+.2f})"
+                  f" → ({best_x:+.2f},{best_y:+.2f})")
+            obj.world_x = best_x
+            obj.world_y = best_y
+
+    return markers
+
+
 def cluster_objects(
     markers: List[ObjectMarker],
     radius_m: float = 1.0,
+    max_radius_scale: float = _MAX_RADIUS_SCALE,
 ) -> List[ObjectMarker]:
     """
     Merge same-label markers within an effective radius that scales with
     tag confidence: low-confidence fixes use a larger merge radius.
 
-    Effective radius = min(base * MAX_SCALE, base / anchor_confidence).
+    Effective radius = min(base * max_radius_scale, base / anchor_confidence).
+    Pass max_radius_scale=1.0 (sidecar-pose mode) to disable confidence scaling
+    and keep the base radius fixed regardless of tag confidence.
     """
     result: List[ObjectMarker] = []
     for label in sorted({m.label for m in markers}):
@@ -251,7 +386,7 @@ def cluster_objects(
         for i, anchor in enumerate(group):
             if used[i]:
                 continue
-            eff_r = min(radius_m * _MAX_RADIUS_SCALE,
+            eff_r = min(radius_m * max_radius_scale,
                         radius_m / max(anchor.tag_confidence, 0.1))
             cluster = [anchor]
             used[i] = True
