@@ -5,15 +5,12 @@ repulsive field ``U_rep`` + distance field ``D_obs`` from an occupancy grid) and
 :class:`TrajectorySafetyCorrector` (recentres a Path2D against that field) --
 into a single :class:`PathCorrector`: given a planned path and the live
 occupancy grid it returns a path recentred off the walls toward corridor
-centres. It adds the two map-aware safety steps the algorithm needs in the field:
-
-* **unknown-area damping** -- scale each waypoint's shift by the fraction of
-  KNOWN cells around its corrected position, so a push into half-mapped space
-  (no opposing wall to balance it) is damped, and fades back to full strength as
-  the map fills in;
-* **per-waypoint collision clip** -- pull any corrected waypoint back toward its
-  input position just far enough to keep both of its adjacent segments clear of
-  inflated obstacles, so the corrected path is never less safe than the input.
+centres. It then applies the two shared map-aware safety steps (:mod:`map_safety`,
+also used by the ESDF strategy): **unknown-area damping** (scale each waypoint's
+shift by the fraction of KNOWN cells around it, so a push into half-mapped space
+is damped) and the **per-waypoint collision clip** (pull any corrected waypoint
+back just enough to keep its segments clear of inflated obstacles, so the
+corrected path is never less safe than the input).
 
 The field generation matches the BEV frame exactly (cell-centre half-cell origin
 shift). All maths is numpy-only. Python 3.8 compatible (the FALCON Noetic adapter
@@ -27,11 +24,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
-from sparx_agency.core.common.types import Path2D, Pose2D
+from sparx_agency.core.common.types import Path2D
 from sparx_agency.core.mapping.costmap.potential_field_layer import PotentialFieldLayer
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 
@@ -39,7 +36,7 @@ from ..potential_field_sampler import PotentialFieldSampler
 from ..trajectory_safety_corrector import TrajectorySafetyCorrector
 from ..types import TrajectoryCorrectionParams
 from .base import PathCorrector, PathCorrectionResult
-from .grid_collision import InflatedGridCollisionChecker
+from .map_safety import clip_to_clear, dampen_unknown
 
 
 @dataclass(frozen=True)
@@ -162,9 +159,9 @@ class PotentialFieldPathCorrector(PathCorrector):
         if self.cfg.unknown_damping:
             # Damp the push where it heads into unknown (unbalanced) BEFORE the
             # collision clip, so both only ever pull the path back toward input.
-            pts = self._dampen_unknown(path.points, pts, grid)
+            pts = dampen_unknown(path.points, pts, grid, self.cfg.unknown_radius_m)
         if self.cfg.collision_recheck:
-            pts = self._clip_to_clear(path.points, pts, grid)
+            pts = clip_to_clear(path.points, pts, grid, self.cfg.inflate_radius_m)
         moved = sum(1 for r, s in zip(path.points, pts)
                     if math.hypot(s.x - r.x, s.y - r.y) > 1e-3)
         corrected = Path2D(points=tuple(pts), frame_id=path.frame_id,
@@ -204,90 +201,3 @@ class PotentialFieldPathCorrector(PathCorrector):
         self._corrector.set_field(
             u_rep, grid.resolution, grid.origin_x + half, grid.origin_y + half,
             d_obs=d_obs, known_mask=known)
-
-    # ------------------------------------------------------------------
-    # Unknown-area damping
-    # ------------------------------------------------------------------
-    def _map_confidence(self, grid: OccupancyGrid2D, x: float, y: float) -> float:
-        """Fraction of KNOWN cells in a disk of ``unknown_radius_m`` around (x, y).
-
-        1.0 = fully mapped neighbourhood (walls observed on both sides, so the
-        repulsive forces balance); lower when (x, y) is in or near unknown space,
-        where the push is unbalanced. Used to scale down the correction there.
-        """
-        rad = max(1, int(round(self.cfg.unknown_radius_m / grid.resolution)))
-        gx, gy = grid.world_to_grid(x, y)
-        x0, x1 = max(0, gx - rad), min(grid.width, gx + rad + 1)
-        y0, y1 = max(0, gy - rad), min(grid.height, gy + rad + 1)
-        win = grid.grid[y0:y1, x0:x1]
-        if win.size == 0:
-            return 1.0
-        return float(np.count_nonzero(win != grid.values.unknown)) / float(win.size)
-
-    def _dampen_unknown(self, raw_points, corrected_points,
-                        grid: OccupancyGrid2D) -> Tuple[Pose2D, ...]:
-        """Scale each waypoint's correction by the map confidence at its corrected
-        position, so a push into/near unknown space (no opposing wall to balance
-        it) is damped while a push to the centre of a fully-mapped corridor is kept
-        at full strength. ``final = raw + confidence * (corrected - raw)``.
-        """
-        out: List[Pose2D] = []
-        for r, c in zip(raw_points, corrected_points):
-            conf = self._map_confidence(grid, c.x, c.y)
-            if conf >= 1.0 - 1e-6:
-                out.append(c)
-            else:
-                out.append(Pose2D(r.x + conf * (c.x - r.x),
-                                  r.y + conf * (c.y - r.y), c.yaw))
-        return tuple(out)
-
-    # ------------------------------------------------------------------
-    # Per-waypoint collision clip
-    # ------------------------------------------------------------------
-    def _clip_to_clear(self, raw_points, safe_points,
-                       grid: OccupancyGrid2D) -> Tuple[Pose2D, ...]:
-        """Per-waypoint safety clip of the corrected path against inflation.
-
-        Each interior waypoint is pulled back toward its raw position only as far
-        as needed to keep BOTH its adjacent segments clear (bisection), so a single
-        corner-cut reverts just that waypoint while the rest stay centred. Never
-        less safe than the input: a waypoint that cannot be cleared falls back to
-        its raw position. Endpoints stay pinned.
-        """
-        checker = InflatedGridCollisionChecker(grid, self.cfg.inflate_radius_m)
-        out = list(safe_points)
-        n = len(out)
-        if n < 3:
-            return tuple(out)
-
-        def clear(a: Pose2D, b: Pose2D) -> bool:
-            return checker.segment_clear(a, b)
-
-        # Re-evaluate EVERY interior waypoint to its most-centred clear position
-        # each sweep (not only colliding ones): pulling one waypoint back can later
-        # free a neighbour to return to full correction, so we recompute rather than
-        # latch a one-time revert. Converges in a few sweeps; endpoints stay pinned.
-        for _sweep in range(3):
-            changed = False
-            for i in range(1, n - 1):
-                full = safe_points[i]                # t=1: full correction
-                if clear(out[i - 1], full) and clear(full, out[i + 1]):
-                    new = full
-                else:
-                    rx, ry = raw_points[i].x, raw_points[i].y
-                    sx, sy = safe_points[i].x, safe_points[i].y
-                    lo, hi, best = 0.0, 1.0, raw_points[i]   # t: 0=raw .. 1=corrected
-                    for _ in range(6):           # bisect for the most-centred clear t
-                        t = 0.5 * (lo + hi)
-                        cand = Pose2D(rx + t * (sx - rx), ry + t * (sy - ry), full.yaw)
-                        if clear(out[i - 1], cand) and clear(cand, out[i + 1]):
-                            best, lo = cand, t
-                        else:
-                            hi = t
-                    new = best
-                if math.hypot(new.x - out[i].x, new.y - out[i].y) > 1e-6:
-                    out[i] = new
-                    changed = True
-            if not changed:
-                break
-        return tuple(out)

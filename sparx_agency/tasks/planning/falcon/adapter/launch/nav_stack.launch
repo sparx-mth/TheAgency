@@ -236,11 +236,24 @@
        false makes it a passthrough. The APF / force-viz args live in the
        "APF safety recentring" block above and are consumed HERE now.
        ══════════════════════════════════════════════════════════════ -->
-  <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy; raises on an unknown name -->
+  <arg name="corrector" default="esdf" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
   <!-- Which planner the corrector reads: NavDP when use_navdp, else A*. The
        corrector ALWAYS owns /path/waypoints, so the follower reads one topic. -->
   <arg name="planner_path_topic"
        default="$(eval '/path/waypoints_navdp' if use_navdp else '/path/waypoints_astar')" />
+
+  <!-- ESDF corrector knobs (used only when corrector:=esdf). Ascend each waypoint
+       up the gradient of the distance-to-wall field toward the corridor / doorway
+       centre. The shared safety knobs (apf_collision_recheck / apf_treat_unknown_as_free
+       / apf_unknown_damping / apf_unknown_radius_m / apf_pin_last / inflate_radius_m)
+       apply to whichever corrector is active. -->
+  <arg name="esdf_target_clearance_m" default="0.0" /><!-- 0 = centre on the ESDF ridge (corridor middle); >0 = stop once this far from walls (a safety floor, like FALCON safe_distance) -->
+  <arg name="esdf_max_total_shift_m"  default="1.0" /><!-- cap on a waypoint's total displacement off the planner path -->
+  <arg name="esdf_max_step_m"         default="0.2" /><!-- cap on one ascent step -->
+  <arg name="esdf_iterations"         default="12" /><!-- max ascent steps per waypoint -->
+  <arg name="esdf_lateral_only"       default="true" /><!-- push perpendicular to the path (no fore/aft slide) -->
+  <arg name="esdf_smooth_sigma_m"     default="0.1" /><!-- light blur on the distance field for a clean gradient (0 = none) -->
+  <arg name="esdf_occ_thresh"         default="0.65" />
 
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
@@ -569,6 +582,14 @@
     <param name="force_arrow_scale"     value="$(arg force_arrow_scale)" />
     <param name="publish_force_field"   value="$(arg publish_force_field)" />
     <param name="force_field_stride"    value="$(arg force_field_stride)" />
+    <!-- ESDF corrector knobs (used only when corrector:=esdf) -->
+    <param name="esdf_target_clearance_m" value="$(arg esdf_target_clearance_m)" />
+    <param name="esdf_max_total_shift_m"  value="$(arg esdf_max_total_shift_m)" />
+    <param name="esdf_max_step_m"         value="$(arg esdf_max_step_m)" />
+    <param name="esdf_iterations"         value="$(arg esdf_iterations)" />
+    <param name="esdf_lateral_only"       value="$(arg esdf_lateral_only)" />
+    <param name="esdf_smooth_sigma_m"     value="$(arg esdf_smooth_sigma_m)" />
+    <param name="esdf_occ_thresh"         value="$(arg esdf_occ_thresh)" />
   </node>
 
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"

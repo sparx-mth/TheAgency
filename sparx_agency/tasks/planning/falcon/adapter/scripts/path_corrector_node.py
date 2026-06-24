@@ -51,7 +51,8 @@ from sparx_agency.core.common.types import Path2D, Pose2D
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
 from sparx_agency.core.planning.safety.path_correction import (
-    PotentialFieldCorrectorConfig, PotentialFieldPathCorrector, make_path_corrector)
+    EsdfCorrectorConfig, PotentialFieldCorrectorConfig, PotentialFieldPathCorrector,
+    make_path_corrector)
 
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -75,33 +76,14 @@ class PathCorrectorNode:
         self.corrector_name = G("~corrector", "potential_field")
         self._apf_debug = bool(G("~apf_debug", True))
 
-        # Build the correction strategy from rosparams. Defaults match the historical
-        # astar_planner node so wiring the same ~apf_* params through is behaviour-
-        # preserving. inflate_radius_m feeds the corrected-path collision clip and
-        # should match the planner's inflation (the launch wires the same arg to both).
+        # Build the chosen correction strategy from rosparams. Defaults match the
+        # historical astar_planner node, so wiring the same ~apf_* params through is
+        # behaviour-preserving. inflate_radius_m feeds the corrected-path collision
+        # clip and should match the planner's inflation (the launch wires the same
+        # arg to both). Raises loudly on an unknown ~corrector name (no fallback).
         self.corrector = None
         if self.enabled:
-            cfg = PotentialFieldCorrectorConfig(
-                occ_thresh=float(G("~apf_occ_thresh", 0.65)),
-                sigma_m=float(G("~apf_sigma_m", 0.6)),
-                centering=str(G("~apf_centering", "line_search")),
-                center_step_m=float(G("~apf_center_step_m", 0.05)),
-                corner_swing=float(G("~apf_corner_swing", 1.0)),
-                iterations=int(G("~apf_iterations", 5)),
-                gain=float(G("~apf_gain", 1.0)),
-                max_step_m=float(G("~apf_max_step_m", 0.4)),
-                max_total_shift_m=float(G("~apf_max_total_shift_m", 2.0)),
-                smoothing_passes=int(G("~apf_smoothing_passes", 2)),
-                min_clearance_m=float(G("~apf_min_clearance_m", 0.0)),
-                lateral_only=bool(G("~apf_lateral_only", True)),
-                pin_last=bool(G("~apf_pin_last", True)),
-                collision_recheck=bool(G("~apf_collision_recheck", True)),
-                inflate_radius_m=float(G("~inflate_radius_m", 0.4)),
-                treat_unknown_as_free=bool(G("~apf_treat_unknown_as_free", True)),
-                unknown_damping=bool(G("~apf_unknown_damping", True)),
-                unknown_radius_m=float(G("~apf_unknown_radius_m", 0.75)),
-            )
-            # Raises loudly on an unknown ~corrector name (no silent fallback).
+            cfg = self._build_config(G, self.corrector_name)
             self.corrector = make_path_corrector(self.corrector_name, cfg)
 
         # Repulsive-force arrows (F_rep = -grad U_rep) for RViz / the BEV viewer.
@@ -126,6 +108,56 @@ class PathCorrectorNode:
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.input_path_topic, Path, self._path_cb, queue_size=1)
         self._banner()
+
+    # ─── Strategy config ─────────────────────────────────────────
+    @staticmethod
+    def _build_config(G, name):
+        """Build the strategy-specific config from rosparams.
+
+        Strategy-specific tuning uses a per-strategy prefix (~apf_* / ~esdf_*); the
+        map-aware SAFETY knobs (~apf_collision_recheck / ~apf_treat_unknown_as_free /
+        ~apf_unknown_damping / ~apf_unknown_radius_m / ~apf_pin_last and the shared
+        ~inflate_radius_m) apply to whichever corrector is active. An unknown name
+        falls through with a potential_field config; make_path_corrector then raises.
+        """
+        if name == "esdf":
+            return EsdfCorrectorConfig(
+                occ_thresh=float(G("~esdf_occ_thresh", 0.65)),
+                smooth_sigma_m=float(G("~esdf_smooth_sigma_m", 0.1)),
+                # 0 = centre on the ESDF ridge (corridor/doorway middle); >0 = stop
+                # once this far from walls (a safety floor, like FALCON safe_distance).
+                target_clearance_m=float(G("~esdf_target_clearance_m", 0.0)),
+                max_step_m=float(G("~esdf_max_step_m", 0.2)),
+                max_total_shift_m=float(G("~esdf_max_total_shift_m", 1.0)),
+                iterations=int(G("~esdf_iterations", 12)),
+                lateral_only=bool(G("~esdf_lateral_only", True)),
+                pin_last=bool(G("~apf_pin_last", True)),
+                collision_recheck=bool(G("~apf_collision_recheck", True)),
+                inflate_radius_m=float(G("~inflate_radius_m", 0.4)),
+                treat_unknown_as_free=bool(G("~apf_treat_unknown_as_free", True)),
+                unknown_damping=bool(G("~apf_unknown_damping", True)),
+                unknown_radius_m=float(G("~apf_unknown_radius_m", 0.75)),
+            )
+        return PotentialFieldCorrectorConfig(
+            occ_thresh=float(G("~apf_occ_thresh", 0.65)),
+            sigma_m=float(G("~apf_sigma_m", 0.6)),
+            centering=str(G("~apf_centering", "line_search")),
+            center_step_m=float(G("~apf_center_step_m", 0.05)),
+            corner_swing=float(G("~apf_corner_swing", 1.0)),
+            iterations=int(G("~apf_iterations", 5)),
+            gain=float(G("~apf_gain", 1.0)),
+            max_step_m=float(G("~apf_max_step_m", 0.4)),
+            max_total_shift_m=float(G("~apf_max_total_shift_m", 2.0)),
+            smoothing_passes=int(G("~apf_smoothing_passes", 2)),
+            min_clearance_m=float(G("~apf_min_clearance_m", 0.0)),
+            lateral_only=bool(G("~apf_lateral_only", True)),
+            pin_last=bool(G("~apf_pin_last", True)),
+            collision_recheck=bool(G("~apf_collision_recheck", True)),
+            inflate_radius_m=float(G("~inflate_radius_m", 0.4)),
+            treat_unknown_as_free=bool(G("~apf_treat_unknown_as_free", True)),
+            unknown_damping=bool(G("~apf_unknown_damping", True)),
+            unknown_radius_m=float(G("~apf_unknown_radius_m", 0.75)),
+        )
 
     # ─── Callbacks ───────────────────────────────────────────────
     def _bev_cb(self, msg):
@@ -354,15 +386,20 @@ class PathCorrectorNode:
         L("  raw echo  out = %s   (input echo, viz)", self.raw_path_topic)
         if not self.enabled:
             L("  correction = OFF (passthrough: input -> %s verbatim)", self.path_topic)
-        else:
-            cp = self.corrector.params if self._is_pf else None
-            if cp is not None:
-                L("  centering=%s search=%.2fm corner_swing=%.2f step=%.2fm pin_goal=%s",
-                  cp.centering, cp.max_total_shift_m, cp.corner_swing,
-                  cp.center_step_m, cp.pin_last)
+        elif self._is_pf:
+            cp = self.corrector.params
+            L("  potential_field: centering=%s search=%.2fm corner_swing=%.2f "
+              "step=%.2fm pin_goal=%s", cp.centering, cp.max_total_shift_m,
+              cp.corner_swing, cp.center_step_m, cp.pin_last)
             L("  F_rep arrows: publish=%s scale=%.2f field=%s -> %s",
               self._publish_force_markers, self.force_arrow_scale,
               self._publish_force_field, self.forces_topic)
+        else:
+            ec = self.corrector.cfg
+            L("  esdf: target_clearance=%.2fm search=%.2fm step=%.2fm iters=%d "
+              "lateral=%s pin_goal=%s", ec.target_clearance_m, ec.max_total_shift_m,
+              ec.max_step_m, ec.iterations, ec.lateral_only, ec.pin_last)
+            L("  (force arrows are potential_field-only; not published for esdf)")
         L("=" * 64)
 
 
@@ -388,10 +425,16 @@ if __name__ == "__main__":
 #       ~raw_path_topic (/path/waypoints_raw; input echo for the BEV viewer's red)
 #       ~frame_id (world)
 #   strategy: ~enabled (true; false = passthrough, input -> path_topic verbatim)
-#       ~corrector (potential_field; the core PathCorrector to build -- raises on
-#         an unknown name)
+#       ~corrector (potential_field | esdf; the core PathCorrector to build --
+#         raises on an unknown name)
+#   shared map-safety knobs (apply to whichever corrector is active):
 #       ~inflate_radius_m (0.4; obstacle inflation for the corrected-path collision
 #         clip -- match the planner's inflate_radius_m)
+#       ~apf_collision_recheck (true; per-waypoint clip against inflation)
+#       ~apf_treat_unknown_as_free (true; recentre over UNKNOWN cells too)
+#       ~apf_unknown_damping (true) ~apf_unknown_radius_m (0.75)
+#       ~apf_pin_last (true; keep the goal fixed)
+#       ~apf_debug (true; TEMP per-waypoint in/push/new logging each cycle)
 #   potential-field knobs (used when ~corrector=potential_field):
 #       ~apf_occ_thresh (0.65) ~apf_sigma_m (0.6; Gaussian repulsion spread)
 #       ~apf_centering (line_search | descent)
@@ -399,12 +442,13 @@ if __name__ == "__main__":
 #       ~apf_max_total_shift_m (2.0; line_search lateral search half-range)
 #       ~apf_iterations (5) ~apf_gain (1.0) ~apf_max_step_m (0.4)
 #         ~apf_smoothing_passes (2) ~apf_lateral_only (true) -- DESCENT ONLY
-#       ~apf_pin_last (true; keep the goal fixed)
 #       ~apf_min_clearance_m (0.0; >0 also pushes to a min distance-to-wall)
-#       ~apf_collision_recheck (true; per-waypoint clip against inflation)
-#       ~apf_treat_unknown_as_free (true; recentre over UNKNOWN cells too)
-#       ~apf_unknown_damping (true) ~apf_unknown_radius_m (0.75)
-#       ~apf_debug (true; TEMP per-waypoint in/push/new logging each cycle)
+#   esdf knobs (used when ~corrector=esdf; ascend +grad D up the distance field):
+#       ~esdf_occ_thresh (0.65) ~esdf_smooth_sigma_m (0.1; blur for a clean grad)
+#       ~esdf_target_clearance_m (0.0; 0 = centre on the ESDF ridge / corridor
+#         middle, >0 = stop once this far from walls -- a safety floor)
+#       ~esdf_max_step_m (0.2) ~esdf_max_total_shift_m (1.0) ~esdf_iterations (12)
+#       ~esdf_lateral_only (true; push perpendicular to the path)
 #   force arrows (potential_field only): ~publish_forces (true)
 #       ~forces_topic (/path/forces; visualization_msgs/MarkerArray, yellow)
 #       ~force_arrow_scale (1.0) ~force_arrow_z (0.0)

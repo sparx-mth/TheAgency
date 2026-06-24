@@ -98,7 +98,7 @@ class TestFactory:
 
     def test_unknown_name_raises(self):
         with pytest.raises(ValueError):
-            make_path_corrector("esdf")
+            make_path_corrector("nope_not_a_corrector")
 
     def test_wrong_config_type_raises(self):
         with pytest.raises(TypeError):

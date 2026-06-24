@@ -95,6 +95,15 @@
   <arg name="use_navdp"               default="false" />
   <arg name="navdp_camera_info_topic" default="" />
 
+  <!-- ── Path-correction strategy ─────────────────────────────────
+       corrector:=potential_field (default) | esdf. With esdf the route is
+       nudged up the distance-to-wall gradient toward the corridor/doorway
+       centre. esdf_target_clearance_m: 0 = centre on the ESDF ridge, >0 =
+       stop once that far from walls (a safety floor). -->
+  <arg name="corrector"               default="esdf" />
+  <arg name="esdf_target_clearance_m" default="0.0" />
+  <arg name="esdf_max_total_shift_m"  default="1.0" />
+
   <arg name="publish_mapping_inputs" value="false" />
   <!-- ══════════════════════════════════════════════════════════════
        Pose adapter — converts the real-drone localization message
@@ -180,6 +189,10 @@
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="navdp_depth_topic"       value="$(arg real_depth_topic)" />
     <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+
+    <arg name="corrector"               value="$(arg corrector)" />
+    <arg name="esdf_target_clearance_m" value="$(arg esdf_target_clearance_m)" />
+    <arg name="esdf_max_total_shift_m"  value="$(arg esdf_max_total_shift_m)" />
   </include>
 
 </launch>
