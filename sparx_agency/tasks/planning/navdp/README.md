@@ -138,8 +138,14 @@ FALCON reaches it over `--network host` + `127.0.0.1:<port>` loopback (run it on
 the FALCON host).
 
 ```bash
-python -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
-    --engine-dir .../engines/<target_tag> --navdp-repo $NAVDP_REPO --port 8888
+# self-contained (run from the repo root). <target_tag> = nvidiageforcertx_sm120
+# on x86, orin_sm87 on the Orin.
+cd ~/GIT/TheAgency
+export NAVDP_REPO=/home/nadavc/PycharmProjects/NavDP/baselines/navdp
+PYTHONPATH=$PWD /home/nadavc/miniconda3/envs/navdp/bin/python \
+    -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
+    --engine-dir sparx_agency/tasks/planning/navdp/engines/nvidiageforcertx_sm120 \
+    --navdp-repo $NAVDP_REPO --port 8888
 # navdp_click_node.py points at it unchanged (~port 8888)
 ```
 
