@@ -100,51 +100,71 @@
   <arg name="cam_max_depth" default="10.0" />
 
   <!-- Goal -->
-  <arg name="goal_x" default="0.0" />
-  <arg name="goal_y" default="-3.0" />
+  <arg name="goal_x" default="4.0" />
+  <arg name="goal_y" default="0.0" />
 
   <!-- Speeds & radii -->
   <arg name="vel_x"                  default="0.3" />
   <arg name="yaw_rate"               default="0.7" />
   <arg name="pos_acquisition_radius" default="0.3" />
-  <arg name="yaw_acquisition_radius" default="0.2" />
-  <arg name="yaw_lead_pct"           default="10.0" />
-  <!-- Glide deadband: the follower flies straight to the next waypoint instead
-       of stopping to re-yaw whenever the heading change is under this many
-       radians. Raised from 0.25 (~14 deg) to 0.40 (~23 deg) so it only yaws for
-       genuine corners, not every small bend. Raise further for even straighter
-       flight (at the cost of more cross-track error), lower to hug corners. -->
-  <arg name="skip_yaw_thresh"        default="0.40" />
+  <arg name="yaw_acquisition_radius" default="0.2" /><!-- now LIVE: cross-track tolerance (m) for the gentle predictive ADVANCE gate (was previously read by nobody) -->
+  <arg name="yaw_lead_pct"           default="10.0" /><!-- deprecated (unused by the pulse->settle yaw loop); kept for config compatibility -->
+
+  <!-- Yaw: pulse -> settle -> re-measure (slow turn, strong inertia, jumpy yaw) -->
+  <arg name="yaw_settle_dwell_s"  default="0.8" /><!-- dwell (s) after a burst coasts to a stop so AprilTag yaw re-converges before re-measuring -->
+  <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
+  <arg name="yaw_burst_max_deg"   default="25.0" /><!-- per-burst increment: a big turn (e.g. 80deg) is split into ~25deg chunks, each followed by a stop + voxel update + re-measure, not one open-loop sweep -->
+  <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
+  <arg name="cmd_commit_ticks"    default="2" /><!-- output guarantee: a stop (zero twist) never reaches the drone until the motion ran >=this many ticks; a lone motion->stop is held to the floor first -->
+  <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
+  <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
+
+  <!-- Trajectory prediction (rollout of the follower) -> /path/predicted + score -->
+  <arg name="predict_hz"          default="2.0" />
+  <arg name="predict_horizon_s"   default="30.0" />
+  <arg name="predict_yaw_tau_s"   default="0.5" /><!-- yaw inertia time constant used by the prediction motion model -->
+  <arg name="predict_vx_tau_s"    default="0.3" />
+
+  <!-- Map-settle: at bring-up and during every stop, hold in forward mode and
+       wait for a fresh BEV (voxel) update before moving (turn -> stop -> update
+       voxels -> turn). Proceeds after the timeout if none arrives. -->
+  <arg name="require_map_update"  default="true" />
+  <arg name="map_update_topic"    default="/falcon/bev_2d" /><!-- a fresh msg here = the map advanced -->
+  <arg name="map_wait_timeout_s"  default="3.0" /><!-- proceed anyway if no update lands (never hang) -->
+  <arg name="mapsettle_min_s"     default="0.5" /><!-- min bring-up settle before the first move -->
+  <arg name="mapsettle_min_updates" default="2" /><!-- fresh voxel updates required before the FIRST move (running re-stops use 1) -->
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
-  <arg name="inflate_radius_m"      default="0.5" />
+  <arg name="inflate_radius_m"      default="0.2" />
   <arg name="unknown_blocked"       default="false" />
-  <!-- Gray (UNKNOWN) traversal cost. Keep > 1 + clearance_weight so the planner
-       prefers any known-free route and stops cutting illogical paths through the
-       gray it cannot see into. -->
-  <arg name="unknown_cost"          default="5.0" />
-  <!-- Corridor centering / wall standoff (route through the middle). -->
-  <arg name="clearance_weight"      default="3.0" />
-  <arg name="clearance_margin_m"    default="0.8" />
-  <arg name="path_simplify_m"       default="0.0" /><!-- 0 = auto (~1 cell) -->
+  <arg name="unknown_cost"          default="1.0" />
   <arg name="los_smoothing"         default="true" />
-  <arg name="turn_penalty"          default="0.5" />
+  <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
   <arg name="start_skip_m"          default="0.4" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <arg name="replan_on_collision"   default="true" />
-  <!-- Replan ONLY when the committed path is actually blocked, confirmed over
-       replan_collision_confirm BEV frames. This collision check now runs every
-       frame regardless of replan_on_bev, so the confirm-gate is always active.
-       Keep replan_on_bev/replan_period_s OFF: replanning when nothing collides
-       just churns the path and makes the drone re-yaw and slow down. Turn one on
-       only if you want opportunistic refresh once the route is stable. -->
   <arg name="replan_on_bev"         default="true" />
-  <arg name="replan_period_s"       default="1.0" />
-  <arg name="replan_collision_confirm" default="1" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
+  <arg name="replan_period_s"       default="2.0" />
+  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy -->
+
+  <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
+       into two half-angle turns, so the stop-and-turn follower can glide through
+       them instead of stopping to yaw. -->
+  <arg name="corner_round"           default="true" />
+  <arg name="corner_merge_deg"       default="8.0" /><!-- drop interior vertices that turn less than this -->
+  <arg name="corner_max_turn_deg"    default="14.0" /><!-- corners gentler than this are already glide-able (pair with skip_yaw_thresh) -->
+  <arg name="corner_chamfer_max_deg" default="28.0" /><!-- corners up to this are chamfered; sharper ones kept as genuine turns -->
+  <arg name="corner_chamfer_dist_m"  default="0.5" />
+  <arg name="corner_min_runup_m"     default="0.6" />
+
+  <!-- Dynamics-aware replan: replan when the follower's PREDICTED stop-and-turn
+       trajectory (/path/predicted) collides even if the geometric path does not. -->
+  <arg name="replan_on_predicted_collision" default="true" />
+  <arg name="max_predicted_replans"         default="3" />
 
   <!-- ══════════════════════════════════════════════════════════════
        NavDP (point-goal policy) — REPLACES A* when use_navdp:=true.
@@ -163,7 +183,7 @@
        sync from a camera_info topic (K preferred; must describe the 504x294
        stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
-  <arg name="use_navdp"                default="false" />
+  <arg name="use_navdp"                default="true" />
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
   <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
@@ -182,7 +202,7 @@
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
   <arg name="cruise_z"          default="1.0" />
-  <arg name="freeze_during_yaw" default="true" />
+  <arg name="freeze_during_yaw" default="false" />
   <arg name="maintain_altitude" default="true" />
   <arg name="use_posctrl"       default="true" />
   <arg name="ctrl_rate_hz"      default="5.0" />
@@ -207,14 +227,14 @@
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="0.40" />            <!-- column z-range considered -->
-  <arg name="bev_z_ceil"            default="1.70" />
+  <arg name="bev_z_floor"           default="0.80" />            <!-- column z-range considered -->
+  <arg name="bev_z_ceil"            default="1.50" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
   <arg name="bev_weight_sigma"      default="0.50" />            <!-- gaussian width (profile=gaussian) -->
   <arg name="bev_voxel_size"        default="$(arg bev_resolution)" />  <!-- z-layer thickness -->
-  <arg name="bev_occ_weight_thresh" default="1.2" />             <!-- min weighted column mass for OCC -->
-  <arg name="bev_min_occ_voxels"    default="2" />               <!-- AND min raw voxel count for OCC -->
+  <arg name="bev_occ_weight_thresh" default="2.0" />             <!-- min weighted column mass for OCC -->
+  <arg name="bev_min_occ_voxels"    default="4" />               <!-- AND min raw voxel count for OCC -->
   <arg name="bev_min_free_voxels"   default="1" />               <!-- min voxels for a cell to read FREE -->
 
   <!-- 3D neighbour confirm (stage 2) — drops isolated DA3 speckle -->
@@ -224,7 +244,7 @@
 
   <!-- door / window protection (stage 3) — never wall an opening that is open at flight height -->
   <arg name="bev_protect_openings"  default="true" />
-  <arg name="bev_door_band_m"       default="0.60" />           <!-- z-band around z_peak inspected for openness -->
+  <arg name="bev_door_band_m"       default="0.80" />           <!-- z-band around z_peak inspected for openness -->
   <arg name="bev_door_free_voxels"  default="2" />              <!-- free voxels in the band => it's an opening -->
   <arg name="bev_door_occ_tol"      default="0" />              <!-- max occupied voxels tolerated in the band -->
 
@@ -233,13 +253,20 @@
   <arg name="bev_wall_fill_neighbors" default="5" />            <!-- count mode only -->
   <arg name="bev_wall_fill_iters"     default="1" />            <!-- max bridge width; keep small (1-2) -->
 
-  <!-- temporal hysteresis (stage 5, optional — FALCON already fuses, so off) -->
-  <arg name="bev_temporal_filter" default="false" />
-  <arg name="bev_t_inc" default="1.0" />
-  <arg name="bev_t_dec" default="1.0" />
-  <arg name="bev_t_max" default="5.0" />
-  <arg name="bev_t_on"  default="2.0" />
-  <arg name="bev_t_off" default="0.5" />
+  <!-- temporal CONFIRMATION (now runs BEFORE wall completion; ON by default).
+       A cell only reads OCC after it has been seen occupied, with enough
+       confidence, across MULTIPLE clouds — this rejects the monocular-depth
+       speckle FALCON leaks into corridor openings the camera is not aimed at.
+       Was off on the assumption "FALCON already fuses in time"; that assumption
+       is exactly what fails for these view-dependent artifacts, so it is now on.
+       Set bev_temporal_filter:=false to restore the old single-frame behaviour. -->
+  <arg name="bev_temporal_filter" default="true" />
+  <arg name="bev_occ_conf_full" default="3.0" />  <!-- weighted column mass = full per-frame confidence; per-frame conf = occ_w/this clipped to [0,1]. MUST be > bev_occ_weight_thresh. RAISE to make persistent peripheral speckle harder to confirm. -->
+  <arg name="bev_t_inc" default="1.0" />   <!-- evidence added per cloud, scaled by confidence -->
+  <arg name="bev_t_dec" default="1.0" />   <!-- evidence bled per cloud a cell is seen FREE (opening recovery) -->
+  <arg name="bev_t_max" default="5.0" />   <!-- evidence cap (memory of a confirmed wall) -->
+  <arg name="bev_t_on"  default="2.0" />   <!-- evidence to confirm OCC; ~t_on/t_inc clouds of solid wall (~0.6s at FALCON's ~3Hz) -->
+  <arg name="bev_t_off" default="0.5" />   <!-- evidence to clear (Schmitt lower rail) -->
 
   <!-- runtime -->
   <arg name="bev_always_recompute"       default="false" />     <!-- recompute every tick vs only on a new cloud -->
@@ -390,8 +417,9 @@
     <param name="wall_fill_mode"         value="$(arg bev_wall_fill_mode)" />
     <param name="wall_fill_neighbors"    value="$(arg bev_wall_fill_neighbors)" />
     <param name="wall_fill_iters"        value="$(arg bev_wall_fill_iters)" />
-    <!-- temporal hysteresis (optional) -->
+    <!-- temporal confirmation (ON by default; runs before wall completion) -->
     <param name="temporal_filter"        value="$(arg bev_temporal_filter)" />
+    <param name="occ_conf_full"          value="$(arg bev_occ_conf_full)" />
     <param name="t_inc"                  value="$(arg bev_t_inc)" />
     <param name="t_dec"                  value="$(arg bev_t_dec)" />
     <param name="t_max"                  value="$(arg bev_t_max)" />
@@ -417,9 +445,6 @@
     <param name="inflate_radius_m"      value="$(arg inflate_radius_m)" />
     <param name="unknown_blocked"       value="$(arg unknown_blocked)" />
     <param name="unknown_cost"          value="$(arg unknown_cost)" />
-    <param name="clearance_weight"      value="$(arg clearance_weight)" />
-    <param name="clearance_margin_m"    value="$(arg clearance_margin_m)" />
-    <param name="path_simplify_m"       value="$(arg path_simplify_m)" />
     <param name="los_smoothing"         value="$(arg los_smoothing)" />
     <param name="turn_penalty"          value="$(arg turn_penalty)" />
     <param name="connectivity"          value="$(arg connectivity)" />
@@ -431,6 +456,15 @@
     <param name="replan_on_bev"         value="$(arg replan_on_bev)" />
     <param name="replan_period_s"       value="$(arg replan_period_s)" />
     <param name="replan_collision_confirm" value="$(arg replan_collision_confirm)" />
+    <param name="corner_round"          value="$(arg corner_round)" />
+    <param name="corner_merge_deg"      value="$(arg corner_merge_deg)" />
+    <param name="corner_max_turn_deg"   value="$(arg corner_max_turn_deg)" />
+    <param name="corner_chamfer_max_deg" value="$(arg corner_chamfer_max_deg)" />
+    <param name="corner_chamfer_dist_m" value="$(arg corner_chamfer_dist_m)" />
+    <param name="corner_min_runup_m"    value="$(arg corner_min_runup_m)" />
+    <param name="replan_on_predicted_collision" value="$(arg replan_on_predicted_collision)" />
+    <param name="max_predicted_replans" value="$(arg max_predicted_replans)" />
+    <param name="predicted_path_topic"  value="/path/predicted" />
     <param name="frame_id"              value="world" />
   </node>
 
@@ -465,7 +499,24 @@
     <param name="pos_acquisition_radius" value="$(arg pos_acquisition_radius)" />
     <param name="yaw_acquisition_radius" value="$(arg yaw_acquisition_radius)" />
     <param name="yaw_lead_pct"           value="$(arg yaw_lead_pct)" />
-    <param name="skip_yaw_thresh"        value="$(arg skip_yaw_thresh)" />
+    <param name="yaw_settle_dwell_s"     value="$(arg yaw_settle_dwell_s)" />
+    <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
+    <param name="yaw_burst_max_deg"      value="$(arg yaw_burst_max_deg)" />
+    <param name="min_motion_ticks"       value="$(arg min_motion_ticks)" />
+    <param name="cmd_commit_ticks"       value="$(arg cmd_commit_ticks)" />
+    <param name="cmd_stop_eps"           value="$(arg cmd_stop_eps)" />
+    <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
+    <param name="predict_hz"             value="$(arg predict_hz)" />
+    <param name="predict_horizon_s"      value="$(arg predict_horizon_s)" />
+    <param name="predict_yaw_tau_s"      value="$(arg predict_yaw_tau_s)" />
+    <param name="predict_vx_tau_s"       value="$(arg predict_vx_tau_s)" />
+    <param name="predicted_path_topic"   value="/path/predicted" />
+    <param name="predicted_score_topic"  value="/path/predicted_score" />
+    <param name="require_map_update"     value="$(arg require_map_update)" />
+    <param name="map_update_topic"       value="$(arg map_update_topic)" />
+    <param name="map_wait_timeout_s"     value="$(arg map_wait_timeout_s)" />
+    <param name="mapsettle_min_s"        value="$(arg mapsettle_min_s)" />
+    <param name="mapsettle_min_updates"  value="$(arg mapsettle_min_updates)" />
     <param name="auto_takeoff"           value="$(arg auto_takeoff)" />
     <param name="cruise_z"               value="$(arg cruise_z)" />
     <param name="use_posctrl"            value="$(arg use_posctrl)" />

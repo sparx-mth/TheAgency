@@ -203,7 +203,7 @@ source /home/user/GIT/TheAgency/theagency_venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --tag_size_m 0.13 \
   --source ros \
   --image_topic /xtend/rgb \
@@ -336,11 +336,11 @@ LaunchItem(
             "Detects tag36h11 AprilTags in /xtend/rgb, estimates 6-DOF camera pose in map frame "
             "via solvePnP + known tag world positions. "
             "Publishes /xtend/april_tag_pose (PoseStamped). "
-            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
+            "Tag map: new_map.yaml. Calibration: 504x294."
         ),
         command="""
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --tag_size_m 0.13 \
   --source ros \
   --image_topic /xtend/rgb \

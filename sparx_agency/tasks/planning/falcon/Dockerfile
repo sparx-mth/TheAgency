@@ -175,6 +175,15 @@ RUN chmod +x /tmp/fix_falcon_cost_check.sh && /tmp/fix_falcon_cost_check.sh
 COPY patches/fix_falcon_depth_overflow.sh /tmp/fix_falcon_depth_overflow.sh
 RUN chmod +x /tmp/fix_falcon_depth_overflow.sh && /tmp/fix_falcon_depth_overflow.sh
 
+# ── 6a-quinquies. Silence per-callback FSM glog spam ──────────
+# exploration_fsm.cpp logs two LOG(INFO) lines on EVERY callback
+# (~90-130 Hz). With GLOG_logtostderr=1 (set above) they bury every
+# other log on the console. Demote just those two to VLOG(99) so they
+# vanish by default; all other FALCON logs are untouched. Restore with
+# GLOG_v=99. See patches/fix_falcon_fsm_logspam.sh.
+COPY patches/fix_falcon_fsm_logspam.sh /tmp/fix_falcon_fsm_logspam.sh
+RUN chmod +x /tmp/fix_falcon_fsm_logspam.sh && /tmp/fix_falcon_fsm_logspam.sh
+
 # ── 6b. Skip CUDA-only + (Jetson) simulator-side packages ─────
 COPY patches/ignore_cuda_pkgs.sh /tmp/ignore_cuda_pkgs.sh
 RUN chmod +x /tmp/ignore_cuda_pkgs.sh \

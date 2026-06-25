@@ -147,6 +147,10 @@
     <param name="demo_mode_topic"      value="/xtend/demo_mode" />
     <param name="turning_mode_name"    value="turning" />
     <param name="resume_settle_sec"    value="0.0" />
+    <!-- Startup warm-up: force-fuse the first N voxel pairs ignoring demo_mode
+         (so a stale latched 'turning' can't freeze mapping at pickup), then reset
+         to a forward-flight baseline. 0 disables the warm-up. -->
+    <param name="warmup_emits"         value="2" />
   </node>
   <!-- ══════════════════════════════════════════════════════════════
        The actual nav stack — same launch as Gazebo, just with the
