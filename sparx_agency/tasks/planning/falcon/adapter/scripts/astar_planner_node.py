@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-astar_planner_node.py -- ROS1 adapter: 2D BEV OccupancyGrid -> smoothed waypoints.
+astar_planner_node.py -- ROS1 adapter: 2D BEV OccupancyGrid -> A* waypoints.
 
 Thin glue around the ROS-free planner in
 ``sparx_agency.core.planning.planners.astar.WeightedAStarPlanner2D``. All of the
@@ -13,15 +13,29 @@ tested without ROS. This node owns ONLY ROS concerns:
   - decoding nav_msgs/OccupancyGrid into a core OccupancyGrid2D,
   - the map-warmup gate (hold until FALCON has integrated real FREE cells),
   - goal-click handling and lazy collision/periodic replanning,
-  - publishing nav_msgs/Path and logging.
+  - anchoring the path to the live drone pose,
+  - publishing the A* path as nav_msgs/Path and logging.
 
-Drop-in replacement for the legacy falcon_adapter ``astar_planner.py``:
-identical topics and message types.
+Separation of concerns (the path corrector is its own node)
+-----------------------------------------------------------
+This node now publishes ONLY the raw A* path, on ``~path_topic``
+(``/path/waypoints_astar``). It does NOT recentre the path off walls. A separate,
+planner-agnostic ``path_corrector_node`` subscribes to that topic, reshapes the
+path against the same BEV (repulsive potential field by default) and republishes
+the corrected path on ``/path/waypoints`` -- the topic the follower flies. To
+correct a different planner (NavDP, RRT*, ...) instead, point the corrector's
+``~input_path_topic`` at that planner's topic; nothing here changes. With the
+corrector disabled (``enabled:=false``) it passes the A* path through unchanged.
+
+Collision / predicted-collision replanning here runs on THIS node's published
+(raw A*) path. The corrector only ever makes the flown path safer (it clips any
+corrected waypoint back to clear inflated obstacles), so the flown path is never
+less safe than the A* path this node already validates.
 
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
   in   ~drone_ns + /gt_pose (Pose)
   in   ~goal_topic (Point)          /waypoint_nav/goal
-  out  ~path_topic (Path, latched)  /path/waypoints
+  out  ~path_topic (Path, latched)  /path/waypoints_astar  (raw A* -> corrector)
 
 See the file footer for the full rosparam list.
 """
@@ -32,7 +46,7 @@ import rospy
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
 
-from sparx_agency.core.common.types import Pose2D, PlanStatus
+from sparx_agency.core.common.types import Path2D, Pose2D, PlanStatus
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
@@ -50,7 +64,9 @@ class AStarPlannerNode:
 
         self.drone_ns = G("~drone_ns", "/simple_drone")
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
-        self.path_topic = G("~path_topic", "/path/waypoints")
+        # Raw A* output. A separate path_corrector_node recentres this against the
+        # BEV and republishes the corrected path on /path/waypoints (the flown one).
+        self.path_topic = G("~path_topic", "/path/waypoints_astar")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.frame_id = G("~frame_id", "world")
 
@@ -76,16 +92,29 @@ class AStarPlannerNode:
         )
         self.planner = WeightedAStarPlanner2D(self.params)
 
-        self.replan_on_collision = bool(G("~replan_on_collision", True))
+        # ── Planning cadence ─────────────────────────────────────────
+        # A* fires on a STRICT periodic timer (plan_period_s). The published path
+        # is then frozen until the next tick: the live BEV keeps updating in the
+        # background but never triggers a replan, so the follower is not chasing a
+        # path that shifts every map frame. A goal click still plans immediately.
+        # (The downstream path_corrector likewise re-corrects only when a new A*
+        # path is published, so the flown trajectory stays frozen between ticks.)
+        self.plan_period_s = float(G("~plan_period_s", 3.0))
+
+        # Optional MID-CYCLE replan triggers. OFF by default -- keeping them off is
+        # what freezes the trajectory between ticks. Enable any of them only to
+        # react to obstacles faster than plan_period_s (the path and its APF field
+        # may then change between ticks).
+        self.replan_on_collision = bool(G("~replan_on_collision", False))
         self.replan_on_bev = bool(G("~replan_on_bev", False))
-        self.replan_period_s = float(G("~replan_period_s", 0.0))
 
         # Dynamics-aware replan: the follower publishes its predicted (stop-and-
         # turn) trajectory; replan if THAT collides even when the geometric path
         # does not (overshoot into a wall the straight path misses). Guarded by a
         # freshness check, the same confirm streak, and a consecutive-replan cap.
+        # Off by default with the rest of the mid-cycle replans (keeps the freeze).
         self.replan_on_predicted_collision = bool(
-            G("~replan_on_predicted_collision", True))
+            G("~replan_on_predicted_collision", False))
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.max_predicted_replans = int(G("~max_predicted_replans", 3))
 
@@ -137,8 +166,9 @@ class AStarPlannerNode:
             rospy.Subscriber(self.predicted_path_topic, Path, self._predicted_cb,
                              queue_size=1)
 
-        if self.replan_period_s > 0:
-            rospy.Timer(rospy.Duration(self.replan_period_s), lambda _e: self._try_plan())
+        # Strict A* cadence (always on): every plan_period_s recompute A* + APF
+        # once and publish; the trajectory is frozen in between.
+        rospy.Timer(rospy.Duration(self.plan_period_s), self._plan_tick)
         rospy.Timer(rospy.Duration(2.0), self._status)
         self._banner()
 
@@ -170,6 +200,14 @@ class AStarPlannerNode:
                           new.x, new.y, self.fail_reason)
 
     def _bev_cb(self, msg):
+        """Store the latest BEV. A map update does NOT replan -- planning is driven
+        strictly by the periodic timer (and goal clicks), so the APF correction
+        runs once per A* path and the published trajectory stays frozen between
+        ticks. The only thing a map update triggers is the FIRST plan, so we start
+        as soon as the map warms up instead of waiting a full period. The
+        replan_on_* hooks below are off by default; enable them to react to
+        obstacles mid-cycle (at the cost of a path that can move between ticks).
+        """
         first = self.grid is None
         self.grid = self._decode(msg)
         if first:
@@ -178,14 +216,11 @@ class AStarPlannerNode:
                           i.width, i.height, i.resolution,
                           i.origin.position.x, i.origin.position.y)
         if not self.has_plan:
-            self._try_plan()
+            self._try_plan()                 # one-shot: first path ASAP after warmup
         elif self.replan_on_bev:
             self._try_plan()
         elif self.replan_on_collision:
             self._collision_replan_check()
-        # Additional dynamics-aware check (skipped if a replan just fired: the
-        # prediction is then older than the new path and the freshness guard
-        # drops it).
         if self.has_plan and self.replan_on_predicted_collision:
             self._predicted_collision_check()
 
@@ -279,6 +314,13 @@ class AStarPlannerNode:
         self.has_plan = False
         self._try_plan()
 
+    def _plan_tick(self, _evt):
+        """Strict A* cadence: every plan_period_s recompute A* + APF once and
+        publish, then freeze until the next tick. Fires regardless of has_plan, so
+        each cycle yields a fresh path from the latest map and current pose -- the
+        one periodic source of a new trajectory once the first plan exists."""
+        self._try_plan()
+
     def _try_plan(self):
         if self.grid is None:
             self.fail_reason = "no BEV yet"; return False
@@ -300,13 +342,38 @@ class AStarPlannerNode:
                 self.goal.y, res.status.value, res.message)
             return False
 
-        self.last_points = res.path.points
-        self._publish(res.path.points, (rospy.Time.now() - t0).to_sec())
+        anchored = self._anchor_to_drone(res.path)   # path begins at the drone pose
+        # Publish the raw A* path; the path_corrector recentres it downstream.
+        # Collision re-checks here run against THIS published path.
+        self.last_points = anchored.points
+        self._publish(anchored.points, (rospy.Time.now() - t0).to_sec())
         self.has_plan = True
         self._collision_streak = 0    # every fresh path starts its debounce clean
         self._pred_collision_streak = 0
         self.fail_reason = "(success)"
         return True
+
+    # ─── Path anchoring ──────────────────────────────────────────
+    def _anchor_to_drone(self, path):
+        """Make the path originate exactly at the drone's current pose.
+
+        The A* planner trims waypoints within ~start_skip_m of the start and never
+        re-inserts the start pose, so the published path begins a step ahead of the
+        drone (it appears to "start at the second waypoint"). Prepend the live pose
+        as waypoint 0 -- or replace a near-coincident first point with it -- so the
+        published path starts exactly at the drone. The downstream corrector pins
+        waypoint 0, so the origin stays fixed through correction.
+        """
+        pts = path.points
+        if self.pose is None:
+            return path
+        p0 = pts[0]
+        if math.hypot(p0.x - self.pose.x, p0.y - self.pose.y) < 0.15:
+            new_pts = (self.pose,) + tuple(pts[1:])   # replace near-coincident start
+        else:
+            new_pts = (self.pose,) + tuple(pts)       # prepend the true origin
+        return Path2D(points=new_pts, frame_id=path.frame_id,
+                      metadata=dict(path.metadata))
 
     def _warmup_ok(self):
         """Hold until the BEV has enough genuine FREE cells (one-shot latch)."""
@@ -323,11 +390,11 @@ class AStarPlannerNode:
         return True
 
     # ─── Publish / status ────────────────────────────────────────
-    def _publish(self, points, plan_dt_s):
+    def _path_msg(self, points):
+        """Build a nav_msgs/Path (identity orientation) from Pose2D points."""
         m = Path()
         m.header.stamp = rospy.Time.now()
         m.header.frame_id = self.frame_id
-        self._last_plan_stamp = m.header.stamp   # freshness ref for predicted check
         for pt in points:
             ps = PoseStamped()
             ps.header = m.header
@@ -335,6 +402,12 @@ class AStarPlannerNode:
             ps.pose.position.y = pt.y
             ps.pose.orientation.w = 1.0
             m.poses.append(ps)
+        return m
+
+    def _publish(self, points, plan_dt_s):
+        """Publish the raw A* path on ~path_topic and stamp it."""
+        m = self._path_msg(points)
+        self._last_plan_stamp = m.header.stamp   # freshness ref for predicted check
         self.pub_path.publish(m)
         length = sum(a.distance_to(b) for a, b in zip(points[:-1], points[1:]))
         rospy.loginfo("astar_planner: PATH PUBLISHED %d wp %.2fm plan=%.0fms "
@@ -358,7 +431,11 @@ class AStarPlannerNode:
         L("  bev  in  = %s", self.bev_topic)
         L("  pose in  = %s/gt_pose", self.drone_ns)
         L("  goal in  = %s", self.goal_topic)
-        L("  path out = %s", self.path_topic)
+        L("  path out = %s   (raw A* -> path_corrector)", self.path_topic)
+        L("  plan period = %.1fs  (strict A* cadence; path frozen between ticks)",
+          self.plan_period_s)
+        L("  mid-cycle replan: bev=%s collision=%s predicted=%s",
+          self.replan_on_bev, self.replan_on_collision, self.replan_on_predicted_collision)
         L("  goal init= %s", "(%.2f,%.2f)" % (self.goal.x, self.goal.y) if self.goal else "none")
         L("  conn=%d inflate=%.2fm unknown=%s max_seg=%.2fm los=%s turn_pen=%.2f",
           p.connectivity, p.inflate_radius_m,
@@ -374,6 +451,8 @@ class AStarPlannerNode:
         L("  predicted-collision replan=%s cap=%d topic=%s",
           self.replan_on_predicted_collision, self.max_predicted_replans,
           self.predicted_path_topic)
+        L("  path correction runs in path_corrector_node (subscribes %s)",
+          self.path_topic)
         L("=" * 64)
 
 
@@ -395,7 +474,9 @@ if __name__ == "__main__":
 # and owns ROS I/O, the warmup gate and replan triggering.
 #
 #   IO: ~bev_topic (/falcon/bev_2d) ~drone_ns (/simple_drone) [+/gt_pose]
-#       ~goal_topic (/waypoint_nav/goal) ~path_topic (/path/waypoints)
+#       ~goal_topic (/waypoint_nav/goal)
+#       ~path_topic (/path/waypoints_astar; raw A* -> path_corrector_node, which
+#         recentres it and republishes the flown path on /path/waypoints)
 #       ~frame_id (world) ~goal_x ~goal_y (initial goal; unset = wait for a click)
 #   planner: ~connectivity (8) ~inflate_radius_m (0.4) ~unknown_blocked (false)
 #       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.3)
@@ -404,14 +485,26 @@ if __name__ == "__main__":
 #   corner rounding (gentler turns): ~corner_round (true) ~corner_merge_deg (8)
 #       ~corner_max_turn_deg (14) ~corner_chamfer_max_deg (28)
 #       ~corner_chamfer_dist_m (0.5) ~corner_min_runup_m (0.6)
-#   replanning: ~replan_on_collision (true) ~replan_on_bev (false) ~replan_period_s (0.0)
+#   planning cadence: ~plan_period_s (3.0) -- A* runs ONLY on this strict timer
+#       (and on a goal click); the published path is frozen between ticks so the
+#       follower is not chasing a path that shifts every BEV frame. The downstream
+#       path_corrector re-corrects only when a new A* path is published, so the
+#       flown trajectory is frozen between ticks too.
+#   OPTIONAL mid-cycle replan (ALL OFF by default -- enabling any lets the path
+#     move between ticks):
+#       ~replan_on_collision (false) ~replan_on_bev (false)
 #       ~replan_collision_confirm (2; consecutive colliding BEV frames required
-#         before a collision replan -- debounces single-frame depth noise and,
-#         since the streak resets after each replan, caps the sustained replan
-#         rate; 1 = legacy replan-on-first-frame)
-#       ~replan_on_predicted_collision (true; replan when the follower's predicted
+#         before a collision replan -- debounces single-frame depth noise; only
+#         used when ~replan_on_collision is true)
+#       ~replan_on_predicted_collision (false; replan when the follower's predicted
 #         stop-and-turn trajectory on ~predicted_path_topic (/path/predicted)
 #         collides even if the geometric path does not -- dynamics-aware)
 #       ~max_predicted_replans (3; consecutive cap, reset once prediction is clear)
 #   warmup gate: ~min_free_cells_to_plan (80; 0 disables)
+#
+# PATH CORRECTION moved out of this node. The repulsive-field recentring (and its
+# F_rep force-arrow viz) now lives in path_corrector_node.py, which subscribes to
+# ~path_topic (/path/waypoints_astar), reshapes the path against the same BEV and
+# republishes the flown path on /path/waypoints. Its ~apf_* / ~inflate_radius_m /
+# ~publish_forces rosparams are documented in that node.
 # ============================================================================

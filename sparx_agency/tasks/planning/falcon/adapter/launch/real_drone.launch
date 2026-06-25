@@ -95,6 +95,25 @@
   <arg name="use_navdp"               default="true" />
   <arg name="navdp_camera_info_topic" default="" />
 
+  <!-- ── Path-correction strategy ─────────────────────────────────
+       corrector:=potential_field (default) | esdf. With esdf the route is
+       nudged up the distance-to-wall gradient toward the corridor/doorway
+       centre. esdf_target_clearance_m: 0 = centre on the ESDF ridge, >0 =
+       stop once that far from walls (a safety floor). -->
+  <arg name="corrector"               default="potential_field" />
+  <arg name="esdf_target_clearance_m" default="0.0" />
+  <arg name="esdf_max_total_shift_m"  default="1.0" />
+  <!-- Thin a dense input path before correcting (NavDP zig-zag fix); no-op for A*. -->
+  <arg name="resample_min_spacing_m"  default="0.3" />
+
+  <!-- ── NavDP execution / display ────────────────────────────────
+       navdp_execute_fraction: fly only the first fraction of the route, hold at
+       the prefix end until the next ENTER (NavDP drifts further out). The full
+       route is still shown on the BEV viewer. navdp_display_mode: full = RGB +
+       depth + snapshot panels | rgb_only = just the clickable RGB panel. -->
+  <arg name="navdp_execute_fraction"  default="0.5" />
+  <arg name="navdp_display_mode"      default="full" />
+
   <arg name="publish_mapping_inputs" value="false" />
   <!-- ══════════════════════════════════════════════════════════════
        Pose adapter — converts the real-drone localization message
@@ -180,6 +199,13 @@
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="navdp_depth_topic"       value="$(arg real_depth_topic)" />
     <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+
+    <arg name="corrector"               value="$(arg corrector)" />
+    <arg name="esdf_target_clearance_m" value="$(arg esdf_target_clearance_m)" />
+    <arg name="esdf_max_total_shift_m"  value="$(arg esdf_max_total_shift_m)" />
+    <arg name="resample_min_spacing_m"  value="$(arg resample_min_spacing_m)" />
+    <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
+    <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
   </include>
 
 </launch>
