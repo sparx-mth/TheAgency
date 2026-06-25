@@ -2,6 +2,8 @@
 from .ompl_imports import ob, og, OMPL_AVAILABLE, OMPL_ERROR
 from .utils_2d import (
     interpolate_path_2d,
+    split_long_segments_2d,
+    decimate_min_spacing_2d,
     reduce_path_2d,
     make_clearance_objective_2d,
 )
@@ -23,6 +25,8 @@ __all__ = [
     "OMPL_ERROR",
     # 2D utilities
     "interpolate_path_2d",
+    "split_long_segments_2d",
+    "decimate_min_spacing_2d",
     "reduce_path_2d",
     "make_clearance_objective_2d",
     # 3D utilities

@@ -50,6 +50,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from sparx_agency.core.common.types import Path2D, Pose2D
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
+from sparx_agency.core.planning.planners.common.utils_2d import decimate_min_spacing_2d
 from sparx_agency.core.planning.safety.path_correction import (
     EsdfCorrectorConfig, PotentialFieldCorrectorConfig, PotentialFieldPathCorrector,
     make_path_corrector)
@@ -75,6 +76,10 @@ class PathCorrectorNode:
         self.enabled = bool(G("~enabled", True))
         self.corrector_name = G("~corrector", "potential_field")
         self._apf_debug = bool(G("~apf_debug", True))
+        # Thin a dense input path to >= this spacing (m) BEFORE correcting, so a
+        # lateral corrector does not push near-coincident neighbours opposite ways
+        # (the NavDP zig-zag). 0 = off. A*'s metre-scale waypoints are unaffected.
+        self.resample_min_spacing_m = float(G("~resample_min_spacing_m", 0.0))
 
         # Build the chosen correction strategy from rosparams. Defaults match the
         # historical astar_planner node, so wiring the same ~apf_* params through is
@@ -175,37 +180,48 @@ class PathCorrectorNode:
     def _path_cb(self, msg):
         """Correct one planned path and publish it (+ raw echo + force arrows)."""
         pts = self._decode_path(msg)
-        self.pub_raw.publish(self._path_msg(pts))         # input echo (viewer red)
 
         if not self.enabled or len(pts) < 2:
+            self.pub_raw.publish(self._path_msg(pts))     # input echo (viewer red)
             self._publish(pts, corrected=False)           # passthrough
             return
         if self.grid is None:
+            self.pub_raw.publish(self._path_msg(pts))
             rospy.logwarn_throttle(
                 5.0, "path_corrector: no BEV yet -- passing the input path through "
                 "on %s uncorrected", self.path_topic)
             self._publish(pts, corrected=False)
             return
 
+        # Thin a dense input (NavDP) to >= resample_min_spacing_m BEFORE correcting,
+        # so the lateral corrector cannot push near-coincident neighbours opposite
+        # ways (zig-zag). A*'s metre-scale waypoints come back unchanged. The echo
+        # and force arrows use this conditioned path -- the actual correction input.
+        cond = (decimate_min_spacing_2d(pts, self.resample_min_spacing_m)
+                if self.resample_min_spacing_m > 0.0 else pts)
+        self.pub_raw.publish(self._path_msg(cond))        # input echo (viewer red)
+
         frame = msg.header.frame_id or self.frame_id
-        path = Path2D(points=tuple(pts), frame_id=frame)
+        path = Path2D(points=tuple(cond), frame_id=frame)
         try:
             result = self.corrector.correct(path, self.grid)
             out = result.path.points
-            rospy.loginfo_throttle(5.0, "path_corrector: %s recentred %d/%d waypoint(s)",
-                                   self.corrector_name, result.num_moved, result.num_points)
+            rospy.loginfo_throttle(
+                5.0, "path_corrector: %s recentred %d/%d waypoint(s) (input %d -> %d)",
+                self.corrector_name, result.num_moved, result.num_points,
+                len(pts), len(cond))
             if self._apf_debug:
-                self._log_debug(pts, out)
+                self._log_debug(cond, out)
         except Exception as exc:                          # noqa: BLE001 -- stay flying
             rospy.logwarn_throttle(
-                5.0, "path_corrector: correction failed (%s) -- publishing the raw "
-                "input path on %s", exc, self.path_topic)
-            self._publish(pts, corrected=False)
+                5.0, "path_corrector: correction failed (%s) -- publishing the "
+                "(uncorrected) input path on %s", exc, self.path_topic)
+            self._publish(cond, corrected=False)
             return
 
         self._publish(out, corrected=True)
         if self._pub_forces is not None and self.corrector.field is not None:
-            self._publish_forces(pts)                     # sampled at the raw waypoints
+            self._publish_forces(cond)                    # sampled at the input waypoints
 
     # ─── Decode ──────────────────────────────────────────────────
     def _decode(self, msg):
@@ -384,6 +400,9 @@ class PathCorrectorNode:
         L("  bev        in = %s", self.bev_topic)
         L("  path      out = %s   (corrected, flown)", self.path_topic)
         L("  raw echo  out = %s   (input echo, viz)", self.raw_path_topic)
+        if self.resample_min_spacing_m > 0.0:
+            L("  resample: thin dense input to >= %.2fm before correcting",
+              self.resample_min_spacing_m)
         if not self.enabled:
             L("  correction = OFF (passthrough: input -> %s verbatim)", self.path_topic)
         elif self._is_pf:
@@ -427,6 +446,10 @@ if __name__ == "__main__":
 #   strategy: ~enabled (true; false = passthrough, input -> path_topic verbatim)
 #       ~corrector (potential_field | esdf; the core PathCorrector to build --
 #         raises on an unknown name)
+#       ~resample_min_spacing_m (0.0; thin a dense input path to >= this spacing
+#         BEFORE correcting, to stop a lateral corrector zig-zagging on
+#         near-coincident points -- e.g. NavDP. 0 = off; ~0.3-0.5 suits NavDP;
+#         A*'s metre-scale waypoints are unaffected)
 #   shared map-safety knobs (apply to whichever corrector is active):
 #       ~inflate_radius_m (0.4; obstacle inflation for the corrected-path collision
 #         clip -- match the planner's inflate_radius_m)

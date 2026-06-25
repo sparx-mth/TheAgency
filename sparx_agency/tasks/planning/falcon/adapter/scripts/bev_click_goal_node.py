@@ -8,6 +8,7 @@ trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
     red path   = raw A*  (shortest -- hugs walls / cuts corners)
     green path = APF-safe (recentred toward free space -- the path flown)
+    blue dashed = full planner route (e.g. NavDP) when only its near prefix flies
     yellow arrows = repulsive force F_rep=-grad U_rep at each waypoint (obstacle push)
     gold field    = F_rep across the free space (how hard each wall section pushes)
     orange dashed = predicted (stop-and-turn)
@@ -25,6 +26,7 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
   in   ~path_topic (Path)           /path/waypoints      (APF-safe; drawn green)
   in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
+  in   ~full_path_topic (Path)      /path/waypoints_navdp_full  (full route, blue dashed; '' = off)
   in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
   in   ~predicted_path_topic (Path) /path/predicted
   in   ~predicted_score_topic (Float32) /path/predicted_score
@@ -64,6 +66,11 @@ class BevClickGoalNode:
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
         self.path_topic = G("~path_topic", "/path/waypoints")
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
+        # FULL planner route (e.g. NavDP's whole trajectory when only its near
+        # prefix is executed): drawn dim/dashed for reference. Defaults to NavDP's
+        # full-route topic so `rosrun bev_click_goal_node.py` shows the whole route
+        # out of the box; harmless for A* (no publisher -> no blue line). "" = off.
+        self.full_path_topic = G("~full_path_topic", "/path/waypoints_navdp_full")
         self.forces_topic = G("~forces_topic", "/path/forces")
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
@@ -83,6 +90,7 @@ class BevClickGoalNode:
         self._bev = None
         self._path_xy = []              # APF-safe path (green) -- the path flown
         self._raw_xy = []               # raw A* path (red) -- shortest, viz only
+        self._full_xy = []              # full planner route (blue dashed) -- ref only
         self._forces = []               # (x,y,dx,dy) per-waypoint force arrows (yellow)
         self._field_arrows = []         # (x,y,dx,dy) coarse wall force-field (gold)
         self._pred_xy = []              # predicted drone trajectory (rollout)
@@ -95,6 +103,8 @@ class BevClickGoalNode:
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.path_topic, Path, self._path_cb, queue_size=1)
         rospy.Subscriber(self.raw_path_topic, Path, self._raw_path_cb, queue_size=1)
+        if self.full_path_topic:
+            rospy.Subscriber(self.full_path_topic, Path, self._full_path_cb, queue_size=1)
         rospy.Subscriber(self.forces_topic, MarkerArray, self._forces_cb, queue_size=1)
         rospy.Subscriber(self.predicted_path_topic, Path, self._pred_cb, queue_size=1)
         rospy.Subscriber(self.predicted_score_topic, Float32, self._pred_score_cb,
@@ -116,6 +126,7 @@ class BevClickGoalNode:
 
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
+        self._full_line = None           # full planner route (blue dashed)
         self._forces_artist = None      # quiver of per-waypoint force arrows
         self._field_artist = None       # quiver of the coarse wall force-field
         self._drone_dot = self._drone_arrow = self._goal_marker = None
@@ -126,6 +137,9 @@ class BevClickGoalNode:
         rospy.loginfo("  bev  in  = %s", self.bev_topic)
         rospy.loginfo("  path in  = %s   (APF-safe, green)", self.path_topic)
         rospy.loginfo("  raw  in  = %s   (raw A*, red)", self.raw_path_topic)
+        if self.full_path_topic:
+            rospy.loginfo("  full in  = %s   (full route, blue dashed)",
+                          self.full_path_topic)
         rospy.loginfo("  force in = %s   (F_rep arrows, yellow)", self.forces_topic)
         rospy.loginfo("  pose in  = %s/gt_pose", self.drone_ns)
         if self.pose_stamped_topic:
@@ -148,6 +162,11 @@ class BevClickGoalNode:
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._raw_xy = pts
+
+    def _full_path_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._full_xy = pts
 
     def _forces_cb(self, msg):
         """Split ARROW markers into per-waypoint (ns 'apf_forces') and the coarse
@@ -193,6 +212,7 @@ class BevClickGoalNode:
             self._goal_xy = (gx, gy)
             self._path_xy = []          # drop the stale safe path; replan redraws it
             self._raw_xy = []           # and the stale raw A* path
+            self._full_xy = []          # and the stale full planner route
             self._forces = []           # and the stale force arrows
             self._field_arrows = []     # and the stale wall force-field
         m = Point()
@@ -204,6 +224,7 @@ class BevClickGoalNode:
         with self._lock:
             bev, path = self._bev, list(self._path_xy)
             raw = list(self._raw_xy)
+            full = list(self._full_xy)
             forces = list(self._forces)
             field_arrows = list(self._field_arrows)
             drone, goal = self._drone_p, self._goal_xy
@@ -248,6 +269,18 @@ class BevClickGoalNode:
         if score is not None:
             title += "   |  predicted quality: %.2f" % score
         self.ax.set_title(title)
+
+        # Full planner route (blue dashed, bottommost): the WHOLE route the planner
+        # proposed when only its near prefix is executed (e.g. NavDP). Shown for
+        # reference -- the drone flies the green path and stops at its end.
+        if self._full_line is not None:
+            self._full_line.remove()
+            self._full_line = None
+        if len(full) >= 2:
+            fxs, fys = [p[0] for p in full], [p[1] for p in full]
+            self._full_line, = self.ax.plot(fxs, fys, "--o", color="deepskyblue",
+                                            linewidth=1.4, markersize=2,
+                                            alpha=0.6, zorder=1)
 
         # Path overlays: raw A* (red, underneath) vs APF-safe path (green, on
         # top). The green path is what the drone actually flies; the red shows
