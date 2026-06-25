@@ -115,17 +115,17 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_pub
   --frequency 10.0 \
   --image-topic /xtend/rgb \
   --camera-info-topic /xtend/camera_info \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  --preprocess-mode resize \
+  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  --preprocess-mode crop_resize \
   --output-width 504 \
-  --output-height 294
+  --output-height 392
 '
 
 wait_for_topic_name /xtend/rgb 20
 wait_for_topic_rate /xtend/bearing 20 best_effort || true
 wait_for_topic_rate /xtend/rgb 20 best_effort || true
 
-echo "[AUTO] Step 2: start DA3 Large Metric 504x294 depth"
+echo "[AUTO] Step 2: start DA3 Large Metric 504x392 depth"
 start_tmux xtend_depth '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -137,8 +137,8 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   --ros-args \
   -p image_topic:=/xtend/rgb \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p apply_metric_focal_scaling:=true \
@@ -152,22 +152,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
 wait_for_topic_name /xtend/depth_m 30
 wait_for_topic_rate /xtend/depth_m 60 best_effort
 
-echo "[AUTO] Step 3: start Twist converter"
-start_tmux xtend_twist_converter '
-cd /home/user/GIT/TheAgency
-source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/venv/bin/activate
-export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-'
-
-sleep 2
-
-echo "[AUTO] Step 4: start XTEND demo mode manager"
+echo "[AUTO] Step 3: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -205,7 +190,7 @@ source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --tag_size_m 0.13 \
   --source ros \
   --image_topic /xtend/rgb \
@@ -252,30 +237,30 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + RGB publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x294 full-FOV resized frames, /xtend/camera_info, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
+        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 full-FOV resized frames, /xtend/camera_info, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
         command="""
                 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
                 --frequency 10.0 \
                 --image-topic /xtend/rgb \
                 --camera-info-topic /xtend/camera_info \
-                --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-                --preprocess-mode resize \
+                --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+                --preprocess-mode crop_resize \
                 --output-width 504 \
-                --output-height 294
+                --output-height 392
                 """,
     ),
     LaunchItem(
-        name="2. DA3 Large Metric 504x294 depth processor",
+        name="2. DA3 Large Metric 504x392 depth processor",
         machine="jetson",
         tmux_name="xtend_depth",
-        description="Subscribes to /xtend/rgb 504x294, runs DA3METRIC-LARGE depth-only FP16, applies focal metric scaling, publishes /xtend/depth_m. Default output encoding: 16UC1 millimeters.",
+        description="Subscribes to /xtend/rgb 504x392, runs DA3METRIC-LARGE depth-only FP16, applies focal metric scaling, publishes /xtend/depth_m. Default output encoding: 16UC1 millimeters.",
         command="""
                 python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
                   --ros-args \
                   -p image_topic:=/xtend/rgb \
                   -p depth_topic:=/xtend/depth_m \
-                  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
-                  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+                  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
+                  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
                   -p camera_info_mode:=base \
                   -p model_type:=large_metric \
                   -p apply_metric_focal_scaling:=true \
@@ -287,19 +272,7 @@ LAUNCH_ITEMS: list[LaunchItem] = [
                 """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-""",
-    ),
-    LaunchItem(
-        name="4. XTEND demo mode manager",
+        name="3. XTEND demo mode manager",
         machine="jetson",
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm. Also prepares /xtend/reset_odom publisher but does not call it yet.",
@@ -339,11 +312,11 @@ LaunchItem(
             "Detects tag36h11 AprilTags in /xtend/rgb, estimates 6-DOF camera pose in map frame "
             "via solvePnP + known tag world positions. "
             "Publishes /xtend/april_tag_pose (PoseStamped). "
-            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
+            "Tag map: new_map.yaml. Calibration: 504x392."
         ),
         command="""
 python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
+  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
   --tag_size_m 0.13 \
   --source ros \
   --image_topic /xtend/rgb \

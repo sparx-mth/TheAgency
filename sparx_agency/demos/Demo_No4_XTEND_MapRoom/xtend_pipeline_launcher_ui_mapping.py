@@ -124,16 +124,16 @@ python3 /home/user/agency_ws/sparx_agency/robots/XTEND/online_nav_bridge_dir_pub
   --frequency 10.0 \
   --out-dir /tmp/xtend_frames \
   --path-topic /xtend/rgb_frame_path \
-  --preprocess-mode resize \
+  --preprocess-mode crop_resize \
   --output-width 504 \
-  --output-height 294
+  --output-height 392
 '
 
 wait_for_topic_name /xtend/rgb_frame_path 20
 wait_for_topic_rate /xtend/bearing 20 best_effort || true
 wait_for_topic_rate /xtend/rgb_frame_path 20 best_effort || true
 
-echo "[AUTO] Step 2: start DA3 Large Metric 504x294 depth + point cloud"
+echo "[AUTO] Step 2: start DA3 Large Metric 504x392 depth + point cloud"
 start_tmux xtend_depth '
 cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
@@ -145,8 +145,8 @@ python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_nod
   --ros-args \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
-  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
+  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p apply_metric_focal_scaling:=true \
@@ -165,22 +165,7 @@ wait_for_topic_name /xtend/depth_m 30
 wait_for_topic_rate /xtend/depth_m 60 best_effort
 wait_for_topic_name /xtend/pointcloud 15
 
-echo "[AUTO] Step 3: start Twist converter"
-start_tmux xtend_twist_converter '
-cd /home/user/agency_ws
-source /opt/ros/humble/setup.bash
-source /home/user/agency_ws/venv/bin/activate
-export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
-python3 /home/user/agency_ws/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-'
-
-sleep 2
-
-echo "[AUTO] Step 4: start XTEND demo mode manager"
+echo "[AUTO] Step 3: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
 cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
@@ -222,8 +207,8 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   --ros-args \
   -p provider_type:=apriltag \
   -p frame_path_topic:=/xtend/rgb_frame_path \
-  -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
-  -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
   -p tag_size_m:=0.13
 '
 
@@ -308,19 +293,19 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + frame dir publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket. Saves 504x294 resized frames to /tmp/xtend_frames and publishes each path on /xtend/rgb_frame_path (std_msgs/String). Also publishes /xtend/bearing and /xtend/local_telemetry.",
+        description="Owns XTEND WebSocket. Saves 504x392 crop-resized frames to /tmp/xtend_frames and publishes each path on /xtend/rgb_frame_path (std_msgs/String). Also publishes /xtend/bearing and /xtend/local_telemetry.",
         command="""
 python3 /home/user/agency_ws/sparx_agency/robots/XTEND/online_nav_bridge_dir_publisher.py \
   --frequency 10.0 \
   --out-dir /tmp/xtend_frames \
   --path-topic /xtend/rgb_frame_path \
-  --preprocess-mode resize \
+  --preprocess-mode crop_resize \
   --output-width 504 \
-  --output-height 294
+  --output-height 392
 """,
     ),
     LaunchItem(
-        name="2. DA3 Large Metric 504x294 depth + point cloud",
+        name="2. DA3 Large Metric 504x392 depth + point cloud",
         machine="jetson",
         tmux_name="xtend_depth",
         description=(
@@ -333,8 +318,8 @@ python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_nod
   --ros-args \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
-  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
+  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p apply_metric_focal_scaling:=true \
@@ -350,19 +335,7 @@ python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_nod
 """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/user/agency_ws/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-""",
-    ),
-    LaunchItem(
-        name="4. XTEND demo mode manager",
+        name="3. XTEND demo mode manager",
         machine="jetson",
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm.",
@@ -400,15 +373,15 @@ python3 /home/user/agency_ws/sparx_agency/tasks/planning/twist_replayer.py \
         description=(
             "Reads frames from /xtend/rgb_frame_path, detects tag36h11 AprilTags, estimates 6-DOF pose via solvePnP. "
             "Publishes /xtend/localization (PoseStamped) and /xtend/localization_source (String). "
-            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
+            "Tag map: new_map.yaml. Calibration: 504x392."
         ),
         command="""
 python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   --ros-args \
   -p provider_type:=apriltag \
   -p frame_path_topic:=/xtend/rgb_frame_path \
-  -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
-  -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
   -p tag_size_m:=0.13
 """,
     ),
