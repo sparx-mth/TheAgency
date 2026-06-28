@@ -143,18 +143,18 @@
   <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
-  <arg name="start_skip_m"          default="0.4" />
+  <arg name="start_skip_m"          default="1.0" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
        this timer (and on a goal click). The trajectory is frozen between ticks
        so the follower is not chasing a path that shifts every BEV frame. -->
-  <arg name="plan_period_s"         default="3.0" />
+  <arg name="plan_period_s"         default="4.0" />
   <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
        plan_period_s cycles. Set true to react to obstacles faster than that. -->
-  <arg name="replan_on_collision"   default="false" />
-  <arg name="replan_on_bev"         default="false" />
-  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
+  <arg name="replan_on_collision"   default="true" />
+  <arg name="replan_on_bev"         default="true" />
+  <arg name="replan_collision_confirm" default="3" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
        into two half-angle turns, so the stop-and-turn follower can glide through
@@ -211,7 +211,7 @@
        sync from a camera_info topic (K preferred; must describe the 504x294
        stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
-  <arg name="use_navdp"                default="true" />
+  <arg name="use_navdp"                default="false" />
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
   <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
@@ -291,7 +291,7 @@
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="0.80" />            <!-- column z-range considered -->
+  <arg name="bev_z_floor"           default="1.00" />            <!-- column z-range considered -->
   <arg name="bev_z_ceil"            default="1.50" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
