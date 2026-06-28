@@ -456,14 +456,14 @@ ros2 run octomap_server octomap_server_node \
         command="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/ui.py",
     ),
     LaunchItem(
-        name="12. Planner: hospital world",
+        name="12. Planner: Office world",
         machine="manual",
-        tmux_name="planner_hospital",
-        description="Manual planner step on Jetson/container: starts hospital environment.",
+        tmux_name="planner_office_world",
+        description="Manual planner step on Jetson/container: starts office environment.",
         enabled_by_default=False,
         command="""
-cd /home/user/GIT/sjtu_project/falcon_docker
-./run_hospital.sh office
+cd /home/user/agency_ws/sparx_agency/tasks/planning/falcon
+./run_falcon.sh office
 """,
     ),
     LaunchItem(
@@ -481,7 +481,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
         description="Manual ROS bridge step.",
         enabled_by_default=False,
         command="""
-cd /home/user/GIT/sjtu_project/ros_bridge_docker
+cd /home/user/agency_ws/sparx_agency/tasks/planning/falcon/bridge
 ./run_bridge.sh
 """,
     ),
@@ -491,7 +491,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
         tmux_name="planner_rviz",
         description="Optional display command inside falcon container.",
         enabled_by_default=False,
-        command="docker exec -it falcon bash -lc 'roslaunch exploration_manager rviz.launch'",
+        command="docker exec -it falcon bash -lc 'export DISPLAY=:0 && roslaunch exploration_manager rviz.launch'",
     ),
     LaunchItem(
         name="16. BEV click goal UI",
@@ -499,7 +499,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
         tmux_name="planner_bev_goal",
         description="Optional click-goal command inside falcon container.",
         enabled_by_default=False,
-        command="docker exec -it falcon bash -lc 'rosrun falcon_adapter bev_click_goal.py'",
+        command="docker exec -it falcon bash -lc 'export DISPLAY=:0 && rosrun falcon_adapter bev_click_goal_node.py'",
     ),
 ]
 
