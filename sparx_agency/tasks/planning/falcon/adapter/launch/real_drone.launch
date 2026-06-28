@@ -25,8 +25,9 @@
     where FALCON's exploration_node reads them.
 
     Defaults match the xtend drone:
-      pose : /xtend/april_tag_pose (PoseStamped)
-      depth: /xtend/depth_m        (32FC1, 504x294)
+      pose : /xtend/localization        (PoseStamped)
+      depth: /xtend/depth_frame_path    (String "<path> <sec> <nsec>" -> .npy, 504x294)
+      rgb  : /xtend/rgb_frame_path      (String "<path> <sec> <nsec>" -> .jpg)
       K    : fx=322.635 fy=323.389 cx=242.065 cy=90.030
              (RAW/unrectified intrinsics from the 504x294 calibration.
               FALCON projects the RAW depth with NO undistortion, so the
@@ -44,11 +45,21 @@
   <arg name="gated_ns" default="/gated_drone" />
 
   <!-- ── Real-drone localization ──────────────────────────────── -->
-  <arg name="real_pose_topic" default="/xtend/april_tag_pose" />
+  <arg name="real_pose_topic" default="/xtend/localization" />
 <!--   <arg name="real_pose_topic" default="/flow_depth/pose_est" /> -->
   <arg name="real_pose_type"  default="pose_stamped" />
 
-  <!-- ── Real-drone depth ──────────────────────────────────────── -->
+  <!-- ── Real-drone depth / rgb (frame-path transport) ──────────────
+       The drone saves each frame to disk and publishes a tiny std_msgs/String
+       "<path> <sec> <nsec>"; mapping_sync (depth) and navdp_click (depth+rgb)
+       load the .npy / .jpg and reuse the localization-synchronized stamp. -->
+  <arg name="real_depth_path_topic" default="/xtend/depth_frame_path" />
+  <arg name="real_rgb_path_topic"   default="/xtend/rgb_frame_path" />
+  <!-- Legacy raw-depth Image topic. Kept ONLY as sensor_gate's input name; on the
+       real drone nothing publishes it anymore (depth now arrives as a frame-path),
+       so sensor_gate's depth path is inert here. mapping_sync is the sole voxel
+       feeder and loads depth from real_depth_path_topic, so this does not affect
+       the map. (sensor_gate's turning-freeze is disabled below for the same reason.) -->
   <arg name="real_depth_topic" default="/xtend/depth_m" />
 
   <!-- ── Camera intrinsics (xtend K-matrix defaults for 504x392) ──
@@ -87,8 +98,8 @@
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
        use_navdp:=true swaps astar_planner for navdp_click. It consumes the
-       same /xtend/rgb + /xtend/depth_m stream FALCON maps, so its intrinsics
-       inherit the cam_* (raw K) args above automatically — nothing to pass.
+       same /xtend/rgb_frame_path + /xtend/depth_frame_path frames FALCON maps, so
+       its intrinsics inherit the cam_* (raw K) args above automatically — nothing to pass.
        The overlay tracks the live pose altitude. Set
        navdp_camera_info_topic:=/xtend/camera_info to auto-sync intrinsics from
        the (bridged) camera_info (K; must describe the 504x294 stream) instead. -->
@@ -153,19 +164,17 @@
   </node>
 
   <node pkg="falcon_adapter" type="mapping_sync_node.py" name="mapping_sync" output="screen">
-    <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/april_tag_pose -->
-    <!-- RAW depth, NOT the sensor_gate output. mapping_sync is the SOLE voxel
+    <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/localization -->
+    <!-- Depth as a frame-path String: mapping_sync loads the .npy and rebuilds the
+         32FC1 Image at the message's capture stamp. mapping_sync is the SOLE voxel
          feeder here (falcon_adapter runs with publish_mapping_inputs=false) and
          owns the authoritative rotation freeze below, so it must see true capture
-         stamps: the raw /xtend/depth_m shares its stamp with /xtend/april_tag_pose
-         (which is stamped from the depth it was computed on), so they pair exactly.
-         Feeding the GATED depth instead would mix in sensor_gate's replay frames
-         (restamped to now()), which would pair a held pre-turn frame with the live
-         rotating pose and smear the map (the very thing the freeze prevents). -->
-    <param name="depth_topic"        value="$(arg real_depth_topic)" />              <!-- /xtend/depth_m -->
+         stamps: the frame-path stamp is the same capture time /xtend/localization
+         carries (both derived from the depth frame), so they pair exactly. -->
+    <param name="depth_topic"        value="$(arg real_depth_path_topic)" />         <!-- /xtend/depth_frame_path -->
     <param name="out_pose_topic"     value="/map_ros/pose" />
     <param name="out_depth_topic"    value="/map_ros/depth" />
-    <!-- Pairing tolerance. By design /xtend/depth_m and /xtend/april_tag_pose
+    <!-- Pairing tolerance. By design the depth frame-path and /xtend/localization
          carry the SAME capture stamp, so the ideal pair is an exact (dt==0) match.
          These windows are kept NON-zero on purpose: depth and AprilTag pose are
          independent consumers of the RGB stream running at DIFFERENT cadences
@@ -205,7 +214,11 @@
     <arg name="drone_ns"      value="$(arg drone_ns)" />
     <arg name="gated_ns"      value="$(arg gated_ns)" />
     <arg name="publish_mapping_inputs" value="$(arg publish_mapping_inputs)" />
+    <!-- sensor_gate's (now inert) raw-depth Image input name; see real_depth_topic. -->
     <arg name="depth_topic"   value="$(arg real_depth_topic)" />
+    <!-- Depth no longer reaches sensor_gate, so its depth-driven resume can't fire;
+         disable its turning-freeze (mapping_sync owns the authoritative freeze). -->
+    <arg name="sensor_gate_freeze_on_turning_mode" value="false" />
 
     <arg name="cam_fx"        value="$(arg cam_fx)" />
     <arg name="cam_fy"        value="$(arg cam_fy)" />
@@ -222,7 +235,9 @@
     <arg name="goal_y"        value="$(arg goal_y)" />
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
-    <arg name="navdp_depth_topic"       value="$(arg real_depth_topic)" />
+    <arg name="navdp_rgb_topic"         value="$(arg real_rgb_path_topic)" />
+    <arg name="navdp_depth_topic"       value="$(arg real_depth_path_topic)" />
+    <arg name="navdp_pose_topic"        value="$(arg real_pose_topic)" />
     <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
 
     <arg name="corrector"               value="$(arg corrector)" />
