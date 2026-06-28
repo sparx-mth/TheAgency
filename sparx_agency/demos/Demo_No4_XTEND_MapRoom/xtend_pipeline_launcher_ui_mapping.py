@@ -157,7 +157,7 @@ python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_nod
   -p depth_path_topic:=/xtend/depth_frame_path \
   -p depth_dir:=/tmp/xtend_depth \
   -p max_depth_kept:=300 \
-  -p publish_cloud:=true \
+  -p publish_cloud:=false \
   -p pointcloud_topic:=/xtend/pointcloud
 '
 
@@ -194,7 +194,7 @@ sleep 30
 
 echo "[AUTO] Re-check depth + pointcloud before mapping"
 wait_for_topic_rate /xtend/depth_m 30 best_effort
-wait_for_topic_rate /xtend/pointcloud 30 best_effort
+# wait_for_topic_rate /xtend/pointcloud 30 best_effort
 
 echo "[AUTO] Step 6: start localization node (AprilTag provider)"
 start_tmux xtend_apriltag '
@@ -330,7 +330,7 @@ python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_nod
   -p depth_path_topic:=/xtend/depth_frame_path \
   -p depth_dir:=/tmp/xtend_depth \
   -p max_depth_kept:=300 \
-  -p publish_cloud:=true \
+  -p publish_cloud:=false \
   -p pointcloud_topic:=/xtend/pointcloud
 """,
     ),

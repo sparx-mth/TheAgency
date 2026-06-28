@@ -62,7 +62,7 @@ class DepthProcessorNode(Node):
         self.declare_parameter("depth_path_topic", "/xtend/depth_frame_path")
         self.declare_parameter("depth_dir", "/tmp/xtend_depth")
         self.declare_parameter("max_depth_kept", 30)
-        self.declare_parameter("publish_depth_ros", True)
+        self.declare_parameter("publish_depth_ros", False)
         # self.declare_parameter("debug_topic", "/xtend/depth_vis")
 
         self.declare_parameter("publish_debug", False)
@@ -142,13 +142,13 @@ class DepthProcessorNode(Node):
         self.pub_depth_path: "rclpy.publisher.Publisher | None" = None
         if self.depth_path_topic:
             self.depth_dir.mkdir(parents=True, exist_ok=True)
-            for f in self.depth_dir.glob("depth_*.npy"):
+            removed = sum(1 for f in self.depth_dir.glob("*.npy") if f.unlink(missing_ok=True) is None)
+            for f in self.depth_dir.glob("*.tmp"):
                 f.unlink(missing_ok=True)
-            for f in self.depth_dir.glob("depth_*.tmp"):
-                f.unlink(missing_ok=True)
+            if removed:
+                self.get_logger().info(f"[depth_dir] cleared {removed} stale .npy file(s)")
             self.pub_depth_path = self.create_publisher(String, self.depth_path_topic, 10)
             self.get_logger().info(f"Depth dir publisher: {self.depth_dir} -> {self.depth_path_topic}")
-        # self.pub_debug = self.create_publisher(Image, self.debug_topic, image_qos)
 
         if self.frame_path_topic:
             self.create_subscription(
@@ -461,7 +461,7 @@ class DepthProcessorNode(Node):
                 tmp_path.write_bytes(buf.getvalue())
                 tmp_path.rename(final_path)
                 if self.max_depth_kept > 0:
-                    existing = sorted(self.depth_dir.glob("*.npy"))
+                    existing = sorted(self.depth_dir.glob("*.npy"), key=lambda p: p.stat().st_mtime)
                     for old in existing[: max(0, len(existing) - self.max_depth_kept)]:
                         old.unlink(missing_ok=True)
                 path_msg = String()
