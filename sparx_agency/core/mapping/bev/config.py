@@ -41,9 +41,18 @@ class BevConfig:
         voxel_size_m: Z-layer thickness; defaults to resolution_m.
 
     Occupancy decision (stage 1):
-        occ_weight_thresh: Min weighted column mass for OCC.
-        min_occ_voxels: Min raw occupied-voxel count for OCC.
+        occ_weight_thresh: Min weighted column mass to be an OCC *candidate*.
+        min_occ_voxels: Min raw occupied-voxel count for an OCC candidate.
         min_free_voxels: Min free-voxel count for a cell to read FREE.
+        occ_conf_full: Weighted column mass at which a single frame counts as a
+            full-confidence (conf == 1) occupied observation. Per-frame
+            confidence is occ_w / occ_conf_full clipped to [0, 1]; it scales how
+            fast a candidate accrues temporal evidence (stage 5). A marginal
+            column (mass just over occ_weight_thresh) -- the typical monocular
+            speckle in a corridor opening -- accrues slowly and needs many
+            frames, while a solid wall accrues ~t_inc/frame and confirms in
+            ~t_on/t_inc frames. Raise it to be stricter (slower to trust),
+            lower it (toward occ_weight_thresh) to trust faster.
 
     3D neighbour confirm (stage 2):
         confirm_3d: Drop occupied voxels with too few occupied neighbours.
@@ -61,13 +70,25 @@ class BevConfig:
         wall_fill_neighbors: (count mode) occupied 8-neighbours to fill.
         wall_fill_iters: Max bridge width; keep small (1-2).
 
-    Temporal hysteresis (stage 5, optional, STATEFUL):
-        temporal_filter: Smooth occupancy over frames. FALCON already fuses in
-            time, so this is usually off; on, it makes BevProjector stateful.
-        t_inc, t_dec: Per-frame evidence added for OCC / removed for FREE.
+    Temporal confirmation (stage 5, STATEFUL, ON by default):
+        temporal_filter: Require a cell to be observed occupied with enough
+            confidence across MULTIPLE frames before it is published OCCUPIED.
+            FALCON fuses in time, but its monocular-depth speckle still leaks
+            single-frame false positives into corridor openings the camera is
+            not pointed straight at; this stage rejects them. When on (the
+            default) BevProjector is stateful (holds a per-cell evidence map).
+            Set it off for a pure single-frame projection -- e.g. a unit test
+            that asserts on the result of one project() call.
+        t_inc: Per-frame evidence scale. The increment on a candidate cell is
+            t_inc * confidence (see occ_conf_full), so weak/marginal columns add
+            little and solid walls add ~t_inc.
+        t_dec: Per-frame evidence removed from a cell observed FREE -- lets a
+            wrongly-filled opening recover within a frame or two once it is
+            actually seen to be open.
         t_max: Evidence saturation ceiling.
-        t_on, t_off: Schmitt thresholds; a cell turns OCC at >=t_on and only
-            clears below <=t_off.
+        t_on, t_off: Schmitt thresholds. A cell turns OCC once evidence reaches
+            >= t_on (roughly t_on / t_inc confident frames) and only clears once
+            it falls <= t_off. Keep t_on <= t_max or cells can never confirm.
     """
 
     # geometry / IO
@@ -91,6 +112,7 @@ class BevConfig:
     occ_weight_thresh: float = 1.2
     min_occ_voxels: int = 2
     min_free_voxels: int = 1
+    occ_conf_full: float = 3.0
 
     # 3D neighbour confirm
     confirm_3d: bool = True
@@ -108,8 +130,8 @@ class BevConfig:
     wall_fill_neighbors: int = 5
     wall_fill_iters: int = 1
 
-    # temporal hysteresis (optional, stateful)
-    temporal_filter: bool = False
+    # temporal confirmation (multi-frame; stateful)
+    temporal_filter: bool = True
     t_inc: float = 1.0
     t_dec: float = 1.0
     t_max: float = 5.0
@@ -119,7 +141,7 @@ class BevConfig:
     def __post_init__(self) -> None:
         for name in ("resolution_m", "x_min", "x_max", "y_min", "y_max",
                      "z_floor", "z_ceil", "z_peak", "weight_sigma",
-                     "occ_weight_thresh", "door_band_m",
+                     "occ_weight_thresh", "occ_conf_full", "door_band_m",
                      "t_inc", "t_dec", "t_max", "t_on", "t_off"):
             _assert_finite(f"BevConfig.{name}", float(getattr(self, name)))
 
@@ -139,6 +161,11 @@ class BevConfig:
             raise ValueError(f"neighbors_3d must be one of {_CONN}")
         if self.occ_dilate_cells < 0:
             raise ValueError("occ_dilate_cells must be >= 0")
+        if self.occ_conf_full <= self.occ_weight_thresh:
+            raise ValueError(
+                f"occ_conf_full must be > occ_weight_thresh, got "
+                f"occ_conf_full={self.occ_conf_full}, "
+                f"occ_weight_thresh={self.occ_weight_thresh}")
 
         if self.voxel_size_m is None:
             self.voxel_size_m = self.resolution_m
@@ -148,6 +175,12 @@ class BevConfig:
         if self.temporal_filter:
             if self.t_max <= 0:
                 raise ValueError(f"t_max must be > 0, got {self.t_max}")
+            if self.t_inc <= 0:
+                raise ValueError(f"t_inc must be > 0, got {self.t_inc}")
             if self.t_on < self.t_off:
                 raise ValueError(f"t_on must be >= t_off, got "
                                  f"[{self.t_off},{self.t_on}]")
+            if self.t_on > self.t_max:
+                raise ValueError(f"t_on must be <= t_max or no cell can ever "
+                                 f"confirm, got t_on={self.t_on}, "
+                                 f"t_max={self.t_max}")

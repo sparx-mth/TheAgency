@@ -17,8 +17,16 @@ Main Components:
       vicinity. Provides a hard safety gate separate from trajectory validation.
       See `emergency_stop` module.
 
+    - **TrajectorySafetyCorrector**: Nudges a planned BEV trajectory away from
+      walls (and toward corridor centres) using a repulsive potential field.
+      Corrects only the waypoints inside the observed map. See
+      `trajectory_safety_corrector` module.
+
 Classes:
-    TrajectorySafetyChecker: Main trajectory validation class.
+    TrajectorySafetyChecker: Main trajectory validation class (lazily imported;
+        pulls in skimage/scipy via the map-collision adapters).
+    PotentialFieldSampler: Bilinear world-coordinate sampler over a repulsive field.
+    TrajectorySafetyCorrector: Potential-field trajectory recentring/correction.
 
 Enums:
     SafetyStatus: Outcome of a safety check (CLEAR, BLOCKED, UNKNOWN, OUT_OF_BOUNDS).
@@ -27,6 +35,8 @@ Enums:
 Dataclasses:
     TrajectorySafetyParams: Configuration for trajectory safety checking.
     SafetyCheckResult: Result container for safety checks.
+    TrajectoryCorrectionParams: Tuning for the potential-field trajectory corrector.
+    TrajectoryCorrectionResult: Result container for trajectory correction.
 
 Example:
     Basic trajectory safety checking::
@@ -100,8 +110,27 @@ from .types import (
     UnknownPolicy,
     TrajectorySafetyParams,
     SafetyCheckResult,
+    TrajectoryCorrectionParams,
+    TrajectoryCorrectionResult,
 )
-from .trajectory_checker import TrajectorySafetyChecker
+from .potential_field_sampler import PotentialFieldSampler
+from .trajectory_safety_corrector import TrajectorySafetyCorrector
+
+# `TrajectorySafetyChecker` pulls in the map-collision adapters (skimage/scipy)
+# at import time. The corrector and sampler are deliberately numpy-only so the
+# FALCON Noetic (Python 3.8, skimage-free) adapter can import them; loading the
+# checker eagerly here would defeat that. Expose it lazily (PEP 562) so it is
+# imported only when first accessed, keeping the corrector path numpy-only.
+_LAZY = {"TrajectorySafetyChecker": ".trajectory_checker"}
+
+
+def __getattr__(name):
+    if name in _LAZY:
+        import importlib
+        module = importlib.import_module(_LAZY[name], __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "SafetyStatus",
@@ -109,4 +138,8 @@ __all__ = [
     "TrajectorySafetyParams",
     "SafetyCheckResult",
     "TrajectorySafetyChecker",
+    "TrajectoryCorrectionParams",
+    "TrajectoryCorrectionResult",
+    "PotentialFieldSampler",
+    "TrajectorySafetyCorrector",
 ]

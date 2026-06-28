@@ -14,9 +14,11 @@ mid-flight. `bridge.yaml` pins `reliability: best_effort` on the sensor streams
 to fix that.
 
 The bridged topics are exactly the ones the FALCON adapters consume/produce
-(`/xtend/depth_m`, `/xtend/rgb`, `/flow_depth/pose_est`, `/xtend/april_tag_pose_1`,
+(`/xtend/depth_frame_path`, `/xtend/rgb_frame_path`, `/xtend/localization`,
 `/cmd_vel`, `/xtend/demo_mode`, …) — see `bridge.yaml` and the adapter nodes in
-`../adapter/scripts/`.
+`../adapter/scripts/`. Depth/RGB are no longer raw Images: the drone writes each
+frame to disk and bridges a tiny `std_msgs/String` "<path> <sec> <nsec>" the
+consumers load, which removes the per-frame image serialization cost.
 
 ## Files
 

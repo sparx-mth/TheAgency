@@ -8,18 +8,25 @@ those voxels into an OccupancyGrid-valued 2D grid the planner can use, while
 rejecting the monocular-depth speckle that FALCON's threshold lets through.
 
 Pipeline (each stage is gated by BevConfig; disable one to isolate it):
-  1. column projection   height-weighted occupied mass per (x,y) column
-  2. 3D neighbour confirm drop isolated occupied voxels (floaters)
-  3. door protection      keep openings free where the flight band is clear
-  4. wall completion      bridge one-cell gaps in continuous walls
-  5. temporal hysteresis  optional Schmitt filter over frames (off by default)
-  6. compose              OCC > FREE > UNK, then stamp caller `force_occ` cells
-  7. dilate               optional safety inflation (force_occ cells seed it too)
+  1. column projection    height-weighted occupied mass per (x,y) column
+  2. 3D neighbour confirm  drop isolated occupied voxels (floaters)
+  3. door protection       keep openings free where the flight band is clear
+  4. temporal confirm      require a candidate to be seen occupied, with enough
+                           confidence, over MULTIPLE frames before it is OCC
+                           (ON by default; this rejects the view-dependent
+                           monocular speckle that leaks into corridor openings)
+  5. wall completion       bridge one-cell gaps in CONFIRMED walls
+  6. compose               OCC > FREE > UNK, then stamp caller `force_occ` cells
+  7. dilate                optional safety inflation (force_occ cells seed it too)
 
 Output matches the costmap convention: (GridSpec, int8 (H,W)) with values
-{UNKNOWN:-1, FREE:0, OCCUPIED:100}. The projector is STATELESS across calls
-EXCEPT when cfg.temporal_filter is on, in which case it holds the small
-per-cell evidence accumulator -- FALCON otherwise owns the temporal fusion.
+{UNKNOWN:-1, FREE:0, OCCUPIED:100}. With cfg.temporal_filter (the default) the
+projector is STATEFUL: it holds a small per-cell evidence accumulator so a cell
+must be seen occupied, with enough confidence, over several frames before it is
+published OCCUPIED -- FALCON's in-time fusion is not enough to stop its
+monocular speckle from filling openings the camera isn't aimed at. Set
+cfg.temporal_filter=False for a pure single-frame projection (each project()
+call then stands alone).
 
 `force_occ` lets the caller stamp hard, env-specific obstacles (manual walls,
 a virtual back-wall from /map_config) as OCCUPIED after compose and before
@@ -46,7 +53,7 @@ UNKNOWN, FREE, OCCUPIED = -1, 0, 100
 
 
 class BevProjector:
-    """Stateless 3D-voxel -> 2D-occupancy projector."""
+    """3D-voxel -> 2D-occupancy projector (stateful when temporal_filter)."""
 
     def __init__(self, cfg: BevConfig):
         self.cfg = cfg
@@ -99,19 +106,34 @@ class BevProjector:
                          & (occ_band <= cfg.door_occ_tol))
             base_occ &= ~protected
 
-        # 5) wall completion (fill UNKNOWN gaps only, never free/openings)
+        # 5) temporal confirmation (stateful, ON by default). A candidate cell
+        #    only becomes OCCUPIED after it has been observed occupied, with
+        #    enough confidence, across MULTIPLE frames -- this is what rejects
+        #    the monocular-depth speckle FALCON leaks into corridor openings the
+        #    camera is not aimed straight at. Per-frame confidence is
+        #    occ_w / occ_conf_full in [0,1]: a marginal column (mass just over
+        #    occ_weight_thresh) adds little evidence and needs many frames, a
+        #    solid wall adds ~t_inc and confirms in ~t_on/t_inc frames. A Schmitt
+        #    trigger (t_on/t_off) stops flicker; cells seen FREE bleed evidence
+        #    (t_dec) so a wrongly-filled opening recovers once it's actually
+        #    observed open. With temporal_filter off this is a no-op passthrough.
+        if cfg.temporal_filter:
+            conf = np.clip(occ_w / cfg.occ_conf_full, 0.0, 1.0) * base_occ
+            self._ev += cfg.t_inc * conf - cfg.t_dec * (observed_free & ~base_occ)
+            np.clip(self._ev, 0.0, cfg.t_max, out=self._ev)
+            self._occ_state = ((self._occ_state & (self._ev > cfg.t_off))
+                               | (self._ev >= cfg.t_on))
+            confirmed = self._occ_state.copy()
+        else:
+            confirmed = base_occ
+        n_pending = int((base_occ & ~confirmed).sum())
+
+        # 6) wall completion: bridge one-cell gaps in CONFIRMED walls only,
+        #    never over observed-free cells or protected openings.
         occ, n_fill = morph.bridge_fill(
-            base_occ, observed_free | protected,
+            confirmed, observed_free | protected,
             mode=cfg.wall_fill_mode, n_neighbors=cfg.wall_fill_neighbors,
             iters=cfg.wall_fill_iters)
-
-        # 6) temporal hysteresis (optional, stateful): Schmitt filter on occ
-        if cfg.temporal_filter:
-            self._ev += cfg.t_inc * occ - cfg.t_dec * (observed_free & ~occ)
-            np.clip(self._ev, 0.0, cfg.t_max, out=self._ev)
-            self._occ_state = ((self._occ_state & ~(self._ev <= cfg.t_off))
-                               | (self._ev >= cfg.t_on))
-            occ = self._occ_state.copy()
 
         # 7) compose label grid (OCC > FREE > UNK), keep openings free,
         #    then stamp caller-forced obstacles (manual/back walls) as OCC
@@ -129,7 +151,7 @@ class BevProjector:
             grid[new] = OCCUPIED
 
         self.last_stats = dict(
-            raw=n_raw, confirmed=n_conf, fill=n_fill,
+            raw=n_raw, confirmed=n_conf, fill=n_fill, pending=n_pending,
             occ=int((grid == OCCUPIED).sum()),
             free=int((grid == FREE).sum()),
             unknown=int((grid == UNKNOWN).sum()),

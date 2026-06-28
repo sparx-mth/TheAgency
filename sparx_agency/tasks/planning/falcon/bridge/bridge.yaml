@@ -8,8 +8,13 @@ topics:
       reliability: best_effort     # confirm with `ros2 topic info -v /xtend/camera_info`
       durability: volatile
 
-  - topic: /xtend/depth_m
-    type: sensor_msgs/msg/Image
+  # Depth/RGB are no longer bridged as raw Images. The drone saves each
+  # frame to disk and publishes a tiny std_msgs/String "<path> <sec> <nsec>"
+  # instead; the ROS1 consumers (mapping_sync, navdp_click) load the .npy /
+  # .jpg from the path and reuse the (localization-synchronized) stamp. This
+  # cuts the per-frame serialization/network cost of the image transport.
+  - topic: /xtend/depth_frame_path
+    type: std_msgs/msg/String
     queue_size: 1
     qos:
       history: keep_last
@@ -19,15 +24,15 @@ topics:
       reliability: best_effort
       durability: volatile
 
-  - topic: /xtend/rgb
-    type: sensor_msgs/msg/Image
+  - topic: /xtend/rgb_frame_path
+    type: std_msgs/msg/String
     queue_size: 1
     qos:
       history: keep_last
       depth: 1
-      # Same QoS as /xtend/depth_m — RGB is a high-rate sensor stream
-      # from the same camera, drops are fine. If `ros2 topic info -v
-      # /xtend/rgb` shows the publisher as reliable, flip this to
+      # Same QoS as /xtend/depth_frame_path — a high-rate sensor stream from
+      # the same camera, drops are fine. If `ros2 topic info -v
+      # /xtend/rgb_frame_path` shows the publisher as reliable, flip this to
       # reliable (mismatch = no data flows, same trap as depth).
       reliability: best_effort
       durability: volatile
@@ -53,7 +58,7 @@ topics:
 #      reliability: best_effort
 #      durability: volatile
 
-  - topic: /xtend/april_tag_pose
+  - topic: /xtend/localization
     type: geometry_msgs/msg/PoseStamped
     queue_size: 10
     qos:

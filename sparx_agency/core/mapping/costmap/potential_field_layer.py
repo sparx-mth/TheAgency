@@ -1,3 +1,9 @@
+# ``from __future__ import annotations`` keeps the ``tuple[...]`` return
+# annotations from being evaluated at import time, so this module is importable
+# under Python 3.8 — the FALCON Noetic adapter imports it to build the repulsive
+# field that feeds TrajectorySafetyCorrector (see CLAUDE.md: core must stay 3.8).
+from __future__ import annotations
+
 import numpy as np
 
 try:

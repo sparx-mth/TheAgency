@@ -4,10 +4,18 @@
 A drop-in REPLACEMENT for ``astar_planner_node.py``. Instead of A* searching the
 BEV grid to a clicked map goal, this node lets the operator click a pixel in the
 live camera image; it asks the NavDP point-goal policy for a trajectory and
-publishes that trajectory as a world-frame ``nav_msgs/Path`` on the SAME topic
-the A* planner used (``/path/waypoints``). Everything downstream is unchanged:
-``waypoint_follower_node`` flies the path and ``bev_click_goal_node`` draws it on
-the BEV map.
+publishes that trajectory as a world-frame ``nav_msgs/Path``.
+
+Like A*, it publishes its RAW trajectory on its own planner topic
+(``~path_topic`` = ``/path/waypoints_navdp``), not directly on ``/path/waypoints``.
+This lets the same planner-agnostic ``path_corrector_node`` recentre the NavDP
+path off walls against the BEV (point its ``~input_path_topic`` at
+``/path/waypoints_navdp``) and republish the corrected, flown path on
+``/path/waypoints``. To fly NavDP UNcorrected, point the corrector's input
+elsewhere (or set its ``enabled:=false``, which passes the input through), or
+point ``~path_topic`` here straight at ``/path/waypoints``. Everything downstream
+(``waypoint_follower_node`` flying ``/path/waypoints``, ``bev_click_goal_node``
+drawing it) is unchanged.
 
 All the maths is ROS-free and unit-tested in ``core.planning.navdp``:
   * pixel + depth -> body-frame point-goal      (geometry.pixel_to_pointgoal)
@@ -32,9 +40,15 @@ No new inference runs until the next ENTER, so the follower keeps flying the las
 published path until then -- exactly the "click once, follow until I click again"
 behaviour.
 
+RGB and depth arrive as frame-path messages (``std_msgs/String`` of the form
+"<path> <sec> <nsec>"): this node loads the ``.jpg`` and ``.npy`` from disk rather
+than receiving raw images over ROS, cutting serialization/network cost. The
+parsed paths point at the SAME frames FALCON's mapping uses; only the transport
+differs.
+
 IMPORTANT -- intrinsics must match the RGB/depth stream NavDP receives. NavDP
-consumes the SAME ``/xtend/rgb`` + ``/xtend/depth_m`` stream FALCON's voxel
-mapping does, so it uses the SAME intrinsics (the launch wires ``~fx ~fy ~cx ~cy``
+consumes the SAME ``/xtend/rgb_frame_path`` + ``/xtend/depth_frame_path`` frames
+FALCON's voxel mapping does, so it uses the SAME intrinsics (the launch wires ``~fx ~fy ~cx ~cy``
 to the shared ``cam_*`` args). On the real XTEND that stream is the RAW,
 unrectified depth at 504x294, so the correct focals are the ``camera_matrix`` (K)
 values -- the ``~fx ~fy ~cx ~cy`` defaults below -- NOT the rectified
@@ -44,7 +58,7 @@ resamples the stream to its P-target intrinsics, so the launch's ``cam_*`` (and
 hence these) become those instead -- the rule is simply "match the live stream".
 Point this at a different camera by passing the matching ``~fx ~fy ~cx ~cy
 ~img_width ~img_height`` (or a ``~camera_info_topic``). Because the click pixel
-indexes the depth array directly, ``/xtend/rgb`` and ``/xtend/depth_m`` MUST share
+indexes the depth array directly, the loaded RGB and depth frames MUST share
 one resolution -- the node fails loud at startup if they do not.
 
 Run:
@@ -59,8 +73,10 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import Path
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo
+from std_msgs.msg import String
 
+from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics
 from sparx_agency.core.planning.navdp import (
@@ -86,24 +102,43 @@ class NavDPClickNode:
         G = rospy.get_param
 
         self.drone_ns = G("~drone_ns", "")
-        self.rgb_topic = G("~rgb_topic", "/xtend/rgb")
-        self.depth_topic = G("~depth_topic", "/xtend/depth_m")
-        self.pose_topic = G("~pose_topic", "/xtend/april_tag_pose")
+        self.rgb_topic = G("~rgb_topic", "/xtend/rgb_frame_path")
+        self.depth_topic = G("~depth_topic", "/xtend/depth_frame_path")
+        self.pose_topic = G("~pose_topic", "/xtend/localization")
         # Message type on ~pose_topic: "pose_stamped" (geometry_msgs/PoseStamped)
         # or "pose" (geometry_msgs/Pose). The default localization
-        # /xtend/april_tag_pose is a PoseStamped -- present in bag playback, on the
+        # /xtend/localization is a PoseStamped -- present in bag playback, on the
         # real drone, and from sim_adapter -- so the default is pose_stamped. Point
         # this at the bare /gt_pose (pose_type:=pose) when running inside the nav
         # stack. Mirrors pose_adapter's ~in_type and real_drone's real_pose_type.
         self.pose_type = G("~pose_type", "pose_stamped")
         self.camera_info_topic = G("~camera_info_topic", "")  # "" -> use params
 
-        # Output: world-frame path on the SAME topic the A* planner published,
-        # so the existing waypoint_follower consumes it unchanged.
-        self.path_topic = G("~path_topic", "/path/waypoints")
+        # Output: world-frame raw NavDP path on its own planner topic, mirroring
+        # A* on /path/waypoints_astar. The path_corrector recentres it against the
+        # BEV and republishes /path/waypoints (the flown topic). Point this straight
+        # at /path/waypoints to fly NavDP uncorrected.
+        self.path_topic = G("~path_topic", "/path/waypoints_navdp")
+        # Execute only the first fraction of the trajectory: NavDP is accurate near
+        # the camera and drifts further out, so we fly only the near part and re-
+        # infer (next ENTER) before going further. The EXECUTED prefix goes on
+        # path_topic (-> corrector -> follower, which holds at its last waypoint, so
+        # the drone stops there until the next inference); the FULL trajectory is
+        # published on full_path_topic for display only. 1.0 = execute the whole
+        # trajectory (legacy behaviour).
+        self.execute_fraction = float(G("~execute_fraction", 1.0))
+        self.full_path_topic = G("~full_path_topic", "/path/waypoints_navdp_full")
         self.frame_id = G("~frame_id", "world")
 
-        # Camera intrinsics matching the /xtend/depth_m stream NavDP indexes.
+        # Window layout. "full" = RGB + colorized depth + snapshot/overlay panels
+        # (the legacy 3-up view). "rgb_only" = just the live RGB panel to click on,
+        # for performance and a clean view (no depth colorize, no overlay render).
+        self.display_mode = G("~display_mode", "full")
+        if self.display_mode not in ("full", "rgb_only"):
+            raise ValueError("~display_mode must be 'full' or 'rgb_only', got %r"
+                             % self.display_mode)
+
+        # Camera intrinsics matching the depth frames NavDP indexes.
         # Defaults are the real-XTEND RAW K-matrix at 504x294 (the same values
         # real_drone.launch hands FALCON). The launch overrides them with the
         # shared cam_* args -- raw K on the real drone, sim_adapter's P-target in
@@ -117,13 +152,15 @@ class NavDPClickNode:
             cx=float(G("~cx", 242.06479658679714)),
             cy=float(G("~cy", 90.03019076680604)))
 
-        # Client-side overlay camera height (3rd panel only). The trajectory
-        # projects onto the true floor when this equals the drone's altitude, so
-        # the default <= 0 tracks the live pose altitude. Set a fixed positive
-        # value (e.g. 0.5, NavDP's ~ground-robot training height) to pin the
-        # render and keep more near waypoints in-frame at the cost of floor
-        # alignment.
-        self.render_cam_height = float(G("~render_cam_height", 0.0))
+        # Client-side overlay camera height (snapshot panel only). The trajectory
+        # projects onto the true floor when this equals the drone's altitude, but
+        # at the ~1 m flight height the dense near waypoints project BELOW the image
+        # and vanish. So the default is a fixed 0.5 m (NavDP's ~ground-robot
+        # training height): it keeps the near part of the route in-frame (the
+        # overlay's purpose) at the cost of exact floor alignment. Set <= 0 to track
+        # the live altitude instead, or lower (e.g. 0.3) to pull in even more near
+        # waypoints. Overlay-only -- the flown/BEV path is unaffected by this.
+        self.render_cam_height = float(G("~render_cam_height", 0.5))
 
         # Kept so the depth panel can be colorized to exactly what NavDP receives
         # (the client clips depth to this before encoding).
@@ -145,8 +182,8 @@ class NavDPClickNode:
         self._got_cam_info = False
         self._reset_done = False                            # latch intrinsics after
 
-        rospy.Subscriber(self.rgb_topic, Image, self._rgb_cb, queue_size=2)
-        rospy.Subscriber(self.depth_topic, Image, self._depth_cb, queue_size=2)
+        rospy.Subscriber(self.rgb_topic, String, self._rgb_cb, queue_size=2)
+        rospy.Subscriber(self.depth_topic, String, self._depth_cb, queue_size=2)
         if self.pose_type == "pose_stamped":
             rospy.Subscriber(self.pose_topic, PoseStamped,
                              self._pose_stamped_cb, queue_size=10)
@@ -161,29 +198,41 @@ class NavDPClickNode:
 
         self.pub_path = rospy.Publisher(self.path_topic, Path,
                                         queue_size=1, latch=True)
+        # Full (un-truncated) trajectory for display only -- the BEV viewer draws it
+        # so the operator sees the whole NavDP route while only the near part flies.
+        self.pub_full = rospy.Publisher(self.full_path_topic, Path,
+                                        queue_size=1, latch=True)
         self.n_published = 0
         self._banner()
 
-    # ─── Subscribers ─────────────────────────────────────────────
+    # ─── Subscribers (frame-path String: load the file from disk) ────────────
     def _rgb_cb(self, msg):
-        arr = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)
-        if msg.encoding == "bgr8":
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-        self.rgb = arr.copy()
+        # "<path> <sec> <nsec>" -> load the .jpg. cv2 reads BGR; NavDP wants RGB.
+        # A malformed message or unreadable file keeps the last frame (counted by
+        # the throttled warn) rather than clearing the live view.
+        try:
+            path = parse_frame_path_message(msg.data).path
+            bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise OSError("cv2.imread returned None for %s" % path)
+        except (ValueError, OSError) as e:
+            rospy.logwarn_throttle(5.0, "navdp_click: dropping RGB frame-path (%s)", e)
+            return
+        self.rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
     def _depth_cb(self, msg):
-        if msg.encoding == "32FC1":
-            self.depth = np.frombuffer(msg.data, np.float32).reshape(
-                msg.height, msg.width).copy()
-        elif msg.encoding == "16UC1":
-            self.depth = (np.frombuffer(msg.data, np.uint16).reshape(
-                msg.height, msg.width).astype(np.float32) / 1000.0)
-        else:
-            # Warn loudly so the operator sees WHY "Waiting for RGB + depth"
-            # never clears, instead of silently dropping the frame.
-            rospy.logwarn_throttle(5.0, "navdp_click: unsupported depth encoding "
-                                   "%r (need 32FC1 or 16UC1); ignoring frame",
-                                   msg.encoding)
+        # "<path> <sec> <nsec>" -> load the .npy (HxW float32 meters). Keep the
+        # last good frame on a bad message/file instead of clearing the view.
+        try:
+            path = parse_frame_path_message(msg.data).path
+            arr = np.squeeze(np.load(path))
+            if arr.ndim != 2:
+                raise ValueError("depth %s has shape %r; expected HxW"
+                                 % (path, arr.shape))
+        except (ValueError, OSError) as e:
+            rospy.logwarn_throttle(5.0, "navdp_click: dropping depth frame-path (%s)", e)
+            return
+        self.depth = np.ascontiguousarray(arr, dtype=np.float32)
 
     def _pose_cb(self, msg):
         yaw = se3.yaw_from_quaternion((msg.orientation.x, msg.orientation.y,
@@ -197,8 +246,8 @@ class NavDPClickNode:
     def _cam_info_cb(self, msg):
         # ROS1 sensor_msgs/CameraInfo exposes UPPERCASE fields (K, P, R, D); ROS2
         # lowercases them. This node is rospy, so use K/P. Prefer the RAW 3x3
-        # camera matrix K (fx=K[0] fy=K[4] cx=K[2] cy=K[5]): /xtend/depth_m is the
-        # raw, unrectified depth, so K -- not the rectified projection matrix P --
+        # camera matrix K (fx=K[0] fy=K[4] cx=K[2] cy=K[5]): the loaded depth is
+        # raw, unrectified, so K -- not the rectified projection matrix P --
         # back-projects it correctly (P over-scales metric distances; see the
         # K-vs-P note in real_drone.launch). Fall back to P (fx=P[0] fy=P[5]
         # cx=P[2] cy=P[6]) only if K is absent. The published info MUST describe
@@ -222,7 +271,9 @@ class NavDPClickNode:
     def infer_and_publish(self, rgb, depth, pose_xyyaw, px, py):
         """Run one NavDP step for click ``(px, py)`` and publish the world path.
 
-        Returns the body-frame trajectory ``(T, >=2)`` for the overlay, or None.
+        Publishes the EXECUTED near prefix on ``path_topic`` (-> corrector ->
+        follower) and the FULL trajectory on ``full_path_topic`` (display only).
+        Returns the full body-frame trajectory ``(T, >=2)`` for the overlay, or None.
         """
         gx, gy, d, bz = pixel_to_pointgoal(px, py, depth, self.intr)
         side = "left" if gy > 0 else "right"
@@ -243,18 +294,27 @@ class NavDPClickNode:
             return None
 
         ox, oy, oyaw = pose_xyyaw
-        world_xy = anchor_trajectory_to_world(traj, ox, oy, oyaw)
-        self._publish_path(world_xy)
+        full_world = anchor_trajectory_to_world(traj, ox, oy, oyaw)
+        n = len(full_world)
+        # Execute only the near prefix (NavDP drifts further out); display the rest.
+        # max(2, ...) keeps a flyable path; the follower holds at its last waypoint,
+        # so the drone stops at the prefix end until the next ENTER re-infers.
+        k = n if self.execute_fraction >= 1.0 else min(n, max(2, int(round(n * self.execute_fraction))))
+        stamp = rospy.Time.now()
+        self.pub_path.publish(self._make_path(full_world[:k], stamp))   # flown prefix
+        self.pub_full.publish(self._make_path(full_world, stamp))       # display full
+        self.n_published += 1
         end = traj[-1]
-        rospy.loginfo("NavDP path PUBLISHED: %d waypoints  body_end=(%.2f, %.2f)  "
-                      "anchored@(%.2f, %.2f, %.0fdeg)", len(world_xy),
-                      float(end[0]), float(end[1]), ox, oy, np.degrees(oyaw))
+        rospy.loginfo("NavDP PUBLISHED: execute %d/%d waypoints (full route on %s)  "
+                      "body_end=(%.2f, %.2f)  anchored@(%.2f, %.2f, %.0fdeg)",
+                      k, n, self.full_path_topic, float(end[0]), float(end[1]),
+                      ox, oy, np.degrees(oyaw))
         return traj
 
-    def _publish_path(self, world_xy):
-        """Publish a latched world-frame ``nav_msgs/Path`` (follower input)."""
+    def _make_path(self, world_xy, stamp):
+        """Build a latched world-frame ``nav_msgs/Path`` from ``(x, y)`` pairs."""
         m = Path()
-        m.header.stamp = rospy.Time.now()
+        m.header.stamp = stamp
         m.header.frame_id = self.frame_id
         for wx, wy in world_xy:
             ps = PoseStamped()
@@ -263,8 +323,7 @@ class NavDPClickNode:
             ps.pose.position.y = float(wy)
             ps.pose.orientation.w = 1.0   # identity; follower derives heading
             m.poses.append(ps)
-        self.pub_path.publish(m)
-        self.n_published += 1
+        return m
 
     # ─── Rendering ───────────────────────────────────────────────
     def _draw_live(self, rgb, depth):
@@ -369,14 +428,19 @@ class NavDPClickNode:
                 continue
 
             live = self._draw_live(rgb, depth)
-            depth_vis, depth_status = self._draw_depth(depth)
-            third = (snap_vis if snap_vis is not None
-                     else self._placeholder(live))
-            top = np.hstack([live, depth_vis, third])
+            default_status = ("ENTER=send  r=clear  q=quit  |  alt=%.2fm  published=%d"
+                              % (self.altitude, self.n_published))
+            if self.display_mode == "rgb_only":
+                # Just the clickable RGB panel -- no depth colorize, no overlay
+                # render (lighter; the route is still seen on the BEV viewer).
+                top, status = live, default_status
+            else:
+                depth_vis, depth_status = self._draw_depth(depth)
+                third = (snap_vis if snap_vis is not None
+                         else self._placeholder(live))
+                top = np.hstack([live, depth_vis, third])
+                status = depth_status or default_status
             bar = np.zeros((28, top.shape[1], 3), np.uint8)
-            status = (depth_status or
-                      "ENTER=send  r=clear  q=quit  |  alt=%.2fm  published=%d"
-                      % (self.altitude, self.n_published))
             cv2.putText(bar, status, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                         (220, 220, 220), 1)
             cv2.imshow(WINDOW, np.vstack([top, bar]))
@@ -410,6 +474,10 @@ class NavDPClickNode:
         px, py = self.click_px
         traj = self.infer_and_publish(snap_rgb, snap_depth, snap_pose, px, py)
         if traj is None:
+            return None
+        # rgb_only: skip the (costly) ground-plane overlay render -- there is no
+        # snapshot panel to show it; the route is seen on the BEV viewer instead.
+        if self.display_mode == "rgb_only":
             return None
         return self._draw_snapshot(snap_rgb, traj, px, py)
 
@@ -454,8 +522,14 @@ class NavDPClickNode:
         L("  depth in  = %s", self.depth_topic)
         L("  pose  in  = %s  (%s)", self.pose_topic, self.pose_type)
         L("  navdp     = %s", self.client.url)
-        L("  path  out = %s  (world frame, latched -> waypoint_follower)",
-          self.path_topic)
+        L("  path  out = %s  (executed prefix -> path_corrector)", self.path_topic)
+        L("  full  out = %s  (full route, display only)", self.full_path_topic)
+        if self.execute_fraction >= 1.0:
+            L("  execute   = whole trajectory")
+        else:
+            L("  execute   = first %.0f%% of the trajectory (hold at the prefix end "
+              "until the next ENTER)", 100.0 * self.execute_fraction)
+        L("  display   = %s", self.display_mode)
         L("  intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f  (%dx%d)",
           self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
           self.intr.width, self.intr.height)
@@ -482,16 +556,29 @@ if __name__ == "__main__":
 # contract live in core.planning.navdp; this node owns ROS I/O, the OpenCV
 # window, click handling and publishing the world path.
 #
-#   IO: ~rgb_topic (/xtend/rgb) ~depth_topic (/xtend/depth_m)
-#       ~drone_ns ('') ~pose_topic (/xtend/april_tag_pose)
+#   IO: ~rgb_topic (/xtend/rgb_frame_path) ~depth_topic (/xtend/depth_frame_path)
+#       (both std_msgs/String "<path> <sec> <nsec>"; the .jpg/.npy are loaded from disk)
+#       ~drone_ns ('') ~pose_topic (/xtend/localization)
 #       ~pose_type (pose_stamped ; 'pose' for a bare geometry_msgs/Pose, e.g.
 #         the nav stack's /gt_pose or Gazebo's /simple_drone/gt_pose)
 #       ~camera_info_topic ('' = use the fx/fy/cx/cy params; K preferred over P)
-#       ~path_topic (/path/waypoints) ~frame_id (world)
-#   camera (MUST match the live /xtend/depth_m stream; the launch wires these to
+#       ~path_topic (/path/waypoints_navdp; the EXECUTED prefix -> path_corrector_node,
+#         which recentres it and republishes /path/waypoints. Point straight at
+#         /path/waypoints to fly NavDP uncorrected.) ~frame_id (world)
+#       ~full_path_topic (/path/waypoints_navdp_full; the FULL trajectory, display
+#         only -- the BEV viewer draws it so you see the whole route while flying
+#         only the near prefix)
+#   execution: ~execute_fraction (1.0; fly only the first fraction of the route,
+#       then hold at the prefix end until the next ENTER re-infers -- NavDP is
+#       accurate near the camera and drifts further out. 0.5 = first half.)
+#   camera (MUST match the live depth frames; the launch wires these to
 #       the shared cam_* args): ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #       [real-XTEND raw-K defaults; sim uses sim_adapter's P-target via cam_*]
 #   NavDP server: ~port (8888) ~timeout_s (30.0) ~depth_max_m (5.0)
-#   overlay/misc: ~render_cam_height (0.0 tracks live altitude; >0 pins a height)
+#   window: ~display_mode (full = RGB + depth + snapshot/overlay; rgb_only = just
+#       the clickable RGB panel, lighter -- the route is still seen on the BEV viewer)
+#   overlay/misc: ~render_cam_height (0.5; fixed ground-plane height for the snapshot
+#       overlay so the near waypoints stay in-frame at flight altitude. <=0 tracks
+#       the live altitude; lower pulls in more near waypoints. Overlay-only.)
 #       ~default_altitude (0.8; used until the first pose arrives)
 # ============================================================================

@@ -23,10 +23,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCH=$(uname -m)
 if [ "${ARCH}" = "aarch64" ]; then
   # Change to your custom Jetson image tag
-  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
+  IMAGE="${IMAGE:-falcon-ros-custom:v2}"
 else
   # Change to your custom x86 image tag
-  IMAGE="${IMAGE:-falcon-ros-custom:v1}"
+  IMAGE="${IMAGE:-falcon-ros-custom:v2}"
 fi
 echo "[INFO] Arch: ${ARCH}   Image: ${IMAGE}"
 
@@ -102,7 +102,7 @@ echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sp
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py path_corrector_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else
@@ -119,6 +119,28 @@ for f in nav_stack.launch real_drone.launch ; do
   fi
 done
 
+# ── Frame directories (frame-path transport) ──────────────────
+# Depth/RGB now arrive as std_msgs/String "<path> <sec> <nsec>" messages whose
+# paths point at files the drone-side publisher writes on the HOST (e.g.
+# /tmp/xtend_depth/*.npy). The ROS1 consumers (mapping_sync, navdp_click) run
+# INSIDE this container, so those host dirs MUST be bind-mounted at the SAME path
+# for the paths to resolve. The mount is live: files the host writes after launch
+# appear in the container, so producer/container start order does not matter.
+# We mkdir -p first so the mount is created even if the publisher has not run yet
+# (a missing source would otherwise be skipped and reads would fail until a
+# restart). Override the set with XTEND_FRAME_DIRS (space-separated).
+XTEND_FRAME_DIRS="${XTEND_FRAME_DIRS:-/tmp/xtend_frames /tmp/xtend_depth}"
+FRAME_MOUNTS=()
+for d in ${XTEND_FRAME_DIRS}; do
+  mkdir -p "${d}" 2>/dev/null || true
+  if [ -d "${d}" ]; then
+    FRAME_MOUNTS+=( --volume "${d}:${d}:ro" )
+    echo "[INFO] Frame dir mounted (ro): ${d}"
+  else
+    echo "[WARN] Could not create/mount frame dir: ${d}"
+  fi
+done
+
 # docker.sock is only needed when respawn_drone.py is in play
 # (sim-only). On Jetson it's harmless to mount but pointless.
 DOCKER_SOCK_MOUNT=()
@@ -131,6 +153,8 @@ docker run -it --rm \
     --name "${CONTAINER}" \
     ${GPU_ARGS} \
     --env DISPLAY="${DISPLAY}" \
+    --env XAUTHORITY=/tmp/.docker.xauth \
+    --volume /tmp/.docker.xauth:/tmp/.docker.xauth \
     --env QT_X11_NO_MITSHM=1 \
     --shm-size=2g \
     --ulimit nofile=65536:65536 \
@@ -139,6 +163,7 @@ docker run -it --rm \
     --env PYTHONPATH=/opt \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
+    "${FRAME_MOUNTS[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
     --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     --network host \
