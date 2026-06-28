@@ -1,7 +1,7 @@
 # NavDP point-goal — TensorRT build + inference infrastructure
 
 Optimizes the NavDP cross-modal point-goal policy for TensorRT on a Jetson AGX
-Orin (15 W) — best FPS with minimal loss of network capacity — and provides a
+Orin — best FPS with minimal loss of network capacity — and provides a
 drop-in TRT inference server that honors the existing HTTP contract, so
 `navdp_click_node.py` and the core `NavDPPointgoalClient` run **unchanged**.
 
@@ -34,21 +34,54 @@ to the engines' precision.
 The exported ONNX is portable; the built `.engine` is **not** (it deserializes
 only on the exact GPU compute capability + TensorRT build that wrote it). So:
 
-### Stage 1 — export ONNX (once, any x86/dev box with torch)
+### Stage 1 — export ONNX (once; any box with torch — x86 dev box *or* the Jetson)
+
+Export runs on **CPU** and is hardware-agnostic, so it can be done on the Jetson
+itself; it does not need CUDA or TensorRT. It does, however, import the *real*
+NavDP model: `build_policy` loads the external repo's `policy_network.py`, which
+pulls in `diffusers` (DDPM scheduler) and, via `policy_backbone` →
+`depth_anything/.../dpt.py`, `torchvision` + `opencv`. A bare `torch`-only venv
+is missing these — that is the `ModuleNotFoundError: No module named 'diffusers'`.
 
 ```bash
-# in the navdp conda env (torch + the external NavDP repo); add onnx tooling:
-pip install onnx onnxruntime onnxslim          # export + parity deps
+# 1) NavDP model deps the exported graphs are built from. `onnx` is required
+#    (the export op-gate uses its pure-Python checker).
+pip install diffusers transformers onnx opencv-python
 
-export NAVDP_REPO=~/PycharmProjects/NavDP/baselines/navdp
+# torchvision must match the installed torch. On Jetson do NOT use the PyPI wheel
+# (it drags in an x86/CPU torch). Use the matched aarch64 wheel from the Jetson AI
+# Lab index and --no-deps so it can't replace torch. Example (verified): JetPack
+# 6.2 / L4T R36.4 with torch 2.9.1+cu126 -> torchvision 0.24.1:
+#   pip install --no-deps torchvision==0.24.1 \
+#       --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+#   pip install pillow                      # tv runtime dep skipped by --no-deps
+# (torch 2.x <-> torchvision: 2.9->0.24, 2.8->0.23, 2.7->0.22; pick the matching cuXXX.)
+
+# verify the model stack imports AND torch is untouched before exporting:
+python -c "import torch, torchvision, cv2, diffusers, onnx; \
+print('model deps OK; torch', torch.__version__, 'tv', torchvision.__version__)"
+
+# Optional graph-simplify + FP32 parity tooling. x86 dev box ONLY:
+#   pip install onnxslim onnxruntime
+# Do NOT install these on a Jetson — onnxruntime's CPU-feature detection fails on
+# aarch64 ("Unknown CPU vendor") and SIGABRTs; onnxslim calls it during export and
+# crashes the whole run. The export auto-skips onnxslim if it is absent, but a
+# `--system-site-packages` venv may still see a system onnxslim, so pass
+# `--no-slim` (below) to skip it unconditionally. Run the onnxruntime-based
+# `validate_parity` on x86; on the Jetson the Stage-2 bench gate (TRT vs the torch
+# reference) is the accuracy proof.
+
+export NAVDP_REPO=~/GIT/NavDP/baselines/navdp   # dir containing policy_network.py
 export PYTHONPATH=<repo-root>                  # dir containing sparx_agency/
 
 python -m sparx_agency.tasks.planning.navdp.export.export_onnx \
     --ckpt   $NAVDP_REPO/checkpoints/navdp-cross-modal.ckpt \
     --navdp-repo $NAVDP_REPO \
-    --out-dir sparx_agency/tasks/planning/navdp/engines/onnx
+    --out-dir sparx_agency/tasks/planning/navdp/engines/onnx \
+    --no-slim          # Jetson/aarch64: skip the onnxslim pass (it SIGABRTs)
 
-# authoritative numeric proof (FP32, CPU EP, deterministic):
+# authoritative numeric proof (FP32, CPU EP, deterministic) -- x86 ONLY,
+# needs onnxruntime (skip on Jetson; see the note above):
 python -m sparx_agency.tasks.planning.navdp.export.validate_parity \
     --onnx-dir sparx_agency/tasks/planning/navdp/engines/onnx \
     --ckpt $NAVDP_REPO/checkpoints/navdp-cross-modal.ckpt --navdp-repo $NAVDP_REPO
@@ -60,23 +93,55 @@ This writes the three `.onnx`, a `manifest.json`, and `navdp_head_params.npz`
 ### Stage 2 — build engines + gate (on the target device, in its TRT venv)
 
 Run with the **same python `tensorrt` the server imports** (engines are locked to
-the build). Hardware is auto-detected (x86 dGPU vs Jetson Orin 15 W: power mode,
-DLA, memory, compute capability).
+the build). Hardware is auto-detected (x86 dGPU vs Jetson Orin: power mode, DLA,
+memory, compute capability → `target_tag`, e.g. `orin_sm87`).
 
 ```bash
-python -m sparx_agency.tasks.planning.navdp.engine.build_engine \
-    --onnx-dir .../engines/onnx --precision fp16
-# -> .../engines/<target_tag>/navdp_{encoder,denoise,critic}.fp16.engine (+ .json)
+# 0) TensorRT + pycuda must be importable from THIS python (engines deserialize
+#    only on the exact TRT build that wrote them). JetPack's TensorRT is a system
+#    apt package, not pip-installable -- create the venv with --system-site-packages
+#    (or use the system python). pycuda may still need `pip install pycuda`.
+python -c "import tensorrt, pycuda.autoinit; print('TRT', tensorrt.__version__)"
 
-# FPS + accuracy gate; picks the precision and writes selected.json:
+# 1) build (use the REAL onnx dir from Stage 1, not a literal '...'):
+python -m sparx_agency.tasks.planning.navdp.engine.build_engine \
+    --onnx-dir sparx_agency/tasks/planning/navdp/engines/onnx --precision fp16
+# -> engines/<target_tag>/navdp_{encoder,denoise,critic}.fp16.engine (+ .json,
+#    and navdp_head_params.npz is copied in for the gate/server)
+
+# 2) FPS + accuracy gate; picks the precision and writes selected.json:
 python -m sparx_agency.tasks.planning.navdp.benchmark.bench \
-    --engine-dir .../engines/<target_tag> \
+    --engine-dir sparx_agency/tasks/planning/navdp/engines/<target_tag> \
     --ckpt $NAVDP_REPO/checkpoints/navdp-cross-modal.ckpt --navdp-repo $NAVDP_REPO
 ```
+
+The gate is **mandatory**: it writes `selected.json` (chosen precision + engine
+filenames), and the Stage-3 server fails loud if that file is absent — it never
+guesses a precision. If no precision passes the gate, `bench` raises instead of
+shipping a bad engine.
 
 INT8 is an optional stretch: build with `--precision int8 --calib-npz <frames>`
 and it is selected **only if** it clears a stricter on-device accuracy gate
 (`argmax`-flip / stop-decision / `<0.5`-zeroing vs the FP32 torch reference).
+
+#### Power mode matters more than workspace
+
+The builder logs e.g. `workspace=1.0GiB ... opt-target=orin_sm87`. That **1 GiB is
+a function of the active `nvpmodel` power mode, not your RAM**: the Jetson workspace
+cap (`hardware/detect.py:_workspace_bytes`) is 1 GiB at ≤15 W, 2 GiB above it, then
+`min(cap, total_mem/4)` — small on purpose because Jetson GPU memory is unified with
+the CPU. Workspace is only a tactic-selection scratch ceiling; for these small
+DINOv2 ViT-S graphs 1–2 GiB rarely changes the chosen kernels. The real throughput
+lever is the **power mode itself**. For best FPS on a 64 GB AGX:
+
+```bash
+sudo nvpmodel -q          # show the active mode (a *W mode => 1 GiB cap)
+sudo nvpmodel -m 0        # MAXN (id may vary; check -q). Then:
+sudo jetson_clocks        # pin GPU/CPU/EMC clocks to max
+```
+
+**Build and run the gate in the same power mode you will fly in** — the engine's
+tactics are tuned to the clocks present at build time.
 
 #### TensorRT 10 vs 11 (the builder handles both)
 
@@ -137,15 +202,18 @@ The FALCON Noetic container has no TensorRT, so the server is a **host process**
 FALCON reaches it over `--network host` + `127.0.0.1:<port>` loopback (run it on
 the FALCON host).
 
+The TRT server needs `tensorrt` + `pycuda` (the same ones that built the engines)
+plus `flask opencv-python pillow numpy`. `--navdp-repo` is only consulted by the
+`torch` fallback backend; the default `trt` backend does not need it.
+
 ```bash
-# self-contained (run from the repo root). <target_tag> = nvidiageforcertx_sm120
-# on x86, orin_sm87 on the Orin.
+# self-contained (run from the repo root). <target_tag> = orin_sm87 on the Jetson
+# AGX Orin (nvidiageforcertx_sm120 on the x86 dev box).
 cd ~/GIT/TheAgency
-export NAVDP_REPO=/home/nadavc/PycharmProjects/NavDP/baselines/navdp
-PYTHONPATH=$PWD /home/nadavc/miniconda3/envs/navdp/bin/python \
+PYTHONPATH=$PWD python \
     -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
-    --engine-dir sparx_agency/tasks/planning/navdp/engines/nvidiageforcertx_sm120 \
-    --navdp-repo $NAVDP_REPO --port 8888
+    --engine-dir sparx_agency/tasks/planning/navdp/engines/orin_sm87 \
+    --port 8888
 # navdp_click_node.py points at it unchanged (~port 8888)
 ```
 
@@ -171,8 +239,8 @@ comparison. The image/pixel/nogoal routes return **501** (point-goal only).
   torch-free), the ONNX export + FP32 parity (authoritative), hardware detection,
   and — with an x86 TRT venv — the FP16 engine build + FPS/gate for that GPU.
 - **On the Orin (must wait):** the Orin engines (home `.engine` is invalid there),
-  the @15 W FPS numbers, INT8 calibration/blessing, and the FALCON loopback
-  integration.
+  the on-device FPS numbers (at the chosen `nvpmodel` power mode), INT8
+  calibration/blessing, and the FALCON loopback integration.
 
 ## File map
 

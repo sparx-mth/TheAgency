@@ -3,7 +3,7 @@ tags:
 
  # Door towards the exit, the first one
   5:
-    xyz: [4.5, 0, 0.65]
+    xyz: [4.5, 0, 1.33]
     rpy: [-1.5708, 0, -1.5708]
     size: 0.28
 

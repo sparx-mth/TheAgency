@@ -101,10 +101,35 @@
        centre. esdf_target_clearance_m: 0 = centre on the ESDF ridge, >0 =
        stop once that far from walls (a safety floor). -->
   <arg name="corrector"               default="potential_field" />
-  <arg name="esdf_target_clearance_m" default="0.0" />
-  <arg name="esdf_max_total_shift_m"  default="1.0" />
+  <arg name="esdf_target_clearance_m" default="0.2" />
+  <arg name="esdf_max_total_shift_m"  default="0.5" />
   <!-- Thin a dense input path before correcting (NavDP zig-zag fix); no-op for A*. -->
   <arg name="resample_min_spacing_m"  default="0.3" />
+
+  <!-- ── Wall standoff / push strength (potential_field corrector) ──
+       How hard the corrector pushes A*/NavDP waypoints off walls. In the
+       default line_search centering, apf_min_clearance_m is the lever: raise it
+       (e.g. 0.3-0.4) to force a larger min distance to walls; apf_max_total_shift_m
+       must be high enough not to clip the push. apf_gain ONLY applies when
+       apf_centering=descent (line_search ignores it). -->
+  <arg name="apf_centering"           default="line_search" />
+  <arg name="apf_min_clearance_m"     default="0.2" />
+  <arg name="apf_max_total_shift_m"   default="0.5" />
+  <arg name="apf_gain"                default="0.5" />
+
+  <!-- ── Square (Manhattan) path shape ────────────────────────────
+       Produce axis-aligned, right-angle routes instead of diagonal cuts.
+       Three settings must agree: connectivity=4 drops A*'s diagonal moves;
+       los_smoothing=false keeps the line-of-sight string-puller from collapsing
+       each L into a single diagonal; corner_round=false keeps 90 deg corners
+       sharp instead of chamfering them into 45 deg bevels. turn_penalty biases
+       4-connected A* toward clean single-turn L-shapes (raise it to suppress
+       staircases). For the legacy diagonal behaviour set connectivity:=8
+       los_smoothing:=true corner_round:=true. -->
+  <arg name="connectivity"   default="4" />
+  <arg name="los_smoothing"  default="false" />
+  <arg name="corner_round"   default="false" />
+  <arg name="turn_penalty"   default="0.3" />
 
   <!-- ── NavDP execution / display ────────────────────────────────
        navdp_execute_fraction: fly only the first fraction of the route, hold at
@@ -156,8 +181,8 @@
          sync_tolerance=0.0 AND max_interp_gap=0.0. Downstream FALCON pairing is
          unaffected, since mapping_sync re-stamps the emitted pose to the depth
          stamp, so /transformer (timestamp_tolerance 0.02) always matches exactly. -->
-    <param name="sync_tolerance"     value="0.05" />   <!-- 0 = exact-only (dt==0) -->
-    <param name="max_interp_gap"     value="0.12" />   <!-- 0 = no interpolation (nearest-only) -->
+    <param name="sync_tolerance"     value="0.0" />    <!-- 0 = exact-only (dt==0) -->
+    <param name="max_interp_gap"     value="0.0" />    <!-- 0 = no interpolation (nearest-only) -->
     <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
     <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
     <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
@@ -204,6 +229,14 @@
     <arg name="esdf_target_clearance_m" value="$(arg esdf_target_clearance_m)" />
     <arg name="esdf_max_total_shift_m"  value="$(arg esdf_max_total_shift_m)" />
     <arg name="resample_min_spacing_m"  value="$(arg resample_min_spacing_m)" />
+    <arg name="apf_centering"           value="$(arg apf_centering)" />
+    <arg name="apf_min_clearance_m"     value="$(arg apf_min_clearance_m)" />
+    <arg name="apf_max_total_shift_m"   value="$(arg apf_max_total_shift_m)" />
+    <arg name="apf_gain"                value="$(arg apf_gain)" />
+    <arg name="connectivity"            value="$(arg connectivity)" />
+    <arg name="los_smoothing"           value="$(arg los_smoothing)" />
+    <arg name="corner_round"            value="$(arg corner_round)" />
+    <arg name="turn_penalty"            value="$(arg turn_penalty)" />
     <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
     <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
   </include>

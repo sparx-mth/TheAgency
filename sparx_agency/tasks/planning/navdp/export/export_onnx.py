@@ -87,8 +87,13 @@ def _dummy_inputs(engine_key):
     return tuple(torch.randn(*sh[name]) for name in io_spec.input_names(engine_key))
 
 
-def export_one(engine_key, module, out_dir):
-    """Export one wrapper to ONNX and run the op-type gate. Returns the path."""
+def export_one(engine_key, module, out_dir, slim=True):
+    """Export one wrapper to ONNX and run the op-type gate. Returns the path.
+
+    ``slim`` enables the optional ``onnxslim`` graph simplification. Disable it on
+    Jetson/aarch64: onnxslim invokes onnxruntime, whose CPU-feature detection
+    SIGABRTs there ("Unknown CPU vendor"), and a native abort cannot be caught.
+    """
     out_path = Path(out_dir) / (engine_key + ".onnx")
     inputs = io_spec.input_names(engine_key)
     outputs = io_spec.output_names(engine_key)
@@ -106,7 +111,8 @@ def export_one(engine_key, module, out_dir):
                 input_names=inputs, output_names=outputs, opset_version=OPSET,
                 do_constant_folding=True)
     _gate_ops(engine_key, out_path)
-    _maybe_slim(out_path)
+    if slim:
+        _maybe_slim(out_path)
     return out_path
 
 
@@ -150,6 +156,9 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--with-causal-denoise", action="store_true",
                     help="also export a tgt_is_causal=True denoiser variant for A/B testing")
+    ap.add_argument("--no-slim", action="store_true",
+                    help="skip the optional onnxslim pass (required on Jetson/aarch64: "
+                         "onnxslim runs onnxruntime, which SIGABRTs there)")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -161,7 +170,7 @@ def main():
     manifest = {"opset": OPSET, "ckpt_sha256": _sha256(args.ckpt),
                 "head_params": npz.name, "engines": {}}
     for key, module in build_wrappers(policy, with_causal_denoise=args.with_causal_denoise):
-        path = export_one(key, module, out_dir)
+        path = export_one(key, module, out_dir, slim=not args.no_slim)
         manifest["engines"][key] = {
             "onnx": path.name, "onnx_sha256": _sha256(path),
             "inputs": io_spec.input_names(key), "outputs": io_spec.output_names(key),
