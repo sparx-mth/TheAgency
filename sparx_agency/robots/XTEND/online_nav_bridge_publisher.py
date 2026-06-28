@@ -44,7 +44,7 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         crop_width: int = 540,
         crop_height: int = 420,
         output_width: int = 504,
-        output_height: int = 392,
+        output_height: int = 294,
         drop_bad_frames: bool = True,
         bad_frame_mean_min: float = 2.0,
         bad_frame_std_min: float = 1.0,

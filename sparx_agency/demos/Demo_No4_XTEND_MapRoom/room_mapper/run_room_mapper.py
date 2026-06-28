@@ -40,8 +40,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _CONFIG_DIR = _REPO_ROOT / "sparx_agency" / "robots" / "XTEND" / "config"
 
 RGB_CALIB   = str(_CONFIG_DIR / "camera_xtend_ros_calib_720_420.yaml")
-DEPTH_CALIB = str(_CONFIG_DIR / "camera_xtend_ros_calib_504_392_crop_resize.yaml")
-DEPTH_H, DEPTH_W = 392, 504
+DEPTH_CALIB = str(_CONFIG_DIR / "camera_xtend_ros_calib_504_294_resize.yaml")
+DEPTH_H, DEPTH_W = 294, 504
 
 _TRAJ_MIN_MOVE_M = 0.05   # skip trajectory point if drone moved less than this
 _TRAJ_SMOOTH_WIN = 3      # rolling-average window for trajectory smoothing

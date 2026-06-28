@@ -58,30 +58,29 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + RGB publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 crop-resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav and /cmd_vel (Twist).",
+        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x294 resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav and /cmd_vel (Twist).",
         command="""
         python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
-          --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
-          --crop-width 540 \
-          --crop-height 420 \
+          --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+          --preprocess-mode resize \
           --output-width 504 \
-          --output-height 392
+          --output-height 294
         """,
     ),
     LaunchItem(
         name="2. DA3 Small depth processor",
         machine="jetson",
         tmux_name="xtend_depth",
-        description="Subscribes to /xtend/rgb 504x392, runs DA3-SMALL, converts raw depth to meters using LUT, publishes /xtend/depth_m.",
+        description="Subscribes to /xtend/rgb 504x294, runs DA3-SMALL, converts raw depth to meters using LUT, publishes /xtend/depth_m.",
         command="""
         python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
           --ros-args \
           -p image_topic:=/xtend/rgb \
           -p depth_topic:=/xtend/depth_m \
-          -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine \
+          -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-294x504.engine \
           -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
           -p model_type:=small_lut \
-          -p camera_info_mode:=crop_resize \
+          -p camera_info_mode:=resize \
           -p apply_metric_focal_scaling:=false \
           -p small_lut_clip_min_m:=0.2 \
           -p small_lut_clip_max_m:=8.0

@@ -3,23 +3,24 @@ tags:
 
  # Door towards the exit, the first one
   5:
-    xyz: [4.5, 0, 0.65]
+    xyz: [4.5, 0, 1.33]
     rpy: [-1.5708, 0, -1.5708]
-    size: 0.28
+    size: 0.29
 
 
 # Communication room
-  1:
+  2:
     xyz: [2.55, -2.3, 0.97]
-    rpy: [-1.5708, 0, -3.1416]
-    size: 0.28
+    rpy: [-1.5708, 0,  -3.1416]
+    size: 0.2
 
 
-# Enter the hallway to the right towards the MAMAD, same orientation as tag 5
+# Enther the hallway to the right towards the MAMAD, same orientation as tag 5
   10:
     xyz: [3.13, -0.82, 1.0]
     rpy: [-1.5708,  0, -1.5708]
     size: 0.2
+
 
 
  # MAMAD Door
@@ -54,11 +55,11 @@ tags:
     rpy: [-1.5708, 0, -1.5708]
     size: 0.2
 
- # Inbal's Office
-  2:
-    xyz: [1.7, 0.75, 1.0]
-    rpy: [-1.5708, 0, 0]
-    size: 0.2
+# # Inbal's Office
+#  2:
+#    xyz: [1.7, 0.75, 1.0]
+#    rpy: [-1.5708, 0, 0]
+#    size: 0.2
 
 
   # inside MAMAD, in front of mamad's door facing the window

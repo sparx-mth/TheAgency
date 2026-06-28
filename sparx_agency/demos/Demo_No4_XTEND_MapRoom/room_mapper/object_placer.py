@@ -40,7 +40,7 @@ def load_labels(labels_path: str) -> list:
 def load_labels_from_session(
     session_dir,
     min_score: float = 0.25,
-    depth_h: int = 392,
+    depth_h: int = 294,
     depth_w: int = 504,
 ) -> list:
     """

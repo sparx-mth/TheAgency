@@ -65,7 +65,7 @@ class PoseFuser:
         tag_map_path: Optional[str],
         rgb_calib_path: str,
         depth_calib_path: str,
-        depth_h: int = 392,
+        depth_h: int = 294,
         depth_w: int = 504,
         min_margin: float = 15.0,
         tag_family: str = "tag36h11",
@@ -146,7 +146,7 @@ class PoseFuser:
         Process one frame. Returns world_T_cam (4×4) or None if no pose available yet.
 
         bgr: 720×420 raw RGB (for AprilTag).
-        depth_m: 504×392 metric float32 (for odometry).
+        depth_m: 504×294 metric float32 (for odometry).
         """
         if self._odom is not None:
             self._odom.update(bgr, depth_m)

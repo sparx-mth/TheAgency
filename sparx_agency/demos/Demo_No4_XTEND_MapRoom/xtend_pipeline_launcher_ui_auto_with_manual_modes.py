@@ -172,15 +172,15 @@ export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_dir_publisher.py \
   --out-dir /tmp/xtend_frames \
   --path-topic /xtend/rgb_frame_path \
-  --preprocess-mode crop_resize \
+  --preprocess-mode resize \
   --output-width 504 \
-  --output-height 392
+  --output-height 294
 '
 
 require_topic_name /xtend/rgb_frame_path 20 xtend_bridge
 optional_topic_rate /xtend/rgb_frame_path 20 best_effort
 
-echo "[AUTO] Step 2: start DA3 Large Metric depth (504x392)"
+echo "[AUTO] Step 2: start DA3 Large Metric depth (504x294)"
 start_tmux xtend_depth '
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
@@ -192,8 +192,8 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   --ros-args \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p model_type:=large_metric \
   -p camera_info_mode:=base \
   -p apply_metric_focal_scaling:=true \
@@ -251,7 +251,7 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   -p provider_type:=apriltag \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p tag_map_path:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
-  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p tag_size_m:=0.13
 '
 
@@ -405,8 +405,8 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   --ros-args \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p model_type:=large_metric \
   -p camera_info_mode:=base \
   -p apply_metric_focal_scaling:=true \
@@ -435,7 +435,7 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   -p provider_type:=apriltag \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p tag_map_path:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
-  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p tag_size_m:=0.13
 '
 
@@ -462,14 +462,14 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + frame dir publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket. Saves 504x392 crop-resized frames to /tmp/xtend_frames and publishes each path on /xtend/rgb_frame_path (std_msgs/String). Also publishes /xtend/bearing and /xtend/local_telemetry.",
+        description="Owns XTEND WebSocket. Saves 504x294 resized frames to /tmp/xtend_frames and publishes each path on /xtend/rgb_frame_path (std_msgs/String). Also publishes /xtend/bearing and /xtend/local_telemetry.",
         command="""
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_dir_publisher.py \
   --out-dir /tmp/xtend_frames \
   --path-topic /xtend/rgb_frame_path \
-  --preprocess-mode crop_resize \
+  --preprocess-mode resize \
   --output-width 504 \
-  --output-height 392
+  --output-height 294
 """,
     ),
     LaunchItem(
@@ -493,17 +493,17 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/offline_frame_dir_pub
 """,
     ),
     LaunchItem(
-        name="2. DA3 Large Metric depth processor (504x392)",
+        name="2. DA3 Large Metric depth processor (504x294)",
         machine="jetson",
         tmux_name="xtend_depth",
-        description="Reads frames from /xtend/rgb_frame_path, runs DA3METRIC-LARGE FP16 504x392, applies focal metric scaling, publishes /xtend/depth_m and saves depth to /tmp/xtend_depth via /xtend/depth_frame_path.",
+        description="Reads frames from /xtend/rgb_frame_path, runs DA3METRIC-LARGE FP16 504x294, applies focal metric scaling, publishes /xtend/depth_m and saves depth to /tmp/xtend_depth via /xtend/depth_frame_path.",
         command="""
 python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
   --ros-args \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-392x504.depth_only.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p model_type:=large_metric \
   -p camera_info_mode:=base \
   -p apply_metric_focal_scaling:=true \
@@ -556,7 +556,7 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
             "Generic localization node with provider_type=apriltag. "
             "Reads frames from /xtend/rgb_frame_path, detects tag36h11 AprilTags, estimates 6-DOF camera pose "
             "via solvePnP + EMA smoothing. Publishes /xtend/localization (PoseStamped). "
-            "Tag map: new_map.yaml. Calibration: 504x392 resize."
+            "Tag map: new_map.yaml. Calibration: 504x294 resize."
         ),
         command="""
 python3 -m sparx_agency.tasks.localization.ros2.localization_node \
@@ -564,7 +564,7 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   -p provider_type:=apriltag \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p tag_map_path:=/home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml \
-  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p tag_size_m:=0.13
 """,
     ),
@@ -586,7 +586,7 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   -p provider_type:=optical_flow \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_frame_path_topic:=/xtend/depth_frame_path \
-  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml \
+  -p camera_calib_path:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p bearing_topic:=/xtend/bearing \
   -p demo_mode_topic:=/xtend/demo_mode \
   -p max_wait_for_depth_sec:=0.5 \

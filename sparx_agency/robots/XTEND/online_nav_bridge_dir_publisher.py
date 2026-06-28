@@ -46,12 +46,12 @@ class OnlineNavBridgeDirPublisher(OnlineXtendBridgeBase):
         jpeg_quality: int = 90,
         clear_on_start: bool = True,
         max_frames_kept: int = 30,
-        preprocess_mode: str = "crop_resize",
+        preprocess_mode: str = "resize",
         pad_to_width: int = 728,
         crop_width: int = 540,
         crop_height: int = 420,
         output_width: int = 504,
-        output_height: int = 392,
+        output_height: int = 294,
         drop_bad_frames: bool = True,
         bad_frame_mean_min: float = 2.0,
         bad_frame_std_min: float = 1.0,
@@ -230,13 +230,13 @@ def parse_args():
     p.add_argument(
         "--preprocess-mode",
         choices=["pad", "crop_resize", "resize"],
-        default="crop_resize",
+        default="resize",
     )
     p.add_argument("--pad-to-width", type=int, default=728)
     p.add_argument("--crop-width", type=int, default=540)
     p.add_argument("--crop-height", type=int, default=420)
     p.add_argument("--output-width", type=int, default=504)
-    p.add_argument("--output-height", type=int, default=392)
+    p.add_argument("--output-height", type=int, default=294)
 
     p.add_argument("--no-drop-bad-frames", action="store_true")
     p.add_argument("--bad-frame-mean-min", type=float, default=2.0)
