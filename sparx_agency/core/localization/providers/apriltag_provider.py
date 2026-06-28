@@ -1,12 +1,9 @@
 """AprilTag-based localization provider (pure Python, no ROS2)."""
 from __future__ import annotations
 
-import logging
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
-_log = logging.getLogger(__name__)
 
 import cv2
 import numpy as np
@@ -98,6 +95,9 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._filtered_q: Optional[np.ndarray] = None
         self._healthy = True
 
+        import rclpy.logging
+        self._log = rclpy.logging.get_logger("apriltag_provider")
+
     def is_healthy(self) -> bool:
         return self._healthy
 
@@ -122,20 +122,20 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             tag_id = int(d.tag_id)
             margin = d.decision_margin
             if margin < self._min_margin:
-                _log.info("[apriltag] tag %d: margin=%.1f SKIP(low < %.1f)", tag_id, margin, self._min_margin)
+                self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(low < {self._min_margin:.1f})")
                 continue
             if tag_id not in self._tag_map:
-                _log.info("[apriltag] tag %d: margin=%.1f SKIP(not in map)", tag_id, margin)
+                self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(not in map)")
                 continue
             corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
             obj_pts = tag_object_points(self._tag_sizes.get(tag_id, self._default_tag_size))
             cam_T_tag = solvepnp_ippe_square(corners, obj_pts, self._calib.K, self._calib.D)
             if cam_T_tag is None:
-                _log.info("[apriltag] tag %d: margin=%.1f SKIP(solvePnP failed)", tag_id, margin)
+                self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(solvePnP failed)")
                 continue
             area = float(cv2.contourArea(corners.astype(np.float32)))
             total_area += area
-            _log.info("[apriltag] tag %d: margin=%.1f area=%.0fpx USED", tag_id, margin, area)
+            self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} area={area:.0f}px USED")
             observations.append(TagObservation(tag_id=tag_id, cam_T_tag=cam_T_tag, weight=area))
 
         if not observations:
@@ -166,7 +166,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         n_tags = len(observations)
         confidence = min(1.0, _confidence_from_area(total_area) * (0.7 + 0.15 * min(n_tags, 2)))
         used_ids = sorted(o.tag_id for o in observations)
-        _log.info("[apriltag] pose: conf=%.2f n_tags=%d used=%s", confidence, n_tags, used_ids)
+        self._log.info(f"[apriltag] pose: conf={confidence:.2f} n_tags={n_tags} used={used_ids}")
 
         return LocalizationEstimate(
             pose=Pose3D(x=float(x), y=float(y), z=float(z), yaw=yaw),

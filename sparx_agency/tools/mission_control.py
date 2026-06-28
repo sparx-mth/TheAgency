@@ -27,12 +27,14 @@ _ROS_ENV = f"""
 source /opt/ros/humble/setup.bash
 source {JETSON_REPO}/venv/bin/activate
 export ROS_DOMAIN_ID=5
+export PYTHONUNBUFFERED=1
 cd {JETSON_REPO}
 """
 
 _DEPTH_WS_ENV = """
 source /opt/ros/humble/setup.bash
 source /home/user/depth_anything_ws/install/setup.bash
+export PYTHONUNBUFFERED=1
 """
 
 _NANOOWL_ENV = f"cd {NANOOWL_REPO}"
@@ -59,6 +61,8 @@ class Service:
     docker_container: str = ""   # for env="docker" — container name to inspect
     stop_extra: str = ""         # extra stop command if needed
     machine: str = "jetson"      # "jetson" | "pc"
+    proc_container: str = ""     # container to exec into for process-based status check
+    proc_pattern: str = ""       # grep pattern inside proc_container to detect running
 
     def log_file(self) -> str:
         return f"/tmp/{self.key}.log"
@@ -95,14 +99,6 @@ XTEND_SERVICES: list[Service] = [
   -p publish_cloud:=true -p pointcloud_topic:=/xtend/pointcloud""",
     ),
     Service(
-        name="Twist Converter",
-        key="xtend_twist",
-        group="core",
-        description="/cmd_vel Twist → /xtend/cmd_nav JSON. linear.x=0.3 m/s → thrust 400",
-        cmd=f"""python3 {JETSON_REPO}/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \\
-  --cmd-vel-topic /cmd_vel --cmd-nav-topic /xtend/cmd_nav --timeout-sec 1.5""",
-    ),
-    Service(
         name="Demo Mode Manager",
         key="xtend_demo_mgr",
         group="core",
@@ -121,26 +117,9 @@ XTEND_SERVICES: list[Service] = [
         cmd=f"""python3 -m sparx_agency.tasks.localization.ros2.localization_node \\
   --ros-args -p provider_type:=apriltag \\
   -p frame_path_topic:=/xtend/rgb_frame_path \\
-  -p tag_map_path:={JETSON_REPO}/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \\
+  -p tag_map_path:={JETSON_REPO}/sparx_agency/tasks/localization/config/new_map.yaml \\
   -p camera_calib_path:={JETSON_REPO}/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \\
   -p tag_size_m:=0.13""",
-    ),
-    Service(
-        name="Static TF",
-        key="xtend_static_tf",
-        group="localization",
-        description="Static fallback TF map→xtend_camera at z=1.0m. Overridden when AprilTags visible.",
-        cmd="""ros2 run tf2_ros static_transform_publisher \\
-  --x 0 --y 0 --z 1.0 --roll -1.5708 --pitch 0 --yaw -1.5708 \\
-  --frame-id map --child-frame-id xtend_camera""",
-    ),
-    Service(
-        name="Pose → TF",
-        key="xtend_pose_to_tf",
-        group="localization",
-        description="/xtend/localization PoseStamped → dynamic TF map→xtend_camera",
-        cmd=f"""python3 -m sparx_agency.tasks.mapping.ros2.pose_to_tf_node \\
-  --ros-args -p pose_topic:=/xtend/localization""",
     ),
     Service(
         name="Octomap",
@@ -178,35 +157,42 @@ XTEND_SERVICES: list[Service] = [
     ),
     # ── Planner (Falcon) ──────────────────────────────────────────────────
     Service(
-        name="Hospital World",
+        name="Falcon Container",
         key="planner_hospital",
         group="planner",
-        description="Starts hospital/office Docker environment for Falcon planner.",
-        cmd="cd /home/user/GIT/sjtu_project/falcon_docker && ./run_hospital.sh office",
-        env="none",
+        description="Start falcon-ros Docker container (office map). Must be running before Falcon Adapter.",
+        cmd=f"cd {JETSON_REPO}/sparx_agency/tasks/planning/falcon && ./run_falcon.sh office",
+        env="docker",
+        docker_container="falcon",
+        stop_extra="docker rm -f falcon 2>/dev/null || true",
     ),
     Service(
         name="Falcon Adapter",
         key="planner_falcon",
         group="planner",
-        description="ROS1 Falcon planner inside the falcon container.",
-        cmd="docker exec falcon bash -lc 'roslaunch falcon_adapter real_drone.launch map_name:=office'",
+        description="ROS1 Falcon planner inside the falcon container (requires falcon container running).",
+        cmd="docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter real_drone.launch map_name:=office'",
         env="none",
+        proc_container="falcon",
+        proc_pattern="real_drone.launch",
+        stop_extra="docker exec falcon bash -lc 'pkill -f real_drone.launch || true; pkill -f roslaunch || true' 2>/dev/null || true",
     ),
     Service(
-        name="ROS Bridge",
+        name="ROS1↔ROS2 Bridge",
         key="planner_ros_bridge",
         group="planner",
-        description="ROS1↔ROS2 bridge container.",
-        cmd="cd /home/user/GIT/sjtu_project/ros_bridge_docker && ./run_bridge.sh",
-        env="none",
+        description="ROS1↔ROS2 bridge container. Forwards /xtend/localization and cmd_vel between ROS versions.",
+        cmd=f"cd {JETSON_REPO}/sparx_agency/tasks/planning/falcon/bridge && ./run_bridge.sh",
+        env="docker",
+        docker_container="ros1_bridge",
+        stop_extra="docker rm -f ros1_bridge 2>/dev/null || true",
     ),
     Service(
         name="Falcon RViz",
         key="planner_rviz_falcon",
         group="planner",
-        description="RViz inside the falcon container.",
-        cmd="docker exec falcon bash -lc 'roslaunch exploration_manager rviz.launch'",
+        description="RViz inside the falcon container (optional, for visualisation).",
+        cmd="docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && export DISPLAY=:0 && roslaunch exploration_manager rviz.launch'",
         env="none",
     ),
     Service(
@@ -214,8 +200,11 @@ XTEND_SERVICES: list[Service] = [
         key="planner_bev_goal",
         group="planner",
         description="Bird's-eye-view click-to-goal UI inside falcon container.",
-        cmd="docker exec falcon bash -lc 'rosrun falcon_adapter bev_click_goal.py'",
+        cmd="docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && export DISPLAY=:0 && rosrun falcon_adapter bev_click_goal_node.py'",
         env="none",
+        proc_container="falcon",
+        proc_pattern="bev_click_goal_node.py",
+        stop_extra="docker exec falcon bash -lc 'pkill -f bev_click_goal_node.py || true' 2>/dev/null || true",
     ),
     # ── PC-side tools (run locally) ───────────────────────────────────────
     Service(
@@ -340,9 +329,16 @@ def _ssh(cmd: str, timeout: int = 8) -> subprocess.CompletedProcess:
 
 def get_all_states() -> dict[str, bool]:
     """Single SSH call: returns {service_key: is_running} for all services."""
+    # Collect containers we need to exec into for proc-pattern checks
+    proc_containers = {svc.proc_container for svc in ALL_SERVICES if svc.proc_pattern and svc.proc_container}
+    proc_exec_cmds = "".join(
+        f"echo '=PROCS:{c}='; docker exec {c} ps -eo args 2>/dev/null || true; "
+        for c in sorted(proc_containers)
+    )
     cmd = (
         "echo '=TMUX='; tmux ls 2>/dev/null | cut -d: -f1; "
-        "echo '=DOCKER='; docker ps --format '{{.Names}}' 2>/dev/null"
+        "echo '=DOCKER='; docker ps --format '{{.Names}}' 2>/dev/null; "
+        + proc_exec_cmds
     )
     try:
         result = _ssh(cmd)
@@ -351,6 +347,7 @@ def get_all_states() -> dict[str, bool]:
 
     tmux_sessions: set[str] = set()
     docker_containers: set[str] = set()
+    container_procs: dict[str, list[str]] = {c: [] for c in proc_containers}
     section = None
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -358,14 +355,21 @@ def get_all_states() -> dict[str, bool]:
             section = "tmux"
         elif line == "=DOCKER=":
             section = "docker"
+        elif line.startswith("=PROCS:") and line.endswith("="):
+            section = f"procs:{line[7:-1]}"
         elif section == "tmux" and line:
             tmux_sessions.add(line)
         elif section == "docker" and line:
             docker_containers.add(line)
+        elif section and section.startswith("procs:") and line:
+            container_procs.setdefault(section[6:], []).append(line)
 
     states: dict[str, bool] = {}
     for svc in ALL_SERVICES:
-        if svc.env == "docker":
+        if svc.proc_pattern and svc.proc_container:
+            procs = container_procs.get(svc.proc_container, [])
+            states[svc.key] = any(svc.proc_pattern in p for p in procs)
+        elif svc.env == "docker":
             states[svc.key] = svc.docker_container in docker_containers
         elif svc.machine == "pc":
             states[svc.key] = False  # not tracked remotely
@@ -553,7 +557,7 @@ with tab_xtend:
     room_mapper = [s for s in XTEND_SERVICES if s.group == "room_mapper"]
     _service_cards(room_mapper, states)
 
-    with st.expander("🗺️  Planner (Falcon)", expanded=False):
+    with st.expander("🗺️  Planner (Falcon)", expanded=True):
         planner = [s for s in XTEND_SERVICES if s.group == "planner"]
         _service_cards(planner, states)
 
