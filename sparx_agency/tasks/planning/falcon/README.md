@@ -127,6 +127,57 @@ Example — Gazebo sim:
 roslaunch falcon_adapter nav_stack.launch map_name:=hospital
 ```
 
+## Visualizing & interacting (RViz, BEV, NavDP viewer)
+
+These run against the live stack, so start the FALCON container first
+(`./run_falcon.sh <env>`) and leave that shell open.
+
+### Open RViz
+
+Now in a new host terminal:
+
+```bash
+docker exec -it falcon bash
+export DISPLAY=:0
+source /catkin_ws/devel/setup.bash
+roslaunch exploration_manager rviz.launch
+```
+
+This loads a pre-configured RViz with the BEV map, planned path, and odometry
+already wired up.
+
+### Open the 2D Map (BEV click-to-goal)
+
+In another new host terminal:
+
+```bash
+docker exec -it falcon bash
+export DISPLAY=:0
+source /catkin_ws/devel/setup.bash
+rosrun falcon_adapter bev_click_goal_node.py
+```
+
+A 2D map window opens. **Left-click** anywhere to publish a goal — A* replans and
+the drone flies the new path. The red arrow marks the drone's live pose.
+
+### NavDP click viewer (optional, standalone sanity check)
+
+> Skip unless you're checking the NavDP path in isolation. This viewer doesn't
+> fly the drone and doesn't replace the BEV goal flow. It only confirms that
+> `click pixel → body-frame (gx, gy) → NavDP → trajectory` is wired up correctly.
+
+Requires the NavDP HTTP server running on `127.0.0.1:8888` (override with
+`_port:=`).
+
+In another new host terminal:
+
+```bash
+docker exec -it falcon bash
+export DISPLAY=:0
+source /catkin_ws/devel/setup.bash
+rosrun falcon_adapter navdp_click.py
+```
+
 ## NavDP click-to-go (replacing A*)
 
 [NavDP](https://github.com/InternRobotics/NavDP) is a point-goal navigation
@@ -199,6 +250,45 @@ bridge/run_bridge.sh              # ROS1<->ROS2 bridge (separate terminal)
 The bridge does **all** ROS1↔ROS2 message passing (the adapters never bridge);
 its `bridge.yaml` is pinned to exactly this stack's topics. See
 [`bridge/README.md`](bridge/README.md).
+
+### ROS2 bridge — only if your drone publishes on ROS2
+
+Skip this whole section if your drone already publishes on ROS1.
+
+**Build (one-time):**
+
+```bash
+cd ros_bridge_docker
+docker build -t ros1_bridge:noetic-foxy .
+```
+
+Or just run `./run_bridge.sh` — it auto-builds if the image is missing.
+
+**Start roscore** (inside the bridge container):
+
+```bash
+docker run -d --rm --net=host --name=roscore \
+  --entrypoint bash ros1_bridge:noetic-foxy -c \
+  "source /opt/ros/noetic/setup.bash && roscore"
+```
+
+**Start the bridge:**
+
+```bash
+cd ros_bridge_docker
+./run_bridge.sh
+```
+
+Verify it's up — these should appear in `rostopic list`:
+
+```
+/flow_depth/pose_est
+/xtend/depth_m
+```
+
+> Topics only appear on the ROS1 side once a ROS1 subscriber asks for them
+> (`dynamic_bridge` is lazy). If `rostopic list` looks empty before FALCON is up,
+> that's normal — start FALCON and they'll show up.
 
 ## Notes
 
