@@ -57,6 +57,14 @@
   <!-- v5: when false, sensor_gate ignores camera_info entirely. -->
   <arg name="bridge_camera_info" default="false" />
 
+  <!-- sensor_gate rotation freeze. Default true (the Gazebo path: sensor_gate's
+       gated pose+depth feed falcon_adapter, so freezing both keeps that pair
+       consistent across a turn). real_drone.launch sets this false: there the
+       depth no longer reaches sensor_gate (it arrives as a frame-path the voxel
+       feeder mapping_sync loads, and mapping_sync owns the AUTHORITATIVE freeze),
+       so a depth-driven resume would never fire and would strand the gated pose. -->
+  <arg name="sensor_gate_freeze_on_turning_mode" default="true" />
+
   <!-- Camera intrinsics — loaded from a camera_calibration_parsers
        YAML (camera_config_file) when set; the cam_* args below act as
        both the literal fallback (when camera_config_file:='') and the
@@ -203,20 +211,21 @@
        bev_click_goal need no change. With use_navdp:=true the
        astar_planner node is NOT launched.
 
-       navdp_click consumes the SAME /xtend/depth_m (+ /xtend/rgb) stream
-       FALCON's mapping does, so its intrinsics MUST match that stream — the
-       navdp_* intrinsic args below therefore DEFAULT to the shared cam_*
-       (raw K on the real drone via real_drone.launch; sim_adapter's P-target
-       in sim). Override per camera, or set navdp_camera_info_topic to auto-
-       sync from a camera_info topic (K preferred; must describe the 504x294
-       stream — real drone only).
+       navdp_click consumes the SAME frames FALCON's mapping does — now via the
+       frame-path topics /xtend/depth_frame_path (+ /xtend/rgb_frame_path), tiny
+       std_msgs/String "<path> <sec> <nsec>" messages it loads from disk — so its
+       intrinsics MUST match that stream. The navdp_* intrinsic args below
+       therefore DEFAULT to the shared cam_* (raw K on the real drone via
+       real_drone.launch; sim_adapter's P-target in sim). Override per camera, or
+       set navdp_camera_info_topic to auto-sync from a camera_info topic (K
+       preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
   <arg name="navdp_port"               default="8888" />
-  <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
-  <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
-  <arg name="navdp_pose_topic"         default="/xtend/april_tag_pose" />
-  <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/april_tag_pose) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
+  <arg name="navdp_rgb_topic"          default="/xtend/rgb_frame_path" />
+  <arg name="navdp_depth_topic"        default="/xtend/depth_frame_path" />
+  <arg name="navdp_pose_topic"         default="/xtend/localization" />
+  <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/localization) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
   <arg name="navdp_camera_info_topic"  default="" /><!-- e.g. /xtend/camera_info to auto-sync intrinsics; '' = use the navdp_* params below -->
   <arg name="navdp_fx"                 default="$(arg cam_fx)" />
   <arg name="navdp_fy"                 default="$(arg cam_fy)" />
@@ -424,6 +433,7 @@
     <param name="depth_topic"        value="$(arg depth_topic)" />
     <param name="camera_info_topic"  value="$(arg camera_info_topic)" />
     <param name="bridge_camera_info" value="$(arg bridge_camera_info)" />
+    <param name="freeze_on_turning_mode" value="$(arg sensor_gate_freeze_on_turning_mode)" />
     <param name="replay_hz"          value="30.0" />
   </node>
 

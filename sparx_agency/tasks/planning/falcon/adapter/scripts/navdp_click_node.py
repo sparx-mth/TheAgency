@@ -40,9 +40,15 @@ No new inference runs until the next ENTER, so the follower keeps flying the las
 published path until then -- exactly the "click once, follow until I click again"
 behaviour.
 
+RGB and depth arrive as frame-path messages (``std_msgs/String`` of the form
+"<path> <sec> <nsec>"): this node loads the ``.jpg`` and ``.npy`` from disk rather
+than receiving raw images over ROS, cutting serialization/network cost. The
+parsed paths point at the SAME frames FALCON's mapping uses; only the transport
+differs.
+
 IMPORTANT -- intrinsics must match the RGB/depth stream NavDP receives. NavDP
-consumes the SAME ``/xtend/rgb`` + ``/xtend/depth_m`` stream FALCON's voxel
-mapping does, so it uses the SAME intrinsics (the launch wires ``~fx ~fy ~cx ~cy``
+consumes the SAME ``/xtend/rgb_frame_path`` + ``/xtend/depth_frame_path`` frames
+FALCON's voxel mapping does, so it uses the SAME intrinsics (the launch wires ``~fx ~fy ~cx ~cy``
 to the shared ``cam_*`` args). On the real XTEND that stream is the RAW,
 unrectified depth at 504x294, so the correct focals are the ``camera_matrix`` (K)
 values -- the ``~fx ~fy ~cx ~cy`` defaults below -- NOT the rectified
@@ -52,7 +58,7 @@ resamples the stream to its P-target intrinsics, so the launch's ``cam_*`` (and
 hence these) become those instead -- the rule is simply "match the live stream".
 Point this at a different camera by passing the matching ``~fx ~fy ~cx ~cy
 ~img_width ~img_height`` (or a ``~camera_info_topic``). Because the click pixel
-indexes the depth array directly, ``/xtend/rgb`` and ``/xtend/depth_m`` MUST share
+indexes the depth array directly, the loaded RGB and depth frames MUST share
 one resolution -- the node fails loud at startup if they do not.
 
 Run:
@@ -67,8 +73,10 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import Path
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo
+from std_msgs.msg import String
 
+from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics
 from sparx_agency.core.planning.navdp import (
@@ -94,12 +102,12 @@ class NavDPClickNode:
         G = rospy.get_param
 
         self.drone_ns = G("~drone_ns", "")
-        self.rgb_topic = G("~rgb_topic", "/xtend/rgb")
-        self.depth_topic = G("~depth_topic", "/xtend/depth_m")
-        self.pose_topic = G("~pose_topic", "/xtend/april_tag_pose")
+        self.rgb_topic = G("~rgb_topic", "/xtend/rgb_frame_path")
+        self.depth_topic = G("~depth_topic", "/xtend/depth_frame_path")
+        self.pose_topic = G("~pose_topic", "/xtend/localization")
         # Message type on ~pose_topic: "pose_stamped" (geometry_msgs/PoseStamped)
         # or "pose" (geometry_msgs/Pose). The default localization
-        # /xtend/april_tag_pose is a PoseStamped -- present in bag playback, on the
+        # /xtend/localization is a PoseStamped -- present in bag playback, on the
         # real drone, and from sim_adapter -- so the default is pose_stamped. Point
         # this at the bare /gt_pose (pose_type:=pose) when running inside the nav
         # stack. Mirrors pose_adapter's ~in_type and real_drone's real_pose_type.
@@ -130,7 +138,7 @@ class NavDPClickNode:
             raise ValueError("~display_mode must be 'full' or 'rgb_only', got %r"
                              % self.display_mode)
 
-        # Camera intrinsics matching the /xtend/depth_m stream NavDP indexes.
+        # Camera intrinsics matching the depth frames NavDP indexes.
         # Defaults are the real-XTEND RAW K-matrix at 504x294 (the same values
         # real_drone.launch hands FALCON). The launch overrides them with the
         # shared cam_* args -- raw K on the real drone, sim_adapter's P-target in
@@ -174,8 +182,8 @@ class NavDPClickNode:
         self._got_cam_info = False
         self._reset_done = False                            # latch intrinsics after
 
-        rospy.Subscriber(self.rgb_topic, Image, self._rgb_cb, queue_size=2)
-        rospy.Subscriber(self.depth_topic, Image, self._depth_cb, queue_size=2)
+        rospy.Subscriber(self.rgb_topic, String, self._rgb_cb, queue_size=2)
+        rospy.Subscriber(self.depth_topic, String, self._depth_cb, queue_size=2)
         if self.pose_type == "pose_stamped":
             rospy.Subscriber(self.pose_topic, PoseStamped,
                              self._pose_stamped_cb, queue_size=10)
@@ -197,26 +205,34 @@ class NavDPClickNode:
         self.n_published = 0
         self._banner()
 
-    # ─── Subscribers ─────────────────────────────────────────────
+    # ─── Subscribers (frame-path String: load the file from disk) ────────────
     def _rgb_cb(self, msg):
-        arr = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)
-        if msg.encoding == "bgr8":
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-        self.rgb = arr.copy()
+        # "<path> <sec> <nsec>" -> load the .jpg. cv2 reads BGR; NavDP wants RGB.
+        # A malformed message or unreadable file keeps the last frame (counted by
+        # the throttled warn) rather than clearing the live view.
+        try:
+            path = parse_frame_path_message(msg.data).path
+            bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise OSError("cv2.imread returned None for %s" % path)
+        except (ValueError, OSError) as e:
+            rospy.logwarn_throttle(5.0, "navdp_click: dropping RGB frame-path (%s)", e)
+            return
+        self.rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
     def _depth_cb(self, msg):
-        if msg.encoding == "32FC1":
-            self.depth = np.frombuffer(msg.data, np.float32).reshape(
-                msg.height, msg.width).copy()
-        elif msg.encoding == "16UC1":
-            self.depth = (np.frombuffer(msg.data, np.uint16).reshape(
-                msg.height, msg.width).astype(np.float32) / 1000.0)
-        else:
-            # Warn loudly so the operator sees WHY "Waiting for RGB + depth"
-            # never clears, instead of silently dropping the frame.
-            rospy.logwarn_throttle(5.0, "navdp_click: unsupported depth encoding "
-                                   "%r (need 32FC1 or 16UC1); ignoring frame",
-                                   msg.encoding)
+        # "<path> <sec> <nsec>" -> load the .npy (HxW float32 meters). Keep the
+        # last good frame on a bad message/file instead of clearing the view.
+        try:
+            path = parse_frame_path_message(msg.data).path
+            arr = np.squeeze(np.load(path))
+            if arr.ndim != 2:
+                raise ValueError("depth %s has shape %r; expected HxW"
+                                 % (path, arr.shape))
+        except (ValueError, OSError) as e:
+            rospy.logwarn_throttle(5.0, "navdp_click: dropping depth frame-path (%s)", e)
+            return
+        self.depth = np.ascontiguousarray(arr, dtype=np.float32)
 
     def _pose_cb(self, msg):
         yaw = se3.yaw_from_quaternion((msg.orientation.x, msg.orientation.y,
@@ -230,8 +246,8 @@ class NavDPClickNode:
     def _cam_info_cb(self, msg):
         # ROS1 sensor_msgs/CameraInfo exposes UPPERCASE fields (K, P, R, D); ROS2
         # lowercases them. This node is rospy, so use K/P. Prefer the RAW 3x3
-        # camera matrix K (fx=K[0] fy=K[4] cx=K[2] cy=K[5]): /xtend/depth_m is the
-        # raw, unrectified depth, so K -- not the rectified projection matrix P --
+        # camera matrix K (fx=K[0] fy=K[4] cx=K[2] cy=K[5]): the loaded depth is
+        # raw, unrectified, so K -- not the rectified projection matrix P --
         # back-projects it correctly (P over-scales metric distances; see the
         # K-vs-P note in real_drone.launch). Fall back to P (fx=P[0] fy=P[5]
         # cx=P[2] cy=P[6]) only if K is absent. The published info MUST describe
@@ -540,8 +556,9 @@ if __name__ == "__main__":
 # contract live in core.planning.navdp; this node owns ROS I/O, the OpenCV
 # window, click handling and publishing the world path.
 #
-#   IO: ~rgb_topic (/xtend/rgb) ~depth_topic (/xtend/depth_m)
-#       ~drone_ns ('') ~pose_topic (/xtend/april_tag_pose)
+#   IO: ~rgb_topic (/xtend/rgb_frame_path) ~depth_topic (/xtend/depth_frame_path)
+#       (both std_msgs/String "<path> <sec> <nsec>"; the .jpg/.npy are loaded from disk)
+#       ~drone_ns ('') ~pose_topic (/xtend/localization)
 #       ~pose_type (pose_stamped ; 'pose' for a bare geometry_msgs/Pose, e.g.
 #         the nav stack's /gt_pose or Gazebo's /simple_drone/gt_pose)
 #       ~camera_info_topic ('' = use the fx/fy/cx/cy params; K preferred over P)
@@ -554,7 +571,7 @@ if __name__ == "__main__":
 #   execution: ~execute_fraction (1.0; fly only the first fraction of the route,
 #       then hold at the prefix end until the next ENTER re-infers -- NavDP is
 #       accurate near the camera and drifts further out. 0.5 = first half.)
-#   camera (MUST match the live /xtend/depth_m stream; the launch wires these to
+#   camera (MUST match the live depth frames; the launch wires these to
 #       the shared cam_* args): ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #       [real-XTEND raw-K defaults; sim uses sim_adapter's P-target via cam_*]
 #   NavDP server: ~port (8888) ~timeout_s (30.0) ~depth_max_m (5.0)
