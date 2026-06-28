@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="KhKXnOHbKQ6jJoVN7C1s">
+    <mxGraphModel dx="1684" dy="1654" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ── SOURCE container (groups 2 alternatives) ─────────────────── -->
+        <mxCell id="src_bg" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontSize=14;fontStyle=1;"
+          value="Source" vertex="1">
+          <mxGeometry x="580" y="180" width="300" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="online" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#a0522d;strokeColor=#6D1F00;fontColor=#ffffff;fontSize=13;"
+          value="Online Bridge&#xa;─────────────&#xa;RTSP → rgb frames&#xa;WebSocket ↔ Drone&#xa;bearing from telemetry" vertex="1">
+          <mxGeometry x="600" y="210" width="255" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="offline" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#a0522d;strokeColor=#6D1F00;fontColor=#ffffff;fontSize=13;"
+          value="Offline Source&#xa;─────────────&#xa;recorded session&#xa;rgb · bearing from CSV" vertex="1">
+          <mxGeometry x="600" y="340" width="255" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- ── PERCEPTION container (groups Depth + Localization) ────────── -->
+        <mxCell id="perc_bg" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;fontSize=14;fontStyle=1;"
+          value="Perception" vertex="1">
+          <mxGeometry x="980" y="130" width="300" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="depth" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#f0a30a;strokeColor=#BD7000;fontColor=#000000;fontSize=13;"
+          value="Depth&#xa;─────────────&#xa;DA3 TRT · pre-computed .npy&#xa;RGB → metric depth image" vertex="1">
+          <mxGeometry x="1000" y="160" width="255" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="loc" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#76608a;strokeColor=#432D57;fontColor=#ffffff;fontSize=13;"
+          value="Localization&#xa;─────────────&#xa;AprilTag&#xa;Optical Flow&#xa;AMCL" vertex="1">
+          <mxGeometry x="1000" y="300" width="255" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ── FALCON (standalone) ───────────────────────────────────────── -->
+        <mxCell id="falcon" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#60a917;strokeColor=#2D7600;fontColor=#ffffff;fontSize=13;"
+          value="Falcon  ROS1&#xa;─────────────&#xa;2D / 3D Occupancy&#xa;RRT planner&#xa;→ /cmd_vel" vertex="1">
+          <mxGeometry x="580" y="560" width="255" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ── DEMO MANAGER (standalone) ────────────────────────────────── -->
+        <mxCell id="demo" parent="1"
+          style="whiteSpace=wrap;strokeWidth=2;fillColor=#73756A;strokeColor=#555555;fontColor=#ffffff;fontSize=13;"
+          value="Demo Manager&#xa;─────────────&#xa;orchestrates mission&#xa;Takeoff · Land&#xa;request plan" vertex="1">
+          <mxGeometry x="140" y="400" width="240" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ── DRONE (standalone) ────────────────────────────────────────── -->
+        <mxCell id="drone" parent="1"
+          style="rounded=1;whiteSpace=wrap;arcSize=50;strokeWidth=2;fillColor=#fa6800;strokeColor=#C73500;fontColor=#000000;fontSize=14;"
+          value="Drone&#xa;XTEND · ROBOTICAN · SJTU" vertex="1">
+          <mxGeometry x="980" y="570" width="255" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ── EDGES ──────────────────────────────────────────────────────── -->
+
+        <!-- Source → Perception -->
+        <mxCell id="e1" edge="1" parent="1" source="online" target="perc_bg"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1l" connectable="0" parent="e1" vertex="1"
+          style="edgeLabel;fontSize=13;">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <mxCell id="e2" edge="1" parent="1" source="offline" target="perc_bg"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Perception → Falcon -->
+        <mxCell id="e3" edge="1" parent="1" source="depth" target="falcon"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="900" y="215" />
+              <mxPoint x="900" y="600" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3l" connectable="0" parent="e3" vertex="1"
+          style="edgeLabel;fontSize=13;" value="depth image">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <mxCell id="e4" edge="1" parent="1" source="loc" target="falcon"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="900" y="370" />
+              <mxPoint x="900" y="620" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4l" connectable="0" parent="e4" vertex="1"
+          style="edgeLabel;fontSize=13;" value="pose">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- Falcon → Online Bridge (cmd_vel) -->
+        <mxCell id="e5" edge="1" parent="1" source="falcon" target="online"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="540" y="630" />
+              <mxPoint x="540" y="265" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5l" connectable="0" parent="e5" vertex="1"
+          style="edgeLabel;fontSize=13;" value="cmd_vel">
+          <mxGeometry relative="1" x="0.2" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- Online Bridge ↔ Drone -->
+        <mxCell id="e6" edge="1" parent="1" source="online" target="drone"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6l" connectable="0" parent="e6" vertex="1"
+          style="edgeLabel;fontSize=13;" value="WebSocket">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <mxCell id="e7" edge="1" parent="1" source="drone" target="online"
+          style="curved=1;endArrow=block;startArrow=none;dashed=0;fontSize=13;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="640" />
+              <mxPoint x="1200" y="780" />
+              <mxPoint x="490" y="780" />
+              <mxPoint x="490" y="265" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7l" connectable="0" parent="e7" vertex="1"
+          style="edgeLabel;fontSize=13;" value="telemetry">
+          <mxGeometry relative="1" x="-0.3" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- Demo Manager → Online Bridge (ARM/TAKEOFF/LAND) -->
+        <mxCell id="e8" edge="1" parent="1" source="demo" target="online"
+          style="curved=1;endArrow=block;startArrow=none;fontSize=13;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="450" y="350" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8l" connectable="0" parent="e8" vertex="1"
+          style="edgeLabel;fontSize=13;" value="ARM · TAKEOFF · LAND">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- Demo Manager -.-> Falcon (request plan) -->
+        <mxCell id="e9" edge="1" parent="1" source="demo" target="falcon"
+          style="curved=1;endArrow=block;startArrow=none;dashed=1;dashPattern=6 4;fontSize=13;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9l" connectable="0" parent="e9" vertex="1"
+          style="edgeLabel;fontSize=13;" value="request plan">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- Demo Manager -.-> Perception (monitor) -->
+        <mxCell id="e10" edge="1" parent="1" source="demo" target="perc_bg"
+          style="curved=1;endArrow=block;startArrow=none;dashed=1;dashPattern=6 4;fontSize=13;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="260" y="290" />
+              <mxPoint x="870" y="290" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10l" connectable="0" parent="e10" vertex="1"
+          style="edgeLabel;fontSize=13;" value="monitor">
+          <mxGeometry relative="1" x="0" y="-15" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

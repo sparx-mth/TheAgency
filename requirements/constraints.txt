@@ -1,0 +1,5 @@
+# Keep NumPy below 2 because parts of the stack still expect NumPy 1.x.
+numpy==1.26.4
+
+# Do not use latest OpenCV because newer wheels may pull numpy>=2.
+opencv-python==4.11.0.86

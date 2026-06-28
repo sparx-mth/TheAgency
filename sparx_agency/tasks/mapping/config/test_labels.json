@@ -1,0 +1,660 @@
+[
+  {
+    "frame_idx": 300,
+    "bbox": [
+      177,
+      191,
+      54,
+      224
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "gun"
+  },
+  {
+    "frame_idx": 300,
+    "bbox": [
+      27,
+      183,
+      127,
+      235
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "plastic_chair"
+  },
+  {
+    "frame_idx": 300,
+    "bbox": [
+      449,
+      257,
+      86,
+      43
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "electric_outlet"
+  },
+  {
+    "frame_idx": 380,
+    "bbox": [
+      236,
+      357,
+      186,
+      60
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 380,
+    "bbox": [
+      691,
+      207,
+      28,
+      125
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 385,
+    "bbox": [
+      660,
+      207,
+      29,
+      119
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 385,
+    "bbox": [
+      637,
+      207,
+      32,
+      107
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 385,
+    "bbox": [
+      148,
+      340,
+      223,
+      80
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 385,
+    "bbox": [
+      586,
+      274,
+      133,
+      145
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "fridge"
+  },
+  {
+    "frame_idx": 410,
+    "bbox": [
+      3,
+      339,
+      193,
+      81
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 410,
+    "bbox": [
+      484,
+      213,
+      68,
+      120
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 410,
+    "bbox": [
+      432,
+      278,
+      198,
+      138
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "fridge"
+  },
+  {
+    "frame_idx": 420,
+    "bbox": [
+      129,
+      231,
+      81,
+      115
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 420,
+    "bbox": [
+      82,
+      292,
+      237,
+      124
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "fridge"
+  },
+  {
+    "frame_idx": 420,
+    "bbox": [
+      636,
+      254,
+      82,
+      166
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "cabinet"
+  },
+  {
+    "frame_idx": 430,
+    "bbox": [
+      16,
+      224,
+      80,
+      116
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 430,
+    "bbox": [
+      7,
+      301,
+      186,
+      111
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "fridge"
+  },
+  {
+    "frame_idx": 430,
+    "bbox": [
+      616,
+      87,
+      104,
+      127
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "screen"
+  },
+  {
+    "frame_idx": 430,
+    "bbox": [
+      511,
+      261,
+      209,
+      157
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "cabinet"
+  },
+  {
+    "frame_idx": 430,
+    "bbox": [
+      625,
+      251,
+      94,
+      36
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "keyboard"
+  },
+  {
+    "frame_idx": 450,
+    "bbox": [
+      0,
+      232,
+      37,
+      113
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "bottle"
+  },
+  {
+    "frame_idx": 450,
+    "bbox": [
+      3,
+      327,
+      132,
+      88
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "fridge"
+  },
+  {
+    "frame_idx": 450,
+    "bbox": [
+      559,
+      132,
+      151,
+      109
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "screen"
+  },
+  {
+    "frame_idx": 450,
+    "bbox": [
+      561,
+      272,
+      134,
+      60
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "keyboard"
+  },
+  {
+    "frame_idx": 450,
+    "bbox": [
+      450,
+      276,
+      261,
+      137
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "cabinet"
+  },
+  {
+    "frame_idx": 470,
+    "bbox": [
+      351,
+      175,
+      162,
+      104
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "screen"
+  },
+  {
+    "frame_idx": 470,
+    "bbox": [
+      517,
+      261,
+      117,
+      101
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "box"
+  },
+  {
+    "frame_idx": 470,
+    "bbox": [
+      352,
+      319,
+      150,
+      39
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "keyboard"
+  },
+  {
+    "frame_idx": 470,
+    "bbox": [
+      235,
+      324,
+      303,
+      94
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "cabinet"
+  },
+  {
+    "frame_idx": 470,
+    "bbox": [
+      541,
+      282,
+      171,
+      129
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "desk"
+  },
+  {
+    "frame_idx": 485,
+    "bbox": [
+      128,
+      194,
+      164,
+      102
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "screen"
+  },
+  {
+    "frame_idx": 485,
+    "bbox": [
+      278,
+      275,
+      144,
+      97
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "box"
+  },
+  {
+    "frame_idx": 485,
+    "bbox": [
+      121,
+      339,
+      142,
+      27
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "keyboard"
+  },
+  {
+    "frame_idx": 485,
+    "bbox": [
+      304,
+      314,
+      257,
+      97
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "desk"
+  },
+  {
+    "frame_idx": 500,
+    "bbox": [
+      16,
+      184,
+      162,
+      122
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "screen"
+  },
+  {
+    "frame_idx": 500,
+    "bbox": [
+      0,
+      343,
+      142,
+      24
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "keyboard"
+  },
+  {
+    "frame_idx": 500,
+    "bbox": [
+      175,
+      306,
+      144,
+      97
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "box"
+  },
+  {
+    "frame_idx": 500,
+    "bbox": [
+      180,
+      331,
+      308,
+      87
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "desk"
+  },
+  {
+    "frame_idx": 500,
+    "bbox": [
+      0,
+      333,
+      175,
+      81
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "cabinet"
+  },
+  {
+    "frame_idx": 595,
+    "bbox": [
+      636,
+      277,
+      67,
+      132
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 620,
+    "bbox": [
+      491,
+      265,
+      73,
+      125
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 640,
+    "bbox": [
+      184,
+      192,
+      95,
+      141
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 640,
+    "bbox": [
+      489,
+      235,
+      46,
+      134
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "plastic_chair"
+  },
+  {
+    "frame_idx": 665,
+    "bbox": [
+      635,
+      247,
+      81,
+      131
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 665,
+    "bbox": [
+      69,
+      287,
+      103,
+      117
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  },
+  {
+    "frame_idx": 675,
+    "bbox": [
+      255,
+      308,
+      48,
+      103
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "gun"
+  },
+  {
+    "frame_idx": 675,
+    "bbox": [
+      535,
+      274,
+      102,
+      127
+    ],
+    "source_size": [
+      720,
+      420
+    ],
+    "label": "chair"
+  }
+]

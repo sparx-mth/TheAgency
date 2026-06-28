@@ -1,0 +1,7 @@
+camera_matrix:
+  data: [149.2, 0.0, 319.5,
+         0.0, 180.0, 179.5,
+         0.0, 0.0, 1.0]
+
+distortion_coefficients:
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]

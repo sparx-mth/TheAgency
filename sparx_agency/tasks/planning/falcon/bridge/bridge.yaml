@@ -1,0 +1,172 @@
+topics:
+  - topic: /xtend/camera_info
+    type: sensor_msgs/msg/CameraInfo
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: best_effort     # confirm with `ros2 topic info -v /xtend/camera_info`
+      durability: volatile
+
+  # Depth/RGB are no longer bridged as raw Images. The drone saves each
+  # frame to disk and publishes a tiny std_msgs/String "<path> <sec> <nsec>"
+  # instead; the ROS1 consumers (mapping_sync, navdp_click) load the .npy /
+  # .jpg from the path and reuse the (localization-synchronized) stamp. This
+  # cuts the per-frame serialization/network cost of the image transport.
+  - topic: /xtend/depth_frame_path
+    type: std_msgs/msg/String
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      # best_effort matches the drone's publisher. With reliable here,
+      # no data flows (this was the bug).
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /xtend/rgb_frame_path
+    type: std_msgs/msg/String
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      # Same QoS as /xtend/depth_frame_path — a high-rate sensor stream from
+      # the same camera, drops are fine. If `ros2 topic info -v
+      # /xtend/rgb_frame_path` shows the publisher as reliable, flip this to
+      # reliable (mismatch = no data flows, same trap as depth).
+      reliability: best_effort
+      durability: volatile
+  # camera_info intentionally NOT bridged. Intrinsics are static and
+  # already loaded into rosparam on the ROS1 side via
+  #   /uav_model/sensing_parameters/camera_intrinsics/{fx,fy,cx,cy}
+  #   /uav_model/sensing_parameters/{image_width,image_height,min_depth,max_depth}
+  # FALCON's exploration_node reads intrinsics from rosparam, not from
+  # the topic, so there's no reason to drag /xtend/camera_info across.
+  # If you ever need it back, re-add the entry here AND set
+  # bridge_camera_info:=true on the ROS1 sensor_gate.
+#- topic: /flow_depth/pose_est
+#  - topic: /xtend/amcl_pose
+#  - topic: /flow_depth/pose_est
+#    type: geometry_msgs/msg/PoseStamped
+#    queue_size: 10
+#    qos:
+#      history: keep_last
+#      depth: 10
+#      # Per your QoSProfile snippet: best_effort. If pose is published
+#      # reliable on the drone, change this to reliable and the depth
+#      # to a higher number (50) for catch-up after stalls.
+#      reliability: best_effort
+#      durability: volatile
+
+  - topic: /xtend/localization
+    type: geometry_msgs/msg/PoseStamped
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      # Per your QoSProfile snippet: best_effort. If pose is published
+      # reliable on the drone, change this to reliable and the depth
+      # to a higher number (50) for catch-up after stalls.
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /cmd_vel
+    type: geometry_msgs/msg/Twist
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      # Control commands — reliable on the drone side. Scripts that
+      # subscribe to /cmd_vel (like xtend_twist_to_cmd_nav.py) expect
+      # reliable; best_effort here would cause a QoS mismatch.
+      reliability: reliable
+      durability: volatile
+
+  # ── DemoMode state machine handshake ──────────────────────────────
+  # Two String topics bridge the ROS2-owned DemoMode state machine to
+  # the ROS1 Falcon planner. parameter_bridge bridges each entry in
+  # both directions; the asymmetry below is purely about which side
+  # is the authoritative publisher.
+  #
+  #   /xtend/demo_mode          published by ROS2 (system),
+  #                             subscribed by ROS1 (waypoint_follower,
+  #                             falcon_adapter). Current system state.
+  #   /xtend/demo_mode_request  published by ROS1 (waypoint_follower)
+  #                             to request a transition; consumed by
+  #                             the ROS2 state-machine owner.
+  #
+  # Both use transient_local durability so a late-joining subscriber
+  # (e.g. the bridge or Falcon restarting mid-flight) picks up the
+  # last known state/request without waiting for the next publish.
+
+  - topic: /xtend/demo_mode
+    type: std_msgs/msg/String
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: reliable
+      durability: transient_local
+
+  - topic: /xtend/demo_mode_request
+    type: std_msgs/msg/String
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: reliable
+      durability: transient_local
+
+#  # ── SIM-mode inputs (Gazebo via gazebo_ros, ROS2 → ROS1) ─────────────
+#  # These three are consumed by ROS1's sim_adapter.py, which crops the
+#  # images and republishes them on the real-drone topic names so the
+#  # rest of the stack doesn't know it's sim. Real-drone runs don't
+#  # need these — they cost nothing if no one publishes them.
+#  #
+#  # QoS notes:
+#  #   • Gazebo's libgazebo_ros_camera.so default is RELIABLE / VOLATILE.
+#  #     If `ros2 topic info -v /simple_drone/front/image_raw` shows
+#  #     best_effort instead, flip the matching reliability line — a
+#  #     mismatch means zero data flows (same trap as /xtend/depth_m).
+#  #   • /simple_drone/gt_pose is Pose, not PoseStamped — sim_adapter
+#  #     adds the header before republishing as PoseStamped on
+#  #     /flow_depth/pose_est.
+#
+#  - topic: /simple_drone/front/image_raw
+#    type: sensor_msgs/msg/Image
+#    queue_size: 1
+#    qos:
+#      history: keep_last
+#      depth: 1
+#      reliability: reliable
+#      durability: volatile
+#
+#  - topic: /simple_drone/front_depth/depth/image_raw
+#    type: sensor_msgs/msg/Image
+#    queue_size: 1
+#    qos:
+#      history: keep_last
+#      depth: 1
+#      reliability: reliable
+#      durability: volatile
+#
+#  - topic: /simple_drone/gt_pose
+#    type: geometry_msgs/msg/Pose
+#    queue_size: 10
+#    qos:
+#      history: keep_last
+#      depth: 10
+#      reliability: reliable
+#      durability: volatile
+#
+#  - topic: /simple_drone/cmd_vel
+#    type: geometry_msgs/msg/Twist
+#    queue_size: 10
+#    qos:
+#      history: keep_last
+#      depth: 10
+#      # Outbound: FALCON publishes /cmd_vel (ROS1). sim_adapter renames
+#      # it to /simple_drone/cmd_vel (ROS1). This entry bridges
+#      # /simple_drone/cmd_vel ROS1→ROS2 so Gazebo's sjtu_drone gets it.
+#      reliability: reliable
+#      durability: volatile

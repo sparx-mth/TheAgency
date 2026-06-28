@@ -1,0 +1,72 @@
+{
+  "paths": {
+    "unified_rooms_json": "data/unified_rooms.json",
+    "house_map_txt": "data/house_map.txt",
+    "current_map_png": "data/current_map.png",
+    "task_request_file": "task_request.json",
+    "mission_response_file": "mission_response.txt",
+    "mission_file": "current_mission.txt",
+    "agent_commands_file": "agent_commands.txt",
+    "ingest_out_dir": "ingest_out",
+    "data_dir": "data"
+  },
+
+  "server": {
+    "web_host": "0.0.0.0",
+    "web_port": 8080,
+    "receiver_host": "0.0.0.0",
+    "receiver_port": 9090
+  },
+
+  "llm": {
+    "mission_model": "llama3.1:8b",
+    "agent_model": "llama3.2:3b",
+    "timeout": 120
+  },
+
+    "_diagram": [
+    "    ┌── north (y=0) ───┐"     ,
+    "    │                  │"     ,
+    "  west(x=0)        east(x=W)" ,
+    "    │                  │"     ,
+    "    └── south (y=H) ───┘"
+  ],
+
+  "camera": {
+    "camera_wall": "south",
+    "camera_position_along_wall": null,
+    "camera_fov_h": 100,
+    "camera_fov_v": 50
+  },
+
+
+  "room": {
+    "mode": "standalone",
+    "room_name": "main_room",
+    "grid_cells": [21, 21],
+    "grid_resolution": null,
+    "room_width_m": null,
+    "room_height_m": null,
+    "room_bbox": null,
+    "existing_map": null,
+    "existing_json": null,
+    "default_distance_m": 5.0
+  },
+
+  "rendering": {
+    "cell_size": 35,
+    "legend_width": 400,
+    "reload_interval": 500
+  },
+
+  "receiver": {
+    "accumulate_mode": false
+  },
+
+  "polling": {
+    "llm_poll_interval": 0.5,
+    "web_poll_interval": 0.25,
+    "data_update_interval": 1,
+    "mapper_poll_interval": 2
+  }
+}

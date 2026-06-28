@@ -1,0 +1,413 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="kdxxWvEFPJkOLDg-B66F">
+    <mxGraphModel dx="3369" dy="3309" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-1" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="XTEND Drone" vertex="1">
+          <mxGeometry height="173" width="921" x="1707" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-2" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Jetson Orin AGX — 192.0.0.89  (ROS Humble · ROS_DOMAIN_ID=5)" vertex="1">
+          <mxGeometry height="2373" width="3158" x="527" y="213" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-3" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Docker Stack — ROS1 Noetic" vertex="1">
+          <mxGeometry height="516" width="817" x="2318" y="2026" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-4" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Optional tmux Sessions" vertex="1">
+          <mxGeometry height="336" width="1403" x="1732" y="1670" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-5" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Core tmux Sessions  (Jetson)" vertex="1">
+          <mxGeometry height="1417" width="2534" x="1126" y="233" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-6" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="AUTO Offline  ·  tmux: xtend_auto_offline" vertex="1">
+          <mxGeometry height="517" width="317" x="552" y="1577" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-7" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="AUTO Orchestrator  ·  tmux: xtend_auto_launch" vertex="1">
+          <mxGeometry height="1042" width="342" x="539" y="399" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-8" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="PC — Base Station  (ROS Jazzy · ROS_DOMAIN_ID=5)" vertex="1">
+          <mxGeometry height="1575" width="372" x="20" y="257" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-9" parent="1" style="rounded=1;whiteSpace=wrap;arcSize=50;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="XtendPipelineLauncher&#xa;Tkinter UI&#xa;Jetson SSH: 192.0.0.89" vertex="1">
+          <mxGeometry height="87" width="201" x="105" y="1382" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-10" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_pc_ui&#xa;ui.py&#xa;[item 10]" vertex="1">
+          <mxGeometry height="102" width="148" x="132" y="292" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-11" parent="1" style="rounded=1;whiteSpace=wrap;arcSize=50;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="AUTO pipeline script&#xa;① Bridge  ② Depth  ③ Twist-conv  ④ Demo-mgr&#xa;→ ARM → TAKEOFF → sleep 30s&#xa;→ ⑥ AprilTag  →  ⑧ Falcon&#xa;→ publish demo_mode fly_straight" vertex="1">
+          <mxGeometry height="207" width="267" x="577" y="632" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-12" parent="1" style="rounded=1;whiteSpace=wrap;arcSize=50;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="OFFLINE pipeline script&#xa;① Replay  ② Depth  ③ AprilTag" vertex="1">
+          <mxGeometry height="87" width="237" x="592" y="1739" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-13" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_bridge  [1]&#xa;online_nav_bridge_dir_publisher.py&#xa;· 504×294 resize frames → /tmp/xtend_frames&#xa;· owns XTEND WebSocket" vertex="1">
+          <mxGeometry height="150" width="314" x="1151" y="798" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-14" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_offline_replay  [1-ALT]&#xa;offline_frame_dir_publisher.py&#xa;reads /tmp/xtend_capture @ 10 Hz loop" vertex="1">
+          <mxGeometry height="126" width="281" x="1167" y="1272" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-15" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_depth  [2]&#xa;depth_processor_node.py&#xa;DA3METRIC-LARGE FP16 504×294&#xa;focal scale ÷300 · clip 0.2–8 m&#xa;saves .npy → /tmp/xtend_depth" vertex="1">
+          <mxGeometry height="222" width="260" x="1776" y="764" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-16" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_twist_converter  [3]&#xa;extend_twist_to_cmd_nav.py&#xa;linear.x=0.3 → fwd thrust 400&#xa;max 600 · timeout 1.5 s" vertex="1">
+          <mxGeometry height="150" width="269" x="3366" y="358" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-17" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_demo_manager  [4]&#xa;extend_drone_demo_manager.py&#xa;states: idle · fly_straight&#xa;turning · visual_servoing · finish&#xa;disarm-delay 8 s" vertex="1">
+          <mxGeometry height="150" width="298" x="1757" y="1110" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-18" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_april_tag  [6]&#xa;apriltag_triangulation_node&#xa;tag36h11 · size 0.13 m&#xa;new_map.yaml · 504×294 calib" vertex="1">
+          <mxGeometry height="150" width="260" x="1776" y="1438" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-19" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_twist_replayer  [5]&#xa;twist_replayer.py&#xa;JSONL log → /cmd_vel" vertex="1">
+          <mxGeometry height="102" width="238" x="2861" y="1705" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-20" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_flow_depth  [7]&#xa;flow_depth_velocity_node&#xa;not active: needs /xtend/rgb Image" vertex="1">
+          <mxGeometry height="126" width="260" x="2343" y="1845" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-21" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_velocity_integrator  [8]&#xa;velocity_integrator" vertex="1">
+          <mxGeometry height="102" width="260" x="2850" y="1857" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-22" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="xtend_static_tf  [9]&#xa;static_transform_publisher&#xa;odom → xtend_camera" vertex="1">
+          <mxGeometry height="102" width="253" x="1779" y="1857" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-23" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="roscore&#xa;container" vertex="1">
+          <mxGeometry height="78" width="128" x="2409" y="2101" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-24" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="ros1_bridge&#xa;container&#xa;run_bridge.sh&#xa;ROS1 ↔ ROS2" vertex="1">
+          <mxGeometry height="126" width="159" x="2901" y="2061" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-25" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="falcon&#xa;container  [12]&#xa;falcon_adapter&#xa;real_drone.launch&#xa;map:=office" vertex="1">
+          <mxGeometry height="150" width="191" x="2378" y="2293" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-26" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="planner_bev_goal  [15]&#xa;bev_click_goal.py&#xa;(optional)" vertex="1">
+          <mxGeometry height="102" width="220" x="2870" y="2253" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-27" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="planner_rviz  [14]&#xa;rviz.launch&#xa;(optional)" vertex="1">
+          <mxGeometry height="102" width="182" x="2889" y="2405" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-28" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="XTEND WebSocket&#xa;(onboard)" vertex="1">
+          <mxGeometry height="78" width="190" x="1811" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-29" parent="1" style="rounded=1;whiteSpace=wrap;arcSize=50;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="Flight Controller&#xa;ARM · TAKEOFF · NAV&#xa;LAND · DISARM" vertex="1">
+          <mxGeometry height="87" width="188" x="2379" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-30" parent="1" style="whiteSpace=wrap;strokeWidth=2;fillColor=light-dark(#eeeeee,#1f2020);strokeColor=light-dark(#999999,#cccccc);fontColor=light-dark(#333333,#cccccc);" value="```" vertex="1">
+          <mxGeometry height="54" width="85" x="163" y="1867" as="geometry" />
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-31" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-9" style="curved=1;startArrow=none;endArrow=block;exitX=0.54;exitY=0;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-11" value="SSH → spawn tmux:&#xa;extend_auto_launch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="331" y="736" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-32" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-9" style="curved=1;startArrow=none;endArrow=block;exitX=0.58;exitY=1;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-12" value="SSH → spawn tmux:&#xa;extend_auto_offline">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="331" y="1782" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-33" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-9" style="curved=1;startArrow=none;endArrow=block;exitX=0.76;exitY=1;entryX=0.14;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-17" value="SSH: ros2 topic pub&#xa;/xtend/demo_mode_request&#xa;{mode, source, reason}">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="331" y="1528" />
+              <mxPoint x="868" y="1528" />
+              <mxPoint x="997" y="1065" />
+              <mxPoint x="1732" y="1065" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-34" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.2;entryX=0;entryY=0.04;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-13" value="start_tmux ①&#xa;wait /xtend/rgb_frame_path">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="662" />
+              <mxPoint x="997" y="793" />
+              <mxPoint x="1126" y="793" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-35" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=0.94;exitY=0;entryX=0.23;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-15" value="start_tmux ②&#xa;wait /xtend/depth_m">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="596" />
+              <mxPoint x="1732" y="596" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-36" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=0.75;exitY=0;entryX=0;entryY=0.34;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-16" value="start_tmux ③&#xa;sleep 2 s">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="488" />
+              <mxPoint x="997" y="389" />
+              <mxPoint x="3250" y="389" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-37" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.99;entryX=0;entryY=0.13;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-17" value="start_tmux ④&#xa;wait /xtend/demo_mode">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="856" />
+              <mxPoint x="997" y="1121" />
+              <mxPoint x="1732" y="1121" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-38" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.4;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-13" value="ros2 topic pub --once&#xa;/xtend/cmd_nav  ARM">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="712" />
+              <mxPoint x="997" y="873" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-39" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.61;entryX=0;entryY=0.96;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-13" value="ros2 topic pub --once&#xa;/xtend/cmd_nav  TAKEOFF&#xa;sleep 30 s">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="762" />
+              <mxPoint x="997" y="953" />
+              <mxPoint x="1126" y="953" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-40" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=0.7;exitY=1;entryX=0;entryY=0.22;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-18" value="start_tmux ⑥&#xa;wait /xtend/april_tag_pose">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="1044" />
+              <mxPoint x="997" y="1457" />
+              <mxPoint x="1732" y="1457" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-41" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=0.6;exitY=1;entryX=0;entryY=0.23;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-25" value="docker exec falcon ⑧&#xa;roslaunch falcon_adapter&#xa;real_drone.launch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="1361" />
+              <mxPoint x="997" y="2304" />
+              <mxPoint x="2318" y="2304" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-42" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-11" style="curved=1;startArrow=none;endArrow=block;exitX=0.86;exitY=1;entryX=0;entryY=0.59;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-17" value="step 9: ros2 pub&#xa;/xtend/demo_mode_request&#xa;fly_straight">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="906" />
+              <mxPoint x="997" y="1201" />
+              <mxPoint x="1732" y="1201" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-43" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-12" style="curved=1;startArrow=none;endArrow=block;exitX=0.68;exitY=1;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-14" value="start_tmux ①">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="1945" />
+              <mxPoint x="997" y="1335" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-44" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-12" style="curved=1;startArrow=none;endArrow=block;exitX=0.7;exitY=0;entryX=0.07;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-15" value="start_tmux ②">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="1636" />
+              <mxPoint x="997" y="704" />
+              <mxPoint x="1732" y="704" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-45" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-12" style="curved=1;startArrow=none;endArrow=block;exitX=0.61;exitY=1;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-18" value="start_tmux ③">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="2044" />
+              <mxPoint x="997" y="1513" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-46" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-29" style="curved=1;startArrow=none;endArrow=block;exitX=0;exitY=0.73;entryX=1;entryY=0.64;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-28" value="telemetry: IMU, bearing&#xa;onboard sensors">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2318" y="131" />
+              <mxPoint x="2186" y="131" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-47" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-28" style="curved=1;startArrow=none;endArrow=block;exitX=0.35;exitY=0.99;entryX=0.63;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-13" value="RTSP video stream&#xa;raw frames">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1732" y="345" />
+              <mxPoint x="1586" y="345" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-48" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-13" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.49;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-15" value="/xtend/rgb_frame_path&#xa;std_msgs/String  (file path)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1732" y="873" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-49" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-13" style="curved=1;startArrow=none;endArrow=block;exitX=0.6;exitY=1;entryX=0;entryY=0.66;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-18" value="/xtend/rgb_frame_path">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1586" y="1545" />
+              <mxPoint x="1732" y="1545" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-50" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-13" style="curved=1;startArrow=none;endArrow=block;exitX=0.66;exitY=1;entryX=0.05;entryY=1;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-17" value="/xtend/bearing&#xa;/xtend/local_telemetry">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1586" y="1283" />
+              <mxPoint x="1732" y="1283" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-51" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-14" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;exitX=0.7;exitY=0;entryX=0;entryY=0.99;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-15" value="/xtend/rgb_frame_path&#xa;[offline mode]">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1586" y="1021" />
+              <mxPoint x="1732" y="1021" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-52" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-14" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;exitX=0.75;exitY=1;entryX=0;entryY=0.88;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-18" value="/xtend/rgb_frame_path">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1586" y="1589" />
+              <mxPoint x="1732" y="1589" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-53" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-15" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.74;entryX=0.46;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-20" value="/xtend/depth_m&#xa;32FC1 metric">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2186" y="993" />
+              <mxPoint x="2318" y="993" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-54" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-15" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.09;entryX=0.46;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-21" value="/xtend/depth_frame_path&#xa;path to .npy">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2186" y="678" />
+              <mxPoint x="2739" y="678" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-55" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-10" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-16" value="/cmd_vel&#xa;geometry_msgs/Twist">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="868" y="343" />
+              <mxPoint x="997" y="433" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-56" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-19" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.65;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-16" value="/cmd_vel Twist&#xa;[optional]">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="3135" y="1756" />
+              <mxPoint x="3250" y="477" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-57" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-16" style="curved=1;startArrow=none;endArrow=block;exitX=0;exitY=0.97;entryX=0.72;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-13" value="/xtend/cmd_nav&#xa;JSON String&#xa;{action, value}">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="3250" y="565" />
+              <mxPoint x="1586" y="565" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-58" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-17" style="curved=1;startArrow=none;endArrow=block;exitX=0.25;exitY=1;entryX=0.64;entryY=1;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-13" value="/xtend/cmd_nav&#xa;ARM · LAND · DISARM&#xa;{action, value}">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1732" y="1363" />
+              <mxPoint x="1586" y="1363" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-59" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-13" style="curved=1;startArrow=none;endArrow=block;exitX=0.61;exitY=0;entryX=0.3;entryY=0.99;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-28" value="WebSocket JSON&#xa;/xtend/cmd_nav forward">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1586" y="277" />
+              <mxPoint x="1732" y="277" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-60" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-28" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.39;entryX=0;entryY=0.34;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-29" value="flight commands">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2186" y="75" />
+              <mxPoint x="2318" y="75" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-61" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-17" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0.45;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-25" value="/xtend/demo_mode&#xa;std_msgs/String&#xa;idle·fly_straight·finish…">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2318" y="1185" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-62" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-18" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0.43;entryY=0;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-25" value="/xtend/april_tag_pose&#xa;geometry_msgs/PoseStamped">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2318" y="1513" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-63" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-25" style="curved=1;startArrow=none;endArrow=block;exitX=0.72;exitY=0;entryX=0;entryY=0.41;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-24" value="/cmd_vel  (ROS1 Noetic)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2628" y="2091" />
+              <mxPoint x="2739" y="2091" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-64" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-24" style="curved=1;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.86;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-16" value="/cmd_vel  (ROS2 Humble)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="3135" y="2124" />
+              <mxPoint x="3250" y="533" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-65" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-23" style="curved=1;startArrow=none;endArrow=none;exitX=1;exitY=0.49;entryX=0;entryY=0.54;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-24" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2739" y="2140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-66" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-25" style="curved=1;startArrow=none;endArrow=none;exitX=1;exitY=0.23;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-26" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2628" y="2304" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-67" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-25" style="curved=1;startArrow=none;endArrow=none;exitX=1;exitY=0.86;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-27" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2628" y="2456" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-68" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-22" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-20" value="TF: odom → xtend_camera">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-69" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-20" style="curved=1;dashed=1;dashPattern=2 3;startArrow=none;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-21" value="velocity estimate">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tNaazlhTEyBPnVG3TFr1-70" edge="1" parent="1" source="tNaazlhTEyBPnVG3TFr1-9" style="curved=1;startArrow=none;endArrow=block;rounded=0;" target="tNaazlhTEyBPnVG3TFr1-5" value="SSH → spawn tmux&#xa;per LaunchItem">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
