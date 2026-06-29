@@ -20,12 +20,10 @@ from std_msgs.msg import Int32MultiArray
 from apriltag_msgs.msg import AprilTagDetectionArray
 
 from sparx_agency.core.localization.tag_triangulation import (
-    estimate_camera_pose_from_tags,
-    matrix_to_pose,
-)
-from sparx_agency.core.localization.types.tag_triangulation import (
     TagWorldPose,
-    TagTransformObservation,
+    TagObservation,
+    estimate_camera_pose_from_tags,
+    transform_to_pose,
 )
 
 
@@ -261,7 +259,7 @@ class TagTriangulationNode(Node):
         detection_stamp = msg.header.stamp
 
         # Build observations (only for tags we know in tag_map)
-        observations: List[TagTransformObservation] = []
+        observations: List[TagObservation] = []
         used_for_tf: Set[int] = set()
 
         for tag_id in sorted(list(current_ids)):
@@ -285,7 +283,7 @@ class TagTriangulationNode(Node):
                 continue
 
             cam_T_tag = self.transform_to_matrix(tf_found)
-            observations.append(TagTransformObservation(tag_id=tag_id, cam_T_tag=cam_T_tag))
+            observations.append(TagObservation(tag_id=tag_id, cam_T_tag=cam_T_tag))
             used_for_tf.add(tag_id)
 
         if not observations:
@@ -304,7 +302,7 @@ class TagTriangulationNode(Node):
             self.last_seen_ids = current_ids
             return
 
-        (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+        (x, y, z), (qx, qy, qz, qw) = transform_to_pose(est.world_T_cam)
 
         pose_msg = PoseStamped()
         pose_msg.header.frame_id = self.world_frame

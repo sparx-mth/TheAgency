@@ -27,11 +27,7 @@ class LogOddsGridConfig:
 
 
 class LogOddsGridCostmap(Costmap):
-    """
-    Log-odds occupancy grid:
-      - marks occupied based on point evidence
-      - does NOT raytrace free space (by design, for “1-hour” robustness)
-    """
+    """Log-odds occupancy grid with optional ray-cast free-space marking."""
 
     def __init__(self, cfg: LogOddsGridConfig):
         self.cfg = cfg
@@ -84,6 +80,11 @@ class LogOddsGridCostmap(Costmap):
 
         self._L[hit_mask] = np.clip(self._L[hit_mask] + dL[hit_mask], self.cfg.l_min, self.cfg.l_max)
         self._seen[hit_mask] = True
+
+    def apply_free_mask(self, mask: np.ndarray) -> None:
+        """Decrement log-odds for every True cell in mask (ray-cast free space)."""
+        self._L[mask] = np.clip(self._L[mask] + self.cfg.l_free, self.cfg.l_min, self.cfg.l_max)
+        self._seen[mask] = True
 
     def get_grid(self) -> Tuple[GridSpec, np.ndarray]:
         spec = GridSpec(

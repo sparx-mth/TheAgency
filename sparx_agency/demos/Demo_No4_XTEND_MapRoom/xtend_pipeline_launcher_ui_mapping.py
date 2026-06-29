@@ -5,7 +5,7 @@ XTEND pipeline launcher UI — RGBD Mapping variant.
 Replaces optical-flow localization (flow_depth + velocity_integrator + static odom TF)
 with AprilTag-based 6-DOF pose estimation driving a live octomap:
 
-  AprilTag triangulation → /xtend/april_tag_pose
+  localization_node (apriltag) → /xtend/localization
     → pose_to_tf_node    → TF map→xtend_camera (dynamic, overrides static fallback)
     → octomap_server     ← /xtend/pointcloud (from depth_processor_node)
 
@@ -27,15 +27,16 @@ from tkinter import messagebox, ttk
 from typing import Literal
 
 JETSON_SSH_DEFAULT = "user@192.0.0.89"
+JETSON_REPO = "/home/user/agency_ws"
 
 JETSON_ENV = """
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
+export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
 """
 
 PC_ENV = """
@@ -53,13 +54,13 @@ set +e
 
 echo "[AUTO] XTEND RGBD mapping pipeline auto launch started"
 
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
+export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
 
 wait_for_topic_name() {
     local topic="$1"
@@ -111,42 +112,41 @@ start_tmux() {
     tmux new-session -d -s "${session}" "bash -lc $(printf '%q' "${command}")"
 }
 
-echo "[AUTO] Step 1: start online bridge + RGB"
+echo "[AUTO] Step 1: start online bridge + frame dir publisher"
 start_tmux xtend_bridge '
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
+export PYTHONPATH=/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
+python3 /home/user/agency_ws/sparx_agency/robots/XTEND/online_nav_bridge_dir_publisher.py \
   --frequency 10.0 \
-  --image-topic /xtend/rgb \
-  --camera-info-topic /xtend/camera_info \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  --out-dir /tmp/xtend_frames \
+  --path-topic /xtend/rgb_frame_path \
   --preprocess-mode resize \
   --output-width 504 \
   --output-height 294
 '
 
-wait_for_topic_name /xtend/rgb 20
+wait_for_topic_name /xtend/rgb_frame_path 20
 wait_for_topic_rate /xtend/bearing 20 best_effort || true
-wait_for_topic_rate /xtend/rgb 20 best_effort || true
+wait_for_topic_rate /xtend/rgb_frame_path 20 best_effort || true
 
 echo "[AUTO] Step 2: start DA3 Large Metric 504x294 depth + point cloud"
 start_tmux xtend_depth '
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
+export PYTHONPATH=/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
+python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
   --ros-args \
-  -p image_topic:=/xtend/rgb \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p apply_metric_focal_scaling:=true \
@@ -154,7 +154,10 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p clip_min_m:=0.2 \
   -p clip_max_m:=5.0 \
   -p depth_encoding:=32FC1 \
-  -p publish_cloud:=true \
+  -p depth_path_topic:=/xtend/depth_frame_path \
+  -p depth_dir:=/tmp/xtend_depth \
+  -p max_depth_kept:=300 \
+  -p publish_cloud:=false \
   -p pointcloud_topic:=/xtend/pointcloud
 '
 
@@ -162,29 +165,14 @@ wait_for_topic_name /xtend/depth_m 30
 wait_for_topic_rate /xtend/depth_m 60 best_effort
 wait_for_topic_name /xtend/pointcloud 15
 
-echo "[AUTO] Step 3: start Twist converter"
-start_tmux xtend_twist_converter '
-cd /home/user/GIT/TheAgency
-source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
-export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-'
-
-sleep 2
-
-echo "[AUTO] Step 4: start XTEND demo mode manager"
+echo "[AUTO] Step 3: start XTEND demo mode manager"
 start_tmux xtend_demo_manager '
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
+export PYTHONPATH=/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
+python3 /home/user/agency_ws/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
   --request-topic /xtend/demo_mode_request \
   --mode-topic /xtend/demo_mode \
   --cmd-nav-topic /xtend/cmd_nav \
@@ -206,23 +194,22 @@ sleep 30
 
 echo "[AUTO] Re-check depth + pointcloud before mapping"
 wait_for_topic_rate /xtend/depth_m 30 best_effort
-wait_for_topic_rate /xtend/pointcloud 30 best_effort
+# wait_for_topic_rate /xtend/pointcloud 30 best_effort
 
-echo "[AUTO] Step 6: start AprilTag triangulation (pose estimation)"
+echo "[AUTO] Step 6: start localization node (AprilTag provider)"
 start_tmux xtend_apriltag '
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
-  --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  --tag_size_m 0.13 \
-  --source ros \
-  --image_topic /xtend/rgb \
-  --pose_topic /xtend/april_tag_pose \
-  --no_vis
+export PYTHONPATH=/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
+python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+  --ros-args \
+  -p provider_type:=apriltag \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
+  -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_size_m:=0.13
 '
 
 echo "[AUTO] Step 7: start static TF fallback (map -> xtend_camera, z=1.0m)"
@@ -238,14 +225,14 @@ ros2 run tf2_ros static_transform_publisher \
 
 echo "[AUTO] Step 8: start pose-to-TF bridge (AprilTag pose -> TF)"
 start_tmux xtend_pose_to_tf '
-cd /home/user/GIT/TheAgency
+cd /home/user/agency_ws
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/agency_ws/venv/bin/activate
 export ROS_DOMAIN_ID=5
-export PYTHONPATH=/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
+export PYTHONPATH=/home/user/agency_ws:/home/user/agency_ws/sparx_agency:${PYTHONPATH}
 python3 -m sparx_agency.tasks.mapping.ros2.pose_to_tf_node \
   --ros-args \
-  -p pose_topic:=/xtend/april_tag_pose
+  -p pose_topic:=/xtend/localization
 '
 
 echo "[AUTO] Step 9: start octomap server"
@@ -266,7 +253,7 @@ ros2 run octomap_server octomap_server_node \
   --remap cloud_in:=/xtend/pointcloud
 '
 
-wait_for_topic_name /xtend/april_tag_pose 20 || true
+wait_for_topic_name /xtend/localization 20 || true
 
 echo "[AUTO] Step 10: check planner containers"
 docker ps --format '{{.Names}}' | tee /tmp/xtend_docker_names.txt
@@ -303,16 +290,15 @@ class LaunchItem:
 
 LAUNCH_ITEMS: list[LaunchItem] = [
     LaunchItem(
-        name="1. XTEND online bridge + RGB publisher",
+        name="1. XTEND online bridge + frame dir publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x294 full-FOV resized frames, /xtend/camera_info, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
+        description="Owns XTEND WebSocket. Saves 504x294 resized frames to /tmp/xtend_frames and publishes each path on /xtend/rgb_frame_path (std_msgs/String). Also publishes /xtend/bearing and /xtend/local_telemetry.",
         command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
+python3 /home/user/agency_ws/sparx_agency/robots/XTEND/online_nav_bridge_dir_publisher.py \
   --frequency 10.0 \
-  --image-topic /xtend/rgb \
-  --camera-info-topic /xtend/camera_info \
-  --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  --out-dir /tmp/xtend_frames \
+  --path-topic /xtend/rgb_frame_path \
   --preprocess-mode resize \
   --output-width 504 \
   --output-height 294
@@ -323,17 +309,17 @@ python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_pub
         machine="jetson",
         tmux_name="xtend_depth",
         description=(
-            "Subscribes to /xtend/rgb 504x294, runs DA3METRIC-LARGE FP16 TRT, "
+            "Reads frames from /xtend/rgb_frame_path, runs DA3METRIC-LARGE FP16 TRT, "
             "publishes /xtend/depth_m (32FC1 meters) and /xtend/pointcloud (PointCloud2 in xtend_camera frame). "
-            "32FC1 required for correct metric backprojection."
+            "Saves depth arrays to /tmp/xtend_depth, publishes paths on /xtend/depth_frame_path."
         ),
         command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
+python3 /home/user/agency_ws/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
   --ros-args \
-  -p image_topic:=/xtend/rgb \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
   -p depth_topic:=/xtend/depth_m \
-  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine \
-  -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.engine \
+  -p config_yaml:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p apply_metric_focal_scaling:=true \
@@ -341,29 +327,20 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor
   -p clip_min_m:=0.2 \
   -p clip_max_m:=5.0 \
   -p depth_encoding:=32FC1 \
-  -p publish_cloud:=true \
+  -p depth_path_topic:=/xtend/depth_frame_path \
+  -p depth_dir:=/tmp/xtend_depth \
+  -p max_depth_kept:=300 \
+  -p publish_cloud:=false \
   -p pointcloud_topic:=/xtend/pointcloud
 """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.5
-""",
-    ),
-    LaunchItem(
-        name="4. XTEND demo mode manager",
+        name="3. XTEND demo mode manager",
         machine="jetson",
         tmux_name="xtend_demo_manager",
         description="Publishes /xtend/demo_mode from planner/UI requests and handles FINISH as stop -> land -> disarm.",
         command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
+python3 /home/user/agency_ws/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo_manager.py \
   --request-topic /xtend/demo_mode_request \
   --mode-topic /xtend/demo_mode \
   --cmd-nav-topic /xtend/cmd_nav \
@@ -380,8 +357,8 @@ python3 /home/user/GIT/TheAgency/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend
         description="Optional: replays a JSONL Twist log onto /cmd_vel. Edit LOG_PATH before running.",
         enabled_by_default=False,
         command="""
-LOG_PATH="/home/user/GIT/TheAgency/cmd_log.jsonl"
-python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
+LOG_PATH="/home/user/agency_ws/cmd_log.jsonl"
+python3 /home/user/agency_ws/sparx_agency/tasks/planning/twist_replayer.py \
   --ros-args \
   -p log_path:="${LOG_PATH}" \
   -p topic:=/cmd_vel \
@@ -390,24 +367,22 @@ python3 /home/user/GIT/TheAgency/sparx_agency/tasks/planning/twist_replayer.py \
 """,
     ),
     LaunchItem(
-        name="6. AprilTag triangulation (pose estimation)",
+        name="6. Localization node (AprilTag provider)",
         machine="jetson",
         tmux_name="xtend_apriltag",
         description=(
-            "Detects tag36h11 AprilTags in /xtend/rgb, estimates 6-DOF camera pose in map frame "
-            "via solvePnP + known tag world positions. "
-            "Publishes /xtend/april_tag_pose (PoseStamped). "
-            "Tag map: tag_map_path_ALL.yaml. Calibration: 504x294."
+            "Reads frames from /xtend/rgb_frame_path, detects tag36h11 AprilTags, estimates 6-DOF pose via solvePnP. "
+            "Publishes /xtend/localization (PoseStamped) and /xtend/localization_source (String). "
+            "Tag map: new_map.yaml. Calibration: 504x294."
         ),
         command="""
-python3 -m sparx_agency.tasks.localization.apriltag_triangulation_node \
-  --tag_map_path /home/user/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml \
-  --camera_calib_path /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  --tag_size_m 0.13 \
-  --source ros \
-  --image_topic /xtend/rgb \
-  --pose_topic /xtend/april_tag_pose \
-  --no_vis
+python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+  --ros-args \
+  -p provider_type:=apriltag \
+  -p frame_path_topic:=/xtend/rgb_frame_path \
+  -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/new_map.yaml \
+  -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+  -p tag_size_m:=0.13
 """,
     ),
     LaunchItem(
@@ -428,18 +403,18 @@ ros2 run tf2_ros static_transform_publisher \
 """,
     ),
     LaunchItem(
-        name="8. Pose-to-TF bridge (april_tag_pose -> TF)",
+        name="8. Pose-to-TF bridge (localization -> TF)",
         machine="jetson",
         tmux_name="xtend_pose_to_tf",
         description=(
-            "Subscribes to /xtend/april_tag_pose, applies body→optical frame correction "
+            "Subscribes to /xtend/localization (PoseStamped), applies body→optical frame correction "
             "(q_opt = q_body ⊗ (-0.5, 0.5, -0.5, 0.5)), broadcasts dynamic TF map→xtend_camera. "
             "Overrides static fallback while tags are visible; TF2 falls back after ~10s without tags."
         ),
         command="""
 python3 -m sparx_agency.tasks.mapping.ros2.pose_to_tf_node \
   --ros-args \
-  -p pose_topic:=/xtend/april_tag_pose
+  -p pose_topic:=/xtend/localization
 """,
     ),
     LaunchItem(
@@ -481,14 +456,14 @@ ros2 run octomap_server octomap_server_node \
         command="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/ui.py",
     ),
     LaunchItem(
-        name="12. Planner: hospital world",
+        name="12. Planner: Office world",
         machine="manual",
-        tmux_name="planner_hospital",
-        description="Manual planner step on Jetson/container: starts hospital environment.",
+        tmux_name="planner_office_world",
+        description="Manual planner step on Jetson/container: starts office environment.",
         enabled_by_default=False,
         command="""
-cd /home/user/GIT/sjtu_project/falcon_docker
-./run_hospital.sh office
+cd /home/user/agency_ws/sparx_agency/tasks/planning/falcon
+./run_falcon.sh office
 """,
     ),
     LaunchItem(
@@ -506,7 +481,7 @@ cd /home/user/GIT/sjtu_project/falcon_docker
         description="Manual ROS bridge step.",
         enabled_by_default=False,
         command="""
-cd /home/user/GIT/sjtu_project/ros_bridge_docker
+cd /home/user/agency_ws/sparx_agency/tasks/planning/falcon/bridge
 ./run_bridge.sh
 """,
     ),
@@ -516,7 +491,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
         tmux_name="planner_rviz",
         description="Optional display command inside falcon container.",
         enabled_by_default=False,
-        command="docker exec -it falcon bash -lc 'roslaunch exploration_manager rviz.launch'",
+        command="docker exec -it falcon bash -lc 'export DISPLAY=:0 && roslaunch exploration_manager rviz.launch'",
     ),
     LaunchItem(
         name="16. BEV click goal UI",
@@ -524,7 +499,7 @@ cd /home/user/GIT/sjtu_project/ros_bridge_docker
         tmux_name="planner_bev_goal",
         description="Optional click-goal command inside falcon container.",
         enabled_by_default=False,
-        command="docker exec -it falcon bash -lc 'rosrun falcon_adapter bev_click_goal.py'",
+        command="docker exec -it falcon bash -lc 'export DISPLAY=:0 && rosrun falcon_adapter bev_click_goal_node.py'",
     ),
 ]
 
@@ -626,8 +601,9 @@ class XtendPipelineLauncher(tk.Tk):
         self.selected_item = item
         self.desc_text.delete("1.0", "end")
         self.desc_text.insert("end", f"{item.name}\nMachine: {item.machine}\nTmux: {item.tmux_name}\n\n{item.description}")
+        cmd = item.command
         self.cmd_text.delete("1.0", "end")
-        self.cmd_text.insert("end", normalize_command(item.command))
+        self.cmd_text.insert("end", normalize_command(cmd))
 
     def get_command_text(self) -> str:
         return normalize_command(self.cmd_text.get("1.0", "end"))
@@ -683,9 +659,9 @@ class XtendPipelineLauncher(tk.Tk):
         mode_json = json.dumps({"mode": mode, "source": "launcher_ui_manual", "reason": "manual mode button"})
         payload = f"{{data: '{mode_json}'}}"
         remote_cmd = (
-            "cd /home/user/GIT/TheAgency && "
+            f"cd {JETSON_REPO} && "
             "source /opt/ros/humble/setup.bash && "
-            "source /home/user/GIT/TheAgency/theagency_venv/bin/activate && "
+            f"source {JETSON_REPO}/venv/bin/activate && "
             "export ROS_DOMAIN_ID=5 && "
             f"ros2 topic pub --once /xtend/demo_mode_request std_msgs/msg/String {shlex.quote(payload)}"
         )

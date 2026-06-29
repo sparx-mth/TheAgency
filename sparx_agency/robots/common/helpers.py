@@ -3,6 +3,102 @@ import cv2
 import yaml
 from sensor_msgs.msg import CameraInfo
 
+
+def clamp(value: float, lo: float, hi: float) -> float:
+    """Clamp value to [lo, hi]."""
+    return max(lo, min(hi, float(value)))
+
+
+def clamp_symmetric(value: float, limit: float) -> float:
+    """Clamp value to [-limit, limit]."""
+    return max(-float(limit), min(float(limit), float(value)))
+
+
+def clamp_axis(value: float, limit: float = 1000.0) -> int:
+    """Clamp to [-limit, limit] and cast to int (for drone controller axis values)."""
+    return int(clamp_symmetric(value, limit))
+
+
+def matrix_from_yaml_dict(data: dict, key: str, shape: tuple,
+                          allow_missing: bool = False) -> "np.ndarray | None":
+    """Extract and reshape a matrix stored as {key: {data: [...]}} in a ROS YAML dict.
+
+    Returns None when allow_missing=True and the key is absent; raises KeyError otherwise.
+    """
+    if key not in data:
+        if allow_missing:
+            return None
+        raise KeyError(f"Key '{key}' not found in YAML data")
+    return np.array(data[key]["data"], dtype=np.float64).reshape(shape)
+
+
+def load_intrinsics_from_yaml(
+    path,
+    prefer_projection: bool = True,
+    depth_w: "int | None" = None,
+    depth_h: "int | None" = None,
+) -> "tuple[float, float, float, float]":
+    """Load (fx, fy, cx, cy) from a ROS camera calibration YAML.
+
+    Fallback priority:
+      1. projection_matrix (3×4)  — if prefer_projection=True
+      2. raw fx / fy / cx / cy fields
+      3. camera_matrix (3×3)
+      4. K (3×3 flat list)
+
+    If depth_w and depth_h are provided, scales intrinsics to match that
+    image size (useful when depth output differs from calibration resolution).
+    """
+    with open(path, "r") as f:
+        data = yaml.safe_load(f)
+
+    fx = fy = cx = cy = None
+
+    if prefer_projection:
+        P = matrix_from_yaml_dict(data, "projection_matrix", (3, 4), allow_missing=True)
+        if P is not None:
+            fx, fy, cx, cy = float(P[0, 0]), float(P[1, 1]), float(P[0, 2]), float(P[1, 2])
+
+    if fx is None and all(k in data for k in ("fx", "fy", "cx", "cy")):
+        fx, fy, cx, cy = float(data["fx"]), float(data["fy"]), float(data["cx"]), float(data["cy"])
+
+    if fx is None:
+        K = matrix_from_yaml_dict(data, "camera_matrix", (3, 3), allow_missing=True)
+        if K is None:
+            K = matrix_from_yaml_dict(data, "K", (3, 3), allow_missing=True)
+        if K is not None:
+            fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+
+    if fx is None:
+        raise ValueError(f"Could not find intrinsics in {path}")
+
+    if depth_w is not None and depth_h is not None:
+        sx = depth_w / int(data["image_width"])
+        sy = depth_h / int(data["image_height"])
+        fx, fy, cx, cy = fx * sx, fy * sy, cx * sx, cy * sy
+
+    return fx, fy, cx, cy
+
+
+def sanitize_depth(depth: np.ndarray, fill: float = 0.0,
+                   clip_min: "float | None" = None,
+                   clip_max: "float | None" = None) -> np.ndarray:
+    """Replace non-finite values with fill, then optionally clip to [clip_min, clip_max]."""
+    out = np.array(depth, dtype=np.float32)
+    out[~np.isfinite(out)] = float(fill)
+    if clip_min is not None or clip_max is not None:
+        lo = clip_min if clip_min is not None else -np.inf
+        hi = clip_max if clip_max is not None else  np.inf
+        out = np.clip(out, lo, hi)
+    return out
+
+
+def valid_depth_mask(depth: np.ndarray, min_depth: float = 0.01,
+                     max_depth: float = float("inf")) -> np.ndarray:
+    """Boolean mask of pixels that are finite and within [min_depth, max_depth]."""
+    return np.isfinite(depth) & (depth >= min_depth) & (depth <= max_depth)
+
+
 def depth_to_vis_u8(depth_m: np.ndarray, clip_min=0.3, clip_max=50.0) -> np.ndarray:
     d = depth_m.copy().astype(np.float32)
     d[~np.isfinite(d)] = 0.0

@@ -21,6 +21,7 @@ import yaml
 import csv
 
 from sparx_agency.tasks.localization.common.optical_flow_tracker import OpticalFlowTracker
+from sparx_agency.robots.common.image_utils import _finite_mask
 
 
 class FlowDepthVelocityNode(Node):
@@ -808,9 +809,7 @@ class FlowDepthVelocityNode(Node):
         y1 = min(H, v_idx + half_side + 1)
 
         center_region = depth_map[y0:y1, x0:x1]
-        valid_center_depths = center_region[
-            np.isfinite(center_region) & (center_region > 0)
-        ]
+        valid_center_depths = center_region[_finite_mask(center_region)]
 
         if valid_center_depths.size > 0:
             self.center_depth = float(np.mean(valid_center_depths) * self.depth_scale)

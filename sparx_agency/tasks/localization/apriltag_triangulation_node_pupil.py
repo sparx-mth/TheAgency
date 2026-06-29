@@ -47,9 +47,9 @@ from cv_bridge import CvBridge
 
 from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
-    TagTransformObservation,
+    TagObservation,
     estimate_camera_pose_from_tags,
-    matrix_to_pose,
+    transform_to_pose,
     #print_transform_debug,
     world_T_tag_from_pose,
 )
@@ -255,7 +255,7 @@ class TagTriangulationOpenCVTask:
                 tag_size=self.tag_size_m
             )
 
-            observations: List[TagTransformObservation] = []
+            observations: List[TagObservation] = []
             detections_info = []
 
             for d in dets:
@@ -299,7 +299,7 @@ class TagTriangulationOpenCVTask:
               # print_transform_debug("camera_T_tag from pupil_apriltags", camera_T_tag)
                # print_transform_debug("tag_T_camera directly after inverse", tag_T_camera)
 
-                observations.append(TagTransformObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
+                observations.append(TagObservation(tag_id=tag_id, cam_T_tag=camera_T_tag))
                 
                 area = float(cv2.contourArea(corners.astype(np.float32)))
                 detections_info.append(
@@ -356,7 +356,7 @@ class TagTriangulationOpenCVTask:
                 continue
                 
 
-           # (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(est.world_T_cam)
+           # (x, y, z), (qx, qy, qz, qw) = transform_to_pose(est.world_T_cam)
 
             cv_to_ros = np.array([
                 [ 0.0, -1.0,  0.0,  0.0],
@@ -367,7 +367,7 @@ class TagTriangulationOpenCVTask:
 
             world_T_ros = est.world_T_cam @ cv_to_ros
 
-            (x, y, z), (qx, qy, qz, qw) = matrix_to_pose(world_T_ros)
+            (x, y, z), (qx, qy, qz, qw) = transform_to_pose(world_T_ros)
 
            # print(f"\n[DEBUG] Detected {len(observations)} tags")
             #print(f"[DEBUG] world_T_cam:\n{est.world_T_cam}")

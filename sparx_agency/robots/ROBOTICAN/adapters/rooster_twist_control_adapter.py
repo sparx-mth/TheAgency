@@ -15,8 +15,7 @@ from std_msgs.msg import Bool
 from fcu_driver_interfaces.msg import UAVState
 
 
-def clamp(value: float, limit: float) -> float:
-    return max(-limit, min(limit, float(value)))
+from sparx_agency.robots.common.helpers import clamp_symmetric as clamp
 
 
 class RoosterTwistControlNode(Node):

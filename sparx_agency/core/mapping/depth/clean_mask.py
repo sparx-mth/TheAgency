@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from sparx_agency.robots.common.helpers import valid_depth_mask
 
 @dataclass
 class MaskingConfig:
@@ -124,7 +125,7 @@ class DepthMasker:
         points = self.depth_to_points(depth)
         
         # Base valid mask
-        valid_depth = (depth > 0) & np.isfinite(depth) & (depth < self.cfg.max_dist)
+        valid_depth = valid_depth_mask(depth, min_depth=0.0, max_depth=self.cfg.max_dist)
         
         # 1. Floor Fit
         # Search in bottom 2/3rds for robustness

@@ -8,8 +8,8 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Range
 
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
+from sparx_agency.robots.common.helpers import clamp  # noqa: F401 re-exported
+from sparx_agency.core.common.filters import ExponentialMovingAverage
 
 
 class AltitudeMux(Node):
@@ -78,7 +78,7 @@ class AltitudeMux(Node):
         self.have_range = False
         self.last_z = None
         self.last_t = None
-        self.vz_filt = 0.0
+        self._vz_ema = ExponentialMovingAverage(alpha=self.vz_alpha, initial=0.0)
 
         self.u_prev = 0.0
         self._last_log_t = 0.0
@@ -124,7 +124,7 @@ class AltitudeMux(Node):
         if self.last_z is not None and self.last_t is not None:
             dt = max(t - self.last_t, 1e-4)
             vz = (z - self.last_z) / dt
-            self.vz_filt = self.vz_alpha * vz + (1.0 - self.vz_alpha) * self.vz_filt
+            self._vz_ema.update(vz)
 
         self.last_z = z
         self.last_t = t
@@ -155,7 +155,7 @@ class AltitudeMux(Node):
 
         # Altitude PD
         z = float(self.last_z)
-        vz = float(self.vz_filt)
+        vz = float(self._vz_ema.value)
 
         e = self.z_ref - z
         de = -vz

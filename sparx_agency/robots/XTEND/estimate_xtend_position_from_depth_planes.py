@@ -31,47 +31,17 @@ import yaml
 PlaneFit = Tuple[Optional[np.ndarray], Optional[float], Optional[np.ndarray], Optional[np.ndarray]]
 
 
+from sparx_agency.robots.common.helpers import load_intrinsics_from_yaml, valid_depth_mask
+
+
 def load_yaml(path: Path) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
-def matrix_from_yaml(data: dict, key: str, shape: tuple[int, int]) -> Optional[np.ndarray]:
-    if key not in data:
-        return None
-    return np.array(data[key]["data"], dtype=np.float64).reshape(shape)
-
-
 def load_intrinsics_for_depth(camera_yaml: Path, depth_w: int, depth_h: int) -> tuple[float, float, float, float]:
     """Load rectified pinhole intrinsics and scale them to the depth image size."""
-    data = load_yaml(camera_yaml)
-    image_w = int(data["image_width"])
-    image_h = int(data["image_height"])
-
-    P = matrix_from_yaml(data, "projection_matrix", (3, 4))
-    if P is not None:
-        fx = float(P[0, 0])
-        fy = float(P[1, 1])
-        cx = float(P[0, 2])
-        cy = float(P[1, 2])
-    elif all(k in data for k in ["fx", "fy", "cx", "cy"]):
-        fx = float(data["fx"])
-        fy = float(data["fy"])
-        cx = float(data["cx"])
-        cy = float(data["cy"])
-    else:
-        K = matrix_from_yaml(data, "camera_matrix", (3, 3))
-        if K is None:
-            raise RuntimeError(f"Could not find intrinsics in {camera_yaml}")
-        fx = float(K[0, 0])
-        fy = float(K[1, 1])
-        cx = float(K[0, 2])
-        cy = float(K[1, 2])
-
-    sx = depth_w / image_w
-    sy = depth_h / image_h
-
-    return fx * sx, fy * sy, cx * sx, cy * sy
+    return load_intrinsics_from_yaml(camera_yaml, depth_w=depth_w, depth_h=depth_h)
 
 
 def backproject_depth(depth: np.ndarray, fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
@@ -98,7 +68,7 @@ def roi_points(points: np.ndarray, roi: tuple[float, float, float, float], depth
     patch_points = points[y0:y1:stride, x0:x1:stride].reshape(-1, 3)
     patch_depth = depth[y0:y1:stride, x0:x1:stride].reshape(-1)
 
-    valid = np.isfinite(patch_depth) & (patch_depth >= min_depth) & (patch_depth <= max_depth)
+    valid = valid_depth_mask(patch_depth, min_depth=min_depth, max_depth=max_depth)
     valid &= np.all(np.isfinite(patch_points), axis=1)
 
     return patch_points[valid]
