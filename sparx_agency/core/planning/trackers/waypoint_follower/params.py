@@ -103,6 +103,18 @@ class WaypointFollowerParams:
     yaw_burst_max_rad: float = radians(25.0)   # per-burst increment; split big turns
     yaw_coast_rad: float = radians(15.0)
 
+    # Graded-pulse / mid-burst-feedback / anti-deadlock yaw upgrades. ALL default
+    # to today's behaviour (flags off / 0) so the change is inert until enabled;
+    # the FALCON launch turns them on (see waypoint_follower_node + nav_stack.launch).
+    yaw_graded_pulses: bool = False     # size each burst by tick count {2,4,6}, cap 6
+    yaw_burst_grade_max_ticks: int = 6  # hard cap on a graded burst (req: 6 ticks)
+    yaw_settle_dwell_per_tick: float = 0.0  # extra settle dwell per burst tick (inertia)
+    yaw_burst_live_feedback: bool = False   # cut a burst short on confirmed live overshoot
+    yaw_fb_reach_rad: float = 0.0       # remaining-in-burst-dir <= this counts as reached
+    yaw_fb_confirm_ticks: int = 2       # consecutive reach ticks before cutting (noise guard)
+    yaw_max_reversals: int = 0          # force ADVANCE after this many sign-flips (0 = off)
+    yaw_accept_growth_rad: float = 0.0  # widen the accept band per reversal (anti-deadlock)
+
     # Gentle predictive ADVANCE gate.
     yaw_capture_tol_m: float = 0.20
     yaw_acquire_max: float = radians(35.0)

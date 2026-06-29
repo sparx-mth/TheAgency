@@ -44,6 +44,10 @@ from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Bool, Empty, Float32, Int8, String
 
 from sparx_agency.core.common.types import Pose2D
+from sparx_agency.core.localization.pose_estimator import (
+    PoseEstimatorParams,
+    WindowedPoseEstimator,
+)
 from sparx_agency.core.planning.trackers.waypoint_follower import (
     ControlAxis,
     FollowerState,
@@ -99,6 +103,18 @@ class WaypointFollowerNode:
             # Per-burst increment: split a big turn into ~this-size chunks, each
             # followed by a stop + voxel update + re-measure (not one big sweep).
             yaw_burst_max_rad=math.radians(float(G("~yaw_burst_max_deg", 25.0))),
+            yaw_burst_max_ticks=int(G("~yaw_burst_max_ticks", 30)),
+            # Graded-pulse / mid-burst-feedback / anti-deadlock yaw upgrades. All
+            # default OFF (inert); the launch enables them (needs ctrl_rate_hz:=10
+            # for the 4 deg/tick -> 8 deg-min / 24 deg-cap numbers).
+            yaw_graded_pulses=bool(G("~yaw_graded_pulses", False)),
+            yaw_burst_grade_max_ticks=int(G("~yaw_burst_grade_max_ticks", 6)),
+            yaw_settle_dwell_per_tick=float(G("~yaw_settle_dwell_per_tick", 0.0)),
+            yaw_burst_live_feedback=bool(G("~yaw_burst_live_feedback", False)),
+            yaw_fb_reach_rad=math.radians(float(G("~yaw_fb_reach_deg", 0.0))),
+            yaw_fb_confirm_ticks=int(G("~yaw_fb_confirm_ticks", 2)),
+            yaw_max_reversals=int(G("~yaw_max_reversals", 0)),
+            yaw_accept_growth_rad=math.radians(float(G("~yaw_accept_growth_deg", 0.0))),
             # Gentle predictive ADVANCE gate. The legacy ~yaw_acquisition_radius
             # (previously read by nobody) now feeds the cross-track tolerance.
             yaw_capture_tol_m=float(G("~yaw_acquisition_radius", 0.20)),
@@ -110,6 +126,31 @@ class WaypointFollowerNode:
             yaw_accel_limit=float(G("~yaw_accel_limit", 3.5)),
             forward_only=bool(G("~forward_only", False)),
         ))
+
+        # ── Pose estimator ───────────────────────────────────────────
+        # Fuses the ~10 Hz noisy /gt_pose stream with the command being executed,
+        # so the follower (run at ctrl_rate_hz) sees a DENOISED pose + yaw-rate:
+        # drift-rejected when stopped, true-rate while turning. ~use_pose_estimator
+        # false feeds the raw pose (today's behaviour). Ingest stays at the full
+        # /gt_pose rate (decoupled from the control loop).
+        self.use_pose_estimator = bool(G("~use_pose_estimator", False))
+        self.estimator = WindowedPoseEstimator(PoseEstimatorParams(
+            window_s=float(G("~est_window_s", 0.6)),
+            min_samples=int(G("~est_min_samples", 2)),
+            max_buffer_s=float(G("~est_max_buffer_s", 1.5)),
+            wz_cmd_eps=float(G("~est_wz_cmd_eps", 0.05)),
+            vx_cmd_eps=float(G("~est_vx_cmd_eps", 0.03)),
+            settle_wz_eps=float(G("~yaw_settle_eps", 0.05)),
+            wz_ff_ref=float(G("~yaw_rate", 0.7)),
+            vx_ff_ref=float(G("~vel_x", 0.3)),
+            ff_blend_min=float(G("~est_ff_blend_min", 0.15)),
+            ff_blend_max=float(G("~est_ff_blend_max", 0.6)),
+            dropout_s=float(G("~est_dropout_s", 0.25)),
+            max_coast_s=float(G("~est_max_coast_s", 1.0)),
+            fresh_tau_s=float(G("~est_fresh_tau_s", 0.3)),
+        ))
+        self._last_pub_vx = 0.0      # cmd executed last tick -> estimator feed-forward
+        self._last_pub_wz = 0.0
 
         # Takeoff / settle (platform bring-up).
         self.auto_takeoff = bool(G("~auto_takeoff", True))
@@ -239,6 +280,12 @@ class WaypointFollowerNode:
             rospy.loginfo("waypoint_follower: first /gt_pose pose=(%.2f,%.2f,%.2f)",
                           msg.position.x, msg.position.y, msg.position.z)
         self.cur_pose = msg
+        # Feed the estimator at the FULL /gt_pose rate (decoupled from the control
+        # loop). /gt_pose is a bare Pose (no stamp), so use the receive time.
+        q = msg.orientation
+        yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
+        self.estimator.add_measurement(msg.position.x, msg.position.y, yaw,
+                                       rospy.Time.now().to_sec())
 
     def _dstate_cb(self, msg):
         self.drone_state = msg.data
@@ -302,9 +349,23 @@ class WaypointFollowerNode:
         if self.current_demo_mode == MODE_VISUAL_SERVOING:
             return
 
-        pose2d = self._pose2d()
-        if pose2d is None:
+        raw2d = self._pose2d()
+        if raw2d is None:
             return
+
+        # Pose fed to the follower: the estimator's denoised pose (command
+        # feed-forward removes per-frame noise / hover drift), or the raw pose when
+        # ~use_pose_estimator is off. The estimator is told the command executed
+        # LAST tick (what the platform is actually doing now).
+        est_hold = False
+        if self.use_pose_estimator:
+            self.estimator.set_command(self._last_pub_vx, self._last_pub_wz)
+            est = self.estimator.estimate(rospy.Time.now().to_sec())
+            pose2d = est.as_pose2d() if est.mode != "invalid" else raw2d
+            # Stale/no localization: hold rather than fly open-loop on a dead pose.
+            est_hold = est.mode in ("invalid", "hold")
+        else:
+            pose2d = raw2d
 
         # Drive the DemoMode handshake for the axis the follower needs, and
         # tell it whether that axis is confirmed (until then it holds zero).
@@ -319,9 +380,11 @@ class WaypointFollowerNode:
             # do not fly -- so the platform is stable for a clean voxel update.
             self._request_demo_mode(MODE_FORWARD)
 
-        hold = ((rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec)
+        hold = (est_hold
+                or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec)
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready())
+        self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
 
         if cmd.freeze is not None:
             # The core asks to freeze only while rotating; ~freeze_during_yaw

@@ -15,6 +15,24 @@ def normalize_angle(angle: float) -> float:
     return angle
 
 
+def circular_mean(angles) -> float:
+    """Mean of angles via unit vectors (rad), robust to the ±π wrap.
+
+    Averaging raw angles breaks across the ±π discontinuity (the mean of +179°
+    and −179° is 180°, not 0°); summing their unit vectors and taking ``atan2``
+    of the result avoids that. Used to fuse a window of noisy heading samples
+    (e.g. a localization dwell) into one estimate so a single jump cannot skew
+    it. Empty input returns 0.0; a net-zero vector falls back to the last sample.
+    """
+    if not angles:
+        return 0.0
+    s = sum(sin(a) for a in angles)
+    c = sum(cos(a) for a in angles)
+    if s == 0.0 and c == 0.0:
+        return float(angles[-1])
+    return atan2(s, c)
+
+
 @dataclass(frozen=True)
 class Pose2D:
     """2D pose: position (x, y) and orientation (yaw) in world frame."""

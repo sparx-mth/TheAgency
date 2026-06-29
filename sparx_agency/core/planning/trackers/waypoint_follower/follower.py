@@ -26,7 +26,7 @@ State machine::
 """
 from __future__ import annotations
 
-from math import atan2, copysign, hypot
+from math import atan2, copysign, cos, hypot
 from typing import List, Optional, Sequence
 
 from sparx_agency.core.common.types import ControlCommand, Pose2D, normalize_angle
@@ -54,12 +54,17 @@ class WaypointFollower:
         self._time_in_state = 0.0
         self._last_vx = 0.0
         self._last_wz = 0.0
-        # YAW_ALIGN burst bookkeeping (one open-loop burst per YAW_ALIGN entry).
+        # YAW_ALIGN burst bookkeeping (one burst per YAW_ALIGN entry).
         self._burst_active = False
         self._burst_sign = 0.0
         self._burst_target = 0.0
         self._burst_swept = 0.0
         self._burst_ticks = 0
+        self._burst_planned_ticks = 0    # graded-mode tick budget for this burst
+        self._fb_over = 0                # consecutive mid-burst "reached" ticks
+        # Anti-deadlock: per-alignment-episode reversal bookkeeping.
+        self._reversals = 0
+        self._last_burst_sign = 0.0
         # YAW_SETTLE dwell bookkeeping.
         self._settle_unfrozen_s = 0.0
         self._settle_yaws: List[float] = []
@@ -94,6 +99,8 @@ class WaypointFollower:
         self._path = alg.reanchor_path(pts, pose, self.params.pos_radius)
         self._wp_idx = 0
         self._settled_pose = pose
+        self._reversals = 0           # a fresh path starts a new alignment episode
+        self._last_burst_sign = 0.0
         self._enter(self._entry_state(pose), pose)
 
     def step(
@@ -143,42 +150,92 @@ class WaypointFollower:
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)
         if not self._burst_active:
             return self._decide_yaw(pose, dt)
-        return self._run_burst(dt)
+        return self._run_burst(pose, dt)
 
     def _decide_yaw(self, pose: Pose2D, dt: float) -> FollowerCommand:
         """First YAW_ALIGN tick: advance if aligned enough (predictive gate, read
-        from the last *settled* pose), else commit to one open-loop burst."""
+        from the last *settled* pose), else commit to one burst.
+
+        Anti-deadlock (when enabled): a burst whose direction reverses the last
+        one increments a per-episode counter that widens the accept band and, at
+        ``yaw_max_reversals``, FORCES ADVANCE instead of firing the opposing
+        burst — so the machine can never ping-pong forever (the classic
+        10°R→10°L→10°R). The 10° case never even bursts: it is already inside the
+        un-improvable accept floor, so it advances on the first tick.
+        """
         p = self.params
         meas = self._settled_pose or pose
         eyaw = self._heading_error(meas)
         tx, ty = self._path[self._wp_idx]
         dist = hypot(tx - meas.x, ty - meas.y)
         floor = alg.sweep_floor(p.yaw_rate, dt, p.min_motion_ticks)
-        accept = alg.yaw_accept_floor(p.yaw_rate, dt, p.min_motion_ticks,
-                                      p.yaw_coast_rad)
-        if alg.advance_gate(eyaw, dist, p.yaw_capture_tol_m, accept,
-                            p.yaw_acquire_max):
+        base_accept = alg.yaw_accept_floor(p.yaw_rate, dt, p.min_motion_ticks,
+                                           p.yaw_coast_rad)
+        accept, locked = alg.accept_with_reversals(
+            base_accept, self._reversals, p.yaw_accept_growth_rad, p.yaw_max_reversals)
+        if ((locked and cos(eyaw) > 0.0)
+                or alg.advance_gate(eyaw, dist, p.yaw_capture_tol_m, accept,
+                                    p.yaw_acquire_max)):
             self._enter(FollowerState.ADVANCE, pose)
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)
+        sign = copysign(1.0, eyaw)
+        if self._last_burst_sign != 0.0 and sign != self._last_burst_sign:
+            self._reversals += 1                      # count the direction flip ...
+            accept, locked = alg.accept_with_reversals(
+                base_accept, self._reversals, p.yaw_accept_growth_rad,
+                p.yaw_max_reversals)
+            if locked and cos(eyaw) > 0.0:            # ... and never fire the burst
+                self._enter(FollowerState.ADVANCE, pose)
+                return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)
+        self._last_burst_sign = sign
+        self._burst_sign = sign
         self._burst_active = True
-        self._burst_sign = copysign(1.0, eyaw)
-        self._burst_target = alg.burst_target_angle(
-            eyaw, p.yaw_coast_rad, floor, p.yaw_burst_max_rad)
+        if p.yaw_graded_pulses:
+            self._burst_planned_ticks = alg.burst_tick_count(
+                eyaw, p.yaw_coast_rad, p.yaw_rate * dt, p.min_motion_ticks,
+                p.yaw_burst_grade_max_ticks)
+        else:
+            self._burst_planned_ticks = 0
+            self._burst_target = alg.burst_target_angle(
+                eyaw, p.yaw_coast_rad, floor, p.yaw_burst_max_rad)
         self._burst_swept = 0.0
         self._burst_ticks = 0
-        return self._run_burst(dt)
+        self._fb_over = 0
+        return self._run_burst(pose, dt)
 
-    def _run_burst(self, dt: float) -> FollowerCommand:
-        """Execute one open-loop burst tick; ignores the noisy live pose.
+    def _run_burst(self, pose: Pose2D, dt: float) -> FollowerCommand:
+        """Execute one burst tick.
 
-        A burst always lasts at least ``min_motion_ticks`` ticks so it actually
-        overcomes the yaw deadband (a lone tick does not turn the platform)."""
+        Graded mode sizes the burst by a tick budget (``burst_tick_count`` snaps
+        to 2/4/6 ticks, cap 6) instead of a swept angle; legacy mode keeps the
+        swept-angle test. A burst always lasts at least ``min_motion_ticks`` ticks
+        so it overcomes the yaw deadband. With ``yaw_burst_live_feedback`` the
+        (now-denoised, estimator-fed) live pose can CUT the burst short — but only
+        one-way (stop early on a confirmed overshoot), never reverse in flight, so
+        it cannot seed a ping-pong; the clean YAW_SETTLE re-measure decides the
+        next pulse.
+        """
         p = self.params
-        reached = (self._burst_swept >= self._burst_target
-                   and self._burst_ticks >= p.min_motion_ticks)
-        if reached or self._burst_ticks >= p.yaw_burst_max_ticks:
+        if p.yaw_graded_pulses:
+            reached = (self._burst_ticks >= self._burst_planned_ticks
+                       and self._burst_ticks >= p.min_motion_ticks)
+            capped = self._burst_ticks >= p.yaw_burst_grade_max_ticks
+        else:
+            reached = (self._burst_swept >= self._burst_target
+                       and self._burst_ticks >= p.min_motion_ticks)
+            capped = self._burst_ticks >= p.yaw_burst_max_ticks
+        if reached or capped:
             self._enter(FollowerState.YAW_SETTLE, None)
             return self._emit(self._finalize(0.0, 0.0, dt), freeze=True)
+        # Mid-burst one-way CUT: only after the deadband-clearing min ticks, and
+        # only on yaw_fb_confirm_ticks consecutive "reached/overshot" readings so a
+        # single noisy frame can't trigger it. Never reverses here.
+        if p.yaw_burst_live_feedback and self._burst_ticks >= p.min_motion_ticks:
+            remaining = self._burst_sign * self._heading_error(pose)
+            self._fb_over = self._fb_over + 1 if remaining <= p.yaw_fb_reach_rad else 0
+            if self._fb_over >= p.yaw_fb_confirm_ticks:
+                self._enter(FollowerState.YAW_SETTLE, None)
+                return self._emit(self._finalize(0.0, 0.0, dt), freeze=True)
         cmd = self._finalize(0.0, self._burst_sign * p.yaw_rate, dt)
         self._burst_swept += abs(self._last_wz) * dt
         self._burst_ticks += 1
@@ -199,7 +256,12 @@ class WaypointFollower:
             return self._emit(cmd, freeze=True)
         self._settle_unfrozen_s += dt
         self._settle_yaws.append(pose.yaw)
-        if self._settle_unfrozen_s >= p.yaw_settle_dwell_s and map_ready:
+        # Inertia-proportional dwell: a longer burst built more momentum, so it
+        # dwells longer before re-measuring (graded mode only; else fixed).
+        dwell = (alg.settle_dwell(p.yaw_settle_dwell_s, p.yaw_settle_dwell_per_tick,
+                                  self._burst_ticks, p.yaw_burst_grade_max_ticks)
+                 if p.yaw_graded_pulses else p.yaw_settle_dwell_s)
+        if self._settle_unfrozen_s >= dwell and map_ready:
             yaw = alg.circular_mean(self._settle_yaws)
             self._settled_pose = Pose2D(pose.x, pose.y, yaw)
             self._enter(FollowerState.YAW_ALIGN, self._settled_pose)
@@ -305,6 +367,8 @@ class WaypointFollower:
             self._settle_yaws = []
         elif new == FollowerState.ADVANCE:
             self._advance_ticks = 0
+            self._reversals = 0          # reaching alignment ends the episode
+            self._last_burst_sign = 0.0
             if pose is not None:
                 self._advance_yaw_at_entry = pose.yaw
 
