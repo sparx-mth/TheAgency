@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Optional
+from sparx_agency.robots.common.helpers import valid_depth_mask
 
 def bbox_to_xyz_cam_from_depth(
     depth_m: np.ndarray,
@@ -31,7 +32,7 @@ def bbox_to_xyz_cam_from_depth(
     xv, yv = np.meshgrid(xs, ys)
     z = d[yv, xv].reshape(-1)
 
-    m = np.isfinite(z) & (z >= min_depth) & (z <= max_depth)
+    m = valid_depth_mask(z, min_depth=min_depth, max_depth=max_depth)
     z = z[m]
     if z.size < 8:
         return None

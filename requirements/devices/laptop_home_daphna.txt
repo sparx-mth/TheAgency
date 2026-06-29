@@ -1,0 +1,26 @@
+# Flat requirements for: laptop_home_daphna (PC dev machine, user1)
+# Covers: prod + dev + debug
+# Generated from: prod.txt + dev.txt + debug.txt + constraints.txt
+
+numpy==1.26.4
+opencv-python==4.11.0.86
+
+pupil-apriltags==1.0.4.post11
+PyYAML>=6.0
+requests>=2.27,<3
+Pillow>=10.4.0
+
+pytest
+ruff
+black
+
+matplotlib
+pandas
+plotly
+streamlit
+starlette>=0.40.0
+dash
+Flask<3.2,>=1.0.4
+Werkzeug>=2.2.3,<3.2
+typing_extensions>=4.1.1
+open3d==0.18.0

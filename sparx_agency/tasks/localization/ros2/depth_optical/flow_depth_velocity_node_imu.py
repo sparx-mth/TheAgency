@@ -13,6 +13,7 @@ import message_filters
 import csv
 import os
 from geometry_msgs.msg import Twist
+from sparx_agency.robots.common.helpers import valid_depth_mask
 
 class FlowDepthVelocityNode(Node):
 
@@ -302,7 +303,7 @@ class FlowDepthVelocityNode(Node):
         Z[valid] = depth_map[v_int[valid], u_int[valid]] * self.depth_scale  # sample depth map and apply scale
 
         # filter bad depth
-        valid = valid & np.isfinite(Z) & (Z > self.min_depth) & (Z < self.max_depth)
+        valid = valid & valid_depth_mask(Z, min_depth=self.min_depth, max_depth=self.max_depth)
 
         if not np.any(valid):
             return 0.0, 0.0, 0.0, 0

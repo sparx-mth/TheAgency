@@ -206,11 +206,22 @@ class TrajectorySafetyCorrector:
         visible = self._visibility(orig)
         if self.p.centering == "line_search":
             # Direct medial-axis centring. The search is per-waypoint bounded and
-            # lands on the smooth maximum-clearance line, so it needs neither the
-            # displacement clamp nor the smoothing pass -- both would only drag the
-            # path back toward the wall-hugging input. ``_freeze`` re-pins the
-            # fixed (pinned / unobserved) waypoints.
+            # lands on the smooth maximum-clearance line, so centring itself needs
+            # neither the displacement clamp nor the smoothing pass -- both would
+            # only drag the path back toward the wall-hugging input.
             out = self._center_line_search(orig.copy(), visible)
+            # Clearance FLOOR (best-effort), same step as the descent branch.
+            # Centring lands on the NEAREST local clearance maximum, which against
+            # a lone wall or in an open room can still sit close to it (the walk
+            # stops at the first prominent peak by design). With min_clearance_m>0
+            # push each visible waypoint out to that distance-to-wall along
+            # +grad D_obs, bounded by max_total_shift_m. Without this the
+            # min_clearance_m knob was silently a no-op in line_search mode, so a
+            # large value barely moved the path off the walls. ``_freeze`` then
+            # re-pins the fixed (pinned / unobserved) waypoints.
+            if self.p.min_clearance_m > 0.0 and self._field.has_distance:
+                self._enforce_clearance(out, visible)
+                self._clamp_total_shift(out, orig)
             self._freeze(out, orig, visible)
             return out, visible, np.linalg.norm(out - orig, axis=1)
 

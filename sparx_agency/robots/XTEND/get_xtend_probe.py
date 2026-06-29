@@ -409,7 +409,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="XTEND probe: RTSP video + WS telemetry dump")
     p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--robot-uid", default="drnb177ede2")
+    p.add_argument("--robot-uid", default="drndfb3eeb1")  # drone 42B drnb177ede2, drone 36B drndfb3eeb1
     p.add_argument("--frequency-hz", type=float, default=10.0)
     p.add_argument("--mode", choices=["send", "listen", "both"], default="both")
 

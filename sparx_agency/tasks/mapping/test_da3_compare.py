@@ -21,25 +21,11 @@ da3_small = DA3TensorRTModel(
     yaml_path=camera_yaml,
 )
 
+from sparx_agency.robots.common.helpers import load_intrinsics_from_yaml as _load_intrinsics
+
 def load_intrinsics_from_yaml(path):
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-
-    if "camera_matrix" in cfg:
-        data = cfg["camera_matrix"]["data"]
-        K = np.array(data, dtype=np.float32).reshape(3, 3)
-    elif "K" in cfg:
-        K = np.array(cfg["K"], dtype=np.float32).reshape(3, 3)
-    else:
-        raise ValueError("Could not find camera_matrix or K in yaml")
-
-    fx = float(K[0, 0])
-    fy = float(K[1, 1])
-    cx = float(K[0, 2])
-    cy = float(K[1, 2])
-    focal = 0.5 * (fx + fy)
-
-    return fx, fy, cx, cy, focal
+    fx, fy, cx, cy = _load_intrinsics(path, prefer_projection=False)
+    return fx, fy, cx, cy, 0.5 * (fx + fy)
 
 
 def save_depth_outputs(name, depth_m, out_dir,roi):

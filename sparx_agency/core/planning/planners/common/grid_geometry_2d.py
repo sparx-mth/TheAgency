@@ -7,6 +7,8 @@ world-frame or ROS concepts so they can back any grid planner:
 - :func:`dilate_mask` — binary obstacle inflation (4-connected, N iterations).
 - :func:`line_of_sight_clear` — Bresenham visibility test between two cells.
 - :func:`los_smooth_cells` — greedy any-angle string-pulling post-pass.
+- :func:`simplify_path_cells` — Douglas–Peucker reduction that keeps the path
+  shape (and its clearance) — the centring-friendly alternative to string-pulling.
 - :func:`snap_to_free_cell` — nearest finite-cost cell within a radius.
 
 All functions index arrays as ``arr[y, x]`` (numpy row-major, matching the
@@ -86,6 +88,11 @@ def los_smooth_cells(cells: Sequence[Cell], occ: np.ndarray) -> List[Cell]:
     sight. This removes A*'s grid staircase, leaving only the necessary corners
     where the obstacle layout actually forces a turn.
 
+    Note: string-pulling makes the path *taut*, so it pulls toward the inside of
+    corners — undesirable when the route is meant to stay centred in a corridor.
+    For that case prefer :func:`simplify_path_cells`, which keeps the A* shape
+    (and thus its clearance) and only drops redundant near-collinear points.
+
     Args:
         cells: Ordered cell path (e.g. an A* result).
         occ: ``(H, W)`` boolean occupancy (True = blocked).
@@ -109,6 +116,72 @@ def los_smooth_cells(cells: Sequence[Cell], occ: np.ndarray) -> List[Cell]:
         out.append(cells[j])
         i = j
     return out
+
+
+def _max_perp_offset(cells: Sequence[Cell], a: int, b: int) -> Tuple[float, int]:
+    """Farthest interior cell from the chord ``cells[a]``→``cells[b]``.
+
+    Returns ``(distance_in_cells, index)``; index is ``-1`` when there is no
+    interior point. Distance is the perpendicular distance to the chord (or the
+    endpoint distance when the chord has zero length).
+    """
+    (x0, y0), (x1, y1) = cells[a], cells[b]
+    dx, dy = float(x1 - x0), float(y1 - y0)
+    seg = (dx * dx + dy * dy) ** 0.5
+    best_d, best_i = -1.0, -1
+    for k in range(a + 1, b):
+        px, py = cells[k]
+        if seg == 0.0:
+            d = ((px - x0) ** 2 + (py - y0) ** 2) ** 0.5
+        else:
+            d = abs(dx * (y0 - py) - dy * (x0 - px)) / seg
+        if d > best_d:
+            best_d, best_i = d, k
+    return best_d, best_i
+
+
+def simplify_path_cells(
+    cells: Sequence[Cell], lethal: np.ndarray, epsilon_cells: float
+) -> List[Cell]:
+    """Douglas–Peucker path simplification that preserves the A* shape.
+
+    Unlike :func:`los_smooth_cells`, this never moves the route off the original
+    polyline by more than ``epsilon_cells``: it only deletes points that are
+    near-collinear with their kept neighbours. A staircase along a straight run
+    collapses to its endpoints, while genuine corners (a corridor bend, a detour
+    around an obstacle) are kept — so a centred A* route stays centred and keeps
+    its clearance, just with far fewer waypoints. A segment is additionally never
+    collapsed if the resulting chord would cross a lethal cell (safety belt;
+    with a sub-robot ``epsilon`` this effectively never fires).
+
+    Args:
+        cells: Ordered cell path (consecutive cells adjacent), e.g. an A* result.
+        lethal: ``(H, W)`` boolean collision mask (True = blocked).
+        epsilon_cells: Max perpendicular deviation, in cells, allowed when
+            dropping a point.
+
+    Returns:
+        A reduced list of cells; endpoints are preserved.
+    """
+    n = len(cells)
+    if n <= 2:
+        return list(cells)
+    keep = [False] * n
+    keep[0] = keep[n - 1] = True
+    stack: List[Tuple[int, int]] = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b <= a + 1:
+            continue
+        dmax, idx = _max_perp_offset(cells, a, b)
+        chord_clear = line_of_sight_clear(
+            lethal, cells[a][0], cells[a][1], cells[b][0], cells[b][1]
+        )
+        if idx >= 0 and (dmax > epsilon_cells or not chord_clear):
+            keep[idx] = True
+            stack.append((a, idx))
+            stack.append((idx, b))
+    return [cells[i] for i in range(n) if keep[i]]
 
 
 def snap_to_free_cell(

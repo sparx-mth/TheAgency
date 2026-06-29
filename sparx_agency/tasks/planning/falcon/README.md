@@ -193,7 +193,7 @@ the last published path.
 ```bash
 # 0. Start the NavDP HTTP server on the GPU box (default 127.0.0.1:8888) — see
 #    the NavDP repo's eval_*_wheeled.py. navdp_click_node only POSTs to it.
-# 1. Real XTEND (bring up the bridge so /xtend/rgb + /xtend/depth_m flow):
+# 1. Real XTEND (bring up the bridge so /xtend/rgb_frame_path + /xtend/depth_frame_path flow):
 roslaunch falcon_adapter real_drone.launch map_name:=office use_navdp:=true
 # or, to auto-sync intrinsics from the bridged camera_info:
 roslaunch falcon_adapter real_drone.launch use_navdp:=true \
@@ -207,8 +207,9 @@ roslaunch falcon_adapter nav_stack.launch use_navdp:=true \
     navdp_fx:=320.0 navdp_fy:=320.0 navdp_cx:=320.5 navdp_cy:=240.5 \
     navdp_img_width:=640 navdp_img_height:=480
 # 3. Standalone sidecar (e.g. rosbag playback through the bridge): the node
-#    defaults already match — /xtend/rgb + /xtend/depth_m, raw-K 504x294
-#    intrinsics, and pose from /xtend/april_tag_pose (PoseStamped):
+#    defaults already match — /xtend/rgb_frame_path + /xtend/depth_frame_path
+#    (frame-path strings it loads from disk), raw-K 504x294 intrinsics, and pose
+#    from /xtend/localization (PoseStamped):
 rosrun falcon_adapter navdp_click_node.py
 ```
 
@@ -216,16 +217,18 @@ In the **NavDP click** window: LEFT-CLICK the RGB panel (a readout shows the goa
 in metres), then ENTER/SPACE to send it and publish the path; `r` clears, `q`
 quits.
 
-> **Intrinsics must match the `/xtend/depth_m` stream NavDP receives** — the
-> SAME stream FALCON's mapping uses, so the `navdp_*` intrinsic args default to
-> the shared `cam_*` (raw K on the real drone, `sim_adapter`'s P-target in sim).
-> You normally pass nothing; override per camera, or use a
-> `navdp_camera_info_topic` (K; must describe the live stream). Wrong intrinsics
-> distort both the pixel→goal mapping and the on-image overlay. `/xtend/rgb` and
-> `/xtend/depth_m` must share one resolution — the node fails loud otherwise.
+> **Intrinsics must match the depth frames NavDP receives** — the SAME frames
+> FALCON's mapping uses (now via the frame-path topics `/xtend/rgb_frame_path` +
+> `/xtend/depth_frame_path`, tiny `std_msgs/String` "<path> <sec> <nsec>" messages
+> the node loads from disk), so the `navdp_*` intrinsic args default to the shared
+> `cam_*` (raw K on the real drone, `sim_adapter`'s P-target in sim). You normally
+> pass nothing; override per camera, or use a `navdp_camera_info_topic` (K; must
+> describe the live stream). Wrong intrinsics distort both the pixel→goal mapping
+> and the on-image overlay. The loaded RGB and depth must share one resolution —
+> the node fails loud otherwise.
 >
 > **Pose source** — the path is anchored at the drone pose. By default navdp reads
-> `/xtend/april_tag_pose` (`PoseStamped`), present in bag playback, on the real
+> `/xtend/localization` (`PoseStamped`), present in bag playback, on the real
 > drone, and from `sim_adapter`; set `pose_type:=pose` to read a bare `Pose`
 > (e.g. the nav stack's `/gt_pose` or Gazebo's `/simple_drone/gt_pose`). The
 > pose's `z` is the altitude the overlay projects the trajectory onto.
@@ -283,7 +286,7 @@ Verify it's up — these should appear in `rostopic list`:
 
 ```
 /flow_depth/pose_est
-/xtend/depth_m
+/xtend/depth_frame_path
 ```
 
 > Topics only appear on the ROS1 side once a ROS1 subscriber asks for them

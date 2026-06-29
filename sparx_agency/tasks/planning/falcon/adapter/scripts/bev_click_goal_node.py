@@ -31,14 +31,14 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~predicted_path_topic (Path) /path/predicted
   in   ~predicted_score_topic (Float32) /path/predicted_score
   in   ~drone_ns + /gt_pose (Pose)
-  in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/april_tag_pose
+  in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/localization
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
 
 The drone marker normally reads a bare Pose on ~drone_ns + /gt_pose (what the
 rest of the nav stack publishes via pose_adapter). For standalone debugging --
 e.g. a rosbag played straight through the ROS1<->ROS2 bridge with no nav stack
 up -- set ~pose_stamped_topic to the raw localization (a PoseStamped such as
-/xtend/april_tag_pose) and the dot is drawn directly from it, even before any
+/xtend/localization) and the dot is drawn directly from it, even before any
 BEV map is published.
 """
 import threading

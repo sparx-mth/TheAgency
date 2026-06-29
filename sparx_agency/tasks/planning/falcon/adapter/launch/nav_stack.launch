@@ -57,6 +57,14 @@
   <!-- v5: when false, sensor_gate ignores camera_info entirely. -->
   <arg name="bridge_camera_info" default="false" />
 
+  <!-- sensor_gate rotation freeze. Default true (the Gazebo path: sensor_gate's
+       gated pose+depth feed falcon_adapter, so freezing both keeps that pair
+       consistent across a turn). real_drone.launch sets this false: there the
+       depth no longer reaches sensor_gate (it arrives as a frame-path the voxel
+       feeder mapping_sync loads, and mapping_sync owns the AUTHORITATIVE freeze),
+       so a depth-driven resume would never fire and would strand the gated pose. -->
+  <arg name="sensor_gate_freeze_on_turning_mode" default="true" />
+
   <!-- Camera intrinsics — loaded from a camera_calibration_parsers
        YAML (camera_config_file) when set; the cam_* args below act as
        both the literal fallback (when camera_config_file:='') and the
@@ -143,18 +151,18 @@
   <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
-  <arg name="start_skip_m"          default="0.4" />
+  <arg name="start_skip_m"          default="1.0" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
        this timer (and on a goal click). The trajectory is frozen between ticks
        so the follower is not chasing a path that shifts every BEV frame. -->
-  <arg name="plan_period_s"         default="3.0" />
+  <arg name="plan_period_s"         default="4.0" />
   <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
        plan_period_s cycles. Set true to react to obstacles faster than that. -->
-  <arg name="replan_on_collision"   default="false" />
-  <arg name="replan_on_bev"         default="false" />
-  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
+  <arg name="replan_on_collision"   default="true" />
+  <arg name="replan_on_bev"         default="true" />
+  <arg name="replan_collision_confirm" default="3" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
        into two half-angle turns, so the stop-and-turn follower can glide through
@@ -203,20 +211,21 @@
        bev_click_goal need no change. With use_navdp:=true the
        astar_planner node is NOT launched.
 
-       navdp_click consumes the SAME /xtend/depth_m (+ /xtend/rgb) stream
-       FALCON's mapping does, so its intrinsics MUST match that stream — the
-       navdp_* intrinsic args below therefore DEFAULT to the shared cam_*
-       (raw K on the real drone via real_drone.launch; sim_adapter's P-target
-       in sim). Override per camera, or set navdp_camera_info_topic to auto-
-       sync from a camera_info topic (K preferred; must describe the 504x294
-       stream — real drone only).
+       navdp_click consumes the SAME frames FALCON's mapping does — now via the
+       frame-path topics /xtend/depth_frame_path (+ /xtend/rgb_frame_path), tiny
+       std_msgs/String "<path> <sec> <nsec>" messages it loads from disk — so its
+       intrinsics MUST match that stream. The navdp_* intrinsic args below
+       therefore DEFAULT to the shared cam_* (raw K on the real drone via
+       real_drone.launch; sim_adapter's P-target in sim). Override per camera, or
+       set navdp_camera_info_topic to auto-sync from a camera_info topic (K
+       preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
   <arg name="navdp_port"               default="8888" />
-  <arg name="navdp_rgb_topic"          default="/xtend/rgb" />
-  <arg name="navdp_depth_topic"        default="/xtend/depth_m" />
-  <arg name="navdp_pose_topic"         default="/xtend/april_tag_pose" />
-  <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/april_tag_pose) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
+  <arg name="navdp_rgb_topic"          default="/xtend/rgb_frame_path" />
+  <arg name="navdp_depth_topic"        default="/xtend/depth_frame_path" />
+  <arg name="navdp_pose_topic"         default="/xtend/localization" />
+  <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/localization) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
   <arg name="navdp_camera_info_topic"  default="" /><!-- e.g. /xtend/camera_info to auto-sync intrinsics; '' = use the navdp_* params below -->
   <arg name="navdp_fx"                 default="$(arg cam_fx)" />
   <arg name="navdp_fy"                 default="$(arg cam_fy)" />
@@ -291,7 +300,7 @@
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="0.80" />            <!-- column z-range considered -->
+  <arg name="bev_z_floor"           default="1.00" />            <!-- column z-range considered -->
   <arg name="bev_z_ceil"            default="1.50" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
@@ -424,6 +433,7 @@
     <param name="depth_topic"        value="$(arg depth_topic)" />
     <param name="camera_info_topic"  value="$(arg camera_info_topic)" />
     <param name="bridge_camera_info" value="$(arg bridge_camera_info)" />
+    <param name="freeze_on_turning_mode" value="$(arg sensor_gate_freeze_on_turning_mode)" />
     <param name="replay_hz"          value="30.0" />
   </node>
 

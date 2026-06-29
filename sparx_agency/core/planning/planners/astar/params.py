@@ -29,17 +29,44 @@ class WeightedAStarParams:
     box, and post-processes the path (line-of-sight smoothing + corner-
     preserving resample + start-prefix trim). Distances are in meters.
 
+    Clearance shaping (the wall-avoidance + corridor-centering layer): obstacle
+    distance is computed with an exact Euclidean transform. Cells within
+    ``inflate_radius_m`` of an obstacle are lethal (blocked); beyond that, a soft
+    cost that fades to zero over ``clearance_margin_m`` makes routes that hug
+    walls more expensive than routes that stay clear. Because the middle of a
+    corridor is the farthest point from both walls, this soft cost pulls the
+    route to the centre. Set ``clearance_weight = 0`` to recover the old binary
+    (free / blocked) behaviour.
+
     Attributes:
         connectivity: 4 or 8 (8 = diagonals at sqrt(2) cost, octile heuristic).
-        inflate_radius_m: Obstacle inflation (robot radius). 0 disables.
-        unknown_blocked: If True, UNKNOWN cells are impassable.
-        unknown_cost: Traversal cost multiplier for UNKNOWN cells when not
-            blocked (1.0 = same as free; >1 prefers known-free routes).
+        inflate_radius_m: Lethal obstacle radius (robot inscribed radius). Cells
+            this close to an obstacle are impassable; gaps narrower than twice
+            this are therefore never threaded. 0 = only obstacle cells block.
+        unknown_blocked: If True, UNKNOWN ("gray") cells are impassable.
+        unknown_cost: Flat traversal cost for UNKNOWN cells when not blocked.
+            Keep it above ``1 + clearance_weight`` (the most expensive known-free
+            cell) so the planner prefers any known-free route over driving blind
+            through gray, and only enters gray when there is no alternative.
+        clearance_weight: Peak extra cost added at the lethal boundary, decaying
+            to 0 at ``inflate_radius_m + clearance_margin_m``. Larger = stronger
+            wall avoidance / corridor centering (and slightly more A* work).
+            0 disables the soft layer.
+        clearance_margin_m: Width of the soft cost band beyond the lethal
+            radius. Routes are centred within corridors up to roughly
+            ``2*(inflate_radius_m + clearance_margin_m)`` wide.
+        path_simplify_m: Douglas–Peucker tolerance used to thin the A* path
+            without changing its shape (so the centred route keeps its
+            clearance — string-pulling is deliberately *not* used, as it would
+            make the path taut and undo the centring at corners). Larger = fewer
+            waypoints but coarser corners. <= 0 = auto (~1 cell).
         search_margin_m: Bounding-box margin around start/goal. Smaller =
             faster but may miss paths that detour far outside the box.
         turn_penalty: Extra cost on a direction change (suppresses staircasing
-            before smoothing). 0 disables.
-        los_smoothing: Run greedy line-of-sight smoothing on the raw A* cells.
+            before simplification). 0 disables.
+        los_smoothing: Simplify the raw A* cell path (Douglas–Peucker) before
+            emitting waypoints. (Name kept for the rosparam; it no longer
+            string-pulls.)
         waypoint_spacing_m: Max output segment length; corners are preserved,
             only longer legs are split. <= 0 disables splitting.
         goal_snap_radius_m: If the goal cell is blocked, snap to the nearest
@@ -66,7 +93,10 @@ class WeightedAStarParams:
     connectivity: int = 8
     inflate_radius_m: float = 0.4
     unknown_blocked: bool = False
-    unknown_cost: float = 1.0
+    unknown_cost: float = 5.0
+    clearance_weight: float = 3.0
+    clearance_margin_m: float = 0.8
+    path_simplify_m: float = 0.0
     search_margin_m: float = 3.0
     turn_penalty: float = 0.3
     los_smoothing: bool = True

@@ -38,7 +38,7 @@ _DEFAULT_YAML = os.path.expanduser(
     "~/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_728_420_padded.yaml"
 )
 _DEFAULT_TAG_MAP = os.path.expanduser(
-    "~/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path_ALL.yaml"
+    "~/GIT/TheAgency/sparx_agency/tasks/localization/config/new_map.yaml"
 )
 _DEFAULT_RGB_DIR = os.path.expanduser(
     "~/Documents/xtend_da3_takes/xtend_da3_take_20260527_124147/rgb"

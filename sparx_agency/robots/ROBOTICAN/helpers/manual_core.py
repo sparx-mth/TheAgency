@@ -10,6 +10,8 @@ from fcu_driver_interfaces.msg import ManualControl, UAVState
 from rclpy.node import Node
 from datetime import datetime
 
+from sparx_agency.robots.common.helpers import clamp_symmetric
+
 
 @dataclass
 class AxisState:
@@ -44,7 +46,7 @@ class ManualCommandModel:
 
     @staticmethod
     def _clamp(v: float) -> float:
-        return max(-1000.0, min(1000.0, v))
+        return clamp_symmetric(v, 1000.0)
 
     def set_axes(self, x: float, y: float, z: float, r: float):
         self.axes = AxisState(

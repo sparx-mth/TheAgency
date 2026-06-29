@@ -56,6 +56,7 @@ class BevPublisherNode:
             voxel_size_m=(float(G("~voxel_size_m"))
                           if rospy.has_param("~voxel_size_m") else None),
             occ_weight_thresh=float(G("~occ_weight_thresh", 1.2)),
+            occ_conf_full=float(G("~occ_conf_full", 3.0)),
             min_occ_voxels=int(G("~min_occ_voxels", 2)),
             min_free_voxels=int(G("~min_free_voxels", 1)),
             confirm_3d=bool(G("~confirm_3d", True)),
@@ -68,7 +69,7 @@ class BevPublisherNode:
             wall_fill_mode=str(G("~wall_fill_mode", "directional")),
             wall_fill_neighbors=int(G("~wall_fill_neighbors", 5)),
             wall_fill_iters=int(G("~wall_fill_iters", 1)),
-            temporal_filter=bool(G("~temporal_filter", False)),
+            temporal_filter=bool(G("~temporal_filter", True)),
             t_inc=float(G("~t_inc", 1.0)),
             t_dec=float(G("~t_dec", 1.0)),
             t_max=float(G("~t_max", 5.0)),
@@ -175,11 +176,11 @@ class BevPublisherNode:
     def _heartbeat(self, _evt):
         st = self.projector.last_stats
         rospy.loginfo("bev hb  in occ=%d free=%d  pub=%d  |  voxels raw=%d conf=%d  "
-                      "|  grid occ=%d free=%d unk=%d open=%d fill=%d",
+                      "|  grid occ=%d free=%d unk=%d open=%d pend=%d fill=%d",
                       self._hb["occ"], self._hb["free"], self._hb["pub"],
                       st.get("raw", 0), st.get("confirmed", 0), st.get("occ", 0),
                       st.get("free", 0), st.get("unknown", 0),
-                      st.get("openings", 0), st.get("fill", 0))
+                      st.get("openings", 0), st.get("pending", 0), st.get("fill", 0))
         # Loud warning when most occupied points fall outside the BEV bounds
         # (a strong hint the bbox / map_size is wrong for this environment).
         if self._occ.shape[0]:
@@ -206,6 +207,12 @@ class BevPublisherNode:
         L(" confirm_3d=%s(conn=%d,min=%d) protect=%s wall=%s dilate=%d",
           c.confirm_3d, c.neighbors_3d, c.min_occ_neighbors_3d,
           c.protect_openings, c.wall_fill_mode, c.occ_dilate_cells)
+        if c.temporal_filter:
+            L(" temporal: ON  conf_full=%.2f t_inc=%.2f t_dec=%.2f "
+              "t_on=%.2f t_off=%.2f t_max=%.2f",
+              c.occ_conf_full, c.t_inc, c.t_dec, c.t_on, c.t_off, c.t_max)
+        else:
+            L(" temporal: off (single-frame projection)")
         if self.behind_wall_x is not None:
             L(" behind_wall_x=%.2f", self.behind_wall_x)
         if self.walls:
@@ -240,11 +247,12 @@ if __name__ == "__main__":
 #   bounds: ~bbox_{xmin,xmax,ymin,ymax} (launch) > /map_config/map_size/* (+~bbox_margin_m, 1.0) > +-12
 #   column/height: ~z_floor (.30) ~z_ceil (2.20) ~z_peak (1.00)
 #     ~weight_profile (triangular) ~weight_sigma (.50) ~voxel_size_m (=resolution)
-#   occupancy: ~resolution (.15) ~occ_weight_thresh (1.2) ~min_occ_voxels (2) ~min_free_voxels (1)
+#   occupancy: ~resolution (.15) ~occ_weight_thresh (1.2) ~occ_conf_full (3.0) ~min_occ_voxels (2) ~min_free_voxels (1)
 #   3D confirm: ~confirm_3d (true) ~neighbors_3d (6) ~min_occ_neighbors_3d (1)
 #   doors: ~protect_openings (true) ~door_band_m (.60) ~door_free_voxels (2) ~door_occ_tol (0)
 #   walls: ~wall_fill_mode (directional) ~wall_fill_neighbors (5) ~wall_fill_iters (1)
-#   temporal (optional): ~temporal_filter (false) ~t_inc (1) ~t_dec (1) ~t_max (5) ~t_on (2) ~t_off (0.5)
+#   temporal confirm (ON by default): ~temporal_filter (true) ~t_inc (1) ~t_dec (1) ~t_max (5) ~t_on (2) ~t_off (0.5)
+#     multi-frame confidence gate (with ~occ_conf_full); set ~temporal_filter false for single-frame projection
 #   dilation: ~occ_dilate_cells (0)
 #   per-map overrides (node-side, from /map_config): behind_wall_x, walls[]
 #

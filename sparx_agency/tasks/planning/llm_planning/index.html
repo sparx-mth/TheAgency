@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SPARX Mission Generator - Drone Navigation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', sans-serif;
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            min-height: 100vh;
+            padding: 20px;
+            direction: ltr;
+        }
+
+        /* MODIFIED: Main layout container */
+        .main-layout {
+            display: flex;
+            gap: 20px;
+            max-width: 1900px;  /* CHANGED: Increased from 1600px to accommodate larger map */
+            margin: 0 auto;
+            height: calc(100vh - 40px);
+        }
+
+        /* MODIFIED: Left panel for chat - MADE SMALLER */
+        .left-panel {
+            flex: 0 0 400px;  /* CHANGED: Fixed width 400px instead of flex: 1 with min-width 500px */
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* MODIFIED: Right panel for map - MADE BIGGER */
+        .right-panel {
+            flex: 1;  /* CHANGED: Takes remaining space instead of fixed 500px */
+            min-width: 800px;  /* CHANGED: Minimum width for map panel */
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* MODIFIED: Container now fills height */
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 20px;  /* CHANGED: Reduced from 30px */
+            animation: slideIn 0.5s ease;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* MODIFIED: Logo styles - SMALLER */
+        .logo-container {
+            text-align: center;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
+        }
+
+        .logo-container img {
+            max-width: 150px;  /* CHANGED: Reduced from 200px */
+            height: auto;
+            object-fit: contain;
+        }
+
+        /* MODIFIED: Status bar - SMALLER */
+        .status-bar {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 8px;  /* CHANGED: Reduced from 10px */
+            border-radius: 10px;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            box-shadow: 0 4px 15px rgba(44, 62, 80, 0.3);
+        }
+
+        .status-item {
+            text-align: center;
+        }
+
+        .status-value {
+            font-size: 1.2em;  /* CHANGED: Reduced from 1.4em */
+            font-weight: bold;
+        }
+
+        .status-label {
+            font-size: 0.75em;  /* CHANGED: Reduced from 0.8em */
+            opacity: 0.9;
+        }
+
+        /* MODIFIED: Input section - SMALLER */
+        .input-section {
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
+        }
+
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            gap: 10px;
+        }
+
+        #taskInput {
+            flex: 1;
+            padding: 10px;  /* CHANGED: Reduced from 12px */
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 0.9em;  /* CHANGED: Reduced from 1em */
+            transition: all 0.3s;
+        }
+
+        #taskInput:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+        }
+
+        #sendBtn {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;  /* CHANGED: Reduced from 12px 24px */
+            border-radius: 10px;
+            font-size: 0.9em;  /* CHANGED: Reduced from 1em */
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #sendBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(52, 152, 219, 0.3);
+        }
+
+        #sendBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* MODIFIED: Examples - SMALLER */
+        .examples {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;  /* CHANGED: Reduced from 8px */
+            margin-bottom: 10px;  /* CHANGED: Reduced from 15px */
+        }
+
+        .example-chip {
+            background: #f5f5f5;
+            padding: 5px 10px;  /* CHANGED: Reduced from 6px 12px */
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.8em;  /* CHANGED: Reduced from 0.85em */
+            color: #666;
+        }
+
+        .example-chip:hover {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            transform: translateY(-2px);
+        }
+
+        /* MODIFIED: Output section to fill remaining space */
+        .output-section {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 15px;  /* CHANGED: Reduced from 20px */
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        /* MODIFIED: Response items - SMALLER */
+        .response-item {
+            background: white;
+            border-radius: 10px;
+            padding: 12px;  /* CHANGED: Reduced from 15px */
+            margin-bottom: 12px;  /* CHANGED: Reduced from 15px */
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .response-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;  /* CHANGED: Reduced from 10px */
+            padding-bottom: 6px;  /* CHANGED: Reduced from 8px */
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .task-label {
+            color: #2c3e50;
+            font-weight: bold;
+            font-size: 0.8em;  /* CHANGED: Reduced from 0.85em */
+        }
+
+        .timestamp {
+            color: #999;
+            font-size: 0.75em;  /* CHANGED: Reduced from 0.8em */
+        }
+
+        .response-text {
+            color: #333;
+            line-height: 1.4;  /* CHANGED: Reduced from 1.5 */
+            white-space: pre-wrap;
+            font-size: 0.85em;  /* CHANGED: Reduced from 0.95em */
+        }
+
+        .agent-section {
+            margin-top: 8px;  /* CHANGED: Reduced from 10px */
+            padding-top: 8px;  /* CHANGED: Reduced from 10px */
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .agent-label {
+            color: #2c3e50;
+            font-weight: bold;
+            margin-bottom: 6px;  /* CHANGED: Reduced from 8px */
+            font-size: 0.85em;  /* CHANGED: Reduced from 0.9em */
+        }
+
+        .agent-commands {
+            background: #f5f5f5;
+            padding: 8px;  /* CHANGED: Reduced from 10px */
+            border-radius: 8px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 0.8em;  /* CHANGED: Reduced from 0.85em */
+        }
+
+        .agent-loading {
+            color: #666;
+            font-style: italic;
+            font-size: 0.85em;  /* CHANGED: Reduced from 0.9em */
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 30px;  /* CHANGED: Reduced from 40px */
+            color: #999;
+            font-size: 0.9em;  /* CHANGED: Reduced font size */
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 15px;  /* CHANGED: Reduced from 20px */
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .loading-dots {
+            display: inline-block;
+            animation: loading 1.4s infinite;
+        }
+
+        @keyframes loading {
+            0%, 60%, 100% {
+                transform: translateY(0);
+            }
+            30% {
+                transform: translateY(-10px);
+            }
+        }
+
+        /* MODIFIED: Map section */
+        .map-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .map-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .map-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .map-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .refresh-btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.9em;
+        }
+
+        .refresh-btn:hover {
+            background: #2980b9;
+            transform: translateY(-1px);
+        }
+
+        .map-timestamp {
+            color: #666;
+            font-size: 0.8em;
+        }
+
+        /* MODIFIED: Map display area - BIGGER */
+        .map-display {
+            flex: 1;
+            background: #f5f5f5;
+            border-radius: 10px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: auto;
+            padding: 10px;
+        }
+
+        .map-display img {
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+        }
+
+        .map-placeholder {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        /* Connection status */
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00ff00;
+            animation: pulse 2s infinite;
+        }
+
+        .connection-dot.offline {
+            background: #ff0000;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* MODIFIED: Title - SMALLER */
+        h1 {
+            font-size: 1.3em;  /* CHANGED: Reduced from default */
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 15px;  /* CHANGED: Reduced from 20px */
+        }
+    </style>
+</head>
+<body>
+    <div class="main-layout">
+        <!-- MODIFIED: Left Panel - Chat Interface (SMALLER) -->
+        <div class="left-panel">
+            <div class="container">
+                <!-- Logo -->
+                <div class="logo-container">
+                    <img src="SPARX.jpg" alt="SPARX Logo" onerror="this.style.display='none'">
+                </div>
+
+                <h1>Mission Generator</h1>
+
+                <!-- Status Bar -->
+                <div class="status-bar">
+                    <div class="status-item">
+                        <div class="status-value" id="roomCount">0</div>
+                        <div class="status-label">Rooms</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="objectCount">0</div>
+                        <div class="status-label">Objects</div>
+                    </div>
+                    <div class="status-item connection-status">
+                        <div class="connection-dot" id="connectionDot"></div>
+                        <div class="status-label" id="connectionText">Connecting...</div>
+                    </div>
+                </div>
+
+                <!-- Input Section -->
+                <div class="input-section">
+                    <div class="examples">
+                        <div class="example-chip" onclick="setExample('Find the box')">Find box</div>
+                        <div class="example-chip" onclick="setExample('Get to the weapon')">Get to weapon</div>
+                        <div class="example-chip" onclick="setExample('Find the bottle')">Find bottle</div>
+                        <div class="example-chip" onclick="setExample('Go to Inbals office')">Inbal's office</div>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <input type="text"
+                               id="taskInput"
+                               placeholder="Enter navigation task..."
+                               onkeypress="handleKeyPress(event)">
+                        <button id="sendBtn" onclick="sendTask()">
+                            <span>Navigate</span>
+                            <span>➤</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Output Section -->
+                <div class="output-section" id="output">
+                    <div class="empty-state">
+                        <p>🚁 Ready for navigation commands</p>
+                        <p style="font-size: 0.9em; margin-top: 10px;">Enter a task above to generate mission instructions</p>
+                    </div>
+                    <div id="loading" class="loading">
+                        <span class="loading-dots">⚡ Processing</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MODIFIED: Right Panel - Map Display (BIGGER) -->
+        <div class="right-panel">
+            <div class="map-section">
+                <div class="map-header">
+                    <div class="map-title">🗺️ House Map</div>
+                    <div class="map-controls">
+                        <span class="map-timestamp" id="mapTimestamp">Waiting for map...</span>
+                        <button class="refresh-btn" onclick="refreshMap()">↻ Refresh</button>
+                    </div>
+                </div>
+
+                <div class="map-display" id="mapDisplay">
+                    <div class="map-placeholder">
+                        <p>📍 Map will appear here</p>
+                        <p style="font-size: 0.9em; margin-top: 10px;">Waiting for first scan...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isProcessing = false;
+        let activePollingIds = new Set();
+        let lastMapTimestamp = 0;
+        let mapUpdateInterval = null;
+
+        // Update status
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                document.getElementById('roomCount').textContent = data.rooms || 0;
+                document.getElementById('objectCount').textContent = data.objects || 0;
+                document.getElementById('connectionDot').classList.remove('offline');
+                document.getElementById('connectionText').textContent = 'Connected';
+            } catch (error) {
+                document.getElementById('connectionDot').classList.add('offline');
+                document.getElementById('connectionText').textContent = 'Offline';
+            }
+        }
+
+        // Poll for agent commands
+        async function pollForAgentCommands(responseId, maxAttempts = 20) {
+            let attempts = 0;
+
+            const pollInterval = setInterval(async () => {
+                if (!activePollingIds.has(responseId)) {
+                    clearInterval(pollInterval);
+                    return;
+                }
+
+                attempts++;
+
+                try {
+                    const response = await fetch('/api/check_agent_commands');
+                    const data = await response.json();
+
+                    if (data.agent_commands) {
+                        // Update the specific response with agent commands
+                        const agentDiv = document.getElementById(`agent-${responseId}`);
+                        if (agentDiv) {
+                            agentDiv.innerHTML = `
+                                <div class="agent-label">🤖 Agent Execution Plan:</div>
+                                <div class="agent-commands">${data.agent_commands}</div>
+                            `;
+                        }
+
+                        activePollingIds.delete(responseId);
+                        clearInterval(pollInterval);
+                    }
+                } catch (error) {
+                    console.error('Error polling for agent commands:', error);
+                }
+
+                if (attempts >= maxAttempts) {
+                    activePollingIds.delete(responseId);
+                    clearInterval(pollInterval);
+                }
+            }, 1500); // Poll every 1.5 seconds
+        }
+
+        // Send task to backend
+        async function sendTask() {
+            const input = document.getElementById('taskInput');
+            const task = input.value.trim();
+
+            if (!task || isProcessing) return;
+
+            isProcessing = true;
+            document.getElementById('sendBtn').disabled = true;
+
+            // Clear empty state if it exists
+            const emptyState = document.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            // Show loading
+            document.getElementById('loading').classList.add('active');
+
+            try {
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ task: task })
+                });
+
+                const data = await response.json();
+
+                // Hide loading
+                document.getElementById('loading').classList.remove('active');
+
+                // Generate unique ID for this response
+                const responseId = Date.now().toString();
+
+                // Add response to output
+                addResponse(task, data.response, data.agent_commands, responseId);
+
+                // If no agent commands yet, start polling
+                if (!data.agent_commands) {
+                    pollForAgentCommands(responseId);
+                }
+
+                // Clear input
+                input.value = '';
+
+                // Update status
+                updateStatus();
+
+            } catch (error) {
+                document.getElementById('loading').classList.remove('active');
+                addResponse(task, 'Error: Failed to connect to server. Make sure the Flask server is running.', '');
+            } finally {
+                isProcessing = false;
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+
+        // Add response to output
+        function addResponse(task, response, agentCommands, responseId) {
+            const output = document.getElementById('output');
+            const timestamp = new Date().toLocaleTimeString();
+
+            let agentSection = '';
+            if (agentCommands) {
+                agentSection = `
+                    <div class="agent-section" id="agent-${responseId}">
+                        <div class="agent-label">🤖 Agent Execution Plan:</div>
+                        <div class="agent-commands">${agentCommands}</div>
+                    </div>
+                `;
+            } else if (responseId) {
+                // Add placeholder that will be updated
+                activePollingIds.add(responseId);
+                agentSection = `
+                    <div class="agent-section" id="agent-${responseId}">
+                        <div class="agent-label">🤖 Agent Execution Plan:</div>
+                        <div class="agent-loading">Waiting for agent command processor...</div>
+                    </div>
+                `;
+            }
+
+            const responseHtml = `
+                <div class="response-item">
+                    <div class="response-header">
+                        <span class="task-label">Task: ${task}</span>
+                        <span class="timestamp">${timestamp}</span>
+                    </div>
+                    <div class="response-text">${response}</div>
+                    ${agentSection}
+                </div>
+            `;
+
+            // Remove loading if it's there
+            const loading = document.getElementById('loading');
+            if (loading.classList.contains('active')) {
+                loading.classList.remove('active');
+            }
+
+            // Insert at the beginning (newest first)
+            output.insertAdjacentHTML('afterbegin', responseHtml);
+
+            // Limit to last 10 responses
+            const items = output.querySelectorAll('.response-item');
+            if (items.length > 10) {
+                items[items.length - 1].remove();
+            }
+        }
+
+        // Handle enter key
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendTask();
+            }
+        }
+
+        // Set example in input
+        function setExample(text) {
+            document.getElementById('taskInput').value = text;
+            document.getElementById('taskInput').focus();
+        }
+
+        // UPDATED: Smart map loading - only when changed
+        async function checkAndLoadMap() {
+            try {
+                // First check if map has been updated
+                const statusResponse = await fetch('/api/map_status');
+                const status = await statusResponse.json();
+
+                if (!status.available) {
+                    return;
+                }
+
+                // Only load if timestamp is newer than last loaded
+                if (status.last_updated > lastMapTimestamp) {
+                    console.log('Map has changed, loading new image...');
+
+                    const mapDisplay = document.getElementById('mapDisplay');
+                    const mapTimestamp = document.getElementById('mapTimestamp');
+
+                    // Load the new map image
+                    const img = new Image();
+
+                    img.onload = function() {
+                        // Clear and display new image
+                        mapDisplay.innerHTML = '';
+                        mapDisplay.appendChild(img);
+
+                        // Update timestamp display
+                        mapTimestamp.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+
+                        // Remember this timestamp
+                        lastMapTimestamp = status.last_updated;
+                    };
+
+                    img.onerror = function() {
+                        console.error('Failed to load map image');
+                    };
+
+                    // Load with cache buster based on actual file timestamp
+                    img.src = `/api/map?t=${status.last_updated}`;
+                }
+                // If timestamp hasn't changed, do nothing (keep current image)
+
+            } catch (error) {
+                console.error('Error checking map status:', error);
+            }
+        }
+
+        // Manual refresh function
+        function refreshMap() {
+            // Force reload by resetting timestamp
+            lastMapTimestamp = 0;
+            checkAndLoadMap();
+        }
+
+        // Auto-check for map updates
+        function startMapMonitoring() {
+            console.log('Starting map monitoring (checks for changes only)...');
+            checkAndLoadMap();  // Initial check
+
+            // Check for changes every 2 seconds (but only load if changed)
+            mapUpdateInterval = setInterval(() => {
+                checkAndLoadMap();
+            }, 2000);
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Page loaded, initializing...');
+            updateStatus();
+            setInterval(updateStatus, 5000);
+            startMapMonitoring();
+        });
+
+        // Clean up on page unload
+        window.addEventListener('beforeunload', function() {
+            if (mapUpdateInterval) {
+                clearInterval(mapUpdateInterval);
+            }
+        });
+    </script>
+</body>
+</html>

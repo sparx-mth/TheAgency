@@ -10,14 +10,7 @@ from nav_msgs.msg import Odometry
 from sparx_agency.core.common.types.perception import PoseSE3
 
 
-def quat_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
-    """
-    Standard yaw (Z-axis) from quaternion.
-    """
-    # yaw (z-axis rotation)
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return math.atan2(siny_cosp, cosy_cosp)
+from sparx_agency.robots.common.spatial_math import quat_to_yaw
 
 
 def yaw_to_rot(yaw: float) -> np.ndarray:
