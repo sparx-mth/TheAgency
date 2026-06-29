@@ -42,6 +42,7 @@ falcon/
     │   ├── mapping_sync_node.py    # depth<->pose pairing + localization gate + authoritative rotation freeze (core.localization + core.mapping.depth_fusion_gate)
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
     │   ├── navdp_click_node.py     # click an RGB pixel -> NavDP point-goal policy -> world Path (core.planning.navdp); A* replacement
+    │   ├── combination_planner_node.py # nav_mode:=combination — A* global route + NavDP local legs (farthest visible A* waypoint -> NavDP -> fly to midpoint -> re-infer); core.planning.navdp
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
@@ -263,6 +264,53 @@ quits.
 > calls the server). Install them in the container if missing
 > (`pip install requests pillow opencv-python`), as with `bev_click_goal`'s
 > matplotlib.
+
+## Combination mode (A* global route + NavDP local legs)
+
+`nav_mode:=combination` is a third mode that **fuses** the two planners instead of
+choosing one. A* plans the collision-free *global* route to the mission goal;
+NavDP supplies the smooth *local* trajectory the drone actually flies, aimed at
+the farthest point on the A* route it can currently **see**. The run can start on
+A* and switch to the fusion on a signal, or be combined from the first frame.
+
+`combination_planner_node` is the arbiter on `/path/waypoints_combo` (the raw path
+`path_corrector` → `trajectory_simplifier` → `waypoint_follower` then process and
+fly, exactly as for A*/NavDP). Its loop, once enabled:
+
+1. read the latest A* route (the `astar_planner` keeps replanning to the goal);
+2. pick the **farthest A\* waypoint visible** in the current frame — in front of
+   the camera, projecting in-frame, and (by default) with clear line-of-sight
+   (not behind a wall);
+3. express it in NavDP's body frame (drone = origin, +x forward), ask NavDP for a
+   trajectory, anchor it to the world and publish it;
+4. fly that leg to its **midpoint**, then go to 1 — re-grounding every half-leg
+   keeps NavDP in its accurate near field while A* supplies the direction.
+
+If NavDP can't produce a leg (server down, nothing visible, the route turns out of
+view) the node **falls back to the A\* path**, so the drone always has a route; on
+the final approach it hands the last stretch to A* so it reaches the true goal.
+
+```bash
+# 0. Start the NavDP HTTP server on the GPU box (default 127.0.0.1:8888), as for
+#    plain NavDP — combination_planner is just an HTTP client of it.
+# 1. Real XTEND, combined for the whole run (no signal needed):
+roslaunch falcon_adapter real_drone.launch map_name:=office \
+    nav_mode:=combination combination_start_enabled:=true
+# 2. Start on A*, switch to the fusion later by publishing the enable signal:
+roslaunch falcon_adapter real_drone.launch map_name:=office nav_mode:=combination
+rostopic pub -1 /combination/enable std_msgs/Bool "data: true"     # back to A*: data: false
+```
+
+Key knobs (all `combination_*` args, forwarded by `real_drone.launch`):
+`combination_start_enabled` (false), `combination_enable_topic`
+(`/combination/enable`), `combination_leg_fraction` (0.5, the midpoint hand-off),
+`combination_require_unoccluded` (true — visible means clear line-of-sight, not
+merely in-FOV), `combination_final_handoff_m` (1.5), `combination_leg_timeout_s`
+(8.0, the re-infer watchdog), `combination_min_goal_fwd_m` (0.5). Camera
+intrinsics, RGB/depth transport, pose source and the NavDP server reuse the same
+`navdp_*` / `cam_*` args as NavDP click-to-go above. The geometry and selection
+are ROS-free and unit-tested in `core.planning.navdp` (`world_to_body_2d`,
+`select_farthest_visible_waypoint`, `arclength_fraction_2d`).
 
 ## Talking to a ROS2 sim / drone — the bridge
 

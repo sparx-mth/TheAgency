@@ -262,6 +262,19 @@
        preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
+  <!-- nav_mode = astar | navdp | combination. The 3-way mode selector (use_navdp
+       is the legacy boolean shim: nav_mode defaults to 'navdp' when use_navdp:=true,
+       else 'astar'; pass nav_mode:=combination to opt into the A*+NavDP fusion).
+         astar       : astar_planner -> /path/waypoints_astar
+         navdp       : navdp_click   -> /path/waypoints_navdp (operator clicks a pixel)
+         combination : astar_planner AND combination_planner run; A* plans the global
+                       route, combination_planner hands NavDP the farthest visible A*
+                       waypoint, flies the returned leg to its midpoint, re-infers, and
+                       publishes the arbitrated raw path on /path/waypoints_combo. A
+                       'std_msgs/Bool True' on combination_enable_topic (or
+                       combination_start_enabled:=true) turns the fusion on; until then
+                       it follows A* directly. Needs the NavDP server up once enabled. -->
+  <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'astar')" />
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
   <arg name="navdp_depth_topic"        default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
@@ -281,6 +294,21 @@
   <arg name="navdp_display_mode"       default="full" /><!-- full = RGB + depth + snapshot panels | rgb_only = just the clickable RGB panel (lighter) -->
 
   <!-- ══════════════════════════════════════════════════════════════
+       COMBINATION (nav_mode:=combination) — A* global route + NavDP local legs.
+       combination_planner reuses the navdp_* intrinsic/transport/server args
+       above (same camera stream + NavDP server); these knobs tune the fusion.
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="combination_enable_topic"          default="/combination/enable" /><!-- std_msgs/Bool: True = combine, False = follow A* -->
+  <arg name="combination_start_enabled"         default="false" /><!-- true = start combined for the whole run (no signal needed) -->
+  <arg name="combination_tick_hz"               default="5.0" /><!-- state-machine rate -->
+  <arg name="combination_leg_fraction"          default="0.5" /><!-- re-infer once the drone passes this fraction of the NavDP leg (0.5 = midpoint; NavDP is accurate near the camera) -->
+  <arg name="combination_final_handoff_m"       default="1.5" /><!-- when the mission goal is the visible local goal and within this range, fly A* straight in (no NavDP tiny-leg jitter at the end) -->
+  <arg name="combination_leg_timeout_s"         default="8.0" /><!-- watchdog: re-infer if a leg has been followed this long (prevents a deadlock if the flown path is shorter than the raw leg) -->
+  <arg name="combination_require_unoccluded"    default="true" /><!-- a waypoint is "visible" only with clear line-of-sight (depth), not merely in-FOV; false = in-frame only -->
+  <arg name="combination_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the depth occlusion test -->
+  <arg name="combination_min_goal_fwd_m"        default="0.5" /><!-- ignore A* waypoints nearer than this (the drone is already on top of them) -->
+
+  <!-- ══════════════════════════════════════════════════════════════
        PATH CORRECTOR (path_corrector_node) — planner-agnostic SAFETY.
        Subscribes to the active planner's RAW path, recentres it off
        walls against the BEV (the repulsive potential field, by default)
@@ -291,11 +319,13 @@
        "APF safety recentring" block above and are consumed HERE now.
        ══════════════════════════════════════════════════════════════ -->
   <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
-  <!-- Which planner the corrector reads: NavDP when use_navdp, else A*. The
-       corrector owns /path/waypoints_safe; the trajectory_simplifier turns that
-       into the flown /path/waypoints, so the follower still reads one topic. -->
+  <!-- Which raw path the corrector reads, by nav_mode: combination -> the
+       combination_planner's arbitrated /path/waypoints_combo; navdp -> NavDP's
+       /path/waypoints_navdp; astar -> A*'s /path/waypoints_astar. The corrector
+       owns /path/waypoints_safe; the trajectory_simplifier turns that into the
+       flown /path/waypoints, so the follower still reads one topic. -->
   <arg name="planner_path_topic"
-       default="$(eval '/path/waypoints_navdp' if use_navdp else '/path/waypoints_astar')" />
+       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar'))" />
 
   <!-- ESDF corrector knobs (used only when corrector:=esdf). Ascend each waypoint
        up the gradient of the distance-to-wall field toward the corridor / doorway
@@ -588,8 +618,11 @@
     <param name="out_topic"              value="/falcon/bev_2d" />
   </node>
 
+  <!-- A* planner: runs in astar AND combination modes (in combination it plans the
+       global route the combination_planner steers NavDP along). NOT in pure navdp. -->
   <node pkg="falcon_adapter" type="astar_planner_node.py"
-        name="astar_planner" output="screen" unless="$(arg use_navdp)">
+        name="astar_planner" output="screen"
+        if="$(eval arg('nav_mode') in ('astar', 'combination'))">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
     <!-- Raw A* path; path_corrector recentres it and republishes /path/waypoints. -->
@@ -631,7 +664,8 @@
        it (planner_path_topic auto-selects it when use_navdp) and republishes
        /path/waypoints, the world Path the follower consumes. -->
   <node pkg="falcon_adapter" type="navdp_click_node.py"
-        name="navdp_click" output="screen" if="$(arg use_navdp)">
+        name="navdp_click" output="screen"
+        if="$(eval arg('nav_mode') == 'navdp')">
     <param name="drone_ns"          value="$(arg drone_ns)" />
     <param name="image_transport"   value="$(arg image_transport)" />
     <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
@@ -654,6 +688,51 @@
     <param name="execute_fraction"  value="$(arg navdp_execute_fraction)" />
     <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
     <param name="display_mode"      value="$(arg navdp_display_mode)" />
+  </node>
+
+  <!-- Combination planner (nav_mode:=combination): A* plans the global route (the
+       astar_planner above stays on); this node hands NavDP the farthest A* waypoint
+       VISIBLE in the current frame as a local goal, anchors the returned trajectory
+       to the world, and publishes the arbitrated raw path on /path/waypoints_combo
+       (which planner_path_topic selects, so path_corrector recentres it and the
+       trajectory_simplifier cleans it into the flown /path/waypoints). It flies each
+       NavDP leg to its midpoint, then re-infers. Disabled at first it echoes A*
+       straight through, so the run can start on A* and switch to the fusion on a
+       'std_msgs/Bool True' on combination_enable_topic (or combination_start_enabled).
+       Reuses the navdp_* camera/transport/server args. Needs the NavDP server up. -->
+  <node pkg="falcon_adapter" type="combination_planner_node.py"
+        name="combination_planner" output="screen"
+        if="$(eval arg('nav_mode') == 'combination')">
+    <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+    <!-- A* route in; arbitrated raw path out (-> path_corrector via planner_path_topic). -->
+    <param name="astar_path_topic"  value="/path/waypoints_astar" />
+    <param name="path_topic"        value="/path/waypoints_combo" />
+    <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg navdp_port)" />
+    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <!-- Combination behaviour / visibility -->
+    <param name="enable_topic"             value="$(arg combination_enable_topic)" />
+    <param name="start_enabled"            value="$(arg combination_start_enabled)" />
+    <param name="tick_hz"                  value="$(arg combination_tick_hz)" />
+    <param name="leg_execute_fraction"     value="$(arg combination_leg_fraction)" />
+    <param name="final_handoff_m"          value="$(arg combination_final_handoff_m)" />
+    <param name="leg_timeout_s"            value="$(arg combination_leg_timeout_s)" />
+    <param name="require_unoccluded"       value="$(arg combination_require_unoccluded)" />
+    <param name="visibility_depth_tol_m"   value="$(arg combination_visibility_depth_tol_m)" />
+    <param name="min_goal_fwd_m"           value="$(arg combination_min_goal_fwd_m)" />
   </node>
 
   <!-- Path corrector (SAFETY): recentres whichever planner's raw path against the

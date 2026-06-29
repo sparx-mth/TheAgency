@@ -16,6 +16,7 @@ catkin_install_python(PROGRAMS
   scripts/bev_click_goal_node.py
   scripts/astar_planner_node.py
   scripts/navdp_click_node.py
+  scripts/combination_planner_node.py
   scripts/path_corrector_node.py
   scripts/trajectory_simplifier_node.py
   scripts/waypoint_follower_node.py

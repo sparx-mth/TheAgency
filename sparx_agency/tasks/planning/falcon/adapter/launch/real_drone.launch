@@ -113,6 +113,24 @@
   <arg name="use_navdp"               default="false" />
   <arg name="navdp_camera_info_topic" default="" />
 
+  <!-- ── Combination mode (A* global route + NavDP local legs) ──────
+       nav_mode:=combination runs A* AND combination_planner together: A* plans the
+       route to the goal, combination_planner hands NavDP the farthest A* waypoint
+       visible in the current frame, flies that leg to its midpoint, then re-infers.
+       Disabled at first it follows A*; publish 'std_msgs/Bool True' on
+       combination_enable_topic (or set combination_start_enabled:=true) to combine.
+       nav_mode defaults from use_navdp (legacy shim); needs the NavDP server up. -->
+  <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'astar')" />
+  <arg name="combination_enable_topic"   default="/combination/enable" />
+  <arg name="combination_start_enabled"  default="false" />
+  <arg name="combination_tick_hz"        default="5.0" />
+  <arg name="combination_leg_fraction"   default="0.5" /><!-- re-infer at the leg midpoint -->
+  <arg name="combination_final_handoff_m" default="1.5" /><!-- fly A* straight in for the final approach within this range -->
+  <arg name="combination_leg_timeout_s"  default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
+  <arg name="combination_require_unoccluded"     default="true" /><!-- visible = clear line-of-sight, not merely in-FOV -->
+  <arg name="combination_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the occlusion test -->
+  <arg name="combination_min_goal_fwd_m" default="0.5" /><!-- ignore A* waypoints nearer than this -->
+
   <!-- ── Path-correction strategy ─────────────────────────────────
        corrector:=potential_field (default) | esdf. With esdf the route is
        nudged up the distance-to-wall gradient toward the corridor/doorway
@@ -247,9 +265,22 @@
     <arg name="goal_y"        value="$(arg goal_y)" />
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
+    <arg name="nav_mode"                value="$(arg nav_mode)" />
+    <arg name="combination_enable_topic"       value="$(arg combination_enable_topic)" />
+    <arg name="combination_start_enabled"      value="$(arg combination_start_enabled)" />
+    <arg name="combination_tick_hz"            value="$(arg combination_tick_hz)" />
+    <arg name="combination_leg_fraction"       value="$(arg combination_leg_fraction)" />
+    <arg name="combination_final_handoff_m"    value="$(arg combination_final_handoff_m)" />
+    <arg name="combination_leg_timeout_s"      value="$(arg combination_leg_timeout_s)" />
+    <arg name="combination_require_unoccluded"     value="$(arg combination_require_unoccluded)" />
+    <arg name="combination_visibility_depth_tol_m" value="$(arg combination_visibility_depth_tol_m)" />
+    <arg name="combination_min_goal_fwd_m"     value="$(arg combination_min_goal_fwd_m)" />
     <arg name="navdp_rgb_topic"         value="$(arg real_rgb_path_topic)" />
     <arg name="navdp_depth_topic"       value="$(arg real_depth_path_topic)" />
     <arg name="navdp_pose_topic"        value="$(arg real_pose_topic)" />
+    <!-- Forward the localization message type so navdp_click / combination read the
+         right type (real_pose_type:=pose would otherwise mismatch the PoseStamped default). -->
+    <arg name="navdp_pose_type"         value="$(arg real_pose_type)" />
     <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
 
     <arg name="corrector"               value="$(arg corrector)" />

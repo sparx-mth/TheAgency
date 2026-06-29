@@ -109,6 +109,48 @@ def decimate_min_spacing_2d(points: List[Pose2D], min_spacing: float) -> List[Po
     return out
 
 
+def arclength_fraction_2d(points: List[Pose2D], query: Pose2D) -> float:
+    """Fraction along a polyline (``0..1``) of the point nearest to ``query``.
+
+    Projects ``query`` onto every segment, keeps the nearest projection, and
+    returns the cumulative arclength up to that projection divided by the total
+    polyline length. Used to measure how far the drone has flown along a published
+    leg -- e.g. to trigger a re-plan once it passes the leg midpoint
+    (``fraction >= 0.5``). Monotonic as the drone advances along the leg.
+
+    Args:
+        points: Ordered polyline vertices.
+        query: The point to project (e.g. the live drone pose).
+
+    Returns:
+        A fraction in ``[0, 1]``; ``0.0`` for a degenerate (<2-point or
+        zero-length) polyline.
+    """
+    if len(points) < 2:
+        return 0.0
+    qx, qy = query.x, query.y
+    best_d2 = float("inf")
+    best_arc = 0.0
+    total = 0.0
+    for a, b in zip(points[:-1], points[1:]):
+        dx, dy = b.x - a.x, b.y - a.y
+        seg_len = hypot(dx, dy)
+        if seg_len <= 0.0:
+            continue
+        t = ((qx - a.x) * dx + (qy - a.y) * dy) / (seg_len * seg_len)
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        proj_x, proj_y = a.x + t * dx, a.y + t * dy
+        d2 = (qx - proj_x) ** 2 + (qy - proj_y) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            best_arc = total + t * seg_len   # total = arclength up to segment start
+        total += seg_len
+    if total <= 0.0:
+        return 0.0
+    f = best_arc / total
+    return 0.0 if f < 0.0 else (1.0 if f > 1.0 else f)
+
+
 def reduce_path_2d(si, costmap: Costmap2D, states: List, min_clearance: float) -> List:
     """Adaptive waypoint reduction for 2D."""
     if len(states) < 3:
@@ -149,6 +191,7 @@ __all__ = [
     "interpolate_path_2d",
     "split_long_segments_2d",
     "decimate_min_spacing_2d",
+    "arclength_fraction_2d",
     "reduce_path_2d",
     "make_clearance_objective_2d",
 ]
