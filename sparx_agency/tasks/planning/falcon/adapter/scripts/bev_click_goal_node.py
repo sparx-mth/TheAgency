@@ -49,6 +49,7 @@ import numpy as np
 import rospy
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.lines import Line2D
 
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
@@ -132,6 +133,7 @@ class BevClickGoalNode:
         self.ax.set_xlabel("x (m)")
         self.ax.set_ylabel("y (m)")
         self.ax.grid(True, alpha=0.25)
+        self._add_legend()
 
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
@@ -237,6 +239,40 @@ class BevClickGoalNode:
         m = Point()
         m.x, m.y, m.z = gx, gy, 0.0
         self.goal_pub.publish(m)
+
+    # -- legend ----------------------------------------------------------------
+    def _add_legend(self):
+        """A static colour key for every route/marker the viewer draws.
+
+        Proxy ``Line2D`` handles (the real artists are recreated each frame, so
+        they can't anchor a legend). Colours/styles mirror ``_render`` exactly:
+        the three planner-pipeline paths (raw planner -> safe corrector ->
+        cleaned/flown), the display-only routes, the repulsive-force overlays,
+        and the drone/goal markers. Drawn once; it persists because ``_render``
+        only updates artists in place and never clears the axes.
+        """
+        handles = [
+            Line2D([0], [0], color="red", marker="o", markersize=4,
+                   label="raw planner path (A*/NavDP, /path/waypoints_raw)"),
+            Line2D([0], [0], color="magenta", marker="o", markersize=4,
+                   label="safe: corrector, pre-cleanup (/path/waypoints_safe)"),
+            Line2D([0], [0], color="limegreen", marker="o", markersize=5, lw=2.4,
+                   label="cleaned / FLOWN path (/path/waypoints)"),
+            Line2D([0], [0], color="deepskyblue", marker="o", markersize=3,
+                   linestyle="--", label="full planner route (NavDP, display-only)"),
+            Line2D([0], [0], color="darkorange", linestyle="--", lw=2,
+                   label="predicted stop-and-turn trajectory"),
+            Line2D([0], [0], color="yellow", marker=">", markeredgecolor="black",
+                   linestyle="None", label="F_rep at each waypoint (obstacle push)"),
+            Line2D([0], [0], color="gold", marker=">", linestyle="None",
+                   label="F_rep field over free space"),
+            Line2D([0], [0], color="red", marker="o", markeredgecolor="black",
+                   markersize=8, linestyle="None", label="drone pose + heading"),
+            Line2D([0], [0], color="lime", marker="*", markeredgecolor="black",
+                   markersize=12, linestyle="None", label="navigation goal"),
+        ]
+        self.ax.legend(handles=handles, loc="upper right", fontsize=7,
+                       framealpha=0.85, ncol=1, title="routes & markers").set_zorder(20)
 
     # -- render (main thread, via FuncAnimation) ------------------------------
     def _render(self, _frame):
