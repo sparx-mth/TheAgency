@@ -7,13 +7,14 @@ With this node running, the Gazebo sim publishes the XTEND's localization on
 real XTEND's intrinsics exactly. Two differences are absorbed entirely inside
 this node:
 
-NOTE -- image transport. The real XTEND no longer streams raw RGB/depth Images;
-it saves each frame to disk and publishes frame-path strings
-(/xtend/rgb_frame_path, /xtend/depth_frame_path) that the consumers load. This
-emulator still emits raw Images on /xtend/rgb and /xtend/depth_m, so it does NOT
-drive the frame-path consumers (mapping_sync, navdp_click) as configured for the
-real drone; driving those from sim would need a frame-path producer that writes
-the resampled frames to disk. The localization rename below is wired through.
+NOTE -- image transport. The real XTEND saves each frame to disk and publishes
+frame-path strings (/xtend/rgb_frame_path, /xtend/depth_frame_path) that the
+consumers load (the launches' default, image_transport:=frame_path). This
+emulator emits raw Images on /xtend/rgb and /xtend/depth_m instead, so to drive
+mapping_sync / navdp_click from sim, launch them with image_transport:=topic
+(and bridge with bridge_topic.yaml if crossing the ROS1<->ROS2 boundary); they
+then subscribe to the raw Images this node publishes. The localization rename
+below is wired through.
 
 1. Camera intrinsics. The XTEND depth is 504x294 with fx=253.07, fy=287.54,
    cx=236.14, cy=81.73 -- an OFF-CENTRE principal point and, crucially,

@@ -127,6 +127,32 @@ Example — Gazebo sim:
 roslaunch falcon_adapter nav_stack.launch map_name:=hospital
 ```
 
+### Image transport: frame-path vs topic
+
+RGB/depth can arrive two ways; pick with `image_transport` (default
+`frame_path`). The launch arg and the bridge config **must match**.
+
+**1. frame-path (default — real XTEND):** the drone writes `.jpg`/`.npy` to disk
+and publishes tiny `std_msgs/String` path messages the nodes load.
+
+```bash
+# container:
+roslaunch falcon_adapter real_drone.launch map_name:=office
+# host (bridge):
+cd bridge && ./run_bridge.sh
+```
+
+**2. topic (Gazebo sim or old bag — raw images on the wire):**
+
+```bash
+# container:
+roslaunch falcon_adapter real_drone.launch map_name:=office image_transport:=topic
+#   add real_pose_topic:=/xtend/april_tag_pose for bags recorded before the
+#   /xtend/localization rename
+# host (bridge):
+cd bridge && BRIDGE_CFG=bridge_topic.yaml ./run_bridge.sh
+```
+
 ## Visualizing & interacting (RViz, BEV, NavDP viewer)
 
 These run against the live stack, so start the FALCON container first

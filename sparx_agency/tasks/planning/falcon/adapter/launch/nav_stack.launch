@@ -57,6 +57,14 @@
   <!-- v5: when false, sensor_gate ignores camera_info entirely. -->
   <arg name="bridge_camera_info" default="false" />
 
+  <!-- RGB/depth transport for navdp_click (and, via real_drone.launch, for
+       mapping_sync). frame_path (default): the drone wrote .jpg/.npy to disk and
+       publishes std_msgs/String "<path> <sec> <nsec>"; the nodes load the files.
+       topic: raw sensor_msgs/Image straight off the wire (Gazebo sim or an old
+       bag replay, where nothing writes frame files). When 'topic', the navdp_*
+       image-topic defaults below flip to /xtend/rgb + /xtend/depth_m. -->
+  <arg name="image_transport" default="frame_path" /><!-- frame_path | topic -->
+
   <!-- sensor_gate rotation freeze. Default true (the Gazebo path: sensor_gate's
        gated pose+depth feed falcon_adapter, so freezing both keeps that pair
        consistent across a turn). real_drone.launch sets this false: there the
@@ -222,8 +230,8 @@
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
   <arg name="navdp_port"               default="8888" />
-  <arg name="navdp_rgb_topic"          default="/xtend/rgb_frame_path" />
-  <arg name="navdp_depth_topic"        default="/xtend/depth_frame_path" />
+  <arg name="navdp_rgb_topic"          default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
+  <arg name="navdp_depth_topic"        default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
   <arg name="navdp_pose_topic"         default="/xtend/localization" />
   <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/localization) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
   <arg name="navdp_camera_info_topic"  default="" /><!-- e.g. /xtend/camera_info to auto-sync intrinsics; '' = use the navdp_* params below -->
@@ -552,6 +560,7 @@
   <node pkg="falcon_adapter" type="navdp_click_node.py"
         name="navdp_click" output="screen" if="$(arg use_navdp)">
     <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="image_transport"   value="$(arg image_transport)" />
     <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
     <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
     <param name="pose_topic"        value="$(arg navdp_pose_topic)" />

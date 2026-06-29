@@ -49,12 +49,19 @@
 <!--   <arg name="real_pose_topic" default="/flow_depth/pose_est" /> -->
   <arg name="real_pose_type"  default="pose_stamped" />
 
-  <!-- ── Real-drone depth / rgb (frame-path transport) ──────────────
-       The drone saves each frame to disk and publishes a tiny std_msgs/String
-       "<path> <sec> <nsec>"; mapping_sync (depth) and navdp_click (depth+rgb)
-       load the .npy / .jpg and reuse the localization-synchronized stamp. -->
-  <arg name="real_depth_path_topic" default="/xtend/depth_frame_path" />
-  <arg name="real_rgb_path_topic"   default="/xtend/rgb_frame_path" />
+  <!-- ── RGB/depth transport ────────────────────────────────────────
+       frame_path (default, the real drone): each frame is saved to disk and a
+       tiny std_msgs/String "<path> <sec> <nsec>" is published; mapping_sync
+       (depth) and navdp_click (depth+rgb) load the .npy / .jpg and reuse the
+       localization-synchronized stamp. topic: raw sensor_msgs/Image straight off
+       the wire (Gazebo sim via sim_adapter, or an old bag replay) — set
+       image_transport:=topic and the depth/rgb topic defaults below flip to the
+       raw /xtend/depth_m + /xtend/rgb. -->
+  <arg name="image_transport" default="frame_path" /><!-- frame_path | topic -->
+
+  <!-- ── Real-drone depth / rgb (transport-dependent topic names) ──── -->
+  <arg name="real_depth_path_topic" default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
+  <arg name="real_rgb_path_topic"   default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
   <!-- Legacy raw-depth Image topic. Kept ONLY as sensor_gate's input name; on the
        real drone nothing publishes it anymore (depth now arrives as a frame-path),
        so sensor_gate's depth path is inert here. mapping_sync is the sole voxel
@@ -171,7 +178,8 @@
          owns the authoritative rotation freeze below, so it must see true capture
          stamps: the frame-path stamp is the same capture time /xtend/localization
          carries (both derived from the depth frame), so they pair exactly. -->
-    <param name="depth_topic"        value="$(arg real_depth_path_topic)" />         <!-- /xtend/depth_frame_path -->
+    <param name="depth_transport"    value="$(arg image_transport)" />              <!-- frame_path -> load .npy from a String path; topic -> raw Image -->
+    <param name="depth_topic"        value="$(arg real_depth_path_topic)" />         <!-- /xtend/depth_frame_path (frame_path) | /xtend/depth_m (topic) -->
     <param name="out_pose_topic"     value="/map_ros/pose" />
     <param name="out_depth_topic"    value="/map_ros/depth" />
     <!-- Pairing tolerance. By design the depth frame-path and /xtend/localization
@@ -214,11 +222,15 @@
     <arg name="drone_ns"      value="$(arg drone_ns)" />
     <arg name="gated_ns"      value="$(arg gated_ns)" />
     <arg name="publish_mapping_inputs" value="$(arg publish_mapping_inputs)" />
-    <!-- sensor_gate's (now inert) raw-depth Image input name; see real_depth_topic. -->
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <!-- sensor_gate's raw-depth Image input name; see real_depth_topic. -->
     <arg name="depth_topic"   value="$(arg real_depth_topic)" />
-    <!-- Depth no longer reaches sensor_gate, so its depth-driven resume can't fire;
-         disable its turning-freeze (mapping_sync owns the authoritative freeze). -->
-    <arg name="sensor_gate_freeze_on_turning_mode" value="false" />
+    <!-- frame_path: depth never reaches sensor_gate (it arrives as a frame-path the
+         voxel feeder mapping_sync loads), so its depth-driven resume can't fire —
+         disable its turning-freeze (mapping_sync owns the authoritative freeze).
+         topic: raw depth DOES reach sensor_gate, so keep the freeze on (the Gazebo
+         default), restoring the pre-frame-path behaviour. -->
+    <arg name="sensor_gate_freeze_on_turning_mode" value="$(eval 'false' if arg('image_transport') == 'frame_path' else 'true')" />
 
     <arg name="cam_fx"        value="$(arg cam_fx)" />
     <arg name="cam_fy"        value="$(arg cam_fy)" />
