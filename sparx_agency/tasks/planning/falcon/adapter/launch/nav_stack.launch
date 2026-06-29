@@ -175,7 +175,7 @@
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
        into two half-angle turns, so the stop-and-turn follower can glide through
        them instead of stopping to yaw. -->
-  <arg name="corner_round"           default="true" />
+  <arg name="corner_round"           default="false" />
   <arg name="corner_merge_deg"       default="8.0" /><!-- drop interior vertices that turn less than this -->
   <arg name="corner_max_turn_deg"    default="14.0" /><!-- corners gentler than this are already glide-able (pair with skip_yaw_thresh) -->
   <arg name="corner_chamfer_max_deg" default="28.0" /><!-- corners up to this are chamfered; sharper ones kept as genuine turns -->
@@ -293,10 +293,12 @@
        ══════════════════════════════════════════════════════════════ -->
   <arg name="simplify"               default="true" /><!-- false = passthrough: fly the corrector's path uncleaned -->
   <arg name="simplify_debug"         default="true" /><!-- per-cycle in->out waypoint-count logging -->
-  <!-- 1) merge near-duplicate waypoints (the field can leave two points almost on
-          top of each other); points closer than this collapse to one. -->
+  <!-- 1) merge near-duplicate waypoints = the HARD FLOOR: no two points in the
+          final route end up closer than this, even at a turn (a tight cluster the
+          field left is noise, not several turns). A genuinely required tight corner
+          survives because cutting it would clip an obstacle (BEV-checked). -->
   <arg name="simplify_merge"         default="true" />
-  <arg name="simplify_merge_radius_m" default="0.30" />
+  <arg name="simplify_merge_radius_m" default="0.20" />
   <!-- 2) flatten field-induced zig-zags: a middle point whose heading change
           exceeds zigzag_angle_deg is pulled zigzag_strength (0..1) toward the line
           between its neighbours (kept, not deleted). A corner that hugs a wall is
@@ -311,8 +313,9 @@
   <arg name="simplify_collinear"     default="true" />
   <arg name="simplify_collinear_angle_deg" default="10.0" /><!-- heading change below this = same plane -->
   <arg name="simplify_max_segment_m" default="3.0" />
-  <!-- 4) enforce a minimum spacing on the straights, but allow genuine turns
-          (heading change > turn_keep_deg) to sit closer where they must. -->
+  <!-- 4) min spacing on the straights = the SOFT FLOOR: thin straights to >= this,
+          but allow genuine turns (heading change > turn_keep_deg) to sit closer
+          where they must (down to, but never below, the hard merge floor in 1). -->
   <arg name="simplify_min_spacing"   default="true" />
   <arg name="simplify_min_spacing_m" default="1.0" />
   <arg name="simplify_turn_keep_deg" default="25.0" />

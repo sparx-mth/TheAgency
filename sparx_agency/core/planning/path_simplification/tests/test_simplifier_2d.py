@@ -175,11 +175,46 @@ def test_min_spacing_respects_max_segment_cap():
     assert max(_legs(res.points)) <= 3.0 + 1e-9
 
 
-def test_merge_protects_a_genuine_corner():
-    # A 90 deg corner 0.2 m from the start must NOT be merged away (turn-protected).
-    res = TrajectorySimplifier2D(TrajectorySimplifierConfig(zigzag_enabled=False)).simplify(
-        [Pose2D(0, 0), Pose2D(0.2, 0), Pose2D(0.2, 3)])
-    assert Pose2D(0.2, 0) in res.points
+def _seg_hits(a, b, cx, cy, r):
+    """True if segment a-b passes within r of (cx, cy)."""
+    return any(hypot(a.x + t / 20 * (b.x - a.x) - cx,
+                     a.y + t / 20 * (b.y - a.y) - cy) < r for t in range(21))
+
+
+def test_merge_is_the_hard_floor_clear_fn_keeps_obstacle_corners():
+    # A 90 deg corner only 0.2 m from the start. In OPEN space it is a tight
+    # cluster (noise) and the hard-floor merge collapses it -- there is no reason
+    # to turn in free space.
+    corner = [Pose2D(0, 0), Pose2D(0.2, 0), Pose2D(0.2, 3)]
+    res = TrajectorySimplifier2D(TrajectorySimplifierConfig(zigzag_enabled=False)).simplify(corner)
+    assert Pose2D(0.2, 0) not in res.points
+    # But with an obstacle in the corner (the diagonal bypass clips it), clear_fn
+    # keeps the corner point -- a turn that is actually required survives.
+    obstacle = lambda a, b: not _seg_hits(a, b, 0.0, 1.5, 0.15)  # blob beside the vertical leg
+    res2 = TrajectorySimplifier2D(TrajectorySimplifierConfig(zigzag_enabled=False)).simplify(
+        corner, clear_fn=obstacle)
+    assert Pose2D(0.2, 0) in res2.points
+
+
+def test_collapses_a_tight_3point_knot():
+    # Regression for the field-induced knot seen on /path/waypoints: three points
+    # within ~10 cm (one of them a direction reversal) must collapse so no two
+    # output points are closer than the hard floor (merge_radius_m, default 0.30).
+    knot = [Pose2D(-1.114, -3.173), Pose2D(-0.650, -3.771), Pose2D(-0.687, -4.192),
+            Pose2D(-0.782, -4.234), Pose2D(-0.758, -4.171), Pose2D(0.950, -4.150),
+            Pose2D(1.250, -4.650)]
+    res = TrajectorySimplifier2D(TrajectorySimplifierConfig()).simplify(knot)
+    assert min(_legs(res.points)) >= 0.30 - 1e-9      # no sub-floor pair survives
+    assert res.points[0] == knot[0] and res.points[-1] == knot[-1]
+
+
+def test_final_pass_enforces_hard_floor_even_on_turns():
+    # Two genuine turns 0.2 m apart (both < min_spacing): the soft min-spacing
+    # exception would keep both, but the FINAL hard-floor merge collapses them so
+    # the route never has two points closer than merge_radius_m.
+    pts = [Pose2D(0, 0), Pose2D(1, 0), Pose2D(1.1, 0.4), Pose2D(1.2, 0), Pose2D(3, 0)]
+    res = TrajectorySimplifier2D(TrajectorySimplifierConfig()).simplify(pts)
+    assert min(_legs(res.points)) >= 0.30 - 1e-9
 
 
 def test_config_rejects_out_of_range_strength():

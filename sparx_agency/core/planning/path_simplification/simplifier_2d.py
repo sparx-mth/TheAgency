@@ -1,24 +1,30 @@
 """Trajectory simplification / cleanup for 2D waypoint paths (ROS-free).
 
-Four geometry-only passes turn a (potential-field-corrected) waypoint path into a
+Geometry-only passes turn a (potential-field-corrected) waypoint path into a
 cleaner one that a stop-and-turn follower can fly without spurious yaws, applied
-in this order:
+in this order (the whole route is reconsidered end to end, not pass by pass):
 
-  1. ``thin_by_spacing_2d`` (merge)   — collapse near-duplicate points the field
-     left almost on top of each other (no turn protection: even at a corner two
-     coincident points are one point).
+  1. ``thin_by_spacing_2d`` (merge, the HARD FLOOR) — collapse any cluster of
+     near-coincident points (the field pushing back and forth) so no two kept
+     points are closer than ``merge_radius``. NO turn protection: a tight knot is
+     noise, not several turns. ``clear_fn`` still keeps a genuinely required tight
+     corner (its corner-cutting bypass clips, so a point stays).
   2. ``smooth_zigzags_2d``            — when a middle point makes the path reverse
      (right→left→right), pull it toward the line between its neighbours instead of
      deleting it, so the exaggerated swing flattens. (Step 1 then repeats, because
-     smoothing pulls the swing points close together and the residue should merge.)
+     smoothing pulls the swing points together and that residue should merge.)
   3. ``simplify_collinear_capped_2d`` — drop middle points that lie on the "same
      plane" (heading change below a threshold), but never let dropping one create
      a leg longer than ``max_segment`` (so you never get a too-coarse path).
-  4. ``thin_by_spacing_2d`` (spacing) — enforce a minimum spacing on the straights
-     while KEEPING genuine turns, which may legitimately sit closer together.
+  4. ``thin_by_spacing_2d`` (spacing, the SOFT FLOOR) — enforce ``min_spacing`` on
+     the straights while KEEPING genuine turns, which may sit closer (down to the
+     hard floor), and carrying the same ``max_segment`` cap as step 3.
+  5. ``thin_by_spacing_2d`` (merge again) — a FINAL whole-route pass re-applying
+     the hard floor, so two turns the soft-floor exception kept (or points the
+     smoothing nudged together) can never leave the route closer than the floor.
 
-Why a ``clear_fn``: steps that move (2) or remove (1, 3, 4) waypoints could let a
-new straight segment clip an obstacle the corrector just avoided. To stay map-free
+Why a ``clear_fn``: steps that move (2) or remove (1, 3, 4, 5) waypoints could let
+a new straight segment clip an obstacle the corrector just avoided. To stay map-free
 yet never degrade safety, every such step is gated by an injected
 ``clear_fn(a, b) -> bool`` (True iff the world segment ``a→b`` is obstacle-free),
 exactly the pattern :func:`...corner_rounding_2d.chamfer_corners_2d` uses. With no
@@ -170,7 +176,7 @@ class TrajectorySimplifierConfig:
     heading-change thresholds in degrees; distances are in meters.
     """
     merge_enabled: bool = True
-    merge_radius_m: float = 0.30          # points closer than this collapse to one
+    merge_radius_m: float = 0.30          # HARD floor: no two kept points closer than this
     zigzag_enabled: bool = True
     zigzag_angle_deg: float = 60.0        # heading change above this = a swing to flatten
     zigzag_strength: float = 0.5          # 0..1 fraction moved toward neighbour midpoint
@@ -179,8 +185,9 @@ class TrajectorySimplifierConfig:
     collinear_angle_deg: float = 10.0     # below this a middle point is "same plane"
     max_segment_m: float = 3.0            # never drop a point if the bypass leg exceeds this
     min_spacing_enabled: bool = True
-    min_spacing_m: float = 1.0            # straight-run minimum spacing
+    min_spacing_m: float = 1.0            # SOFT floor: straight-run minimum spacing
     turn_keep_deg: float = 25.0           # turns sharper than this may sit closer than min_spacing
+                                          # (but never closer than the hard merge_radius_m floor)
 
     def __post_init__(self) -> None:
         """Reject misconfiguration loudly (no silent absurd output)."""
@@ -226,27 +233,31 @@ class TrajectorySimplifier2D:
         original = list(points)
         pts = list(points)
         if len(pts) >= 3:
-            # Merge protects genuine turns (turn_keep_rad): a sharp corner that
-            # happens to sit within merge_radius is kept; only non-turning
-            # near-duplicates the field left behind collapse.
+            # MERGE is the HARD floor: no two kept points closer than merge_radius_m
+            # -- even at a turn. A tight cluster of near-coincident points (the field
+            # pushing back and forth) is noise, not several turns, so it is collapsed
+            # regardless of the per-vertex angle. clear_fn still protects a genuine
+            # obstacle-required tight corner (its bypass clips, so a point stays).
             if cfg.merge_enabled:
-                pts = thin_by_spacing_2d(pts, cfg.merge_radius_m, turn_keep_rad,
-                                         0.0, clear_fn)
+                pts = thin_by_spacing_2d(pts, cfg.merge_radius_m, 0.0, 0.0, clear_fn)
             if cfg.zigzag_enabled:
                 pts = smooth_zigzags_2d(pts, radians(cfg.zigzag_angle_deg),
                                         cfg.zigzag_strength, cfg.zigzag_passes, clear_fn)
-                # Smoothing pulls the swing points together; re-merge the
-                # non-turning residue (still protecting any real corner).
-                if cfg.merge_enabled:
-                    pts = thin_by_spacing_2d(pts, cfg.merge_radius_m, turn_keep_rad,
-                                             0.0, clear_fn)
+                if cfg.merge_enabled:               # re-merge swing points pulled together
+                    pts = thin_by_spacing_2d(pts, cfg.merge_radius_m, 0.0, 0.0, clear_fn)
             if cfg.collinear_enabled:
                 pts = simplify_collinear_capped_2d(pts, radians(cfg.collinear_angle_deg),
                                                    cfg.max_segment_m, clear_fn)
-            # min-spacing carries the SAME max_segment cap as the collinear pass, so
-            # it never drops a point the cap deliberately kept (no over-long leg).
+            # min-spacing is the SOFT floor: thin straights to >= min_spacing_m but
+            # let genuine turns sit closer (down to the hard floor). Same max_segment
+            # cap as collinear, so it never drops a point the cap deliberately kept.
             if cfg.min_spacing_enabled:
                 pts = thin_by_spacing_2d(pts, cfg.min_spacing_m, turn_keep_rad,
                                          cfg.max_segment_m, clear_fn)
+            # FINAL whole-route pass: re-apply the hard floor so the published route
+            # never contains two points closer than merge_radius_m -- e.g. two turns
+            # the min_spacing exception kept, or points the smoothing nudged together.
+            if cfg.merge_enabled:
+                pts = thin_by_spacing_2d(pts, cfg.merge_radius_m, 0.0, 0.0, clear_fn)
         return SimplifyResult(points=tuple(pts), num_in=len(original),
                               num_out=len(pts), num_moved=_count_moved(original, pts))
