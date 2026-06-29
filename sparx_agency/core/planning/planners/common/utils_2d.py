@@ -1,7 +1,7 @@
 """2D path planning utilities."""
 from __future__ import annotations
 
-from math import ceil, hypot
+from math import hypot
 from typing import List, TYPE_CHECKING
 
 from sparx_agency.core.common.types import Pose2D
@@ -32,34 +32,41 @@ def interpolate_path_2d(points: List[Pose2D], spacing: float) -> List[Pose2D]:
     return result
 
 
-def split_long_segments_2d(points: List[Pose2D], max_seg: float) -> List[Pose2D]:
-    """Corner-preserving resample: keep every vertex, split only long legs.
+def split_long_segments_2d(points: List[Pose2D], target_seg: float) -> List[Pose2D]:
+    """Corner-preserving resample: keep every vertex, even out the long legs.
 
     Unlike :func:`interpolate_path_2d`, this never moves or drops an input
     vertex. It keeps every corner exactly where it is (e.g. the corners left by
-    line-of-sight smoothing) and only inserts evenly-spaced intermediate points
-    on segments longer than ``max_seg``. A straight 6 m leg with ``max_seg=3``
-    therefore yields just its two endpoints plus one midpoint — so a follower
-    yaws only at genuine corners, not at every grid step.
+    line-of-sight smoothing) and only inserts intermediate points on the long
+    legs between corners.
+
+    Each leg is divided into the *nearest whole number* of equal sub-segments,
+    ``round(dist / target_seg)`` (at least one), so the resulting legs land as
+    close as possible to ``target_seg`` rather than always below it. A 6 m leg
+    with ``target_seg=2.5`` becomes 2 legs of 3.0 m (round(2.4)=2), and a 2.6 m
+    leg stays whole (round(1.04)=1) instead of being halved into 1.3 m steps.
+    The trade-off of targeting the spacing this way is that a leg may exceed
+    ``target_seg`` by up to ~50 % (a leg up to 1.5x is left whole); use a smaller
+    ``target_seg`` if a hard ceiling matters. Legs shorter than ~0.5x (e.g. the
+    close vertices a chamfered corner leaves) are kept as-is.
 
     Args:
         points: Ordered path vertices.
-        max_seg: Maximum segment length in meters (<= 0 disables splitting).
+        target_seg: Desired segment length in meters (<= 0 disables resampling).
 
     Returns:
         A new list starting at ``points[0]`` and ending at ``points[-1]``.
     """
-    if len(points) < 2 or max_seg <= 0:
+    if len(points) < 2 or target_seg <= 0:
         return list(points)
     out = [points[0]]
     for a, b in zip(points[:-1], points[1:]):
         dx, dy = b.x - a.x, b.y - a.y
         dist = hypot(dx, dy)
-        if dist > max_seg:
-            n = int(ceil(dist / max_seg))  # n sub-segments -> n-1 inserts
-            for k in range(1, n):
-                t = k / n
-                out.append(Pose2D(a.x + t * dx, a.y + t * dy))
+        n = max(1, int(round(dist / target_seg)))  # nearest count -> n-1 inserts
+        for k in range(1, n):
+            t = k / n
+            out.append(Pose2D(a.x + t * dx, a.y + t * dy))
         out.append(b)
     return out
 

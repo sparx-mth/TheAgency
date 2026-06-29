@@ -6,8 +6,9 @@ A matplotlib window (NOT RViz) showing the published BEV grid plus the drone
 pose, the raw A* path, the APF-safe (recentred) path, the predicted drone
 trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
-    red path   = raw A*  (shortest -- hugs walls / cuts corners)
-    green path = APF-safe (recentred toward free space -- the path flown)
+    red path     = raw A*  (shortest -- hugs walls / cuts corners)
+    magenta path = APF-safe (recentred off walls -- before cleanup)
+    green path   = cleaned/flown (simplified APF-safe path -- the path flown)
     blue dashed = full planner route (e.g. NavDP) when only its near prefix flies
     yellow arrows = repulsive force F_rep=-grad U_rep at each waypoint (obstacle push)
     gold field    = F_rep across the free space (how hard each wall section pushes)
@@ -24,8 +25,9 @@ Run as a sidecar in the FALCON container:
 Requires matplotlib (apt-get install -y python3-matplotlib if missing).
 
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
-  in   ~path_topic (Path)           /path/waypoints      (APF-safe; drawn green)
+  in   ~path_topic (Path)           /path/waypoints      (cleaned/flown; drawn green)
   in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
+  in   ~safe_path_topic (Path)      /path/waypoints_safe (APF-safe pre-cleanup; magenta; '' = off)
   in   ~full_path_topic (Path)      /path/waypoints_navdp_full  (full route, blue dashed; '' = off)
   in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
   in   ~predicted_path_topic (Path) /path/predicted
@@ -66,6 +68,10 @@ class BevClickGoalNode:
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
         self.path_topic = G("~path_topic", "/path/waypoints")
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
+        # The corrector's safe path BEFORE the trajectory_simplifier cleans it.
+        # Drawn magenta so safety-corrected vs final-flown is visible while tuning
+        # the simplifier. "" disables it (no publisher -> nothing drawn anyway).
+        self.safe_path_topic = G("~safe_path_topic", "/path/waypoints_safe")
         # FULL planner route (e.g. NavDP's whole trajectory when only its near
         # prefix is executed): drawn dim/dashed for reference. Defaults to NavDP's
         # full-route topic so `rosrun bev_click_goal_node.py` shows the whole route
@@ -88,8 +94,9 @@ class BevClickGoalNode:
 
         # Latest data + lock for cross-thread (ROS callbacks vs render) access
         self._bev = None
-        self._path_xy = []              # APF-safe path (green) -- the path flown
-        self._raw_xy = []               # raw A* path (red) -- shortest, viz only
+        self._path_xy = []              # cleaned, flown path (green)
+        self._raw_xy = []               # raw planner path (red) -- shortest, viz only
+        self._safe_xy = []              # corrector's safe path (magenta) -- pre-cleanup
         self._full_xy = []              # full planner route (blue dashed) -- ref only
         self._forces = []               # (x,y,dx,dy) per-waypoint force arrows (yellow)
         self._field_arrows = []         # (x,y,dx,dy) coarse wall force-field (gold)
@@ -103,6 +110,8 @@ class BevClickGoalNode:
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.path_topic, Path, self._path_cb, queue_size=1)
         rospy.Subscriber(self.raw_path_topic, Path, self._raw_path_cb, queue_size=1)
+        if self.safe_path_topic:
+            rospy.Subscriber(self.safe_path_topic, Path, self._safe_path_cb, queue_size=1)
         if self.full_path_topic:
             rospy.Subscriber(self.full_path_topic, Path, self._full_path_cb, queue_size=1)
         rospy.Subscriber(self.forces_topic, MarkerArray, self._forces_cb, queue_size=1)
@@ -126,6 +135,7 @@ class BevClickGoalNode:
 
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
+        self._safe_line = None           # corrector safe path (magenta)
         self._full_line = None           # full planner route (blue dashed)
         self._forces_artist = None      # quiver of per-waypoint force arrows
         self._field_artist = None       # quiver of the coarse wall force-field
@@ -137,6 +147,9 @@ class BevClickGoalNode:
         rospy.loginfo("  bev  in  = %s", self.bev_topic)
         rospy.loginfo("  path in  = %s   (APF-safe, green)", self.path_topic)
         rospy.loginfo("  raw  in  = %s   (raw A*, red)", self.raw_path_topic)
+        if self.safe_path_topic:
+            rospy.loginfo("  safe in  = %s   (corrector safe, magenta)",
+                          self.safe_path_topic)
         if self.full_path_topic:
             rospy.loginfo("  full in  = %s   (full route, blue dashed)",
                           self.full_path_topic)
@@ -162,6 +175,11 @@ class BevClickGoalNode:
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._raw_xy = pts
+
+    def _safe_path_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._safe_xy = pts
 
     def _full_path_cb(self, msg):
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -210,8 +228,9 @@ class BevClickGoalNode:
         rospy.loginfo("bev_click_goal: click -> goal (%.2f, %.2f)", gx, gy)
         with self._lock:
             self._goal_xy = (gx, gy)
-            self._path_xy = []          # drop the stale safe path; replan redraws it
-            self._raw_xy = []           # and the stale raw A* path
+            self._path_xy = []          # drop the stale flown path; replan redraws it
+            self._raw_xy = []           # and the stale raw planner path
+            self._safe_xy = []          # and the stale corrector safe path
             self._full_xy = []          # and the stale full planner route
             self._forces = []           # and the stale force arrows
             self._field_arrows = []     # and the stale wall force-field
@@ -224,6 +243,7 @@ class BevClickGoalNode:
         with self._lock:
             bev, path = self._bev, list(self._path_xy)
             raw = list(self._raw_xy)
+            safe = list(self._safe_xy)
             full = list(self._full_xy)
             forces = list(self._forces)
             field_arrows = list(self._field_arrows)
@@ -293,6 +313,17 @@ class BevClickGoalNode:
             self._raw_line, = self.ax.plot(rxs, rys, "-o", color="red",
                                            linewidth=1.6, markersize=3,
                                            alpha=0.75, zorder=2)
+
+        # Corrector's safe path (magenta), BEFORE the trajectory_simplifier cleans
+        # it: shows what the cleanup removed/smoothed vs the green flown path.
+        if self._safe_line is not None:
+            self._safe_line.remove()
+            self._safe_line = None
+        if len(safe) >= 2:
+            sxs, sys = [p[0] for p in safe], [p[1] for p in safe]
+            self._safe_line, = self.ax.plot(sxs, sys, "-o", color="magenta",
+                                            linewidth=1.8, markersize=3,
+                                            alpha=0.7, zorder=2)
 
         if self._path_line is not None:
             self._path_line.remove()

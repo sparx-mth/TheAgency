@@ -159,17 +159,17 @@
   <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
-  <arg name="start_skip_m"          default="1.0" />
+  <arg name="start_skip_m"          default="0.5" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
        this timer (and on a goal click). The trajectory is frozen between ticks
        so the follower is not chasing a path that shifts every BEV frame. -->
-  <arg name="plan_period_s"         default="4.0" />
+  <arg name="plan_period_s"         default="5.0" />
   <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
        plan_period_s cycles. Set true to react to obstacles faster than that. -->
-  <arg name="replan_on_collision"   default="true" />
-  <arg name="replan_on_bev"         default="true" />
+  <arg name="replan_on_collision"   default="false" />
+  <arg name="replan_on_bev"         default="false" />
   <arg name="replan_collision_confirm" default="3" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
@@ -191,9 +191,10 @@
   <!-- APF safety recentring: recentre the planner's raw path off walls toward
        corridor centres via the repulsive field U_rep, so a corridor turn stops
        hugging the inside corner. These args are consumed by the path_corrector
-       node (below), which works for ANY planner (A* or NavDP). The follower flies
-       the corrected path on /path/waypoints; the planner's raw path is echoed on
-       /path/waypoints_raw for the BEV viewer (red = raw, green = safe).
+       node (below), which works for ANY planner (A* or NavDP). The corrector
+       publishes the SAFE path on /path/waypoints_safe; the trajectory_simplifier
+       then cleans it into the flown /path/waypoints. For the BEV viewer:
+       red = raw planner, magenta = safe (pre-cleanup), green = cleaned/flown.
        safety_correct:=false makes the corrector a passthrough (flies the raw path). -->
   <arg name="safety_correct"        default="true" />
   <arg name="apf_centering"         default="line_search" /><!-- line_search: move each waypoint to the lateral potential minimum (omnidirectional, scale-free, single-pass) | descent: legacy gradient descent -->
@@ -248,17 +249,19 @@
   <arg name="navdp_display_mode"       default="full" /><!-- full = RGB + depth + snapshot panels | rgb_only = just the clickable RGB panel (lighter) -->
 
   <!-- ══════════════════════════════════════════════════════════════
-       PATH CORRECTOR (path_corrector_node) — planner-agnostic.
+       PATH CORRECTOR (path_corrector_node) — planner-agnostic SAFETY.
        Subscribes to the active planner's RAW path, recentres it off
        walls against the BEV (the repulsive potential field, by default)
-       and republishes the corrected, flown path on /path/waypoints.
-       The follower and BEV viewer are unchanged. ~enabled (=safety_correct)
-       false makes it a passthrough. The APF / force-viz args live in the
+       and publishes the corrected, SAFE path on /path/waypoints_safe.
+       The trajectory_simplifier (below) then cleans that path and owns the
+       flown /path/waypoints. ~enabled (=safety_correct) false makes the
+       corrector a passthrough. The APF / force-viz args live in the
        "APF safety recentring" block above and are consumed HERE now.
        ══════════════════════════════════════════════════════════════ -->
   <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
   <!-- Which planner the corrector reads: NavDP when use_navdp, else A*. The
-       corrector ALWAYS owns /path/waypoints, so the follower reads one topic. -->
+       corrector owns /path/waypoints_safe; the trajectory_simplifier turns that
+       into the flown /path/waypoints, so the follower still reads one topic. -->
   <arg name="planner_path_topic"
        default="$(eval '/path/waypoints_navdp' if use_navdp else '/path/waypoints_astar')" />
 
@@ -279,6 +282,40 @@
        lateral corrector cannot push near-coincident neighbours opposite ways (the
        NavDP zig-zag). No-op for A*'s metre-scale waypoints; 0 disables it. -->
   <arg name="resample_min_spacing_m"  default="0.3" />
+
+  <!-- ══════════════════════════════════════════════════════════════
+       TRAJECTORY SIMPLIFIER (trajectory_simplifier_node) — CLEANUP, not safety.
+       Runs AFTER the corrector: takes the safe path on /path/waypoints_safe and
+       makes it cleaner/flyable, then publishes the flown /path/waypoints. Every
+       geometry-changing pass is validated against the BEV (inflated line-of-sight)
+       so cleanup never re-introduces a collision the corrector avoided. Set
+       simplify:=false for a verbatim passthrough (corrector path flown directly).
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="simplify"               default="true" /><!-- false = passthrough: fly the corrector's path uncleaned -->
+  <arg name="simplify_debug"         default="true" /><!-- per-cycle in->out waypoint-count logging -->
+  <!-- 1) merge near-duplicate waypoints (the field can leave two points almost on
+          top of each other); points closer than this collapse to one. -->
+  <arg name="simplify_merge"         default="true" />
+  <arg name="simplify_merge_radius_m" default="0.30" />
+  <!-- 2) flatten field-induced zig-zags: a middle point whose heading change
+          exceeds zigzag_angle_deg is pulled zigzag_strength (0..1) toward the line
+          between its neighbours (kept, not deleted). A corner that hugs a wall is
+          left alone (its bypass line would clip, so the move is rejected). -->
+  <arg name="simplify_zigzag"        default="true" />
+  <arg name="simplify_zigzag_angle_deg" default="60.0" />
+  <arg name="simplify_zigzag_strength"  default="0.5" />
+  <arg name="simplify_zigzag_passes"    default="1" />
+  <!-- 3) drop redundant collinear middles ("same plane"), but never create a leg
+          longer than max_segment_m (so the path never gets too coarse). Raise
+          max_segment_m to collapse straights harder; lower it to keep more points. -->
+  <arg name="simplify_collinear"     default="true" />
+  <arg name="simplify_collinear_angle_deg" default="10.0" /><!-- heading change below this = same plane -->
+  <arg name="simplify_max_segment_m" default="3.0" />
+  <!-- 4) enforce a minimum spacing on the straights, but allow genuine turns
+          (heading change > turn_keep_deg) to sit closer where they must. -->
+  <arg name="simplify_min_spacing"   default="true" />
+  <arg name="simplify_min_spacing_m" default="1.0" />
+  <arg name="simplify_turn_keep_deg" default="25.0" />
 
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
@@ -583,15 +620,16 @@
     <param name="display_mode"      value="$(arg navdp_display_mode)" />
   </node>
 
-  <!-- Path corrector: recentres whichever planner's raw path against the BEV and
-       republishes the flown path on /path/waypoints (+ /path/waypoints_raw echo
-       and /path/forces arrows for the BEV viewer). Always launched; ~enabled
+  <!-- Path corrector (SAFETY): recentres whichever planner's raw path against the
+       BEV and publishes the SAFE path on /path/waypoints_safe (+ /path/waypoints_raw
+       echo and /path/forces arrows for the BEV viewer). The trajectory_simplifier
+       below cleans that into the flown /path/waypoints. Always launched; ~enabled
        (=safety_correct) false makes it a verbatim passthrough. -->
   <node pkg="falcon_adapter" type="path_corrector_node.py"
         name="path_corrector" output="screen">
     <param name="input_path_topic"      value="$(arg planner_path_topic)" />
     <param name="bev_topic"             value="/falcon/bev_2d" />
-    <param name="path_topic"            value="/path/waypoints" />
+    <param name="path_topic"            value="/path/waypoints_safe" />
     <param name="raw_path_topic"        value="/path/waypoints_raw" />
     <param name="frame_id"              value="world" />
     <param name="enabled"               value="$(arg safety_correct)" />
@@ -621,6 +659,35 @@
     <param name="esdf_lateral_only"       value="$(arg esdf_lateral_only)" />
     <param name="esdf_smooth_sigma_m"     value="$(arg esdf_smooth_sigma_m)" />
     <param name="esdf_occ_thresh"         value="$(arg esdf_occ_thresh)" />
+  </node>
+
+  <!-- Trajectory simplifier (CLEANUP, not safety): cleans the corrector's safe
+       path on /path/waypoints_safe and publishes the flown /path/waypoints. Each
+       pass is validated against the BEV (inflated line-of-sight) so cleanup never
+       re-introduces a collision the corrector avoided. ~enabled (=simplify) false
+       passes the safe path straight through. -->
+  <node pkg="falcon_adapter" type="trajectory_simplifier_node.py"
+        name="trajectory_simplifier" output="screen">
+    <param name="input_path_topic"   value="/path/waypoints_safe" />
+    <param name="bev_topic"          value="/falcon/bev_2d" />
+    <param name="path_topic"         value="/path/waypoints" />
+    <param name="frame_id"           value="world" />
+    <param name="enabled"            value="$(arg simplify)" />
+    <param name="debug"              value="$(arg simplify_debug)" />
+    <!-- Match the corrector/planner inflation so "clear" means the same thing. -->
+    <param name="inflate_radius_m"   value="$(arg inflate_radius_m)" />
+    <param name="merge_enabled"      value="$(arg simplify_merge)" />
+    <param name="merge_radius_m"     value="$(arg simplify_merge_radius_m)" />
+    <param name="zigzag_enabled"     value="$(arg simplify_zigzag)" />
+    <param name="zigzag_angle_deg"   value="$(arg simplify_zigzag_angle_deg)" />
+    <param name="zigzag_strength"    value="$(arg simplify_zigzag_strength)" />
+    <param name="zigzag_passes"      value="$(arg simplify_zigzag_passes)" />
+    <param name="collinear_enabled"  value="$(arg simplify_collinear)" />
+    <param name="collinear_angle_deg" value="$(arg simplify_collinear_angle_deg)" />
+    <param name="max_segment_m"      value="$(arg simplify_max_segment_m)" />
+    <param name="min_spacing_enabled" value="$(arg simplify_min_spacing)" />
+    <param name="min_spacing_m"      value="$(arg simplify_min_spacing_m)" />
+    <param name="turn_keep_deg"      value="$(arg simplify_turn_keep_deg)" />
   </node>
 
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"

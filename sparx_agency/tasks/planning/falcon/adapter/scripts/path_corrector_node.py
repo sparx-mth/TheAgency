@@ -33,7 +33,7 @@ same whether or not correction is on, and the follower always reads one topic.
 
   in   ~input_path_topic (Path)  /path/waypoints_astar  (the planner's raw path)
   in   ~bev_topic (OccupancyGrid) /falcon/bev_2d
-  out  ~path_topic (Path, latched)      /path/waypoints      (corrected, flown)
+  out  ~path_topic (Path, latched)      /path/waypoints_safe (corrected, SAFE -> simplifier)
   out  ~raw_path_topic (Path, latched)  /path/waypoints_raw  (input echo, viz)
   out  ~forces_topic (MarkerArray)      /path/forces         (F_rep arrows, viz)
 
@@ -66,7 +66,10 @@ class PathCorrectorNode:
 
         self.input_path_topic = G("~input_path_topic", "/path/waypoints_astar")
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
-        self.path_topic = G("~path_topic", "/path/waypoints")
+        # SAFE (corrected) path -> the trajectory_simplifier cleans this into the
+        # flown /path/waypoints. Defaults to /path/waypoints_safe so a standalone
+        # rosrun does not double-publish /path/waypoints against the simplifier.
+        self.path_topic = G("~path_topic", "/path/waypoints_safe")
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
         self.frame_id = G("~frame_id", "world")
 

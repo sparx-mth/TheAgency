@@ -146,7 +146,7 @@ cd bridge && ./run_bridge.sh
 
 ```bash
 # container:
-roslaunch falcon_adapter real_drone.launch map_name:=office image_transport:=topic
+roslaunch falcon_adapter real_drone.launch map_name:=office image_transport:=topic real_pose_topic:=/xtend/april_tag_pose
 #   add real_pose_topic:=/xtend/april_tag_pose for bags recorded before the
 #   /xtend/localization rename
 # host (bridge):
