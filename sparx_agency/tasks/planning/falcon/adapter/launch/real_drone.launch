@@ -132,6 +132,8 @@
   <arg name="flownav_port"             default="8889" />
   <arg name="flownav_rate_hz"          default="4.0" />
   <arg name="flownav_execute_fraction" default="1.0" />
+  <arg name="flownav_arrival_distance" default="0.0" />
+  <arg name="flownav_display"          default="false" />
   <arg name="combination_enable_topic"   default="/combination/enable" />
   <arg name="combination_start_enabled"  default="true" />
   <arg name="combination_tick_hz"        default="5.0" />
@@ -288,6 +290,8 @@
     <arg name="flownav_port"             value="$(arg flownav_port)" />
     <arg name="flownav_rate_hz"          value="$(arg flownav_rate_hz)" />
     <arg name="flownav_execute_fraction" value="$(arg flownav_execute_fraction)" />
+    <arg name="flownav_arrival_distance" value="$(arg flownav_arrival_distance)" />
+    <arg name="flownav_display"          value="$(arg flownav_display)" />
     <arg name="combination_enable_topic"       value="$(arg combination_enable_topic)" />
     <arg name="combination_start_enabled"      value="$(arg combination_start_enabled)" />
     <arg name="combination_tick_hz"            value="$(arg combination_tick_hz)" />

@@ -384,6 +384,8 @@
   <arg name="flownav_goal_image_topic" default="" /><!-- optional sensor_msgs/Image live-goal topic (overrides the file) -->
   <arg name="flownav_rate_hz"          default="4.0" /><!-- continuous (reactive) inference rate -->
   <arg name="flownav_execute_fraction" default="1.0" /><!-- fraction of the predicted path to fly each tick (1.0 = whole) -->
+  <arg name="flownav_arrival_distance" default="0.0" /><!-- >0: hold when the goal-distance head drops below this (tune from the node's logged distances); 0 = never auto-stop -->
+  <arg name="flownav_display"          default="false" /><!-- open an OpenCV window: live RGB + predicted trajectory + goal-distance; whole frame turns GREEN once arrival_distance is met -->
   <arg name="flownav_path_topic"       default="/path/waypoints_flownav" /><!-- raw path -> path_corrector -->
   <arg name="flownav_full_path_topic"  default="/path/waypoints_flownav_full" /><!-- display-only full route -->
 
@@ -808,6 +810,16 @@
     <param name="port"              value="$(arg flownav_port)" />
     <param name="rate_hz"           value="$(arg flownav_rate_hz)" />
     <param name="execute_fraction"  value="$(arg flownav_execute_fraction)" />
+    <param name="arrival_distance"  value="$(arg flownav_arrival_distance)" />
+    <!-- optional display overlay: reuses the navdp_* intrinsics for this camera -->
+    <param name="display"           value="$(arg flownav_display)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <param name="render_cam_height" value="$(arg navdp_render_cam_height)" />
   </node>
 
   <!-- Combination planner (nav_mode:=combination): A* plans the global route (the

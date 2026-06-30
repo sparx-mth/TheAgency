@@ -24,12 +24,13 @@ Run (host, flownav_trt env; PYTHONPATH = repo root):
 from __future__ import annotations
 
 import argparse
+import io
 import json
 from collections import deque
 from pathlib import Path
 
 import numpy as np
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from PIL import Image
 
 from sparx_agency.tasks.planning.flownav.server import preprocess
@@ -37,6 +38,7 @@ from sparx_agency.tasks.planning.flownav.server import preprocess
 app = Flask(__name__)
 _POLICY = None          # FlowNavTRTPolicy, built at startup
 _FRAMES = None          # deque(maxlen=context_size+1) of RGB uint8 frames
+_GOAL_RGB = None        # cached goal image as HxWx3 uint8 RGB, or None
 _CFG = {}
 
 
@@ -83,30 +85,55 @@ def reset():
     return jsonify({"algo": "flownav-trt"})
 
 
+@app.route("/set_goal", methods=["POST"])
+def set_goal():
+    """Set / replace the target goal image (multipart ``goal_image``)."""
+    global _GOAL_RGB
+    if "goal_image" not in request.files:
+        return jsonify({"error": "need multipart 'goal_image'"}), 400
+    _GOAL_RGB = _read_rgb(request.files["goal_image"])
+    _FRAMES.clear()
+    return jsonify({"algo": "flownav-trt", "goal": "set"})
+
+
+@app.route("/get_goal", methods=["GET"])
+def get_goal():
+    """Return the current goal image as a PNG (for the node's display panel)."""
+    if _GOAL_RGB is None:
+        return jsonify({"error": "no goal set"}), 404
+    buf = io.BytesIO()
+    Image.fromarray(np.ascontiguousarray(_GOAL_RGB, np.uint8)).save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png")
+
+
 @app.route("/imagegoal_step", methods=["POST"])
 def imagegoal_step():
+    global _GOAL_RGB
     if _POLICY is None:
         return jsonify({"error": "server not initialized"}), 503
-    if "image" not in request.files or "goal_image" not in request.files:
-        return jsonify({"error": "need multipart 'image' and 'goal_image'"}), 400
+    if "image" not in request.files:
+        return jsonify({"error": "need multipart 'image'"}), 400
 
     _FRAMES.append(_read_rgb(request.files["image"]))            # current obs frame
-    goal_rgb = _read_rgb(request.files["goal_image"])
-
     image_size = _CFG["image_size"]
+    if "goal_image" in request.files:                           # per-request goal updates the cache...
+        _GOAL_RGB = _read_rgb(request.files["goal_image"])
+    if _GOAL_RGB is None:                                       # ...else the --goal-image default
+        return jsonify({"error": "no goal set: send a 'goal_image' part or start "
+                        "the server with --goal-image"}), 400
+
     obs_img = preprocess.build_obs_stack(list(_FRAMES), image_size,
                                          _CFG["context_size"] + 1)
-    goal_img = preprocess.build_goal(goal_rgb, image_size)
-
-    actions, distance = _POLICY.predict(obs_img, goal_img)       # (N,8,2), float
-    chosen = actions[0]                                          # FlowNav executes sample 0
+    goal_img = preprocess.build_goal(_GOAL_RGB, image_size)
+    actions, distance = _POLICY.predict(obs_img, goal_img)      # (N,8,2), float
+    chosen = actions[0]                                         # FlowNav executes sample 0
     return jsonify({"trajectory": chosen.tolist(),
                     "all_trajectory": actions.tolist(),
                     "distance": float(distance)})
 
 
 def main():
-    global _POLICY, _FRAMES, _CFG
+    global _POLICY, _FRAMES, _GOAL_RGB, _CFG
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=8889)
     ap.add_argument("--engine-dir", required=True)
@@ -116,11 +143,17 @@ def main():
     ap.add_argument("--image-size", type=int, default=96)
     ap.add_argument("--num-steps", type=int, default=None,
                     help="override the flow-matching step count K (default: selected.json)")
+    ap.add_argument("--goal-image", default=None,
+                    help="host path to a default target image; the node can then omit "
+                         "per-step goals (avoids mounting the goal into the container)")
     args = ap.parse_args()
 
     _CFG = {"context_size": int(args.context_size), "image_size": int(args.image_size)}
     _FRAMES = deque(maxlen=_CFG["context_size"] + 1)
     _POLICY = _build_policy(args)
+    if args.goal_image:
+        _GOAL_RGB = np.asarray(Image.open(args.goal_image).convert("RGB"))
+        print("[flownav-trt] default goal loaded from %s" % args.goal_image)
     print("[flownav-trt] port=%d engine-dir=%s context=%d image=%d"
           % (args.port, args.engine_dir, args.context_size, args.image_size))
     app.run(host="127.0.0.1", port=args.port, threaded=False, processes=1)

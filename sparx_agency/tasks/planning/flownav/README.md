@@ -262,19 +262,29 @@ FALCON Noetic container has no TensorRT, FlowNav inference runs in a **host
 process** over loopback HTTP, exactly like NavDP.
 
 ```bash
-# 1) Start the FlowNav TRT host server (GPU host, flownav_trt env). Default :8889.
+# 1) Start the FlowNav TRT host server (GPU host, flownav_trt env). Pass your
+#    target image with --goal-image: the HOST can read paths the container can't
+#    mount (e.g. ~/Downloads), so the in-container node needs no goal file at all.
 PY=/home/$USER/miniconda3/envs/flownav_trt/bin/python \
-    sparx_agency/tasks/planning/flownav/server/run_server.sh
+    sparx_agency/tasks/planning/flownav/server/run_server.sh --goal-image ~/Downloads/goal_image.jpg
 #   (or directly:)
 #   PYTHONPATH=$PWD $PY -m sparx_agency.tasks.planning.flownav.server.flownav_trt_server \
-#       --engine-dir sparx_agency/tasks/planning/flownav/engines/<target_tag> --port 8889
+#       --engine-dir sparx_agency/tasks/planning/flownav/engines/<target_tag> \
+#       --port 8889 --goal-image ~/Downloads/goal_image.jpg
 
-# 2) Launch FALCON with the FlowNav VLA + a goal image (inside the adapter container):
+# 2) Launch FALCON with the FlowNav VLA (NO goal needed here — the server has it):
 roslaunch falcon_adapter real_drone.launch \
-    map_name:=office nav_mode:=navdp vla:=flownav \
-    flownav_goal_image:=/path/to/target.png
-# back to NavDP: drop vla:=flownav (or vla:=navdp) and start the NavDP server instead.
+    map_name:=office nav_mode:=navdp vla:=flownav
+#   optional: flownav_arrival_distance:=3.0  -> hold once the goal-distance head
+#   drops below 3.0 (watch the node's "goal-distance N.NN" log to pick a value).
+# back to NavDP: drop vla:=flownav and start the NavDP server instead.
 ```
+
+A good goal image is a **view from the destination** — what the drone's own camera
+would see once it has arrived (same camera / aspect ratio helps). The goal can
+instead be set on the node (`flownav_goal_image:=<container-visible path>`), live
+via `flownav_goal_image_topic`, or swapped at runtime with the server's `/set_goal`
+route — but `--goal-image` on the host is the simplest given the container mount.
 
 Responsibilities — one per file, so the navdp ⇄ flownav switch is trivial:
 

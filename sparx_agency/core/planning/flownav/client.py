@@ -68,32 +68,27 @@ class FlowNavImageGoalClient:
             return False
 
     # ── step ─────────────────────────────────────────────────────────
-    def step(self, rgb, goal_rgb):
+    def step(self, rgb, goal_rgb=None):
         """POST ``/imagegoal_step``; return the parsed JSON dict or ``None``.
 
         Args:
             rgb: HxWx3 uint8 current observation image in RGB order.
-            goal_rgb: HxWx3 uint8 goal image in RGB order.
+            goal_rgb: optional HxWx3 uint8 goal image in RGB order. If ``None``,
+                the server uses its configured goal (``--goal-image`` at startup,
+                a prior :meth:`set_goal`, or the last goal it received) -- this is
+                how the in-container node avoids needing the goal file mounted.
 
         Returns:
             The decoded response JSON, or ``None`` on any HTTP/transport error.
         """
         import requests
-        from PIL import Image as PILImage
 
-        def _png(arr):
-            buf = io.BytesIO()
-            PILImage.fromarray(np.ascontiguousarray(arr, dtype=np.uint8), "RGB").save(
-                buf, format="PNG")
-            buf.seek(0)
-            return buf
-
+        files = {"image": ("rgb.png", self._png(rgb), "image/png")}
+        if goal_rgb is not None:
+            files["goal_image"] = ("goal.png", self._png(goal_rgb), "image/png")
         try:
-            r = requests.post(
-                self.url + "/imagegoal_step",
-                files={"image": ("rgb.png", _png(rgb), "image/png"),
-                       "goal_image": ("goal.png", _png(goal_rgb), "image/png")},
-                timeout=self.timeout_s)
+            r = requests.post(self.url + "/imagegoal_step", files=files,
+                              timeout=self.timeout_s)
             if r.status_code != 200:
                 self._log("FlowNav step HTTP %s", r.status_code)
                 return None
@@ -101,6 +96,52 @@ class FlowNavImageGoalClient:
         except Exception as e:                       # noqa: BLE001
             self._log("FlowNav step failed: %s", e)
             return None
+
+    def set_goal(self, goal_rgb):
+        """POST ``/set_goal`` to set/replace the server's target goal image.
+
+        Returns:
+            ``True`` if the server accepted the goal, else ``False``.
+        """
+        import requests
+
+        try:
+            r = requests.post(
+                self.url + "/set_goal",
+                files={"goal_image": ("goal.png", self._png(goal_rgb), "image/png")},
+                timeout=self.timeout_s)
+            return r.status_code == 200
+        except Exception as e:                       # noqa: BLE001
+            self._log("FlowNav set_goal failed: %s", e)
+            return False
+
+    def get_goal(self):
+        """GET ``/get_goal``; return the server's goal image (HxWx3 uint8 RGB) or None.
+
+        Used by the display to show the target view when the goal lives on the
+        server (``--goal-image``) and the node has no local copy.
+        """
+        import requests
+        from PIL import Image as PILImage
+
+        try:
+            r = requests.get(self.url + "/get_goal", timeout=self.timeout_s)
+            if r.status_code != 200:
+                return None
+            return np.asarray(PILImage.open(io.BytesIO(r.content)).convert("RGB"))
+        except Exception as e:                       # noqa: BLE001
+            self._log("FlowNav get_goal failed: %s", e)
+            return None
+
+    @staticmethod
+    def _png(arr):
+        """RGB uint8 array -> a seek-0 PNG :class:`io.BytesIO` buffer."""
+        from PIL import Image as PILImage
+        buf = io.BytesIO()
+        PILImage.fromarray(np.ascontiguousarray(arr, dtype=np.uint8), "RGB").save(
+            buf, format="PNG")
+        buf.seek(0)
+        return buf
 
     # ── helpers ──────────────────────────────────────────────────────
     @staticmethod
