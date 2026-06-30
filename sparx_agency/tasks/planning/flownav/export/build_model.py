@@ -113,6 +113,23 @@ def build_flownav_model(ckpt_path, flownav_repo=None, config_path=None, device="
     return model.to(device).eval()
 
 
+def load_action_stats(flownav_repo=None):
+    """Read the per-dim action ``(min, max)`` from FlowNav's ``data_config.yaml``.
+
+    Args:
+        flownav_repo: FlowNav repo path (else ``FLOWNAV_REPO``).
+
+    Returns:
+        ``(action_min, action_max)`` as float32 arrays, used to de-normalize the
+        velocity-field output (shared by the TRT and the eager-torch runtimes).
+    """
+    repo = resolve_flownav_repo(flownav_repo)
+    with open(repo / "flownav" / "data" / "data_config.yaml", "r") as f:
+        stats = yaml.safe_load(f)["action_stats"]
+    return (np.asarray(stats["min"], dtype=np.float32),
+            np.asarray(stats["max"], dtype=np.float32))
+
+
 def dump_head_params(flownav_repo, out_npz):
     """Write the action min/max used to de-normalize the velocity-field output.
 
@@ -123,14 +140,7 @@ def dump_head_params(flownav_repo, out_npz):
     Returns:
         ``out_npz`` as a :class:`pathlib.Path`.
     """
-    repo = Path(flownav_repo)
-    data_cfg_path = repo / "flownav" / "data" / "data_config.yaml"
-    with open(data_cfg_path, "r") as f:
-        data_cfg = yaml.safe_load(f)
-    stats = data_cfg["action_stats"]
-    action_min = np.asarray(stats["min"], dtype=np.float32)
-    action_max = np.asarray(stats["max"], dtype=np.float32)
-
+    action_min, action_max = load_action_stats(flownav_repo)
     out_npz = Path(out_npz)
     out_npz.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out_npz, action_min=action_min, action_max=action_max)

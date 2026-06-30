@@ -204,6 +204,16 @@ on top of low-K flow matching; FP16 is the validated default).
 - **Without TRT** (baseline): `build_flownav_model(ckpt, flownav_repo)` then the
   eager-torch path (the `bench.py` `TorchReference`, or the reference
   `torchdiffeq.odeint` loop). The benchmark measures both and reports the speed-up.
+- **Live FALCON server, either backend** (same routes -> the node + window are
+  unchanged; just swap how you start the server):
+  ```bash
+  # optimized (engines):   ... --engine-dir .../engines/<target_tag>
+  # UNOPTIMIZED (eager torch):
+  python -m sparx_agency.tasks.planning.flownav.server.flownav_trt_server --backend torch \
+      --ckpt $CKPT --flownav-repo $FLOWNAV_REPO --goal-image ~/Downloads/goal_image.jpg
+  ```
+  `server/torch_policy.FlowNavTorchPolicy` is a drop-in twin of `FlowNavTRTPolicy`
+  (same numpy Euler loop + de-normalization; only the 3 forward passes differ).
 
 `obs_img` / `goal_img` are produced by FlowNav's `transform_images` (resize to
 96×96, ToTensor, ImageNet-normalize, context frames concatenated on the channel

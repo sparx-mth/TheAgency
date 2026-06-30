@@ -17,9 +17,18 @@ Policy on failures (repo rule: raise, don't silently degrade): the engines are
 deserialized + version-locked at startup (not lazily), so an engine built for
 another GPU / TensorRT build fails loud before the server serves.
 
+Backends (same routes / wire contract -- the node and window are unchanged):
+  * ``--backend trt`` (default) -- the TensorRT engines (optimized).
+  * ``--backend torch`` -- the eager PyTorch model (UNOPTIMIZED, ~3-5x slower); for
+    A/B-ing the model with vs without TensorRT through the identical FALCON path.
+
 Run (host, flownav_trt env; PYTHONPATH = repo root):
+    # optimized (TensorRT engines):
     python -m sparx_agency.tasks.planning.flownav.server.flownav_trt_server \
         --engine-dir sparx_agency/tasks/planning/flownav/engines/<target_tag> --port 8889
+    # UNOPTIMIZED (eager torch):
+    python -m sparx_agency.tasks.planning.flownav.server.flownav_trt_server --backend torch \
+        --ckpt .../flownav_weights.pth --flownav-repo ~/PycharmProjects/flownav --port 8889
 """
 from __future__ import annotations
 
@@ -58,8 +67,26 @@ def _require_trt_artifacts(engine_dir, head_params):
 
 
 def _build_policy(args):
-    """Deserialize + version-lock the engines now (not on first request)."""
+    """Build the TRT (default) or eager-torch (``--backend torch``) policy now.
+
+    Both expose the same ``predict(obs_img, goal_img)`` interface, so only this
+    factory differs -- the routes are backend-agnostic. TRT engines are
+    deserialized + version-locked HERE (not lazily) so a bad engine fails loud.
+    """
+    if args.backend == "torch":
+        from sparx_agency.tasks.planning.flownav.server.torch_policy import FlowNavTorchPolicy
+        if not args.ckpt:
+            raise SystemExit("[fatal] --backend torch needs --ckpt (+ --flownav-repo)")
+        policy = FlowNavTorchPolicy(args.ckpt, flownav_repo=args.flownav_repo,
+                                    num_samples=args.num_samples,
+                                    num_steps=(args.num_steps or 4))
+        print("[flownav-torch] eager-torch model loaded (UNOPTIMIZED; N=%d K=%d)"
+              % (policy.num_samples, policy.num_steps))
+        return policy
+
     from sparx_agency.core.planning.flownav.trt.policy import FlowNavTRTPolicy
+    if not args.engine_dir:
+        raise SystemExit("[fatal] --backend trt needs --engine-dir")
     head = args.head_params or str(Path(args.engine_dir) / "flownav_head_params.npz")
     _require_trt_artifacts(args.engine_dir, head)
     policy = FlowNavTRTPolicy(args.engine_dir, head, num_steps=args.num_steps)
@@ -136,13 +163,20 @@ def main():
     global _POLICY, _FRAMES, _GOAL_RGB, _CFG
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=8889)
-    ap.add_argument("--engine-dir", required=True)
+    ap.add_argument("--backend", choices=["trt", "torch"], default="trt",
+                    help="trt = TensorRT engines (optimized); torch = eager PyTorch (UNOPTIMIZED)")
+    ap.add_argument("--engine-dir", default=None, help="required for --backend trt")
     ap.add_argument("--head-params", default=None)
+    ap.add_argument("--ckpt", default=None,
+                    help="flownav_weights.pth (required for --backend torch)")
+    ap.add_argument("--flownav-repo", default=None, help="FlowNav repo path (--backend torch)")
     ap.add_argument("--context-size", type=int, default=3,
                     help="FlowNav context_size; the obs stack is context_size+1 frames")
     ap.add_argument("--image-size", type=int, default=96)
     ap.add_argument("--num-steps", type=int, default=None,
-                    help="override the flow-matching step count K (default: selected.json)")
+                    help="override the flow-matching step count K (default: selected.json, or 4 for torch)")
+    ap.add_argument("--num-samples", type=int, default=8,
+                    help="trajectory samples N (--backend torch only; trt reads selected.json)")
     ap.add_argument("--goal-image", default=None,
                     help="host path to a default target image; the node can then omit "
                          "per-step goals (avoids mounting the goal into the container)")
@@ -154,8 +188,8 @@ def main():
     if args.goal_image:
         _GOAL_RGB = np.asarray(Image.open(args.goal_image).convert("RGB"))
         print("[flownav-trt] default goal loaded from %s" % args.goal_image)
-    print("[flownav-trt] port=%d engine-dir=%s context=%d image=%d"
-          % (args.port, args.engine_dir, args.context_size, args.image_size))
+    print("[flownav-%s] port=%d context=%d image=%d"
+          % (args.backend, args.port, args.context_size, args.image_size))
     app.run(host="127.0.0.1", port=args.port, threaded=False, processes=1)
 
 
