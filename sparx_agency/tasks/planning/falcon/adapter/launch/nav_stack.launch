@@ -262,19 +262,21 @@
        preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
-  <!-- nav_mode = astar | navdp | combination. The 3-way mode selector (use_navdp
-       is the legacy boolean shim: nav_mode defaults to 'navdp' when use_navdp:=true,
-       else 'astar'; pass nav_mode:=combination to opt into the A*+NavDP fusion).
+  <!-- nav_mode = astar | navdp | combination. The 3-way mode selector. DEFAULT is
+       'combination' (the A*+NavDP fusion runs automatically); use_navdp:=true is the
+       legacy shim that selects 'navdp'; pass nav_mode:=astar for plain A* only.
          astar       : astar_planner -> /path/waypoints_astar
          navdp       : navdp_click   -> /path/waypoints_navdp (operator clicks a pixel)
          combination : astar_planner AND combination_planner run; A* plans the global
                        route, combination_planner hands NavDP the farthest visible A*
                        waypoint, flies the returned leg to its midpoint, re-infers, and
-                       publishes the arbitrated raw path on /path/waypoints_combo. A
-                       'std_msgs/Bool True' on combination_enable_topic (or
-                       combination_start_enabled:=true) turns the fusion on; until then
-                       it follows A* directly. Needs the NavDP server up once enabled. -->
-  <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'astar')" />
+                       publishes the arbitrated raw path on /path/waypoints_combo. With
+                       combination_start_enabled:=true (the default) the fusion is on
+                       from the first tick (no signal needed); set it false to start on
+                       A* and turn the fusion on later with a 'std_msgs/Bool True' on
+                       combination_enable_topic. Needs the NavDP server up once enabled. -->
+<!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
+  <arg name="nav_mode" default="astar" />
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
   <arg name="navdp_depth_topic"        default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
@@ -299,9 +301,14 @@
        above (same camera stream + NavDP server); these knobs tune the fusion.
        ══════════════════════════════════════════════════════════════ -->
   <arg name="combination_enable_topic"          default="/combination/enable" /><!-- std_msgs/Bool: True = combine, False = follow A* -->
-  <arg name="combination_start_enabled"         default="false" /><!-- true = start combined for the whole run (no signal needed) -->
+  <arg name="combination_start_enabled"         default="true" /><!-- true (default) = start combined for the whole run, no signal needed; false = start on A* and wait for a 'std_msgs/Bool True' on combination_enable_topic -->
   <arg name="combination_tick_hz"               default="5.0" /><!-- state-machine rate -->
-  <arg name="combination_leg_fraction"          default="0.5" /><!-- re-infer once the drone passes this fraction of the NavDP leg (0.5 = midpoint; NavDP is accurate near the camera) -->
+  <arg name="combination_min_engage_fwd_m"      default="1.5" /><!-- CRUISE follows A* until a visible point is at least this far ahead, then STOPS and engages NavDP (a "reasonable distance" worth a leg) -->
+  <arg name="combination_engage_confirm_ticks"  default="2" /><!-- hysteresis: require this many CONSECUTIVE engage-able detections before stopping, so depth/occlusion flicker can't cause stop/go lurching -->
+  <arg name="combination_engage_settle_s"       default="1.0" /><!-- after stopping to engage, wait this long for the drone to brake to a clean, stationary frame before the first inference -->
+  <arg name="combination_max_wait_s"            default="30.0" /><!-- when a re-infer is slow and the leg has been flown out, HOLD (stop) this long for the new route before giving up to A* (checked before each attempt; raise for a slow Jetson) -->
+  <arg name="combination_navdp_timeout_s"       default="10.0" /><!-- NavDP HTTP step timeout for ONE inference; generous for a slow Jetson (the drone holds/flies the latched leg meanwhile, never moving un-commanded). Keep < max_wait_s so several attempts fit. -->
+  <arg name="combination_leg_fraction"          default="0.5" /><!-- re-infer once the drone passes this fraction of the NavDP leg (0.5 = midpoint; the 2nd half buffers the inference latency) -->
   <arg name="combination_final_handoff_m"       default="1.5" /><!-- when the mission goal is the visible local goal and within this range, fly A* straight in (no NavDP tiny-leg jitter at the end) -->
   <arg name="combination_leg_timeout_s"         default="8.0" /><!-- watchdog: re-infer if a leg has been followed this long (prevents a deadlock if the flown path is shorter than the raw leg) -->
   <arg name="combination_require_unoccluded"    default="true" /><!-- a waypoint is "visible" only with clear line-of-sight (depth), not merely in-FOV; false = in-frame only -->
@@ -727,6 +734,11 @@
     <param name="enable_topic"             value="$(arg combination_enable_topic)" />
     <param name="start_enabled"            value="$(arg combination_start_enabled)" />
     <param name="tick_hz"                  value="$(arg combination_tick_hz)" />
+    <param name="min_engage_fwd_m"         value="$(arg combination_min_engage_fwd_m)" />
+    <param name="engage_confirm_ticks"     value="$(arg combination_engage_confirm_ticks)" />
+    <param name="engage_settle_s"          value="$(arg combination_engage_settle_s)" />
+    <param name="max_wait_s"               value="$(arg combination_max_wait_s)" />
+    <param name="timeout_s"                value="$(arg combination_navdp_timeout_s)" />
     <param name="leg_execute_fraction"     value="$(arg combination_leg_fraction)" />
     <param name="final_handoff_m"          value="$(arg combination_final_handoff_m)" />
     <param name="leg_timeout_s"            value="$(arg combination_leg_timeout_s)" />

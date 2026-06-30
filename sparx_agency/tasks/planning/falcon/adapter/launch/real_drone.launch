@@ -114,16 +114,23 @@
   <arg name="navdp_camera_info_topic" default="" />
 
   <!-- ── Combination mode (A* global route + NavDP local legs) ──────
-       nav_mode:=combination runs A* AND combination_planner together: A* plans the
-       route to the goal, combination_planner hands NavDP the farthest A* waypoint
-       visible in the current frame, flies that leg to its midpoint, then re-infers.
-       Disabled at first it follows A*; publish 'std_msgs/Bool True' on
-       combination_enable_topic (or set combination_start_enabled:=true) to combine.
-       nav_mode defaults from use_navdp (legacy shim); needs the NavDP server up. -->
-  <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'astar')" />
+       DEFAULT mode: nav_mode:=combination runs A* AND combination_planner together: A*
+       plans the route to the goal, combination_planner hands NavDP the farthest A*
+       waypoint visible in the current frame, flies that leg to its midpoint, then
+       re-infers. With combination_start_enabled:=true (the default) the fusion is on
+       from the first tick; set it false to start on A* and publish a 'std_msgs/Bool
+       True' on combination_enable_topic later. use_navdp:=true selects pure navdp;
+       nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
+<!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
+  <arg name="nav_mode" default="astar" />
   <arg name="combination_enable_topic"   default="/combination/enable" />
-  <arg name="combination_start_enabled"  default="false" />
+  <arg name="combination_start_enabled"  default="true" />
   <arg name="combination_tick_hz"        default="5.0" />
+  <arg name="combination_min_engage_fwd_m" default="1.5" /><!-- cruise A* until a visible point is at least this far ahead, then stop & engage NavDP -->
+  <arg name="combination_engage_confirm_ticks" default="2" /><!-- consecutive engage-able detections before stopping (debounce flicker) -->
+  <arg name="combination_engage_settle_s"  default="1.0" /><!-- brake-settle before the first inference (clean, stationary frame) -->
+  <arg name="combination_max_wait_s"       default="30.0" /><!-- hold this long for a slow re-infer before giving up to A* (raise for a slow Jetson) -->
+  <arg name="combination_navdp_timeout_s"  default="10.0" /><!-- NavDP HTTP step timeout for one inference; generous for a slow Jetson -->
   <arg name="combination_leg_fraction"   default="0.5" /><!-- re-infer at the leg midpoint -->
   <arg name="combination_final_handoff_m" default="1.5" /><!-- fly A* straight in for the final approach within this range -->
   <arg name="combination_leg_timeout_s"  default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
@@ -269,6 +276,11 @@
     <arg name="combination_enable_topic"       value="$(arg combination_enable_topic)" />
     <arg name="combination_start_enabled"      value="$(arg combination_start_enabled)" />
     <arg name="combination_tick_hz"            value="$(arg combination_tick_hz)" />
+    <arg name="combination_min_engage_fwd_m"   value="$(arg combination_min_engage_fwd_m)" />
+    <arg name="combination_engage_confirm_ticks" value="$(arg combination_engage_confirm_ticks)" />
+    <arg name="combination_engage_settle_s"    value="$(arg combination_engage_settle_s)" />
+    <arg name="combination_max_wait_s"         value="$(arg combination_max_wait_s)" />
+    <arg name="combination_navdp_timeout_s"    value="$(arg combination_navdp_timeout_s)" />
     <arg name="combination_leg_fraction"       value="$(arg combination_leg_fraction)" />
     <arg name="combination_final_handoff_m"    value="$(arg combination_final_handoff_m)" />
     <arg name="combination_leg_timeout_s"      value="$(arg combination_leg_timeout_s)" />

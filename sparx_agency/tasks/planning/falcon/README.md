@@ -275,42 +275,52 @@ A* and switch to the fusion on a signal, or be combined from the first frame.
 
 `combination_planner_node` is the arbiter on `/path/waypoints_combo` (the raw path
 `path_corrector` → `trajectory_simplifier` → `waypoint_follower` then process and
-fly, exactly as for A*/NavDP). Its loop, once enabled:
+fly, exactly as for A*/NavDP). Once enabled it runs a **CRUISE → HOLD → FOLLOW**
+state machine:
 
-1. read the latest A* route (the `astar_planner` keeps replanning to the goal);
-2. pick the **farthest A\* waypoint visible** in the current frame — in front of
-   the camera, projecting in-frame, and (by default) with clear line-of-sight
-   (not behind a wall);
-3. express it in NavDP's body frame (drone = origin, +x forward), ask NavDP for a
-   trajectory, anchor it to the world and publish it;
-4. fly that leg to its **midpoint**, then go to 1 — re-grounding every half-leg
-   keeps NavDP in its accurate near field while A* supplies the direction.
+- **CRUISE** — fly the A* route while watching for a waypoint that is **visible**
+  in the current frame (in front, in-frame, and by default not behind a wall) AND
+  at least `combination_min_engage_fwd_m` (1.5 m) ahead — a goal worth a leg. None
+  visible yet → keep flying A*. (Hysteresis: it takes `combination_engage_confirm_ticks`
+  consecutive detections to commit, so depth flicker can't cause stop/go lurching.)
+- **HOLD** — a good point appeared → **STOP** the drone (so the first inference is
+  from a clean, stationary frame — important on a slow Jetson), settle, then ask
+  NavDP for a leg. This is also the **"stop and wait"**: when a re-infer is slow and
+  the previous leg has been flown out, the drone holds here for the new route, up to
+  `combination_max_wait_s` (then it resumes A*).
+- **FOLLOW** — fly the published leg; at its **midpoint** re-infer, with the leg's
+  *second half* as a latency buffer. A fast reply → seamless switch; a slow one →
+  the drone coasts to the leg end and holds (→ HOLD) until the route comes back.
 
-If NavDP can't produce a leg (server down, nothing visible, the route turns out of
-view) the node **falls back to the A\* path**, so the drone always has a route; on
-the final approach it hands the last stretch to A* so it reaches the true goal.
+If no waypoint is visible, or NavDP is unreachable, it falls back to **flying A\***
+so the drone always has a route and never dead-stalls; on the final approach it
+hands the last stretch to A* so it reaches the true goal.
 
 ```bash
 # 0. Start the NavDP HTTP server on the GPU box (default 127.0.0.1:8888), as for
 #    plain NavDP — combination_planner is just an HTTP client of it.
-# 1. Real XTEND, combined for the whole run (no signal needed):
-roslaunch falcon_adapter real_drone.launch map_name:=office \
-    nav_mode:=combination combination_start_enabled:=true
+# 1. Real XTEND — combination is the DEFAULT, so a plain launch fuses from t=0:
+roslaunch falcon_adapter real_drone.launch map_name:=office
 # 2. Start on A*, switch to the fusion later by publishing the enable signal:
-roslaunch falcon_adapter real_drone.launch map_name:=office nav_mode:=combination
+roslaunch falcon_adapter real_drone.launch map_name:=office combination_start_enabled:=false
 rostopic pub -1 /combination/enable std_msgs/Bool "data: true"     # back to A*: data: false
+# Other modes: nav_mode:=astar (plain A* only) | use_navdp:=true (operator NavDP click)
 ```
 
 Key knobs (all `combination_*` args, forwarded by `real_drone.launch`):
-`combination_start_enabled` (false), `combination_enable_topic`
-(`/combination/enable`), `combination_leg_fraction` (0.5, the midpoint hand-off),
+`combination_start_enabled` (true — combined from the first frame; set false to
+start on A* and wait for the enable signal), `combination_enable_topic`
+(`/combination/enable`), `combination_min_engage_fwd_m` (1.5, the "reasonable
+distance" to engage), `combination_engage_settle_s` (1.0, brake-settle for a clean
+frame), `combination_leg_fraction` (0.5, the midpoint hand-off),
 `combination_require_unoccluded` (true — visible means clear line-of-sight, not
-merely in-FOV), `combination_final_handoff_m` (1.5), `combination_leg_timeout_s`
-(8.0, the re-infer watchdog), `combination_min_goal_fwd_m` (0.5). Camera
-intrinsics, RGB/depth transport, pose source and the NavDP server reuse the same
-`navdp_*` / `cam_*` args as NavDP click-to-go above. The geometry and selection
-are ROS-free and unit-tested in `core.planning.navdp` (`world_to_body_2d`,
-`select_farthest_visible_waypoint`, `arclength_fraction_2d`).
+merely in-FOV), `combination_final_handoff_m` (1.5). **Jetson timing:**
+`combination_navdp_timeout_s` (10.0, one inference) and `combination_max_wait_s`
+(30.0, how long to hold for a slow route before resuming A*) — raise both if your
+Jetson inference is slower. Camera intrinsics, RGB/depth transport, pose source and
+the NavDP server reuse the same `navdp_*` / `cam_*` args as NavDP click-to-go above.
+The geometry and selection are ROS-free and unit-tested in `core.planning.navdp`
+(`world_to_body_2d`, `select_farthest_visible_waypoint`, `arclength_fraction_2d`).
 
 ## Talking to a ROS2 sim / drone — the bridge
 
