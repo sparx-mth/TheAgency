@@ -13,6 +13,8 @@ trajectory, and the last clicked goal:
     yellow arrows = repulsive force F_rep=-grad U_rep at each waypoint (obstacle push)
     gold field    = F_rep across the free space (how hard each wall section pushes)
     orange dashed = predicted (stop-and-turn)
+    cyan          = smooth spline tracked by pure-pursuit (/path/smooth)
+    blueviolet X  = pure-pursuit lookahead aim point (/path/lookahead)
 The title shows the predicted-trajectory quality score (0..1) when available.
 
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
@@ -32,6 +34,8 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
   in   ~predicted_path_topic (Path) /path/predicted
   in   ~predicted_score_topic (Float32) /path/predicted_score
+  in   ~smooth_path_topic (Path)    /path/smooth    (pure-pursuit spline; cyan; '' = off)
+  in   ~lookahead_topic (PointStamped) /path/lookahead (pure-pursuit aim; blueviolet X; '' = off)
   in   ~drone_ns + /gt_pose (Pose)
   in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/localization
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
@@ -51,7 +55,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 
-from geometry_msgs.msg import Pose, PoseStamped, Point
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Float32
 from visualization_msgs.msg import Marker, MarkerArray
@@ -82,6 +86,11 @@ class BevClickGoalNode:
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
                                        "/path/predicted_score")
+        # Pure-pursuit overlays: the splined trajectory it tracks (cyan) and the
+        # moving lookahead point it aims at (blueviolet). "" disables either; no
+        # publisher (other controllers) -> nothing drawn anyway.
+        self.smooth_path_topic = G("~smooth_path_topic", "/path/smooth")
+        self.lookahead_topic = G("~lookahead_topic", "/path/lookahead")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.pose_stamped_topic = G("~pose_stamped_topic", "")
         self.refresh_hz = float(G("~refresh_hz", 5.0))
@@ -103,6 +112,8 @@ class BevClickGoalNode:
         self._field_arrows = []         # (x,y,dx,dy) coarse wall force-field (gold)
         self._pred_xy = []              # predicted drone trajectory (rollout)
         self._pred_score = None         # 0..1 "how good" score
+        self._smooth_xy = []            # pure-pursuit splined trajectory (cyan)
+        self._lookahead_xy = None       # pure-pursuit lookahead aim point (blueviolet)
         self._drone_p = None            # (x, y, yaw)
         self._goal_xy = None
         self._lock = threading.Lock()
@@ -119,6 +130,11 @@ class BevClickGoalNode:
         rospy.Subscriber(self.predicted_path_topic, Path, self._pred_cb, queue_size=1)
         rospy.Subscriber(self.predicted_score_topic, Float32, self._pred_score_cb,
                          queue_size=1)
+        if self.smooth_path_topic:
+            rospy.Subscriber(self.smooth_path_topic, Path, self._smooth_cb, queue_size=1)
+        if self.lookahead_topic:
+            rospy.Subscriber(self.lookahead_topic, PointStamped, self._lookahead_cb,
+                             queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         if self.pose_stamped_topic:
             rospy.Subscriber(self.pose_stamped_topic, PoseStamped,
@@ -139,6 +155,8 @@ class BevClickGoalNode:
         self._im = self._raw_line = self._path_line = self._pred_line = None
         self._safe_line = None           # corrector safe path (magenta)
         self._full_line = None           # full planner route (blue dashed)
+        self._smooth_line = None         # pure-pursuit splined trajectory (cyan)
+        self._lookahead_marker = None    # pure-pursuit lookahead point (blueviolet)
         self._forces_artist = None      # quiver of per-waypoint force arrows
         self._field_artist = None       # quiver of the coarse wall force-field
         self._drone_dot = self._drone_arrow = self._goal_marker = None
@@ -211,6 +229,15 @@ class BevClickGoalNode:
         with self._lock:
             self._pred_score = float(msg.data)
 
+    def _smooth_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._smooth_xy = pts
+
+    def _lookahead_cb(self, msg):
+        with self._lock:
+            self._lookahead_xy = (msg.point.x, msg.point.y)
+
     def _pose_cb(self, msg):
         o = msg.orientation
         yaw = se3.yaw_from_quaternion((o.x, o.y, o.z, o.w))
@@ -236,6 +263,8 @@ class BevClickGoalNode:
             self._full_xy = []          # and the stale full planner route
             self._forces = []           # and the stale force arrows
             self._field_arrows = []     # and the stale wall force-field
+            self._smooth_xy = []        # and the stale splined trajectory
+            self._lookahead_xy = None   # and the stale lookahead point
         m = Point()
         m.x, m.y, m.z = gx, gy, 0.0
         self.goal_pub.publish(m)
@@ -262,6 +291,11 @@ class BevClickGoalNode:
                    linestyle="--", label="full planner route (NavDP, display-only)"),
             Line2D([0], [0], color="darkorange", linestyle="--", lw=2,
                    label="predicted stop-and-turn trajectory"),
+            Line2D([0], [0], color="cyan", lw=2,
+                   label="smooth spline (pure-pursuit, /path/smooth)"),
+            Line2D([0], [0], color="blueviolet", marker="X", markeredgecolor="black",
+                   markersize=10, linestyle="None",
+                   label="pure-pursuit lookahead (/path/lookahead)"),
             Line2D([0], [0], color="yellow", marker=">", markeredgecolor="black",
                    linestyle="None", label="F_rep at each waypoint (obstacle push)"),
             Line2D([0], [0], color="gold", marker=">", linestyle="None",
@@ -285,6 +319,8 @@ class BevClickGoalNode:
             field_arrows = list(self._field_arrows)
             drone, goal = self._drone_p, self._goal_xy
             pred, score = list(self._pred_xy), self._pred_score
+            smooth = list(self._smooth_xy)
+            lookahead = self._lookahead_xy
 
         # Map background (optional): the drone is still drawn without it, so a
         # bridge+bag run with no bev_publisher up still shows where the drone is.
@@ -411,6 +447,17 @@ class BevClickGoalNode:
             self._pred_line, = self.ax.plot(pxs, pys, "--", color="darkorange",
                                             linewidth=2.0, alpha=0.9, zorder=4)
 
+        # Pure-pursuit smooth (splined) trajectory the tracker follows (cyan): the
+        # continuous path Pure Pursuit chases via its moving lookahead, vs the
+        # piecewise green planner path it was splined from.
+        if self._smooth_line is not None:
+            self._smooth_line.remove()
+            self._smooth_line = None
+        if len(smooth) >= 2:
+            mxs, mys = [p[0] for p in smooth], [p[1] for p in smooth]
+            self._smooth_line, = self.ax.plot(mxs, mys, "-", color="cyan",
+                                              linewidth=1.8, alpha=0.85, zorder=4)
+
         # Drone marker + heading arrow
         for artist in ("_drone_dot", "_drone_arrow"):
             a = getattr(self, artist)
@@ -435,6 +482,16 @@ class BevClickGoalNode:
             self._goal_marker, = self.ax.plot([goal[0]], [goal[1]], "*", color="lime",
                                               markersize=20, markeredgecolor="black",
                                               zorder=4)
+
+        # Pure-pursuit lookahead point (blueviolet X, topmost): the moving target
+        # on the smooth path the tracker is steering toward this instant.
+        if self._lookahead_marker is not None:
+            self._lookahead_marker.remove()
+            self._lookahead_marker = None
+        if lookahead is not None:
+            self._lookahead_marker, = self.ax.plot(
+                [lookahead[0]], [lookahead[1]], "X", color="blueviolet",
+                markersize=13, markeredgecolor="black", zorder=7)
         return []
 
     def spin(self):

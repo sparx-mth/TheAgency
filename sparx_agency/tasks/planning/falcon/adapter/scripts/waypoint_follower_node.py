@@ -39,11 +39,11 @@ import os
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import Pose, PoseStamped, Twist
+from geometry_msgs.msg import PointStamped, Pose, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Bool, Empty, Float32, Int8, String
 
-from sparx_agency.core.common.types import Pose2D
+from sparx_agency.core.common.types import KinematicLimits, Pose2D
 from sparx_agency.core.localization.pose_estimator import (
     PoseEstimatorParams,
     WindowedPoseEstimator,
@@ -64,6 +64,12 @@ from sparx_agency.core.planning.trackers.multi_axis_follower import (
 from sparx_agency.core.planning.trackers.multi_axis_follower import (
     predict_trajectory as mx_predict_trajectory,
 )
+from sparx_agency.core.planning.smoothers.hermite import HermiteParams, HermiteSmoother
+from sparx_agency.core.planning.trackers.pure_pursuit import (
+    PurePursuitParams,
+    PurePursuitTracker,
+)
+from pure_pursuit_follower import PurePursuitFollower  # sibling module in scripts/
 
 # DemoMode payloads bridged over /xtend/demo_mode(_request). The core control
 # axis maps onto the platform's flight modes; visual_servoing is platform-only.
@@ -135,22 +141,29 @@ class WaypointFollowerNode:
         ))
 
         # ── Controller selection ─────────────────────────────────────
-        # ~controller picks the path tracker. "waypoint" (default) keeps the
-        # one-axis follower built above (pure X advance OR pure yaw); "multi_axis"
-        # swaps in the combined-axis tracker that drives forward + lateral + yaw
-        # together, crabbing (ROLL) for small offsets and engaging yaw only past a
-        # deadband -- so falling back to the legacy controller is a one-line param.
-        # Altitude is never commanded by either (vz = 0). The one-axis follower is
-        # still constructed above; for "multi_axis" we just replace the handle.
+        # ~controller picks the path tracker; falling back is a one-line param.
+        #   "waypoint"     (default) one-axis follower built above (X advance OR
+        #                  yaw, never both -- the "stupid" controller),
+        #   "multi_axis"   combined forward + lateral + yaw, crabbing (ROLL) for
+        #                  small offsets and yawing only past a deadband,
+        #   "pure_pursuit" splines the path (Hermite) and tracks it with Pure
+        #                  Pursuit on a moving lookahead (holonomic).
+        # Altitude is never commanded by any of them (vz = 0). The one-axis
+        # follower is always constructed above; for the others we replace the
+        # handle. ``_holonomic`` groups the two that drive linear.y (multi_axis,
+        # pure_pursuit) so the loop branches once, not per-controller.
         self.controller_kind = str(G("~controller", "waypoint")).strip().lower()
-        # DemoMode the multi-axis controller requests (best effort) and, if
-        # ~mx_require_mode, gates on. The platform now accepts multi-axis commands,
-        # so the per-axis handshake of the legacy path does not apply here.
+        self._holonomic = self.controller_kind in ("multi_axis", "pure_pursuit")
+        # DemoMode the holonomic controllers request (best effort) and, if
+        # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
+        # so the per-axis handshake of the legacy path does not apply to them.
         self.multi_axis_demo_mode = str(
             G("~mx_demo_mode", MODE_FORWARD)).strip().lower()
         self.multi_axis_require_mode = bool(G("~mx_require_mode", False))
         if self.controller_kind == "multi_axis":
             self.follower = self._build_multi_axis(G)
+        elif self.controller_kind == "pure_pursuit":
+            self.follower = self._build_pure_pursuit(G)
 
         # ── Pose estimator ───────────────────────────────────────────
         # Fuses the ~10 Hz noisy /gt_pose stream with the command being executed,
@@ -203,6 +216,10 @@ class WaypointFollowerNode:
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
                                        "/path/predicted_score")
+        # Pure-pursuit visualization: the smooth (splined) trajectory and the
+        # current lookahead point the tracker is aiming at, for the BEV viewer.
+        self.smooth_path_topic = G("~smooth_path_topic", "/path/smooth")
+        self.lookahead_topic = G("~lookahead_topic", "/path/lookahead")
         self._motion = MotionModelParams(
             yaw_tau_s=float(G("~predict_yaw_tau_s", 0.5)),
             vx_tau_s=float(G("~predict_vx_tau_s", 0.3)))
@@ -282,6 +299,12 @@ class WaypointFollowerNode:
                                              queue_size=1, latch=True)
         self.pred_score_pub = rospy.Publisher(self.predicted_score_topic, Float32,
                                               queue_size=1, latch=True)
+        # Pure-pursuit-only viz publishers (latched). Harmless for the other
+        # controllers (never published to), so created unconditionally.
+        self.smooth_path_pub = rospy.Publisher(self.smooth_path_topic, Path,
+                                               queue_size=1, latch=True)
+        self.lookahead_pub = rospy.Publisher(self.lookahead_topic, PointStamped,
+                                             queue_size=1, latch=True)
 
         rospy.Subscriber(self.t_pose, Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.t_dstate, Int8, self._dstate_cb, queue_size=10)
@@ -338,6 +361,62 @@ class WaypointFollowerNode:
                                     float(G("~yaw_accel_limit", 2.5)))),
         ))
 
+    def _build_pure_pursuit(self, G):
+        """Construct the spline-then-Pure-Pursuit follower from rosparams.
+
+        Composes the core HermiteSmoother (~pp_smooth_*) and PurePursuitTracker
+        (~pp_*) behind the follower interface (see pure_pursuit_follower.py). The
+        spline timing + the tracker yaw-rate cap share one KinematicLimits; an
+        optional per-axis minimum-force snap (~pp_min_*) mirrors the platform
+        deadband. Altitude is never commanded (the 2D tracker is planar)."""
+        limits = KinematicLimits(
+            max_speed_xy=float(G("~pp_max_speed", 0.5)),
+            max_yaw_rate=float(G("~pp_max_yaw_rate", 0.6)),
+        )
+        tracker = PurePursuitTracker(
+            params=PurePursuitParams(
+                holonomic=bool(G("~pp_holonomic", True)),
+                base_lookahead=float(G("~pp_base_lookahead", 0.6)),
+                min_lookahead=float(G("~pp_min_lookahead", 0.3)),
+                max_lookahead=float(G("~pp_max_lookahead", 1.5)),
+                lookahead_speed_gain=float(G("~pp_lookahead_speed_gain", 0.5)),
+                cruise_speed=float(G("~pp_cruise_speed", float(G("~vel_x", 0.4)))),
+                min_speed=float(G("~pp_min_speed", 0.1)),
+                max_speed=float(G("~pp_max_speed", 0.5)),
+                curvature_speed_factor=float(G("~pp_curvature_speed_factor", 0.5)),
+                curvature_lookahead_factor=float(G("~pp_curvature_lookahead_factor", 0.8)),
+                slow_down_distance=float(G("~pp_slow_down_distance", 1.0)),
+                goal_tolerance=float(G("~pp_goal_tolerance",
+                                       float(G("~pos_acquisition_radius", 0.35)))),
+                path_tolerance=float(G("~pp_path_tolerance", 0.8)),
+                max_yaw_rate=float(G("~pp_max_yaw_rate", 0.6)),
+                speed_smoothing=float(G("~pp_speed_smoothing", 0.3)),
+                yaw_rate_smoothing=float(G("~pp_yaw_rate_smoothing", 0.3)),
+                sample_dt=float(G("~pp_sample_dt", 0.05)),
+                closest_search_back=int(G("~pp_closest_search_back", 10)),
+                closest_search_forward=int(G("~pp_closest_search_forward", 120)),
+            ),
+            default_limits=limits,
+        )
+        smoother = HermiteSmoother(HermiteParams(
+            dt=float(G("~pp_smooth_dt", 0.02)),
+            min_point_spacing=float(G("~pp_smooth_min_point_spacing", 0.05)),
+            tangent_scale=float(G("~pp_smooth_tangent_scale", 0.5)),
+            nominal_speed_xy=float(G("~pp_smooth_nominal_speed", 0.4)),
+            arc_lut_samples=int(G("~pp_smooth_arc_lut_samples", 600)),
+            zero_endpoint_velocity=bool(G("~pp_smooth_zero_endpoint_velocity", False)),
+        ))
+        return PurePursuitFollower(
+            tracker, smoother, limits=limits,
+            fixed_z=float(G("~takeoff_z", 1.0)),
+            smooth_sample_dt=float(G("~pp_viz_sample_dt", 0.1)),
+            min_vx=float(G("~pp_min_vx", 0.06)),
+            min_vy=float(G("~pp_min_vy", 0.06)),
+            min_wz=math.radians(float(G("~pp_min_wz_deg", 8.0))),
+            min_release_frac=float(G("~pp_min_release_frac", 0.5)),
+            cmd_zero_eps=float(G("~pp_cmd_zero_eps", 1e-3)),
+        )
+
     # ─── Callbacks ───────────────────────────────────────────────
     def _pose_cb(self, msg):
         if self.cur_pose is None:
@@ -377,6 +456,8 @@ class WaypointFollowerNode:
         rospy.loginfo("[PATH] NEW PATH %d waypoints  start=(%.2f,%.2f) end=(%.2f,%.2f)",
                       len(pts), pts[0].x, pts[0].y, pts[-1].x, pts[-1].y)
         self._publish_prediction()   # refresh the predicted trajectory at once
+        if self.controller_kind == "pure_pursuit":
+            self._publish_smooth_path()   # refresh the splined trajectory viz
         if self.state == _Bringup.WAIT_PATH:
             self._enter(_Bringup.RUNNING)
 
@@ -443,10 +524,10 @@ class WaypointFollowerNode:
             mode = AXIS_TO_MODE[axis]
             confirmed = (self.current_demo_mode == mode)
             self._request_demo_mode(mode)
-        elif self.controller_kind == "multi_axis":
-            # The multi-axis controller needs no per-axis handshake (it drives all
-            # axes at once); request its mode best-effort and, unless
-            # ~mx_require_mode, proceed regardless of confirmation.
+        elif self._holonomic:
+            # The holonomic controllers (multi_axis, pure_pursuit) need no
+            # per-axis handshake (they drive all axes at once); request the mode
+            # best-effort and, unless ~mx_require_mode, proceed regardless.
             self._request_demo_mode(self.multi_axis_demo_mode)
             confirmed = (not self.multi_axis_require_mode
                          or self.current_demo_mode == self.multi_axis_demo_mode)
@@ -460,17 +541,19 @@ class WaypointFollowerNode:
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready())
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
-        self._last_pub_vy = (cmd.vy if self.controller_kind == "multi_axis" else 0.0)
+        self._last_pub_vy = (cmd.vy if self._holonomic else 0.0)
 
         if cmd.freeze is not None:
             # The core asks to freeze only while rotating; ~freeze_during_yaw
             # lets an operator disable that without touching the algorithm.
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
         self._update_map_wait(cmd)
-        if self.controller_kind == "multi_axis":
+        if self._holonomic:
             self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz)
         else:
             self._publish_twist(cmd.vx, cmd.wz)
+        if self.controller_kind == "pure_pursuit":
+            self._publish_lookahead()   # smooth path is published on each new path
 
     # ─── ROS helpers ─────────────────────────────────────────────
     def _pose2d(self):
@@ -480,11 +563,46 @@ class WaypointFollowerNode:
         yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
         return Pose2D(self.cur_pose.position.x, self.cur_pose.position.y, yaw)
 
+    def _publish_smooth_path(self):
+        """Publish the pure-pursuit follower's smooth (splined) trajectory for the
+        BEV viewer. Called once per new path (the spline does not change tick to
+        tick); latched so the viewer sees it even between updates."""
+        smooth = getattr(self.follower, "smooth_xy", None)
+        if not smooth or len(smooth) < 2:
+            return
+        m = Path()
+        m.header.stamp = rospy.Time.now()
+        m.header.frame_id = self.frame_id
+        for x, y in smooth:
+            ps = PoseStamped()
+            ps.header = m.header
+            ps.pose.position.x = float(x)
+            ps.pose.position.y = float(y)
+            ps.pose.orientation.w = 1.0
+            m.poses.append(ps)
+        self.smooth_path_pub.publish(m)
+
+    def _publish_lookahead(self):
+        """Publish the pure-pursuit lookahead point (the aim point) for the BEV
+        viewer. Called every control tick (it moves along the path)."""
+        la = getattr(self.follower, "lookahead", None)
+        if la is None:
+            return
+        p = PointStamped()
+        p.header.stamp = rospy.Time.now()
+        p.header.frame_id = self.frame_id
+        p.point.x, p.point.y, p.point.z = float(la[0]), float(la[1]), 0.0
+        self.lookahead_pub.publish(p)
+
     def _publish_prediction(self):
         """Roll the follower forward from the current pose and publish the
         predicted trajectory (+ a 0..1 quality score). Best-effort: the BEV
         viewer draws it and the planner uses it for a dynamics-aware collision
         check. No map here, so the score is dynamics-only (no clearance)."""
+        # Pure pursuit has no stop-and-turn rollout; its smooth path + lookahead
+        # are the visualization instead, so skip the predicted-trajectory rollout.
+        if self.controller_kind == "pure_pursuit":
+            return
         pose2d = self._pose2d()
         if pose2d is None or len(self._path_pts) < 2:
             return
@@ -718,6 +836,21 @@ class WaypointFollowerNode:
             L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
             L("=" * 72)
             return
+        if self.controller_kind == "pure_pursuit":
+            L("waypoint_follower (Hermite spline + core PurePursuitTracker)  fixed alt")
+            L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
+            L("  cruise=%.2f m/s  lookahead=%.2f..%.2f m (base %.2f)  holonomic=%s",
+              p.cruise_speed, p.min_lookahead, p.max_lookahead, p.base_lookahead,
+              p.holonomic)
+            L("  goal_tol=%.2f m  path_tol=%.2f m  max_yaw_rate=%.2f rad/s",
+              p.goal_tolerance, p.path_tolerance, p.max_yaw_rate)
+            L("  smooth -> %s   lookahead -> %s", self.smooth_path_topic,
+              self.lookahead_topic)
+            L("  demo_mode=%s (require=%s)", self.multi_axis_demo_mode,
+              self.multi_axis_require_mode)
+            L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
+            L("=" * 72)
+            return
         L("waypoint_follower (core WaypointFollower)  X+YAW only, fixed altitude")
         L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
         L("  vel_x=%.2f m/s  yaw_rate=%.2f rad/s  forward_only=%s",
@@ -770,16 +903,31 @@ if __name__ == "__main__":
 #     ~map_wait_timeout_s (3.0; proceed anyway after this) ~mapsettle_min_s (0.5)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
-#   controller: ~controller (waypoint | multi_axis). multi_axis swaps in the
-#       combined forward+lateral+yaw tracker (un-hardwires linear.y; no per-axis
-#       handshake). Tuning is namespaced ~mx_*: ~mx_lateral_speed_max (0.25)
-#       ~mx_yaw_rate (0.6) ~mx_slow_radius (0.8) ~mx_arrive_speed_min (0.08)
-#       ~mx_yaw_engage_deg (25) ~mx_yaw_release_deg (10) ~mx_yaw_kp (1.2)
-#       ~mx_travel_cone_deg (80) ~mx_translate_suppress_deg (120)
+#   controller: ~controller (waypoint | multi_axis | pure_pursuit).
+#     multi_axis swaps in the combined forward+lateral+yaw tracker (un-hardwires
+#       linear.y; no per-axis handshake). Tuning namespaced ~mx_*:
+#       ~mx_lateral_speed_max (0.25) ~mx_yaw_rate (0.6) ~mx_slow_radius (0.8)
+#       ~mx_arrive_speed_min (0.08) ~mx_yaw_engage_deg (25) ~mx_yaw_release_deg (10)
+#       ~mx_yaw_kp (1.2) ~mx_travel_cone_deg (80) ~mx_translate_suppress_deg (120)
 #       ~mx_translate_suppress_floor (0.2) ~mx_min_vx (0.06) ~mx_min_vy (0.06)
 #       ~mx_min_wz_deg (8) ~mx_min_release_frac (0.5) ~mx_hold_deadband (0.18)
 #       ~mx_hold_kp (0.8) ~mx_hold_speed_max (0.2) ~mx_hold_reacquire_margin (0.15)
 #       ~mx_passed_bearing_deg (110) ~mx_demo_mode (fly_straight) ~mx_require_mode (false)
+#     pure_pursuit splines the path (core HermiteSmoother) then tracks it with the
+#       core PurePursuitTracker on a moving lookahead (holonomic). Tracker ~pp_*:
+#       ~pp_holonomic (true) ~pp_cruise_speed (=vel_x) ~pp_max_speed (0.5)
+#       ~pp_min_speed (0.1) ~pp_base_lookahead (0.6) ~pp_min/max_lookahead (0.3/1.5)
+#       ~pp_lookahead_speed_gain (0.5) ~pp_goal_tolerance (=pos_acquisition_radius)
+#       ~pp_path_tolerance (0.8) ~pp_max_yaw_rate (0.6) ~pp_curvature_speed_factor (0.5)
+#       ~pp_curvature_lookahead_factor (0.8) ~pp_slow_down_distance (1.0)
+#       ~pp_speed_smoothing (0.3) ~pp_yaw_rate_smoothing (0.3) ~pp_sample_dt (0.05)
+#       ~pp_closest_search_back/forward (10/120). Spline ~pp_smooth_*:
+#       ~pp_smooth_dt (0.02) ~pp_smooth_min_point_spacing (0.05)
+#       ~pp_smooth_tangent_scale (0.5) ~pp_smooth_nominal_speed (0.4)
+#       ~pp_smooth_arc_lut_samples (600) ~pp_smooth_zero_endpoint_velocity (false).
+#       Min-force snap ~pp_min_vx/vy (0.06) ~pp_min_wz_deg (8) ~pp_min_release_frac (0.5).
+#       Viz out: ~smooth_path_topic (/path/smooth) ~lookahead_topic (/path/lookahead)
+#       ~pp_viz_sample_dt (0.1).
 #   loop/gate: ~ctrl_rate_hz (5) ~status_hz (1) ~freeze_during_yaw (true)
 #       ~startup_hold_sec (3.0) ~startup_delay_sec (1.0)
 #       ~request_repeat_sec (0.5) ~request_timeout_sec (5.0)
