@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
-from numpy.typing import NDArray
-from scipy.interpolate import CubicHermiteSpline
+try:
+    from numpy.typing import NDArray
+except ImportError:  # numpy < 1.20 (e.g. ROS Noetic system numpy lacks numpy.typing)
+    from typing import Any as NDArray  # used only in (stringized) annotations
 
 from sparx_agency.core.common.types import Path2D, TrajectoryPoint, KinematicLimits
 from .params import HermiteParams, HermiteParams3D
@@ -44,6 +46,68 @@ class HermiteSolution:
     samples: Tuple[TrajectoryPoint, ...]
     total_length: float
     total_time: float
+
+
+# =============================================================================
+# Cubic Hermite spline (numpy-only; no scipy dependency)
+# =============================================================================
+
+class _CubicHermiteSpline:
+    """Numpy-only cubic Hermite spline — a drop-in for the subset of
+    ``scipy.interpolate.CubicHermiteSpline`` this module uses.
+
+    Construct with strictly-increasing knots ``x``, values ``y`` and slopes
+    ``dydx`` (dy/dx at the knots); call ``spline(xq)`` for the value and
+    ``spline(xq, 1)`` / ``spline(xq, 2)`` for the 1st / 2nd derivative. ``xq`` may
+    be a scalar or a 1-D array (queries are assumed within ``[x[0], x[-1]]``).
+
+    Per segment this is the SAME unique cubic scipy constructs (matching endpoint
+    value and first derivative), so results agree with scipy to float precision.
+    It exists so ``core`` imports under ROS Noetic, whose system Python ships no
+    scipy.
+    """
+
+    def __init__(self, x: NDArray, y: NDArray, dydx: NDArray) -> None:
+        self.x = np.asarray(x, dtype=float)
+        self.y = np.asarray(y, dtype=float)
+        self.dydx = np.asarray(dydx, dtype=float)
+        if self.x.ndim != 1 or self.x.shape[0] < 2:
+            raise ValueError("CubicHermiteSpline needs >= 2 knots")
+        self.h = np.diff(self.x)
+        if np.any(self.h <= 0.0):
+            raise ValueError("CubicHermiteSpline knots must be strictly increasing")
+
+    def __call__(self, xq, nu: int = 0):
+        q = np.asarray(xq, dtype=float)
+        scalar = q.ndim == 0
+        q = np.atleast_1d(q)
+        # Segment index per query, clamped into the valid knot range.
+        idx = np.searchsorted(self.x, q, side="right") - 1
+        idx = np.clip(idx, 0, self.x.shape[0] - 2)
+        hi = self.h[idx]
+        t = (q - self.x[idx]) / hi
+        p0, p1 = self.y[idx], self.y[idx + 1]
+        # Endpoint tangents in t-space are h * (dy/dx).
+        m0, m1 = self.dydx[idx] * hi, self.dydx[idx + 1] * hi
+        if nu == 0:
+            t2 = t * t
+            t3 = t2 * t
+            val = ((2 * t3 - 3 * t2 + 1) * p0 + (t3 - 2 * t2 + t) * m0
+                   + (-2 * t3 + 3 * t2) * p1 + (t3 - t2) * m1)
+        elif nu == 1:
+            t2 = t * t
+            val = ((6 * t2 - 6 * t) * p0 + (3 * t2 - 4 * t + 1) * m0
+                   + (-6 * t2 + 6 * t) * p1 + (3 * t2 - 2 * t) * m1) / hi
+        elif nu == 2:
+            val = ((12 * t - 6) * p0 + (6 * t - 4) * m0
+                   + (-12 * t + 6) * p1 + (6 * t - 2) * m1) / (hi * hi)
+        else:
+            raise ValueError("nu must be 0, 1 or 2")
+        return float(val[0]) if scalar else val
+
+
+# Name the rest of the module constructs/annotates by (drop-in replacement).
+CubicHermiteSpline = _CubicHermiteSpline
 
 
 # =============================================================================

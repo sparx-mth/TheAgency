@@ -125,7 +125,7 @@
        forward+lateral+yaw tracker that crabs (ROLL) for small offsets and yaws
        only past a deadband, so the noisy yaw axis is used sparingly. Both hold
        altitude (vz=0). Switch back to the legacy controller with controller:=waypoint. -->
-  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit -->
+  <arg name="controller"            default="pure_pursuit" /><!-- waypoint | multi_axis | pure_pursuit -->
 
   <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
        ~mx_* so they never collide with the one-axis params; cruise speed and the

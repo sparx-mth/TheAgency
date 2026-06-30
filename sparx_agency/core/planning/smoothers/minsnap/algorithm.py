@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
-from numpy.typing import NDArray
+try:
+    from numpy.typing import NDArray
+except ImportError:  # numpy < 1.20 (e.g. ROS Noetic system numpy lacks numpy.typing)
+    from typing import Any as NDArray  # used only in (stringized) annotations
 
 from sparx_agency.core.common.types import Path2D, TrajectoryPoint, KinematicLimits
 from .params import MinSnapParams

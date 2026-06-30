@@ -64,12 +64,11 @@ from sparx_agency.core.planning.trackers.multi_axis_follower import (
 from sparx_agency.core.planning.trackers.multi_axis_follower import (
     predict_trajectory as mx_predict_trajectory,
 )
-from sparx_agency.core.planning.smoothers.hermite import HermiteParams, HermiteSmoother
-from sparx_agency.core.planning.trackers.pure_pursuit import (
-    PurePursuitParams,
-    PurePursuitTracker,
-)
-from pure_pursuit_follower import PurePursuitFollower  # sibling module in scripts/
+# NOTE: the pure_pursuit imports (core HermiteSmoother / PurePursuitTracker and the
+# sibling pure_pursuit_follower.py) are deliberately deferred into
+# _build_pure_pursuit() so they are loaded ONLY when ~controller:=pure_pursuit.
+# The waypoint and multi_axis controllers must keep starting even if the
+# pure-pursuit helper/module is not deployed in this container.
 
 # DemoMode payloads bridged over /xtend/demo_mode(_request). The core control
 # axis maps onto the platform's flight modes; visual_servoing is platform-only.
@@ -368,7 +367,15 @@ class WaypointFollowerNode:
         (~pp_*) behind the follower interface (see pure_pursuit_follower.py). The
         spline timing + the tracker yaw-rate cap share one KinematicLimits; an
         optional per-axis minimum-force snap (~pp_min_*) mirrors the platform
-        deadband. Altitude is never commanded (the 2D tracker is planar)."""
+        deadband. Altitude is never commanded (the 2D tracker is planar).
+
+        The pure-pursuit dependencies are imported HERE (not at module load) so
+        the other controllers start even when this controller is not deployed."""
+        from sparx_agency.core.planning.smoothers.hermite import (
+            HermiteParams, HermiteSmoother)
+        from sparx_agency.core.planning.trackers.pure_pursuit import (
+            PurePursuitParams, PurePursuitTracker)
+        from pure_pursuit_follower import PurePursuitFollower  # sibling in scripts/
         limits = KinematicLimits(
             max_speed_xy=float(G("~pp_max_speed", 0.5)),
             max_yaw_rate=float(G("~pp_max_yaw_rate", 0.6)),
