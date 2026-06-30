@@ -57,6 +57,13 @@ from sparx_agency.core.planning.trackers.waypoint_follower import (
     predict_trajectory,
     prediction_score,
 )
+from sparx_agency.core.planning.trackers.multi_axis_follower import (
+    MultiAxisFollower,
+    MultiAxisFollowerParams,
+)
+from sparx_agency.core.planning.trackers.multi_axis_follower import (
+    predict_trajectory as mx_predict_trajectory,
+)
 
 # DemoMode payloads bridged over /xtend/demo_mode(_request). The core control
 # axis maps onto the platform's flight modes; visual_servoing is platform-only.
@@ -127,6 +134,24 @@ class WaypointFollowerNode:
             forward_only=bool(G("~forward_only", False)),
         ))
 
+        # ── Controller selection ─────────────────────────────────────
+        # ~controller picks the path tracker. "waypoint" (default) keeps the
+        # one-axis follower built above (pure X advance OR pure yaw); "multi_axis"
+        # swaps in the combined-axis tracker that drives forward + lateral + yaw
+        # together, crabbing (ROLL) for small offsets and engaging yaw only past a
+        # deadband -- so falling back to the legacy controller is a one-line param.
+        # Altitude is never commanded by either (vz = 0). The one-axis follower is
+        # still constructed above; for "multi_axis" we just replace the handle.
+        self.controller_kind = str(G("~controller", "waypoint")).strip().lower()
+        # DemoMode the multi-axis controller requests (best effort) and, if
+        # ~mx_require_mode, gates on. The platform now accepts multi-axis commands,
+        # so the per-axis handshake of the legacy path does not apply here.
+        self.multi_axis_demo_mode = str(
+            G("~mx_demo_mode", MODE_FORWARD)).strip().lower()
+        self.multi_axis_require_mode = bool(G("~mx_require_mode", False))
+        if self.controller_kind == "multi_axis":
+            self.follower = self._build_multi_axis(G)
+
         # ── Pose estimator ───────────────────────────────────────────
         # Fuses the ~10 Hz noisy /gt_pose stream with the command being executed,
         # so the follower (run at ctrl_rate_hz) sees a DENOISED pose + yaw-rate:
@@ -151,6 +176,7 @@ class WaypointFollowerNode:
         ))
         self._last_pub_vx = 0.0      # cmd executed last tick -> estimator feed-forward
         self._last_pub_wz = 0.0
+        self._last_pub_vy = 0.0      # lateral feed-forward (multi-axis only; 0 otherwise)
 
         # Takeoff / settle (platform bring-up).
         self.auto_takeoff = bool(G("~auto_takeoff", True))
@@ -274,6 +300,44 @@ class WaypointFollowerNode:
                         lambda _e: self._publish_prediction())
         self._banner()
 
+    # ─── Controller factory ──────────────────────────────────────
+    def _build_multi_axis(self, G):
+        """Construct the multi-axis (vx + vy + yaw) follower from rosparams.
+
+        Shares ~vel_x / ~yaw_rate / ~pos_acquisition_radius with the legacy
+        follower; everything else is namespaced ~mx_* so the two tunings never
+        collide. ``deg`` params are converted to radians here."""
+        return MultiAxisFollower(MultiAxisFollowerParams(
+            cruise_speed=float(G("~vel_x", 0.3)),
+            lateral_speed_max=float(G("~mx_lateral_speed_max", 0.25)),
+            yaw_rate=float(G("~mx_yaw_rate", float(G("~yaw_rate", 0.6)))),
+            pos_radius=float(G("~pos_acquisition_radius", 0.35)),
+            slow_radius=float(G("~mx_slow_radius", 0.8)),
+            arrive_speed_min=float(G("~mx_arrive_speed_min", 0.08)),
+            yaw_engage_rad=math.radians(float(G("~mx_yaw_engage_deg", 25.0))),
+            yaw_release_rad=math.radians(float(G("~mx_yaw_release_deg", 10.0))),
+            yaw_kp=float(G("~mx_yaw_kp", 1.2)),
+            travel_cone_rad=math.radians(float(G("~mx_travel_cone_deg", 80.0))),
+            translate_suppress_rad=math.radians(
+                float(G("~mx_translate_suppress_deg", 120.0))),
+            translate_suppress_floor=float(G("~mx_translate_suppress_floor", 0.2)),
+            min_vx=float(G("~mx_min_vx", 0.06)),
+            min_vy=float(G("~mx_min_vy", 0.06)),
+            min_wz=math.radians(float(G("~mx_min_wz_deg", 8.0))),
+            release_frac=float(G("~mx_min_release_frac", 0.5)),
+            cmd_zero_eps=float(G("~mx_cmd_zero_eps", 1e-3)),
+            hold_deadband=float(G("~mx_hold_deadband", 0.18)),
+            hold_kp=float(G("~mx_hold_kp", 0.8)),
+            hold_speed_max=float(G("~mx_hold_speed_max", 0.2)),
+            hold_reacquire_margin=float(G("~mx_hold_reacquire_margin", 0.15)),
+            passed_bearing_rad=math.radians(float(G("~mx_passed_bearing_deg", 110.0))),
+            vel_xy_sat=float(G("~mx_vel_xy_sat", float(G("~vel_xy_sat", 1.0)))),
+            yaw_rate_sat=float(G("~mx_yaw_rate_sat", float(G("~yaw_rate_sat", 1.5)))),
+            accel_limit=float(G("~mx_accel_limit", float(G("~accel_limit", 1.0)))),
+            yaw_accel_limit=float(G("~mx_yaw_accel_limit",
+                                    float(G("~yaw_accel_limit", 2.5)))),
+        ))
+
     # ─── Callbacks ───────────────────────────────────────────────
     def _pose_cb(self, msg):
         if self.cur_pose is None:
@@ -359,7 +423,11 @@ class WaypointFollowerNode:
         # LAST tick (what the platform is actually doing now).
         est_hold = False
         if self.use_pose_estimator:
-            self.estimator.set_command(self._last_pub_vx, self._last_pub_wz)
+            # Feed the commanded lateral too so a crab is propagated, not dropped
+            # as drift (vy is 0 for the one-axis follower, so its behaviour is
+            # unchanged). See WindowedPoseEstimator.set_command.
+            self.estimator.set_command(self._last_pub_vx, self._last_pub_wz,
+                                       vy=self._last_pub_vy)
             est = self.estimator.estimate(rospy.Time.now().to_sec())
             pose2d = est.as_pose2d() if est.mode != "invalid" else raw2d
             # Stale/no localization: hold rather than fly open-loop on a dead pose.
@@ -375,6 +443,13 @@ class WaypointFollowerNode:
             mode = AXIS_TO_MODE[axis]
             confirmed = (self.current_demo_mode == mode)
             self._request_demo_mode(mode)
+        elif self.controller_kind == "multi_axis":
+            # The multi-axis controller needs no per-axis handshake (it drives all
+            # axes at once); request its mode best-effort and, unless
+            # ~mx_require_mode, proceed regardless of confirmation.
+            self._request_demo_mode(self.multi_axis_demo_mode)
+            confirmed = (not self.multi_axis_require_mode
+                         or self.current_demo_mode == self.multi_axis_demo_mode)
         else:
             # In a stop (settle/brake/done): request forward mode -- hold heading,
             # do not fly -- so the platform is stable for a clean voxel update.
@@ -385,13 +460,17 @@ class WaypointFollowerNode:
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready())
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
+        self._last_pub_vy = (cmd.vy if self.controller_kind == "multi_axis" else 0.0)
 
         if cmd.freeze is not None:
             # The core asks to freeze only while rotating; ~freeze_during_yaw
             # lets an operator disable that without touching the algorithm.
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
         self._update_map_wait(cmd)
-        self._publish_twist(cmd.vx, cmd.wz)
+        if self.controller_kind == "multi_axis":
+            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz)
+        else:
+            self._publish_twist(cmd.vx, cmd.wz)
 
     # ─── ROS helpers ─────────────────────────────────────────────
     def _pose2d(self):
@@ -410,9 +489,11 @@ class WaypointFollowerNode:
         if pose2d is None or len(self._path_pts) < 2:
             return
         try:
-            res = predict_trajectory(self.follower.params, pose2d, self._path_pts,
-                                     self.dt, self.predict_horizon_s,
-                                     motion=self._motion)
+            predictor = (mx_predict_trajectory
+                         if self.controller_kind == "multi_axis"
+                         else predict_trajectory)
+            res = predictor(self.follower.params, pose2d, self._path_pts,
+                            self.dt, self.predict_horizon_s, motion=self._motion)
         except ValueError:
             return
         if len(res.poses) < 2:
@@ -551,6 +632,28 @@ class WaypointFollowerNode:
             except Exception as e:
                 rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
 
+    def _publish_twist_multi(self, vx, vy, wz):
+        """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz;
+        linear.z=0 hardwired (fixed altitude). No command-commitment gate -- the
+        multi-axis controller emits continuous, minimum-force-shaped commands, so
+        it never needs the lone-pulse protection the one-axis path uses."""
+        m = Twist()
+        m.linear.x = vx
+        m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller
+        m.linear.z = 0.0  # HARDWIRED -- fixed altitude (platform holds it)
+        m.angular.z = wz
+        self.cmd_vel_pub.publish(m)
+        if self._log_file is not None:
+            try:
+                self._log_file.write(json.dumps({
+                    "t": rospy.Time.now().to_sec(),
+                    "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
+                    "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
+                }) + "\n")
+                self._log_file.flush()
+            except Exception as e:
+                rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
+
     def _open_log(self, path):
         if path and "{ts}" in path:
             path = path.replace("{ts}", datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -600,6 +703,21 @@ class WaypointFollowerNode:
         L = rospy.loginfo
         p = self.follower.params
         L("=" * 72)
+        if self.controller_kind == "multi_axis":
+            L("waypoint_follower (core MultiAxisFollower)  X+Y+YAW, fixed altitude")
+            L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
+            L("  cruise=%.2f m/s  lat_max=%.2f m/s  yaw_rate=%.2f rad/s",
+              p.cruise_speed, p.lateral_speed_max, p.yaw_rate)
+            L("  pos_radius=%.2f  yaw_engage=%.0f deg  release=%.0f deg  cone=%.0f deg",
+              p.pos_radius, math.degrees(p.yaw_engage_rad),
+              math.degrees(p.yaw_release_rad), math.degrees(p.travel_cone_rad))
+            L("  min force: vx=%.3f vy=%.3f wz=%.0f deg/s  hold_deadband=%.2f m",
+              p.min_vx, p.min_vy, math.degrees(p.min_wz), p.hold_deadband)
+            L("  demo_mode=%s (require=%s)", self.multi_axis_demo_mode,
+              self.multi_axis_require_mode)
+            L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
+            L("=" * 72)
+            return
         L("waypoint_follower (core WaypointFollower)  X+YAW only, fixed altitude")
         L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
         L("  vel_x=%.2f m/s  yaw_rate=%.2f rad/s  forward_only=%s",
@@ -652,6 +770,16 @@ if __name__ == "__main__":
 #     ~map_wait_timeout_s (3.0; proceed anyway after this) ~mapsettle_min_s (0.5)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
+#   controller: ~controller (waypoint | multi_axis). multi_axis swaps in the
+#       combined forward+lateral+yaw tracker (un-hardwires linear.y; no per-axis
+#       handshake). Tuning is namespaced ~mx_*: ~mx_lateral_speed_max (0.25)
+#       ~mx_yaw_rate (0.6) ~mx_slow_radius (0.8) ~mx_arrive_speed_min (0.08)
+#       ~mx_yaw_engage_deg (25) ~mx_yaw_release_deg (10) ~mx_yaw_kp (1.2)
+#       ~mx_travel_cone_deg (80) ~mx_translate_suppress_deg (120)
+#       ~mx_translate_suppress_floor (0.2) ~mx_min_vx (0.06) ~mx_min_vy (0.06)
+#       ~mx_min_wz_deg (8) ~mx_min_release_frac (0.5) ~mx_hold_deadband (0.18)
+#       ~mx_hold_kp (0.8) ~mx_hold_speed_max (0.2) ~mx_hold_reacquire_margin (0.15)
+#       ~mx_passed_bearing_deg (110) ~mx_demo_mode (fly_straight) ~mx_require_mode (false)
 #   loop/gate: ~ctrl_rate_hz (5) ~status_hz (1) ~freeze_during_yaw (true)
 #       ~startup_hold_sec (3.0) ~startup_delay_sec (1.0)
 #       ~request_repeat_sec (0.5) ~request_timeout_sec (5.0)

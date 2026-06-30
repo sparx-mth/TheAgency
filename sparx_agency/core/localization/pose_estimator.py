@@ -14,8 +14,11 @@ over the window:
     lone AprilTag jump can never dominate.
 
 This is the literal "fuse the last ~2 readings plus the command" the platform
-needs, not a black-box filter. The platform is strictly one-axis-at-a-time, so
-the command alone selects the regime:
+needs, not a black-box filter. The one-axis platform it was written for moves on
+a single axis at a time, so the command alone selects the regime (a holonomic
+caller may also pass a commanded lateral ``vy`` to ``set_command`` so a crab is
+propagated rather than dropped — it defaults to 0 and leaves the regimes below
+unchanged):
 
   * **stopped**  (vx≈0, wz≈0, and the measured rate has settled): average the
     window → rejects hover drift; this generalises the follower's YAW_SETTLE
@@ -164,6 +167,7 @@ class WindowedPoseEstimator:
         self._buf: List[Tuple[float, float, float, float]] = []  # (t, x, y, yaw)
         self._vx_cmd = 0.0
         self._wz_cmd = 0.0
+        self._vy_cmd = 0.0
 
     def add_measurement(self, x: float, y: float, yaw: float, t: float) -> None:
         """Append one localization reading (drops non-increasing/duplicate ``t``)."""
@@ -174,10 +178,19 @@ class WindowedPoseEstimator:
         if self._buf[0][0] < cutoff:
             self._buf = [r for r in self._buf if r[0] >= cutoff]
 
-    def set_command(self, vx: float, wz: float, t: Optional[float] = None) -> None:
-        """Store the one-axis command currently being executed (vx, wz)."""
+    def set_command(self, vx: float, wz: float, vy: float = 0.0,
+                    t: Optional[float] = None) -> None:
+        """Store the command currently being executed.
+
+        ``vy`` is the optional commanded *lateral* (body-left) speed. It defaults
+        to 0 — the one-axis platform the estimator was written for never crabs, so
+        existing two-argument callers are byte-for-byte unaffected. A holonomic
+        caller (the multi-axis follower) passes it so the estimate propagates the
+        commanded crab instead of geometrically dropping it as drift.
+        """
         self._vx_cmd = float(vx)
         self._wz_cmd = float(wz)
+        self._vy_cmd = float(vy)
 
     def estimate(self, now: float) -> PoseEstimate:
         """Re-fit the window and return the fused pose+velocity (pure read)."""
@@ -218,7 +231,7 @@ class WindowedPoseEstimator:
         vy_w, _ = _fit_slope(ts, [r[2] for r in win], t_bar, p.min_samples)
         speed_ls = hypot(vx_w, vy_w)      # measured ground speed (heading-agnostic)
 
-        vx_cmd, wz_cmd = self._vx_cmd, self._wz_cmd
+        vx_cmd, wz_cmd, vy_cmd = self._vx_cmd, self._wz_cmd, self._vy_cmd
         fill = min(1.0, float(n) / max(1.0, round(p.window_s * 10.0)))
         freshness = exp(-max(0.0, age) / p.fresh_tau_s) if p.fresh_tau_s > 0 else 1.0
         confidence = freshness * fill
@@ -226,8 +239,11 @@ class WindowedPoseEstimator:
         # Dropout (short): dead-reckon on the command rather than a stale pose.
         if age > p.dropout_s:
             yaw_est = normalize_angle(u_bar + wz_cmd * dt_prop)
-            x_est = x_bar + vx_cmd * cos(yaw_est) * dt_prop
-            y_est = y_bar + vx_cmd * sin(yaw_est) * dt_prop
+            # Dead-reckon on the full commanded body velocity: forward along the
+            # heading, plus the commanded lateral crab along body-left (0 for the
+            # one-axis platform, so the legacy path is unchanged).
+            x_est = x_bar + (vx_cmd * cos(yaw_est) - vy_cmd * sin(yaw_est)) * dt_prop
+            y_est = y_bar + (vx_cmd * sin(yaw_est) + vy_cmd * cos(yaw_est)) * dt_prop
             return PoseEstimate(now, x_est, y_est, yaw_est, vx_cmd, wz_cmd,
                                 confidence, n, age, "coast", False)
 
@@ -235,6 +251,7 @@ class WindowedPoseEstimator:
         # each axis, so neither a yaw coast nor a forward glide after a stop
         # command is frozen as a hover (the symmetric settle guards).
         stopped = (abs(vx_cmd) < p.vx_cmd_eps and abs(wz_cmd) < p.wz_cmd_eps
+                   and abs(vy_cmd) < p.vx_cmd_eps
                    and abs(wz_ls) < p.settle_wz_eps and speed_ls < p.settle_vx_eps)
         if stopped:
             # Average the window: rejects hover drift; slopes discarded.
@@ -249,8 +266,13 @@ class WindowedPoseEstimator:
         vx_ls = vx_w * cos(yaw_est) + vy_w * sin(yaw_est)   # along-heading; drop lateral
         beta_vx = _ff_blend(abs(vx_cmd), p.vx_ff_ref, p.ff_blend_min, p.ff_blend_max)
         vx_est = (1.0 - beta_vx) * vx_ls + beta_vx * vx_cmd
-        x_est = x_bar + vx_est * cos(yaw_est) * dt_prop
-        y_est = y_bar + vx_est * sin(yaw_est) * dt_prop
+        # Position propagates from the window centroid by the along-heading speed
+        # plus the COMMANDED lateral crab (body-left). The measured perpendicular
+        # slope stays dropped (it is drift/noise on the one-axis platform); the
+        # commanded vy is a known feed-forward and defaults to 0, so the one-axis
+        # estimate is unchanged while a holonomic crab is no longer lost.
+        x_est = x_bar + (vx_est * cos(yaw_est) - vy_cmd * sin(yaw_est)) * dt_prop
+        y_est = y_bar + (vx_est * sin(yaw_est) + vy_cmd * cos(yaw_est)) * dt_prop
 
         if abs(wz_cmd) >= p.wz_cmd_eps:
             mode = "turning"

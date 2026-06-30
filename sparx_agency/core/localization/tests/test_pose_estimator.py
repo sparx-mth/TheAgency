@@ -205,3 +205,39 @@ def test_settle_equivalence_with_circular_mean():
     t_last = _feed(est, [(0.0, 0.0, y) for y in yaws])
     e = est.estimate(t_last)
     assert abs(e.yaw - circular_mean(yaws)) < 1e-9
+
+
+# --------------------------------------------------------------------------
+# holonomic crab: the optional commanded lateral (vy) is propagated, not dropped
+# (multi-axis follower). vy defaults to 0, so all tests above are unaffected.
+# --------------------------------------------------------------------------
+def test_crab_lateral_preserved_with_commanded_vy():
+    """A pure sideways crab (facing +x, moving +y) is tracked when vy is fed; the
+    legacy two-argument call drops it and the estimate lags."""
+    samples = [(0.0, 0.2 * (i * DT), 0.0) for i in range(7)]    # y = 0.2*t, yaw 0
+    t_now = 6 * DT                                              # true y(now) = 0.12
+    fix = WindowedPoseEstimator()
+    fix.set_command(0.0, 0.0, vy=0.2)                          # forward 0, crab 0.2 left
+    _feed(fix, samples)
+    e_fix = fix.estimate(t_now)
+    leg = WindowedPoseEstimator()
+    leg.set_command(0.0, 0.0)                                   # legacy: no vy
+    _feed(leg, samples)
+    e_leg = leg.estimate(t_now)
+    assert abs(e_fix.y - 0.12) < 0.015                          # tracks the crab
+    assert abs(e_fix.y - 0.12) < abs(e_leg.y - 0.12)           # and beats the legacy lag
+
+
+def test_slow_crab_not_frozen_as_stopped():
+    """A slow crab (measured speed below settle_vx_eps) is NOT frozen as 'stopped'
+    when vy is commanded; without vy the legacy call freezes it (drift rejection)."""
+    samples = [(0.0, 0.05 * (i * DT), 0.0) for i in range(7)]   # 0.05 m/s < settle_vx_eps
+    t_now = 6 * DT
+    fix = WindowedPoseEstimator()
+    fix.set_command(0.0, 0.0, vy=0.05)
+    _feed(fix, samples)
+    assert fix.estimate(t_now).mode != "stopped"
+    leg = WindowedPoseEstimator()
+    leg.set_command(0.0, 0.0)
+    _feed(leg, samples)
+    assert leg.estimate(t_now).mode == "stopped"

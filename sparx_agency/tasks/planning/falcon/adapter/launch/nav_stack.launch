@@ -119,6 +119,39 @@
   <arg name="goal_x" default="4.0" />
   <arg name="goal_y" default="0.0" />
 
+  <!-- ══════════════════════════════════════════════════════════════
+       CONTROLLER SELECTION. "waypoint" (default) = the one-axis follower
+       (pure X advance OR pure yaw, never both). "multi_axis" = the combined
+       forward+lateral+yaw tracker that crabs (ROLL) for small offsets and yaws
+       only past a deadband, so the noisy yaw axis is used sparingly. Both hold
+       altitude (vz=0). Switch back to the legacy controller with controller:=waypoint. -->
+  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis -->
+
+  <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
+       ~mx_* so they never collide with the one-axis params; cruise speed and the
+       capture radius are shared with vel_x / pos_acquisition_radius. -->
+  <arg name="mx_lateral_speed_max"      default="0.25" /><!-- max sideways (crab) speed (m/s); usually < cruise -->
+  <arg name="mx_yaw_rate"               default="0.6" /><!-- saturation on the yaw rate during a turn (rad/s) -->
+  <arg name="mx_slow_radius"            default="0.8" /><!-- start ramping speed down inside this range of the FINAL goal (m) -->
+  <arg name="mx_arrive_speed_min"       default="0.08" /><!-- speed floor while outside pos_radius (m/s); never crawl to a noisy stop -->
+  <arg name="mx_yaw_engage_deg"         default="25.0" /><!-- heading error above which yaw engages; below it the drone crabs (no yaw) -->
+  <arg name="mx_yaw_release_deg"        default="10.0" /><!-- heading error below which yaw releases (hysteresis; < engage) -->
+  <arg name="mx_yaw_kp"                 default="1.2" /><!-- proportional gain heading-error -> yaw rate (1/s), saturated to mx_yaw_rate -->
+  <arg name="mx_travel_cone_deg"        default="80.0" /><!-- max body angle off forward the translation may point; yaw rotates the cone onto the target (perception safety) -->
+  <arg name="mx_translate_suppress_deg" default="120.0" /><!-- heading error at/above which translation is throttled so the drone mostly yaws first (> cone) -->
+  <arg name="mx_translate_suppress_floor" default="0.2" /><!-- fraction of speed kept when grossly mis-pointed (creeps, never fully stops) -->
+  <arg name="mx_min_vx"                 default="0.06" /><!-- min forward speed that actually moves the platform (m/s) -->
+  <arg name="mx_min_vy"                 default="0.06" /><!-- min lateral speed that actually moves the platform (m/s) -->
+  <arg name="mx_min_wz_deg"             default="8.0" /><!-- min yaw rate that actually rotates the platform (deg/s) -->
+  <arg name="mx_min_release_frac"       default="0.5" /><!-- below release_frac*min an axis is dropped to 0; between that and min it is snapped up to min -->
+  <arg name="mx_hold_deadband"          default="0.18" /><!-- station-keeping: positional error below this is left uncorrected (ride out the standstill noise) (m) -->
+  <arg name="mx_hold_kp"                default="0.8" /><!-- station-keeping correction gain (1/s) -->
+  <arg name="mx_hold_speed_max"         default="0.2" /><!-- cap on the station-keeping correction speed (m/s) -->
+  <arg name="mx_hold_reacquire_margin"  default="0.15" /><!-- drift past pos_radius+this while holding -> resume full pursuit (m) -->
+  <arg name="mx_passed_bearing_deg"     default="110.0" /><!-- a NON-final waypoint whose bearing exceeds this is treated as passed/behind -->
+  <arg name="mx_demo_mode"              default="fly_straight" /><!-- DemoMode requested (best-effort) for the multi-axis controller -->
+  <arg name="mx_require_mode"           default="false" /><!-- gate motion on the demo mode being confirmed (false: proceed regardless) -->
+
   <!-- Speeds & radii -->
   <arg name="vel_x"                  default="0.3" />
   <arg name="yaw_rate"               default="0.7" />
@@ -873,6 +906,29 @@
     <param name="ctrl_rate_hz"           value="$(arg ctrl_rate_hz)" />
     <param name="forward_only"           value="$(arg forward_only)" />
     <param name="cmd_log_path"           value="$(arg cmd_log_path)" />
+    <!-- controller selection + multi-axis tuning (only used when controller:=multi_axis) -->
+    <param name="controller"             value="$(arg controller)" />
+    <param name="mx_lateral_speed_max"   value="$(arg mx_lateral_speed_max)" />
+    <param name="mx_yaw_rate"            value="$(arg mx_yaw_rate)" />
+    <param name="mx_slow_radius"         value="$(arg mx_slow_radius)" />
+    <param name="mx_arrive_speed_min"    value="$(arg mx_arrive_speed_min)" />
+    <param name="mx_yaw_engage_deg"      value="$(arg mx_yaw_engage_deg)" />
+    <param name="mx_yaw_release_deg"     value="$(arg mx_yaw_release_deg)" />
+    <param name="mx_yaw_kp"              value="$(arg mx_yaw_kp)" />
+    <param name="mx_travel_cone_deg"     value="$(arg mx_travel_cone_deg)" />
+    <param name="mx_translate_suppress_deg"   value="$(arg mx_translate_suppress_deg)" />
+    <param name="mx_translate_suppress_floor" value="$(arg mx_translate_suppress_floor)" />
+    <param name="mx_min_vx"              value="$(arg mx_min_vx)" />
+    <param name="mx_min_vy"              value="$(arg mx_min_vy)" />
+    <param name="mx_min_wz_deg"          value="$(arg mx_min_wz_deg)" />
+    <param name="mx_min_release_frac"    value="$(arg mx_min_release_frac)" />
+    <param name="mx_hold_deadband"       value="$(arg mx_hold_deadband)" />
+    <param name="mx_hold_kp"             value="$(arg mx_hold_kp)" />
+    <param name="mx_hold_speed_max"      value="$(arg mx_hold_speed_max)" />
+    <param name="mx_hold_reacquire_margin" value="$(arg mx_hold_reacquire_margin)" />
+    <param name="mx_passed_bearing_deg"  value="$(arg mx_passed_bearing_deg)" />
+    <param name="mx_demo_mode"           value="$(arg mx_demo_mode)" />
+    <param name="mx_require_mode"        value="$(arg mx_require_mode)" />
   </node>
 
   <!-- voxel_reset_watcher: intentionally NOT transferred (diagnostics only).
