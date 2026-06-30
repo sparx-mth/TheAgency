@@ -1,0 +1,90 @@
+{
+  "opset": 17,
+  "ckpt_sha256": "980c7f1645522f9adcf76df5139876e6a50e48d88938b5fc15f2dff1baad3b44",
+  "head_params": "flownav_head_params.npz",
+  "num_samples": 8,
+  "horizon": 8,
+  "action_dim": 2,
+  "engines": {
+    "flownav_encoder": {
+      "onnx": "flownav_encoder.onnx",
+      "onnx_sha256": "302352fd8825a4d341e82cfced77b1d8d235e8256b5acc475fa5079336e86385",
+      "inputs": [
+        "obs_img",
+        "goal_img"
+      ],
+      "outputs": [
+        "obsgoal_cond"
+      ],
+      "shapes": {
+        "obs_img": [
+          1,
+          12,
+          96,
+          96
+        ],
+        "goal_img": [
+          1,
+          3,
+          96,
+          96
+        ],
+        "obsgoal_cond": [
+          1,
+          256
+        ]
+      }
+    },
+    "flownav_vfield": {
+      "onnx": "flownav_vfield.onnx",
+      "onnx_sha256": "0c6b0b87fb1f19220b04459d407873a6b5160decad24fbb97d8356b3d6f9702c",
+      "inputs": [
+        "sample",
+        "timestep",
+        "global_cond"
+      ],
+      "outputs": [
+        "vfield"
+      ],
+      "shapes": {
+        "sample": [
+          8,
+          8,
+          2
+        ],
+        "timestep": [
+          1
+        ],
+        "global_cond": [
+          8,
+          256
+        ],
+        "vfield": [
+          8,
+          8,
+          2
+        ]
+      }
+    },
+    "flownav_dist": {
+      "onnx": "flownav_dist.onnx",
+      "onnx_sha256": "d3d3e8b62c7c45fdef6badd6c08e62b30b3ca733532615164fbadcc802c10a48",
+      "inputs": [
+        "obsgoal_cond"
+      ],
+      "outputs": [
+        "distance"
+      ],
+      "shapes": {
+        "obsgoal_cond": [
+          1,
+          256
+        ],
+        "distance": [
+          1,
+          1
+        ]
+      }
+    }
+  }
+}

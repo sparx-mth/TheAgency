@@ -1,0 +1,25 @@
+{
+  "_comment": "Version-controlled FlowNav TensorRT build + gate policy. JSON (not YAML) because the repo .gitignore globs *.yaml. Tunables read by engine/inspect_onnx.py and benchmark/bench.py.",
+  "fp_keep_keywords": [
+    "layernorm", "norm", "groupnorm", "head", "softmax", "pos_emb",
+    "positional", "reducemean", "instancenorm"
+  ],
+  "builder_optimization_level": {
+    "orin_15w": 3,
+    "default": 5
+  },
+  "_strongly_typed_note": "TensorRT >=11 removed weak typing, so FP16 is forced via an FP16 ONNX. The encoder (EfficientNet x2 + a deep DINOv2 ViT-S) is the most precision-sensitive graph; if it drifts in forced FP16 on the strongly-typed path, list it here to build it FP32 (the velocity field + distance head stay FP16). On TRT-10 (the Orin) weak typing handles all three in mixed FP16 and this list is ignored. Start empty; add flownav_encoder if the gate flags encoder drift.",
+  "strongly_typed_fp32_engines": [],
+  "accuracy_gates": {
+    "fp16": {"waypoint_l2": 0.05, "traj_rel_l2": 0.05, "dist_abs_err": 0.25}
+  },
+  "parity_tolerances": {
+    "encoder_rel_l2": 1.0e-3,
+    "vfield_rel_l2": 2.0e-3,
+    "dist_rel_l2": 2.0e-3
+  },
+  "_k_note": "K (num_steps) is the flow-matching Euler grid size; the velocity field runs K-1 times and K is the dominant speed lever. The bench sweeps these K and picks the smallest whose trajectory stays within k_quality_waypoint_l2 of the high-K reference AND whose TRT engines pass the fidelity gate. NOTE: the quality-drift metric is measured on SYNTHETIC random inputs, so it is only a coarse proxy -- re-evaluate low-K trajectory quality on REAL images during integration. The bound below is intentionally loose to honor 'relatively low K' (lands on K=4: ~4x speedup, TRT engines still lossless vs torch). Tighten it toward 0.05 for max fidelity-to-10-step, or set num_steps directly in selected.json / FlowNavTRTPolicy(num_steps=...) at runtime (no rebuild).",
+  "k_sweep": [2, 3, 4, 5, 8, 10],
+  "k_quality_waypoint_l2": 0.20,
+  "waypoint_index": 2
+}

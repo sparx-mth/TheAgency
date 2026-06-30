@@ -351,6 +351,10 @@
                        combination_enable_topic. Needs the NavDP server up once enabled. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
   <arg name="nav_mode" default="astar" />
+  <!-- vla = navdp | flownav. Selects which VLA policy serves nav_mode:=navdp:
+         navdp   = navdp_click_node (point-goal; operator clicks a pixel; NavDP server :navdp_port)
+         flownav = flownav_node     (image-goal toward ~flownav_goal_image;  FlowNav server :flownav_port) -->
+  <arg name="vla" default="navdp" /><!-- navdp | flownav -->
   <arg name="navdp_port"               default="8888" />
   <arg name="navdp_rgb_topic"          default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
   <arg name="navdp_depth_topic"        default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
@@ -368,6 +372,20 @@
   <arg name="navdp_execute_fraction"   default="0.5" /><!-- fly only the first fraction of the NavDP route, then hold at the prefix end until the next ENTER re-infers (NavDP is accurate near the camera, drifts further out). 1.0 = whole route -->
   <arg name="navdp_full_path_topic"    default="/path/waypoints_navdp_full" /><!-- the FULL route, display-only (BEV viewer draws it blue-dashed while the near prefix flies) -->
   <arg name="navdp_display_mode"       default="full" /><!-- full = RGB + depth + snapshot panels | rgb_only = just the clickable RGB panel (lighter) -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       FLOWNAV (vla:=flownav) — image-goal VLA, drop-in for the navdp VLA.
+       Reuses navdp_rgb_topic / navdp_pose_topic / navdp_pose_type / image_transport
+       above (FlowNav needs NO depth and NO intrinsics). Requires the FlowNav TRT host
+       server up (default 127.0.0.1:flownav_port) — see
+       tasks/planning/flownav/server/flownav_trt_server.py. -->
+  <arg name="flownav_port"             default="8889" /><!-- FlowNav server loopback port (distinct from navdp_port 8888) -->
+  <arg name="flownav_goal_image"       default="" /><!-- path to the target RGB image to steer toward (set this for vla:=flownav) -->
+  <arg name="flownav_goal_image_topic" default="" /><!-- optional sensor_msgs/Image live-goal topic (overrides the file) -->
+  <arg name="flownav_rate_hz"          default="4.0" /><!-- continuous (reactive) inference rate -->
+  <arg name="flownav_execute_fraction" default="1.0" /><!-- fraction of the predicted path to fly each tick (1.0 = whole) -->
+  <arg name="flownav_path_topic"       default="/path/waypoints_flownav" /><!-- raw path -> path_corrector -->
+  <arg name="flownav_full_path_topic"  default="/path/waypoints_flownav_full" /><!-- display-only full route -->
 
   <!-- ══════════════════════════════════════════════════════════════
        COMBINATION (nav_mode:=combination) — A* global route + NavDP local legs.
@@ -400,13 +418,13 @@
        "APF safety recentring" block above and are consumed HERE now.
        ══════════════════════════════════════════════════════════════ -->
   <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
-  <!-- Which raw path the corrector reads, by nav_mode: combination -> the
-       combination_planner's arbitrated /path/waypoints_combo; navdp -> NavDP's
-       /path/waypoints_navdp; astar -> A*'s /path/waypoints_astar. The corrector
+  <!-- Which raw path the corrector reads, by nav_mode (and vla for navdp):
+       combination -> /path/waypoints_combo; navdp+vla=flownav -> /path/waypoints_flownav;
+       navdp -> /path/waypoints_navdp; astar -> /path/waypoints_astar. The corrector
        owns /path/waypoints_safe; the trajectory_simplifier turns that into the
        flown /path/waypoints, so the follower still reads one topic. -->
   <arg name="planner_path_topic"
-       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar'))" />
+       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_flownav' if (arg('nav_mode') == 'navdp' and arg('vla') == 'flownav') else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar')))" />
 
   <!-- ESDF corrector knobs (used only when corrector:=esdf). Ascend each waypoint
        up the gradient of the distance-to-wall field toward the corridor / doorway
@@ -746,7 +764,7 @@
        /path/waypoints, the world Path the follower consumes. -->
   <node pkg="falcon_adapter" type="navdp_click_node.py"
         name="navdp_click" output="screen"
-        if="$(eval arg('nav_mode') == 'navdp')">
+        if="$(eval arg('nav_mode') == 'navdp' and arg('vla') == 'navdp')">
     <param name="drone_ns"          value="$(arg drone_ns)" />
     <param name="image_transport"   value="$(arg image_transport)" />
     <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
@@ -769,6 +787,27 @@
     <param name="execute_fraction"  value="$(arg navdp_execute_fraction)" />
     <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
     <param name="display_mode"      value="$(arg navdp_display_mode)" />
+  </node>
+
+  <!-- FlowNav image-goal VLA (vla:=flownav). Drop-in for navdp_click: identical world
+       Path output contract (path_corrector recentres /path/waypoints_flownav and
+       republishes /path/waypoints). Image-goal, so NO depth / intrinsics / click — it
+       steers toward ~goal_image continuously at ~rate_hz. Needs the FlowNav server up. -->
+  <node pkg="falcon_adapter" type="flownav_node.py"
+        name="flownav" output="screen"
+        if="$(eval arg('nav_mode') == 'navdp' and arg('vla') == 'flownav')">
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="goal_image"        value="$(arg flownav_goal_image)" />
+    <param name="goal_image_topic"  value="$(arg flownav_goal_image_topic)" />
+    <param name="path_topic"        value="$(arg flownav_path_topic)" />
+    <param name="full_path_topic"   value="$(arg flownav_full_path_topic)" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg flownav_port)" />
+    <param name="rate_hz"           value="$(arg flownav_rate_hz)" />
+    <param name="execute_fraction"  value="$(arg flownav_execute_fraction)" />
   </node>
 
   <!-- Combination planner (nav_mode:=combination): A* plans the global route (the

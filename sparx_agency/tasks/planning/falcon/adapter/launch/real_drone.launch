@@ -123,6 +123,15 @@
        nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
   <arg name="nav_mode" default="astar" />
+  <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
+       nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
+       and start the FlowNav TRT server (tasks/planning/flownav/server/...). -->
+  <arg name="vla"                      default="navdp" />
+  <arg name="flownav_goal_image"       default="" />
+  <arg name="flownav_goal_image_topic" default="" />
+  <arg name="flownav_port"             default="8889" />
+  <arg name="flownav_rate_hz"          default="4.0" />
+  <arg name="flownav_execute_fraction" default="1.0" />
   <arg name="combination_enable_topic"   default="/combination/enable" />
   <arg name="combination_start_enabled"  default="true" />
   <arg name="combination_tick_hz"        default="5.0" />
@@ -273,6 +282,12 @@
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="nav_mode"                value="$(arg nav_mode)" />
+    <arg name="vla"                      value="$(arg vla)" />
+    <arg name="flownav_goal_image"       value="$(arg flownav_goal_image)" />
+    <arg name="flownav_goal_image_topic" value="$(arg flownav_goal_image_topic)" />
+    <arg name="flownav_port"             value="$(arg flownav_port)" />
+    <arg name="flownav_rate_hz"          value="$(arg flownav_rate_hz)" />
+    <arg name="flownav_execute_fraction" value="$(arg flownav_execute_fraction)" />
     <arg name="combination_enable_topic"       value="$(arg combination_enable_topic)" />
     <arg name="combination_start_enabled"      value="$(arg combination_start_enabled)" />
     <arg name="combination_tick_hz"            value="$(arg combination_tick_hz)" />
