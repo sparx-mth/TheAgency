@@ -122,7 +122,7 @@
        True' on combination_enable_topic later. use_navdp:=true selects pure navdp;
        nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
-  <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
+  <arg name="nav_mode" default="astar" />  <!-- navdp | astar | combination-->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/flownav/server/...). -->

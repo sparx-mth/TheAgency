@@ -125,7 +125,7 @@
        forward+lateral+yaw tracker that crabs (ROLL) for small offsets and yaws
        only past a deadband, so the noisy yaw axis is used sparingly. Both hold
        altitude (vz=0). Switch back to the legacy controller with controller:=waypoint. -->
-  <arg name="controller"            default="pure_pursuit" /><!-- waypoint | multi_axis | pure_pursuit -->
+  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit -->
 
   <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
        ~mx_* so they never collide with the one-axis params; cruise speed and the
@@ -204,6 +204,19 @@
   <arg name="yaw_settle_dwell_s"  default="0.8" /><!-- dwell (s) after a burst coasts to a stop so AprilTag yaw re-converges before re-measuring -->
   <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
   <arg name="yaw_burst_max_deg"   default="25.0" /><!-- per-burst increment: a big turn (e.g. 80deg) is split into ~25deg chunks, each followed by a stop + voxel update + re-measure, not one open-loop sweep -->
+  <arg name="freeze_on_rotation"    default="true" /><!-- MASTER on/off for freeze-during-rotation (waypoint controller AND holonomic supervisor). false = never freeze / never stop to re-observe; the map stays live through every turn (set when depth is trusted during rotation) -->
+  <arg name="freeze_yaw_thresh_deg" default="20.0" /><!-- waypoint controller: a turn LARGER than this freezes the voxel map (depth lies / localization lags mid-turn) AND forces the post-turn re-observe below; a smaller correction stays live. 0 = freeze every turn -->
+  <arg name="settle_map_updates"    default="2" /><!-- fresh voxel updates a FROZEN turn re-observes (stopped, sensors live) before it advances/turns again, so it never acts on a map built before the turn -->
+  <arg name="freeze_through_coast"  default="true" /><!-- waypoint controller: hold 'turning' mode until wz~0 so the mode-authoritative gate stays frozen over the end-of-turn inertia, not just the commanded burst -->
+  <!-- Holonomic rotation supervisor (pure_pursuit / multi_axis only; the one-axis
+       'waypoint' controller freezes inside its own state machine and IGNORES these):
+       freeze throughout any turn (rate-based) and stop every rot_reobserve_every_deg
+       of rotation to re-observe settle_map_updates voxels while stopped. -->
+  <arg name="rot_wz_turn_on"        default="0.20" /><!-- rad/s: commanded yaw at/above which a holonomic tracker counts as turning (freeze arms) -->
+  <arg name="rot_wz_turn_off"       default="0.10" /><!-- rad/s: below this (debounced) the turn is ending (hysteresis vs rot_wz_turn_on) -->
+  <arg name="rot_turn_off_ticks"    default="3" /><!-- consecutive below-off ticks to declare the turn over -->
+  <arg name="rot_reobserve_every_deg" default="25.0" /><!-- stop to re-observe every this much accumulated rotation -->
+  <arg name="rot_max_coast_s"       default="2.0" /><!-- cap (s) on the post-stop yaw coast wait, so a noisy yaw never hangs the stop -->
   <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
   <arg name="cmd_commit_ticks"    default="2" /><!-- output guarantee: a stop (zero twist) never reaches the drone until the motion ran >=this many ticks; a lone motion->stop is held to the floor first -->
   <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
@@ -254,7 +267,7 @@
   <arg name="map_update_topic"    default="/falcon/bev_2d" /><!-- a fresh msg here = the map advanced -->
   <arg name="map_wait_timeout_s"  default="3.0" /><!-- proceed anyway if no update lands (never hang) -->
   <arg name="mapsettle_min_s"     default="0.5" /><!-- min bring-up settle before the first move -->
-  <arg name="mapsettle_min_updates" default="2" /><!-- fresh voxel updates required before the FIRST move (running re-stops use 1) -->
+  <arg name="mapsettle_min_updates" default="2" /><!-- fresh voxel updates required before the FIRST move at bring-up (a frozen running re-stop uses settle_map_updates) -->
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
@@ -271,7 +284,7 @@
   <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
        this timer (and on a goal click). The trajectory is frozen between ticks
        so the follower is not chasing a path that shifts every BEV frame. -->
-  <arg name="plan_period_s"         default="15.0" />
+  <arg name="plan_period_s"         default="5.0" />
   <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
        plan_period_s cycles. Set true to react to obstacles faster than that. -->
   <arg name="replan_on_collision"   default="false" />
@@ -953,6 +966,15 @@
     <param name="yaw_settle_dwell_s"     value="$(arg yaw_settle_dwell_s)" />
     <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
     <param name="yaw_burst_max_deg"      value="$(arg yaw_burst_max_deg)" />
+    <param name="freeze_on_rotation"     value="$(arg freeze_on_rotation)" />
+    <param name="freeze_yaw_thresh_deg"  value="$(arg freeze_yaw_thresh_deg)" />
+    <param name="settle_map_updates"     value="$(arg settle_map_updates)" />
+    <param name="freeze_through_coast"   value="$(arg freeze_through_coast)" />
+    <param name="rot_wz_turn_on"         value="$(arg rot_wz_turn_on)" />
+    <param name="rot_wz_turn_off"        value="$(arg rot_wz_turn_off)" />
+    <param name="rot_turn_off_ticks"     value="$(arg rot_turn_off_ticks)" />
+    <param name="rot_reobserve_every_deg" value="$(arg rot_reobserve_every_deg)" />
+    <param name="rot_max_coast_s"        value="$(arg rot_max_coast_s)" />
     <param name="min_motion_ticks"       value="$(arg min_motion_ticks)" />
     <!-- graded-pulse / mid-burst-feedback / anti-deadlock yaw -->
     <param name="yaw_graded_pulses"      value="$(arg yaw_graded_pulses)" />

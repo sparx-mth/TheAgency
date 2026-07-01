@@ -64,6 +64,10 @@ from sparx_agency.core.planning.trackers.multi_axis_follower import (
 from sparx_agency.core.planning.trackers.multi_axis_follower import (
     predict_trajectory as mx_predict_trajectory,
 )
+from sparx_agency.core.planning.trackers.rotation_supervisor import (
+    RotationReobserveSupervisor,
+    RotationSupervisorParams,
+)
 # NOTE: the pure_pursuit imports (core HermiteSmoother / PurePursuitTracker and the
 # sibling pure_pursuit_follower.py) are deliberately deferred into
 # _build_pure_pursuit() so they are loaded ONLY when ~controller:=pure_pursuit.
@@ -78,6 +82,10 @@ MODE_VISUAL_SERVOING = "visual_servoing"
 # the FC to hold heading (stop rotating) while we command zero velocity, so the
 # platform is stable for a clean voxel update -- "forward mode but not flying".
 MODE_FORWARD = AXIS_TO_MODE[ControlAxis.FORWARD]
+# "Turning" mode, held through the physical yaw coast at the end of a turn so the
+# mode-authoritative depth gate stays frozen until the drone has actually stopped
+# (the inertia frames right after a turn are the worst to fuse). See _ctrl_loop.
+MODE_TURNING = AXIS_TO_MODE[ControlAxis.YAW]
 
 
 class _Bringup:
@@ -116,6 +124,16 @@ class WaypointFollowerNode:
             # followed by a stop + voxel update + re-measure (not one big sweep).
             yaw_burst_max_rad=math.radians(float(G("~yaw_burst_max_deg", 25.0))),
             yaw_burst_max_ticks=int(G("~yaw_burst_max_ticks", 30)),
+            # Master on/off for freeze-during-rotation (shared with the holonomic
+            # supervisor via ~freeze_on_rotation). False keeps the map live in turns.
+            freeze_on_rotation=bool(G("~freeze_on_rotation", True)),
+            # Angle-gated map freeze: a turn LARGER than this freezes the voxel map
+            # (and forces the post-turn re-observation below); a smaller correction
+            # stays live so the map keeps updating through a gentle nudge.
+            freeze_yaw_thresh_rad=math.radians(float(G("~freeze_yaw_thresh_deg", 20.0))),
+            # Fresh voxel updates a frozen turn re-observes while stopped before it
+            # advances/turns again (>=2: never act on a map built before the turn).
+            settle_map_updates=int(G("~settle_map_updates", 2)),
             # Graded-pulse / mid-burst-feedback / anti-deadlock yaw upgrades. All
             # default OFF (inert); the launch enables them (needs ctrl_rate_hz:=10
             # for the 4 deg/tick -> 8 deg-min / 24 deg-cap numbers).
@@ -164,6 +182,25 @@ class WaypointFollowerNode:
         elif self.controller_kind == "pure_pursuit":
             self.follower = self._build_pure_pursuit(G)
 
+        # ── Rotation supervisor (holonomic controllers only) ─────────
+        # The one-axis follower freezes + re-observes inside its own state machine.
+        # The CONTINUOUS holonomic trackers (multi_axis, pure_pursuit) have no
+        # discrete turn, so this supervisor imposes the same discipline on them:
+        # freeze the map throughout any turn (rate-based) and stop every
+        # ~rot_reobserve_every_deg of rotation to re-observe >=settle_map_updates
+        # voxels while stopped. ~freeze_on_rotation is the shared master switch.
+        self.rot_sup = RotationReobserveSupervisor(RotationSupervisorParams(
+            enabled=bool(G("~freeze_on_rotation", True)),
+            wz_turn_on=float(G("~rot_wz_turn_on", 0.20)),
+            wz_turn_off=float(G("~rot_wz_turn_off", 0.10)),
+            turn_off_ticks=int(G("~rot_turn_off_ticks", 3)),
+            reobserve_every_rad=math.radians(float(G("~rot_reobserve_every_deg", 25.0))),
+            settle_eps=float(G("~yaw_settle_eps", 0.05)),
+            settle_dwell_s=float(G("~yaw_settle_dwell_s", 0.8)),
+            settle_map_updates=int(G("~settle_map_updates", 2)),
+            max_coast_s=float(G("~rot_max_coast_s", 2.0)),
+            map_wait_timeout_s=float(G("~map_wait_timeout_s", 3.0))))
+
         # ── Pose estimator ───────────────────────────────────────────
         # Fuses the ~10 Hz noisy /gt_pose stream with the command being executed,
         # so the follower (run at ctrl_rate_hz) sees a DENOISED pose + yaw-rate:
@@ -202,6 +239,11 @@ class WaypointFollowerNode:
         self.ctrl_rate_hz = float(G("~ctrl_rate_hz", 5.0))
         self.status_hz = float(G("~status_hz", 1.0))
         self.freeze_during_yaw = bool(G("~freeze_during_yaw", True))
+        # Hold 'turning' demo-mode through the physical yaw coast (until wz~0) so
+        # the mode-authoritative voxel gate stays frozen over the post-turn inertia
+        # settle, not just the commanded burst. Off = request forward the instant
+        # YAW_SETTLE begins (legacy; relies on ~resume_settle_sec on the gate node).
+        self.freeze_through_coast = bool(G("~freeze_through_coast", True))
         # Default 0: bring-up motion is gated event-driven by the MAP_SETTLE voxel
         # warm-up, not by a fixed time hold. Set >0 only to force an extra blanket
         # hold after node start.
@@ -527,34 +569,67 @@ class WaypointFollowerNode:
         # tell it whether that axis is confirmed (until then it holds zero).
         axis = self.follower.required_axis()
         confirmed = True
+        defer_stop_mode = False
+        sup = None                         # holonomic rotation-supervisor decision
         if axis is not None:
             mode = AXIS_TO_MODE[axis]
             confirmed = (self.current_demo_mode == mode)
             self._request_demo_mode(mode)
         elif self._holonomic:
-            # The holonomic controllers (multi_axis, pure_pursuit) need no
-            # per-axis handshake (they drive all axes at once); request the mode
-            # best-effort and, unless ~mx_require_mode, proceed regardless.
-            self._request_demo_mode(self.multi_axis_demo_mode)
+            # The holonomic controllers (multi_axis, pure_pursuit) drive all axes
+            # at once, so a supervisor (not the tracker) owns the rotation freeze:
+            # from last tick's commanded yaw rate + the heading + the voxel count it
+            # decides freeze (-> request 'turning', which the mode-authoritative gate
+            # freezes on) and hold (-> stop the tracker for a stationary re-observe).
+            sup = self.rot_sup.update(pose2d.yaw, self._last_pub_wz, self.dt,
+                                      self._bev_count)
+            want_mode = MODE_TURNING if sup.freeze else self.multi_axis_demo_mode
+            self._request_demo_mode(want_mode)
+            # Do not gate the tracker on 'turning' confirmation (that would deadlock
+            # the freeze); proceed unless the operator explicitly requires the mode.
             confirmed = (not self.multi_axis_require_mode
-                         or self.current_demo_mode == self.multi_axis_demo_mode)
+                         or self.current_demo_mode == want_mode)
+        elif self.freeze_through_coast:
+            # In a stop, but pick the mode AFTER stepping so it can follow
+            # cmd.freeze: while still coasting out of a frozen turn we hold
+            # 'turning' (the mode-authoritative voxel gate stays frozen through the
+            # inertia settle); once actually stopped we request forward mode.
+            defer_stop_mode = True
         else:
-            # In a stop (settle/brake/done): request forward mode -- hold heading,
-            # do not fly -- so the platform is stable for a clean voxel update.
+            # Legacy: request forward mode the instant the stop begins (relies on
+            # the gate node's ~resume_settle_sec to skip the physical coast).
             self._request_demo_mode(MODE_FORWARD)
 
+        # Fresh voxel updates a frozen-turn stop must re-observe (stopped, sensors
+        # live) before the follower may move on. 0 when advancing or in a small
+        # live correction -> no stationary re-observation is forced.
+        map_need = getattr(self.follower, "settle_map_updates_required", 0)
         hold = (est_hold
-                or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec)
+                or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec
+                or (sup is not None and sup.hold))   # supervisor mid-turn stop
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
-                                 hold=hold, map_ready=self._map_ready())
+                                 hold=hold, map_ready=self._map_ready(map_need))
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
         self._last_pub_vy = (cmd.vy if self._holonomic else 0.0)
 
-        if cmd.freeze is not None:
+        if defer_stop_mode:
+            # Coasting out of a frozen turn (cmd.freeze True) -> hold 'turning' so
+            # the gate stays frozen over the inertia; stopped/dwelling/braking
+            # (cmd.freeze False/None) -> forward mode for the clean stationary
+            # voxel update. cmd.freeze is None only under an external hold, which
+            # already means "don't move", so forward is the safe choice there.
+            self._request_demo_mode(MODE_TURNING if cmd.freeze else MODE_FORWARD)
+
+        if sup is not None:
+            # Holonomic: the supervisor owns the freeze (the 'turning' mode was
+            # already requested above); mirror it onto the /sensor_gate/freeze
+            # fallback bool so both freeze signals agree.
+            self._set_freeze(sup.freeze and self.freeze_during_yaw)
+        elif cmd.freeze is not None:
             # The core asks to freeze only while rotating; ~freeze_during_yaw
             # lets an operator disable that without touching the algorithm.
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
-        self._update_map_wait(cmd)
+        self._update_map_wait(cmd, map_need)
         if self._holonomic:
             self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz)
         else:
@@ -664,14 +739,25 @@ class WaypointFollowerNode:
     def _map_ready(self, min_updates=1):
         """True once ``min_updates`` fresh BEV (voxel) updates have landed since
         the stop unfroze, or the wait timed out (so a mapping stall never hangs
-        the drone). Bring-up passes ~mapsettle_min_updates; running stops use 1."""
-        if not self._await_map:
+        the drone). ``min_updates <= 0`` (advancing / small live correction) or
+        map gating disabled -> always ready. Bring-up passes ~mapsettle_min_updates;
+        a frozen-turn stop passes the follower's ``settle_map_updates_required``
+        (>=2)."""
+        if min_updates <= 0 or not self.require_map_update:
             return True
+        if not self._await_map:
+            # Gating is ON but this stop's wait is not armed yet: the coast->dwell
+            # edge arms it (in _update_map_wait) AFTER this is consulted each tick.
+            # Treat un-armed as NOT ready so a dwell that would otherwise finish in
+            # its very first tick (dt >= yaw_settle_dwell_s) can never skip the
+            # >=2-update re-observation; arming lands the same tick.
+            return False
         if self._bev_count - self._await_baseline >= min_updates:
             return True
         if (rospy.Time.now() - self._await_t0).to_sec() > self.map_wait_timeout_s:
-            rospy.logwarn_throttle(2.0, "[MAP] no voxel update within %.1fs -- "
-                                   "proceeding", self.map_wait_timeout_s)
+            rospy.logwarn_throttle(2.0, "[MAP] fewer than %d voxel updates within "
+                                   "%.1fs -- proceeding", min_updates,
+                                   self.map_wait_timeout_s)
             return True
         return False
 
@@ -684,10 +770,13 @@ class WaypointFollowerNode:
             self._await_map = False
             self._enter(_Bringup.WAIT_PATH if not self.have_path else _Bringup.RUNNING)
 
-    def _update_map_wait(self, cmd):
-        """Track the RUNNING stop: start a fresh map wait when a YAW_SETTLE
-        unfreezes (begins its dwell), and end it once the settle is left."""
-        in_dwell = (cmd.state == FollowerState.YAW_SETTLE and cmd.freeze is False)
+    def _update_map_wait(self, cmd, min_updates):
+        """Track the RUNNING stop: start a fresh map wait when a *frozen* turn's
+        YAW_SETTLE unfreezes (begins its dwell, ``min_updates > 0``), and end it
+        once the settle is left. A small live correction (``min_updates == 0``)
+        never starts a wait, so the map is only re-observed when it was frozen."""
+        in_dwell = (cmd.state == FollowerState.YAW_SETTLE and cmd.freeze is False
+                    and min_updates > 0)
         if in_dwell and not self._await_map and self.require_map_update:
             self._await_map = True
             self._await_baseline = self._bev_count
@@ -903,11 +992,25 @@ if __name__ == "__main__":
 #       ~yaw_burst_max_deg (25; per-burst increment -- big turns split into chunks,
 #         each followed by a stop + voxel update + re-measure)
 #       ~yaw_acquisition_radius (0.20; cross-track ADVANCE tol, m) ~yaw_acquire_max_deg (35)
+#   rotation freeze: ~freeze_on_rotation (true; MASTER on/off -- false keeps the map
+#       live through every turn, for both controller families)
+#     waypoint controller (angle-gated): ~freeze_yaw_thresh_deg (20; a turn LARGER than
+#       this freezes the voxel map and forces the post-turn re-observation -- a smaller
+#       correction skips both; 0 = freeze every turn) ~settle_map_updates (2; fresh
+#       voxel updates a frozen turn re-observes, stopped, before it moves on)
+#       ~freeze_through_coast (true; hold 'turning' until wz~0 so the gate stays frozen
+#       over the end-of-turn inertia, not just the commanded burst)
+#     holonomic supervisor (pure_pursuit/multi_axis; rate-based freeze-throughout +
+#       stop every N deg to re-observe): ~rot_wz_turn_on (0.20 rad/s) ~rot_wz_turn_off
+#       (0.10) ~rot_turn_off_ticks (3) ~rot_reobserve_every_deg (25) ~rot_max_coast_s
+#       (2.0); reuses ~settle_map_updates ~yaw_settle_dwell_s ~yaw_settle_eps
+#       ~map_wait_timeout_s
 #   prediction: ~predict_hz (2.0) ~predict_horizon_s (30) ~predict_yaw_tau_s (0.5)
 #       ~predict_vx_tau_s (0.3)
-#   map-settle (forward mode + a fresh voxel update before any motion / before the
+#   map-settle (forward mode + fresh voxel updates before any motion / before the
 #     next turn): ~require_map_update (true) ~map_update_topic (/falcon/bev_2d)
 #     ~map_wait_timeout_s (3.0; proceed anyway after this) ~mapsettle_min_s (0.5)
+#     ~mapsettle_min_updates (2; fresh updates before the FIRST move at bring-up)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
 #   controller: ~controller (waypoint | multi_axis | pure_pursuit).
