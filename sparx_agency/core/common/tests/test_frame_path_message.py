@@ -5,6 +5,7 @@ import pytest
 from sparx_agency.core.common.frame_path_message import (
     ParsedFramePath,
     parse_frame_path_message,
+    resolve_frame_path,
 )
 
 
@@ -39,6 +40,27 @@ def test_path_with_spaces_is_preserved():
     p = parse_frame_path_message("/tmp/my frames/f.jpg 7 8")
     assert p.path == "/tmp/my frames/f.jpg"
     assert (p.sec, p.nsec) == (7, 8)
+
+
+def test_resolve_no_search_dir_returns_original():
+    # Empty search_dir = live behaviour: the recorded path is used verbatim.
+    assert resolve_frame_path("/tmp/xtend_depth/frame_1.npy") == \
+        "/tmp/xtend_depth/frame_1.npy"
+
+
+def test_resolve_search_dir_hit_wins(tmp_path):
+    # The basename exists under search_dir -> that location overrides the
+    # (stale) recorded directory. This is the offline/recording fix.
+    (tmp_path / "frame_1.npy").write_bytes(b"x")
+    got = resolve_frame_path("/tmp/gone/frame_1.npy", str(tmp_path))
+    assert got == str(tmp_path / "frame_1.npy")
+
+
+def test_resolve_search_dir_miss_falls_back(tmp_path):
+    # Basename absent under search_dir -> return the original so the caller's
+    # load raises and surfaces the real miss (no silent wrong file).
+    got = resolve_frame_path("/tmp/xtend_depth/frame_9.npy", str(tmp_path))
+    assert got == "/tmp/xtend_depth/frame_9.npy"
 
 
 @pytest.mark.parametrize("bad", [

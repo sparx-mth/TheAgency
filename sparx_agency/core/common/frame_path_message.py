@@ -16,6 +16,7 @@ This module is deliberately ROS-free and Python 3.8 compatible so it can be
 shared by the ROS1 adapter nodes (which import ``core`` under Python 3.8).
 """
 
+import os
 from typing import NamedTuple
 
 
@@ -70,3 +71,31 @@ def parse_frame_path_message(data: str) -> ParsedFramePath:
         raise ValueError(
             "frame-path stamp tokens must be integers, got %r" % data)
     return ParsedFramePath(path=path, sec=sec, nsec=nsec)
+
+
+def resolve_frame_path(path: str, search_dir: str = "") -> str:
+    """Resolve a frame-path message's path to an existing file.
+
+    Live, the absolute path in the message is correct and used as-is. For an
+    OFFLINE bag replay it often is not: the path was baked in when the frame was
+    written (e.g. ``/tmp/xtend_depth/frame_00006296.npy``), but on the replay
+    host the frames live somewhere else (a recording folder) and/or that exact
+    file was rotated away. ``search_dir`` decouples the consumer from the
+    recorded directory: when set, the file is looked up there BY BASENAME and,
+    if found, that location wins. Otherwise (unset, or basename absent there)
+    the original path is returned unchanged, so live behaviour is untouched.
+
+    Args:
+        path: The path token from the frame-path message.
+        search_dir: Directory holding the actual frames by basename; ``""``
+            disables the override (default live behaviour).
+
+    Returns:
+        A filesystem path to load. Existence is NOT guaranteed when the override
+        misses — the caller's load still raises, surfacing the real miss.
+    """
+    if search_dir:
+        candidate = os.path.join(search_dir, os.path.basename(path))
+        if os.path.exists(candidate):
+            return candidate
+    return path

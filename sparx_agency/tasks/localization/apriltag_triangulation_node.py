@@ -47,8 +47,6 @@ from cv_bridge import CvBridge
 
 from sparx_agency.core.localization.tag_triangulation import (
     TagWorldPose,
-    TagObservation,
-    estimate_camera_pose_from_tags,
     transform_to_pose,
     print_transform_debug,
     world_T_tag_from_pose,
@@ -57,10 +55,11 @@ from sparx_agency.core.common.filters import ExponentialMovingAverage
 
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     load_camera_calib_yaml,
-    tag_object_points,
     make_detector,
-    invert_T,
-    solvepnp_ippe_square,
+)
+from sparx_agency.tasks.localization.common.apriltag_pnp import (
+    TagDetection,
+    estimate_camera_pose,
 )
 
 
@@ -195,6 +194,9 @@ class TagTriangulationOpenCVTask:
         self.alpha = 0.1
         self._pos_ema = ExponentialMovingAverage(alpha=self.alpha)
         self.filtered_q = None
+        # Previous camera position in world, used to disambiguate the planar
+        # (IPPE) two-fold pose ambiguity of a single tag via temporal continuity.
+        self._prev_cam_pos = None
         self.min_margin = float(min_margin)
 
         if self.use_ros_image:
@@ -326,7 +328,7 @@ class TagTriangulationOpenCVTask:
 
                 dets = self.detector.detect(gray)
 
-                observations: List[TagObservation] = []
+                tag_dets: List[TagDetection] = []
                 detections_info = []
 
                 for d in dets:
@@ -340,39 +342,23 @@ class TagTriangulationOpenCVTask:
                         continue
 
                     corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
-
                     specific_tag_size = self.tag_sizes.get(tag_id, self.default_tag_size)
-                    current_obj_pts = tag_object_points(specific_tag_size)
 
-                    camera_T_tag = solvepnp_ippe_square(
-                        corners_2d=corners,
-                        obj_pts_3d=current_obj_pts,
-                        K=self.K,
-                        D=self.D,
-                    )
-                    if camera_T_tag is None:
-                        continue
-
-                    # Calculate the area of the tag in pixels to use as a confidence weight
-                    area = float(cv2.contourArea(corners.astype(np.float32)))
-
-                    # Append observation with the calculated weight
-                    observations.append(TagObservation(
+                    tag_dets.append(TagDetection(
                         tag_id=tag_id,
-                        cam_T_tag=camera_T_tag,
-                        weight=area
+                        corners=corners,
+                        size_m=specific_tag_size,
                     ))
 
                     detections_info.append(
                         {
                             "tag_id": tag_id,
-                            "area_px2": area,
+                            "area_px2": float(cv2.contourArea(corners.astype(np.float32))),
                             "corners_px": [[float(x), float(y)] for (x, y) in corners],
                         }
-
                     )
 
-                if not observations:
+                if not tag_dets:
                     if self.visualize:
                         cv2.putText(
                             frame,
@@ -401,10 +387,14 @@ class TagTriangulationOpenCVTask:
                     )
                     continue
 
-                est = estimate_camera_pose_from_tags(
-                    observations=observations,
-                    tag_map=self.tag_map,
-                    fuse_method=self.fuse_method,
+                # One joint PnP over all tags' pooled corners when >= 2 tags are
+                # visible; a disambiguated IPPE-square solve for a single tag.
+                est = estimate_camera_pose(
+                    detections=tag_dets,
+                    tag_world_poses=self.tag_map,
+                    K=self.K,
+                    D=self.D,
+                    prev_cam_pos_world=self._prev_cam_pos,
                 )
 
                 if est is None:
@@ -418,6 +408,10 @@ class TagTriangulationOpenCVTask:
                         }
                     )
                     continue
+
+                # Seed next frame's temporal disambiguation with this (unfiltered)
+                # camera position; translation is identical in the CV and ROS frames.
+                self._prev_cam_pos = est.world_T_cam[:3, 3].copy()
 
                 cv_to_ros = np.array([
                     [0.0, -1.0, 0.0, 0.0],
