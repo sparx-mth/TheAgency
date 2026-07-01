@@ -2,11 +2,18 @@
 """
 sim_adapter_node.py -- ROS1 shim: make Gazebo's sjtu_drone look like the XTEND.
 
-With this node running, the Gazebo sim publishes on the EXACT topic names the
-real XTEND uses (/xtend/rgb, /xtend/depth_m, /xtend/april_tag_pose) and
-RESAMPLES the camera images so the output matches the real XTEND's intrinsics
-exactly -- so ``real_drone.launch`` is reused for sim with ZERO camera or topic
-changes downstream. Two differences are absorbed entirely inside this node:
+With this node running, the Gazebo sim publishes the XTEND's localization on
+/xtend/localization and RESAMPLES the camera images so the output matches the
+real XTEND's intrinsics exactly. Two differences are absorbed entirely inside
+this node:
+
+NOTE -- image transport. The real XTEND no longer streams raw RGB/depth Images;
+it saves each frame to disk and publishes frame-path strings
+(/xtend/rgb_frame_path, /xtend/depth_frame_path) that the consumers load. This
+emulator still emits raw Images on /xtend/rgb and /xtend/depth_m, so it does NOT
+drive the frame-path consumers (mapping_sync, navdp_click) as configured for the
+real drone; driving those from sim would need a frame-path producer that writes
+the resampled frames to disk. The localization rename below is wired through.
 
 1. Camera intrinsics. The XTEND depth is 504x294 with fx=253.07, fy=287.54,
    cx=236.14, cy=81.73 -- an OFF-CENTRE principal point and, crucially,
@@ -50,7 +57,7 @@ Responsibilities are split:
   in   /xtend/demo_mode_request (String)
   out  ~out_rgb_topic   (Image, target_w x target_h)  /xtend/rgb
   out  ~out_depth_topic (Image, target_w x target_h)  /xtend/depth_m
-  out  ~out_pose_topic  (PoseStamped)                 /xtend/april_tag_pose
+  out  ~out_pose_topic  (PoseStamped)                 /xtend/localization
   out  ~out_cmd_topic   (Twist, bridged to Gazebo)    /simple_drone/cmd_vel
   out  /xtend/demo_mode (String, latched)
 
@@ -92,7 +99,7 @@ class SimAdapterNode:
         self.in_cmd_t = G("~in_cmd_topic", "/cmd_vel")
         self.out_rgb_t = G("~out_rgb_topic", "/xtend/rgb")
         self.out_depth_t = G("~out_depth_topic", "/xtend/depth_m")
-        self.out_pose_t = G("~out_pose_topic", "/xtend/april_tag_pose")
+        self.out_pose_t = G("~out_pose_topic", "/xtend/localization")
         self.out_cmd_t = G("~out_cmd_topic", "/simple_drone/cmd_vel")
         self.pose_frame = G("~pose_frame_id", "world")
 
@@ -270,7 +277,7 @@ if __name__ == "__main__":
 #       ~in_depth_topic (/simple_drone/front_depth/depth/image_raw)
 #       ~in_pose_topic (/simple_drone/gt_pose) ~in_cmd_topic (/cmd_vel)
 #       ~out_rgb_topic (/xtend/rgb) ~out_depth_topic (/xtend/depth_m)
-#       ~out_pose_topic (/xtend/april_tag_pose) ~out_cmd_topic (/simple_drone/cmd_vel)
+#       ~out_pose_topic (/xtend/localization) ~out_cmd_topic (/simple_drone/cmd_vel)
 #       ~pose_frame_id (world)
 #   target intrinsics (must match real_drone.launch cam_*):
 #       ~target_width (504) ~target_height (294)

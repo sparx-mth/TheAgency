@@ -1,5 +1,5 @@
 import math
-from typing import Any
+from typing import Any, Tuple
 import numpy as np
 from numpy import ndarray, dtype, float64, generic
 
@@ -33,33 +33,28 @@ def init_belief(map_shape: tuple[int,int] ,
     num_angles = len(orientations)
     belief = np.zeros((map_lat, map_long, num_angles))
 
-    # Find the orientation index closest to prediction
-    orientation_diffs = np.abs(orientations - robot_orientation_pred)
-    orientation_pred_idx = np.argmin(orientation_diffs)
-
-    # Apply gaussian around prediction
-    sigma_spatial = np.array(loc_uncertainty)
+    orientation_pred_idx = int(np.argmin(np.abs(orientations - robot_orientation_pred)))
+    sigma_spatial = np.asarray(loc_uncertainty, dtype=np.float64)
     sigma_angular = 1.0
 
-    for i in range(map_lat):
-        for j in range(map_long):
-            for k in range(num_angles):
-                # Spatial distance
-                offset = np.array([i - robot_loc_pred[0], j - robot_loc_pred[1]])
-                # spatial_dist = np.sqrt((i - robot_loc_pred[0]) ** 2 + (j - robot_loc_pred[1]) ** 2)
+    rows = np.arange(map_lat, dtype=np.float64)
+    cols = np.arange(map_long, dtype=np.float64)
+    wy = np.exp(-0.5 * ((rows - robot_loc_pred[0]) / sigma_spatial[0]) ** 2)
+    wx = np.exp(-0.5 * ((cols - robot_loc_pred[1]) / sigma_spatial[1]) ** 2)
+    # Matches original: norm([exp(-0.5*dy²), exp(-0.5*dx²)]) = sqrt(wy² + wx²)
+    spatial_weight = np.sqrt(wy[:, None] ** 2 + wx[None, :] ** 2)  # (H, W)
 
-                # Angular distance (handle wrapping)
-                angular_dist = min(abs(k - orientation_pred_idx),
-                                   num_angles - abs(k - orientation_pred_idx))
+    angle_idxs = np.arange(num_angles, dtype=np.float64)
+    angular_dist = np.minimum(
+        np.abs(angle_idxs - orientation_pred_idx),
+        num_angles - np.abs(angle_idxs - orientation_pred_idx),
+    )
+    angular_weight = np.exp(-0.5 * (angular_dist / sigma_angular) ** 2)  # (K,)
 
-                # Gaussian weights
-                spatial_weight = np.linalg.norm(np.exp(-0.5 * (offset / sigma_spatial) ** 2))
-                # spatial_weight = np.exp(-0.5 * (spatial_dist / sigma_spatial) ** 2)
-                angular_weight = np.exp(-0.5 * (angular_dist / sigma_angular) ** 2)
-
-                belief[i, j, k] = spatial_weight * angular_weight
-
-    belief /= belief.sum()
+    belief = spatial_weight[:, :, None] * angular_weight[None, None, :]
+    total = belief.sum()
+    if total > 0:
+        belief /= total
     return belief
 
 
@@ -97,33 +92,49 @@ def ray_cast_lut_pose(grid, orientations, beam_angles, max_range, step=0.1):
         raise ValueError("Max range must be positive.")
 
     m, n = grid.shape
-
     lut = np.ones((m, n, len(orientations), len(beam_angles)), dtype=np.float32) * np.inf
 
     for i in range(m):
         for j in range(n):
             if grid[i, j] == 1:
                 continue
-
             for k, theta in enumerate(orientations):
                 for b, rel in enumerate(beam_angles):
                     angle = theta + rel
                     dist = 0.0
-
                     while dist < max_range:
                         x = int(round(i + dist * math.cos(angle)))
                         y = int(round(j + dist * math.sin(angle)))
-
                         if x < 0 or y < 0 or x >= m or y >= n:
                             dist += max_range
                             break
                         if grid[x, y] == 1:
                             break
-
                         dist += step
-
                     lut[i, j, k, b] = dist
 
+def ray_cast_lut_vectorized(grid: np.ndarray, orientations: np.ndarray,
+                             beam_angles: np.ndarray, max_range: float,
+                             step: float = 1.0) -> np.ndarray:
+    """Build LUT by vectorising ray-marching over all free cells simultaneously.
+
+    Prefer over ray_cast_lut_pose for any non-trivial map.  Run offline via
+    precompute_amcl_lut.py and cache the result alongside the map.
+    """
+    if step <= 0:
+        raise ValueError("Step must be positive.")
+    m, n = grid.shape
+    lut = np.full((m, n, len(orientations), len(beam_angles)), max_range, dtype=np.float32)
+    free_r, free_c = np.where(grid == 0)
+    if len(free_r) == 0:
+        return lut
+    n_steps = int(max_range / step) + 1
+    n_or = len(orientations)
+    for k, theta in enumerate(orientations):
+        for b, rel in enumerate(beam_angles):
+            _ray_fill(lut, grid, free_r, free_c, theta + rel, max_range, step, n_steps, m, n, k, b)
+        if (k + 1) % max(1, n_or // 4) == 0:
+            print(f"  LUT: {k + 1}/{n_or} orientations done", flush=True)
     return lut
 
 
@@ -188,7 +199,6 @@ def measurement_update_pose(bel, lut, z, sigma, occupancy):
     """
     likelihood = range_likelihood_lut(z, lut, sigma)
     likelihood[occupancy == 1] = 0.0
-
     bel_new = bel * likelihood
     s = bel_new.sum()
     if s > 0:
@@ -196,13 +206,13 @@ def measurement_update_pose(bel, lut, z, sigma, occupancy):
     return bel_new
 
 
-def amcl_estimator(lut: ndarray[tuple[Any, ...], dtype[float64]],
-                   orientations: ndarray[tuple[Any, ...], dtype[float64]],
-                   robot_loc_prediction: ndarray[tuple[Any, ...], dtype[Any]],
+def amcl_estimator(lut: np.ndarray,
+                   orientations: np.ndarray,
+                   robot_loc_prediction: np.ndarray,
                    robot_orientation_prediction: float,
-                   world: ndarray[tuple[int, ...], dtype[float64]],
-                   z_measured_pose: ndarray[tuple[Any, ...], dtype[float64]],
-                   prediction_uncertainty: tuple[int, int]):
+                   world: np.ndarray,
+                   z_measured_pose: np.ndarray,
+                   prediction_uncertainty: tuple):
     """
     Estimate the robot's current location and orientation using the AMCL algorithm.
 
@@ -235,15 +245,14 @@ def amcl_estimator(lut: ndarray[tuple[Any, ...], dtype[float64]],
     Raises:
         None
     """
-
-
-    belief = init_belief(map_shape=world.shape, orientations=orientations, robot_loc_pred=robot_loc_prediction,
-                         robot_orientation_pred=robot_orientation_prediction, loc_uncertainty=prediction_uncertainty)
-
-    belief = measurement_update_pose(
-        belief, lut, z_measured_pose, sigma=SIGMA, occupancy=world
+    belief = init_belief(
+        map_shape=world.shape,
+        orientations=orientations,
+        robot_loc_pred=robot_loc_prediction,
+        robot_orientation_pred=robot_orientation_prediction,
+        loc_uncertainty=prediction_uncertainty,
     )
-
+    belief = measurement_update_pose(belief, lut, z_measured_pose, sigma=SIGMA, occupancy=world)
     idx = np.unravel_index(np.argmax(belief), belief.shape)
 
     robot_loc_estimate = np.array(idx[:2])

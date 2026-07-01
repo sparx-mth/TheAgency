@@ -16,7 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sparx_agency.robots.XTEND.xtend_online_bridge_base import OnlineXtendBridgeBase
 from sparx_agency.robots.XTEND.xtend_rtsp_image_publisher import LatestFrameGrabber
 from sparx_agency.robots.common.helpers import load_camera_info_from_yaml
-from sparx_agency.robots.common.image_utils import pad_width_center, center_crop_resize
+from sparx_agency.robots.common.image_utils import BadFrameGuard, pad_width_center, center_crop_resize
 
 
 class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
@@ -44,7 +44,7 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         crop_width: int = 540,
         crop_height: int = 420,
         output_width: int = 504,
-        output_height: int = 392,
+        output_height: int = 294,
         drop_bad_frames: bool = True,
         bad_frame_mean_min: float = 2.0,
         bad_frame_std_min: float = 1.0,
@@ -68,6 +68,9 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             log_dir=log_dir,
         )
 
+        self.bad_frame_mean_min = bad_frame_mean_min
+        self.bad_frame_std_min = bad_frame_std_min
+        self.bad_frame_sample_step = bad_frame_sample_step
         if preprocess_mode not in ("pad", "crop_resize", "resize"):
             raise ValueError(
                 f"preprocess_mode must be 'pad', 'crop_resize', or 'resize', got: {preprocess_mode!r}"
@@ -87,12 +90,13 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
         self.output_height = int(output_height)
 
         self.drop_bad_frames = bool(drop_bad_frames)
-        self.bad_frame_mean_min = float(bad_frame_mean_min)
-        self.bad_frame_std_min = float(bad_frame_std_min)
-        self.bad_frame_sample_step = max(1, int(bad_frame_sample_step))
-        self.bad_frame_log_every = max(1, int(bad_frame_log_every))
-        self.bad_frame_count = 0
-        self.good_frame_count = 0
+        self.frame_guard = BadFrameGuard(
+            mean_min=bad_frame_mean_min,
+            std_min=bad_frame_std_min,
+            sample_step=bad_frame_sample_step,
+            log_every=bad_frame_log_every,
+            prefix="image",
+        )
 
         self.bridge = CvBridge()
 
@@ -169,63 +173,10 @@ class OnlineNavBridgePublisher(OnlineXtendBridgeBase):
             output_height=self.output_height,
         )
 
-    def is_bad_frame(self, frame) -> tuple[bool, str]:
-        """Return True for empty/flat frames that should not enter the pipeline."""
-        if frame is None:
-            return True, "frame is None"
-
-        if not isinstance(frame, np.ndarray):
-            return True, f"not ndarray: {type(frame).__name__}"
-
-        if frame.size == 0:
-            return True, "zero-size ndarray"
-
-        if frame.ndim != 3 or frame.shape[2] != 3:
-            return True, f"unexpected shape: {frame.shape}"
-
-        h, w = frame.shape[:2]
-        if h <= 0 or w <= 0:
-            return True, f"invalid shape: {frame.shape}"
-
-        small = frame[:: self.bad_frame_sample_step, :: self.bad_frame_sample_step]
-
-        if not np.isfinite(small).all():
-            return True, "contains non-finite values"
-
-        mean_val = float(small.mean())
-        std_val = float(small.std())
-
-        if mean_val < self.bad_frame_mean_min:
-            return True, f"too dark/empty: mean={mean_val:.3f}"
-
-        if std_val < self.bad_frame_std_min:
-            return True, f"too flat/empty: std={std_val:.3f}"
-
-        return False, f"mean={mean_val:.3f}, std={std_val:.3f}"
-
     def should_publish_frame(self, frame) -> bool:
         if not self.drop_bad_frames:
             return True
-
-        is_bad, reason = self.is_bad_frame(frame)
-        if is_bad:
-            self.bad_frame_count += 1
-            self.good_frame_count = 0
-
-            if self.bad_frame_count == 1 or self.bad_frame_count % self.bad_frame_log_every == 0:
-                print(f"[image][drop] bad frame #{self.bad_frame_count}: {reason}")
-
-            return False
-
-        self.good_frame_count += 1
-        if self.bad_frame_count > 0:
-            print(
-                f"[image] recovered after {self.bad_frame_count} dropped bad frame(s); "
-                f"first good frame: {reason}"
-            )
-            self.bad_frame_count = 0
-
-        return True
+        return self.frame_guard.should_pass(frame)
 
     async def image_publish_loop(self):
         sleep_time = 1.0 / max(self.frequency, 1e-6)

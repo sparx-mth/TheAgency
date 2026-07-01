@@ -24,9 +24,16 @@ class ControlAxis(str, Enum):
 
 
 class FollowerState(str, Enum):
-    """Navigation states. Platform bring-up states live in the ROS adapter."""
+    """Navigation states. Platform bring-up states live in the ROS adapter.
+
+    ``YAW_SETTLE`` is the pause that follows every rotation burst: the platform
+    coasts to a stop (yaw inertia) and then dwells in place so the AprilTag
+    localization — which jumps while rotating but is accurate when still —
+    re-converges before the next heading is measured.
+    """
 
     YAW_ALIGN = "YAW_ALIGN"
+    YAW_SETTLE = "YAW_SETTLE"
     ADVANCE = "ADVANCE"
     BRAKE = "BRAKE"
     DONE = "DONE"

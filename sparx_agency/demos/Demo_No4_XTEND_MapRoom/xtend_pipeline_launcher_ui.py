@@ -8,7 +8,7 @@ and keeps the full command list in one place.
 Safety:
 - Use the UI for ARM / TAKEOFF / LAND / DISARM.
 - Only online_nav_bridge_publisher.py should own the XTEND WebSocket.
-- Movement path: planner/replayer -> /cmd_vel -> xtend_twist_to_cmd_nav -> /xtend/cmd_nav -> online bridge -> drone.
+- Movement path: planner/replayer -> /cmd_vel -> online bridge (built-in Twist converter) -> drone.
 """
 from __future__ import annotations
 
@@ -20,16 +20,17 @@ from tkinter import messagebox, ttk
 from typing import Literal
 
 JETSON_SSH_DEFAULT = "user@192.0.0.89"
+JETSON_REPO = "/home/user/agency_ws"
 
 JETSON_ENV = """
 cd /home/user/GIT/TheAgency
 source /opt/ros/humble/setup.bash
-source /home/user/GIT/TheAgency/theagency_venv/bin/activate
+source /home/user/GIT/TheAgency/venv/bin/activate
 export ROS_DOMAIN_ID=5
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH=/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages:/home/user/GIT/TheAgency:/home/user/GIT/TheAgency/sparx_agency:${PYTHONPATH}
-"""
+""".replace("/home/user/GIT/TheAgency", JETSON_REPO)
 
 PC_ENV = """
 cd /home/user1/GIT/TheAgency
@@ -57,49 +58,36 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         name="1. XTEND online bridge + RGB publisher",
         machine="jetson",
         tmux_name="xtend_bridge",
-        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x392 crop-resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav.",
+        description="Owns XTEND WebSocket, publishes /xtend/rgb as 504x294 resized frames, /xtend/bearing, /xtend/local_telemetry, subscribes to /xtend/cmd_nav and /cmd_vel (Twist).",
         command="""
         python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/online_nav_bridge_publisher.py \
-          --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
-          --crop-width 540 \
-          --crop-height 420 \
+          --camera-info-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
+          --preprocess-mode resize \
           --output-width 504 \
-          --output-height 392
+          --output-height 294
         """,
     ),
     LaunchItem(
         name="2. DA3 Small depth processor",
         machine="jetson",
         tmux_name="xtend_depth",
-        description="Subscribes to /xtend/rgb 504x392, runs DA3-SMALL, converts raw depth to meters using LUT, publishes /xtend/depth_m.",
+        description="Subscribes to /xtend/rgb 504x294, runs DA3-SMALL, converts raw depth to meters using LUT, publishes /xtend/depth_m.",
         command="""
         python3 /home/user/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
           --ros-args \
           -p image_topic:=/xtend/rgb \
           -p depth_topic:=/xtend/depth_m \
-          -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-392x504.engine \
+          -p engine_path:=/home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-294x504.engine \
           -p config_yaml:=/home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml \
           -p model_type:=small_lut \
-          -p camera_info_mode:=crop_resize \
+          -p camera_info_mode:=resize \
           -p apply_metric_focal_scaling:=false \
           -p small_lut_clip_min_m:=0.2 \
           -p small_lut_clip_max_m:=8.0
         """,
     ),
     LaunchItem(
-        name="3. Twist -> XTEND command converter",
-        machine="jetson",
-        tmux_name="xtend_twist_converter",
-        description="Converts /cmd_vel Twist to /xtend/cmd_nav JSON. Calibrated: linear.x=0.3 m/s -> forward thrust 400, forward max 600.",
-        command="""
-python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
-  --cmd-vel-topic /cmd_vel \
-  --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.0
-""",
-    ),
-    LaunchItem(
-        name="4. Optional Twist replayer",
+        name="3. Optional Twist replayer",
         machine="jetson",
         tmux_name="xtend_twist_replayer",
         description="Optional: replays a JSONL Twist log onto /cmd_vel. Edit LOG_PATH before running.",
@@ -196,6 +184,8 @@ def normalize_command(text: str) -> str:
 
 def wrap_with_env(machine: str, command: str) -> str:
     env = JETSON_ENV if machine == "jetson" else PC_ENV
+    if machine == "jetson":
+        command = command.replace("/home/user/GIT/TheAgency", JETSON_REPO)
     return normalize_command(env) + "\n" + normalize_command(command)
 
 
@@ -277,8 +267,9 @@ class XtendPipelineLauncher(tk.Tk):
         self.selected_item = item
         self.desc_text.delete("1.0", "end")
         self.desc_text.insert("end", f"{item.name}\nMachine: {item.machine}\nTmux: {item.tmux_name}\n\n{item.description}")
+        cmd = item.command.replace("/home/user/GIT/TheAgency", JETSON_REPO) if item.machine == "jetson" else item.command
         self.cmd_text.delete("1.0", "end")
-        self.cmd_text.insert("end", normalize_command(item.command))
+        self.cmd_text.insert("end", normalize_command(cmd))
 
     def get_command_text(self) -> str:
         return normalize_command(self.cmd_text.get("1.0", "end"))

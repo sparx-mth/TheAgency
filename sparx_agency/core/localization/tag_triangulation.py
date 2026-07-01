@@ -14,11 +14,6 @@ from sparx_agency.core.common.spatial_math import (
     transform_to_pose,
 )
 
-from .types.tag_triangulation import (
-    TagWorldPose,
-    TagTransformObservation,
-    PoseEstimate,
-)
 
 # -------------------------
 # Data models (ROS-agnostic)
@@ -57,7 +52,6 @@ class PoseEstimate:
 # Math utilities imported from spatial_math:
 #   rpy_to_transform, rot_to_quat, rot_to_rpy, transform_to_pose
 # -------------------------
-
 
 
 def print_transform_debug(name: str, T: np.ndarray):
@@ -205,14 +199,6 @@ def estimate_camera_pose_from_tags(
 
     if not world_poses:
         return None
-
-    if len(world_poses) > 1:
-        print("\n[DEBUG FUSION] --- Multiple Tags Detected ---")
-        total_w = sum(weights)
-        for tid, w in zip(used_ids, weights):
-            norm_w = (w / total_w) * 100 if total_w > 0 else 0
-            print(f"  -> Tag ID: {tid} | Area: {w:.0f}px | Power: {norm_w:.1f}%")
-        print("---------------------------------------------")
 
     # Pass the collected weights to the fusion function
     fused = fuse_world_T_cam(world_poses, weights=weights, method=fuse_method)

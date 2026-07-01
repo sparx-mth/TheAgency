@@ -10,12 +10,17 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
 import websockets
 
+from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import TwistToCmdNavConverter
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
 from sparx_agency.core.common.spatial_math import yaw_to_quaternion
+
+
+_FLIGHT_OPS = frozenset({"arm", "takeoff", "land", "disarm"})
 
 
 def clamp_axis(value: int, limit: int = 1000) -> int:
@@ -47,6 +52,11 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         robot_uid: str,
         *,
         cmd_topic: str = "/xtend/cmd_nav",
+        cmd_vel_topic: str = "/cmd_vel",
+        cmd_vel_angular_delta: float = 0.05,
+        cmd_vel_linear_delta: float = 0.05,
+        cmd_vel_timeout_sec: float = 1.5,
+        cmd_vel_stop_on_timeout: bool = True,
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
         telemetry_frame_id: str = "odom",
@@ -66,6 +76,21 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             self.ros_callback,
             10,
         )
+
+        self._twist_converter = TwistToCmdNavConverter(
+            angular_delta=cmd_vel_angular_delta,
+            linear_delta=cmd_vel_linear_delta,
+            timeout_sec=cmd_vel_timeout_sec,
+            publish_stop_on_timeout=cmd_vel_stop_on_timeout,
+        )
+        self._twist_sub = self.ros_node.create_subscription(
+            Twist,
+            cmd_vel_topic,
+            self._twist_cb,
+            10,
+        )
+        print(f"[bridge] cmd_vel topic:  {cmd_vel_topic}")
+
         self.telemetry_topic = telemetry_topic
         self.bearing_topic = bearing_topic
         self.telemetry_frame_id = telemetry_frame_id
@@ -90,6 +115,8 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         self.x = None
         self.y = None
         self.z = None
+
+        self._flight_op_active: bool = False
 
         self.active_action: str | None = None
         self.active_action_start_t: float | None = None
@@ -131,6 +158,12 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                 raise ValueError("JSON command must be an object")
             if self.loop is None:
                 self.ros_node.get_logger().warn("Async loop is not ready yet; dropping command")
+                return
+            action = data.get("action", "")
+            if self._flight_op_active and action not in _FLIGHT_OPS:
+                self.ros_node.get_logger().info(
+                    f"[bridge] flight op active — dropping cmd_nav action={action!r}"
+                )
                 return
             self.loop.call_soon_threadsafe(self.cmd_queue.put_nowait, data)
         except Exception as exc:
@@ -398,18 +431,34 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
             try:
                 if action == "arm":
-                    await self.timed_async_action("arm", self.arm_robot())
+                    self._flight_op_active = True
+                    try:
+                        await self.timed_async_action("arm", self.arm_robot())
+                    finally:
+                        self._flight_op_active = False
 
                 elif action == "disarm":
-                    self.stop_motion(reason="disarm")
-                    await self.timed_async_action("disarm", self.disarm_robot())
+                    self._flight_op_active = True
+                    try:
+                        self.stop_motion(reason="disarm")
+                        await self.timed_async_action("disarm", self.disarm_robot())
+                    finally:
+                        self._flight_op_active = False
 
                 elif action == "takeoff":
-                    await self.timed_async_action("takeoff", self.takeoff())
+                    self._flight_op_active = True
+                    try:
+                        await self.timed_async_action("takeoff", self.takeoff())
+                    finally:
+                        self._flight_op_active = False
 
                 elif action == "land":
-                    self.stop_motion(reason="land")
-                    await self.timed_async_action("land", self.land())
+                    self._flight_op_active = True
+                    try:
+                        self.stop_motion(reason="land")
+                        await self.timed_async_action("land", self.land())
+                    finally:
+                        self._flight_op_active = False
 
                 elif action == "stop":
                     self.stop_motion(reason="stop")
@@ -446,6 +495,35 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
             finally:
                 self.cmd_queue.task_done()
+
+    def _twist_cb(self, msg: Twist) -> None:
+        if self._flight_op_active:
+            return
+        result = self._twist_converter.process(
+            msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z
+        )
+        if result is None:
+            return
+        action, value = result
+        if self.loop is None:
+            self.ros_node.get_logger().warn("Async loop not ready; dropping Twist command")
+            return
+        self.loop.call_soon_threadsafe(
+            self.cmd_queue.put_nowait, {"action": action, "value": value}
+        )
+
+    async def _twist_watchdog_loop(self):
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+                if self._flight_op_active:
+                    continue
+                result = self._twist_converter.check_timeout()
+                if result is not None:
+                    action, value = result
+                    await self.cmd_queue.put({"action": action, "value": value})
+        except asyncio.CancelledError:
+            pass
 
     def create_extra_tasks(self) -> list[asyncio.Task]:
         return []
@@ -492,6 +570,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                             asyncio.create_task(self.dynamic_executor()),
                             asyncio.create_task(self._ros_spin_loop()),
                             asyncio.create_task(self._telemetry_flush_loop()),
+                            asyncio.create_task(self._twist_watchdog_loop()),
                         ]
                         tasks.extend(self.create_extra_tasks())
 

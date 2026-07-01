@@ -5,11 +5,9 @@ This is the ROS-free core behind the FALCON ``astar_planner`` node. It turns a
 clean, corner-preserving set of world waypoints by composing the reusable core
 primitives:
 
-    occupancy --build_cost_grid--> float cost map (lethal inflation + clearance
-                                   centering cost + UNKNOWN weight)
+    occupancy --build_cost_grid--> float cost map (inflation + UNKNOWN weight)
               --astar_cost_grid_2d--> grid cell path (bbox-restricted, octile)
-              --simplify_path_cells--> reduced corners (Douglas-Peucker; keeps
-                                   the centred shape and its clearance)
+              --los_smooth_cells----> any-angle corners
               --split_long_segments_2d--> spaced world waypoints
 
 The planner is stateful only to cache the cost map per input grid (keyed on
@@ -29,10 +27,11 @@ from sparx_agency.core.planning.interfaces.planner import PlanRequest
 
 from .params import WeightedAStarParams
 from .algorithm_2d import astar_cost_grid_2d
-from ..common.clearance_2d import clearance_field
+from ..common.corner_rounding_2d import round_corners_2d
 from ..common.grid_geometry_2d import (
+    dilate_mask,
     line_of_sight_clear,
-    simplify_path_cells,
+    los_smooth_cells,
     snap_to_free_cell,
 )
 from ..common.utils_2d import split_long_segments_2d
@@ -40,79 +39,29 @@ from ..common.utils_2d import split_long_segments_2d
 
 def build_cost_grid(
     grid: OccupancyGrid2D, params: WeightedAStarParams
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build the float cost map, lethal mask and clearance field from a grid.
-
-    The cost map encodes:
-
-    - ``inf`` for lethal cells: real obstacles and anything within
-      ``inflate_radius_m`` of one (exact Euclidean distance), so gaps narrower
-      than the robot are never threaded. UNKNOWN is *not* lethal unless
-      ``unknown_blocked``.
-    - ``unknown_cost`` (flat) for traversable UNKNOWN ("gray") cells. Keep it
-      above ``1 + clearance_weight`` so the planner prefers any known-free route
-      over driving blind through gray.
-    - a baseline of ``1.0`` for known-free cells, plus a soft *clearance
-      penalty* that fades from ``clearance_weight`` to ``0`` over
-      ``clearance_margin_m``. The penalty is measured against the distance to
-      the nearest *boundary of known-free space* — i.e. an obstacle **or the
-      gray frontier**. The middle of a known-free corridor is the farthest point
-      from both, so it is the cheapest lane: the route is pulled to the centre,
-      away from walls, and does **not** drift toward (or cut through) unknown
-      space.
-
-    Two distance fields are used because the two jobs differ: collision cares
-    only about real obstacles, while centring cares about staying inside the
-    known-free region.
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build the float cost map and inflated occupancy mask from a grid.
 
     Args:
         grid: Source occupancy grid (uses ``grid.values`` for OCC/UNKNOWN).
-        params: Weighting / inflation / clearance parameters.
+        params: Weighting / inflation parameters.
 
     Returns:
-        ``(cost, lethal, clearance)`` — ``cost`` is an ``(H, W)`` float array
-        (``inf`` = blocked), ``lethal`` is the boolean collision mask (obstacles
-        + inscribed radius) used for line-of-sight checks, and ``clearance`` is
-        the per-cell distance (m) to the nearest known-free boundary
-        (obstacle or gray).
+        ``(cost, occ)`` where ``cost`` is an ``(H, W)`` float array
+        (1.0 free, ``inf`` blocked, ``unknown_cost`` for traversable UNKNOWN)
+        and ``occ`` is the inflated boolean obstacle mask used for LOS checks.
     """
     data = grid.grid
-    res = grid.resolution
-    occupied = data == grid.values.occupied
-    unknown = data == grid.values.unknown
-
-    # Lethal mask from REAL obstacles only (so the drone may still approach the
-    # gray frontier). `occupied |` keeps obstacles blocked even at inflate 0.
-    if params.inflate_radius_m > 0.0:
-        obstacle_clear = clearance_field(occupied, res, params.inflate_radius_m + res)
-        lethal = occupied | (obstacle_clear <= params.inflate_radius_m)
-    else:
-        lethal = occupied.copy()
-
-    # Centring field: distance to the nearest boundary of KNOWN-FREE space —
-    # an obstacle OR an unknown cell. This is what keeps the route centred
-    # *within* the explored corridor instead of hugging the gray frontier.
-    band = params.inflate_radius_m + max(params.clearance_margin_m, 0.0)
-    clearance = clearance_field(occupied | unknown, res, band + res)
+    occ = data == grid.values.occupied
+    n = max(0, int(round(params.inflate_radius_m / grid.resolution)))
+    if n > 0:
+        occ = dilate_mask(occ, n)
 
     cost = np.ones(data.shape, dtype=np.float64)
-
-    # Soft clearance penalty on known-free cells: linear ramp, peak at the
-    # boundary -> 0 at inflate_radius_m + clearance_margin_m. Minimum at maximum
-    # clearance, so A* settles on the centre of the known-free corridor.
-    if params.clearance_weight > 0.0 and params.clearance_margin_m > 0.0:
-        ramp = (band - clearance) / params.clearance_margin_m
-        np.clip(ramp, 0.0, 1.0, out=ramp)
-        cost += params.clearance_weight * ramp
-
-    # Gray cells get a flat, deliberately-high traversal cost (not the centring
-    # penalty), so they are used only as a last resort. Then stamp lethal as inf.
-    if params.unknown_blocked:
-        cost[unknown] = np.inf
-    else:
-        cost[unknown] = float(params.unknown_cost)
-    cost[lethal] = np.inf
-    return cost, lethal, clearance
+    cost[occ] = np.inf
+    unk = (data == grid.values.unknown) & ~occ
+    cost[unk] = np.inf if params.unknown_blocked else float(params.unknown_cost)
+    return cost, occ
 
 
 class WeightedAStarPlanner2D:
@@ -128,35 +77,23 @@ class WeightedAStarPlanner2D:
         self.params = params or WeightedAStarParams()
         self._cache_grid: Optional[OccupancyGrid2D] = None
         self._cache_cost: Optional[np.ndarray] = None
-        self._cache_lethal: Optional[np.ndarray] = None
-        self._cache_clearance: Optional[np.ndarray] = None
+        self._cache_occ: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Cost cache (keyed on grid object identity)
     # ------------------------------------------------------------------
-    def cost_for(
-        self, grid: OccupancyGrid2D
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ``(cost, lethal, clearance)``, rebuilding only when ``grid`` changes."""
+    def cost_for(self, grid: OccupancyGrid2D) -> Tuple[np.ndarray, np.ndarray]:
+        """Return ``(cost, occ)`` for ``grid``, rebuilding only when it changes."""
         if self._cache_grid is not grid or self._cache_cost is None:
-            (self._cache_cost, self._cache_lethal,
-             self._cache_clearance) = build_cost_grid(grid, self.params)
+            self._cache_cost, self._cache_occ = build_cost_grid(grid, self.params)
             self._cache_grid = grid
-        return self._cache_cost, self._cache_lethal, self._cache_clearance
+        return self._cache_cost, self._cache_occ
 
     def invalidate_cache(self) -> None:
         """Drop the cached cost map (e.g. on an explicit replan request)."""
         self._cache_grid = None
         self._cache_cost = None
-        self._cache_lethal = None
-        self._cache_clearance = None
-
-    def _simplify_tol_cells(self, res: float) -> float:
-        """Douglas–Peucker tolerance in cells (auto = ~1 cell when <= 0)."""
-        p = self.params
-        if p.path_simplify_m > 0.0:
-            return p.path_simplify_m / res
-        return 1.0
+        self._cache_occ = None
 
     # ------------------------------------------------------------------
     # Planning
@@ -164,7 +101,7 @@ class WeightedAStarPlanner2D:
     def plan(self, request: PlanRequest, world: OccupancyGrid2D) -> PlanResult:
         p = self.params
         res = world.resolution
-        cost, lethal, _clearance = self.cost_for(world)
+        cost, occ = self.cost_for(world)
         h, w = cost.shape
 
         sx, sy = world.world_to_grid(request.start.x, request.start.y)
@@ -217,13 +154,13 @@ class WeightedAStarPlanner2D:
 
         cells: Sequence[Tuple[int, int]] = search.path
         if p.los_smoothing:
-            # Simplify rather than string-pull: A*'s cost already centres the
-            # route, so we keep its shape (and clearance) and only drop the
-            # redundant near-collinear cells. String-pulling would make the path
-            # taut and undo the centring at corners.
-            cells = simplify_path_cells(cells, lethal, self._simplify_tol_cells(res))
+            cells = los_smooth_cells(cells, occ)
 
         pts = [Pose2D(*world.grid_to_world(cx, cy)) for cx, cy in cells]
+        # Round corners BEFORE splitting: chamfering needs the true leg lengths,
+        # which segment-splitting would hide behind collinear midpoints.
+        if p.corner_round:
+            pts = round_corners_2d(pts, p, clear_fn=self._clear_fn(world, occ))
         pts = split_long_segments_2d(pts, p.waypoint_spacing_m)
         pts = self._trim_start(pts, request.start, p.start_skip_m)
         if len(pts) < 2:
@@ -256,13 +193,13 @@ class WeightedAStarPlanner2D:
         """
         if len(points) < 2:
             return False
-        _, lethal, _ = self.cost_for(world)
-        h, w = lethal.shape
+        _, occ = self.cost_for(world)
+        h, w = occ.shape
         cells = [world.world_to_grid(pt.x, pt.y) for pt in points]
         for (x0, y0), (x1, y1) in zip(cells[:-1], cells[1:]):
             if not (0 <= x0 < w and 0 <= y0 < h and 0 <= x1 < w and 0 <= y1 < h):
                 continue
-            if not line_of_sight_clear(lethal, x0, y0, x1, y1):
+            if not line_of_sight_clear(occ, x0, y0, x1, y1):
                 return True
         return False
 
@@ -278,6 +215,24 @@ class WeightedAStarPlanner2D:
         ymin = max(0, min(sy, gy) - margin)
         ymax = min(h, max(sy, gy) + margin + 1)
         return xmin, xmax, ymin, ymax
+
+    @staticmethod
+    def _clear_fn(world: OccupancyGrid2D, occ: np.ndarray):
+        """Closure ``(a, b) -> bool``: is the world segment a->b obstacle-free?
+
+        Lets the ROS-free corner rounder reject a cut that would clip an
+        obstacle, without it knowing anything about the grid.
+        """
+        h, w = occ.shape
+
+        def clear(a: Pose2D, b: Pose2D) -> bool:
+            x0, y0 = world.world_to_grid(a.x, a.y)
+            x1, y1 = world.world_to_grid(b.x, b.y)
+            if not (0 <= x0 < w and 0 <= y0 < h and 0 <= x1 < w and 0 <= y1 < h):
+                return False
+            return line_of_sight_clear(occ, x0, y0, x1, y1)
+
+        return clear
 
     @staticmethod
     def _trim_start(

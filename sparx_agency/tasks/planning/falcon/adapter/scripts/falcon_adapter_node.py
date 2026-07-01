@@ -110,9 +110,10 @@ class FalconAdapterNode:
         rospy.Subscriber(self.drone_ns + "/front_depth/depth/image_raw",
                          Image, self._depth_cb)
 
-        # Give the bridged subscribers a moment to receive their first message
-        # before we start forwarding to FALCON.
-        rospy.sleep(float(G("~startup_delay_sec", 1.0)))
+        # Optional settle before forwarding to FALCON. Default 0: latched/flowing
+        # topics mean the subscribers warm immediately, so a fixed wait only slows
+        # bring-up. Set >0 only if a source needs time to publish its first msg.
+        rospy.sleep(float(G("~startup_delay_sec", 0.0)))
         self._banner()
 
     # ─── rosparam -> core params ──────────────────────────────────

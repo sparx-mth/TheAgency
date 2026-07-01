@@ -39,21 +39,29 @@ import os
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import Pose, Twist
-from nav_msgs.msg import Path
-from std_msgs.msg import Bool, Empty, Int8, String
+from geometry_msgs.msg import Pose, PoseStamped, Twist
+from nav_msgs.msg import OccupancyGrid, Path
+from std_msgs.msg import Bool, Empty, Float32, Int8, String
 
 from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.trackers.waypoint_follower import (
     ControlAxis,
+    FollowerState,
+    MotionModelParams,
     WaypointFollower,
     WaypointFollowerParams,
+    predict_trajectory,
+    prediction_score,
 )
 
 # DemoMode payloads bridged over /xtend/demo_mode(_request). The core control
 # axis maps onto the platform's flight modes; visual_servoing is platform-only.
 AXIS_TO_MODE = {ControlAxis.YAW: "turning", ControlAxis.FORWARD: "fly_straight"}
 MODE_VISUAL_SERVOING = "visual_servoing"
+# "Forward flight" mode, requested during every stop (and at bring-up): it tells
+# the FC to hold heading (stop rotating) while we command zero velocity, so the
+# platform is stable for a clean voxel update -- "forward mode but not flying".
+MODE_FORWARD = AXIS_TO_MODE[ControlAxis.FORWARD]
 
 
 class _Bringup:
@@ -61,6 +69,7 @@ class _Bringup:
     WAIT_POSE = "WAIT_POSE"
     TAKING_OFF = "TAKING_OFF"
     HOVER_SETTLE = "HOVER_SETTLE"
+    MAP_SETTLE = "MAP_SETTLE"      # forward mode + stopped + first voxel update
     WAIT_PATH = "WAIT_PATH"
     RUNNING = "RUNNING"
 
@@ -82,6 +91,18 @@ class WaypointFollowerNode:
             vx_brake_thresh=float(G("~vx_brake_thresh", 0.05)),
             brake_timeout_s=float(G("~brake_timeout_s", 2.0)),
             passed_bearing_rad=math.radians(float(G("~passed_bearing_deg", 100.0))),
+            # Pulse -> settle -> re-measure yaw (slow turn, inertia, jumpy yaw).
+            yaw_settle_dwell_s=float(G("~yaw_settle_dwell_s", 0.8)),
+            yaw_settle_eps=float(G("~yaw_settle_eps", 0.05)),
+            min_motion_ticks=int(G("~min_motion_ticks", 2)),
+            yaw_coast_rad=math.radians(float(G("~yaw_coast_deg", 15.0))),
+            # Per-burst increment: split a big turn into ~this-size chunks, each
+            # followed by a stop + voxel update + re-measure (not one big sweep).
+            yaw_burst_max_rad=math.radians(float(G("~yaw_burst_max_deg", 25.0))),
+            # Gentle predictive ADVANCE gate. The legacy ~yaw_acquisition_radius
+            # (previously read by nobody) now feeds the cross-track tolerance.
+            yaw_capture_tol_m=float(G("~yaw_acquisition_radius", 0.20)),
+            yaw_acquire_max=math.radians(float(G("~yaw_acquire_max_deg", 35.0))),
             yaw_lead_pct=float(G("~yaw_lead_pct", 10.0)),
             vel_xy_sat=float(G("~vel_xy_sat", 1.25)),
             yaw_rate_sat=float(G("~yaw_rate_sat", 2.4)),
@@ -102,7 +123,40 @@ class WaypointFollowerNode:
         self.ctrl_rate_hz = float(G("~ctrl_rate_hz", 5.0))
         self.status_hz = float(G("~status_hz", 1.0))
         self.freeze_during_yaw = bool(G("~freeze_during_yaw", True))
-        self.startup_hold_sec = float(G("~startup_hold_sec", 3.0))
+        # Default 0: bring-up motion is gated event-driven by the MAP_SETTLE voxel
+        # warm-up, not by a fixed time hold. Set >0 only to force an extra blanket
+        # hold after node start.
+        self.startup_hold_sec = float(G("~startup_hold_sec", 0.0))
+        self.frame_id = G("~frame_id", "world")
+
+        # Trajectory prediction (rollout) -> /path/predicted for the BEV viewer
+        # and the planner's dynamics-aware collision check.
+        self.predict_hz = float(G("~predict_hz", 2.0))
+        self.predict_horizon_s = float(G("~predict_horizon_s", 30.0))
+        self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
+        self.predicted_score_topic = G("~predicted_score_topic",
+                                       "/path/predicted_score")
+        self._motion = MotionModelParams(
+            yaw_tau_s=float(G("~predict_yaw_tau_s", 0.5)),
+            vx_tau_s=float(G("~predict_vx_tau_s", 0.3)))
+        self._path_pts = []
+
+        # Map-settle gate: at bring-up and during every stop, hold position in
+        # forward mode and wait for a fresh BEV (voxel) update before moving on,
+        # so the map reflects post-stop data (never the turn itself). Proceeds
+        # after a timeout if none arrives, so a mapping stall cannot hang flight.
+        self.require_map_update = bool(G("~require_map_update", True))
+        self.map_update_topic = G("~map_update_topic", "/falcon/bev_2d")
+        self.map_wait_timeout_s = float(G("~map_wait_timeout_s", 3.0))
+        self.mapsettle_min_s = float(G("~mapsettle_min_s", 0.5))
+        # Bring-up requires this many fresh voxel updates before the FIRST move,
+        # so the map is genuinely seeded (not a single frame) even if the goal is
+        # behind the drone. Running re-stops still need only one (see _map_ready).
+        self.mapsettle_min_updates = int(G("~mapsettle_min_updates", 2))
+        self._bev_count = 0           # ++ on every BEV (voxel) update received
+        self._await_map = False       # in a stop, waiting for a fresh update
+        self._await_baseline = 0      # _bev_count when the current stop unfroze
+        self._await_t0 = rospy.Time(0)
 
         # DemoMode handshake.
         self.demo_mode_topic = G("~demo_mode_topic", "/xtend/demo_mode")
@@ -131,6 +185,20 @@ class WaypointFollowerNode:
         self._node_start_t = rospy.Time.now()
         self.dt = 1.0 / self.ctrl_rate_hz
 
+        # Command-commitment on the twist sent to the drone: each motion command
+        # (a turn, or forward) must be emitted at least ~cmd_commit_ticks times in
+        # a row before switching to a different command -- a single-tick command
+        # can't overcome the motor deadband, so the drone would ignore a lone turn
+        # then stop. A premature switch re-emits the under-committed motion until
+        # it reaches the floor, then the new command takes effect. The command
+        # "category" is the sign of (vx, wz); (0,0) is a stop and is never held.
+        # Applies to both FALCON and NavDP (both flow through this follower).
+        self.cmd_commit_ticks = int(G("~cmd_commit_ticks", 2))
+        self.cmd_stop_eps = float(G("~cmd_stop_eps", 1e-3))
+        self._cmd_cat = None          # last emitted command category (sx, sz)
+        self._cmd_run = 0             # consecutive emits of that category
+        self._cmd_vx = self._cmd_wz = 0.0   # last motion twist, repeated if held
+
         # ── Topics ──
         self.t_cmd_vel = self.drone_ns + "/cmd_vel"
         self.t_takeoff = self.drone_ns + "/takeoff"
@@ -143,16 +211,26 @@ class WaypointFollowerNode:
         self.freeze_pub = rospy.Publisher("/sensor_gate/freeze", Bool, queue_size=1, latch=True)
         self.demo_req_pub = rospy.Publisher(self.demo_mode_request_topic, String,
                                             queue_size=1, latch=True)
+        self.pred_path_pub = rospy.Publisher(self.predicted_path_topic, Path,
+                                             queue_size=1, latch=True)
+        self.pred_score_pub = rospy.Publisher(self.predicted_score_topic, Float32,
+                                              queue_size=1, latch=True)
 
         rospy.Subscriber(self.t_pose, Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.t_dstate, Int8, self._dstate_cb, queue_size=10)
         rospy.Subscriber(self.t_path, Path, self._path_cb, queue_size=1)
         rospy.Subscriber(self.demo_mode_topic, String, self._demo_mode_cb, queue_size=10)
+        if self.require_map_update:
+            rospy.Subscriber(self.map_update_topic, OccupancyGrid, self._bev_cb,
+                             queue_size=1)
 
-        rospy.sleep(float(G("~startup_delay_sec", 1.0)))
+        rospy.sleep(float(G("~startup_delay_sec", 0.0)))  # 0: no fixed bring-up wait
         rospy.on_shutdown(self._on_shutdown)
         rospy.Timer(rospy.Duration(self.dt), self._ctrl_loop)
         rospy.Timer(rospy.Duration(1.0 / self.status_hz), self._status)
+        if self.predict_hz > 0:
+            rospy.Timer(rospy.Duration(1.0 / self.predict_hz),
+                        lambda _e: self._publish_prediction())
         self._banner()
 
     # ─── Callbacks ───────────────────────────────────────────────
@@ -171,6 +249,11 @@ class WaypointFollowerNode:
             rospy.loginfo("[MODE] DemoMode  %s -> %s", self.current_demo_mode, new_mode)
             self.current_demo_mode = new_mode
 
+    def _bev_cb(self, _msg):
+        # Each BEV (voxel) update is one "the map advanced" tick; the map-settle
+        # gate counts these to confirm a fresh post-stop update before moving on.
+        self._bev_count += 1
+
     def _path_cb(self, msg):
         pose2d = self._pose2d()
         pts = [Pose2D(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -178,9 +261,11 @@ class WaypointFollowerNode:
             rospy.logwarn("waypoint_follower: ignoring path with %d waypoints", len(pts))
             return
         self.follower.set_path(pts, pose2d)
+        self._path_pts = pts
         self.have_path = True
         rospy.loginfo("[PATH] NEW PATH %d waypoints  start=(%.2f,%.2f) end=(%.2f,%.2f)",
                       len(pts), pts[0].x, pts[0].y, pts[-1].x, pts[-1].y)
+        self._publish_prediction()   # refresh the predicted trajectory at once
         if self.state == _Bringup.WAIT_PATH:
             self._enter(_Bringup.RUNNING)
 
@@ -198,7 +283,12 @@ class WaypointFollowerNode:
 
         if self.state == _Bringup.HOVER_SETTLE:
             if self._t_in() > self.hover_settle_sec:
-                self._enter(_Bringup.WAIT_PATH if not self.have_path else _Bringup.RUNNING)
+                self._begin_map_wait()           # unfreeze + snapshot BEV count
+                self._enter(_Bringup.MAP_SETTLE)
+            return
+
+        if self.state == _Bringup.MAP_SETTLE:
+            self._step_map_settle()
             return
 
         if self.state == _Bringup.WAIT_PATH:
@@ -224,14 +314,20 @@ class WaypointFollowerNode:
             mode = AXIS_TO_MODE[axis]
             confirmed = (self.current_demo_mode == mode)
             self._request_demo_mode(mode)
+        else:
+            # In a stop (settle/brake/done): request forward mode -- hold heading,
+            # do not fly -- so the platform is stable for a clean voxel update.
+            self._request_demo_mode(MODE_FORWARD)
 
         hold = ((rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec)
-        cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed, hold=hold)
+        cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
+                                 hold=hold, map_ready=self._map_ready())
 
         if cmd.freeze is not None:
             # The core asks to freeze only while rotating; ~freeze_during_yaw
             # lets an operator disable that without touching the algorithm.
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
+        self._update_map_wait(cmd)
         self._publish_twist(cmd.vx, cmd.wz)
 
     # ─── ROS helpers ─────────────────────────────────────────────
@@ -241,6 +337,35 @@ class WaypointFollowerNode:
         q = self.cur_pose.orientation
         yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
         return Pose2D(self.cur_pose.position.x, self.cur_pose.position.y, yaw)
+
+    def _publish_prediction(self):
+        """Roll the follower forward from the current pose and publish the
+        predicted trajectory (+ a 0..1 quality score). Best-effort: the BEV
+        viewer draws it and the planner uses it for a dynamics-aware collision
+        check. No map here, so the score is dynamics-only (no clearance)."""
+        pose2d = self._pose2d()
+        if pose2d is None or len(self._path_pts) < 2:
+            return
+        try:
+            res = predict_trajectory(self.follower.params, pose2d, self._path_pts,
+                                     self.dt, self.predict_horizon_s,
+                                     motion=self._motion)
+        except ValueError:
+            return
+        if len(res.poses) < 2:
+            return
+        m = Path()
+        m.header.stamp = rospy.Time.now()
+        m.header.frame_id = self.frame_id
+        for p in res.poses:
+            ps = PoseStamped()
+            ps.header = m.header
+            ps.pose.position.x = float(p.x)
+            ps.pose.position.y = float(p.y)
+            ps.pose.orientation.w = 1.0
+            m.poses.append(ps)
+        self.pred_path_pub.publish(m)
+        self.pred_score_pub.publish(Float32(data=float(prediction_score(res))))
 
     def _do_takeoff(self):
         now = rospy.Time.now()
@@ -256,6 +381,50 @@ class WaypointFollowerNode:
               and now - self.last_takeoff > rospy.Duration(self.takeoff_timeout)):
             rospy.logwarn("[TAKEOFF] timeout after %d attempts -- settling", self.takeoff_count)
             self._enter(_Bringup.HOVER_SETTLE)
+
+    # ─── Map-settle gate ─────────────────────────────────────────
+    def _begin_map_wait(self):
+        """Unfreeze and snapshot the BEV count so a fresh *post-stop* voxel
+        update can be detected. Called when a stop begins (bring-up, or the
+        unfrozen dwell of a RUNNING YAW_SETTLE)."""
+        self._set_freeze(False)
+        self._await_map = self.require_map_update
+        self._await_baseline = self._bev_count
+        self._await_t0 = rospy.Time.now()
+
+    def _map_ready(self, min_updates=1):
+        """True once ``min_updates`` fresh BEV (voxel) updates have landed since
+        the stop unfroze, or the wait timed out (so a mapping stall never hangs
+        the drone). Bring-up passes ~mapsettle_min_updates; running stops use 1."""
+        if not self._await_map:
+            return True
+        if self._bev_count - self._await_baseline >= min_updates:
+            return True
+        if (rospy.Time.now() - self._await_t0).to_sec() > self.map_wait_timeout_s:
+            rospy.logwarn_throttle(2.0, "[MAP] no voxel update within %.1fs -- "
+                                   "proceeding", self.map_wait_timeout_s)
+            return True
+        return False
+
+    def _step_map_settle(self):
+        """Bring-up: hold in forward mode, stopped, until the first voxel update
+        (or timeout) -- the drone sends no motion before the map is current."""
+        self._request_demo_mode(MODE_FORWARD)
+        self._publish_twist(0.0, 0.0)
+        if self._t_in() >= self.mapsettle_min_s and self._map_ready(self.mapsettle_min_updates):
+            self._await_map = False
+            self._enter(_Bringup.WAIT_PATH if not self.have_path else _Bringup.RUNNING)
+
+    def _update_map_wait(self, cmd):
+        """Track the RUNNING stop: start a fresh map wait when a YAW_SETTLE
+        unfreezes (begins its dwell), and end it once the settle is left."""
+        in_dwell = (cmd.state == FollowerState.YAW_SETTLE and cmd.freeze is False)
+        if in_dwell and not self._await_map and self.require_map_update:
+            self._await_map = True
+            self._await_baseline = self._bev_count
+            self._await_t0 = rospy.Time.now()
+        elif self._await_map and cmd.state != FollowerState.YAW_SETTLE:
+            self._await_map = False
 
     def _request_demo_mode(self, mode):
         """Rate-limited, latched DemoMode request with a soft timeout warning."""
@@ -285,6 +454,23 @@ class WaypointFollowerNode:
     def _publish_twist(self, vx, wz):
         """Assemble the Twist. linear.y = linear.z = 0 are hardwired here; the
         core has already enforced the invariant, saturated and slew-limited."""
+        # Command-commitment (see __init__): emit each motion >=cmd_commit_ticks
+        # times before switching, repeating an under-committed motion so a lone
+        # 1-tick turn/forward can't be followed straight into a stop.
+        eps = self.cmd_stop_eps
+        cat = (0 if abs(vx) < eps else (1 if vx > 0 else -1),
+               0 if abs(wz) < eps else (1 if wz > 0 else -1))
+        if cat == self._cmd_cat:
+            self._cmd_run += 1
+        elif (self._cmd_cat not in (None, (0, 0))
+              and self._cmd_run < self.cmd_commit_ticks):
+            vx, wz, cat = self._cmd_vx, self._cmd_wz, self._cmd_cat  # hold motion
+            self._cmd_run += 1
+        else:
+            self._cmd_cat, self._cmd_run = cat, 1
+        if cat != (0, 0):
+            self._cmd_vx, self._cmd_wz = vx, wz   # remember motion twist to repeat
+
         m = Twist()
         m.linear.x = vx
         m.linear.y = 0.0  # HARDWIRED -- no lateral movement, ever
@@ -355,8 +541,10 @@ class WaypointFollowerNode:
         L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
         L("  vel_x=%.2f m/s  yaw_rate=%.2f rad/s  forward_only=%s",
           p.vel_x, p.yaw_rate, p.forward_only)
-        L("  pos_radius=%.2f  yaw_settle=%.3f  lead=%.1f%%", p.pos_radius, p.yaw_settle,
-          p.yaw_lead_pct)
+        L("  pos_radius=%.2f  min_motion_ticks=%d  settle_dwell=%.2fs",
+          p.pos_radius, p.min_motion_ticks, p.yaw_settle_dwell_s)
+        L("  map-settle: require=%s topic=%s timeout=%.1fs", self.require_map_update,
+          self.map_update_topic, self.map_wait_timeout_s)
         L("  takeoff_z=%.2f m (Empty -> %s; no vz commands)", self.takeoff_z, self.t_takeoff)
         L("  PUBLISHED Twist invariants:  vy=0  vz=0  (vx=0 OR wz=0)")
         L("=" * 72)
@@ -381,13 +569,24 @@ if __name__ == "__main__":
 # the freeze gate, the startup hold and the cmd_vel log.
 #
 #   IO: ~drone_ns (/simple_drone) [+/gt_pose +/state +/cmd_vel +/takeoff]
-#       ~path_topic (/path/waypoints)
+#       ~path_topic (/path/waypoints) ~frame_id (world)
+#       ~predicted_path_topic (/path/predicted) ~predicted_score_topic (/path/predicted_score)
 #       ~demo_mode_topic (/xtend/demo_mode) ~demo_mode_request_topic (/xtend/demo_mode_request)
 #   follower: ~vel_x (0.3) ~yaw_rate (0.7) ~pos_acquisition_radius (0.35)
 #       ~yaw_settle_thresh (0.05) ~yaw_drift_thresh (0.40) ~skip_yaw_thresh (0.25)
 #       ~vx_brake_thresh (0.05) ~brake_timeout_s (2.0) ~passed_bearing_deg (100)
-#       ~yaw_lead_pct (10) ~vel_xy_sat (1.25) ~yaw_rate_sat (2.4) ~accel_limit (1.5)
-#       ~yaw_accel_limit (3.5) ~forward_only (false)
+#       ~vel_xy_sat (1.25) ~yaw_rate_sat (2.4) ~accel_limit (1.5)
+#       ~yaw_accel_limit (3.5) ~forward_only (false) ~yaw_lead_pct (10, deprecated)
+#   yaw pulse->settle: ~yaw_settle_dwell_s (0.8) ~yaw_settle_eps (0.05)
+#       ~min_motion_ticks (2; min consecutive ticks for forward OR yaw) ~yaw_coast_deg (15)
+#       ~yaw_burst_max_deg (25; per-burst increment -- big turns split into chunks,
+#         each followed by a stop + voxel update + re-measure)
+#       ~yaw_acquisition_radius (0.20; cross-track ADVANCE tol, m) ~yaw_acquire_max_deg (35)
+#   prediction: ~predict_hz (2.0) ~predict_horizon_s (30) ~predict_yaw_tau_s (0.5)
+#       ~predict_vx_tau_s (0.3)
+#   map-settle (forward mode + a fresh voxel update before any motion / before the
+#     next turn): ~require_map_update (true) ~map_update_topic (/falcon/bev_2d)
+#     ~map_wait_timeout_s (3.0; proceed anyway after this) ~mapsettle_min_s (0.5)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
 #   loop/gate: ~ctrl_rate_hz (5) ~status_hz (1) ~freeze_during_yaw (true)

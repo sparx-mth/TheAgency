@@ -6,6 +6,70 @@ import cv2
 import numpy as np
 from sensor_msgs.msg import Image
 
+from sparx_agency.robots.common.helpers import valid_depth_mask
+
+
+class BadFrameGuard:
+    """
+    Stateful guard that drops frames that are black, frozen, or malformed.
+    Create one instance per node/source; call should_pass(frame) before processing.
+    """
+
+    def __init__(
+        self,
+        mean_min: float = 2.0,
+        std_min: float = 1.0,
+        sample_step: int = 16,
+        log_every: int = 30,
+        prefix: str = "",
+    ):
+        self.mean_min = float(mean_min)
+        self.std_min = float(std_min)
+        self.sample_step = max(1, int(sample_step))
+        self.log_every = max(1, int(log_every))
+        self._prefix = f"[{prefix}] " if prefix else ""
+        self.bad_count = 0
+        self.good_count = 0
+
+    def check(self, frame) -> tuple[bool, str]:
+        """Return (is_bad, reason). Pure check — no side effects."""
+        if frame is None:
+            return True, "frame is None"
+        if not isinstance(frame, np.ndarray):
+            return True, f"not ndarray: {type(frame).__name__}"
+        if frame.size == 0:
+            return True, "zero-size ndarray"
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            return True, f"unexpected shape: {frame.shape}"
+        h, w = frame.shape[:2]
+        if h <= 0 or w <= 0:
+            return True, f"invalid shape: {frame.shape}"
+        small = frame[:: self.sample_step, :: self.sample_step]
+        if not np.isfinite(small).all():
+            return True, "contains non-finite values"
+        mean_val = float(small.mean())
+        std_val = float(small.std())
+        if mean_val < self.mean_min:
+            return True, f"too dark/empty: mean={mean_val:.3f}"
+        if std_val < self.std_min:
+            return True, f"too flat/empty: std={std_val:.3f}"
+        return False, f"mean={mean_val:.3f}, std={std_val:.3f}"
+
+    def should_pass(self, frame) -> bool:
+        """Return True if frame is good; logs drops and recovery."""
+        is_bad, reason = self.check(frame)
+        if is_bad:
+            self.bad_count += 1
+            self.good_count = 0
+            if self.bad_count == 1 or self.bad_count % self.log_every == 0:
+                print(f"{self._prefix}[drop] bad frame #{self.bad_count}: {reason}")
+            return False
+        self.good_count += 1
+        if self.bad_count > 0:
+            print(f"{self._prefix}recovered after {self.bad_count} dropped frame(s)")
+            self.bad_count = 0
+        return True
+
 def list_frames(frames_dir: str):
     exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
     files = []
@@ -79,7 +143,7 @@ def create_hist_image_with_objects(
     out_h: int = 400,
 ):
     depth = np.asarray(depth_map, dtype=np.float32)
-    valid = np.isfinite(depth) & (depth > 0) & (depth >= min_dist) & (depth <= max_dist)
+    valid = valid_depth_mask(depth, min_depth=min_dist, max_depth=max_dist)
     vals = depth[valid]
     img = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
@@ -195,7 +259,7 @@ def get_objects_via_histogram(
     depth = np.asarray(depth_img).astype(np.float32)
 
     # 1) Valid mask
-    valid = np.isfinite(depth) & (depth > 0) & (depth >= min_dist) & (depth <= max_dist)
+    valid = valid_depth_mask(depth, min_depth=min_dist, max_depth=max_dist)
     if valid.sum() < 100:  # not enough data
         return []
 
@@ -319,7 +383,7 @@ def get_objects_via_histogram(
     return final
 
 def _finite_mask(depth_m: np.ndarray) -> np.ndarray:
-    return np.isfinite(depth_m) & (depth_m > 0)
+    return valid_depth_mask(depth_m, min_depth=0.0)
 
 def estimate_floor_mask_from_bottom_band(
     depth_m: np.ndarray,
@@ -556,7 +620,7 @@ def robust_depth_from_bbox_hist(
     x1, y1, x2, y2 = bbox
     patch = depth_m[y1:y2, x1:x2]
 
-    valid = np.isfinite(patch) & (patch > min_depth) & (patch < max_depth)
+    valid = valid_depth_mask(patch, min_depth=min_depth, max_depth=max_depth)
     vals = patch[valid]
     if vals.size < 30:
         return None

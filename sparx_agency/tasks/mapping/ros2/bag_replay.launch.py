@@ -44,15 +44,28 @@ def generate_launch_description():
             "clip_max_m", default_value="10.0",
             description="Max depth (m) for pointcloud backprojection",
         ),
+        DeclareLaunchArgument(
+            "depth_mode", default_value="ros_image",
+            description="ros_image  = bag replay (/xtend/depth_m Image)\n"
+                        "file_path  = live, via /xtend/depth_frame_path String topic\n"
+                        "dir_watch  = live/offline, reads .npy files from depth_dir",
+        ),
+        DeclareLaunchArgument(
+            "depth_dir", default_value="/tmp/xtend_depth",
+            description="(dir_watch mode) directory where depth_processor_node saves .npy files",
+        ),
     ]
 
-    # ── 1. Depth image → PointCloud2 ─────────────────────────────────────────
+    # ── 1. Depth → PointCloud2 ────────────────────────────────────────────────
     depth_to_cloud = Node(
         executable=_PY,
         arguments=["-m", "sparx_agency.tasks.mapping.ros2.depth_to_pointcloud_node"],
         parameters=[{
+            "mode":              LaunchConfiguration("depth_mode"),
             "depth_topic":       "/xtend/depth_m",
             "camera_info_topic": "/xtend/camera_info",
+            "depth_path_topic":  "/xtend/depth_frame_path",
+            "depth_dir":         LaunchConfiguration("depth_dir"),
             "pointcloud_topic":  "/xtend/pointcloud",
             "clip_max_m":        LaunchConfiguration("clip_max_m"),
         }],
