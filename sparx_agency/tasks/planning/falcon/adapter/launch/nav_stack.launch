@@ -284,7 +284,7 @@
   <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
        this timer (and on a goal click). The trajectory is frozen between ticks
        so the follower is not chasing a path that shifts every BEV frame. -->
-  <arg name="plan_period_s"         default="5.0" />
+  <arg name="plan_period_s"         default="10.0" />
   <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
        plan_period_s cycles. Set true to react to obstacles faster than that. -->
   <arg name="replan_on_collision"   default="false" />
@@ -363,7 +363,7 @@
                        A* and turn the fusion on later with a 'std_msgs/Bool True' on
                        combination_enable_topic. Needs the NavDP server up once enabled. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
-  <arg name="nav_mode" default="astar" />
+  <arg name="nav_mode" default="combination" />
   <!-- vla = navdp | flownav. Selects which VLA policy serves nav_mode:=navdp:
          navdp   = navdp_click_node (point-goal; operator clicks a pixel; NavDP server :navdp_port)
          flownav = flownav_node     (image-goal toward ~flownav_goal_image;  FlowNav server :flownav_port) -->
@@ -857,6 +857,9 @@
     <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
     <!-- A* route in; arbitrated raw path out (-> path_corrector via planner_path_topic). -->
     <param name="astar_path_topic"  value="/path/waypoints_astar" />
+    <!-- Same goal topic astar_planner replans on: a new click here forces an immediate
+         NavDP re-inference off the click's fresh A* route (idle cadence unchanged). -->
+    <param name="goal_topic"        value="/waypoint_nav/goal" />
     <param name="path_topic"        value="/path/waypoints_combo" />
     <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
     <param name="frame_id"          value="world" />

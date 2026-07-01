@@ -59,7 +59,7 @@ import cv2
 import numpy as np
 
 import rospy
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped
 from nav_msgs.msg import Path
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
@@ -121,6 +121,12 @@ class CombinationPlannerNode:
         self.astar_path_topic = G("~astar_path_topic", "/path/waypoints_astar")
         self.path_topic = G("~path_topic", "/path/waypoints_combo")
         self.full_path_topic = G("~full_path_topic", "/path/waypoints_navdp_full")
+        # Same goal topic astar_planner replans on (bev_click_goal publishes here). A
+        # new goal here means the operator clicked: it arms an IMMEDIATE re-inference
+        # off the click's fresh A* route, instead of waiting out the current leg or
+        # the cruise engage streak. The periodic same-goal A* replan does NOT arm it,
+        # so the idle cadence is unchanged. Default matches astar/bev_click_goal.
+        self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
 
         # ── Combination behaviour ────────────────────────────────────
         self.enable_topic = G("~enable_topic", "/combination/enable")
@@ -205,6 +211,8 @@ class CombinationPlannerNode:
         self.hold_t = None                                   # rospy.Time the HOLD began
         self.settle_until = None                             # rospy.Time the engage brake-settle ends
         self.engage_confirm = 0                              # consecutive engage-able detections
+        self._new_goal_pending = False                       # a goal click arrived; await its A* path
+        self._force_engage = False                           # that A* path landed -> re-infer NOW
         self.state = _CRUISE
         self.n_legs = 0
         self._got_cam_info = False
@@ -234,6 +242,7 @@ class CombinationPlannerNode:
             rospy.Subscriber(self.camera_info_topic, CameraInfo, self._cam_info_cb, queue_size=1)
         rospy.Subscriber(self.astar_path_topic, Path, self._astar_cb, queue_size=1)
         rospy.Subscriber(self.enable_topic, Bool, self._enable_cb, queue_size=1)
+        rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
 
     # ─── Sensor ingestion (mirrors navdp_click_node) ─────────────────
     def _rgb_path_cb(self, msg):
@@ -316,9 +325,20 @@ class CombinationPlannerNode:
         self._echoed_msg = self.astar_msg
         return True
 
+    def _goal_cb(self, _msg):
+        """A new goal was clicked. Arm an immediate re-inference, but wait for the
+        click's fresh A* route to land in ``_astar_cb`` before firing (so the leg is
+        planned against the new route, not the stale one). Every click re-arms, so
+        re-clicking the same spot also forces a fresh leg."""
+        self._new_goal_pending = True
+
     def _astar_cb(self, msg):
         self.astar_msg = msg
         self.astar_pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        if self._new_goal_pending:
+            # The route for the just-clicked goal has arrived -> re-infer immediately.
+            self._new_goal_pending = False
+            self._force_engage = True
         if not self.combo_enabled:
             self._echo_astar()                # follow A* directly while disabled
 
@@ -589,6 +609,30 @@ class CombinationPlannerNode:
             m.poses.append(ps)
         return m
 
+    def _begin_forced_engage(self):
+        """New goal: STOP and re-infer now, bypassing the cruise gate/hysteresis.
+
+        Mirrors the CRUISE->HOLD commit (stop for a clean, stationary frame, settle,
+        then infer) but without requiring a >= min_engage_fwd_m point or the confirm
+        streak -- the operator asked for a leg on the new route explicitly. Returns
+        True if it committed to a stop; False (no route/pose yet, or NavDP down) so
+        the caller falls through to normal handling and re-engages on the cadence.
+        """
+        if (self.pose_xyyaw is None or self.astar_pts is None
+                or len(self.astar_pts) < 2):
+            return False                          # no fresh route/pose to engage on yet
+        if not self._ensure_reset():
+            rospy.logwarn_throttle(2.0, "combination: new goal but NavDP unreachable "
+                                   "-- staying on A*")
+            return False
+        rospy.loginfo("combination: NEW GOAL -- stopping to re-infer immediately")
+        self.engage_confirm = 0
+        self._publish_hold()                      # STOP for a clean, stationary inference
+        self.hold_t = rospy.Time.now()
+        self.settle_until = self.hold_t + rospy.Duration(self.engage_settle_s)
+        self.state = _HOLD
+        return True
+
     # ─── Control tick ────────────────────────────────────────────────
     def _tick(self, _evt):
         if not self.combo_enabled:
@@ -598,6 +642,11 @@ class CombinationPlannerNode:
         # rospy.Timer callback terminates the timer thread, stopping all ticks.
         # Catch everything, drop safely back to flying A*, and retry next frame.
         try:
+            if self._force_engage:
+                self._force_engage = False        # one-shot; consumed whether or not it commits
+                if self._begin_forced_engage():
+                    return                         # HOLD infers over the next ticks
+                # not ready / NavDP down -> fall through to the normal state handler
             if self.state == _CRUISE:
                 self._cruise()
             elif self.state == _HOLD:
