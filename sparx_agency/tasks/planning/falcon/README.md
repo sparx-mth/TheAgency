@@ -183,6 +183,14 @@ export DISPLAY=:0
 source /catkin_ws/devel/setup.bash
 rosrun falcon_adapter bev_click_goal_node.py
 ```
+or
+```bash
+ssh -Y user@user-agx1
+export XAUTHORITY=$HOME/.Xauthority
+cp ~/.Xauthority /tmp/.docker.xauth && chmod 644 /tmp/.docker.xauth
+XAUTHORITY=/tmp/.docker.xauth ./run_falcon.sh office
+rosrun falcon_adapter bev_click_goal_node.py
+```
 
 A 2D map window opens. **Left-click** anywhere to publish a goal — A* replans and
 the drone flies the new path. The red arrow marks the drone's live pose.

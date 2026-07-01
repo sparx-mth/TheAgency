@@ -216,8 +216,8 @@ matches where you're running — engines are **not** portable across devices.
 ```bash
 # --- AGX Orin (the Jetson at the office) -------------------------------------
 # Run in MAXN + jetson_clocks, the same power mode the engines were built in.
+export NAVDP_REPO=~/GIT/NavDP/baselines/navdp/
 cd ~/GIT/TheAgency
-NAVDP_REPO=${NAVDP_REPO:?set NAVDP_REPO to the NavDP repo (has policy_agent.py)} \
 PYTHONPATH=$PWD python \
     -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
     --engine-dir sparx_agency/tasks/planning/navdp/engines/orin_sm87 \
