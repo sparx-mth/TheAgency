@@ -1,0 +1,65 @@
+{
+    "name": "TheAgency Development Environment",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "updateRemoteUserUID": true,
+    "runArgs": [
+        "--net=host",
+        "--pid=host",
+        "--ipc=host",
+        "--gpus=all",
+        "--privileged",
+        "-e", "DISPLAY=${env:DISPLAY}",
+        "-v", "/tmp/.X11-unix:/tmp/.X11-unix:rw",
+        "--cap-add=SYS_PTRACE",
+        "--cap-add=CAP_PERFMON"
+    ],
+    "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer,target=/workspace/.devcontainer,type=bind",
+    "source=${localWorkspaceFolder}/sparx_agency,target=/workspace/src/sparx_agency,type=bind",
+    "source=${localWorkspaceFolder}/scripts,target=/workspace/scripts,type=bind",
+    "source=${localWorkspaceFolder}/requirements,target=/workspace/requirements,type=bind",
+    "source=${localWorkspaceFolder}/src/interfaces/xtend,target=/workspace/src/interfaces/xtend,type=bind",
+    "source=${localWorkspaceFolder}/turtlebot3_modifications,target=/workspace/turtlebot3_modifications,type=bind",
+    "source=agency-venv-cache,target=/workspace/venv,type=volume",
+    "source=agency-pip-cache,target=/home/vscode/.cache/pip,type=volume"
+    ],
+   "containerEnv": {
+    "PIP_CACHE_DIR": "/home/vscode/.cache/pip",
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "all",
+    "QT_X11_NO_MITSHM": "1",
+    "ROS_LANG_DISABLE": "gennodejs;geneus;genlisp",
+    "GAZEBO_IP": "127.0.0.1",
+    "IGN_IP": "127.0.0.1",
+    "GAZEBO_MASTER_URI": "http://127.0.0.1:11345",
+    "GAZEBO_MODEL_PATH": "/opt/ros/humble/share/turtlebot3_gazebo/models"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack",
+                "twxs.cmake",
+                "ms-iot.vscode-ros",
+                "ms-azuretools.vscode-docker",
+                "redhat.vscode-yaml"
+            ],
+            "settings": {
+                "terminal.integrated.profiles.linux": {
+                    "bash": {
+                        "path": "bash"
+                    }
+                },
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+    "remoteUser": "vscode",
+    "workspaceFolder": "/workspace",
+    "initializeCommand": "mkdir -p ${localWorkspaceFolder}/src && chown -R 1000:1000 ${localWorkspaceFolder}/src",
+    "postCreateCommand": "sudo chown -R vscode:vscode /workspace/src && bash -c 'source /opt/ros/humble/setup.bash && ./scripts/prepare_ros_deps.sh /workspace && ./scripts/setup_venv_humble.sh office_pc'",
+    "postStartCommand": "bash -c 'source /opt/ros/humble/setup.bash && colcon build --base-paths src --symlink-install'"
+}

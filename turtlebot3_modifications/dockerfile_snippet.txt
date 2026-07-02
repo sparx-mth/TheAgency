@@ -1,0 +1,6 @@
+# Optional: Add this to the devcontainer Dockerfile for automatic setup
+# Place this after the turtlebot3 installation in the .devcontainer/Dockerfile
+
+# Setup TurtleBot3 with Depth Camera Support
+# RUN chmod +x /workspace/turtlebot3_modifications/setup_camera.sh && \
+#     /workspace/turtlebot3_modifications/setup_camera.sh
