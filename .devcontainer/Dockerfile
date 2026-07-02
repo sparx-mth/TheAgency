@@ -71,6 +71,28 @@ RUN git clone --depth 1 --branch v2.7.1 https://github.com/stevengj/nlopt.git \
     && make install \
     && cd ../.. && rm -rf nlopt
 
+
+# Create workspace directory
+# RUN mkdir -p /turtlebot3_ws/src
+# WORKDIR /turtlebot3_ws/src
+
+# # Copy your local workspace source code into the image
+# # Ensure your .dockerignore file excludes 'build' and 'install' folders to save space
+# COPY . /turtlebot3_ws/src/
+
+# # Install dependencies and build
+# WORKDIR /turtlebot3_ws
+# RUN source /opt/ros/humble/setup.bash && \
+#     rosdep install --from-paths src --ignore-src -r -y && \
+#     colcon build --symlink-install
+
+# # Set environment variables for the runtime
+# ENV GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:/turtlebot3_ws/install/turtlebot3_gazebo/share/turtlebot3_gazebo/models
+# ENV COLCON_PREFIX_PATH=/turtlebot3_ws/install:$COLCON_PREFIX_PATH
+
+# Source the workspace in the entrypoint
+RUN echo "source /turtlebot3_ws/install/setup.bash" >> ~/.bashrc   
+
 # Fix workspace ownership for the non-root user
 RUN mkdir -p /workspace && chown -R vscode:vscode /workspace
 
