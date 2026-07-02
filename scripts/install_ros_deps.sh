@@ -36,9 +36,17 @@ fi
 # 2) Resolve deps + build
 echo "[install_ros_deps] Running rosdep install"
 cd "$ROS_WS"
-rosdep update
-rosdep install --from-paths src --ignore-src -r -y
 
+# TWEAK 1: rosdep update should run as the normal user, but may need a quick sudo apt update first
+# to ensure the package lists are fresh for the rosdep install step.
+sudo apt-get update
+
+rosdep update
+# TWEAK 2: Added 'sudo' here so rosdep has permission to invoke apt-get install
+sudo rosdep install --from-paths src --ignore-src -r -y
+
+# NOTE: We leave 'colcon build' WITHOUT sudo. 
+# This ensures build/install directories are owned by your non-root user!
 echo "[install_ros_deps] Building workspace with colcon"
 colcon build --symlink-install
 

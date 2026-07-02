@@ -5,24 +5,24 @@ from numpy import ndarray, dtype, float64, generic
 
 SIGMA = 0.5
 
+
 def init_belief(map_shape: tuple[int,int] ,
-                orientations: ndarray[tuple[Any, ...], dtype[float64]],
-                robot_loc_pred: ndarray[tuple[Any, ...], dtype[float64]],
+                orientations: np.ndarray,
+                robot_loc_pred: np.ndarray,
                 robot_orientation_pred: float,
-                loc_uncertainty: tuple[int,int] ) -> ndarray[tuple[int, ...], dtype[float64]]:
+                loc_uncertainty: tuple[int,int] ) -> np.ndarray:
     """
     Initializes the belief state of a robot's location and orientation on a discrete grid map, using
     a Gaussian distribution centered around a predicted position and orientation.
 
     Parameters:
-        args: A namespace or object containing the necessary attributes such as `map_lat`, `map_long`,
-            `num_angles`, `pred_offset_y`, and `pred_offset_x`. These attributes define the grid
-            map's dimensions, angular discretization, and spatial prediction offset factors.
-        orientations (ndarray[tuple[Any, ...], dtype[float64]]): Array of possible orientation
+        map_shape (tuple[int,int]): A 2-dimensional grid of cells representing the map
+        orientations (np.ndarray): Array of possible orientation
             angles for the robot, used to determine the angular prediction index.
-        robot_loc_pred (ndarray[tuple[Any, ...], dtype[float64]]): Predicted [y, x] location of the
+        robot_loc_pred (np.ndarray): Predicted [y, x] location of the
             robot on the grid.
         robot_orientation_pred (float): Predicted orientation of the robot in radians.
+        loc_uncertainty (tuple[int,int]): A 2-dimensional grid of cells
 
     Returns:
         ndarray[tuple[int, ...], dtype[float64]]: A 3-dimensional belief tensor of size
@@ -56,6 +56,45 @@ def init_belief(map_shape: tuple[int,int] ,
     if total > 0:
         belief /= total
     return belief
+
+
+def motion_predict(
+    prev_loc_grid: np.ndarray,
+    prev_orientation: float,
+    vx_ms: float,
+    vy_ms: float,
+    dt_sec: float,
+    m_per_cell: float,
+) -> Tuple[np.ndarray, float]:
+    """Advance AMCL's own last estimate by optical flow velocity × dt.
+
+    prev_loc_grid is [row, col] from the previous AMCL output — never an
+    externally accumulated optical-flow position.  vx=forward, vy=lateral.
+    """
+    if dt_sec <= 0.0 or m_per_cell <= 0.0:
+        return prev_loc_grid.copy(), prev_orientation
+    c, s = math.cos(prev_orientation), math.sin(prev_orientation)
+    dx_cells = (c * vx_ms - s * vy_ms) * dt_sec / m_per_cell  # col (x)
+    dy_cells = (s * vx_ms + c * vy_ms) * dt_sec / m_per_cell  # row (y)
+    return prev_loc_grid + np.array([dy_cells, dx_cells]), prev_orientation
+
+
+def extract_local_window(arr: np.ndarray, center_grid: np.ndarray,
+                         half_cells: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Slice a (H, W, ...) array to a local window around center_grid.
+
+    Returns (window_array, origin) where origin=[r0, c0] is the top-left
+    corner in global grid coordinates.  Window may be smaller near borders.
+    """
+    H, W = arr.shape[0], arr.shape[1]
+    r_c = int(round(float(center_grid[0])))
+    c_c = int(round(float(center_grid[1])))
+    r0 = max(0, r_c - half_cells)
+    r1 = min(H, r_c + half_cells)
+    c0 = max(0, c_c - half_cells)
+    c1 = min(W, c_c + half_cells)
+    return arr[r0:r1, c0:c1], np.array([r0, c0], dtype=np.float64)
+
 
 
 def ray_cast_lut_pose(grid, orientations, beam_angles, max_range, step=0.1):
@@ -137,6 +176,27 @@ def ray_cast_lut_vectorized(grid: np.ndarray, orientations: np.ndarray,
             print(f"  LUT: {k + 1}/{n_or} orientations done", flush=True)
     return lut
 
+def _ray_fill(lut, grid, free_r, free_c, angle, max_range, step, n_steps, m, n, k, b):
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    dists = np.full(len(free_r), max_range, dtype=np.float32)
+    active = np.ones(len(free_r), dtype=bool)
+    for s in range(1, n_steps + 1):
+        if not np.any(active):
+            break
+        d = float(s) * step
+        ai = np.where(active)[0]
+        xi = np.rint(free_r[ai] + d * cos_a).astype(np.int32)
+        yj = np.rint(free_c[ai] + d * sin_a).astype(np.int32)
+        in_bounds = (xi >= 0) & (xi < m) & (yj >= 0) & (yj < n)
+        out = ~in_bounds
+        dists[ai[out]] = d
+        active[ai[out]] = False
+        ib = np.where(in_bounds)[0]
+        if len(ib):
+            hit = grid[xi[ib], yj[ib]] == 1
+            dists[ai[ib[hit]]] = d
+            active[ai[ib[hit]]] = False
+    lut[free_r, free_c, k, b] = dists
 
 def range_likelihood_lut(z, lut, sigma):
     """
@@ -212,7 +272,7 @@ def amcl_estimator(lut: np.ndarray,
                    robot_orientation_prediction: float,
                    world: np.ndarray,
                    z_measured_pose: np.ndarray,
-                   prediction_uncertainty: tuple):
+                   prediction_uncertainty: tuple[int,int]):
     """
     Estimate the robot's current location and orientation using the AMCL algorithm.
 
@@ -222,16 +282,16 @@ def amcl_estimator(lut: np.ndarray,
     the observed data, and determining the most likely pose of the robot.
 
     Parameters:
-        lut (ndarray[tuple[Any, ...], dtype[float64]]): Lookup table connecting sensor
+        lut (np.ndarray): Lookup table connecting sensor
             observations to the probability distribution over possible robot poses.
-        orientations (ndarray[tuple[Any, ...], dtype[float64]]): Array of possible
+        orientations (np.ndarray): Array of possible
             robot orientations utilized in the environment.
-        robot_loc_prediction (ndarray[tuple[Any, ...], dtype[Any]]): Prior prediction
+        robot_loc_prediction (np.ndarray): Prior prediction
             of the robot's location as derived by prediction models or sensors.
         robot_orientation_prediction (float): Prior prediction of the robot's orientation.
-        world (ndarray[tuple[int, ...], dtype[float64]]): Environmental map represented
+        world (np.ndarray): Environmental map represented
             as a grid where cells define occupancy probabilities.
-        z_measured_pose (ndarray[tuple[Any, ...], dtype[float64]]): Pose information
+        z_measured_pose (np.ndarray): Pose information
             obtained from recent sensor measurements.
         prediction_uncertainty (tuple[int, int]): Tuple representing the uncertainty
             in the predicted location coordinates.
