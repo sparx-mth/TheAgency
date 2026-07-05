@@ -1,0 +1,16 @@
+<?xml version="1.0" ?>
+<sdf version="1.7">
+  <model name="target_box">
+    <pose>2.0 0 0.5 0 0 0</pose> <!-- 2m in front of drone -->
+    <static>true</static>
+    <link name="link">
+      <collision name="box_collision">
+        <geometry><box><size>1.0 1.0 1.0</size></box></geometry>
+      </collision>
+      <visual name="box_visual">
+        <geometry><box><size>1.0 1.0 1.0</size></box></geometry>
+        <material><ambient>1 0 0 1</ambient><diffuse>1 0 0 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+</sdf>   

@@ -1,0 +1,56 @@
+{
+  "name": "ROS 2 Humble + Gazebo (TheAgency)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..", 
+    "args": {
+      "USERNAME": "user1",
+      "USER_UID": "1000",
+      "USER_GID": "1000",
+      "ROS_DISTRO": "humble",
+      "TARGETARCH": "amd64"
+    },
+    "cacheFrom": "ghcr.io/your-org/ros2-humble-cache:latest"
+  },
+  "remoteUser": "user1",
+  "workspaceFolder": "/home/ws",
+  "workspaceMount": "source=${localWorkspaceFolder}/sparx_agency,target=/home/ws,type=bind,consistency=cached",
+  "mounts": [
+    "source=${localWorkspaceFolder}/sparx_agency/../cache/humble/build,target=/home/ws/build,type=bind",
+    "source=${localWorkspaceFolder}/sparx_agency/../cache/humble/install,target=/home/ws/install,type=bind",
+    "source=${localWorkspaceFolder}/sparx_agency/../cache/humble/log,target=/home/ws/log,type=bind",
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    "source=${localWorkspaceFolder}/.gazebo,target=/home/ws/.gazebo,type=bind",
+    "source=${localWorkspaceFolder}/.ignition,target=/home/ws/.ignition,type=bind",
+    "source=${localWorkspaceFolder}/.devcontainer,target=/home/ws/.devcontainer,type=bind",
+    "source=${localWorkspaceFolder}/.vscode,target=/home/ws/.vscode,type=bind"
+  ],
+  "runArgs": [
+    "--net=host",
+    "--gpus", "all",
+    "-e", "DISPLAY=${env:DISPLAY}",
+    "-e", "QT_X11_NO_MITSHM=1",
+    "-e", "IGNITION_GUI_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/ignition/ignition-gazebo6/gui-plugins"
+  ],
+   "containerEnv": {
+    "HOME": "/home/user1",
+    "XDG_RUNTIME_DIR": "/tmp/runtime-user1",
+    "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
+    "GZ_SIM_RESOURCE_PATH": "/usr/share/gz/models:/home/ws/install/simple_drone/share/simple_drone/models",
+    "LD_LIBRARY_PATH": "/opt/ros/humble/lib:/usr/lib/x86_64-linux-gnu:${env:LD_LIBRARY_PATH}",
+    "PATH": "/opt/ros/humble/bin:${env:PATH}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-vscode.cpptools",
+        "twxs.cmake",
+        "ms-iot.vscode-ros",
+        "JacksonMinot.sdf"
+      ]
+    }
+  },
+  "postCreateCommand": "sudo chown -R 'user1' /home/ws && /bin/bash -c 'source /opt/ros/humble/setup.bash && colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'"
+}   
