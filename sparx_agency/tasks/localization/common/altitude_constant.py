@@ -8,7 +8,7 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Range
 
 
-from sparx_agency.robots.common.helpers import clamp  # noqa: F401 re-exported
+from sparx_agency.robots.common.math_utils import clamp  # noqa: F401 re-exported
 from sparx_agency.core.common.filters import ExponentialMovingAverage
 
 

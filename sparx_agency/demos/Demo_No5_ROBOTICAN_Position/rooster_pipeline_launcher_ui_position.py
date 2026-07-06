@@ -13,7 +13,7 @@ Architecture
   Container: sphera-backend:rooster-with-sparx  (docker compose service: `it`)
   TheAgency/sparx_agency/robots/ROBOTICAN is mounted inside at:
     /home/rooster/sparx_agency/robots/ROBOTICAN
-- network_mode: host  → container topics visible on host at ROS_DOMAIN_ID=2.
+- network_mode: host  → container topics visible on host at ROS_DOMAIN_ID=9.
 
 Quickstart
 ----------
@@ -34,12 +34,12 @@ from typing import Literal
 CONTAINER_NAME_DEFAULT = "it"
 
 # Environment sourced inside the container before every node command.
-# ROS_DOMAIN_ID=2 overrides the compose default of 1.
+# ROS_DOMAIN_ID=9 matches the SPHERA simulator's domain.
 CONTAINER_ENV = """\
 export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages:/home/rooster
 source /opt/ros/foxy/setup.bash
 source /home/rooster/workspace/install/setup.bash
-export ROS_DOMAIN_ID=2
+export ROS_DOMAIN_ID=9
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml
 export PYTHONUNBUFFERED=1"""
@@ -48,7 +48,7 @@ export PYTHONUNBUFFERED=1"""
 PC_ENV = """\
 cd /home/user1/GIT/TheAgency
 source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=2
+export ROS_DOMAIN_ID=9
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export PYTHONUNBUFFERED=1"""
 
@@ -152,7 +152,7 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         proc_key="rviz2",
         description=(
             "Opens RViz2 on the host with Jazzy.\n"
-            "Requires rmw_cyclonedds_cpp + ROS_DOMAIN_ID=2 to see drone topics."
+            "Requires rmw_cyclonedds_cpp + ROS_DOMAIN_ID=9 to see drone topics."
         ),
         enabled_by_default=False,
         command="rviz2",
@@ -411,7 +411,7 @@ class RoosterPositionLauncher(tk.Tk):
         srv_cmd = (
             "source /opt/ros/foxy/setup.bash && "
             "source /home/rooster/workspace/install/setup.bash && "
-            "export ROS_DOMAIN_ID=2 && "
+            "export ROS_DOMAIN_ID=9 && "
             "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
             "export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml && "
             f"ros2 service call /{drone_id}/fcu/command/force_arm "

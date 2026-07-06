@@ -46,7 +46,7 @@ _CONTAINER_ENV = """\
 export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages:/home/rooster
 source /opt/ros/foxy/setup.bash
 source /home/rooster/workspace/install/setup.bash
-export ROS_DOMAIN_ID=2
+export ROS_DOMAIN_ID=9
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml
 export PYTHONUNBUFFERED=1"""
@@ -598,7 +598,7 @@ def force_arm_rooster(drone_id: str, arm: bool) -> str | None:
     srv_cmd = (
         "source /opt/ros/foxy/setup.bash && "
         "source /home/rooster/workspace/install/setup.bash && "
-        "export ROS_DOMAIN_ID=2 && "
+        "export ROS_DOMAIN_ID=9 && "
         "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
         "export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml && "
         f"ros2 service call /{drone_id}/fcu/command/force_arm "

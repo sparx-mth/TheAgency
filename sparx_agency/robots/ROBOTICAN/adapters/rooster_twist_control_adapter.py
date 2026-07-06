@@ -15,7 +15,7 @@ from std_msgs.msg import Bool
 from fcu_driver_interfaces.msg import UAVState
 
 
-from sparx_agency.robots.common.helpers import clamp_symmetric as clamp
+from sparx_agency.robots.common.math_utils import clamp_symmetric as clamp
 
 
 class RoosterTwistControlNode(Node):

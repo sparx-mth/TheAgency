@@ -1,7 +1,6 @@
 import os, json, time, glob, datetime, re
 from typing import Optional, Tuple
 
-import cv2
 import numpy as np
 
 _POSE_NAME_RES = [
