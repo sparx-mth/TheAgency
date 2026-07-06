@@ -99,7 +99,11 @@ export DATA=$HOME/flight_dataset                             # recordings
 export CKPT=$HOME/navdp-cross-modal.ckpt                     # the checkpoint
 export PYTHONPATH=$REPO
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PKG=sparx_agency.tasks.planning.finetune.train        # module path used in Part C
 ```
+
+> All the Part C commands below reuse these variables, so run this whole block once
+> per shell session (or add it to your `~/.bashrc`).
 
 Sanity-check the model loads:
 
@@ -116,7 +120,7 @@ Labels → train (with validation) → evaluate on the held-out recording. `walk
 out (never trained on) so the eval measures generalization.
 
 ```bash
-PKG=sparx_agency.tasks.planning.finetune.train
+# (uses $PKG, $CKPT, $NAVDP_REPO, $DATA from Step 2 — set that block first)
 
 # (1) LABELS — 7 recordings, 150 goals/frame from the top 4/5, very-low ESDF correction
 python -m $PKG.pixel_labels --backend torch --ckpt "$CKPT" --navdp-repo "$NAVDP_REPO" \
