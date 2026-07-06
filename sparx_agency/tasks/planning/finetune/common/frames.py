@@ -51,13 +51,21 @@ class LocalMapConfig:
         forward_extent_m: How far ahead (``+x``) the grid reaches from the robot.
         half_width_m: Lateral half-extent; the grid spans ``[-half, +half]`` in
             ``+y`` (left).
-        z_band_m: Ground-relative height band ``(low, high)`` in meters. Points
-            whose height above the ground plane falls inside the band count as
-            obstacles; the floor and the ceiling are filtered out.
+        z_band_m: Absolute height band ``(low, high)`` in meters used only as the
+            **fallback** when ``remove_ground_plane`` is off or no ground plane is
+            found. Sensitive to ``camera_height_m`` / ``pitch_deg`` being right.
         depth_range_m: Valid depth interval; pixels outside are dropped.
-        camera_height_m: Camera height above the ground plane (meters).
-        pitch_deg: Camera pitch, nose-down positive (degrees).
+        camera_height_m: Camera height above the ground plane (meters). Only used
+            by the absolute-band fallback; the plane fit is height-invariant.
+        pitch_deg: Camera pitch, nose-down positive (degrees). Only the absolute
+            band depends on it; the plane fit is pitch-invariant.
         stride: Pixel subsampling stride for back-projection (speed lever).
+        remove_ground_plane: Fit the ground plane per frame and mark obstacles by
+            height *above it* (robust to unknown camera height/pitch, e.g. a low
+            drone at takeoff). Falls back to ``z_band_m`` if no ground is visible.
+        obstacle_band_m: Height band **above the fitted ground** counted as an
+            obstacle (floor and ceiling excluded). Used when the plane fit succeeds.
+        ground_fit_thresh_m: Inlier distance (m) for the robust ground-plane fit.
     """
 
     resolution_m: float = 0.10
@@ -68,6 +76,9 @@ class LocalMapConfig:
     camera_height_m: float = 1.0
     pitch_deg: float = 0.0
     stride: int = 2
+    remove_ground_plane: bool = True
+    obstacle_band_m: Tuple[float, float] = (0.15, 2.0)
+    ground_fit_thresh_m: float = 0.12
 
 
 def depth_to_body_cloud(
@@ -141,6 +152,32 @@ def depth_to_body_cloud(
     return np.stack([fwd, left, height], axis=1).astype(np.float32)
 
 
+def _ground_plane_residual(fwd, left, height, thresh):
+    """Height of each point above a robustly-fit ground plane, or ``None``.
+
+    Fits ``height ~= a*fwd + b*left + c`` by trimmed least-squares (seeded from the
+    lower half of the cloud, then re-fit on inliers). The plane absorbs a wrong
+    camera height (its offset ``c``) and pitch/roll (its tilt ``a, b``), so the
+    floor maps to ~zero residual regardless of those being right. Returns ``None``
+    when there is no dominant, roughly-horizontal ground surface (e.g. a wall-only
+    scene) so the caller can fall back to the absolute band.
+    """
+    if fwd.size < 50:
+        return None
+    a_mat = np.stack([fwd, left, np.ones_like(fwd)], axis=1)
+    inl = height < np.median(height)                 # seed: the lower half by height
+    coef = None
+    for _ in range(3):                               # trimmed-LS refinement
+        if int(inl.sum()) < 30:
+            return None
+        coef, *_ = np.linalg.lstsq(a_mat[inl], height[inl], rcond=None)
+        inl = np.abs(height - a_mat @ coef) < thresh
+    # a genuine ground plane is dominant and roughly horizontal (small tilt)
+    if inl.mean() < 0.10 or np.hypot(coef[0], coef[1]) > 1.0:
+        return None
+    return height - a_mat @ coef
+
+
 def cloud_to_occupancy_grid(
     cloud_body: np.ndarray,
     config: LocalMapConfig,
@@ -175,8 +212,15 @@ def cloud_to_occupancy_grid(
 
     if cloud_body.size:
         fwd, left, height = cloud_body[:, 0], cloud_body[:, 1], cloud_body[:, 2]
-        z_lo, z_hi = config.z_band_m
-        keep = (height >= z_lo) & (height <= z_hi)
+        keep = None
+        if config.remove_ground_plane:
+            resid = _ground_plane_residual(fwd, left, height, config.ground_fit_thresh_m)
+            if resid is not None:                    # obstacles = height above ground
+                lo, hi = config.obstacle_band_m
+                keep = (resid >= lo) & (resid <= hi)
+        if keep is None:                             # fallback: absolute height band
+            z_lo, z_hi = config.z_band_m
+            keep = (height >= z_lo) & (height <= z_hi)
         gx = np.floor((fwd[keep] - params.origin_x) / res).astype(np.int64)
         gy = np.floor((left[keep] - params.origin_y) / res).astype(np.int64)
         inb = (gx >= 0) & (gx < n_fwd) & (gy >= 0) & (gy < n_left)

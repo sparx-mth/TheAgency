@@ -86,6 +86,10 @@ python -m sparx_agency.tasks.planning.finetune.train.train_pixel \
 # 3) EVALUATE trained vs untrained (metrics table + side-by-side PNG)
 python -m sparx_agency.tasks.planning.finetune.train.evaluate \
   --rec walk_into --finetuned ~/flight_dataset/walk_into/run1/ema_latest.pth --out eval.png
+
+# 3b) LIVE side-by-side: click a pixel, see BOTH models answer (untrained + trained)
+python -m sparx_agency.tasks.planning.finetune.train.interactive_compare \
+  --rec walk_into --trained ~/flight_dataset/run_long/ema_latest.pth
 ```
 
 **GPU note:** this is an 8 GB GPU; use `--batch-size 2` and
