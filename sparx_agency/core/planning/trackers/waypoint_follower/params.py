@@ -64,6 +64,29 @@ class WaypointFollowerParams:
         yaw_coast_rad: Physical yaw the platform keeps sweeping after the burst
             command stops (inertia). The burst aims this much short to land on
             the target instead of overshooting.
+        freeze_on_rotation: Master on/off for the whole freeze-during-rotation
+            feature. False keeps the map LIVE through every turn (no freeze, no
+            forced re-observation) — use it if depth is trusted during rotation.
+            Navigation (the burst/settle loop) is unchanged either way.
+        freeze_yaw_thresh_rad: Heading change above which an alignment *episode*
+            is treated as a real rotation and FREEZES the map: while depth and
+            localization are unreliable during a turn, no voxel is fused. A small
+            heading correction (error at or below this) is instead executed with
+            the sensors LIVE -- the map keeps updating through the gentle nudge --
+            because freezing (and the post-turn re-observation it forces) is not
+            worth it for a few degrees. Measured once, from the settled heading at
+            the start of the episode, and LATCHED for the whole episode (so the
+            small residual burst that ends an 80 deg turn stays frozen, not just
+            the first chunk); it clears on reaching ADVANCE. Set ``0.0`` to freeze
+            every turn (legacy behaviour); set very large to never freeze on yaw.
+        settle_map_updates: Fresh map/voxel updates a *frozen* turn's YAW_SETTLE
+            must see (stopped, sensors live) before the follower will move on --
+            i.e. the drone re-observes the scene at least this many times from the
+            new, converged heading before advancing or turning again, so it never
+            acts on a map built before the turn. Only enforced for frozen episodes
+            (a small live correction needs none); surfaced to the adapter via
+            :attr:`WaypointFollower.settle_map_updates_required` and gated together
+            with the ``map_ready`` input to :meth:`WaypointFollower.step`.
         yaw_capture_tol_m: Cross-track tolerance for the predictive ADVANCE gate
             (m): advance once going straight on the current heading would pass
             within this distance of the waypoint. Wired from the launch's
@@ -102,6 +125,28 @@ class WaypointFollowerParams:
     yaw_burst_max_ticks: int = 30
     yaw_burst_max_rad: float = radians(25.0)   # per-burst increment; split big turns
     yaw_coast_rad: float = radians(15.0)
+
+    # Freeze-vs-live decision for the turn (see docstring). A turn larger than
+    # freeze_yaw_thresh_rad freezes the map and then re-observes settle_map_updates
+    # times while stopped; a smaller correction stays live and needs no re-observe.
+    # freeze_on_rotation is the master switch: False => never freeze / never wait
+    # to re-observe (the map stays live through every turn), for when depth is
+    # trusted during rotation. Navigation (bursts/settle) is unaffected.
+    freeze_on_rotation: bool = True
+    freeze_yaw_thresh_rad: float = radians(20.0)
+    settle_map_updates: int = 2
+
+    # Graded-pulse / mid-burst-feedback / anti-deadlock yaw upgrades. ALL default
+    # to today's behaviour (flags off / 0) so the change is inert until enabled;
+    # the FALCON launch turns them on (see waypoint_follower_node + nav_stack.launch).
+    yaw_graded_pulses: bool = False     # size each burst by tick count {2,4,6}, cap 6
+    yaw_burst_grade_max_ticks: int = 6  # hard cap on a graded burst (req: 6 ticks)
+    yaw_settle_dwell_per_tick: float = 0.0  # extra settle dwell per burst tick (inertia)
+    yaw_burst_live_feedback: bool = False   # cut a burst short on confirmed live overshoot
+    yaw_fb_reach_rad: float = 0.0       # remaining-in-burst-dir <= this counts as reached
+    yaw_fb_confirm_ticks: int = 2       # consecutive reach ticks before cutting (noise guard)
+    yaw_max_reversals: int = 0          # force ADVANCE after this many sign-flips (0 = off)
+    yaw_accept_growth_rad: float = 0.0  # widen the accept band per reversal (anti-deadlock)
 
     # Gentle predictive ADVANCE gate.
     yaw_capture_tol_m: float = 0.20

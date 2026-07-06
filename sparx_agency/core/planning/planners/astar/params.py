@@ -67,8 +67,11 @@ class WeightedAStarParams:
         los_smoothing: Simplify the raw A* cell path (Douglas–Peucker) before
             emitting waypoints. (Name kept for the rosparam; it no longer
             string-pulls.)
-        waypoint_spacing_m: Max output segment length; corners are preserved,
-            only longer legs are split. <= 0 disables splitting.
+        waypoint_spacing_m: Target output segment length. Corners are preserved;
+            each long leg is divided into the nearest whole number of equal
+            sub-segments, so legs land close to this value (a leg may run up to
+            ~1.5x before it splits, rather than always coming out below it).
+            <= 0 disables resampling.
         goal_snap_radius_m: If the goal cell is blocked, snap to the nearest
             free cell within this radius. 0 disables.
         start_skip_m: Drop leading waypoints within this distance of the start

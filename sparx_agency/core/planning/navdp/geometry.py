@@ -6,6 +6,11 @@ networking nor ROS:
 * :func:`pixel_to_pointgoal` -- a clicked image pixel + its depth -> the
   body-frame point-goal NavDP consumes, scaled into NavDP's input range while
   preserving the click bearing.
+* :func:`point_to_pointgoal` -- the bearing-preserving scale on its own, for a
+  goal already given in the body frame (e.g. a global A* waypoint, not a click).
+* :func:`world_to_body_2d` -- a world point expressed in the drone body frame
+  (the inverse of :func:`anchor_trajectory_to_world`); used to hand NavDP a goal
+  taken from the world-frame A* route.
 * :func:`anchor_trajectory_to_world` -- NavDP's body-frame trajectory anchored at
   the drone's world pose, ready to publish as a world-frame path (the BEV map /
   waypoint-follower frame).
@@ -70,6 +75,32 @@ def patch_median_depth(depth, px, py, half=10, min_valid=0.1, max_valid=50.0):
     return float(np.median(valid))
 
 
+def point_to_pointgoal(fwd, left, max_fwd_m=NAVDP_MAX_FWD_M,
+                       max_lat_m=NAVDP_MAX_LAT_M):
+    """Scale a body-frame point ``(forward, left)`` into NavDP's input range.
+
+    The goal is scaled as a *whole* (uniform scale, both axes), so the bearing
+    ``atan2(left, forward)`` to the point is preserved -- a goal past the range
+    keeps its direction instead of looking far more sideways than intended (the
+    same policy :func:`pixel_to_pointgoal` applies to a clicked pixel). A point
+    on/behind the camera plane (``forward < 0.1`` m) collapses to a tiny
+    straight-ahead goal so NavDP is never handed a non-positive forward range.
+
+    Args:
+        fwd, left: body-frame point ``(forward, left)`` in meters (FLU).
+        max_fwd_m, max_lat_m: NavDP input-range bounds.
+
+    Returns:
+        ``(gx, gy)`` -- the scaled body-frame point-goal ``(forward, left)``.
+    """
+    if fwd < 0.1:                          # on/behind the camera plane
+        return 0.1, 0.0
+    scale_fwd = max_fwd_m / fwd if fwd > max_fwd_m else 1.0
+    scale_lat = max_lat_m / abs(left) if abs(left) > max_lat_m else 1.0
+    scale = min(scale_fwd, scale_lat)
+    return float(fwd * scale), float(left * scale)
+
+
 def pixel_to_pointgoal(px, py, depth, intr, fallback_depth_m=3.0,
                        max_fwd_m=NAVDP_MAX_FWD_M, max_lat_m=NAVDP_MAX_LAT_M):
     """Convert a clicked pixel + depth into NavDP's body-frame point-goal.
@@ -101,12 +132,8 @@ def pixel_to_pointgoal(px, py, depth, intr, fallback_depth_m=3.0,
     by_raw = -(px - intr.cx) * d / intr.fx
     bz = -(py - intr.cy) * d / intr.fy
 
-    if bx_raw < 0.1:                       # click on/behind the camera plane
-        return 0.1, 0.0, d, bz
-    scale_fwd = max_fwd_m / bx_raw if bx_raw > max_fwd_m else 1.0
-    scale_lat = max_lat_m / abs(by_raw) if abs(by_raw) > max_lat_m else 1.0
-    scale = min(scale_fwd, scale_lat)
-    return float(bx_raw * scale), float(by_raw * scale), d, bz
+    gx, gy = point_to_pointgoal(bx_raw, by_raw, max_fwd_m, max_lat_m)
+    return gx, gy, d, bz
 
 
 def anchor_trajectory_to_world(traj_xy, ref_x, ref_y, ref_yaw):
@@ -137,6 +164,32 @@ def anchor_trajectory_to_world(traj_xy, ref_x, ref_y, ref_yaw):
         out.append((ref_x + fwd * c - left * s,
                     ref_y + fwd * s + left * c))
     return out
+
+
+def world_to_body_2d(wx, wy, ref_x, ref_y, ref_yaw):
+    """Express a world point in the drone body frame (FLU) at a world pose.
+
+    The exact inverse of :func:`anchor_trajectory_to_world` for a single point::
+
+        dx = wx - ref_x;  dy = wy - ref_y
+        forward =  dx * cos(ref_yaw) + dy * sin(ref_yaw)
+        left    = -dx * sin(ref_yaw) + dy * cos(ref_yaw)
+
+    Use it to turn a world-frame goal (e.g. an A* route waypoint) into the
+    body-frame ``(forward, left)`` NavDP consumes -- the drone body is the origin,
+    facing ``+x`` -- so anchoring the returned trajectory back with the SAME pose
+    round-trips exactly.
+
+    Args:
+        wx, wy: the world point.
+        ref_x, ref_y, ref_yaw: drone world pose (the body-frame origin/heading).
+
+    Returns:
+        ``(forward, left)`` body-frame coordinates (m).
+    """
+    dx, dy = wx - ref_x, wy - ref_y
+    c, s = cos(ref_yaw), sin(ref_yaw)
+    return float(dx * c + dy * s), float(-dx * s + dy * c)
 
 
 def body_point_to_pixel(x_fwd, y_left, intr, cam_height_m, min_fwd_m=0.05,

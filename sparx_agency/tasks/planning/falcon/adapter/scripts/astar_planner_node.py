@@ -56,6 +56,35 @@ from sparx_agency.core.planning.planners.astar import (
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
 
+_TRUE_STRINGS = ("true", "1", "yes", "on")
+_FALSE_STRINGS = ("false", "0", "no", "off")
+
+
+def _get_bool_param(name, default):
+    """Read a boolean rosparam, raising on a value that is not clearly boolean.
+
+    roslaunch coerces ``value="true"`` / ``value="false"`` to a real Python bool,
+    but it leaves an UNRECOGNISED string (e.g. the typo ``"fales"``) as a raw
+    string -- and ``bool("fales")`` is ``True``. A plain ``bool(get_param(...))``
+    cast therefore *looks* like sanitisation while silently flipping a default-off
+    flag ON (exactly the bug that made the planner replan on every BEV frame). Per
+    the repo rule "prefer raising errors over silent fallbacks to default values",
+    validate explicitly and raise so a typo fails loudly at node start-up.
+    """
+    value = rospy.get_param(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _TRUE_STRINGS:
+            return True
+        if token in _FALSE_STRINGS:
+            return False
+    raise ValueError(
+        "rosparam %s expected a boolean (true/false), got %r -- check the launch "
+        "file / overrides for a typo (e.g. 'fales' instead of 'false')"
+        % (name, value))
+
 
 class AStarPlannerNode:
     def __init__(self):
@@ -73,17 +102,17 @@ class AStarPlannerNode:
         self.params = WeightedAStarParams(
             connectivity=int(G("~connectivity", 8)),
             inflate_radius_m=float(G("~inflate_radius_m", 0.4)),
-            unknown_blocked=bool(G("~unknown_blocked", False)),
+            unknown_blocked=_get_bool_param("~unknown_blocked", False),
             unknown_cost=float(G("~unknown_cost", 1.0)),
             search_margin_m=float(G("~search_margin_m", 3.0)),
             turn_penalty=float(G("~turn_penalty", 0.3)),
-            los_smoothing=bool(G("~los_smoothing", True)),
+            los_smoothing=_get_bool_param("~los_smoothing", True),
             waypoint_spacing_m=float(G("~waypoint_spacing_m", 3.0)),
             goal_snap_radius_m=float(G("~goal_snap_radius_m", 2.0)),
             start_skip_m=float(G("~start_skip_m", 0.4)),
             max_expansions=int(G("~max_expansions", 200000)),
             # Corner rounding -> gentler turns for the stop-and-turn follower.
-            corner_round=bool(G("~corner_round", True)),
+            corner_round=_get_bool_param("~corner_round", True),
             corner_merge_rad=math.radians(float(G("~corner_merge_deg", 8.0))),
             corner_max_turn_rad=math.radians(float(G("~corner_max_turn_deg", 14.0))),
             corner_chamfer_max_rad=math.radians(float(G("~corner_chamfer_max_deg", 28.0))),
@@ -105,16 +134,16 @@ class AStarPlannerNode:
         # what freezes the trajectory between ticks. Enable any of them only to
         # react to obstacles faster than plan_period_s (the path and its APF field
         # may then change between ticks).
-        self.replan_on_collision = bool(G("~replan_on_collision", False))
-        self.replan_on_bev = bool(G("~replan_on_bev", False))
+        self.replan_on_collision = _get_bool_param("~replan_on_collision", False)
+        self.replan_on_bev = _get_bool_param("~replan_on_bev", False)
 
         # Dynamics-aware replan: the follower publishes its predicted (stop-and-
         # turn) trajectory; replan if THAT collides even when the geometric path
         # does not (overshoot into a wall the straight path misses). Guarded by a
         # freshness check, the same confirm streak, and a consecutive-replan cap.
         # Off by default with the rest of the mid-cycle replans (keeps the freeze).
-        self.replan_on_predicted_collision = bool(
-            G("~replan_on_predicted_collision", False))
+        self.replan_on_predicted_collision = _get_bool_param(
+            "~replan_on_predicted_collision", False)
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.max_predicted_replans = int(G("~max_predicted_replans", 3))
 
@@ -218,7 +247,7 @@ class AStarPlannerNode:
         if not self.has_plan:
             self._try_plan()                 # one-shot: first path ASAP after warmup
         elif self.replan_on_bev:
-            self._try_plan()
+            self._try_plan(allow_suppress=True)
         elif self.replan_on_collision:
             self._collision_replan_check()
         if self.has_plan and self.replan_on_predicted_collision:
@@ -318,10 +347,39 @@ class AStarPlannerNode:
         """Strict A* cadence: every plan_period_s recompute A* + APF once and
         publish, then freeze until the next tick. Fires regardless of has_plan, so
         each cycle yields a fresh path from the latest map and current pose -- the
-        one periodic source of a new trajectory once the first plan exists."""
-        self._try_plan()
+        one periodic source of a new trajectory once the first plan exists.
 
-    def _try_plan(self):
+        allow_suppress=True: when the periodic replan reproduces the SAME path
+        (typical while the drone is stopped to yaw, so the start anchor has not
+        moved) the re-publish is skipped -- see _try_plan."""
+        self._try_plan(allow_suppress=True)
+
+    @staticmethod
+    def _paths_equal(a, b, eps=1e-3):
+        """True if two waypoint tuples are the same length and match within eps (m).
+
+        Used to decide whether a periodic replan actually changed the route. The
+        start waypoint is anchored to the live pose, so while the drone moves this
+        is False every tick (the route genuinely shifts) and the replan publishes;
+        while it is stopped (yaw settle, map wait) the anchor is fixed and an
+        identical A* result compares equal, so the redundant re-publish is skipped.
+        """
+        if not a or len(a) != len(b):
+            return False
+        return all(abs(p.x - q.x) < eps and abs(p.y - q.y) < eps
+                   for p, q in zip(a, b))
+
+    def _try_plan(self, allow_suppress=False):
+        """Plan once and (re)publish the raw A* path.
+
+        allow_suppress (set by the periodic / replan_on_bev ticks): if the freshly
+        planned path is identical to the one already published, skip the re-publish
+        so the downstream corrector and follower are not reset by an unchanged
+        route -- re-emitting it resets the follower's waypoint index and re-enters
+        its yaw state machine, stuttering the path it is flying. The first plan,
+        goal clicks and collision replans leave this False, so an intentional
+        new/changed path always reaches the follower.
+        """
         if self.grid is None:
             self.fail_reason = "no BEV yet"; return False
         if self.goal is None:
@@ -343,6 +401,17 @@ class AStarPlannerNode:
             return False
 
         anchored = self._anchor_to_drone(res.path)   # path begins at the drone pose
+        # Freeze the trajectory when a periodic replan reproduces the CURRENT path:
+        # re-publishing it would only reset the follower (waypoint index + yaw
+        # state), never change where the drone goes. has_plan guards the first plan.
+        if (allow_suppress and self.has_plan
+                and self._paths_equal(anchored.points, self.last_points)):
+            self.fail_reason = "(unchanged -- not re-published)"
+            rospy.loginfo_throttle(
+                10.0, "astar_planner: periodic replan reproduced the current path "
+                "-- not re-publishing (trajectory frozen)")
+            return True
+
         # Publish the raw A* path; the path_corrector recentres it downstream.
         # Collision re-checks here run against THIS published path.
         self.last_points = anchored.points
@@ -489,7 +558,9 @@ if __name__ == "__main__":
 #       (and on a goal click); the published path is frozen between ticks so the
 #       follower is not chasing a path that shifts every BEV frame. The downstream
 #       path_corrector re-corrects only when a new A* path is published, so the
-#       flown trajectory is frozen between ticks too.
+#       flown trajectory is frozen between ticks too. A periodic replan that
+#       reproduces the CURRENT path (e.g. while stopped to yaw, anchor unmoved) is
+#       not re-published, so an unchanged route never resets the follower.
 #   OPTIONAL mid-cycle replan (ALL OFF by default -- enabling any lets the path
 #     move between ticks):
 #       ~replan_on_collision (false) ~replan_on_bev (false)

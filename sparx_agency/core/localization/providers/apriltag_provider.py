@@ -13,16 +13,15 @@ from sparx_agency.core.common.filters import ExponentialMovingAverage
 from sparx_agency.core.common.types.geometry import Pose3D
 from sparx_agency.core.common.types.perception import Observation
 from sparx_agency.core.localization.base import BaseLocalizationProvider, LocalizationEstimate
-from sparx_agency.core.localization.tag_triangulation import (
-    TagObservation,
-    TagWorldPose,
-    estimate_camera_pose_from_tags,
-)
+from sparx_agency.core.localization.tag_triangulation import TagWorldPose
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     load_camera_calib_yaml,
     make_detector,
-    solvepnp_ippe_square,
-    tag_object_points,
+)
+from sparx_agency.tasks.localization.common.apriltag_pnp import (
+    TagDetection,
+    estimate_camera_pose,
+    pose_confidence,
 )
 
 # OpenCV camera frame → ROS/world frame convention
@@ -57,17 +56,14 @@ def _load_tag_world_map(path: str, default_size: float) -> Tuple[Dict[int, TagWo
     return out_poses, out_sizes
 
 
-def _confidence_from_area(total_area_px: float) -> float:
-    """Map total visible tag area (px²) to a 0–1 confidence score."""
-    return float(min(1.0, total_area_px / 10_000.0))
-
-
 class AprilTagLocalizationProvider(BaseLocalizationProvider):
     """
-    Localization from AprilTag triangulation.
+    Localization from AprilTags.
 
-    Wraps the core estimate_camera_pose_from_tags() algorithm.
-    Applies EMA smoothing on position and quaternion (same as apriltag_triangulation_node).
+    Wraps :func:`apriltag_pnp.estimate_camera_pose`: a single joint PnP over the
+    pooled corners of all visible tags (>= 2), or a disambiguated IPPE-square
+    solve for a single tag. Applies EMA smoothing on position and quaternion
+    (same as apriltag_triangulation_node).
     """
 
     source_name = "apriltag"
@@ -93,6 +89,9 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
 
         self._pos_ema = ExponentialMovingAverage(alpha=alpha)
         self._filtered_q: Optional[np.ndarray] = None
+        # Previous camera position in world for temporal disambiguation of the
+        # single-tag planar (IPPE) pose ambiguity.
+        self._prev_cam_pos: Optional[np.ndarray] = None
         self._healthy = True
 
         import rclpy.logging
@@ -104,6 +103,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
     def reset(self) -> None:
         self._pos_ema = ExponentialMovingAverage(alpha=self._alpha)
         self._filtered_q = None
+        self._prev_cam_pos = None
 
     def update(self, obs: Observation) -> Optional[LocalizationEstimate]:
         if obs.rgb is None:
@@ -115,8 +115,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         dets = self._detector.detect(gray)
 
-        observations: List[TagObservation] = []
-        total_area = 0.0
+        tag_dets: List[TagDetection] = []
 
         for d in dets:
             tag_id = int(d.tag_id)
@@ -128,22 +127,23 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
                 self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(not in map)")
                 continue
             corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
-            obj_pts = tag_object_points(self._tag_sizes.get(tag_id, self._default_tag_size))
-            cam_T_tag = solvepnp_ippe_square(corners, obj_pts, self._calib.K, self._calib.D)
-            if cam_T_tag is None:
-                self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(solvePnP failed)")
-                continue
-            area = float(cv2.contourArea(corners.astype(np.float32)))
-            total_area += area
-            self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} area={area:.0f}px USED")
-            observations.append(TagObservation(tag_id=tag_id, cam_T_tag=cam_T_tag, weight=area))
+            size_m = self._tag_sizes.get(tag_id, self._default_tag_size)
+            self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} USED")
+            tag_dets.append(TagDetection(tag_id=tag_id, corners=corners, size_m=size_m))
 
-        if not observations:
+        if not tag_dets:
             return None
 
-        est = estimate_camera_pose_from_tags(observations, self._tag_map, self._fuse_method)
+        # One joint PnP over all tags (>= 2), or a disambiguated IPPE-square
+        # solve for a single tag, seeded with the previous position.
+        est = estimate_camera_pose(
+            tag_dets, self._tag_map, self._calib.K, self._calib.D,
+            prev_cam_pos_world=self._prev_cam_pos,
+        )
         if est is None:
             return None
+
+        self._prev_cam_pos = est.world_T_cam[:3, 3].copy()
 
         world_T_ros = est.world_T_cam @ _CV_TO_ROS
         x = float(world_T_ros[0, 3])
@@ -163,10 +163,11 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         qx, qy, qz, qw = self._filtered_q
         yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
-        n_tags = len(observations)
-        confidence = min(1.0, _confidence_from_area(total_area) * (0.7 + 0.15 * min(n_tags, 2)))
-        used_ids = sorted(o.tag_id for o in observations)
-        self._log.info(f"[apriltag] pose: conf={confidence:.2f} n_tags={n_tags} used={used_ids}")
+        confidence = pose_confidence(est)
+        used_ids = sorted(est.used_tag_ids)
+        self._log.info(
+            f"[apriltag] pose: conf={confidence:.2f} n_tags={est.n_tags} "
+            f"used={used_ids} rms={est.reproj_rms_px:.2f}px amb={est.ambiguity:.2f}")
 
         return LocalizationEstimate(
             pose=Pose3D(x=float(x), y=float(y), z=float(z), yaw=yaw),

@@ -7,6 +7,12 @@ from .waypoint_follower import (
     WaypointFollower,
     WaypointFollowerParams,
 )
+from .multi_axis_follower import (
+    MultiAxisCommand,
+    MultiAxisFollower,
+    MultiAxisFollowerParams,
+    MultiAxisState,
+)
 
 __all__ = [
     "TrackerFactory",
@@ -19,4 +25,8 @@ __all__ = [
     "FollowerCommand",
     "FollowerState",
     "ControlAxis",
+    "MultiAxisFollower",
+    "MultiAxisFollowerParams",
+    "MultiAxisCommand",
+    "MultiAxisState",
 ]

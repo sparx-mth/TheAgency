@@ -6,12 +6,16 @@ A matplotlib window (NOT RViz) showing the published BEV grid plus the drone
 pose, the raw A* path, the APF-safe (recentred) path, the predicted drone
 trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
-    red path   = raw A*  (shortest -- hugs walls / cuts corners)
-    green path = APF-safe (recentred toward free space -- the path flown)
+    red path     = raw A*  (shortest -- hugs walls / cuts corners)
+    teal dashed  = A* global route (whole plan; stays put as a NavDP leg flies it)
+    magenta path = APF-safe (recentred off walls -- before cleanup)
+    green path   = cleaned/flown (simplified APF-safe path -- the path flown)
     blue dashed = full planner route (e.g. NavDP) when only its near prefix flies
     yellow arrows = repulsive force F_rep=-grad U_rep at each waypoint (obstacle push)
     gold field    = F_rep across the free space (how hard each wall section pushes)
     orange dashed = predicted (stop-and-turn)
+    cyan          = smooth spline tracked by pure-pursuit (/path/smooth)
+    blueviolet X  = pure-pursuit lookahead aim point (/path/lookahead)
 The title shows the predicted-trajectory quality score (0..1) when available.
 
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
@@ -19,17 +23,29 @@ picks it up, replans, and the new path is drawn within one BEV update. This node
 is purely a viewer + click adapter -- it does not move the drone, plan, or alter
 the map.
 
+Overlays can be toggled live with the number keys to declutter the view (the
+drone dot and goal star always stay on):
+    1 full route   2 raw A*    3 safe    4 flown path   5 F_rep field
+    6 F_rep arrows 7 predicted 8 smooth  9 lookahead    a A* global route
+    0 all on/off
+Initial visibility can also be preset per layer via the ~show_<layer> params
+(e.g. ~show_pred:=false to start with the predicted trajectory hidden).
+
 Run as a sidecar in the FALCON container:
     rosrun falcon_adapter bev_click_goal_node.py
 Requires matplotlib (apt-get install -y python3-matplotlib if missing).
 
   in   ~bev_topic  (OccupancyGrid)  /falcon/bev_2d
-  in   ~path_topic (Path)           /path/waypoints      (APF-safe; drawn green)
+  in   ~path_topic (Path)           /path/waypoints      (cleaned/flown; drawn green)
   in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
+  in   ~astar_path_topic (Path)     /path/waypoints_astar (A* global route; teal dashed; '' = off)
+  in   ~safe_path_topic (Path)      /path/waypoints_safe (APF-safe pre-cleanup; magenta; '' = off)
   in   ~full_path_topic (Path)      /path/waypoints_navdp_full  (full route, blue dashed; '' = off)
   in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
   in   ~predicted_path_topic (Path) /path/predicted
   in   ~predicted_score_topic (Float32) /path/predicted_score
+  in   ~smooth_path_topic (Path)    /path/smooth    (pure-pursuit spline; cyan; '' = off)
+  in   ~lookahead_topic (PointStamped) /path/lookahead (pure-pursuit aim; blueviolet X; '' = off)
   in   ~drone_ns + /gt_pose (Pose)
   in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/localization
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
@@ -47,8 +63,9 @@ import numpy as np
 import rospy
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.lines import Line2D
 
-from geometry_msgs.msg import Pose, PoseStamped, Point
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Float32
 from visualization_msgs.msg import Marker, MarkerArray
@@ -66,6 +83,17 @@ class BevClickGoalNode:
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
         self.path_topic = G("~path_topic", "/path/waypoints")
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
+        # A* GLOBAL route, subscribed straight from the planner so it draws
+        # independently of the arbitrated combo/corrector pipeline. In combination
+        # mode the raw/safe/flown overlays follow /path/waypoints_combo, which
+        # time-shares between the echoed A* route (cruise) and the live NavDP leg
+        # (follow) -- so the global A* route is otherwise invisible while a NavDP
+        # leg flies. Drawn teal-dashed; "" disables it.
+        self.astar_path_topic = G("~astar_path_topic", "/path/waypoints_astar")
+        # The corrector's safe path BEFORE the trajectory_simplifier cleans it.
+        # Drawn magenta so safety-corrected vs final-flown is visible while tuning
+        # the simplifier. "" disables it (no publisher -> nothing drawn anyway).
+        self.safe_path_topic = G("~safe_path_topic", "/path/waypoints_safe")
         # FULL planner route (e.g. NavDP's whole trajectory when only its near
         # prefix is executed): drawn dim/dashed for reference. Defaults to NavDP's
         # full-route topic so `rosrun bev_click_goal_node.py` shows the whole route
@@ -75,6 +103,11 @@ class BevClickGoalNode:
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
                                        "/path/predicted_score")
+        # Pure-pursuit overlays: the splined trajectory it tracks (cyan) and the
+        # moving lookahead point it aims at (blueviolet). "" disables either; no
+        # publisher (other controllers) -> nothing drawn anyway.
+        self.smooth_path_topic = G("~smooth_path_topic", "/path/smooth")
+        self.lookahead_topic = G("~lookahead_topic", "/path/lookahead")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.pose_stamped_topic = G("~pose_stamped_topic", "")
         self.refresh_hz = float(G("~refresh_hz", 5.0))
@@ -88,27 +121,51 @@ class BevClickGoalNode:
 
         # Latest data + lock for cross-thread (ROS callbacks vs render) access
         self._bev = None
-        self._path_xy = []              # APF-safe path (green) -- the path flown
-        self._raw_xy = []               # raw A* path (red) -- shortest, viz only
+        self._path_xy = []              # cleaned, flown path (green)
+        self._raw_xy = []               # raw planner path (red) -- shortest, viz only
+        self._astar_xy = []             # A* GLOBAL route (teal) -- independent overlay
+        self._safe_xy = []              # corrector's safe path (magenta) -- pre-cleanup
         self._full_xy = []              # full planner route (blue dashed) -- ref only
         self._forces = []               # (x,y,dx,dy) per-waypoint force arrows (yellow)
         self._field_arrows = []         # (x,y,dx,dy) coarse wall force-field (gold)
         self._pred_xy = []              # predicted drone trajectory (rollout)
         self._pred_score = None         # 0..1 "how good" score
+        self._smooth_xy = []            # pure-pursuit splined trajectory (cyan)
+        self._lookahead_xy = None       # pure-pursuit lookahead aim point (blueviolet)
         self._drone_p = None            # (x, y, yaw)
         self._goal_xy = None
         self._lock = threading.Lock()
+
+        # Live per-layer visibility. Each maps a number key to an overlay; a
+        # layer that is off is simply not recreated in _render, so its artist
+        # disappears on the next frame. Defaults come from ~show_<layer> so a
+        # launch file can start with a cluttered overlay (e.g. pred) hidden.
+        self._keymap = {"1": "full", "2": "raw", "3": "safe", "4": "path",
+                        "5": "field", "6": "forces", "7": "pred",
+                        "8": "smooth", "9": "lookahead", "a": "astar"}
+        self._show = {layer: bool(G("~show_" + layer, True))
+                      for layer in self._keymap.values()}
 
         self.goal_pub = rospy.Publisher(self.goal_topic, Point, queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.path_topic, Path, self._path_cb, queue_size=1)
         rospy.Subscriber(self.raw_path_topic, Path, self._raw_path_cb, queue_size=1)
+        if self.astar_path_topic:
+            rospy.Subscriber(self.astar_path_topic, Path, self._astar_path_cb,
+                             queue_size=1)
+        if self.safe_path_topic:
+            rospy.Subscriber(self.safe_path_topic, Path, self._safe_path_cb, queue_size=1)
         if self.full_path_topic:
             rospy.Subscriber(self.full_path_topic, Path, self._full_path_cb, queue_size=1)
         rospy.Subscriber(self.forces_topic, MarkerArray, self._forces_cb, queue_size=1)
         rospy.Subscriber(self.predicted_path_topic, Path, self._pred_cb, queue_size=1)
         rospy.Subscriber(self.predicted_score_topic, Float32, self._pred_score_cb,
                          queue_size=1)
+        if self.smooth_path_topic:
+            rospy.Subscriber(self.smooth_path_topic, Path, self._smooth_cb, queue_size=1)
+        if self.lookahead_topic:
+            rospy.Subscriber(self.lookahead_topic, PointStamped, self._lookahead_cb,
+                             queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         if self.pose_stamped_topic:
             rospy.Subscriber(self.pose_stamped_topic, PoseStamped,
@@ -116,6 +173,7 @@ class BevClickGoalNode:
 
         self.fig, self.ax = plt.subplots(figsize=(9, 9))
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self.fig.canvas.mpl_connect(
             "close_event",
             lambda _e: rospy.signal_shutdown("bev_click_goal window closed"))
@@ -123,10 +181,15 @@ class BevClickGoalNode:
         self.ax.set_xlabel("x (m)")
         self.ax.set_ylabel("y (m)")
         self.ax.grid(True, alpha=0.25)
+        self._add_legend()
 
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
+        self._astar_line = None          # A* global route (teal dashed)
+        self._safe_line = None           # corrector safe path (magenta)
         self._full_line = None           # full planner route (blue dashed)
+        self._smooth_line = None         # pure-pursuit splined trajectory (cyan)
+        self._lookahead_marker = None    # pure-pursuit lookahead point (blueviolet)
         self._forces_artist = None      # quiver of per-waypoint force arrows
         self._field_artist = None       # quiver of the coarse wall force-field
         self._drone_dot = self._drone_arrow = self._goal_marker = None
@@ -137,6 +200,12 @@ class BevClickGoalNode:
         rospy.loginfo("  bev  in  = %s", self.bev_topic)
         rospy.loginfo("  path in  = %s   (APF-safe, green)", self.path_topic)
         rospy.loginfo("  raw  in  = %s   (raw A*, red)", self.raw_path_topic)
+        if self.astar_path_topic:
+            rospy.loginfo("  astar in = %s   (A* global route, teal)",
+                          self.astar_path_topic)
+        if self.safe_path_topic:
+            rospy.loginfo("  safe in  = %s   (corrector safe, magenta)",
+                          self.safe_path_topic)
         if self.full_path_topic:
             rospy.loginfo("  full in  = %s   (full route, blue dashed)",
                           self.full_path_topic)
@@ -146,6 +215,7 @@ class BevClickGoalNode:
             rospy.loginfo("  pose in  = %s   (PoseStamped, direct)",
                           self.pose_stamped_topic)
         rospy.loginfo("  goal out = %s   (left-click to publish)", self.goal_topic)
+        rospy.loginfo("  toggles  = keys 1-9 per overlay, 0 = all on/off")
         rospy.loginfo("=" * 64)
 
     # -- subscribers ----------------------------------------------------------
@@ -162,6 +232,16 @@ class BevClickGoalNode:
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._raw_xy = pts
+
+    def _astar_path_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._astar_xy = pts
+
+    def _safe_path_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._safe_xy = pts
 
     def _full_path_cb(self, msg):
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -191,6 +271,15 @@ class BevClickGoalNode:
         with self._lock:
             self._pred_score = float(msg.data)
 
+    def _smooth_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._smooth_xy = pts
+
+    def _lookahead_cb(self, msg):
+        with self._lock:
+            self._lookahead_xy = (msg.point.x, msg.point.y)
+
     def _pose_cb(self, msg):
         o = msg.orientation
         yaw = se3.yaw_from_quaternion((o.x, o.y, o.z, o.w))
@@ -210,25 +299,102 @@ class BevClickGoalNode:
         rospy.loginfo("bev_click_goal: click -> goal (%.2f, %.2f)", gx, gy)
         with self._lock:
             self._goal_xy = (gx, gy)
-            self._path_xy = []          # drop the stale safe path; replan redraws it
-            self._raw_xy = []           # and the stale raw A* path
+            self._path_xy = []          # drop the stale flown path; replan redraws it
+            self._raw_xy = []           # and the stale raw planner path
+            self._astar_xy = []         # and the stale A* global route
+            self._safe_xy = []          # and the stale corrector safe path
             self._full_xy = []          # and the stale full planner route
             self._forces = []           # and the stale force arrows
             self._field_arrows = []     # and the stale wall force-field
+            self._smooth_xy = []        # and the stale splined trajectory
+            self._lookahead_xy = None   # and the stale lookahead point
         m = Point()
         m.x, m.y, m.z = gx, gy, 0.0
         self.goal_pub.publish(m)
+
+    # -- keyboard toggles ------------------------------------------------------
+    def _on_key(self, event):
+        """Toggle overlay visibility live: number keys 1-9 flip one layer, 0
+        flips all of them (off if any are on, else all back on).
+
+        The numeric keypad reports its digits as ``kp_1`` .. ``kp_9`` (backend
+        /NumLock dependent) rather than bare ``1`` .. ``9``, so strip that
+        prefix first to accept both the top-row and right-hand number pads.
+        """
+        key = event.key or ""
+        if key.lower().startswith("kp_"):
+            key = key[3:]
+        if key == "0":
+            new = not any(self._show.values())
+            for layer in self._show:
+                self._show[layer] = new
+            rospy.loginfo("bev_click_goal: all overlays %s",
+                          "on" if new else "off")
+            return
+        layer = self._keymap.get(key)
+        if layer is None:
+            return
+        self._show[layer] = not self._show[layer]
+        rospy.loginfo("bev_click_goal: [%s] %s -> %s", key, layer,
+                      "on" if self._show[layer] else "off")
+
+    # -- legend ----------------------------------------------------------------
+    def _add_legend(self):
+        """A static colour key for every route/marker the viewer draws.
+
+        Proxy ``Line2D`` handles (the real artists are recreated each frame, so
+        they can't anchor a legend). Colours/styles mirror ``_render`` exactly:
+        the three planner-pipeline paths (raw planner -> safe corrector ->
+        cleaned/flown), the display-only routes, the repulsive-force overlays,
+        and the drone/goal markers. Drawn once; it persists because ``_render``
+        only updates artists in place and never clears the axes.
+        """
+        handles = [
+            Line2D([0], [0], color="deepskyblue", marker="o", markersize=3,
+                   linestyle="--", label="[1] full planner route (NavDP, display-only)"),
+            Line2D([0], [0], color="red", marker="o", markersize=4,
+                   label="[2] raw planner path (A*/NavDP, /path/waypoints_raw)"),
+            Line2D([0], [0], color="magenta", marker="o", markersize=4,
+                   label="[3] safe: corrector, pre-cleanup (/path/waypoints_safe)"),
+            Line2D([0], [0], color="limegreen", marker="o", markersize=5, lw=2.4,
+                   label="[4] cleaned / FLOWN path (/path/waypoints)"),
+            Line2D([0], [0], color="gold", marker=">", linestyle="None",
+                   label="[5] F_rep field over free space"),
+            Line2D([0], [0], color="yellow", marker=">", markeredgecolor="black",
+                   linestyle="None", label="[6] F_rep at each waypoint (obstacle push)"),
+            Line2D([0], [0], color="darkorange", linestyle="--", lw=2,
+                   label="[7] predicted stop-and-turn trajectory"),
+            Line2D([0], [0], color="cyan", lw=2,
+                   label="[8] smooth spline (pure-pursuit, /path/smooth)"),
+            Line2D([0], [0], color="blueviolet", marker="X", markeredgecolor="black",
+                   markersize=10, linestyle="None",
+                   label="[9] pure-pursuit lookahead (/path/lookahead)"),
+            Line2D([0], [0], color="teal", marker="s", markersize=4, linestyle="--",
+                   label="[a] A* global route (/path/waypoints_astar)"),
+            Line2D([0], [0], color="red", marker="o", markeredgecolor="black",
+                   markersize=8, linestyle="None", label="drone pose + heading"),
+            Line2D([0], [0], color="lime", marker="*", markeredgecolor="black",
+                   markersize=12, linestyle="None", label="navigation goal"),
+        ]
+        self.ax.legend(handles=handles, loc="upper right", fontsize=7,
+                       framealpha=0.85, ncol=1,
+                       title="routes & markers  (keys 1-9/a toggle, 0 = all)"
+                       ).set_zorder(20)
 
     # -- render (main thread, via FuncAnimation) ------------------------------
     def _render(self, _frame):
         with self._lock:
             bev, path = self._bev, list(self._path_xy)
             raw = list(self._raw_xy)
+            astar = list(self._astar_xy)
+            safe = list(self._safe_xy)
             full = list(self._full_xy)
             forces = list(self._forces)
             field_arrows = list(self._field_arrows)
             drone, goal = self._drone_p, self._goal_xy
             pred, score = list(self._pred_xy), self._pred_score
+            smooth = list(self._smooth_xy)
+            lookahead = self._lookahead_xy
 
         # Map background (optional): the drone is still drawn without it, so a
         # bridge+bag run with no bev_publisher up still shows where the drone is.
@@ -276,11 +442,25 @@ class BevClickGoalNode:
         if self._full_line is not None:
             self._full_line.remove()
             self._full_line = None
-        if len(full) >= 2:
+        if self._show["full"] and len(full) >= 2:
             fxs, fys = [p[0] for p in full], [p[1] for p in full]
             self._full_line, = self.ax.plot(fxs, fys, "--o", color="deepskyblue",
                                             linewidth=1.4, markersize=2,
                                             alpha=0.6, zorder=1)
+
+        # A* GLOBAL route (teal dashed): the whole planned route to the goal,
+        # straight from astar_planner. In combination mode it stays put while the
+        # NavDP leg (raw/green + blue-dashed full) flies along it, so the global
+        # plan and the current NavDP leg are both visible at once. In plain A*
+        # mode it coincides with the red raw overlay (same route pre-correction).
+        if self._astar_line is not None:
+            self._astar_line.remove()
+            self._astar_line = None
+        if self._show["astar"] and len(astar) >= 2:
+            axs, ays = [p[0] for p in astar], [p[1] for p in astar]
+            self._astar_line, = self.ax.plot(axs, ays, "--s", color="teal",
+                                             linewidth=1.4, markersize=3,
+                                             alpha=0.7, zorder=1.5)
 
         # Path overlays: raw A* (red, underneath) vs APF-safe path (green, on
         # top). The green path is what the drone actually flies; the red shows
@@ -288,16 +468,27 @@ class BevClickGoalNode:
         if self._raw_line is not None:
             self._raw_line.remove()
             self._raw_line = None
-        if len(raw) >= 2:
+        if self._show["raw"] and len(raw) >= 2:
             rxs, rys = [p[0] for p in raw], [p[1] for p in raw]
             self._raw_line, = self.ax.plot(rxs, rys, "-o", color="red",
                                            linewidth=1.6, markersize=3,
                                            alpha=0.75, zorder=2)
 
+        # Corrector's safe path (magenta), BEFORE the trajectory_simplifier cleans
+        # it: shows what the cleanup removed/smoothed vs the green flown path.
+        if self._safe_line is not None:
+            self._safe_line.remove()
+            self._safe_line = None
+        if self._show["safe"] and len(safe) >= 2:
+            sxs, sys = [p[0] for p in safe], [p[1] for p in safe]
+            self._safe_line, = self.ax.plot(sxs, sys, "-o", color="magenta",
+                                            linewidth=1.8, markersize=3,
+                                            alpha=0.7, zorder=2)
+
         if self._path_line is not None:
             self._path_line.remove()
             self._path_line = None
-        if len(path) >= 2:
+        if self._show["path"] and len(path) >= 2:
             xs, ys = [p[0] for p in path], [p[1] for p in path]
             self._path_line, = self.ax.plot(xs, ys, "-o", color="limegreen",
                                             linewidth=2.4, markersize=4,
@@ -309,7 +500,7 @@ class BevClickGoalNode:
         if self._field_artist is not None:
             self._field_artist.remove()
             self._field_artist = None
-        if field_arrows:
+        if self._show["field"] and field_arrows:
             qx = [a[0] for a in field_arrows]
             qy = [a[1] for a in field_arrows]
             qu = [a[2] for a in field_arrows]
@@ -324,7 +515,7 @@ class BevClickGoalNode:
         if self._forces_artist is not None:
             self._forces_artist.remove()
             self._forces_artist = None
-        if forces:
+        if self._show["forces"] and forces:
             fx = [a[0] for a in forces]
             fy = [a[1] for a in forces]
             fu = [a[2] for a in forces]
@@ -339,10 +530,21 @@ class BevClickGoalNode:
         if self._pred_line is not None:
             self._pred_line.remove()
             self._pred_line = None
-        if len(pred) >= 2:
+        if self._show["pred"] and len(pred) >= 2:
             pxs, pys = [p[0] for p in pred], [p[1] for p in pred]
             self._pred_line, = self.ax.plot(pxs, pys, "--", color="darkorange",
                                             linewidth=2.0, alpha=0.9, zorder=4)
+
+        # Pure-pursuit smooth (splined) trajectory the tracker follows (cyan): the
+        # continuous path Pure Pursuit chases via its moving lookahead, vs the
+        # piecewise green planner path it was splined from.
+        if self._smooth_line is not None:
+            self._smooth_line.remove()
+            self._smooth_line = None
+        if self._show["smooth"] and len(smooth) >= 2:
+            mxs, mys = [p[0] for p in smooth], [p[1] for p in smooth]
+            self._smooth_line, = self.ax.plot(mxs, mys, "-", color="cyan",
+                                              linewidth=1.8, alpha=0.85, zorder=4)
 
         # Drone marker + heading arrow
         for artist in ("_drone_dot", "_drone_arrow"):
@@ -368,6 +570,16 @@ class BevClickGoalNode:
             self._goal_marker, = self.ax.plot([goal[0]], [goal[1]], "*", color="lime",
                                               markersize=20, markeredgecolor="black",
                                               zorder=4)
+
+        # Pure-pursuit lookahead point (blueviolet X, topmost): the moving target
+        # on the smooth path the tracker is steering toward this instant.
+        if self._lookahead_marker is not None:
+            self._lookahead_marker.remove()
+            self._lookahead_marker = None
+        if self._show["lookahead"] and lookahead is not None:
+            self._lookahead_marker, = self.ax.plot(
+                [lookahead[0]], [lookahead[1]], "X", color="blueviolet",
+                markersize=13, markeredgecolor="black", zorder=7)
         return []
 
     def spin(self):

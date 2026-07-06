@@ -30,6 +30,7 @@ from sparx_agency.core.planning.planners.common.grid_geometry_2d import (
     simplify_path_cells,
     snap_to_free_cell,
 )
+from sparx_agency.core.planning.planners.common.utils_2d import split_long_segments_2d
 
 # BEV value convention published by the FALCON bev node.
 VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -366,3 +367,47 @@ def test_cost_cache_reused_until_grid_changes():
     planner.invalidate_cache()
     c3, _, _ = planner.cost_for(grid)
     assert c3 is not c1
+
+
+# --------------------------------------------------------------------------
+# waypoint spacing: legs target the spacing (nearest division), not ceil-below
+# --------------------------------------------------------------------------
+def _legs(pts):
+    return [a.distance_to(b) for a, b in zip(pts[:-1], pts[1:])]
+
+
+def test_split_targets_spacing_not_always_below():
+    # A 10 m straight leg at target 2.5 -> exactly 2.5 m legs.
+    pts = split_long_segments_2d([Pose2D(0.0, 0.0), Pose2D(10.0, 0.0)], 2.5)
+    legs = _legs(pts)
+    assert len(legs) == 4
+    assert all(abs(d - 2.5) < 1e-6 for d in legs)
+
+
+def test_split_keeps_slightly_long_leg_whole():
+    # The old ceil() halved a 2.6 m leg into 1.3 m steps; nearest-division keeps
+    # it whole (round(2.6/2.5)=1), so the spacing tracks the target instead of
+    # collapsing well below it.
+    pts = split_long_segments_2d([Pose2D(0.0, 0.0), Pose2D(2.6, 0.0)], 2.5)
+    assert len(pts) == 2
+    assert abs(_legs(pts)[0] - 2.6) < 1e-6
+
+
+def test_split_legs_stay_near_target_across_lengths():
+    # Every leg lands within +-50% of the target (the nearest-division bound),
+    # never the arbitrarily-short legs the ceil rule could produce.
+    target = 2.5
+    for length in (1.6, 3.7, 6.0, 7.4, 12.3):
+        pts = split_long_segments_2d([Pose2D(0.0, 0.0), Pose2D(length, 0.0)], target)
+        for d in _legs(pts):
+            assert 0.5 * target - 1e-9 <= d <= 1.5 * target + 1e-9
+
+
+def test_split_preserves_endpoints_and_corner_vertices():
+    # An L-shaped path: the corner vertex (5,0) must survive exactly; only the
+    # long legs get intermediate points.
+    corner = Pose2D(5.0, 0.0)
+    pts = split_long_segments_2d([Pose2D(0.0, 0.0), corner, Pose2D(5.0, 5.0)], 2.5)
+    assert pts[0] == Pose2D(0.0, 0.0)
+    assert pts[-1] == Pose2D(5.0, 5.0)
+    assert any(p.x == corner.x and p.y == corner.y for p in pts)

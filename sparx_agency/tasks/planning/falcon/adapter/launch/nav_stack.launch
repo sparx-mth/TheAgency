@@ -57,6 +57,14 @@
   <!-- v5: when false, sensor_gate ignores camera_info entirely. -->
   <arg name="bridge_camera_info" default="false" />
 
+  <!-- RGB/depth transport for navdp_click (and, via real_drone.launch, for
+       mapping_sync). frame_path (default): the drone wrote .jpg/.npy to disk and
+       publishes std_msgs/String "<path> <sec> <nsec>"; the nodes load the files.
+       topic: raw sensor_msgs/Image straight off the wire (Gazebo sim or an old
+       bag replay, where nothing writes frame files). When 'topic', the navdp_*
+       image-topic defaults below flip to /xtend/rgb + /xtend/depth_m. -->
+  <arg name="image_transport" default="frame_path" /><!-- frame_path | topic -->
+
   <!-- sensor_gate rotation freeze. Default true (the Gazebo path: sensor_gate's
        gated pose+depth feed falcon_adapter, so freezing both keeps that pair
        consistent across a turn). real_drone.launch sets this false: there the
@@ -111,6 +119,80 @@
   <arg name="goal_x" default="4.0" />
   <arg name="goal_y" default="0.0" />
 
+  <!-- ══════════════════════════════════════════════════════════════
+       CONTROLLER SELECTION. "waypoint" (default) = the one-axis follower
+       (pure X advance OR pure yaw, never both). "multi_axis" = the combined
+       forward+lateral+yaw tracker that crabs (ROLL) for small offsets and yaws
+       only past a deadband, so the noisy yaw axis is used sparingly. Both hold
+       altitude (vz=0). Switch back to the legacy controller with controller:=waypoint. -->
+  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit -->
+
+  <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
+       ~mx_* so they never collide with the one-axis params; cruise speed and the
+       capture radius are shared with vel_x / pos_acquisition_radius. -->
+  <arg name="mx_lateral_speed_max"      default="0.25" /><!-- max sideways (crab) speed (m/s); usually < cruise -->
+  <arg name="mx_yaw_rate"               default="0.6" /><!-- saturation on the yaw rate during a turn (rad/s) -->
+  <arg name="mx_slow_radius"            default="0.8" /><!-- start ramping speed down inside this range of the FINAL goal (m) -->
+  <arg name="mx_arrive_speed_min"       default="0.08" /><!-- speed floor while outside pos_radius (m/s); never crawl to a noisy stop -->
+  <arg name="mx_yaw_engage_deg"         default="25.0" /><!-- heading error above which yaw engages; below it the drone crabs (no yaw) -->
+  <arg name="mx_yaw_release_deg"        default="10.0" /><!-- heading error below which yaw releases (hysteresis; < engage) -->
+  <arg name="mx_yaw_kp"                 default="1.2" /><!-- proportional gain heading-error -> yaw rate (1/s), saturated to mx_yaw_rate -->
+  <arg name="mx_travel_cone_deg"        default="80.0" /><!-- max body angle off forward the translation may point; yaw rotates the cone onto the target (perception safety) -->
+  <arg name="mx_translate_suppress_deg" default="120.0" /><!-- heading error at/above which translation is throttled so the drone mostly yaws first (> cone) -->
+  <arg name="mx_translate_suppress_floor" default="0.2" /><!-- fraction of speed kept when grossly mis-pointed (creeps, never fully stops) -->
+  <arg name="mx_min_vx"                 default="0.06" /><!-- min forward speed that actually moves the platform (m/s) -->
+  <arg name="mx_min_vy"                 default="0.06" /><!-- min lateral speed that actually moves the platform (m/s) -->
+  <arg name="mx_min_wz_deg"             default="8.0" /><!-- min yaw rate that actually rotates the platform (deg/s) -->
+  <arg name="mx_min_release_frac"       default="0.5" /><!-- below release_frac*min an axis is dropped to 0; between that and min it is snapped up to min -->
+  <arg name="mx_hold_deadband"          default="0.18" /><!-- station-keeping: positional error below this is left uncorrected (ride out the standstill noise) (m) -->
+  <arg name="mx_hold_kp"                default="0.8" /><!-- station-keeping correction gain (1/s) -->
+  <arg name="mx_hold_speed_max"         default="0.2" /><!-- cap on the station-keeping correction speed (m/s) -->
+  <arg name="mx_hold_reacquire_margin"  default="0.15" /><!-- drift past pos_radius+this while holding -> resume full pursuit (m) -->
+  <arg name="mx_passed_bearing_deg"     default="110.0" /><!-- a NON-final waypoint whose bearing exceeds this is treated as passed/behind -->
+  <arg name="mx_demo_mode"              default="fly_straight" /><!-- DemoMode requested (best-effort) for the multi-axis controller -->
+  <arg name="mx_require_mode"           default="false" /><!-- gate motion on the demo mode being confirmed (false: proceed regardless) -->
+
+  <!-- Pure-pursuit controller (only used when controller:=pure_pursuit): splines
+       the final path (core HermiteSmoother) then tracks it with the core
+       PurePursuitTracker on a moving lookahead. Tracker tuning ~pp_*, spline
+       ~pp_smooth_*. Holonomic so it crabs+yaws toward the lookahead (linear.y on,
+       altitude held). Reuses the multi-axis ~mx_demo_mode/~mx_require_mode. -->
+  <arg name="pp_holonomic"            default="true" /><!-- velocity points at the lookahead (vx+vy); false = unicycle (yaw only) -->
+  <arg name="pp_cruise_speed"         default="0.3" /><!-- nominal tracking speed (m/s) -->
+  <arg name="pp_min_speed"            default="0.1" /><!-- speed floor before goal (m/s) -->
+  <arg name="pp_max_speed"            default="0.5" /><!-- speed cap (m/s) -->
+  <arg name="pp_base_lookahead"       default="0.6" /><!-- base lookahead distance (m) -->
+  <arg name="pp_min_lookahead"        default="0.3" /><!-- min adaptive lookahead (m) -->
+  <arg name="pp_max_lookahead"        default="1.5" /><!-- max adaptive lookahead (m) -->
+  <arg name="pp_lookahead_speed_gain" default="0.5" /><!-- lookahead grows with speed by this gain -->
+  <arg name="pp_goal_tolerance"       default="0.35" /><!-- distance to goal that counts as reached (m) -->
+  <arg name="pp_path_tolerance"       default="0.8" /><!-- cross-track error that stops tracking as diverged (m) -->
+  <arg name="pp_max_yaw_rate"         default="0.6" /><!-- yaw-rate cap (rad/s) -->
+  <arg name="pp_curvature_speed_factor"     default="0.5" /><!-- slow down in curves -->
+  <arg name="pp_curvature_lookahead_factor" default="0.8" /><!-- shorten lookahead in curves -->
+  <arg name="pp_slow_down_distance"   default="1.0" /><!-- start decelerating this far from the goal (m) -->
+  <arg name="pp_speed_smoothing"      default="0.3" /><!-- EMA on the commanded speed (0..1) -->
+  <arg name="pp_yaw_rate_smoothing"   default="0.3" /><!-- EMA on the commanded yaw rate (0..1) -->
+  <arg name="pp_sample_dt"            default="0.05" /><!-- tracker re-sampling of the trajectory (s) -->
+  <arg name="pp_closest_search_back"    default="10" /><!-- closest-point search window (samples) -->
+  <arg name="pp_closest_search_forward" default="120" />
+  <!-- Hermite spline of the path -->
+  <arg name="pp_smooth_dt"            default="0.02" /><!-- spline trajectory time step (s) -->
+  <arg name="pp_smooth_min_point_spacing" default="0.05" /><!-- merge raw points closer than this (m) -->
+  <arg name="pp_smooth_tangent_scale" default="0.5" /><!-- Hermite tangent magnitude scale -->
+  <arg name="pp_smooth_nominal_speed" default="0.4" /><!-- spline timing speed (m/s); does not bound tracking -->
+  <arg name="pp_smooth_arc_lut_samples" default="600" /><!-- arc-length LUT resolution -->
+  <arg name="pp_smooth_zero_endpoint_velocity" default="false" /><!-- zero velocity at the path ends -->
+  <!-- Per-axis minimum force (platform deadband) on the pure-pursuit output -->
+  <arg name="pp_min_vx"               default="0.06" /><!-- min forward speed that moves the platform (m/s) -->
+  <arg name="pp_min_vy"               default="0.06" /><!-- min lateral speed that moves the platform (m/s) -->
+  <arg name="pp_min_wz_deg"           default="8.0" /><!-- min yaw rate that rotates the platform (deg/s) -->
+  <arg name="pp_min_release_frac"     default="0.5" /><!-- below release_frac*min an axis is dropped to 0 -->
+  <arg name="pp_viz_sample_dt"        default="0.1" /><!-- smooth-path viz sampling (s) -->
+  <!-- Visualization topics consumed by the BEV viewer (bev_click_goal_node) -->
+  <arg name="smooth_path_topic"       default="/path/smooth" /><!-- splined trajectory (Path) -->
+  <arg name="lookahead_topic"         default="/path/lookahead" /><!-- current aim point (PointStamped) -->
+
   <!-- Speeds & radii -->
   <arg name="vel_x"                  default="0.3" />
   <arg name="yaw_rate"               default="0.7" />
@@ -122,10 +204,55 @@
   <arg name="yaw_settle_dwell_s"  default="0.8" /><!-- dwell (s) after a burst coasts to a stop so AprilTag yaw re-converges before re-measuring -->
   <arg name="yaw_coast_deg"       default="15.0" /><!-- physical yaw still swept after the command stops; the burst aims this much short of the target -->
   <arg name="yaw_burst_max_deg"   default="25.0" /><!-- per-burst increment: a big turn (e.g. 80deg) is split into ~25deg chunks, each followed by a stop + voxel update + re-measure, not one open-loop sweep -->
+  <arg name="freeze_on_rotation"    default="true" /><!-- MASTER on/off for freeze-during-rotation (waypoint controller AND holonomic supervisor). false = never freeze / never stop to re-observe; the map stays live through every turn (set when depth is trusted during rotation) -->
+  <arg name="freeze_yaw_thresh_deg" default="20.0" /><!-- waypoint controller: a turn LARGER than this freezes the voxel map (depth lies / localization lags mid-turn) AND forces the post-turn re-observe below; a smaller correction stays live. 0 = freeze every turn -->
+  <arg name="settle_map_updates"    default="2" /><!-- fresh voxel updates a FROZEN turn re-observes (stopped, sensors live) before it advances/turns again, so it never acts on a map built before the turn -->
+  <arg name="freeze_through_coast"  default="true" /><!-- waypoint controller: hold 'turning' mode until wz~0 so the mode-authoritative gate stays frozen over the end-of-turn inertia, not just the commanded burst -->
+  <!-- Holonomic rotation supervisor (pure_pursuit / multi_axis only; the one-axis
+       'waypoint' controller freezes inside its own state machine and IGNORES these):
+       freeze throughout any turn (rate-based) and stop every rot_reobserve_every_deg
+       of rotation to re-observe settle_map_updates voxels while stopped. -->
+  <arg name="rot_wz_turn_on"        default="0.20" /><!-- rad/s: commanded yaw at/above which a holonomic tracker counts as turning (freeze arms) -->
+  <arg name="rot_wz_turn_off"       default="0.10" /><!-- rad/s: below this (debounced) the turn is ending (hysteresis vs rot_wz_turn_on) -->
+  <arg name="rot_turn_off_ticks"    default="3" /><!-- consecutive below-off ticks to declare the turn over -->
+  <arg name="rot_reobserve_every_deg" default="25.0" /><!-- stop to re-observe every this much accumulated rotation -->
+  <arg name="rot_max_coast_s"       default="2.0" /><!-- cap (s) on the post-stop yaw coast wait, so a noisy yaw never hangs the stop -->
   <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
   <arg name="cmd_commit_ticks"    default="2" /><!-- output guarantee: a stop (zero twist) never reaches the drone until the motion ran >=this many ticks; a lone motion->stop is held to the floor first -->
   <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       GRADED-PULSE YAW + MID-BURST FEEDBACK + ANTI-DEADLOCK (real-drone yaw).
+       Needs ctrl_rate_hz:=10 for the 4deg/tick -> 8deg-min / 24deg-cap numbers.
+       All default to the legacy behaviour at the core; enabled here. -->
+  <arg name="yaw_graded_pulses"     default="true" /><!-- size each burst by tick count {2,4,6} (strong/med/weak), hard 6-tick cap, vary DURATION not magnitude -->
+  <arg name="yaw_burst_grade_max_ticks" default="6" /><!-- max consecutive yaw ticks in one burst (6 ticks = 24deg @10Hz) -->
+  <arg name="yaw_settle_dwell_per_tick" default="0.1" /><!-- extra settle (s) per burst tick: more continuous rotation -> more inertia -> longer stop before re-measuring -->
+  <arg name="yaw_burst_live_feedback" default="true" /><!-- use the (estimator-denoised) live heading mid-burst to CUT a burst short on confirmed overshoot (one-way; never reverses in flight) -->
+  <arg name="yaw_fb_reach_deg"      default="2.0" /><!-- remaining-in-burst-direction (deg) at/below which the live heading counts as having reached the target -->
+  <arg name="yaw_fb_confirm_ticks"  default="2" /><!-- consecutive 'reached' ticks before cutting (rejects a single jumpy localization frame) -->
+  <arg name="yaw_max_reversals"     default="3" /><!-- anti-deadlock: after this many burst-direction flips, FORCE advance (never ping-pong 10R/10L/10R); 0 = off -->
+  <arg name="yaw_accept_growth_deg" default="4.0" /><!-- widen the accept band (deg) per reversal so an oscillating residual is swallowed -->
+  <arg name="yaw_burst_max_ticks"   default="30" /><!-- legacy runaway guard on a burst (now also a rosparam) -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       POSE ESTIMATOR — fuses the ~10Hz noisy /gt_pose with the command being
+       executed so the follower sees a DENOISED pose + yaw-rate: averages out
+       hover drift when stopped, recovers the true rate while turning. Decoupled
+       from the control loop (ingests every /gt_pose). use_pose_estimator:=false
+       feeds the raw pose. -->
+  <arg name="use_pose_estimator"    default="true" />
+  <arg name="est_window_s"          default="0.6" /><!-- least-squares fit window (s); ~6 samples @10Hz -->
+  <arg name="est_min_samples"       default="2" />
+  <arg name="est_max_buffer_s"      default="1.5" />
+  <arg name="est_wz_cmd_eps"        default="0.05" /><!-- |wz_cmd| (rad/s) above which the regime is TURNING -->
+  <arg name="est_vx_cmd_eps"        default="0.03" /><!-- |vx_cmd| (m/s) above which the regime is FORWARD -->
+  <arg name="est_ff_blend_min"      default="0.15" /><!-- feed-forward fraction when the axis is idle (trust the measured fit) -->
+  <arg name="est_ff_blend_max"      default="0.6" /><!-- feed-forward fraction at full command (lean on the command in the noisy rotating regime) -->
+  <arg name="est_dropout_s"         default="0.25" /><!-- measurement age (s) after which the estimate dead-reckons from the command -->
+  <arg name="est_max_coast_s"       default="1.0" /><!-- cap on the dead-reckon horizon (s); beyond it the pose is HELD and the follower is told to wait -->
+  <arg name="est_fresh_tau_s"       default="0.3" /><!-- confidence freshness decay constant -->
 
   <!-- Trajectory prediction (rollout of the follower) -> /path/predicted + score -->
   <arg name="predict_hz"          default="2.0" />
@@ -140,7 +267,7 @@
   <arg name="map_update_topic"    default="/falcon/bev_2d" /><!-- a fresh msg here = the map advanced -->
   <arg name="map_wait_timeout_s"  default="3.0" /><!-- proceed anyway if no update lands (never hang) -->
   <arg name="mapsettle_min_s"     default="0.5" /><!-- min bring-up settle before the first move -->
-  <arg name="mapsettle_min_updates" default="2" /><!-- fresh voxel updates required before the FIRST move (running re-stops use 1) -->
+  <arg name="mapsettle_min_updates" default="2" /><!-- fresh voxel updates required before the FIRST move at bring-up (a frozen running re-stop uses settle_map_updates) -->
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
@@ -151,23 +278,23 @@
   <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
-  <arg name="start_skip_m"          default="1.0" />
+  <arg name="start_skip_m"          default="0.5" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
   <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
        this timer (and on a goal click). The trajectory is frozen between ticks
        so the follower is not chasing a path that shifts every BEV frame. -->
-  <arg name="plan_period_s"         default="4.0" />
+  <arg name="plan_period_s"         default="10.0" />
   <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
        plan_period_s cycles. Set true to react to obstacles faster than that. -->
-  <arg name="replan_on_collision"   default="true" />
-  <arg name="replan_on_bev"         default="true" />
+  <arg name="replan_on_collision"   default="false" />
+  <arg name="replan_on_bev"         default="false" />
   <arg name="replan_collision_confirm" default="3" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
        into two half-angle turns, so the stop-and-turn follower can glide through
        them instead of stopping to yaw. -->
-  <arg name="corner_round"           default="true" />
+  <arg name="corner_round"           default="false" />
   <arg name="corner_merge_deg"       default="8.0" /><!-- drop interior vertices that turn less than this -->
   <arg name="corner_max_turn_deg"    default="14.0" /><!-- corners gentler than this are already glide-able (pair with skip_yaw_thresh) -->
   <arg name="corner_chamfer_max_deg" default="28.0" /><!-- corners up to this are chamfered; sharper ones kept as genuine turns -->
@@ -183,9 +310,10 @@
   <!-- APF safety recentring: recentre the planner's raw path off walls toward
        corridor centres via the repulsive field U_rep, so a corridor turn stops
        hugging the inside corner. These args are consumed by the path_corrector
-       node (below), which works for ANY planner (A* or NavDP). The follower flies
-       the corrected path on /path/waypoints; the planner's raw path is echoed on
-       /path/waypoints_raw for the BEV viewer (red = raw, green = safe).
+       node (below), which works for ANY planner (A* or NavDP). The corrector
+       publishes the SAFE path on /path/waypoints_safe; the trajectory_simplifier
+       then cleans it into the flown /path/waypoints. For the BEV viewer:
+       red = raw planner, magenta = safe (pre-cleanup), green = cleaned/flown.
        safety_correct:=false makes the corrector a passthrough (flies the raw path). -->
   <arg name="safety_correct"        default="true" />
   <arg name="apf_centering"         default="line_search" /><!-- line_search: move each waypoint to the lateral potential minimum (omnidirectional, scale-free, single-pass) | descent: legacy gradient descent -->
@@ -221,9 +349,28 @@
        preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
+  <!-- nav_mode = astar | navdp | combination. The 3-way mode selector. DEFAULT is
+       'combination' (the A*+NavDP fusion runs automatically); use_navdp:=true is the
+       legacy shim that selects 'navdp'; pass nav_mode:=astar for plain A* only.
+         astar       : astar_planner -> /path/waypoints_astar
+         navdp       : navdp_click   -> /path/waypoints_navdp (operator clicks a pixel)
+         combination : astar_planner AND combination_planner run; A* plans the global
+                       route, combination_planner hands NavDP the farthest visible A*
+                       waypoint, flies the returned leg to its midpoint, re-infers, and
+                       publishes the arbitrated raw path on /path/waypoints_combo. With
+                       combination_start_enabled:=true (the default) the fusion is on
+                       from the first tick (no signal needed); set it false to start on
+                       A* and turn the fusion on later with a 'std_msgs/Bool True' on
+                       combination_enable_topic. Needs the NavDP server up once enabled. -->
+<!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
+  <arg name="nav_mode" default="combination" />
+  <!-- vla = navdp | flownav. Selects which VLA policy serves nav_mode:=navdp:
+         navdp   = navdp_click_node (point-goal; operator clicks a pixel; NavDP server :navdp_port)
+         flownav = flownav_node     (image-goal toward ~flownav_goal_image;  FlowNav server :flownav_port) -->
+  <arg name="vla" default="navdp" /><!-- navdp | flownav -->
   <arg name="navdp_port"               default="8888" />
-  <arg name="navdp_rgb_topic"          default="/xtend/rgb_frame_path" />
-  <arg name="navdp_depth_topic"        default="/xtend/depth_frame_path" />
+  <arg name="navdp_rgb_topic"          default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
+  <arg name="navdp_depth_topic"        default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
   <arg name="navdp_pose_topic"         default="/xtend/localization" />
   <arg name="navdp_pose_type"          default="pose_stamped" /><!-- pose_stamped (PoseStamped, e.g. /xtend/localization) | pose (bare Pose, e.g. /gt_pose or /simple_drone/gt_pose) -->
   <arg name="navdp_camera_info_topic"  default="" /><!-- e.g. /xtend/camera_info to auto-sync intrinsics; '' = use the navdp_* params below -->
@@ -240,19 +387,59 @@
   <arg name="navdp_display_mode"       default="full" /><!-- full = RGB + depth + snapshot panels | rgb_only = just the clickable RGB panel (lighter) -->
 
   <!-- ══════════════════════════════════════════════════════════════
-       PATH CORRECTOR (path_corrector_node) — planner-agnostic.
+       FLOWNAV (vla:=flownav) — image-goal VLA, drop-in for the navdp VLA.
+       Reuses navdp_rgb_topic / navdp_pose_topic / navdp_pose_type / image_transport
+       above (FlowNav needs NO depth and NO intrinsics). Requires the FlowNav TRT host
+       server up (default 127.0.0.1:flownav_port) — see
+       tasks/planning/flownav/server/flownav_trt_server.py. -->
+  <arg name="flownav_port"             default="8889" /><!-- FlowNav server loopback port (distinct from navdp_port 8888) -->
+  <arg name="flownav_goal_image"       default="" /><!-- path to the target RGB image to steer toward (set this for vla:=flownav) -->
+  <arg name="flownav_goal_image_topic" default="" /><!-- optional sensor_msgs/Image live-goal topic (overrides the file) -->
+  <arg name="flownav_rate_hz"          default="4.0" /><!-- continuous (reactive) inference rate -->
+  <arg name="flownav_execute_fraction" default="1.0" /><!-- fraction of the predicted path to fly each tick (1.0 = whole) -->
+  <arg name="flownav_arrival_distance" default="0.0" /><!-- >0: hold when the goal-distance head drops below this (tune from the node's logged distances); 0 = never auto-stop -->
+  <arg name="flownav_display"          default="false" /><!-- open an OpenCV window: live RGB + predicted trajectory + goal-distance; whole frame turns GREEN once arrival_distance is met -->
+  <arg name="flownav_path_topic"       default="/path/waypoints_flownav" /><!-- raw path -> path_corrector -->
+  <arg name="flownav_full_path_topic"  default="/path/waypoints_flownav_full" /><!-- display-only full route -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       COMBINATION (nav_mode:=combination) — A* global route + NavDP local legs.
+       combination_planner reuses the navdp_* intrinsic/transport/server args
+       above (same camera stream + NavDP server); these knobs tune the fusion.
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="combination_enable_topic"          default="/combination/enable" /><!-- std_msgs/Bool: True = combine, False = follow A* -->
+  <arg name="combination_start_enabled"         default="true" /><!-- true (default) = start combined for the whole run, no signal needed; false = start on A* and wait for a 'std_msgs/Bool True' on combination_enable_topic -->
+  <arg name="combination_tick_hz"               default="5.0" /><!-- state-machine rate -->
+  <arg name="combination_min_engage_fwd_m"      default="1.5" /><!-- CRUISE follows A* until a visible point is at least this far ahead, then STOPS and engages NavDP (a "reasonable distance" worth a leg) -->
+  <arg name="combination_engage_confirm_ticks"  default="2" /><!-- hysteresis: require this many CONSECUTIVE engage-able detections before stopping, so depth/occlusion flicker can't cause stop/go lurching -->
+  <arg name="combination_engage_settle_s"       default="1.0" /><!-- after stopping to engage, wait this long for the drone to brake to a clean, stationary frame before the first inference -->
+  <arg name="combination_max_wait_s"            default="30.0" /><!-- when a re-infer is slow and the leg has been flown out, HOLD (stop) this long for the new route before giving up to A* (checked before each attempt; raise for a slow Jetson) -->
+  <arg name="combination_navdp_timeout_s"       default="10.0" /><!-- NavDP HTTP step timeout for ONE inference; generous for a slow Jetson (the drone holds/flies the latched leg meanwhile, never moving un-commanded). Keep < max_wait_s so several attempts fit. -->
+  <arg name="combination_leg_fraction"          default="0.5" /><!-- re-infer once the drone passes this fraction of the NavDP leg (0.5 = midpoint; the 2nd half buffers the inference latency) -->
+  <arg name="combination_final_handoff_m"       default="1.5" /><!-- when the mission goal is the visible local goal and within this range, fly A* straight in (no NavDP tiny-leg jitter at the end) -->
+  <arg name="combination_leg_timeout_s"         default="8.0" /><!-- watchdog: re-infer if a leg has been followed this long (prevents a deadlock if the flown path is shorter than the raw leg) -->
+  <arg name="combination_require_unoccluded"    default="true" /><!-- a waypoint is "visible" only with clear line-of-sight (depth), not merely in-FOV; false = in-frame only -->
+  <arg name="combination_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the depth occlusion test -->
+  <arg name="combination_min_goal_fwd_m"        default="0.5" /><!-- ignore A* waypoints nearer than this (the drone is already on top of them) -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       PATH CORRECTOR (path_corrector_node) — planner-agnostic SAFETY.
        Subscribes to the active planner's RAW path, recentres it off
        walls against the BEV (the repulsive potential field, by default)
-       and republishes the corrected, flown path on /path/waypoints.
-       The follower and BEV viewer are unchanged. ~enabled (=safety_correct)
-       false makes it a passthrough. The APF / force-viz args live in the
+       and publishes the corrected, SAFE path on /path/waypoints_safe.
+       The trajectory_simplifier (below) then cleans that path and owns the
+       flown /path/waypoints. ~enabled (=safety_correct) false makes the
+       corrector a passthrough. The APF / force-viz args live in the
        "APF safety recentring" block above and are consumed HERE now.
        ══════════════════════════════════════════════════════════════ -->
   <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
-  <!-- Which planner the corrector reads: NavDP when use_navdp, else A*. The
-       corrector ALWAYS owns /path/waypoints, so the follower reads one topic. -->
+  <!-- Which raw path the corrector reads, by nav_mode (and vla for navdp):
+       combination -> /path/waypoints_combo; navdp+vla=flownav -> /path/waypoints_flownav;
+       navdp -> /path/waypoints_navdp; astar -> /path/waypoints_astar. The corrector
+       owns /path/waypoints_safe; the trajectory_simplifier turns that into the
+       flown /path/waypoints, so the follower still reads one topic. -->
   <arg name="planner_path_topic"
-       default="$(eval '/path/waypoints_navdp' if use_navdp else '/path/waypoints_astar')" />
+       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_flownav' if (arg('nav_mode') == 'navdp' and arg('vla') == 'flownav') else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar')))" />
 
   <!-- ESDF corrector knobs (used only when corrector:=esdf). Ascend each waypoint
        up the gradient of the distance-to-wall field toward the corridor / doorway
@@ -272,13 +459,51 @@
        NavDP zig-zag). No-op for A*'s metre-scale waypoints; 0 disables it. -->
   <arg name="resample_min_spacing_m"  default="0.3" />
 
+  <!-- ══════════════════════════════════════════════════════════════
+       TRAJECTORY SIMPLIFIER (trajectory_simplifier_node) — CLEANUP, not safety.
+       Runs AFTER the corrector: takes the safe path on /path/waypoints_safe and
+       makes it cleaner/flyable, then publishes the flown /path/waypoints. Every
+       geometry-changing pass is validated against the BEV (inflated line-of-sight)
+       so cleanup never re-introduces a collision the corrector avoided. Set
+       simplify:=false for a verbatim passthrough (corrector path flown directly).
+       ══════════════════════════════════════════════════════════════ -->
+  <arg name="simplify"               default="true" /><!-- false = passthrough: fly the corrector's path uncleaned -->
+  <arg name="simplify_debug"         default="true" /><!-- per-cycle in->out waypoint-count logging -->
+  <!-- 1) merge near-duplicate waypoints = the HARD FLOOR: no two points in the
+          final route end up closer than this, even at a turn (a tight cluster the
+          field left is noise, not several turns). A genuinely required tight corner
+          survives because cutting it would clip an obstacle (BEV-checked). -->
+  <arg name="simplify_merge"         default="true" />
+  <arg name="simplify_merge_radius_m" default="0.20" />
+  <!-- 2) flatten field-induced zig-zags: a middle point whose heading change
+          exceeds zigzag_angle_deg is pulled zigzag_strength (0..1) toward the line
+          between its neighbours (kept, not deleted). A corner that hugs a wall is
+          left alone (its bypass line would clip, so the move is rejected). -->
+  <arg name="simplify_zigzag"        default="true" />
+  <arg name="simplify_zigzag_angle_deg" default="60.0" />
+  <arg name="simplify_zigzag_strength"  default="0.5" />
+  <arg name="simplify_zigzag_passes"    default="1" />
+  <!-- 3) drop redundant collinear middles ("same plane"), but never create a leg
+          longer than max_segment_m (so the path never gets too coarse). Raise
+          max_segment_m to collapse straights harder; lower it to keep more points. -->
+  <arg name="simplify_collinear"     default="true" />
+  <arg name="simplify_collinear_angle_deg" default="10.0" /><!-- heading change below this = same plane -->
+  <arg name="simplify_max_segment_m" default="3.0" />
+  <!-- 4) min spacing on the straights = the SOFT FLOOR: thin straights to >= this,
+          but allow genuine turns (heading change > turn_keep_deg) to sit closer
+          where they must (down to, but never below, the hard merge floor in 1). -->
+  <arg name="simplify_min_spacing"   default="true" />
+  <arg name="simplify_min_spacing_m" default="1.0" />
+  <arg name="simplify_turn_keep_deg" default="25.0" />
+
   <!-- Takeoff & cruise -->
   <arg name="auto_takeoff"      default="false" />
   <arg name="cruise_z"          default="1.0" />
   <arg name="freeze_during_yaw" default="false" />
   <arg name="maintain_altitude" default="true" />
   <arg name="use_posctrl"       default="true" />
-  <arg name="ctrl_rate_hz"      default="5.0" />
+  <arg name="ctrl_rate_hz"      default="10.0" /><!-- 10Hz = localization rate -> 4deg/tick so the graded-pulse min turn is ~8deg (2 ticks). The pose estimator denoises over its 0.6s window regardless, so 10Hz does not mean chasing noisy single readings. Set 5.0 for coarser/cheaper turns (min turn ~16deg). -->
+
 
   <arg name="forward_only"      default="false" />
   <arg name="cmd_log_path"      default="/tmp/cmd_log_{ts}.jsonl" />
@@ -507,8 +732,11 @@
     <param name="out_topic"              value="/falcon/bev_2d" />
   </node>
 
+  <!-- A* planner: runs in astar AND combination modes (in combination it plans the
+       global route the combination_planner steers NavDP along). NOT in pure navdp. -->
   <node pkg="falcon_adapter" type="astar_planner_node.py"
-        name="astar_planner" output="screen" unless="$(arg use_navdp)">
+        name="astar_planner" output="screen"
+        if="$(eval arg('nav_mode') in ('astar', 'combination'))">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
     <!-- Raw A* path; path_corrector recentres it and republishes /path/waypoints. -->
@@ -550,8 +778,10 @@
        it (planner_path_topic auto-selects it when use_navdp) and republishes
        /path/waypoints, the world Path the follower consumes. -->
   <node pkg="falcon_adapter" type="navdp_click_node.py"
-        name="navdp_click" output="screen" if="$(arg use_navdp)">
+        name="navdp_click" output="screen"
+        if="$(eval arg('nav_mode') == 'navdp' and arg('vla') == 'navdp')">
     <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="image_transport"   value="$(arg image_transport)" />
     <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
     <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
     <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
@@ -574,15 +804,100 @@
     <param name="display_mode"      value="$(arg navdp_display_mode)" />
   </node>
 
-  <!-- Path corrector: recentres whichever planner's raw path against the BEV and
-       republishes the flown path on /path/waypoints (+ /path/waypoints_raw echo
-       and /path/forces arrows for the BEV viewer). Always launched; ~enabled
+  <!-- FlowNav image-goal VLA (vla:=flownav). Drop-in for navdp_click: identical world
+       Path output contract (path_corrector recentres /path/waypoints_flownav and
+       republishes /path/waypoints). Image-goal, so NO depth / intrinsics / click — it
+       steers toward ~goal_image continuously at ~rate_hz. Needs the FlowNav server up. -->
+  <node pkg="falcon_adapter" type="flownav_node.py"
+        name="flownav" output="screen"
+        if="$(eval arg('nav_mode') == 'navdp' and arg('vla') == 'flownav')">
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="goal_image"        value="$(arg flownav_goal_image)" />
+    <param name="goal_image_topic"  value="$(arg flownav_goal_image_topic)" />
+    <param name="path_topic"        value="$(arg flownav_path_topic)" />
+    <param name="full_path_topic"   value="$(arg flownav_full_path_topic)" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg flownav_port)" />
+    <param name="rate_hz"           value="$(arg flownav_rate_hz)" />
+    <param name="execute_fraction"  value="$(arg flownav_execute_fraction)" />
+    <param name="arrival_distance"  value="$(arg flownav_arrival_distance)" />
+    <!-- optional display overlay: reuses the navdp_* intrinsics for this camera -->
+    <param name="display"           value="$(arg flownav_display)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <param name="render_cam_height" value="$(arg navdp_render_cam_height)" />
+  </node>
+
+  <!-- Combination planner (nav_mode:=combination): A* plans the global route (the
+       astar_planner above stays on); this node hands NavDP the farthest A* waypoint
+       VISIBLE in the current frame as a local goal, anchors the returned trajectory
+       to the world, and publishes the arbitrated raw path on /path/waypoints_combo
+       (which planner_path_topic selects, so path_corrector recentres it and the
+       trajectory_simplifier cleans it into the flown /path/waypoints). It flies each
+       NavDP leg to its midpoint, then re-infers. Disabled at first it echoes A*
+       straight through, so the run can start on A* and switch to the fusion on a
+       'std_msgs/Bool True' on combination_enable_topic (or combination_start_enabled).
+       Reuses the navdp_* camera/transport/server args. Needs the NavDP server up. -->
+  <node pkg="falcon_adapter" type="combination_planner_node.py"
+        name="combination_planner" output="screen"
+        if="$(eval arg('nav_mode') == 'combination')">
+    <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+    <!-- A* route in; arbitrated raw path out (-> path_corrector via planner_path_topic). -->
+    <param name="astar_path_topic"  value="/path/waypoints_astar" />
+    <!-- Same goal topic astar_planner replans on: a new click here forces an immediate
+         NavDP re-inference off the click's fresh A* route (idle cadence unchanged). -->
+    <param name="goal_topic"        value="/waypoint_nav/goal" />
+    <param name="path_topic"        value="/path/waypoints_combo" />
+    <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg navdp_port)" />
+    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <!-- Combination behaviour / visibility -->
+    <param name="enable_topic"             value="$(arg combination_enable_topic)" />
+    <param name="start_enabled"            value="$(arg combination_start_enabled)" />
+    <param name="tick_hz"                  value="$(arg combination_tick_hz)" />
+    <param name="min_engage_fwd_m"         value="$(arg combination_min_engage_fwd_m)" />
+    <param name="engage_confirm_ticks"     value="$(arg combination_engage_confirm_ticks)" />
+    <param name="engage_settle_s"          value="$(arg combination_engage_settle_s)" />
+    <param name="max_wait_s"               value="$(arg combination_max_wait_s)" />
+    <param name="timeout_s"                value="$(arg combination_navdp_timeout_s)" />
+    <param name="leg_execute_fraction"     value="$(arg combination_leg_fraction)" />
+    <param name="final_handoff_m"          value="$(arg combination_final_handoff_m)" />
+    <param name="leg_timeout_s"            value="$(arg combination_leg_timeout_s)" />
+    <param name="require_unoccluded"       value="$(arg combination_require_unoccluded)" />
+    <param name="visibility_depth_tol_m"   value="$(arg combination_visibility_depth_tol_m)" />
+    <param name="min_goal_fwd_m"           value="$(arg combination_min_goal_fwd_m)" />
+  </node>
+
+  <!-- Path corrector (SAFETY): recentres whichever planner's raw path against the
+       BEV and publishes the SAFE path on /path/waypoints_safe (+ /path/waypoints_raw
+       echo and /path/forces arrows for the BEV viewer). The trajectory_simplifier
+       below cleans that into the flown /path/waypoints. Always launched; ~enabled
        (=safety_correct) false makes it a verbatim passthrough. -->
   <node pkg="falcon_adapter" type="path_corrector_node.py"
         name="path_corrector" output="screen">
     <param name="input_path_topic"      value="$(arg planner_path_topic)" />
     <param name="bev_topic"             value="/falcon/bev_2d" />
-    <param name="path_topic"            value="/path/waypoints" />
+    <param name="path_topic"            value="/path/waypoints_safe" />
     <param name="raw_path_topic"        value="/path/waypoints_raw" />
     <param name="frame_id"              value="world" />
     <param name="enabled"               value="$(arg safety_correct)" />
@@ -614,6 +929,35 @@
     <param name="esdf_occ_thresh"         value="$(arg esdf_occ_thresh)" />
   </node>
 
+  <!-- Trajectory simplifier (CLEANUP, not safety): cleans the corrector's safe
+       path on /path/waypoints_safe and publishes the flown /path/waypoints. Each
+       pass is validated against the BEV (inflated line-of-sight) so cleanup never
+       re-introduces a collision the corrector avoided. ~enabled (=simplify) false
+       passes the safe path straight through. -->
+  <node pkg="falcon_adapter" type="trajectory_simplifier_node.py"
+        name="trajectory_simplifier" output="screen">
+    <param name="input_path_topic"   value="/path/waypoints_safe" />
+    <param name="bev_topic"          value="/falcon/bev_2d" />
+    <param name="path_topic"         value="/path/waypoints" />
+    <param name="frame_id"           value="world" />
+    <param name="enabled"            value="$(arg simplify)" />
+    <param name="debug"              value="$(arg simplify_debug)" />
+    <!-- Match the corrector/planner inflation so "clear" means the same thing. -->
+    <param name="inflate_radius_m"   value="$(arg inflate_radius_m)" />
+    <param name="merge_enabled"      value="$(arg simplify_merge)" />
+    <param name="merge_radius_m"     value="$(arg simplify_merge_radius_m)" />
+    <param name="zigzag_enabled"     value="$(arg simplify_zigzag)" />
+    <param name="zigzag_angle_deg"   value="$(arg simplify_zigzag_angle_deg)" />
+    <param name="zigzag_strength"    value="$(arg simplify_zigzag_strength)" />
+    <param name="zigzag_passes"      value="$(arg simplify_zigzag_passes)" />
+    <param name="collinear_enabled"  value="$(arg simplify_collinear)" />
+    <param name="collinear_angle_deg" value="$(arg simplify_collinear_angle_deg)" />
+    <param name="max_segment_m"      value="$(arg simplify_max_segment_m)" />
+    <param name="min_spacing_enabled" value="$(arg simplify_min_spacing)" />
+    <param name="min_spacing_m"      value="$(arg simplify_min_spacing_m)" />
+    <param name="turn_keep_deg"      value="$(arg simplify_turn_keep_deg)" />
+  </node>
+
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"
         name="waypoint_follower" output="screen">
     <param name="drone_ns"               value="$(arg drone_ns)" />
@@ -625,7 +969,38 @@
     <param name="yaw_settle_dwell_s"     value="$(arg yaw_settle_dwell_s)" />
     <param name="yaw_coast_deg"          value="$(arg yaw_coast_deg)" />
     <param name="yaw_burst_max_deg"      value="$(arg yaw_burst_max_deg)" />
+    <param name="freeze_on_rotation"     value="$(arg freeze_on_rotation)" />
+    <param name="freeze_yaw_thresh_deg"  value="$(arg freeze_yaw_thresh_deg)" />
+    <param name="settle_map_updates"     value="$(arg settle_map_updates)" />
+    <param name="freeze_through_coast"   value="$(arg freeze_through_coast)" />
+    <param name="rot_wz_turn_on"         value="$(arg rot_wz_turn_on)" />
+    <param name="rot_wz_turn_off"        value="$(arg rot_wz_turn_off)" />
+    <param name="rot_turn_off_ticks"     value="$(arg rot_turn_off_ticks)" />
+    <param name="rot_reobserve_every_deg" value="$(arg rot_reobserve_every_deg)" />
+    <param name="rot_max_coast_s"        value="$(arg rot_max_coast_s)" />
     <param name="min_motion_ticks"       value="$(arg min_motion_ticks)" />
+    <!-- graded-pulse / mid-burst-feedback / anti-deadlock yaw -->
+    <param name="yaw_graded_pulses"      value="$(arg yaw_graded_pulses)" />
+    <param name="yaw_burst_grade_max_ticks" value="$(arg yaw_burst_grade_max_ticks)" />
+    <param name="yaw_settle_dwell_per_tick" value="$(arg yaw_settle_dwell_per_tick)" />
+    <param name="yaw_burst_live_feedback" value="$(arg yaw_burst_live_feedback)" />
+    <param name="yaw_fb_reach_deg"       value="$(arg yaw_fb_reach_deg)" />
+    <param name="yaw_fb_confirm_ticks"   value="$(arg yaw_fb_confirm_ticks)" />
+    <param name="yaw_max_reversals"      value="$(arg yaw_max_reversals)" />
+    <param name="yaw_accept_growth_deg"  value="$(arg yaw_accept_growth_deg)" />
+    <param name="yaw_burst_max_ticks"    value="$(arg yaw_burst_max_ticks)" />
+    <!-- pose estimator -->
+    <param name="use_pose_estimator"     value="$(arg use_pose_estimator)" />
+    <param name="est_window_s"           value="$(arg est_window_s)" />
+    <param name="est_min_samples"        value="$(arg est_min_samples)" />
+    <param name="est_max_buffer_s"       value="$(arg est_max_buffer_s)" />
+    <param name="est_wz_cmd_eps"         value="$(arg est_wz_cmd_eps)" />
+    <param name="est_vx_cmd_eps"         value="$(arg est_vx_cmd_eps)" />
+    <param name="est_ff_blend_min"       value="$(arg est_ff_blend_min)" />
+    <param name="est_ff_blend_max"       value="$(arg est_ff_blend_max)" />
+    <param name="est_dropout_s"          value="$(arg est_dropout_s)" />
+    <param name="est_max_coast_s"        value="$(arg est_max_coast_s)" />
+    <param name="est_fresh_tau_s"        value="$(arg est_fresh_tau_s)" />
     <param name="cmd_commit_ticks"       value="$(arg cmd_commit_ticks)" />
     <param name="cmd_stop_eps"           value="$(arg cmd_stop_eps)" />
     <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
@@ -648,6 +1023,62 @@
     <param name="ctrl_rate_hz"           value="$(arg ctrl_rate_hz)" />
     <param name="forward_only"           value="$(arg forward_only)" />
     <param name="cmd_log_path"           value="$(arg cmd_log_path)" />
+    <!-- controller selection + multi-axis tuning (only used when controller:=multi_axis) -->
+    <param name="controller"             value="$(arg controller)" />
+    <param name="mx_lateral_speed_max"   value="$(arg mx_lateral_speed_max)" />
+    <param name="mx_yaw_rate"            value="$(arg mx_yaw_rate)" />
+    <param name="mx_slow_radius"         value="$(arg mx_slow_radius)" />
+    <param name="mx_arrive_speed_min"    value="$(arg mx_arrive_speed_min)" />
+    <param name="mx_yaw_engage_deg"      value="$(arg mx_yaw_engage_deg)" />
+    <param name="mx_yaw_release_deg"     value="$(arg mx_yaw_release_deg)" />
+    <param name="mx_yaw_kp"              value="$(arg mx_yaw_kp)" />
+    <param name="mx_travel_cone_deg"     value="$(arg mx_travel_cone_deg)" />
+    <param name="mx_translate_suppress_deg"   value="$(arg mx_translate_suppress_deg)" />
+    <param name="mx_translate_suppress_floor" value="$(arg mx_translate_suppress_floor)" />
+    <param name="mx_min_vx"              value="$(arg mx_min_vx)" />
+    <param name="mx_min_vy"              value="$(arg mx_min_vy)" />
+    <param name="mx_min_wz_deg"          value="$(arg mx_min_wz_deg)" />
+    <param name="mx_min_release_frac"    value="$(arg mx_min_release_frac)" />
+    <param name="mx_hold_deadband"       value="$(arg mx_hold_deadband)" />
+    <param name="mx_hold_kp"             value="$(arg mx_hold_kp)" />
+    <param name="mx_hold_speed_max"      value="$(arg mx_hold_speed_max)" />
+    <param name="mx_hold_reacquire_margin" value="$(arg mx_hold_reacquire_margin)" />
+    <param name="mx_passed_bearing_deg"  value="$(arg mx_passed_bearing_deg)" />
+    <param name="mx_demo_mode"           value="$(arg mx_demo_mode)" />
+    <param name="mx_require_mode"        value="$(arg mx_require_mode)" />
+    <!-- pure-pursuit controller (only used when controller:=pure_pursuit) -->
+    <param name="pp_holonomic"           value="$(arg pp_holonomic)" />
+    <param name="pp_cruise_speed"        value="$(arg pp_cruise_speed)" />
+    <param name="pp_min_speed"           value="$(arg pp_min_speed)" />
+    <param name="pp_max_speed"           value="$(arg pp_max_speed)" />
+    <param name="pp_base_lookahead"      value="$(arg pp_base_lookahead)" />
+    <param name="pp_min_lookahead"       value="$(arg pp_min_lookahead)" />
+    <param name="pp_max_lookahead"       value="$(arg pp_max_lookahead)" />
+    <param name="pp_lookahead_speed_gain" value="$(arg pp_lookahead_speed_gain)" />
+    <param name="pp_goal_tolerance"      value="$(arg pp_goal_tolerance)" />
+    <param name="pp_path_tolerance"      value="$(arg pp_path_tolerance)" />
+    <param name="pp_max_yaw_rate"        value="$(arg pp_max_yaw_rate)" />
+    <param name="pp_curvature_speed_factor"     value="$(arg pp_curvature_speed_factor)" />
+    <param name="pp_curvature_lookahead_factor" value="$(arg pp_curvature_lookahead_factor)" />
+    <param name="pp_slow_down_distance"  value="$(arg pp_slow_down_distance)" />
+    <param name="pp_speed_smoothing"     value="$(arg pp_speed_smoothing)" />
+    <param name="pp_yaw_rate_smoothing"  value="$(arg pp_yaw_rate_smoothing)" />
+    <param name="pp_sample_dt"           value="$(arg pp_sample_dt)" />
+    <param name="pp_closest_search_back"    value="$(arg pp_closest_search_back)" />
+    <param name="pp_closest_search_forward" value="$(arg pp_closest_search_forward)" />
+    <param name="pp_smooth_dt"           value="$(arg pp_smooth_dt)" />
+    <param name="pp_smooth_min_point_spacing" value="$(arg pp_smooth_min_point_spacing)" />
+    <param name="pp_smooth_tangent_scale" value="$(arg pp_smooth_tangent_scale)" />
+    <param name="pp_smooth_nominal_speed" value="$(arg pp_smooth_nominal_speed)" />
+    <param name="pp_smooth_arc_lut_samples" value="$(arg pp_smooth_arc_lut_samples)" />
+    <param name="pp_smooth_zero_endpoint_velocity" value="$(arg pp_smooth_zero_endpoint_velocity)" />
+    <param name="pp_min_vx"              value="$(arg pp_min_vx)" />
+    <param name="pp_min_vy"              value="$(arg pp_min_vy)" />
+    <param name="pp_min_wz_deg"          value="$(arg pp_min_wz_deg)" />
+    <param name="pp_min_release_frac"    value="$(arg pp_min_release_frac)" />
+    <param name="pp_viz_sample_dt"       value="$(arg pp_viz_sample_dt)" />
+    <param name="smooth_path_topic"      value="$(arg smooth_path_topic)" />
+    <param name="lookahead_topic"        value="$(arg lookahead_topic)" />
   </node>
 
   <!-- voxel_reset_watcher: intentionally NOT transferred (diagnostics only).

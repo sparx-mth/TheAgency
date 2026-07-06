@@ -12,7 +12,9 @@ from sparx_agency.core.planning.navdp.geometry import (
     body_point_to_pixel,
     patch_median_depth,
     pixel_to_pointgoal,
+    point_to_pointgoal,
     project_trajectory_to_pixels,
+    world_to_body_2d,
 )
 
 # A simple, axis-aligned pinhole: principal point at the image centre.
@@ -74,6 +76,58 @@ def test_pointgoal_fallback_depth_when_no_valid():
     gx, gy, d, _ = pixel_to_pointgoal(25, 25, depth, INTR, fallback_depth_m=3.0)
     assert d == pytest.approx(3.0)
     assert gx == pytest.approx(3.0)
+
+
+# ── point_to_pointgoal ───────────────────────────────────────────────
+def test_point_to_pointgoal_in_range_is_identity():
+    gx, gy = point_to_pointgoal(3.0, -1.0)
+    assert gx == pytest.approx(3.0)
+    assert gy == pytest.approx(-1.0)
+
+
+def test_point_to_pointgoal_scales_preserving_bearing():
+    fwd, left = 40.0, -20.0          # both past range
+    gx, gy = point_to_pointgoal(fwd, left)
+    assert math.atan2(gy, gx) == pytest.approx(math.atan2(left, fwd), abs=1e-6)
+    assert gx <= NAVDP_MAX_FWD_M + 1e-6
+    assert abs(gy) <= NAVDP_MAX_LAT_M + 1e-6
+
+
+def test_point_to_pointgoal_behind_collapses_straight_ahead():
+    assert point_to_pointgoal(-2.0, 5.0) == (0.1, 0.0)
+
+
+def test_pixel_to_pointgoal_delegates_to_point_scaler():
+    # The refactored pixel path must match point_to_pointgoal on the raw body point.
+    depth = _const_depth(40.0)
+    u = INTR.cx - 200.0
+    gx, gy, _, _ = pixel_to_pointgoal(u, INTR.cy, depth, INTR)
+    by_raw = -(u - INTR.cx) * 40.0 / INTR.fx
+    egx, egy = point_to_pointgoal(40.0, by_raw)
+    assert (gx, gy) == pytest.approx((egx, egy))
+
+
+# ── world_to_body_2d ─────────────────────────────────────────────────
+def test_world_to_body_identity_pose():
+    # At the origin facing +x, world == body.
+    assert world_to_body_2d(2.0, 1.0, 0.0, 0.0, 0.0) == pytest.approx((2.0, 1.0))
+
+
+def test_world_to_body_yaw_90deg():
+    # Drone at (10,5) facing +y (yaw=90deg). A point 1 m ahead in world (+y) is
+    # forward=+1; a point 1 m to world +x is on the body's RIGHT (left=-1).
+    fwd, left = world_to_body_2d(10.0, 6.0, 10.0, 5.0, math.pi / 2.0)
+    assert (fwd, left) == pytest.approx((1.0, 0.0))
+    fwd2, left2 = world_to_body_2d(11.0, 5.0, 10.0, 5.0, math.pi / 2.0)
+    assert (fwd2, left2) == pytest.approx((0.0, -1.0))
+
+
+def test_world_to_body_inverts_anchor():
+    # world_to_body_2d is the exact inverse of anchor_trajectory_to_world.
+    ref = (3.0, -2.0, 0.7)
+    body_in = (4.0, -1.5)
+    (wx, wy), = anchor_trajectory_to_world([body_in], *ref)
+    assert world_to_body_2d(wx, wy, *ref) == pytest.approx(body_in)
 
 
 # ── anchor_trajectory_to_world ───────────────────────────────────────

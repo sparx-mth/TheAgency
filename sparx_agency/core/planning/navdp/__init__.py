@@ -24,7 +24,14 @@ from .geometry import (
     body_point_to_pixel,
     patch_median_depth,
     pixel_to_pointgoal,
+    point_to_pointgoal,
     project_trajectory_to_pixels,
+    world_to_body_2d,
+)
+from .local_goal import (
+    LocalGoal,
+    point_visible,
+    select_farthest_visible_waypoint,
 )
 
 __all__ = [
@@ -32,9 +39,14 @@ __all__ = [
     "NAVDP_MAX_LAT_M",
     "patch_median_depth",
     "pixel_to_pointgoal",
+    "point_to_pointgoal",
+    "world_to_body_2d",
     "anchor_trajectory_to_world",
     "body_point_to_pixel",
     "project_trajectory_to_pixels",
+    "LocalGoal",
+    "point_visible",
+    "select_farthest_visible_waypoint",
     "DEPTH_SCALE",
     "NavDPError",
     "NavDPPointgoalClient",
