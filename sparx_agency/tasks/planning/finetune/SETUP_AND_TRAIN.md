@@ -88,6 +88,10 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # everything else (no transformers / timm / tensorrt / pycuda on the torch path)
 pip install numpy scipy opencv-python matplotlib pyyaml diffusers pillow
+
+# optional: only silences the "[costmap] Numba unavailable" notice — it does NOT change
+# any results (numba isn't on the label-gen / correction path, which is numpy + scipy)
+pip install numba
 ```
 
 ### Step 2 — define the paths (edit these lines)
