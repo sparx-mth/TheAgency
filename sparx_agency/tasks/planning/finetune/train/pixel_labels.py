@@ -37,12 +37,13 @@ def _goal_clearance(target, goal) -> float:
 def generate(dataset: Path, rec: str, out: Path, n_per_frame: int, frame_stride: int,
              corrector: str, clearance: float, max_shift: float, smooth: float,
              pitch: float, height: float, seed: int, min_goal_clear: float = 0.0,
-             exclude_bottom_frac: float = 0.0) -> int:
+             exclude_bottom_frac: float = 0.0, infer=None) -> int:
     rec_dir = dataset / rec
     intr = pipeline.load_intrinsics(rec_dir)
     frames = pipeline.list_frames(rec_dir)[::frame_stride]
-    engine_dir, head = default_engine_paths()
-    infer = NavDPInfer(engine_dir, head)
+    if infer is None:                                    # default: TensorRT (this host)
+        engine_dir, head = default_engine_paths()
+        infer = NavDPInfer(engine_dir, head)
     cfg = make_config(corrector=corrector, target_clearance_m=clearance,
                       max_total_shift_m=max_shift, pitch_deg=pitch,
                       camera_height_m=height, smooth_strength=smooth)
@@ -120,9 +121,27 @@ def main() -> None:
     ap.add_argument("--exclude-bottom-frac", type=float, default=0.0,
                     help="drop the bottom fraction of image rows (e.g. 0.2) so goals "
                          "avoid the ground right below the drone")
+    ap.add_argument("--backend", default="trt", choices=["trt", "torch"],
+                    help="NavDP inference backend: 'trt' (fast, needs this host's engines) "
+                         "or 'torch' (portable to any CUDA machine)")
+    ap.add_argument("--ckpt", type=Path, default=Path.home() / "Downloads/navdp-cross-modal.ckpt",
+                    help="NavDP checkpoint (torch backend only)")
+    ap.add_argument("--navdp-repo", type=Path,
+                    default=Path.home() / "PycharmProjects/NavDP/baselines/navdp",
+                    help="external NavDP repo (torch backend only)")
+    ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     dataset = args.dataset.expanduser()
+
+    if args.backend == "torch":                          # build the model once, reuse per rec
+        from .navdp_torch import TorchNavDPInfer
+        infer = TorchNavDPInfer(str(args.ckpt.expanduser()),
+                                str(args.navdp_repo.expanduser()), args.device)
+    else:
+        engine_dir, head = default_engine_paths()
+        infer = NavDPInfer(engine_dir, head)
+
     total = 0
     for rec in args.recs:
         print(f"== {rec} ==")
@@ -130,7 +149,7 @@ def main() -> None:
         total += generate(dataset, rec, out, args.n_per_frame, args.frame_stride,
                           args.corrector, args.clearance, args.max_shift, args.smooth,
                           args.pitch, args.height, args.seed, args.min_goal_clear,
-                          args.exclude_bottom_frac)
+                          args.exclude_bottom_frac, infer=infer)
     print(f"TOTAL {total} samples across {len(args.recs)} recordings")
 
 

@@ -63,13 +63,81 @@ def build(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str):
     return model, loss, ds
 
 
-def train_loop(cfg: dict, model, loss_fn, ds, device: str = "cuda") -> None:
-    """Run the DDPM eps-MSE + critic + ESDF + L2-SP loop over any NavDP dataset."""
+def _forward_loss(model, loss_fn, batch, device, n_steps, scheduler, l2sp, gen=None):
+    """One forward pass -> (total tensor, parts dict of float act/critic/esdf/total).
+
+    ``gen=None`` draws fresh noise (training); a seeded generator makes the
+    validation loss reproducible so it is comparable across intervals.
+    """
+    b = batch["images"].shape[0]
+    images = batch["images"].to(device)
+    depth = batch["depth"].to(device)
+    goal = batch["goal"].to(device)
+    x0 = batch["label"].to(device)                        # (B,24,3)
+    sdf = batch["sdf_grid"].to(device)
+    res = float(batch["resolution"][0]); ox = float(batch["origin_x"][0]); oy = float(batch["origin_y"][0])
+
+    rgbd = model.encode(images, depth)
+    goal_embed = model.goal_embed(goal)
+    if gen is None:
+        noise = torch.randn_like(x0)
+        k = torch.randint(0, n_steps, (b,), device=device)
+    else:
+        noise = torch.randn(x0.shape, generator=gen, device=device, dtype=x0.dtype)
+        k = torch.randint(0, n_steps, (b,), generator=gen, device=device)
+    x_k = scheduler.add_noise(x0, noise, k)
+    pred = model.predict_noise(x_k, k, goal_embed, rgbd)
+
+    parts = {"act": loss_fn.diffusion_loss(pred, noise)}
+    if loss_fn.config.use_critic:
+        v_tgt = loss_fn.critic_target_from_sdf(x0, sdf, res, ox, oy)
+        parts["critic"] = loss_fn.critic_loss(model.predict_critic(x0, rgbd), v_tgt)
+    x0_hat = model.x0_from_eps(x_k, k, pred)
+    parts["esdf"] = loss_fn.esdf_loss(x0_hat, sdf, res, ox, oy)
+    total = loss_fn.total(parts) + l2sp.penalty(model.policy)
+    # detach before float() -- these tensors carry grad; float() alone warns
+    flat = {kk: float(vv.detach()) for kk, vv in parts.items()}
+    flat["total"] = float(total.detach())
+    return total, flat
+
+
+@torch.no_grad()
+def _validate(model, loss_fn, loader, device, n_steps, scheduler, l2sp, max_batches):
+    """Mean loss over up to ``max_batches`` of the val set (fixed noise seed)."""
+    training = model.training
+    model.eval()
+    gen = torch.Generator(device=device).manual_seed(20260101)
+    acc, n = {}, 0
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        _, parts = _forward_loss(model, loss_fn, batch, device, n_steps, scheduler, l2sp, gen=gen)
+        for kk, vv in parts.items():
+            acc[kk] = acc.get(kk, 0.0) + vv
+        n += 1
+    if training:
+        model.train()
+    return {kk: vv / max(n, 1) for kk, vv in acc.items()}
+
+
+_HDR = "  step | epoch |    lr    | train_tot | val_act val_crit val_esdf | val_tot | best_val | status"
+
+
+def train_loop(cfg: dict, model, loss_fn, ds, device: str = "cuda", val_ds=None) -> None:
+    """DDPM eps-MSE + critic + ESDF + L2-SP loop with validation-tracked logging.
+
+    Every ``optim.val_every`` steps and at each epoch end it logs one clean row:
+    running train loss, held-out validation loss (fixed-noise, comparable across
+    intervals), and whether it improved -- saving ``best.pth`` on every new-best
+    validation and ``ema_latest.pth`` each time. ``val_ds=None`` -> train-only log.
+    """
     o = cfg["optim"]
-    loader = DataLoader(ds, batch_size=o["batch_size"], shuffle=True, drop_last=True,
-                        num_workers=4)
+    bs = int(o["batch_size"])
+    train_loader = DataLoader(ds, batch_size=bs, shuffle=True, drop_last=True, num_workers=4)
+    val_loader = (DataLoader(val_ds, batch_size=bs, shuffle=False, drop_last=False, num_workers=2)
+                  if val_ds is not None and len(val_ds) >= bs else None)
     opt = torch.optim.AdamW(model.param_groups(), weight_decay=float(o["weight_decay"]))
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=o["epochs"])
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, int(o["epochs"])))
     ema = ModelEma(model.policy, decay=float(o["ema_decay"]))
     l2sp = L2SP(model.policy, weight=float(o["l2sp_weight"]))
     scheduler = model.scheduler
@@ -77,40 +145,51 @@ def train_loop(cfg: dict, model, loss_fn, ds, device: str = "cuda") -> None:
 
     out = Path(cfg["checkpoint"]["out_dir"])
     out.mkdir(parents=True, exist_ok=True)
+    max_steps = o.get("max_steps")
+    val_every = int(o.get("val_every", 1000))
+    val_batches = int(o.get("val_batches", 80))
+    spe = max(1, len(train_loader))
+    total_steps = max_steps or spe * int(o["epochs"])
 
-    max_steps = o.get("max_steps")            # None -> full epochs
-    log_every = int(o.get("log_every", 200))
-    save_every_steps = int(o.get("save_every_steps", 2000))
+    print("train=%d  val=%d  steps/epoch=%d  target_steps=%s  batch=%d  lr=%.1e"
+          % (len(ds), len(val_ds) if val_ds is not None else 0, spe, total_steps, bs,
+             opt.param_groups[0]["lr"]), flush=True)
+    print(_HDR, flush=True)
+    print("-" * len(_HDR), flush=True)
+
+    state = {"best": float("inf"), "since": 0, "last": -1}
+    run = {}
     step = 0
-    run = {}                                  # running mean of loss parts (for logging)
     done = False
-    for epoch in range(o["epochs"]):
+
+    def checkpoint(epoch_f):
+        if step == state["last"]:
+            return                                    # already logged this step
+        state["last"] = step
+        torch.save(ema.state_dict(), out / "ema_latest.pth")
+        lr = opt.param_groups[0]["lr"]
+        if val_loader is None:
+            print("%6d | %5.2f | %.2e | %9.3f |  (no validation set)"
+                  % (step, epoch_f, lr, run.get("total", float("nan"))), flush=True)
+            return
+        val = _validate(model, loss_fn, val_loader, device, n_steps, scheduler, l2sp, val_batches)
+        vt = val["total"]
+        if vt < state["best"]:
+            state["best"], state["since"] = vt, 0
+            torch.save(ema.state_dict(), out / "best.pth")
+            status = "*** NEW BEST -> best.pth"
+        else:
+            state["since"] += 1
+            status = "no improve x%d" % state["since"]
+        print("%6d | %5.2f | %.2e | %9.3f | %7.3f %8.3f %8.3f | %7.3f | %8.3f | %s"
+              % (step, epoch_f, lr, run.get("total", float("nan")),
+                 val.get("act", 0.0), val.get("critic", 0.0), val.get("esdf", 0.0),
+                 vt, state["best"], status), flush=True)
+
+    for epoch in range(int(o["epochs"])):
         model.train()
-        for batch in loader:
-            b = batch["images"].shape[0]
-            images = batch["images"].to(device)
-            depth = batch["depth"].to(device)
-            goal = batch["goal"].to(device)
-            x0 = batch["label"].to(device)                    # (B,24,3)
-            sdf = batch["sdf_grid"].to(device)
-            res = float(batch["resolution"][0]); ox = float(batch["origin_x"][0]); oy = float(batch["origin_y"][0])
-
-            rgbd = model.encode(images, depth)
-            goal_embed = model.goal_embed(goal)
-            noise = torch.randn_like(x0)
-            k = torch.randint(0, n_steps, (b,), device=device)
-            x_k = scheduler.add_noise(x0, noise, k)
-            pred = model.predict_noise(x_k, k, goal_embed, rgbd)
-
-            parts = {"act": loss_fn.diffusion_loss(pred, noise)}
-            if loss_fn.config.use_critic:
-                v_tgt = loss_fn.critic_target_from_sdf(x0, sdf, res, ox, oy)
-                v_pred = model.predict_critic(x0, rgbd)
-                parts["critic"] = loss_fn.critic_loss(v_pred, v_tgt)
-            x0_hat = model.x0_from_eps(x_k, k, pred)
-            parts["esdf"] = loss_fn.esdf_loss(x0_hat, sdf, res, ox, oy)
-            total = loss_fn.total(parts) + l2sp.penalty(model.policy)
-
+        for batch in train_loader:
+            total, parts = _forward_loss(model, loss_fn, batch, device, n_steps, scheduler, l2sp)
             opt.zero_grad()
             total.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -120,23 +199,19 @@ def train_loop(cfg: dict, model, loss_fn, ds, device: str = "cuda") -> None:
 
             step += 1
             for kk, vv in parts.items():
-                run[kk] = 0.98 * run.get(kk, float(vv)) + 0.02 * float(vv)
-            if step % log_every == 0:
-                print("step %d/%s: " % (step, max_steps or "epoch")
-                      + " ".join(f"{kk}={vv:.4f}" for kk, vv in run.items()), flush=True)
-            if step % save_every_steps == 0:
-                torch.save(ema.state_dict(), out / "ema_latest.pth")
+                run[kk] = 0.98 * run.get(kk, vv) + 0.02 * vv
+            if step % val_every == 0:
+                checkpoint(step / spe)
             if max_steps and step >= max_steps:
                 done = True
                 break
         sched.step()
-        torch.save(ema.state_dict(), out / f"ema_ep{epoch:03d}.pth")
-        torch.save(ema.state_dict(), out / "ema_latest.pth")
-        print(f"epoch {epoch} done ({step} steps): "
-              + " ".join(f"{kk}={vv:.4f}" for kk, vv in run.items()), flush=True)
+        checkpoint(step / spe)                        # always at epoch end
         if done:
             break
-    torch.save(ema.state_dict(), out / "ema_latest.pth")
+    print("-" * len(_HDR), flush=True)
+    print("done. best val=%.4f  ->  %s/best.pth   (latest: ema_latest.pth)"
+          % (state["best"], out), flush=True)
 
 
 def train(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str = "cuda") -> None:

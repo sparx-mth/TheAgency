@@ -16,8 +16,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import torch
 import yaml
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, random_split
 
 from ..navdp.train import build_model_loss, train_loop
 from .pixel_dataset import PixelGoalDataset
@@ -33,6 +34,10 @@ def main() -> None:
                     help="one or more labels.npz (multiple recordings are concatenated)")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="cap total optimizer steps (a step budget instead of full epochs)")
+    ap.add_argument("--val-frac", type=float, default=0.1,
+                    help="fraction of samples held out for validation (0 disables)")
+    ap.add_argument("--val-every", type=int, default=1000,
+                    help="run validation + log a row every N steps (also at each epoch end)")
     ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
     ap.add_argument("--ckpt", type=Path, default=_DEFAULT_CKPT)
     ap.add_argument("--navdp-repo", type=Path, default=_DEFAULT_REPO)
@@ -61,17 +66,27 @@ def main() -> None:
         cfg["finetune"]["lr_head"] = args.lr
     if args.max_steps is not None:
         cfg["optim"]["max_steps"] = args.max_steps
+    cfg["optim"]["val_every"] = args.val_every
     cfg["checkpoint"]["out_dir"] = str(args.out_dir)
 
     model, loss_fn = build_model_loss(cfg, str(args.ckpt.expanduser()),
                                       str(args.navdp_repo.expanduser()), args.device)
     parts = [PixelGoalDataset(p.expanduser(), memory_size=cfg["data"]["memory_size"])
              for p in args.labels]
-    ds = parts[0] if len(parts) == 1 else ConcatDataset(parts)
-    print(f"training on {len(ds)} pixel-goal samples from {len(parts)} recording(s), "
-          f"batch {args.batch_size}, max_steps {args.max_steps} -> {args.out_dir}")
-    train_loop(cfg, model, loss_fn, ds, args.device)
-    print("done. checkpoint:", args.out_dir / "ema_latest.pth")
+    full = parts[0] if len(parts) == 1 else ConcatDataset(parts)
+
+    # deterministic train/val split (a held-out slice of the sampled goals)
+    val_ds = None
+    ds = full
+    if args.val_frac > 0:
+        n_val = int(len(full) * args.val_frac)
+        n_train = len(full) - n_val
+        gen = torch.Generator().manual_seed(42)
+        ds, val_ds = random_split(full, [n_train, n_val], generator=gen)
+
+    print(f"loaded {len(full)} pixel-goal samples from {len(parts)} recording(s) "
+          f"-> train {len(ds)} / val {len(val_ds) if val_ds else 0}", flush=True)
+    train_loop(cfg, model, loss_fn, ds, args.device, val_ds=val_ds)
 
 
 if __name__ == "__main__":

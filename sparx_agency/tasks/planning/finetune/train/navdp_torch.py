@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ..verify.navdp_infer import preprocess_depth, preprocess_rgb
+from ..verify.navdp_infer import NavDPResult, preprocess_depth, preprocess_rgb
 from sparx_agency.tasks.planning.navdp.export.build_policy import build_navdp_policy
 
 
@@ -39,3 +39,29 @@ class TorchNavDP:
             _all, _crit, pos, _neg = self.policy.predict_pointgoal_action(goal, images, dep)
         pos = pos.detach().cpu().numpy() if hasattr(pos, "detach") else np.asarray(pos)
         return pos[0, 0, :, :2].astype(np.float32)
+
+
+class TorchNavDPInfer:
+    """Torch-backed drop-in for ``NavDPInfer.predict`` (portable, no TensorRT).
+
+    Same signature/return (:class:`NavDPResult`) as the TensorRT ``NavDPInfer`` so
+    label generation can run on any CUDA machine without the GPU-specific engines.
+    """
+
+    def __init__(self, ckpt: str, navdp_repo: str, device: str = "cuda", memory: int = 8):
+        self.policy = build_navdp_policy(ckpt, navdp_repo, device=device)
+        self.memory = memory
+
+    def predict(self, rgb_bgr, depth_m, goal_body, seed: int = 0) -> NavDPResult:
+        frame = preprocess_rgb(rgb_bgr, 224)
+        images = np.tile(frame[None, None], (1, self.memory, 1, 1, 1)).astype(np.float32)
+        dep = preprocess_depth(depth_m, 224)[None].astype(np.float32)
+        goal = np.array([[goal_body[0], goal_body[1], 0.0]], np.float32).clip(-10, 10)
+        goal[:, 0] = np.clip(goal[:, 0], 0.0, 10.0)
+        np.random.seed(int(seed))
+        with torch.no_grad():
+            allt, crit, pos, _neg = self.policy.predict_pointgoal_action(goal, images, dep)
+        to_np = lambda a: a.detach().cpu().numpy() if hasattr(a, "detach") else np.asarray(a)
+        allt, crit, pos = to_np(allt), to_np(crit), to_np(pos)
+        return NavDPResult(trajectory=pos[0, 0, :, :2].astype(np.float32),
+                           all_traj=allt[0], critic=crit[0], goal_clipped=goal[0, :2].copy())
