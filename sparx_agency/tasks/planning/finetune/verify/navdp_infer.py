@@ -24,6 +24,34 @@ import numpy as np
 from sparx_agency.core.planning.navdp.trt.policy import NavDPTRTPolicy
 
 
+def resize_pad(arr: np.ndarray, size: int) -> np.ndarray:
+    """Keep-aspect resize to fit ``size`` then center-pad to a square (NavDP-style)."""
+    prop = size / max(arr.shape[0], arr.shape[1])
+    r = cv2.resize(arr, (-1, -1), fx=prop, fy=prop)
+    pw = max((size - r.shape[1]) // 2, 0)
+    ph = max((size - r.shape[0]) // 2, 0)
+    pad = ((ph, ph), (pw, pw), (0, 0)) if r.ndim == 3 else ((ph, ph), (pw, pw))
+    r = np.pad(r, pad, mode="constant", constant_values=0)
+    return cv2.resize(r, (size, size))
+
+
+def preprocess_rgb(rgb_bgr: np.ndarray, size: int = 224) -> np.ndarray:
+    """BGR uint8 -> ``(size, size, 3)`` float32 RGB in [0, 1] (model colour order)."""
+    rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+    return resize_pad(rgb, size).astype(np.float32) / 255.0
+
+
+def preprocess_depth(depth_m: np.ndarray, size: int = 224,
+                     dmin: float = 0.1, dmax: float = 5.0) -> np.ndarray:
+    """Metric depth -> ``(size, size, 1)`` float32, out-of-range zeroed (NavDP-style)."""
+    d = depth_m.astype(np.float32).copy()
+    d[~np.isfinite(d)] = 0.0
+    d = resize_pad(d, size)
+    d[d > dmax] = 0.0
+    d[d < dmin] = 0.0
+    return d[:, :, None]
+
+
 @dataclass
 class NavDPResult:
     """One NavDP point-goal inference."""
@@ -61,31 +89,6 @@ class NavDPInfer:
                                       device_id=device_id)
 
     # ------------------------------------------------------------------
-    # Preprocessing (faithful to NavDP_Agent, kept pure / stateless)
-    # ------------------------------------------------------------------
-    def _resize_pad(self, arr: np.ndarray) -> np.ndarray:
-        """Keep-aspect resize to fit ``image_size`` then center-pad to a square."""
-        s = self.image_size
-        prop = s / max(arr.shape[0], arr.shape[1])
-        r = cv2.resize(arr, (-1, -1), fx=prop, fy=prop)
-        pw = max((s - r.shape[1]) // 2, 0)
-        ph = max((s - r.shape[0]) // 2, 0)
-        pad = ((ph, ph), (pw, pw), (0, 0)) if r.ndim == 3 else ((ph, ph), (pw, pw))
-        r = np.pad(r, pad, mode="constant", constant_values=0)
-        return cv2.resize(r, (s, s))
-
-    def _process_image(self, rgb: np.ndarray) -> np.ndarray:
-        return self._resize_pad(rgb).astype(np.float32) / 255.0
-
-    def _process_depth(self, depth_m: np.ndarray) -> np.ndarray:
-        d = depth_m.astype(np.float32).copy()
-        d[~np.isfinite(d)] = 0.0
-        d = self._resize_pad(d)
-        d[d > self.depth_max_m] = 0.0
-        d[d < self.depth_min_m] = 0.0
-        return d[:, :, None]
-
-    # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
     def predict(self, rgb_bgr: np.ndarray, depth_m: np.ndarray,
@@ -103,10 +106,10 @@ class NavDPInfer:
             A :class:`NavDPResult`; ``trajectory`` is the executed ``(24, 2)``
             ``[fwd, left]`` path (meters, body FLU).
         """
-        rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-        frame = self._process_image(rgb)                                  # (S,S,3)
+        frame = preprocess_rgb(rgb_bgr, self.image_size)                  # (S,S,3) RGB [0,1]
         images = np.tile(frame[None, None], (1, self.memory_size, 1, 1, 1))  # (1,8,S,S,3)
-        depth = self._process_depth(depth_m)[None]                        # (1,S,S,1)
+        depth = preprocess_depth(depth_m, self.image_size,
+                                 self.depth_min_m, self.depth_max_m)[None]   # (1,S,S,1)
 
         goal = np.array([[goal_body[0], goal_body[1], 0.0]], np.float32).clip(-10, 10)
         goal[:, 0] = np.clip(goal[:, 0], 0.0, 10.0)

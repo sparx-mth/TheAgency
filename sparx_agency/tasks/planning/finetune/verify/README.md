@@ -29,6 +29,18 @@ So connecting them is not a transform — we simply hand NavDP's waypoints to
 corrects (instead of the default straight-to-goal seed). `verify/correction.py` is that
 one-line glue. The push off the walls is done by the repo's existing correctors.
 
+## Correct, then smooth
+
+The corrector pushes each waypoint off the walls *independently*, so a strongly-pushed
+point next to an un-pushed one leaves a **kink**, and two points pushed opposite ways
+leave a **zigzag** — something NavDP (a smooth cumsum of small deltas) would never emit,
+and a poor training label. So after correcting we run a **collision-aware smoothing**
+pass (`common/smoothing.py`): a count-preserving Gauss-Seidel relaxation that flattens
+kinks **only where the relaxed point stays clear** of the (inflated) walls — smoothing
+never undoes the wall-avoidance. Endpoints (robot, goal) stay pinned and the 24-waypoint
+horizon is preserved. The BEV/comparison panels draw the **raw** correction (tomato,
+dashed) under the **smoothed** target (green) so you can see the kink being removed.
+
 ## Run it
 
 Runs in the **`navdp` conda env** (it has TensorRT + numpy + matplotlib; **no torch
@@ -48,8 +60,8 @@ PYTHONPATH=/home/nadavc/GIT/TheAgency \
 |---|---|
 | top-left | colour image + clicked pixel (red ✕) + goal / critic in the title |
 | top-right | depth image + clicked pixel |
-| bottom-left | **the field** (signed ESDF or repulsion) + occupancy + NavDP (orange) & corrected (green) trajectories, robot ▲, goal ★ |
-| bottom-right | NavDP vs corrected **comparison** with per-waypoint shift vectors + `moved N/M, max/mean shift` |
+| bottom-left | **the field** (signed ESDF or repulsion) + occupancy + NavDP (orange), raw correction (tomato dashed) & smoothed target (green), robot ▲, goal ★ |
+| bottom-right | NavDP vs raw-corrected vs smoothed **comparison** with per-waypoint shift vectors + `moved N · smoothed M · max/mean shift` |
 
 ## Knobs
 
@@ -58,6 +70,8 @@ PYTHONPATH=/home/nadavc/GIT/TheAgency \
 * **clearance m** — how far off a wall the corrector aims (the push target). Higher →
   it engages sooner / pushes more. Default `0.5` (matches NavDP's own `d_safe`).
 * **max shift m** — cap on how far any waypoint may move ("not too hard"). Default `0.8`.
+* **smooth** — smoothing strength `0..1` (`0` = off). Relaxes kinks/zigzags out of the
+  pushed trajectory so the target is smooth like NavDP. Default `0.5`.
 * **pitch deg**, **cam height m** — shape the single-frame occupancy (which pixels are
   floor vs obstacle). **These are hardware constants you must measure** — the live stack
   does not record camera pitch (see the package README). Defaults `0°, 1.0 m` are XTEND

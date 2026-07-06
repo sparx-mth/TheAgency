@@ -49,6 +49,7 @@ class VerifyApp:
         self.max_shift = 0.8
         self.pitch = 0.0
         self.height = 1.0
+        self.smooth = 0.5
         self.field_mode = "esdf"
 
         # per-frame + per-click state
@@ -81,7 +82,7 @@ class VerifyApp:
     # ---- pipeline -----------------------------------------------------
     def _cfg(self):
         return make_config(self.corrector, self.clearance, self.max_shift,
-                           self.pitch, self.height)
+                           self.pitch, self.height, self.smooth)
 
     def _recompute(self, rerun_navdp: bool) -> None:
         u, v = self.uv
@@ -140,11 +141,12 @@ class VerifyApp:
         def slider(y, label, lo, hi, val):
             s = Slider(self.fig.add_axes([0.08, y, 0.30, 0.02]), label, lo, hi, valinit=val)
             return s
-        self.s_clear = slider(0.20, "clearance m", 0.1, 1.0, self.clearance)
-        self.s_shift = slider(0.16, "max shift m", 0.1, 2.0, self.max_shift)
-        self.s_pitch = slider(0.12, "pitch deg", -30.0, 30.0, self.pitch)
-        self.s_height = slider(0.08, "cam height m", 0.3, 2.0, self.height)
-        for s in (self.s_clear, self.s_shift, self.s_pitch, self.s_height):
+        self.s_clear = slider(0.22, "clearance m", 0.1, 1.0, self.clearance)
+        self.s_shift = slider(0.18, "max shift m", 0.1, 2.0, self.max_shift)
+        self.s_smooth = slider(0.14, "smooth", 0.0, 1.0, self.smooth)
+        self.s_pitch = slider(0.10, "pitch deg", -30.0, 30.0, self.pitch)
+        self.s_height = slider(0.06, "cam height m", 0.3, 2.0, self.height)
+        for s in (self.s_clear, self.s_shift, self.s_smooth, self.s_pitch, self.s_height):
             s.on_changed(self._on_slider)
 
         self.r_corr = RadioButtons(self.fig.add_axes([0.44, 0.06, 0.11, 0.15]),
@@ -187,6 +189,7 @@ class VerifyApp:
     def _on_slider(self, _val) -> None:
         self.clearance = self.s_clear.val
         self.max_shift = self.s_shift.val
+        self.smooth = self.s_smooth.val
         self.pitch = self.s_pitch.val
         self.height = self.s_height.val
         if self.uv is not None:

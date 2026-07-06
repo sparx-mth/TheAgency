@@ -30,7 +30,13 @@ from .finetune_model import NavDPFinetune, NavDPFinetuneConfig
 from .loss import NavDPLoss, NavDPLossConfig
 
 
-def build(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str):
+def build_model_loss(cfg: dict, ckpt: str, navdp_repo: str, device: str):
+    """Construct the frozen-backbone NavDP model + the fine-tune loss (dataset-free).
+
+    Shared by the pose-based trainer here and the pixel-goal trainer in
+    ``train/train_pixel.py`` -- both feed the SAME loop with batches carrying
+    ``images/depth/goal/label/sdf_grid/resolution/origin_{x,y}``.
+    """
     ft_cfg = NavDPFinetuneConfig(
         train_depth_encoder=cfg["finetune"]["train_depth_encoder"],
         lr_head=float(cfg["finetune"]["lr_head"]),
@@ -43,7 +49,11 @@ def build(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str):
         d_safe_m=float(lcfg["d_safe_m"]), progress_alpha=float(lcfg["progress_alpha"]),
         esdf=EsdfPenaltyConfig(**lcfg["esdf"]),
     )).to(device)
+    return model, loss
 
+
+def build(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str):
+    model, loss = build_model_loss(cfg, ckpt, navdp_repo, device)
     aug = ViewpointAugmentConfig(**cfg["augment"]) if cfg["augment"]["enabled"] else None
     ds = FlightDataset(recording, FlightDatasetConfig(
         model="navdp", memory_size=cfg["data"]["memory_size"],
@@ -53,8 +63,8 @@ def build(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str):
     return model, loss, ds
 
 
-def train(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str = "cuda") -> None:
-    model, loss_fn, ds = build(cfg, recording, ckpt, navdp_repo, device)
+def train_loop(cfg: dict, model, loss_fn, ds, device: str = "cuda") -> None:
+    """Run the DDPM eps-MSE + critic + ESDF + L2-SP loop over any NavDP dataset."""
     o = cfg["optim"]
     loader = DataLoader(ds, batch_size=o["batch_size"], shuffle=True, drop_last=True,
                         num_workers=4)
@@ -68,6 +78,12 @@ def train(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str = "cuda"
     out = Path(cfg["checkpoint"]["out_dir"])
     out.mkdir(parents=True, exist_ok=True)
 
+    max_steps = o.get("max_steps")            # None -> full epochs
+    log_every = int(o.get("log_every", 200))
+    save_every_steps = int(o.get("save_every_steps", 2000))
+    step = 0
+    run = {}                                  # running mean of loss parts (for logging)
+    done = False
     for epoch in range(o["epochs"]):
         model.train()
         for batch in loader:
@@ -101,11 +117,32 @@ def train(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str = "cuda"
                 [p for p in model.parameters() if p.requires_grad], float(o["grad_clip"]))
             opt.step()
             ema.update(model.policy)
+
+            step += 1
+            for kk, vv in parts.items():
+                run[kk] = 0.98 * run.get(kk, float(vv)) + 0.02 * float(vv)
+            if step % log_every == 0:
+                print("step %d/%s: " % (step, max_steps or "epoch")
+                      + " ".join(f"{kk}={vv:.4f}" for kk, vv in run.items()), flush=True)
+            if step % save_every_steps == 0:
+                torch.save(ema.state_dict(), out / "ema_latest.pth")
+            if max_steps and step >= max_steps:
+                done = True
+                break
         sched.step()
-        if (epoch + 1) % cfg["checkpoint"]["save_every"] == 0:
-            torch.save(ema.state_dict(), out / f"ema_{epoch:03d}.pth")
-            torch.save(ema.state_dict(), out / "ema_latest.pth")
-        print(f"epoch {epoch}: " + " ".join(f"{k}={float(v):.4f}" for k, v in parts.items()))
+        torch.save(ema.state_dict(), out / f"ema_ep{epoch:03d}.pth")
+        torch.save(ema.state_dict(), out / "ema_latest.pth")
+        print(f"epoch {epoch} done ({step} steps): "
+              + " ".join(f"{kk}={vv:.4f}" for kk, vv in run.items()), flush=True)
+        if done:
+            break
+    torch.save(ema.state_dict(), out / "ema_latest.pth")
+
+
+def train(cfg: dict, recording, ckpt: str, navdp_repo: str, device: str = "cuda") -> None:
+    """Pose-based training entry: build the flight dataset, then run the loop."""
+    model, loss_fn, ds = build(cfg, recording, ckpt, navdp_repo, device)
+    train_loop(cfg, model, loss_fn, ds, device)
 
 
 def main() -> None:

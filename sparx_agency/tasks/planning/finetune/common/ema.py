@@ -50,5 +50,10 @@ class ModelEma:
         model.load_state_dict(self._shadow, strict=False)
 
     def state_dict(self) -> Dict[str, torch.Tensor]:
-        """Return the EMA weights (for checkpointing / export)."""
-        return {k: v.clone() for k, v in self._shadow.items()}
+        """Return the EMA weights on CPU (for checkpointing / export).
+
+        Streams each shadow tensor host-side rather than cloning on-device, so
+        saving never needs a second GPU copy of the model (important on a small or
+        shared GPU).
+        """
+        return {k: v.detach().to("cpu") for k, v in self._shadow.items()}

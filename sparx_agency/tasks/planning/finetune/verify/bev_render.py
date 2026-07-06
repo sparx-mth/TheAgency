@@ -76,11 +76,14 @@ def draw_bev(ax, target, goal_xy: Tuple[float, float], field_mode: str = "esdf",
                s=3, c="black", alpha=0.45, zorder=1, linewidths=0)
 
     seed = path_xy(target.seed_path)
+    raw = path_xy(target.corrected_unsmoothed)
     corr = path_xy(target.corrected_path)
     ax.plot(seed[:, 0], seed[:, 1], "o-", color="darkorange", ms=3, lw=2,
             label="NavDP", zorder=3)
+    ax.plot(raw[:, 0], raw[:, 1], "--", color="tomato", lw=1.2, alpha=0.7,
+            label="corrected (raw)", zorder=3)
     ax.plot(corr[:, 0], corr[:, 1], "o-", color="lime", ms=3, lw=2,
-            label="corrected", zorder=4)
+            label="corrected+smooth", zorder=4)
     ax.plot(0.0, 0.0, "^", color="cyan", ms=13, zorder=5, label="robot")
     ax.plot(goal_xy[0], goal_xy[1], "*", color="magenta", ms=20, zorder=6, label="goal")
 
@@ -96,24 +99,27 @@ def draw_bev(ax, target, goal_xy: Tuple[float, float], field_mode: str = "esdf",
 
 
 def draw_comparison(ax, target, goal_xy: Tuple[float, float]) -> None:
-    """Overlay NavDP vs corrected with per-waypoint shift vectors + stats title."""
+    """NavDP vs raw-corrected vs smoothed, with shift vectors + stats title."""
     ax.clear()
     seed = path_xy(target.seed_path)
+    raw = path_xy(target.corrected_unsmoothed)
     corr = path_xy(target.corrected_path)
     n = min(len(seed), len(corr))
     for i in range(n):
         ax.plot([seed[i, 0], corr[i, 0]], [seed[i, 1], corr[i, 1]],
-                "-", color="gray", lw=0.6, zorder=1)
+                "-", color="gray", lw=0.5, alpha=0.7, zorder=1)
     ax.plot(seed[:, 0], seed[:, 1], "o-", color="darkorange", ms=3, lw=2,
             label="NavDP (original)", zorder=2)
+    ax.plot(raw[:, 0], raw[:, 1], "--", color="tomato", lw=1.3, alpha=0.8,
+            label="corrected (raw, kinky)", zorder=3)
     ax.plot(corr[:, 0], corr[:, 1], "o-", color="lime", ms=3, lw=2,
-            label="corrected (target)", zorder=3)
-    ax.plot(goal_xy[0], goal_xy[1], "*", color="magenta", ms=16, zorder=4)
+            label="corrected + smooth (target)", zorder=4)
+    ax.plot(goal_xy[0], goal_xy[1], "*", color="magenta", ms=16, zorder=5)
 
     shift = np.linalg.norm(corr[:n] - seed[:n], axis=1)
-    ax.set_title("moved %d/%d wp   max shift %.2f m   mean %.2f m"
-                 % (int(target.num_moved), n, float(shift.max()), float(shift.mean())),
-                 fontsize=9)
+    ax.set_title("moved %d wp · smoothed %d wp · max shift %.2f m · mean %.2f m"
+                 % (int(target.num_moved), int(target.num_smoothed),
+                    float(shift.max()), float(shift.mean())), fontsize=9)
     ax.set_xlabel("forward [m]")
     ax.set_ylabel("left [m]")
     ax.set_aspect("equal")

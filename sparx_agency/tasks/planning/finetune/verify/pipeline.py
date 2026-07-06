@@ -47,11 +47,22 @@ def load_frame(rec_dir: Path, frame: int) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def sample_valid_pixels(depth_m: np.ndarray, n: int, seed: int = 0,
-                        margin: int = 20, min_depth_m: float = 0.3) -> List[Tuple[int, int]]:
-    """Pick ``n`` random pixels with valid depth (for dataset-diversity previews)."""
+                        margin: int = 20, min_depth_m: float = 0.3,
+                        exclude_bottom_frac: float = 0.0) -> List[Tuple[int, int]]:
+    """Pick ``n`` random pixels with valid depth.
+
+    Args:
+        exclude_bottom_frac: drop the bottom fraction of image rows before
+            sampling. For a drone, the lowest rows look at the ground right below
+            / just ahead, which is a "land / creep forward" non-goal -- excluding
+            them keeps goals to meaningful forward navigation. ``0.2`` drops the
+            bottom fifth.
+    """
     h, w = depth_m.shape
+    v_max = int(round(h * (1.0 - exclude_bottom_frac)))
     ys, xs = np.where(np.isfinite(depth_m) & (depth_m > min_depth_m))
-    keep = (xs >= margin) & (xs < w - margin) & (ys >= margin) & (ys < h - margin)
+    keep = ((xs >= margin) & (xs < w - margin)
+            & (ys >= margin) & (ys < min(v_max, h - margin)))
     xs, ys = xs[keep], ys[keep]
     if xs.size == 0:
         return []

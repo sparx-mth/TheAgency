@@ -36,6 +36,7 @@ def make_config(
     max_total_shift_m: float = 0.8,
     pitch_deg: float = 0.0,
     camera_height_m: float = 1.0,
+    smooth_strength: float = 0.5,
     z_band_m: Tuple[float, float] = (0.10, 2.0),
     resolution_m: float = 0.10,
     forward_extent_m: float = 8.0,
@@ -45,7 +46,9 @@ def make_config(
 
     ``pitch_deg`` and ``camera_height_m`` shape the single-frame occupancy (the
     floor/obstacle split); ``corrector`` / ``target_clearance_m`` /
-    ``max_total_shift_m`` control how hard the trajectory is pushed off walls.
+    ``max_total_shift_m`` control how hard the trajectory is pushed off walls;
+    ``smooth_strength`` (0 disables) sets how hard the post-correction smoothing
+    relaxes kinks/zigzags out of the pushed trajectory.
     """
     return EsdfTargetConfig(
         local_map=LocalMapConfig(
@@ -59,6 +62,8 @@ def make_config(
         corrector=corrector,
         target_clearance_m=target_clearance_m,
         max_total_shift_m=max_total_shift_m,
+        smooth=smooth_strength > 0.0,
+        smooth_strength=smooth_strength,
     )
 
 

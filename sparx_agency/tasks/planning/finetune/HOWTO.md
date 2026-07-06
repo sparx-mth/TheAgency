@@ -66,25 +66,36 @@ timestamp. Runs in the plain `.venv`; ~4 s for all 8.)
 
 ---
 
-## 4. Run the training
+## 4. Run the training (pose-free, pixel-goal — your method)
 
-The pipeline is: **extract → verify (step 2) → generate labels → train**. Steps 1–2 are
-done and validated. The label-generation glue for the clicked-goal method is the next
-piece to wire (it reuses `verify/pipeline.run_pixel` over ~100 sampled pixels/frame +
-`common/label_format`). Once labels exist, the trainers already exist:
+The loop is: **generate labels → short train → evaluate → adjust → repeat**, all in the
+`navdp` conda env, all pose-free (`train/` package). Prefix every command with
+`PYTHONPATH=/home/nadavc/GIT/TheAgency NAVDP_REPO=~/PycharmProjects/NavDP/baselines/navdp`
+and run with `~/miniconda3/envs/navdp/bin/python`.
 
 ```bash
-# NavDP (navdp conda env)
-python -m sparx_agency.tasks.planning.finetune.navdp.train \
-  --config sparx_agency/tasks/planning/finetune/configs/navdp_finetune.yaml \
-  --recording ~/flight_dataset/<rec> --ckpt ~/Downloads/navdp-cross-modal.ckpt
+# 1) labels: sample pixel goals, run NavDP, correct+smooth -> per-frame labels (~2-3 min)
+python -m sparx_agency.tasks.planning.finetune.train.pixel_labels \
+  --rec walk_into --n-per-frame 12            # -> ~/flight_dataset/walk_into/labels.npz
 
-# FlowNav (flownav_trt conda env)
-python -m sparx_agency.tasks.planning.finetune.flownav.train \
-  --config sparx_agency/tasks/planning/finetune/configs/flownav_finetune.yaml \
-  --recording ~/flight_dataset/<rec> --ckpt <flownav_weights.pth>
+# 2) SHORT train on one video (frozen backbone, head only)
+python -m sparx_agency.tasks.planning.finetune.train.train_pixel \
+  --labels ~/flight_dataset/walk_into/labels.npz \
+  --epochs 4 --batch-size 2 --ema-decay 0.99 --out-dir ~/flight_dataset/walk_into/run1
+
+# 3) EVALUATE trained vs untrained (metrics table + side-by-side PNG)
+python -m sparx_agency.tasks.planning.finetune.train.evaluate \
+  --rec walk_into --finetuned ~/flight_dataset/walk_into/run1/ema_latest.pth --out eval.png
 ```
 
-**Before real training you still need to:** (a) measure the camera **pitch** and **height**
-on the XTEND (placeholders 0°/1.0 m — set them in the tool first and confirm the ESDF
-walls match the scene), and (b) build the per-frame label set. See `README.md` §b–c.
+**GPU note:** this is an 8 GB GPU; use `--batch-size 2` and
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Free other GPU processes first if you
+hit CUDA OOM.
+
+**Before the long run on all videos:** measure the camera **pitch** and **height** on the
+XTEND (placeholders 0°/1.0 m — set them via `--pitch/--height` in label-gen + eval and
+confirm the ESDF walls match the scene in the verifier), then generate labels for every
+recording and train longer with the full `navdp_finetune.yaml` (EMA 0.999, more epochs).
+
+> The pose-based trainer (`navdp/train.py`, needs `poses.npy`) still exists for the
+> flown-future labeling method; the `train/` package above is the pixel-goal method.

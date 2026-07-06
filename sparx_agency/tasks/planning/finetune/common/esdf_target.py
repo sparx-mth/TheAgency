@@ -37,6 +37,7 @@ from .frames import (
     depth_to_body_cloud,
     occupancy_binary,
 )
+from .smoothing import smooth_path
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,13 @@ class EsdfTargetConfig:
             when no flown-future seed is supplied.
         sdf_clamp_m: Clamp the signed SDF to +/- this (keeps far-field gradients
             finite for the penalty). ``None`` disables clamping.
+        smooth: Run a collision-aware smoothing pass after the corrector (see
+            :mod:`.smoothing`) so per-waypoint pushes do not leave kinks/zigzags.
+        smooth_strength: Relaxation fraction per pass (0..1).
+        smooth_passes: Gauss-Seidel sweeps (more -> smoother).
+        smooth_angle_deg: Only vertices bending more than this are relaxed.
+        smooth_clearance_m: Hard obstacle margin the smoother must not cross
+            (<= ``target_clearance_m``).
     """
 
     local_map: LocalMapConfig = field(default_factory=LocalMapConfig)
@@ -64,6 +72,11 @@ class EsdfTargetConfig:
     max_total_shift_m: float = 1.5
     n_seed_points: int = 24
     sdf_clamp_m: Optional[float] = 4.0
+    smooth: bool = True
+    smooth_strength: float = 0.5
+    smooth_passes: int = 10
+    smooth_angle_deg: float = 5.0
+    smooth_clearance_m: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -71,19 +84,24 @@ class PerFrameTarget:
     """Output of :func:`generate_target`.
 
     Attributes:
-        corrected_path: The wall-avoiding target trajectory (body FLU ``Path2D``).
+        corrected_path: The wall-avoiding target trajectory (body FLU ``Path2D``),
+            after the corrector AND the smoothing pass -- this is the label.
+        corrected_unsmoothed: The corrector output BEFORE smoothing (diagnostics).
         seed_path: The uncorrected seed (for diagnostics / visualization).
         occupancy: The single-frame occupancy grid it was built on.
         sdf_m: ``(H, W)`` float32 signed ESDF in meters (``>0`` free), aligned to
             ``occupancy`` (indexed ``[gy, gx]``).
         num_moved: How many waypoints the corrector actually shifted.
+        num_smoothed: How many waypoints the smoothing pass then moved.
     """
 
     corrected_path: Path2D
+    corrected_unsmoothed: Path2D
     seed_path: Path2D
     occupancy: OccupancyGrid2D
     sdf_m: np.ndarray
     num_moved: int
+    num_smoothed: int
 
 
 def _straight_seed(goal_body: Tuple[float, float], n: int) -> np.ndarray:
@@ -164,10 +182,24 @@ def generate_target(
         raise ValueError(f"unknown corrector {cfg.corrector!r}")
 
     result = corrector.correct(seed_path2d, occ)
+
+    corrected = result.path
+    num_smoothed = 0
+    if cfg.smooth:
+        corrected, num_smoothed = smooth_path(
+            result.path, occ,
+            clearance_m=cfg.smooth_clearance_m,
+            strength=cfg.smooth_strength,
+            passes=cfg.smooth_passes,
+            angle_deg=cfg.smooth_angle_deg,
+        )
+
     return PerFrameTarget(
-        corrected_path=result.path,
+        corrected_path=corrected,
+        corrected_unsmoothed=result.path,
         seed_path=seed_path2d,
         occupancy=occ,
         sdf_m=sdf_m,
         num_moved=int(result.num_moved),
+        num_smoothed=int(num_smoothed),
     )
