@@ -39,11 +39,24 @@ export PYTHONUNBUFFERED=1
 
 _NANOOWL_ENV = f"cd {NANOOWL_REPO}"
 
+# ROBOTICAN container (docker compose service `it`, network_mode: host)
+ROOSTER_CONTAINER   = "it"
+ROOSTER_DOCKER_COMPOSE = "~/rqs_iai_ws/src"
+_CONTAINER_ENV = """\
+export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages:/home/rooster
+source /opt/ros/foxy/setup.bash
+source /home/rooster/workspace/install/setup.bash
+export ROS_DOMAIN_ID=2
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml
+export PYTHONUNBUFFERED=1"""
+
 _ENVS = {
-    "ros":      _ROS_ENV,
-    "depth_ws": _DEPTH_WS_ENV,
-    "nanoowl":  _NANOOWL_ENV,
-    "none":     "",
+    "ros":       _ROS_ENV,
+    "depth_ws":  _DEPTH_WS_ENV,
+    "nanoowl":   _NANOOWL_ENV,
+    "none":      "",
+    "container": _CONTAINER_ENV,
 }
 
 
@@ -57,10 +70,12 @@ class Service:
     group: str
     description: str
     cmd: str
-    env: str = "ros"   # "ros" | "depth_ws" | "nanoowl" | "none" | "docker"
+    env: str = "ros"   # "ros" | "depth_ws" | "nanoowl" | "none" | "docker" | "container"
     docker_container: str = ""   # for env="docker" — container name to inspect
     stop_extra: str = ""         # extra stop command if needed
-    machine: str = "jetson"      # "jetson" | "pc"
+    machine: str = "jetson"      # "jetson" | "pc" | "container"
+    container_name: str = ""     # for machine="container" — docker container to exec into
+    is_interactive: bool = False  # if True, opens a terminal window (needs TTY)
     proc_container: str = ""     # container to exec into for process-based status check
     proc_pattern: str = ""       # grep pattern inside proc_container to detect running
 
@@ -314,7 +329,73 @@ NANOOWL_SERVICES: list[Service] = [
     ),
 ]
 
-ALL_SERVICES = XTEND_SERVICES + NANOOWL_SERVICES
+_ROOSTER_CTRL = (
+    "/home/rooster/sparx_agency/robots/ROBOTICAN/examples/src/position_fly_controller.py"
+)
+
+ROBOTICAN_SERVICES: list[Service] = [
+    # ── Core controller ───────────────────────────────────────────────────────
+    Service(
+        name="Position Fly Controller",
+        key="rooster_position_ctrl",
+        group="rooster_core",
+        description=(
+            "Keyboard controller — POSITION mode (flight_mode=3).\n"
+            "f=arm+takeoff  w/s=fwd/back  j/l=strafe  i/k=up/dn  "
+            "a/d=yaw  h=hover-lock  e=disarm  p=path  q=quit"
+        ),
+        cmd=(
+            f"python3 {_ROOSTER_CTRL} \\\n"
+            "  --ros-args \\\n"
+            "  -p rooster_ids:=R1 \\\n"
+            "  -p step:=50.0 \\\n"
+            "  -p climb_z:=600.0 \\\n"
+            "  -p hover_z:=550.0 \\\n"
+            "  -p log_dir:=/tmp"
+        ),
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        is_interactive=True,
+        proc_pattern="position_fly_controller",
+    ),
+    # ── Monitors ──────────────────────────────────────────────────────────────
+    Service(
+        name="State Monitor (R1)",
+        key="rooster_state_R1",
+        group="rooster_monitor",
+        description="Streams /R1/state — armed, flight_mode, airborne, roll/pitch/azimuth.",
+        cmd="ros2 topic echo /R1/state",
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        proc_pattern="topic echo /R1/state",
+    ),
+    Service(
+        name="KeepAlive Hz (R1)",
+        key="rooster_keepalive_hz",
+        group="rooster_monitor",
+        description="Publish rate of /R1/keep_alive. Expected ~1 Hz.",
+        cmd="ros2 topic hz /R1/keep_alive",
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        proc_pattern="topic hz /R1/keep_alive",
+    ),
+    Service(
+        name="ManualControl Hz (R1)",
+        key="rooster_manual_hz",
+        group="rooster_monitor",
+        description="Publish rate of /R1/manual_control. Expected ~40 Hz.",
+        cmd="ros2 topic hz /R1/manual_control",
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        proc_pattern="topic hz /R1/manual_control",
+    ),
+]
+
+ALL_SERVICES = XTEND_SERVICES + NANOOWL_SERVICES + ROBOTICAN_SERVICES
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +409,10 @@ def _ssh(cmd: str, timeout: int = 8) -> subprocess.CompletedProcess:
 
 
 def get_all_states() -> dict[str, bool]:
-    """Single SSH call: returns {service_key: is_running} for all services."""
-    # Collect containers we need to exec into for proc-pattern checks
+    """Returns {service_key: is_running} for all services."""
+    states: dict[str, bool] = {}
+
+    # ── Jetson services — single SSH call ────────────────────────────────────
     proc_containers = {svc.proc_container for svc in ALL_SERVICES if svc.proc_pattern and svc.proc_container}
     proc_exec_cmds = "".join(
         f"echo '=PROCS:{c}='; docker exec {c} ps -eo args 2>/dev/null || true; "
@@ -342,40 +425,76 @@ def get_all_states() -> dict[str, bool]:
     )
     try:
         result = _ssh(cmd)
+        tmux_sessions: set[str] = set()
+        docker_containers: set[str] = set()
+        container_procs: dict[str, list[str]] = {c: [] for c in proc_containers}
+        section = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line == "=TMUX=":
+                section = "tmux"
+            elif line == "=DOCKER=":
+                section = "docker"
+            elif line.startswith("=PROCS:") and line.endswith("="):
+                section = f"procs:{line[7:-1]}"
+            elif section == "tmux" and line:
+                tmux_sessions.add(line)
+            elif section == "docker" and line:
+                docker_containers.add(line)
+            elif section and section.startswith("procs:") and line:
+                container_procs.setdefault(section[6:], []).append(line)
     except Exception:
-        return {svc.key: False for svc in ALL_SERVICES}
+        tmux_sessions = set()
+        docker_containers = set()
+        container_procs = {}
 
-    tmux_sessions: set[str] = set()
-    docker_containers: set[str] = set()
-    container_procs: dict[str, list[str]] = {c: [] for c in proc_containers}
-    section = None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line == "=TMUX=":
-            section = "tmux"
-        elif line == "=DOCKER=":
-            section = "docker"
-        elif line.startswith("=PROCS:") and line.endswith("="):
-            section = f"procs:{line[7:-1]}"
-        elif section == "tmux" and line:
-            tmux_sessions.add(line)
-        elif section == "docker" and line:
-            docker_containers.add(line)
-        elif section and section.startswith("procs:") and line:
-            container_procs.setdefault(section[6:], []).append(line)
-
-    states: dict[str, bool] = {}
     for svc in ALL_SERVICES:
+        if svc.machine == "container":
+            continue  # handled below
         if svc.proc_pattern and svc.proc_container:
             procs = container_procs.get(svc.proc_container, [])
             states[svc.key] = any(svc.proc_pattern in p for p in procs)
         elif svc.env == "docker":
             states[svc.key] = svc.docker_container in docker_containers
         elif svc.machine == "pc":
-            states[svc.key] = False  # not tracked remotely
+            states[svc.key] = False
         else:
             states[svc.key] = svc.key in tmux_sessions
+
+    # ── Container services — local docker exec pgrep ─────────────────────────
+    for svc in ALL_SERVICES:
+        if svc.machine != "container":
+            continue
+        if not svc.proc_pattern:
+            states[svc.key] = False
+            continue
+        try:
+            r = subprocess.run(
+                ["docker", "exec", svc.container_name, "pgrep", "-f", svc.proc_pattern],
+                capture_output=True, check=False, timeout=3,
+            )
+            states[svc.key] = r.returncode == 0
+        except Exception:
+            states[svc.key] = False
+
     return states
+
+
+def _spawn_terminal_window(cmd: str, title: str) -> None:
+    """Open a new host terminal window running cmd."""
+    candidates = [
+        ["gnome-terminal", "--title", title, "--", "bash", "-c", cmd],
+        ["xterm", "-T", title, "-e", f"bash -c {shlex.quote(cmd)}"],
+        ["konsole", "--new-tab", "-p", f"tabtitle={title}", "-e", "bash", "-c", cmd],
+    ]
+    last_exc: Exception | None = None
+    for args in candidates:
+        try:
+            subprocess.Popen(args)
+            return
+        except FileNotFoundError as exc:
+            last_exc = exc
+    raise RuntimeError(f"No supported terminal emulator found. Last error: {last_exc}")
 
 
 def start_service(svc: Service) -> str | None:
@@ -390,6 +509,19 @@ def start_service(svc: Service) -> str | None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    if svc.machine == "container":
+        env_block = _ENVS.get(svc.env, _CONTAINER_ENV)
+        full_script = f"{env_block}\n{svc.cmd} 2>&1 | tee /tmp/{svc.key}.log"
+        docker_cmd = (
+            f"docker exec -it {shlex.quote(svc.container_name)} "
+            f"bash -c {shlex.quote(full_script)}"
+        )
+        try:
+            _spawn_terminal_window(docker_cmd, title=svc.name)
         except Exception as exc:
             return str(exc)
         return None
@@ -413,6 +545,19 @@ def stop_service(svc: Service) -> str | None:
     if svc.machine == "pc":
         return None  # user closes the window manually
 
+    if svc.machine == "container":
+        if not svc.proc_pattern:
+            return None
+        kill_cmd = f"pkill -f {shlex.quote(svc.proc_pattern)} 2>/dev/null || true"
+        try:
+            subprocess.run(
+                ["docker", "exec", svc.container_name, "bash", "-c", kill_cmd],
+                capture_output=True, check=False, timeout=5,
+            )
+        except Exception as exc:
+            return str(exc)
+        return None
+
     cmds = [f"tmux kill-session -t {shlex.quote(svc.key)} 2>/dev/null || true"]
     if svc.stop_extra:
         cmds.append(svc.stop_extra)
@@ -424,7 +569,18 @@ def stop_service(svc: Service) -> str | None:
 
 
 def get_logs(svc: Service, lines: int = 120) -> str:
-    """Fetch last N lines from the service log on the Jetson."""
+    """Fetch last N lines from the service log."""
+    if svc.machine == "container":
+        log_cmd = f"tail -n {lines} /tmp/{svc.key}.log 2>/dev/null || echo 'No log yet: /tmp/{svc.key}.log'"
+        try:
+            r = subprocess.run(
+                ["docker", "exec", svc.container_name, "bash", "-c", log_cmd],
+                capture_output=True, text=True, timeout=8,
+            )
+            return r.stdout or r.stderr or "(empty)"
+        except Exception as exc:
+            return f"docker exec error: {exc}"
+
     if svc.env == "docker":
         cmd = f"docker logs --tail {lines} {svc.docker_container} 2>&1 || echo 'No container logs'"
     else:
@@ -434,6 +590,30 @@ def get_logs(svc: Service, lines: int = 120) -> str:
         return r.stdout or r.stderr or "(empty)"
     except Exception as exc:
         return f"SSH error: {exc}"
+
+
+def force_arm_rooster(drone_id: str, arm: bool) -> str | None:
+    """Send force_arm service call to a Rooster drone via the container."""
+    action_str = "true" if arm else "false"
+    srv_cmd = (
+        "source /opt/ros/foxy/setup.bash && "
+        "source /home/rooster/workspace/install/setup.bash && "
+        "export ROS_DOMAIN_ID=2 && "
+        "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
+        "export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml && "
+        f"ros2 service call /{drone_id}/fcu/command/force_arm "
+        f"std_srvs/srv/SetBool '{{data: {action_str}}}'"
+    )
+    try:
+        r = subprocess.run(
+            ["docker", "exec", ROOSTER_CONTAINER, "bash", "-c", srv_cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.stderr.strip() if r.returncode != 0 else None
+    except subprocess.TimeoutExpired:
+        return "Service call timed out (10 s)"
+    except Exception as exc:
+        return str(exc)
 
 
 def publish_demo_mode(mode: str) -> str | None:
@@ -507,14 +687,15 @@ with st.spinner("Checking service states…"):
     states = get_all_states()
 
 running_count = sum(states.values())
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Services running", f"{running_count} / {len(ALL_SERVICES)}")
 m2.metric("XTEND", f"{sum(states.get(s.key, False) for s in XTEND_SERVICES)} / {len(XTEND_SERVICES)}")
 m3.metric("NanoLLM", f"{sum(states.get(s.key, False) for s in NANOOWL_SERVICES)} / {len(NANOOWL_SERVICES)}")
+m4.metric("ROBOTICAN", f"{sum(states.get(s.key, False) for s in ROBOTICAN_SERVICES)} / {len(ROBOTICAN_SERVICES)}")
 
 st.divider()
 
-tab_xtend, tab_nanoowl = st.tabs(["🚁  XTEND", "🤖  NanoLLM / OWL"])
+tab_xtend, tab_nanoowl, tab_rooster = st.tabs(["🚁  XTEND", "🤖  NanoLLM / OWL", "🐓  ROBOTICAN"])
 
 # ── XTEND tab ──────────────────────────────────────────────────────────────
 with tab_xtend:
@@ -583,7 +764,65 @@ with tab_nanoowl:
     with st.expander("⚙️  Optional", expanded=False):
         _service_cards([s for s in NANOOWL_SERVICES if s.group == "nanoowl_optional"], states)
 
-    st.caption(f"📷 Display: http://{VLLM_IP}:8090   |   📁 Data: http://{VLLM_IP}:9000")
+    st.caption(f"📷 Display: http://{VLLM_IP}:8090   |   📁 Data: http://{VLLM_IP}:9000")# ── ROBOTICAN tab ──────────────────────────────────────────────────────────
+with tab_rooster:
+
+    # Container status banner
+    try:
+        ctr_result = subprocess.run(
+            ["docker", "ps", "--filter", f"name=^{ROOSTER_CONTAINER}$", "--format", "{{.Names}}\t{{.Status}}"],
+            capture_output=True, text=True, timeout=3,
+        )
+        ctr_running = ROOSTER_CONTAINER in ctr_result.stdout
+    except Exception:
+        ctr_running = False
+
+    if ctr_running:
+        st.success(f"Container `{ROOSTER_CONTAINER}` is running.")
+    else:
+        st.error(
+            f"Container `{ROOSTER_CONTAINER}` is **not running**. "
+            f"Start it with:  `cd {ROOSTER_DOCKER_COMPOSE} && docker compose up -d it`"
+        )
+
+    # ARM / DISARM quick actions
+    st.markdown("#### Drone Quick Actions")
+    qa_cols = st.columns(6)
+    for col, drone_id, arm in zip(
+        qa_cols,
+        ["R1", "R1", "R2", "R2"],
+        [True, False, True, False],
+    ):
+        label = ("ARM" if arm else "DISARM") + f" {drone_id}"
+        btn_type = "primary" if arm else "secondary"
+        with col:
+            if st.button(label, key=f"arm_{drone_id}_{arm}", use_container_width=True, type=btn_type):
+                if arm:
+                    st.session_state[f"arm_confirm_{drone_id}"] = True
+                    st.warning(f"Click **ARM {drone_id}** again to confirm — drone will arm!")
+                    st.stop()
+                if st.session_state.pop(f"arm_confirm_{drone_id}", False) or not arm:
+                    err = force_arm_rooster(drone_id, arm)
+                    if err:
+                        st.error(f"{label} failed: {err}")
+                    else:
+                        st.success(f"{label} sent.")
+
+    st.divider()
+
+    st.markdown("#### Core")
+    _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_core"], states)
+
+    with st.expander("📊  Monitors", expanded=False):
+        _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_monitor"], states)
+
+    with st.expander("ℹ️  Container commands", expanded=False):
+        st.code(
+            f"# Start container\ncd {ROOSTER_DOCKER_COMPOSE} && docker compose up -d it\n\n"
+            f"# Attach interactive shell\ndocker exec -it {ROOSTER_CONTAINER} bash\n\n"
+            f"# Stop container\ndocker compose -f {ROOSTER_DOCKER_COMPOSE}/docker-compose.yml stop it",
+            language="bash",
+        )
 
 # ── Log viewer ─────────────────────────────────────────────────────────────
 st.divider()
