@@ -20,6 +20,24 @@ The bridged topics are exactly the ones the FALCON adapters consume/produce
 frame to disk and bridges a tiny `std_msgs/String` "<path> <sec> <nsec>" the
 consumers load, which removes the per-frame image serialization cost.
 
+### Transport modes (frame-path vs topic)
+
+Two transports are supported, selected by which config the bridge mounts:
+
+| Transport | Config | Bridges | When |
+|---|---|---|---|
+| **frame-path** (default) | `bridge.yaml` | `/xtend/depth_frame_path`, `/xtend/rgb_frame_path` (`std_msgs/String`) | Real XTEND — writes frames to disk |
+| **topic** | `bridge_topic.yaml` | `/xtend/depth_m`, `/xtend/rgb` (`sensor_msgs/Image`) | Gazebo sim or an old bag replay — raw Images on the wire |
+
+```bash
+./run_bridge.sh                              # frame-path (default)
+BRIDGE_CFG=bridge_topic.yaml ./run_bridge.sh # topic mode
+```
+
+The ROS1 consumers MUST be launched with the matching transport
+(`image_transport:=topic` on `real_drone.launch` / `nav_stack.launch`); the two
+defaults are both **frame-path**, so a plain run keeps today's behaviour.
+
 ## Files
 
 | File | Purpose |
@@ -65,6 +83,7 @@ The bridge tolerates ordering (it waits for roscore and restarts
 | `ROS_DOMAIN_ID` | `5` | **Must match** the ROS2 sim/drone |
 | `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` | **Must match** the ROS2 side (Foxy default fastrtps; Humble/Jazzy default cyclonedds) |
 | `ROS_MASTER_URI` | `http://localhost:11311` | ROS1 master |
+| `BRIDGE_CFG` | `bridge.yaml` | Which host config to mount (`bridge.yaml` = frame-path, `bridge_topic.yaml` = raw Images) |
 | `BRIDGE_YAML` | `/bridge.yaml` | Path inside the container (bind-mounted) |
 | `BAG_DIR` | _(unset)_ | Optional: host dir to mount read-only at `/bag` for rosbag playback |
 

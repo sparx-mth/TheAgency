@@ -203,16 +203,34 @@ FALCON reaches it over `--network host` + `127.0.0.1:<port>` loopback (run it on
 the FALCON host).
 
 The TRT server needs `tensorrt` + `pycuda` (the same ones that built the engines)
-plus `flask opencv-python pillow numpy`. `--navdp-repo` is only consulted by the
-`torch` fallback backend; the default `trt` backend does not need it.
+plus `flask opencv-python pillow numpy`. `--navdp-repo` (or `NAVDP_REPO`) **is**
+required even on the default `trt` backend: the agent inherits `NavDP_Agent`'s image
+preprocessing, which is imported from that repo on the first navigate request (the
+server still *starts* without it, then fails on the first reset). It is only the
+`torch` fallback that additionally needs `--ckpt`.
+
+The engine directory name is the device's hardware tag (`hardware/detect.py`), so
+the same checkout has a different `--engine-dir` per machine. Pick the one that
+matches where you're running — engines are **not** portable across devices.
 
 ```bash
-# self-contained (run from the repo root). <target_tag> = orin_sm87 on the Jetson
-# AGX Orin (nvidiageforcertx_sm120 on the x86 dev box).
+# --- AGX Orin (the Jetson at the office) -------------------------------------
+# Run in MAXN + jetson_clocks, the same power mode the engines were built in.
+export NAVDP_REPO=~/GIT/NavDP/baselines/navdp/
 cd ~/GIT/TheAgency
 PYTHONPATH=$PWD python \
     -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
     --engine-dir sparx_agency/tasks/planning/navdp/engines/orin_sm87 \
+    --navdp-repo "$NAVDP_REPO" \
+    --port 8888
+
+# --- x86 dev box (RTX 5070 / sm120) ------------------------------------------
+cd ~/GIT/TheAgency
+NAVDP_REPO=${NAVDP_REPO:?set NAVDP_REPO to the NavDP repo (has policy_agent.py)} \
+PYTHONPATH=$PWD python \
+    -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
+    --engine-dir sparx_agency/tasks/planning/navdp/engines/nvidiageforcertx_sm120 \
+    --navdp-repo "$NAVDP_REPO" \
     --port 8888
 # navdp_click_node.py points at it unchanged (~port 8888)
 ```

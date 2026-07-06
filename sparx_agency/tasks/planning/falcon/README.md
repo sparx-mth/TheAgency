@@ -42,6 +42,7 @@ falcon/
     │   ├── mapping_sync_node.py    # depth<->pose pairing + localization gate + authoritative rotation freeze (core.localization + core.mapping.depth_fusion_gate)
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
     │   ├── navdp_click_node.py     # click an RGB pixel -> NavDP point-goal policy -> world Path (core.planning.navdp); A* replacement
+    │   ├── combination_planner_node.py # nav_mode:=combination — A* global route + NavDP local legs (farthest visible A* waypoint -> NavDP -> fly to midpoint -> re-infer); core.planning.navdp
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
@@ -127,6 +128,32 @@ Example — Gazebo sim:
 roslaunch falcon_adapter nav_stack.launch map_name:=hospital
 ```
 
+### Image transport: frame-path vs topic
+
+RGB/depth can arrive two ways; pick with `image_transport` (default
+`frame_path`). The launch arg and the bridge config **must match**.
+
+**1. frame-path (default — real XTEND):** the drone writes `.jpg`/`.npy` to disk
+and publishes tiny `std_msgs/String` path messages the nodes load.
+
+```bash
+# container:
+roslaunch falcon_adapter real_drone.launch map_name:=office
+# host (bridge):
+cd bridge && ./run_bridge.sh
+```
+
+**2. topic (Gazebo sim or old bag — raw images on the wire):**
+
+```bash
+# container:
+roslaunch falcon_adapter real_drone.launch map_name:=office image_transport:=topic real_pose_topic:=/xtend/april_tag_pose
+#   add real_pose_topic:=/xtend/april_tag_pose for bags recorded before the
+#   /xtend/localization rename
+# host (bridge):
+cd bridge && BRIDGE_CFG=bridge_topic.yaml ./run_bridge.sh
+```
+
 ## Visualizing & interacting (RViz, BEV, NavDP viewer)
 
 These run against the live stack, so start the FALCON container first
@@ -154,6 +181,14 @@ In another new host terminal:
 docker exec -it falcon bash
 export DISPLAY=:0
 source /catkin_ws/devel/setup.bash
+rosrun falcon_adapter bev_click_goal_node.py
+```
+or
+```bash
+ssh -Y user@user-agx1
+export XAUTHORITY=$HOME/.Xauthority
+cp ~/.Xauthority /tmp/.docker.xauth && chmod 644 /tmp/.docker.xauth
+XAUTHORITY=/tmp/.docker.xauth ./run_falcon.sh office
 rosrun falcon_adapter bev_click_goal_node.py
 ```
 
@@ -237,6 +272,63 @@ quits.
 > calls the server). Install them in the container if missing
 > (`pip install requests pillow opencv-python`), as with `bev_click_goal`'s
 > matplotlib.
+
+## Combination mode (A* global route + NavDP local legs)
+
+`nav_mode:=combination` is a third mode that **fuses** the two planners instead of
+choosing one. A* plans the collision-free *global* route to the mission goal;
+NavDP supplies the smooth *local* trajectory the drone actually flies, aimed at
+the farthest point on the A* route it can currently **see**. The run can start on
+A* and switch to the fusion on a signal, or be combined from the first frame.
+
+`combination_planner_node` is the arbiter on `/path/waypoints_combo` (the raw path
+`path_corrector` → `trajectory_simplifier` → `waypoint_follower` then process and
+fly, exactly as for A*/NavDP). Once enabled it runs a **CRUISE → HOLD → FOLLOW**
+state machine:
+
+- **CRUISE** — fly the A* route while watching for a waypoint that is **visible**
+  in the current frame (in front, in-frame, and by default not behind a wall) AND
+  at least `combination_min_engage_fwd_m` (1.5 m) ahead — a goal worth a leg. None
+  visible yet → keep flying A*. (Hysteresis: it takes `combination_engage_confirm_ticks`
+  consecutive detections to commit, so depth flicker can't cause stop/go lurching.)
+- **HOLD** — a good point appeared → **STOP** the drone (so the first inference is
+  from a clean, stationary frame — important on a slow Jetson), settle, then ask
+  NavDP for a leg. This is also the **"stop and wait"**: when a re-infer is slow and
+  the previous leg has been flown out, the drone holds here for the new route, up to
+  `combination_max_wait_s` (then it resumes A*).
+- **FOLLOW** — fly the published leg; at its **midpoint** re-infer, with the leg's
+  *second half* as a latency buffer. A fast reply → seamless switch; a slow one →
+  the drone coasts to the leg end and holds (→ HOLD) until the route comes back.
+
+If no waypoint is visible, or NavDP is unreachable, it falls back to **flying A\***
+so the drone always has a route and never dead-stalls; on the final approach it
+hands the last stretch to A* so it reaches the true goal.
+
+```bash
+# 0. Start the NavDP HTTP server on the GPU box (default 127.0.0.1:8888), as for
+#    plain NavDP — combination_planner is just an HTTP client of it.
+# 1. Real XTEND — combination is the DEFAULT, so a plain launch fuses from t=0:
+roslaunch falcon_adapter real_drone.launch map_name:=office
+# 2. Start on A*, switch to the fusion later by publishing the enable signal:
+roslaunch falcon_adapter real_drone.launch map_name:=office combination_start_enabled:=false
+rostopic pub -1 /combination/enable std_msgs/Bool "data: true"     # back to A*: data: false
+# Other modes: nav_mode:=astar (plain A* only) | use_navdp:=true (operator NavDP click)
+```
+
+Key knobs (all `combination_*` args, forwarded by `real_drone.launch`):
+`combination_start_enabled` (true — combined from the first frame; set false to
+start on A* and wait for the enable signal), `combination_enable_topic`
+(`/combination/enable`), `combination_min_engage_fwd_m` (1.5, the "reasonable
+distance" to engage), `combination_engage_settle_s` (1.0, brake-settle for a clean
+frame), `combination_leg_fraction` (0.5, the midpoint hand-off),
+`combination_require_unoccluded` (true — visible means clear line-of-sight, not
+merely in-FOV), `combination_final_handoff_m` (1.5). **Jetson timing:**
+`combination_navdp_timeout_s` (10.0, one inference) and `combination_max_wait_s`
+(30.0, how long to hold for a slow route before resuming A*) — raise both if your
+Jetson inference is slower. Camera intrinsics, RGB/depth transport, pose source and
+the NavDP server reuse the same `navdp_*` / `cam_*` args as NavDP click-to-go above.
+The geometry and selection are ROS-free and unit-tested in `core.planning.navdp`
+(`world_to_body_2d`, `select_farthest_visible_waypoint`, `arclength_fraction_2d`).
 
 ## Talking to a ROS2 sim / drone — the bridge
 

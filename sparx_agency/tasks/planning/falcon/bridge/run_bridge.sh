@@ -11,10 +11,17 @@ if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
     docker build -t "${IMAGE}" "${SCRIPT_DIR}"
 fi
 
-# Sanity-check the bridge.yaml is here (entrypoint will hard-fail
+# Which bridge config to mount. Default bridge.yaml = frame-path transport
+# (RGB/depth as std_msgs/String "<path> <sec> <nsec>", the real drone). Set
+# BRIDGE_CFG=bridge_topic.yaml for the TOPIC transport variant (raw
+# sensor_msgs/Image, a sim or bag replay). Always launch the ROS1 consumers with
+# the matching image_transport (frame_path | topic).
+BRIDGE_CFG="${BRIDGE_CFG:-bridge.yaml}"
+
+# Sanity-check the chosen config is here (entrypoint will hard-fail
 # otherwise, but failing here gives a more helpful message)
-if [ ! -f "${SCRIPT_DIR}/bridge.yaml" ]; then
-    echo "[ERROR] bridge.yaml not found at ${SCRIPT_DIR}/bridge.yaml"
+if [ ! -f "${SCRIPT_DIR}/${BRIDGE_CFG}" ]; then
+    echo "[ERROR] ${BRIDGE_CFG} not found at ${SCRIPT_DIR}/${BRIDGE_CFG}"
     echo "        parameter_bridge needs it to know which topics + QoS"
     exit 1
 fi
@@ -38,7 +45,7 @@ echo "================================================"
 echo "  Launching ${CONTAINER}"
 echo "  Domain   : ${ROS_DOMAIN_ID:-5}"
 echo "  RMW      : ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
-echo "  Config   : ${SCRIPT_DIR}/bridge.yaml  (editable; restart container)"
+echo "  Config   : ${SCRIPT_DIR}/${BRIDGE_CFG}  (editable; restart container)"
 echo "  Log      : ${LOGFILE_HOST}"
 echo "================================================"
 
@@ -54,7 +61,7 @@ docker run -it --rm \
     -e LOGFILE="/tmp/bridge.log" \
     -e BRIDGE_YAML="/bridge.yaml" \
     -v "${SCRIPT_DIR}/entrypoint.sh:/entrypoint.sh:ro" \
-    -v "${SCRIPT_DIR}/bridge.yaml:/bridge.yaml:ro" \
+    -v "${SCRIPT_DIR}/${BRIDGE_CFG}:/bridge.yaml:ro" \
     -v "${LOGFILE_HOST}:/tmp/bridge.log:rw" \
     -v "${SCRIPT_DIR}/fastdds_no_shm.xml:/fastdds_no_shm.xml:ro" \
     -v /dev/shm:/dev/shm \

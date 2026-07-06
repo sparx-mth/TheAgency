@@ -39,11 +39,15 @@ import os
 
 import rospy
 import tf.transformations as tft
-from geometry_msgs.msg import Pose, PoseStamped, Twist
+from geometry_msgs.msg import PointStamped, Pose, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Bool, Empty, Float32, Int8, String
 
-from sparx_agency.core.common.types import Pose2D
+from sparx_agency.core.common.types import KinematicLimits, Pose2D
+from sparx_agency.core.localization.pose_estimator import (
+    PoseEstimatorParams,
+    WindowedPoseEstimator,
+)
 from sparx_agency.core.planning.trackers.waypoint_follower import (
     ControlAxis,
     FollowerState,
@@ -53,6 +57,22 @@ from sparx_agency.core.planning.trackers.waypoint_follower import (
     predict_trajectory,
     prediction_score,
 )
+from sparx_agency.core.planning.trackers.multi_axis_follower import (
+    MultiAxisFollower,
+    MultiAxisFollowerParams,
+)
+from sparx_agency.core.planning.trackers.multi_axis_follower import (
+    predict_trajectory as mx_predict_trajectory,
+)
+from sparx_agency.core.planning.trackers.rotation_supervisor import (
+    RotationReobserveSupervisor,
+    RotationSupervisorParams,
+)
+# NOTE: the pure_pursuit imports (core HermiteSmoother / PurePursuitTracker and the
+# sibling pure_pursuit_follower.py) are deliberately deferred into
+# _build_pure_pursuit() so they are loaded ONLY when ~controller:=pure_pursuit.
+# The waypoint and multi_axis controllers must keep starting even if the
+# pure-pursuit helper/module is not deployed in this container.
 
 # DemoMode payloads bridged over /xtend/demo_mode(_request). The core control
 # axis maps onto the platform's flight modes; visual_servoing is platform-only.
@@ -62,6 +82,10 @@ MODE_VISUAL_SERVOING = "visual_servoing"
 # the FC to hold heading (stop rotating) while we command zero velocity, so the
 # platform is stable for a clean voxel update -- "forward mode but not flying".
 MODE_FORWARD = AXIS_TO_MODE[ControlAxis.FORWARD]
+# "Turning" mode, held through the physical yaw coast at the end of a turn so the
+# mode-authoritative depth gate stays frozen until the drone has actually stopped
+# (the inertia frames right after a turn are the worst to fuse). See _ctrl_loop.
+MODE_TURNING = AXIS_TO_MODE[ControlAxis.YAW]
 
 
 class _Bringup:
@@ -99,6 +123,28 @@ class WaypointFollowerNode:
             # Per-burst increment: split a big turn into ~this-size chunks, each
             # followed by a stop + voxel update + re-measure (not one big sweep).
             yaw_burst_max_rad=math.radians(float(G("~yaw_burst_max_deg", 25.0))),
+            yaw_burst_max_ticks=int(G("~yaw_burst_max_ticks", 30)),
+            # Master on/off for freeze-during-rotation (shared with the holonomic
+            # supervisor via ~freeze_on_rotation). False keeps the map live in turns.
+            freeze_on_rotation=bool(G("~freeze_on_rotation", True)),
+            # Angle-gated map freeze: a turn LARGER than this freezes the voxel map
+            # (and forces the post-turn re-observation below); a smaller correction
+            # stays live so the map keeps updating through a gentle nudge.
+            freeze_yaw_thresh_rad=math.radians(float(G("~freeze_yaw_thresh_deg", 20.0))),
+            # Fresh voxel updates a frozen turn re-observes while stopped before it
+            # advances/turns again (>=2: never act on a map built before the turn).
+            settle_map_updates=int(G("~settle_map_updates", 2)),
+            # Graded-pulse / mid-burst-feedback / anti-deadlock yaw upgrades. All
+            # default OFF (inert); the launch enables them (needs ctrl_rate_hz:=10
+            # for the 4 deg/tick -> 8 deg-min / 24 deg-cap numbers).
+            yaw_graded_pulses=bool(G("~yaw_graded_pulses", False)),
+            yaw_burst_grade_max_ticks=int(G("~yaw_burst_grade_max_ticks", 6)),
+            yaw_settle_dwell_per_tick=float(G("~yaw_settle_dwell_per_tick", 0.0)),
+            yaw_burst_live_feedback=bool(G("~yaw_burst_live_feedback", False)),
+            yaw_fb_reach_rad=math.radians(float(G("~yaw_fb_reach_deg", 0.0))),
+            yaw_fb_confirm_ticks=int(G("~yaw_fb_confirm_ticks", 2)),
+            yaw_max_reversals=int(G("~yaw_max_reversals", 0)),
+            yaw_accept_growth_rad=math.radians(float(G("~yaw_accept_growth_deg", 0.0))),
             # Gentle predictive ADVANCE gate. The legacy ~yaw_acquisition_radius
             # (previously read by nobody) now feeds the cross-track tolerance.
             yaw_capture_tol_m=float(G("~yaw_acquisition_radius", 0.20)),
@@ -110,6 +156,76 @@ class WaypointFollowerNode:
             yaw_accel_limit=float(G("~yaw_accel_limit", 3.5)),
             forward_only=bool(G("~forward_only", False)),
         ))
+
+        # ── Controller selection ─────────────────────────────────────
+        # ~controller picks the path tracker; falling back is a one-line param.
+        #   "waypoint"     (default) one-axis follower built above (X advance OR
+        #                  yaw, never both -- the "stupid" controller),
+        #   "multi_axis"   combined forward + lateral + yaw, crabbing (ROLL) for
+        #                  small offsets and yawing only past a deadband,
+        #   "pure_pursuit" splines the path (Hermite) and tracks it with Pure
+        #                  Pursuit on a moving lookahead (holonomic).
+        # Altitude is never commanded by any of them (vz = 0). The one-axis
+        # follower is always constructed above; for the others we replace the
+        # handle. ``_holonomic`` groups the two that drive linear.y (multi_axis,
+        # pure_pursuit) so the loop branches once, not per-controller.
+        self.controller_kind = str(G("~controller", "waypoint")).strip().lower()
+        self._holonomic = self.controller_kind in ("multi_axis", "pure_pursuit")
+        # DemoMode the holonomic controllers request (best effort) and, if
+        # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
+        # so the per-axis handshake of the legacy path does not apply to them.
+        self.multi_axis_demo_mode = str(
+            G("~mx_demo_mode", MODE_FORWARD)).strip().lower()
+        self.multi_axis_require_mode = bool(G("~mx_require_mode", False))
+        if self.controller_kind == "multi_axis":
+            self.follower = self._build_multi_axis(G)
+        elif self.controller_kind == "pure_pursuit":
+            self.follower = self._build_pure_pursuit(G)
+
+        # ── Rotation supervisor (holonomic controllers only) ─────────
+        # The one-axis follower freezes + re-observes inside its own state machine.
+        # The CONTINUOUS holonomic trackers (multi_axis, pure_pursuit) have no
+        # discrete turn, so this supervisor imposes the same discipline on them:
+        # freeze the map throughout any turn (rate-based) and stop every
+        # ~rot_reobserve_every_deg of rotation to re-observe >=settle_map_updates
+        # voxels while stopped. ~freeze_on_rotation is the shared master switch.
+        self.rot_sup = RotationReobserveSupervisor(RotationSupervisorParams(
+            enabled=bool(G("~freeze_on_rotation", True)),
+            wz_turn_on=float(G("~rot_wz_turn_on", 0.20)),
+            wz_turn_off=float(G("~rot_wz_turn_off", 0.10)),
+            turn_off_ticks=int(G("~rot_turn_off_ticks", 3)),
+            reobserve_every_rad=math.radians(float(G("~rot_reobserve_every_deg", 25.0))),
+            settle_eps=float(G("~yaw_settle_eps", 0.05)),
+            settle_dwell_s=float(G("~yaw_settle_dwell_s", 0.8)),
+            settle_map_updates=int(G("~settle_map_updates", 2)),
+            max_coast_s=float(G("~rot_max_coast_s", 2.0)),
+            map_wait_timeout_s=float(G("~map_wait_timeout_s", 3.0))))
+
+        # ── Pose estimator ───────────────────────────────────────────
+        # Fuses the ~10 Hz noisy /gt_pose stream with the command being executed,
+        # so the follower (run at ctrl_rate_hz) sees a DENOISED pose + yaw-rate:
+        # drift-rejected when stopped, true-rate while turning. ~use_pose_estimator
+        # false feeds the raw pose (today's behaviour). Ingest stays at the full
+        # /gt_pose rate (decoupled from the control loop).
+        self.use_pose_estimator = bool(G("~use_pose_estimator", False))
+        self.estimator = WindowedPoseEstimator(PoseEstimatorParams(
+            window_s=float(G("~est_window_s", 0.6)),
+            min_samples=int(G("~est_min_samples", 2)),
+            max_buffer_s=float(G("~est_max_buffer_s", 1.5)),
+            wz_cmd_eps=float(G("~est_wz_cmd_eps", 0.05)),
+            vx_cmd_eps=float(G("~est_vx_cmd_eps", 0.03)),
+            settle_wz_eps=float(G("~yaw_settle_eps", 0.05)),
+            wz_ff_ref=float(G("~yaw_rate", 0.7)),
+            vx_ff_ref=float(G("~vel_x", 0.3)),
+            ff_blend_min=float(G("~est_ff_blend_min", 0.15)),
+            ff_blend_max=float(G("~est_ff_blend_max", 0.6)),
+            dropout_s=float(G("~est_dropout_s", 0.25)),
+            max_coast_s=float(G("~est_max_coast_s", 1.0)),
+            fresh_tau_s=float(G("~est_fresh_tau_s", 0.3)),
+        ))
+        self._last_pub_vx = 0.0      # cmd executed last tick -> estimator feed-forward
+        self._last_pub_wz = 0.0
+        self._last_pub_vy = 0.0      # lateral feed-forward (multi-axis only; 0 otherwise)
 
         # Takeoff / settle (platform bring-up).
         self.auto_takeoff = bool(G("~auto_takeoff", True))
@@ -123,6 +239,11 @@ class WaypointFollowerNode:
         self.ctrl_rate_hz = float(G("~ctrl_rate_hz", 5.0))
         self.status_hz = float(G("~status_hz", 1.0))
         self.freeze_during_yaw = bool(G("~freeze_during_yaw", True))
+        # Hold 'turning' demo-mode through the physical yaw coast (until wz~0) so
+        # the mode-authoritative voxel gate stays frozen over the post-turn inertia
+        # settle, not just the commanded burst. Off = request forward the instant
+        # YAW_SETTLE begins (legacy; relies on ~resume_settle_sec on the gate node).
+        self.freeze_through_coast = bool(G("~freeze_through_coast", True))
         # Default 0: bring-up motion is gated event-driven by the MAP_SETTLE voxel
         # warm-up, not by a fixed time hold. Set >0 only to force an extra blanket
         # hold after node start.
@@ -136,6 +257,10 @@ class WaypointFollowerNode:
         self.predicted_path_topic = G("~predicted_path_topic", "/path/predicted")
         self.predicted_score_topic = G("~predicted_score_topic",
                                        "/path/predicted_score")
+        # Pure-pursuit visualization: the smooth (splined) trajectory and the
+        # current lookahead point the tracker is aiming at, for the BEV viewer.
+        self.smooth_path_topic = G("~smooth_path_topic", "/path/smooth")
+        self.lookahead_topic = G("~lookahead_topic", "/path/lookahead")
         self._motion = MotionModelParams(
             yaw_tau_s=float(G("~predict_yaw_tau_s", 0.5)),
             vx_tau_s=float(G("~predict_vx_tau_s", 0.3)))
@@ -215,6 +340,12 @@ class WaypointFollowerNode:
                                              queue_size=1, latch=True)
         self.pred_score_pub = rospy.Publisher(self.predicted_score_topic, Float32,
                                               queue_size=1, latch=True)
+        # Pure-pursuit-only viz publishers (latched). Harmless for the other
+        # controllers (never published to), so created unconditionally.
+        self.smooth_path_pub = rospy.Publisher(self.smooth_path_topic, Path,
+                                               queue_size=1, latch=True)
+        self.lookahead_pub = rospy.Publisher(self.lookahead_topic, PointStamped,
+                                             queue_size=1, latch=True)
 
         rospy.Subscriber(self.t_pose, Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.t_dstate, Int8, self._dstate_cb, queue_size=10)
@@ -233,12 +364,120 @@ class WaypointFollowerNode:
                         lambda _e: self._publish_prediction())
         self._banner()
 
+    # ─── Controller factory ──────────────────────────────────────
+    def _build_multi_axis(self, G):
+        """Construct the multi-axis (vx + vy + yaw) follower from rosparams.
+
+        Shares ~vel_x / ~yaw_rate / ~pos_acquisition_radius with the legacy
+        follower; everything else is namespaced ~mx_* so the two tunings never
+        collide. ``deg`` params are converted to radians here."""
+        return MultiAxisFollower(MultiAxisFollowerParams(
+            cruise_speed=float(G("~vel_x", 0.3)),
+            lateral_speed_max=float(G("~mx_lateral_speed_max", 0.25)),
+            yaw_rate=float(G("~mx_yaw_rate", float(G("~yaw_rate", 0.6)))),
+            pos_radius=float(G("~pos_acquisition_radius", 0.35)),
+            slow_radius=float(G("~mx_slow_radius", 0.8)),
+            arrive_speed_min=float(G("~mx_arrive_speed_min", 0.08)),
+            yaw_engage_rad=math.radians(float(G("~mx_yaw_engage_deg", 25.0))),
+            yaw_release_rad=math.radians(float(G("~mx_yaw_release_deg", 10.0))),
+            yaw_kp=float(G("~mx_yaw_kp", 1.2)),
+            travel_cone_rad=math.radians(float(G("~mx_travel_cone_deg", 80.0))),
+            translate_suppress_rad=math.radians(
+                float(G("~mx_translate_suppress_deg", 120.0))),
+            translate_suppress_floor=float(G("~mx_translate_suppress_floor", 0.2)),
+            min_vx=float(G("~mx_min_vx", 0.06)),
+            min_vy=float(G("~mx_min_vy", 0.06)),
+            min_wz=math.radians(float(G("~mx_min_wz_deg", 8.0))),
+            release_frac=float(G("~mx_min_release_frac", 0.5)),
+            cmd_zero_eps=float(G("~mx_cmd_zero_eps", 1e-3)),
+            hold_deadband=float(G("~mx_hold_deadband", 0.18)),
+            hold_kp=float(G("~mx_hold_kp", 0.8)),
+            hold_speed_max=float(G("~mx_hold_speed_max", 0.2)),
+            hold_reacquire_margin=float(G("~mx_hold_reacquire_margin", 0.15)),
+            passed_bearing_rad=math.radians(float(G("~mx_passed_bearing_deg", 110.0))),
+            vel_xy_sat=float(G("~mx_vel_xy_sat", float(G("~vel_xy_sat", 1.0)))),
+            yaw_rate_sat=float(G("~mx_yaw_rate_sat", float(G("~yaw_rate_sat", 1.5)))),
+            accel_limit=float(G("~mx_accel_limit", float(G("~accel_limit", 1.0)))),
+            yaw_accel_limit=float(G("~mx_yaw_accel_limit",
+                                    float(G("~yaw_accel_limit", 2.5)))),
+        ))
+
+    def _build_pure_pursuit(self, G):
+        """Construct the spline-then-Pure-Pursuit follower from rosparams.
+
+        Composes the core HermiteSmoother (~pp_smooth_*) and PurePursuitTracker
+        (~pp_*) behind the follower interface (see pure_pursuit_follower.py). The
+        spline timing + the tracker yaw-rate cap share one KinematicLimits; an
+        optional per-axis minimum-force snap (~pp_min_*) mirrors the platform
+        deadband. Altitude is never commanded (the 2D tracker is planar).
+
+        The pure-pursuit dependencies are imported HERE (not at module load) so
+        the other controllers start even when this controller is not deployed."""
+        from sparx_agency.core.planning.smoothers.hermite import (
+            HermiteParams, HermiteSmoother)
+        from sparx_agency.core.planning.trackers.pure_pursuit import (
+            PurePursuitParams, PurePursuitTracker)
+        from pure_pursuit_follower import PurePursuitFollower  # sibling in scripts/
+        limits = KinematicLimits(
+            max_speed_xy=float(G("~pp_max_speed", 0.5)),
+            max_yaw_rate=float(G("~pp_max_yaw_rate", 0.6)),
+        )
+        tracker = PurePursuitTracker(
+            params=PurePursuitParams(
+                holonomic=bool(G("~pp_holonomic", True)),
+                base_lookahead=float(G("~pp_base_lookahead", 0.6)),
+                min_lookahead=float(G("~pp_min_lookahead", 0.3)),
+                max_lookahead=float(G("~pp_max_lookahead", 1.5)),
+                lookahead_speed_gain=float(G("~pp_lookahead_speed_gain", 0.5)),
+                cruise_speed=float(G("~pp_cruise_speed", float(G("~vel_x", 0.4)))),
+                min_speed=float(G("~pp_min_speed", 0.1)),
+                max_speed=float(G("~pp_max_speed", 0.5)),
+                curvature_speed_factor=float(G("~pp_curvature_speed_factor", 0.5)),
+                curvature_lookahead_factor=float(G("~pp_curvature_lookahead_factor", 0.8)),
+                slow_down_distance=float(G("~pp_slow_down_distance", 1.0)),
+                goal_tolerance=float(G("~pp_goal_tolerance",
+                                       float(G("~pos_acquisition_radius", 0.35)))),
+                path_tolerance=float(G("~pp_path_tolerance", 0.8)),
+                max_yaw_rate=float(G("~pp_max_yaw_rate", 0.6)),
+                speed_smoothing=float(G("~pp_speed_smoothing", 0.3)),
+                yaw_rate_smoothing=float(G("~pp_yaw_rate_smoothing", 0.3)),
+                sample_dt=float(G("~pp_sample_dt", 0.05)),
+                closest_search_back=int(G("~pp_closest_search_back", 10)),
+                closest_search_forward=int(G("~pp_closest_search_forward", 120)),
+            ),
+            default_limits=limits,
+        )
+        smoother = HermiteSmoother(HermiteParams(
+            dt=float(G("~pp_smooth_dt", 0.02)),
+            min_point_spacing=float(G("~pp_smooth_min_point_spacing", 0.05)),
+            tangent_scale=float(G("~pp_smooth_tangent_scale", 0.5)),
+            nominal_speed_xy=float(G("~pp_smooth_nominal_speed", 0.4)),
+            arc_lut_samples=int(G("~pp_smooth_arc_lut_samples", 600)),
+            zero_endpoint_velocity=bool(G("~pp_smooth_zero_endpoint_velocity", False)),
+        ))
+        return PurePursuitFollower(
+            tracker, smoother, limits=limits,
+            fixed_z=float(G("~takeoff_z", 1.0)),
+            smooth_sample_dt=float(G("~pp_viz_sample_dt", 0.1)),
+            min_vx=float(G("~pp_min_vx", 0.06)),
+            min_vy=float(G("~pp_min_vy", 0.06)),
+            min_wz=math.radians(float(G("~pp_min_wz_deg", 8.0))),
+            min_release_frac=float(G("~pp_min_release_frac", 0.5)),
+            cmd_zero_eps=float(G("~pp_cmd_zero_eps", 1e-3)),
+        )
+
     # ─── Callbacks ───────────────────────────────────────────────
     def _pose_cb(self, msg):
         if self.cur_pose is None:
             rospy.loginfo("waypoint_follower: first /gt_pose pose=(%.2f,%.2f,%.2f)",
                           msg.position.x, msg.position.y, msg.position.z)
         self.cur_pose = msg
+        # Feed the estimator at the FULL /gt_pose rate (decoupled from the control
+        # loop). /gt_pose is a bare Pose (no stamp), so use the receive time.
+        q = msg.orientation
+        yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
+        self.estimator.add_measurement(msg.position.x, msg.position.y, yaw,
+                                       rospy.Time.now().to_sec())
 
     def _dstate_cb(self, msg):
         self.drone_state = msg.data
@@ -266,6 +505,8 @@ class WaypointFollowerNode:
         rospy.loginfo("[PATH] NEW PATH %d waypoints  start=(%.2f,%.2f) end=(%.2f,%.2f)",
                       len(pts), pts[0].x, pts[0].y, pts[-1].x, pts[-1].y)
         self._publish_prediction()   # refresh the predicted trajectory at once
+        if self.controller_kind == "pure_pursuit":
+            self._publish_smooth_path()   # refresh the splined trajectory viz
         if self.state == _Bringup.WAIT_PATH:
             self._enter(_Bringup.RUNNING)
 
@@ -302,33 +543,99 @@ class WaypointFollowerNode:
         if self.current_demo_mode == MODE_VISUAL_SERVOING:
             return
 
-        pose2d = self._pose2d()
-        if pose2d is None:
+        raw2d = self._pose2d()
+        if raw2d is None:
             return
+
+        # Pose fed to the follower: the estimator's denoised pose (command
+        # feed-forward removes per-frame noise / hover drift), or the raw pose when
+        # ~use_pose_estimator is off. The estimator is told the command executed
+        # LAST tick (what the platform is actually doing now).
+        est_hold = False
+        if self.use_pose_estimator:
+            # Feed the commanded lateral too so a crab is propagated, not dropped
+            # as drift (vy is 0 for the one-axis follower, so its behaviour is
+            # unchanged). See WindowedPoseEstimator.set_command.
+            self.estimator.set_command(self._last_pub_vx, self._last_pub_wz,
+                                       vy=self._last_pub_vy)
+            est = self.estimator.estimate(rospy.Time.now().to_sec())
+            pose2d = est.as_pose2d() if est.mode != "invalid" else raw2d
+            # Stale/no localization: hold rather than fly open-loop on a dead pose.
+            est_hold = est.mode in ("invalid", "hold")
+        else:
+            pose2d = raw2d
 
         # Drive the DemoMode handshake for the axis the follower needs, and
         # tell it whether that axis is confirmed (until then it holds zero).
         axis = self.follower.required_axis()
         confirmed = True
+        defer_stop_mode = False
+        sup = None                         # holonomic rotation-supervisor decision
         if axis is not None:
             mode = AXIS_TO_MODE[axis]
             confirmed = (self.current_demo_mode == mode)
             self._request_demo_mode(mode)
+        elif self._holonomic:
+            # The holonomic controllers (multi_axis, pure_pursuit) drive all axes
+            # at once, so a supervisor (not the tracker) owns the rotation freeze:
+            # from last tick's commanded yaw rate + the heading + the voxel count it
+            # decides freeze (-> request 'turning', which the mode-authoritative gate
+            # freezes on) and hold (-> stop the tracker for a stationary re-observe).
+            sup = self.rot_sup.update(pose2d.yaw, self._last_pub_wz, self.dt,
+                                      self._bev_count)
+            want_mode = MODE_TURNING if sup.freeze else self.multi_axis_demo_mode
+            self._request_demo_mode(want_mode)
+            # Do not gate the tracker on 'turning' confirmation (that would deadlock
+            # the freeze); proceed unless the operator explicitly requires the mode.
+            confirmed = (not self.multi_axis_require_mode
+                         or self.current_demo_mode == want_mode)
+        elif self.freeze_through_coast:
+            # In a stop, but pick the mode AFTER stepping so it can follow
+            # cmd.freeze: while still coasting out of a frozen turn we hold
+            # 'turning' (the mode-authoritative voxel gate stays frozen through the
+            # inertia settle); once actually stopped we request forward mode.
+            defer_stop_mode = True
         else:
-            # In a stop (settle/brake/done): request forward mode -- hold heading,
-            # do not fly -- so the platform is stable for a clean voxel update.
+            # Legacy: request forward mode the instant the stop begins (relies on
+            # the gate node's ~resume_settle_sec to skip the physical coast).
             self._request_demo_mode(MODE_FORWARD)
 
-        hold = ((rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec)
+        # Fresh voxel updates a frozen-turn stop must re-observe (stopped, sensors
+        # live) before the follower may move on. 0 when advancing or in a small
+        # live correction -> no stationary re-observation is forced.
+        map_need = getattr(self.follower, "settle_map_updates_required", 0)
+        hold = (est_hold
+                or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec
+                or (sup is not None and sup.hold))   # supervisor mid-turn stop
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
-                                 hold=hold, map_ready=self._map_ready())
+                                 hold=hold, map_ready=self._map_ready(map_need))
+        self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
+        self._last_pub_vy = (cmd.vy if self._holonomic else 0.0)
 
-        if cmd.freeze is not None:
+        if defer_stop_mode:
+            # Coasting out of a frozen turn (cmd.freeze True) -> hold 'turning' so
+            # the gate stays frozen over the inertia; stopped/dwelling/braking
+            # (cmd.freeze False/None) -> forward mode for the clean stationary
+            # voxel update. cmd.freeze is None only under an external hold, which
+            # already means "don't move", so forward is the safe choice there.
+            self._request_demo_mode(MODE_TURNING if cmd.freeze else MODE_FORWARD)
+
+        if sup is not None:
+            # Holonomic: the supervisor owns the freeze (the 'turning' mode was
+            # already requested above); mirror it onto the /sensor_gate/freeze
+            # fallback bool so both freeze signals agree.
+            self._set_freeze(sup.freeze and self.freeze_during_yaw)
+        elif cmd.freeze is not None:
             # The core asks to freeze only while rotating; ~freeze_during_yaw
             # lets an operator disable that without touching the algorithm.
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
-        self._update_map_wait(cmd)
-        self._publish_twist(cmd.vx, cmd.wz)
+        self._update_map_wait(cmd, map_need)
+        if self._holonomic:
+            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz)
+        else:
+            self._publish_twist(cmd.vx, cmd.wz)
+        if self.controller_kind == "pure_pursuit":
+            self._publish_lookahead()   # smooth path is published on each new path
 
     # ─── ROS helpers ─────────────────────────────────────────────
     def _pose2d(self):
@@ -338,18 +645,55 @@ class WaypointFollowerNode:
         yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
         return Pose2D(self.cur_pose.position.x, self.cur_pose.position.y, yaw)
 
+    def _publish_smooth_path(self):
+        """Publish the pure-pursuit follower's smooth (splined) trajectory for the
+        BEV viewer. Called once per new path (the spline does not change tick to
+        tick); latched so the viewer sees it even between updates."""
+        smooth = getattr(self.follower, "smooth_xy", None)
+        if not smooth or len(smooth) < 2:
+            return
+        m = Path()
+        m.header.stamp = rospy.Time.now()
+        m.header.frame_id = self.frame_id
+        for x, y in smooth:
+            ps = PoseStamped()
+            ps.header = m.header
+            ps.pose.position.x = float(x)
+            ps.pose.position.y = float(y)
+            ps.pose.orientation.w = 1.0
+            m.poses.append(ps)
+        self.smooth_path_pub.publish(m)
+
+    def _publish_lookahead(self):
+        """Publish the pure-pursuit lookahead point (the aim point) for the BEV
+        viewer. Called every control tick (it moves along the path)."""
+        la = getattr(self.follower, "lookahead", None)
+        if la is None:
+            return
+        p = PointStamped()
+        p.header.stamp = rospy.Time.now()
+        p.header.frame_id = self.frame_id
+        p.point.x, p.point.y, p.point.z = float(la[0]), float(la[1]), 0.0
+        self.lookahead_pub.publish(p)
+
     def _publish_prediction(self):
         """Roll the follower forward from the current pose and publish the
         predicted trajectory (+ a 0..1 quality score). Best-effort: the BEV
         viewer draws it and the planner uses it for a dynamics-aware collision
         check. No map here, so the score is dynamics-only (no clearance)."""
+        # Pure pursuit has no stop-and-turn rollout; its smooth path + lookahead
+        # are the visualization instead, so skip the predicted-trajectory rollout.
+        if self.controller_kind == "pure_pursuit":
+            return
         pose2d = self._pose2d()
         if pose2d is None or len(self._path_pts) < 2:
             return
         try:
-            res = predict_trajectory(self.follower.params, pose2d, self._path_pts,
-                                     self.dt, self.predict_horizon_s,
-                                     motion=self._motion)
+            predictor = (mx_predict_trajectory
+                         if self.controller_kind == "multi_axis"
+                         else predict_trajectory)
+            res = predictor(self.follower.params, pose2d, self._path_pts,
+                            self.dt, self.predict_horizon_s, motion=self._motion)
         except ValueError:
             return
         if len(res.poses) < 2:
@@ -395,14 +739,25 @@ class WaypointFollowerNode:
     def _map_ready(self, min_updates=1):
         """True once ``min_updates`` fresh BEV (voxel) updates have landed since
         the stop unfroze, or the wait timed out (so a mapping stall never hangs
-        the drone). Bring-up passes ~mapsettle_min_updates; running stops use 1."""
-        if not self._await_map:
+        the drone). ``min_updates <= 0`` (advancing / small live correction) or
+        map gating disabled -> always ready. Bring-up passes ~mapsettle_min_updates;
+        a frozen-turn stop passes the follower's ``settle_map_updates_required``
+        (>=2)."""
+        if min_updates <= 0 or not self.require_map_update:
             return True
+        if not self._await_map:
+            # Gating is ON but this stop's wait is not armed yet: the coast->dwell
+            # edge arms it (in _update_map_wait) AFTER this is consulted each tick.
+            # Treat un-armed as NOT ready so a dwell that would otherwise finish in
+            # its very first tick (dt >= yaw_settle_dwell_s) can never skip the
+            # >=2-update re-observation; arming lands the same tick.
+            return False
         if self._bev_count - self._await_baseline >= min_updates:
             return True
         if (rospy.Time.now() - self._await_t0).to_sec() > self.map_wait_timeout_s:
-            rospy.logwarn_throttle(2.0, "[MAP] no voxel update within %.1fs -- "
-                                   "proceeding", self.map_wait_timeout_s)
+            rospy.logwarn_throttle(2.0, "[MAP] fewer than %d voxel updates within "
+                                   "%.1fs -- proceeding", min_updates,
+                                   self.map_wait_timeout_s)
             return True
         return False
 
@@ -415,10 +770,13 @@ class WaypointFollowerNode:
             self._await_map = False
             self._enter(_Bringup.WAIT_PATH if not self.have_path else _Bringup.RUNNING)
 
-    def _update_map_wait(self, cmd):
-        """Track the RUNNING stop: start a fresh map wait when a YAW_SETTLE
-        unfreezes (begins its dwell), and end it once the settle is left."""
-        in_dwell = (cmd.state == FollowerState.YAW_SETTLE and cmd.freeze is False)
+    def _update_map_wait(self, cmd, min_updates):
+        """Track the RUNNING stop: start a fresh map wait when a *frozen* turn's
+        YAW_SETTLE unfreezes (begins its dwell, ``min_updates > 0``), and end it
+        once the settle is left. A small live correction (``min_updates == 0``)
+        never starts a wait, so the map is only re-observed when it was frozen."""
+        in_dwell = (cmd.state == FollowerState.YAW_SETTLE and cmd.freeze is False
+                    and min_updates > 0)
         if in_dwell and not self._await_map and self.require_map_update:
             self._await_map = True
             self._await_baseline = self._bev_count
@@ -488,6 +846,28 @@ class WaypointFollowerNode:
             except Exception as e:
                 rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
 
+    def _publish_twist_multi(self, vx, vy, wz):
+        """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz;
+        linear.z=0 hardwired (fixed altitude). No command-commitment gate -- the
+        multi-axis controller emits continuous, minimum-force-shaped commands, so
+        it never needs the lone-pulse protection the one-axis path uses."""
+        m = Twist()
+        m.linear.x = vx
+        m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller
+        m.linear.z = 0.0  # HARDWIRED -- fixed altitude (platform holds it)
+        m.angular.z = wz
+        self.cmd_vel_pub.publish(m)
+        if self._log_file is not None:
+            try:
+                self._log_file.write(json.dumps({
+                    "t": rospy.Time.now().to_sec(),
+                    "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
+                    "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
+                }) + "\n")
+                self._log_file.flush()
+            except Exception as e:
+                rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
+
     def _open_log(self, path):
         if path and "{ts}" in path:
             path = path.replace("{ts}", datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -537,6 +917,36 @@ class WaypointFollowerNode:
         L = rospy.loginfo
         p = self.follower.params
         L("=" * 72)
+        if self.controller_kind == "multi_axis":
+            L("waypoint_follower (core MultiAxisFollower)  X+Y+YAW, fixed altitude")
+            L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
+            L("  cruise=%.2f m/s  lat_max=%.2f m/s  yaw_rate=%.2f rad/s",
+              p.cruise_speed, p.lateral_speed_max, p.yaw_rate)
+            L("  pos_radius=%.2f  yaw_engage=%.0f deg  release=%.0f deg  cone=%.0f deg",
+              p.pos_radius, math.degrees(p.yaw_engage_rad),
+              math.degrees(p.yaw_release_rad), math.degrees(p.travel_cone_rad))
+            L("  min force: vx=%.3f vy=%.3f wz=%.0f deg/s  hold_deadband=%.2f m",
+              p.min_vx, p.min_vy, math.degrees(p.min_wz), p.hold_deadband)
+            L("  demo_mode=%s (require=%s)", self.multi_axis_demo_mode,
+              self.multi_axis_require_mode)
+            L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
+            L("=" * 72)
+            return
+        if self.controller_kind == "pure_pursuit":
+            L("waypoint_follower (Hermite spline + core PurePursuitTracker)  fixed alt")
+            L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
+            L("  cruise=%.2f m/s  lookahead=%.2f..%.2f m (base %.2f)  holonomic=%s",
+              p.cruise_speed, p.min_lookahead, p.max_lookahead, p.base_lookahead,
+              p.holonomic)
+            L("  goal_tol=%.2f m  path_tol=%.2f m  max_yaw_rate=%.2f rad/s",
+              p.goal_tolerance, p.path_tolerance, p.max_yaw_rate)
+            L("  smooth -> %s   lookahead -> %s", self.smooth_path_topic,
+              self.lookahead_topic)
+            L("  demo_mode=%s (require=%s)", self.multi_axis_demo_mode,
+              self.multi_axis_require_mode)
+            L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
+            L("=" * 72)
+            return
         L("waypoint_follower (core WaypointFollower)  X+YAW only, fixed altitude")
         L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
         L("  vel_x=%.2f m/s  yaw_rate=%.2f rad/s  forward_only=%s",
@@ -582,13 +992,52 @@ if __name__ == "__main__":
 #       ~yaw_burst_max_deg (25; per-burst increment -- big turns split into chunks,
 #         each followed by a stop + voxel update + re-measure)
 #       ~yaw_acquisition_radius (0.20; cross-track ADVANCE tol, m) ~yaw_acquire_max_deg (35)
+#   rotation freeze: ~freeze_on_rotation (true; MASTER on/off -- false keeps the map
+#       live through every turn, for both controller families)
+#     waypoint controller (angle-gated): ~freeze_yaw_thresh_deg (20; a turn LARGER than
+#       this freezes the voxel map and forces the post-turn re-observation -- a smaller
+#       correction skips both; 0 = freeze every turn) ~settle_map_updates (2; fresh
+#       voxel updates a frozen turn re-observes, stopped, before it moves on)
+#       ~freeze_through_coast (true; hold 'turning' until wz~0 so the gate stays frozen
+#       over the end-of-turn inertia, not just the commanded burst)
+#     holonomic supervisor (pure_pursuit/multi_axis; rate-based freeze-throughout +
+#       stop every N deg to re-observe): ~rot_wz_turn_on (0.20 rad/s) ~rot_wz_turn_off
+#       (0.10) ~rot_turn_off_ticks (3) ~rot_reobserve_every_deg (25) ~rot_max_coast_s
+#       (2.0); reuses ~settle_map_updates ~yaw_settle_dwell_s ~yaw_settle_eps
+#       ~map_wait_timeout_s
 #   prediction: ~predict_hz (2.0) ~predict_horizon_s (30) ~predict_yaw_tau_s (0.5)
 #       ~predict_vx_tau_s (0.3)
-#   map-settle (forward mode + a fresh voxel update before any motion / before the
+#   map-settle (forward mode + fresh voxel updates before any motion / before the
 #     next turn): ~require_map_update (true) ~map_update_topic (/falcon/bev_2d)
 #     ~map_wait_timeout_s (3.0; proceed anyway after this) ~mapsettle_min_s (0.5)
+#     ~mapsettle_min_updates (2; fresh updates before the FIRST move at bring-up)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
+#   controller: ~controller (waypoint | multi_axis | pure_pursuit).
+#     multi_axis swaps in the combined forward+lateral+yaw tracker (un-hardwires
+#       linear.y; no per-axis handshake). Tuning namespaced ~mx_*:
+#       ~mx_lateral_speed_max (0.25) ~mx_yaw_rate (0.6) ~mx_slow_radius (0.8)
+#       ~mx_arrive_speed_min (0.08) ~mx_yaw_engage_deg (25) ~mx_yaw_release_deg (10)
+#       ~mx_yaw_kp (1.2) ~mx_travel_cone_deg (80) ~mx_translate_suppress_deg (120)
+#       ~mx_translate_suppress_floor (0.2) ~mx_min_vx (0.06) ~mx_min_vy (0.06)
+#       ~mx_min_wz_deg (8) ~mx_min_release_frac (0.5) ~mx_hold_deadband (0.18)
+#       ~mx_hold_kp (0.8) ~mx_hold_speed_max (0.2) ~mx_hold_reacquire_margin (0.15)
+#       ~mx_passed_bearing_deg (110) ~mx_demo_mode (fly_straight) ~mx_require_mode (false)
+#     pure_pursuit splines the path (core HermiteSmoother) then tracks it with the
+#       core PurePursuitTracker on a moving lookahead (holonomic). Tracker ~pp_*:
+#       ~pp_holonomic (true) ~pp_cruise_speed (=vel_x) ~pp_max_speed (0.5)
+#       ~pp_min_speed (0.1) ~pp_base_lookahead (0.6) ~pp_min/max_lookahead (0.3/1.5)
+#       ~pp_lookahead_speed_gain (0.5) ~pp_goal_tolerance (=pos_acquisition_radius)
+#       ~pp_path_tolerance (0.8) ~pp_max_yaw_rate (0.6) ~pp_curvature_speed_factor (0.5)
+#       ~pp_curvature_lookahead_factor (0.8) ~pp_slow_down_distance (1.0)
+#       ~pp_speed_smoothing (0.3) ~pp_yaw_rate_smoothing (0.3) ~pp_sample_dt (0.05)
+#       ~pp_closest_search_back/forward (10/120). Spline ~pp_smooth_*:
+#       ~pp_smooth_dt (0.02) ~pp_smooth_min_point_spacing (0.05)
+#       ~pp_smooth_tangent_scale (0.5) ~pp_smooth_nominal_speed (0.4)
+#       ~pp_smooth_arc_lut_samples (600) ~pp_smooth_zero_endpoint_velocity (false).
+#       Min-force snap ~pp_min_vx/vy (0.06) ~pp_min_wz_deg (8) ~pp_min_release_frac (0.5).
+#       Viz out: ~smooth_path_topic (/path/smooth) ~lookahead_topic (/path/lookahead)
+#       ~pp_viz_sample_dt (0.1).
 #   loop/gate: ~ctrl_rate_hz (5) ~status_hz (1) ~freeze_during_yaw (true)
 #       ~startup_hold_sec (3.0) ~startup_delay_sec (1.0)
 #       ~request_repeat_sec (0.5) ~request_timeout_sec (5.0)

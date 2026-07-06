@@ -33,7 +33,7 @@ same whether or not correction is on, and the follower always reads one topic.
 
   in   ~input_path_topic (Path)  /path/waypoints_astar  (the planner's raw path)
   in   ~bev_topic (OccupancyGrid) /falcon/bev_2d
-  out  ~path_topic (Path, latched)      /path/waypoints      (corrected, flown)
+  out  ~path_topic (Path, latched)      /path/waypoints_safe (corrected, SAFE -> simplifier)
   out  ~raw_path_topic (Path, latched)  /path/waypoints_raw  (input echo, viz)
   out  ~forces_topic (MarkerArray)      /path/forces         (F_rep arrows, viz)
 
@@ -59,6 +59,19 @@ from sparx_agency.core.planning.safety.path_correction import (
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
 
 
+def _is_degenerate_path(pts, eps=1e-3):
+    """True if every waypoint coincides with the first (a zero-length 'hold').
+
+    The combination planner commands a STOP by publishing a 2-point path whose
+    points are both the drone's current pose. Such a path must be flown through
+    untouched -- recentring it would move the stop point.
+    """
+    if len(pts) < 2:
+        return False
+    p0 = pts[0]
+    return all(abs(p.x - p0.x) <= eps and abs(p.y - p0.y) <= eps for p in pts)
+
+
 class PathCorrectorNode:
     def __init__(self):
         rospy.init_node("path_corrector")
@@ -66,7 +79,10 @@ class PathCorrectorNode:
 
         self.input_path_topic = G("~input_path_topic", "/path/waypoints_astar")
         self.bev_topic = G("~bev_topic", "/falcon/bev_2d")
-        self.path_topic = G("~path_topic", "/path/waypoints")
+        # SAFE (corrected) path -> the trajectory_simplifier cleans this into the
+        # flown /path/waypoints. Defaults to /path/waypoints_safe so a standalone
+        # rosrun does not double-publish /path/waypoints against the simplifier.
+        self.path_topic = G("~path_topic", "/path/waypoints_safe")
         self.raw_path_topic = G("~raw_path_topic", "/path/waypoints_raw")
         self.frame_id = G("~frame_id", "world")
 
@@ -181,7 +197,13 @@ class PathCorrectorNode:
         """Correct one planned path and publish it (+ raw echo + force arrows)."""
         pts = self._decode_path(msg)
 
-        if not self.enabled or len(pts) < 2:
+        if not self.enabled or len(pts) < 2 or _is_degenerate_path(pts):
+            # Passthrough: correction off, a trivial path, OR a degenerate
+            # "hold" (all points coincident -- e.g. the combination planner's
+            # stop command). A hold has 2+ points so it would otherwise run the
+            # lateral recentring, which could push the stop point off its spot
+            # (up to apf_max_total_shift_m when apf_pin_last is off) and silently
+            # turn a STOP into a move. Echo it verbatim so a stop stays a stop.
             self.pub_raw.publish(self._path_msg(pts))     # input echo (viewer red)
             self._publish(pts, corrected=False)           # passthrough
             return

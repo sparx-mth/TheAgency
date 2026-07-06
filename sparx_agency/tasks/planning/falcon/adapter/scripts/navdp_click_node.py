@@ -73,7 +73,7 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import Path
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
@@ -102,8 +102,22 @@ class NavDPClickNode:
         G = rospy.get_param
 
         self.drone_ns = G("~drone_ns", "")
-        self.rgb_topic = G("~rgb_topic", "/xtend/rgb_frame_path")
-        self.depth_topic = G("~depth_topic", "/xtend/depth_frame_path")
+        # Image transport. "frame_path" (default): RGB/depth arrive as tiny
+        # std_msgs/String "<path> <sec> <nsec>" messages this node loads from disk
+        # (the .jpg/.npy the drone wrote -- see _rgb_path_cb/_depth_path_cb).
+        # "topic": RGB/depth arrive as raw sensor_msgs/Image straight off the wire
+        # (Gazebo sim or an old bag replay, where nothing writes frame files).
+        # Only the subscriber type + decode path differ; everything downstream
+        # (click -> NavDP -> world path) is identical.
+        self.image_transport = str(G("~image_transport", "frame_path")).strip().lower()
+        if self.image_transport not in ("frame_path", "topic"):
+            raise ValueError("~image_transport must be 'frame_path' or 'topic', "
+                             "got %r" % self.image_transport)
+        _fp = self.image_transport == "frame_path"
+        self.rgb_topic = G("~rgb_topic",
+                           "/xtend/rgb_frame_path" if _fp else "/xtend/rgb")
+        self.depth_topic = G("~depth_topic",
+                             "/xtend/depth_frame_path" if _fp else "/xtend/depth_m")
         self.pose_topic = G("~pose_topic", "/xtend/localization")
         # Message type on ~pose_topic: "pose_stamped" (geometry_msgs/PoseStamped)
         # or "pose" (geometry_msgs/Pose). The default localization
@@ -182,8 +196,12 @@ class NavDPClickNode:
         self._got_cam_info = False
         self._reset_done = False                            # latch intrinsics after
 
-        rospy.Subscriber(self.rgb_topic, String, self._rgb_cb, queue_size=2)
-        rospy.Subscriber(self.depth_topic, String, self._depth_cb, queue_size=2)
+        if self.image_transport == "frame_path":
+            rospy.Subscriber(self.rgb_topic, String, self._rgb_path_cb, queue_size=2)
+            rospy.Subscriber(self.depth_topic, String, self._depth_path_cb, queue_size=2)
+        else:  # "topic": raw Images decoded in place
+            rospy.Subscriber(self.rgb_topic, Image, self._rgb_cb, queue_size=2)
+            rospy.Subscriber(self.depth_topic, Image, self._depth_cb, queue_size=2)
         if self.pose_type == "pose_stamped":
             rospy.Subscriber(self.pose_topic, PoseStamped,
                              self._pose_stamped_cb, queue_size=10)
@@ -206,7 +224,7 @@ class NavDPClickNode:
         self._banner()
 
     # ─── Subscribers (frame-path String: load the file from disk) ────────────
-    def _rgb_cb(self, msg):
+    def _rgb_path_cb(self, msg):
         # "<path> <sec> <nsec>" -> load the .jpg. cv2 reads BGR; NavDP wants RGB.
         # A malformed message or unreadable file keeps the last frame (counted by
         # the throttled warn) rather than clearing the live view.
@@ -220,7 +238,7 @@ class NavDPClickNode:
             return
         self.rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    def _depth_cb(self, msg):
+    def _depth_path_cb(self, msg):
         # "<path> <sec> <nsec>" -> load the .npy (HxW float32 meters). Keep the
         # last good frame on a bad message/file instead of clearing the view.
         try:
@@ -233,6 +251,27 @@ class NavDPClickNode:
             rospy.logwarn_throttle(5.0, "navdp_click: dropping depth frame-path (%s)", e)
             return
         self.depth = np.ascontiguousarray(arr, dtype=np.float32)
+
+    # ─── Subscribers (raw Image: decode in place; sim / bag replay) ──────────
+    def _rgb_cb(self, msg):
+        arr = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)
+        if msg.encoding == "bgr8":
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        self.rgb = arr.copy()
+
+    def _depth_cb(self, msg):
+        if msg.encoding == "32FC1":
+            self.depth = np.frombuffer(msg.data, np.float32).reshape(
+                msg.height, msg.width).copy()
+        elif msg.encoding == "16UC1":
+            self.depth = (np.frombuffer(msg.data, np.uint16).reshape(
+                msg.height, msg.width).astype(np.float32) / 1000.0)
+        else:
+            # Warn loudly so the operator sees WHY "Waiting for RGB + depth"
+            # never clears, instead of silently dropping the frame.
+            rospy.logwarn_throttle(5.0, "navdp_click: unsupported depth encoding "
+                                   "%r (need 32FC1 or 16UC1); ignoring frame",
+                                   msg.encoding)
 
     def _pose_cb(self, msg):
         yaw = se3.yaw_from_quaternion((msg.orientation.x, msg.orientation.y,
@@ -556,8 +595,12 @@ if __name__ == "__main__":
 # contract live in core.planning.navdp; this node owns ROS I/O, the OpenCV
 # window, click handling and publishing the world path.
 #
-#   IO: ~rgb_topic (/xtend/rgb_frame_path) ~depth_topic (/xtend/depth_frame_path)
-#       (both std_msgs/String "<path> <sec> <nsec>"; the .jpg/.npy are loaded from disk)
+#   IO: ~image_transport (frame_path | topic) selects RGB/depth transport:
+#       frame_path -> ~rgb_topic (/xtend/rgb_frame_path) ~depth_topic
+#         (/xtend/depth_frame_path), both std_msgs/String "<path> <sec> <nsec>";
+#         the .jpg/.npy are loaded from disk
+#       topic -> ~rgb_topic (/xtend/rgb) ~depth_topic (/xtend/depth_m), raw
+#         sensor_msgs/Image (sim/bag replay)
 #       ~drone_ns ('') ~pose_topic (/xtend/localization)
 #       ~pose_type (pose_stamped ; 'pose' for a bare geometry_msgs/Pose, e.g.
 #         the nav stack's /gt_pose or Gazebo's /simple_drone/gt_pose)

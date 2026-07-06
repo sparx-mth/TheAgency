@@ -1,12 +1,15 @@
 """Pure geometry helpers for the waypoint follower (ROS-free, math-only)."""
 from __future__ import annotations
 
-from math import atan2, cos, hypot, sin
+from math import cos, hypot, sin
 from typing import List, Optional, Sequence, Tuple
 
-from sparx_agency.core.common.types import Pose2D
+from sparx_agency.core.common.types import Pose2D, circular_mean  # noqa: F401 (re-export)
 
 XY = Tuple[float, float]
+
+# circular_mean now lives in core.common.types (shared with the pose estimator);
+# re-exported here so existing ``alg.circular_mean`` call sites keep working.
 
 
 def saturate(value: float, limit: float) -> float:
@@ -74,6 +77,52 @@ def yaw_accept_floor(
     return 0.5 * (sweep_floor(yaw_rate, dt, min_ticks) + abs(yaw_coast))
 
 
+def burst_tick_count(
+    eyaw: float, yaw_coast: float, tick_angle: float, min_ticks: int, max_ticks: int
+) -> int:
+    """Number of yaw ticks to command this burst (graded PWM-by-duration).
+
+    Sizes the burst by the *remaining* error (aiming ``yaw_coast`` short, the
+    coast fills the rest), expressed in control ticks of ``tick_angle`` rad each,
+    snapped to an even count and clamped to ``[min_ticks, max_ticks]`` — i.e. the
+    weak/medium/strong = 2/4/6-tick grades. Far from target it returns the cap
+    (strong); as the residual shrinks across successive bursts it grades down.
+    """
+    if tick_angle <= 0.0:
+        return int(min_ticks)
+    n = int(round((abs(eyaw) - abs(yaw_coast)) / tick_angle))
+    n = 2 * ((n + 1) // 2)              # snap to the nearest even tick count
+    if n < min_ticks:
+        n = int(min_ticks)
+    if n > max_ticks:
+        n = int(max_ticks)
+    return n
+
+
+def settle_dwell(base: float, per_tick: float, ticks: int, cap: int) -> float:
+    """YAW_SETTLE dwell scaled by the burst's tick count (inertia-proportional).
+
+    A longer burst builds more angular momentum, so it should dwell longer before
+    the heading is re-measured. ``per_tick = 0`` reproduces the fixed ``base``.
+    """
+    return float(base) + max(0.0, float(per_tick)) * float(min(ticks, cap))
+
+
+def accept_with_reversals(
+    base_accept: float, reversals: int, growth: float, max_rev: int
+) -> Tuple[float, bool]:
+    """Anti-deadlock accept tolerance + hard lock, as a function of reversals.
+
+    Each burst-direction sign-flip widens the accept band by ``growth`` (so a
+    ping-pong residual is eventually swallowed) and, once ``reversals`` reaches
+    ``max_rev`` (> 0), forces a lock so YAW_ALIGN must advance instead of firing
+    yet another opposing burst. Returns ``(accept, locked)``.
+    """
+    accept = base_accept + max(0.0, growth) * max(0, reversals)
+    locked = max_rev > 0 and reversals >= max_rev
+    return accept, locked
+
+
 def burst_target_angle(
     eyaw: float, yaw_coast: float, floor: float, ceil: float
 ) -> float:
@@ -109,21 +158,6 @@ def advance_gate(
     if e <= acquire_max and cos(eyaw) > 0.0 and dist * abs(sin(eyaw)) <= capture_tol:
         return True
     return False
-
-
-def circular_mean(angles: Sequence[float]) -> float:
-    """Mean of angles via unit vectors (rad), robust to the +/-pi wrap.
-
-    Used to fuse the heading samples collected during a YAW_SETTLE dwell into
-    one estimate, so a single localization jump does not skew the decision.
-    """
-    if not angles:
-        return 0.0
-    s = sum(sin(a) for a in angles)
-    c = sum(cos(a) for a in angles)
-    if s == 0.0 and c == 0.0:
-        return float(angles[-1])
-    return atan2(s, c)
 
 
 def reanchor_path(

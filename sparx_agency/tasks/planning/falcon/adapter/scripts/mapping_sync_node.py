@@ -104,7 +104,21 @@ class MappingSyncNode:
         self.topics = _parse_topics(G("~pose_stamped_topics", None),
                                     G("~pose_stamped_topic", "/flow_depth/pose_est"))
         self.nsrc = len(self.topics)
-        self.depth_topic = G("~depth_topic", "/xtend/depth_frame_path")
+        # Depth transport. "frame_path" (default): depth arrives as a tiny
+        # std_msgs/String "<path> <sec> <nsec>" and this node loads the .npy from
+        # disk (the real-drone path; see _depth_path_cb). "topic": depth arrives
+        # as a raw sensor_msgs/Image straight off the wire (Gazebo sim or an old
+        # bag replay, where no frame-path producer writes the files). Either way
+        # the SAME pairing/freeze path runs on the capture stamp -- only the
+        # subscriber type and how the Image is obtained differ.
+        self.depth_transport = str(G("~depth_transport", "frame_path")).strip().lower()
+        if self.depth_transport not in ("frame_path", "topic"):
+            raise ValueError("~depth_transport must be 'frame_path' or 'topic', "
+                             "got %r" % self.depth_transport)
+        default_depth_topic = ("/xtend/depth_frame_path"
+                               if self.depth_transport == "frame_path"
+                               else "/xtend/depth_m")
+        self.depth_topic = G("~depth_topic", default_depth_topic)
         self.depth_frame_id = G("~depth_frame_id", "camera")
         self.out_pose_topic = G("~out_pose_topic", "/map_ros/pose")
         self.out_depth_topic = G("~out_depth_topic", "/map_ros/depth")
@@ -172,7 +186,10 @@ class MappingSyncNode:
         for idx, tp in enumerate(self.topics):
             rospy.Subscriber(tp, PoseStamped, self._pose_cb,
                              callback_args=idx, queue_size=200)
-        rospy.Subscriber(self.depth_topic, String, self._depth_path_cb, queue_size=16)
+        if self.depth_transport == "frame_path":
+            rospy.Subscriber(self.depth_topic, String, self._depth_path_cb, queue_size=16)
+        else:  # "topic": raw Image straight into the unchanged _depth_cb
+            rospy.Subscriber(self.depth_topic, Image, self._depth_cb, queue_size=16)
         if self.gate.policy.freeze_on_turning_mode:
             rospy.Subscriber(self.demo_mode_topic, String, self._demo_mode_cb, queue_size=10)
         rospy.Timer(rospy.Duration(0.05), self._sweep_timer)
@@ -444,8 +461,11 @@ class MappingSyncNode:
         if self.nsrc > 1:
             L("  >>> %d sources; first co-temporal wins; ALL must share one world "
               "frame (disagree_warn=%.2fm)", self.nsrc, self.disagree_warn_m)
-        L("  depth in  = %s   (frame-path String; loads .npy, stamp == capture time)",
-          self.depth_topic)
+        if self.depth_transport == "frame_path":
+            L("  depth in  = %s   (frame-path String; loads .npy, stamp == capture time)",
+              self.depth_topic)
+        else:
+            L("  depth in  = %s   (raw Image; stamp == capture time)", self.depth_topic)
         if self.gate.policy.freeze_on_turning_mode:
             L("  rotation freeze = ON  (drop pairs while %s == %r; resume after fresh "
               "frame, settle=%.2fs)", self.demo_mode_topic, self.turning_mode_name,
@@ -483,8 +503,10 @@ if __name__ == "__main__":
 #
 #   sources: ~pose_stamped_topics (/flow_depth/pose_est)  comma string or list,
 #            order = priority; ~pose_stamped_topic (singular) still honored
-#   io: ~depth_topic (/xtend/depth_frame_path; String "<path> <sec> <nsec>", loads
-#       the .npy and rebuilds a 32FC1 Image at the capture stamp)
+#   io: ~depth_transport (frame_path | topic) selects how depth arrives:
+#       frame_path -> ~depth_topic (/xtend/depth_frame_path; String "<path> <sec>
+#         <nsec>", loads the .npy and rebuilds a 32FC1 Image at the capture stamp)
+#       topic -> ~depth_topic (/xtend/depth_m; raw sensor_msgs/Image, sim/bag)
 #       ~depth_frame_id (camera)  ~out_pose_topic (/map_ros/pose)
 #       ~out_depth_topic (/map_ros/depth)  ~world_frame (world)
 #   timing: ~sync_tolerance (0.05) ~max_interp_gap (0.12, 0=off)
