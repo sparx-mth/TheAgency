@@ -1,0 +1,46 @@
+# FlowNav fine-tune configuration. Keep sigma=0 and the Euler grid consistent with
+# deployment; do not change image_size/context_size/action normalization.
+model: flownav
+
+data:
+  recording: null          # path to a flight recording directory (REQUIRED)
+  labels_dir: null
+  context_size: 3
+  goal_lookahead: 24
+  flownav_horizon: 8
+  metric_waypoint_spacing: 0.25   # drone waypoint-unit scale (add to data_config.yaml too)
+  seed_from_flight: true
+
+augment:
+  enabled: true
+  pitch_deg_range: [-8.0, 8.0]
+  brightness_range: [0.8, 1.2]
+  # depth_* jitter is ignored by FlowNav (it has no depth input)
+
+finetune:
+  train_compress: true     # train the compress_{obs,goal,depth}_enc projections
+  use_film: false          # fallback: add a viewpoint-FiLM adapter, freeze the rest
+  metric_waypoint_spacing: 0.25
+  lr: 1.0e-4
+
+loss:
+  alpha: 1.0e-4            # distance-loss weight (FlowNav default)
+  fix_dist_mask: true      # fix the shipped reduction-order bug
+  esdf:
+    margin_m: 0.35
+    weight: 0.5
+    clamp_grad_m: 4.0
+
+optim:
+  epochs: 30
+  batch_size: 64
+  warmup_epochs: 4
+  num_steps: 8             # Euler K for the ESDF-penalty rollout
+  weight_decay: 0.01
+  ema_decay: 0.999         # or reuse diffusers EMAModel(power=0.75)
+  l2sp_weight: 1.0e-3
+  grad_clip: 1.0
+
+checkpoint:
+  out_dir: runs/flownav_finetune
+  save_every: 1
