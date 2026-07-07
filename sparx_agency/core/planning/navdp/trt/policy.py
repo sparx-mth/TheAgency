@@ -28,6 +28,7 @@ from typing import Optional
 
 import numpy as np
 
+from sparx_agency.core.planning.navdp.trt.ddim_scheduler import NumpyDDIMScheduler
 from sparx_agency.core.planning.navdp.trt.engine_runner import TRTEngineRunner
 from sparx_agency.core.planning.navdp.trt.errors import NavDPError
 from sparx_agency.core.planning.navdp.trt.point_encoder import NavDPPointEncoder
@@ -66,11 +67,14 @@ class NavDPTRTPolicy:
     """
 
     def __init__(self, engine_dir, head_params_npz, sample_num=16,
-                 predict_size=24, device_id=0):
+                 predict_size=24, device_id=0, sampler="ddpm",
+                 num_inference_steps=None):
         self.engine_dir = Path(engine_dir)
         self.sample_num = int(sample_num)
         self.predict_size = int(predict_size)
         self.device_id = int(device_id)
+        self.sampler = str(sampler).lower()
+        self.num_inference_steps = num_inference_steps
 
         sel_path = self.engine_dir / "selected.json"
         if not sel_path.exists():
@@ -84,6 +88,7 @@ class NavDPTRTPolicy:
         self._cri = self._runner(engines, "critic")
 
         self._load_head_params(head_params_npz)
+        self._build_scheduler()
 
     def _runner(self, engines, key):
         """Build a :class:`TRTEngineRunner` for the named engine in selected.json."""
@@ -115,7 +120,36 @@ class NavDPTRTPolicy:
         self.point_encoder = NavDPPointEncoder(p["point_encoder_weight"],
                                                p["point_encoder_bias"])
         self.time_table = np.asarray(p["time_table"], dtype=np.float32)  # (T, 384)
-        self.scheduler = NumpyDDPMScheduler(p["alphas_cumprod"])
+        self._alphas_cumprod = np.asarray(p["alphas_cumprod"], dtype=np.float32)
+
+    def _build_scheduler(self):
+        """Construct the diffusion sampler from ``self.sampler`` + steps.
+
+        ``ddpm`` is the bit-faithful trained default and MUST run the full trained
+        step count. ``ddim`` runs a deterministic reduced-step schedule (the
+        Tier-1 speed lever) over the SAME engines -- no re-export, no retrain.
+        """
+        n_train = len(self._alphas_cumprod)
+        if self.sampler == "ddpm":
+            if self.num_inference_steps not in (None, n_train):
+                raise NavDPError(
+                    "sampler='ddpm' runs the full %d trained steps; use "
+                    "sampler='ddim' for num_inference_steps=%s"
+                    % (n_train, self.num_inference_steps))
+            self.scheduler = NumpyDDPMScheduler(self._alphas_cumprod)
+        elif self.sampler == "ddim":
+            steps = int(self.num_inference_steps or n_train)
+            self.scheduler = NumpyDDIMScheduler(self._alphas_cumprod, steps)
+        else:
+            raise NavDPError("unknown sampler %r (use 'ddpm' or 'ddim')" % self.sampler)
+
+    def configure_sampler(self, sampler, num_inference_steps=None):
+        """Swap the diffusion sampler at runtime. Engines are unchanged, so this
+        needs NO re-export/rebuild -- used by the step validator and the server."""
+        self.sampler = str(sampler).lower()
+        self.num_inference_steps = num_inference_steps
+        self._build_scheduler()
+        return self
 
     # ------------------------------------------------------------------
     # Inference

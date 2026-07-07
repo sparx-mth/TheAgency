@@ -15,9 +15,11 @@ Public API:
     * :class:`NavDPTRTPolicy` -- drop-in for ``NavDP_Policy.predict_pointgoal_action``.
     * :class:`TRTEngineRunner` -- minimal TRT-10 fixed-shape engine runner.
     * :class:`NumpyDDPMScheduler` -- diffusers-faithful DDPM sampler in numpy.
+    * :class:`NumpyDDIMScheduler` -- deterministic reduced-step DDIM sampler.
     * :class:`NavDPPointEncoder` -- numpy point-goal linear encoder.
     * :class:`NavDPError` -- raised on any runtime failure (no silent fallbacks).
 """
+from sparx_agency.core.planning.navdp.trt.ddim_scheduler import NumpyDDIMScheduler
 from sparx_agency.core.planning.navdp.trt.engine_runner import TRTEngineRunner
 from sparx_agency.core.planning.navdp.trt.errors import NavDPError
 from sparx_agency.core.planning.navdp.trt.point_encoder import NavDPPointEncoder
@@ -28,6 +30,7 @@ __all__ = [
     "NavDPTRTPolicy",
     "TRTEngineRunner",
     "NumpyDDPMScheduler",
+    "NumpyDDIMScheduler",
     "NavDPPointEncoder",
     "NavDPError",
 ]
