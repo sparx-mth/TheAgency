@@ -72,6 +72,51 @@ def load_speed_config(path=None):
     return str(rt.get("sampler", "ddpm")).lower(), rt.get("num_inference_steps")
 
 
+def load_gate_config(path=None):
+    """Read the ``runtime.validate_against_frozen_gold`` startup-gate block.
+
+    Returns the block dict (``{}`` if absent, disabled, not a mapping, or pyyaml
+    is missing) so a stale ``false`` value simply disables the gate.
+    """
+    p = Path(path) if path else _DEFAULT_SPEED_CONFIG
+    if not p.exists():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    rt = ((yaml.safe_load(p.read_text()) or {}).get("runtime", {})) or {}
+    g = rt.get("validate_against_frozen_gold")
+    return g if isinstance(g, dict) else {}
+
+
+def _frozen_gold_gate(policy, gate_cfg):
+    """Pre-flight gate: if enabled and a reduced-step sampler is configured,
+    compare it to the 10-step DDPM gold and REFUSE to serve if the trajectory
+    drift exceeds ``max_chosen_l2`` -- a too-aggressive K never reaches the drone.
+    A no-op for ``sampler: ddpm`` (nothing to check) or when disabled."""
+    if not gate_cfg.get("enabled"):
+        return
+    if policy.sampler == "ddpm":
+        print("[navdp-trt] frozen-gold gate: nothing to check (sampler=ddpm)")
+        return
+    from sparx_agency.tasks.planning.navdp.benchmark.validate_steps import frozen_gold_check
+    k = len(policy.scheduler.timesteps)
+    m = frozen_gold_check(policy, k, num_scenarios=int(gate_cfg.get("scenarios", 16)),
+                          frames=gate_cfg.get("frames"))
+    limit = float(gate_cfg.get("max_chosen_l2", 5.0))
+    inputs = "real" if gate_cfg.get("frames") else "RANDOM(smoke)"
+    print("[navdp-trt] frozen-gold gate: ddim/%d vs ddpm/%d  chosen_L2=%.3f "
+          "(limit %.3f, inputs=%s, flip=%.3f)"
+          % (k, m["num_train"], m["chosen_l2"], limit, inputs, m["argmax_flip"]))
+    if m["chosen_l2"] > limit:
+        raise SystemExit(
+            "[fatal] frozen-gold gate FAILED: ddim/%d trajectory drift %.3f > %.3f "
+            "vs the 10-step baseline -- too aggressive to fly. Lower "
+            "num_inference_steps, raise max_chosen_l2, or validate on real "
+            "--frames first." % (k, m["chosen_l2"], limit))
+
+
 def _require_trt_artifacts(engine_dir, head_params):
     """Fail loud if the engine directory is not a complete, selected build."""
     engine_dir = Path(engine_dir)
@@ -108,6 +153,7 @@ def _trt_agent_builder(args):
                             num_inference_steps=steps)   # loads + version-locks now
     print("[navdp-trt] engines loaded (precision=%s, sampler=%s, steps=%d)"
           % (policy.precision, policy.sampler, len(policy.scheduler.timesteps)))
+    _frozen_gold_gate(policy, load_gate_config(args.speed_config))   # refuses to serve a bad K
     return lambda intrinsic: make_trt_agent(
         intrinsic, args.engine_dir, head, navdp_repo=args.navdp_repo,
         render_cam_height=args.render_cam_height, policy=policy)

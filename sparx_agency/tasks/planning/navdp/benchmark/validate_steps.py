@@ -129,6 +129,34 @@ def _run(policy, scenarios, use_variance):
     return res
 
 
+def frozen_gold_check(policy, k, num_scenarios=16, frames=None, seed=0,
+                      stop_threshold=-999.0):
+    """Compare a K-step DDIM config to the 10-step DDPM 'frozen gold' on ``policy``.
+
+    Runs both on the SAME engines and returns the drift metrics. RESTORES the
+    policy's incoming sampler before returning, so it is safe to call at server
+    startup as a pre-flight gate. On random inputs ``chosen_l2`` is the robust
+    signal (it catches a catastrophically low K even when argmax-flip is noise);
+    ``argmax_flip`` is only trustworthy with real ``frames``.
+
+    Returns a dict: ``argmax_flip``, ``stop_match``, ``zero_match``, ``chosen_l2``,
+    ``num_train``, ``k``, ``scenarios``.
+    """
+    t = len(policy._alphas_cumprod)
+    scenarios = _load_scenarios(frames, num_scenarios, t, seed)
+    incoming = (policy.sampler, policy.num_inference_steps)
+    try:
+        policy.configure_sampler("ddpm")
+        gold = _run(policy, scenarios, use_variance=True)
+        policy.configure_sampler("ddim", k)
+        test = _run(policy, scenarios, use_variance=False)
+    finally:
+        policy.configure_sampler(*incoming)                 # restore serving config
+    flip, stop_m, zero_m, l2 = _metrics(gold, test, stop_threshold)
+    return {"argmax_flip": flip, "stop_match": stop_m, "zero_match": zero_m,
+            "chosen_l2": l2, "num_train": t, "k": k, "scenarios": len(scenarios)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--engine-dir", required=True)

@@ -36,11 +36,18 @@ runtime:
   #   dpm  : DPM-Solver (fewer steps per quality) -- NOT yet implemented; use ddim.
   sampler: ddpm                  # ddpm | ddim
 
-  # Reducing steps CHANGES trajectories, which the FP32 parity gate cannot bless.
-  # Validate a reduced-step config against the frozen 10-step DDPM baseline with:
-  #   python -m ...benchmark.validate_steps --engine-dir <dir> --steps <K>
-  # (reports Hz speedup + argmax-flip / stop / zeroing divergence).
-  validate_against_frozen_gold: false
+  # Startup safety gate (LIVE): when enabled, the server compares the configured
+  # reduced-step sampler to the 10-step DDPM gold BEFORE serving and REFUSES to
+  # start if the trajectory drift exceeds max_chosen_l2 -- so a too-aggressive K
+  # never reaches the drone. `chosen_L2` is the robust signal (catches a
+  # catastrophically low K even on random inputs, e.g. K=2 blew up to ~14); set
+  # `frames` to a real-RGB-D npz for a meaningful check of subtle quality.
+  # No-op for sampler: ddpm. For a full offline report use benchmark.validate_steps.
+  validate_against_frozen_gold:
+    enabled: false
+    max_chosen_l2: 5.0     # refuse to serve if drift vs the 10-step gold exceeds this
+    scenarios: 16          # quick check size (adds a few seconds to startup)
+    frames: null           # real-RGB-D npz for a trustworthy check; null -> random smoke
 
 # ===========================================================================
 # TIER 2 -- REQUIRES ONNX RE-EXPORT + TRT REBUILD (build_engine + bench).
