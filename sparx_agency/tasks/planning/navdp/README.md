@@ -120,9 +120,12 @@ filenames), and the Stage-3 server fails loud if that file is absent — it neve
 guesses a precision. If no precision passes the gate, `bench` raises instead of
 shipping a bad engine.
 
-INT8 is an optional stretch: build with `--precision int8 --calib-npz <frames>`
-and it is selected **only if** it clears a stricter on-device accuracy gate
-(`argmax`-flip / stop-decision / `<0.5`-zeroing vs the FP32 torch reference).
+INT8 is a first-class option: capture a calibration `.npz` with
+`engine/gen_calib.py` (from the baseline torch model — no TRT engines needed),
+build with `--precision int8 --calib-npz <npz>`, and it is selected **only if** it
+clears a stricter on-device accuracy gate (`argmax`-flip / stop-decision /
+`<0.5`-zeroing vs the FP32 torch reference). See **Precision recipes (FP16 / INT8
+/ INT4)** below for the exact per-model commands and parameters.
 
 #### Power mode matters more than workspace
 
@@ -160,6 +163,91 @@ Validated on x86 (RTX 5070, sm_120, TRT 11): encoder FP32 + denoise/critic FP16
 passes the gate at **0% argmax-flip**, ~20 Hz end-to-end, and a full client
 round-trip returns a 24-waypoint trajectory. The Orin's all-FP16 TRT-10 build should
 match or beat this — re-run the gate there to confirm before flying.
+
+### Precision recipes (FP16 / INT8 / INT4)
+
+All three engines share **one** exported ONNX — precision is a *build-time*
+choice — so you export once and then build whichever precision you want. The knob
+is the `build_engine` **`--precision`** flag, plus (INT8 only) a **`--calib-npz`**
+calibration file. `bench` then picks the fastest precision that clears its gate
+and writes `selected.json`.
+
+| Model | `build_engine` flags | Extra prerequisite | Availability |
+|---|---|---|---|
+| **FP16** | `--precision fp16` | — | always (shippable default) |
+| **INT8** | `--precision int8 --calib-npz <npz>` | a calibration `.npz` (below) | Orin TRT-10 only; must clear the *stricter* gate |
+| **INT4** | *not a flag* | — | **not supported** — see below |
+
+Full AGX sequence — export once, build FP16 **and** INT8, let the gate choose:
+
+```bash
+conda activate navdp
+export NAVDP_REPO=~/GIT/NavDP/baselines/navdp
+export CKPT=$NAVDP_REPO/checkpoints/best.pth
+export ENGINES=sparx_agency/tasks/planning/navdp/engines
+cd ~/GIT/TheAgency && export PYTHONPATH=$PWD
+
+sudo nvpmodel -m <15W_id> && sudo nvpmodel -q          # 15W; do NOT run jetson_clocks
+
+# 1) export ONNX + head params ONCE (precision-agnostic)
+python -m sparx_agency.tasks.planning.navdp.export.export_onnx \
+    --ckpt "$CKPT" --navdp-repo "$NAVDP_REPO" --out-dir $ENGINES/onnx --no-slim
+
+# 2a) FP16 engines           (param: --precision fp16)
+python -m sparx_agency.tasks.planning.navdp.engine.build_engine \
+    --onnx-dir $ENGINES/onnx --precision fp16
+
+# 2b) INT8 engines           (params: --precision int8  +  --calib-npz)
+#     first capture calibration data from the torch model (no TRT engines needed):
+python -m sparx_agency.tasks.planning.navdp.engine.gen_calib \
+    --ckpt "$CKPT" --navdp-repo "$NAVDP_REPO" \
+    --out $ENGINES/onnx/calib.npz --num-scenarios 64      # + --frames real_rgbd.npz for a shippable encoder
+python -m sparx_agency.tasks.planning.navdp.engine.build_engine \
+    --onnx-dir $ENGINES/onnx --precision int8 --calib-npz $ENGINES/onnx/calib.npz
+
+# 3) gate: benchmarks BOTH precisions, writes selected.json to the fastest that passes
+python -m sparx_agency.tasks.planning.navdp.benchmark.bench \
+    --engine-dir $ENGINES/orin_sm87 --ckpt "$CKPT" --navdp-repo "$NAVDP_REPO"
+
+# 4) run the server on the chosen precision
+python -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
+    --engine-dir $ENGINES/orin_sm87 --navdp-repo "$NAVDP_REPO" --port 8888
+```
+
+Both engine sets coexist (filenames carry the precision, e.g.
+`navdp_denoise.int8.engine` vs `navdp_denoise.fp16.engine`), so to **force** a
+precision instead of letting the gate choose, edit `selected.json`'s `"precision"`
+and `"engines"` to `fp16` or `int8`.
+
+**Calibration data (`calib.npz`), INT8 only.** `engine/gen_calib.py` runs the
+baseline torch model and captures representative inputs for all three engines:
+- **encoder** — pass `--frames real_rgbd.npz` (an `.npz` with `images
+  (K,8,224,224,3)`, `depth (K,224,224,1)`, optional `goals (K,3)`) for a
+  shippable encoder; omit it for a random-RGB-D **bootstrap** that BUILDS but
+  likely misses the encoder gate (uniform noise is out-of-distribution for the ViT).
+- **denoise / critic** — captured automatically from the full 10-step loop across
+  all timesteps (so the `last_actions` range spans noisy→clean).
+- `--num-scenarios` sets the sample count (64 default; denoise gets ×10 that).
+
+**Why there is no INT4.** It is not a flag you can flip here, and it should not be
+faked:
+- `build_engine --precision` accepts only `fp16`/`int8`; the Orin's TRT-10
+  weak-typed path exposes `BuilderFlag.FP16`/`INT8` and an INT8 *entropy
+  calibrator* — TensorRT's calibration API has no INT4 flag or INT4 calibrator.
+- Real TRT INT4 is **weight-only, block-quantized**, requiring a *Q/DQ ONNX*
+  produced by a separate toolkit (NVIDIA TensorRT Model Optimizer) and the
+  **strongly-typed** build path — which this pipeline reserves for TRT≥11 and
+  which *rejects* the calibrator route. It is a different toolchain, not a parameter.
+- Even wired up, INT4 targets memory-bandwidth-bound LLM weight matrices; these
+  graphs are small DINOv2 ViT-S + a 24-token diffusion decoder (compute-bound), so
+  INT4 weight-only buys little speed, while INT4 *activations* would wreck the
+  10-step trajectory and the gate would reject it.
+
+If you truly want to pursue it: export an INT4 Q/DQ ONNX via TensorRT Model
+Optimizer with calibration, add a strongly-typed INT4 build path, and rebuild the
+accuracy gate — a project, not a `--precision` value. For runtime at 15 W, **INT8
+is the real low-precision lever**; the larger win is fewer sampler steps (a
+separate, gate-blocked change).
 
 ### Engine variants & A/B comparison
 
