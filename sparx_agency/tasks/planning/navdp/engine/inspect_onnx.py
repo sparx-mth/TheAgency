@@ -66,11 +66,14 @@ def inspect(onnx_path, profile, precision="fp16"):
     engine_key = Path(onnx_path).stem
     node_count = _count_nodes(onnx_path)
     cfg = load_build_policy()
-    # A 15 W Jetson benefits from a lower optimization level (shorter build, less
-    # memory churn); a desktop dGPU can afford the max search.
+    # builder_optimization_level is OFFLINE build-search effort, NOT a runtime
+    # power/memory knob: nvpmodel clamps runtime power regardless of which tactics
+    # the engine picks. So the 15 W target uses the SAME max search (5) as a
+    # desktop -- a higher level only costs a longer one-time build and can yield a
+    # same-or-faster engine (the on-target gate re-validates numerics on rebuild).
     levels = cfg.get("builder_optimization_level", {})
     is_15w = profile.is_jetson and (profile.power_budget_w or 99) <= 15
-    opt_level = levels.get("orin_15w", 3) if is_15w else levels.get("default", 5)
+    opt_level = levels.get("orin_15w", 5) if is_15w else levels.get("default", 5)
     keep = list(cfg.get("fp_keep_keywords", FP_KEEP_KEYWORDS))
     force_fp32 = engine_key in cfg.get("strongly_typed_fp32_engines", [])
     return NetworkPolicy(
