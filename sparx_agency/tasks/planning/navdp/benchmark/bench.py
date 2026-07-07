@@ -101,7 +101,10 @@ def gen_scenarios(num, seed=0):
 def _chosen(result):
     """(executed trajectory, argmax index, critic.max, chosen-sample zeroed?)."""
     all_traj, critic, positive, _ = result
-    idx = int(np.argmax(critic[0]))
+    # Use the SAME ordering that produced the executed trajectory (positive[0,0]
+    # comes from argsort(-critic)), so the flip/zero checks describe the sample
+    # the drone would actually fly, even on an exact critic tie.
+    idx = int(np.argsort(-critic[0])[0])
     length = float(np.linalg.norm(all_traj[0, idx, -1, 0:2]))
     return positive[0, 0], idx, float(critic[0].max()), length < 0.5
 
@@ -179,17 +182,24 @@ def main():
     scenarios = gen_scenarios(args.num_scenarios)
 
     rows = []
-    for precision in ("fp16", "int8"):
-        if all((engine_dir / ("%s.%s.engine" % (k, precision))).exists()
-               for k in build_engine.ENGINE_KEYS):
-            print("[bench] evaluating", precision)
-            rows.append(evaluate(precision, engine_dir, npz, ref, scenarios, args.stop_threshold))
-
-    if not rows:
-        raise RuntimeError("No engines found in %s" % engine_dir)
-    passing = [r for r in rows if r["passed"]]
-    if not passing:
-        raise RuntimeError("No precision passed the accuracy gate: %s" % rows)
+    try:
+        for precision in ("fp16", "int8"):
+            if all((engine_dir / ("%s.%s.engine" % (k, precision))).exists()
+                   for k in build_engine.ENGINE_KEYS):
+                print("[bench] evaluating", precision)
+                rows.append(evaluate(precision, engine_dir, npz, ref, scenarios, args.stop_threshold))
+        if not rows:
+            raise RuntimeError("No engines found in %s" % engine_dir)
+        passing = [r for r in rows if r["passed"]]
+        if not passing:
+            raise RuntimeError("No precision passed the accuracy gate: %s" % rows)
+    except BaseException:
+        # evaluate() writes selected.json per-precision as a side effect (the
+        # policy resolves its engines only from that file). If no precision is
+        # blessed -- or a scenario crashes mid-loop -- never leave selected.json
+        # pointing at an unvalidated / gate-failed engine for the server to load.
+        (engine_dir / "selected.json").unlink(missing_ok=True)
+        raise
     # Prefer the fastest passing precision; FP16 wins ties (safer).
     winner = max(passing, key=lambda r: (r["hz"], r["precision"] == "fp16"))
     _write_selected(engine_dir, winner["precision"])
