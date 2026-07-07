@@ -51,12 +51,24 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///home/rooster/workspace/src/cyclonedds.xml
 export PYTHONUNBUFFERED=1"""
 
+# Host-side env for talking to the ROBOTICAN container over network_mode: host.
+# Must match _CONTAINER_ENV's ROS_DOMAIN_ID/RMW or the two sides never
+# discover each other's topics (the plain "ros" env below is ROS_DOMAIN_ID=5,
+# which is for the Jetson/XTEND stack, not ROBOTICAN).
+_ROOSTER_PC_ENV = """
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=9
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export PYTHONUNBUFFERED=1
+"""
+
 _ENVS = {
     "ros":       _ROS_ENV,
     "depth_ws":  _DEPTH_WS_ENV,
     "nanoowl":   _NANOOWL_ENV,
     "none":      "",
     "container": _CONTAINER_ENV,
+    "rooster_pc": _ROOSTER_PC_ENV,
 }
 
 
@@ -358,6 +370,45 @@ ROBOTICAN_SERVICES: list[Service] = [
         container_name=ROOSTER_CONTAINER,
         is_interactive=True,
         proc_pattern="position_fly_controller",
+    ),
+    # ── Command unit + UI ────────────────────────────────────────────────────
+    # RoosterCommandUnit is the single gateway that talks to the FCU for one
+    # drone: it owns arm/disarm/takeoff/land/manual-move and listens on
+    # /<id>/cmd_nav (JSON). The manual UI below is just one publisher on that
+    # topic — a planner node can publish the same JSON commands to drive the
+    # same drone through the same gateway.
+    Service(
+        name="Rooster Command Unit (R1)",
+        key="rooster_command_unit_R1",
+        group="rooster_core",
+        description=(
+            "Single command gateway for R1 — owns arm/disarm/takeoff/land/move.\n"
+            "Listens on /R1/cmd_nav (String JSON), publishes /R1/rooster_status.\n"
+            "Both the manual UI and a future planner talk to this one node."
+        ),
+        cmd=(
+            "python3 /home/rooster/sparx_agency/robots/ROBOTICAN/adapters/rooster_command_unit.py \\\n"
+            "  --ros-args \\\n"
+            "  -p rooster_id:=R1 \\\n"
+            "  -p climb_z:=600.0 \\\n"
+            "  -p hover_z:=550.0"
+        ),
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        proc_pattern="rooster_command_unit",
+    ),
+    Service(
+        name="Rooster Manual UI (R1)",
+        key="rooster_manual_ui_R1",
+        group="rooster_core",
+        description=(
+            "ARM / TAKEOFF / LAND / DISARM + movement d-pad for R1.\n"
+            "Publishes /R1/cmd_nav — requires Rooster Command Unit (R1) running."
+        ),
+        cmd="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/ui.py --ros-args -p rooster_id:=R1",
+        env="rooster_pc",
+        machine="pc",
     ),
     # ── Monitors ──────────────────────────────────────────────────────────────
     Service(

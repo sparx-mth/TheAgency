@@ -179,6 +179,38 @@ LAUNCH_ITEMS: list[LaunchItem] = [
         enabled_by_default=False,
         command="docker exec -it it bash",
     ),
+    LaunchItem(
+        name="9. Rooster command unit (R1)",
+        machine="container",
+        proc_key="rooster_command_unit",
+        description=(
+            "Single command gateway for R1 — the one node that actually talks\n"
+            "to the FCU (arm/disarm/takeoff/land/move). Listens on /R1/cmd_nav\n"
+            "(String JSON) and publishes /R1/rooster_status.\n\n"
+            "Run this instead of item 1 when using the Rooster manual UI (item 10)\n"
+            "or, later, a planner — both just publish to /R1/cmd_nav.\n\n"
+            "cmd_nav actions: arm, disarm, takeoff, land, forward, backward,\n"
+            "left, right, up, down, turn_left, turn_right, stop."
+        ),
+        command=(
+            "python3 /home/rooster/sparx_agency/robots/ROBOTICAN/adapters/rooster_command_unit.py \\\n"
+            "  --ros-args \\\n"
+            "  -p rooster_id:=R1 \\\n"
+            "  -p climb_z:=600.0 \\\n"
+            "  -p hover_z:=550.0"
+        ),
+    ),
+    LaunchItem(
+        name="10. Rooster manual UI (Tkinter, host)",
+        machine="pc",
+        proc_key="ROBOTICAN/ui.py",
+        description=(
+            "ARM / TAKEOFF / LAND / DISARM + movement d-pad for R1.\n"
+            "Runs on the host (like the XTEND UI) — publishes /R1/cmd_nav.\n"
+            "Requires item 9 (Rooster command unit) running in the container."
+        ),
+        command="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/ui.py --ros-args -p rooster_id:=R1",
+    ),
 ]
 
 
