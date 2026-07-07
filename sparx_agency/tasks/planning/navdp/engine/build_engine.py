@@ -71,14 +71,34 @@ def _load_timing_cache(config, trt, cache_path):
 
 
 def _pin_precision(network, trt, policy):
-    """Pin sensitive layers to FP32 under INT8 (no-op for pure FP16)."""
+    """Pin sensitive FLOAT layers to FP32 under INT8 (no-op for pure FP16).
+
+    Only float-valued layers are pinned. Shape / constant / integer layers are
+    skipped: their outputs must stay INT32/INT64 (``IShapeLayer``, shape math, and
+    the Int64 constants baked into the ``pos_embed`` / ``former`` subgraphs), and a
+    name-substring match (e.g. ``pos_embed`` hitting ``.../Constant_2_output_0``)
+    would otherwise force FP32 on them -- an illegal TensorRT API use that fails
+    the whole INT8 build ("IShapeLayer can only run in precision Int64" /
+    "cannot use precision Float with weights of type Int64"). Skipping them does
+    not weaken the safeguard: those layers never did float math to begin with.
+    """
     if not policy.use_int8:
         return
+    int_dtypes = {getattr(trt, n) for n in ("int32", "int64", "bool") if hasattr(trt, n)}
+    skip_types = {getattr(trt.LayerType, n) for n in ("SHAPE", "CONSTANT")
+                  if hasattr(trt.LayerType, n)}
     for i in range(network.num_layers):
         layer = network.get_layer(i)
-        if any(kw in layer.name.lower() for kw in policy.fp_keep_keywords):
-            layer.precision = trt.float32
-            for o in range(layer.num_outputs):
+        if not any(kw in layer.name.lower() for kw in policy.fp_keep_keywords):
+            continue
+        if layer.type in skip_types:
+            continue
+        outs = [layer.get_output(o) for o in range(layer.num_outputs)]
+        if any(t is not None and t.dtype in int_dtypes for t in outs):
+            continue                       # integer/shape output -> must not be FP32
+        layer.precision = trt.float32
+        for o, t in enumerate(outs):
+            if t is not None:
                 layer.set_output_type(o, trt.float32)
 
 
