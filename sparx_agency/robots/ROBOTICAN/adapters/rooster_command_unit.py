@@ -11,7 +11,7 @@ talks to the FCU, regardless of who issued the command.
 
 cmd_nav payload (std_msgs/String, JSON):
     {"action": "arm|disarm|takeoff|land|forward|backward|left|right|
-                up|down|turn_left|turn_right|stop",
+                up|down|turn_left|turn_right|stop|video_on|video_off",
      "value": <float, optional axis magnitude, default 400>}
 """
 
@@ -24,6 +24,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from sparx_agency.robots.ROBOTICAN.helpers.rooster_unit import RoosterUnit
+from sparx_agency.robots.ROBOTICAN.helpers.rooster_payload import RoosterPayload
 
 DEFAULT_AXIS_VALUE = 400.0
 
@@ -50,6 +51,10 @@ class RoosterCommandUnitNode(Node):
         self.declare_parameter("land_step_interval_sec", 1.0)
         self.declare_parameter("land_timeout_sec", 30.0)
         self.declare_parameter("publish_hz", 40.0)
+        self.declare_parameter("video_host", "127.0.0.1")
+        self.declare_parameter("video_port", 5001)
+        self.declare_parameter("video_width", 540)
+        self.declare_parameter("video_height", 360)
 
         rooster_id = self.get_parameter("rooster_id").value
         climb_z = float(self.get_parameter("climb_z").value)
@@ -58,6 +63,10 @@ class RoosterCommandUnitNode(Node):
         land_step_interval_sec = float(self.get_parameter("land_step_interval_sec").value)
         land_timeout_sec = float(self.get_parameter("land_timeout_sec").value)
         publish_hz = float(self.get_parameter("publish_hz").value)
+        video_host = self.get_parameter("video_host").value
+        video_port = int(self.get_parameter("video_port").value)
+        video_width = int(self.get_parameter("video_width").value)
+        video_height = int(self.get_parameter("video_height").value)
 
         self.rooster_id = rooster_id
         self.unit = RoosterUnit(
@@ -67,6 +76,11 @@ class RoosterCommandUnitNode(Node):
             land_step_interval_sec=land_step_interval_sec,
             land_timeout_sec=land_timeout_sec,
         )
+        self.payload = RoosterPayload(
+            self, rooster_id,
+            video_host=video_host, video_port=video_port,
+            video_width=video_width, video_height=video_height,
+        )
 
         self.cmd_sub = self.create_subscription(
             String, f"/{rooster_id}/cmd_nav", self._on_cmd_nav, 10)
@@ -75,6 +89,7 @@ class RoosterCommandUnitNode(Node):
 
         self.create_timer(1.0 / publish_hz, self.unit.publish_manual)
         self.create_timer(1.0, self.unit.publish_keep_alive)
+        self.create_timer(1.0, self.payload.publish_gcs_keep_alive)
         self.create_timer(0.2, self._publish_status)
 
         self.get_logger().info(
@@ -89,6 +104,9 @@ class RoosterCommandUnitNode(Node):
             "armed": bool(self.unit.armed),
             "airborne": bool(self.unit.airborne),
             "busy_action": self.unit.busy_action,
+            "battery_pct": self.payload.battery_percentage,
+            "battery_voltage": self.payload.battery_voltage,
+            "video_on": self.payload.video_on,
         })
         self.status_pub.publish(msg)
 
@@ -113,6 +131,10 @@ class RoosterCommandUnitNode(Node):
             unit.land()
         elif action == "stop":
             unit.stop()
+        elif action == "video_on":
+            self.payload.set_video(True)
+        elif action == "video_off":
+            self.payload.set_video(False)
         elif action in _MOVE_ACTIONS:
             # Only override the axis this action controls - z in particular
             # is throttle/altitude-hold, and defaulting it to 0 here would
