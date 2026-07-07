@@ -1,0 +1,96 @@
+# NavDP inference-speed profile
+# ==============================
+# Model-level knobs that trade a little accuracy for runtime speed, WITHOUT
+# changing the algorithms. Organized by COST TO CHANGE -- read the tier header
+# before touching a knob, because it answers "do I need to re-optimize TRT?":
+#
+#   TIER 1  runtime   : takes effect on the next server start.  NO TRT rebuild.
+#   TIER 2  rebuild   : needs ONNX re-export + build_engine + bench.  NO retrain.
+#   TIER 3  retrain   : baked into the trained weights.  LOCKED (enabled: false).
+#
+# Per-decision cost is ~71% the 10x denoise loop and ~29% encoder+critic, so the
+# TIER-1 `num_inference_steps` knob is by far the highest-leverage change.
+#
+# WIRING STATUS: this file DEFINES the control surface. It is read on the tasks
+# side (server) and passed as plain values into the core policy, so `core` stays
+# numpy-only. A knob only takes effect once its consumer is wired -- see the
+# `wired` flag on each tier. Nothing here is live until then; values are targets.
+
+schema_version: 1
+
+# ===========================================================================
+# TIER 1 -- RUNTIME ONLY.  No TRT rebuild. Edit -> restart the server.
+# ===========================================================================
+runtime:
+  wired: false        # set true once the DDIM sampler + loader are in place
+
+  # Diffusion denoise steps per decision. Trained at 10 (DDPM). Fewer steps is a
+  # ~linear cut of the 71% denoise budget (rough end-to-end):
+  #   10 -> 1.00x (baseline)   5 -> ~1.55x   4 -> ~1.74x   2 -> ~2.5x
+  # NOTE: values < 10 REQUIRE sampler != ddpm (DDPM cannot skip timesteps).
+  num_inference_steps: 10        # try 4; keep 10 for the bit-faithful baseline
+
+  # Sampler used to run `num_inference_steps`:
+  #   ddpm : trained default; MUST use 10 steps (stochastic, bit-faithful).
+  #   ddim : deterministic; subsamples the 10 trained timesteps -> allows < 10.
+  #   dpm  : DPM-Solver; fewest steps for a given quality (2-4).
+  sampler: ddpm                  # ddpm | ddim | dpm
+
+  # Reducing steps CHANGES trajectories, which the FP32 parity gate cannot bless.
+  # When true, the runtime is validated against a frozen 10-step gold instead
+  # (argmax / stop / zeroing divergence), the honest way to measure step cuts.
+  validate_against_frozen_gold: false
+
+# ===========================================================================
+# TIER 2 -- REQUIRES ONNX RE-EXPORT + TRT REBUILD (build_engine + bench).
+#           Same weights, NO retrain. `bench` re-validates numerics on rebuild.
+# ===========================================================================
+rebuild:
+  wired: false        # `sample_num` currently comes from io_spec.N (static)
+
+  # Candidate trajectories denoised in parallel, then ranked by the critic.
+  # Baked into the engine's STATIC batch (io_spec.N), so changing it needs a
+  # re-export + rebuild. Fewer = faster denoise + critic, but the critic has
+  # fewer routes to choose from (navigation-quality tradeoff; needs task eval).
+  sample_num: 16                 # try 8; MUST re-export ONNX + rebuild engines
+
+  # Encoder frame-caching: the 8 RGB memory frames are a sliding window, so run
+  # the ViT only on the NEW frame and reuse cached tokens for the other 7 (the
+  # Q-Former still runs over all). ~1.2x, no retrain -- needs the encoder graph
+  # split into (per-frame ViT) + (Q-Former), i.e. a re-export.
+  encoder_frame_cache: false     # not yet implemented
+
+# ===========================================================================
+# TIER 3 -- REQUIRES RETRAINING.  LOCKED. These are baked into the trained
+#           weights; changing them needs a NEW checkpoint. Listed for planning
+#           only. Keep enabled: false -- we are NOT changing these for now.
+# ===========================================================================
+retrain:
+  enabled: false                 # master lock for this whole tier
+
+  predict_size:                  # trajectory horizon (waypoints the head emits)
+    enabled: false
+    trained_value: 24
+    proposed_value: 12           # shorter look-ahead; moderate speedup; retrain
+
+  memory_size:                   # RGB memory frames fed to the encoder
+    enabled: false
+    trained_value: 8
+    proposed_value: 4            # less temporal/obstacle memory; retrain
+
+  token_dim:                     # transformer width
+    enabled: false
+    trained_value: 384
+
+  decoder_layers:                # denoise decoder depth
+    enabled: false
+    trained_value: 16
+
+  backbone:                      # encoder ViT size
+    enabled: false
+    trained_value: dinov2_vit_s
+    proposed_value: dinov2_vit_t # smaller/faster encoder; retrain
+
+  distillation:                  # consistency / few-step student model
+    enabled: false               # highest ceiling (~3.4x) but the biggest project
+    proposed_steps: 2
