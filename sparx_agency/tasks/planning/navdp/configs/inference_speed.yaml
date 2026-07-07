@@ -22,23 +22,24 @@ schema_version: 1
 # TIER 1 -- RUNTIME ONLY.  No TRT rebuild. Edit -> restart the server.
 # ===========================================================================
 runtime:
-  wired: false        # set true once the DDIM sampler + loader are in place
+  wired: true         # LIVE: read by server/navdp_trt_server.py -> NavDPTRTPolicy
 
   # Diffusion denoise steps per decision. Trained at 10 (DDPM). Fewer steps is a
   # ~linear cut of the 71% denoise budget (rough end-to-end):
   #   10 -> 1.00x (baseline)   5 -> ~1.55x   4 -> ~1.74x   2 -> ~2.5x
-  # NOTE: values < 10 REQUIRE sampler != ddpm (DDPM cannot skip timesteps).
-  num_inference_steps: 10        # try 4; keep 10 for the bit-faithful baseline
+  # NOTE: values < 10 REQUIRE sampler: ddim (DDPM cannot skip timesteps).
+  num_inference_steps: 10        # try 4 (with sampler: ddim); 10 = bit-faithful baseline
 
   # Sampler used to run `num_inference_steps`:
   #   ddpm : trained default; MUST use 10 steps (stochastic, bit-faithful).
-  #   ddim : deterministic; subsamples the 10 trained timesteps -> allows < 10.
-  #   dpm  : DPM-Solver; fewest steps for a given quality (2-4).
-  sampler: ddpm                  # ddpm | ddim | dpm
+  #   ddim : deterministic; subsamples the 10 trained timesteps -> allows < 10. [implemented]
+  #   dpm  : DPM-Solver (fewer steps per quality) -- NOT yet implemented; use ddim.
+  sampler: ddpm                  # ddpm | ddim
 
   # Reducing steps CHANGES trajectories, which the FP32 parity gate cannot bless.
-  # When true, the runtime is validated against a frozen 10-step gold instead
-  # (argmax / stop / zeroing divergence), the honest way to measure step cuts.
+  # Validate a reduced-step config against the frozen 10-step DDPM baseline with:
+  #   python -m ...benchmark.validate_steps --engine-dir <dir> --steps <K>
+  # (reports Hz speedup + argmax-flip / stop / zeroing divergence).
   validate_against_frozen_gold: false
 
 # ===========================================================================

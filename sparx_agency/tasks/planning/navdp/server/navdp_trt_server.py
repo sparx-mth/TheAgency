@@ -42,6 +42,34 @@ app = Flask(__name__)
 _AGENT = None        # constructed on first /navigator_reset
 _BUILD_AGENT = None  # closure: intrinsic -> agent
 _CFG = {}
+_DEFAULT_SPEED_CONFIG = (Path(__file__).resolve().parents[1]
+                         / "configs" / "inference_speed.yaml")
+
+
+def load_speed_config(path=None):
+    """Read the runtime sampler settings from the inference-speed YAML.
+
+    Returns ``(sampler, num_inference_steps)``. A missing file / missing pyyaml /
+    ``runtime.wired != true`` all fall back to the bit-faithful default
+    (``ddpm``, full trained steps), so an absent or not-yet-live config never
+    silently changes behaviour. Parsed on the tasks side only -- ``core`` never
+    gains a YAML dependency (the resolved values are passed in as plain kwargs).
+    """
+    default = ("ddpm", None)
+    p = Path(path) if path else _DEFAULT_SPEED_CONFIG
+    if not p.exists():
+        print("[navdp-trt] no speed config at %s; using ddpm baseline" % p)
+        return default
+    try:
+        import yaml
+    except ImportError:
+        print("[warn] pyyaml missing; ignoring %s, using ddpm baseline" % p)
+        return default
+    rt = ((yaml.safe_load(p.read_text()) or {}).get("runtime", {})) or {}
+    if not rt.get("wired", False):
+        print("[navdp-trt] %s runtime.wired=false; using ddpm baseline" % p.name)
+        return default
+    return str(rt.get("sampler", "ddpm")).lower(), rt.get("num_inference_steps")
 
 
 def _require_trt_artifacts(engine_dir, head_params):
@@ -71,8 +99,15 @@ def _trt_agent_builder(args):
     from sparx_agency.tasks.planning.navdp.server.trt_agent import make_trt_agent
     head = args.head_params or str(Path(args.engine_dir) / "navdp_head_params.npz")
     _require_trt_artifacts(args.engine_dir, head)
-    policy = NavDPTRTPolicy(args.engine_dir, head)   # loads + version-locks now
-    print("[navdp-trt] engines loaded (precision=%s)" % policy.precision)
+    sampler, steps = load_speed_config(args.speed_config)
+    if args.sampler:                          # CLI overrides the YAML
+        sampler = args.sampler
+    if args.num_inference_steps is not None:
+        steps = args.num_inference_steps
+    policy = NavDPTRTPolicy(args.engine_dir, head, sampler=sampler,
+                            num_inference_steps=steps)   # loads + version-locks now
+    print("[navdp-trt] engines loaded (precision=%s, sampler=%s, steps=%d)"
+          % (policy.precision, policy.sampler, len(policy.scheduler.timesteps)))
     return lambda intrinsic: make_trt_agent(
         intrinsic, args.engine_dir, head, navdp_repo=args.navdp_repo,
         render_cam_height=args.render_cam_height, policy=policy)
@@ -181,6 +216,12 @@ def main():
     ap.add_argument("--render-cam-height", type=float, default=0.2)
     ap.add_argument("--backend", choices=["trt", "torch"], default="trt")
     ap.add_argument("--allow-torch-fallback", action="store_true")
+    ap.add_argument("--speed-config", default=None,
+                    help="inference-speed YAML (default: configs/inference_speed.yaml)")
+    ap.add_argument("--sampler", default=None, choices=["ddpm", "ddim"],
+                    help="override runtime.sampler from the speed config")
+    ap.add_argument("--num-inference-steps", type=int, default=None,
+                    help="override runtime.num_inference_steps (ddim only)")
     args = ap.parse_args()
     if args.backend == "trt" and not args.engine_dir:
         raise SystemExit("[fatal] --backend trt needs --engine-dir")
