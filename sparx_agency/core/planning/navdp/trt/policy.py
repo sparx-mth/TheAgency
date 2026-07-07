@@ -91,6 +91,17 @@ class NavDPTRTPolicy:
             raise NavDPError("selected.json missing engine %r" % key)
         return TRTEngineRunner(self.engine_dir / engines[key], device_id=self.device_id)
 
+    @staticmethod
+    def _infer_out(runner, feeds, out_name):
+        """Run ``runner`` and return its ``out_name`` output, raising a clear
+        :class:`NavDPError` (not a bare ``KeyError``) if the engine was built with
+        a differently-named output than the runtime expects."""
+        out = runner.infer(feeds)
+        if out_name not in out:
+            raise NavDPError("engine %s produced no output %r; got %r"
+                             % (runner.engine_path.name, out_name, list(out)))
+        return out[out_name]
+
     def _load_head_params(self, npz_path):
         """Load point-encoder weights, the time table, and alphas_cumprod."""
         npz_path = Path(npz_path)
@@ -140,7 +151,7 @@ class NavDPTRTPolicy:
         goal_n = np.repeat(goal_embed[:, None, :], self.sample_num, axis=0)  # (N,1,384)
 
         naction = self._denoise_loop(rgbd_n, goal_n, init_noise, variance_noises)
-        critic = self._cri.infer({CRI_IN_TRAJ: naction, CRI_IN_RGBD: rgbd_n})[CRI_OUT]
+        critic = self._infer_out(self._cri, {CRI_IN_TRAJ: naction, CRI_IN_RGBD: rgbd_n}, CRI_OUT)
         return finalize_trajectories(naction, critic.reshape(-1), 1, self.sample_num)
 
     def _encode(self, input_images, input_depths):
@@ -149,7 +160,7 @@ class NavDPTRTPolicy:
             np.transpose(input_images, (0, 1, 4, 2, 3)), dtype=np.float32)  # (1,8,3,224,224)
         depth = np.ascontiguousarray(
             np.transpose(input_depths, (0, 3, 1, 2)), dtype=np.float32)     # (1,1,224,224)
-        return self._enc.infer({ENC_IN_IMAGES: images, ENC_IN_DEPTH: depth})[ENC_OUT]
+        return self._infer_out(self._enc, {ENC_IN_IMAGES: images, ENC_IN_DEPTH: depth}, ENC_OUT)
 
     def _denoise_loop(self, rgbd_n, goal_n, init_noise, variance_noises):
         """Run the 10-step DDPM loop; conditioning is uploaded once and resident."""
@@ -160,8 +171,8 @@ class NavDPTRTPolicy:
         self._den.upload({DEN_IN_RGBD: rgbd_n, DEN_IN_GOAL: goal_n})
         for step, k in enumerate(self.scheduler.timesteps):
             k = int(k)
-            noise_pred = self._den.infer(
-                {DEN_IN_ACTIONS: naction, DEN_IN_TIME: self._time_token(k)})[DEN_OUT]
+            noise_pred = self._infer_out(
+                self._den, {DEN_IN_ACTIONS: naction, DEN_IN_TIME: self._time_token(k)}, DEN_OUT)
             vn = None if variance_noises is None else variance_noises[step]
             naction = self.scheduler.step(noise_pred, k, naction, variance_noise=vn)
         return naction
