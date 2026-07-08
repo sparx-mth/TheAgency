@@ -1,131 +1,136 @@
-# YOLO-World TensorRT optimization (DLA-first, for Jetson AGX Orin @ 15 W)
+# Open-set YOLO-World TensorRT (backbone→DLA + head→GPU, Jetson AGX Orin @ 15 W)
 
-Turns the ultralytics **YOLO-World** checkpoints (`s` / `m` / `l` / `x`) into
-TensorRT engines tuned for the exact board they run on. The headline target is the
-**Jetson AGX Orin 64 GB pinned to 15 W**, where the two **DLA** cores are used to
-run the YOLO CNN off the GPU — the GPU is the throughput *and* power bottleneck at
-that cap, so offloading the convolutional backbone/neck to the fixed-function DLA
-is the single biggest win available.
+Turns the ultralytics **YOLO-World** checkpoints (`s`/`m`/`l`/`x`) into TensorRT
+engines that stay **fully open-vocabulary** while pushing the heavy convolutional
+work onto the Jetson AGX Orin **DLA**. You give a prompt (or a list of objects) at
+run time — never at build time — and can change it whenever you like, with no
+rebuild.
 
 This task owns only the **build + runtime + benchmark**. The detection algorithm
-stays ROS-free in `core.mapping.detection` (`YoloWorldDetector`, the torch path).
-The engine here is exposed through the same
-`DetectionModel` ABC (`runtime.YoloTRTDetector`), so the existing
-`yolo_detector_node` can consume it unchanged.
+stays ROS-free in `core.mapping.detection`; the TRT engine is exposed through the
+same `DetectionModel` ABC (`runtime.YoloTRTDetector`), so `yolo_detector_node`
+consumes it unchanged.
 
 ---
 
-## 0. The one thing to understand first: prompts are *baked in*
+## 0. The idea (why this stays open-set *and* uses the DLA)
 
-YOLO-World is open-vocabulary because it fuses a **CLIP text encoder** into the
-image neck. That text transformer is expensive and is *not* a good TensorRT/DLA
-citizen. The standard, fast deployment path — the one used here — calls
-`model.set_classes(prompts)` **before export**, which **freezes the text
-embeddings into the head as constants**. The exported graph is then a pure-vision
-CNN with a fixed number of classes `nc = len(prompts)`. That is exactly what makes
-it fast and DLA-able.
-
-**The trade-off:** a baked engine detects **only the prompts you baked**. To
-detect a new class you must re-export + re-build. So bake the **full mission
-vocabulary** you might ever target in one shot, e.g.:
+YOLO-World has two data paths with opposite runtime profiles:
 
 ```
---prompts refrigerator chair door person "fire extinguisher" backpack
+ prompts ─► [ CLIP text encoder ]* ─► txt_feats [N,512]   (* runs ONLY on re-prompt)
+                                          │  cached
+ image ─► [ backbone: conv/C2f/SPPF ] ─► feature maps      (static, text-free, EVERY frame)
+                                          │
+                    txt_feats ───────────┤
+                                          ▼
+              [ neck+head: RepVL-PAN + WorldDetect ] ─► detections  (text-fused, EVERY frame)
 ```
 
-At runtime you can *restrict* to a subset cheaply (`set_prompts(["refrigerator"])`),
-but you cannot add a class that was not baked. `runtime.YoloTRTDetector` enforces
-this and tells you to rebuild if you ask for an un-baked class.
+Your key insight drives the whole design: **the text side only runs when the
+object list changes.** So we never bake the prompts (that would kill open-set).
+Instead we split the model in two and feed the text embeddings as a **runtime
+input**:
+
+| Engine | Contents | Shapes | Device | Runs |
+|---|---|---|---|---|
+| **backbone** | CSPDarknet conv/C2f/SPPF | fully **static**, text-free | **DLA** (+GPU fallback) | every frame |
+| **head** | RepVL-PAN neck + WorldDetect | **dynamic N** (prompt count) | **GPU** | every frame |
+| **text** (`TextEmbedder`) | CLIP text encoder | — | torch (CPU/GPU) | only on re-prompt |
+
+- The **backbone** is the bulk of the compute and is a pure CNN → the part that
+  *can* go on DLA. DLA needs static shapes, and the backbone is N-independent, so
+  it qualifies cleanly.
+- The **head** fuses text and its class dimension follows the (runtime, variable)
+  prompt count → **dynamic shape → GPU** (DLA cannot do dynamic shapes). It is the
+  lighter part.
+- The **text encoder** is expensive and a poor TRT/DLA fit, but it runs *rarely*
+  (once per prompt change), so it stays torch and its cost is off the frame path.
+
+Net effect: arbitrary prompts at run time, the conv backbone offloaded to the two
+DLA cores (a big win at 15 W where the GPU is the power/thermal bottleneck), and a
+per-frame path that touches no torch.
+
+> **"Truly unlimited N":** TensorRT dynamic shapes need a maximum. The head is
+> built with a profile `N ∈ [n_min, n_opt, n_max]` (default `1 / 8 / 256`).
+> Re-prompt with **≤ n_max** classes needs no rebuild — 256 is far above any real
+> mission list. Raise it with `--n-max` / `N_MAX` if you ever need more.
 
 ---
 
-## 1. Why these hardware choices (nothing is left to TensorRT defaults)
+## 1. Nothing is left to TensorRT defaults
 
-`hardware.py` probes the board (`detect()`), and `build_policy.py` turns that plus
-`configs/build_policy.json` into an explicit `BuildPolicy` that `build_engine.py`
-applies literally:
+`hardware.py` probes the board; `build_policy.py` derives an explicit per-role
+`BuildPolicy` that `build_engine.py` applies literally:
 
-| Decision | Value | Why |
-|---|---|---|
-| **Precision** | FP16 (default) | DLA runs **FP16 or INT8 only, never FP32**. FP16 is the floor; INT8 is opt-in (see §7). |
-| **Device** | `DLA` core 0 + **GPU fallback** | A prompt-baked YOLO is a CNN → DLA. A few tail ops (head decode Reshape/Transpose, some Slice/Concat, the max-sigmoid class step) are not DLA-supported, so `GPU_FALLBACK` is **mandatory** — without it the build fails; with it, the conv-heavy 90 % stays on DLA. |
-| **DLA memory pools** | SRAM 1 MiB, local DRAM 1 GiB, global DRAM 512 MiB | Explicitly sized; the Orin DLA managed-SRAM is ~1 MiB/core. |
-| **Workspace** | ≤ ¼ of shared RAM at 15 W | LPDDR is shared with the CPU; stay well under the cap. |
-| **Optimization level** | 5 (max) | This is an **offline build-search** knob, *not* runtime power — nvpmodel clamps power regardless. Max search only costs a longer one-time build. |
-| **Input size** | `288×512` (H×W) default | Stride-32, matches the 504×294 landscape frame with minimal letterbox padding, ~2.8× fewer pixels than 640². Use `640×640` for max open-vocab accuracy. See §6. |
+| Decision | backbone | head | Why |
+|---|---|---|---|
+| Precision | FP16 | FP16 | DLA runs FP16/INT8 only; FP16 is the floor. INT8 is opt-in (§7). |
+| Device | **DLA** core 0 + **GPU fallback** | **GPU** | A few backbone tail ops (SPPF variants, some Slice/Concat) aren't DLA-supported → fallback is mandatory. The head is dynamic → GPU. |
+| Shapes | static | dynamic `N` profile | Static is what lets DLA accept the backbone; the head's class dim is the runtime prompt count. |
+| DLA pools | SRAM 1 MiB / local 1 GiB / global 512 MiB | — | Explicitly sized (Orin DLA managed-SRAM ≈ 1 MiB/core). |
+| Workspace | ≤ ¼ shared RAM @ 15 W | same | LPDDR is shared with the CPU. |
+| Opt level | 5 | 5 | Offline build-search knob, **not** runtime power (nvpmodel clamps that). Max search only costs a longer one-time build. |
+| Input size | `288×512` (H×W) default | — | Stride-32, matches the 504×294 landscape frame with minimal padding, ~2.8× fewer pixels than 640². `640×640` for max accuracy (§6). |
 
-DLA engines can be built **only on a Jetson**. On the x86 dev laptop the builder
-detects no DLA and transparently produces a **GPU FP16** engine instead, so the
-whole pipeline is still exercisable off-target (just not the DLA path).
+DLA engines build **only on a Jetson**. On the x86 laptop the builder finds no DLA
+and produces a **GPU** backbone engine instead, so the whole pipeline is still
+exercisable off-target (the DLA path just isn't taken).
 
 ---
 
 ## 2. Install
 
-### 2a. Export box (laptop or Orin) — needs torch + ultralytics + onnx
-Export is CPU-only and portable; you can do it on the laptop.
-
+### 2a. Export box (laptop or Orin) — torch + ultralytics + onnx
+Export is CPU-only and portable.
 ```bash
-# In the project venv (or any py>=3.10 env):
-pip install "ultralytics>=8.2" onnx onnxslim
-# torch comes as an ultralytics dependency; a CPU wheel is fine for export.
+pip install "ultralytics>=8.2" onnx onnxslim      # torch comes with ultralytics
 ```
 
-### 2b. Target Orin — needs TensorRT + pycuda (for build + runtime + benchmark)
-On JetPack these ship with the system Python. Use a venv **with system site
-packages** so it sees the JetPack `tensorrt`:
-
+### 2b. Target Orin — TensorRT + pycuda (build + runtime + benchmark)
+JetPack ships these; use a venv that can see the system packages:
 ```bash
-python3 -m venv --system-site-packages ~/venvs/trt
-source ~/venvs/trt/bin/activate
-python -c "import tensorrt, pycuda; print(tensorrt.__version__)"   # sanity
-pip install pycuda numpy opencv-python   # if not already present
+python3 -m venv --system-site-packages ~/venvs/trt && source ~/venvs/trt/bin/activate
+python -c "import tensorrt, pycuda; print(tensorrt.__version__)"
+pip install pycuda numpy opencv-python          # if missing
 ```
-
 > Build **on the target with the same TensorRT the runtime imports** — engines are
 > locked to the exact GPU + TensorRT build and are **not portable**.
 
-Always run modules from the **repo root** with it on `PYTHONPATH`:
+Run everything from the repo root with it on `PYTHONPATH`:
 ```bash
-cd /path/to/TheAgency
-export PYTHONPATH=$PWD
+cd /path/to/TheAgency && export PYTHONPATH=$PWD
 ```
 
 ---
 
-## 3. Where to put the weights, and where outputs land
+## 3. Where the weights go, and what gets produced
 
-### Input weights (the original `.pt` you provide)
-Download the four ultralytics YOLO-World checkpoints and put them in **one folder**
-of your choice (nothing is hardcoded). `worldv2` is preferred; `world` also works:
-
+### Input weights (you provide these)
+Put the four checkpoints in **one folder** (nothing is hardcoded; `worldv2`
+preferred, `world` also works):
 ```
 <WEIGHTS_DIR>/
-  yolov8s-worldv2.pt
-  yolov8m-worldv2.pt
-  yolov8l-worldv2.pt
-  yolov8x-worldv2.pt
+  yolov8s-worldv2.pt   yolov8m-worldv2.pt   yolov8l-worldv2.pt   yolov8x-worldv2.pt
 ```
-Get them from the ultralytics releases (e.g. `YOLOWorld("yolov8s-worldv2.pt")`
-auto-downloads on first use if you have internet). Point the tooling at them with
-`--weights <path>` or `WEIGHTS_DIR=<folder>` for `build_all.sh`.
+`YOLOWorld("yolov8s-worldv2.pt")` auto-downloads on first use if you have internet.
+Point the tools at them with `--weights <path>` (or `WEIGHTS_DIR=<folder>` for
+`build_all.sh`).
 
 ### Outputs (created for you)
 ```
 sparx_agency/tasks/mapping/yolo_world_trt/engines/
-  onnx/                          # exported ONNX + baked-class sidecars
-    yolo_world_s.onnx
-    yolo_world_s.classes.json    # the baked prompt order + shapes (do not edit)
+  onnx/
+    yolo_world_s.backbone.onnx        # image -> feature maps (static)
+    yolo_world_s.head.onnx            # feats + txt_feats -> detections (dynamic N)
+    yolo_world_s.io.json              # feat names/shapes, txt axis, N profile (do not edit)
     ...
-  <target_tag>/                  # e.g. orin_sm87  or  nvidiageforcertx_sm120
-    yolo_world_s.fp16.dla0.engine
-    yolo_world_s.fp16.dla0.engine.json   # manifest: TRT ver, SM, prompts, DLA layer count
+  <target_tag>/                       # e.g. orin_sm87  or  nvidiageforcertx_sm120
+    yolo_world_s.backbone.fp16.dla0.engine   (+ .json manifest: DLA layer count, IO, ...)
+    yolo_world_s.head.fp16.gpu.engine        (+ .json manifest: dynamic N bounds, ...)
     timing_<target_tag>.cache
     ...
 ```
-The `<target_tag>` subfolder keeps engines from different boards from clobbering
-each other. The `.json` manifest lets the runtime version-lock and records how many
-layers were DLA-eligible.
 
 ---
 
@@ -133,91 +138,91 @@ layers were DLA-eligible.
 
 ```bash
 cd /path/to/TheAgency && export PYTHONPATH=$PWD
-export PROMPTS="refrigerator chair door person"     # your baked mission vocabulary
 export WEIGHTS_DIR=/path/to/yolo_world_weights
-export IMAGES=/path/to/bench_frames                 # optional → also runs the benchmark
+export IMAGES=/path/to/bench_frames        # optional → also runs the benchmark
 ./sparx_agency/tasks/mapping/yolo_world_trt/build_all.sh
 ```
-
-This exports → builds → benchmarks `s`, `m`, `l`, `x` with the same prompts and
-input size, then prints a ranked FPS summary and writes
-`/tmp/yolo_world_trt_compare.csv`.
-
-Useful env overrides: `VARIANTS="s m"`, `IMGSZ=640x640`, `PRECISION=fp16`,
-`DLA=on|off|auto` (default `auto`), `PYTHON=/path/to/python`.
+Exports (backbone+head) → builds (backbone-DLA + head-GPU) → benchmarks `s/m/l/x`,
+prints a ranked FPS summary, and writes `/tmp/yolo_world_trt_compare.csv`.
+No prompts are needed at build time. Overrides: `VARIANTS`, `IMGSZ=640x640`,
+`N_MAX=256`, `NUM_PROMPTS=4`, `DLA=on|off|auto`, `PYTHON`.
 
 ---
 
-## 5. The steps, run manually (what `build_all.sh` does)
+## 5. The steps, run manually
 
-**Step 1 — Export to ONNX** (export box; bakes the prompts):
+**Step 1 — Export the split to ONNX** (export box; NO prompts baked):
 ```bash
 python -m sparx_agency.tasks.mapping.yolo_world_trt.export_onnx \
-    --weights $WEIGHTS_DIR/yolov8s-worldv2.pt --variant s \
-    --prompts refrigerator chair door person \
-    --imgsz 288x512 \
-    --out-dir sparx_agency/tasks/mapping/yolo_world_trt/engines/onnx
+    --weights $WEIGHTS_DIR/yolov8s-worldv2.pt --variant s --imgsz 288x512
 ```
+This writes the backbone + head ONNX and runs a **parity gate** — it compares
+`head(backbone(image))` against ultralytics' own full-model forward and aborts if
+they differ. That gate is your safety net: the one fragile part is cutting the
+graph correctly on *your* ultralytics version, and it is checked numerically every
+export.
 
-**Step 2 — Build the engine** (on the Orin; DLA + FP16 chosen automatically):
+**Step 2 — Build both engines** (on the Orin; backbone→DLA, head→GPU chosen for you):
 ```bash
 python -m sparx_agency.tasks.mapping.yolo_world_trt.build_engine \
-    --onnx sparx_agency/tasks/mapping/yolo_world_trt/engines/onnx/yolo_world_s.onnx \
-    --variant s
-# add --no-dla to force a GPU-only engine, or --dla to force DLA (errors off-Jetson)
+    --onnx-dir sparx_agency/tasks/mapping/yolo_world_trt/engines/onnx --variant s --role both
+# --role backbone|head to build one; --no-dla to force a GPU backbone; --dla to force DLA
 ```
 
 **Step 3 — Benchmark & compare** (on the Orin):
 ```bash
 python -m sparx_agency.tasks.mapping.yolo_world_trt.benchmark \
-    --images /path/to/frames \
-    --engine s:.../orin_sm87/yolo_world_s.fp16.dla0.engine \
-    --engine m:.../orin_sm87/yolo_world_m.fp16.dla0.engine \
-    --engine l:.../orin_sm87/yolo_world_l.fp16.dla0.engine \
-    --engine x:.../orin_sm87/yolo_world_x.fp16.dla0.engine
+    --images /path/to/frames --num-prompts 4 \
+    --pair s:.../yolo_world_s.backbone.fp16.dla0.engine,.../yolo_world_s.head.fp16.gpu.engine \
+    --pair m:.../yolo_world_m.backbone.fp16.dla0.engine,.../yolo_world_m.head.fp16.gpu.engine \
+    --pair l:.../..backbone..engine,.../..head..engine \
+    --pair x:.../..backbone..engine,.../..head..engine
 ```
-The report breaks latency into **preprocess / inference / decode+NMS / total**,
-prints **FPS** and the **DLA-eligible layer count** per variant, and ranks them.
+Breaks latency into **preprocess / backbone+head / decode+NMS / total**, prints
+FPS and the **DLA-eligible layer count** per variant, and ranks them. It uploads
+random embeddings for `--num-prompts` classes to drive the head's dynamic-N cost
+(no torch needed on the target).
 
-**Use it in code / the ROS node:**
+**Use it in code / the ROS node (open-set at run time):**
 ```python
 from sparx_agency.tasks.mapping.yolo_world_trt.runtime import YoloTRTDetector
-det = YoloTRTDetector(".../orin_sm87/yolo_world_s.fp16.dla0.engine")
-det.set_prompts(["refrigerator"])          # subset of the baked classes
-boxes = det.detect(rgb_hwc_uint8)          # -> List[core Detection2D]
+det = YoloTRTDetector(
+    ".../yolo_world_s.backbone.fp16.dla0.engine",
+    ".../yolo_world_s.head.fp16.gpu.engine",
+    text_weights="yolov8s-worldv2.pt")     # the .pt drives the CLIP text branch
+det.set_prompts(["refrigerator", "chair"]) # any prompts, any time, no rebuild
+boxes = det.detect(rgb_hwc_uint8)          # -> List[core Detection2D]; torch-free
 ```
-To swap the torch detector in `yolo_detector_node` for this, construct a
-`YoloTRTDetector(engine_path)` instead of `YoloWorldDetector(...)` — same ABC.
+`set_prompts` runs the text encoder once (torch) and caches the embeddings;
+`detect` is pure TensorRT + numpy. For a **torch-free runtime**, precompute the
+embeddings offline and call `det.set_text_features(embeddings, labels)` instead.
+To swap this into `yolo_detector_node`, construct a `YoloTRTDetector(...)` in place
+of `YoloWorldDetector(...)` — same ABC.
 
 ---
 
-## 6. Choosing the input size (the biggest performance lever after DLA)
+## 6. Input size (the biggest lever after DLA)
 
-The engine input is **static** (a fixed `H×W`). Two sane choices:
+The backbone input is **static**. Two sane choices, both multiples of 32:
+- **`288×512` (default)** — matches the XTEND `504×294` resize with almost no
+  letterbox padding; ~2.8× fewer pixels than 640². Fastest sensible option for
+  15 W. **Recommended for the drone.**
+- **`640×640`** — YOLO-World's native size; best open-vocab accuracy on small /
+  ambiguous objects, but heavier.
 
-- **`288×512` (default)** — matches the XTEND `504×294` resize (landscape,
-  aspect 1.78 vs 1.71) with almost no letterbox padding. ~2.8× fewer pixels than
-  640², i.e. the fastest sensible option for the 15 W budget. **Recommended for the
-  drone.**
-- **`640×640`** — YOLO-World's native training size; best open-vocabulary accuracy
-  (small/ambiguous objects), but heavier. Use if you see missed detections at
-  288×512.
-
-Both must be **multiples of 32**. The future `720×420` full frame just changes the
-letterbox source; pick a stride-32 engine size for it (e.g. `416×704`) and re-export.
-Benchmark both and let the numbers decide — that is exactly what this task is for.
+The future `720×420` full frame only changes the letterbox source; pick a
+stride-32 size for it (e.g. `416×704`) and re-export. Benchmark both — that's what
+this task is for.
 
 ---
 
 ## 7. INT8 (opt-in, future)
 
-DLA is dramatically more efficient in INT8, but it needs a **representative
-calibration set** and must pass an on-target accuracy check before it can be
-trusted for flight. The precision knob and manifest already carry `int8`;
-`build_engine.py` currently stops with a clear message because the calibrator is
-not wired yet. Plan: add an entropy calibrator fed a folder of real XTEND frames
-(mirroring the NavDP `engine/calibrator.py`), keep FP16 as the safe default, and
-gate INT8 selection on a measured mAP delta.
+DLA is far more efficient in INT8, but it needs a representative calibration set
+and must pass an on-target accuracy check before flight. The precision knob is
+plumbed; `build_engine.py` stops with a clear message because the calibrator isn't
+wired yet. Plan: entropy calibrator fed real XTEND frames (mirroring NavDP's
+`engine/calibrator.py`), FP16 stays the default, INT8 gated on a measured mAP delta.
 
 ---
 
@@ -226,18 +231,32 @@ gate INT8 selection on a measured mAP delta.
 | File | Purpose |
 |---|---|
 | `hardware.py` | Probe GPU / Jetson / power → `HardwareProfile` (DLA-aware). |
-| `build_policy.py` | Derive the explicit `BuildPolicy` from hardware + `configs/`. |
-| `export_onnx.py` | ultralytics `YOLOWorld.pt` → static ONNX (bakes prompts). |
-| `build_engine.py` | ONNX → TensorRT engine with explicit DLA/FP16 config + manifest. |
-| `preprocess.py` | Letterbox a frame into the fixed engine input (pure numpy). |
-| `postprocess.py` | Decode raw head + class-wise NMS + un-letterbox (pure numpy). |
-| `runtime.py` | TRT engine runner + `YoloTRTDetector(DetectionModel)`. |
+| `build_policy.py` | Per-role (`backbone`/`head`) explicit `BuildPolicy`. |
+| `wrappers.py` | Cut the ultralytics model at the first text-aware layer → backbone / head modules. |
+| `text_embed.py` | `TextEmbedder`: prompts → text embeddings (the re-prompt-only text branch). |
+| `export_onnx.py` | Export backbone + head ONNX + `io.json`, with the parity gate. |
+| `build_engine.py` | ONNX → backbone(DLA,static) + head(GPU,dynamic-N) engines + manifests. |
+| `preprocess.py` | Letterbox a frame into the static backbone input (pure numpy). |
+| `postprocess.py` | Decode raw head + class-wise NMS + un-letterbox (pure numpy, dynamic nc). |
+| `runtime.py` | `TwoStageYoloTRT` (shared feature buffers) + `YoloTRTDetector(DetectionModel)`. |
 | `benchmark.py` | Compare `s/m/l/x`: latency / FPS / DLA-vs-GPU breakdown. |
 | `build_all.sh` | One-shot export + build + benchmark for all variants. |
-| `configs/build_policy.json` | Version-controlled knobs (variants, imgsz, precision, DLA pools). |
-| `tests/` | Numpy-only tests (geometry, NMS, decode, policy) — run anywhere. |
+| `configs/build_policy.json` | Knobs (variants, imgsz, precision, DLA pools, head N profile). |
+| `tests/` | Numpy-only tests (geometry, NMS, decode, policy, graph-cut) — run anywhere. |
 
 Run the tests (no torch/TRT needed):
 ```bash
 .venv/bin/python -m pytest sparx_agency/tasks/mapping/yolo_world_trt/tests/ -q
+```
+
+---
+
+## 9. The one risk to know about
+
+Cutting the ultralytics graph cleanly (`wrappers.py`) is the only version-fragile
+part. It is written generically (find the first text-aware layer; reuse the model's
+own `.f`/`.save` routing — no hard-coded indices) and is **guarded by the numerical
+parity gate** in `export_onnx.py`, which fails loudly if the cut is wrong for your
+ultralytics version. If it ever fires, inspect `wrappers.find_cut` and the head
+routing against that version's `WorldModel.predict`.
 ```

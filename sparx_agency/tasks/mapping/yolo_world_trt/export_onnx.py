@@ -1,29 +1,24 @@
-"""Export an ultralytics YOLO-World checkpoint to a static-shape ONNX graph.
+"""Export the open-set YOLO-World split to two ONNX graphs (backbone + head).
 
-The open-vocabulary class list is **baked in** at export time via
-:meth:`YOLOWorld.set_classes`: this freezes the CLIP text embeddings into the
-head, so the exported graph is a pure-vision CNN (backbone + RepVL-PAN neck +
-detection head) with a *fixed* ``nc = len(prompts)``. That is the whole reason a
-YOLO-World engine can run efficiently on TensorRT (and on the Orin DLA): the heavy
-text transformer never enters the graph.
+Open-set is preserved: the text embeddings are a **runtime input** to the head,
+never baked. This exports:
 
-Trade-off you are opting into: after baking, the engine detects ONLY the baked
-prompts. Re-prompting to a class outside that set means re-exporting + re-building.
-So bake the *full mission vocabulary* you expect to target (e.g. every object the
-mission might approach), not just one class -- ``--prompts`` takes a list.
+  * ``yolo_world_<variant>.backbone.onnx`` -- ``image[1,3,H,W] -> feature maps``.
+    Fully static and text-free -> the DLA target.
+  * ``yolo_world_<variant>.head.onnx`` -- ``(feature maps, txt_feats[...,N,...])
+    -> raw detections [1, 4+N, anchors]``. ``N`` (the prompt count) is a **dynamic
+    axis**, so any number of prompts runs without a rebuild -> the GPU target.
 
-The export is static-shape (batch 1, fixed ``HxW``) and NMS-free (``nms=False``):
-the raw head output ``[1, 4 + nc, num_anchors]`` is decoded + NMS'd at runtime in
-:mod:`postprocess` (torch-free numpy) so the engine stays a clean CNN. A sidecar
-``<stem>.classes.json`` records the baked prompt order so the runtime can map a
-class index back to its label.
+Before trusting the cut, a **parity gate** runs the library's own
+``WorldModel.predict`` and compares it to ``head(backbone(image), txt)`` on random
+inputs; a mismatch aborts the export (this is the one thing that can silently
+break across ultralytics versions). A ``<variant>.io.json`` sidecar records the
+feature-map names/shapes, the txt axis, and the dynamic-N profile bounds that
+``build_engine`` and the runtime consume.
 
-Run (any box with ultralytics + torch + onnx; a GPU is NOT required to export):
+Run (any box with ultralytics + torch + onnx; CPU is fine):
     python -m sparx_agency.tasks.mapping.yolo_world_trt.export_onnx \\
-        --weights /path/to/yolov8s-worldv2.pt \\
-        --variant s --imgsz 288x512 \\
-        --prompts refrigerator chair door person \\
-        --out-dir sparx_agency/tasks/mapping/yolo_world_trt/engines/onnx
+        --weights /path/to/yolov8s-worldv2.pt --variant s --imgsz 288x512
 """
 from __future__ import annotations
 
@@ -32,76 +27,141 @@ import hashlib
 import json
 from pathlib import Path
 
+from sparx_agency.tasks.mapping.yolo_world_trt import wrappers
 from sparx_agency.tasks.mapping.yolo_world_trt.build_policy import (
     load_config, parse_imgsz, variant_weights,
 )
+from sparx_agency.tasks.mapping.yolo_world_trt.text_embed import TextEmbedder, txt_n_axis
+
+OPSET = 17
+# A distinctive example prompt count so the N axis is unambiguous in txt_feats
+# (avoid 1 and the 512 embed dim). Only used to trace the head.
+_EXAMPLE_N = 7
+_EXAMPLE_PROMPTS = ["object%d" % i for i in range(_EXAMPLE_N)]
 
 
 def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def export_one(weights, variant, prompts, imgsz, out_dir, opset=17, simplify=True):
-    """Export one checkpoint to ``<out_dir>/yolo_world_<variant>.onnx``.
+def _onnx_export(module, args, path, input_names, output_names, dynamic_axes=None):
+    """torch.onnx.export pinned to the TorchScript exporter (robust across versions).
 
-    Args:
-        weights: path to the ``.pt`` YOLO-World checkpoint.
-        variant: size tag (``s``/``m``/``l``/``x``) used to name the output.
-        prompts: baked open-vocabulary class list (>= 1 non-empty string).
-        imgsz: ``(H, W)`` engine input, stride-32 multiples.
-        out_dir: directory to write the ONNX + sidecar into.
-        opset: ONNX opset (17 traces YOLOv8 cleanly for TensorRT 10.x).
-        simplify: run onnx-simplifier to fold shape math (DLA-friendlier graph).
-
-    Returns:
-        Path to the written ``.onnx``.
+    ``dynamo=False`` forces the well-trodden TorchScript tracer (the dynamo exporter
+    mishandles YOLO's shape arithmetic); it is retried without the kwarg on older
+    torch that predates it.
     """
-    from ultralytics import YOLOWorld           # lazy: heavy torch dep
+    import torch
 
-    prompts = [str(p).strip() for p in prompts if str(p).strip()]
-    if not prompts:
-        raise ValueError("export needs at least one non-empty prompt to bake.")
+    kw = dict(input_names=input_names, output_names=output_names,
+              opset_version=OPSET, do_constant_folding=True)
+    if dynamic_axes:
+        kw["dynamic_axes"] = dynamic_axes
+    try:
+        torch.onnx.export(module, args, path, dynamo=False, **kw)
+    except TypeError:                       # torch too old for the dynamo kwarg
+        torch.onnx.export(module, args, path, **kw)
+
+
+def _set_export_mode(world_model):
+    """Put the WorldDetect head in export mode so it returns the raw tensor."""
+    detect = world_model.model[-1]
+    detect.export = True
+    detect.format = "onnx"
+    return detect
+
+
+def _parity(world_model, backbone, head, image, txt, atol=1e-3):
+    """Assert head(backbone(image), txt) matches WorldModel.predict(image, txt)."""
+    import torch
+
+    with torch.no_grad():
+        ref = world_model.predict(image, txt_feats=txt)
+        ref = ref[0] if isinstance(ref, (tuple, list)) else ref
+        got = head(backbone(image), txt)
+    err = (ref - got).abs().max().item()
+    if err > atol:
+        raise RuntimeError(
+            "backbone/head split does NOT match the full model (max abs err %.3e > "
+            "%.1e). The ultralytics graph cut is wrong for this version -- inspect "
+            "wrappers.find_cut / the layer routing." % (err, atol))
+    return err
+
+
+def export_one(weights, variant, imgsz, out_dir, n_min=1, n_opt=8, n_max=256):
+    """Export the backbone + head ONNX for one checkpoint. Returns their paths."""
+    import torch
+
+    from ultralytics import YOLOWorld  # lazy: heavy torch dep
+
     h, w = imgsz
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = YOLOWorld(str(weights))
-    model.set_classes(prompts)                  # bakes text embeddings into the head
+    yolo = YOLOWorld(str(weights))
+    world = yolo.model.float().eval()
+    _set_export_mode(world)
+    backbone, head, out_indices, cut = wrappers.build_split(world)
 
-    # Ultralytics writes <weights_stem>.onnx next to the source; export on CPU so
-    # this step is portable (no GPU needed) and deterministic.
-    exported = model.export(
-        format="onnx",
-        imgsz=(h, w),
-        opset=opset,
-        simplify=simplify,
-        dynamic=False,                          # static shape -> DLA + no opt profile
-        nms=False,                              # decode + NMS live in postprocess.py
-        half=False,                             # FP32 ONNX; TRT applies FP16/INT8
-        device="cpu",
-    )
+    # Example inputs: image + the text embeddings for a distinctive prompt count.
+    image = torch.zeros(1, 3, h, w, dtype=torch.float32)
+    txt_np = TextEmbedder(weights).embed(_EXAMPLE_PROMPTS)
+    txt = torch.from_numpy(txt_np).float()
+    n_axis = txt_n_axis(tuple(txt.shape), _EXAMPLE_N)
+    embed_dim = int(txt.shape[-1])
 
-    dst = out_dir / ("yolo_world_%s.onnx" % variant)
-    src = Path(exported)
-    if src.resolve() != dst.resolve():
-        dst.write_bytes(src.read_bytes())
+    with torch.no_grad():
+        feats = backbone(image)
+    feat_names = ["feat%d" % i for i in range(len(feats))]
+    feat_shapes = [list(f.shape) for f in feats]
 
-    sidecar = {
+    err = _parity(world, backbone, head, image, txt)
+    print("[parity] split matches full model (max abs err %.2e, cut=%d, "
+          "backbone outs=%s)" % (err, cut, out_indices))
+
+    backbone_path = out_dir / ("yolo_world_%s.backbone.onnx" % variant)
+    head_path = out_dir / ("yolo_world_%s.head.onnx" % variant)
+
+    # Backbone: fully static (no dynamic_axes).
+    _onnx_export(
+        backbone, (image,), str(backbone_path),
+        input_names=["image"], output_names=feat_names)
+
+    # Head: N (prompt count) is dynamic on the txt input and the output class dim.
+    _onnx_export(
+        head, (tuple(feats), txt), str(head_path),
+        input_names=feat_names + ["txt_feats"], output_names=["output"],
+        dynamic_axes={"txt_feats": {n_axis: "N"}, "output": {1: "C"}})
+
+    with torch.no_grad():
+        raw = head(tuple(feats), txt)
+    io = {
         "variant": variant,
         "weights": str(weights),
         "weights_sha256": _sha256(weights),
-        "prompts": prompts,
-        "nc": len(prompts),
         "imgsz_hw": [h, w],
-        "opset": opset,
-        "simplify": bool(simplify),
-        "onnx_sha256": _sha256(dst),
-        "nms": False,
-        "layout": "NCHW",
+        "opset": OPSET,
+        "embed_dim": embed_dim,
+        "txt_n_axis": n_axis,
+        "txt_example_shape": list(txt.shape),
+        "cut_index": cut,
+        "backbone": {
+            "input": "image",
+            "feat_names": feat_names,
+            "feat_shapes": feat_shapes,
+            "onnx_sha256": _sha256(backbone_path),
+        },
+        "head": {
+            "feat_inputs": feat_names,
+            "txt_input": "txt_feats",
+            "output": "output",
+            "output_example_shape": list(raw.shape),
+            "n_min": n_min, "n_opt": n_opt, "n_max": n_max,
+            "onnx_sha256": _sha256(head_path),
+        },
     }
-    (out_dir / ("yolo_world_%s.classes.json" % variant)).write_text(
-        json.dumps(sidecar, indent=2))
-    return dst
+    (out_dir / ("yolo_world_%s.io.json" % variant)).write_text(json.dumps(io, indent=2))
+    return backbone_path, head_path
 
 
 def main():
@@ -110,9 +170,9 @@ def main():
     ap.add_argument("--weights", default=None,
                     help="path to the .pt checkpoint (default: config filename)")
     ap.add_argument("--variant", required=True, choices=["s", "m", "l", "x"])
-    ap.add_argument("--prompts", nargs="+", required=True,
-                    help="baked open-vocab class list, e.g. refrigerator chair door")
     ap.add_argument("--imgsz", default=None, help="HxW (default: config imgsz)")
+    ap.add_argument("--n-max", type=int, default=None,
+                    help="max prompt count the head profile allows (default: config)")
     ap.add_argument("--out-dir", default=str(
         Path(__file__).resolve().parent / "engines" / "onnx"))
     args = ap.parse_args()
@@ -120,14 +180,17 @@ def main():
     cfg = load_config()
     weights = args.weights or variant_weights(cfg)[args.variant]
     imgsz = parse_imgsz(args.imgsz if args.imgsz else cfg.get("imgsz", "288x512"))
-    opset = int(cfg.get("opset", 17))
-    simplify = bool(cfg.get("simplify", True))
+    prof = cfg.get("head_prompt_profile", {})
+    n_min = int(prof.get("n_min", 1))
+    n_opt = int(prof.get("n_opt", 8))
+    n_max = int(args.n_max if args.n_max else prof.get("n_max", 256))
 
-    print("[export] %s  weights=%s  imgsz=%dx%d  prompts=%s"
-          % (args.variant, weights, imgsz[0], imgsz[1], args.prompts))
-    path = export_one(weights, args.variant, args.prompts, imgsz, args.out_dir,
-                      opset=opset, simplify=simplify)
-    print("[ok] wrote", path)
+    print("[export] %s  weights=%s  imgsz=%dx%d  dynamic-N in [%d,%d,%d]"
+          % (args.variant, weights, imgsz[0], imgsz[1], n_min, n_opt, n_max))
+    bpath, hpath = export_one(weights, args.variant, imgsz, args.out_dir,
+                              n_min=n_min, n_opt=n_opt, n_max=n_max)
+    print("[ok] backbone ->", bpath.name)
+    print("[ok] head     ->", hpath.name)
 
 
 if __name__ == "__main__":

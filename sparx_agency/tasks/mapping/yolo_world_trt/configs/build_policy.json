@@ -1,5 +1,5 @@
 {
-  "_comment": "Version-controlled knobs for the YOLO-World TensorRT build. Overrides the code defaults in build_policy.py. imgsz is HEIGHTxWIDTH and MUST be stride-32 multiples. The default 288x512 matches the 504x294 XTEND resize (landscape, aspect 1.78 vs 1.71) with minimal letterbox padding and ~2.8x fewer pixels than 640x640 -- the right trade for the 15 W DLA target. Use 640x640 for maximum open-vocab accuracy.",
+  "_comment": "Knobs for the OPEN-SET YOLO-World TensorRT build. The model is split into a static text-free BACKBONE engine (DLA) and a dynamic text-fused HEAD engine (GPU); the text embeddings are a runtime input, never baked, so it stays open-vocabulary. imgsz is HEIGHTxWIDTH and MUST be stride-32 multiples. Default 288x512 matches the 504x294 XTEND resize with minimal letterbox padding; use 640x640 for max accuracy.",
 
   "variants": {
     "s": "yolov8s-worldv2.pt",
@@ -10,15 +10,20 @@
 
   "imgsz": "288x512",
   "opset": 17,
-  "simplify": true,
 
   "precision": "fp16",
+
+  "head_prompt_profile": {
+    "_comment": "Dynamic-N optimization profile for the head engine: N is the prompt count. n_max is the hard ceiling on simultaneous classes without a rebuild (generous; re-prompt with <= n_max needs no rebuild). n_opt is the size TensorRT tunes for.",
+    "n_min": 1,
+    "n_opt": 8,
+    "n_max": 256
+  },
 
   "dla": {
     "enable": true,
     "core": 0,
     "gpu_fallback": true,
-    "allow_gpu_head": true,
     "managed_sram_bytes": 1048576,
     "local_dram_bytes": 1073741824,
     "global_dram_bytes": 536870912

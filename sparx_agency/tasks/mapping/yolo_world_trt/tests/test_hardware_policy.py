@@ -1,10 +1,13 @@
-"""Tests for the hardware probe + build-policy derivation (no torch/TRT needed).
+"""Tests for the hardware probe + per-role build-policy (no torch/TRT needed).
 
-Verifies :func:`detect` never raises and yields a stable tag, and that
-:func:`build_policy` makes the DLA / precision / opt-level decisions the builder
-depends on -- including that DLA is only *requested* where the board has one.
+Verifies :func:`detect` never raises, and that :func:`build_policy` makes the
+split's core decisions: the backbone prefers DLA (only where the board has one)
+and is static, while the head is always GPU + dynamic (DLA cannot run its runtime
+prompt-count shapes).
 """
 import dataclasses
+
+import pytest
 
 from sparx_agency.tasks.mapping.yolo_world_trt.build_policy import build_policy
 from sparx_agency.tasks.mapping.yolo_world_trt.hardware import HardwareProfile, detect
@@ -14,7 +17,7 @@ def test_detect_never_raises_and_tags():
     p = detect()
     assert isinstance(p.target_tag, str) and p.target_tag
     assert p.recommended_workspace_bytes > 0
-    dataclasses.asdict(p)               # fully serializable
+    dataclasses.asdict(p)
 
 
 def _orin_15w():
@@ -33,25 +36,29 @@ def _x86():
         target_tag="rtx5070_sm120")
 
 
-def test_orin_enables_dla_fp16_default():
-    pol = build_policy("s", _orin_15w(), config={})
-    assert pol.use_dla is True
-    assert pol.precision == "fp16" and pol.use_fp16 is True
-    assert pol.gpu_fallback is True
-    assert pol.imgsz == (288, 512)      # code default when config empty
+def test_backbone_uses_dla_on_orin_and_is_static():
+    pol = build_policy("backbone", "s", _orin_15w(), config={})
+    assert pol.use_dla is True and pol.gpu_fallback is True
+    assert pol.is_dynamic is False
+    assert pol.use_fp16 is True
 
 
-def test_x86_never_uses_dla_even_if_requested():
-    pol = build_policy("s", _x86(), config={}, dla=True)
-    assert pol.use_dla is False         # board has no DLA -> request ignored
+def test_head_is_always_gpu_and_dynamic():
+    pol = build_policy("head", "s", _orin_15w(), config={}, dla=True)
+    assert pol.use_dla is False          # DLA can't do dynamic shapes
+    assert pol.is_dynamic is True
 
 
-def test_no_dla_override_forces_gpu_on_orin():
-    pol = build_policy("l", _orin_15w(), config={}, dla=False)
+def test_backbone_never_uses_dla_on_x86():
+    pol = build_policy("backbone", "l", _x86(), config={}, dla=True)
     assert pol.use_dla is False
 
 
-def test_int8_precision_flag():
-    pol = build_policy("x", _orin_15w(), config={}, precision="int8")
-    assert pol.use_int8 is True and pol.precision == "int8"
-    assert pol.use_fp16 is True          # FP16 stays on as the floor
+def test_no_dla_override_forces_gpu_backbone_on_orin():
+    pol = build_policy("backbone", "l", _orin_15w(), config={}, dla=False)
+    assert pol.use_dla is False
+
+
+def test_invalid_role_raises():
+    with pytest.raises(ValueError):
+        build_policy("neck", "s", _orin_15w(), config={})

@@ -1,22 +1,25 @@
-"""Build a YOLO-World TensorRT engine with a fully explicit, DLA-aware config.
+"""Build the two YOLO-World TensorRT engines with a fully explicit config.
 
-Nothing is left to TensorRT defaults. From the :class:`BuildPolicy` this sets:
-the precision (FP16 default, INT8 opt-in), the DLA target + core + GPU fallback,
-the DLA SRAM / local-DRAM / global-DRAM memory pools, the workspace pool, and the
-builder optimization level. A sibling ``.json`` manifest records the TensorRT
-version, target SM, precision, IO, the baked class list, and how many layers were
-DLA-eligible -- so the runtime can version-lock and you can see the DLA offload at
-a glance.
+From one exported variant this builds:
 
-Engines are locked to the exact GPU + TensorRT build that produced them and are
-NOT portable. **DLA engines can only be built ON a Jetson** (the x86 dev box has
-no DLA): if you force ``--dla`` off-Jetson the build errors; with the default
-(``dla=None``) it silently falls back to a GPU FP16 engine so the pipeline is
-still exercisable on a laptop.
+  * the **backbone** engine -- static, text-free -> targets the **DLA** (core +
+    GPU fallback + explicit DLA memory pools) at FP16.
+  * the **head** engine -- text-fused, with a **dynamic ``N`` (prompt-count)
+    optimization profile** so any prompt list runs without a rebuild -> **GPU**,
+    FP16 (DLA cannot run dynamic shapes).
+
+Nothing is left to TensorRT defaults (precision, device, pools, workspace,
+optimization level all come from the :class:`BuildPolicy`). Each engine gets a
+sibling ``.json`` manifest (TRT version, SM, IO, DLA-eligible layer count, dynamic
+bounds) so the runtime version-locks and the DLA offload is visible.
+
+Engines are locked to the exact GPU + TensorRT build. **DLA engines build only on
+a Jetson**; off-Jetson the backbone silently falls back to a GPU engine so the
+pipeline is still exercisable on a laptop.
 
 Run (target device, TRT venv, PYTHONPATH = repo root):
     python -m sparx_agency.tasks.mapping.yolo_world_trt.build_engine \\
-        --onnx .../engines/onnx/yolo_world_s.onnx --variant s
+        --onnx-dir .../engines/onnx --variant s        # builds both roles
 """
 from __future__ import annotations
 
@@ -36,7 +39,6 @@ def _sha256(path):
 
 
 def _parse(network, trt, onnx_path):
-    """Parse an ONNX graph into ``network`` or raise with the parser errors."""
     parser = trt.OnnxParser(network, trt.Logger(trt.Logger.WARNING))
     if not parser.parse(Path(onnx_path).read_bytes()):
         errs = [str(parser.get_error(i)) for i in range(parser.num_errors)]
@@ -44,8 +46,7 @@ def _parse(network, trt, onnx_path):
 
 
 def _configure_precision(config, trt, policy, calibrator):
-    """Set FP16 (always) and, if requested, INT8 + calibrator."""
-    config.set_flag(trt.BuilderFlag.FP16)        # floor for DLA; default for GPU
+    config.set_flag(trt.BuilderFlag.FP16)
     if policy.use_int8:
         if calibrator is None:
             raise RuntimeError("INT8 requested but no calibrator was provided.")
@@ -55,11 +56,7 @@ def _configure_precision(config, trt, policy, calibrator):
 
 
 def _configure_dla(config, trt, policy):
-    """Point the default device at the DLA, keep GPU fallback, size the pools.
-
-    Returns the number of layers the builder reports as DLA-eligible (an estimate
-    of the offload; the tail -- head decode, some Slice/Concat -- runs on GPU).
-    """
+    """Point the default device at the DLA, keep GPU fallback, size the pools."""
     config.default_device_type = trt.DeviceType.DLA
     config.DLA_core = policy.dla_core
     if policy.gpu_fallback:
@@ -71,12 +68,11 @@ def _configure_dla(config, trt, policy):
     ):
         try:
             config.set_memory_pool_limit(pool, int(nbytes))
-        except (AttributeError, TypeError):       # older TRT: pool may be absent
+        except (AttributeError, TypeError):
             pass
 
 
 def _count_dla_eligible(config, network):
-    """Best-effort count of DLA-eligible layers (0 if the API is unavailable)."""
     try:
         return sum(int(config.can_run_on_DLA(network.get_layer(i)))
                    for i in range(network.num_layers))
@@ -84,7 +80,32 @@ def _count_dla_eligible(config, network):
         return 0
 
 
-def build_one(onnx_path, variant, out_dir, profile, policy, calibrator=None):
+def _add_head_profile(builder, config, io):
+    """Add the dynamic-N optimization profile for the head engine.
+
+    Feature-map inputs are static (min=opt=max = their shape); only ``txt_feats``
+    varies along the class axis over ``[n_min, n_opt, n_max]``.
+    """
+    profile = builder.create_optimization_profile()
+    for name, shape in zip(io["backbone"]["feat_names"], io["backbone"]["feat_shapes"]):
+        t = tuple(int(d) for d in shape)
+        profile.set_shape(name, t, t, t)
+
+    axis = int(io["txt_n_axis"])
+    base = [int(d) for d in io["txt_example_shape"]]
+    head = io["head"]
+
+    def _with_n(n):
+        s = list(base)
+        s[axis] = int(n)
+        return tuple(s)
+
+    profile.set_shape(head["txt_input"], _with_n(head["n_min"]),
+                      _with_n(head["n_opt"]), _with_n(head["n_max"]))
+    config.add_optimization_profile(profile)
+
+
+def build_one(role, onnx_path, io, out_dir, profile, policy, calibrator=None):
     """Parse one ONNX graph and build + serialize its engine. Returns the path."""
     import tensorrt as trt
 
@@ -92,7 +113,7 @@ def build_one(onnx_path, variant, out_dir, profile, policy, calibrator=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(0)          # explicit-batch, static shape
+    network = builder.create_network(0)          # explicit batch
     _parse(network, trt, onnx_path)
 
     config = builder.create_builder_config()
@@ -104,6 +125,8 @@ def build_one(onnx_path, variant, out_dir, profile, policy, calibrator=None):
 
     _configure_precision(config, trt, policy, calibrator)
     dla_eligible = 0
+    if policy.is_dynamic:
+        _add_head_profile(builder, config, io)
     if policy.use_dla:
         _configure_dla(config, trt, policy)
         dla_eligible = _count_dla_eligible(config, network)
@@ -115,99 +138,101 @@ def build_one(onnx_path, variant, out_dir, profile, policy, calibrator=None):
 
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
-        raise RuntimeError("build_serialized_network returned None for %s "
-                           "(if DLA was forced off-Jetson this is expected)" % variant)
+        raise RuntimeError("build_serialized_network returned None for %s/%s "
+                           "(DLA forced off-Jetson?)" % (policy.variant, role))
 
     device = "dla%d" % policy.dla_core if policy.use_dla else "gpu"
-    engine_path = out_dir / ("yolo_world_%s.%s.%s.engine"
-                             % (variant, policy.precision, device))
+    engine_path = out_dir / ("yolo_world_%s.%s.%s.%s.engine"
+                             % (policy.variant, role, policy.precision, device))
     engine_path.write_bytes(bytes(serialized))
     cache_path.write_bytes(bytes(timing.serialize()))
-    _write_manifest(engine_path, variant, onnx_path, profile, policy, trt,
+    _write_manifest(engine_path, role, onnx_path, io, profile, policy, trt,
                     network.num_layers, dla_eligible)
     return engine_path
 
 
-def _load_classes(onnx_path):
-    """Load the baked prompt list written next to the ONNX by export_onnx."""
-    sidecar = Path(onnx_path).with_name(Path(onnx_path).stem + ".classes.json")
-    if sidecar.exists():
-        return json.loads(sidecar.read_text())
-    return {}
-
-
-def _write_manifest(engine_path, variant, onnx_path, profile, policy, trt,
+def _write_manifest(engine_path, role, onnx_path, io, profile, policy, trt,
                     total_layers, dla_eligible):
-    """Write the sibling ``.json`` the runtime version-locks against."""
-    classes = _load_classes(onnx_path)
     meta = {
-        "variant": variant,
+        "role": role,
+        "variant": policy.variant,
         "precision": policy.precision,
         "device": "dla%d" % policy.dla_core if policy.use_dla else "gpu",
         "use_dla": policy.use_dla,
         "gpu_fallback": policy.gpu_fallback if policy.use_dla else None,
+        "dynamic_N": policy.is_dynamic,
         "trt_version": str(trt.__version__),
         "sm": profile.sm,
         "target_tag": profile.target_tag,
         "gpu_name": profile.gpu_name,
         "power_budget_w": profile.power_budget_w,
-        "imgsz_hw": list(policy.imgsz),
+        "imgsz_hw": io.get("imgsz_hw"),
+        "embed_dim": io.get("embed_dim"),
         "onnx_sha256": _sha256(onnx_path),
-        "prompts": classes.get("prompts", []),
-        "nc": classes.get("nc", 0),
-        "conf_thresh": policy.conf_thresh,
-        "iou_thresh": policy.iou_thresh,
-        "max_det": policy.max_det,
         "total_layers": int(total_layers),
         "dla_eligible_layers": int(dla_eligible),
         "workspace_bytes": policy.workspace_bytes,
         "builder_optimization_level": policy.builder_optimization_level,
     }
+    if role == "backbone":
+        meta["feat_names"] = io["backbone"]["feat_names"]
+        meta["feat_shapes"] = io["backbone"]["feat_shapes"]
+    else:
+        meta["head"] = {k: io["head"][k] for k in
+                        ("feat_inputs", "txt_input", "output", "output_example_shape",
+                         "n_min", "n_opt", "n_max")}
+        meta["txt_n_axis"] = io["txt_n_axis"]
+        meta["txt_example_shape"] = io["txt_example_shape"]
     Path(str(engine_path) + ".json").write_text(json.dumps(meta, indent=2))
+
+
+def build_variant(onnx_dir, variant, roles, profile, cfg, precision=None, dla=None):
+    """Build the requested roles for one variant. Returns ``{role: engine_path}``."""
+    onnx_dir = Path(onnx_dir)
+    io = json.loads((onnx_dir / ("yolo_world_%s.io.json" % variant)).read_text())
+    out_dir = onnx_dir.parent / profile.target_tag
+    built = {}
+    for role in roles:
+        onnx_path = onnx_dir / ("yolo_world_%s.%s.onnx" % (variant, role))
+        policy = build_policy(role, variant, profile, config=cfg,
+                              precision=precision, dla=dla)
+        if policy.use_int8:
+            raise SystemExit("INT8 is not wired yet; use fp16. See README 'INT8'.")
+        print("[build] %s/%s device=%s dynamic=%s opt=%d"
+              % (variant, role, "dla%d" % policy.dla_core if policy.use_dla else "gpu",
+                 policy.is_dynamic, policy.builder_optimization_level))
+        built[role] = build_one(role, onnx_path, io, out_dir, profile, policy)
+        print("[ok] built", built[role].name)
+    return built
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--onnx", required=True, help="path to yolo_world_<variant>.onnx")
+    ap.add_argument("--onnx-dir", required=True, help="dir with yolo_world_<v>.*.onnx")
     ap.add_argument("--variant", required=True, choices=["s", "m", "l", "x"])
-    ap.add_argument("--out-dir", default=None,
-                    help="default: <onnx-dir>/../<target_tag>")
+    ap.add_argument("--role", choices=["backbone", "head", "both"], default="both")
     ap.add_argument("--precision", choices=["fp16", "int8"], default=None)
     ap.add_argument("--dla", dest="dla", action="store_true", default=None,
-                    help="force DLA (errors off-Jetson)")
+                    help="force DLA for the backbone (errors off-Jetson)")
     ap.add_argument("--no-dla", dest="dla", action="store_false",
-                    help="force GPU-only (skip DLA even on Orin)")
-    ap.add_argument("--calib-npz", default=None, help="required for --precision int8")
+                    help="force GPU-only backbone (skip DLA even on Orin)")
     args = ap.parse_args()
 
     profile = detect()
     cfg = load_config()
-    policy = build_policy(args.variant, profile, config=cfg,
-                          precision=args.precision, dla=args.dla)
-
-    onnx_path = Path(args.onnx)
-    out_dir = Path(args.out_dir) if args.out_dir else \
-        onnx_path.parent.parent / profile.target_tag
+    roles = ("backbone", "head") if args.role == "both" else (args.role,)
 
     print("[hw] %s sm=%s dla_cores=%d power=%sW workspace=%.1fGiB tag=%s"
-          % (profile.gpu_name, profile.sm, profile.dla_cores,
-             profile.power_budget_w, profile.workspace_bytes / (1 << 30),
-             profile.target_tag))
-    print("[policy] variant=%s imgsz=%dx%d precision=%s use_dla=%s core=%d opt=%d"
-          % (policy.variant, policy.imgsz[0], policy.imgsz[1], policy.precision,
-             policy.use_dla, policy.dla_core, policy.builder_optimization_level))
+          % (profile.gpu_name, profile.sm, profile.dla_cores, profile.power_budget_w,
+             profile.recommended_workspace_bytes / (1 << 30), profile.target_tag))
     if args.dla is None and cfg.get("dla", {}).get("enable", True) \
-            and not profile.allow_dla:
-        print("[note] DLA requested in config but this board has none -> GPU engine.")
+            and not profile.allow_dla and "backbone" in roles:
+        print("[note] DLA enabled in config but this board has none -> GPU backbone.")
 
-    calibrator = None
-    if policy.use_int8:
-        raise SystemExit("INT8 calibration is not wired yet; use --precision fp16 "
-                         "(the DLA default). See README 'INT8' for the plan.")
-
-    path = build_one(onnx_path, args.variant, out_dir, profile, policy, calibrator)
-    print("[ok] built", path.name, "->", out_dir)
+    built = build_variant(args.onnx_dir, args.variant, roles, profile, cfg,
+                          precision=args.precision, dla=args.dla)
+    print("[done] %s ->" % args.variant, {r: p.name for r, p in built.items()})
 
 
 if __name__ == "__main__":

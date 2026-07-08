@@ -1,21 +1,20 @@
-"""Benchmark & compare the YOLO-World TensorRT engines (s / m / l / x).
+"""Benchmark & compare the open-set YOLO-World TRT splits (s / m / l / x).
 
-Runs each engine over a folder of RGB frames and reports, per variant, the mean /
-std / min / max latency and FPS for the three stages -- letterbox preprocess,
-TensorRT inference (H2D + execute + D2H + sync), numpy decode + NMS -- plus the
-end-to-end total. It also pulls ``device`` and ``dla_eligible_layers`` from each
-engine's manifest so the table shows, at a glance, how much of each variant landed
-on the DLA. A side-by-side summary ranks the variants so you can pick the
-accuracy/latency trade for the 15 W target.
+For each variant it runs the full per-frame path -- letterbox preprocess ->
+backbone(DLA)+head(GPU) inference -> numpy decode+NMS -> over a folder of frames,
+and reports mean/std/min/max latency and FPS per stage plus the end-to-end total.
+It reads ``device`` and ``dla_eligible_layers`` from the backbone manifest so the
+table shows how much of each variant landed on the DLA, and ranks the variants.
+
+The text branch is NOT exercised here (it runs only on re-prompt): the benchmark
+uploads random text embeddings for ``--num-prompts`` classes, which drives the
+head's dynamic-N cost realistically without needing torch on the target.
 
 Run (target device, TRT venv, PYTHONPATH = repo root):
     python -m sparx_agency.tasks.mapping.yolo_world_trt.benchmark \\
-        --images /path/to/frames \\
-        --engine s:.../yolo_world_s.fp16.dla0.engine \\
-        --engine m:.../yolo_world_m.fp16.dla0.engine \\
-        --engine l:.../yolo_world_l.fp16.dla0.engine \\
-        --engine x:.../yolo_world_x.fp16.dla0.engine \\
-        --out /tmp/yolo_world_trt_compare
+        --images /path/to/frames --num-prompts 4 \\
+        --pair s:.../yolo_world_s.backbone.fp16.dla0.engine,.../yolo_world_s.head.fp16.gpu.engine \\
+        --pair m:.../yolo_world_m.backbone.fp16.dla0.engine,.../yolo_world_m.head.fp16.gpu.engine
 """
 from __future__ import annotations
 
@@ -32,9 +31,7 @@ import cv2
 import numpy as np
 
 from sparx_agency.tasks.mapping.yolo_world_trt import postprocess, preprocess
-from sparx_agency.tasks.mapping.yolo_world_trt.runtime import (
-    YoloWorldTRTEngine, load_manifest,
-)
+from sparx_agency.tasks.mapping.yolo_world_trt.runtime import TwoStageYoloTRT
 
 
 @dataclass
@@ -57,14 +54,14 @@ def stat(times_ms: List[float]) -> Stat:
                 1000.0 / mean if mean > 0 else 0.0, len(a))
 
 
-def parse_engine_arg(value: str) -> Tuple[str, str]:
-    if ":" not in value:
-        return Path(value).stem, value
-    label, path = value.split(":", 1)
-    label, path = label.strip(), path.strip()
-    if not label or not path:
-        raise argparse.ArgumentTypeError("engine must be label:/path, got %r" % value)
-    return label, path
+def parse_pair(value: str) -> Tuple[str, str, str]:
+    """``label:/backbone.engine,/head.engine`` -> (label, backbone, head)."""
+    if ":" not in value or "," not in value:
+        raise argparse.ArgumentTypeError(
+            "pair must be label:/backbone.engine,/head.engine, got %r" % value)
+    label, paths = value.split(":", 1)
+    back, head = paths.split(",", 1)
+    return label.strip(), back.strip(), head.strip()
 
 
 def find_images(images_dir: str, max_images: Optional[int]) -> List[str]:
@@ -78,27 +75,37 @@ def find_images(images_dir: str, max_images: Optional[int]) -> List[str]:
     return files
 
 
-def benchmark_engine(label, engine_path, files, warmup, repeat) -> dict:
+def _random_text_features(stage: TwoStageYoloTRT, n: int):
+    """Upload n random unit-norm embeddings so the head runs at prompt count n."""
+    axis = stage._txt_axis
+    shape = list(stage._txt_base)
+    shape[axis] = n
+    emb = np.random.default_rng(0).standard_normal(shape).astype(np.float32)
+    emb /= (np.linalg.norm(emb, axis=-1, keepdims=True) + 1e-9)
+    stage.set_text_features(emb, ["c%d" % i for i in range(n)])
+
+
+def benchmark_pair(label, backbone, head, files, num_prompts, warmup, repeat) -> dict:
     print("\n" + "=" * 78)
-    print("VARIANT: %s   (%s)" % (label, Path(engine_path).name))
+    print("VARIANT: %s" % label)
+    print("  backbone: %s" % Path(backbone).name)
+    print("  head    : %s" % Path(head).name)
     print("=" * 78)
-    man = load_manifest(engine_path)
-    engine = YoloWorldTRTEngine(engine_path)
-    labels = [str(p).strip().lower() for p in man.get("prompts", [])] or ["object"]
-    imgsz = tuple(man.get("imgsz_hw", [engine.input_h, engine.input_w]))
-    conf = float(man.get("conf_thresh", 0.25))
-    iou = float(man.get("iou_thresh", 0.5))
-    print("device=%s  dla_eligible=%s/%s layers  imgsz=%s  nc=%d"
-          % (man.get("device"), man.get("dla_eligible_layers"),
-             man.get("total_layers"), imgsz, len(labels)))
+    stage = TwoStageYoloTRT(backbone, head)
+    _random_text_features(stage, num_prompts)
+    labels = list(stage._labels)
+    bman = stage.bman
+    print("backbone device=%s  dla_eligible=%s/%s layers  imgsz=%s  N=%d"
+          % (bman.get("device"), bman.get("dla_eligible_layers"),
+             bman.get("total_layers"), stage.imgsz, num_prompts))
 
     warm = cv2.imread(files[0], cv2.IMREAD_COLOR)
     if warm is None:
         raise RuntimeError("Failed to read warmup image: %s" % files[0])
     warm_rgb = cv2.cvtColor(warm, cv2.COLOR_BGR2RGB)
     for _ in range(max(0, warmup)):
-        padded, _t = preprocess.letterbox(warm_rgb, imgsz)
-        engine.infer(preprocess.to_engine_tensor(padded))
+        padded, _t = preprocess.letterbox(warm_rgb, stage.imgsz)
+        stage.infer(preprocess.to_engine_tensor(padded))
 
     t_pre, t_inf, t_post, t_tot = [], [], [], []
     for path in files:
@@ -109,12 +116,12 @@ def benchmark_engine(label, engine_path, files, warmup, repeat) -> dict:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         for _ in range(max(1, repeat)):
             t0 = time.perf_counter()
-            padded, tr = preprocess.letterbox(rgb, imgsz)
+            padded, tr = preprocess.letterbox(rgb, stage.imgsz)
             tensor = preprocess.to_engine_tensor(padded)
             t1 = time.perf_counter()
-            raw = engine.infer(tensor)
+            raw = stage.infer(tensor)
             t2 = time.perf_counter()
-            postprocess.decode(raw, labels, tr, conf_thresh=conf, iou_thresh=iou)
+            postprocess.decode(raw, labels, tr)
             t3 = time.perf_counter()
             t_pre.append((t1 - t0) * 1000.0)
             t_inf.append((t2 - t1) * 1000.0)
@@ -122,10 +129,10 @@ def benchmark_engine(label, engine_path, files, warmup, repeat) -> dict:
             t_tot.append((t3 - t0) * 1000.0)
 
     result = {
-        "label": label, "engine_path": engine_path,
-        "device": man.get("device"), "imgsz": imgsz,
-        "dla_eligible": man.get("dla_eligible_layers"),
-        "total_layers": man.get("total_layers"),
+        "label": label, "device": bman.get("device"), "imgsz": stage.imgsz,
+        "num_prompts": num_prompts,
+        "dla_eligible": bman.get("dla_eligible_layers"),
+        "total_layers": bman.get("total_layers"),
         "preprocess": stat(t_pre), "infer": stat(t_inf),
         "postprocess": stat(t_post), "total": stat(t_tot),
     }
@@ -137,7 +144,7 @@ def _print_one(r: dict):
     print("%-14s | %9s %8s %8s %8s | %8s | %6s"
           % ("phase", "mean ms", "std", "min", "max", "FPS", "n"))
     print("-" * 74)
-    for name, key in (("preprocess", "preprocess"), ("inference TRT", "infer"),
+    for name, key in (("preprocess", "preprocess"), ("backbone+head", "infer"),
                       ("decode+NMS", "postprocess"), ("TOTAL", "total")):
         s = r[key]
         print("%-14s | %9.2f %8.2f %8.2f %8.2f | %8.2f | %6d"
@@ -162,14 +169,16 @@ def write_csv(results: List[dict], out_prefix: str):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["variant", "device", "dla_eligible", "total_layers", "imgsz",
-                    "phase", "mean_ms", "std_ms", "min_ms", "max_ms", "fps", "n"])
+                    "num_prompts", "phase", "mean_ms", "std_ms", "min_ms", "max_ms",
+                    "fps", "n"])
         for r in results:
             for phase in ("preprocess", "infer", "postprocess", "total"):
                 s = r[phase]
                 w.writerow([r["label"], r["device"], r["dla_eligible"],
-                            r["total_layers"], "x".join(map(str, r["imgsz"])), phase,
-                            "%.6f" % s.mean_ms, "%.6f" % s.std_ms, "%.6f" % s.min_ms,
-                            "%.6f" % s.max_ms, "%.6f" % s.fps, s.n])
+                            r["total_layers"], "x".join(map(str, r["imgsz"])),
+                            r["num_prompts"], phase, "%.6f" % s.mean_ms,
+                            "%.6f" % s.std_ms, "%.6f" % s.min_ms, "%.6f" % s.max_ms,
+                            "%.6f" % s.fps, s.n])
     print("\nSaved:", path)
 
 
@@ -177,8 +186,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--images", required=True, help="folder of RGB frames")
-    ap.add_argument("--engine", action="append", required=True, type=parse_engine_arg,
-                    help="label:/path/to/engine (repeatable, e.g. s:.../..engine)")
+    ap.add_argument("--pair", action="append", required=True, type=parse_pair,
+                    help="label:/backbone.engine,/head.engine (repeatable)")
+    ap.add_argument("--num-prompts", type=int, default=4,
+                    help="prompt count to drive the head's dynamic-N cost")
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--max-images", type=int, default=None)
@@ -186,9 +197,10 @@ def main():
     args = ap.parse_args()
 
     files = find_images(args.images, args.max_images)
-    print("Images: %s (%d frames)" % (args.images, len(files)))
-    results = [benchmark_engine(lbl, path, files, args.warmup, args.repeat)
-               for lbl, path in args.engine]
+    print("Images: %s (%d frames)  num_prompts=%d" % (args.images, len(files),
+                                                       args.num_prompts))
+    results = [benchmark_pair(lbl, b, h, files, args.num_prompts, args.warmup,
+                              args.repeat) for lbl, b, h in args.pair]
     _print_summary(results)
     write_csv(results, args.out)
 
