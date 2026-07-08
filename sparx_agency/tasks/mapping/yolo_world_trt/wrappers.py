@@ -89,7 +89,9 @@ class BackboneWrapper:
                 super().__init__()
                 self.layers = world_model.model
                 self.cut = cut
-                self.save = set(world_model.model.save) | set(out_indices)
+                # `.save` (indices to cache) lives on the WorldModel, not its
+                # inner nn.Sequential (`world_model.model`).
+                self.save = set(world_model.save) | set(out_indices)
                 self.out_indices = out_indices
 
             def forward(self, x):
@@ -122,7 +124,7 @@ class HeadWrapper:
                 self.layers = world_model.model
                 self.cut = cut
                 self.total = len(world_model.model)
-                self.save = set(world_model.model.save)
+                self.save = set(world_model.save)   # on the WorldModel, not Sequential
                 self.out_indices = out_indices
 
             def forward(self, feats: Tuple, txt_feats):
