@@ -1,6 +1,18 @@
+from __future__ import annotations  # PEP 563: stringize the tuple[...] annotations for Python 3.8
+
 import numpy as np
 from typing import Optional
-from sparx_agency.robots.common.helpers import valid_depth_mask
+
+
+def valid_depth_mask(depth: np.ndarray, min_depth: float = 0.01,
+                     max_depth: float = float("inf")) -> np.ndarray:
+    """Boolean mask of finite depths within ``[min_depth, max_depth]``.
+
+    Inlined (rather than imported from ``robots.common.helpers``) to keep this
+    core geometry module ROS-free and torch-free, so it can be used by the
+    Python-3.8 Noetic adapters without dragging ``sensor_msgs``.
+    """
+    return np.isfinite(depth) & (depth >= min_depth) & (depth <= max_depth)
 
 def bbox_to_xyz_cam_from_depth(
     depth_m: np.ndarray,

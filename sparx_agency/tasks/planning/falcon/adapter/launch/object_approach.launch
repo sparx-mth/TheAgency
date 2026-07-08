@@ -1,0 +1,123 @@
+<launch>
+  <!-- object_approach.launch — "lock onto a named object and fly up to it".
+
+       Runs the open-vocab detector + the visual-approach state machine ALONGSIDE
+       a running nav stack (nav_stack.launch / real_drone.launch). While the target
+       is not confirmed the drone flies its normal A*/NavDP route; once the detector
+       sees the target for ~n_confirm consecutive frames, object_approach takes over
+       /cmd_vel via the visual_servoing demo-mode hand-off (the follower goes passive)
+       and servos up to the object until it is centred and very close (hover-lock; no
+       landing). Losing the track triggers an active re-search; a prolonged loss hands
+       control back and returns to SEARCH.
+
+       Usage:
+         # bring up the nav stack as usual, then in another shell:
+         roslaunch falcon_adapter object_approach.launch target_object:=refrigerator
+         # change the goal at runtime:
+         rostopic pub -1 /object_approach/goal std_msgs/String "data: 'hat'"
+         # arm/disarm:
+         rostopic pub -1 /object_approach/enable std_msgs/Bool "data: true"
+
+       Intrinsics MUST match the live RGB/depth stream (raw K, not P — see the K-vs-P
+       note in navdp_click). Defaults are the real-XTEND raw K at 504x294; override
+       to match your camera / the nav stack's navdp_* args. -->
+
+  <!-- ── Transport / topics ─────────────────────────────────────────── -->
+  <arg name="drone_ns"          default="" />                 <!-- '' on the real drone -->
+  <arg name="image_transport"   default="frame_path" />       <!-- frame_path | topic -->
+  <arg name="rgb_topic"         default="/xtend/rgb_frame_path" />
+  <arg name="depth_topic"       default="/xtend/depth_frame_path" />
+  <arg name="pose_topic"        default="/xtend/localization" /><!-- diagnostic only -->
+  <arg name="pose_type"         default="pose_stamped" />
+  <arg name="camera_info_topic" default="" />                 <!-- '' => use fx/fy/cx/cy -->
+
+  <arg name="detections_topic"  default="/object_approach/detections" />
+  <arg name="target_topic"      default="/object_approach/goal" />
+  <arg name="enable_topic"      default="/object_approach/enable" />
+
+  <!-- ── Mission ────────────────────────────────────────────────────── -->
+  <arg name="target_object"     default="refrigerator" />
+  <arg name="start_enabled"     default="true" />
+  <arg name="n_confirm"         default="3" />
+  <arg name="min_score"         default="0.30" />
+
+  <!-- ── Camera intrinsics (match the live stream) ──────────────────── -->
+  <arg name="fx"                default="322.6351083474948" />
+  <arg name="fy"                default="323.3893307141174" />
+  <arg name="cx"                default="242.06479658679714" />
+  <arg name="cy"                default="90.03019076680604" />
+  <arg name="img_width"         default="504" />
+  <arg name="img_height"        default="294" />
+
+  <!-- ── Detector ───────────────────────────────────────────────────── -->
+  <arg name="model_path"        default="yolov8s-world.pt" />
+  <arg name="device"            default="cuda:0" />
+  <arg name="conf_thresh"       default="0.25" />
+  <arg name="detect_hz"         default="2.0" />
+
+  <!-- ── Servo / approach ───────────────────────────────────────────── -->
+  <arg name="servo_mode"        default="holonomic" />        <!-- holonomic | yaw_forward_xor -->
+  <arg name="use_depth"         default="true" />
+  <arg name="target_range_m"    default="0.8" />              <!-- "very close, in front" -->
+  <arg name="slowdown_range_m"  default="2.0" />
+  <arg name="target_area_frac"  default="0.12" />             <!-- fallback when no depth -->
+  <arg name="vx_max"            default="0.35" />
+  <arg name="max_speed_xy"      default="0.4" />
+  <arg name="max_yaw_rate"      default="0.6" />
+  <arg name="ctrl_hz"           default="15.0" />
+
+  <!-- ── Recovery ───────────────────────────────────────────────────── -->
+  <arg name="search_yaw_rate"   default="0.5" />
+  <arg name="recover_timeout_s" default="6.0" /><!-- governs re-search duration -->
+
+
+  <!-- The open-vocab detector (torch/ultralytics). Publishes detections JSON. -->
+  <node pkg="falcon_adapter" type="yolo_detector_node.py"
+        name="yolo_detector" output="screen">
+    <param name="image_transport"  value="$(arg image_transport)" />
+    <param name="rgb_topic"        value="$(arg rgb_topic)" />
+    <param name="target_topic"     value="$(arg target_topic)" />
+    <param name="detections_topic" value="$(arg detections_topic)" />
+    <param name="target_object"    value="$(arg target_object)" />
+    <param name="model_path"       value="$(arg model_path)" />
+    <param name="device"           value="$(arg device)" />
+    <param name="conf_thresh"      value="$(arg conf_thresh)" />
+    <param name="detect_hz"        value="$(arg detect_hz)" />
+  </node>
+
+  <!-- The tracker + visual servo + search/approach state machine (torch-free). -->
+  <node pkg="falcon_adapter" type="object_approach_node.py"
+        name="object_approach" output="screen">
+    <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg rgb_topic)" />
+    <param name="depth_topic"       value="$(arg depth_topic)" />
+    <param name="pose_topic"        value="$(arg pose_topic)" />
+    <param name="pose_type"         value="$(arg pose_type)" />
+    <param name="camera_info_topic" value="$(arg camera_info_topic)" />
+    <param name="detections_topic"  value="$(arg detections_topic)" />
+    <param name="target_topic"      value="$(arg target_topic)" />
+    <param name="enable_topic"      value="$(arg enable_topic)" />
+    <param name="target_object"     value="$(arg target_object)" />
+    <param name="start_enabled"     value="$(arg start_enabled)" />
+    <param name="n_confirm"         value="$(arg n_confirm)" />
+    <param name="min_score"         value="$(arg min_score)" />
+    <param name="fx"                value="$(arg fx)" />
+    <param name="fy"                value="$(arg fy)" />
+    <param name="cx"                value="$(arg cx)" />
+    <param name="cy"                value="$(arg cy)" />
+    <param name="img_width"         value="$(arg img_width)" />
+    <param name="img_height"        value="$(arg img_height)" />
+    <param name="servo_mode"        value="$(arg servo_mode)" />
+    <param name="use_depth"         value="$(arg use_depth)" />
+    <param name="target_range_m"    value="$(arg target_range_m)" />
+    <param name="slowdown_range_m"  value="$(arg slowdown_range_m)" />
+    <param name="target_area_frac"  value="$(arg target_area_frac)" />
+    <param name="vx_max"            value="$(arg vx_max)" />
+    <param name="max_speed_xy"      value="$(arg max_speed_xy)" />
+    <param name="max_yaw_rate"      value="$(arg max_yaw_rate)" />
+    <param name="ctrl_hz"           value="$(arg ctrl_hz)" />
+    <param name="search_yaw_rate"   value="$(arg search_yaw_rate)" />
+    <param name="recover_timeout_s" value="$(arg recover_timeout_s)" />
+  </node>
+</launch>
