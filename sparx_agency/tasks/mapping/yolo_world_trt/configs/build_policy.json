@@ -1,0 +1,35 @@
+{
+  "_comment": "Version-controlled knobs for the YOLO-World TensorRT build. Overrides the code defaults in build_policy.py. imgsz is HEIGHTxWIDTH and MUST be stride-32 multiples. The default 288x512 matches the 504x294 XTEND resize (landscape, aspect 1.78 vs 1.71) with minimal letterbox padding and ~2.8x fewer pixels than 640x640 -- the right trade for the 15 W DLA target. Use 640x640 for maximum open-vocab accuracy.",
+
+  "variants": {
+    "s": "yolov8s-worldv2.pt",
+    "m": "yolov8m-worldv2.pt",
+    "l": "yolov8l-worldv2.pt",
+    "x": "yolov8x-worldv2.pt"
+  },
+
+  "imgsz": "288x512",
+  "opset": 17,
+  "simplify": true,
+
+  "precision": "fp16",
+
+  "dla": {
+    "enable": true,
+    "core": 0,
+    "gpu_fallback": true,
+    "allow_gpu_head": true,
+    "managed_sram_bytes": 1048576,
+    "local_dram_bytes": 1073741824,
+    "global_dram_bytes": 536870912
+  },
+
+  "builder_optimization_level": {
+    "default": 5,
+    "orin_15w": 5
+  },
+
+  "conf_thresh": 0.25,
+  "iou_thresh": 0.5,
+  "max_det": 100
+}
