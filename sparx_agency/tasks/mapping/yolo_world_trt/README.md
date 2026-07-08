@@ -221,6 +221,35 @@ of `YoloWorldDetector(...)` — same ABC.
 
 ---
 
+## 5b. PyTorch vs TensorRT — is it actually faster?
+
+`compare_torch_vs_trt.py` runs the **PyTorch** YOLO-World and the **TensorRT
+split** over the same frames, with the same labels, at the same input size, and
+prints a side-by-side latency / FPS table and the speed-up. You give it exactly:
+the `.pt` weights, the two TRT engines, the image folder, and a label string.
+
+```bash
+python -m sparx_agency.tasks.mapping.yolo_world_trt.compare_torch_vs_trt \
+    --torch-weights /path/to/yolov8s-world.pt \
+    --backbone .../orin_sm87/yolo_world_s.backbone.fp16.dla0.engine \
+    --head     .../orin_sm87/yolo_world_s.head.fp16.gpu.engine \
+    --images   /path/to/frames \
+    --labels   "weapon, chair, refrigerator"
+```
+
+Output (both timed over the full per-frame path: preprocess → inference → NMS):
+```
+model      |   mean ms      std      min      max |      FPS | dets/img
+--------------------------------------------------------------------------
+pytorch    |    ...          ...     ...      ... |    ...   |   ...
+tensorrt   |    ...          ...     ...      ... |    ...   |   ...
+--------------------------------------------------------------------------
+TensorRT speed-up: N.NNx  (... -> ... ms/frame, ... -> ... FPS)
+```
+`dets/img` (mean detections per frame) lets you confirm the two agree, not just
+that TRT is faster. Both run at the engine's built size by default (`--imgsz` to
+override); needs `ultralytics`+`torch` **and** `tensorrt`+`pycuda` present.
+
 ## 6. Input size (the biggest lever after DLA)
 
 The backbone input is **static**. Two sane choices, both multiples of 32:
@@ -259,7 +288,8 @@ wired yet. Plan: entropy calibrator fed real XTEND frames (mirroring NavDP's
 | `preprocess.py` | Letterbox a frame into the static backbone input (pure numpy). |
 | `postprocess.py` | Decode raw head + class-wise NMS + un-letterbox (pure numpy, dynamic nc). |
 | `runtime.py` | `TwoStageYoloTRT` (shared feature buffers) + `YoloTRTDetector(DetectionModel)`. |
-| `benchmark.py` | Compare `s/m/l/x`: latency / FPS / DLA-vs-GPU breakdown. |
+| `benchmark.py` | Compare `s/m/l/x` TRT engines: latency / FPS / DLA-vs-GPU. |
+| `compare_torch_vs_trt.py` | PyTorch vs TensorRT speed on a folder + labels. |
 | `build_all.sh` | One-shot export + build + benchmark for all variants. |
 | `configs/build_policy.json` | Knobs (variants, imgsz, precision, DLA pools, head N profile). |
 | `tests/` | Numpy-only tests (geometry, NMS, decode, policy, graph-cut) — run anywhere. |
