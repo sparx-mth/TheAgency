@@ -64,10 +64,19 @@ def _onnx_export(module, args, path, input_names, output_names, dynamic_axes=Non
 
 
 def _set_export_mode(world_model):
-    """Put the WorldDetect head in export mode so it returns the raw tensor."""
+    """Put the WorldDetect head in export mode so it returns the raw tensor.
+
+    ``dynamic=True`` forces the head to rebuild its anchor grid from the *current*
+    feature-map sizes on every forward. Without it, this ultralytics version reuses
+    the checkpoint's cached anchors (built at a different input size) and the box
+    decode fails with an anchor/grid size mismatch on our 288x512 input. The image
+    size is still static, so the traced anchors are constant-folded.
+    """
     detect = world_model.model[-1]
     detect.export = True
     detect.format = "onnx"
+    detect.dynamic = True
+    detect.shape = None                  # drop any cached (stale) grid shape
     return detect
 
 
@@ -114,6 +123,8 @@ def export_one(weights, variant, imgsz, out_dir, n_min=1, n_opt=8, n_max=256):
         feats = backbone(image)
     feat_names = ["feat%d" % i for i in range(len(feats))]
     feat_shapes = [list(f.shape) for f in feats]
+    print("[split] cut=%d  backbone outs=%s  feat shapes=%s  txt shape=%s"
+          % (cut, out_indices, feat_shapes, list(txt.shape)))
 
     err = _parity(world, backbone, head, image, txt)
     print("[parity] split matches full model (max abs err %.2e, cut=%d, "
