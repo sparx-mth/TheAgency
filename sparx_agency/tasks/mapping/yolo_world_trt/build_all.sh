@@ -9,12 +9,22 @@
 # Usage:
 #   export WEIGHTS_DIR=/path/to/yolo_world_weights   # holds yolov8{s,m,l,x}-worldv2.pt
 #   export IMAGES=/path/to/bench_frames              # optional: enables benchmark
-#   ./build_all.sh
+#   ./build_all.sh [variants...]
 #
-# Env overrides: VARIANTS (default "s m l x"), PYTHON (default python3),
-#   ONNX_DIR, IMGSZ (else config default), PRECISION (fp16|int8), DLA (auto|on|off),
-#   N_MAX (head dynamic-N ceiling), NUM_PROMPTS (benchmark prompt count).
+#   ./build_all.sh            # all four:  s m l x
+#   ./build_all.sh s          # just the small model (start here)
+#   ./build_all.sh s m        # small + medium
+#
+# Variants may also come from the VARIANTS env var; positional args win over it.
+# Env overrides: PYTHON (default python3), ONNX_DIR, IMGSZ (else config default),
+#   PRECISION (fp16|int8), DLA (auto|on|off), N_MAX (head dynamic-N ceiling),
+#   NUM_PROMPTS (benchmark prompt count).
 set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  # Print the top comment block (skip the shebang; stop at the first code line).
+  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../../.." && pwd)"
@@ -22,8 +32,21 @@ export PYTHONPATH="${PYTHONPATH:-}:$REPO_ROOT"
 
 PYTHON="${PYTHON:-python3}"
 MOD="sparx_agency.tasks.mapping.yolo_world_trt"
-VARIANTS="${VARIANTS:-s m l x}"
 ONNX_DIR="${ONNX_DIR:-$HERE/engines/onnx}"
+
+# Variants: positional args win, else the VARIANTS env var, else all four.
+if [[ $# -gt 0 ]]; then
+  VARIANTS="$*"
+else
+  VARIANTS="${VARIANTS:-s m l x}"
+fi
+for v in $VARIANTS; do
+  case "$v" in
+    s|m|l|x) ;;
+    *) echo "error: unknown variant '$v' (allowed: s m l x)" >&2; exit 2;;
+  esac
+done
+
 WEIGHTS_DIR="${WEIGHTS_DIR:?set WEIGHTS_DIR to the folder holding the .pt checkpoints}"
 
 imgsz_flag=(); [[ -n "${IMGSZ:-}" ]] && imgsz_flag=(--imgsz "$IMGSZ")

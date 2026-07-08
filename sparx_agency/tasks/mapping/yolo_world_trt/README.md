@@ -134,18 +134,38 @@ sparx_agency/tasks/mapping/yolo_world_trt/engines/
 
 ---
 
-## 4. Quick start — build all four and compare (one command)
+## 4. Quick start — build and compare (one command)
+
+Yes — this one command does the whole chain end to end: for each variant it
+**exports both ONNX graphs → builds both TRT engines → benchmarks the run speeds**,
+then prints a ranked FPS summary and writes `/tmp/yolo_world_trt_compare.csv`.
 
 ```bash
 cd /path/to/TheAgency && export PYTHONPATH=$PWD
 export WEIGHTS_DIR=/path/to/yolo_world_weights
 export IMAGES=/path/to/bench_frames        # optional → also runs the benchmark
-./sparx_agency/tasks/mapping/yolo_world_trt/build_all.sh
+./sparx_agency/tasks/mapping/yolo_world_trt/build_all.sh          # all four: s m l x
 ```
-Exports (backbone+head) → builds (backbone-DLA + head-GPU) → benchmarks `s/m/l/x`,
-prints a ranked FPS summary, and writes `/tmp/yolo_world_trt_compare.csv`.
-No prompts are needed at build time. Overrides: `VARIANTS`, `IMGSZ=640x640`,
-`N_MAX=256`, `NUM_PROMPTS=4`, `DLA=on|off|auto`, `PYTHON`.
+
+**Pick which models to build** — pass them as arguments (start small if you like):
+```bash
+./…/build_all.sh s          # just the small model
+./…/build_all.sh s m        # small + medium
+./…/build_all.sh            # no args → all four
+./…/build_all.sh --help     # usage
+```
+
+Two things to know about "does everything":
+- The **benchmark step only runs if `IMAGES` is set** (a folder of RGB frames).
+  Without it you still get the ONNX + engines, just no speed comparison.
+- It runs in **whatever environment you launch it in**: the export step needs
+  `ultralytics`+`torch` and the build/benchmark steps need `tensorrt`+`pycuda`. On
+  the laptop you get ONNX + a GPU engine (no DLA); the DLA engines and the real
+  15 W numbers come from running it on the Orin (§2b).
+
+No prompts are needed at build time (open-set). Overrides: `VARIANTS` (same as the
+positional args), `IMGSZ=640x640`, `N_MAX=256`, `NUM_PROMPTS=4`, `DLA=on|off|auto`,
+`PYTHON`.
 
 ---
 
