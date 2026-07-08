@@ -7,8 +7,53 @@ version, so `room_mapper/run_room_mapper.py` works unchanged on either
 robot's captures.
 
 This covers only the sensing bridge + sweep capture. FALCON/InternNav
-navigation on ROBOTICAN is a separate, not-yet-built follow-up — see the
-"Out of scope" note in this repo's ROBOTICAN sensing-bridge plan.
+navigation on ROBOTICAN is a separate, not-yet-built follow-up.
+
+## Where things run (read this first)
+
+Not everything runs on the host. `rooster_command_unit.py` needs the custom
+Rooster ROS2 interfaces (`fcu_driver_interfaces`, `rooster_handler_interfaces`,
+`rooster_manager_interfaces`, `video_handler_interfaces`), which are only
+built for ROS2 **Foxy** inside the `it` Docker container
+(`sphera-backend:rooster-with-sparx`) — this host only has Jazzy, and
+`~/rqs_iai_ws` here is a stale/incompatible Foxy-era build. Everything else
+(frame publisher, DA3, localization, dome main, `ui.py`) only needs plain
+`rclpy`/`std_msgs`/`geometry_msgs`, so it runs on the host.
+
+`sparx_agency` is bind-mounted read-write into `it` at
+`/home/rooster/sparx_agency` (same files as this repo — edits here are
+live there immediately, no rebuild/copy step).
+
+| Process | Where | Why |
+|---|---|---|
+| `rooster_command_unit.py` | **container `it`** | needs Foxy-built custom Rooster interfaces |
+| `rooster_frame_dir_publisher.py` | host | only `std_msgs`, `rclpy`, `gi`/GStreamer |
+| `depth_processor_node.py` | host | runs DA3 on the PC's GPU |
+| `localization_node.py` | host | only `std_msgs`/`geometry_msgs` |
+| `ui.py` | host | only `std_msgs`, `rclpy` |
+| `rooster_dome_main.py` | host | only `std_msgs`/`geometry_msgs` |
+
+**Fixed 2026-07-08 — CycloneDDS network interface.** All three Sphera/Rooster
+containers (`it`, `R1`, `drone_simulator`) run with `NetworkMode: host`, so
+they share this machine's network namespace directly — there's no
+container/host boundary here. This machine has two active NICs: the real
+Rooster/Sphera network is `enx00e04c680602` (192.168.131.x); `enp129s0`
+(172.16.17.x) is unrelated. Without `CYCLONEDDS_URI` explicitly set on
+**both** the host and inside `it`, CycloneDDS silently ignores
+`/etc/cyclonedds.xml` and picks a network interface "arbitrarily" — which
+crashed the container's much older CycloneDDS (0.7.0, vs. the host's 0.10.5)
+with a SIGSEGV in its discovery-packet parser (`ddsi_plist_init_frommsg`)
+as soon as it saw a mismatched/cross-interface participant. The host's own
+`/etc/cyclonedds.xml` also had a stale interface name (`enx00e04c6807d3`,
+which doesn't exist on this machine) that was never being loaded for the
+same reason. Fix, one-time on the host:
+```bash
+sudo sed -i 's/enx00e04c6807d3/enx00e04c680602/' /etc/cyclonedds.xml
+```
+All `run_*.sh` wrappers now `export CYCLONEDDS_URI=file:///etc/cyclonedds.xml`
+so this is no longer silently skipped. The container needs the same export
+before running `rooster_command_unit.py` (see Terminal 1 below) — its own
+`/etc/cyclonedds.xml` already correctly points at `enx00e04c680602`.
 
 ## One-time: camera calibration
 
@@ -19,37 +64,58 @@ capture against the live stream) and calibrates at the drone's native
 resolution:
 
 ```bash
-python3 sparx_agency/robots/ROBOTICAN/calibrate_camera.py \
+./sparx_agency/robots/ROBOTICAN/run_calibrate_camera.sh \
   --host-ip <this machine's IP> --drone-id R1
 # -> sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml
 ```
 
-The frame publisher below does no crop/resize — it publishes frames at that
-same native resolution — so this calibration file is used as-is (`camera_info_mode:=base`)
-for both `depth_processor_node.py` and `localization_node.py`. The DA3
-TensorRT engine must be exported/sized to match this same resolution;
-`depth_processor_node.py --engine-path` should point at that engine, not
-XTEND's 504x294 one.
+For the Sphera simulator specifically, a starting-point calibration already
+exists at `sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml`
+— an ideal-pinhole approximation for the wide FOV (130°x90°) already assumed
+elsewhere in this codebase (`rooster_video_adapter.py`'s `intrinsic_from_fov`),
+**not verified against Sphera's actual camera sensor definition**. Replace it
+if you know the real FOV/intrinsics Sphera uses for R1's camera.
+
+The frame publisher below does no crop/resize — it publishes frames at the
+drone's native resolution — so this calibration file is used as-is
+(`camera_info_mode:=base`) for both `depth_processor_node.py` and
+`localization_node.py`.
 
 ## Run order
 
-Each terminal needs the ROS2 environment sourced first (see the repo
-`README.md`/`run_ui.sh` for the exact Rooster/Sphera env preamble). This
-works identically against the Sphera simulator or the real drone — nothing
-here branches on which one is running underneath.
-
-### Terminal 1 — Command gateway
-
-The single owner of this drone's FCU (arm/disarm/takeoff/land/video). Every
-other process — including `rooster_dome_main.py` below — only ever talks to
-it over `/R1/cmd_nav` / `/R1/rooster_status`.
-
+All host commands below assume this preamble (or use the `run_*.sh`
+wrappers, which already do this — **always use the `.sh` wrapper over the
+`.py` file directly**; running the `.py` file straight skips the ROS
+environment and will crash with either a SIGSEGV in `gi`/GStreamer or an
+`rmw_cyclonedds_cpp` load error):
 ```bash
-python3 -m sparx_agency.robots.ROBOTICAN.adapters.rooster_command_unit \
-  --ros-args -p rooster_id:=R1
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=9
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 ```
 
-### Terminal 2 — Frame publisher
+### Terminal 1 — Command gateway (inside container `it`)
+
+The single owner of this drone's FCU (arm/disarm/takeoff/land/video). Every
+other process — including `rooster_dome_main.py` and `ui.py` — only ever
+talks to it over `/R1/cmd_nav` / `/R1/rooster_status`.
+
+```bash
+docker exec -it it bash
+source /opt/ros/foxy/setup.bash
+source /home/rooster/workspace/install/setup.bash
+export CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+cd /home/rooster
+python3 -m sparx_agency.robots.ROBOTICAN.adapters.rooster_command_unit --ros-args -p rooster_id:=R1
+```
+
+Verify from the host: `ros2 topic echo /R1/rooster_status --once` should
+print real `armed`/`airborne`/`battery_pct`/`video_on` values (not just
+defaults) — if `ros2 topic info /R1/rooster_status` shows
+`Publisher count: 0`, this isn't actually running.
+
+### Terminal 2 — Frame publisher (host)
 
 Decodes the drone's UDP/RTP-H264 stream, saves each frame at its native
 resolution (no crop/resize) as a JPEG to `/tmp/rooster_frames`, publishes
@@ -58,65 +124,80 @@ their path published — required for both this capture flow and any future
 FALCON bridging.
 
 ```bash
-python3 sparx_agency/robots/ROBOTICAN/rooster_frame_dir_publisher.py \
+./sparx_agency/robots/ROBOTICAN/run_rooster_frame_dir_publisher.sh \
   --rooster-id R1 \
   --out-dir /tmp/rooster_frames \
   --port 5001
 ```
 
 `--port` must match `rooster_command_unit`'s `video_port` parameter (default
-5001 on both sides). The drone only starts streaming once `rooster_dome_main.py`
-sends a `video_on` command in Terminal 4 below — this terminal will show no
-frames until then.
+5001 on both sides). Nothing arrives here until something sends `video_on`
+over `/R1/cmd_nav` (Terminal 4's "VIDEO STREAM" button, or Terminal 5).
 
-### Terminal 3 — DA3 depth + AprilTag localization
+### Terminal 3 — DA3 depth + AprilTag localization (host)
 
-Reuses the exact same generic nodes XTEND uses, just repointed at ROBOTICAN's
-topics, calibration, and a DA3 TensorRT engine sized/exported for ROBOTICAN's
-own frame dimensions (running on the PC's GPU against the Sphera simulator,
-not XTEND's Jetson-targeted 504x294 engine):
+Reuses the exact same generic nodes XTEND uses, just repointed at
+ROBOTICAN's topics, calibration, and a DA3 TensorRT engine sized/exported
+for ROBOTICAN's own frame dimensions (running on the PC's GPU against the
+Sphera simulator, not XTEND's Jetson-targeted 504x294 engine):
 
 ```bash
-python3 sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
+/home/user1/GIT/TheAgency/venv/bin/python \
+  /home/user1/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
   --ros-args \
   -p frame_path_topic:=/R1/rgb_frame_path \
   -p depth_path_topic:=/R1/depth_frame_path \
   -p depth_dir:=/tmp/rooster_depth \
-  -p engine_path:=<path to a DA3 engine exported for ROBOTICAN's native resolution> \
-  -p config_yaml:=sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml \
+  -p engine_path:=/home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_fp16_546x364.engine \
+  -p config_yaml:=/home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml \
   -p camera_info_mode:=base \
   -p model_type:=large_metric \
   -p depth_encoding:=32FC1
 ```
 
+The engine's 546x364 input (a multiple of 14, the ViT patch size) has the
+exact same 3:2 aspect ratio as the native 540x360 stream, so
+`DA3TensorRTModel`'s internal resize is a clean uniform scale — no
+crop/letterbox needed on the publisher side.
+
 ```bash
-python3 -m sparx_agency.tasks.localization.ros2.localization_node \
+/home/user1/GIT/TheAgency/venv/bin/python -m sparx_agency.tasks.localization.ros2.localization_node \
   --ros-args \
   -p provider_type:=apriltag \
   -p frame_path_topic:=/R1/rgb_frame_path \
-  -p camera_calib_path:=sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml \
-  -p tag_map_path:=sparx_agency/tasks/localization/config/tag_map_path.yaml \
-  -p tag_size_m:=0.13
+  -p camera_calib_path:=/home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml \
+  -p tag_map_path:=/home/user1/GIT/TheAgency/sparx_agency/tasks/localization/config/tag_map_path.yaml \
+  -p tag_size_m:=0.13 \
+  -r /xtend/localization:=/R1/localization -r /xtend/localization_source:=/R1/localization_source
 ```
 
 `localization_node.py` always publishes on the fixed `/xtend/localization` /
-`/xtend/localization_source` topic names — remap them to ROBOTICAN's
-namespace:
+`/xtend/localization_source` topic names internally — the `-r` remaps above
+are required to get them onto ROBOTICAN's `/R1/...` namespace.
+
+**Verify `tag_map_path.yaml` matches the physical/simulated AprilTag
+placement before trusting localization output** — it can't be checked from
+code.
+
+### Terminal 4 — `ui.py` (host, optional but recommended for manual control)
 
 ```bash
-  --ros-args -r /xtend/localization:=/R1/localization -r /xtend/localization_source:=/R1/localization_source
+./sparx_agency/robots/ROBOTICAN/run_ui.sh
 ```
 
-**Verify `tag_map_path.yaml` matches the physical AprilTag placement in the
-current room before trusting localization output** — it can't be checked
-from code.
+Use ARM/TAKEOFF/LAND/DISARM and the **"VIDEO STREAM"** button freely — it
+only sends `video_on`/`video_off` over `cmd_nav`. Do **not** click **"LOCAL
+PREVIEW"** while capturing — it opens a second UDP listener on the same
+video port as Terminal 2 and splits the stream between the two, so neither
+gets a complete, reliable feed.
 
-### Terminal 4 — Dome main
+### Terminal 5 — Dome main (host)
 
-Run once the drone is ready and Terminal 3 is publishing localization.
+Run once Terminal 3 is publishing localization. This sends its own
+`video_on`/`video_off` (you don't need to click `ui.py`'s button first).
 
 ```bash
-python3 sparx_agency/robots/ROBOTICAN/rooster_dome_main.py \
+./sparx_agency/robots/ROBOTICAN/run_rooster_dome_main.sh \
   --rooster-id R1 \
   --pose-topic /R1/localization \
   --out-dir ~/rooster_dome_capture \
@@ -124,12 +205,12 @@ python3 sparx_agency/robots/ROBOTICAN/rooster_dome_main.py \
   --yaw-bucket-deg 30.0
 ```
 
-This turns on the video stream, arms, takes off, rotates 360° in 90° chunks
-(guided by `/R1/localization`, falling back to a rough time-based blind turn
-if no pose arrives — tune `--blind-turn-deg-per-sec` for your drone/room if
-you ever see that fallback fire), captures frames, then lands, disarms, and
-turns the video stream back off — with a `finally`-guaranteed land+disarm
-safety net on Ctrl-C or SIGTERM.
+Arms, takes off, rotates 360° in 90° chunks (guided by `/R1/localization`,
+falling back to a rough time-based blind turn if no pose arrives — tune
+`--blind-turn-deg-per-sec` for your drone/room if you ever see that fallback
+fire), captures frames, then lands, disarms, and turns the video stream back
+off — with a `finally`-guaranteed land+disarm safety net on Ctrl-C or
+SIGTERM.
 
 Output lands in:
 ```
@@ -146,7 +227,8 @@ Output lands in:
 Same as XTEND — run NanoOWL against the session's JPEGs, then:
 
 ```bash
-python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/room_mapper/run_room_mapper.py \
+/home/user1/GIT/TheAgency/venv/bin/python \
+  sparx_agency/demos/Demo_No4_XTEND_MapRoom/room_mapper/run_room_mapper.py \
   --data-dir ~/rooster_dome_capture/latest \
   --labels /path/to/detections.json
 ```
@@ -154,8 +236,16 @@ python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/room_mapper/run_room_mapper.py
 ## Useful checks
 
 ```bash
+ros2 topic list                       # /R1/cmd_nav and /R1/rooster_status must
+                                       # exist WITH a publisher (see Terminal 1)
+ros2 topic info /R1/rooster_status    # Publisher count must be >= 1
 ros2 topic hz /R1/rgb_frame_path
 ros2 topic hz /R1/depth_frame_path
 ros2 topic hz /R1/localization
-ros2 topic echo /R1/rooster_status
+ros2 topic echo /R1/rooster_status --once
 ```
+
+The `Failed to parse type hash ... USER_DATA '(null)'` warnings from
+`rmw_cyclonedds_cpp` are harmless discovery-time noise (seen whenever the
+host's Jazzy DDS participant discovers Sphera's Foxy-built topics) — not an
+error, safe to ignore.

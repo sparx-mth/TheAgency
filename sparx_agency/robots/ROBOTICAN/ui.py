@@ -61,6 +61,7 @@ class RoosterControlUI(Node):
         # comes back via rooster_status.video_on.
         self.video_pipeline = None
         self.video_placeholder = None
+        self.preview_on = False
 
         self.active_action = None
         self.active_action_start_t = None
@@ -126,9 +127,21 @@ class RoosterControlUI(Node):
         self._btn("DISARM", "disarm", "darkred")
 
         self.video_btn = tk.Button(
-            self.root, text="VIDEO: OFF", command=self.on_video_button, bg="lightgrey", width=24,
+            self.root, text="VIDEO STREAM: OFF", command=self.on_video_stream_button,
+            bg="lightgrey", width=24,
         )
         self.video_btn.pack(pady=4)
+
+        # Separate from the stream toggle above: this only binds video_port
+        # locally to display it, so it must not run at the same time as any
+        # other listener on that port (e.g. rooster_frame_dir_publisher.py) -
+        # two UDP sockets bound to the same port split the incoming stream
+        # between them instead of both receiving it whole.
+        self.preview_btn = tk.Button(
+            self.root, text="LOCAL PREVIEW: OFF", command=self.on_preview_button,
+            bg="lightgrey", width=24,
+        )
+        self.preview_btn.pack(pady=4)
 
         ttk.Separator(self.root, orient="horizontal").pack(fill="x", pady=8)
 
@@ -232,13 +245,26 @@ class RoosterControlUI(Node):
 
     # ── Video ──────────────────────────────────────────────────
 
-    def on_video_button(self):
+    def on_video_stream_button(self):
+        """Only asks the drone to start/stop streaming - no local viewer.
+        Safe to use while something else (e.g. rooster_frame_dir_publisher.py)
+        is the sole listener on video_port."""
         if self.video_on:
             self.send_cmd("video_off", 0)
-            self._stop_video_viewer()
         else:
             self.send_cmd("video_on", 0)
+
+    def on_preview_button(self):
+        """Only shows/hides this UI's own local view of whatever is already
+        on video_port - does not itself ask the drone to start streaming."""
+        if self.preview_on:
+            self._stop_video_viewer()
+            self.preview_on = False
+            self.preview_btn.config(text="LOCAL PREVIEW: OFF", bg="lightgrey")
+        else:
             self._start_video_viewer()
+            self.preview_on = True
+            self.preview_btn.config(text="LOCAL PREVIEW: ON", bg="lightgreen")
 
     def _start_video_viewer(self):
         """Play the RTP/H264 stream the drone sends to this host directly
@@ -250,6 +276,7 @@ class RoosterControlUI(Node):
         if self.video_placeholder is not None:
             self.video_placeholder.destroy()
             self.video_placeholder = None
+
         self.video_frame.update_idletasks()
         # ximagesink doesn't reliably scale via set_render_rectangle (it's a
         # software sink, not xvimagesink) - it just clips at native pixel
@@ -333,7 +360,7 @@ class RoosterControlUI(Node):
 
         self.video_on = status.get("video_on", False)
         self.video_btn.config(
-            text=f"VIDEO: {'ON' if self.video_on else 'OFF'}",
+            text=f"VIDEO STREAM: {'ON' if self.video_on else 'OFF'}",
             bg="lightgreen" if self.video_on else "lightgrey",
         )
 
