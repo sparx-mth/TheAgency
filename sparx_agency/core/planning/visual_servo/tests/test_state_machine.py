@@ -17,6 +17,7 @@ from sparx_agency.core.planning.visual_servo.state_machine import (
     APPROACH,
     HOVER_LOCK,
     RECOVER,
+    SCAN,
     SEARCH,
     ApproachDecision,
     ApproachFSMConfig,
@@ -94,6 +95,74 @@ def test_search_confirmed_and_track_valid_enters_approach():
     assert d.drive_cmd_vel is True
     assert d.reset_acquisition is False
     assert d.lost_for_s == 0.0
+
+
+# ── SCAN transitions (arrived at goal, still looking) ─────────────────
+def test_search_arrived_at_goal_enters_scan():
+    fsm = _make()
+    d = fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+                   arrived_at_goal=True)
+    assert d.mode == SCAN
+    assert d.drive_cmd_vel is True          # the node now drives the sweep
+    assert d.reset_acquisition is False
+    assert d.lost_for_s == 0.0
+
+
+def test_search_confirm_beats_arrived():
+    # Confirmed+locked on the same tick we arrive -> go straight to APPROACH.
+    fsm = _make()
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1,
+                   arrived_at_goal=True)
+    assert d.mode == APPROACH
+
+
+def test_scan_confirmed_and_locked_enters_approach():
+    fsm = _make()
+    fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+               arrived_at_goal=True)
+    assert fsm.state == SCAN
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1,
+                   arrived_at_goal=True)
+    assert d.mode == APPROACH
+    assert d.drive_cmd_vel is True
+
+
+def test_scan_stays_while_arrived_and_unconfirmed():
+    fsm = _make()
+    fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+               arrived_at_goal=True)
+    d = fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+                   arrived_at_goal=True)
+    assert d.mode == SCAN
+
+
+def test_scan_goal_cleared_falls_back_to_search():
+    # Goal changed out from under us (no longer at the goal) -> hand back to planner.
+    fsm = _make()
+    fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+               arrived_at_goal=True)
+    d = fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+                   arrived_at_goal=False)
+    assert d.mode == SEARCH
+    assert d.drive_cmd_vel is False
+
+
+def test_recover_giveup_then_rescans_when_still_at_goal():
+    # A closure that was reached from a scan, then lost the object: on the recover
+    # give-up it returns to SEARCH (reset), and re-enters SCAN the next tick because
+    # the drone is still standing at the goal.
+    fsm = _make(recover_timeout_s=1.0)
+    fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1,
+               arrived_at_goal=True)                      # APPROACH
+    fsm.update(confirmed=True, track_valid=False, at_target=False, dt=0.1,
+               arrived_at_goal=True)                      # RECOVER
+    d = fsm.update(confirmed=True, track_valid=False, at_target=False, dt=2.0,
+                   arrived_at_goal=True)                  # timeout -> SEARCH + reset
+    assert d.mode == SEARCH
+    assert d.reset_acquisition is True
+    d = fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+                   arrived_at_goal=True)                  # back to SCAN
+    assert d.mode == SCAN
 
 
 # ── APPROACH transitions ──────────────────────────────────────────────

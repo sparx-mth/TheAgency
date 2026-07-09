@@ -1,0 +1,120 @@
+<launch>
+  <!--
+    real_drone_object_approach.launch — ONE launch that brings up the whole
+    "fly the route while hunting an object, then close on it" mission.
+
+    = real_drone.launch (map + BEV + A*/NavDP planner + route follower)
+    + object_approach.launch (TensorRT YOLO detector + tracker/visual-servo/
+      scan state machine + live target-lock HUD viewer)
+    + the interactive BEV window (bev_click_goal: shows /falcon/bev_2d and
+      click-to-set-goal on /waypoint_nav/goal).
+
+    So a single command starts everything the mission needs:
+
+      # in the FALCON container (see run_falcon.sh):
+      roslaunch falcon_adapter real_drone_object_approach.launch \
+          map_name:=office target_object:=refrigerator goal_x:=0.0 goal_y:=-3.0 \
+          backbone_engine:=/path/backbone.engine head_engine:=/path/head.engine \
+          text_weights:=/path/yolov8s-worldv2.pt
+
+    Flow: the planner flies to (goal_x, goal_y) while the detector scans in the
+    background. On confirmation the object_approach node grabs /cmd_vel (via the
+    visual_servoing hand-off), closes on the object with per-axis force-shaped
+    commands (default multi_axis + "fixed" bang-bang) and holds a moving-target
+    lock. A lost track re-searches, then re-asserts the goal and hands back to the
+    planner. If the route reaches the goal unconfirmed, the node sweeps the room.
+
+    Intrinsics: object_approach inherits the same raw-K cam_* as the map, so the
+    detector geometry matches the voxel map. Everything is overridable below.
+  -->
+
+  <!-- ── Shared / nav ─────────────────────────────────────────────── -->
+  <arg name="map_name"      default="office" />
+  <arg name="drone_ns"      default="" />
+  <arg name="image_transport" default="frame_path" />
+  <arg name="goal_x"        default="0.0" />
+  <arg name="goal_y"        default="-3.0" />
+  <arg name="nav_mode"      default="combination" /><!-- navdp | astar | combination -->
+  <arg name="use_navdp"     default="false" />
+  <!-- Route follower tracker. Independent of closure_mode below; defaults to the
+       working one-axis follower. Set multi_axis to match the closure. -->
+  <arg name="controller"    default="waypoint" />
+
+  <!-- Camera intrinsics (raw K; shared by the map AND the detector). -->
+  <arg name="cam_fx"        default="322.6351083474948" />
+  <arg name="cam_fy"        default="323.3893307141174" />
+  <arg name="cam_cx"        default="242.06479658679714" />
+  <arg name="cam_cy"        default="90.03019076680604" />
+  <arg name="cam_width"     default="504" />
+  <arg name="cam_height"    default="294" />
+
+  <!-- ── Object-approach mission ──────────────────────────────────── -->
+  <arg name="target_object"   default="refrigerator" />
+  <arg name="start_enabled"   default="true" />
+  <arg name="closure_mode"    default="multi_axis" />        <!-- multi_axis | waypoint -->
+  <arg name="force_mode"      default="fixed" />             <!-- fixed | snap | none -->
+  <arg name="arrive_radius_m" default="0.6" />
+  <!-- Detector min class confidence (the "conf" flag of the offline target-lock
+       tools). A detection below this is never emitted; the confirmation gate then
+       needs n_confirm consecutive hits above min_score. Raise it to suppress false
+       locks, lower it to acquire sooner. -->
+  <arg name="conf_thresh"     default="0.40" />
+
+  <!-- Detector engines (built on-target). Override to your paths. -->
+  <arg name="engines_dir"     default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/engines/orin_sm87" />
+  <arg name="backbone_engine" default="$(arg engines_dir)/yolo_world_s.backbone.fp16.dla0.engine" />
+  <arg name="head_engine"     default="$(arg engines_dir)/yolo_world_s.head.fp16.gpu.engine" />
+  <arg name="text_weights"    default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/weights/yolov8s-worldv2.pt" />
+
+  <!-- ── Viewers (on by default; need a display) ──────────────────── -->
+  <arg name="viewer"          default="true" />              <!-- live target-lock HUD window -->
+  <arg name="bev_viewer"      default="true" />              <!-- interactive BEV / click-to-goal -->
+
+  <!-- ══ The nav stack pointed at the real drone ══════════════════── -->
+  <include file="$(find falcon_adapter)/launch/real_drone.launch">
+    <arg name="map_name"        value="$(arg map_name)" />
+    <arg name="drone_ns"        value="$(arg drone_ns)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <arg name="goal_x"          value="$(arg goal_x)" />
+    <arg name="goal_y"          value="$(arg goal_y)" />
+    <arg name="nav_mode"        value="$(arg nav_mode)" />
+    <arg name="use_navdp"       value="$(arg use_navdp)" />
+    <arg name="controller"      value="$(arg controller)" />
+    <arg name="cam_fx"          value="$(arg cam_fx)" />
+    <arg name="cam_fy"          value="$(arg cam_fy)" />
+    <arg name="cam_cx"          value="$(arg cam_cx)" />
+    <arg name="cam_cy"          value="$(arg cam_cy)" />
+    <arg name="cam_width"       value="$(arg cam_width)" />
+    <arg name="cam_height"      value="$(arg cam_height)" />
+  </include>
+
+  <!-- ══ The object-approach mission (detector + servo + HUD) ═══════── -->
+  <include file="$(find falcon_adapter)/launch/object_approach.launch">
+    <arg name="drone_ns"        value="$(arg drone_ns)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <arg name="target_object"   value="$(arg target_object)" />
+    <arg name="start_enabled"   value="$(arg start_enabled)" />
+    <arg name="closure_mode"    value="$(arg closure_mode)" />
+    <arg name="force_mode"      value="$(arg force_mode)" />
+    <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />
+    <arg name="conf_thresh"     value="$(arg conf_thresh)" />
+    <!-- The route's goal, so arrival -> scan works and give-up re-injects it. -->
+    <arg name="goal_x"          value="$(arg goal_x)" />
+    <arg name="goal_y"          value="$(arg goal_y)" />
+    <!-- Detector geometry MUST match the map (same raw K). -->
+    <arg name="fx"              value="$(arg cam_fx)" />
+    <arg name="fy"              value="$(arg cam_fy)" />
+    <arg name="cx"              value="$(arg cam_cx)" />
+    <arg name="cy"              value="$(arg cam_cy)" />
+    <arg name="img_width"       value="$(arg cam_width)" />
+    <arg name="img_height"      value="$(arg cam_height)" />
+    <arg name="backbone_engine" value="$(arg backbone_engine)" />
+    <arg name="head_engine"     value="$(arg head_engine)" />
+    <arg name="text_weights"    value="$(arg text_weights)" />
+    <arg name="viewer"          value="$(arg viewer)" />
+  </include>
+
+  <!-- ══ Interactive BEV window (map + click-to-set-goal) ══════════── -->
+  <node pkg="falcon_adapter" type="bev_click_goal_node.py"
+        name="bev_click_goal" output="screen" if="$(arg bev_viewer)" />
+</launch>

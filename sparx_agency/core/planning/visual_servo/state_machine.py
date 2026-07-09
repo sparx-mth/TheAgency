@@ -10,16 +10,20 @@ and never lets the follower fight it.
 States (string labels, à la
 :class:`~sparx_agency.core.planning.trackers.rotation_supervisor.RotationReobserveSupervisor`):
 
-  * ``SEARCH``      — planner flies; node passive (``drive_cmd_vel=False``).
+  * ``SEARCH``      — planner flies the route; node passive (``drive_cmd_vel=False``).
+  * ``SCAN``        — the route reached its goal without a confirmation, so the node
+    drives a slow rotate-with-stops sweep of the room (see the scan-search policy)
+    to look for the object. Still "searching", but the node now owns ``/cmd_vel``.
   * ``APPROACH``    — servo drives toward the target.
   * ``HOVER_LOCK``  — target centred and close: success, hold and keep tracking.
   * ``RECOVER``     — track lost; node sweeps to re-acquire (see the recovery policy).
 
 Transitions are driven only by booleans the node already has (target confirmed,
-track valid, servo at-target), plus a lost-timer for the recovery timeout — no
-clock, no I/O. A short hysteresis on the HOVER_LOCK exit prevents chatter at the
-success boundary. On a recovery timeout the machine returns to SEARCH and flags
-``reset_acquisition`` so the node clears the confirmation gate and tracker.
+track valid, servo at-target, arrived-at-goal), plus a lost-timer for the recovery
+timeout — no clock, no I/O. A short hysteresis on the HOVER_LOCK exit prevents
+chatter at the success boundary. On a recovery timeout the machine returns to
+SEARCH and flags ``reset_acquisition`` so the node clears the confirmation gate and
+tracker (from SEARCH it re-enters SCAN on the next tick if still at the goal).
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 SEARCH = "SEARCH"
+SCAN = "SCAN"
 APPROACH = "APPROACH"
 HOVER_LOCK = "HOVER_LOCK"
 RECOVER = "RECOVER"
@@ -65,10 +70,11 @@ class ApproachDecision:
     """One tick's mission decision.
 
     Attributes:
-        mode: Current state label (one of SEARCH/APPROACH/HOVER_LOCK/RECOVER).
+        mode: Current state label (one of SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER).
         drive_cmd_vel: True when this node owns ``/cmd_vel`` this tick (everything
-            except SEARCH). The node requests the ``visual_servoing`` hand-off while
-            this is True and releases the follower when it goes False.
+            except SEARCH — SCAN drives the sweep, so it owns it too). The node
+            requests the ``visual_servoing`` hand-off while this is True and
+            releases the follower when it goes False.
         reset_acquisition: True on the RECOVER->SEARCH give-up edge — the node
             clears the confirmation gate and tracker to re-acquire from scratch.
         lost_for_s: Seconds the track has been lost (0 outside RECOVER); pass to
@@ -100,22 +106,40 @@ class VisualApproachStateMachine:
         return self._state
 
     def update(self, confirmed: bool, track_valid: bool, at_target: bool,
-               dt: float) -> ApproachDecision:
+               dt: float, arrived_at_goal: bool = False) -> ApproachDecision:
         """Advance one tick.
 
         Args:
-            confirmed: Target confirmed by the acquisition gate (used in SEARCH).
+            confirmed: Target confirmed by the acquisition gate (used in SEARCH/SCAN).
             track_valid: The tracker holds a (measured or predicted) box this frame.
             at_target: The servo reports the target centred and close enough.
             dt: Seconds since the previous update (for the recovery timer).
+            arrived_at_goal: The coordinate route has reached its goal. While True
+                and the target is not yet confirmed, the machine sits in SCAN and
+                the node sweeps the room; when it goes False (goal changed) SCAN
+                falls back to SEARCH so the planner flies the new route. Defaults
+                False — an offline replay with no planner never scans.
         """
         dt = max(0.0, float(dt))
 
         if self._state == SEARCH:
             # Only leave SEARCH once BOTH confirmed and the tracker is actually
-            # locked (the node seeds the tracker on confirmation).
+            # locked (the node seeds the tracker on confirmation). Otherwise, once
+            # the route has reached its goal, switch to a room sweep (SCAN).
             if confirmed and track_valid:
                 self._enter(APPROACH)
+            elif arrived_at_goal:
+                self._enter(SCAN)
+            return self._decide()
+
+        if self._state == SCAN:
+            # Sweeping the room at the goal. Confirm+lock -> approach; if the goal
+            # moves out from under us (arrived_at_goal cleared) hand back to the
+            # planner via SEARCH.
+            if confirmed and track_valid:
+                self._enter(APPROACH)
+            elif not arrived_at_goal:
+                self._enter(SEARCH)
             return self._decide()
 
         if self._state == APPROACH:

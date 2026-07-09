@@ -8,19 +8,33 @@ parallel. Once the target is confirmed for N consecutive detector frames, the no
 takes over ``/cmd_vel`` -- via the ``visual_servoing`` demo-mode hand-off, which
 makes the follower go passive so there is exactly one publisher -- and visually
 servos onto the object at camera rate until it is centred and very close (a stable
-hover-lock directly in front of it). If the track is lost it actively re-searches
-in the direction the target left; if it cannot re-acquire it hands control back and
-returns to SEARCH.
+hover-lock directly in front of it). There is NO terminal stop: HOVER_LOCK keeps
+tracking, and if the object moves it re-enters APPROACH. If the track is lost it
+actively re-searches in the direction the target left; if it cannot re-acquire it
+hands control back, re-asserts the goal, and returns to SEARCH.
+
+Beyond the base search->approach loop this node adds four mission behaviours:
+  1. Per-axis FORCE SHAPING of every published command (min/max force; the
+     platform needs a minimum force to move at all). Default "fixed" bang-bang;
+     ~closure_mode picks multi_axis (holonomic) or waypoint (yaw-xor).
+  2. GOAL RE-INJECT: on a lost-track give-up, re-publish the last/initial goal so
+     the planner flies back to it instead of stalling.
+  3. SCAN-AT-GOAL: once the route reaches its goal still unconfirmed, sweep the
+     room (slow rotate with stops) looking for the object.
+  4. LIVE HUD: publish the target-lock overlay (detections + tracked box + the
+     exact shaped command) as an Image for target_lock_viewer_node.
 
 All the maths is ROS-free and unit-tested:
   * detect-once/track-many bbox tracking   core.planning.visual_tracking.TargetTracker
   * bbox (+depth range) -> body velocity    core.planning.visual_servo.VisualServoController
   * N-consecutive-frame acquisition         core.planning.visual_servo.TargetConfirmationGate
   * where to look when lost                  core.planning.visual_servo.ReSearchPolicy
-  * SEARCH/APPROACH/HOVER_LOCK/RECOVER       core.planning.visual_servo.VisualApproachStateMachine
-  * bbox + depth -> metric range            core.mapping.depth.bbox_to_xyz_cam_from_depth
+  * SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER  core.planning.visual_servo.VisualApproachStateMachine
+  * per-axis min/max force shaping           core.planning.visual_servo.CommandForceShaper
+  * rotate-with-stops room sweep             core.planning.visual_servo.ScanSearchPolicy
+  * bbox + depth -> metric range             core.mapping.depth.bbox_to_xyz_cam_from_depth
 This node owns ONLY ROS concerns: sensor I/O, the demo-mode hand-off, /cmd_vel,
-and feeding the pure state machine. NO localization is used for the approach.
+and feeding the pure state machines. Pose is used ONLY for arrival detection.
 
 Inputs  (mirrors navdp_click / combination transports):
   ~rgb_topic     frame-path String or raw Image   (tracked every frame)
@@ -29,13 +43,18 @@ Inputs  (mirrors navdp_click / combination transports):
   ~target_topic  std_msgs/String                  (the mission "goal", e.g. "hat")
   ~enable_topic  std_msgs/Bool                     (mode switch; ~start_enabled)
   ~demo_mode_topic  std_msgs/String                (to know we hold visual_servoing)
+  ~pose_topic    PoseStamped/Pose                  (arrival detection only)
+  ~goal_in_topic geometry_msgs/Point               (the coordinate route's goal)
 Outputs:
-  <drone_ns>/cmd_vel  geometry_msgs/Twist          (holonomic vx, vy, wz)
+  <drone_ns>/cmd_vel  geometry_msgs/Twist          (force-shaped vx, vy, wz)
   ~demo_mode_request_topic  std_msgs/String        (visual_servoing <-> fly_straight)
+  ~goal_out_topic  geometry_msgs/Point             (goal re-inject on give-up)
+  ~overlay_topic   sensor_msgs/Image               (live target-lock HUD)
   ~status_topic  std_msgs/String                    (diagnostics, optional)
 See the file footer for the full rosparam list.
 """
 import json
+import math
 import threading
 from collections import deque
 
@@ -43,12 +62,12 @@ import cv2
 import numpy as np
 
 import rospy
-from geometry_msgs.msg import Pose, PoseStamped, Twist
+from geometry_msgs.msg import Point, Pose, PoseStamped, Twist
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
-from sparx_agency.core.common.types import Intrinsics, KinematicLimits
+from sparx_agency.core.common.types import ControlCommand, Intrinsics, KinematicLimits
 from sparx_agency.core.common.types.perception import Detection2D
 from sparx_agency.core.mapping.depth.depth_bbox_fusion import bbox_to_xyz_cam_from_depth
 from sparx_agency.core.planning.visual_tracking import TargetTracker, TargetTrackerConfig
@@ -56,8 +75,23 @@ from sparx_agency.core.planning.visual_servo import (
     VisualServoController, VisualServoParams, VisualServoRequest,
     TargetConfirmationGate, ConfirmationGateConfig,
     ReSearchPolicy, ReSearchConfig,
-    VisualApproachStateMachine, ApproachFSMConfig, SEARCH,
+    VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN,
+    AxisForceProfile, CommandForceShaper,
+    ScanSearchConfig, ScanSearchPolicy,
 )
+
+# The live target-lock HUD (same renderer as the offline tool). Optional: if the
+# offline package is not importable in this runtime the mission still runs, only
+# the overlay is disabled.
+try:
+    from sparx_agency.tasks.planning.object_approach_offline import overlay as _overlay
+    from sparx_agency.tasks.planning.object_approach_offline.pipeline import FrameResult
+    _HAVE_OVERLAY = True
+except Exception as _e:                       # noqa: BLE001 -- viz is non-critical
+    _overlay = None
+    FrameResult = None
+    _HAVE_OVERLAY = False
+    _OVERLAY_IMPORT_ERR = _e
 
 MODE_VISUAL_SERVOING = "visual_servoing"   # follower goes passive on this
 MODE_RELEASE = "fly_straight"              # hand control back to the follower
@@ -116,6 +150,19 @@ class ObjectApproachNode(object):
         self.enabled = _param_bool("~start_enabled", True)
         self.target = str(G("~target_object", "refrigerator")).strip().lower()
 
+        # ── Closure "version" ────────────────────────────────────────
+        # multi_axis (holonomic vx+vy+yaw; the default) or waypoint (yaw XOR
+        # forward, matching the one-axis follower). It picks the servo mode and
+        # whether lateral crab is used; ~servo_mode / ~use_lateral still override.
+        self.closure_mode = str(G("~closure_mode", "multi_axis")).strip().lower()
+        if self.closure_mode not in ("multi_axis", "waypoint"):
+            raise ValueError("~closure_mode must be 'multi_axis' or 'waypoint', "
+                             "got %r" % self.closure_mode)
+        _is_mx = self.closure_mode == "multi_axis"
+        servo_mode = str(G("~servo_mode",
+                           "holonomic" if _is_mx else "yaw_forward_xor")).strip().lower()
+        use_lateral = _param_bool("~use_lateral", _is_mx)
+
         # ── Core objects (ROS-free) ──────────────────────────────────
         self.limits = KinematicLimits(
             max_speed_xy=float(G("~max_speed_xy", 0.4)),
@@ -125,10 +172,10 @@ class ObjectApproachNode(object):
             input_is_bgr=True,
             max_predict_s=float(G("~max_predict_s", 0.4))))
         self.servo = VisualServoController(VisualServoParams(
-            mode=str(G("~servo_mode", "holonomic")).strip().lower(),
+            mode=servo_mode,
             kp_yaw=float(G("~kp_yaw", 1.2)),
             max_yaw_rate=float(G("~max_yaw_rate", 0.6)),
-            use_lateral=_param_bool("~use_lateral", True),
+            use_lateral=use_lateral,
             use_vertical=_param_bool("~use_vertical", False),
             vx_max=float(G("~vx_max", 0.35)),
             use_depth=_param_bool("~use_depth", True),
@@ -137,6 +184,45 @@ class ObjectApproachNode(object):
             target_area_frac=float(G("~target_area_frac", 0.12)),
             center_tol=float(G("~center_tol", 0.15))),
             default_limits=self.limits)
+        self.servo_vx_max = float(G("~vx_max", 0.35))
+        self.servo_vy_max = float(G("~max_lateral_speed", 0.25))
+
+        # ── Per-axis force shaping ("minimum force") ─────────────────
+        # The servo emits an analog velocity capped only at the top; the platform
+        # needs a minimum per-axis force to move at all, so shape every published
+        # command (servo / recovery / scan) through the same discipline the
+        # multi-axis follower uses. Default mode is "fixed" (bang-bang: 0 or a
+        # single fixed pulse per axis). Max = the kinematic limits.
+        self.force_mode = str(G("~force_mode", "fixed")).strip().lower()
+        release_frac = float(G("~force_release_frac", 0.5))
+        zero_eps = float(G("~force_zero_eps", 1e-3))
+
+        def _axis(min_mag, max_mag, fixed_mag):
+            return AxisForceProfile(
+                min_magnitude=float(min_mag), max_magnitude=float(max_mag),
+                release_frac=release_frac, zero_eps=zero_eps, mode=self.force_mode,
+                fixed_magnitude=(None if fixed_mag is None or float(fixed_mag) <= 0.0
+                                 else float(fixed_mag)))
+
+        min_vx = float(G("~min_vx", 0.06))
+        min_vy = float(G("~min_vy", 0.06))
+        min_wz = math.radians(float(G("~min_wz_deg", 8.0)))
+        self.shaper = CommandForceShaper(
+            vx=_axis(min_vx, self.limits.max_speed_xy, G("~fixed_vx", 0.0)),
+            vy=_axis(min_vy, self.limits.max_speed_xy, G("~fixed_vy", 0.0)),
+            wz=_axis(min_wz, self.limits.max_yaw_rate,
+                     math.radians(float(G("~fixed_wz_deg", 0.0)))))
+
+        # ── Scan-at-goal sweep (arrived, still looking) ──────────────
+        self.arrive_radius_m = float(G("~arrive_radius_m", 0.6))
+        self.scan = ScanSearchPolicy(ScanSearchConfig(
+            yaw_rate=float(G("~scan_yaw_rate", 0.4)),
+            rotate_s=float(G("~scan_rotate_s", 1.2)),
+            pause_s=float(G("~scan_pause_s", 1.2)),
+            direction=(1.0 if float(G("~scan_direction", 1.0)) >= 0.0 else -1.0),
+            forward_speed=float(G("~scan_forward_speed", 0.0)),
+            forward_s=float(G("~scan_forward_s", 0.0)),
+            bursts_before_move=int(G("~scan_bursts_before_move", 8))))
         self.gate = TargetConfirmationGate(self.target, ConfirmationGateConfig(
             n_confirm=int(G("~n_confirm", 3)),
             min_score=float(G("~min_score", 0.30))))
@@ -150,9 +236,31 @@ class ObjectApproachNode(object):
         self.fsm = VisualApproachStateMachine(ApproachFSMConfig(
             recover_timeout_s=recover_timeout_s))
 
+        # ── Goal memory + re-inject ───────────────────────────────────
+        # We remember the coordinate route's goal (from ~goal_x/y and any live
+        # /waypoint_nav/goal click) so that (a) we can tell when the drone has
+        # arrived (-> scan), and (b) on a lost-track give-up we re-assert it, so the
+        # planner resumes flying to the last/initial goal instead of stalling.
+        self.goal_in_topic = G("~goal_in_topic", "/waypoint_nav/goal")
+        self.goal_out_topic = G("~goal_out_topic", "/waypoint_nav/goal")
+        gx, gy = G("~goal_x", None), G("~goal_y", None)
+        self._goal_xy = None if gx is None or gy is None else (float(gx), float(gy))
+        self._pose_xy = None
+
+        # ── Live HUD (overlay Image) ──────────────────────────────────
+        self.publish_overlay = _param_bool("~publish_overlay", True) and _HAVE_OVERLAY
+        self.overlay_topic = G("~overlay_topic", "/object_approach/overlay")
+        self.viz_hz = float(G("~viz_hz", 10.0))
+        # Full-scale gauge references (max the servo can command, floored by any
+        # kinematic limit) -- for a HUD gauge, not a command.
+        self.gauge_max_vx = min(self.servo_vx_max, self.limits.max_speed_xy)
+        self.gauge_max_vy = min(self.servo_vy_max, self.limits.max_speed_xy)
+        self.gauge_max_yaw_rate = min(float(G("~max_yaw_rate", 0.6)),
+                                      self.limits.max_yaw_rate)
+
         # ── Shared state ──────────────────────────────────────────────
-        # _lock guards tracker/gate/frame-buffer; _mode_lock guards the
-        # enabled + demo-mode-request handshake (mutated by the enable callback
+        # _lock guards tracker/gate/frame-buffer/viz snapshot; _mode_lock guards
+        # the enabled + demo-mode-request handshake (mutated by the enable callback
         # thread and the control-timer thread).
         self._lock = threading.Lock()
         self._mode_lock = threading.Lock()
@@ -161,10 +269,15 @@ class ObjectApproachNode(object):
         self.depth = None
         self._frame_buf = deque(maxlen=max(2, self.frame_buffer_len))  # (stamp, bgr)
         self._confirmed = False
+        self._streak = 0
+        self._last_dets = []
         self.current_demo_mode = None
         self._requested_mode = None
         self._last_dec = None
         self._last_res = None
+        self._last_track = None
+        self._last_cmd = None            # last SHAPED ControlCommand (None in SEARCH)
+        self._last_cmd_source = "planner (visual approach passive)"
         self._prev_tick_t = None
 
         # ── ROS I/O (publishers before subscribers) ──────────────────
@@ -172,6 +285,9 @@ class ObjectApproachNode(object):
         self.demo_req_pub = rospy.Publisher(self.demo_mode_request_topic, String,
                                             queue_size=1, latch=True)
         self.status_pub = rospy.Publisher(self.status_topic, String, queue_size=1)
+        self.goal_pub = rospy.Publisher(self.goal_out_topic, Point, queue_size=1, latch=True)
+        self.overlay_pub = (rospy.Publisher(self.overlay_topic, Image, queue_size=1)
+                            if self.publish_overlay else None)
 
         if _fp:
             rospy.Subscriber(self.rgb_topic, String, self._rgb_path_cb, queue_size=2)
@@ -182,6 +298,12 @@ class ObjectApproachNode(object):
         if self.camera_info_topic:
             rospy.Subscriber(self.camera_info_topic, CameraInfo, self._cam_info_cb,
                              queue_size=1)
+        # Pose (for arrival detection): PoseStamped on /xtend/localization by default.
+        if self.pose_type == "pose_stamped":
+            rospy.Subscriber(self.pose_topic, PoseStamped, self._pose_stamped_cb, queue_size=5)
+        else:
+            rospy.Subscriber(self.pose_topic, Pose, self._pose_cb, queue_size=5)
+        rospy.Subscriber(self.goal_in_topic, Point, self._goal_cb, queue_size=1)
         rospy.Subscriber(self.detections_topic, String, self._det_cb, queue_size=5)
         rospy.Subscriber(self.target_topic, String, self._target_cb, queue_size=1)
         rospy.Subscriber(self.enable_topic, Bool, self._enable_cb, queue_size=1)
@@ -268,6 +390,27 @@ class ObjectApproachNode(object):
     def _demo_mode_cb(self, msg):
         self.current_demo_mode = str(msg.data).strip().lower()
 
+    def _pose_stamped_cb(self, msg):
+        self._pose_xy = (float(msg.pose.position.x), float(msg.pose.position.y))
+
+    def _pose_cb(self, msg):
+        self._pose_xy = (float(msg.position.x), float(msg.position.y))
+
+    def _goal_cb(self, msg):
+        # Remember the coordinate route's live goal (a bev click). Ignore our own
+        # latched re-inject (same value) so we never fight the planner over it.
+        self._goal_xy = (float(msg.x), float(msg.y))
+
+    def _arrived_at_goal(self):
+        """True once the drone is within ``arrive_radius_m`` of the known goal --
+        the proxy for "the A*/NavDP route reached its goal" (there is no done
+        topic). None goal or pose -> False (never scans without a known goal)."""
+        if self._goal_xy is None or self._pose_xy is None:
+            return False
+        dx = self._pose_xy[0] - self._goal_xy[0]
+        dy = self._pose_xy[1] - self._goal_xy[1]
+        return math.hypot(dx, dy) <= self.arrive_radius_m
+
     # ─── Detections: confirm + (re)seed the tracker ──────────────────
     def _det_cb(self, msg):
         try:
@@ -286,6 +429,8 @@ class ObjectApproachNode(object):
         with self._lock:
             state = self.gate.update(dets)
             self._confirmed = state.confirmed
+            self._streak = state.streak
+            self._last_dets = dets          # for the HUD overlay
             if state.best is None:
                 return
             # Seed on acquisition; re-seed later to bound drift / regain a lost lock.
@@ -305,6 +450,8 @@ class ObjectApproachNode(object):
     def start(self):
         rospy.Timer(rospy.Duration(1.0 / max(self.ctrl_hz, 1.0)), self._tick)
         rospy.Timer(rospy.Duration(2.0), self._hb)
+        if self.overlay_pub is not None and self.viz_hz > 0.0:
+            rospy.Timer(rospy.Duration(1.0 / self.viz_hz), self._publish_overlay)
         rospy.spin()
 
     def _tick(self, _evt):
@@ -348,18 +495,31 @@ class ObjectApproachNode(object):
                 track=track, intrinsics=self.intr, range_m=rng, dt=dt))
         at_target = bool(res is not None and res.at_target)
 
+        # Arrival at the coordinate goal (no done topic exists) lets the FSM switch
+        # from passive SEARCH to an active room SCAN when still unconfirmed.
+        arrived = self._arrived_at_goal()
         dec = self.fsm.update(confirmed=confirmed, track_valid=track_valid,
-                              at_target=at_target, dt=dt)
-        self._last_dec, self._last_res = dec, res
+                              at_target=at_target, dt=dt, arrived_at_goal=arrived)
+        self._last_dec, self._last_res, self._last_track = dec, res, track
 
         if dec.reset_acquisition:
             with self._lock:
                 self.gate.reset()
                 self.tracker.reset()
                 self._confirmed = False
+            # Lost the object for good: re-assert the goal so the planner flies us
+            # back to the last/initial goal rather than stalling where we gave up.
+            self._reinject_goal()
+
+        # The sweep is stateful: keep it reset unless we are actively scanning, so
+        # each SCAN episode starts from a clean look straight ahead.
+        if dec.mode != SCAN:
+            self.scan.reset()
 
         if not dec.drive_cmd_vel:                 # SEARCH: hand /cmd_vel back
             self._release()
+            self._last_cmd = None
+            self._last_cmd_source = "planner (visual approach passive)"
             return
 
         # We own /cmd_vel: make the follower passive first. Do NOT publish until
@@ -367,18 +527,23 @@ class ObjectApproachNode(object):
         # still-active follower would both drive /cmd_vel for the round-trip.
         self._request_mode(MODE_VISUAL_SERVOING)
         if self.current_demo_mode != MODE_VISUAL_SERVOING:
+            self._last_cmd = None
+            self._last_cmd_source = "awaiting %s hand-off" % MODE_VISUAL_SERVOING
             return
-        if dec.mode == "RECOVER" or res is None:
+        if dec.mode == SCAN:                       # arrived, sweeping the room
+            c = self.scan.command(dt)
+            self._publish_cmd(c.x, c.y, c.yaw_rate, "scan:%s" % self.scan.phase)
+        elif dec.mode == "RECOVER" or res is None:
             self._drive_recovery(last_track, dec.lost_for_s)
         else:
             c = res.command
-            self._publish_cmd(c.x, c.y, c.yaw_rate)
+            self._publish_cmd(c.x, c.y, c.yaw_rate, "servo:%s" % res.mode)
 
     def _drive_recovery(self, last_track, lost_for_s):
         rec = self.recovery.command(last_track, lost_for_s,
                                     self.intr.width, self.intr.height)
         c = rec.command
-        self._publish_cmd(c.x, c.y, c.yaw_rate)
+        self._publish_cmd(c.x, c.y, c.yaw_rate, "recovery:%s" % rec.phase)
 
     def _range_to(self, track, depth):
         """Metric range (m) to the tracked box from depth, or None."""
@@ -427,16 +592,35 @@ class ObjectApproachNode(object):
         with self._mode_lock:
             if self._requested_mode != MODE_VISUAL_SERVOING:
                 return
-            self._publish_cmd(0.0, 0.0, 0.0)          # one brake before releasing
+            self._publish_cmd(0.0, 0.0, 0.0, "stop")  # one brake before releasing
             self._request_mode_locked(MODE_RELEASE)
 
-    def _publish_cmd(self, vx, vy, wz):
+    def _publish_cmd(self, vx, vy, wz, source="servo"):
+        """Force-shape (per-axis min/max) then publish the body-velocity Twist.
+
+        Shaping is the FINAL stage before the wire, so every published command --
+        servo, recovery sweep, room scan, or brake -- respects the platform's
+        minimum/maximum per-axis force. Shaping ``0 -> 0``, so a stop stays a stop.
+        """
+        shaped = self.shaper.shape(
+            ControlCommand.velocity(float(vx), float(vy), 0.0, float(wz)))
         m = Twist()
-        m.linear.x = float(vx)
-        m.linear.y = float(vy)          # holonomic crab (XTEND accepts it)
+        m.linear.x = float(shaped.x)
+        m.linear.y = float(shaped.y)    # holonomic crab (0 in waypoint closure)
         m.linear.z = 0.0                # fixed altitude (platform holds it)
-        m.angular.z = float(wz)
+        m.angular.z = float(shaped.yaw_rate)
         self.cmd_pub.publish(m)
+        self._last_cmd = shaped
+        self._last_cmd_source = source
+
+    def _reinject_goal(self):
+        """Re-publish the last/initial goal so the planner resumes to it (R2)."""
+        if self._goal_xy is None:
+            return
+        p = Point(x=float(self._goal_xy[0]), y=float(self._goal_xy[1]), z=0.0)
+        self.goal_pub.publish(p)
+        rospy.loginfo("object_approach: re-inject goal (%.2f, %.2f) -> %s",
+                      p.x, p.y, self.goal_out_topic)
 
     # ─── Heartbeat ───────────────────────────────────────────────────
     def _hb(self, _evt):
@@ -454,6 +638,48 @@ class ObjectApproachNode(object):
         rospy.loginfo(line)
         self.status_pub.publish(String(data=line))
 
+    # ─── Live HUD overlay ────────────────────────────────────────────
+    def _publish_overlay(self, _evt):
+        """Render the live target-lock HUD (the same renderer the offline tool uses)
+        from the ACTUAL mission state -- detections, tracked box, and the exact
+        SHAPED command being published -- and publish it as a bgr8 Image."""
+        if self.overlay_pub is None:
+            return
+        with self._lock:
+            bgr = self.rgb                     # node stores BGR (see _push_rgb)
+            dets = list(self._last_dets)
+            track = self._last_track
+            stamp = self.rgb_stamp
+        if bgr is None:
+            return
+        res, dec, cmd = self._last_res, self._last_dec, self._last_cmd
+        fr = FrameResult(
+            stamp_s=stamp, dt=0.0, target=self.target,
+            detections=dets, confirmed=self._confirmed, streak=self._streak,
+            track=track, fsm_mode=(dec.mode if dec is not None else SEARCH),
+            at_target=bool(res is not None and res.at_target),
+            x_offset=None if res is None else res.x_offset,
+            y_offset=None if res is None else res.y_offset,
+            area_frac=None if res is None else res.area_frac,
+            range_m=None if res is None else res.range_m,
+            command=cmd, cmd_source=self._last_cmd_source,
+            gauge_max_vx=self.gauge_max_vx, gauge_max_vy=self.gauge_max_vy,
+            gauge_max_yaw_rate=self.gauge_max_yaw_rate)
+        try:
+            img = _overlay.render(bgr, fr)
+        except Exception as e:                    # noqa: BLE001 -- viz must not kill the node
+            rospy.logwarn_throttle(5.0, "object_approach: overlay render failed (%s)", e)
+            return
+        img = np.ascontiguousarray(img)
+        msg = Image()
+        msg.header.stamp = rospy.Time.now()
+        msg.height, msg.width = int(img.shape[0]), int(img.shape[1])
+        msg.encoding = "bgr8"
+        msg.is_bigendian = 0
+        msg.step = int(img.shape[1] * 3)
+        msg.data = img.tobytes()
+        self.overlay_pub.publish(msg)
+
     def _banner(self):
         L = rospy.loginfo
         L("=" * 64)
@@ -463,8 +689,16 @@ class ObjectApproachNode(object):
         L("  dets  in  = %s", self.detections_topic)
         L("  goal  in  = %s   (start target=%r)", self.target_topic, self.target)
         L("  enable    = %s   (start_enabled=%s)", self.enable_topic, self.enabled)
-        L("  cmd_vel out = %s  (holonomic, via %s hand-off)",
+        L("  cmd_vel out = %s  (via %s hand-off)",
           self.drone_ns + "/cmd_vel", MODE_VISUAL_SERVOING)
+        L("  closure   = %s   force=%s (min vx=%.3f vy=%.3f wz=%.0f deg/s)",
+          self.closure_mode, self.force_mode, self.shaper.vx.min_magnitude,
+          self.shaper.vy.min_magnitude, math.degrees(self.shaper.wz.min_magnitude))
+        L("  nav goal  = %s  (in=%s out=%s, arrive<%.2fm -> SCAN)",
+          self._goal_xy, self.goal_in_topic, self.goal_out_topic, self.arrive_radius_m)
+        L("  HUD out   = %s  @ %.1f Hz (%s)", self.overlay_topic, self.viz_hz,
+          "on" if self.overlay_pub is not None else
+          ("off" if _HAVE_OVERLAY else "overlay import failed: %s" % _OVERLAY_IMPORT_ERR))
         L("  intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f  (%dx%d)",
           self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
           self.intr.width, self.intr.height)
@@ -492,7 +726,7 @@ if __name__ == "__main__":
 #       ~rgb_topic (/xtend/rgb_frame_path) ~depth_topic (/xtend/depth_frame_path)
 #       ~detections_topic (/object_approach/detections)  ~target_topic (/object_approach/goal)
 #       ~enable_topic (/object_approach/enable)  ~status_topic (/object_approach/status)
-#       ~pose_topic (/xtend/localization) ~pose_type (pose_stamped)  [diagnostic only]
+#       ~pose_topic (/xtend/localization) ~pose_type (pose_stamped | pose)  [arrival test]
 #       ~drone_ns ('')  [-> <drone_ns>/cmd_vel]
 #       ~demo_mode_topic (/xtend/demo_mode)  ~demo_mode_request_topic (/xtend/demo_mode_request)
 #   camera (MUST match the live stream; K over P): ~fx ~fy ~cx ~cy ~img_width (504)
@@ -500,11 +734,25 @@ if __name__ == "__main__":
 #   mission: ~target_object (refrigerator) ~start_enabled (true) ~ctrl_hz (15.0)
 #   acquisition: ~n_confirm (3) ~min_score (0.30)
 #   tracking: ~reseed_on_detection (true) ~frame_buffer_len (30) ~max_predict_s (0.4)
-#   servo: ~servo_mode (holonomic | yaw_forward_xor) ~kp_yaw (1.2) ~vx_max (0.35)
-#       ~use_lateral (true) ~use_vertical (false) ~center_tol (0.15)
-#       ~use_depth (true) ~target_range_m (0.8) ~slowdown_range_m (2.0)
-#       ~target_area_frac (0.12)   [used when depth absent]
+#   closure version: ~closure_mode (multi_axis | waypoint). multi_axis -> holonomic
+#       servo (vx+vy+yaw); waypoint -> yaw_forward_xor (yaw OR forward, no crab).
+#       ~servo_mode / ~use_lateral still override the derived defaults.
+#   servo: ~kp_yaw (1.2) ~vx_max (0.35) ~max_lateral_speed (0.25) ~use_vertical (false)
+#       ~center_tol (0.15) ~use_depth (true) ~target_range_m (0.8)
+#       ~slowdown_range_m (2.0) ~target_area_frac (0.12)   [area used when depth absent]
+#   force shaping (min/max force per axis on EVERY published command):
+#       ~force_mode (fixed | snap | none; default fixed = bang-bang 0/±pulse)
+#       ~min_vx (0.06) ~min_vy (0.06) ~min_wz_deg (8.0) ~force_release_frac (0.5)
+#       ~force_zero_eps (1e-3) ~fixed_vx/~fixed_vy/~fixed_wz_deg (<=0 -> = the min)
 #   limits: ~max_speed_xy (0.4) ~max_speed_z (0.3) ~max_yaw_rate (0.6)
 #   recovery: ~search_yaw_rate (0.5) ~recover_timeout_s (6.0)  [governs re-search
 #       duration; the recovery policy's give-up mirrors it]
+#   goal (arrival -> SCAN, re-inject on give-up): ~goal_in_topic (/waypoint_nav/goal)
+#       ~goal_out_topic (/waypoint_nav/goal) ~goal_x/~goal_y (initial goal, unset =
+#       none) ~arrive_radius_m (0.6)
+#   scan-at-goal sweep: ~scan_yaw_rate (0.4) ~scan_rotate_s (1.2) ~scan_pause_s (1.2)
+#       ~scan_direction (+1 CCW / -1 CW) ~scan_forward_speed (0.0 = in place)
+#       ~scan_forward_s (0.0) ~scan_bursts_before_move (8)
+#   HUD overlay: ~publish_overlay (true) ~overlay_topic (/object_approach/overlay)
+#       ~viz_hz (10.0)  [sensor_msgs/Image bgr8; view with target_lock_viewer_node]
 # ============================================================================

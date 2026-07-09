@@ -102,6 +102,9 @@
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
+  <!-- Path tracker for the route follower: waypoint (one-axis, default) |
+       multi_axis (vx+vy+yaw crab) | pure_pursuit. Forwarded to nav_stack. -->
+  <arg name="controller" default="waypoint" />
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
        use_navdp:=true swaps astar_planner for navdp_click. It consumes the
@@ -281,6 +284,7 @@
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
+    <arg name="controller"    value="$(arg controller)" />
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="nav_mode"                value="$(arg nav_mode)" />

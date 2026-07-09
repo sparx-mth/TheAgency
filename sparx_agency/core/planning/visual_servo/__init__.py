@@ -40,9 +40,20 @@ from sparx_agency.core.planning.visual_servo.state_machine import (
     ApproachDecision,
     VisualApproachStateMachine,
     SEARCH,
+    SCAN,
     APPROACH,
     HOVER_LOCK,
     RECOVER,
+)
+from sparx_agency.core.planning.visual_servo.force_shaping import (
+    FORCE_MODES,
+    AxisForceProfile,
+    CommandForceShaper,
+    shape_axis_force,
+)
+from sparx_agency.core.planning.visual_servo.scan_search import (
+    ScanSearchConfig,
+    ScanSearchPolicy,
 )
 
 __all__ = [
@@ -63,7 +74,14 @@ __all__ = [
     "ApproachDecision",
     "VisualApproachStateMachine",
     "SEARCH",
+    "SCAN",
     "APPROACH",
     "HOVER_LOCK",
     "RECOVER",
+    "FORCE_MODES",
+    "AxisForceProfile",
+    "CommandForceShaper",
+    "shape_axis_force",
+    "ScanSearchConfig",
+    "ScanSearchPolicy",
 ]
