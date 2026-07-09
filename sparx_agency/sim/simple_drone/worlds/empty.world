@@ -1,6 +1,18 @@
 <?xml version="1.0" ?>
 <sdf version="1.7">
   <world name="empty">
+   <!-- Physics plugin is required for the world to run -->
+  <plugin filename="ignition-gazebo-physics-system" name="ignition::gazebo::systems::Physics"/>
+  
+  <!-- CRITICAL: This plugin initializes and publishes sensor data -->
+  <plugin filename="ignition-gazebo-sensors-system" name="ignition::gazebo::systems::Sensors">
+    <render_engine>ogre2</render_engine>
+  </plugin>
+
+  <!-- Essential for the GUI to see/interact with the world -->
+  <plugin filename="ignition-gazebo-scene-broadcaster-system" name="ignition::gazebo::systems::SceneBroadcaster"/>
+  
+  <!-- Add your other elements here -->
     <!-- Inline Sun -->
     <light name="sun" type="directional">
       <pose>0 0 10 0 0 0</pose>

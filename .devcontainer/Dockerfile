@@ -1,84 +1,115 @@
-# syntax=docker/dockerfile:1
-ARG ROS_DISTRO=humble
-ARG TARGETARCH=amd64
-
-# --- Stage 1: Base PC (AMD64) ---
-FROM ros:${ROS_DISTRO} AS base-pc
-ARG ROS_DISTRO
+# ==============================================================================
+# BASE DEVELOPMENT LAYER (NVIDIA CUDA Runtime + Development Drivers)
+# ==============================================================================
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS base
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \
-    python3-pip python3-venv git curl wget \
-    ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
-    ros-${ROS_DISTRO}-cyclonedds \
-    ros-${ROS_DISTRO}-ros-gz \
-    ros-${ROS_DISTRO}-gazebo-ros-pkgs \
-    ignition-fortress \
-    && rm -rf /var/lib/apt/lists/*
-
-# --- Stage 2: Base Jetson (ARM64) ---
-FROM nvcr.io/nvidia/l4t-jetpack:r35.4.1 AS base-jetson
-ARG ROS_DISTRO
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \
-    python3-pip python3-venv git curl wget software-properties-common \
+ENV LD_LIBRARY_PATH=/opt/ros/humble/lib:$LD_LIBRARY_PATH
+ENV GZ_SIM_RESOURCE_PATH=/usr/share/gz/models
+# Install foundational tools and configure ROS 2 repositories
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    git \
+    curl \
+    wget \
+    sudo \
+    nano \
+    ca-certificates \
+    gnupg2 \
+    lsb-release \
     && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null \
-    && apt-get update \
-    && apt-get install -y ros-humble-desktop ros-humble-ros-gz ros-humble-cyclonedds \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" | tee /etc/apt/sources.list.d/ros2.list \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Select Base ---
-FROM base-pc AS base-amd64
-FROM base-jetson AS base-arm64
-FROM base-${TARGETARCH} AS base
+# ==============================================================================
+# X11 & QT5 GUI DEPENDENCIES (Required for Gazebo Ignition GUI)
+# ==============================================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglu1-mesa \
+    libxcursor1 \
+    libxrandr2 \
+    libxinerama1 \
+    libxi6 \
+    libxtst6 \
+    libxss1 \
+    libxkbcommon-x11-0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-xfixes0 \
+    libxcb-xinerama0 \
+    libxcb-xkb1 \
+    libxkbcommon0 \
+    libdbus-1-3 \
+    libegl1 \
+    libxcb-cursor0 \
+    mesa-utils \
+    && rm -rf /var/lib/apt/lists/*   
 
-# --- Stage 3: Heavy Deps (Cached Layer) ---
-FROM base AS cacher
-ARG ROS_DISTRO
-# Add NVIDIA CUDA repo for TensorRT
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
-    dpkg -i cuda-keyring_1.1-1_all.deb && \
-    apt-get update && apt-get install -y \
+# ==============================================================================
+# ROS 2 & AUTONOMY SIMULATION PACKAGE STACK
+# ==============================================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-humble-desktop \
+    ros-humble-ros-gz \
+    ros-humble-ros-gz-sim \
+    ros-humble-rmw-cyclonedds-cpp \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-vcstool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install isolated Python toolchain dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-numpy \
     python3-opencv \
-    tensorrt \
-    python3-libnvinfer \
-    libnvinfer-plugin10 \
-    python3-yaml python3-requests python3-pil \
-    python3-matplotlib python3-scipy python3-pandas \
-    python3-sklearn python3-numba python3-networkx \
-    python3-sympy python3-pyqt5 \
+    python3-yaml \
+    python3-requests \
+    python3-pil \
+    python3-matplotlib \
+    python3-scipy \
+    python3-pandas \
+    python3-networkx \
+    python3-sympy \
+    python3-pyqt5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy reqs to install pip deps in cache layer
-COPY sparx_agency/requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/requirements.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu121
-
-# --- Stage 4: Final Image ---
-FROM base
-ARG ROS_DISTRO
+# ==============================================================================
+# USER & WORKSPACE CONFIGURATION LAYER 
+# ==============================================================================
 ARG USERNAME=user1
 ARG USER_UID=1000
 ARG USER_GID=1000
 
-# Create User
-RUN groupadd --gid $USER_GID $USERNAME && \
-    useradd --uid $USER_UID --gid $USER_GID -m $USERNAME && \
-    apt-get update && apt-get install -y sudo && \
-    echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME && \
-    chmod 0440 /etc/sudoers.d/$USERNAME
+RUN groupadd --gid $USER_GID $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
 
-# Copy cached deps from Stage 3
-COPY --from=cacher /usr/lib/python3/dist-packages /usr/lib/python3/dist-packages
-COPY --from=cacher /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
-COPY --from=cacher /usr/bin /usr/bin
-COPY --from=cacher /opt/ros /opt/ros
+# ==============================================================================
+# INTERACTIVE BASHRC CONFIGURATION
+# ==============================================================================
+RUN echo '\n\
+# ROS 2 Environment Setup\n\
+source /opt/ros/humble/setup.bash\n\
+[ -f /home/ws/install/setup.bash ] && source /home/ws/install/setup.bash\n\
+\n\
+# Autonomous Systems Runtime Parameters\n\
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp\n\
+export GZ_SIM_RESOURCE_PATH="/usr/share/gz/models:/home/ws/install/simple_drone/share/simple_drone/models"\n\
+export LD_LIBRARY_PATH="/opt/ros/humble/lib:$LD_LIBRARY_PATH"\n\   
+' >> /home/$USERNAME/.bashrc \
+    && echo '\n\
+# ROS 2 Environment Setup\n\
+source /opt/ros/humble/setup.bash\n\
+[ -f /home/ws/install/setup.bash ] && source /home/ws/install/setup.bash\n\
+\n\
+# Autonomous Systems Runtime Parameters\n\
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp\n\
+export GZ_SIM_RESOURCE_PATH="/usr/share/gz/models:/home/ws/install/simple_drone/share/simple_drone/models"\n\
+export LD_LIBRARY_PATH="/opt/ros/humble/lib:$LD_LIBRARY_PATH"\n\   
+' >> /root/.bashrc
 
-USER $USERNAME
 WORKDIR /home/ws
-ENV SHELL=/bin/bash
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ENV ROS_DOMAIN_ID=0
-ENV ROS_LOCALHOST_ONLY=1
-CMD ["/bin/bash"]   

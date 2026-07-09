@@ -1,0 +1,12 @@
+<robot name="simple_drone">
+  <link name="base_link"/>
+  
+  <link name="camera_link"/>
+  
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <!-- Use the same pose offsets as in your SDF -->
+    <origin xyz="0.2 0 0.1" rpy="0 0 0"/>
+  </joint>
+</robot>

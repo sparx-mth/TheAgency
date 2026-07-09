@@ -1,0 +1,1 @@
+rm -rf build/* install/* log/* && colcon build --symlink-install && source install/setup.bash && ros2 launch simple_drone launch.py 
