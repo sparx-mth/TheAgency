@@ -31,12 +31,11 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 import gi
 gi.require_version("Gst", "1.0")
-gi.require_version("GstVideo", "1.0")
-from gi.repository import Gst, GstVideo
+from gi.repository import Gst
 
 from sparx_agency.robots.common.image_utils import BadFrameGuard
 
@@ -85,12 +84,12 @@ class UdpH264FrameGrabber:
             return Gst.FlowReturn.ERROR
 
         buf = sample.get_buffer()
-        info = GstVideo.VideoInfo()
-        try:
-            info.from_caps(sample.get_caps())
-        except Exception:
+        caps = sample.get_caps()
+        struct = caps.get_structure(0)
+        width = struct.get_value("width")
+        height = struct.get_value("height")
+        if not width or not height:
             return Gst.FlowReturn.ERROR
-        width, height = info.width, info.height
 
         ok, map_info = buf.map(Gst.MapFlags.READ)
         if not ok:
@@ -143,6 +142,10 @@ class RoosterFrameDirPublisher(Node):
         self._frame_seq = 0
         self.path_pub = self.create_publisher(String, self.path_topic, 10)
 
+        keep_alive_topic = f"/{args.rooster_id}/gcs_keep_alive"
+        self._keep_alive_pub = self.create_publisher(Bool, keep_alive_topic, 10)
+        self.create_timer(1.0, self._on_keep_alive)
+
         self.grabber = UdpH264FrameGrabber(port=args.port)
         self.grabber.start()
 
@@ -155,6 +158,11 @@ class RoosterFrameDirPublisher(Node):
             f"  out_dir:     {self.out_dir}\n"
             f"  path topic:  {self.path_topic}"
         )
+
+    def _on_keep_alive(self):
+        msg = Bool()
+        msg.data = True
+        self._keep_alive_pub.publish(msg)
 
     def _on_timer(self):
         out = self.grabber.get_latest()
