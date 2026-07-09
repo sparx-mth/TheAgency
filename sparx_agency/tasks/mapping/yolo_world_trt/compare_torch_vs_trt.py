@@ -48,10 +48,39 @@ class TorchYoloWorld:
         self.model = YOLOWorld(str(weights))
         self.model.to(device)
         self.model.set_classes(labels)
+        # Lower-cased to match the TRT detector's labels (postprocess lowercases).
+        self.labels = [str(l).strip().lower() for l in labels]
         self.imgsz = (int(imgsz[0]), int(imgsz[1]))
         self.device = device
         self.conf = conf
         self.iou = iou
+
+    def detect(self, rgb: np.ndarray):
+        """Run one frame; return detections as core ``Detection2D`` (original px).
+
+        Mirrors :meth:`YoloTRTDetector.detect` so the two are directly comparable:
+        same input size, same conf/iou, boxes in original-frame coordinates.
+        """
+        from sparx_agency.core.common.types.perception import Detection2D
+
+        bgr = np.ascontiguousarray(rgb[:, :, ::-1])   # ultralytics expects BGR
+        res = self.model.predict(bgr, imgsz=self.imgsz, conf=self.conf, iou=self.iou,
+                                 device=self.device, verbose=False)[0]
+        boxes = getattr(res, "boxes", None)
+        h, w = rgb.shape[:2]
+        dets = []
+        if boxes is not None and len(boxes):
+            xyxy = boxes.xyxy.cpu().numpy()
+            confs = boxes.conf.cpu().numpy()
+            clss = boxes.cls.cpu().numpy().astype(int)
+            for (x1, y1, x2, y2), sc, c in zip(xyxy, confs, clss):
+                label = self.labels[c] if 0 <= c < len(self.labels) else str(c)
+                dets.append(Detection2D(
+                    label=label, score=float(sc),
+                    bbox_xyxy=(int(round(x1)), int(round(y1)),
+                               int(round(x2)), int(round(y2))),
+                    frame_w=w, frame_h=h))
+        return dets
 
     def detect_count(self, rgb: np.ndarray) -> int:
         """Run one frame; return the detection count (times the full call)."""

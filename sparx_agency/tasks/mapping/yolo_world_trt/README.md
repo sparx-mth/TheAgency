@@ -290,6 +290,8 @@ wired yet. Plan: entropy calibrator fed real XTEND frames (mirroring NavDP's
 | `runtime.py` | `TwoStageYoloTRT` (shared feature buffers) + `YoloTRTDetector(DetectionModel)`. |
 | `benchmark.py` | Compare `s/m/l/x` TRT engines: latency / FPS / DLA-vs-GPU. |
 | `compare_torch_vs_trt.py` | PyTorch vs TensorRT speed on a folder + labels. |
+| `detect_folder.py` | Run the TRT detector over a folder + prompts → annotated images + CSV/JSONL identifications. |
+| `compare_folder.py` | Run PyTorch **and** TRT over a folder → identifications for each + speed table + ID-agreement (accuracy-drop) report. |
 | `build_all.sh` | One-shot export + build + benchmark for all variants. |
 | `configs/build_policy.json` | Knobs (variants, imgsz, precision, DLA pools, head N profile). |
 | `tests/` | Numpy-only tests (geometry, NMS, decode, policy, graph-cut) — run anywhere. |

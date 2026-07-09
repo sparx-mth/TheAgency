@@ -66,11 +66,14 @@ def _onnx_export(module, args, path, input_names, output_names, dynamic_axes=Non
 def _set_export_mode(world_model):
     """Put the WorldDetect head in export mode so it returns the raw tensor.
 
-    ``dynamic=True`` forces the head to rebuild its anchor grid from the *current*
-    feature-map sizes on every forward. Without it, this ultralytics version reuses
-    the checkpoint's cached anchors (built at a different input size) and the box
-    decode fails with an anchor/grid size mismatch on our 288x512 input. The image
-    size is still static, so the traced anchors are constant-folded.
+    ``dynamic=True`` (plus dropping the cached ``shape``) forces the head to rebuild
+    its anchor grid from the *current* feature-map sizes on every forward, so a
+    non-default input size such as 288x512 does not reuse the checkpoint's cached
+    640-grid anchors. The image size is still static, so the traced anchors are
+    constant-folded.
+
+    Note: this alone does *not* make the head usable with an arbitrary prompt count
+    -- the class dimension is aligned separately by :func:`_set_prompt_count`.
     """
     detect = world_model.model[-1]
     detect.export = True
@@ -78,6 +81,61 @@ def _set_export_mode(world_model):
     detect.dynamic = True
     detect.shape = None                  # drop any cached (stale) grid shape
     return detect
+
+
+def _set_prompt_count(detect, n_prompts):
+    """Align the WorldDetect head's class count with the runtime prompt count.
+
+    ``WorldDetect.forward`` reshapes its raw per-level output with
+    ``self.no = self.nc + 4*reg_max`` and then splits it into boxes/scores at
+    ``self.nc``. A checkpoint ships ``nc`` = its pretrained vocabulary (e.g. 80),
+    but here the head is driven by an arbitrary number of text prompts. If ``nc`` is
+    left stale, the reshape splits the channel axis at the wrong boundary and the
+    decoded box count diverges from the anchor count (e.g. 3024 anchors vs 1491
+    boxes on 288x512 with 7 prompts: ``(4*16 + 7) * 3024 / (4*16 + 80) = 1491``),
+    which blows up in ``dist2bbox``.
+
+    ``WorldModel.set_classes`` is ultralytics' own hook for this, but it re-encodes
+    the prompts with CLIP; we set ``nc`` directly because the text embeddings are
+    supplied separately (see :class:`~...text_embed.TextEmbedder`). ``self.no`` is
+    also recomputed inside ``forward``, but we set it for a consistent state.
+    """
+    detect.nc = int(n_prompts)
+    detect.no = detect.nc + detect.reg_max * 4
+
+
+# ImagePoolingAttn (YOLO-Worldv1 only) max-pools every feature map to a k x k grid.
+_IMAGE_POOL_K = 3
+
+
+def _assert_onnx_exportable(world_model, imgsz):
+    """Fail fast on the YOLO-Worldv1 ``adaptive_max_pool2d`` ONNX-export limitation.
+
+    v1 carries an ``ImagePoolingAttn`` block that pools each feature map to a fixed
+    ``k x k`` (k=3) grid with ``nn.AdaptiveMaxPool2d``. The TorchScript ONNX exporter
+    can only lower ``adaptive_max_pool2d`` when the output size divides the input, so
+    every feature-map side must be a multiple of ``k``; across strides 8/16/32 that
+    means the image height and width must each be a multiple of ``32*k`` (=96).
+    Otherwise torch aborts the head export with a cryptic
+    ``Unsupported: adaptive_max_pool2d`` deep in ``symbolic_opset9``.
+
+    YOLO-Worldv2 drops ``ImagePoolingAttn`` and exports at any stride-32 size, so it
+    is the preferred checkpoint; this guard only trips for v1.
+    """
+    has_image_pool = any(
+        type(m).__name__ == "ImagePoolingAttn" for m in world_model.model)
+    if not has_image_pool:
+        return
+    h, w = imgsz
+    step = 32 * _IMAGE_POOL_K
+    if h % step or w % step:
+        raise ValueError(
+            "This checkpoint is YOLO-Worldv1 (it has an ImagePoolingAttn block), "
+            "whose %dx%d adaptive-max-pool only exports to ONNX when H and W are "
+            "multiples of %d (got %dx%d). Use a v2 checkpoint such as "
+            "yolov8s-worldv2.pt -- which drops this block and exports at 288x512 -- "
+            "or choose an imgsz like 288x480 / 288x576."
+            % (_IMAGE_POOL_K, _IMAGE_POOL_K, step, h, w))
 
 
 def _parity(world_model, backbone, head, image, txt, atol=1e-3):
@@ -109,7 +167,8 @@ def export_one(weights, variant, imgsz, out_dir, n_min=1, n_opt=8, n_max=256):
 
     yolo = YOLOWorld(str(weights))
     world = yolo.model.float().eval()
-    _set_export_mode(world)
+    detect = _set_export_mode(world)
+    _assert_onnx_exportable(world, (h, w))       # fail fast before the heavy trace
     backbone, head, out_indices, cut = wrappers.build_split(world)
 
     # Example inputs: image + the text embeddings for a distinctive prompt count.
@@ -118,6 +177,10 @@ def export_one(weights, variant, imgsz, out_dir, n_min=1, n_opt=8, n_max=256):
     txt = torch.from_numpy(txt_np).float()
     n_axis = txt_n_axis(tuple(txt.shape), _EXAMPLE_N)
     embed_dim = int(txt.shape[-1])
+
+    # Tell the head how many prompts it is being driven with (the checkpoint's
+    # stale nc would otherwise mis-split the box/score channels -- see _set_prompt_count).
+    _set_prompt_count(detect, txt.shape[n_axis])
 
     with torch.no_grad():
         feats = backbone(image)

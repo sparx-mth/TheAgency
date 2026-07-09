@@ -107,12 +107,48 @@ class BackboneWrapper:
         return _Backbone()
 
 
+def _world_detect_dynamic(detect, feats, text):
+    """N-dynamic ``WorldDetect`` decode so the exported head stays open-set.
+
+    ultralytics' ``WorldDetect.forward`` flattens each level with
+    ``xi.view(bs, self.no, -1)``: it pins the channel dimension to the traced
+    ``self.no = 4*reg_max + N`` and leaves ``-1`` on the *spatial* axis. That bakes
+    the prompt count ``N`` into the ONNX graph, so a dynamic-N TensorRT profile is
+    unsatisfiable -- TRT reports ``Reshape dimension of -1 has no solution`` because
+    ``(4*reg_max + N)*A / self.no`` has no integer solution as ``N`` sweeps the
+    profile.
+
+    This reproduces the same arithmetic but reshapes with the (static) spatial size
+    ``h*w`` explicit and the channel size (``4*reg_max + N``) on the ``-1`` axis, so
+    ``-1`` always resolves to ``4*reg_max + N`` for any ``N`` and one engine serves
+    every prompt count. Boxes/scores are then split by slicing (a static ``4*reg_max``
+    prefix, a dynamic remainder) rather than a fixed-size ``split``. The result is
+    numerically identical to ``WorldDetect.forward`` at a fixed ``N`` -- the export
+    parity gate enforces that -- only the traced reshape/split differ.
+    """
+    import torch
+
+    reg = detect.reg_max * 4
+    flat = []
+    for i in range(detect.nl):
+        merged = torch.cat(
+            (detect.cv2[i](feats[i]),
+             detect.cv4[i](detect.cv3[i](feats[i]), text)), 1)   # [bs, reg+N, h, w]
+        bs, _, h, w = merged.shape
+        flat.append(merged.reshape(bs, -1, h * w))               # keep reg+N on -1
+    x_cat = torch.cat(flat, 2)                                   # [bs, reg+N, anchors]
+    preds = dict(boxes=x_cat[:, :reg], scores=x_cat[:, reg:], feats=list(feats))
+    return detect._inference(preds)
+
+
 class HeadWrapper:
     """``(*feature maps, txt_feats) -> raw detections`` for the text-fused head.
 
     Replays ``WorldModel.predict`` for the layers at/after the cut: keeps the
     original text features for ``WorldDetect`` while letting ``ImagePoolingAttn``
-    refine a working copy for the ``C2fAttn`` blocks.
+    refine a working copy for the ``C2fAttn`` blocks. The final ``WorldDetect`` is
+    run through :func:`_world_detect_dynamic` so the prompt count stays a dynamic
+    ONNX axis (open-set) instead of being baked into the reshape.
     """
 
     def __new__(cls, world_model, cut, out_indices):
@@ -144,7 +180,8 @@ class HeadWrapper:
                         y[m.i] = x if m.i in self.save else None
                         continue
                     if name == _WORLD_DETECT:
-                        x = m(x, ori_txt)                # head uses ORIGINAL text
+                        # ORIGINAL text; N-dynamic decode (see _world_detect_dynamic).
+                        x = _world_detect_dynamic(m, x, ori_txt)
                     elif name in TEXT_AWARE:
                         x = m(x, cur_txt)                # C2fAttn: refined text
                     else:
@@ -167,6 +204,11 @@ def build_split(world_model):
     layers = world_model.model
     cut = find_cut(layers)
     out_indices = backbone_output_indices(layers, cut)
-    backbone = BackboneWrapper(world_model, cut, out_indices)
-    head = HeadWrapper(world_model, cut, out_indices)
+    # These are inference-only wrappers, so force eval mode. A freshly built
+    # nn.Module defaults to train()=True; torch.onnx.export saves that flag and
+    # *restores* it on exit, which would flip the shared WorldDetect head back into
+    # training mode -- where its forward returns a raw dict instead of the detection
+    # tensor, breaking every forward after the export.
+    backbone = BackboneWrapper(world_model, cut, out_indices).eval()
+    head = HeadWrapper(world_model, cut, out_indices).eval()
     return backbone, head, out_indices, cut

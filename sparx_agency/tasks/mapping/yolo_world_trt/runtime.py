@@ -46,9 +46,20 @@ class TwoStageYoloTRT:
     """Backbone(DLA) -> Head(GPU) TensorRT chain with shared feature buffers."""
 
     def __init__(self, backbone_engine: str, head_engine: str):
-        import pycuda.autoinit  # noqa: F401  (creates the CUDA context)
         import pycuda.driver as cuda
         import tensorrt as trt
+
+        # Attach to the CUDA *primary* context (the one the runtime API / PyTorch
+        # use) rather than the separate context ``pycuda.autoinit`` would create.
+        # Sharing the primary context is what lets these engines run in a process
+        # that also drives torch on the GPU -- the CLIP text branch when
+        # ``text_device`` is a GPU, or a side-by-side PyTorch baseline. With
+        # autoinit's own context, a torch GPU op makes torch's context current and
+        # the next ``enqueueV3`` fails with 'invalid resource handle' /
+        # 'cuTensor permutate execute failed'. The context is released in __del__.
+        cuda.init()
+        self._cuda_ctx = cuda.Device(0).retain_primary_context()
+        self._cuda_ctx.push()
 
         self._cuda = cuda
         self.stream = cuda.Stream()
@@ -158,6 +169,15 @@ class TwoStageYoloTRT:
         cuda.memcpy_dtoh_async(self._out["host"][:n], self._out["device"], self.stream)
         self.stream.synchronize()
         return self._out["host"][:n].reshape(out_shape)
+
+    def __del__(self):
+        """Release our push of the CUDA primary context (best-effort)."""
+        ctx = getattr(self, "_cuda_ctx", None)
+        if ctx is not None:
+            try:
+                ctx.pop()
+            except Exception:       # noqa: BLE001 - interpreter teardown races
+                pass
 
 
 def _txt_n(shape, axis):
