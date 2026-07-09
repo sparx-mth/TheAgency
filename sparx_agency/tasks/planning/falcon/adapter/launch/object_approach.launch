@@ -57,6 +57,18 @@
   <arg name="img_width"         default="504" />
   <arg name="img_height"        default="294" />
 
+  <!-- Where the TensorRT detector runs.
+         external (default) : it runs as a ROS2 sidecar ON THE HOST
+                              (tasks/mapping/ros2/yolo_detector_ros2_node.py) and
+                              its detections reach us over the bridge. Nothing is
+                              started here. This is the ONLY working option on the
+                              real drone: the Falcon image is FROM ros:noetic-*,
+                              which has no CUDA / TensorRT / pycuda, so an
+                              in-container detector dies on `import pycuda`.
+         internal           : start yolo_detector_node.py in this container.
+                              Requires tensorrt + pycuda inside the image. -->
+  <arg name="detector"          default="external" />       <!-- external | internal -->
+
   <!-- ── Detector (TensorRT YOLO-World; engines built on-target) ─────── -->
   <arg name="engines_dir"       default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/engines/orin_sm87" />
   <arg name="backbone_engine"   default="$(arg engines_dir)/yolo_world_s.backbone.fp16.dla0.engine" />
@@ -116,9 +128,11 @@
   <arg name="viewer"            default="true" />             <!-- on-screen HUD window -->
 
 
-  <!-- The TensorRT open-vocab detector. Publishes detections JSON. -->
+  <!-- The TensorRT open-vocab detector. Publishes detections JSON. Only started
+       when detector:=internal; by default it runs as a ROS2 sidecar on the host. -->
   <node pkg="falcon_adapter" type="yolo_detector_node.py"
-        name="yolo_detector" output="screen">
+        name="yolo_detector" output="screen"
+        if="$(eval arg('detector') == 'internal')">
     <param name="image_transport"  value="$(arg image_transport)" />
     <param name="rgb_topic"        value="$(arg rgb_topic)" />
     <param name="target_topic"     value="$(arg target_topic)" />

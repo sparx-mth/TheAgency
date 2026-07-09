@@ -34,8 +34,6 @@ them. ``~text_weights`` (the ``.pt`` YOLO-World checkpoint) drives the text bran
 and requires torch/ultralytics at prompt-set time only. See the file footer for the
 rosparam list.
 """
-import json
-
 import cv2
 import numpy as np
 
@@ -43,6 +41,7 @@ import rospy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
+from sparx_agency.core.common.detection_message import encode_detections
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.tasks.mapping.yolo_world_trt.runtime import YoloTRTDetector
 
@@ -149,16 +148,7 @@ class YoloDetectorNode(object):
                                    type(e).__name__, e)
             return
         h, w = rgb.shape[:2]
-        payload = {
-            "stamp": float(stamp),
-            "w": int(w), "h": int(h),
-            "detections": [
-                {"label": d.label, "score": float(d.score),
-                 "bbox": [int(v) for v in d.bbox_xyxy]}
-                for d in dets
-            ],
-        }
-        self.pub.publish(String(data=json.dumps(payload)))
+        self.pub.publish(String(data=encode_detections(dets, stamp, w, h)))
 
     def _banner(self):
         L = rospy.loginfo

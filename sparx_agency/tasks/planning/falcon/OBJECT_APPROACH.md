@@ -22,57 +22,94 @@ Pure, ROS-free, unit-tested core (222 tests):
 | Control | `core/planning/visual_servo/` | `TargetConfirmationGate` (N-consecutive-frame acquisition, pose-free), `VisualServoController` (bbox[+depth] → body velocity), `ReSearchPolicy` (where to look when lost), `ScanSearchPolicy` (rotate-with-stops room sweep), `CommandForceShaper` (per-axis min/max force), `VisualApproachStateMachine` (SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER) |
 | 2D→range | `core/mapping/depth/depth_bbox_fusion.py` | robust metric range to the box from depth |
 
-ROS glue (`adapter/scripts/`):
+Wire format: `core/common/detection_message.py` — the single definition of the
+detections JSON, shared by every producer and consumer.
 
-- **`yolo_detector_node.py`** — runs the **TensorRT** YOLO-World split (backbone on
-  DLA + head on GPU, from `tasks/mapping/yolo_world_trt`) on the RGB stream and
-  publishes detections JSON; re-prompts on the `goal` topic. Inference is torch-free;
-  only embedding a new prompt touches torch. *Separate* node so the heavy TRT/torch
-  deps stay off the servo node.
-- **`object_approach_node.py`** — torch-free (Python-3.8-safe): tracks + servos +
-  runs the state machine; force-shapes every command; takes over `/cmd_vel` via the
-  `visual_servoing` demo-mode hand-off (so the follower goes passive), releases it in
-  SEARCH; re-injects the goal on a give-up; renders the live HUD.
-- **`target_lock_viewer_node.py`** — displays the HUD Image. Separate so the GUI
-  dependency and display loop stay off the control node (`viewer:=false` for headless).
+ROS glue. The detector is a **ROS2 sidecar on the host**; the rest is ROS1 in the
+FALCON container. They meet at two `std_msgs/String` topics on the bridge.
+
+- **`tasks/mapping/ros2/yolo_detector_ros2_node.py`** (ROS2, host) — runs the
+  **TensorRT** YOLO-World split (backbone on DLA + head on GPU, from
+  `tasks/mapping/yolo_world_trt`) and publishes detections JSON; re-prompts on the
+  `goal` topic. Inference is torch-free; only embedding a new prompt touches torch.
+  It lives on the host because the FALCON image is `FROM ros:noetic-perception` and
+  has no CUDA/TensorRT/pycuda, while the host already has the env that built the
+  engines. It reads `/xtend/rgb_frame_path` natively, *upstream of the bridge*, so no
+  image is ever bridged.
+- **`adapter/scripts/yolo_detector_node.py`** (ROS1, container) — the same detector as
+  an in-container node, started only with `detector:=internal`. Needs tensorrt +
+  pycuda in the image; kept for a future JetPack-based build.
+- **`adapter/scripts/object_approach_node.py`** (ROS1) — torch-free (Python-3.8-safe):
+  tracks + servos + runs the state machine; force-shapes every command; takes over
+  `/cmd_vel` via the `visual_servoing` demo-mode hand-off (so the follower goes
+  passive), releases it in SEARCH; re-injects the goal on a give-up; renders the HUD.
+- **`adapter/scripts/target_lock_viewer_node.py`** (ROS1) — displays the HUD Image.
+  Separate so the GUI dependency and display loop stay off the control node
+  (`viewer:=false` for headless).
+
+That the detector was always decoupled by a JSON topic is what makes this split free:
+moving it across a host boundary changed no algorithm and no other node.
 
 ## Data flow
 
 ```
-RGB ─┬─► yolo_detector_node ──/detections(JSON)──► object_approach_node
-     │      (TensorRT YOLO-World)                    │  confirmation gate (N frames)
-     └────────────────────────────────────────────►  │  TargetTracker (LK + motion)
-depth ──────────────────────────────────────────►    │  → range via depth_bbox_fusion
-pose  ──────────────────────────────────────────►    │  → arrived_at_goal? (scan trigger)
-                                                     │  VisualServoController + FSM
-                                                     │  CommandForceShaper (min/max force)
-                                                     ├─► demo_mode_request=visual_servoing
-                                                     ├─► /cmd_vel (vx, vy, wz)
-                                                     ├─► /waypoint_nav/goal (re-inject on give-up)
-                                                     └─► /object_approach/overlay (HUD Image)
-                                                             └─► target_lock_viewer_node
+        ROS2 (host, GPU)          ║ bridge ║        ROS1 (falcon container)
+                                  ║        ║
+RGB(frame_path) ─► yolo_detector ─╫─/object_approach/detections─► object_approach_node
+   (read off disk)  (TensorRT)    ║        ║       │  confirmation gate (N frames)
+                                  ║        ║       │  TargetTracker (LK + motion)
+RGB  ─────────────────────────────╫────────╫────►  │
+depth ────────────────────────────╫────────╫────►  │  → range via depth_bbox_fusion
+pose  ────────────────────────────╫────────╫────►  │  → arrived_at_goal? (scan trigger)
+                                  ║        ║       │  VisualServoController + FSM
+                                  ║        ║       │  CommandForceShaper (min/max force)
+      re-prompt ◄─/object_approach/goal◄───╫───────┤
+                                  ║        ║       ├─► demo_mode_request=visual_servoing
+                                  ║        ║       ├─► /cmd_vel (vx, vy, wz)
+                                  ║        ║       ├─► /waypoint_nav/goal (re-inject on give-up)
+                                  ║        ║       └─► /object_approach/overlay (HUD Image)
+                                  ║        ║               └─► target_lock_viewer_node
 ```
+
+Only the two String topics cross the bridge. The detector reads the frame-path topic
+natively on the ROS2 side and loads the JPEG off disk, so no image is serialized.
 
 ## Run
 
 See the **Object approach** section of [`README.md`](README.md) for the full recipe
-(engine build, knobs, HUD, failure behaviour). The short version:
+(engine build, knobs, HUD, failure behaviour). The short version — three processes:
 
 ```bash
-# everything at once — nav stack + detector + servo + HUD + BEV window:
-roslaunch falcon_adapter real_drone_object_approach.launch \
-    map_name:=office target_object:=refrigerator goal_x:=0.0 goal_y:=-3.0
+# 1. host: the TensorRT detector, in the env that has tensorrt + pycuda
+PYTHONPATH=$PWD python3 sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py \
+    --ros-args -p target_object:=monitor \
+      -p backbone_engine:=/path/backbone.engine -p head_engine:=/path/head.engine \
+      -p text_weights:=/path/yolov8s-worldv2.pt
 
+# 2. host: the bridge (carries /object_approach/detections + /object_approach/goal)
+cd bridge && ./run_bridge.sh
+
+# 3. container: nav stack + servo + HUD + BEV window
+roslaunch falcon_adapter real_drone_object_approach.launch \
+    map_name:=office target_object:=monitor goal_x:=0.0 goal_y:=-3.0
 # or add the mission to a nav stack that is already up:
-roslaunch falcon_adapter object_approach.launch target_object:=refrigerator
+roslaunch falcon_adapter object_approach.launch target_object:=monitor
 
 rostopic pub -1 /object_approach/goal   std_msgs/String "data: 'hat'"   # retarget live
 rostopic pub -1 /object_approach/enable std_msgs/Bool   "data: false"   # arm/disarm
 ```
 
+Both launches default to `detector:=external` (no detector started in the container).
+
 Intrinsics **must** match the live stream (raw K, not P). The TRT engines are not
 portable — build them on the target. Tuning is all rosparams: see the footers of the
 node files and the launch args.
+
+**Two thresholds in series, both must be cleared to acquire.** `conf_thresh` is the
+detector's floor: a weaker box is never emitted. `min_score` is the confirmation
+gate's floor: an emitted box below it is drawn on the HUD but never counted toward
+`n_confirm`. Lowering `conf_thresh` alone cannot make the mission lock on — the weak
+boxes appear on screen and the gate silently drops them. Keep `min_score <= conf_thresh`.
 
 ## State machine
 

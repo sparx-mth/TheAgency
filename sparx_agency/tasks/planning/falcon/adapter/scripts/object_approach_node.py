@@ -53,7 +53,6 @@ Outputs:
   ~status_topic  std_msgs/String                    (diagnostics, optional)
 See the file footer for the full rosparam list.
 """
-import json
 import math
 import threading
 from collections import deque
@@ -66,9 +65,9 @@ from geometry_msgs.msg import Point, Pose, PoseStamped, Twist
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 
+from sparx_agency.core.common.detection_message import parse_detections_message
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.types import ControlCommand, Intrinsics, KinematicLimits
-from sparx_agency.core.common.types.perception import Detection2D
 from sparx_agency.core.mapping.depth.depth_bbox_fusion import bbox_to_xyz_cam_from_depth
 from sparx_agency.core.planning.visual_tracking import TargetTracker, TargetTrackerConfig
 from sparx_agency.core.planning.visual_servo import (
@@ -413,18 +412,16 @@ class ObjectApproachNode(object):
 
     # ─── Detections: confirm + (re)seed the tracker ──────────────────
     def _det_cb(self, msg):
+        # The detector may be the in-container ROS1 node or the host-side ROS2
+        # sidecar arriving over the bridge; both speak core.common.detection_message.
         try:
-            payload = json.loads(msg.data)
-            dets = [Detection2D(label=str(d["label"]).strip().lower(),
-                                score=float(d["score"]),
-                                bbox_xyxy=tuple(int(v) for v in d["bbox"]),
-                                frame_w=int(payload.get("w", self.intr.width)),
-                                frame_h=int(payload.get("h", self.intr.height)))
-                    for d in payload.get("detections", [])]
-            stamp = float(payload.get("stamp", self.rgb_stamp))
-        except (ValueError, KeyError, TypeError) as e:
+            parsed = parse_detections_message(
+                msg.data, default_width=self.intr.width,
+                default_height=self.intr.height, default_stamp=self.rgb_stamp)
+        except ValueError as e:
             rospy.logwarn_throttle(5.0, "object_approach: bad detections msg (%s)", e)
             return
+        dets, stamp = parsed.detections, parsed.stamp
 
         with self._lock:
             state = self.gate.update(dets)

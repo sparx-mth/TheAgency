@@ -54,13 +54,24 @@
   <arg name="closure_mode"    default="multi_axis" />        <!-- multi_axis | waypoint -->
   <arg name="force_mode"      default="fixed" />             <!-- fixed | snap | none -->
   <arg name="arrive_radius_m" default="0.6" />
-  <!-- Detector min class confidence (the "conf" flag of the offline target-lock
-       tools). A detection below this is never emitted; the confirmation gate then
-       needs n_confirm consecutive hits above min_score. Raise it to suppress false
-       locks, lower it to acquire sooner. -->
-  <arg name="conf_thresh"     default="0.40" />
+  <!-- Two thresholds in series; a detection must clear BOTH to acquire.
+       conf_thresh (the "conf" flag of the offline target-lock tools) is the
+       detector's min class confidence: a weaker box is never emitted at all.
+       min_score is the confirmation gate's floor: an emitted box below it is
+       drawn on the HUD but never counted toward n_confirm. So lowering conf_thresh
+       ALONE cannot make the mission lock on. Keep min_score <= conf_thresh. -->
+  <arg name="conf_thresh"     default="0.10" />
+  <arg name="min_score"       default="0.10" />
+  <arg name="n_confirm"       default="3" />
 
-  <!-- Detector engines (built on-target). Override to your paths. -->
+  <!-- The detector runs as a ROS2 sidecar on the HOST by default (the Falcon image
+       has no CUDA/TensorRT/pycuda). Start it there and bridge its two String
+       topics; see the README. detector:=internal starts it in this container
+       instead, which needs tensorrt + pycuda in the image. -->
+  <arg name="detector"        default="external" />         <!-- external | internal -->
+
+  <!-- Detector engines (built on-target). Override to your paths.
+       Only used when detector:=internal; the sidecar takes its own parameters. -->
   <arg name="engines_dir"     default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/engines/orin_sm87" />
   <arg name="backbone_engine" default="$(arg engines_dir)/yolo_world_s.backbone.fp16.dla0.engine" />
   <arg name="head_engine"     default="$(arg engines_dir)/yolo_world_s.head.fp16.gpu.engine" />
@@ -97,7 +108,10 @@
     <arg name="closure_mode"    value="$(arg closure_mode)" />
     <arg name="force_mode"      value="$(arg force_mode)" />
     <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />
+    <arg name="detector"        value="$(arg detector)" />
     <arg name="conf_thresh"     value="$(arg conf_thresh)" />
+    <arg name="min_score"       value="$(arg min_score)" />
+    <arg name="n_confirm"       value="$(arg n_confirm)" />
     <!-- The route's goal, so arrival -> scan works and give-up re-injects it. -->
     <arg name="goal_x"          value="$(arg goal_x)" />
     <arg name="goal_y"          value="$(arg goal_y)" />

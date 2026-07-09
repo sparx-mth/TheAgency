@@ -47,7 +47,7 @@ falcon/
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
     │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common.intrinsic_remap + wall-clock restamp)
-    │   ├── yolo_detector_node.py   # RGB -> TensorRT YOLO-World -> detections JSON (open-vocab; re-prompt at runtime)
+    │   ├── yolo_detector_node.py   # RGB -> TensorRT YOLO-World -> detections JSON (only with detector:=internal; the container has no CUDA — the detector normally runs as a ROS2 sidecar on the host, tasks/mapping/ros2/yolo_detector_ros2_node.py)
     │   ├── object_approach_node.py # detections -> track + visual servo + SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER (core.planning.visual_servo)
     │   ├── target_lock_viewer_node.py # on-screen live target-lock HUD (subscribes the overlay Image)
     │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
@@ -348,23 +348,85 @@ the background. Once the target is confirmed for `n_confirm` consecutive frames 
 servos onto the object until it is centred and very close. There is **no terminal
 stop** — it keeps tracking, so a moving object is followed.
 
-One command brings up everything (map + BEV + A*/NavDP + follower + detector + servo
-+ the live target-lock HUD + the clickable BEV window):
+It runs as **two processes**: the nav stack + servo inside the FALCON ROS1 container,
+and the TensorRT detector as a ROS2 sidecar **on the host** (see
+[Why the detector runs on the host](#why-the-detector-runs-on-the-host)). They are
+joined only by two `std_msgs/String` topics across the bridge — no image is bridged.
+
+**1. The detector**, on the Orin host, in the environment that has `tensorrt` +
+`pycuda` (the one that built the engines and ran `object_approach_offline`):
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /path/to/repo    # the dir CONTAINING sparx_agency/
+PYTHONPATH=$PWD python3 sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py \
+    --ros-args -p target_object:=monitor \
+      -p backbone_engine:=/path/yolo_world_s.backbone.fp16.dla0.engine \
+      -p head_engine:=/path/yolo_world_s.head.fp16.gpu.engine \
+      -p text_weights:=/path/yolov8s-worldv2.pt
+```
+
+**2. The bridge** (it carries `/object_approach/detections` and `/object_approach/goal`):
+
+```bash
+cd bridge && ./run_bridge.sh
+```
+
+**3. The nav stack + mission**, in the container. This starts map + BEV + A*/NavDP +
+follower + servo + the live target-lock HUD + the clickable BEV window:
 
 ```bash
 ./run_falcon.sh office
 # inside the container:
 source /catkin_ws/devel/setup.bash
 roslaunch falcon_adapter real_drone_object_approach.launch \
-    map_name:=office target_object:=refrigerator goal_x:=0.0 goal_y:=-3.0
+    map_name:=office target_object:=monitor goal_x:=0.0 goal_y:=-3.0
 ```
 
 To add the mission to a nav stack that is **already running**, launch just the
 mission half in a second shell (`docker exec -it falcon bash` first):
 
 ```bash
-roslaunch falcon_adapter object_approach.launch target_object:=refrigerator
+roslaunch falcon_adapter object_approach.launch target_object:=monitor
 ```
+
+Both launches default to `detector:=external`, which starts **no** detector in the
+container and simply consumes the sidecar's detections. `detector:=internal` starts
+`yolo_detector_node.py` in-container instead — only useful once the image actually
+carries TensorRT + pycuda (it does not today).
+
+### Why the detector runs on the host
+
+The FALCON Jetson image is built `FROM ros:noetic-perception`: a stock Ubuntu 20.04
+ROS image with **no CUDA, no TensorRT, no pycuda**. `--runtime nvidia` bind-mounts
+JetPack's *shared libraries* into the container but not the Python bindings, so an
+in-container detector dies immediately on `import pycuda.driver`. And `pip install
+pycuda` there cannot fix it — pycuda compiles against `nvcc` and the CUDA headers,
+which the mounts don't provide.
+
+The Orin host already has a working `tensorrt` + `pycuda` Python environment. So the
+detector runs there, and only two String topics cross the bridge:
+
+```
+ROS2 (host, GPU)                          bridge          ROS1 (falcon container)
+/xtend/rgb_frame_path ─► yolo_detector ─► /object_approach/detections ─► object_approach
+                                     ◄─── /object_approach/goal ◄─── operator / mission
+```
+
+This costs nothing in bandwidth. On the real drone RGB arrives as a *frame path*, so
+the sidecar reads `/xtend/rgb_frame_path` natively on the ROS2 side — **upstream of
+the bridge** — and loads the JPEG straight off the host's disk. The detections JSON is
+a few hundred bytes. The two nodes were always decoupled by that topic
+(`core/common/detection_message.py` is the one definition of the wire format), which
+is exactly what makes this split free.
+
+> The sidecar needs the repo importable: run it from the directory *containing*
+> `sparx_agency/`, with that directory on `PYTHONPATH`. Its parameters mirror the
+> ROS1 node's rosparams — see the footer of `yolo_detector_ros2_node.py`.
+>
+> **QoS matters.** The sidecar subscribes to the frame-path topic as `BEST_EFFORT` to
+> match the drone's publisher. A reliability mismatch here means *no data flows at
+> all* — the same trap `bridge/bridge.yaml` documents for depth.
 
 Live control, at any time:
 
@@ -384,15 +446,9 @@ export WEIGHTS_DIR=/path/to/yolo_world_weights     # holds yolov8s-worldv2.pt
 sparx_agency/tasks/mapping/yolo_world_trt/build_all.sh s
 ```
 
-Then point the launch at them (defaults assume
-`tasks/mapping/yolo_world_trt/engines/orin_sm87/` under the read-only mount):
-
-```bash
-roslaunch falcon_adapter real_drone_object_approach.launch map_name:=office \
-    target_object:=refrigerator \
-    backbone_engine:=/path/backbone.engine head_engine:=/path/head.engine \
-    text_weights:=/path/yolov8s-worldv2.pt
-```
+Then point the **sidecar** at them (`-p backbone_engine:=… -p head_engine:=…`, step 1
+above). They are host paths, not container paths — the detector no longer runs in the
+container, so the `engines_dir` launch args only matter for `detector:=internal`.
 
 `text_weights` (the `.pt` checkpoint) is only touched to embed the *prompt* — the
 CLIP text branch — so torch runs once per retarget, never per frame. Inference itself
@@ -429,10 +485,10 @@ how large the tracking error is.
 `closure_mode` picks how the servo drives the axes, independently of the route
 follower's own `controller`:
 
-| `closure_mode` | Servo | Use when |
-|---|---|---|
-| `multi_axis` (default) | holonomic — `vx` + `vy` crab + yaw together | the platform accepts lateral velocity |
-| `waypoint` | yaw **XOR** forward, no crab | matching the one-axis `waypoint` follower |
+- `multi_axis` (default) — holonomic: `vx` + `vy` crab + yaw together. Use when the
+  platform accepts lateral velocity.
+- `waypoint` — yaw **XOR** forward, no crab. Use to match the one-axis `waypoint`
+  route follower.
 
 Key knobs: `target_object`, `conf_thresh` (0.40 — the detector's min class confidence,
 the offline tools' `--conf`; raise it to suppress false locks, lower it to acquire
@@ -526,6 +582,10 @@ Verify it's up — these should appear in `rostopic list`:
 - Adapter node scripts must be **executable** (`chmod +x`) — `roslaunch` refuses to
   start a `type=` script without the bit set, and `run_falcon.sh` bind-mounts them
   from the host, so the host's permissions are what the container sees.
+- The image has **no CUDA/TensorRT/pycuda** (it is `FROM ros:noetic-*`, not an L4T
+  base). `--runtime nvidia` mounts JetPack's shared libraries but not the Python
+  bindings. Anything needing GPU inference therefore runs on the host and talks to
+  the container over the bridge — as the object-approach detector does.
 - The import chain for the nodes (`core.mapping.bev`,
   `core.planning.planners.astar`, `core.planning.trackers.waypoint_follower`,
   `core.localization`) is numpy-only (the follower is pure-stdlib) — no

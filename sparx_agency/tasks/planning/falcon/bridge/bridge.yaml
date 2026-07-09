@@ -117,6 +117,44 @@ topics:
       reliability: reliable
       durability: transient_local
 
+  # ── Object-approach mission (ROS2 detector sidecar <-> ROS1 servo) ───
+  # The TensorRT detector runs on the HOST as a ROS2 node (the Falcon container
+  # has no CUDA/TensorRT/pycuda), so these two String topics carry the mission
+  # across. No image is bridged: the detector reads /xtend/rgb_frame_path
+  # natively on the ROS2 side and loads the JPEG off the host's disk.
+  #
+  #   /object_approach/detections  published by ROS2 (the detector sidecar),
+  #                                subscribed by ROS1 (object_approach_node).
+  #                                Detections JSON; see
+  #                                core/common/detection_message.py.
+  #   /object_approach/goal        the target object's label. Either side may
+  #                                publish it (an operator's `rostopic pub` on
+  #                                ROS1, or `ros2 topic pub` on ROS2); BOTH the
+  #                                detector and object_approach_node subscribe.
+  #
+  # detections is a live stream at ~detect_hz: keep it shallow and volatile, and
+  # never transient_local (a late joiner must not act on a stale box). goal is
+  # transient_local so a detector or Falcon restarting mid-flight picks up the
+  # current target without waiting for the operator to re-publish it.
+
+  - topic: /object_approach/detections
+    type: std_msgs/msg/String
+    queue_size: 5
+    qos:
+      history: keep_last
+      depth: 5
+      reliability: reliable
+      durability: volatile
+
+  - topic: /object_approach/goal
+    type: std_msgs/msg/String
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: reliable
+      durability: transient_local
+
 #  # ── SIM-mode inputs (Gazebo via gazebo_ros, ROS2 → ROS1) ─────────────
 #  # These three are consumed by ROS1's sim_adapter.py, which crops the
 #  # images and republishes them on the real-drone topic names so the
