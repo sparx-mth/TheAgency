@@ -47,10 +47,15 @@ falcon/
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
     │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common.intrinsic_remap + wall-clock restamp)
+    │   ├── yolo_detector_node.py   # RGB -> TensorRT YOLO-World -> detections JSON (open-vocab; re-prompt at runtime)
+    │   ├── object_approach_node.py # detections -> track + visual servo + SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER (core.planning.visual_servo)
+    │   ├── target_lock_viewer_node.py # on-screen live target-lock HUD (subscribes the overlay Image)
     │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
     └── launch/
         ├── nav_stack.launch    # shared nav core (Gazebo sim)
-        └── real_drone.launch   # real drone — includes nav_stack.launch + pose/depth bridge
+        ├── real_drone.launch   # real drone — includes nav_stack.launch + pose/depth bridge
+        ├── object_approach.launch          # detector + servo + HUD, ALONGSIDE a running nav stack
+        └── real_drone_object_approach.launch # ONE launch: real_drone + object_approach + BEV window
 ```
 
 These nodes are **FALCON-specific adapters** (FALCON topics, `/map_config`,
@@ -72,6 +77,9 @@ ROS-free algorithms** they call live in `core/`, each in its own domain:
 - `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`
 - `core/planning/navdp` (point-goal geometry + NavDP HTTP client used by
   `navdp_click_node`)
+- `core/planning/visual_tracking` + `core/planning/visual_servo` (the object-approach
+  mission: acquisition gate, LK tracker, visual servo, force shaping, scan sweep,
+  re-search, and the mission state machine) — see [`OBJECT_APPROACH.md`](OBJECT_APPROACH.md)
 - `core/common/intrinsic_remap` (resample a render to a target camera's
   intrinsics — sim_adapter uses it to hit the XTEND's anisotropic fx≠fy;
   `principal_point_crop` is the older crop-only special case)
@@ -330,6 +338,126 @@ the NavDP server reuse the same `navdp_*` / `cam_*` args as NavDP click-to-go ab
 The geometry and selection are ROS-free and unit-tested in `core.planning.navdp`
 (`world_to_body_2d`, `select_farthest_visible_waypoint`, `arclength_fraction_2d`).
 
+## Object approach (hunt a named object while flying the route, then close on it)
+
+Runs the whole nav stack **and** an open-vocabulary object hunt at once. The planner
+flies to `goal_x, goal_y` while the TensorRT YOLO-World detector scans every frame in
+the background. Once the target is confirmed for `n_confirm` consecutive frames the
+`object_approach` node takes `/cmd_vel` (the follower goes passive via the
+`visual_servoing` demo-mode hand-off, so there is exactly one publisher) and visually
+servos onto the object until it is centred and very close. There is **no terminal
+stop** — it keeps tracking, so a moving object is followed.
+
+One command brings up everything (map + BEV + A*/NavDP + follower + detector + servo
++ the live target-lock HUD + the clickable BEV window):
+
+```bash
+./run_falcon.sh office
+# inside the container:
+source /catkin_ws/devel/setup.bash
+roslaunch falcon_adapter real_drone_object_approach.launch \
+    map_name:=office target_object:=refrigerator goal_x:=0.0 goal_y:=-3.0
+```
+
+To add the mission to a nav stack that is **already running**, launch just the
+mission half in a second shell (`docker exec -it falcon bash` first):
+
+```bash
+roslaunch falcon_adapter object_approach.launch target_object:=refrigerator
+```
+
+Live control, at any time:
+
+```bash
+rostopic pub -1 /object_approach/goal   std_msgs/String "data: 'hat'"   # retarget (re-prompts the detector)
+rostopic pub -1 /object_approach/enable std_msgs/Bool   "data: false"   # disarm -> planner keeps the route
+rostopic echo /object_approach/status                                   # state, streak, range, at_target
+```
+
+### Prerequisite: build the TensorRT engines on the target
+
+The detector is **TensorRT only** (no ultralytics `.pt` inference path). Engines are
+not portable — build them on the Jetson that will fly:
+
+```bash
+export WEIGHTS_DIR=/path/to/yolo_world_weights     # holds yolov8s-worldv2.pt
+sparx_agency/tasks/mapping/yolo_world_trt/build_all.sh s
+```
+
+Then point the launch at them (defaults assume
+`tasks/mapping/yolo_world_trt/engines/orin_sm87/` under the read-only mount):
+
+```bash
+roslaunch falcon_adapter real_drone_object_approach.launch map_name:=office \
+    target_object:=refrigerator \
+    backbone_engine:=/path/backbone.engine head_engine:=/path/head.engine \
+    text_weights:=/path/yolov8s-worldv2.pt
+```
+
+`text_weights` (the `.pt` checkpoint) is only touched to embed the *prompt* — the
+CLIP text branch — so torch runs once per retarget, never per frame. Inference itself
+is torch-free. See [`yolo_world_trt/README.md`](../../mapping/yolo_world_trt/README.md).
+
+### What happens when things go wrong (by design)
+
+- **Target lost mid-approach** → the node yaws toward the side the object left and
+  re-searches. If it cannot re-acquire within `recover_timeout_s` (6 s) it gives up,
+  hands `/cmd_vel` back to the follower, and **re-publishes the last/initial goal** on
+  `/waypoint_nav/goal` so the planner resumes the route instead of stalling.
+- **Route reaches the goal, object never seen** → the node sweeps the room in place:
+  a slow rotate broken by **stops** (`pause → rotate → pause …`), starting with a pause
+  so the detector gets a clean, motion-blur-free look down each new bearing before the
+  drone turns again. The sweep runs until the object is found or the goal changes.
+- **Object found, then it moves** → `HOVER_LOCK` falls back to `APPROACH`. There is no
+  success-and-stop state; "centred and close" is a condition, not a terminus.
+
+### Closure version + minimum force
+
+The platform needs a **minimum force per axis** to move at all, so every published
+command (servo, re-search, scan, brake) is force-shaped as the final stage before the
+wire. `force_mode:=fixed` (the default) is bang-bang: below the deadband the axis is
+exactly `0`, above it the axis is driven at exactly the fixed level. That means the
+drone approaches at exactly `min_vx` and turns at exactly `min_wz_deg` regardless of
+how large the tracking error is.
+
+- `force_mode:=snap` keeps the same minimum-force floor and max clamp but lets the
+  command be **proportional** in between — use it if your platform can modulate above
+  the floor. `force_mode:=none` disables the floor entirely (analog, max-clamped only).
+- Raise `fixed_vx` / `fixed_vy` / `fixed_wz_deg` above the minimums to fly a faster
+  bang-bang without leaving `fixed`.
+
+`closure_mode` picks how the servo drives the axes, independently of the route
+follower's own `controller`:
+
+| `closure_mode` | Servo | Use when |
+|---|---|---|
+| `multi_axis` (default) | holonomic — `vx` + `vy` crab + yaw together | the platform accepts lateral velocity |
+| `waypoint` | yaw **XOR** forward, no crab | matching the one-axis `waypoint` follower |
+
+Key knobs: `target_object`, `conf_thresh` (0.40 — the detector's min class confidence,
+the offline tools' `--conf`; raise it to suppress false locks, lower it to acquire
+sooner), `n_confirm` (3), `min_score` (0.30), `target_range_m` (0.8,
+the hover-lock standoff), `arrive_radius_m` (0.6, when "arrived" triggers the scan),
+`scan_yaw_rate` / `scan_rotate_s` / `scan_pause_s`, `recover_timeout_s`, `detect_hz`
+(2.0 — the tracker runs at full camera rate between detections). Full rosparam lists
+are in the footers of `object_approach_node.py` and `yolo_detector_node.py`.
+
+### The live target-lock HUD
+
+On by default (`viewer:=true`). `object_approach_node` renders the overlay from the
+**actual mission state** — detections, the tracked box, the FSM mode, and the exact
+*shaped* command being published — and publishes it as a `sensor_msgs/Image` on
+`/object_approach/overlay`; `target_lock_viewer_node` just displays it. It is the same
+renderer as the offline `run_live_target_lock` tool, so what you validated offline is
+what you see in flight.
+
+Keeping it a separate node means the GUI dependency and the display loop stay off the
+control node: run headless with `viewer:=false` (the overlay Image is still published,
+so you can view it remotely), or turn the rendering off entirely with
+`publish_overlay:=false`. It needs a display — run on the Jetson's own screen, or
+`ssh -Y` / VNC in, exactly as for `bev_click_goal` (see the BEV section above). Press
+`q` in the window to close it; the mission keeps running.
+
 ## Talking to a ROS2 sim / drone — the bridge
 
 FALCON is ROS1; the SJTU Gazebo sim and the real XTEND are ROS2. The
@@ -391,9 +519,13 @@ Verify it's up — these should appear in `rostopic list`:
   `…/sparx_agency` at `/opt/sparx_agency` and sets `PYTHONPATH=/opt` (ROS's
   setup.bash then prepends its own paths). Override the host location with
   `SPARX_PARENT=/path/that/contains/sparx_agency ./run_falcon.sh office`.
-- Only the two launch files we use are kept (`nav_stack.launch`, `real_drone.launch`);
-  the original `gazebo_exploration.launch`, `playback_exploration.launch`, and
+- Only the launch files we use are kept (`nav_stack.launch`, `real_drone.launch`,
+  `object_approach.launch`, `real_drone_object_approach.launch`); the original
+  `gazebo_exploration.launch`, `playback_exploration.launch`, and
   `visual_servoing.launch` were dropped.
+- Adapter node scripts must be **executable** (`chmod +x`) — `roslaunch` refuses to
+  start a `type=` script without the bit set, and `run_falcon.sh` bind-mounts them
+  from the host, so the host's permissions are what the container sees.
 - The import chain for the nodes (`core.mapping.bev`,
   `core.planning.planners.astar`, `core.planning.trackers.waypoint_follower`,
   `core.localization`) is numpy-only (the follower is pure-stdlib) — no
