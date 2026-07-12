@@ -134,7 +134,8 @@ class VisualServoController:
         if 0.0 < vx < floor:
             vx = floor
         vx = alg.saturate(vx, max_fwd)
-        vy = alg.lateral_command(ox, p.kp_lateral, max_lat, p.center_deadband) \
+        lat_db = p.lateral_deadband if p.lateral_deadband is not None else p.center_deadband
+        vy = alg.lateral_command(ox, p.kp_lateral, max_lat, lat_db) \
             if p.use_lateral else 0.0
         vz = alg.vertical_command(oy, p.kp_vertical, max_vert, p.center_deadband) \
             if p.use_vertical else 0.0

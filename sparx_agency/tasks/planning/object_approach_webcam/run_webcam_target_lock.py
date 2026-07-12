@@ -97,7 +97,8 @@ def _build_pipeline(args: argparse.Namespace, w: int, h: int) -> TargetLockPipel
         vx_max=args.vx_max, center_tol=args.center_tol,
         target_area_frac=args.target_area_frac,
         yaw_deadband=(0.35 if fa else None),
-        yaw_close_deadband=(0.15 if fa else 0.0))
+        yaw_close_deadband=(0.15 if fa else 0.0),
+        lateral_deadband=(0.10 if fa else None))
     shaper = None
     if fa:
         prof = lambda mn: AxisForceProfile(min_magnitude=mn, max_magnitude=0.6, mode="fixed")

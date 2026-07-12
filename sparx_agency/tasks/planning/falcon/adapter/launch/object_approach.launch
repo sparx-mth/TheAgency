@@ -89,7 +89,7 @@
   <arg name="max_det_age_s"     default="0.5" />              <!-- detector mode: hold-last-box window -->
   <arg name="closure_mode"      default="multi_axis" />       <!-- multi_axis | waypoint -->
   <arg name="use_depth"         default="true" />
-  <arg name="target_range_m"    default="0.8" />              <!-- "very close, in front" -->
+  <arg name="target_range_m"    default="0.5" />              <!-- stop distance: hold ~0.5 m from the object -->
   <arg name="slowdown_range_m"  default="2.0" />
   <arg name="target_area_frac"  default="0.12" />             <!-- fallback when no depth -->
   <arg name="vx_max"            default="0.35" />
@@ -99,8 +99,9 @@
   <arg name="ctrl_hz"           default="10.0" />             <!-- matches the route follower's tick calibration -->
   <!-- Coarse-yaw platform: a large yaw deadband (fine centring uses crab, not yaw)
        that grows as we close so a yaw doesn't sweep the object out of frame. -->
-  <arg name="yaw_deadband"       default="0.35" />
+  <arg name="yaw_deadband"       default="0.35" />            <!-- yaw acquisition angle (min-burst + coast) -->
   <arg name="yaw_close_deadband" default="0.15" />
+  <arg name="lateral_deadband"   default="0.10" />            <!-- coast-aware crab deadband (fine centring) -->
 
   <!-- ── Flight-command shaping (discrete + inertial actuation) ─────── -->
   <arg name="force_mode"        default="fixed" />            <!-- fixed | snap | none -->
@@ -198,6 +199,7 @@
     <param name="ctrl_hz"           value="$(arg ctrl_hz)" />
     <param name="yaw_deadband"       value="$(arg yaw_deadband)" />
     <param name="yaw_close_deadband" value="$(arg yaw_close_deadband)" />
+    <param name="lateral_deadband"   value="$(arg lateral_deadband)" />
     <param name="force_mode"        value="$(arg force_mode)" />
     <param name="min_vx"            value="$(arg min_vx)" />
     <param name="min_vy"            value="$(arg min_vy)" />

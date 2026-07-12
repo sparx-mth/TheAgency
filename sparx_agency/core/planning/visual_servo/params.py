@@ -57,14 +57,25 @@ class VisualServoParams:
 
         use_depth: Prefer a metric range (from depth) over the area-fraction proxy
             for the approach/terminal logic. Falls back to area if range is absent.
-        target_range_m: Success range — stop here, "close and in front" (m).
+        target_range_m: **Stop distance** — the forward ramp reaches zero here and
+            the mission declares "close and in front" (m). The drone holds this
+            standoff (default 0.5 m).
         slowdown_range_m: Range at which the forward ramp begins (m). Must be
             greater than ``target_range_m``.
         target_area_frac: Success box-area fraction when no depth is available.
         slowdown_area_frac: Area fraction at which the forward ramp begins.
 
-        center_tol: ``|ox|`` below which the target counts as "centred" for the
-            at-target (hover-lock) decision.
+        center_tol: The **acquisition angle** — ``|ox|`` below which the target
+            counts as "centred" for the at-target (hover-lock) decision. It is the
+            angular analogue of a waypoint's acquisition *radius*: on a pulsed,
+            coarse-yaw platform we cannot centre to a single degree (a correction
+            burst would overshoot to the other side), so "centred" is deliberately a
+            small allowed deviation, not exact zero. Keep it >= what the fine axis
+            (crab) can actually settle to.
+        lateral_deadband: ``|ox|`` below which no lateral crab is commanded, separate
+            from ``center_deadband`` so the crab that does the fine centring is also
+            pulse/coast-aware and does not oscillate about centre. ``None`` reuses
+            ``center_deadband`` (no change).
 
         speed_smoothing: EMA blend on the forward speed output (0..1; 1 = no smoothing).
         yaw_smoothing: EMA blend on the yaw-rate output (0..1; 1 = no smoothing).
@@ -87,6 +98,7 @@ class VisualServoParams:
     use_lateral: bool = True
     kp_lateral: float = 0.25
     max_lateral_speed: float = 0.25
+    lateral_deadband: Optional[float] = None  # None -> use center_deadband
 
     # Vertical centring
     use_vertical: bool = False
@@ -101,7 +113,7 @@ class VisualServoParams:
 
     # Terminal / range logic
     use_depth: bool = True
-    target_range_m: float = 0.8
+    target_range_m: float = 0.5          # stop distance: hold ~0.5 m from the object
     slowdown_range_m: float = 2.0
     target_area_frac: float = 0.12
     slowdown_area_frac: float = 0.03
@@ -127,6 +139,8 @@ class VisualServoParams:
             raise ValueError("yaw_deadband must be >= 0 when given.")
         if self.yaw_close_deadband < 0.0:
             raise ValueError("yaw_close_deadband must be >= 0.")
+        if self.lateral_deadband is not None and self.lateral_deadband < 0.0:
+            raise ValueError("lateral_deadband must be >= 0 when given.")
         if self.slowdown_range_m <= self.target_range_m:
             raise ValueError("slowdown_range_m must be > target_range_m.")
         if self.target_area_frac <= self.slowdown_area_frac:

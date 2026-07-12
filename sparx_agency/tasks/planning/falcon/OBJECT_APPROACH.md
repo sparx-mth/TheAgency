@@ -185,6 +185,14 @@ RECOVER that outlasts `recover_timeout_s` falls back to SEARCH/SCAN.
   inertial sim (`core/.../visual_servo/tests/test_closure_inertial.py`) shows this
   glides to centre with no overshoot where the analog servo oscillates. Preview it at
   home with the webcam rig's `--falcon-actuation`.
+- **Standoff + acquisition angle.** The mission holds a **stop distance**
+  `target_range_m` (**0.5 m** by default): the forward ramp reaches zero there and
+  declares success (it never flies closer). Centring uses an **acquisition angle**,
+  the angular analogue of a waypoint's acquisition *radius*: `center_tol` is the
+  allowed centring deviation for hover-lock (a pulsed platform can't centre to a
+  degree, so "centred" is a small band, not exact zero), `yaw_deadband` is the yaw
+  acquisition angle (no yaw within it, so a burst can't overshoot 89°→97°), and
+  `lateral_deadband` is the coast-aware crab band that does the fine centring.
 - **Exactly one publisher.** The node never publishes `/cmd_vel` until the platform
   echoes `demo_mode == visual_servoing`, and it releases (`fly_straight`) on every
   disabled/SEARCH tick. The follower goes fully passive while that mode is held.

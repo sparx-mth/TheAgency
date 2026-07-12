@@ -107,7 +107,8 @@ def add_target_lock_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--use-vertical", action="store_true")
     ap.add_argument("--no-depth", action="store_true",
                     help="ignore --depth even if given; use the area-fraction proxy")
-    ap.add_argument("--target-range-m", type=float, default=0.8)
+    ap.add_argument("--target-range-m", type=float, default=0.5,
+                    help="stop distance: hold this far (m) from the object")
     ap.add_argument("--slowdown-range-m", type=float, default=2.0)
     ap.add_argument("--target-area-frac", type=float, default=0.12)
     ap.add_argument("--center-tol", type=float, default=0.15)

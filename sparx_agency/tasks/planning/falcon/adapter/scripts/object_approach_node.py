@@ -208,15 +208,19 @@ class ObjectApproachNode(object):
             use_vertical=_param_bool("~use_vertical", False),
             vx_max=float(G("~vx_max", 0.35)),
             use_depth=_param_bool("~use_depth", True),
-            target_range_m=float(G("~target_range_m", 0.8)),
+            target_range_m=float(G("~target_range_m", 0.5)),   # stop ~0.5 m from the object
             slowdown_range_m=float(G("~slowdown_range_m", 2.0)),
             target_area_frac=float(G("~target_area_frac", 0.12)),
+            # ~center_tol is the ACQUISITION ANGLE: the allowed centring deviation
+            # for hover-lock. On a pulsed platform we cannot centre to a degree, so
+            # "centred" is a small deviation, not exact zero.
             center_tol=float(G("~center_tol", 0.15)),
-            # Coarse-yaw platform: a large yaw deadband (min-burst + coast) that
-            # grows as we close, so a small yaw does not sweep the object out of
-            # frame -- lateral crab does the fine centring instead.
+            # Coarse-yaw platform: a large yaw deadband (min-burst + coast, the yaw
+            # acquisition angle) that grows as we close so a yaw does not sweep the
+            # object out of frame; a coast-aware crab deadband does the fine centring.
             yaw_deadband=float(G("~yaw_deadband", 0.35)),
-            yaw_close_deadband=float(G("~yaw_close_deadband", 0.15))),
+            yaw_close_deadband=float(G("~yaw_close_deadband", 0.15)),
+            lateral_deadband=float(G("~lateral_deadband", 0.10))),
             default_limits=self.limits)
         self.servo_vx_max = float(G("~vx_max", 0.35))
         self.servo_vy_max = float(G("~max_lateral_speed", 0.25))
@@ -836,8 +840,11 @@ if __name__ == "__main__":
 #       servo (vx+vy+yaw); waypoint -> yaw_forward_xor (yaw OR forward, no crab).
 #       ~servo_mode / ~use_lateral still override the derived defaults.
 #   servo: ~kp_yaw (1.2) ~vx_max (0.35) ~max_lateral_speed (0.25) ~use_vertical (false)
-#       ~center_tol (0.15) ~use_depth (true) ~target_range_m (0.8)
-#       ~slowdown_range_m (2.0) ~target_area_frac (0.12)   [area used when depth absent]
+#       ~center_tol (0.15, the ACQUISITION ANGLE = allowed centring deviation for
+#       hover-lock; not exact centre) ~use_depth (true) ~target_range_m (0.5, STOP
+#       distance: hold this far from the object) ~slowdown_range_m (2.0)
+#       ~target_area_frac (0.12) [area used when depth absent] ~lateral_deadband
+#       (0.10, coast-aware crab deadband for the fine centring)
 #       coarse-yaw platform: ~yaw_deadband (0.22, larger than the crab deadband so
 #       fine centring is done by crab, not yaw) ~yaw_close_deadband (0.15, extra yaw
 #       deadband as we close so a yaw does not sweep the object out of frame)
