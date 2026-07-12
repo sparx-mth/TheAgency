@@ -349,9 +349,9 @@
        preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
-  <!-- nav_mode = astar | navdp | combination. The 3-way mode selector. DEFAULT is
-       'combination' (the A*+NavDP fusion runs automatically); use_navdp:=true is the
-       legacy shim that selects 'navdp'; pass nav_mode:=astar for plain A* only.
+  <!-- nav_mode = astar | navdp | combination | fallback. The mode selector. DEFAULT
+       is 'combination' (the A*+NavDP fusion runs automatically); use_navdp:=true is
+       the legacy shim that selects 'navdp'; pass nav_mode:=astar for plain A* only.
          astar       : astar_planner -> /path/waypoints_astar
          navdp       : navdp_click   -> /path/waypoints_navdp (operator clicks a pixel)
          combination : astar_planner AND combination_planner run; A* plans the global
@@ -361,7 +361,16 @@
                        combination_start_enabled:=true (the default) the fusion is on
                        from the first tick (no signal needed); set it false to start on
                        A* and turn the fusion on later with a 'std_msgs/Bool True' on
-                       combination_enable_topic. Needs the NavDP server up once enabled. -->
+                       combination_enable_topic. Needs the NavDP server up once enabled.
+         fallback    : astar_planner AND astar_navdp_fallback run. A* is PRIMARY: its
+                       route is echoed straight through. When A* reports NO route on
+                       fallback_astar_fail_confirm consecutive attempts (via the new
+                       /path/astar_status signal), the drone STOPS and NavDP takes over,
+                       driving toward the mission goal in the body frame (flying each
+                       leg to its midpoint, re-inferring) until A* reports a route on
+                       fallback_astar_ok_confirm consecutive attempts -> resume A*. The
+                       hysteresis (larger ok than fail) prevents A*<->NavDP zig-zag at a
+                       hard turn / door. Publishes /path/waypoints_fallback. NavDP up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
   <arg name="nav_mode" default="combination" />
   <!-- vla = navdp | flownav. Selects which VLA policy serves nav_mode:=navdp:
@@ -422,6 +431,20 @@
   <arg name="combination_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the depth occlusion test -->
   <arg name="combination_min_goal_fwd_m"        default="0.5" /><!-- ignore A* waypoints nearer than this (the drone is already on top of them) -->
 
+  <!-- FALLBACK (nav_mode:=fallback) — A*-primary, NavDP rescue. astar_navdp_fallback
+       echoes A* until A* reports NO route on N consecutive attempts, then STOPS and
+       drives NavDP toward the mission goal (body frame) until A* reports a route on M
+       consecutive attempts. Reuses the navdp_* camera/transport/server args below. -->
+  <arg name="fallback_astar_fail_confirm"       default="3" /><!-- consecutive A* "no route" reports before stopping and engaging NavDP (with plan_period_s=3s -> ~9s; lower plan_period_s for a snappier switch) -->
+  <arg name="fallback_astar_ok_confirm"         default="5" /><!-- consecutive A* "route found" reports before handing control back to A*; keep >= fail_confirm so the return is sticky (prevents A*<->NavDP zig-zag at a hard turn/door) -->
+  <arg name="fallback_tick_hz"                  default="5.0" /><!-- state-machine rate -->
+  <arg name="fallback_engage_settle_s"          default="1.0" /><!-- after stopping to engage, wait this long for the drone to brake to a clean, stationary frame before the first inference -->
+  <arg name="fallback_navdp_timeout_s"          default="10.0" /><!-- NavDP HTTP step timeout for ONE inference; generous for a slow Jetson (the drone holds/flies the latched leg meanwhile) -->
+  <arg name="fallback_leg_fraction"             default="0.5" /><!-- re-infer once the drone passes this fraction of the NavDP leg (0.5 = midpoint; the 2nd half buffers the inference latency) -->
+  <arg name="fallback_leg_timeout_s"            default="8.0" /><!-- watchdog: re-infer if a leg has been followed this long (prevents a deadlock if the flown path is shorter than the raw leg) -->
+  <arg name="fallback_leg_endpoint_radius_m"    default="0.4" /><!-- re-infer once the drone is within this of the leg end -->
+  <arg name="fallback_arrival_radius_m"         default="0.5" /><!-- within this of the mission goal NavDP has arrived -> hold (mission done) -->
+
   <!-- ══════════════════════════════════════════════════════════════
        PATH CORRECTOR (path_corrector_node) — planner-agnostic SAFETY.
        Subscribes to the active planner's RAW path, recentres it off
@@ -434,12 +457,13 @@
        ══════════════════════════════════════════════════════════════ -->
   <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
   <!-- Which raw path the corrector reads, by nav_mode (and vla for navdp):
-       combination -> /path/waypoints_combo; navdp+vla=flownav -> /path/waypoints_flownav;
-       navdp -> /path/waypoints_navdp; astar -> /path/waypoints_astar. The corrector
-       owns /path/waypoints_safe; the trajectory_simplifier turns that into the
-       flown /path/waypoints, so the follower still reads one topic. -->
+       combination -> /path/waypoints_combo; fallback -> /path/waypoints_fallback;
+       navdp+vla=flownav -> /path/waypoints_flownav; navdp -> /path/waypoints_navdp;
+       astar -> /path/waypoints_astar. The corrector owns /path/waypoints_safe; the
+       trajectory_simplifier turns that into the flown /path/waypoints, so the
+       follower still reads one topic. -->
   <arg name="planner_path_topic"
-       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_flownav' if (arg('nav_mode') == 'navdp' and arg('vla') == 'flownav') else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar')))" />
+       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_fallback' if arg('nav_mode') == 'fallback' else ('/path/waypoints_flownav' if (arg('nav_mode') == 'navdp' and arg('vla') == 'flownav') else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar'))))" />
 
   <!-- ESDF corrector knobs (used only when corrector:=esdf). Ascend each waypoint
        up the gradient of the distance-to-wall field toward the corridor / doorway
@@ -736,11 +760,13 @@
        global route the combination_planner steers NavDP along). NOT in pure navdp. -->
   <node pkg="falcon_adapter" type="astar_planner_node.py"
         name="astar_planner" output="screen"
-        if="$(eval arg('nav_mode') in ('astar', 'combination'))">
+        if="$(eval arg('nav_mode') in ('astar', 'combination', 'fallback'))">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
     <!-- Raw A* path; path_corrector recentres it and republishes /path/waypoints. -->
     <param name="path_topic"         value="/path/waypoints_astar" />
+    <!-- Per-attempt plan status (Bool): consumed by astar_navdp_fallback in fallback mode. -->
+    <param name="status_topic"       value="/path/astar_status" />
     <param name="goal_topic"         value="/waypoint_nav/goal" />
     <param name="goal_x"             value="$(arg goal_x)" />
     <param name="goal_y"             value="$(arg goal_y)" />
@@ -886,6 +912,55 @@
     <param name="require_unoccluded"       value="$(arg combination_require_unoccluded)" />
     <param name="visibility_depth_tol_m"   value="$(arg combination_visibility_depth_tol_m)" />
     <param name="min_goal_fwd_m"           value="$(arg combination_min_goal_fwd_m)" />
+  </node>
+
+  <!-- Fallback planner (nav_mode:=fallback): A* stays PRIMARY (astar_planner above
+       publishes the route AND a per-attempt /path/astar_status Bool). This node
+       echoes the A* route on /path/waypoints_fallback until A* reports NO route on
+       fallback_astar_fail_confirm consecutive attempts, then STOPS the drone and
+       drives NavDP toward the mission goal expressed in the drone body frame,
+       flying each leg to its midpoint and re-inferring, until A* reports a route on
+       fallback_astar_ok_confirm consecutive attempts -> resume A*. The hysteresis
+       (ok >= fail) stops A*<->NavDP zig-zag at a hard turn / door. No visibility
+       gate (the goal is usually not visible — that is why A* failed). Reuses the
+       navdp_* camera/transport/server args. Needs the NavDP server up. -->
+  <node pkg="falcon_adapter" type="astar_navdp_fallback_node.py"
+        name="astar_navdp_fallback" output="screen"
+        if="$(eval arg('nav_mode') == 'fallback')">
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+    <!-- A* status + route in; arbitrated raw path out (-> path_corrector via planner_path_topic). -->
+    <param name="astar_status_topic" value="/path/astar_status" />
+    <param name="astar_path_topic"  value="/path/waypoints_astar" />
+    <!-- Mission goal (world); NavDP is aimed here, converted to the body frame. -->
+    <param name="goal_topic"        value="/waypoint_nav/goal" />
+    <param name="goal_x"            value="$(arg goal_x)" />
+    <param name="goal_y"            value="$(arg goal_y)" />
+    <param name="path_topic"        value="/path/waypoints_fallback" />
+    <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg navdp_port)" />
+    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <!-- Fallback hysteresis + leg behaviour -->
+    <param name="astar_fail_confirm"       value="$(arg fallback_astar_fail_confirm)" />
+    <param name="astar_ok_confirm"         value="$(arg fallback_astar_ok_confirm)" />
+    <param name="tick_hz"                  value="$(arg fallback_tick_hz)" />
+    <param name="engage_settle_s"          value="$(arg fallback_engage_settle_s)" />
+    <param name="timeout_s"                value="$(arg fallback_navdp_timeout_s)" />
+    <param name="leg_execute_fraction"     value="$(arg fallback_leg_fraction)" />
+    <param name="leg_timeout_s"            value="$(arg fallback_leg_timeout_s)" />
+    <param name="leg_endpoint_radius_m"    value="$(arg fallback_leg_endpoint_radius_m)" />
+    <param name="arrival_radius_m"         value="$(arg fallback_arrival_radius_m)" />
   </node>
 
   <!-- Path corrector (SAFETY): recentres whichever planner's raw path against the

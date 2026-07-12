@@ -45,6 +45,7 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
+from std_msgs.msg import Bool
 
 from sparx_agency.core.common.types import Path2D, Pose2D, PlanStatus
 from sparx_agency.core.planning.environment import (
@@ -96,6 +97,13 @@ class AStarPlannerNode:
         # Raw A* output. A separate path_corrector_node recentres this against the
         # BEV and republishes the corrected path on /path/waypoints (the flown one).
         self.path_topic = G("~path_topic", "/path/waypoints_astar")
+        # Per-attempt plan-status signal (std_msgs/Bool): True = a route was found
+        # this attempt, False = no route (res.ok == False). Published only when the
+        # planner ACTUALLY ran (never for the not-ready gates: no BEV/goal/pose or
+        # warmup), so a consumer counting consecutive fails/successes sees one
+        # sample per real planning attempt. The fallback arbiter (nav_mode:=fallback)
+        # uses this to switch to NavDP after N failures and back after M successes.
+        self.status_topic = G("~status_topic", "/path/astar_status")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.frame_id = G("~frame_id", "world")
 
@@ -188,6 +196,7 @@ class AStarPlannerNode:
         self._predicted_replans = 0               # consecutive; reset when clear
 
         self.pub_path = rospy.Publisher(self.path_topic, Path, queue_size=1, latch=True)
+        self.pub_status = rospy.Publisher(self.status_topic, Bool, queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
@@ -394,6 +403,7 @@ class AStarPlannerNode:
         res = self.planner.plan(req, self.grid)
         if not res.ok:
             self.fail_reason = res.message
+            self.pub_status.publish(Bool(data=False))   # no route this attempt
             rospy.logwarn_throttle(
                 5.0, "astar_planner: PLAN FAILED start=(%.2f,%.2f) goal=(%.2f,%.2f) "
                 "status=%s reason=%s", self.pose.x, self.pose.y, self.goal.x,
@@ -407,6 +417,7 @@ class AStarPlannerNode:
         if (allow_suppress and self.has_plan
                 and self._paths_equal(anchored.points, self.last_points)):
             self.fail_reason = "(unchanged -- not re-published)"
+            self.pub_status.publish(Bool(data=True))    # still a valid route
             rospy.loginfo_throttle(
                 10.0, "astar_planner: periodic replan reproduced the current path "
                 "-- not re-publishing (trajectory frozen)")
@@ -416,6 +427,7 @@ class AStarPlannerNode:
         # Collision re-checks here run against THIS published path.
         self.last_points = anchored.points
         self._publish(anchored.points, (rospy.Time.now() - t0).to_sec())
+        self.pub_status.publish(Bool(data=True))    # a fresh route was found
         self.has_plan = True
         self._collision_streak = 0    # every fresh path starts its debounce clean
         self._pred_collision_streak = 0
@@ -501,6 +513,7 @@ class AStarPlannerNode:
         L("  pose in  = %s/gt_pose", self.drone_ns)
         L("  goal in  = %s", self.goal_topic)
         L("  path out = %s   (raw A* -> path_corrector)", self.path_topic)
+        L("  status out = %s   (Bool: True=route found, False=no route)", self.status_topic)
         L("  plan period = %.1fs  (strict A* cadence; path frozen between ticks)",
           self.plan_period_s)
         L("  mid-cycle replan: bev=%s collision=%s predicted=%s",
@@ -546,6 +559,10 @@ if __name__ == "__main__":
 #       ~goal_topic (/waypoint_nav/goal)
 #       ~path_topic (/path/waypoints_astar; raw A* -> path_corrector_node, which
 #         recentres it and republishes the flown path on /path/waypoints)
+#       ~status_topic (/path/astar_status; std_msgs/Bool published once per real
+#         planning attempt -- True=route found, False=no route (res.ok False). Not
+#         emitted for the not-ready gates (no BEV/goal/pose, warmup). The fallback
+#         arbiter counts consecutive False/True to switch to/from NavDP.)
 #       ~frame_id (world) ~goal_x ~goal_y (initial goal; unset = wait for a click)
 #   planner: ~connectivity (8) ~inflate_radius_m (0.4) ~unknown_blocked (false)
 #       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.3)

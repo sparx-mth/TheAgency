@@ -125,7 +125,7 @@
        True' on combination_enable_topic later. use_navdp:=true selects pure navdp;
        nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
-  <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
+  <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination | fallback-->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/flownav/server/...). -->
@@ -151,6 +151,16 @@
   <arg name="combination_require_unoccluded"     default="true" /><!-- visible = clear line-of-sight, not merely in-FOV -->
   <arg name="combination_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the occlusion test -->
   <arg name="combination_min_goal_fwd_m" default="0.5" /><!-- ignore A* waypoints nearer than this -->
+  <!-- fallback (nav_mode:=fallback): A*-primary + NavDP rescue, hysteretic switch -->
+  <arg name="fallback_astar_fail_confirm" default="3" /><!-- consecutive A* "no route" reports before stopping & engaging NavDP -->
+  <arg name="fallback_astar_ok_confirm"   default="5" /><!-- consecutive A* "route found" reports before resuming A* (keep >= fail; sticky, anti-zigzag) -->
+  <arg name="fallback_tick_hz"            default="5.0" />
+  <arg name="fallback_engage_settle_s"    default="1.0" /><!-- brake-settle before the first inference (clean, stationary frame) -->
+  <arg name="fallback_navdp_timeout_s"    default="10.0" /><!-- NavDP HTTP step timeout for one inference -->
+  <arg name="fallback_leg_fraction"       default="0.5" /><!-- re-infer at the leg midpoint -->
+  <arg name="fallback_leg_timeout_s"      default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
+  <arg name="fallback_leg_endpoint_radius_m" default="0.4" /><!-- re-infer once within this of the leg end -->
+  <arg name="fallback_arrival_radius_m"   default="0.5" /><!-- within this of the goal NavDP has arrived -> hold -->
 
   <!-- ── Path-correction strategy ─────────────────────────────────
        corrector:=potential_field (default) | esdf. With esdf the route is
@@ -310,6 +320,15 @@
     <arg name="combination_require_unoccluded"     value="$(arg combination_require_unoccluded)" />
     <arg name="combination_visibility_depth_tol_m" value="$(arg combination_visibility_depth_tol_m)" />
     <arg name="combination_min_goal_fwd_m"     value="$(arg combination_min_goal_fwd_m)" />
+    <arg name="fallback_astar_fail_confirm"    value="$(arg fallback_astar_fail_confirm)" />
+    <arg name="fallback_astar_ok_confirm"      value="$(arg fallback_astar_ok_confirm)" />
+    <arg name="fallback_tick_hz"               value="$(arg fallback_tick_hz)" />
+    <arg name="fallback_engage_settle_s"       value="$(arg fallback_engage_settle_s)" />
+    <arg name="fallback_navdp_timeout_s"       value="$(arg fallback_navdp_timeout_s)" />
+    <arg name="fallback_leg_fraction"          value="$(arg fallback_leg_fraction)" />
+    <arg name="fallback_leg_timeout_s"         value="$(arg fallback_leg_timeout_s)" />
+    <arg name="fallback_leg_endpoint_radius_m" value="$(arg fallback_leg_endpoint_radius_m)" />
+    <arg name="fallback_arrival_radius_m"      value="$(arg fallback_arrival_radius_m)" />
     <arg name="navdp_rgb_topic"         value="$(arg real_rgb_path_topic)" />
     <arg name="navdp_depth_topic"       value="$(arg real_depth_path_topic)" />
     <arg name="navdp_pose_topic"        value="$(arg real_pose_topic)" />
