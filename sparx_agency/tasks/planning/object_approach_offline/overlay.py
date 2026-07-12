@@ -1,29 +1,45 @@
-"""Draw the tracked target on the frame and the mission/command HUD in a side panel.
+"""Draw the target lock on the frame and the mission/command HUD in a side panel.
 
-The camera frame itself only ever gets the raw detections and the tracked box --
-the actual "did we find it" visual. Everything else (mission state, offsets,
-range, and the exact body-frame command that would be published to ``/cmd_vel``)
-renders into a separate panel :func:`render` places to the right of the frame, so
-captions never obscure the image. The command is shown both as numbers and as
-three gauges: a ROLL arrow (lateral, ``vy``), a PITCH arrow (forward/back, ``vx``),
-and a YAW dial (a circle with a point marking the commanded turn rate/direction).
+The camera frame carries the raw detections plus a single **colour-coded lock
+indicator** that says, at a glance, *how well we currently know where the target
+is*:
+
+  * **green box** -- the detector (YOLO) reports the target this frame: the most
+    confident state, drawn on the detector's own box;
+  * **orange box** -- tracking only: the detector did not report it (too low a
+    confidence, or it fires slower than the camera), but the tracker still holds a
+    box on it. Also used while the tracker briefly dead-reckons through a dropout;
+  * **red full-frame border (no box)** -- the target is lost (both detector and
+    tracker) and the mission is actively re-searching (RECOVER): the first seconds
+    of trying to re-acquire. There is no box because we do not know where it is,
+    so the *whole frame* is bordered instead;
+  * **grey full-frame border (no box)** -- searching from scratch (SEARCH / SCAN):
+    not found for many frames, hunting for it again.
+
+Everything else (mission state, offsets, range, and the exact body-frame command
+that would be published to ``/cmd_vel``) renders into a separate panel
+:func:`render` places to the right of the frame, so captions never obscure the
+image. The command is shown both as numbers and as three gauges: a ROLL arrow
+(lateral, ``vy``), a PITCH arrow (forward/back, ``vx``), and a YAW dial (a circle
+with a point marking the commanded turn rate/direction).
 """
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 from sparx_agency.core.common.types.perception import Detection2D
+from sparx_agency.core.planning.visual_servo import RECOVER
 from sparx_agency.tasks.planning.object_approach_offline.pipeline import FrameResult
 
-# ── frame-overlay colors (BGR) ──────────────────────────────────────────────
-_DET_GRAY = (140, 140, 140)
-_TRACK_GREEN = (60, 200, 60)
-_TRACK_YELLOW = (30, 210, 230)
-_TRACK_RED = (40, 40, 220)
+# ── lock-indicator colors (BGR) ─────────────────────────────────────────────
+_GREEN = (60, 200, 60)      # detector sees the target (confident)
+_ORANGE = (0, 140, 255)     # tracking only (detector silent this frame)
+_RED = (40, 40, 220)        # lost, actively re-searching (RECOVER)
+_GRAY = (150, 150, 150)     # searching from scratch (SEARCH/SCAN) + context boxes
 _BLACK = (0, 0, 0)
 
 # ── panel colors/layout ──────────────────────────────────────────────────────
@@ -33,7 +49,8 @@ _TEXT = (235, 235, 235)
 _MUTED = (150, 150, 150)
 _MODE_COLOR = {
     "SEARCH": (150, 150, 150),
-    "APPROACH": (30, 210, 230),
+    "SCAN": (150, 150, 150),
+    "APPROACH": (0, 140, 255),
     "HOVER_LOCK": (60, 200, 60),
     "RECOVER": (40, 40, 220),
 }
@@ -56,29 +73,59 @@ def _tag(bgr: np.ndarray, text: str, x: int, y: int, color, scale: float = 0.5) 
                 _BLACK, 1, cv2.LINE_AA)
 
 
-# ── frame overlay: detections + tracked box only, no captions ───────────────
-def draw_detections(bgr: np.ndarray, detections: Sequence[Detection2D],
-                    target: str) -> None:
-    """Thin gray boxes for every non-target detection this frame (context only)."""
-    for d in detections:
-        if d.label == target:
-            continue  # the locked target is drawn separately by draw_track, on top
-        x1, y1, x2, y2 = d.bbox_xyxy
-        cv2.rectangle(bgr, (x1, y1), (x2, y2), _DET_GRAY, 1)
-        _tag(bgr, "%s %.2f" % (d.label, d.score), x1, y1, _DET_GRAY, 0.4)
+# ── frame overlay: the colour-coded lock indicator ──────────────────────────
+def classify_lock(result: FrameResult) -> Tuple[str, tuple,
+                                                 Optional[Tuple[float, float, float, float]]]:
+    """Pick the lock indicator: ``(caption, BGR color, box_or_None)``.
 
-
-def draw_track(bgr: np.ndarray, result: FrameResult) -> None:
-    """Thick color-coded box for the tracked target, or nothing before acquisition."""
+    A returned box (green/orange) means we know *where* the target is and draw a
+    rectangle there; ``None`` means we do not, so a whole-frame border in the
+    colour is drawn instead. Priority: a live detector box (green) outranks a
+    tracker-only box (orange); with neither, RECOVER is red and everything else
+    (SEARCH/SCAN) is grey.
+    """
+    if result.target_detection is not None:
+        return "DETECTED", _GREEN, tuple(float(v) for v in result.target_detection.bbox_xyxy)
     track = result.track
-    if track is None:
+    if track is not None and track.valid:
+        caption = "TRACKING (coast)" if track.predicted else "TRACKING"
+        return caption, _ORANGE, tuple(float(v) for v in track.bbox_xyxy)
+    if result.fsm_mode == RECOVER:
+        return "LOST -- RE-SEARCHING", _RED, None
+    return "SEARCHING", _GRAY, None
+
+
+def draw_context_detections(bgr: np.ndarray, detections: Sequence[Detection2D],
+                            target_detection: Optional[Detection2D]) -> None:
+    """Thin gray boxes for every detection except the locked target (context only)."""
+    for d in detections:
+        if d is target_detection:
+            continue  # the target is drawn as the colour-coded lock indicator, on top
+        x1, y1, x2, y2 = (int(v) for v in d.bbox_xyxy)
+        cv2.rectangle(bgr, (x1, y1), (x2, y2), _GRAY, 1)
+        _tag(bgr, "%s %.2f" % (d.label, d.score), x1, y1, _GRAY, 0.4)
+
+
+def draw_lock(bgr: np.ndarray, result: FrameResult) -> None:
+    """Draw the lock indicator: a green/orange target box, or a red/grey border."""
+    caption, color, box = classify_lock(result)
+    if box is None:
+        _draw_frame_border(bgr, color, caption)
         return
-    color = _TRACK_RED if not track.valid else (
-        _TRACK_YELLOW if track.predicted else _TRACK_GREEN)
-    x1, y1, x2, y2 = (int(v) for v in track.bbox_xyxy)
+    x1, y1, x2, y2 = (int(v) for v in box)
     cv2.rectangle(bgr, (x1, y1), (x2, y2), color, 2)
-    state = " [lost]" if not track.valid else (" [predicted]" if track.predicted else "")
-    _tag(bgr, "%s %.2f%s" % (track.label, track.score, state), x1, y1, color, 0.5)
+    score = (result.target_detection.score if result.target_detection is not None
+             else (result.track.score if result.track is not None else 0.0))
+    _tag(bgr, "%s %.2f [%s]" % (result.target or "target", score, caption),
+         x1, y1, color, 0.5)
+
+
+def _draw_frame_border(bgr: np.ndarray, color: tuple, caption: str) -> None:
+    """Border the whole image (target position unknown), captioned top-left."""
+    h, w = bgr.shape[:2]
+    t = 6
+    cv2.rectangle(bgr, (t // 2, t // 2), (w - t // 2 - 1, h - t // 2 - 1), color, t)
+    _tag(bgr, caption, 10, 14, color, 0.5)
 
 
 # ── gauges: ROLL/PITCH arrows + YAW dial ─────────────────────────────────────
@@ -213,10 +260,10 @@ def _pad_to_height(img: np.ndarray, height: int) -> np.ndarray:
 
 
 def render(bgr: np.ndarray, result: FrameResult) -> np.ndarray:
-    """Camera frame (detections + tracked box) beside the mission/command panel."""
+    """Camera frame (context detections + colour-coded lock) beside the HUD panel."""
     frame = bgr.copy()
-    draw_detections(frame, result.detections, result.target)
-    draw_track(frame, result)
+    draw_context_detections(frame, result.detections, result.target_detection)
+    draw_lock(frame, result)
 
     panel = build_panel(result)
     height = max(frame.shape[0], panel.shape[0])

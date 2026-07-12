@@ -1,7 +1,7 @@
 """Pure, stateless axis-aligned bounding-box geometry (image plane).
 
 Cross-cutting helpers shared by the visual tracker
-(:mod:`sparx_agency.core.planning.visual_tracking`) and the visual-servo control
+(:mod:`sparx_agency.core.mapping.tracking`) and the visual-servo control
 law (:mod:`sparx_agency.core.planning.visual_servo`). Data *types* (``Detection2D``,
 ``Track2D``) live in :mod:`sparx_agency.core.common.types`; this module only holds
 the arithmetic that operates on their boxes.

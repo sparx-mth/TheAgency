@@ -18,7 +18,12 @@ from sparx_agency.core.planning.visual_servo import (
     ReSearchConfig,
     VisualServoParams,
 )
-from sparx_agency.core.planning.visual_tracking import TargetTrackerConfig
+from sparx_agency.core.mapping.tracking import (
+    DetectionOnlyConfig,
+    DETECTOR,
+    DETECTOR_TRACKER,
+    TargetTrackerConfig,
+)
 from sparx_agency.tasks.mapping.yolo_world_trt.detect_folder import parse_labels
 from sparx_agency.tasks.planning.object_approach_offline.pipeline import TargetLockPipeline
 
@@ -68,6 +73,17 @@ def add_target_lock_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--n-confirm", type=int, default=3)
     ap.add_argument("--min-score", type=float, default=0.30)
 
+    # Closure strategy: what we use to keep the box on the target.
+    ap.add_argument("--lock-mode", choices=(DETECTOR_TRACKER, DETECTOR),
+                    default=DETECTOR_TRACKER,
+                    help="detector_tracker (default): detector seeds an optical-flow "
+                         "tracker propagated every frame; detector: the detector's "
+                         "box alone, no tracking (use when the detector keeps up "
+                         "with the RGB stream)")
+    ap.add_argument("--max-det-age-s", type=float, default=0.5,
+                    help="(detector mode) hold the last detection as a valid track "
+                         "for this long before declaring loss")
+
     # Tracking (TargetTracker)
     ap.add_argument("--max-predict-s", type=float, default=0.4)
     ap.add_argument("--no-reseed", action="store_true",
@@ -113,7 +129,9 @@ def build_pipeline(args: argparse.Namespace, intr: Intrinsics) -> TargetLockPipe
         reseed_on_detection=not args.no_reseed, servo_params=servo_params,
         gate_config=ConfirmationGateConfig(n_confirm=args.n_confirm,
                                            min_score=args.min_score),
+        lock_mode=args.lock_mode,
         tracker_config=TargetTrackerConfig(max_predict_s=args.max_predict_s),
+        detection_config=DetectionOnlyConfig(max_det_age_s=args.max_det_age_s),
         fsm_config=ApproachFSMConfig(recover_timeout_s=args.recover_timeout_s),
         recovery_config=ReSearchConfig(search_yaw_rate=args.search_yaw_rate,
                                        max_search_s=args.recover_timeout_s))

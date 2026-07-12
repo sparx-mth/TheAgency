@@ -16,7 +16,7 @@ depth ────────────────────────�
                               (SEARCH/APPROACH/HOVER_LOCK/RECOVER)
 ```
 
-The tracker feeding this lives in `core/planning/visual_tracking`; the detector in
+The tracker feeding this lives in `core/mapping/tracking`; the detector in
 `core/mapping/detection`.
 
 ## Components
@@ -77,7 +77,7 @@ research = ReSearchPolicy()
 
 # each control tick (node owns the tracker + detector cadence):
 conf = gate.update(detections)                        # streak / confirmed / best
-track = tracker.on_frame(rgb, stamp_s=t)              # from visual_tracking
+track = tracker.on_frame(rgb, stamp_s=t)              # from core.mapping.tracking
 dec = fsm.update(conf.confirmed, track.valid, at_target, dt)
 
 if not dec.drive_cmd_vel:

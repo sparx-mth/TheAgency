@@ -77,9 +77,10 @@ ROS-free algorithms** they call live in `core/`, each in its own domain:
 - `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`
 - `core/planning/navdp` (point-goal geometry + NavDP HTTP client used by
   `navdp_click_node`)
-- `core/planning/visual_tracking` + `core/planning/visual_servo` (the object-approach
-  mission: acquisition gate, LK tracker, visual servo, force shaping, scan sweep,
-  re-search, and the mission state machine) — see [`OBJECT_APPROACH.md`](OBJECT_APPROACH.md)
+- `core/mapping/tracking` + `core/planning/visual_servo` (the object-approach
+  mission: acquisition gate, robust Median-Flow tracker (or detector-only, via
+  `lock_mode`), visual servo, force shaping, scan sweep, re-search, and the mission
+  state machine) — see [`OBJECT_APPROACH.md`](OBJECT_APPROACH.md)
 - `core/common/intrinsic_remap` (resample a render to a target camera's
   intrinsics — sim_adapter uses it to hit the XTEND's anisotropic fx≠fy;
   `principal_point_crop` is the older crop-only special case)
@@ -481,6 +482,11 @@ how large the tracking error is.
   the floor. `force_mode:=none` disables the floor entirely (analog, max-clamped only).
 - Raise `fixed_vx` / `fixed_vy` / `fixed_wz_deg` above the minimums to fly a faster
   bang-bang without leaving `fixed`.
+
+`lock_mode` picks how the box is kept on the target: `detector_tracker` (default) —
+the detector seeds the robust Median-Flow tracker, propagated every frame between
+detections; or `detector` — the detector's box alone (held for `max_det_age_s`), no
+tracking, for when the detector already keeps up with the RGB stream.
 
 `closure_mode` picks how the servo drives the axes, independently of the route
 follower's own `controller`:

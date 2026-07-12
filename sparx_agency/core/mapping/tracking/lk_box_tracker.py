@@ -27,7 +27,7 @@ import numpy as np
 import cv2
 
 from sparx_agency.core.common.math.bbox import bounds_rect, clip_xyxy
-from sparx_agency.core.planning.visual_tracking.interface import (
+from sparx_agency.core.mapping.tracking.interface import (
     BBox,
     BoxObservation,
     BoxTracker,

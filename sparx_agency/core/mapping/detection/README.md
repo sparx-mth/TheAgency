@@ -15,7 +15,7 @@ depth ────────────────────────�
 ```
 
 Downstream, the confirmation gate + tracker consume the boxes at frame rate; see
-`core/planning/visual_servo` and `core/planning/visual_tracking`.
+`core/planning/visual_servo` and `core/mapping/tracking`.
 
 ## Interface
 

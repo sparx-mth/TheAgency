@@ -11,7 +11,7 @@ The control half of the "lock onto a named object and approach it" capability:
     RECOVER switch that decides when this node drives ``/cmd_vel``.
 
 The tracker feeding this lives in
-:mod:`sparx_agency.core.planning.visual_tracking`; the detector in
+:mod:`sparx_agency.core.mapping.tracking`; the detector in
 :mod:`sparx_agency.core.mapping.detection`.
 """
 from __future__ import annotations

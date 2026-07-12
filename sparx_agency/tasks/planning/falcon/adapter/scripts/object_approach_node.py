@@ -25,7 +25,7 @@ Beyond the base search->approach loop this node adds four mission behaviours:
      exact shaped command) as an Image for target_lock_viewer_node.
 
 All the maths is ROS-free and unit-tested:
-  * detect-once/track-many bbox tracking   core.planning.visual_tracking.TargetTracker
+  * detect-once/track-many bbox tracking   core.mapping.tracking.TargetTracker
   * bbox (+depth range) -> body velocity    core.planning.visual_servo.VisualServoController
   * N-consecutive-frame acquisition         core.planning.visual_servo.TargetConfirmationGate
   * where to look when lost                  core.planning.visual_servo.ReSearchPolicy
@@ -69,7 +69,10 @@ from sparx_agency.core.common.detection_message import parse_detections_message
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.types import ControlCommand, Intrinsics, KinematicLimits
 from sparx_agency.core.mapping.depth.depth_bbox_fusion import bbox_to_xyz_cam_from_depth
-from sparx_agency.core.planning.visual_tracking import TargetTracker, TargetTrackerConfig
+from sparx_agency.core.mapping.tracking import (
+    make_lock_tracker, TargetTrackerConfig, DetectionOnlyConfig,
+    DETECTOR_TRACKER, LOCK_MODES,
+)
 from sparx_agency.core.planning.visual_servo import (
     VisualServoController, VisualServoParams, VisualServoRequest,
     TargetConfirmationGate, ConfirmationGateConfig,
@@ -167,9 +170,24 @@ class ObjectApproachNode(object):
             max_speed_xy=float(G("~max_speed_xy", 0.4)),
             max_speed_z=float(G("~max_speed_z", 0.3)),
             max_yaw_rate=float(G("~max_yaw_rate", 0.6)))
-        self.tracker = TargetTracker(TargetTrackerConfig(
-            input_is_bgr=True,
-            max_predict_s=float(G("~max_predict_s", 0.4))))
+        # ── Closure strategy: detector_tracker (default) or detector-only ──
+        # detector_tracker: the detector seeds an optical-flow tracker propagated
+        # every frame between detections. detector: the detector's box alone drives
+        # closure (no tracking) -- for when the detector already keeps up with the
+        # RGB stream, so tracking only adds a way to drift onto the background.
+        self.lock_mode = str(G("~lock_mode", DETECTOR_TRACKER)).strip().lower()
+        if self.lock_mode not in LOCK_MODES:
+            raise ValueError("~lock_mode must be one of %s, got %r"
+                             % (list(LOCK_MODES), self.lock_mode))
+        # How long a detection stays "fresh": the detector-only closure window AND
+        # the HUD's "detector sees it now" (green) staleness gate share this knob.
+        self.det_fresh_s = float(G("~max_det_age_s", 0.5))
+        self.tracker = make_lock_tracker(
+            self.lock_mode,
+            tracker_config=TargetTrackerConfig(
+                input_is_bgr=True,
+                max_predict_s=float(G("~max_predict_s", 0.4))),
+            detection_config=DetectionOnlyConfig(max_det_age_s=self.det_fresh_s))
         self.servo = VisualServoController(VisualServoParams(
             mode=servo_mode,
             kp_yaw=float(G("~kp_yaw", 1.2)),
@@ -270,6 +288,8 @@ class ObjectApproachNode(object):
         self._confirmed = False
         self._streak = 0
         self._last_dets = []
+        self._last_target_det = None     # matching target detection (HUD green box)
+        self._last_target_det_t = 0.0    # its stamp, for the HUD freshness gate
         self.current_demo_mode = None
         self._requested_mode = None
         self._last_dec = None
@@ -375,6 +395,10 @@ class ObjectApproachNode(object):
             self.gate.set_target(target)
             self.tracker.reset()
             self.fsm.reset()
+            # Drop the old target's detection so the HUD does not draw a green box
+            # (labelled with the NEW target) over the OLD object until the detector
+            # re-fires on the new prompt.
+            self._last_target_det = None
 
     def _enable_cb(self, msg):
         want = bool(msg.data)
@@ -428,11 +452,17 @@ class ObjectApproachNode(object):
             self._confirmed = state.confirmed
             self._streak = state.streak
             self._last_dets = dets          # for the HUD overlay
+            self._last_target_det = state.best   # matching target -> HUD green box
+            self._last_target_det_t = stamp      # stamped for the freshness gate
             if state.best is None:
                 return
             # Seed on acquisition; re-seed later to bound drift / regain a lost lock.
+            # A non-propagating (detector-only) tracker has no state to coast on, so
+            # ALWAYS re-feed it the latest detection -- "seed once" would freeze the
+            # lock and abandon a still-visible target.
+            reseed = self.reseed_on_detection or not self.tracker.propagates
             need_seed = (not self.tracker.has_target and state.confirmed) or \
-                        (self.tracker.has_target and self.reseed_on_detection)
+                        (self.tracker.has_target and reseed)
             if need_seed:
                 frame = self._closest_frame(stamp)
                 if frame is not None:
@@ -645,6 +675,13 @@ class ObjectApproachNode(object):
         with self._lock:
             bgr = self.rgb                     # node stores BGR (see _push_rgb)
             dets = list(self._last_dets)
+            # Only treat the target as "detected now" (HUD green) while the last
+            # matching detection is fresh -- a stalled/crashed detector must not
+            # leave a confident green box frozen on a target we no longer see.
+            target_det = self._last_target_det
+            if target_det is not None and \
+                    (self.rgb_stamp - self._last_target_det_t) > self.det_fresh_s:
+                target_det = None
             track = self._last_track
             stamp = self.rgb_stamp
         if bgr is None:
@@ -652,7 +689,8 @@ class ObjectApproachNode(object):
         res, dec, cmd = self._last_res, self._last_dec, self._last_cmd
         fr = FrameResult(
             stamp_s=stamp, dt=0.0, target=self.target,
-            detections=dets, confirmed=self._confirmed, streak=self._streak,
+            detections=dets, target_detection=target_det,
+            confirmed=self._confirmed, streak=self._streak,
             track=track, fsm_mode=(dec.mode if dec is not None else SEARCH),
             at_target=bool(res is not None and res.at_target),
             x_offset=None if res is None else res.x_offset,
@@ -688,6 +726,9 @@ class ObjectApproachNode(object):
         L("  enable    = %s   (start_enabled=%s)", self.enable_topic, self.enabled)
         L("  cmd_vel out = %s  (via %s hand-off)",
           self.drone_ns + "/cmd_vel", MODE_VISUAL_SERVOING)
+        L("  lock_mode = %s   (%s)", self.lock_mode,
+          "detector seeds an optical-flow tracker"
+          if self.lock_mode == DETECTOR_TRACKER else "detector box only, no tracking")
         L("  closure   = %s   force=%s (min vx=%.3f vy=%.3f wz=%.0f deg/s)",
           self.closure_mode, self.force_mode, self.shaper.vx.min_magnitude,
           self.shaper.vy.min_magnitude, math.degrees(self.shaper.wz.min_magnitude))
@@ -716,7 +757,7 @@ if __name__ == "__main__":
 
 # ============================================================================
 # ROSPARAMS (all private ~; defaults in parentheses). All servo/track/FSM maths
-# is ROS-free in core.planning.visual_servo / visual_tracking / mapping.detection;
+# is ROS-free in core.planning.visual_servo / core.mapping.tracking / mapping.detection;
 # this node owns ROS I/O, the demo-mode hand-off and the control-loop plumbing.
 #
 #   IO: ~image_transport (frame_path | topic)
@@ -730,6 +771,11 @@ if __name__ == "__main__":
 #       ~img_height (294)  ~camera_info_topic ('' = use params)
 #   mission: ~target_object (refrigerator) ~start_enabled (true) ~ctrl_hz (15.0)
 #   acquisition: ~n_confirm (3) ~min_score (0.30)
+#   closure strategy: ~lock_mode (detector_tracker | detector). detector_tracker
+#       (default): detector seeds an optical-flow tracker propagated every frame.
+#       detector: the detector's box alone drives closure (no tracking), holding
+#       the last box for ~max_det_age_s (0.5) -- use when the detector keeps up
+#       with the RGB stream.
 #   tracking: ~reseed_on_detection (true) ~frame_buffer_len (30) ~max_predict_s (0.4)
 #   closure version: ~closure_mode (multi_axis | waypoint). multi_axis -> holonomic
 #       servo (vx+vy+yaw); waypoint -> yaw_forward_xor (yaw OR forward, no crab).

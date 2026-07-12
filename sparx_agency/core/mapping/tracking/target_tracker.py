@@ -30,15 +30,23 @@ from sparx_agency.core.common.math.bbox import (
     cxcywh_to_xyxy,
     clip_xyxy,
 )
-from sparx_agency.core.planning.visual_tracking.interface import BoxTracker
-from sparx_agency.core.planning.visual_tracking.lk_box_tracker import (
+from sparx_agency.core.mapping.tracking.interface import BoxTracker
+from sparx_agency.core.mapping.tracking.object_lock_tracker import ObjectLockTracker
+from sparx_agency.core.mapping.tracking.lk_box_tracker import (
     LucasKanadeBoxTracker,
     LKBoxTrackerConfig,
 )
-from sparx_agency.core.planning.visual_tracking.motion_model import (
+from sparx_agency.core.mapping.tracking.median_flow_box_tracker import (
+    MedianFlowBoxTracker,
+    MedianFlowConfig,
+)
+from sparx_agency.core.mapping.tracking.motion_model import (
     ConstantVelocityBoxModel,
     MotionModelConfig,
 )
+
+MEDIAN_FLOW = "median_flow"
+LUCAS_KANADE = "lucas_kanade"
 
 
 @dataclass(frozen=True)
@@ -46,13 +54,22 @@ class TargetTrackerConfig:
     """Tuning for :class:`TargetTracker`.
 
     Attributes:
-        lk: Lucas-Kanade box-tracker config.
+        backend: Box-propagation backend — ``"median_flow"`` (default: robust
+            forward-backward + appearance-validated tracker that fails honestly
+            instead of latching onto the background) or ``"lucas_kanade"`` (the
+            leaner, faster sparse-LK tracker).
+        median_flow: Median-Flow box-tracker config (used when ``backend`` is
+            ``"median_flow"``).
+        lk: Lucas-Kanade box-tracker config (used when ``backend`` is
+            ``"lucas_kanade"``).
         motion: Constant-velocity motion-model config.
-        max_predict_s: How long (s) to dead-reckon the box after LK loses lock
-            before declaring the track invalid. 0 disables prediction.
+        max_predict_s: How long (s) to dead-reckon the box after the box tracker
+            loses lock before declaring the track invalid. 0 disables prediction.
         input_is_bgr: Channel order of 3-channel input frames (for gray conversion).
     """
 
+    backend: str = MEDIAN_FLOW
+    median_flow: MedianFlowConfig = field(default_factory=MedianFlowConfig)
     lk: LKBoxTrackerConfig = field(default_factory=LKBoxTrackerConfig)
     motion: MotionModelConfig = field(default_factory=MotionModelConfig)
     max_predict_s: float = 0.4
@@ -61,23 +78,33 @@ class TargetTrackerConfig:
     def __post_init__(self) -> None:
         if self.max_predict_s < 0.0:
             raise ValueError("max_predict_s must be >= 0.")
+        if self.backend not in (MEDIAN_FLOW, LUCAS_KANADE):
+            raise ValueError(
+                "backend must be %r or %r, got %r"
+                % (MEDIAN_FLOW, LUCAS_KANADE, self.backend))
 
 
-class TargetTracker:
-    """Compose LK tracking, motion prediction, and detector re-seeds for one target."""
+class TargetTracker(ObjectLockTracker):
+    """Compose box tracking, motion prediction, and detector re-seeds for one target."""
 
     def __init__(self, config: Optional[TargetTrackerConfig] = None,
                  box_tracker: Optional[BoxTracker] = None) -> None:
         """Args:
             config: Tuning; defaults are sized for a ~640x360 forward camera.
-            box_tracker: Classic box tracker to propagate the box (default the
-                Lucas-Kanade tracker). Inject a different :class:`BoxTracker`
+            box_tracker: Classic box tracker to propagate the box (default per
+                ``config.backend``). Inject a different :class:`BoxTracker`
                 (e.g. a future DNN tracker) here without touching the servo/FSM.
         """
         self.cfg = config or TargetTrackerConfig()
-        self._lk: BoxTracker = box_tracker or LucasKanadeBoxTracker(self.cfg.lk)
+        self._lk: BoxTracker = box_tracker or self._make_backend(self.cfg)
         self._motion = ConstantVelocityBoxModel(self.cfg.motion)
         self.reset()
+
+    @staticmethod
+    def _make_backend(cfg: "TargetTrackerConfig") -> BoxTracker:
+        if cfg.backend == MEDIAN_FLOW:
+            return MedianFlowBoxTracker(cfg.median_flow)
+        return LucasKanadeBoxTracker(cfg.lk)
 
     def reset(self) -> None:
         """Forget the target entirely."""
@@ -99,6 +126,11 @@ class TargetTracker:
     def has_target(self) -> bool:
         """True once a detection has seeded the tracker (even if now lost)."""
         return self._seeded_t is not None
+
+    @property
+    def propagates(self) -> bool:
+        """True: the box tracker + motion model carry the box between detections."""
+        return True
 
     @property
     def is_locked(self) -> bool:

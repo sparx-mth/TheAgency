@@ -2,7 +2,7 @@
 
 Lets a task node pick the propagation backend by name — ``"lucas_kanade"`` today,
 a correlation/DNN tracker later — and inject it into a
-:class:`~sparx_agency.core.planning.visual_tracking.target_tracker.TargetTracker`
+:class:`~sparx_agency.core.mapping.tracking.target_tracker.TargetTracker`
 without changing the servo or FSM above it.
 """
 from __future__ import annotations
@@ -10,10 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List
 
-from sparx_agency.core.planning.visual_tracking.interface import BoxTracker
-from sparx_agency.core.planning.visual_tracking.lk_box_tracker import (
+from sparx_agency.core.mapping.tracking.interface import BoxTracker
+from sparx_agency.core.mapping.tracking.lk_box_tracker import (
     LucasKanadeBoxTracker,
     LKBoxTrackerConfig,
+)
+from sparx_agency.core.mapping.tracking.median_flow_box_tracker import (
+    MedianFlowBoxTracker,
+    MedianFlowConfig,
 )
 
 
@@ -48,8 +52,14 @@ class BoxTrackerRegistry:
 
 
 def default_box_tracker_registry() -> BoxTrackerRegistry:
-    """Registry with the built-in trackers registered."""
+    """Registry with the built-in trackers registered (robust default first)."""
     reg = BoxTrackerRegistry()
+    reg.register(
+        BoxTrackerFactory(
+            name="median_flow",
+            create=lambda: MedianFlowBoxTracker(MedianFlowConfig()),
+        )
+    )
     reg.register(
         BoxTrackerFactory(
             name="lucas_kanade",

@@ -6,7 +6,7 @@ backends. ``YoloWorldDetector`` ("OpenYOLO") is the default; a TensorRT runtime
 backend can be added alongside it, mirroring the depth backends. Downstream, a
 detection is lifted to 3D with
 :func:`sparx_agency.core.mapping.depth.depth_bbox_fusion.bbox_to_xyz_cam_from_depth`,
-and tracked in real time by :mod:`sparx_agency.core.planning.visual_tracking`.
+and tracked in real time by :mod:`sparx_agency.core.mapping.tracking`.
 """
 from __future__ import annotations
 

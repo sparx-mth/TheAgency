@@ -31,7 +31,11 @@ from sparx_agency.core.planning.visual_servo import (
     VisualServoParams,
     VisualServoRequest,
 )
-from sparx_agency.core.planning.visual_tracking import TargetTracker, TargetTrackerConfig
+from sparx_agency.core.mapping.tracking import (
+    DetectionOnlyConfig,
+    TargetTrackerConfig,
+    make_lock_tracker,
+)
 
 
 def _cap(value: float, limit: Optional[float]) -> float:
@@ -48,6 +52,10 @@ class FrameResult:
         dt: Seconds since the previous step.
         target: The locked-onto label.
         detections: All detector output this frame (target + any distractors).
+        target_detection: The matching target detection this frame (above
+            ``min_score``), or None. Its presence is the "YOLO sees it now" signal
+            that colours the HUD box green (vs orange for tracking-only); its box
+            is what the green rectangle is drawn from.
         confirmed: Acquisition gate has seen ``n_confirm`` consecutive hits.
         streak: Current consecutive-hit count.
         track: Current :class:`Track2D`, or None before the tracker is ever seeded.
@@ -74,6 +82,7 @@ class FrameResult:
     dt: float
     target: str
     detections: List[Detection2D]
+    target_detection: Optional[Detection2D]
     confirmed: bool
     streak: int
     track: Optional[Track2D]
@@ -100,13 +109,21 @@ class TargetLockPipeline:
                  tracker_config: Optional[TargetTrackerConfig] = None,
                  fsm_config: Optional[ApproachFSMConfig] = None,
                  recovery_config: Optional[ReSearchConfig] = None,
+                 lock_mode: str = "detector_tracker",
+                 detection_config: Optional[DetectionOnlyConfig] = None,
                  reseed_on_detection: bool = True) -> None:
         """Args:
             target: Object label to lock onto (matched fuzzily; see
                 :func:`~core.planning.visual_servo.label_matches`).
             intrinsics: Camera model of the frames that will be passed to :meth:`step`.
             limits: Optional kinematic caps applied to the servo output.
-            reseed_on_detection: Re-seed the LK tracker from every fresh matching
+            lock_mode: How to close on the object — ``"detector_tracker"`` (default:
+                detector seeds an optical-flow tracker propagated every frame) or
+                ``"detector"`` (the detector's box alone, no tracking). See
+                :func:`~core.mapping.tracking.make_lock_tracker`.
+            detection_config: Config for the ``"detector"`` lock mode (freshness
+                window); ignored for ``"detector_tracker"``.
+            reseed_on_detection: Re-seed the tracker from every fresh matching
                 detection (bounds drift; mirrors the live node's default).
         """
         self.target = str(target).strip().lower()
@@ -115,7 +132,7 @@ class TargetLockPipeline:
         self.reseed_on_detection = reseed_on_detection
 
         params = servo_params or VisualServoParams()
-        self.tracker = TargetTracker(tracker_config or TargetTrackerConfig())
+        self.tracker = make_lock_tracker(lock_mode, tracker_config, detection_config)
         self.servo = VisualServoController(params, default_limits=limits)
         # Full-scale references for a gauge display -- the same caps
         # VisualServoController.step applies internally (params, floored by any
@@ -146,8 +163,13 @@ class TargetLockPipeline:
         self._prev_stamp = stamp
 
         state = self.gate.update(detections)
+        # Re-feed the tracker on every matching detection when asked to (bounds an
+        # optical-flow tracker's drift), and ALWAYS for a non-propagating tracker
+        # (detector-only) -- it has no state to coast on, so "seed once" would
+        # freeze the lock and abandon a still-visible target.
+        reseed = self.reseed_on_detection or not self.tracker.propagates
         need_seed = (not self.tracker.has_target and state.confirmed) or \
-                    (self.tracker.has_target and self.reseed_on_detection)
+                    (self.tracker.has_target and reseed)
         if need_seed and state.best is not None:
             self.tracker.on_detection(bgr, state.best, stamp)
 
@@ -172,6 +194,7 @@ class TargetLockPipeline:
 
         return FrameResult(
             stamp_s=stamp, dt=dt, target=self.target, detections=list(detections),
+            target_detection=state.best,
             confirmed=state.confirmed, streak=state.streak, track=track,
             fsm_mode=dec.mode, at_target=at_target,
             x_offset=None if res is None else res.x_offset,

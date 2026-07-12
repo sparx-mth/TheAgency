@@ -15,8 +15,8 @@ import numpy as np
 import cv2
 import pytest
 
-from sparx_agency.core.planning.visual_tracking.interface import BoxObservation
-from sparx_agency.core.planning.visual_tracking.lk_box_tracker import (
+from sparx_agency.core.mapping.tracking.interface import BoxObservation
+from sparx_agency.core.mapping.tracking.lk_box_tracker import (
     LKBoxTrackerConfig,
     LucasKanadeBoxTracker,
 )

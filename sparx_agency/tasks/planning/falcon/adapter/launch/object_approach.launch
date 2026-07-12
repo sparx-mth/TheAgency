@@ -80,7 +80,13 @@
   <arg name="max_det"           default="0" />                <!-- <=0 => engine manifest -->
   <arg name="detect_hz"         default="2.0" />
 
-  <!-- ── Closure version + servo ────────────────────────────────────── -->
+  <!-- ── Closure strategy + servo ───────────────────────────────────── -->
+  <!-- What keeps the box on the target: detector_tracker (default) = detector
+       seeds an optical-flow tracker propagated every frame; detector = the
+       detector's box alone, no tracking (for when the detector keeps up with the
+       RGB stream). -->
+  <arg name="lock_mode"         default="detector_tracker" /> <!-- detector_tracker | detector -->
+  <arg name="max_det_age_s"     default="0.5" />              <!-- detector mode: hold-last-box window -->
   <arg name="closure_mode"      default="multi_axis" />       <!-- multi_axis | waypoint -->
   <arg name="use_depth"         default="true" />
   <arg name="target_range_m"    default="0.8" />              <!-- "very close, in front" -->
@@ -171,6 +177,8 @@
     <param name="cy"                value="$(arg cy)" />
     <param name="img_width"         value="$(arg img_width)" />
     <param name="img_height"        value="$(arg img_height)" />
+    <param name="lock_mode"         value="$(arg lock_mode)" />
+    <param name="max_det_age_s"     value="$(arg max_det_age_s)" />
     <param name="closure_mode"      value="$(arg closure_mode)" />
     <param name="use_depth"         value="$(arg use_depth)" />
     <param name="target_range_m"    value="$(arg target_range_m)" />

@@ -25,7 +25,7 @@ RGB frame (from a folder, finished or growing)
         │
    TargetConfirmationGate              (acquire on N consecutive hits)
         │
-   TargetTracker (LK + motion model)   (detect-once / track-many)
+   ObjectLockTracker                   (detect-once / track-many; --lock-mode)
         │
    VisualServoController               (tracked box [+ depth] -> body velocity)
         │
@@ -34,9 +34,24 @@ RGB frame (from a folder, finished or growing)
    ReSearchPolicy                      (active re-search on a lost track)
 ```
 
-Every frame is rendered as the camera image (raw detections in gray, the tracked
-target in green/yellow/red for locked/predicted/lost — nothing else drawn on the
-image) next to a status **panel** with:
+**`--lock-mode`** picks how the box is kept on the target: `detector_tracker`
+(default) — the detector seeds a robust Median-Flow tracker propagated every frame
+between detections; or `detector` — the detector's box alone, no tracking (for when
+the detector already keeps up with the RGB stream). Same servo/FSM/HUD either way.
+
+Every frame is rendered as the camera image with a **colour-coded lock indicator**
+next to a status **panel**. The indicator says how well we currently know where
+the target is:
+
+- **green box** — the detector (YOLO) reports the target this frame (most confident);
+- **orange box** — tracking only: the detector is silent (low confidence, or it
+  fires slower than the camera) but the tracker still holds the box (a coasting
+  dead-reckon is tagged `TRACKING (coast)`);
+- **red full-frame border** (no box) — lost and actively re-searching (`RECOVER`),
+  the first seconds of re-acquiring — there is no box, so the whole frame is bordered;
+- **grey full-frame border** (no box) — searching from scratch (`SEARCH`/`SCAN`).
+
+The panel carries:
 
 - the mission state (`SEARCH`/`APPROACH`/`HOVER_LOCK`/`RECOVER`), confirmation streak,
 - the tracked box's offsets/area/range and `at_target`,

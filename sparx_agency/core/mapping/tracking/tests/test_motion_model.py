@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sparx_agency.core.planning.visual_tracking.motion_model import (
+from sparx_agency.core.mapping.tracking.motion_model import (
     ConstantVelocityBoxModel,
     MotionModelConfig,
 )

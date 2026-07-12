@@ -18,7 +18,7 @@ Pure, ROS-free, unit-tested core (222 tests):
 | Concern | Where | What |
 |---|---|---|
 | Detection | `core/mapping/detection/` | `DetectionModel` ABC + open-vocab YOLO-World backends; swap via the registry |
-| Tracking | `core/planning/visual_tracking/` | `LucasKanadeBoxTracker` (detect-once/track-many, fast, GPU-free) + `ConstantVelocityBoxModel` (predict through dropouts + re-search velocity) + `TargetTracker` (composition + detector re-seed) → `Track2D` |
+| Tracking | `core/mapping/tracking/` | `ObjectLockTracker` with two closure strategies (`~lock_mode`): `TargetTracker` (detector + box tracker, default) or `DetectionOnlyTracker` (detector box only). Box backend defaults to the robust `MedianFlowBoxTracker` (forward-backward + median consensus + appearance validation — fails honestly instead of tracking the background); `ConstantVelocityBoxModel` predicts through dropouts + gives the re-search velocity → `Track2D` |
 | Control | `core/planning/visual_servo/` | `TargetConfirmationGate` (N-consecutive-frame acquisition, pose-free), `VisualServoController` (bbox[+depth] → body velocity), `ReSearchPolicy` (where to look when lost), `ScanSearchPolicy` (rotate-with-stops room sweep), `CommandForceShaper` (per-axis min/max force), `VisualApproachStateMachine` (SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER) |
 | 2D→range | `core/mapping/depth/depth_bbox_fusion.py` | robust metric range to the box from depth |
 
@@ -131,6 +131,19 @@ object drops it back to APPROACH, so there is no stopping condition, only a cond
 
 ## Design notes
 
+- **Closure strategy (`~lock_mode`).** `detector_tracker` (default) seeds the
+  Median-Flow tracker from the detector and propagates the box every frame between
+  detections. `detector` skips the tracker and closes on the detector's box alone
+  (held for `~max_det_age_s`) — for when the detector already keeps up with the RGB
+  stream, so tracking only adds a way to drift onto the background. Same servo/FSM.
+- **Honest tracking.** The default box tracker is Median-Flow: forward-backward
+  consistency + median-consensus box update + an appearance template, so an
+  occluded / left-frame target is reported *lost* (→ RECOVER) instead of a
+  confident box on the background — the failure the old plain-LK tracker had.
+- **HUD colours = lock confidence.** `object_approach/overlay` colours the target:
+  **green** box when the detector sees it, **orange** box when tracking only, a
+  **red** whole-frame border while re-searching (RECOVER, box unknown), and a
+  **grey** whole-frame border while searching from scratch (SEARCH/SCAN).
 - **Minimum force.** The servo emits an analog velocity capped only at the top, but
   the platform will not move below a per-axis force floor. `CommandForceShaper` is the
   last stage before the wire, so servo / re-search / scan / brake commands all respect

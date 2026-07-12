@@ -51,6 +51,7 @@
   <!-- ── Object-approach mission ──────────────────────────────────── -->
   <arg name="target_object"   default="refrigerator" />
   <arg name="start_enabled"   default="true" />
+  <arg name="lock_mode"       default="detector_tracker" />  <!-- detector_tracker | detector -->
   <arg name="closure_mode"    default="multi_axis" />        <!-- multi_axis | waypoint -->
   <arg name="force_mode"      default="fixed" />             <!-- fixed | snap | none -->
   <arg name="arrive_radius_m" default="0.6" />
@@ -105,6 +106,7 @@
     <arg name="image_transport" value="$(arg image_transport)" />
     <arg name="target_object"   value="$(arg target_object)" />
     <arg name="start_enabled"   value="$(arg start_enabled)" />
+    <arg name="lock_mode"       value="$(arg lock_mode)" />
     <arg name="closure_mode"    value="$(arg closure_mode)" />
     <arg name="force_mode"      value="$(arg force_mode)" />
     <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />

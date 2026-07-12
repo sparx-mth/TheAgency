@@ -26,12 +26,12 @@ import cv2
 import pytest
 
 from sparx_agency.core.common.types.perception import Detection2D, Track2D
-from sparx_agency.core.planning.visual_tracking.interface import (
+from sparx_agency.core.mapping.tracking.interface import (
     BBox,
     BoxObservation,
     BoxTracker,
 )
-from sparx_agency.core.planning.visual_tracking.target_tracker import (
+from sparx_agency.core.mapping.tracking.target_tracker import (
     TargetTracker,
     TargetTrackerConfig,
 )

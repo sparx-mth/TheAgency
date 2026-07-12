@@ -4,11 +4,11 @@ A ``BoxTracker`` is the *classic*, per-object, detect-once/track-many half of th
 tracking stack: given a seed bounding box on one frame, it propagates that box to
 the next frame from image content alone (no detector, no neural net in the loop).
 The Lucas-Kanade implementation lives in
-:mod:`sparx_agency.core.planning.visual_tracking.lk_box_tracker`.
+:mod:`sparx_agency.core.mapping.tracking.lk_box_tracker`.
 
 The tracker operates on **grayscale** frames (``HxW`` uint8) so the RGB->gray
 conversion happens once per frame in the caller
-(:class:`~sparx_agency.core.planning.visual_tracking.target_tracker.TargetTracker`),
+(:class:`~sparx_agency.core.mapping.tracking.target_tracker.TargetTracker`),
 not once per tracker. It reports only what it can measure from pixels — the raw
 box and how many features survived — leaving velocity/prediction/labels to the
 composing :class:`TargetTracker`, which fuses in a motion model and detector

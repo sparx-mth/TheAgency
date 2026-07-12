@@ -159,6 +159,7 @@ def run(args: argparse.Namespace) -> None:
             jf.write(json.dumps({
                 "image": name, "stamp_s": round(result.stamp_s, 3), "state": result.fsm_mode,
                 "confirmed": result.confirmed, "streak": result.streak,
+                "detector_hit": result.target_detection is not None,
                 "track_valid": None if result.track is None else result.track.valid,
                 "x_offset": result.x_offset, "y_offset": result.y_offset,
                 "area_frac": result.area_frac, "range_m": result.range_m,
