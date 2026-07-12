@@ -81,13 +81,20 @@ class VisualServoController:
         centered = abs(ox) <= p.center_tol
         at_target = bool(close and centered)
 
+        # Coarse-yaw platform: the yaw deadband is larger than the crab/climb one
+        # (min-burst + coast) and GROWS as we close, so a small yaw does not sweep
+        # the (now large) target out of frame -- crab does the fine centring instead.
+        closeness = self._closeness(area, rng, use_depth)
+        yaw_db = (p.yaw_deadband if p.yaw_deadband is not None else p.center_deadband) \
+            + closeness * p.yaw_close_deadband
+
         vx_raw = self._forward_raw(area, rng, use_depth, max_fwd)
 
         if p.mode == "yaw_forward_xor":
-            vx, vy, vz, wz, mode = self._xor_step(ox, vx_raw, max_yaw)
+            vx, vy, vz, wz, mode = self._xor_step(ox, vx_raw, max_yaw, yaw_db)
         else:
             vx, vy, vz, wz, mode = self._holonomic_step(
-                ox, oy, vx_raw, at_target, max_yaw, max_fwd, max_lat, max_vert
+                ox, oy, vx_raw, at_target, max_yaw, max_fwd, max_lat, max_vert, yaw_db
             )
 
         # Output smoothing on the two dominant axes.
@@ -109,14 +116,15 @@ class VisualServoController:
             command=cmd, at_target=at_target, centered=centered,
             x_offset=ox, y_offset=oy, area_frac=area, range_m=rng, mode=mode,
             metadata={"vx_raw": vx_raw, "n_matches": track.n_matches,
-                      "predicted": track.predicted},
+                      "predicted": track.predicted, "closeness": closeness,
+                      "yaw_deadband": yaw_db},
         )
 
     # ── modes ────────────────────────────────────────────────────────
     def _holonomic_step(self, ox, oy, vx_raw, at_target, max_yaw, max_fwd,
-                        max_lat, max_vert):
+                        max_lat, max_vert, yaw_db):
         p = self.p
-        wz = alg.yaw_command(ox, p.kp_yaw, max_yaw, p.center_deadband)
+        wz = alg.yaw_command(ox, p.kp_yaw, max_yaw, yaw_db)
         gate = alg.centering_gain(ox, p.advance_offset_max)
         vx = 0.0 if at_target else vx_raw * gate
         # Stiction floor, scaled by the centring gate so it only lifts a genuine
@@ -132,7 +140,11 @@ class VisualServoController:
             if p.use_vertical else 0.0
         return vx, vy, vz, wz, "holonomic"
 
-    def _xor_step(self, ox, vx_raw, max_yaw):
+    def _xor_step(self, ox, vx_raw, max_yaw, yaw_db):
+        # yaw_db is unused here: the yaw XOR forward mode uses its own
+        # enter/exit submode hysteresis as the yaw deadband (a second large
+        # deadband would fight it). The coast/range-aware yaw deadband applies
+        # to the holonomic closure (the FALCON default).
         p = self.p
         prev = self._sub_mode
         ax = abs(ox)
@@ -151,6 +163,17 @@ class VisualServoController:
         return vx_raw, 0.0, 0.0, 0.0, "ADVANCE"
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _closeness(self, area, rng, use_depth):
+        """Proximity in [0, 1]: 0 far, 1 at the target range/area (for yaw scaling)."""
+        p = self.p
+        if use_depth and rng is not None:
+            if p.slowdown_range_m <= p.target_range_m:
+                return 1.0 if rng <= p.target_range_m else 0.0
+            frac = (p.slowdown_range_m - rng) / (p.slowdown_range_m - p.target_range_m)
+        else:
+            frac = area / p.target_area_frac if p.target_area_frac > 0.0 else 0.0
+        return 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+
     def _forward_raw(self, area, rng, use_depth, max_fwd):
         p = self.p
         if use_depth:

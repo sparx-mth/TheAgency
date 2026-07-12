@@ -9,6 +9,7 @@ right (``vy < 0``); a target **above** centre (``oy < 0``) by climbing (``vz > 0
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,18 @@ class VisualServoParams:
 
         kp_yaw: P-gain from normalised x-offset to yaw rate (rad/s per unit offset).
         max_yaw_rate: Saturation on commanded yaw rate (rad/s).
-        center_deadband: ``|ox|`` below which no yaw is commanded (anti-jitter).
+        center_deadband: ``|ox|``/``|oy|`` below which no yaw/crab/climb is commanded
+            (anti-jitter).
+        yaw_deadband: ``|ox|`` below which no YAW is commanded, separate from
+            ``center_deadband`` so a *coarse-yaw, high-inertia* platform can leave
+            fine centring to the (smoother) lateral crab. On such a platform the
+            smallest reliable yaw correction is ~half of one minimum burst plus the
+            coast (e.g. ~0.25 of the image half-width at 10 Hz), so aligning tighter
+            than that just oscillates. ``None`` reuses ``center_deadband`` (no change).
+        yaw_close_deadband: Extra yaw deadband added *in proportion to closeness*
+            (0 far → this value at the target range/area). As the drone closes in, a
+            given yaw sweeps the (now large) target out of frame fast, so yaw is
+            suppressed near the object and crab does the fine centring. 0 disables.
 
         use_lateral: Also crab sideways to help centre (holonomic mode only).
         kp_lateral: P-gain from x-offset to lateral speed (m/s per unit offset).
@@ -68,6 +80,8 @@ class VisualServoParams:
     kp_yaw: float = 1.2
     max_yaw_rate: float = 0.6
     center_deadband: float = 0.03
+    yaw_deadband: Optional[float] = None      # None -> use center_deadband
+    yaw_close_deadband: float = 0.0           # extra yaw deadband scaled by closeness
 
     # Horizontal centring (lateral crab)
     use_lateral: bool = True
@@ -109,6 +123,10 @@ class VisualServoParams:
             )
         if self.advance_offset_max <= 0.0:
             raise ValueError("advance_offset_max must be > 0.")
+        if self.yaw_deadband is not None and self.yaw_deadband < 0.0:
+            raise ValueError("yaw_deadband must be >= 0 when given.")
+        if self.yaw_close_deadband < 0.0:
+            raise ValueError("yaw_close_deadband must be >= 0.")
         if self.slowdown_range_m <= self.target_range_m:
             raise ValueError("slowdown_range_m must be > target_range_m.")
         if self.target_area_frac <= self.slowdown_area_frac:

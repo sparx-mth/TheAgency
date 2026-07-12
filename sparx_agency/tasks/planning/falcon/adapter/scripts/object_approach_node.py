@@ -14,9 +14,12 @@ actively re-searches in the direction the target left; if it cannot re-acquire i
 hands control back, re-asserts the goal, and returns to SEARCH.
 
 Beyond the base search->approach loop this node adds four mission behaviours:
-  1. Per-axis FORCE SHAPING of every published command (min/max force; the
-     platform needs a minimum force to move at all). Default "fixed" bang-bang;
-     ~closure_mode picks multi_axis (holonomic) or waypoint (yaw-xor).
+  1. DISCRETE/INERTIAL FLIGHT-COMMAND SHAPING of every published command (the
+     platform yaws/advances at a fixed speed, ignores a lone control tick, and
+     coasts). A stateful PulseShaper latches any motion for >= min_burst_ticks and
+     can brake off the coast; the servo uses a coarse, closeness-growing yaw
+     deadband so fine centring is done by crab, not yaw. Runs at ~10 Hz (the route
+     follower's calibration). ~closure_mode picks multi_axis (holonomic)/waypoint.
   2. GOAL RE-INJECT: on a lost-track give-up, re-publish the last/initial goal so
      the planner flies back to it instead of stalling.
   3. SCAN-AT-GOAL: once the route reaches its goal still unconfirmed, sweep the
@@ -30,7 +33,7 @@ All the maths is ROS-free and unit-tested:
   * N-consecutive-frame acquisition         core.planning.visual_servo.TargetConfirmationGate
   * where to look when lost                  core.planning.visual_servo.ReSearchPolicy
   * SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER  core.planning.visual_servo.VisualApproachStateMachine
-  * per-axis min/max force shaping           core.planning.visual_servo.CommandForceShaper
+  * min-burst + coast flight-command shaping core.planning.visual_servo.PulseShaper
   * rotate-with-stops room sweep             core.planning.visual_servo.ScanSearchPolicy
   * bbox + depth -> metric range             core.mapping.depth.bbox_to_xyz_cam_from_depth
 This node owns ONLY ROS concerns: sensor I/O, the demo-mode hand-off, /cmd_vel,
@@ -78,7 +81,7 @@ from sparx_agency.core.planning.visual_servo import (
     TargetConfirmationGate, ConfirmationGateConfig, select_overlapping_target_detection,
     ReSearchPolicy, ReSearchConfig,
     VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN,
-    AxisForceProfile, CommandForceShaper,
+    AxisForceProfile, PulseShaper,
     ScanSearchConfig, ScanSearchPolicy,
 )
 
@@ -146,7 +149,9 @@ class ObjectApproachNode(object):
             fx=float(G("~fx", 322.6351083474948)), fy=float(G("~fy", 323.3893307141174)),
             cx=float(G("~cx", 242.06479658679714)), cy=float(G("~cy", 90.03019076680604)))
 
-        self.ctrl_hz = float(G("~ctrl_hz", 15.0))
+        # 10 Hz matches the route follower's calibrated fixed-speed/tick numbers
+        # (~4 deg/tick at 0.7 rad/s), so the minimum-burst + coast model transfers.
+        self.ctrl_hz = float(G("~ctrl_hz", 10.0))
         self.reseed_on_detection = _param_bool("~reseed_on_detection", True)
         self.frame_buffer_len = int(G("~frame_buffer_len", 30))
         self.enabled = _param_bool("~start_enabled", True)
@@ -206,7 +211,12 @@ class ObjectApproachNode(object):
             target_range_m=float(G("~target_range_m", 0.8)),
             slowdown_range_m=float(G("~slowdown_range_m", 2.0)),
             target_area_frac=float(G("~target_area_frac", 0.12)),
-            center_tol=float(G("~center_tol", 0.15))),
+            center_tol=float(G("~center_tol", 0.15)),
+            # Coarse-yaw platform: a large yaw deadband (min-burst + coast) that
+            # grows as we close, so a small yaw does not sweep the object out of
+            # frame -- lateral crab does the fine centring instead.
+            yaw_deadband=float(G("~yaw_deadband", 0.35)),
+            yaw_close_deadband=float(G("~yaw_close_deadband", 0.15))),
             default_limits=self.limits)
         self.servo_vx_max = float(G("~vx_max", 0.35))
         self.servo_vy_max = float(G("~max_lateral_speed", 0.25))
@@ -217,6 +227,13 @@ class ObjectApproachNode(object):
         # command (servo / recovery / scan) through the same discipline the
         # multi-axis follower uses. Default mode is "fixed" (bang-bang: 0 or a
         # single fixed pulse per axis). Max = the kinematic limits.
+        #
+        # It is a stateful PulseShaper (not the memoryless CommandForceShaper): the
+        # platform's yaw/forward actuation is discrete + inertial, so a lone control
+        # tick does not overcome its deadband. The shaper LATCHES any motion for at
+        # least ~min_burst_ticks ticks (a real >=2-tick burst that moves it) -- the
+        # count-based-speed model -- and can emit a brief opposite BRAKE pulse to
+        # bleed off the coast. Sized for ~ctrl_hz=10 (the follower's calibration).
         self.force_mode = str(G("~force_mode", "fixed")).strip().lower()
         release_frac = float(G("~force_release_frac", 0.5))
         zero_eps = float(G("~force_zero_eps", 1e-3))
@@ -231,11 +248,13 @@ class ObjectApproachNode(object):
         min_vx = float(G("~min_vx", 0.06))
         min_vy = float(G("~min_vy", 0.06))
         min_wz = math.radians(float(G("~min_wz_deg", 8.0)))
-        self.shaper = CommandForceShaper(
+        self.shaper = PulseShaper(
             vx=_axis(min_vx, self.limits.max_speed_xy, G("~fixed_vx", 0.0)),
             vy=_axis(min_vy, self.limits.max_speed_xy, G("~fixed_vy", 0.0)),
             wz=_axis(min_wz, self.limits.max_yaw_rate,
-                     math.radians(float(G("~fixed_wz_deg", 0.0)))))
+                     math.radians(float(G("~fixed_wz_deg", 0.0)))),
+            min_burst_ticks=int(G("~min_burst_ticks", 2)),
+            brake_ticks=int(G("~brake_ticks", 1)))
 
         # ── Scan-at-goal sweep (arrived, still looking) ──────────────
         self.arrive_radius_m = float(G("~arrive_radius_m", 0.6))
@@ -646,7 +665,11 @@ class ObjectApproachNode(object):
         with self._mode_lock:
             if self._requested_mode != MODE_VISUAL_SERVOING:
                 return
-            self._publish_cmd(0.0, 0.0, 0.0, "stop")  # one brake before releasing
+            # Clear the pulse-burst state FIRST so the release "stop" is a clean zero
+            # (not a min-burst that would finish as one more motion pulse), and so the
+            # next closing episode starts fresh.
+            self.shaper.reset()
+            self._publish_cmd(0.0, 0.0, 0.0, "stop")
             self._request_mode_locked(MODE_RELEASE)
 
     def _publish_cmd(self, vx, vy, wz, source="servo"):
@@ -796,7 +819,8 @@ if __name__ == "__main__":
 #       ~demo_mode_topic (/xtend/demo_mode)  ~demo_mode_request_topic (/xtend/demo_mode_request)
 #   camera (MUST match the live stream; K over P): ~fx ~fy ~cx ~cy ~img_width (504)
 #       ~img_height (294)  ~camera_info_topic ('' = use params)
-#   mission: ~target_object (refrigerator) ~start_enabled (true) ~ctrl_hz (15.0)
+#   mission: ~target_object (refrigerator) ~start_enabled (true) ~ctrl_hz (10.0,
+#       matches the route follower's fixed-speed/tick calibration)
 #   acquisition: ~n_confirm (3) ~min_score (0.30)
 #   closure strategy: ~lock_mode (detector_tracker | detector). detector_tracker
 #       (default): detector seeds an optical-flow tracker propagated every frame.
@@ -814,10 +838,16 @@ if __name__ == "__main__":
 #   servo: ~kp_yaw (1.2) ~vx_max (0.35) ~max_lateral_speed (0.25) ~use_vertical (false)
 #       ~center_tol (0.15) ~use_depth (true) ~target_range_m (0.8)
 #       ~slowdown_range_m (2.0) ~target_area_frac (0.12)   [area used when depth absent]
-#   force shaping (min/max force per axis on EVERY published command):
+#       coarse-yaw platform: ~yaw_deadband (0.22, larger than the crab deadband so
+#       fine centring is done by crab, not yaw) ~yaw_close_deadband (0.15, extra yaw
+#       deadband as we close so a yaw does not sweep the object out of frame)
+#   flight-command shaping (discrete + inertial, on EVERY published command):
 #       ~force_mode (fixed | snap | none; default fixed = bang-bang 0/±pulse)
 #       ~min_vx (0.06) ~min_vy (0.06) ~min_wz_deg (8.0) ~force_release_frac (0.5)
 #       ~force_zero_eps (1e-3) ~fixed_vx/~fixed_vy/~fixed_wz_deg (<=0 -> = the min)
+#       ~min_burst_ticks (2, hold any motion >=N ticks so a lone tick that the
+#       platform ignores becomes a real burst) ~brake_ticks (0, opposite pulses to
+#       bleed off the coast after a burst; 0 = rely on the yaw deadband stopping early)
 #   limits: ~max_speed_xy (0.4) ~max_speed_z (0.3) ~max_yaw_rate (0.6)
 #   recovery (RECOVER manoeuvre to re-see a lost target -- all small/bounded for
 #       wall safety, time-bounded by recover_timeout_s):

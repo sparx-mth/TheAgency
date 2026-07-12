@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import math
 import os
 import time
 from typing import Optional, Tuple
@@ -55,7 +56,9 @@ from sparx_agency.core.common.types import Intrinsics, KinematicLimits
 from sparx_agency.core.mapping.tracking import DetectionOnlyConfig, TargetTrackerConfig
 from sparx_agency.core.planning.visual_servo import (
     ApproachFSMConfig,
+    AxisForceProfile,
     ConfirmationGateConfig,
+    PulseShaper,
     ReSearchConfig,
     VisualServoParams,
 )
@@ -85,10 +88,21 @@ def _center_intrinsics(w: int, h: int) -> Intrinsics:
 def _build_pipeline(args: argparse.Namespace, w: int, h: int) -> TargetLockPipeline:
     intr = _center_intrinsics(w, h)
     limits = KinematicLimits(max_speed_xy=0.4, max_speed_z=0.3, max_yaw_rate=0.6)
+    # --falcon-actuation previews the real drone's discrete/inertial closing: the
+    # coarse-yaw deadband (crab does fine centring) + a minimum-burst / brake pulse
+    # shaper, so the HUD gauges show the command the drone would actually get.
+    fa = args.falcon_actuation
     servo = VisualServoParams(
         mode="holonomic", use_lateral=True, use_depth=False,   # no depth at home
         vx_max=args.vx_max, center_tol=args.center_tol,
-        target_area_frac=args.target_area_frac)
+        target_area_frac=args.target_area_frac,
+        yaw_deadband=(0.35 if fa else None),
+        yaw_close_deadband=(0.15 if fa else 0.0))
+    shaper = None
+    if fa:
+        prof = lambda mn: AxisForceProfile(min_magnitude=mn, max_magnitude=0.6, mode="fixed")
+        shaper = PulseShaper(prof(0.06), prof(0.06), prof(math.radians(8.0)),
+                             min_burst_ticks=2, brake_ticks=1)
     return TargetLockPipeline(
         target=args.target, intrinsics=intr, limits=limits, servo_params=servo,
         gate_config=ConfirmationGateConfig(n_confirm=args.n_confirm,
@@ -100,7 +114,8 @@ def _build_pipeline(args: argparse.Namespace, w: int, h: int) -> TargetLockPipel
         fsm_config=ApproachFSMConfig(recover_timeout_s=args.recover_timeout_s),
         recovery_config=ReSearchConfig(max_search_s=args.recover_timeout_s),
         confirm_iou=args.confirm_iou,
-        soft_confirm_min_score=args.soft_confirm_min_score)
+        soft_confirm_min_score=args.soft_confirm_min_score,
+        command_shaper=shaper)
 
 
 class _FolderSource:
@@ -277,6 +292,10 @@ def main() -> None:
     ap.add_argument("--max-unconfirmed-s", type=float, default=2.0)
     ap.add_argument("--confirm-iou", type=float, default=0.4)
     ap.add_argument("--soft-confirm-min-score", type=float, default=0.05)
+    ap.add_argument("--falcon-actuation", action="store_true",
+                    help="preview the real drone's discrete/inertial closing: coarse "
+                         "yaw deadband (crab does fine centring) + minimum-burst/brake "
+                         "command pulses shown in the HUD gauges")
 
     ap.add_argument("--vx-max", type=float, default=0.35)
     ap.add_argument("--center-tol", type=float, default=0.15)

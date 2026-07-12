@@ -19,7 +19,7 @@ Pure, ROS-free, unit-tested core (222 tests):
 |---|---|---|
 | Detection | `core/mapping/detection/` | `DetectionModel` ABC + open-vocab YOLO-World backends; swap via the registry |
 | Tracking | `core/mapping/tracking/` | `ObjectLockTracker` with two closure strategies (`~lock_mode`): `TargetTracker` (detector + box tracker, default) or `DetectionOnlyTracker` (detector box only). Box backend defaults to the robust `MedianFlowBoxTracker` (forward-backward + median consensus + appearance validation — fails honestly instead of tracking the background); `ConstantVelocityBoxModel` predicts through dropouts + gives the re-search velocity → `Track2D` |
-| Control | `core/planning/visual_servo/` | `TargetConfirmationGate` (N-consecutive-frame acquisition, pose-free), `VisualServoController` (bbox[+depth] → body velocity), `ReSearchPolicy` (where to look when lost), `ScanSearchPolicy` (rotate-with-stops room sweep), `CommandForceShaper` (per-axis min/max force), `VisualApproachStateMachine` (SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER) |
+| Control | `core/planning/visual_servo/` | `TargetConfirmationGate` (N-consecutive-frame acquisition, pose-free), `VisualServoController` (bbox[+depth] → body velocity), `ReSearchPolicy` (where to look when lost), `ScanSearchPolicy` (rotate-with-stops room sweep), `PulseShaper` (min-burst + coast/brake flight-command shaping), `VisualApproachStateMachine` (SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER) |
 | 2D→range | `core/mapping/depth/depth_bbox_fusion.py` | robust metric range to the box from depth |
 
 Wire format: `core/common/detection_message.py` — the single definition of the
@@ -62,7 +62,7 @@ RGB  ─────────────────────────
 depth ────────────────────────────╫────────╫────►  │  → range via depth_bbox_fusion
 pose  ────────────────────────────╫────────╫────►  │  → arrived_at_goal? (scan trigger)
                                   ║        ║       │  VisualServoController + FSM
-                                  ║        ║       │  CommandForceShaper (min/max force)
+                                  ║        ║       │  PulseShaper (min-burst + coast)
       re-prompt ◄─/object_approach/goal◄───╫───────┤
                                   ║        ║       ├─► demo_mode_request=visual_servoing
                                   ║        ║       ├─► /cmd_vel (vx, vy, wz)
@@ -105,11 +105,13 @@ Intrinsics **must** match the live stream (raw K, not P). The TRT engines are no
 portable — build them on the target. Tuning is all rosparams: see the footers of the
 node files and the launch args.
 
-**Two thresholds in series, both must be cleared to acquire.** `conf_thresh` is the
-detector's floor: a weaker box is never emitted. `min_score` is the confirmation
-gate's floor: an emitted box below it is drawn on the HUD but never counted toward
-`n_confirm`. Lowering `conf_thresh` alone cannot make the mission lock on — the weak
-boxes appear on screen and the gate silently drops them. Keep `min_score <= conf_thresh`.
+**Two floors that form a soft-confirm band.** `conf_thresh` is the detector's floor
+(a weaker box is never emitted); keep it **low** (0.05) so weak boxes exist. `min_score`
+is the confirmation gate's floor for HARD acquisition / the green HUD box (0.15,
+**above** `conf_thresh`). A detection in `[conf_thresh, min_score)` is too weak to
+acquire the target from scratch, but while tracking, one sitting *on* the tracked box
+(IoU ≥ `confirm_iou`, score ≥ `soft_confirm_min_score`) **re-confirms** the lock and
+resets the unconfirmed timer. So keep `conf_thresh ≤ soft_confirm_min_score < min_score`.
 
 ## State machine
 
@@ -168,12 +170,21 @@ RECOVER that outlasts `recover_timeout_s` falls back to SEARCH/SCAN.
   lost the target (wall safety); the whole episode is bounded by `recover_timeout_s`.
   Tune via the
   `~recover_*` params (footer of `object_approach_node.py`).
-- **Minimum force.** The servo emits an analog velocity capped only at the top, but
-  the platform will not move below a per-axis force floor. `CommandForceShaper` is the
-  last stage before the wire, so servo / re-search / scan / brake commands all respect
-  the same discipline. Default `fixed` (bang-bang: `0` or exactly `±level`); `snap`
-  gives a proportional band above the floor; `none` disables it. Shaping `0 → 0`, so a
-  stop stays a stop.
+- **Discrete + inertial flight commands (real drone).** The platform yaws/advances at
+  a *fixed speed*, a lone control tick can't overcome its deadband (so a small
+  correction needs ≥2 consecutive commands), and it *coasts* after a command stops —
+  the same reality the A*/NavDP `waypoint_follower` handles. Closing runs at **10 Hz**
+  (the follower's tick calibration) and every command (servo / re-search / scan /
+  brake) passes through a stateful **`PulseShaper`** that: fixed-speed-quantises each
+  axis (`force_mode` `fixed`/`snap`/`none`), **latches** any motion for ≥
+  `min_burst_ticks` (2) so it actually registers, and can emit a brief opposite
+  **brake** pulse (`brake_ticks`) to bleed off the coast. The servo also uses a
+  **coarse yaw deadband** (`yaw_deadband` ≈0.35) that **grows as you close**
+  (`yaw_close_deadband`), so a yaw doesn't sweep the (now large) target out of frame —
+  fine centring is done by lateral crab, not yaw. Tune per airframe; a closed-loop
+  inertial sim (`core/.../visual_servo/tests/test_closure_inertial.py`) shows this
+  glides to centre with no overshoot where the analog servo oscillates. Preview it at
+  home with the webcam rig's `--falcon-actuation`.
 - **Exactly one publisher.** The node never publishes `/cmd_vel` until the platform
   echoes `demo_mode == visual_servoing`, and it releases (`fly_straight`) on every
   disabled/SEARCH tick. The follower goes fully passive while that mode is held.

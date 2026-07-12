@@ -114,7 +114,8 @@ class TargetLockPipeline:
                  detection_config: Optional[DetectionOnlyConfig] = None,
                  reseed_on_detection: bool = True,
                  confirm_iou: float = 0.4,
-                 soft_confirm_min_score: float = 0.05) -> None:
+                 soft_confirm_min_score: float = 0.05,
+                 command_shaper=None) -> None:
         """Args:
             target: Object label to lock onto (matched fuzzily; see
                 :func:`~core.planning.visual_servo.label_matches`).
@@ -141,6 +142,7 @@ class TargetLockPipeline:
         self.reseed_on_detection = reseed_on_detection
         self.confirm_iou = float(confirm_iou)
         self.soft_confirm_min_score = float(soft_confirm_min_score)
+        self.command_shaper = command_shaper   # optional FALCON PulseShaper (preview)
 
         params = servo_params or VisualServoParams()
         self.tracker = make_lock_tracker(lock_mode, tracker_config, detection_config)
@@ -213,6 +215,13 @@ class TargetLockPipeline:
             self.tracker.reset()
 
         command, cmd_source = self._select_command(dec, res, track)
+        # Optional discrete/inertial actuation preview (the FALCON PulseShaper): when
+        # provided, the HUD shows the pulsed command the real drone would receive.
+        if self.command_shaper is not None:
+            if command is None:
+                self.command_shaper.reset()   # passive -> clear burst state for next episode
+            else:
+                command = self.command_shaper.shape(command)
 
         return FrameResult(
             stamp_s=stamp, dt=dt, target=self.target, detections=list(detections),

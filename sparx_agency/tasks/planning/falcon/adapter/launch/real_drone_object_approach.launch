@@ -55,14 +55,15 @@
   <arg name="closure_mode"    default="multi_axis" />        <!-- multi_axis | waypoint -->
   <arg name="force_mode"      default="fixed" />             <!-- fixed | snap | none -->
   <arg name="arrive_radius_m" default="0.6" />
-  <!-- Two thresholds in series; a detection must clear BOTH to acquire.
-       conf_thresh (the "conf" flag of the offline target-lock tools) is the
-       detector's min class confidence: a weaker box is never emitted at all.
-       min_score is the confirmation gate's floor: an emitted box below it is
-       drawn on the HUD but never counted toward n_confirm. So lowering conf_thresh
-       ALONE cannot make the mission lock on. Keep min_score <= conf_thresh. -->
-  <arg name="conf_thresh"     default="0.10" />
-  <arg name="min_score"       default="0.10" />
+  <!-- Two floors that create a SOFT-CONFIRM BAND (same as the webcam rig).
+       conf_thresh = the detector's min class confidence; a weaker box is never
+       emitted. Keep it LOW (0.05) so weak boxes exist for the tracking soft-confirm.
+       min_score = the confirmation gate's floor for HARD acquisition / the green
+       HUD box (0.15, > conf_thresh). Detections in [conf_thresh, min_score) are too
+       weak to acquire from scratch, but if one sits ON the tracked box (IoU) it
+       re-confirms the lock (see soft_confirm_min_score). Keep conf_thresh <= min_score. -->
+  <arg name="conf_thresh"     default="0.05" />
+  <arg name="min_score"       default="0.15" />
   <arg name="n_confirm"       default="3" />
 
   <!-- The detector runs as a ROS2 sidecar on the HOST by default (the Falcon image

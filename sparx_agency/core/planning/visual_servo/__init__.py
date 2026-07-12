@@ -52,6 +52,7 @@ from sparx_agency.core.planning.visual_servo.force_shaping import (
     CommandForceShaper,
     shape_axis_force,
 )
+from sparx_agency.core.planning.visual_servo.pulse_shaper import PulseShaper
 from sparx_agency.core.planning.visual_servo.scan_search import (
     ScanSearchConfig,
     ScanSearchPolicy,
@@ -84,6 +85,7 @@ __all__ = [
     "AxisForceProfile",
     "CommandForceShaper",
     "shape_axis_force",
+    "PulseShaper",
     "ScanSearchConfig",
     "ScanSearchPolicy",
 ]

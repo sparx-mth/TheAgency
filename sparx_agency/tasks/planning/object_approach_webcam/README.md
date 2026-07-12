@@ -112,6 +112,16 @@ gauges showing the exact `/cmd_vel` the drone *would* be commanded.
   (~340 MB) and maybe auto-installing `clip`/`ftfy`; it may print a one-time
   "rerun" notice. Run the command again and it's cached.
 
+## Preview the real drone's flight commands (`--falcon-actuation`)
+
+By default the HUD shows the servo's smooth analog command. Add `--falcon-actuation`
+to preview what the **real drone** actually gets: the platform yaws/advances at a
+*fixed speed*, ignores a lone control tick (so motion is held for a ≥2-tick minimum
+burst), and *coasts* after stopping. With the flag the closing runs the same
+`PulseShaper` + coarse, closeness-growing **yaw deadband** the FALCON node uses — so
+the gauges show discrete pulses and fine centring is done by lateral crab, not yaw.
+Same tracking/RECOVER strategy; just the FALCON actuation layer on top.
+
 ## No depth / no localization
 
 The drone supplies depth (metric range) and pose (arrival → room scan); at home you

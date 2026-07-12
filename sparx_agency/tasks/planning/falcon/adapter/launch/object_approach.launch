@@ -96,13 +96,20 @@
   <arg name="max_lateral_speed" default="0.25" />
   <arg name="max_speed_xy"      default="0.4" />
   <arg name="max_yaw_rate"      default="0.6" />
-  <arg name="ctrl_hz"           default="15.0" />
+  <arg name="ctrl_hz"           default="10.0" />             <!-- matches the route follower's tick calibration -->
+  <!-- Coarse-yaw platform: a large yaw deadband (fine centring uses crab, not yaw)
+       that grows as we close so a yaw doesn't sweep the object out of frame. -->
+  <arg name="yaw_deadband"       default="0.35" />
+  <arg name="yaw_close_deadband" default="0.15" />
 
-  <!-- ── Force shaping (per-axis minimum/maximum force) ─────────────── -->
+  <!-- ── Flight-command shaping (discrete + inertial actuation) ─────── -->
   <arg name="force_mode"        default="fixed" />            <!-- fixed | snap | none -->
   <arg name="min_vx"            default="0.06" />
   <arg name="min_vy"            default="0.06" />
   <arg name="min_wz_deg"        default="8.0" />
+  <arg name="min_burst_ticks"   default="2" />                <!-- min consecutive ticks per motion -->
+  <arg name="brake_ticks"       default="1" />                <!-- opposite pulses to bleed off coast -->
+
   <arg name="force_release_frac" default="0.5" />
   <arg name="fixed_vx"          default="0.0" />              <!-- <=0 => = the min -->
   <arg name="fixed_vy"          default="0.0" />
@@ -189,10 +196,14 @@
     <param name="max_speed_xy"      value="$(arg max_speed_xy)" />
     <param name="max_yaw_rate"      value="$(arg max_yaw_rate)" />
     <param name="ctrl_hz"           value="$(arg ctrl_hz)" />
+    <param name="yaw_deadband"       value="$(arg yaw_deadband)" />
+    <param name="yaw_close_deadband" value="$(arg yaw_close_deadband)" />
     <param name="force_mode"        value="$(arg force_mode)" />
     <param name="min_vx"            value="$(arg min_vx)" />
     <param name="min_vy"            value="$(arg min_vy)" />
     <param name="min_wz_deg"        value="$(arg min_wz_deg)" />
+    <param name="min_burst_ticks"   value="$(arg min_burst_ticks)" />
+    <param name="brake_ticks"       value="$(arg brake_ticks)" />
     <param name="force_release_frac" value="$(arg force_release_frac)" />
     <param name="fixed_vx"          value="$(arg fixed_vx)" />
     <param name="fixed_vy"          value="$(arg fixed_vy)" />
