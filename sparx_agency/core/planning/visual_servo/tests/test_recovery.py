@@ -1,8 +1,8 @@
 """Unit tests for the re-search / recovery policy.
 
 Covers :func:`infer_exit_side` (exit-side inference from the last track's box and
-image-plane velocity) and :class:`ReSearchPolicy` (hold -> active yaw sweep ->
-give-up), plus :class:`ReSearchConfig` validation.
+image-plane velocity) and :class:`ReSearchPolicy` (hold -> directional chase OR
+occluder peek -> give-up), plus :class:`ReSearchConfig` validation.
 """
 from __future__ import annotations
 
@@ -104,44 +104,82 @@ def test_command_hold_phase_zero_command():
 
 
 # --------------------------------------------------------------------------- #
-# ReSearchPolicy.command -- search window (yaw sign vs exit side)
+# ReSearchPolicy.command -- directional chase (target left a side)
 # --------------------------------------------------------------------------- #
-def test_command_search_right_yaws_cw():
-    # exit_side == -1 (right) -> yaw_rate < 0 (CW).
+def test_command_right_exit_yaws_cw_and_crabs_right():
+    # A box far to the right -> exited right (-1) -> yaw CW (< 0) and crab right (vy < 0).
     policy = ReSearchPolicy(ReSearchConfig(search_yaw_rate=0.5,
                                            hold_before_search_s=0.3,
                                            max_search_s=8.0))
     dec = policy.command(_track(_RIGHT_BOX), lost_for_s=1.0,
                          frame_w=FRAME_W, frame_h=FRAME_H)
-    assert dec.phase == "search"
+    assert dec.phase == "directional"
     assert dec.exit_side == -1.0
-    assert dec.command.yaw_rate < 0.0
     assert dec.command.yaw_rate == pytest.approx(-0.5)
+    assert dec.command.y < 0.0          # crab toward the right (+vy is left)
     assert dec.give_up is False
 
 
-def test_command_search_left_yaws_ccw():
-    # exit_side == +1 (left) -> yaw_rate > 0 (CCW).
+def test_command_left_exit_yaws_ccw_and_crabs_left():
     policy = ReSearchPolicy(ReSearchConfig(search_yaw_rate=0.5,
                                            hold_before_search_s=0.3,
                                            max_search_s=8.0))
     dec = policy.command(_track(_LEFT_BOX), lost_for_s=1.0,
                          frame_w=FRAME_W, frame_h=FRAME_H)
-    assert dec.phase == "search"
+    assert dec.phase == "directional"
     assert dec.exit_side == 1.0
-    assert dec.command.yaw_rate > 0.0
     assert dec.command.yaw_rate == pytest.approx(0.5)
-    assert dec.give_up is False
+    assert dec.command.y > 0.0          # crab toward the left
 
 
-def test_command_search_none_track_uses_default_direction():
-    # No prior track -> exit side is the configured default (-1 here) -> CW.
+def test_command_none_track_uses_default_direction():
+    # No prior track -> directional sweep toward the configured default (-1 here) -> CW.
     policy = ReSearchPolicy(ReSearchConfig(default_direction=-1.0,
                                            hold_before_search_s=0.3))
     dec = policy.command(None, lost_for_s=1.0, frame_w=FRAME_W, frame_h=FRAME_H)
-    assert dec.phase == "search"
+    assert dec.phase == "directional"
     assert dec.exit_side == -1.0
     assert dec.command.yaw_rate < 0.0
+
+
+# --------------------------------------------------------------------------- #
+# ReSearchPolicy.command -- occluder peek (target vanished from centre)
+# --------------------------------------------------------------------------- #
+def test_command_center_loss_triggers_peek():
+    # Centred box, no velocity -> vanished from the centre -> peek, not directional.
+    policy = ReSearchPolicy(ReSearchConfig(hold_before_search_s=0.3))
+    dec = policy.command(_track(_CENTER_BOX), lost_for_s=1.0,
+                         frame_w=FRAME_W, frame_h=FRAME_H)
+    assert dec.phase == "peek"
+
+
+def test_peek_oscillates_sides_across_half_period():
+    cfg = ReSearchConfig(hold_before_search_s=0.0, peek_period_s=2.0)
+    policy = ReSearchPolicy(cfg)
+    # t=0.1 (first half) vs t=1.1 (second half): sidestep flips sign.
+    a = policy.command(_track(_CENTER_BOX), 0.1, FRAME_W, FRAME_H)
+    b = policy.command(_track(_CENTER_BOX), 1.1, FRAME_W, FRAME_H)
+    assert a.phase == "peek" and b.phase == "peek"
+    assert a.command.y != 0.0 and b.command.y != 0.0
+    assert (a.command.y > 0.0) != (b.command.y > 0.0)   # opposite sidestep directions
+
+
+def test_peek_forward_nudge_is_bounded():
+    cfg = ReSearchConfig(hold_before_search_s=0.0, peek_forward_speed=0.06,
+                         peek_forward_s=0.6)
+    policy = ReSearchPolicy(cfg)
+    early = policy.command(_track(_CENTER_BOX), 0.2, FRAME_W, FRAME_H)  # within nudge
+    late = policy.command(_track(_CENTER_BOX), 1.5, FRAME_W, FRAME_H)   # after nudge
+    assert early.command.x > 0.0        # a little forward to clear the occluder edge
+    assert late.command.x == 0.0        # then no further advance (bounded travel)
+
+
+def test_peek_orbit_yaws_opposite_the_sidestep():
+    # Default peek_orbit=True: as it sidesteps one way it yaws the other, to keep
+    # looking back around the occluder.
+    policy = ReSearchPolicy(ReSearchConfig(hold_before_search_s=0.0))
+    dec = policy.command(_track(_CENTER_BOX), 0.1, FRAME_W, FRAME_H)
+    assert (dec.command.y > 0.0) != (dec.command.yaw_rate > 0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -153,7 +191,7 @@ def test_command_gives_up_after_max_search():
     dec = policy.command(_track(_RIGHT_BOX), lost_for_s=8.0,
                          frame_w=FRAME_W, frame_h=FRAME_H)
     assert dec.give_up is True
-    assert dec.phase == "search"
+    assert dec.phase == "directional"
 
 
 def test_command_no_give_up_just_before_max_search():
@@ -166,14 +204,14 @@ def test_command_no_give_up_just_before_max_search():
 
 def test_command_default_config_hold_boundary():
     # Default hold_before_search_s == 0.3: at exactly the boundary we are no
-    # longer holding (strict <), so the policy searches.
+    # longer holding (strict <), so the policy manoeuvres.
     policy = ReSearchPolicy()  # default config
     dec_hold = policy.command(_track(_RIGHT_BOX), lost_for_s=0.29,
                               frame_w=FRAME_W, frame_h=FRAME_H)
-    dec_search = policy.command(_track(_RIGHT_BOX), lost_for_s=0.3,
-                                frame_w=FRAME_W, frame_h=FRAME_H)
+    dec_move = policy.command(_track(_RIGHT_BOX), lost_for_s=0.3,
+                              frame_w=FRAME_W, frame_h=FRAME_H)
     assert dec_hold.phase == "hold"
-    assert dec_search.phase == "search"
+    assert dec_move.phase == "directional"
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +229,20 @@ def test_config_rejects_invalid_default_direction(bad_dir):
         ReSearchConfig(default_direction=bad_dir)
 
 
+@pytest.mark.parametrize("bad", [-0.1, -1.0])
+def test_config_rejects_negative_center_exit_frac(bad):
+    with pytest.raises(ValueError):
+        ReSearchConfig(center_exit_frac=bad)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_config_rejects_non_positive_peek_period(bad):
+    with pytest.raises(ValueError):
+        ReSearchConfig(peek_period_s=bad)
+
+
 def test_config_accepts_valid_defaults():
     cfg = ReSearchConfig()
     assert cfg.search_yaw_rate > 0.0
     assert cfg.default_direction in (-1.0, 1.0)
+    assert cfg.peek_orbit is True

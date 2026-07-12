@@ -247,9 +247,21 @@ class ObjectApproachNode(object):
         # we re-search before handing control back; the recovery policy's own
         # give-up mirrors it (the node acts on the FSM, not on rec.give_up).
         recover_timeout_s = float(G("~recover_timeout_s", 6.0))
+        # RECOVER manoeuvre: chase the bearing it left on (directional), or peek
+        # around a central occluder (oscillating sidestep+yaw). Speeds are kept
+        # small and the peek oscillates so the drone stays near the loss position
+        # (wall safety); tune the *_speed knobs down further near tight spaces.
         self.recovery = ReSearchPolicy(ReSearchConfig(
             search_yaw_rate=float(G("~search_yaw_rate", 0.5)),
-            max_search_s=recover_timeout_s))
+            max_search_s=recover_timeout_s,
+            hold_before_search_s=float(G("~recover_hold_s", 0.3)),
+            center_exit_frac=float(G("~recover_center_exit_frac", 0.25)),
+            directional_roll_speed=float(G("~recover_directional_roll", 0.05)),
+            peek_forward_speed=float(G("~recover_peek_forward", 0.06)),
+            peek_forward_s=float(G("~recover_peek_forward_s", 0.6)),
+            peek_roll_speed=float(G("~recover_peek_roll", 0.10)),
+            peek_period_s=float(G("~recover_peek_period_s", 2.0)),
+            peek_orbit=_param_bool("~recover_peek_orbit", True)))
         self.fsm = VisualApproachStateMachine(ApproachFSMConfig(
             recover_timeout_s=recover_timeout_s))
 
@@ -788,8 +800,16 @@ if __name__ == "__main__":
 #       ~min_vx (0.06) ~min_vy (0.06) ~min_wz_deg (8.0) ~force_release_frac (0.5)
 #       ~force_zero_eps (1e-3) ~fixed_vx/~fixed_vy/~fixed_wz_deg (<=0 -> = the min)
 #   limits: ~max_speed_xy (0.4) ~max_speed_z (0.3) ~max_yaw_rate (0.6)
-#   recovery: ~search_yaw_rate (0.5) ~recover_timeout_s (6.0)  [governs re-search
-#       duration; the recovery policy's give-up mirrors it]
+#   recovery (RECOVER manoeuvre to re-see a lost target -- all small/bounded for
+#       wall safety, time-bounded by recover_timeout_s):
+#       ~search_yaw_rate (0.5) ~recover_timeout_s (6.0) ~recover_hold_s (0.3, hover
+#       first to let a re-detection recover) ~recover_center_exit_frac (0.25, below
+#       this exit strength the target is "vanished centre" -> peek, else directional)
+#       directional (ran to a side): ~recover_directional_roll (0.05, crab toward it)
+#       peek (occluded ahead): ~recover_peek_forward (0.06) ~recover_peek_forward_s
+#       (0.6, one bounded forward nudge) ~recover_peek_roll (0.10, sidestep)
+#       ~recover_peek_period_s (2.0, L/R oscillation) ~recover_peek_orbit (true, yaw
+#       opposite the sidestep to keep looking around the occluder)
 #   goal (arrival -> SCAN, re-inject on give-up): ~goal_in_topic (/waypoint_nav/goal)
 #       ~goal_out_topic (/waypoint_nav/goal) ~goal_x/~goal_y (initial goal, unset =
 #       none) ~arrive_radius_m (0.6)

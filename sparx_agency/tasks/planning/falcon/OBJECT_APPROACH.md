@@ -122,12 +122,18 @@ SEARCH ─────────────┴─ confirmed(N) + lock ──�
   │                                  │            ▼ track lost                ▼ target moved away
   │                                  └── re-detect ──┐                        │
   └──────── recover timeout ──────────────────── RECOVER ◄─────────────────────┘
-             (+ re-inject last goal)      (yaw toward where it left)
+             (+ re-inject last goal)      (chase where it left / peek round occluder)
 ```
 
 `drive_cmd_vel` is true in every state **except** SEARCH — SCAN owns `/cmd_vel` too,
 because the sweep is the node's own motion. HOVER_LOCK is **not terminal**: a moving
 object drops it back to APPROACH, so there is no stopping condition, only a condition.
+
+**A brief loss stays in APPROACH, not RECOVER.** The tracker coasts (dead-reckons on
+the last velocity) for `max_predict_s` through a few-frame dropout — blur, a thin
+occluder, a fast target — so a 2-frame blip keeps servoing on the coasted box and
+never leaves APPROACH. Only a loss that outlasts the coast enters RECOVER; only a
+RECOVER that outlasts `recover_timeout_s` falls back to SEARCH/SCAN.
 
 ## Design notes
 
@@ -144,6 +150,14 @@ object drops it back to APPROACH, so there is no stopping condition, only a cond
   **green** box when the detector sees it, **orange** box when tracking only, a
   **red** whole-frame border while re-searching (RECOVER, box unknown), and a
   **grey** whole-frame border while searching from scratch (SEARCH/SCAN).
+- **RECOVER manoeuvre reads where it went.** From the last valid track's position +
+  image-plane velocity, RECOVER either **chases** a target that clearly left a side
+  (yaw + gentle crab toward it) or, when it vanished from the frame *centre* (most
+  likely occluded straight ahead), **peeks** around the occluder — a small forward
+  nudge plus an oscillating sidestep+yaw that looks past both edges. Everything is
+  small, the peek oscillates so the drone stays near where it lost the target (wall
+  safety), and the whole episode is bounded by `recover_timeout_s`. Tune via the
+  `~recover_*` params (footer of `object_approach_node.py`).
 - **Minimum force.** The servo emits an analog velocity capped only at the top, but
   the platform will not move below a per-axis force floor. `CommandForceShaper` is the
   last stage before the wire, so servo / re-search / scan / brake commands all respect
