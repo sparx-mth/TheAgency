@@ -75,7 +75,7 @@ from sparx_agency.core.mapping.tracking import (
 )
 from sparx_agency.core.planning.visual_servo import (
     VisualServoController, VisualServoParams, VisualServoRequest,
-    TargetConfirmationGate, ConfirmationGateConfig,
+    TargetConfirmationGate, ConfirmationGateConfig, select_overlapping_target_detection,
     ReSearchPolicy, ReSearchConfig,
     VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN,
     AxisForceProfile, CommandForceShaper,
@@ -186,8 +186,15 @@ class ObjectApproachNode(object):
             self.lock_mode,
             tracker_config=TargetTrackerConfig(
                 input_is_bgr=True,
-                max_predict_s=float(G("~max_predict_s", 0.4))),
+                max_predict_s=float(G("~max_predict_s", 0.4)),
+                max_unconfirmed_s=float(G("~max_unconfirmed_s", 2.0))),
             detection_config=DetectionOnlyConfig(max_det_age_s=self.det_fresh_s))
+        # Soft re-confirmation while tracking: a weak detection ON the tracked box
+        # (>= ~soft_confirm_min_score, IoU >= ~confirm_iou) keeps the lock alive and
+        # resets the unconfirmed timer, so a genuinely-tracked object is not dropped
+        # while pure background drift (no overlapping detection) still times out.
+        self.confirm_iou = float(G("~confirm_iou", 0.4))
+        self.soft_confirm_min_score = float(G("~soft_confirm_min_score", 0.05))
         self.servo = VisualServoController(VisualServoParams(
             mode=servo_mode,
             kp_yaw=float(G("~kp_yaw", 1.2)),
@@ -260,7 +267,6 @@ class ObjectApproachNode(object):
             peek_forward_speed=float(G("~recover_peek_forward", 0.06)),
             peek_forward_s=float(G("~recover_peek_forward_s", 0.6)),
             peek_roll_speed=float(G("~recover_peek_roll", 0.10)),
-            peek_period_s=float(G("~recover_peek_period_s", 2.0)),
             peek_orbit=_param_bool("~recover_peek_orbit", True)))
         self.fsm = VisualApproachStateMachine(ApproachFSMConfig(
             recover_timeout_s=recover_timeout_s))
@@ -464,9 +470,18 @@ class ObjectApproachNode(object):
             self._confirmed = state.confirmed
             self._streak = state.streak
             self._last_dets = dets          # for the HUD overlay
-            self._last_target_det = state.best   # matching target -> HUD green box
+            self._last_target_det = state.best   # HARD match -> HUD green box
             self._last_target_det_t = stamp      # stamped for the freshness gate
-            if state.best is None:
+            # Hard match acquires/greens; while tracking, a WEAK detection on the
+            # tracked box also re-confirms (keeps the lock alive + resets the
+            # unconfirmed timer). Background drift has no such overlap and times out.
+            confirm_det = state.best
+            if (confirm_det is None and self.tracker.has_target
+                    and self.confirm_iou > 0.0 and self.tracker.last_track is not None):
+                confirm_det = select_overlapping_target_detection(
+                    dets, self.target, self.tracker.last_track.bbox_xyxy,
+                    self.confirm_iou, self.soft_confirm_min_score)
+            if confirm_det is None:
                 return
             # Seed on acquisition; re-seed later to bound drift / regain a lost lock.
             # A non-propagating (detector-only) tracker has no state to coast on, so
@@ -478,7 +493,7 @@ class ObjectApproachNode(object):
             if need_seed:
                 frame = self._closest_frame(stamp)
                 if frame is not None:
-                    self.tracker.on_detection(frame, state.best, stamp)
+                    self.tracker.on_detection(frame, confirm_det, stamp)
 
     def _closest_frame(self, stamp):
         if not self._frame_buf:
@@ -789,6 +804,10 @@ if __name__ == "__main__":
 #       the last box for ~max_det_age_s (0.5) -- use when the detector keeps up
 #       with the RGB stream.
 #   tracking: ~reseed_on_detection (true) ~frame_buffer_len (30) ~max_predict_s (0.4)
+#       ~max_unconfirmed_s (2.0, drop the lock if the detector hasn't re-confirmed
+#       the target for this long -> stops tracking the background). A weak detection
+#       ON the tracked box re-confirms: ~confirm_iou (0.4) ~soft_confirm_min_score
+#       (0.05, below min_score; the detector's conf_thresh must reach this low)
 #   closure version: ~closure_mode (multi_axis | waypoint). multi_axis -> holonomic
 #       servo (vx+vy+yaw); waypoint -> yaw_forward_xor (yaw OR forward, no crab).
 #       ~servo_mode / ~use_lateral still override the derived defaults.
@@ -807,9 +826,9 @@ if __name__ == "__main__":
 #       this exit strength the target is "vanished centre" -> peek, else directional)
 #       directional (ran to a side): ~recover_directional_roll (0.05, crab toward it)
 #       peek (occluded ahead): ~recover_peek_forward (0.06) ~recover_peek_forward_s
-#       (0.6, one bounded forward nudge) ~recover_peek_roll (0.10, sidestep)
-#       ~recover_peek_period_s (2.0, L/R oscillation) ~recover_peek_orbit (true, yaw
-#       opposite the sidestep to keep looking around the occluder)
+#       (0.6, one bounded forward nudge) ~recover_peek_roll (0.10, sidestep held to
+#       one side) ~recover_peek_orbit (true, yaw opposite the sidestep to keep
+#       looking around the occluder)
 #   goal (arrival -> SCAN, re-inject on give-up): ~goal_in_topic (/waypoint_nav/goal)
 #       ~goal_out_topic (/waypoint_nav/goal) ~goal_x/~goal_y (initial goal, unset =
 #       none) ~arrive_radius_m (0.6)

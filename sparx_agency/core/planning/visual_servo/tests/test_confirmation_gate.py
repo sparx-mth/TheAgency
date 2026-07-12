@@ -17,7 +17,34 @@ from sparx_agency.core.planning.visual_servo.confirmation_gate import (
     TargetConfirmationGate,
     label_matches,
     select_target_detection,
+    select_overlapping_target_detection,
 )
+
+
+# --------------------------------------------------------------------------- #
+# select_overlapping_target_detection (weak re-confirmation on the tracked box)
+# --------------------------------------------------------------------------- #
+_TRACK = (50, 40, 110, 100)
+
+
+def test_overlapping_weak_detection_on_box_is_selected():
+    on_box = det("bottle", 0.06, (52, 42, 112, 102))    # weak, overlaps the track
+    elsewhere = det("bottle", 0.9, (300, 10, 360, 70))  # strong, no overlap
+    best = select_overlapping_target_detection(
+        [elsewhere, on_box], "bottle", _TRACK, min_iou=0.4, min_score=0.05)
+    assert best is on_box                                # overlap wins over raw score
+
+
+def test_overlap_below_score_or_iou_or_label_is_rejected():
+    # too low score
+    assert select_overlapping_target_detection(
+        [det("bottle", 0.01, (52, 42, 112, 102))], "bottle", _TRACK, 0.4, 0.05) is None
+    # no overlap
+    assert select_overlapping_target_detection(
+        [det("bottle", 0.9, (300, 10, 360, 70))], "bottle", _TRACK, 0.4, 0.05) is None
+    # wrong label
+    assert select_overlapping_target_detection(
+        [det("chair", 0.9, (52, 42, 112, 102))], "bottle", _TRACK, 0.4, 0.05) is None
 
 
 def det(label: str, score: float,

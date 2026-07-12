@@ -30,6 +30,7 @@ from sparx_agency.core.planning.visual_servo import (
     VisualServoController,
     VisualServoParams,
     VisualServoRequest,
+    select_overlapping_target_detection,
 )
 from sparx_agency.core.mapping.tracking import (
     DetectionOnlyConfig,
@@ -111,7 +112,9 @@ class TargetLockPipeline:
                  recovery_config: Optional[ReSearchConfig] = None,
                  lock_mode: str = "detector_tracker",
                  detection_config: Optional[DetectionOnlyConfig] = None,
-                 reseed_on_detection: bool = True) -> None:
+                 reseed_on_detection: bool = True,
+                 confirm_iou: float = 0.4,
+                 soft_confirm_min_score: float = 0.05) -> None:
         """Args:
             target: Object label to lock onto (matched fuzzily; see
                 :func:`~core.planning.visual_servo.label_matches`).
@@ -125,11 +128,19 @@ class TargetLockPipeline:
                 window); ignored for ``"detector_tracker"``.
             reseed_on_detection: Re-seed the tracker from every fresh matching
                 detection (bounds drift; mirrors the live node's default).
+            confirm_iou: While tracking, a *weak* detection overlapping the tracked
+                box by at least this IoU re-confirms the target (keeps the lock alive
+                and resets the tracker's unconfirmed timer). 0 disables it.
+            soft_confirm_min_score: Minimum score for that weak re-confirmation —
+                below the acquisition floor, so a low-confidence detection *on the
+                box* counts even though it could not acquire the target from scratch.
         """
         self.target = str(target).strip().lower()
         self.intr = intrinsics
         self.limits = limits
         self.reseed_on_detection = reseed_on_detection
+        self.confirm_iou = float(confirm_iou)
+        self.soft_confirm_min_score = float(soft_confirm_min_score)
 
         params = servo_params or VisualServoParams()
         self.tracker = make_lock_tracker(lock_mode, tracker_config, detection_config)
@@ -163,6 +174,17 @@ class TargetLockPipeline:
         self._prev_stamp = stamp
 
         state = self.gate.update(detections)
+        # A hard match (>= gate min_score) drives acquisition and the HUD green box.
+        # While already tracking, a WEAKER detection sitting on the tracked box also
+        # re-confirms the target (keeps the lock alive without acquiring from scratch)
+        # and resets the tracker's unconfirmed timer; with neither, that timer runs
+        # down and the tracker drops the lock instead of drifting onto the background.
+        confirm_det = state.best
+        if (confirm_det is None and self.tracker.has_target and self.confirm_iou > 0.0
+                and self.tracker.last_track is not None):
+            confirm_det = select_overlapping_target_detection(
+                detections, self.target, self.tracker.last_track.bbox_xyxy,
+                self.confirm_iou, self.soft_confirm_min_score)
         # Re-feed the tracker on every matching detection when asked to (bounds an
         # optical-flow tracker's drift), and ALWAYS for a non-propagating tracker
         # (detector-only) -- it has no state to coast on, so "seed once" would
@@ -170,8 +192,8 @@ class TargetLockPipeline:
         reseed = self.reseed_on_detection or not self.tracker.propagates
         need_seed = (not self.tracker.has_target and state.confirmed) or \
                     (self.tracker.has_target and reseed)
-        if need_seed and state.best is not None:
-            self.tracker.on_detection(bgr, state.best, stamp)
+        if need_seed and confirm_det is not None:
+            self.tracker.on_detection(bgr, confirm_det, stamp)
 
         track = self.tracker.on_frame(bgr, stamp) if self.tracker.has_target else None
         track_valid = bool(track is not None and track.valid)

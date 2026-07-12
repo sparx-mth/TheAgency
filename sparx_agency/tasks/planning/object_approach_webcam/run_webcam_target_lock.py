@@ -94,10 +94,13 @@ def _build_pipeline(args: argparse.Namespace, w: int, h: int) -> TargetLockPipel
         gate_config=ConfirmationGateConfig(n_confirm=args.n_confirm,
                                            min_score=args.min_score),
         lock_mode=args.lock_mode,
-        tracker_config=TargetTrackerConfig(max_predict_s=args.max_predict_s),
+        tracker_config=TargetTrackerConfig(max_predict_s=args.max_predict_s,
+                                           max_unconfirmed_s=args.max_unconfirmed_s),
         detection_config=DetectionOnlyConfig(max_det_age_s=args.max_det_age_s),
         fsm_config=ApproachFSMConfig(recover_timeout_s=args.recover_timeout_s),
-        recovery_config=ReSearchConfig(max_search_s=args.recover_timeout_s))
+        recovery_config=ReSearchConfig(max_search_s=args.recover_timeout_s),
+        confirm_iou=args.confirm_iou,
+        soft_confirm_min_score=args.soft_confirm_min_score)
 
 
 class _FolderSource:
@@ -249,9 +252,10 @@ def main() -> None:
     ap.add_argument("--weights", default="yolov8s-worldv2.pt",
                     help="YOLO-World checkpoint (yolov8{n,s,m,l,x}-worldv2.pt); must "
                          "be a YOLO-World model, not a plain COCO one")
-    ap.add_argument("--conf", type=float, default=0.10,
-                    help="YOLO-World min confidence (open-vocab scores run low; raise "
-                         "to suppress false locks)")
+    ap.add_argument("--conf", type=float, default=0.05,
+                    help="YOLO-World min confidence FLOOR (kept low so weak boxes are "
+                         "emitted for the tracking soft-confirm; the gate's --min-score "
+                         "is the higher bar that actually acquires/greens a target)")
     ap.add_argument("--device", default="",
                     help="torch device for YOLO-World (blank = auto: your RTX GPU if "
                          "available; or force 'cpu'/'cuda:0')")
@@ -259,11 +263,20 @@ def main() -> None:
     ap.add_argument("--lock-mode", choices=("detector_tracker", "detector"),
                     default="detector_tracker")
     ap.add_argument("--n-confirm", type=int, default=3)
-    ap.add_argument("--min-score", type=float, default=0.10,
-                    help="confirmation-gate floor; keep <= --conf")
+    ap.add_argument("--min-score", type=float, default=0.15,
+                    help="hard-confirmation floor: score to acquire / show green "
+                         "(keep it above --conf so a soft band exists)")
     ap.add_argument("--max-predict-s", type=float, default=0.4)
     ap.add_argument("--max-det-age-s", type=float, default=0.5)
     ap.add_argument("--recover-timeout-s", type=float, default=6.0)
+
+    # Tracking-only guard: drop the lock if the detector hasn't re-confirmed the
+    # target for this long (stops tracking the background); a weak detection ON the
+    # tracked box (>= --soft-confirm-min-score, IoU >= --confirm-iou) counts as a
+    # re-confirmation and keeps it alive.
+    ap.add_argument("--max-unconfirmed-s", type=float, default=2.0)
+    ap.add_argument("--confirm-iou", type=float, default=0.4)
+    ap.add_argument("--soft-confirm-min-score", type=float, default=0.05)
 
     ap.add_argument("--vx-max", type=float, default=0.35)
     ap.add_argument("--center-tol", type=float, default=0.15)

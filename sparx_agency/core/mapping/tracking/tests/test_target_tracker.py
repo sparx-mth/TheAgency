@@ -298,6 +298,34 @@ def test_blank_frames_lose_lock_then_track_goes_invalid(frame: np.ndarray) -> No
     assert tt.time_since_valid(far_t) > tsv_at_loss  # grew across the dropout
 
 
+# ── tests: unconfirmed-tracking timeout ──────────────────────────────────
+def test_unconfirmed_track_times_out(frame: np.ndarray) -> None:
+    """The tracker drops the lock after ``max_unconfirmed_s`` with no re-seed, even
+    though the box tracker could still hold the same content (it may be background)."""
+    tt = TargetTracker(TargetTrackerConfig(max_unconfirmed_s=0.5))
+    assert tt.on_detection(frame, _detection(), stamp_s=0.0) is True
+    assert tt.on_frame(frame, stamp_s=0.3).valid is True     # within the window: valid
+    late = tt.on_frame(frame, stamp_s=0.6)                    # past it, never re-confirmed
+    assert late.valid is False
+    assert tt.is_locked is False
+
+
+def test_reseed_resets_the_unconfirmed_timer(frame: np.ndarray) -> None:
+    """A fresh detection re-confirms the target and restarts the timeout."""
+    tt = TargetTracker(TargetTrackerConfig(max_unconfirmed_s=0.5))
+    tt.on_detection(frame, _detection(), stamp_s=0.0)
+    assert tt.on_frame(frame, stamp_s=0.3).valid is True
+    tt.on_detection(frame, _detection(), stamp_s=0.4)        # re-confirm -> timer resets
+    assert tt.on_frame(frame, stamp_s=0.8).valid is True     # 0.8 - 0.4 = 0.4 <= 0.5
+
+
+def test_unconfirmed_timeout_disabled(frame: np.ndarray) -> None:
+    """``max_unconfirmed_s=0`` disables the timeout (track purely on the box tracker)."""
+    tt = TargetTracker(TargetTrackerConfig(max_unconfirmed_s=0.0))
+    tt.on_detection(frame, _detection(), stamp_s=0.0)
+    assert tt.on_frame(frame, stamp_s=100.0).valid is True
+
+
 # ── tests: reset ─────────────────────────────────────────────────────────
 def test_reset_clears_all_state(frame: np.ndarray) -> None:
     """reset() forgets the target entirely: no lock, no target, no track/history."""

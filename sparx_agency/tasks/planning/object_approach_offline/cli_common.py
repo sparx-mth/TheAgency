@@ -86,6 +86,14 @@ def add_target_lock_args(ap: argparse.ArgumentParser) -> None:
 
     # Tracking (TargetTracker)
     ap.add_argument("--max-predict-s", type=float, default=0.4)
+    ap.add_argument("--max-unconfirmed-s", type=float, default=2.0,
+                    help="drop the lock if the detector hasn't re-confirmed the "
+                         "target for this long (stops tracking the background)")
+    ap.add_argument("--confirm-iou", type=float, default=0.4,
+                    help="a weak detection overlapping the tracked box by this IoU "
+                         "re-confirms the target (keeps the lock alive)")
+    ap.add_argument("--soft-confirm-min-score", type=float, default=0.05,
+                    help="min score for that weak re-confirmation (below --min-score)")
     ap.add_argument("--no-reseed", action="store_true",
                     help="seed the tracker once on acquisition only "
                          "(default: re-seed every matching detection)")
@@ -130,11 +138,14 @@ def build_pipeline(args: argparse.Namespace, intr: Intrinsics) -> TargetLockPipe
         gate_config=ConfirmationGateConfig(n_confirm=args.n_confirm,
                                            min_score=args.min_score),
         lock_mode=args.lock_mode,
-        tracker_config=TargetTrackerConfig(max_predict_s=args.max_predict_s),
+        tracker_config=TargetTrackerConfig(max_predict_s=args.max_predict_s,
+                                           max_unconfirmed_s=args.max_unconfirmed_s),
         detection_config=DetectionOnlyConfig(max_det_age_s=args.max_det_age_s),
         fsm_config=ApproachFSMConfig(recover_timeout_s=args.recover_timeout_s),
         recovery_config=ReSearchConfig(search_yaw_rate=args.search_yaw_rate,
-                                       max_search_s=args.recover_timeout_s))
+                                       max_search_s=args.recover_timeout_s),
+        confirm_iou=args.confirm_iou,
+        soft_confirm_min_score=args.soft_confirm_min_score)
 
 
 def load_intrinsics(args: argparse.Namespace, first_frame: np.ndarray) -> Intrinsics:

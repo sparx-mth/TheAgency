@@ -65,6 +65,11 @@ class TargetTrackerConfig:
         motion: Constant-velocity motion-model config.
         max_predict_s: How long (s) to dead-reckon the box after the box tracker
             loses lock before declaring the track invalid. 0 disables prediction.
+        max_unconfirmed_s: How long (s) the tracker may keep reporting a valid box
+            *without a fresh detection re-seeding it* before it declares the target
+            lost. This is the guard against tracking the background for a long time
+            after the detector stops recognising the object: no re-confirmation ->
+            no lock. 0 disables the timeout (track purely on the box tracker).
         input_is_bgr: Channel order of 3-channel input frames (for gray conversion).
     """
 
@@ -73,11 +78,14 @@ class TargetTrackerConfig:
     lk: LKBoxTrackerConfig = field(default_factory=LKBoxTrackerConfig)
     motion: MotionModelConfig = field(default_factory=MotionModelConfig)
     max_predict_s: float = 0.4
+    max_unconfirmed_s: float = 2.0
     input_is_bgr: bool = True
 
     def __post_init__(self) -> None:
         if self.max_predict_s < 0.0:
             raise ValueError("max_predict_s must be >= 0.")
+        if self.max_unconfirmed_s < 0.0:
+            raise ValueError("max_unconfirmed_s must be >= 0.")
         if self.backend not in (MEDIAN_FLOW, LUCAS_KANADE):
             raise ValueError(
                 "backend must be %r or %r, got %r"
@@ -113,6 +121,7 @@ class TargetTracker(ObjectLockTracker):
         self._label: str = ""
         self._score: float = 0.0
         self._seeded_t: Optional[float] = None
+        self._last_seed_t: Optional[float] = None   # last detector re-seed (confirmation)
         self._last_frame_t: Optional[float] = None
         self._last_valid_t: Optional[float] = None
         self._last_track: Optional[Track2D] = None
@@ -170,6 +179,7 @@ class TargetTracker(ObjectLockTracker):
         self._score = float(detection.score)
         if self._seeded_t is None:
             self._seeded_t = float(stamp_s)
+        self._last_seed_t = float(stamp_s)      # a detection just re-confirmed the target
         # Anchor the motion model on the seed box (re-seed = fresh anchor).
         self._motion.reset()
         self._motion.update(xyxy_to_cxcywh(clip_xyxy(bbox, w, h)), dt=0.0)
@@ -192,6 +202,13 @@ class TargetTracker(ObjectLockTracker):
         dt = 0.0 if self._last_frame_t is None else max(0.0, stamp - self._last_frame_t)
         self._last_frame_t = stamp
 
+        # Tracked too long without the detector re-confirming the target -> declare it
+        # lost, even if the box tracker still "holds" (it may be holding background).
+        if self._unconfirmed_expired(stamp):
+            self._lk.reset()
+            self._last_track = self._make_invalid_track(w, h, stamp)
+            return self._last_track
+
         if not self._lk.is_valid:
             return self._predict_or_invalid(w, h, dt, stamp)
 
@@ -208,6 +225,12 @@ class TargetTracker(ObjectLockTracker):
         return self._predict_or_invalid(w, h, dt, stamp)
 
     # ── internals ────────────────────────────────────────────────────
+    def _unconfirmed_expired(self, stamp: float) -> bool:
+        """True once too long has passed since a detection last re-seeded the track."""
+        return (self.cfg.max_unconfirmed_s > 0.0
+                and self._last_seed_t is not None
+                and (stamp - self._last_seed_t) > self.cfg.max_unconfirmed_s)
+
     def _predict_or_invalid(self, w: int, h: int, dt: float, stamp: float) -> Track2D:
         lost_for = self.time_since_valid(stamp)
         can_predict = (

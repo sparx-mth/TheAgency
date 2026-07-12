@@ -146,6 +146,14 @@ RECOVER that outlasts `recover_timeout_s` falls back to SEARCH/SCAN.
   consistency + median-consensus box update + an appearance template, so an
   occluded / left-frame target is reported *lost* (→ RECOVER) instead of a
   confident box on the background — the failure the old plain-LK tracker had.
+- **Don't track unconfirmed for long.** Even a good tracker can drift onto the
+  background over seconds, so the tracker drops the lock after `~max_unconfirmed_s`
+  (2 s) with no detection re-confirming the target → RECOVER. A *weak* detection
+  sitting **on** the tracked box (score ≥ `~soft_confirm_min_score`, IoU ≥
+  `~confirm_iou`) counts as a re-confirmation and resets that timer — so a genuinely
+  tracked object (the detector just dipped below its acquire threshold) keeps its
+  lock, while background drift (no overlapping detection) times out. The detector's
+  `conf_thresh` must reach ≤ `~soft_confirm_min_score` for weak boxes to exist.
 - **HUD colours = lock confidence.** `object_approach/overlay` colours the target:
   **green** box when the detector sees it, **orange** box when tracking only, a
   **red** whole-frame border while re-searching (RECOVER, box unknown), and a
@@ -154,9 +162,11 @@ RECOVER that outlasts `recover_timeout_s` falls back to SEARCH/SCAN.
   image-plane velocity, RECOVER either **chases** a target that clearly left a side
   (yaw + gentle crab toward it) or, when it vanished from the frame *centre* (most
   likely occluded straight ahead), **peeks** around the occluder — a small forward
-  nudge plus an oscillating sidestep+yaw that looks past both edges. Everything is
-  small, the peek oscillates so the drone stays near where it lost the target (wall
-  safety), and the whole episode is bounded by `recover_timeout_s`. Tune via the
+  nudge plus a sidestep+yaw **held to one side** (the last-seen bearing) for the
+  whole episode, so the motion is a steady lean-and-look, not a jarring left↔right
+  reversal. Everything is small and the held direction keeps the drone near where it
+  lost the target (wall safety); the whole episode is bounded by `recover_timeout_s`.
+  Tune via the
   `~recover_*` params (footer of `object_approach_node.py`).
 - **Minimum force.** The servo emits an analog velocity capped only at the top, but
   the platform will not move below a per-axis force floor. `CommandForceShaper` is the

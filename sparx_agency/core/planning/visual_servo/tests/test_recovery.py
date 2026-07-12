@@ -153,15 +153,17 @@ def test_command_center_loss_triggers_peek():
     assert dec.phase == "peek"
 
 
-def test_peek_oscillates_sides_across_half_period():
-    cfg = ReSearchConfig(hold_before_search_s=0.0, peek_period_s=2.0)
+def test_peek_holds_one_direction_no_flip_flop():
+    cfg = ReSearchConfig(hold_before_search_s=0.0)
     policy = ReSearchPolicy(cfg)
-    # t=0.1 (first half) vs t=1.1 (second half): sidestep flips sign.
-    a = policy.command(_track(_CENTER_BOX), 0.1, FRAME_W, FRAME_H)
-    b = policy.command(_track(_CENTER_BOX), 1.1, FRAME_W, FRAME_H)
+    # Same last_track (frozen during RECOVER) at very different times -> the sidestep
+    # and yaw keep the SAME sign the whole episode (no jarring reversal).
+    a = policy.command(_track(_CENTER_BOX), 0.5, FRAME_W, FRAME_H)
+    b = policy.command(_track(_CENTER_BOX), 3.5, FRAME_W, FRAME_H)
     assert a.phase == "peek" and b.phase == "peek"
-    assert a.command.y != 0.0 and b.command.y != 0.0
-    assert (a.command.y > 0.0) != (b.command.y > 0.0)   # opposite sidestep directions
+    assert a.command.y != 0.0
+    assert (a.command.y > 0.0) == (b.command.y > 0.0)            # roll: same side, held
+    assert (a.command.yaw_rate > 0.0) == (b.command.yaw_rate > 0.0)  # yaw: same, held
 
 
 def test_peek_forward_nudge_is_bounded():
@@ -233,12 +235,6 @@ def test_config_rejects_invalid_default_direction(bad_dir):
 def test_config_rejects_negative_center_exit_frac(bad):
     with pytest.raises(ValueError):
         ReSearchConfig(center_exit_frac=bad)
-
-
-@pytest.mark.parametrize("bad", [0.0, -1.0])
-def test_config_rejects_non_positive_peek_period(bad):
-    with pytest.raises(ValueError):
-        ReSearchConfig(peek_period_s=bad)
 
 
 def test_config_accepts_valid_defaults():

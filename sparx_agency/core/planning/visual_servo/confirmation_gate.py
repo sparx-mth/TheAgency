@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 from sparx_agency.core.common.types.perception import Detection2D
+from sparx_agency.core.common.math.bbox import iou
 
 
 def label_matches(target: str, label: str) -> bool:
@@ -43,6 +44,32 @@ def select_target_detection(detections: Sequence[Detection2D], target: str,
             continue
         if best is None or float(d.score) > float(best.score):
             best = d
+    return best
+
+
+def select_overlapping_target_detection(
+        detections: Sequence[Detection2D], target: str, ref_bbox, min_iou: float,
+        min_score: float) -> Optional[Detection2D]:
+    """Best ``target`` detection overlapping ``ref_bbox`` (IoU >= ``min_iou``).
+
+    The "look harder near the box we're tracking" check: while tracking, a *weak*
+    detection (one too low-confidence to acquire the target from scratch) that sits
+    right on the tracked box is strong evidence the object is still there, so it can
+    keep the lock alive. Background drift has no such overlapping detection, so it is
+    not kept alive. Candidates are ranked by overlap first, then score.
+    """
+    ref = tuple(float(v) for v in ref_bbox)
+    best: Optional[Detection2D] = None
+    best_key = (-1.0, -1.0)
+    for d in detections:
+        if float(d.score) < min_score or not label_matches(target, d.label):
+            continue
+        ov = iou(tuple(float(v) for v in d.bbox_xyxy), ref)
+        if ov < min_iou:
+            continue
+        key = (ov, float(d.score))
+        if key > best_key:
+            best_key, best = key, d
     return best
 
 

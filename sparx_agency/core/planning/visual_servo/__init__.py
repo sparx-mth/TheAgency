@@ -28,6 +28,7 @@ from sparx_agency.core.planning.visual_servo.confirmation_gate import (
     TargetConfirmationGate,
     label_matches,
     select_target_detection,
+    select_overlapping_target_detection,
 )
 from sparx_agency.core.planning.visual_servo.recovery import (
     ReSearchConfig,
@@ -66,6 +67,7 @@ __all__ = [
     "TargetConfirmationGate",
     "label_matches",
     "select_target_detection",
+    "select_overlapping_target_detection",
     "ReSearchConfig",
     "ReSearchDecision",
     "ReSearchPolicy",

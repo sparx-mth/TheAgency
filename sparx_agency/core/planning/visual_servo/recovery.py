@@ -16,13 +16,15 @@ Two manoeuvres, chosen from where/how the target vanished:
   * **peek** — it vanished from near the *centre* of the frame, which means it is
     most likely hidden behind an object straight ahead rather than gone sideways.
     A pure yaw would never see behind that object, so instead the drone sidesteps
-    to change its viewing angle and looks *around* the occluder, alternating sides
-    so both edges get checked. A small one-off forward nudge helps clear the edge.
+    to change its viewing angle and looks *around* the occluder. It commits to **one**
+    side (the last-seen bearing, or the configured default) and **holds** it — no
+    flip-flopping — so the motion is a steady lean-and-look, not a jarring reversal.
+    A small one-off forward nudge helps clear the edge.
 
 Both are deliberately restrained for wall safety: yaw dominates (rotating in place
-does not translate into a wall), the crab speeds are small, the peek oscillates so
-it stays near the loss position instead of drifting away, and the forward nudge is
-one bounded pulse, not a sustained advance. And the whole episode is time-bounded
+does not translate into a wall), the crab speeds are small, the single held
+direction keeps the drone near the loss position, and the forward nudge is one
+bounded pulse, not a sustained advance. And the whole episode is time-bounded
 by ``max_search_s`` (mirrored to the FSM's ``recover_timeout_s``): if the target is
 not re-acquired in time, ``give_up`` is raised and the mission returns to
 SEARCH/SCAN. A short initial hold lets an in-flight re-detection recover the lock
@@ -68,8 +70,6 @@ class ReSearchConfig:
         peek_forward_s: Duration of that forward nudge (s); after it, the peek is
             pure sidestep+yaw with no further advance (bounds forward travel).
         peek_roll_speed: Sidestep (crab) speed while peeking around an occluder (m/s).
-        peek_period_s: Full left->right->left oscillation period of the peek (s);
-            oscillating keeps net drift near zero so the drone stays put.
         peek_orbit: If True (default) the peek yaws *opposite* its sidestep, so as it
             slides to one side it keeps looking back toward the occluded spot and
             sees around the object's edge. If False it yaws *with* the sidestep.
@@ -85,7 +85,6 @@ class ReSearchConfig:
     peek_forward_speed: float = 0.06
     peek_forward_s: float = 0.6
     peek_roll_speed: float = 0.10
-    peek_period_s: float = 2.0
     peek_orbit: bool = True
 
     def __post_init__(self) -> None:
@@ -99,8 +98,6 @@ class ReSearchConfig:
                      "peek_forward_s", "peek_roll_speed"):
             if getattr(self, name) < 0.0:
                 raise ValueError("%s must be >= 0." % name)
-        if self.peek_period_s <= 0.0:
-            raise ValueError("peek_period_s must be > 0.")
 
 
 @dataclass(frozen=True)
@@ -172,17 +169,19 @@ class ReSearchPolicy:
             return ReSearchDecision(command=cmd, exit_side=0.0, phase="hold",
                                     give_up=False)
 
-        # No prior track at all -> sweep toward the configured default side.
+        # Pick ONE side from the last-seen bearing (or the default) and hold it for
+        # the whole episode -- last_track is frozen during RECOVER, so this side is
+        # stable tick to tick (no flip-flopping yaw/roll).
+        side = infer_exit_side(last_track, frame_w, frame_h,
+                               c.velocity_weight, c.default_direction)
         if last_track is None:
-            return self._directional(c.default_direction, give_up)
+            return self._directional(side, give_up)
 
         # Clear side exit -> chase it; vanished near centre -> peek around occluder.
         strength = abs(_exit_score(last_track, frame_w, frame_h, c.velocity_weight))
         if strength >= c.center_exit_frac:
-            side = infer_exit_side(last_track, frame_w, frame_h,
-                                   c.velocity_weight, c.default_direction)
             return self._directional(side, give_up)
-        return self._peek(lost_for_s, give_up)
+        return self._peek(side, lost_for_s, give_up)
 
     # ── manoeuvres ────────────────────────────────────────────────────
     def _directional(self, side: float, give_up: bool) -> ReSearchDecision:
@@ -195,15 +194,14 @@ class ReSearchPolicy:
         return ReSearchDecision(command=cmd, exit_side=side, phase="directional",
                                 give_up=give_up)
 
-    def _peek(self, lost_for_s: float, give_up: bool) -> ReSearchDecision:
-        """Sidestep + yaw to look around a central occluder, alternating sides."""
+    def _peek(self, side: float, lost_for_s: float, give_up: bool) -> ReSearchDecision:
+        """Sidestep + yaw to look around a central occluder, held to ONE side."""
         c = self.cfg
         t = lost_for_s - c.hold_before_search_s
-        step = 1.0 if (t % c.peek_period_s) < 0.5 * c.peek_period_s else -1.0
         vx = c.peek_forward_speed if t < c.peek_forward_s else 0.0  # one bounded nudge
-        vy = c.peek_roll_speed * step                               # sidestep (roll)
-        yaw_sign = -step if c.peek_orbit else step   # orbit: look back at the occluder
+        vy = c.peek_roll_speed * side                              # sidestep (roll), held
+        yaw_sign = -side if c.peek_orbit else side   # orbit: look back at the occluder
         wz = c.search_yaw_rate * yaw_sign
         cmd = ControlCommand.velocity(vx, vy, 0.0, wz, source=self.name, phase="peek")
-        return ReSearchDecision(command=cmd, exit_side=step, phase="peek",
+        return ReSearchDecision(command=cmd, exit_side=side, phase="peek",
                                 give_up=give_up)
