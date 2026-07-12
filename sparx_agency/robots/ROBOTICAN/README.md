@@ -87,5 +87,35 @@ rooster@pavel-pc:~/rqs7_ws$ ros2 topic list
 
 ```
 
+---
 
+## Cage Bar Removal — Research Log
 
+The Rooster drone has a physical cage surrounding the fisheye camera. The cage includes permanent side arcs (always visible) and a motorised horizontal bar that sweeps up and down during flight. Both corrupt DA3METRIC-LARGE depth estimates: the bar pixels produce near-depth artefacts and, when the bar is large, bias DA3's global metric scale.
+
+### Approaches tried (concept-level)
+
+**1. Depth-space detection + depth interpolation**
+Detect bar rows in the DA3 output by thresholding near-depth pixel fraction per row, then interpolate bar rows from neighbouring depth values.
+Result: failed. The depth-row fraction was inversely correlated with bar presence — frames with the cage fully blocking the view had high near-fraction; bar-visible frames had low fraction. Cannot distinguish bar from scene in depth space alone.
+
+**2. RGB dark blob detection (connected components) + position filter + TELEA inpainting**
+Find large dark connected components touching frame edges (cage position prior), inpaint with cv2.INPAINT_TELEA.
+Result: failed. Scene objects (chair, gun, box) near the cage merged into cage blobs and were incorrectly inpainted away.
+
+**3. Static mask + dynamic connected components + TELEA inpainting**
+Separate permanent cage (static mask built from calibration frames, pixels dark in ≥80% of frames) from the moving bar (connected components with separate filter). Inpaint both with TELEA.
+Result: failed. When the moving bar did not connect through the bottom arc it split into narrow components below the width threshold. Object-merging problem persisted.
+
+**4. Static mask + horizontal morphological opening + full-row TELEA inpainting**
+Static mask for permanent cage. Moving bar detected via morphological open with a wide horizontal kernel (keeps only long horizontal dark runs) + row-fraction threshold → mask entire rows → inpaint everything with TELEA.
+Result: partially worked for small bars (<10% row coverage). Failed for large bars (>12%): TELEA propagates from region edges and smears wall+floor texture into the bar region; DA3 then interprets the smear as wrong scene context and its global metric scale collapses by 0.5–0.7 m.
+
+**5. Static mask TELEA + dynamic bar rows → vertical row blending**
+Same detection as approach 4, but instead of TELEA for bar rows, each bar row is replaced by a linear blend of the nearest non-bar rows above and below (preserves real room texture rather than smearing).
+Result: improved RGB quality, but the global scale collapse for large bars persisted. Even with natural-looking row fills, DA3's context-dependent scale estimation was already corrupted by the bar for frames where bar coverage exceeded ~12%.
+
+**6. RGB-guided depth repair (current)**
+Run DA3 on the unmodified original frame (no RGB pre-processing). Use the RGB-based bar detector (morphological opening + row-fraction threshold) to locate bar rows in the depth output. Interpolate those specific rows from neighbouring non-bar depth rows.
+Rationale: DA3's global scale is set by the full original scene; only the bar-row pixels in the resulting depth map are patched. Avoids introducing any synthetic texture that could corrupt DA3's global context.
+Status: see `bar_inpainter.py` → `repair_depth()`.

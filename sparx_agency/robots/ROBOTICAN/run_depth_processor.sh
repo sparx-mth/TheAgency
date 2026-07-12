@@ -12,7 +12,7 @@ export CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml
 export PYTHONPATH=$PYTHONPATH:/home/$USER/GIT/TheAgency
 
 exec /home/$USER/GIT/TheAgency/venv/bin/python \
-  /home/$USER/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \
+  /home/$USER/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/rooster_depth_processor.py \
   --ros-args \
   -p engine_path:="$HOME/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_fp16_trt10.engine" \
   -p config_yaml:="$HOME/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml" \
