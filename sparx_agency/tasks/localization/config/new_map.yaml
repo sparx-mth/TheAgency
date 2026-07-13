@@ -30,11 +30,11 @@ tags:
     size: 0.28
 
 
-#  near the table ( turn right -90 degrees+ -90 degrees = 180 degrees)
-#  6:
-#    xyz: [-1.50, -1.50, 1.1]
-#    rpy: [-1.5708,  0, 1.5708]
-#    size: 0.195
+#  inside MAMAD, in front of mamad's door facing the window
+  6:
+    xyz: [-0.25, -1.01, 1.35]
+    rpy: [ -1.5708, 0, 0 ]
+    size: 0.2
 
  # Inside the MAMAD, above the desk, facing the MAMAD's entrance
   9:
@@ -63,10 +63,10 @@ tags:
 
 
   # inside MAMAD, in front of mamad's door facing the window
-  7:
-    xyz: [ -0.25, -0.99, 1.23 ]
-    rpy: [ -1.5708, 0, 0 ]
-    size: 0.15
+#  7:
+#    xyz: [ -0.25, -0.99, 1.23 ]
+#    rpy: [ -1.5708, 0, 0 ]
+#    size: 0.15
 
  # Tag 4, near the screen inside the MAMAD, same wall as tag 9
 
