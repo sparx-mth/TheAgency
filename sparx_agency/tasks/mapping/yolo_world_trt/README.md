@@ -8,7 +8,7 @@ rebuild.
 
 This task owns only the **build + runtime + benchmark**. The detection algorithm
 stays ROS-free in `core.mapping.detection`; the TRT engine is exposed through the
-same `DetectionModel` ABC (`runtime.YoloTRTDetector`), so `yolo_detector_node`
+same `DetectionModel` ABC (`runtime.YoloTRTDetector`), so `yolo_detector_ros2_node`
 consumes it unchanged.
 
 ---
@@ -216,7 +216,7 @@ boxes = det.detect(rgb_hwc_uint8)          # -> List[core Detection2D]; torch-fr
 `set_prompts` runs the text encoder once (torch) and caches the embeddings;
 `detect` is pure TensorRT + numpy. For a **torch-free runtime**, precompute the
 embeddings offline and call `det.set_text_features(embeddings, labels)` instead.
-To swap this into `yolo_detector_node`, construct a `YoloTRTDetector(...)` in place
+To swap this into `yolo_detector_ros2_node`, construct a `YoloTRTDetector(...)` in place
 of `YoloWorldDetector(...)` — same ABC.
 
 ---
