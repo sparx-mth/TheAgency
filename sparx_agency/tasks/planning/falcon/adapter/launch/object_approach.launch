@@ -1,8 +1,9 @@
 <launch>
   <!-- object_approach.launch — "lock onto a named object and fly up to it".
 
-       Runs the TensorRT open-vocab detector + the visual-approach state machine
-       ALONGSIDE a running nav stack (nav_stack.launch / real_drone.launch). While
+       Runs the visual-approach state machine (tracker + servo + HUD) ALONGSIDE a
+       running nav stack (nav_stack.launch / real_drone.launch), consuming detections
+       from the external TensorRT detector sidecar over the bridge. While
        the target is not confirmed the drone flies its normal A*/NavDP route; once
        the detector sees the target for ~n_confirm consecutive frames, object_approach
        takes over /cmd_vel via the visual_servoing demo-mode hand-off (the follower
@@ -18,10 +19,9 @@
        as an Image and shown by target_lock_viewer (on by default).
 
        Usage:
-         # bring up the nav stack as usual, then in another shell:
-         roslaunch falcon_adapter object_approach.launch target_object:=refrigerator \
-             backbone_engine:=/path/backbone.engine head_engine:=/path/head.engine \
-             text_weights:=/path/yolov8s-worldv2.pt
+         # start the detector sidecar + bridge on the host (see the README), then
+         # bring up the nav stack, then in another shell:
+         roslaunch falcon_adapter object_approach.launch target_object:=refrigerator
          # change the goal at runtime:
          rostopic pub -1 /object_approach/goal std_msgs/String "data: 'hat'"
          # arm/disarm:
@@ -61,29 +61,6 @@
   <arg name="cy"                default="90.03019076680604" />
   <arg name="img_width"         default="504" />
   <arg name="img_height"        default="294" />
-
-  <!-- Where the TensorRT detector runs.
-         external (default) : it runs as a ROS2 sidecar ON THE HOST
-                              (tasks/mapping/ros2/yolo_detector_ros2_node.py) and
-                              its detections reach us over the bridge. Nothing is
-                              started here. This is the ONLY working option on the
-                              real drone: the Falcon image is FROM ros:noetic-*,
-                              which has no CUDA / TensorRT / pycuda, so an
-                              in-container detector dies on `import pycuda`.
-         internal           : start yolo_detector_node.py in this container.
-                              Requires tensorrt + pycuda inside the image. -->
-  <arg name="detector"          default="external" />       <!-- external | internal -->
-
-  <!-- ── Detector (TensorRT YOLO-World; engines built on-target) ─────── -->
-  <arg name="engines_dir"       default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/engines/orin_sm87" />
-  <arg name="backbone_engine"   default="$(arg engines_dir)/yolo_world_s.backbone.fp16.gpu.engine" />
-  <arg name="head_engine"       default="$(arg engines_dir)/yolo_world_s.head.fp16.gpu.engine" />
-  <arg name="text_weights"      default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/weights/yolov8s-worldv2.pt" />
-  <arg name="text_device"       default="cpu" />
-  <arg name="conf_thresh"       default="0.40" />
-  <arg name="iou_thresh"        default="-1.0" />             <!-- <=0 => engine manifest -->
-  <arg name="max_det"           default="0" />                <!-- <=0 => engine manifest -->
-  <arg name="detect_hz"         default="2.0" />
 
   <!-- ── Closure strategy + servo ───────────────────────────────────── -->
   <!-- What keeps the box on the target: detector_tracker (default) = detector
@@ -158,27 +135,6 @@
   <arg name="overlay_topic"     default="/object_approach/overlay" />
   <arg name="viz_hz"            default="10.0" />
   <arg name="viewer"            default="true" />             <!-- on-screen HUD window -->
-
-
-  <!-- The TensorRT open-vocab detector. Publishes detections JSON. Only started
-       when detector:=internal; by default it runs as a ROS2 sidecar on the host. -->
-  <node pkg="falcon_adapter" type="yolo_detector_node.py"
-        name="yolo_detector" output="screen"
-        if="$(eval arg('detector') == 'internal')">
-    <param name="image_transport"  value="$(arg image_transport)" />
-    <param name="rgb_topic"        value="$(arg rgb_topic)" />
-    <param name="target_topic"     value="$(arg target_topic)" />
-    <param name="detections_topic" value="$(arg detections_topic)" />
-    <param name="target_object"    value="$(arg target_object)" />
-    <param name="backbone_engine"  value="$(arg backbone_engine)" />
-    <param name="head_engine"      value="$(arg head_engine)" />
-    <param name="text_weights"     value="$(arg text_weights)" />
-    <param name="text_device"      value="$(arg text_device)" />
-    <param name="conf_thresh"      value="$(arg conf_thresh)" />
-    <param name="iou_thresh"       value="$(arg iou_thresh)" />
-    <param name="max_det"          value="$(arg max_det)" />
-    <param name="detect_hz"        value="$(arg detect_hz)" />
-  </node>
 
   <!-- The tracker + visual servo + search/scan/approach state machine (torch-free). -->
   <node pkg="falcon_adapter" type="object_approach_node.py"
