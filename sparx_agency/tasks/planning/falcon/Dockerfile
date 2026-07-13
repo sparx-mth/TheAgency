@@ -89,10 +89,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── 2b. Open3D-only apt deps (WITH_SIM=1 only) ────────────────
+# ============== ROBOTICAN FIX ==============
+# libc++-dev/libc++abi-dev added below for the BUILD_GUI=ON change further
+# down (also ROBOTICAN FIX): Open3D's BUILD_GUI=ON path links the
+# precompiled Filament library, which requires an LLVM libc++/libc++abi
+# (>=7) even though the rest of the build uses GCC/libstdc++ --
+# 3rdparty/find_dependencies.cmake fails configure without them
+# ("Cannot find matching libc++ and libc++abi libraries").
+# Scope: this whole block is WITH_SIM=1 only, so Jetson (WITH_SIM=0,
+# falcon-jetson) never runs it -- XTEND/Jetson is unaffected either way.
+# ============================================
 RUN if [ "$WITH_SIM" = "1" ]; then \
         apt-get update && apt-get install -y --no-install-recommends \
             libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev \
             libpng-dev libjpeg-dev libssl-dev xorg-dev \
+            libc++-dev libc++abi-dev \
         && rm -rf /var/lib/apt/lists/* ; \
     fi
 
@@ -112,10 +123,29 @@ RUN cd /tmp && git clone --depth 1 --branch v2.7.1 https://github.com/stevengj/n
     && ldconfig && rm -rf /tmp/nlopt
 
 # ── 5. Open3D 0.18.0 (CPU-only) — only when WITH_SIM=1 ────────
+# ============== ROBOTICAN FIX ==============
+# BUILD_GUI=ON (was OFF) is required even though rendering is headless:
+# FALCON's mesh_render node uses Open3D's normal GUI-enabled classes
+# (visualization::gui::Application, visualization::rendering::Open3DScene/
+# FilamentRenderer) and switches them to offscreen mode at RUNTIME via
+# EngineInstance::EnableHeadless() -- this is a different mechanism from
+# Open3D's own ENABLE_HEADLESS_RENDERING cmake option, which actually
+# forces BUILD_GUI OFF and builds an incompatible software-rendering path.
+# With BUILD_GUI=OFF, mesh_render_node fails to LINK (undefined references
+# to Application::GetInstance/Initialize/RenderToImage etc.) because those
+# symbols live in visualization/gui, which is only compiled when
+# BUILD_GUI=ON. On x86_64 this fetches a precompiled Filament binary
+# rather than building it from source (BUILD_FILAMENT_FROM_SOURCE
+# defaults OFF off ARM), so the extra cost is moderate, not a full
+# Filament compile.
+# Scope: WITH_SIM=1 only (Jetson/falcon-jetson uses WITH_SIM=0 and skips
+# this whole Open3D step -- "WITH_SIM=0  Skipping Open3D" below -- so
+# XTEND/Jetson is completely unaffected by this change).
+# ============================================
 ENV OPEN3D_INSTALL_PREFIX=/opt/open3d
 ENV OPEN3D_SOURCE=/opt/Open3D
 RUN if [ "$WITH_SIM" = "1" ]; then \
-        echo "==> Building Open3D 0.18.0 (CPU, no ISPC, no GUI)" && \
+        echo "==> Building Open3D 0.18.0 (CPU, no ISPC, GUI on for headless mesh_render)" && \
         git clone --depth 1 --branch v0.18.0 \
             https://github.com/isl-org/Open3D.git ${OPEN3D_SOURCE} && \
         cd ${OPEN3D_SOURCE} && mkdir build && cd build && \
@@ -123,7 +153,7 @@ RUN if [ "$WITH_SIM" = "1" ]; then \
               -DCMAKE_INSTALL_PREFIX=${OPEN3D_INSTALL_PREFIX} \
               -DBUILD_CUDA_MODULE=OFF \
               -DBUILD_ISPC_MODULE=OFF \
-              -DBUILD_GUI=OFF \
+              -DBUILD_GUI=ON \
               -DBUILD_TENSORFLOW_OPS=OFF \
               -DBUILD_PYTORCH_OPS=OFF \
               -DBUILD_PYTHON_MODULE=OFF \
@@ -183,6 +213,20 @@ RUN chmod +x /tmp/fix_falcon_depth_overflow.sh && /tmp/fix_falcon_depth_overflow
 # GLOG_v=99. See patches/fix_falcon_fsm_logspam.sh.
 COPY patches/fix_falcon_fsm_logspam.sh /tmp/fix_falcon_fsm_logspam.sh
 RUN chmod +x /tmp/fix_falcon_fsm_logspam.sh && /tmp/fix_falcon_fsm_logspam.sh
+
+# ── 6a-sexies. Patch so3_disturbance_generator missing gencfg ─
+# ============== ROBOTICAN FIX ==============
+# CMake configure fails (WITH_SIM=1 only): CMakeLists.txt add_dependencies()
+# on ${PROJECT_NAME}_gencfg but never calls
+# generate_dynamic_reconfigure_options() to create it -- an upstream
+# rosbuild->catkin port gap. See patches/fix_falcon_so3_gencfg.sh.
+# Scope: so3_disturbance_generator is CATKIN_IGNORE'd on Jetson
+# (WITH_SIM=0, see ignore_cuda_pkgs.sh below), so patching its
+# CMakeLists.txt here is a no-op for the Jetson/XTEND build either way --
+# the file is patched but never compiled there.
+# ============================================
+COPY patches/fix_falcon_so3_gencfg.sh /tmp/fix_falcon_so3_gencfg.sh
+RUN chmod +x /tmp/fix_falcon_so3_gencfg.sh && /tmp/fix_falcon_so3_gencfg.sh
 
 # ── 6b. Skip CUDA-only + (Jetson) simulator-side packages ─────
 COPY patches/ignore_cuda_pkgs.sh /tmp/ignore_cuda_pkgs.sh
