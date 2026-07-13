@@ -403,8 +403,15 @@ follower + servo + the live target-lock HUD + the clickable BEV window:
 ./run_falcon.sh office
 # inside the container:
 source /catkin_ws/devel/setup.bash
+export DISPLAY=:0
 roslaunch falcon_adapter real_drone_object_approach.launch \
-    map_name:=office target_object:=monitor goal_x:=0.0 goal_y:=-3.0
+map_name:=office \
+target_object:=bottle \
+goal_x:=0.0 \
+goal_y:=-3.0 \
+viewer:=false \
+bev_viewer:=true \
+publish_overlay:=false
 ```
 
 To add the mission to a nav stack that is **already running**, launch just the
