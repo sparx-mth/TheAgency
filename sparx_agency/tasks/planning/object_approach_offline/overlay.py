@@ -53,6 +53,7 @@ _MODE_COLOR = {
     "APPROACH": (0, 140, 255),
     "HOVER_LOCK": (60, 200, 60),
     "RECOVER": (40, 40, 220),
+    "LAND": (0, 215, 255),      # reached the object -> stopping + landing (amber)
 }
 
 _GAUGE_SIZE = 96

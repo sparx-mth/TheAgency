@@ -10,10 +10,16 @@ makes the follower go passive so there is exactly one publisher -- first holds a
 brief stop-in-place (ACQUIRE_STOP: an actively-published zero-velocity stop for
 ``~acquire_stop_s`` that brakes off any inherited route motion so no stale A*/NavDP
 command carries into closure), then visually servos onto the object at camera rate
-until it is centred and very close (a stable hover-lock directly in front of it). There is NO terminal stop: HOVER_LOCK keeps
-tracking, and if the object moves it re-enters APPROACH. If the track is lost it
-actively re-searches in the direction the target left; if it cannot re-acquire it
-hands control back, re-asserts the goal, and returns to SEARCH.
+until it is centred and very close. On reaching the object (the depth range holds
+``<= ~land_range_m`` for ``~land_confirm_ticks`` ticks) the mission TERMINATES by
+LANDING: the node stops driving ``/cmd_vel`` (so the platform's coasting cannot drift
+it into the object) and requests the ``finish`` demo mode, whose ROS2 manager sends
+stop -> land -> disarm on ``/xtend/cmd_nav`` (the only land path from this ROS1
+container -- cmd_nav is not bridged; demo_mode_request is). Setting ``~land_range_m``
+<= 0 restores the legacy hover-lock terminal (HOVER_LOCK keeps tracking with no land,
+re-entering APPROACH if the object moves). While closing, if the track is lost the
+node actively re-searches in the direction the target left; if it cannot re-acquire
+it hands control back, re-asserts the goal, and returns to SEARCH.
 
 Beyond the base search->approach loop this node adds four mission behaviours:
   1. DISCRETE/INERTIAL FLIGHT-COMMAND SHAPING of every published command (the
@@ -52,7 +58,7 @@ Inputs  (mirrors navdp_click / combination transports):
   ~goal_in_topic geometry_msgs/Point               (the coordinate route's goal)
 Outputs:
   <drone_ns>/cmd_vel  geometry_msgs/Twist          (force-shaped vx, vy, wz)
-  ~demo_mode_request_topic  std_msgs/String        (visual_servoing <-> fly_straight)
+  ~demo_mode_request_topic  std_msgs/String        (visual_servoing / fly_straight / finish)
   ~goal_out_topic  geometry_msgs/Point             (goal re-inject on give-up)
   ~overlay_topic   sensor_msgs/Image               (live target-lock HUD)
   ~status_topic  std_msgs/String                    (diagnostics, optional)
@@ -82,7 +88,7 @@ from sparx_agency.core.planning.visual_servo import (
     VisualServoController, VisualServoParams, VisualServoRequest,
     TargetConfirmationGate, ConfirmationGateConfig, select_overlapping_target_detection,
     ReSearchPolicy, ReSearchConfig,
-    VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN, ACQUIRE_STOP,
+    VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN, ACQUIRE_STOP, LAND,
     AxisForceProfile, PulseShaper,
     ClosureGait, ClosureGaitConfig,
     ScanSearchConfig, ScanSearchPolicy,
@@ -103,6 +109,7 @@ except Exception as _e:                       # noqa: BLE001 -- viz is non-criti
 
 MODE_VISUAL_SERVOING = "visual_servoing"   # follower goes passive on this
 MODE_RELEASE = "fly_straight"              # hand control back to the follower
+MODE_FINISH = "finish"                     # ROS2 demo manager: stop -> land -> disarm
 
 
 def _param_bool(name, default):
@@ -212,6 +219,9 @@ class ObjectApproachNode(object):
         # while pure background drift (no overlapping detection) still times out.
         self.confirm_iou = float(G("~confirm_iou", 0.4))
         self.soft_confirm_min_score = float(G("~soft_confirm_min_score", 0.05))
+        # Stored so the LAND trigger (which needs a metric range) can warn at startup
+        # if it was enabled without depth -- otherwise it would silently never land.
+        self.use_depth = _param_bool("~use_depth", True)
         self.servo = VisualServoController(VisualServoParams(
             mode=servo_mode,
             kp_yaw=float(G("~kp_yaw", 1.2)),
@@ -219,7 +229,7 @@ class ObjectApproachNode(object):
             use_lateral=use_lateral,
             use_vertical=_param_bool("~use_vertical", False),
             vx_max=float(G("~vx_max", 0.35)),
-            use_depth=_param_bool("~use_depth", True),
+            use_depth=self.use_depth,
             target_range_m=float(G("~target_range_m", 1.0)),   # stop ~0.5 m from the object
             slowdown_range_m=float(G("~slowdown_range_m", 2.0)),
             target_area_frac=float(G("~target_area_frac", 0.12)),
@@ -328,6 +338,29 @@ class ObjectApproachNode(object):
             peek_forward_s=float(G("~recover_peek_forward_s", 0.6)),
             peek_roll_speed=float(G("~recover_peek_roll", 0.10)),
             peek_orbit=_param_bool("~recover_peek_orbit", True)))
+        # ── Terminal LAND on closure ─────────────────────────────────
+        # Reaching the object ENDS the mission by landing, not by an endless
+        # hover-lock: once the depth range to the locked target holds <=
+        # ~land_range_m for ~land_confirm_ticks consecutive ticks, the node stops
+        # driving /cmd_vel and requests the FINISH demo mode. /xtend/cmd_nav is NOT
+        # bridged into this ROS1 container (see falcon/bridge/bridge.yaml), so the
+        # demo-mode handshake is the ONLY land path reachable from here -- the ROS2
+        # xtend_drone_demo_manager turns FINISH into stop -> land -> disarm on
+        # /xtend/cmd_nav. Needs depth (~use_depth true); ~land_range_m <= 0 disables
+        # it (keep the legacy hover-lock-forever behaviour).
+        _land_range = float(G("~land_range_m", 1.0))
+        self.land_range_m = _land_range if _land_range > 0.0 else None
+        self.land_confirm_ticks = int(G("~land_confirm_ticks", 3))
+        if self.land_range_m is not None and not self.use_depth:
+            # The LAND trigger keys off the metric depth range, which is None whenever
+            # ~use_depth is false -- so it would never fire and the drone would hover
+            # forever instead of landing. Fail loud (don't silently no-op).
+            rospy.logwarn(
+                "object_approach: ~land_range_m=%.2f set but ~use_depth is false -- "
+                "LAND needs depth and will NEVER trigger; the drone will hover-lock, "
+                "not land. Enable ~use_depth or set ~land_range_m<=0 to make this "
+                "explicit.", self.land_range_m)
+
         # On acquisition (target confirmed + tracker locked) hold a brief
         # stop-in-place before the visual approach begins: the node takes over
         # /cmd_vel and actively publishes a zero-velocity stop for ~acquire_stop_s
@@ -336,7 +369,9 @@ class ObjectApproachNode(object):
         # object. 0 disables the settle (approach immediately, the legacy path).
         self.fsm = VisualApproachStateMachine(ApproachFSMConfig(
             recover_timeout_s=recover_timeout_s,
-            acquire_stop_s=float(G("~acquire_stop_s", 1.5))))
+            acquire_stop_s=float(G("~acquire_stop_s", 1.5)),
+            land_range_m=self.land_range_m,
+            land_confirm_ticks=self.land_confirm_ticks))
 
         # ── Goal memory + re-inject ───────────────────────────────────
         # We remember the coordinate route's goal (from ~goal_x/y and any live
@@ -384,6 +419,10 @@ class ObjectApproachNode(object):
         self._last_cmd = None            # last SHAPED ControlCommand (None in SEARCH)
         self._last_cmd_source = "planner (visual approach passive)"
         self._prev_tick_t = None
+        # Terminal land latch: once the target is reached we stop driving /cmd_vel and
+        # request FINISH, and never servo again (a late detection cannot restart us).
+        self._landing = False
+        self._land_stop_published = False
 
         # ── ROS I/O (publishers before subscribers) ──────────────────
         self.cmd_pub = rospy.Publisher(self.drone_ns + "/cmd_vel", Twist, queue_size=1)
@@ -591,6 +630,12 @@ class ObjectApproachNode(object):
         dt = 0.0 if self._prev_tick_t is None else max(0.0, now - self._prev_tick_t)
         self._prev_tick_t = now
 
+        # Terminal: we reached the target and are landing. Never servo again -- keep
+        # driving the land sequence regardless of enable/track/detection state.
+        if self._landing:
+            self._drive_land()
+            return
+
         with self._mode_lock:
             enabled = self.enabled
         if not enabled:
@@ -620,9 +665,21 @@ class ObjectApproachNode(object):
         # Arrival at the coordinate goal (no done topic exists) lets the FSM switch
         # from passive SEARCH to an active room SCAN when still unconfirmed.
         arrived = self._arrived_at_goal()
+        # Feed the metric range so the FSM can commit to the terminal LAND at
+        # land_range_m. res.range_m already respects ~use_depth (None when depth is
+        # off) and is None without a valid track, so LAND needs working depth.
+        fsm_range = res.range_m if res is not None else None
         dec = self.fsm.update(confirmed=confirmed, track_valid=track_valid,
-                              at_target=at_target, dt=dt, arrived_at_goal=arrived)
+                              at_target=at_target, dt=dt, arrived_at_goal=arrived,
+                              range_m=fsm_range)
         self._last_dec, self._last_res, self._last_track = dec, res, track
+
+        if dec.mode == LAND:
+            # Reached the object: end the mission by landing. Stop closing (so the
+            # platform's inertial actuation cannot drift us into it) and fire the
+            # FINISH land sequence. Latched terminal from here on.
+            self._begin_land()
+            return
 
         if dec.reset_acquisition:
             with self._lock:
@@ -754,6 +811,45 @@ class ObjectApproachNode(object):
             self._publish_cmd(0.0, 0.0, 0.0, "stop")
             self._request_mode_locked(MODE_RELEASE)
 
+    def _begin_land(self):
+        """Commit to the terminal land sequence (idempotent).
+
+        The drone reached ``land_range_m`` of the locked object. Two things then
+        happen, in order and permanently:
+          1. STOP sending motion. The servo streams ``/cmd_vel`` pulses and the
+             platform coasts on them (discrete + inertial actuation), so going quiet
+             is not enough -- we publish one clean zero-stop, then fall silent so the
+             twist bridge's stale-twist watchdog holds the drone. The co-running route
+             follower also goes passive on the ``finish`` demo mode (it treats FINISH
+             like ``visual_servoing``), so no node keeps ``/cmd_vel`` alive.
+          2. LAND. ``/xtend/cmd_nav`` is not bridged into this ROS1 container, so the
+             only land path from here is the demo-mode handshake: requesting FINISH
+             makes the ROS2 demo manager send stop -> land -> disarm on
+             ``/xtend/cmd_nav`` (see xtend_drone_demo_manager).
+        Once ``_landing`` is latched the node never drives ``/cmd_vel`` again, so a
+        late detection cannot restart the approach after we decided to land.
+        """
+        if not self._landing:
+            self._landing = True
+            rng = None if self._last_res is None else self._last_res.range_m
+            rospy.logwarn(
+                "object_approach: REACHED TARGET (range=%s m <= land_range=%.2f m) -- "
+                "stopping commands and requesting FINISH (land)",
+                ("%.2f" % rng) if rng is not None else "?", float(self.land_range_m))
+        self._drive_land()
+
+    def _drive_land(self):
+        """Run the latched land sequence each tick: brake ``/cmd_vel`` once, then keep
+        requesting FINISH until the demo manager grants it. Never publishes motion."""
+        if not self._land_stop_published:
+            # Clear the pulse/gait state so the final /cmd_vel value is a true zero
+            # (not a lingering min-burst pulse), then fall silent for the watchdog.
+            self.shaper.reset()
+            self.gait.reset()
+            self._publish_cmd(0.0, 0.0, 0.0, "land_stop")
+            self._land_stop_published = True
+        self._request_mode(MODE_FINISH)
+
     def _publish_cmd(self, vx, vy, wz, source="servo", gated=False):
         """Force-shape (per-axis min/max) then publish the body-velocity Twist.
 
@@ -882,7 +978,15 @@ class ObjectApproachNode(object):
         L("  intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f  (%dx%d)",
           self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
           self.intr.width, self.intr.height)
-        L("  success = target centred & within target_range/area (hover-lock, no land)")
+        if self.land_range_m is not None:
+            L("  land      = reach range <= %.2f m (x%d ticks) -> STOP + FINISH "
+              "(stop->land->disarm via demo manager)",
+              self.land_range_m, self.land_confirm_ticks)
+            L("  success   = target reached within %.2f m -> land the drone",
+              self.land_range_m)
+        else:
+            L("  land      = disabled (~land_range_m <= 0): hover-lock, no land")
+            L("  success   = target centred & within target_range/area (hover-lock)")
         L("=" * 64)
 
 
@@ -938,6 +1042,15 @@ if __name__ == "__main__":
 #       coarse-yaw platform: ~yaw_deadband (0.22, larger than the crab deadband so
 #       fine centring is done by crab, not yaw) ~yaw_close_deadband (0.15, extra yaw
 #       deadband as we close so a yaw does not sweep the object out of frame)
+#   terminal land (reach the object -> stop + land, ends the mission): ~land_range_m
+#       (1.0, depth range at/below which the object is "reached"; needs ~use_depth;
+#       <= 0 disables and keeps the legacy hover-lock-forever terminal) ~land_confirm_ticks
+#       (3, consecutive in-range ticks required so one depth glitch cannot land). On
+#       trigger the node stops driving /cmd_vel (the twist bridge's watchdog then holds
+#       the drone) and requests the ~demo_mode_request_topic 'finish' mode; the ROS2
+#       xtend_drone_demo_manager turns FINISH into stop -> land -> disarm on /xtend/cmd_nav
+#       (cmd_nav is NOT bridged into this container, so demo_mode_request is the only
+#       land path from here).
 #   flight-command shaping (discrete + inertial, on EVERY published command):
 #       ~force_mode (fixed | snap | none; default fixed = bang-bang 0/±pulse)
 #       ~min_vx (0.06) ~min_vy (0.06) ~min_wz_deg (8.0) ~force_release_frac (0.5)

@@ -18,9 +18,12 @@
     Flow: the planner flies to (goal_x, goal_y) while the detector scans in the
     background. On confirmation the object_approach node grabs /cmd_vel (via the
     visual_servoing hand-off), closes on the object with per-axis force-shaped
-    commands (default multi_axis + "fixed" bang-bang) and holds a moving-target
-    lock. A lost track re-searches, then re-asserts the goal and hands back to the
-    planner. If the route reaches the goal unconfirmed, the node sweeps the room.
+    commands (default multi_axis + "fixed" bang-bang) and, on reaching it (sustained
+    depth range <= land_range_m, default 1.0 m), ENDS the mission by landing: it stops
+    driving /cmd_vel and requests 'finish' (stop -> land -> disarm on /xtend/cmd_nav
+    via the demo manager). Set land_range_m:=0 to hold a moving-target lock instead.
+    A lost track re-searches, then re-asserts the goal and hands back to the planner.
+    If the route reaches the goal unconfirmed, the node sweeps the room.
 
     Intrinsics: object_approach inherits the same raw-K cam_* as the map, so the
     detector geometry matches the voxel map. Everything is overridable below.
@@ -58,6 +61,14 @@
        Default 0.5 m; set 1.0 to consider the object "reached" within 1 metre.
        Needs working depth; without it, closeness falls back to target_area_frac. -->
   <arg name="target_range_m"  default="0.5" />
+  <!-- Reach-and-LAND distance to the OBJECT: on a sustained depth range <= this the
+       mission ends by landing. The node stops driving /cmd_vel and requests the
+       'finish' demo mode (stop then land then disarm on /xtend/cmd_nav via the demo
+       manager). Default 1.0 m (land one metre from the object). Needs working depth;
+       set land_range_m:=0 to disable and keep the legacy hover-lock (no land). -->
+  <arg name="land_range_m"       default="1.0" />
+  <arg name="land_confirm_ticks" default="3" /><!-- consecutive in-range ticks before landing -->
+
   <!-- min_score = the confirmation gate's floor for HARD acquisition / the green
        HUD box (0.15). It forms a SOFT-CONFIRM BAND with the detector's own
        conf_thresh (set on the sidecar, e.g. -p conf_thresh:=0.05): a detection in
@@ -108,6 +119,8 @@
     <arg name="force_mode"      value="$(arg force_mode)" />
     <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />
     <arg name="target_range_m"  value="$(arg target_range_m)" />
+    <arg name="land_range_m"       value="$(arg land_range_m)" />
+    <arg name="land_confirm_ticks" value="$(arg land_confirm_ticks)" />
     <arg name="min_score"       value="$(arg min_score)" />
     <arg name="n_confirm"       value="$(arg n_confirm)" />
     <!-- The route's goal, so arrival -> scan works and give-up re-injects it. -->

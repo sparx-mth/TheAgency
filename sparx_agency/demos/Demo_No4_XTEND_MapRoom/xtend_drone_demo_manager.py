@@ -205,6 +205,13 @@ class XtendDroneDemoManager(Node):
             self.get_logger().info("Exiting TURNING mode")
         elif mode == DemoMode.VISUAL_SERVOING:
             self.get_logger().info("Exiting VISUAL_SERVOING mode")
+        elif mode == DemoMode.FINISH:
+            # Leaving FINISH (e.g. a new approach re-requested visual_servoing): clear
+            # the one-shot latch and cancel any pending disarm so a LATER FINISH runs a
+            # fresh stop -> land -> disarm instead of silently no-opping. Without this,
+            # start_finish_sequence's finish_started guard would swallow every FINISH
+            # after the first for the whole process lifetime.
+            self._reset_finish_sequence()
 
     def on_enter_mode(self, mode: DemoMode) -> None:
         if mode == DemoMode.IDLE:
@@ -284,6 +291,20 @@ class XtendDroneDemoManager(Node):
             self.disarm_timer = None
 
         self.get_logger().warn("FINISH sequence completed: DISARM sent")
+
+    def _reset_finish_sequence(self) -> None:
+        """Clear the FINISH one-shot latch and cancel a pending disarm.
+
+        Called when the manager leaves FINISH so the NEXT FINISH request runs a fresh
+        stop -> land -> disarm. Safe to call whether or not the disarm timer fired.
+        """
+        if self.disarm_timer is not None:
+            self.disarm_timer.cancel()
+            self.destroy_timer(self.disarm_timer)
+            self.disarm_timer = None
+        if self.finish_started:
+            self.get_logger().info("FINISH sequence latch reset (left FINISH mode)")
+        self.finish_started = False
 
 
 def parse_args():

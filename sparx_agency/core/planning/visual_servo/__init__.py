@@ -46,6 +46,7 @@ from sparx_agency.core.planning.visual_servo.state_machine import (
     APPROACH,
     HOVER_LOCK,
     RECOVER,
+    LAND,
 )
 from sparx_agency.core.planning.visual_servo.force_shaping import (
     FORCE_MODES,
@@ -87,6 +88,7 @@ __all__ = [
     "APPROACH",
     "HOVER_LOCK",
     "RECOVER",
+    "LAND",
     "FORCE_MODES",
     "AxisForceProfile",
     "CommandForceShaper",

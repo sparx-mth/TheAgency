@@ -7,8 +7,11 @@
        the target is not confirmed the drone flies its normal A*/NavDP route; once
        the detector sees the target for ~n_confirm consecutive frames, object_approach
        takes over /cmd_vel via the visual_servoing demo-mode hand-off (the follower
-       goes passive) and servos up to the object until it is centred and very close
-       (hover-lock; no landing, no terminal stop — it keeps tracking a moving object).
+       goes passive) and servos up to the object. On reaching it (sustained depth
+       range <= land_range_m, default 1.0 m) the mission ENDS by landing: the node
+       stops driving /cmd_vel and requests the 'finish' demo mode, whose manager sends
+       stop -> land -> disarm on /xtend/cmd_nav. Set land_range_m:=0 to keep the legacy
+       hover-lock terminal instead (no landing; it keeps tracking a moving object).
        Losing the track triggers an active re-search; a prolonged loss hands control
        back, re-asserts the goal, and returns to SEARCH. If the route reaches its goal
        still unconfirmed, the node sweeps the room (slow rotate-with-stops) to find it.
@@ -85,6 +88,16 @@
   <arg name="yaw_deadband"       default="0.35" />            <!-- yaw acquisition angle (min-burst + coast) -->
   <arg name="yaw_close_deadband" default="0.15" />
   <arg name="lateral_deadband"   default="0.10" />            <!-- coast-aware crab deadband (fine centring) -->
+
+  <!-- ── Terminal land: reach the object -> stop + land (ends the mission) ──
+       When the depth range to the locked target holds <= land_range_m for
+       land_confirm_ticks consecutive ticks, the node stops driving /cmd_vel and
+       requests the 'finish' demo mode; the ROS2 demo manager then sends
+       stop -> land -> disarm on /xtend/cmd_nav (the only land path reachable from
+       this ROS1 container). Needs working depth (use_depth:=true). Set
+       land_range_m:=0 to disable and keep the legacy hover-lock (no land). -->
+  <arg name="land_range_m"       default="1.0" />             <!-- reach distance; <=0 disables landing -->
+  <arg name="land_confirm_ticks" default="3" />               <!-- consecutive in-range ticks before landing -->
 
   <!-- ── Flight-command shaping (discrete + inertial actuation) ─────── -->
   <arg name="force_mode"        default="fixed" />            <!-- fixed | snap | none -->
@@ -175,6 +188,8 @@
     <param name="yaw_deadband"       value="$(arg yaw_deadband)" />
     <param name="yaw_close_deadband" value="$(arg yaw_close_deadband)" />
     <param name="lateral_deadband"   value="$(arg lateral_deadband)" />
+    <param name="land_range_m"       value="$(arg land_range_m)" />
+    <param name="land_confirm_ticks" value="$(arg land_confirm_ticks)" />
     <param name="force_mode"        value="$(arg force_mode)" />
     <param name="min_vx"            value="$(arg min_vx)" />
     <param name="min_vy"            value="$(arg min_vy)" />

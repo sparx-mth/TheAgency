@@ -78,6 +78,12 @@ from sparx_agency.core.planning.trackers.rotation_supervisor import (
 # axis maps onto the platform's flight modes; visual_servoing is platform-only.
 AXIS_TO_MODE = {ControlAxis.YAW: "turning", ControlAxis.FORWARD: "fly_straight"}
 MODE_VISUAL_SERVOING = "visual_servoing"
+# Terminal land mode: the demo manager sends stop -> land -> disarm on /xtend/cmd_nav
+# and object_approach has stopped driving /cmd_vel. The follower must stay passive
+# here too (like visual_servoing) so it does not re-drive /cmd_vel toward its route
+# goal while the drone is stopping/landing (which would defeat the land's stop and
+# fight the mode arbiter). Once the mission is landing there is nothing left to fly.
+MODE_FINISH = "finish"
 # "Forward flight" mode, requested during every stop (and at bring-up): it tells
 # the FC to hold heading (stop rotating) while we command zero velocity, so the
 # platform is stable for a clean voxel update -- "forward mode but not flying".
@@ -538,9 +544,12 @@ class WaypointFollowerNode:
             return
 
         # ── RUNNING: delegate navigation to the core follower ──
-        # While the external state machine holds VISUAL_SERVOING, another node
-        # owns /cmd_vel; go fully passive so there is exactly one publisher.
-        if self.current_demo_mode == MODE_VISUAL_SERVOING:
+        # While the external state machine holds VISUAL_SERVOING, another node owns
+        # /cmd_vel; go fully passive so there is exactly one publisher. FINISH is the
+        # terminal land: also stay passive (no node should drive /cmd_vel while the
+        # drone is stopping/landing) so we neither re-drive the route nor fight the
+        # object-approach land over the demo-mode arbiter.
+        if self.current_demo_mode in (MODE_VISUAL_SERVOING, MODE_FINISH):
             return
 
         raw2d = self._pose2d()

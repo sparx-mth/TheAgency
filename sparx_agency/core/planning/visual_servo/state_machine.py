@@ -22,12 +22,21 @@ States (string labels, à la
   * ``APPROACH``    — servo drives toward the target.
   * ``HOVER_LOCK``  — target centred and close: success, hold and keep tracking.
   * ``RECOVER``     — track lost; node sweeps to re-acquire (see the recovery policy).
+  * ``LAND``        — reached the object: the metric range to the target has stayed
+    ``<= land_range_m`` for ``land_confirm_ticks`` consecutive closure ticks. This is
+    a **terminal** state — the machine never leaves it, ``drive_cmd_vel`` goes False,
+    and the ``land`` flag is raised so the node stops sending motion commands and
+    triggers the platform's land sequence. Disabled (never entered) when
+    ``land_range_m is None`` (the default), preserving the hover-lock-forever
+    behaviour for missions that only want to hold in front of the object.
 
 Transitions are driven only by booleans the node already has (target confirmed,
-track valid, servo at-target, arrived-at-goal), plus a lost-timer for the recovery
-timeout — no clock, no I/O. A short hysteresis on the HOVER_LOCK exit prevents
-chatter at the success boundary. On a recovery timeout the machine returns to
-SEARCH and flags ``reset_acquisition`` so the node clears the confirmation gate and
+track valid, servo at-target, arrived-at-goal) plus the optional metric ``range_m``
+for the LAND trigger, and a lost-timer for the recovery timeout — no clock, no I/O.
+A short hysteresis on the HOVER_LOCK exit prevents chatter at the success boundary,
+and the LAND trigger requires ``land_confirm_ticks`` consecutive in-range ticks so a
+single depth glitch cannot land the drone. On a recovery timeout the machine returns
+to SEARCH and flags ``reset_acquisition`` so the node clears the confirmation gate and
 tracker (from SEARCH it re-enters SCAN on the next tick if still at the goal).
 """
 from __future__ import annotations
@@ -41,6 +50,7 @@ ACQUIRE_STOP = "ACQUIRE_STOP"
 APPROACH = "APPROACH"
 HOVER_LOCK = "HOVER_LOCK"
 RECOVER = "RECOVER"
+LAND = "LAND"
 
 
 @dataclass(frozen=True)
@@ -61,12 +71,25 @@ class ApproachFSMConfig:
             the drone to brake off inherited route motion and for the follower's last
             command to lapse. ``0`` disables the settle (confirm+lock -> APPROACH
             directly, the legacy behaviour).
+        land_range_m: Metric range (m) at or below which the mission is "reached" and
+            the machine commits to the terminal LAND state, abandoning hover-lock so
+            the node can stop and land the drone. Needs depth (``range_m`` fed to
+            :meth:`update`); ``None`` disables the LAND trigger entirely (the default),
+            keeping HOVER_LOCK as the terminal behaviour. Usually set larger than the
+            servo's ``target_range_m`` hover standoff so the drone lands on approach
+            rather than after settling into the closer hover-lock.
+        land_confirm_ticks: Consecutive closure ticks with ``range_m <= land_range_m``
+            required before entering LAND, so a single spurious depth reading cannot
+            land the drone. The streak resets on any tick that is out of range or has
+            no range, and on any state change out of the closure states.
     """
 
     recover_timeout_s: float = 6.0
     recover_confirm_ticks: int = 2
     hover_release_ticks: int = 5
     acquire_stop_s: float = 0.0
+    land_range_m: Optional[float] = None
+    land_confirm_ticks: int = 3
 
     def __post_init__(self) -> None:
         if self.recover_timeout_s <= 0.0:
@@ -77,6 +100,10 @@ class ApproachFSMConfig:
             raise ValueError("hover_release_ticks must be >= 1.")
         if self.acquire_stop_s < 0.0:
             raise ValueError("acquire_stop_s must be >= 0.")
+        if self.land_range_m is not None and self.land_range_m <= 0.0:
+            raise ValueError("land_range_m must be > 0 when set (None disables LAND).")
+        if self.land_confirm_ticks < 1:
+            raise ValueError("land_confirm_ticks must be >= 1.")
 
 
 @dataclass(frozen=True)
@@ -85,7 +112,7 @@ class ApproachDecision:
 
     Attributes:
         mode: Current state label (one of
-            SEARCH/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER).
+            SEARCH/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER/LAND).
         drive_cmd_vel: True when this node owns ``/cmd_vel`` this tick (everything
             except SEARCH — SCAN drives the sweep and ACQUIRE_STOP publishes the
             settle stop, so they own it too). The node requests the
@@ -95,12 +122,16 @@ class ApproachDecision:
             clears the confirmation gate and tracker to re-acquire from scratch.
         lost_for_s: Seconds the track has been lost (0 outside RECOVER); pass to
             the recovery policy to size the sweep / give-up.
+        land: True only in the terminal LAND state — the mission reached the object
+            and the node must stop driving ``/cmd_vel`` and land the drone. Once True
+            it stays True (LAND never exits), so the node can latch its land sequence.
     """
 
     mode: str
     drive_cmd_vel: bool
     reset_acquisition: bool
     lost_for_s: float
+    land: bool = False
 
 
 class VisualApproachStateMachine:
@@ -117,13 +148,15 @@ class VisualApproachStateMachine:
         self._release_count = 0
         self._recover_valid = 0
         self._settle_for = 0.0
+        self._land_confirm = 0
 
     @property
     def state(self) -> str:
         return self._state
 
     def update(self, confirmed: bool, track_valid: bool, at_target: bool,
-               dt: float, arrived_at_goal: bool = False) -> ApproachDecision:
+               dt: float, arrived_at_goal: bool = False,
+               range_m: Optional[float] = None) -> ApproachDecision:
         """Advance one tick.
 
         Args:
@@ -136,8 +169,17 @@ class VisualApproachStateMachine:
                 the node sweeps the room; when it goes False (goal changed) SCAN
                 falls back to SEARCH so the planner flies the new route. Defaults
                 False — an offline replay with no planner never scans.
+            range_m: Metric range (m) to the tracked target this frame, or None when
+                unavailable (no depth). Only used for the LAND trigger; ignored when
+                ``land_range_m is None``. Defaults None — a caller that never lands
+                need not supply it.
         """
         dt = max(0.0, float(dt))
+
+        # LAND is terminal: once reached the machine holds it regardless of inputs,
+        # so the node's land sequence is never interrupted by a late track/detection.
+        if self._state == LAND:
+            return self._decide()
 
         if self._state == SEARCH:
             # Only leave SEARCH once BOTH confirmed and the tracker is actually
@@ -172,6 +214,8 @@ class VisualApproachStateMachine:
         if self._state == APPROACH:
             if not track_valid:
                 self._enter(RECOVER)
+            elif self._land_reached(range_m):
+                self._enter(LAND)
             elif at_target:
                 self._enter(HOVER_LOCK)
             return self._decide()
@@ -179,6 +223,8 @@ class VisualApproachStateMachine:
         if self._state == HOVER_LOCK:
             if not track_valid:
                 self._enter(RECOVER)
+            elif self._land_reached(range_m):
+                self._enter(LAND)
             elif not at_target:
                 self._release_count += 1
                 if self._release_count >= self.cfg.hover_release_ticks:
@@ -210,12 +256,30 @@ class VisualApproachStateMachine:
         straight to APPROACH (``acquire_stop_s <= 0``, the legacy behaviour)."""
         self._enter(ACQUIRE_STOP if self.cfg.acquire_stop_s > 0.0 else APPROACH)
 
+    def _land_reached(self, range_m: Optional[float]) -> bool:
+        """Advance the land-confirm streak and report whether LAND is due.
+
+        Returns True once ``land_confirm_ticks`` consecutive closure ticks have had a
+        fresh in-range measurement (``range_m <= land_range_m``). Any tick without one
+        (out of range, or no range this frame) resets the streak, so only a sustained
+        close reading — not a single depth glitch — commits the drone to landing.
+        Always False (and a no-op) when the LAND trigger is disabled.
+        """
+        if self.cfg.land_range_m is None or range_m is None or range_m > self.cfg.land_range_m:
+            self._land_confirm = 0
+            return False
+        self._land_confirm += 1
+        return self._land_confirm >= self.cfg.land_confirm_ticks
+
     def _enter(self, new: str) -> None:
         if new == self._state:
             return
         self._state = new
         self._recover_valid = 0
         self._settle_for = 0.0
+        # A state change breaks the closure: require a fresh consecutive in-range
+        # streak (so e.g. a RECOVER excursion cannot carry stale land progress).
+        self._land_confirm = 0
         if new != RECOVER:
             self._lost_for = 0.0
         if new != HOVER_LOCK:
@@ -224,7 +288,10 @@ class VisualApproachStateMachine:
     def _decide(self, reset_acquisition: bool = False) -> ApproachDecision:
         return ApproachDecision(
             mode=self._state,
-            drive_cmd_vel=(self._state != SEARCH),
+            # LAND owns /cmd_vel only to stop it; the node handles LAND before the
+            # drive/release branch, so False here is a safe default (never release).
+            drive_cmd_vel=(self._state not in (SEARCH, LAND)),
             reset_acquisition=reset_acquisition,
             lost_for_s=self._lost_for if self._state == RECOVER else 0.0,
+            land=(self._state == LAND),
         )
