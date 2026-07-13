@@ -141,6 +141,11 @@ class ObjectApproachNode(object):
         self.demo_mode_topic = G("~demo_mode_topic", "/xtend/demo_mode")
         self.demo_mode_request_topic = G("~demo_mode_request_topic",
                                          "/xtend/demo_mode_request")
+        # Re-assert the demo-mode request at this period until the arbiter echoes
+        # it back on demo_mode. Mirrors the follower's ~request_repeat_sec so a
+        # last-write-wins arbiter cannot strand our single take-over request and
+        # stall the swap into visual servoing.
+        self.request_repeat_sec = float(G("~request_repeat_sec", 0.5))
 
         # Intrinsics matching the live RGB/depth stream (see navdp_click for the
         # K-vs-P note). Depth range uses these; the servo only needs width/height.
@@ -333,6 +338,7 @@ class ObjectApproachNode(object):
         self._last_target_det_t = 0.0    # its stamp, for the HUD freshness gate
         self.current_demo_mode = None
         self._requested_mode = None
+        self._last_request_pub_t = rospy.Time(0)
         self._last_dec = None
         self._last_res = None
         self._last_track = None
@@ -641,20 +647,39 @@ class ObjectApproachNode(object):
 
     # ─── Demo-mode hand-off + cmd_vel ────────────────────────────────
     def _driving(self):
-        return self._requested_mode == MODE_VISUAL_SERVOING
+        # True only once the hand-off is GRANTED (the arbiter echoed
+        # visual_servoing), i.e. we are actually the sole cmd_vel owner -- not
+        # merely while we are still requesting it. Gating on the echoed mode (not
+        # the pending request) means a mid-hand-off error tick does not inject a
+        # stop onto cmd_vel while the follower is still the active publisher.
+        return self.current_demo_mode == MODE_VISUAL_SERVOING
 
     def _request_mode(self, mode):
         with self._mode_lock:
             self._request_mode_locked(mode)
 
     def _request_mode_locked(self, mode):
-        """Publish a demo-mode request on change. Caller must hold _mode_lock."""
-        if self._requested_mode == mode:
+        """Publish a demo-mode request, re-asserting until granted. Hold _mode_lock.
+
+        Publishes on change and then KEEPS re-publishing every
+        ``request_repeat_sec`` until the arbiter echoes the mode back on
+        ``demo_mode`` (``current_demo_mode == mode``). Publishing once is not
+        enough: the follower re-requests its own mode on the same request topic
+        every ``request_repeat_sec`` (waypoint_follower ``_request_demo_mode``),
+        so under a last-write-wins arbiter a single take-over request can be
+        overwritten and the swap into visual servoing would stall forever.
+        """
+        if self._requested_mode != mode:
+            self._requested_mode = mode
+            self._last_request_pub_t = rospy.Time(0)   # force an immediate publish
+            rospy.loginfo("object_approach: request demo_mode=%s (current=%s)",
+                          mode, self.current_demo_mode)
+        if self.current_demo_mode == mode:             # already granted; nothing to do
             return
-        self._requested_mode = mode
-        self.demo_req_pub.publish(String(data=mode))
-        rospy.loginfo("object_approach: request demo_mode=%s (current=%s)",
-                      mode, self.current_demo_mode)
+        now = rospy.Time.now()
+        if (now - self._last_request_pub_t).to_sec() >= self.request_repeat_sec:
+            self.demo_req_pub.publish(String(data=mode))
+            self._last_request_pub_t = now
 
     def _release(self):
         """Hand /cmd_vel back to the follower (once).
