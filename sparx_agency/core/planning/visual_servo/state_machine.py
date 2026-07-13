@@ -14,6 +14,11 @@ States (string labels, à la
   * ``SCAN``        — the route reached its goal without a confirmation, so the node
     drives a slow rotate-with-stops sweep of the room (see the scan-search policy)
     to look for the object. Still "searching", but the node now owns ``/cmd_vel``.
+  * ``ACQUIRE_STOP`` — the target was just confirmed+locked: hold a brief
+    stop-in-place (``acquire_stop_s``) before approaching, so the drone arrests any
+    inherited route (A*/NavDP) motion and no stale follower command lingers into the
+    visual approach. The node owns ``/cmd_vel`` here and publishes a real zero-stop.
+    Skipped (straight to APPROACH) when ``acquire_stop_s <= 0``.
   * ``APPROACH``    — servo drives toward the target.
   * ``HOVER_LOCK``  — target centred and close: success, hold and keep tracking.
   * ``RECOVER``     — track lost; node sweeps to re-acquire (see the recovery policy).
@@ -32,6 +37,7 @@ from typing import Optional
 
 SEARCH = "SEARCH"
 SCAN = "SCAN"
+ACQUIRE_STOP = "ACQUIRE_STOP"
 APPROACH = "APPROACH"
 HOVER_LOCK = "HOVER_LOCK"
 RECOVER = "RECOVER"
@@ -50,11 +56,17 @@ class ApproachFSMConfig:
             spurious re-detection from resetting the episode and ping-ponging.
         hover_release_ticks: Consecutive not-at-target ticks required to fall from
             HOVER_LOCK back to APPROACH (hysteresis; absorbs a moving target's jitter).
+        acquire_stop_s: Seconds to hold a stop-in-place in ACQUIRE_STOP right after
+            the target is confirmed+locked, before APPROACH begins — long enough for
+            the drone to brake off inherited route motion and for the follower's last
+            command to lapse. ``0`` disables the settle (confirm+lock -> APPROACH
+            directly, the legacy behaviour).
     """
 
     recover_timeout_s: float = 6.0
     recover_confirm_ticks: int = 2
     hover_release_ticks: int = 5
+    acquire_stop_s: float = 0.0
 
     def __post_init__(self) -> None:
         if self.recover_timeout_s <= 0.0:
@@ -63,6 +75,8 @@ class ApproachFSMConfig:
             raise ValueError("recover_confirm_ticks must be >= 1.")
         if self.hover_release_ticks < 1:
             raise ValueError("hover_release_ticks must be >= 1.")
+        if self.acquire_stop_s < 0.0:
+            raise ValueError("acquire_stop_s must be >= 0.")
 
 
 @dataclass(frozen=True)
@@ -70,11 +84,13 @@ class ApproachDecision:
     """One tick's mission decision.
 
     Attributes:
-        mode: Current state label (one of SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER).
+        mode: Current state label (one of
+            SEARCH/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER).
         drive_cmd_vel: True when this node owns ``/cmd_vel`` this tick (everything
-            except SEARCH — SCAN drives the sweep, so it owns it too). The node
-            requests the ``visual_servoing`` hand-off while this is True and
-            releases the follower when it goes False.
+            except SEARCH — SCAN drives the sweep and ACQUIRE_STOP publishes the
+            settle stop, so they own it too). The node requests the
+            ``visual_servoing`` hand-off while this is True and releases the follower
+            when it goes False.
         reset_acquisition: True on the RECOVER->SEARCH give-up edge — the node
             clears the confirmation gate and tracker to re-acquire from scratch.
         lost_for_s: Seconds the track has been lost (0 outside RECOVER); pass to
@@ -100,6 +116,7 @@ class VisualApproachStateMachine:
         self._lost_for = 0.0
         self._release_count = 0
         self._recover_valid = 0
+        self._settle_for = 0.0
 
     @property
     def state(self) -> str:
@@ -127,19 +144,29 @@ class VisualApproachStateMachine:
             # locked (the node seeds the tracker on confirmation). Otherwise, once
             # the route has reached its goal, switch to a room sweep (SCAN).
             if confirmed and track_valid:
-                self._enter(APPROACH)
+                self._acquire()
             elif arrived_at_goal:
                 self._enter(SCAN)
             return self._decide()
 
         if self._state == SCAN:
-            # Sweeping the room at the goal. Confirm+lock -> approach; if the goal
-            # moves out from under us (arrived_at_goal cleared) hand back to the
-            # planner via SEARCH.
+            # Sweeping the room at the goal. Confirm+lock -> acquire (settle then
+            # approach); if the goal moves out from under us (arrived_at_goal
+            # cleared) hand back to the planner via SEARCH.
             if confirmed and track_valid:
-                self._enter(APPROACH)
+                self._acquire()
             elif not arrived_at_goal:
                 self._enter(SEARCH)
+            return self._decide()
+
+        if self._state == ACQUIRE_STOP:
+            # Just confirmed+locked: hold a stop-in-place for acquire_stop_s before
+            # approaching. Time-boxed only (the node publishes the real zero-stop);
+            # once elapsed, hand to APPROACH, which routes to RECOVER itself if the
+            # brief settle happened to lose the track.
+            self._settle_for += dt
+            if self._settle_for >= self.cfg.acquire_stop_s:
+                self._enter(APPROACH)
             return self._decide()
 
         if self._state == APPROACH:
@@ -178,11 +205,17 @@ class VisualApproachStateMachine:
         return self._decide(reset_acquisition=reset)
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _acquire(self) -> None:
+        """Target confirmed+locked: settle in place first when configured, else go
+        straight to APPROACH (``acquire_stop_s <= 0``, the legacy behaviour)."""
+        self._enter(ACQUIRE_STOP if self.cfg.acquire_stop_s > 0.0 else APPROACH)
+
     def _enter(self, new: str) -> None:
         if new == self._state:
             return
         self._state = new
         self._recover_valid = 0
+        self._settle_for = 0.0
         if new != RECOVER:
             self._lost_for = 0.0
         if new != HOVER_LOCK:

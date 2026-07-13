@@ -48,6 +48,11 @@
   <arg name="start_enabled"     default="true" />
   <arg name="n_confirm"         default="3" />
   <arg name="min_score"         default="0.30" />
+  <!-- Stop-in-place settle after the target is confirmed+locked, before the
+       visual approach: the node takes over /cmd_vel and publishes a zero-stop for
+       this long so the drone brakes off inherited A*/NavDP motion (and the
+       follower's last command lapses) before flying in. 0 => approach at once. -->
+  <arg name="acquire_stop_s"    default="1.5" />
 
   <!-- ── Camera intrinsics (match the live stream) ──────────────────── -->
   <arg name="fx"                default="322.6351083474948" />
@@ -95,7 +100,8 @@
   <arg name="vx_max"            default="0.35" />
   <arg name="max_lateral_speed" default="0.25" />
   <arg name="max_speed_xy"      default="0.4" />
-  <arg name="max_yaw_rate"      default="0.6" />
+  <arg name="max_yaw_rate"      default="0.7" />             <!-- >= fixed_wz pulse (waypoint follower's yaw_rate) -->
+
   <arg name="ctrl_hz"           default="10.0" />             <!-- matches the route follower's tick calibration -->
   <!-- Coarse-yaw platform: a large yaw deadband (fine centring uses crab, not yaw)
        that grows as we close so a yaw doesn't sweep the object out of frame. -->
@@ -112,9 +118,21 @@
   <arg name="brake_ticks"       default="1" />                <!-- opposite pulses to bleed off coast -->
 
   <arg name="force_release_frac" default="0.5" />
-  <arg name="fixed_vx"          default="0.0" />              <!-- <=0 => = the min -->
-  <arg name="fixed_vy"          default="0.0" />
-  <arg name="fixed_wz_deg"      default="0.0" />
+  <!-- Fixed pulse magnitudes = the working waypoint follower's proven vel_x/yaw_rate.
+       These are the magnitudes the platform's deadband actually moves on (the tiny
+       min_* floor was too weak: a yaw pulse fired but the drone did not turn). -->
+  <arg name="fixed_vx"          default="0.3" />              <!-- forward pulse (= follower vel_x) -->
+  <arg name="fixed_vy"          default="0.3" />              <!-- lateral ROLL pulse (same 0.3 m/s force) -->
+  <arg name="fixed_wz_deg"      default="40.1" />             <!-- yaw pulse = 0.7 rad/s (= follower yaw_rate) -->
+
+  <!-- ── Closure gait: move-a-little / stop-and-look cadence on the servo ──
+       Breaks the servo's continuous closing into short bursts with a stop between
+       them (drone coasts to rest, camera gets a fresh bbox), and stops when a turn
+       gives way to forward flight. Applies to the APPROACH servo only. -->
+  <arg name="gait_enabled"        default="true" />
+  <arg name="gait_move_ticks"     default="2" />              <!-- max motion ticks per burst -->
+  <arg name="gait_settle_ticks"   default="4" />              <!-- forced stop ticks between bursts (0 => off) -->
+  <arg name="gait_settle_on_transition" default="true" />     <!-- stop on turn<->forward change -->
 
   <!-- ── Goal (arrival -> scan; re-inject on give-up) ───────────────── -->
   <arg name="goal_x"            default="" />                 <!-- '' => no known goal -->
@@ -179,6 +197,7 @@
     <param name="start_enabled"     value="$(arg start_enabled)" />
     <param name="n_confirm"         value="$(arg n_confirm)" />
     <param name="min_score"         value="$(arg min_score)" />
+    <param name="acquire_stop_s"    value="$(arg acquire_stop_s)" />
     <param name="fx"                value="$(arg fx)" />
     <param name="fy"                value="$(arg fy)" />
     <param name="cx"                value="$(arg cx)" />
@@ -210,6 +229,10 @@
     <param name="fixed_vx"          value="$(arg fixed_vx)" />
     <param name="fixed_vy"          value="$(arg fixed_vy)" />
     <param name="fixed_wz_deg"      value="$(arg fixed_wz_deg)" />
+    <param name="gait_enabled"      value="$(arg gait_enabled)" />
+    <param name="gait_move_ticks"   value="$(arg gait_move_ticks)" />
+    <param name="gait_settle_ticks" value="$(arg gait_settle_ticks)" />
+    <param name="gait_settle_on_transition" value="$(arg gait_settle_on_transition)" />
     <param name="arrive_radius_m"   value="$(arg arrive_radius_m)" />
     <param name="goal_in_topic"     value="$(arg goal_in_topic)" />
     <param name="goal_out_topic"    value="$(arg goal_out_topic)" />

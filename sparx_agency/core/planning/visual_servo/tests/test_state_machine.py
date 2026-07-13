@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from sparx_agency.core.planning.visual_servo.state_machine import (
+    ACQUIRE_STOP,
     APPROACH,
     HOVER_LOCK,
     RECOVER,
@@ -163,6 +164,77 @@ def test_recover_giveup_then_rescans_when_still_at_goal():
     d = fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
                    arrived_at_goal=True)                  # back to SCAN
     assert d.mode == SCAN
+
+
+# ── ACQUIRE_STOP settle (confirm+lock -> brief stop -> approach) ───────
+def test_default_config_skips_settle():
+    # acquire_stop_s defaults to 0: confirm+lock goes straight to APPROACH (legacy).
+    assert ApproachFSMConfig().acquire_stop_s == 0.0
+    fsm = _make()
+    d = _to_approach(fsm)
+    assert d.mode == APPROACH
+
+
+@pytest.mark.parametrize("bad", [-0.1, -1.0])
+def test_invalid_acquire_stop_raises(bad):
+    with pytest.raises(ValueError):
+        ApproachFSMConfig(acquire_stop_s=bad)
+
+
+def _make_settle(acquire_stop_s: float = 1.0) -> VisualApproachStateMachine:
+    return VisualApproachStateMachine(
+        ApproachFSMConfig(recover_timeout_s=3.0, acquire_stop_s=acquire_stop_s))
+
+
+def test_search_confirmed_enters_acquire_stop_when_settle_enabled():
+    fsm = _make_settle(1.0)
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1)
+    assert d.mode == ACQUIRE_STOP
+    assert d.drive_cmd_vel is True          # node owns cmd_vel to publish the stop
+    assert d.lost_for_s == 0.0
+
+
+def test_scan_confirmed_enters_acquire_stop_when_settle_enabled():
+    fsm = _make_settle(1.0)
+    fsm.update(confirmed=False, track_valid=False, at_target=False, dt=0.1,
+               arrived_at_goal=True)        # -> SCAN
+    assert fsm.state == SCAN
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1,
+                   arrived_at_goal=True)
+    assert d.mode == ACQUIRE_STOP
+
+
+def test_acquire_stop_holds_then_advances_to_approach():
+    # dt=0.5 is exactly representable, so the 1.0s threshold is hit cleanly.
+    fsm = _make_settle(1.0)
+    fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.5)  # ACQUIRE_STOP
+    # First accumulating tick: 0.5s < 1.0s -> still stopped in place.
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.5)
+    assert d.mode == ACQUIRE_STOP
+    # Second tick reaches acquire_stop_s (1.0s) -> start the approach.
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.5)
+    assert d.mode == APPROACH
+
+
+def test_acquire_stop_completes_even_if_track_flickers():
+    # The settle is time-boxed only: a mid-settle track drop does not abort it (the
+    # drone still brakes to a stop); APPROACH handles any real loss afterwards.
+    fsm = _make_settle(0.3)
+    fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1)  # ACQUIRE_STOP
+    d = fsm.update(confirmed=True, track_valid=False, at_target=False, dt=0.1)
+    assert d.mode == ACQUIRE_STOP
+    d = fsm.update(confirmed=True, track_valid=False, at_target=False, dt=0.2)
+    assert d.mode == APPROACH
+
+
+def test_acquire_stop_settle_timer_resets_between_episodes():
+    # A give-up back to SEARCH then a fresh confirm must restart the settle from 0.
+    fsm = _make_settle(0.3)
+    fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1)  # ACQUIRE_STOP
+    fsm.reset()
+    assert fsm.state == SEARCH
+    d = fsm.update(confirmed=True, track_valid=True, at_target=False, dt=0.1)
+    assert d.mode == ACQUIRE_STOP          # fresh settle, not instantly elapsed
 
 
 # ── APPROACH transitions ──────────────────────────────────────────────

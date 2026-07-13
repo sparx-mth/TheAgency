@@ -6,9 +6,11 @@ target is not yet confirmed the node stays PASSIVE and the existing A*/NavDP
 follower flies the coordinate route; the detector (yolo_detector_node) scans in
 parallel. Once the target is confirmed for N consecutive detector frames, the node
 takes over ``/cmd_vel`` -- via the ``visual_servoing`` demo-mode hand-off, which
-makes the follower go passive so there is exactly one publisher -- and visually
-servos onto the object at camera rate until it is centred and very close (a stable
-hover-lock directly in front of it). There is NO terminal stop: HOVER_LOCK keeps
+makes the follower go passive so there is exactly one publisher -- first holds a
+brief stop-in-place (ACQUIRE_STOP: an actively-published zero-velocity stop for
+``~acquire_stop_s`` that brakes off any inherited route motion so no stale A*/NavDP
+command carries into closure), then visually servos onto the object at camera rate
+until it is centred and very close (a stable hover-lock directly in front of it). There is NO terminal stop: HOVER_LOCK keeps
 tracking, and if the object moves it re-enters APPROACH. If the track is lost it
 actively re-searches in the direction the target left; if it cannot re-acquire it
 hands control back, re-asserts the goal, and returns to SEARCH.
@@ -32,7 +34,7 @@ All the maths is ROS-free and unit-tested:
   * bbox (+depth range) -> body velocity    core.planning.visual_servo.VisualServoController
   * N-consecutive-frame acquisition         core.planning.visual_servo.TargetConfirmationGate
   * where to look when lost                  core.planning.visual_servo.ReSearchPolicy
-  * SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER  core.planning.visual_servo.VisualApproachStateMachine
+  * SEARCH/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER  core.planning.visual_servo.VisualApproachStateMachine
   * min-burst + coast flight-command shaping core.planning.visual_servo.PulseShaper
   * rotate-with-stops room sweep             core.planning.visual_servo.ScanSearchPolicy
   * bbox + depth -> metric range             core.mapping.depth.bbox_to_xyz_cam_from_depth
@@ -80,8 +82,9 @@ from sparx_agency.core.planning.visual_servo import (
     VisualServoController, VisualServoParams, VisualServoRequest,
     TargetConfirmationGate, ConfirmationGateConfig, select_overlapping_target_detection,
     ReSearchPolicy, ReSearchConfig,
-    VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN,
+    VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN, ACQUIRE_STOP,
     AxisForceProfile, PulseShaper,
+    ClosureGait, ClosureGaitConfig,
     ScanSearchConfig, ScanSearchPolicy,
 )
 
@@ -179,7 +182,11 @@ class ObjectApproachNode(object):
         self.limits = KinematicLimits(
             max_speed_xy=float(G("~max_speed_xy", 0.4)),
             max_speed_z=float(G("~max_speed_z", 0.3)),
-            max_yaw_rate=float(G("~max_yaw_rate", 0.6)))
+            # 0.7 rad/s matches the waypoint follower's proven ~yaw_rate. It is the
+            # yaw-pulse magnitude the platform actually turns on, and it caps the
+            # shaper's wz axis -- keep it >= the fixed yaw pulse below or the pulse
+            # would be clamped back down and the drone would not turn.
+            max_yaw_rate=float(G("~max_yaw_rate", 0.7)))
         # ── Closure strategy: detector_tracker (default) or detector-only ──
         # detector_tracker: the detector seeds an optical-flow tracker propagated
         # every frame between detections. detector: the detector's box alone drives
@@ -208,12 +215,12 @@ class ObjectApproachNode(object):
         self.servo = VisualServoController(VisualServoParams(
             mode=servo_mode,
             kp_yaw=float(G("~kp_yaw", 1.2)),
-            max_yaw_rate=float(G("~max_yaw_rate", 0.6)),
+            max_yaw_rate=float(G("~max_yaw_rate", 0.7)),
             use_lateral=use_lateral,
             use_vertical=_param_bool("~use_vertical", False),
             vx_max=float(G("~vx_max", 0.35)),
             use_depth=_param_bool("~use_depth", True),
-            target_range_m=float(G("~target_range_m", 0.5)),   # stop ~0.5 m from the object
+            target_range_m=float(G("~target_range_m", 1.0)),   # stop ~0.5 m from the object
             slowdown_range_m=float(G("~slowdown_range_m", 2.0)),
             target_area_frac=float(G("~target_area_frac", 0.12)),
             # ~center_tol is the ACQUISITION ANGLE: the allowed centring deviation
@@ -237,6 +244,14 @@ class ObjectApproachNode(object):
         # multi-axis follower uses. Default mode is "fixed" (bang-bang: 0 or a
         # single fixed pulse per axis). Max = the kinematic limits.
         #
+        # The fixed pulse magnitudes default to the SAME proven values the working
+        # waypoint follower publishes -- ~fixed_vx=0.3 m/s forward and ~fixed_wz=0.7
+        # rad/s yaw (its ~vel_x / ~yaw_rate). Those are the magnitudes the platform's
+        # deadband actually moves on; the earlier default (fall back to the tiny
+        # ~min_* floor: 0.06 m/s, 8 deg/s) was too weak, so a yaw pulse fired but the
+        # drone did not turn. The pulse is held for ~min_burst_ticks (2) consecutive
+        # ticks, mirroring the follower's cmd_commit_ticks=2 "at least two commands".
+        #
         # It is a stateful PulseShaper (not the memoryless CommandForceShaper): the
         # platform's yaw/forward actuation is discrete + inertial, so a lone control
         # tick does not overcome its deadband. The shaper LATCHES any motion for at
@@ -257,13 +272,30 @@ class ObjectApproachNode(object):
         min_vx = float(G("~min_vx", 0.06))
         min_vy = float(G("~min_vy", 0.06))
         min_wz = math.radians(float(G("~min_wz_deg", 8.0)))
+        # Proven pulse magnitudes: forward (vx) and yaw (wz) use the waypoint
+        # follower's ~vel_x=0.3 m/s / ~yaw_rate=0.7 rad/s. Lateral ROLL (vy) is
+        # assumed to move on the same 0.3 m/s forward-force pulse.
         self.shaper = PulseShaper(
-            vx=_axis(min_vx, self.limits.max_speed_xy, G("~fixed_vx", 0.0)),
-            vy=_axis(min_vy, self.limits.max_speed_xy, G("~fixed_vy", 0.0)),
+            vx=_axis(min_vx, self.limits.max_speed_xy, G("~fixed_vx", 0.3)),
+            vy=_axis(min_vy, self.limits.max_speed_xy, G("~fixed_vy", 0.3)),
             wz=_axis(min_wz, self.limits.max_yaw_rate,
-                     math.radians(float(G("~fixed_wz_deg", 0.0)))),
+                     math.radians(float(G("~fixed_wz_deg", math.degrees(0.7))))),
             min_burst_ticks=int(G("~min_burst_ticks", 2)),
             brake_ticks=int(G("~brake_ticks", 1)))
+
+        # ── Pulse-and-settle closure gait ────────────────────────────
+        # A cadence post-filter on the shaped SERVO command: the shaper sets the
+        # pulse magnitude, this gait sets the rhythm. It lets a short burst through
+        # (~gait_move_ticks) then forces a brief stop (~gait_settle_ticks) so the
+        # drone coasts to rest and the camera gets a fresh bbox before the next
+        # burst -- turning a "too strong / too continuous" servo stream into a
+        # move-a-little / stop-and-look rhythm, and stopping when a turn gives way
+        # to forward flight (~gait_settle_on_transition). Sized for ~ctrl_hz=10.
+        self.gait = ClosureGait(ClosureGaitConfig(
+            move_ticks=int(G("~gait_move_ticks", 2)),
+            settle_ticks=int(G("~gait_settle_ticks", 4)),
+            settle_on_axis_change=_param_bool("~gait_settle_on_transition", True),
+            enabled=_param_bool("~gait_enabled", True)))
 
         # ── Scan-at-goal sweep (arrived, still looking) ──────────────
         self.arrive_radius_m = float(G("~arrive_radius_m", 0.6))
@@ -296,8 +328,15 @@ class ObjectApproachNode(object):
             peek_forward_s=float(G("~recover_peek_forward_s", 0.6)),
             peek_roll_speed=float(G("~recover_peek_roll", 0.10)),
             peek_orbit=_param_bool("~recover_peek_orbit", True)))
+        # On acquisition (target confirmed + tracker locked) hold a brief
+        # stop-in-place before the visual approach begins: the node takes over
+        # /cmd_vel and actively publishes a zero-velocity stop for ~acquire_stop_s
+        # so the drone brakes off any inherited A*/NavDP route motion and the
+        # follower's last command lapses -- only then does it start flying to the
+        # object. 0 disables the settle (approach immediately, the legacy path).
         self.fsm = VisualApproachStateMachine(ApproachFSMConfig(
-            recover_timeout_s=recover_timeout_s))
+            recover_timeout_s=recover_timeout_s,
+            acquire_stop_s=float(G("~acquire_stop_s", 1.5))))
 
         # ── Goal memory + re-inject ───────────────────────────────────
         # We remember the coordinate route's goal (from ~goal_x/y and any live
@@ -318,7 +357,7 @@ class ObjectApproachNode(object):
         # kinematic limit) -- for a HUD gauge, not a command.
         self.gauge_max_vx = min(self.servo_vx_max, self.limits.max_speed_xy)
         self.gauge_max_vy = min(self.servo_vy_max, self.limits.max_speed_xy)
-        self.gauge_max_yaw_rate = min(float(G("~max_yaw_rate", 0.6)),
+        self.gauge_max_yaw_rate = min(float(G("~max_yaw_rate", 0.7)),
                                       self.limits.max_yaw_rate)
 
         # ── Shared state ──────────────────────────────────────────────
@@ -613,16 +652,29 @@ class ObjectApproachNode(object):
             self._last_cmd = None
             self._last_cmd_source = "awaiting %s hand-off" % MODE_VISUAL_SERVOING
             return
-        if dec.mode == SCAN:                       # arrived, sweeping the room
+        if dec.mode == ACQUIRE_STOP:               # just locked: settle in place
+            # Now that we own /cmd_vel (the follower is passive), actively publish a
+            # zero-velocity stop so the drone brakes off any inherited route motion
+            # and no stale A*/NavDP command lingers before we start flying in. Keep
+            # the closure gait reset so the approach opens with a fresh burst.
+            self.gait.reset()
+            self._publish_cmd(0.0, 0.0, 0.0, "acquire_stop")
+        elif dec.mode == SCAN:                      # arrived, sweeping the room
             c = self.scan.command(dt)
             self._publish_cmd(c.x, c.y, c.yaw_rate, "scan:%s" % self.scan.phase)
         elif dec.mode == "RECOVER" or res is None:
             self._drive_recovery(last_track, dec.lost_for_s)
         else:
+            # Servo closure (APPROACH / HOVER_LOCK): gate the shaped command through
+            # the pulse-and-settle gait so closing is a move-a-little / stop-and-look
+            # rhythm rather than one strong continuous run.
             c = res.command
-            self._publish_cmd(c.x, c.y, c.yaw_rate, "servo:%s" % res.mode)
+            self._publish_cmd(c.x, c.y, c.yaw_rate, "servo:%s" % res.mode, gated=True)
 
     def _drive_recovery(self, last_track, lost_for_s):
+        # Recovery has its own bounded sweep cadence, so it is not gated; keep the
+        # closure gait reset so a regained track re-opens APPROACH with a fresh burst.
+        self.gait.reset()
         rec = self.recovery.command(last_track, lost_for_s,
                                     self.intr.width, self.intr.height)
         c = rec.command
@@ -694,22 +746,30 @@ class ObjectApproachNode(object):
         with self._mode_lock:
             if self._requested_mode != MODE_VISUAL_SERVOING:
                 return
-            # Clear the pulse-burst state FIRST so the release "stop" is a clean zero
-            # (not a min-burst that would finish as one more motion pulse), and so the
-            # next closing episode starts fresh.
+            # Clear the pulse-burst + gait state FIRST so the release "stop" is a
+            # clean zero (not a min-burst that would finish as one more motion pulse),
+            # and so the next closing episode starts fresh.
             self.shaper.reset()
+            self.gait.reset()
             self._publish_cmd(0.0, 0.0, 0.0, "stop")
             self._request_mode_locked(MODE_RELEASE)
 
-    def _publish_cmd(self, vx, vy, wz, source="servo"):
+    def _publish_cmd(self, vx, vy, wz, source="servo", gated=False):
         """Force-shape (per-axis min/max) then publish the body-velocity Twist.
 
         Shaping is the FINAL stage before the wire, so every published command --
         servo, recovery sweep, room scan, or brake -- respects the platform's
         minimum/maximum per-axis force. Shaping ``0 -> 0``, so a stop stays a stop.
+
+        ``gated`` additionally runs the shaped command through the pulse-and-settle
+        closure gait (the move-a-little / stop-and-look cadence). Only the servo
+        closure path sets it; scan/recovery/brake keep their own cadence and pass
+        through un-gated.
         """
         shaped = self.shaper.shape(
             ControlCommand.velocity(float(vx), float(vy), 0.0, float(wz)))
+        if gated:
+            shaped = self.gait.step(shaped)
         m = Twist()
         m.linear.x = float(shaped.x)
         m.linear.y = float(shaped.y)    # holonomic crab (0 in waypoint closure)
@@ -811,6 +871,9 @@ class ObjectApproachNode(object):
         L("  closure   = %s   force=%s (min vx=%.3f vy=%.3f wz=%.0f deg/s)",
           self.closure_mode, self.force_mode, self.shaper.vx.min_magnitude,
           self.shaper.vy.min_magnitude, math.degrees(self.shaper.wz.min_magnitude))
+        L("  gait      = %s  (move %d / settle %d ticks, transition-stop=%s)",
+          "on" if self.gait.cfg.active else "off", self.gait.cfg.move_ticks,
+          self.gait.cfg.settle_ticks, self.gait.cfg.settle_on_axis_change)
         L("  nav goal  = %s  (in=%s out=%s, arrive<%.2fm -> SCAN)",
           self._goal_xy, self.goal_in_topic, self.goal_out_topic, self.arrive_radius_m)
         L("  HUD out   = %s  @ %.1f Hz (%s)", self.overlay_topic, self.viz_hz,
@@ -850,7 +913,9 @@ if __name__ == "__main__":
 #       ~img_height (294)  ~camera_info_topic ('' = use params)
 #   mission: ~target_object (refrigerator) ~start_enabled (true) ~ctrl_hz (10.0,
 #       matches the route follower's fixed-speed/tick calibration)
-#   acquisition: ~n_confirm (3) ~min_score (0.30)
+#   acquisition: ~n_confirm (3) ~min_score (0.30) ~acquire_stop_s (1.5, stop-in-place
+#       hold right after confirm+lock -- the node publishes a zero-velocity stop that
+#       brakes off inherited A*/NavDP route motion before the approach; 0 = off)
 #   closure strategy: ~lock_mode (detector_tracker | detector). detector_tracker
 #       (default): detector seeds an optical-flow tracker propagated every frame.
 #       detector: the detector's box alone drives closure (no tracking), holding
@@ -876,11 +941,19 @@ if __name__ == "__main__":
 #   flight-command shaping (discrete + inertial, on EVERY published command):
 #       ~force_mode (fixed | snap | none; default fixed = bang-bang 0/±pulse)
 #       ~min_vx (0.06) ~min_vy (0.06) ~min_wz_deg (8.0) ~force_release_frac (0.5)
-#       ~force_zero_eps (1e-3) ~fixed_vx/~fixed_vy/~fixed_wz_deg (<=0 -> = the min)
+#       ~force_zero_eps (1e-3). Fixed pulse magnitudes = the waypoint follower's
+#       proven ~vel_x/~yaw_rate: ~fixed_vx (0.3 m/s) ~fixed_wz_deg (~40.1 = 0.7 rad/s)
+#       ~fixed_vy (0.3 m/s lateral ROLL pulse; assumed same as the forward force)
 #       ~min_burst_ticks (2, hold any motion >=N ticks so a lone tick that the
 #       platform ignores becomes a real burst) ~brake_ticks (0, opposite pulses to
 #       bleed off the coast after a burst; 0 = rely on the yaw deadband stopping early)
-#   limits: ~max_speed_xy (0.4) ~max_speed_z (0.3) ~max_yaw_rate (0.6)
+#   closure gait (move-a-little / stop-and-look cadence on the SERVO command only):
+#       ~gait_enabled (true) ~gait_move_ticks (2, max motion ticks per burst)
+#       ~gait_settle_ticks (4, forced-stop ticks after a burst / on a turn<->forward
+#       change; 0 = gait off) ~gait_settle_on_transition (true, stop when the motion
+#       axis changes). Sized for ~ctrl_hz=10.
+#   limits: ~max_speed_xy (0.4) ~max_speed_z (0.3) ~max_yaw_rate (0.7, >= the fixed
+#       yaw pulse so the shaper does not clamp it below the turn magnitude)
 #   recovery (RECOVER manoeuvre to re-see a lost target -- all small/bounded for
 #       wall safety, time-bounded by recover_timeout_s):
 #       ~search_yaw_rate (0.5) ~recover_timeout_s (6.0) ~recover_hold_s (0.3, hover

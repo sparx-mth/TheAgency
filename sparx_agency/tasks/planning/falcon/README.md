@@ -354,15 +354,38 @@ and the TensorRT detector as a ROS2 sidecar **on the host** (see
 [Why the detector runs on the host](#why-the-detector-runs-on-the-host)). They are
 joined only by two `std_msgs/String` topics across the bridge — no image is bridged.
 
+### One command (recommended)
+
+`run_object_approach_mission.sh` starts all three pieces (detector sidecar → bridge →
+container mission) in order, wires the **GPU** detector engine, and tears the two host
+helpers down on exit. The container stays in the foreground so you keep the HUD and
+can `Ctrl-C` the whole mission:
+
+```bash
+cd sparx_agency/tasks/planning/falcon
+./run_object_approach_mission.sh office gun 0.0 -3.0
+#                                 ^env   ^target ^goal_x ^goal_y
+# NAV_MODE=astar for pure A* (default combination = A* route + NavDP legs).
+# MODEL=l for a bigger detector (detect runs ~2 Hz, so a larger model is affordable).
+# Any real_drone_object_approach.launch arg can be appended, e.g. closure_mode:=waypoint.
+```
+
+It fails loudly if the GPU engines or `.pt` text weights are missing, pointing you at
+`build_all.sh <model>`. The three manual steps below are the same thing by hand.
+
+### The three processes, by hand
+
 **1. The detector**, on the Orin host, in the environment that has `tensorrt` +
-`pycuda` (the one that built the engines and ran `object_approach_offline`):
+`pycuda` (the one that built the engines and ran `object_approach_offline`). Point it
+at the **GPU** backbone engine (the DLA is measured slower — see the yolo_world_trt
+README):
 
 ```bash
 source /opt/ros/humble/setup.bash
 cd /path/to/repo    # the dir CONTAINING sparx_agency/
 PYTHONPATH=$PWD python3 sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py \
-    --ros-args -p target_object:=monitor \
-      -p backbone_engine:=/path/yolo_world_s.backbone.fp16.dla0.engine \
+    --ros-args -p target_object:=gun \
+      -p backbone_engine:=/path/yolo_world_s.backbone.fp16.gpu.engine \
       -p head_engine:=/path/yolo_world_s.head.fp16.gpu.engine \
       -p text_weights:=/path/yolov8s-worldv2.pt
 ```
@@ -432,10 +455,23 @@ is exactly what makes this split free.
 Live control, at any time:
 
 ```bash
-rostopic pub -1 /object_approach/goal   std_msgs/String "data: 'hat'"   # retarget (re-prompts the detector)
+# Switch the hunted object live -- re-prompts the detector AND re-keys the
+# closure's confirmation gate (one topic, both sides). From the HOST use the
+# helper (it sets the RELIABLE + TRANSIENT_LOCAL QoS the subscribers require;
+# a plain `ros2 topic pub` is VOLATILE and is dropped silently):
+./retarget_object.sh knife
+# ...or, from INSIDE the container (ROS1, no QoS flags needed):
+rostopic pub -1 /object_approach/goal   std_msgs/String "data: 'knife'"
+
 rostopic pub -1 /object_approach/enable std_msgs/Bool   "data: false"   # disarm -> planner keeps the route
 rostopic echo /object_approach/status                                   # state, streak, range, at_target
 ```
+
+> **Why a helper for the switch.** `/object_approach/goal` is subscribed as
+> `TRANSIENT_LOCAL` by both the host detector and the bridge. A default
+> `ros2 topic pub` is `VOLATILE` → durability-incompatible → the message reaches
+> neither and the target never changes, with no error. `retarget_object.sh`
+> publishes with the matching QoS so the switch actually lands.
 
 ### Prerequisite: build the TensorRT engines on the target
 

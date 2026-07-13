@@ -42,6 +42,7 @@ from sparx_agency.core.planning.visual_servo.state_machine import (
     VisualApproachStateMachine,
     SEARCH,
     SCAN,
+    ACQUIRE_STOP,
     APPROACH,
     HOVER_LOCK,
     RECOVER,
@@ -53,6 +54,10 @@ from sparx_agency.core.planning.visual_servo.force_shaping import (
     shape_axis_force,
 )
 from sparx_agency.core.planning.visual_servo.pulse_shaper import PulseShaper
+from sparx_agency.core.planning.visual_servo.gait import (
+    ClosureGait,
+    ClosureGaitConfig,
+)
 from sparx_agency.core.planning.visual_servo.scan_search import (
     ScanSearchConfig,
     ScanSearchPolicy,
@@ -78,6 +83,7 @@ __all__ = [
     "VisualApproachStateMachine",
     "SEARCH",
     "SCAN",
+    "ACQUIRE_STOP",
     "APPROACH",
     "HOVER_LOCK",
     "RECOVER",
@@ -86,6 +92,8 @@ __all__ = [
     "CommandForceShaper",
     "shape_axis_force",
     "PulseShaper",
+    "ClosureGait",
+    "ClosureGaitConfig",
     "ScanSearchConfig",
     "ScanSearchPolicy",
 ]
