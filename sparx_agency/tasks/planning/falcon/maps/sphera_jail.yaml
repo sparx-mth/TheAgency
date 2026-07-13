@@ -1,0 +1,73 @@
+# ============== ROBOTICAN FIX ==============
+# New map file, ROBOTICAN/Sphera-only. Does not touch office.yaml,
+# hospital.yaml, or any other existing map config used by XTEND/Jetson.
+# ============================================
+map_config:
+  map_file: ""
+  map_dimension: 2
+
+  # Drone's actual ground-truth spawn position in Sphera's world frame
+  # (confirmed via /R1/localization: pose stayed at (-54.75, 14.66, 0.12)
+  # throughout an idle session). NOT the origin -- office.yaml's
+  # "drone starts at the origin" assumption does NOT hold for this map;
+  # Sphera's world frame places R1 far from (0,0). Getting this wrong
+  # crashes exploration_node: FALCON's voxel grid is sized/indexed from
+  # map_size below, so a real position outside those bounds computes a
+  # wildly out-of-range array index --
+  #   F... map_base_inl.h:173] Check failed: addr < map_data_->data.size()
+  #   (-3062602 vs. 1480000) Address out of range: -3062602
+  # (glog FATAL abort in voxel_mapping::OccupancyGrid::updateOccupancyVoxel).
+  init_x: -54.75
+  init_y: 14.66
+  init_z: 0.12
+  init_yaw: 0.0
+
+  # Unlike office.yaml, no behind_wall_x / walls[] here: the Sphera jail's
+  # walls are NOT known in advance, so bev_publisher won't force any cells
+  # to OCC ahead of time. FALCON must discover the room boundary itself
+  # from depth as it explores (same as hospital/playground/small_house/
+  # bookstore, which also omit these fields).
+
+  # ── Bounds ───────────────────────────────────────────────────────
+  # Centered on the drone's actual spawn position above, NOT the origin.
+  # Room scale (±8 m box / ±10 m map) is still a guess -- adjust once the
+  # real jail dimensions are known. `box` is the hard boundary FALCON maps
+  # and explores; `vbox` (virtual boundary) and `map` (global grid
+  # allocation) are the larger extents around it. Required ordering on
+  # every axis: map ⊇ vbox ⊇ box.
+  map_size:
+    map_min_x: -64.75
+    map_min_y:   4.66
+    map_min_z:  -2.0
+    map_max_x:  -44.75
+    map_max_y:  24.66
+    map_max_z:   1.7
+
+    box_min_x: -62.75
+    box_min_y:   6.66
+    box_min_z:  -1.0
+    box_max_x:  -46.75
+    box_max_y:  22.66
+    box_max_z:   1.7
+
+    vbox_min_x: -64.75
+    vbox_min_y:   4.66
+    vbox_min_z:  -2.0
+    vbox_max_x:  -44.75
+    vbox_max_y:  24.66
+    vbox_max_z:   1.7
+
+  scale: 1.0
+
+  # Body (FLU) -> camera (RDF). Property of the drone, unchanged.
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
