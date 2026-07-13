@@ -47,7 +47,6 @@ falcon/
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
     │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common.intrinsic_remap + wall-clock restamp)
-    │   ├── yolo_detector_node.py   # RGB -> TensorRT YOLO-World -> detections JSON (only with detector:=internal; the container has no CUDA — the detector normally runs as a ROS2 sidecar on the host, tasks/mapping/ros2/yolo_detector_ros2_node.py)
     │   ├── object_approach_node.py # detections -> track + visual servo + SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER (core.planning.visual_servo)
     │   ├── target_lock_viewer_node.py # on-screen live target-lock HUD (subscribes the overlay Image)
     │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
@@ -406,7 +405,7 @@ source /catkin_ws/devel/setup.bash
 export DISPLAY=:0
 roslaunch falcon_adapter real_drone_object_approach.launch \
 map_name:=office \
-target_object:=bottle \
+target_object:=gun \
 goal_x:=0.0 \
 goal_y:=-3.0 \
 viewer:=false \
@@ -421,10 +420,9 @@ mission half in a second shell (`docker exec -it falcon bash` first):
 roslaunch falcon_adapter object_approach.launch target_object:=monitor
 ```
 
-Both launches default to `detector:=external`, which starts **no** detector in the
-container and simply consumes the sidecar's detections. `detector:=internal` starts
-`yolo_detector_node.py` in-container instead — only useful once the image actually
-carries TensorRT + pycuda (it does not today).
+Both launches consume the sidecar's detections over the bridge; **no** detector runs
+in the container (the FALCON image has no CUDA/TensorRT/pycuda). The detector always
+runs as the host-side ROS2 sidecar.
 
 ### Why the detector runs on the host
 
@@ -491,8 +489,8 @@ sparx_agency/tasks/mapping/yolo_world_trt/build_all.sh s
 ```
 
 Then point the **sidecar** at them (`-p backbone_engine:=… -p head_engine:=…`, step 1
-above). They are host paths, not container paths — the detector no longer runs in the
-container, so the `engines_dir` launch args only matter for `detector:=internal`.
+above). They are host paths, not container paths — the detector runs only as the
+host-side sidecar, so no engine paths appear in the container launch at all.
 
 `text_weights` (the `.pt` checkpoint) is only touched to embed the *prompt* — the
 CLIP text branch — so torch runs once per retarget, never per frame. Inference itself
@@ -540,12 +538,14 @@ follower's own `controller`:
   route follower.
 
 Key knobs: `target_object`, `conf_thresh` (0.40 — the detector's min class confidence,
-the offline tools' `--conf`; raise it to suppress false locks, lower it to acquire
-sooner), `n_confirm` (3), `min_score` (0.30), `target_range_m` (0.8,
+set on the sidecar (`-p conf_thresh:=`); the offline tools' `--conf`; raise it to
+suppress false locks, lower it to acquire sooner), `n_confirm` (3), `min_score` (0.30),
+`target_range_m` (0.8,
 the hover-lock standoff), `arrive_radius_m` (0.6, when "arrived" triggers the scan),
 `scan_yaw_rate` / `scan_rotate_s` / `scan_pause_s`, `recover_timeout_s`, `detect_hz`
 (2.0 — the tracker runs at full camera rate between detections). Full rosparam lists
-are in the footers of `object_approach_node.py` and `yolo_detector_node.py`.
+are in the footers of `object_approach_node.py` and the sidecar
+`yolo_detector_ros2_node.py`.
 
 ### The live target-lock HUD
 

@@ -36,9 +36,6 @@ FALCON container. They meet at two `std_msgs/String` topics on the bridge.
   has no CUDA/TensorRT/pycuda, while the host already has the env that built the
   engines. It reads `/xtend/rgb_frame_path` natively, *upstream of the bridge*, so no
   image is ever bridged.
-- **`adapter/scripts/yolo_detector_node.py`** (ROS1, container) — the same detector as
-  an in-container node, started only with `detector:=internal`. Needs tensorrt +
-  pycuda in the image; kept for a future JetPack-based build.
 - **`adapter/scripts/object_approach_node.py`** (ROS1) — torch-free (Python-3.8-safe):
   tracks + servos + runs the state machine; force-shapes every command; takes over
   `/cmd_vel` via the `visual_servoing` demo-mode hand-off (so the follower goes
@@ -99,7 +96,7 @@ rostopic pub -1 /object_approach/goal   std_msgs/String "data: 'hat'"   # retarg
 rostopic pub -1 /object_approach/enable std_msgs/Bool   "data: false"   # arm/disarm
 ```
 
-Both launches default to `detector:=external` (no detector started in the container).
+No detector runs in the container; both launches consume the host sidecar's detections.
 
 Intrinsics **must** match the live stream (raw K, not P). The TRT engines are not
 portable — build them on the target. Tuning is all rosparams: see the footers of the
