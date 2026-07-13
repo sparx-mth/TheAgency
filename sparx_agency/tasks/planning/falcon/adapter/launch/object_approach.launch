@@ -71,7 +71,7 @@
 
   <!-- ── Detector (TensorRT YOLO-World; engines built on-target) ─────── -->
   <arg name="engines_dir"       default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/engines/orin_sm87" />
-  <arg name="backbone_engine"   default="$(arg engines_dir)/yolo_world_s.backbone.fp16.dla0.engine" />
+  <arg name="backbone_engine"   default="$(arg engines_dir)/yolo_world_s.backbone.fp16.gpu.engine" />
   <arg name="head_engine"       default="$(arg engines_dir)/yolo_world_s.head.fp16.gpu.engine" />
   <arg name="text_weights"      default="/opt/sparx_agency/tasks/mapping/yolo_world_trt/weights/yolov8s-worldv2.pt" />
   <arg name="text_device"       default="cpu" />
