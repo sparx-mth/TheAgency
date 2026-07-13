@@ -1,5 +1,5 @@
 {
-  "_comment": "Knobs for the OPEN-SET YOLO-World TensorRT build. The model is split into a static text-free BACKBONE engine (DLA) and a dynamic text-fused HEAD engine (GPU); the text embeddings are a runtime input, never baked, so it stays open-vocabulary. imgsz is HEIGHTxWIDTH and MUST be stride-32 multiples. Default 288x512 matches the 504x294 XTEND resize with minimal letterbox padding; use 640x640 for max accuracy.",
+  "_comment": "Knobs for the OPEN-SET YOLO-World TensorRT build. The model is split into a static text-free BACKBONE engine and a dynamic text-fused HEAD engine (GPU); the text embeddings are a runtime input, never baked, so it stays open-vocabulary. The backbone defaults to the GPU: on-target Orin 15W benchmarks showed the GPU beats the DLA at every size (s 40 vs 29 FPS, x 19 vs 6 FPS), because the DLA is throughput-bound on these backbones and ~28% of layers fall back to the GPU anyway. Set dla.enable=true (or build_engine --dla) to build the DLA backbone for re-measurement. imgsz is HEIGHTxWIDTH and MUST be stride-32 multiples. Default 288x512 matches the 504x294 XTEND resize with minimal letterbox padding; use 640x640 for max accuracy.",
 
   "variants": {
     "s": "yolov8s-worldv2.pt",
@@ -21,7 +21,7 @@
   },
 
   "dla": {
-    "enable": true,
+    "enable": false,
     "core": 0,
     "gpu_fallback": true,
     "managed_sram_bytes": 1048576,

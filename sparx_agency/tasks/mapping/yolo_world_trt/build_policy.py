@@ -3,10 +3,10 @@
 Open-set YOLO-World is split into two engines with opposite hardware fits, so the
 policy is per **role**:
 
-  * ``backbone`` -- text-free, image-only, fully static. Targets the **DLA** (with
-    GPU fallback for the few unsupported ops) at FP16, which is the whole point of
-    the split: the conv bulk runs off the GPU. Static shapes are what let DLA
-    accept it at all.
+  * ``backbone`` -- text-free, image-only, fully static. Defaults to the **GPU** at
+    FP16. It *can* target the DLA (static shapes are what let the DLA accept it),
+    but on-target Orin 15W benchmarks showed the GPU is faster at every size, so
+    the DLA is now opt-in (``dla.enable`` in the config, or ``build_engine --dla``).
   * ``head`` -- fuses the text embeddings; its class dimension is the runtime
     prompt count, so it is built with a **dynamic** ``N`` optimization profile and
     stays on the **GPU** (DLA cannot do dynamic shapes). FP16.
@@ -107,9 +107,10 @@ def build_policy(role, variant, profile, config=None, precision=None,
         profile: the target :class:`HardwareProfile`.
         config: pre-loaded config dict (defaults to ``configs/build_policy.json``).
         precision: override ``"fp16"`` / ``"int8"`` (else the config value).
-        dla: tri-state -- ``True`` force DLA, ``False`` forbid, ``None`` = config +
-            whether the board has a DLA. Ignored for the head (always GPU: DLA
-            cannot run its dynamic shapes).
+        dla: tri-state -- ``True`` force DLA, ``False`` forbid, ``None`` = config
+            (``dla.enable``, default ``False``) gated by whether the board has a
+            DLA. Ignored for the head (always GPU: DLA cannot run its dynamic
+            shapes).
     """
     if role not in ROLES:
         raise ValueError("role must be one of %s, got %r" % (ROLES, role))
@@ -123,7 +124,7 @@ def build_policy(role, variant, profile, config=None, precision=None,
     if role == "head":
         use_dla = False                          # dynamic shapes -> GPU only
     else:
-        want = dla_cfg.get("enable", True) if dla is None else bool(dla)
+        want = dla_cfg.get("enable", False) if dla is None else bool(dla)
         use_dla = bool(want and profile.allow_dla)
 
     levels = cfg.get("builder_optimization_level", {})

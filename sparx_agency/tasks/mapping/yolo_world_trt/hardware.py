@@ -7,11 +7,12 @@ and a Jetson AGX Orin pinned to 15 W. This module produces a
 and it runs *gracefully on both* the dev laptop (no Jetson sysfs, no DLA) and the
 Orin.
 
-Unlike the NavDP hardware probe -- whose ViT graphs are a poor DLA fit, so it
-hard-codes ``allow_dla=False`` -- this one **enables DLA on Orin**: a prompt-baked
-YOLO-World export is a pure convolutional detector, exactly the CNN workload the
-two NVDLA cores are built for. Offloading the backbone/neck to DLA frees the GPU,
-which is the throughput *and* power bottleneck at a 15 W cap.
+``allow_dla`` reports only whether the board *has* usable DLA cores -- it is a
+capability flag, not a recommendation. The build default is GPU (see
+``build_policy``): on-target Orin 15 W benchmarks showed the GPU beats the DLA
+backbone at every size (s 40 vs 29 FPS, x 19 vs 6 FPS) -- the DLA is throughput-
+bound on these backbones and a large fraction of layers fall back to the GPU
+anyway. The DLA path stays reachable via ``build_engine --dla`` for re-measurement.
 
 Everything is best-effort and never raises on a missing tool/node: a field is
 left at its conservative default. Pure standard library; importable anywhere.
@@ -139,7 +140,8 @@ def _jetson_fill(profile):
     elif "xavier" in model_l:
         profile.compute_capability = (7, 2)
         profile.dla_cores = 2
-    # A prompt-baked YOLO-World export is a CNN -> DLA is worth it whenever present.
+    # Capability only: the board has DLA cores. The build still defaults to GPU
+    # (measured faster than DLA on these backbones); --dla opts back in.
     profile.allow_dla = profile.dla_cores > 0
     meminfo = _read("/proc/meminfo")
     m = re.search(r"MemTotal:\s*(\d+)\s*kB", meminfo)
