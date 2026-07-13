@@ -3,7 +3,7 @@
 
 The "hover / visual approach" mission on top of the FALCON nav stack. While the
 target is not yet confirmed the node stays PASSIVE and the existing A*/NavDP
-follower flies the coordinate route; the detector (yolo_detector_node) scans in
+follower flies the coordinate route; the detector (yolo_detector_ros2_node) scans in
 parallel. Once the target is confirmed for N consecutive detector frames, the node
 takes over ``/cmd_vel`` -- via the ``visual_servoing`` demo-mode hand-off, which
 makes the follower go passive so there is exactly one publisher -- first holds a
@@ -44,7 +44,7 @@ and feeding the pure state machines. Pose is used ONLY for arrival detection.
 Inputs  (mirrors navdp_click / combination transports):
   ~rgb_topic     frame-path String or raw Image   (tracked every frame)
   ~depth_topic   frame-path String or raw Image   (optional; metric range)
-  ~detections_topic  std_msgs/String JSON         (from yolo_detector_node)
+  ~detections_topic  std_msgs/String JSON         (from yolo_detector_ros2_node)
   ~target_topic  std_msgs/String                  (the mission "goal", e.g. "hat")
   ~enable_topic  std_msgs/Bool                     (mode switch; ~start_enabled)
   ~demo_mode_topic  std_msgs/String                (to know we hold visual_servoing)
@@ -522,8 +522,8 @@ class ObjectApproachNode(object):
 
     # ─── Detections: confirm + (re)seed the tracker ──────────────────
     def _det_cb(self, msg):
-        # The detector may be the in-container ROS1 node or the host-side ROS2
-        # sidecar arriving over the bridge; both speak core.common.detection_message.
+        # Detections arrive from the host-side ROS2 sidecar over the bridge; the
+        # wire format is core.common.detection_message.
         try:
             parsed = parse_detections_message(
                 msg.data, default_width=self.intr.width,

@@ -34,7 +34,8 @@
 #     TEXT_WEIGHTS host path to yolov8<MODEL>-worldv2.pt (the CLIP prompt
 #                 encoder; torch runs once per retarget, never per frame).
 #     Any real_drone_object_approach.launch arg can be appended after GOAL_Y,
-#     e.g. closure_mode:=waypoint conf_thresh:=0.10 viewer:=false
+#     e.g. closure_mode:=waypoint target_range_m:=1.0 viewer:=false
+#     (detector knobs like conf_thresh are set on the sidecar, not here).
 #
 # Examples:
 #   ./run_object_approach_mission.sh office gun 0.0 -3.0
