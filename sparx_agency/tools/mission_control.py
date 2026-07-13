@@ -361,8 +361,9 @@ ROBOTICAN_SERVICES: list[Service] = [
             "  --ros-args \\\n"
             "  -p rooster_ids:=R1 \\\n"
             "  -p step:=50.0 \\\n"
-            "  -p climb_z:=600.0 \\\n"
+            "  -p climb_z:=700.0 \\\n"
             "  -p hover_z:=550.0 \\\n"
+            "  -p climb_duration_sec:=5.0 \\\n"
             "  -p log_dir:=/tmp"
         ),
         env="container",
@@ -390,8 +391,9 @@ ROBOTICAN_SERVICES: list[Service] = [
             "python3 /home/rooster/sparx_agency/robots/ROBOTICAN/adapters/rooster_command_unit.py \\\n"
             "  --ros-args \\\n"
             "  -p rooster_id:=R1 \\\n"
-            "  -p climb_z:=600.0 \\\n"
-            "  -p hover_z:=550.0"
+            "  -p climb_z:=700.0 \\\n"
+            "  -p hover_z:=550.0 \\\n"
+            "  -p climb_duration_sec:=5.0"
         ),
         env="container",
         machine="container",

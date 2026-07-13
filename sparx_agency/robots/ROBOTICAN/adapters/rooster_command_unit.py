@@ -35,8 +35,14 @@ _MOVE_ACTIONS = {
     "right": dict(y=1),
     "up": dict(z=1),
     "down": dict(z=-1),
-    "turn_left": dict(r=1),
-    "turn_right": dict(r=-1),
+    # Flipped 2026-07-13: user reported turn_left/turn_right swapped live.
+    # Same class of bug as the left/right (y-axis) fix above -- this r-axis
+    # sign was only ever assumed from doc convention, never live-validated
+    # (see the "adjust if needed" comment in
+    # examples/src/ground_roll_turn_left_right.py). Re-confirm with a live
+    # test after this change, same as the y-axis fix was.
+    "turn_left": dict(r=-1),
+    "turn_right": dict(r=1),
 }
 
 

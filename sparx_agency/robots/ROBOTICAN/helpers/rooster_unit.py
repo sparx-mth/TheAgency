@@ -149,6 +149,17 @@ class RoosterUnit:
             on_failed: Optional[Callable[[str], None]] = None):
         if self.arm_pending:
             self.node.get_logger().warn(f"[{self.id}] Arm already in progress.")
+            # Bugfix: this branch used to return without invoking either
+            # callback. takeoff() sets busy_action="takeoff" BEFORE calling
+            # arm(), relying on arm()'s callback to eventually clear it -- if
+            # arm() hit exactly this branch (e.g. ARM clicked, then TAKEOFF
+            # clicked before the first arm confirmed), busy_action was left
+            # stuck forever, silently no-oping every future land()/takeoff()
+            # call. Confirmed live: repeated "Arm already in progress." /
+            # "Busy with 'takeoff', ignoring takeoff." log spam with no ARM/
+            # TAKEOFF ever actually happening.
+            if on_failed:
+                on_failed("arm already in progress")
             return
         if self.armed:
             self.node.get_logger().warn(f"[{self.id}] Already armed.")

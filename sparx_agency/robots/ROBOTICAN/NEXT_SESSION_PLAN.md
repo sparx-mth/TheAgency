@@ -1,5 +1,10 @@
 # Next session: connect FALCON to ROBOTICAN
 
+**Also see `MISSION_CONTROL_INTEGRATION_PLAN.md`** — a separate, self-contained
+task (adding the sensing/dome pipeline to `sparx_agency/tools/mission_control.py`'s
+Streamlit launcher) with every path/command/gotcha needed, written for
+picking up from a different machine.
+
 ## Status as of 2026-07-13 (superseding everything below this point — kept for history)
 
 The Sphera CycloneDDS networking issue is resolved (pragmatically — see
