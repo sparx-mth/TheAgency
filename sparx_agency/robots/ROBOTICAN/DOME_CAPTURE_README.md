@@ -9,6 +9,29 @@ robot's captures.
 This covers only the sensing bridge + sweep capture. FALCON/InternNav
 navigation on ROBOTICAN is a separate, not-yet-built follow-up.
 
+**Confirmed working end-to-end 2026-07-13** against live Sphera: gateway
+(arm/takeoff/hover/rotate/land), frame publisher, DA3 depth, ground-truth
+localization, and the full autonomous dome-sweep mission all validated on
+real Sphera video/telemetry — see `NEXT_SESSION_PLAN.md` for exactly what
+was confirmed and what's still open.
+
+## Offline replay (no Sphera needed)
+
+`rooster_offline_frame_dir_publisher.py` replays a previously-captured
+session (produced by `rooster_dome_main.py`) back onto the exact same
+topics the live pipeline uses (`/R1/rgb_frame_path`, `/R1/depth_frame_path`,
+`/R1/localization`) — for testing downstream consumers (FALCON, etc.)
+without a live drone/Sphera connection at all:
+```bash
+./sparx_agency/robots/ROBOTICAN/run_rooster_offline_replay.sh \
+  --session-dir ~/rooster_dome_capture/latest \
+  --rooster-id R1 --rate 2.0 [--loop]
+```
+RGB/depth files are copied into `--rgb-out-dir`/`--depth-out-dir` (default
+`/tmp/rooster_frames`/`/tmp/rooster_depth` — the same paths the live
+pipeline uses), so a consumer mounting those fixed directories doesn't need
+to know whether it's live or replayed.
+
 ## Where things run (read this first)
 
 Not everything runs on the host. `rooster_command_unit.py` needs the custom
