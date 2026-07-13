@@ -11,7 +11,7 @@ from sparx_agency.robots.common.image_utils import create_hist_image_with_object
 # Add project root to path so we can import sparx_agency
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
 
-from sparx_agency.core.mapping.depth import DepthAnythingV2DepthModel
+from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2Config
 from sparx_agency.core.mapping.depth.depth_object_segmenter import DepthObjectSegmenter
 from sparx_agency.robots.common import TicToc, get_objects_via_histogram

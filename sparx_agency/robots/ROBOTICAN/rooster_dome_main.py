@@ -438,6 +438,7 @@ def main():
         node.run_mission()
     finally:
         executor.shutdown()
+        spin_thread.join(timeout=5.0)
         node.destroy_node()
         rclpy.try_shutdown()
 

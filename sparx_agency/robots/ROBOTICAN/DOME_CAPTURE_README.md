@@ -33,27 +33,35 @@ live there immediately, no rebuild/copy step).
 | `ui.py` | host | only `std_msgs`, `rclpy` |
 | `rooster_dome_main.py` | host | only `std_msgs`/`geometry_msgs` |
 
-**Fixed 2026-07-08 — CycloneDDS network interface.** All three Sphera/Rooster
-containers (`it`, `R1`, `drone_simulator`) run with `NetworkMode: host`, so
-they share this machine's network namespace directly — there's no
-container/host boundary here. This machine has two active NICs: the real
-Rooster/Sphera network is `enx00e04c680602` (192.168.131.x); `enp129s0`
-(172.16.17.x) is unrelated. Without `CYCLONEDDS_URI` explicitly set on
-**both** the host and inside `it`, CycloneDDS silently ignores
-`/etc/cyclonedds.xml` and picks a network interface "arbitrarily" — which
-crashed the container's much older CycloneDDS (0.7.0, vs. the host's 0.10.5)
-with a SIGSEGV in its discovery-packet parser (`ddsi_plist_init_frommsg`)
-as soon as it saw a mismatched/cross-interface participant. The host's own
-`/etc/cyclonedds.xml` also had a stale interface name (`enx00e04c6807d3`,
-which doesn't exist on this machine) that was never being loaded for the
-same reason. Fix, one-time on the host:
-```bash
-sudo sed -i 's/enx00e04c6807d3/enx00e04c680602/' /etc/cyclonedds.xml
-```
-All `run_*.sh` wrappers now `export CYCLONEDDS_URI=file:///etc/cyclonedds.xml`
-so this is no longer silently skipped. The container needs the same export
-before running `rooster_command_unit.py` (see Terminal 1 below) — its own
-`/etc/cyclonedds.xml` already correctly points at `enx00e04c680602`.
+**CycloneDDS network interface — pragmatic fix in place as of 2026-07-13,
+temporary.** All three Sphera/Rooster containers (`it`, `R1`,
+`drone_simulator`) run with `NetworkMode: host`, so they share this
+machine's network namespace directly — there's no container/host boundary
+here. This machine has two active NICs: `enx00e04c680602` (192.168.131.x,
+the network the Sphera vendor says Rooster traffic *should* use) and
+`enp129s0` (172.16.17.x, general/internet network). Without `CYCLONEDDS_URI`
+explicitly set, CycloneDDS silently ignores its config and picks a network
+interface "arbitrarily" — which crashed the older-CycloneDDS containers
+with a SIGSEGV in their discovery-packet parser (`ddsi_plist_init_frommsg`)
+as soon as they saw a mismatched/cross-interface participant.
+
+`R1` is spawned **internally by the Sphera app itself** with no
+`CYCLONEDDS_URI`/config at all, and always "arbitrarily" lands on
+`enp129s0` — confirmed not fixable from our side (no compose file, script,
+or env var controls R1's launch). Rather than keep fighting that, everyone
+else is currently pointed at `enp129s0`/`172.16.17.10` to match it:
+`/home/user1/rqs_iai_ws/src/cyclonedds.xml` (the single shared config file,
+bind-mounted as `/etc/cyclonedds.xml` into both `it` and `drone_simulator`,
+and loaded via `CYCLONEDDS_URI` by every host-side `run_*.sh` wrapper) has
+`<NetworkInterfaceAddress>172.16.17.10</NetworkInterfaceAddress>`. Verified
+working: `rooster_command_unit.py` starts without crashing and
+`/R1/rooster_status` carries real telemetry.
+
+**This contradicts the vendor's stated 192.168.131.x requirement** and is
+only in place to unblock testing — the user is asking the vendor how they
+intend R1's spawned-container networking to be configured. Once that's
+answered, change `NetworkInterfaceAddress` back to `192.168.131.20`
+(or `enx00e04c680602`) in that one shared file.
 
 ## One-time: camera calibration
 
@@ -107,8 +115,21 @@ source /opt/ros/foxy/setup.bash
 source /home/rooster/workspace/install/setup.bash
 export CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 cd /home/rooster
-python3 -m sparx_agency.robots.ROBOTICAN.adapters.rooster_command_unit --ros-args -p rooster_id:=R1
+python3 -m sparx_agency.robots.ROBOTICAN.adapters.rooster_command_unit \
+  --ros-args -p rooster_id:=R1 -p climb_z:=700.0 -p hover_z:=550.0 -p climb_duration_sec:=5.0
 ```
+
+**Climb tuning (Sphera sim, confirmed 2026-07-13)**: the code defaults
+(`climb_z=600`, `climb_duration_sec=3.0`) aren't enough thrust/time for this
+drone's simulated mass to actually leave the ground in Sphera — it silently
+"completes" the climb sequence (RoosterUnit's climb is open-loop, no
+altitude feedback) while never actually gaining altitude. `climb_z=700`,
+`climb_duration_sec=5.0` reliably gets it airborne; `hover_z=550` (the
+existing default) then holds a stable hover once already airborne — values
+between these (600, 450) either kept slowly climbing or sank. These are
+**simulator-specific empirical values, not code defaults** (a real drone's
+thrust characteristics likely differ) — pass them as `-p` overrides here,
+don't bake them into `RoosterUnit`'s defaults.
 
 Verify from the host: `ros2 topic echo /R1/rooster_status --once` should
 print real `armed`/`airborne`/`battery_pct`/`video_on` values (not just
