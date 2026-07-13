@@ -1,8 +1,13 @@
-"""Run the open-set YOLO-World split (backbone DLA engine + head GPU engine).
+"""Run the open-set YOLO-World split (backbone engine + head GPU engine).
+
+The backbone engine's device (GPU or DLA) is baked in at build time -- the runtime
+just deserializes whatever file it is given, so passing a ``.gpu.engine`` runs the
+backbone on the GPU and a ``.dla0.engine`` runs it on the DLA. The build defaults
+to GPU (measured faster on Orin); the head is always GPU.
 
 :class:`TwoStageYoloTRT` chains the two engines on one CUDA stream: the backbone's
 output feature buffers are *shared* (same device address) as the head's feature
-inputs, so no copy happens between DLA and GPU stages. The head's ``txt_feats``
+inputs, so no copy happens between stages. The head's ``txt_feats``
 input is set once per re-prompt (dynamic ``N``); the per-frame call only moves the
 image in and the detections out.
 
@@ -43,7 +48,11 @@ def _prod(shape):
 
 
 class TwoStageYoloTRT:
-    """Backbone(DLA) -> Head(GPU) TensorRT chain with shared feature buffers."""
+    """Backbone -> Head(GPU) TensorRT chain with shared feature buffers.
+
+    The backbone runs on whichever device its engine was built for (GPU by
+    default; DLA if a ``.dla0.engine`` is passed). The head is always GPU.
+    """
 
     def __init__(self, backbone_engine: str, head_engine: str):
         import pycuda.driver as cuda
@@ -185,10 +194,10 @@ def _txt_n(shape, axis):
 
 
 class YoloTRTDetector(DetectionModel):
-    """Open-set ``DetectionModel`` backed by the backbone(DLA)+head(GPU) TRT split.
+    """Open-set ``DetectionModel`` backed by the backbone+head(GPU) TRT split.
 
     Example:
-        >>> det = YoloTRTDetector(".../yolo_world_s.backbone.fp16.dla0.engine",
+        >>> det = YoloTRTDetector(".../yolo_world_s.backbone.fp16.gpu.engine",
         ...                       ".../yolo_world_s.head.fp16.gpu.engine",
         ...                       text_weights="yolov8s-worldv2.pt")   # doctest: +SKIP
         >>> det.set_prompts(["refrigerator", "chair"])   # any prompts, no rebuild

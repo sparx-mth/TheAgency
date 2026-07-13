@@ -2,9 +2,11 @@
 # Export + build (+ optionally benchmark) all four open-set YOLO-World splits.
 #
 # For each variant s/m/l/x it exports the backbone+head ONNX (open-set: text is a
-# runtime input, NOT baked), builds the backbone(DLA) + head(GPU) engines, and --
-# if IMAGES is set -- benchmarks them. Export needs ultralytics+torch+onnx; build +
-# benchmark need tensorrt+pycuda ON THE TARGET (DLA only exists on Jetson).
+# runtime input, NOT baked), builds the backbone(GPU) + head(GPU) engines, and --
+# if IMAGES is set -- benchmarks them. The backbone defaults to the GPU (measured
+# faster than the DLA on these backbones); set DLA=on to build the DLA backbone
+# instead. Export needs ultralytics+torch+onnx; build + benchmark need
+# tensorrt+pycuda ON THE TARGET.
 #
 # Usage:
 #   export WEIGHTS_DIR=/path/to/yolo_world_weights   # holds yolov8{s,m,l,x}-worldv2.pt
@@ -17,7 +19,8 @@
 #
 # Variants may also come from the VARIANTS env var; positional args win over it.
 # Env overrides: PYTHON (default python3), ONNX_DIR, IMGSZ (else config default),
-#   PRECISION (fp16|int8), DLA (auto|on|off), N_MAX (head dynamic-N ceiling),
+#   PRECISION (fp16|int8), DLA (auto|on|off; default auto = GPU per config),
+#   N_MAX (head dynamic-N ceiling),
 #   NUM_PROMPTS (benchmark prompt count).
 set -euo pipefail
 
