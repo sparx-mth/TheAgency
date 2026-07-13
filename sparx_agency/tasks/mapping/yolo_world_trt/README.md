@@ -250,6 +250,38 @@ TensorRT speed-up: N.NNx  (... -> ... ms/frame, ... -> ... FPS)
 that TRT is faster. Both run at the engine's built size by default (`--imgsz` to
 override); needs `ultralytics`+`torch` **and** `tensorrt`+`pycuda` present.
 
+## 5c. PyTorch vs *all* variants at once (s/m/l/x + torch)
+
+`compare_all.py` is the N-way generalisation of `compare_folder`: it runs the same
+prompts over the same frames through the **PyTorch baseline and every TRT engine
+you pass**, and in one command produces, per model, the identifications
+(`<out>/pytorch/` + `<out>/trt_<label>/` with annotated images + CSV/JSONL), one
+ranked FPS table (with each variant's speed-up over torch), and each variant's
+**ID-agreement vs PyTorch** (matched / missed / extra, recall, mean IoU, mean
+|Δconf|). It also writes `comparison_all.json` and `comparison_all.csv`.
+
+To bound Orin memory, engines run **one at a time**: the PyTorch pass runs first
+and its detections are held in memory, then each TRT engine is loaded, compared,
+and released. The single `--torch-weights` doubles as the frozen CLIP text encoder
+for every engine (YOLO-World v2 shares it across sizes), so the torch baseline is
+that checkpoint's size (e.g. `s`); each TRT engine runs at its own built size.
+
+```bash
+E=sparx_agency/tasks/mapping/yolo_world_trt/engines/orin_sm87
+python -m sparx_agency.tasks.mapping.yolo_world_trt.compare_all \
+    --torch-weights /path/to/yolov8s-worldv2.pt \
+    --pair s:$E/yolo_world_s.backbone.fp16.dla0.engine,$E/yolo_world_s.head.fp16.gpu.engine \
+    --pair m:$E/yolo_world_m.backbone.fp16.dla0.engine,$E/yolo_world_m.head.fp16.gpu.engine \
+    --pair l:$E/yolo_world_l.backbone.fp16.dla0.engine,$E/yolo_world_l.head.fp16.gpu.engine \
+    --pair x:$E/yolo_world_x.backbone.fp16.dla0.engine,$E/yolo_world_x.head.fp16.gpu.engine \
+    --images /path/to/rgb --out /path/to/identifications \
+    --labels "chair, bottle, computer screen, table, shelf, suitcase, refrigerator, gun" \
+    --conf 0.4
+```
+Each `--pair` and its `label:backbone,head` value must sit on **one** line (the
+trailing `\` continues to the next argument). Use `--device cuda:0` (default) for a
+meaningful torch FPS; needs `ultralytics`+`torch` **and** `tensorrt`+`pycuda`.
+
 ## 6. Input size (the biggest lever after DLA)
 
 The backbone input is **static**. Two sane choices, both multiples of 32:
@@ -292,6 +324,7 @@ wired yet. Plan: entropy calibrator fed real XTEND frames (mirroring NavDP's
 | `compare_torch_vs_trt.py` | PyTorch vs TensorRT speed on a folder + labels. |
 | `detect_folder.py` | Run the TRT detector over a folder + prompts → annotated images + CSV/JSONL identifications. |
 | `compare_folder.py` | Run PyTorch **and** TRT over a folder → identifications for each + speed table + ID-agreement (accuracy-drop) report. |
+| `compare_all.py` | N-way: PyTorch + **every** TRT variant (s/m/l/x) over a folder → per-model identifications + one ranked FPS table + per-variant ID-agreement. |
 | `build_all.sh` | One-shot export + build + benchmark for all variants. |
 | `configs/build_policy.json` | Knobs (variants, imgsz, precision, DLA pools, head N profile). |
 | `tests/` | Numpy-only tests (geometry, NMS, decode, policy, graph-cut) — run anywhere. |
