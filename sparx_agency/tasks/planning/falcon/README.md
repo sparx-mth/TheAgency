@@ -16,7 +16,7 @@ the launch file you run inside the container picks which.
 ```
 falcon/
 ├── Dockerfile            # builds the FALCON + adapter image
-├── docker-compose.yml    # build profiles: falcon-hospital (x86), falcon-jetson (aarch64)
+├── docker-compose.yml    # build profiles: falcon-pc (x86), falcon-jetson (aarch64)
 ├── entrypoint.sh         # sources ROS + the catkin workspace
 ├── run_falcon.sh         # runs the container for any env: ./run_falcon.sh <env>
 ├── maps/                 # map configs, selected by name at run time
@@ -87,7 +87,7 @@ x86_64 (with Gazebo + Open3D):
 
 ```bash
 cd sparx_agency/tasks/planning/falcon
-docker compose build falcon-hospital      # -> image falcon-ros:noetic
+docker compose build falcon-pc      # -> image falcon-ros:noetic
 ```
 
 Jetson AGX (real drone only, no sim / Open3D):
