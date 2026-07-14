@@ -12,7 +12,11 @@ tested without ROS. This node owns ONLY ROS concerns:
   - rosparams -> WeightedAStarParams + topics/frame/goal,
   - decoding nav_msgs/OccupancyGrid into a core OccupancyGrid2D,
   - the map-warmup gate (hold until FALCON has integrated real FREE cells),
-  - goal-click handling and lazy collision/periodic replanning,
+  - goal-click handling and SMART, event-driven replanning (``~smart_replan``,
+    default on): the committed route is frozen and replanned only on a confirmed
+    collision (safety) or a large, route-relevant map discovery (opportunistic,
+    length-hysteresis adopt) -- see the file footer. ``~smart_replan:=false``
+    restores the legacy periodic timer + optional mid-cycle hooks,
   - anchoring the path to the live drone pose,
   - publishing the A* path as nav_msgs/Path and logging.
 
@@ -53,6 +57,9 @@ from sparx_agency.core.planning.environment import (
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.planners.astar import (
     WeightedAStarPlanner2D, WeightedAStarParams)
+from sparx_agency.core.planning.replanning import (
+    corridor_mask, count_new_known_in_corridor, known_mask,
+    polyline_length, remaining_polyline)
 
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -170,6 +177,59 @@ class AStarPlannerNode:
         self.replan_collision_confirm = max(1, int(G("~replan_collision_confirm", 2)))
         self._collision_streak = 0       # consecutive colliding BEV frames
 
+        # ── Smart replanning (event-driven; supersedes the periodic + mid-cycle
+        #    hooks above when ON) ───────────────────────────────────────────────
+        # The slow stop-and-turn platform must NOT be whipsawed by a route that
+        # A* re-optimises every map frame: re-publishing a path resets the
+        # follower (waypoint index + yaw state), so a route that flips between
+        # near-equal alternatives makes the drone re-turn and barely advance.
+        # With ~smart_replan (default) the planner freezes the committed route and
+        # replans ONLY on two events, both evaluated per BEV frame:
+        #   * COLLISION  -- the remaining committed route now crosses a confirmed
+        #     obstacle. Safety; bypasses the commit window; if A* finds no way
+        #     around, STOP the drone (don't fly the wall) and let NavDP take over.
+        #   * DISCOVERY  -- a large, ROUTE-RELEVANT chunk of new area appeared
+        #     (newly-observed cells inside the route corridor, e.g. after a 90 deg
+        #     turn). Opportunistic; respects the commit window; the new route is
+        #     ADOPTED only if it is meaningfully shorter than the remaining
+        #     committed one (length hysteresis), else the current route is kept
+        #     (no re-publish, no follower reset). Off-corridor discoveries and a
+        #     few stray noise cells never trigger a replan.
+        # ~smart_replan:=false restores the exact legacy behaviour (periodic timer
+        # + the optional replan_on_* hooks).
+        self.smart_replan = _get_bool_param("~smart_replan", True)
+        # Corridor half-width for the route-relevance test (m -> cells at plan time).
+        self.replan_corridor_radius_m = float(G("~replan_corridor_radius_m", 1.0))
+        # "Many, not a few" floor: newly-observed corridor cells needed to consider
+        # an opportunistic replan (at 0.15 m cells, 60 ~= 1.35 m^2 of new area).
+        self.replan_min_new_cells = int(G("~replan_min_new_cells", 60))
+        # Commit window: after (re)committing a route, keep flying it for at least
+        # this long before an opportunistic replan may reconsider it -- so the slow
+        # drone gets time to make progress. Collisions bypass this window.
+        self.replan_commit_min_s = float(G("~replan_commit_min_s", 4.0))
+        # Length hysteresis: adopt a discovery-triggered candidate only if it is at
+        # least this fraction shorter than the remaining committed route. This is
+        # what kills the flip-flop between two near-equal L/R routes -- neither is
+        # 15% better than the other, so the committed one is kept.
+        self.replan_improve_frac = float(G("~replan_improve_frac", 0.15))
+        # On a confirmed obstacle with NO A* route around it, STOP the drone (2-pt
+        # hold) instead of leaving the colliding route latched. status=False still
+        # drives the NavDP fallback arbiter.
+        self.stop_on_blocked_plan_fail = _get_bool_param(
+            "~stop_on_blocked_plan_fail", True)
+
+        # Smart-replan committed-route bookkeeping (all reset together on commit).
+        self._known_at_commit = None     # bool HxW: observed cells at last commit
+        self._grid_key = None            # lattice identity guarding the index diff
+        self._commit_time = rospy.Time(0)
+        self._progress_idx = 0           # forward-monotone projection hint
+        self._blocked_hold = False       # published a STOP hold while boxed in
+        # High-water mark of newly-known corridor cells already evaluated: a
+        # suppressed discovery (kept the route) raises this so the SAME reveal does
+        # not re-fire A* every commit window; only a FURTHER reveal (n_new above the
+        # mark by another min_new_cells) triggers again. Reset on every real commit.
+        self._discovery_baseline = 0
+
         # Map-warmup gate: refuse to plan until the BEV holds at least this many
         # genuine FREE cells. FREE comes only from FALCON's real depth fusion, so
         # it is a true "the map has warmed up" signal -- without it an all-UNKNOWN
@@ -204,9 +264,13 @@ class AStarPlannerNode:
             rospy.Subscriber(self.predicted_path_topic, Path, self._predicted_cb,
                              queue_size=1)
 
-        # Strict A* cadence (always on): every plan_period_s recompute A* + APF
-        # once and publish; the trajectory is frozen in between.
-        rospy.Timer(rospy.Duration(self.plan_period_s), self._plan_tick)
+        # Legacy cadence: the strict periodic replan timer runs ONLY when smart
+        # replanning is off. Under smart_replan the planner is purely event-driven
+        # off _bev_cb (collision + discovery), so there is no periodic re-optimise
+        # against a moving anchor -- the mechanism behind the periodic re-publish
+        # oscillation.
+        if not self.smart_replan:
+            rospy.Timer(rospy.Duration(self.plan_period_s), self._plan_tick)
         rospy.Timer(rospy.Duration(2.0), self._status)
         self._banner()
 
@@ -232,6 +296,18 @@ class AStarPlannerNode:
         self._pred_collision_streak = 0
         self._predicted_replans = 0
         self.planner.invalidate_cache()
+        if self.smart_replan:
+            self._reset_smart_state()
+            cand = (self._plan_candidate()
+                    if self.grid is not None and self.pose is not None else None)
+            if cand is not None:
+                self._commit(cand)
+            else:
+                self._publish_status(False)   # no route yet -> NavDP fallback
+                rospy.logwarn("astar_planner: click goal (%.2f, %.2f) accepted but no "
+                              "path yet -- reason=%s (will retry on next BEV)",
+                              new.x, new.y, self.fail_reason)
+            return
         if not self._try_plan():
             rospy.logwarn("astar_planner: click goal (%.2f, %.2f) accepted but no "
                           "path yet -- reason=%s (will retry on next BEV)",
@@ -253,6 +329,9 @@ class AStarPlannerNode:
             rospy.loginfo("astar_planner: first BEV W=%d H=%d res=%.2f origin=(%.1f,%.1f)",
                           i.width, i.height, i.resolution,
                           i.origin.position.x, i.origin.position.y)
+        if self.smart_replan:
+            self._smart_evaluate()           # event-driven collision + discovery
+            return
         if not self.has_plan:
             self._try_plan()                 # one-shot: first path ASAP after warmup
         elif self.replan_on_bev:
@@ -351,6 +430,220 @@ class AStarPlannerNode:
         self._predicted_replans += 1
         self.has_plan = False
         self._try_plan()
+
+    # ─── Smart replanning (event-driven; ~smart_replan) ──────────────
+    def _smart_evaluate(self):
+        """Decide, on one BEV frame, whether to replan the committed route.
+
+        Order matters: (1) get the first route / recover from a boxed-in stop,
+        (2) COLLISION (safety, every frame, bypasses the commit window),
+        (3) lattice guard for the cross-frame diff, (4) commit window, then
+        (5) route-relevant DISCOVERY (opportunistic, length-hysteresis adopt).
+        Between events the committed route is frozen -- never re-published -- so
+        the follower keeps its progress and the drone actually flies.
+        """
+        if self.grid is None or self.goal is None or self.pose is None:
+            return
+        if not self._warmup_ok():
+            return
+        # (1) No committed route yet, or recovering from a boxed-in STOP hold:
+        #     keep planning every frame until A* succeeds, then commit + resume.
+        if not self.has_plan or self._blocked_hold:
+            cand = self._plan_candidate()
+            if cand is not None:
+                self._commit(cand)
+            else:
+                self._publish_status(False)   # A* cannot plan -> NavDP fallback
+            return
+        pose = self.pose
+        remaining, self._progress_idx = remaining_polyline(
+            self.last_points, pose, self._progress_idx)
+        # (2) Collision: the remaining committed route now crosses a confirmed
+        #     obstacle. Safety -- bypasses the commit window.
+        if self._collision_confirmed(remaining, pose):
+            self._forced_replan()
+            return
+        # The committed route is valid this frame. Emit one status=True so a
+        # fallback arbiter counting consecutive successes (to resume A* from NavDP)
+        # is fed on every frame, not only when the route changes.
+        self._publish_status(True)
+        # (3) Lattice guard: an index-wise map diff is only meaningful on a
+        #     world-fixed grid. On any origin/resolution/shape change, reseed the
+        #     snapshot and skip discovery this frame (never diff a shifted grid).
+        key = self._grid_key_of(self.grid)
+        if self._known_at_commit is None or key != self._grid_key:
+            self._reseed_known(key)
+            return
+        # (4) Commit window: give the slow platform time to fly the route.
+        if (rospy.Time.now() - self._commit_time).to_sec() < self.replan_commit_min_s:
+            return
+        # (5) Discovery: replan only on a large, route-relevant reveal that has not
+        #     already been evaluated (the high-water mark stops a kept reveal from
+        #     re-running A* every commit window on an otherwise static map).
+        n_new = self._new_known_in_corridor()
+        if n_new - self._discovery_baseline < self.replan_min_new_cells:
+            return
+        self._opportunistic_replan(remaining, n_new)
+
+    def _collision_confirmed(self, remaining, pose):
+        """True once the remaining route has collided on ``replan_collision_confirm``
+        consecutive frames (debounces single-frame depth noise). The drone's own
+        cell is exempted (it sits in its inflation skirt), so a route that merely
+        starts inside the skirt is not a false collision."""
+        start = remaining[0] if remaining else pose
+        collides = self.planner.path_collides(
+            self.grid, remaining, passable_start=start)
+        if not collides:
+            if self._collision_streak:
+                rospy.loginfo("astar_planner: route clear again after %d colliding "
+                              "frame(s) -- treated as noise, no replan",
+                              self._collision_streak)
+            self._collision_streak = 0
+            return False
+        self._collision_streak += 1
+        if self._collision_streak < self.replan_collision_confirm:
+            rospy.loginfo_throttle(
+                1.0, "astar_planner: route collision unconfirmed %d/%d -- waiting "
+                "for more depth", self._collision_streak, self.replan_collision_confirm)
+            return False
+        return True
+
+    def _forced_replan(self):
+        """Confirmed obstacle on the route: replan and adopt unconditionally (the
+        old route is invalid). If A* finds no way around, STOP the drone rather
+        than leave the colliding route latched."""
+        rospy.logwarn("astar_planner: committed route blocked on %d consecutive "
+                      "frame(s) -- replanning", self._collision_streak)
+        cand = self._plan_candidate()
+        if cand is not None:
+            self._commit(cand)      # follower stops-and-turns onto the new route
+            return
+        # Boxed in: no A* route around the obstacle. Report the failure (drives the
+        # NavDP fallback) and STOP rather than fly the colliding route.
+        self._collision_streak = 0
+        self._publish_status(False)
+        if self.stop_on_blocked_plan_fail and not self._blocked_hold:
+            self._publish_stop()
+            self._blocked_hold = True
+            rospy.logwarn("astar_planner: no route around the obstacle -- STOP + "
+                          "hold (status=False drives the NavDP fallback)")
+
+    def _opportunistic_replan(self, remaining, n_new):
+        """A route-relevant discovery fired: replan, and ADOPT the candidate only
+        if it is meaningfully shorter than the remaining committed route. Refresh
+        the commit clock either way so opportunistic A* runs at most once per
+        commit window (never per frame)."""
+        cand = self._plan_candidate()
+        # One evaluation regardless of outcome. Do NOT reset _known_at_commit here:
+        # a gradual reveal must keep accumulating toward the threshold; only an
+        # actual commit resets the map snapshot.
+        self._commit_time = rospy.Time.now()
+        if cand is None:
+            # Opportunistic re-plan failed, but the committed route is still valid
+            # (the collision gate passed and already published status=True this
+            # frame). Keep flying it; do not emit a spurious failure.
+            return
+        old_len = polyline_length(remaining)
+        new_len = polyline_length(cand.points)
+        if new_len <= old_len * (1.0 - self.replan_improve_frac):
+            rospy.loginfo("astar_planner: DISCOVERY replan adopted (%d new corridor "
+                          "cells): remaining %.2fm -> %.2fm", n_new, old_len, new_len)
+            self._commit(cand)     # resets _discovery_baseline + snapshot
+        else:
+            # Kept the route: raise the high-water mark so this same reveal does not
+            # re-run A* next commit window; a FURTHER reveal still fires.
+            self._discovery_baseline = n_new
+            rospy.loginfo_throttle(
+                5.0, "astar_planner: discovery (%d new cells) but candidate not "
+                "%.0f%% shorter (%.2fm vs %.2fm) -- keeping committed route",
+                n_new, 100.0 * self.replan_improve_frac, new_len, old_len)
+
+    def _plan_candidate(self):
+        """Plan once from the live pose; return the drone-anchored candidate path,
+        or None on failure. Status is left to the caller, which knows whether the
+        failure is safety-relevant (first plan / boxed in -> status=False) or merely
+        an opportunistic re-plan that failed while the committed route is still valid.
+        """
+        if self.grid is None or self.goal is None or self.pose is None:
+            return None
+        if not self._warmup_ok():
+            return None            # a goal click must NOT bypass the warmup gate
+        t0 = rospy.Time.now()
+        req = PlanRequest(start=self.pose, goal=self.goal, frame_id=self.frame_id)
+        res = self.planner.plan(req, self.grid)
+        if not res.ok:
+            self.fail_reason = res.message
+            rospy.logwarn_throttle(
+                5.0, "astar_planner: PLAN FAILED start=(%.2f,%.2f) goal=(%.2f,%.2f) "
+                "status=%s reason=%s", self.pose.x, self.pose.y, self.goal.x,
+                self.goal.y, res.status.value, res.message)
+            return None
+        self._last_plan_dt = (rospy.Time.now() - t0).to_sec()
+        return self._anchor_to_drone(res.path)
+
+    def _commit(self, cand):
+        """Publish ``cand`` as the new committed route and snapshot the map so the
+        next discovery diff is measured from here. Resets all per-route state."""
+        self.last_points = cand.points
+        self._publish(cand.points, getattr(self, "_last_plan_dt", 0.0))
+        self._publish_status(True)
+        self.has_plan = True
+        self._commit_time = rospy.Time.now()
+        self._known_at_commit = known_mask(self.grid)
+        self._grid_key = self._grid_key_of(self.grid)
+        self._progress_idx = 0
+        self._discovery_baseline = 0
+        self._collision_streak = 0
+        self._blocked_hold = False
+        self.fail_reason = "(success)"
+
+    def _new_known_in_corridor(self):
+        """Count newly-observed cells (vs the last commit) inside the route corridor."""
+        radius_cells = int(round(self.replan_corridor_radius_m / self.grid.resolution))
+        corridor = corridor_mask(self.last_points, self.grid, radius_cells)
+        return count_new_known_in_corridor(self._known_at_commit, self.grid, corridor)
+
+    def _reseed_known(self, key):
+        """Re-snapshot the known-mask on a new BEV lattice (origin/res/shape change)
+        and restart the commit window, without diffing across the shifted grid."""
+        self._known_at_commit = known_mask(self.grid)
+        self._grid_key = key
+        self._commit_time = rospy.Time.now()
+        self._progress_idx = 0
+        self._discovery_baseline = 0
+        rospy.logwarn_throttle(
+            10.0, "astar_planner: BEV lattice changed %s -- reseeding map snapshot, "
+            "skipping discovery this frame", key)
+
+    def _reset_smart_state(self):
+        """Clear all smart-replan bookkeeping (used on a fresh goal click)."""
+        self._known_at_commit = None
+        self._grid_key = None
+        self._commit_time = rospy.Time(0)
+        self._progress_idx = 0
+        self._discovery_baseline = 0
+        self._blocked_hold = False
+        self._collision_streak = 0
+
+    @staticmethod
+    def _grid_key_of(grid):
+        """Lattice identity guarding the cross-frame index diff (world-fixed grid)."""
+        return (grid.height, grid.width, round(grid.origin_x, 6),
+                round(grid.origin_y, 6), round(grid.resolution, 6))
+
+    def _publish_status(self, ok):
+        """Publish one A* plan-attempt outcome (True=route, False=no route)."""
+        self.pub_status.publish(Bool(data=bool(ok)))
+
+    def _publish_stop(self):
+        """Command the drone to STOP: a 2-point hold at the current pose collapses
+        (via the follower's reanchor) to a single waypoint it is already on, so it
+        brakes to DONE. Status is left to the caller (already False)."""
+        if self.pose is None:
+            return
+        hold = (self.pose, self.pose)
+        self.last_points = hold
+        self._publish(hold, 0.0)
 
     def _plan_tick(self, _evt):
         """Strict A* cadence: every plan_period_s recompute A* + APF once and
@@ -514,10 +807,19 @@ class AStarPlannerNode:
         L("  goal in  = %s", self.goal_topic)
         L("  path out = %s   (raw A* -> path_corrector)", self.path_topic)
         L("  status out = %s   (Bool: True=route found, False=no route)", self.status_topic)
-        L("  plan period = %.1fs  (strict A* cadence; path frozen between ticks)",
-          self.plan_period_s)
-        L("  mid-cycle replan: bev=%s collision=%s predicted=%s",
-          self.replan_on_bev, self.replan_on_collision, self.replan_on_predicted_collision)
+        if self.smart_replan:
+            L("  replan = SMART (event-driven: collision + route-relevant discovery)")
+            L("    corridor=%.2fm min_new_cells=%d commit_min=%.1fs improve>=%.0f%% "
+              "collision_confirm=%d stop_on_fail=%s",
+              self.replan_corridor_radius_m, self.replan_min_new_cells,
+              self.replan_commit_min_s, 100.0 * self.replan_improve_frac,
+              self.replan_collision_confirm, self.stop_on_blocked_plan_fail)
+        else:
+            L("  replan = LEGACY periodic %.1fs  (path frozen between ticks)",
+              self.plan_period_s)
+            L("    mid-cycle: bev=%s collision=%s predicted=%s",
+              self.replan_on_bev, self.replan_on_collision,
+              self.replan_on_predicted_collision)
         L("  goal init= %s", "(%.2f,%.2f)" % (self.goal.x, self.goal.y) if self.goal else "none")
         L("  conn=%d inflate=%.2fm unknown=%s max_seg=%.2fm los=%s turn_pen=%.2f",
           p.connectivity, p.inflate_radius_m,
@@ -571,22 +873,34 @@ if __name__ == "__main__":
 #   corner rounding (gentler turns): ~corner_round (true) ~corner_merge_deg (8)
 #       ~corner_max_turn_deg (14) ~corner_chamfer_max_deg (28)
 #       ~corner_chamfer_dist_m (0.5) ~corner_min_runup_m (0.6)
-#   planning cadence: ~plan_period_s (3.0) -- A* runs ONLY on this strict timer
-#       (and on a goal click); the published path is frozen between ticks so the
-#       follower is not chasing a path that shifts every BEV frame. The downstream
-#       path_corrector re-corrects only when a new A* path is published, so the
-#       flown trajectory is frozen between ticks too. A periodic replan that
-#       reproduces the CURRENT path (e.g. while stopped to yaw, anchor unmoved) is
-#       not re-published, so an unchanged route never resets the follower.
-#   OPTIONAL mid-cycle replan (ALL OFF by default -- enabling any lets the path
-#     move between ticks):
+#   SMART replanning (~smart_replan, DEFAULT true) -- event-driven off the BEV,
+#     built for the slow stop-and-turn platform. There is NO periodic re-optimise
+#     (which, against a moving anchor, was the periodic re-publish oscillation).
+#     The committed route is FROZEN and re-published only on:
+#       * COLLISION -- the remaining committed route crosses a confirmed obstacle
+#         (~replan_collision_confirm consecutive frames; the drone's own inflated
+#         cell is exempted). Safety: bypasses the commit window. If A* finds no way
+#         around, the drone STOPS (~stop_on_blocked_plan_fail) and status=False
+#         hands off to the NavDP fallback.
+#       * DISCOVERY -- a large, ROUTE-RELEVANT reveal: >= ~replan_min_new_cells
+#         newly-observed cells inside the route corridor (half-width
+#         ~replan_corridor_radius_m). Opportunistic: respects the commit window
+#         (~replan_commit_min_s), and the new route is ADOPTED only if it is
+#         >= ~replan_improve_frac shorter than the remaining committed route
+#         (length hysteresis -- what stops the L/R flip-flop). Off-corridor
+#         discoveries and stray noise cells never trigger a replan.
+#     Params (defaults): ~smart_replan (true) ~replan_corridor_radius_m (1.0)
+#       ~replan_min_new_cells (60) ~replan_commit_min_s (4.0)
+#       ~replan_improve_frac (0.15) ~replan_collision_confirm (2)
+#       ~stop_on_blocked_plan_fail (true). NavDP is the fallback if A* cannot plan.
+#   LEGACY cadence (~smart_replan:=false): ~plan_period_s (3.0) strict timer +
+#     the OPTIONAL mid-cycle hooks below (ALL OFF by default):
 #       ~replan_on_collision (false) ~replan_on_bev (false)
 #       ~replan_collision_confirm (2; consecutive colliding BEV frames required
-#         before a collision replan -- debounces single-frame depth noise; only
-#         used when ~replan_on_collision is true)
+#         before a collision replan -- debounces single-frame depth noise)
 #       ~replan_on_predicted_collision (false; replan when the follower's predicted
 #         stop-and-turn trajectory on ~predicted_path_topic (/path/predicted)
-#         collides even if the geometric path does not -- dynamics-aware)
+#         collides even if the geometric path does not -- dynamics-aware; legacy)
 #       ~max_predicted_replans (3; consecutive cap, reset once prediction is clear)
 #   warmup gate: ~min_free_cells_to_plan (80; 0 disables)
 #

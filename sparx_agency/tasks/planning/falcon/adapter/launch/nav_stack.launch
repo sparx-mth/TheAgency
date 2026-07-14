@@ -281,15 +281,31 @@
   <arg name="start_skip_m"          default="0.5" />
   <arg name="goal_snap_radius_m"    default="2.0" />
   <arg name="min_free_cells_to_plan" default="80" />
-  <!-- Strict A* cadence: A* + the once-per-path APF post-process run ONLY on
-       this timer (and on a goal click). The trajectory is frozen between ticks
-       so the follower is not chasing a path that shifts every BEV frame. -->
+
+  <!-- SMART replanning (event-driven; the default). The committed route is FROZEN
+       and replanned only on (a) a CONFIRMED collision on the remaining route
+       (safety; STOPs the drone if boxed in, then NavDP fallback takes over) or
+       (b) a large, ROUTE-RELEVANT map discovery, adopted only if the new route is
+       meaningfully shorter (length hysteresis), so the slow stop-and-turn drone
+       is not whipsawed by a route that A* re-optimises every map frame. Set
+       smart_replan:=false to restore the legacy periodic timer + mid-cycle hooks
+       below. -->
+  <arg name="smart_replan"            default="true" />
+  <arg name="replan_corridor_radius_m" default="1.0" /><!-- route-corridor half-width for the discovery relevance test (m) -->
+  <arg name="replan_min_new_cells"    default="60" /><!-- newly-observed corridor cells needed to consider an opportunistic replan ("many, not a few") -->
+  <arg name="replan_commit_min_s"     default="4.0" /><!-- keep flying a committed route at least this long before an opportunistic replan may reconsider it (collision bypasses this) -->
+  <arg name="replan_improve_frac"     default="0.15" /><!-- adopt a discovery candidate only if it is >= this fraction shorter than the remaining committed route (kills L/R flip-flop) -->
+  <arg name="stop_on_blocked_plan_fail" default="true" /><!-- on a confirmed obstacle with NO route around it, STOP (2-pt hold) instead of leaving the colliding route latched -->
+  <arg name="replan_collision_confirm" default="2" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); used by smart AND legacy-with-replan_on_collision -->
+
+  <!-- LEGACY cadence (smart_replan:=false): strict A* timer. A* + the
+       once-per-path APF post-process run ONLY on this timer (and on a goal click);
+       the trajectory is frozen between ticks. -->
   <arg name="plan_period_s"         default="10.0" />
-  <!-- Optional mid-cycle replans: OFF so the trajectory stays frozen between
-       plan_period_s cycles. Set true to react to obstacles faster than that. -->
+  <!-- Optional LEGACY mid-cycle replans: OFF so the trajectory stays frozen
+       between plan_period_s cycles. Only used when smart_replan:=false. -->
   <arg name="replan_on_collision"   default="false" />
   <arg name="replan_on_bev"         default="false" />
-  <arg name="replan_collision_confirm" default="3" /><!-- consecutive colliding BEV frames before a collision replan (debounces single-frame depth noise); 1 = legacy. Only used when replan_on_collision:=true -->
 
   <!-- Corner rounding: merge near-collinear vertices + chamfer moderate corners
        into two half-angle turns, so the stop-and-turn follower can glide through
@@ -781,6 +797,14 @@
     <param name="start_skip_m"          value="$(arg start_skip_m)" />
     <param name="goal_snap_radius_m"    value="$(arg goal_snap_radius_m)" />
     <param name="min_free_cells_to_plan" value="$(arg min_free_cells_to_plan)" />
+    <!-- Smart (event-driven) replanning; the default. -->
+    <param name="smart_replan"          value="$(arg smart_replan)" />
+    <param name="replan_corridor_radius_m" value="$(arg replan_corridor_radius_m)" />
+    <param name="replan_min_new_cells"  value="$(arg replan_min_new_cells)" />
+    <param name="replan_commit_min_s"   value="$(arg replan_commit_min_s)" />
+    <param name="replan_improve_frac"   value="$(arg replan_improve_frac)" />
+    <param name="stop_on_blocked_plan_fail" value="$(arg stop_on_blocked_plan_fail)" />
+    <!-- Legacy cadence (only when smart_replan:=false). -->
     <param name="plan_period_s"         value="$(arg plan_period_s)" />
     <param name="replan_on_collision"   value="$(arg replan_on_collision)" />
     <param name="replan_on_bev"         value="$(arg replan_on_bev)" />

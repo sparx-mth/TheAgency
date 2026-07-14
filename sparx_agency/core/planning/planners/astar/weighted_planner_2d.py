@@ -185,15 +185,39 @@ class WeightedAStarPlanner2D:
     # ------------------------------------------------------------------
     # Collision re-check (for lazy replanning by the caller)
     # ------------------------------------------------------------------
-    def path_collides(self, world: OccupancyGrid2D, points: Sequence[Pose2D]) -> bool:
+    def path_collides(
+        self,
+        world: OccupancyGrid2D,
+        points: Sequence[Pose2D],
+        passable_start: Optional[Pose2D] = None,
+    ) -> bool:
         """True if any segment of ``points`` crosses an inflated obstacle.
 
         Reuses the cached cost map for ``world``; intended for a node that
         wants to replan only when its current path becomes blocked.
+
+        Args:
+            world: The occupancy grid to test against.
+            points: World waypoints of the path to check.
+            passable_start: If given, the drone's own footprint around this world
+                point is treated as free for the duration of the check. The drone
+                routinely sits inside the obstacle-inflation *skirt* (its inscribed
+                radius overlaps the inflated cells), so without this exemption the
+                cells the drone occupies read as blocked and the path "collides" on
+                every frame -- a false positive that would force an endless replan.
+                Only the inflated *skirt* within ``inflate_radius_m`` of the point
+                is cleared; genuinely occupied wall cells are never cleared, so a
+                real obstacle right next to (or ahead of) the drone is still
+                detected. This mirrors the planner's own start-passable override.
+
+        Returns:
+            True iff some segment crosses an inflated (lethal) cell.
         """
         if len(points) < 2:
             return False
         _, occ = self.cost_for(world)
+        if passable_start is not None:
+            occ = self._exempt_footprint(world, occ, passable_start)
         h, w = occ.shape
         cells = [world.world_to_grid(pt.x, pt.y) for pt in points]
         for (x0, y0), (x1, y1) in zip(cells[:-1], cells[1:]):
@@ -202,6 +226,33 @@ class WeightedAStarPlanner2D:
             if not line_of_sight_clear(occ, x0, y0, x1, y1):
                 return True
         return False
+
+    def _exempt_footprint(self, world, occ, center):
+        """Return a COPY of ``occ`` with the drone's own footprint skirt cleared.
+
+        The drone's own body inflates the cells around it, so those cells read as
+        lethal even though the drone is physically standing there. Within the
+        robot's inscribed radius of ``center`` we clear only cells that are
+        inflated but NOT truly ``occupied``: genuine walls stay lethal (so a real
+        obstacle next to or ahead of the drone is still detected), while the
+        drone's own skirt is ignored. Works on a copy so the cached mask A* shares
+        is never mutated.
+        """
+        occ = occ.copy()
+        n = int(round(self.params.inflate_radius_m / world.resolution))
+        if n <= 0:
+            return occ
+        h, w = occ.shape
+        cx, cy = world.world_to_grid(center.x, center.y)
+        true_occ = world.grid == world.values.occupied
+        for yy in range(max(0, cy - n), min(h, cy + n + 1)):
+            dy2 = (yy - cy) ** 2
+            for xx in range(max(0, cx - n), min(w, cx + n + 1)):
+                if (xx - cx) ** 2 + dy2 > n * n:
+                    continue
+                if occ[yy, xx] and not true_occ[yy, xx]:
+                    occ[yy, xx] = False
+        return occ
 
     # ------------------------------------------------------------------
     # Helpers

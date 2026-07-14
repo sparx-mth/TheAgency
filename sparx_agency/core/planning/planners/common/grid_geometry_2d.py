@@ -81,6 +81,42 @@ def line_of_sight_clear(
             y += sy
 
 
+def line_cells(x0: int, y0: int, x1: int, y1: int) -> List[Cell]:
+    """Return the Bresenham cells from ``(x0, y0)`` to ``(x1, y1)`` (inclusive).
+
+    The cell-collecting sibling of :func:`line_of_sight_clear`: it walks the
+    identical Bresenham line but yields the traversed cells instead of testing
+    them, so the two agree exactly on which cells a segment covers. Terminates in
+    ``max(|dx|, |dy|) + 1`` steps and does no bounds checking (callers clip).
+
+    Args:
+        x0, y0: Start cell.
+        x1, y1: End cell.
+
+    Returns:
+        The list of integer ``(x, y)`` cells the segment passes through,
+        endpoints included.
+    """
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    x, y = x0, y0
+    out: List[Cell] = []
+    while True:
+        out.append((x, y))
+        if x == x1 and y == y1:
+            return out
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+
+
 def los_smooth_cells(cells: Sequence[Cell], occ: np.ndarray) -> List[Cell]:
     """Greedy line-of-sight smoothing (any-angle string-pulling).
 
