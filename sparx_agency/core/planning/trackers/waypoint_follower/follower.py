@@ -98,6 +98,16 @@ class WaypointFollower:
     def done(self) -> bool:
         return self._state == FollowerState.DONE
 
+    @property
+    def active_path(self) -> List[alg.XY]:
+        """The current re-anchored path as ``(x, y)`` tuples (read-only copy).
+
+        Exposed so a wrapping layer (e.g. the roll-assist cross-track corrector)
+        can measure the drone's offset from the exact trajectory the follower is
+        flying, without reaching into private state.
+        """
+        return list(self._path)
+
     def required_axis(self) -> Optional[ControlAxis]:
         """Axis the follower needs confirmed before it will command motion."""
         if self._state == FollowerState.YAW_ALIGN:

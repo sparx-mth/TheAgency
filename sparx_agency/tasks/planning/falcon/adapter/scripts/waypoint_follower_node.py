@@ -64,6 +64,11 @@ from sparx_agency.core.planning.trackers.multi_axis_follower import (
 from sparx_agency.core.planning.trackers.multi_axis_follower import (
     predict_trajectory as mx_predict_trajectory,
 )
+from sparx_agency.core.planning.trackers.roll_assist_follower import (
+    CrossTrackRollCorrector,
+    CrossTrackRollParams,
+    RollAssistFollower,
+)
 from sparx_agency.core.planning.trackers.rotation_supervisor import (
     RotationReobserveSupervisor,
     RotationSupervisorParams,
@@ -170,13 +175,23 @@ class WaypointFollowerNode:
         #   "multi_axis"   combined forward + lateral + yaw, crabbing (ROLL) for
         #                  small offsets and yawing only past a deadband,
         #   "pure_pursuit" splines the path (Hermite) and tracks it with Pure
-        #                  Pursuit on a moving lookahead (holonomic).
+        #                  Pursuit on a moving lookahead (holonomic),
+        #   "roll_assist"  the one-axis waypoint follower UNCHANGED (same align ->
+        #                  advance nav, discrete yaw, freeze/map gates, handshake),
+        #                  with a cross-track ROLL (linear.y) correction layered on
+        #                  top that only pulls the drone back onto its trajectory
+        #                  when it drifts sideways -- full while advancing, weak
+        #                  while turning, small while holding.
         # Altitude is never commanded by any of them (vz = 0). The one-axis
-        # follower is always constructed above; for the others we replace the
-        # handle. ``_holonomic`` groups the two that drive linear.y (multi_axis,
-        # pure_pursuit) so the loop branches once, not per-controller.
+        # follower is always constructed above; multi_axis/pure_pursuit replace the
+        # handle, roll_assist WRAPS it. ``_holonomic`` groups the two continuous
+        # trackers that use the rotation supervisor + no per-axis handshake;
+        # ``_lateral`` groups everyone that drives linear.y (adds roll_assist,
+        # which still uses the one-axis handshake) so the loop branches once.
         self.controller_kind = str(G("~controller", "waypoint")).strip().lower()
         self._holonomic = self.controller_kind in ("multi_axis", "pure_pursuit")
+        self._lateral = self.controller_kind in (
+            "multi_axis", "pure_pursuit", "roll_assist")
         # DemoMode the holonomic controllers request (best effort) and, if
         # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
         # so the per-axis handshake of the legacy path does not apply to them.
@@ -187,6 +202,8 @@ class WaypointFollowerNode:
             self.follower = self._build_multi_axis(G)
         elif self.controller_kind == "pure_pursuit":
             self.follower = self._build_pure_pursuit(G)
+        elif self.controller_kind == "roll_assist":
+            self.follower = self._build_roll_assist(G)
 
         # ── Rotation supervisor (holonomic controllers only) ─────────
         # The one-axis follower freezes + re-observes inside its own state machine.
@@ -408,6 +425,41 @@ class WaypointFollowerNode:
                                     float(G("~yaw_accel_limit", 2.5)))),
         ))
 
+    def _build_roll_assist(self, G):
+        """Wrap the one-axis follower with a cross-track ROLL corrector.
+
+        The base ``WaypointFollower`` built in ``__init__`` (from ~vel_x / ~yaw_rate
+        / ~pos_acquisition_radius / the whole yaw-burst tuning) keeps FULL charge of
+        navigation -- align to the next point, advance, the discrete yaw pulse/settle
+        loop, the map-freeze gate and the per-axis handshake are all unchanged. This
+        only adds a lateral (ROLL, +linear.y = left) velocity that pulls the drone
+        back onto its trajectory when it drifts sideways, scaled by what the base is
+        doing this tick (full while advancing, weak while turning, small while
+        holding). Tuning is namespaced ~ra_* so it never collides with the base
+        follower's params; ``deg`` params are converted to radians in core."""
+        corrector = CrossTrackRollCorrector(CrossTrackRollParams(
+            kp_lat=float(G("~ra_kp_lat", 0.8)),
+            lateral_speed_max=float(G("~ra_lateral_speed_max",
+                                      float(G("~max_lateral_speed", 0.25)))),
+            deadband_m=float(G("~ra_deadband_m", 0.05)),
+            advance_frac=float(G("~ra_advance_frac", 1.0)),
+            turn_frac=float(G("~ra_turn_frac", 0.35)),
+            hold_frac=float(G("~ra_hold_frac", 0.25)),
+            kp_fwd=float(G("~ra_kp_fwd", 0.6)),
+            forward_speed_max=float(G("~ra_forward_speed_max", 0.15)),
+            forward_deadband_m=float(G("~ra_forward_deadband_m", 0.08)),
+            turn_fwd_frac=float(G("~ra_turn_fwd_frac", 0.35)),
+            hold_fwd_frac=float(G("~ra_hold_fwd_frac", 0.25)),
+            min_vy=float(G("~ra_min_vy", 0.06)),
+            min_vx=float(G("~ra_min_vx", 0.06)),
+            release_frac=float(G("~ra_release_frac", 0.5)),
+            cmd_zero_eps=float(G("~ra_cmd_zero_eps", 1e-3)),
+            accel_limit=float(G("~ra_accel_limit", 1.0)),
+            yaw_active_eps=float(G("~ra_yaw_active_eps",
+                                   float(G("~yaw_settle_eps", 0.05)))),
+        ))
+        return RollAssistFollower(self.follower, corrector)
+
     def _build_pure_pursuit(self, G):
         """Construct the spline-then-Pure-Pursuit follower from rosparams.
 
@@ -619,7 +671,7 @@ class WaypointFollowerNode:
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready(map_need))
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
-        self._last_pub_vy = (cmd.vy if self._holonomic else 0.0)
+        self._last_pub_vy = (cmd.vy if self._lateral else 0.0)
 
         if defer_stop_mode:
             # Coasting out of a frozen turn (cmd.freeze True) -> hold 'turning' so
@@ -641,6 +693,11 @@ class WaypointFollowerNode:
         self._update_map_wait(cmd, map_need)
         if self._holonomic:
             self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz)
+        elif self._lateral:
+            # roll_assist: the base (vx, wz) still flow through the command-commitment
+            # gate (the one-axis follower emits discrete pulses that need it); the
+            # cross-track ROLL correction rides on linear.y, continuous and un-gated.
+            self._publish_twist(cmd.vx, cmd.wz, vy=cmd.vy)
         else:
             self._publish_twist(cmd.vx, cmd.wz)
         if self.controller_kind == "pure_pursuit":
@@ -818,9 +875,16 @@ class WaypointFollowerNode:
         self.freeze_pub.publish(Bool(data=bool(want)))
         self.last_freeze = want
 
-    def _publish_twist(self, vx, wz):
-        """Assemble the Twist. linear.y = linear.z = 0 are hardwired here; the
-        core has already enforced the invariant, saturated and slew-limited."""
+    def _publish_twist(self, vx, wz, vy=0.0):
+        """Assemble the Twist. linear.z = 0 is hardwired; the core has already
+        enforced the invariant, saturated and slew-limited.
+
+        ``vy`` is 0 for the one-axis waypoint controller (linear.y stays off, the
+        proven behaviour) and carries the roll_assist cross-track ROLL correction
+        otherwise. The command-commitment gate below applies ONLY to (vx, wz) --
+        the discrete forward/yaw pulses that need the lone-pulse protection -- so a
+        held motion still re-emits the base (vx, wz) while this tick's continuous
+        ROLL correction (vy) passes straight through."""
         # Command-commitment (see __init__): emit each motion >=cmd_commit_ticks
         # times before switching, repeating an under-committed motion so a lone
         # 1-tick turn/forward can't be followed straight into a stop.
@@ -840,7 +904,7 @@ class WaypointFollowerNode:
 
         m = Twist()
         m.linear.x = vx
-        m.linear.y = 0.0  # HARDWIRED -- no lateral movement, ever
+        m.linear.y = vy   # 0 for the one-axis controller; ROLL correction for roll_assist
         m.linear.z = 0.0  # HARDWIRED -- fixed altitude (platform holds it)
         m.angular.z = wz
         self.cmd_vel_pub.publish(m)
@@ -848,7 +912,7 @@ class WaypointFollowerNode:
             try:
                 self._log_file.write(json.dumps({
                     "t": rospy.Time.now().to_sec(),
-                    "linear": {"x": float(vx), "y": 0.0, "z": 0.0},
+                    "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
                     "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
                 }) + "\n")
                 self._log_file.flush()
@@ -956,6 +1020,21 @@ class WaypointFollowerNode:
             L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
             L("=" * 72)
             return
+        if self.controller_kind == "roll_assist":
+            rp = self.follower.roll_params
+            L("waypoint_follower (core RollAssistFollower)  X+YAW nav + cross-track ROLL")
+            L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
+            L("  base: vel_x=%.2f m/s  yaw_rate=%.2f rad/s  pos_radius=%.2f  forward_only=%s",
+              p.vel_x, p.yaw_rate, p.pos_radius, p.forward_only)
+            L("  ROLL: kp_lat=%.2f  lat_max=%.2f m/s  deadband=%.2f m",
+              rp.kp_lat, rp.lateral_speed_max, rp.deadband_m)
+            L("  lateral gain frac: advance=%.2f  turn=%.2f  hold=%.2f",
+              rp.advance_frac, rp.turn_frac, rp.hold_frac)
+            L("  along-track: kp_fwd=%.2f  fwd_max=%.2f m/s (turn=%.2f hold=%.2f)",
+              rp.kp_fwd, rp.forward_speed_max, rp.turn_fwd_frac, rp.hold_fwd_frac)
+            L("  PUBLISHED Twist invariants:  vz=0  (base vx, wz + ROLL vy)")
+            L("=" * 72)
+            return
         L("waypoint_follower (core WaypointFollower)  X+YAW only, fixed altitude")
         L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
         L("  vel_x=%.2f m/s  yaw_rate=%.2f rad/s  forward_only=%s",
@@ -1022,7 +1101,20 @@ if __name__ == "__main__":
 #     ~mapsettle_min_updates (2; fresh updates before the FIRST move at bring-up)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
-#   controller: ~controller (waypoint | multi_axis | pure_pursuit).
+#   controller: ~controller (waypoint | multi_axis | pure_pursuit | roll_assist).
+#     roll_assist keeps the one-axis waypoint follower UNCHANGED (same align->advance
+#       nav, discrete yaw, freeze/map gates, per-axis handshake) and layers a
+#       cross-track ROLL (linear.y) correction on top: it only pulls the drone back
+#       onto its trajectory when it drifts sideways -- full gain while advancing,
+#       weak while turning (ROLL would spoil the rotation), small while holding; a
+#       small forward/back nudge corrects along-track drift while turning/holding.
+#       No correction while gated (hold / unconfirmed axis / done). Tuning ~ra_*:
+#       ~ra_kp_lat (0.8) ~ra_lateral_speed_max (=max_lateral_speed, 0.25)
+#       ~ra_deadband_m (0.05) ~ra_advance_frac (1.0) ~ra_turn_frac (0.35)
+#       ~ra_hold_frac (0.25) ~ra_kp_fwd (0.6) ~ra_forward_speed_max (0.15)
+#       ~ra_forward_deadband_m (0.08) ~ra_turn_fwd_frac (0.35) ~ra_hold_fwd_frac (0.25)
+#       ~ra_min_vy (0.06) ~ra_min_vx (0.06) ~ra_release_frac (0.5)
+#       ~ra_cmd_zero_eps (1e-3) ~ra_accel_limit (1.0) ~ra_yaw_active_eps (=yaw_settle_eps).
 #     multi_axis swaps in the combined forward+lateral+yaw tracker (un-hardwires
 #       linear.y; no per-axis handshake). Tuning namespaced ~mx_*:
 #       ~mx_lateral_speed_max (0.25) ~mx_yaw_rate (0.6) ~mx_slow_radius (0.8)
