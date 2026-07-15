@@ -243,6 +243,25 @@ def test_hard_turn_engages_after_confirm():
     assert last.poses[0].pose.position.x == last.poses[1].pose.position.x == 0.0
 
 
+# ─── Engage only once the drone is CLOSE ENOUGH to the turn ──────────────────
+def test_engages_only_within_the_turn_engage_distance():
+    # The user's model: A* flies the approach; NavDP takes over once the hard turn
+    # comes within ~turn_engage_distance_m ahead -- not while it is still far.
+    node = _make_node(**{"~difficulty_confirm": 2, "~turn_engage_distance_m": 2.0,
+                         "~turn_thresh_deg": 70.0, "~difficulty_skip_m": 0.0})
+    _set_route(node, [(0, 0), (3, 0), (3, 3)])    # 90 deg corner 3 m ahead
+    node.pose_xyyaw = (0.0, 0.0, 0.0)
+    for _ in range(5):
+        node._tick(None)
+    assert node.mode == hpn._PRIMARY              # corner 3 m off > 2 m -> stay on A*
+    # Fly up to 1.5 m from the corner: now within the engage range.
+    node.pose_xyyaw = (1.5, 0.0, 0.0)
+    node._tick(None)
+    assert node.mode == hpn._PRIMARY and node.difficulty_streak == 1
+    node._tick(None)
+    assert node.mode == hpn._ENGAGED              # confirmed within range -> NavDP
+
+
 # ─── Doorway (narrow both sides, from the BEV) engages ───────────────────────
 def _doorway(x, y):
     return 1.3 <= x <= 1.8 and abs(y) >= 0.4     # 0.8 m gap across the x axis

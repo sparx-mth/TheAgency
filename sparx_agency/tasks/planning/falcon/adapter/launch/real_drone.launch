@@ -168,10 +168,12 @@
   <arg name="fallback_leg_endpoint_radius_m" default="0.4" /><!-- re-infer once within this of the leg end -->
   <arg name="fallback_arrival_radius_m"   default="0.5" /><!-- within this of the goal NavDP has arrived -> hold -->
   <!-- hybrid (nav_mode:=hybrid, the DEFAULT): A* on easy legs, NavDP on hard maneuvers -->
-  <arg name="hybrid_difficulty_lookahead_m" default="2.0" /><!-- how far ahead of the drone to assess the A* route for a hard maneuver (m) -->
+  <arg name="hybrid_difficulty_lookahead_m" default="2.0" /><!-- forward window (m) for the NARROWNESS/doorway test (the hard-turn engage range is hybrid_turn_engage_distance_m) -->
   <arg name="hybrid_difficulty_skip_m"    default="0.3" /><!-- skip this much past the drone (a just-finished maneuver must not keep reading as "ahead") (m) -->
   <arg name="hybrid_merge_collinear_deg"  default="15.0" /><!-- smooth the jagged raw A* first: drop vertices turning less than this before measuring (staircase noise on a straight corridor must not sum into a false hard turn); 0 = raw route -->
-  <arg name="hybrid_turn_thresh_deg"      default="75.0" /><!-- total heading change (deg) over the window = hard turn -> NavDP. HIGH: only a genuinely sharp corner engages; raise if easy routes still engage, lower if hard turns are missed -->
+  <arg name="hybrid_turn_thresh_deg"      default="70.0" /><!-- a route corner turning >= this (deg) is a HARD TURN -> NavDP (the operator's ">70 deg"). Only a genuinely sharp corner engages; raise if gentle bends engage, lower if hard turns are missed -->
+  <arg name="hybrid_turn_engage_distance_m" default="2.0" /><!-- engage NavDP once a hard turn is within this distance AHEAD ("close enough to the turn"); A* flies the approach up to here, NavDP takes the corner -->
+  <arg name="hybrid_turn_corner_span_m"   default="0.7" /><!-- entry/exit chord (m) for a corner's net turn (robust to a split corner / grid jitter) -->
   <arg name="hybrid_passage_width_m"      default="0.75" /><!-- free width (m) below which the route is a doorway (measured perpendicular; tight on BOTH sides). Strict; raise to treat wider gaps as doorways -->
   <arg name="hybrid_min_narrow_span_m"    default="0.3" /><!-- a doorway must stay narrow over at least this arclength (m); rejects a single BEV speckle cell tripping a false doorway -->
   <arg name="hybrid_sample_step_m"        default="0.1" /><!-- perpendicular-march / sampling step (~one BEV cell) (m) -->
@@ -365,6 +367,8 @@
     <arg name="hybrid_difficulty_skip_m"       value="$(arg hybrid_difficulty_skip_m)" />
     <arg name="hybrid_merge_collinear_deg"     value="$(arg hybrid_merge_collinear_deg)" />
     <arg name="hybrid_turn_thresh_deg"         value="$(arg hybrid_turn_thresh_deg)" />
+    <arg name="hybrid_turn_engage_distance_m"  value="$(arg hybrid_turn_engage_distance_m)" />
+    <arg name="hybrid_turn_corner_span_m"      value="$(arg hybrid_turn_corner_span_m)" />
     <arg name="hybrid_passage_width_m"         value="$(arg hybrid_passage_width_m)" />
     <arg name="hybrid_min_narrow_span_m"       value="$(arg hybrid_min_narrow_span_m)" />
     <arg name="hybrid_sample_step_m"           value="$(arg hybrid_sample_step_m)" />

@@ -13,11 +13,14 @@ planner-agnostic ``path_corrector`` -> ``trajectory_simplifier`` ->
 ``waypoint_follower`` chain flies. Two-mode hysteretic state machine:
 
   PRIMARY  -- echo the A* route straight through (plain ``nav_mode:=astar``). Each
-              tick, assess the route stretch just AHEAD of the drone: a hard turn
-              (accumulated heading change over a short window) or a narrow passage
-              (free width measured perpendicular to the route -- a doorway is tight
-              on both sides). When the stretch is difficult on ``~difficulty_confirm``
-              CONSECUTIVE ticks, STOP the drone and hand control to NavDP. (It also
+              tick, look at the route just AHEAD of the drone for a hard turn (a
+              corner turning >= ``~turn_thresh_deg`` coming within ``~turn_engage_
+              distance_m`` -- "close enough to the turn") or a narrow passage (free
+              width measured perpendicular to the route -- a doorway is tight on both
+              sides). When difficult on ``~difficulty_confirm`` CONSECUTIVE ticks, STOP
+              the drone and hand control to NavDP. Because the turn signal is the
+              DISTANCE to the corner it stays asserted for the whole approach, so the
+              confirm reliably fires (it never sat on A* through a real turn). (It also
               rescues a boxed-in A*: ``~engage_on_astar_fail`` engages when A* reports
               NO route, like ``nav_mode:=fallback``.)
   ENGAGED  -- drive NavDP toward the farthest A* waypoint VISIBLE in the current
@@ -100,6 +103,11 @@ _PENDING = "pending"          # transient/slow failure -> hold and retry
 _ABORTED = "aborted"          # left ENGAGED mid-call -> caller does nothing
 
 
+def _fmt_dist(d):
+    """Format a distance-to-turn for logs: ``inf`` (no hard turn) -> ``'far'``."""
+    return "far" if d == float("inf") else "%.1fm" % d
+
+
 def _param_bool(name, default):
     """Read a boolean rosparam, failing loud on a non-boolean string.
 
@@ -156,10 +164,19 @@ class HybridPlannerNode:
         # drop vertices turning less than this before measuring, so staircase noise
         # doesn't sum into a false "hard turn" on a straight corridor. 0 = raw route.
         self.difficulty_merge_collinear_deg = float(G("~difficulty_merge_collinear_deg", 15.0))
-        # Hard turn: total heading change (deg) over the window at/above which the
-        # follower would have to stop and yaw -> hand to NavDP. Deliberately high so
-        # only a genuinely sharp corner engages NavDP, not every gentle bend.
-        self.turn_thresh_deg = float(G("~turn_thresh_deg", 75.0))
+        # Hard turn: a route corner whose heading change (deg) reaches this is one
+        # the stop-and-turn follower flies poorly -> hand to NavDP. The operator's
+        # ">70 deg" corner; only a genuinely sharp corner engages NavDP, not a bend.
+        self.turn_thresh_deg = float(G("~turn_thresh_deg", 70.0))
+        # ENGAGE RANGE: hand to NavDP once such a hard turn is within this distance
+        # ahead of the drone ("from the moment I get close enough to the turn"). A*
+        # flies the whole approach up to here; NavDP takes the corner itself. The turn
+        # signal is the DISTANCE to the next hard corner, so it stays asserted for the
+        # entire approach within this range (reliable confirm), not just one tick.
+        self.turn_engage_distance_m = float(G("~turn_engage_distance_m", 2.0))
+        # Entry/exit chord (m) for measuring a corner's net turn: robust to a corner
+        # the planner split into two nearby vertices, and to single-cell grid jitter.
+        self.turn_corner_span_m = float(G("~turn_corner_span_m", 0.7))
         # Narrow passage: free width (m) below which the route is a doorway / tight
         # gap. Measured perpendicular to the route (tight on BOTH sides), so an open
         # corridor whose A* route merely clips a corner is NOT flagged. Strict: only a
@@ -443,7 +460,9 @@ class HybridPlannerNode:
             skip_m=self.difficulty_skip_m,
             sample_step_m=self.difficulty_sample_step_m,
             merge_collinear_deg=self.difficulty_merge_collinear_deg,
-            min_narrow_span_m=self.min_narrow_span_m)
+            min_narrow_span_m=self.min_narrow_span_m,
+            turn_span_m=self.turn_corner_span_m,
+            turn_scan_m=self.turn_engage_distance_m)
         self._progress_idx = seg
         return diff
 
@@ -659,7 +678,8 @@ class HybridPlannerNode:
         """A difficult maneuver (or a boxed A*) is ahead: STOP and hand to NavDP."""
         detail = ""
         if diff is not None:
-            detail = " (turn=%.0fdeg width=%.2fm)" % (diff.turn_deg, diff.passage_width_m)
+            detail = " (turn=%.0fdeg @%s width=%.2fm)" % (
+                diff.turn_deg, _fmt_dist(diff.turn_dist_m), diff.passage_width_m)
         rospy.logwarn("hybrid: DIFFICULT maneuver ahead [%s]%s -- STOPPING, "
                       "engaging NavDP", reason, detail)
         self._publish_nav_status("NavDP  (%s)" % reason)
@@ -738,13 +758,16 @@ class HybridPlannerNode:
         self._echo_astar()                        # keep flying A* (deduped)
         hard = diff is not None and diff.is_difficult
         self.difficulty_streak = self.difficulty_streak + 1 if hard else 0
-        # Live readout so you can see WHY it does/doesn't engage along the route.
+        # Live readout so you can see WHY it does/doesn't engage along the route:
+        # the sharpest corner ahead, how far off it is, and the engage countdown.
         if diff is not None:
             rospy.loginfo_throttle(
-                2.0, "hybrid PRIMARY: ahead turn=%.0f/%.0fdeg width=%.2f/%.2fm [%s] "
-                "streak=%d/%d", diff.turn_deg, self.turn_thresh_deg,
-                diff.passage_width_m, self.passage_width_m, diff.reason,
-                self.difficulty_streak, self.difficulty_confirm)
+                2.0, "hybrid PRIMARY: turn=%.0f/%.0fdeg @%s (engage<=%.1fm) "
+                "width=%.2f/%.2fm [%s] streak=%d/%d", diff.turn_deg,
+                self.turn_thresh_deg, _fmt_dist(diff.turn_dist_m),
+                self.turn_engage_distance_m, diff.passage_width_m,
+                self.passage_width_m, diff.reason, self.difficulty_streak,
+                self.difficulty_confirm)
         reason = None
         if self.difficulty_streak >= self.difficulty_confirm:
             reason = diff.reason                   # difficulty implies pose is known (_assess)
@@ -784,11 +807,11 @@ class HybridPlannerNode:
         self.recover_streak = self.recover_streak + 1 if easy else 0
         if diff is not None:
             rospy.loginfo_throttle(
-                2.0, "hybrid ENGAGED[%s]: flown=%.1f/%.1fm ahead turn=%.0fdeg "
+                2.0, "hybrid ENGAGED[%s]: flown=%.1f/%.1fm ahead turn=%.0fdeg @%s "
                 "width=%.2fm easy=%s recover=%d/%d",
                 "rescue" if self._rescue else "difficulty", traveled,
-                self.min_pass_distance_m, diff.turn_deg, diff.passage_width_m, easy,
-                self.recover_streak, self.recover_confirm)
+                self.min_pass_distance_m, diff.turn_deg, _fmt_dist(diff.turn_dist_m),
+                diff.passage_width_m, easy, self.recover_streak, self.recover_confirm)
         if self.recover_streak >= self.recover_confirm:
             self._resume_primary("hard part cleared")
             return
@@ -851,8 +874,9 @@ class HybridPlannerNode:
         L("  pose      in = %s  (%s)", self.pose_topic, self.pose_type)
         L("  navdp        = %s  (timeout %.0fs)", self.client.url, self.client.timeout_s)
         L("  path     out = %s  (raw -> path_corrector)", self.path_topic)
-        L("  engage       = hard turn >= %.0fdeg OR passage < %.2fm within %.1fm "
-          "ahead, x%d ticks", self.turn_thresh_deg, self.passage_width_m,
+        L("  engage       = hard turn >= %.0fdeg within %.1fm ahead OR passage < "
+          "%.2fm within %.1fm, x%d ticks", self.turn_thresh_deg,
+          self.turn_engage_distance_m, self.passage_width_m,
           self.difficulty_lookahead_m, self.difficulty_confirm)
         L("  return       = route ahead easy + A* has a route, x%d ticks (sticky)",
           self.recover_confirm)
@@ -898,13 +922,17 @@ if __name__ == "__main__":
 #     ~arrival_radius_m (0.5)                    within this of the goal a rescue leg holds
 #     ~frame_id (world)
 #   difficulty detector (core route_difficulty):
-#     ~difficulty_lookahead_m (3.0)   how far ahead of the drone to assess the route
+#     ~difficulty_lookahead_m (2.0)   forward window (m) for the NARROWNESS (doorway) test
 #     ~difficulty_skip_m (0.3)        skip this much past the drone (a just-finished
 #                                     maneuver must not keep reading as "ahead")
 #     ~difficulty_merge_collinear_deg (15.0)  drop route vertices turning less than this
 #                                     before measuring (smooth the jagged raw A*); 0=raw
-#     ~turn_thresh_deg (75.0)         total heading change (deg) over the window = hard turn
-#                                     (high: only a genuinely sharp corner engages NavDP)
+#     ~turn_thresh_deg (70.0)         a route corner turning >= this (deg) is a hard turn
+#                                     (only a genuinely sharp corner engages NavDP)
+#     ~turn_engage_distance_m (2.0)   engage NavDP once a hard turn is within this distance
+#                                     ahead ("close enough to the turn"); A* flies up to it
+#     ~turn_corner_span_m (0.7)       entry/exit chord (m) for a corner's net turn (robust
+#                                     to a split corner / grid jitter)
 #     ~passage_width_m (0.75)         free width (m) below which the route is a doorway
 #                                     (measured perpendicular; tight on BOTH sides)
 #     ~min_narrow_span_m (0.3)        a doorway must stay narrow over this arclength to

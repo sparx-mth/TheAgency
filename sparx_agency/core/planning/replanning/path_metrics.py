@@ -22,7 +22,7 @@ Using length also avoids the ~29% axis/diagonal anisotropy of a cell-count metri
 from __future__ import annotations
 
 from math import hypot, inf
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from sparx_agency.core.common.types import Pose2D
 
@@ -31,6 +31,31 @@ def polyline_length(points: Sequence[Pose2D]) -> float:
     """Total Euclidean length of the polyline (0.0 for < 2 points)."""
     return float(sum(hypot(b.x - a.x, b.y - a.y)
                      for a, b in zip(points[:-1], points[1:])))
+
+
+def point_at_arclength_2d(
+    points: Sequence[Pose2D], s: float
+) -> Optional[Pose2D]:
+    """Point at arclength ``s`` along the polyline (clamped to the endpoints).
+
+    ``s <= 0`` returns the first vertex and ``s`` past the total length returns the
+    last, so callers can measure a chord over a fixed span near the ends without
+    running off the polyline. Returns ``None`` only for an empty input. Shared by
+    the route-difficulty turn analysis and the hard-turn corner scan so both walk
+    arclength identically.
+    """
+    if not points:
+        return None
+    if s <= 0.0:
+        return points[0]
+    acc = 0.0
+    for a, b in zip(points[:-1], points[1:]):
+        seg = hypot(b.x - a.x, b.y - a.y)
+        if acc + seg >= s:
+            t = (s - acc) / seg if seg > 1e-9 else 0.0
+            return Pose2D(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+        acc += seg
+    return points[-1]
 
 
 def remaining_polyline(

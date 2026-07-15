@@ -14,13 +14,18 @@ There is deliberately no policy *object* here: the ROS node already owns the
 committed path, the commit time and the collision streak, so it orchestrates
 these functions directly rather than duplicating that state.
 """
+from .corner_scan_2d import net_turn_at_arclength_2d, scan_hard_turn_ahead
 from .map_change import (
     count_new_known_in_corridor,
     known_mask,
     newly_known_mask,
 )
 from .obstacle_confidence import route_obstacle_confidence
-from .path_metrics import polyline_length, remaining_polyline
+from .path_metrics import (
+    point_at_arclength_2d,
+    polyline_length,
+    remaining_polyline,
+)
 from .path_raster import corridor_mask, rasterize_path
 from .route_difficulty import (
     RouteDifficulty,
@@ -39,13 +44,16 @@ __all__ = [
     "count_new_known_in_corridor",
     "forward_window_2d",
     "known_mask",
+    "net_turn_at_arclength_2d",
     "net_turn_deg",
     "newly_known_mask",
     "passage_free_width_2d",
     "passage_widths_2d",
+    "point_at_arclength_2d",
     "polyline_length",
     "rasterize_path",
     "remaining_polyline",
     "route_obstacle_confidence",
+    "scan_hard_turn_ahead",
     "windowed_turn_deg",
 ]

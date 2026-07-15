@@ -190,6 +190,35 @@ def test_real_corner_is_a_hard_turn():
     assert d.hard_turn and abs(d.turn_deg - 90.0) < 2.0
 
 
+def test_turn_dist_reports_distance_to_the_corner():
+    # The engage signal is the along-route distance to the next hard turn.
+    d, _ = assess_route_difficulty(
+        _pts((0, 0), (2, 0), (2, 3)), Pose2D(0, 0), lookahead_m=4.0,
+        turn_thresh_deg=70.0, passage_width_thresh_m=1.0)
+    assert d.hard_turn and abs(d.turn_dist_m - 2.0) < 1e-6
+
+
+def test_turn_scan_range_gates_a_far_corner():
+    # A corner within the (doorway) lookahead but beyond the turn engage range must
+    # NOT be hard yet -- A* flies the approach until the drone is close enough.
+    route = _pts((0, 0), (3, 0), (3, 3))          # corner 3 m ahead
+    far, _ = assess_route_difficulty(
+        route, Pose2D(0, 0), lookahead_m=6.0, turn_thresh_deg=70.0,
+        passage_width_thresh_m=1.0, turn_scan_m=2.0)
+    near, _ = assess_route_difficulty(
+        route, Pose2D(1.5, 0), lookahead_m=6.0, turn_thresh_deg=70.0,
+        passage_width_thresh_m=1.0, turn_scan_m=2.0)
+    assert not far.hard_turn and far.turn_dist_m == float("inf")
+    assert near.hard_turn and abs(near.turn_dist_m - 1.5) < 1e-6
+
+
+def test_no_hard_turn_has_infinite_turn_dist():
+    d, _ = assess_route_difficulty(
+        _pts((0, 0), (5, 0)), Pose2D(0, 0), lookahead_m=4.0, turn_thresh_deg=70.0,
+        passage_width_thresh_m=1.0)
+    assert not d.hard_turn and d.turn_dist_m == float("inf")
+
+
 def test_corner_flagged_across_an_approach_band():
     # As the drone approaches a 90 deg corner, net_turn must clear the 75 deg gate
     # for a BAND of positions (not a single tick), or a fast drone slips past the

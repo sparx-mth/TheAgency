@@ -10,13 +10,16 @@ ahead difficult, and why?".
 
 Two independent signals, each over a short forward window of the route:
 
-* **Turn** -- the NET heading change across the window (:func:`net_turn_deg`): the
-  angle between the route's entry direction and its exit direction. A single 90 deg
-  corner or a sweeping bend reads its full angle, but the jitter of a grid A* route
-  weaving down a straight corridor (dodging occupancy speckle) CANCELS to ~0 -- the
-  cumulative sum (:func:`windowed_turn_deg`) would instead balloon into a false
-  turn. Compared against a degrees threshold. (Limitation: a symmetric S-bend nets
-  to ~0 and is NOT flagged by this signal -- an accepted trade for weave-immunity.)
+* **Turn** -- the along-route DISTANCE to the next hard corner ahead
+  (:func:`sparx_agency.core.planning.replanning.corner_scan_2d.scan_hard_turn_ahead`),
+  where a corner's magnitude is the net heading change over a short span each side of
+  it. A distance shrinks monotonically as the drone approaches, so the switch stays
+  asserted for the whole approach (the arbiter's debounce reliably confirms) and the
+  hand-off point is simply "the turn is within the engage range". The per-corner net
+  turn keeps the weave-immunity of :func:`net_turn_deg`: a grid A* route jittering
+  down a straight corridor cancels to ~0, a genuine 90 deg corner reads its full
+  angle. (Limitation, as for net turn: a symmetric S-bend nets to ~0 per corner and
+  is NOT flagged -- an accepted trade for weave-immunity.)
 * **Narrowness** -- the free passage WIDTH measured *perpendicular* to the route
   (:func:`passage_free_width_2d`): at each sample it marches left and right until
   it meets an obstacle, so the width is the true gap the drone must thread. This
@@ -45,7 +48,8 @@ from sparx_agency.core.planning.planners.common.corner_rounding_2d import (
     turn_angle_2d,
 )
 
-from .path_metrics import remaining_polyline
+from .corner_scan_2d import scan_hard_turn_ahead
+from .path_metrics import point_at_arclength_2d, remaining_polyline
 
 # A query into the occupancy map: True iff the world point (x, y) is a KNOWN
 # obstacle. Off-map / unknown cells return False (not a wall), matching the rest
@@ -59,15 +63,21 @@ class RouteDifficulty:
     """Difficulty verdict for the route stretch just ahead of the drone.
 
     Attributes:
-        turn_deg: Total absolute heading change over the forward window (deg).
+        turn_deg: Net heading change of the relevant corner ahead (deg) -- the sharp
+            corner being engaged when ``hard_turn``, else the sharpest sub-threshold
+            corner in range (0 for a straight stretch).
+        turn_dist_m: Along-route distance from the drone to the next hard turn (m);
+            ``inf`` when none is within the turn scan range ("how close is the turn",
+            the signal the arbiter engages / disengages on).
         passage_width_m: Narrowest free passage width over the window (m);
             ``inf`` when no occupancy query was supplied (narrowness not tested).
-        hard_turn: ``turn_deg`` reached the turn threshold.
+        hard_turn: A corner reaching the turn threshold lies within the scan range.
         narrow: ``passage_width_m`` fell below the width threshold.
         reason: One of ``"clear"`` / ``"turn"`` / ``"narrow"`` / ``"turn+narrow"``.
     """
 
     turn_deg: float
+    turn_dist_m: float
     passage_width_m: float
     hard_turn: bool
     narrow: bool
@@ -163,22 +173,6 @@ def windowed_turn_deg(window: Sequence[Pose2D]) -> float:
     return degrees(total)
 
 
-def _point_at_arclength(pts, s):
-    """Point at arclength ``s`` along the polyline (clamped to the ends)."""
-    if not pts:
-        return None
-    if s <= 0.0:
-        return pts[0]
-    acc = 0.0
-    for a, b in zip(pts[:-1], pts[1:]):
-        seg = hypot(b.x - a.x, b.y - a.y)
-        if acc + seg >= s:
-            t = (s - acc) / seg if seg > 1e-9 else 0.0
-            return Pose2D(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
-        acc += seg
-    return pts[-1]
-
-
 def net_turn_deg(window: Sequence[Pose2D], edge_span_m: float = 0.6) -> float:
     """Net heading change across ``window`` (degrees): the angle between its ENTRY
     direction (over the first ``edge_span_m`` of arclength) and its EXIT direction
@@ -202,8 +196,8 @@ def net_turn_deg(window: Sequence[Pose2D], edge_span_m: float = 0.6) -> float:
     # detection band wide even at a short lookahead (a 0.5*total cap collapses it to
     # a single tick for short windows and a fast drone can skip past the peak).
     span = min(max(edge_span_m, 1e-3), 0.35 * total)
-    p_in = _point_at_arclength(window, span)
-    p_out = _point_at_arclength(window, total - span)
+    p_in = point_at_arclength_2d(window, span)
+    p_out = point_at_arclength_2d(window, total - span)
     ix, iy = p_in.x - window[0].x, p_in.y - window[0].y          # entry direction
     ox, oy = window[-1].x - p_out.x, window[-1].y - p_out.y      # exit direction
     if hypot(ix, iy) < 1e-9 or hypot(ox, oy) < 1e-9:
@@ -312,47 +306,61 @@ def assess_route_difficulty(
     sample_step_m: float = 0.1,
     merge_collinear_deg: float = 0.0,
     min_narrow_span_m: float = 0.0,
-    turn_edge_span_m: float = 0.6,
+    turn_span_m: float = 0.7,
+    turn_scan_m: Optional[float] = None,
 ) -> Tuple[RouteDifficulty, int]:
     """Assess whether the route just ahead holds a hard turn or a narrow passage.
 
-    Composes :func:`net_turn_deg` and (when ``occupied`` is supplied)
-    :func:`passage_widths_2d` over :func:`forward_window_2d`. The narrowness side is
-    skipped when no occupancy query is given (curvature-only difficulty).
+    Two independent signals over the stretch just ahead of the drone:
 
-    The "hard turn" is the NET heading change across the window (entry vs exit
-    direction), NOT the cumulative sum: a grid A* route weaving around obstacles or
-    occupancy speckle on a straight corridor accumulates a large SUM but nearly zero
-    NET, so net avoids that false positive while still catching a genuine corner.
-    ``merge_collinear_deg`` optionally de-noises the window first (minor with net).
+    * **Hard turn** -- via :func:`scan_hard_turn_ahead`: the along-route distance to
+      the NEAREST corner turning at least ``turn_thresh_deg`` within the engage range
+      (``[skip_m, turn_scan_m]``). A distance rather than a single window verdict, so
+      the switch stays asserted for the whole approach (reliable debounce) and yields
+      "how close is the turn" directly; the per-corner net turn is robust to the grid
+      A* weave (jitter cancels across the span, a real corner does not).
+    * **Narrow passage** -- via :func:`passage_widths_2d` over
+      :func:`forward_window_2d` (unchanged): perpendicular free width, tight on both
+      sides = a doorway. Skipped when no ``occupied`` query is given.
 
     Args:
         points: Committed world-frame route waypoints.
         pose: Current drone position.
-        lookahead_m: Forward window length (m).
-        turn_thresh_deg: Net heading change (deg) at/above which a turn is hard.
+        lookahead_m: Forward window length for the NARROWNESS test (m). Also the
+            default turn scan range when ``turn_scan_m`` is unset.
+        turn_thresh_deg: Net heading change (deg) at/above which a corner is a hard
+            turn.
         passage_width_thresh_m: Passage width (m) below which the route is narrow.
             Also caps each perpendicular march (so an open side contributes exactly
             this much and a mere corner-clip never reads as narrow).
         occupied: Occupancy query for the narrowness test; ``None`` = turn only.
         min_index: Forward-monotone projection hint (feed back the returned index).
-        skip_m: Arclength ahead of the drone at which the window starts (m).
+        skip_m: Arclength ahead of the drone at which both windows start (m).
         sample_step_m: Perpendicular-march / sampling step (m); ~one cell.
         merge_collinear_deg: Drop route vertices turning less than this (deg) before
             measuring difficulty, de-noising a raw/jagged route. 0 = off.
         min_narrow_span_m: A passage counts as narrow only where it stays below the
             width threshold for at least this arclength (m) -- so a single occupancy
             speckle cell can't trip a false doorway. 0 = any single sample suffices.
-        turn_edge_span_m: Arclength over which the entry/exit directions of the net
-            turn are measured (m); larger averages out more local jog noise.
+        turn_span_m: Entry/exit chord length for the per-corner net turn (m); larger
+            averages out more local jog noise and merges a split corner.
+        turn_scan_m: How far ahead to scan for a hard turn (m) -- the engage range
+            ("close enough to the turn"). Defaults to ``lookahead_m`` when ``None``.
 
     Returns:
         ``(RouteDifficulty, seg_index)``.
     """
-    window, seg = forward_window_2d(points, pose, lookahead_m, min_index, skip_m)
+    scan_m = lookahead_m if turn_scan_m is None else max(0.0, turn_scan_m)
+    turn_dist_m, hard_deg, max_deg, seg = scan_hard_turn_ahead(
+        points, pose, turn_thresh_deg, min_index=min_index, skip_m=skip_m,
+        max_scan_m=scan_m, span_m=turn_span_m,
+        merge_collinear_deg=merge_collinear_deg)
+    hard_turn = turn_dist_m != float("inf")
+    turn_deg = hard_deg if hard_turn else max_deg
+
+    window, _ = forward_window_2d(points, pose, lookahead_m, min_index, skip_m)
     if merge_collinear_deg > 0.0 and len(window) > 2:
         window = merge_collinear_2d(window, radians(merge_collinear_deg))
-    turn_deg = net_turn_deg(window, turn_edge_span_m)
     if occupied is not None:
         widths = passage_widths_2d(
             window, occupied, sample_step_m, max(passage_width_thresh_m, 0.0))
@@ -363,7 +371,7 @@ def assess_route_difficulty(
     else:
         width = float("inf")
         narrow = False
-    hard_turn = turn_deg >= turn_thresh_deg
+
     if hard_turn and narrow:
         reason = "turn+narrow"
     elif hard_turn:
@@ -372,5 +380,6 @@ def assess_route_difficulty(
         reason = "narrow"
     else:
         reason = "clear"
-    return RouteDifficulty(turn_deg=turn_deg, passage_width_m=width,
-                           hard_turn=hard_turn, narrow=narrow, reason=reason), seg
+    return RouteDifficulty(turn_deg=turn_deg, turn_dist_m=turn_dist_m,
+                           passage_width_m=width, hard_turn=hard_turn,
+                           narrow=narrow, reason=reason), seg

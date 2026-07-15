@@ -392,9 +392,10 @@
          hybrid      : astar_planner AND hybrid_planner run (the DEFAULT). A* is PRIMARY:
                        its route is echoed straight through on the easy stretches. Each
                        tick hybrid_planner assesses the A* route just AHEAD of the drone
-                       for a DIFFICULT maneuver: a hard turn (heading change over
-                       hybrid_turn_thresh_deg) or a narrow passage / doorway (free width
-                       below hybrid_passage_width_m, measured perpendicular against the
+                       for a DIFFICULT maneuver: a hard turn (a corner turning over
+                       hybrid_turn_thresh_deg coming within hybrid_turn_engage_distance_m
+                       ahead) or a narrow passage / doorway (free width below
+                       hybrid_passage_width_m, measured perpendicular against the
                        BEV). On hybrid_difficulty_confirm consecutive difficult ticks it
                        STOPS and hands NavDP the farthest A* waypoint VISIBLE in frame,
                        flying each leg to its midpoint and re-inferring, until the route
@@ -484,10 +485,12 @@
        transport / server args. Needs the NavDP server up once a hard spot is reached.
        ══════════════════════════════════════════════════════════════ -->
   <!-- difficulty detector (core route_difficulty) -->
-  <arg name="hybrid_difficulty_lookahead_m" default="2.0" /><!-- how far ahead of the drone to assess the A* route for a hard maneuver (m) -->
+  <arg name="hybrid_difficulty_lookahead_m" default="2.0" /><!-- forward window (m) for the NARROWNESS/doorway test (the hard-turn engage range is hybrid_turn_engage_distance_m) -->
   <arg name="hybrid_difficulty_skip_m"      default="0.3" /><!-- skip this much past the drone (a maneuver it just finished must not keep reading as "ahead") (m) -->
   <arg name="hybrid_merge_collinear_deg"    default="15.0" /><!-- SMOOTH the jagged raw A* first: drop vertices turning less than this before measuring, so grid-staircase noise on a straight corridor doesn't sum into a false hard turn (0 = assess the raw route) -->
-  <arg name="hybrid_turn_thresh_deg"        default="75.0" /><!-- total heading change (deg) over the window at/above which the turn is "hard" -> NavDP. HIGH on purpose: only a genuinely sharp corner engages NavDP, not every gentle bend. Lower it if hard turns are missed; raise it if easy routes still engage -->
+  <arg name="hybrid_turn_thresh_deg"        default="70.0" /><!-- a route corner turning >= this (deg) is a HARD TURN handed to NavDP (the operator's ">70 deg"). Only a genuinely sharp corner engages; lower it if hard turns are missed, raise it if gentle bends engage -->
+  <arg name="hybrid_turn_engage_distance_m" default="2.0" /><!-- engage NavDP once a hard turn is within this distance AHEAD of the drone ("from the moment I get close enough to the turn"). A* flies the whole approach up to here; NavDP takes the corner itself. Larger = hand off earlier -->
+  <arg name="hybrid_turn_corner_span_m"     default="0.7" /><!-- entry/exit chord (m) for a corner's net turn: robust to a corner the planner split into two nearby vertices and to single-cell grid jitter -->
   <arg name="hybrid_passage_width_m"        default="0.75" /><!-- free width (m) below which the route is a doorway / narrow gap (measured perpendicular; tight on BOTH sides). Strict: only a real door-width gap engages NavDP. Raise to treat wider gaps as doorways -->
   <arg name="hybrid_min_narrow_span_m"      default="0.3" /><!-- a doorway must stay narrow over at least this arclength (m) to count; rejects a single BEV speckle cell tripping a false doorway on an open corridor -->
   <arg name="hybrid_sample_step_m"          default="0.1" /><!-- perpendicular-march / sampling step for the width test (~one BEV cell) (m) -->
@@ -1083,6 +1086,8 @@
     <param name="difficulty_skip_m"      value="$(arg hybrid_difficulty_skip_m)" />
     <param name="difficulty_merge_collinear_deg" value="$(arg hybrid_merge_collinear_deg)" />
     <param name="turn_thresh_deg"        value="$(arg hybrid_turn_thresh_deg)" />
+    <param name="turn_engage_distance_m" value="$(arg hybrid_turn_engage_distance_m)" />
+    <param name="turn_corner_span_m"     value="$(arg hybrid_turn_corner_span_m)" />
     <param name="passage_width_m"        value="$(arg hybrid_passage_width_m)" />
     <param name="min_narrow_span_m"      value="$(arg hybrid_min_narrow_span_m)" />
     <param name="difficulty_sample_step_m" value="$(arg hybrid_sample_step_m)" />
