@@ -108,6 +108,7 @@ class _DepthListener:
             rclpy.init()
         self._node = rclpy.create_node("dome_depth_listener")
         self._latest_path: Optional[str] = None
+        self._latest_stamp: Optional[float] = None
         self._lock = threading.Lock()
         self._node.create_subscription(RosString, depth_topic, self._cb, 10)
         self._executor = _RclpyExecutor()
@@ -117,15 +118,42 @@ class _DepthListener:
         print(f"[depth] listening on {depth_topic}")
 
     def _cb(self, msg: "RosString"):
-        # Format: "{path} {sec} {nanosec}"
+        # Format: "{path} {sec} {nanosec}" — sec/nanosec is the ORIGINAL RGB
+        # frame's capture stamp, carried through by depth_processor_node from
+        # the frame it ran DA3 inference on (not the completion time).
         parts = msg.data.rsplit(" ", 2)
         path = parts[0]
+        stamp = None
+        if len(parts) == 3:
+            try:
+                stamp = float(parts[1]) + float(parts[2]) * 1e-9
+            except ValueError:
+                stamp = None
         with self._lock:
             self._latest_path = path
+            self._latest_stamp = stamp
 
-    def get_latest_path(self) -> Optional[str]:
+    def get_latest_path(self, current_t_sec: Optional[float] = None,
+                         max_age_s: float = 0.5) -> Optional[str]:
+        """Return the latest depth path, or None if it's older than max_age_s
+        relative to current_t_sec (the RGB frame currently being saved).
+
+        DA3 inference takes ~300-450ms, so without this check a depth file
+        computed for a PREVIOUS RGB frame — from before the drone finished
+        rotating to its current heading — can get silently paired with the
+        current frame ("depth from before" / smeared objects on the map).
+        Pass current_t_sec=None to skip the freshness check (old behavior).
+        """
         with self._lock:
-            return self._latest_path
+            path, stamp = self._latest_path, self._latest_stamp
+        if path is None:
+            return None
+        if current_t_sec is not None and stamp is not None:
+            age = current_t_sec - stamp
+            if age > max_age_s:
+                print(f"[depth] stale depth ({age:.2f}s old) — skipping, not pairing with current frame")
+                return None
+        return path
 
     def shutdown(self):
         try:
@@ -148,6 +176,9 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         bearing_unit: str,
         loc_pose_topic: str = "",
         depth_topic: str = "",
+        max_depth_age_sec: float = 0.5,
+        min_climb_m: float = 0.15,
+        takeoff_verify_timeout_s: float = 3.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -159,6 +190,9 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         self._depth_listener: Optional[_DepthListener] = None
         if depth_topic:
             self._depth_listener = _DepthListener(depth_topic)
+        self.max_depth_age_sec = max_depth_age_sec
+        self.min_climb_m = min_climb_m
+        self.takeoff_verify_timeout_s = takeoff_verify_timeout_s
 
         # base_dir is the root; out_dir is the per-session flat capture directory.
         self._last_bearing_print_time = 0.0
@@ -206,10 +240,58 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         await asyncio.sleep(1.0)
         print("Robot armed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
-    async def takeoff(self, duration=3.3, value=1000):
+    def _get_altitude(self) -> Optional[float]:
+        """Read local_telemetry.z (a rough proxy for altitude) from the last
+        XTEND websocket state, if any has arrived yet."""
+        state = self.last_xtend_state or {}
+        local_telemetry = state.get("local_telemetry", {}) or {}
+        z = local_telemetry.get("z")
+        try:
+            return float(z) if z is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    async def takeoff(self, duration=3.3, value=1000,
+                       min_climb_m: Optional[float] = None,
+                       verify_timeout_s: Optional[float] = None):
+        min_climb_m = self.min_climb_m if min_climb_m is None else min_climb_m
+        verify_timeout_s = self.takeoff_verify_timeout_s if verify_timeout_s is None else verify_timeout_s
+        """Issue takeoff, then verify it actually happened before declaring success.
+
+        arm/takeoff are fire-and-forget over the XTEND websocket link — with no
+        check here, a failed takeoff (dead battery, prop fault, dropped command)
+        would silently print "Taken off..." and the mission would proceed to
+        rotate/capture with the drone still on the floor. Raises RuntimeError on
+        a confirmed failure (altitude never moved), which create_scenario()'s
+        try/except/finally already catches and turns into a safe land+disarm
+        instead of running the rest of the dome sweep.
+        """
         print("Taking off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        baseline_z = self._get_altitude()
         self._pub_cmd("takeoff")
         await asyncio.sleep(duration + 1.0)
+
+        if baseline_z is None:
+            print("[takeoff] WARNING: no telemetry available — cannot verify takeoff, "
+                  "proceeding blind.")
+        else:
+            climbed = False
+            t0 = time.time()
+            current_z = baseline_z
+            while time.time() - t0 < verify_timeout_s:
+                current_z = self._get_altitude()
+                if current_z is not None and abs(current_z - baseline_z) >= min_climb_m:
+                    climbed = True
+                    break
+                await asyncio.sleep(0.2)
+            if not climbed:
+                raise RuntimeError(
+                    f"Takeoff verification failed — altitude did not change "
+                    f"(baseline={baseline_z:.3f}m, current={current_z}, "
+                    f"threshold={min_climb_m}m). Drone likely never left the "
+                    f"ground (dead battery, prop fault, or dropped command)."
+                )
+
         print("Taken off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
     async def land(self, duration=4.1):
@@ -424,7 +506,8 @@ class XtendDomeTaskWithCapture(XtendMapRoomTaskWithCapture):
         self._write_sidecar_json(json_path, pose, jpg_path.name)
 
         if self._depth_listener is not None:
-            depth_src = self._depth_listener.get_latest_path()
+            depth_src = self._depth_listener.get_latest_path(
+                current_t_sec=t_sec, max_age_s=self.max_depth_age_sec)
             if depth_src and os.path.isfile(depth_src):
                 try:
                     shutil.copy2(depth_src, self.out_dir / f"{base_name}.npy")
@@ -713,6 +796,26 @@ def parse_args():
         help="String topic publishing depth NPY paths from depth_processor_node. "
              "Leave empty to skip depth capture.",
     )
+    parser.add_argument(
+        "--max-depth-age-sec", type=float, default=0.5,
+        help="Reject a depth file whose embedded RGB-frame timestamp is older than "
+             "this many seconds relative to the frame currently being saved — DA3 "
+             "inference lags ~300-450ms behind the RGB feed, so without this check "
+             "a fast rotation can pair the current frame with a depth map computed "
+             "for an earlier heading (stale/mismatched 'depth from before').",
+    )
+    parser.add_argument(
+        "--min-climb-m", type=float, default=0.15,
+        help="Minimum altitude change (m) from pre-takeoff baseline required to "
+             "consider takeoff successful. Below this after --takeoff-verify-timeout-sec, "
+             "takeoff() raises instead of silently proceeding into the dome sweep "
+             "with the drone still on the ground.",
+    )
+    parser.add_argument(
+        "--takeoff-verify-timeout-sec", type=float, default=3.0,
+        help="How long to poll telemetry for the altitude climb before declaring "
+             "takeoff failed.",
+    )
 
     return parser.parse_args()
 
@@ -740,6 +843,9 @@ def main():
         bearing_unit=args.bearing_unit,
         loc_pose_topic=args.pose_topic,
         depth_topic=args.depth_topic,
+        max_depth_age_sec=args.max_depth_age_sec,
+        min_climb_m=args.min_climb_m,
+        takeoff_verify_timeout_s=args.takeoff_verify_timeout_sec,
     )
 
     asyncio.run(task.run())

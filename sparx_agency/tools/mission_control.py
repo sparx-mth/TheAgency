@@ -7,8 +7,11 @@ Run:
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 
@@ -111,7 +114,7 @@ XTEND_SERVICES: list[Service] = [
         name="Depth DA3",
         key="xtend_depth",
         group="core",
-        description="DA3 Metric Large TRT → /xtend/depth_m (32FC1), saves NPY to /tmp/xtend_depth, publishes /xtend/depth_frame_path",
+        description="DA3 Metric Large TRT, saves NPY to /tmp/xtend_depth, publishes only the file path on /xtend/depth_frame_path (no raw depth_m message, no pointcloud).",
         cmd=f"""python3 {JETSON_REPO}/sparx_agency/tasks/mapping/ros2/depth_processor_node.py \\
   --ros-args \\
   -p frame_path_topic:=/xtend/rgb_frame_path \\
@@ -123,7 +126,7 @@ XTEND_SERVICES: list[Service] = [
   -p clip_min_m:=0.2 -p clip_max_m:=5.0 -p depth_encoding:=32FC1 \\
   -p depth_path_topic:=/xtend/depth_frame_path \\
   -p depth_dir:=/tmp/xtend_depth -p max_depth_kept:=300 \\
-  -p publish_cloud:=true -p pointcloud_topic:=/xtend/pointcloud""",
+  -p depth_smoothing_window:=1""",
     ),
     Service(
         name="Demo Mode Manager",
@@ -176,10 +179,11 @@ XTEND_SERVICES: list[Service] = [
         key="room_mapper",
         group="room_mapper",
         description="Post-flight: build occupancy map + place VLM-detected objects from latest session.",
-        cmd=f"""python3 -m sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.run_room_mapper \\
+        cmd=f"""cp {JETSON_DATA}/captures/latest_ann/*.json {JETSON_DATA}/captures/latest/ 2>/dev/null; \\
+python3 -m sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.run_room_mapper \\
   --data-dir {JETSON_DATA}/captures/latest \\
   --tag-map {JETSON_REPO}/sparx_agency/tasks/localization/config/new_map.yaml \\
-  --stride 1 --no-scale-correction \\
+  --stride 1 \\
   --output-dir {JETSON_DATA}/captures/latest_room_map""",
     ),
     # ── Planner (Falcon) ──────────────────────────────────────────────────
@@ -297,15 +301,17 @@ NANOOWL_SERVICES: list[Service] = [
         name="Depth V3 HTTP",
         key="depth_v3_http",
         group="nanoowl_optional",
-        description="DA3-SMALL HTTP server at :5070. Optional — only needed if comm_manager uses --depth-endpoint.",
-        env="depth_ws",
+        description="On-demand DA3 depth at :5070 for comm_manager's per-frame --depth-endpoint. "
+                     "One request = one frame run fresh through DA3 — no ROS topics, no timestamp "
+                     "pairing, so no sync/staleness/smoothing-ghosting is possible.",
+        env="ros",
         cmd=(
-            "ros2 run depth_anything_v3 depth_anything_http_server "
-            "--model /home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3-SMALL/DA3-SMALL.fp16-batch1.engine "
-            f"--camera-yaml /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml "
-            f"--max-depth 7.0 --host {VLLM_IP} --port 5070 --save-depth --tiling 1"
+            f"python3 {JETSON_REPO}/sparx_agency/tasks/mapping/da3_depth_http_server.py "
+            "--engine /home/user/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE.fp16-294x504.depth_only.v2.engine "
+            f"--calib {JETSON_REPO}/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml "
+            f"--host 0.0.0.0 --port 5070"
         ),
-        stop_extra=f"fuser -k 5070/tcp || true",
+        stop_extra="fuser -k 5070/tcp || true",
     ),
     Service(
         name="Data Server",
@@ -459,6 +465,21 @@ def _ssh(cmd: str, timeout: int = 8) -> subprocess.CompletedProcess:
         ["ssh", "-o", "ConnectTimeout=4", JETSON_SSH, cmd],
         capture_output=True, text=True, timeout=timeout,
     )
+
+
+def fetch_remote_file(remote_path: str, timeout: int = 15) -> str | None:
+    """scp a file from the Jetson to a local temp path. Returns the local path, or None on failure."""
+    local_path = os.path.join(tempfile.gettempdir(), "mc_" + os.path.basename(remote_path))
+    try:
+        r = subprocess.run(
+            ["scp", "-o", "ConnectTimeout=5", f"{JETSON_SSH}:{remote_path}", local_path],
+            capture_output=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return None
+        return local_path
+    except Exception:
+        return None
 
 
 def get_all_states() -> dict[str, bool]:
@@ -790,6 +811,39 @@ with tab_xtend:
     st.markdown("#### Room Mapper (offline)")
     room_mapper = [s for s in XTEND_SERVICES if s.group == "room_mapper"]
     _service_cards(room_mapper, states)
+
+    map_col, objs_col = st.columns([2, 1])
+    with map_col:
+        if st.button("🔄 Load latest room map", key="load_room_map"):
+            with st.spinner("Fetching from Jetson…"):
+                st.session_state["room_map_img"] = fetch_remote_file(
+                    f"{JETSON_DATA}/captures/latest_room_map/map_with_objects.png")
+                st.session_state["room_map_objs"] = fetch_remote_file(
+                    f"{JETSON_DATA}/captures/latest_room_map/objects.json")
+        img_path = st.session_state.get("room_map_img")
+        if img_path and os.path.exists(img_path):
+            st.image(img_path, caption="map_with_objects.png", use_container_width=True)
+        else:
+            st.caption("No map loaded yet — run Room Mapper above, then click Load.")
+    with objs_col:
+        st.markdown("**Detected objects**")
+        objs_path = st.session_state.get("room_map_objs")
+        if objs_path and os.path.exists(objs_path):
+            try:
+                with open(objs_path) as f:
+                    objects = json.load(f)
+                st.dataframe(
+                    [{"label": o["label"],
+                      "x": round(o["position_m"]["x"], 2),
+                      "y": round(o["position_m"]["y"], 2),
+                      "z": round(o["position_m"]["z"], 2),
+                      "tags": o.get("tag_ids", [])} for o in objects],
+                    use_container_width=True, hide_index=True,
+                )
+            except Exception as exc:
+                st.error(f"Failed to parse objects.json: {exc}")
+        else:
+            st.caption("—")
 
     with st.expander("🗺️  Planner (Falcon)", expanded=True):
         planner = [s for s in XTEND_SERVICES if s.group == "planner"]
