@@ -31,6 +31,11 @@ class BevPublisherNode:
         G = rospy.get_param
 
         self.out_topic = G("~out_topic", "/falcon/bev_2d")
+        # Companion per-cell OCCUPIED confidence grid (int8 0..100 = temporal
+        # evidence / t_max). Published co-registered with the BEV so the planner
+        # can gate an obstacle reroute on a *confident* obstacle, not a single
+        # low-confidence depth speckle. Empty when the temporal filter is off.
+        self.conf_topic = G("~conf_topic", "/falcon/bev_2d_conf")
         self.occ_topic = G("~occ_topic", "/voxel_mapping/occupancy_grid_occupied")
         self.free_topic = G("~free_topic", "/voxel_mapping/occupancy_grid_free")
         self.publish_hz = float(G("~publish_hz", 10.0))
@@ -88,11 +93,14 @@ class BevPublisherNode:
         self._occ = np.empty((0, 3), np.float32)
         self._free = np.empty((0, 3), np.float32)
         self._grid = None
+        self._conf = None            # (H,W) float [0,1] from the projector, or None
         self._dirty = True
         self._hb = dict(occ=0, free=0, pub=0)
 
         self.pub = rospy.Publisher(self.out_topic, OccupancyGrid,
                                    queue_size=1, latch=True)
+        self.pub_conf = rospy.Publisher(self.conf_topic, OccupancyGrid,
+                                        queue_size=1, latch=True)
         rospy.Subscriber(self.occ_topic, PointCloud2, self._occ_cb, queue_size=2)
         rospy.Subscriber(self.free_topic, PointCloud2, self._free_cb, queue_size=2)
         rospy.Timer(rospy.Duration(1.0 / self.publish_hz), self._tick)
@@ -154,11 +162,14 @@ class BevPublisherNode:
             self._dirty = False
             _, self._grid = self.projector.project(
                 self._occ, self._free, force_occ=self.force_occ)
+            self._conf = self.projector.last_confidence
             self._publish()
         elif not self.skip_unchanged:
             self._publish()
 
-    def _publish(self):
+    def _grid_msg(self, data_int8):
+        """Build a latched nav_msgs/OccupancyGrid from an (H,W) int8 array on the
+        current lattice (shared by the BEV grid and its confidence companion)."""
         s = self.spec
         m = OccupancyGrid()
         m.header.stamp = rospy.Time.now()
@@ -169,9 +180,17 @@ class BevPublisherNode:
         m.info.origin.position.x = s.origin_x
         m.info.origin.position.y = s.origin_y
         m.info.origin.orientation.w = 1.0
-        m.data = self._grid.flatten().tolist()
-        self.pub.publish(m)
+        m.data = data_int8.flatten().tolist()
+        return m
+
+    def _publish(self):
+        self.pub.publish(self._grid_msg(self._grid))
         self._hb["pub"] += 1
+        # Companion confidence grid (int8 0..100 = evidence / t_max). Only when the
+        # temporal filter is on; consumers that lack it fall back to a frame count.
+        if self._conf is not None:
+            conf8 = np.clip(np.rint(self._conf * 100.0), 0, 100).astype(np.int8)
+            self.pub_conf.publish(self._grid_msg(conf8))
 
     def _heartbeat(self, _evt):
         st = self.projector.last_stats
@@ -220,6 +239,8 @@ class BevPublisherNode:
         L(" in  occ =%s", self.occ_topic)
         L(" in  free=%s", self.free_topic)
         L(" out     =%s  @%.1fHz latched", self.out_topic, self.publish_hz)
+        L(" conf    =%s  (0..100 = evidence/t_max; %s)", self.conf_topic,
+          "on" if c.temporal_filter else "off -- temporal filter disabled")
         L("=" * 64)
 
 
@@ -243,6 +264,10 @@ if __name__ == "__main__":
 #   IO / runtime
 #     ~out_topic (/falcon/bev_2d)  ~occ_topic (/voxel_mapping/occupancy_grid_occupied)
 #     ~free_topic (/voxel_mapping/occupancy_grid_free)  ~frame_id (world)
+#     ~conf_topic (/falcon/bev_2d_conf; companion OccupancyGrid, int8 0..100 =
+#       temporal evidence / t_max, co-registered with ~out_topic. Empty when the
+#       temporal filter is off. The A* planner reads it to reroute only on a
+#       CONFIDENT on-route obstacle, not a single low-confidence depth speckle.)
 #     ~publish_hz (10.0)  ~always_recompute (false)  ~skip_unchanged_publish (true)
 #   bounds: ~bbox_{xmin,xmax,ymin,ymax} (launch) > /map_config/map_size/* (+~bbox_margin_m, 1.0) > +-12
 #   column/height: ~z_floor (.30) ~z_ceil (2.20) ~z_peak (1.00)

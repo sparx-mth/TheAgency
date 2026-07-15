@@ -446,3 +446,135 @@ def test_boxed_in_recovers_when_route_reopens():
     assert not node._blocked_hold
     assert _n_paths(node) == n_blocked + 1, "recovery re-publishes a real route"
     assert _last_status(node) is True
+
+
+# ─── confidence-aware obstacle confirmation ──────────────────────────────────
+def _conf_msg(conf_float):
+    """OccupancyGrid carrying a [0,1] confidence as int8 0..100, co-registered
+    with _occ_msg (same origin/resolution/shape)."""
+    m = _Occ_t()
+    m.info.height, m.info.width = conf_float.shape
+    m.info.resolution = RES
+    m.info.origin.position.x = 0.0
+    m.info.origin.position.y = 0.0
+    conf8 = np.clip(np.rint(conf_float * 100.0), 0, 100).astype(np.int8)
+    m.data = np.ascontiguousarray(conf8).ravel()
+    return m
+
+
+def _conf_for(grid2d, value):
+    """A confidence grid = ``value`` on the OCC cells of ``grid2d``, else 0."""
+    return np.where(grid2d == OCC, float(value), 0.0).astype(np.float32)
+
+
+def _feed(node, grid, conf):
+    """Feed one co-registered (confidence, BEV) frame, in that order."""
+    _advance(0.5)
+    node._conf_cb(_conf_msg(conf))
+    node._bev_cb(_occ_msg(grid))
+
+
+def test_low_confidence_obstacle_is_not_rerouted():
+    """The user's case: a noisy on-route cell that the map is NOT confident about
+    must NOT trigger a reroute -- the committed route is kept so the drone keeps
+    observing (and can clean) the cell instead of veering off it."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.75,
+                 replan_collision_confirm_max=0)   # no ceiling -> pure conf gate
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    conf = _conf_for(wall, 0.5)                    # below the 0.75 threshold
+    for _ in range(20):                            # many frames, stably occupied
+        _feed(node, wall, conf)
+    assert _n_paths(node) == n0, "a low-confidence obstacle must not reroute"
+    assert node._collision_streak >= 2, "collision is seen, just not acted on"
+
+
+def test_confident_obstacle_reroutes():
+    """A high-confidence on-route obstacle reroutes on the confirm frame as before."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.75)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    conf = _conf_for(wall, 0.9)                    # above the 0.75 threshold
+    _feed(node, wall, conf)                        # streak 1 (< confirm)
+    assert _n_paths(node) == n0
+    _feed(node, wall, conf)                        # streak 2, confident -> reroute
+    assert _n_paths(node) == n0 + 1, "a confident obstacle must reroute"
+    assert _last_status(node) is True
+
+
+def test_confidence_ceiling_forces_reroute():
+    """A persistently-flagged but never-confident obstacle still reroutes once the
+    frame ceiling is hit -- the safety backstop bounds flying toward it."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.75,
+                 replan_collision_confirm_max=5)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    conf = _conf_for(wall, 0.4)                    # stays below threshold forever
+    for _ in range(4):                             # streaks 1..4: kept
+        _feed(node, wall, conf)
+        assert _n_paths(node) == n0
+    _feed(node, wall, conf)                        # streak 5 == ceiling -> reroute
+    assert _n_paths(node) == n0 + 1, "frame ceiling must force a reroute"
+
+
+def test_confidence_gate_disabled_reroutes_on_frame_count():
+    """~replan_confirm_conf=0 disables the confidence gate: reroute on the frame
+    count regardless of how low the obstacle confidence is."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.0)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    conf = _conf_for(wall, 0.01)                   # near-zero confidence, ignored
+    _feed(node, wall, conf)                        # streak 1
+    _feed(node, wall, conf)                        # streak 2 -> reroute (gate off)
+    assert _n_paths(node) == n0 + 1
+
+
+def test_rising_confidence_reroutes_when_obstacle_firms_up():
+    """The core promise: an on-route cell that starts LOW-confidence is kept (drone
+    keeps looking), then reroutes as soon as the map firms it up -- and with the
+    ceiling OFF, so it is the CONFIDENCE that triggers, not the frame count."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.75,
+                 replan_collision_confirm_max=0)   # no ceiling: pure conf trigger
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    for _ in range(4):                             # marginal evidence: kept
+        _feed(node, wall, _conf_for(wall, 0.5))
+    assert _n_paths(node) == n0, "low-confidence obstacle is kept, not rerouted"
+    _feed(node, wall, _conf_for(wall, 0.9))        # firms up -> reroute
+    assert _n_paths(node) == n0 + 1, "a firmed-up obstacle must reroute"
+
+
+def test_low_confidence_obstacle_that_clears_never_reroutes():
+    """The noise case end to end: a low-confidence on-route cell is kept, then the
+    map cleans it (seen free) -- the streak resets and the drone never rerouted."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.75,
+                 replan_collision_confirm_max=0)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    for _ in range(4):
+        _feed(node, wall, _conf_for(wall, 0.5))
+    assert _n_paths(node) == n0
+    _feed(node, _all_free(), _conf_for(_all_free(), 0.0))   # noise cleared
+    assert node._collision_streak == 0, "a cleared collision resets the streak"
+    assert _n_paths(node) == n0, "a speckle that clears must never reroute"
+
+
+def test_mismatched_confidence_grid_falls_back_to_frame_count():
+    """A confidence grid that is not co-registered with the BEV (different lattice)
+    is ignored, so the node falls back to the pure frame-count gate and reroutes."""
+    node = _node(replan_collision_confirm=2, replan_confirm_conf=0.75)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    wall = _wall(slice(0, 30))
+    low = _conf_for(wall, 0.1)
+    bad = _conf_msg(low)
+    bad.info.origin.position.x = 99.0              # wrong origin -> key mismatch
+    _advance(0.5); node._conf_cb(bad); node._bev_cb(_occ_msg(wall))   # streak 1
+    _advance(0.5); node._conf_cb(bad); node._bev_cb(_occ_msg(wall))   # streak 2
+    assert _n_paths(node) == n0 + 1, "stale/mismatched conf -> frame-count reroute"

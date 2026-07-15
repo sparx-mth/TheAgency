@@ -19,6 +19,7 @@ from .map_change import (
     known_mask,
     newly_known_mask,
 )
+from .obstacle_confidence import route_obstacle_confidence
 from .path_metrics import polyline_length, remaining_polyline
 from .path_raster import corridor_mask, rasterize_path
 from .route_difficulty import (
@@ -45,5 +46,6 @@ __all__ = [
     "polyline_length",
     "rasterize_path",
     "remaining_polyline",
+    "route_obstacle_confidence",
     "windowed_turn_deg",
 ]

@@ -59,6 +59,14 @@ class BevProjector:
         self.cfg = cfg
         self.lattice = BevLattice(cfg)
         self.last_stats: Dict[str, int] = {}
+        # Per-cell OCCUPIED confidence in [0, 1] from the last project() call, or
+        # None when the temporal filter is off (no graded evidence exists then).
+        # It is the temporal evidence / t_max for observed cells, and forced to 1.0
+        # for caller-forced CERTAIN obstacles (``force_occ``), which carry no
+        # evidence but are ground truth. A downstream planner reads this to gate an
+        # obstacle reroute on a *confident* obstacle instead of a single
+        # low-confidence depth speckle -- see route_obstacle_confidence.
+        self.last_confidence: Optional[np.ndarray] = None
         # temporal-hysteresis state (used only when cfg.temporal_filter)
         self._ev = np.zeros((self.lattice.H, self.lattice.W), np.float32)
         self._occ_state = np.zeros((self.lattice.H, self.lattice.W), bool)
@@ -124,8 +132,13 @@ class BevProjector:
             self._occ_state = ((self._occ_state & (self._ev > cfg.t_off))
                                | (self._ev >= cfg.t_on))
             confirmed = self._occ_state.copy()
+            # Publish the accumulated evidence as a [0, 1] confidence so a planner
+            # can distinguish a barely-latched speckle (near t_on/t_max) from a
+            # solid, repeatedly-seen wall (near 1.0).
+            self.last_confidence = (self._ev / cfg.t_max).astype(np.float32)
         else:
             confirmed = base_occ
+            self.last_confidence = None
         n_pending = int((base_occ & ~confirmed).sum())
 
         # 6) wall completion: bridge one-cell gaps in CONFIRMED walls only,
@@ -143,6 +156,14 @@ class BevProjector:
         grid[protected] = FREE
         if force_occ is not None and force_occ.any():
             grid[force_occ] = OCCUPIED
+            # Caller-forced obstacles are CERTAIN ground truth (manual walls, the
+            # virtual back-wall), not temporally-accrued evidence -- stamp them to
+            # full confidence so a downstream confidence gate never treats a known
+            # wall as a low-confidence speckle to "keep looking at". Their evidence
+            # (_ev) is 0, so without this they would read confidence 0 despite
+            # being OCCUPIED, the exact inverse of the truth.
+            if self.last_confidence is not None:
+                self.last_confidence[force_occ] = 1.0
 
         # 8) optional safety dilation (never seal a protected opening)
         if cfg.occ_dilate_cells > 0:

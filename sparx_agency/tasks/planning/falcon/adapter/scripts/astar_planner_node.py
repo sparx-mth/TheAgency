@@ -60,7 +60,7 @@ from sparx_agency.core.planning.planners.astar import (
     WeightedAStarPlanner2D, WeightedAStarParams)
 from sparx_agency.core.planning.replanning import (
     corridor_mask, count_new_known_in_corridor, known_mask,
-    polyline_length, remaining_polyline)
+    polyline_length, remaining_polyline, route_obstacle_confidence)
 
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -183,6 +183,31 @@ class AStarPlannerNode:
         self.replan_collision_confirm = max(1, int(G("~replan_collision_confirm", 2)))
         self._collision_streak = 0       # consecutive colliding BEV frames
 
+        # ── Confidence-aware obstacle confirmation ───────────────────────────
+        # The frame-count debounce above only rejects a collision that *flickers*.
+        # A stably mis-triggered depth speckle holds the binary BEV cell OCCUPIED
+        # for many consecutive frames, so the streak still clears and the drone
+        # reroutes -- veering off the cell before it can re-observe (and clean) it.
+        # The BEV publisher exposes the temporal filter's per-cell confidence
+        # (evidence / t_max, 0..100) on ~conf_topic. Here we require the on-route
+        # obstacle's confidence to reach ~replan_confirm_conf (fraction of full
+        # evidence) before rerouting: a marginal cell is kept on-route so the drone
+        # keeps looking (it either firms up -> reroute, or is seen free and decays
+        # -> no reroute), while a solid wall firms up fast and reroutes as before.
+        # This is a SECOND gate on top of the frame count -- it only ever DELAYS a
+        # reroute, never bypasses the frame debounce. Set 0 to disable (frame count
+        # only). Without a confidence grid the node falls back to the frame count.
+        self.conf_topic = G("~conf_topic", "/falcon/bev_2d_conf")
+        self.replan_confirm_conf = float(G("~replan_confirm_conf", 0.75))
+        # Safety backstop: reroute anyway once a collision has persisted this many
+        # consecutive frames even if the confidence gate is unmet -- bounds the time
+        # the drone may fly toward a persistently-flagged but never-confirmed cell
+        # (e.g. one just outside the sensor's vertical band). 0 = no ceiling.
+        self.replan_collision_confirm_max = max(
+            0, int(G("~replan_collision_confirm_max", 30)))
+        self.conf_grid = None            # (H,W) float32 [0,1], from ~conf_topic
+        self._conf_key = None            # lattice key of the stored conf grid
+
         # ── Smart replanning (event-driven; supersedes the periodic + mid-cycle
         #    hooks above when ON) ───────────────────────────────────────────────
         # The slow stop-and-turn platform must NOT be whipsawed by a route that
@@ -265,6 +290,7 @@ class AStarPlannerNode:
         self.pub_status = rospy.Publisher(self.status_topic, Bool, queue_size=1, latch=True)
         self.pub_event = rospy.Publisher(self.event_topic, String, queue_size=5, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
+        rospy.Subscriber(self.conf_topic, OccupancyGrid, self._conf_cb, queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
         if self.replan_on_predicted_collision:
@@ -352,6 +378,22 @@ class AStarPlannerNode:
         if self.has_plan and self.replan_on_predicted_collision:
             self._predicted_collision_check()
 
+    def _conf_cb(self, msg):
+        """Store the BEV per-cell OCCUPIED confidence (int8 0..100 -> [0,1]).
+
+        Kept with its lattice key so the collision gate uses it only when it is
+        co-registered with the current BEV (same origin/resolution/shape); a stale
+        or mismatched grid is ignored and the gate falls back to the frame count.
+        """
+        i = msg.info
+        try:
+            data = np.frombuffer(bytes(bytearray(msg.data)), dtype=np.int8)
+        except Exception:
+            data = np.asarray(msg.data, dtype=np.int8)
+        self.conf_grid = (data.reshape(i.height, i.width).astype(np.float32) / 100.0)
+        self._conf_key = (i.height, i.width, round(i.origin.position.x, 6),
+                          round(i.origin.position.y, 6), round(i.resolution, 6))
+
     def _predicted_cb(self, msg):
         """Store the follower's predicted trajectory (world Pose2D) + its stamp."""
         self._predicted_points = tuple(
@@ -404,6 +446,8 @@ class AStarPlannerNode:
                           "waiting for more depth before replanning",
                           self._collision_streak, self.replan_collision_confirm)
             return
+        if not self._obstacle_confirmed(self.last_points, self._collision_streak):
+            return            # obstacle not yet confident -- keep looking
 
         rospy.logwarn("astar_planner: path blocked on %d consecutive BEV frame(s) "
                       "-- replanning", self._collision_streak)
@@ -431,6 +475,9 @@ class AStarPlannerNode:
         self._pred_collision_streak += 1
         if self._pred_collision_streak < self.replan_collision_confirm:
             return
+        if not self._obstacle_confirmed(self._predicted_points,
+                                        self._pred_collision_streak):
+            return            # predicted obstacle not yet confident -- keep looking
         if self._predicted_replans >= self.max_predicted_replans:
             rospy.logwarn_throttle(
                 5.0, "astar_planner: predicted-collision replan cap (%d) reached "
@@ -441,6 +488,63 @@ class AStarPlannerNode:
         self._predicted_replans += 1
         self.has_plan = False
         self._try_plan()
+
+    # ─── Confidence-aware obstacle confirmation ──────────────────────
+    def _obstacle_confirmed(self, points, streak):
+        """Second confirmation stage (after the frame-count debounce): is the map
+        actually CONFIDENT the on-route obstacle is real, or is it a low-confidence
+        speckle that another look would clear?
+
+        Reads the BEV per-cell confidence (evidence / t_max) at the occupied cells
+        ``points`` crosses and reroutes only once it reaches ~replan_confirm_conf.
+        A marginal cell is kept on-route so the drone keeps observing it (it either
+        firms up -> reroute, or is seen free and decays -> no reroute), which is
+        exactly what stops the noisy-map veer-away/veer-back churn. A generous
+        frame ceiling (~replan_collision_confirm_max) still forces a reroute so the
+        drone never flies indefinitely toward an unconfirmed cell. Degrades to the
+        pure frame-count gate (returns True) when the gate is disabled
+        (~replan_confirm_conf<=0) or no co-registered confidence grid is available.
+
+        Args:
+            points: World waypoints whose crossed obstacle is being confirmed.
+            streak: The caller's current consecutive-collision frame count (used
+                for the safety ceiling; geometric and predicted checks pass their
+                own streak).
+
+        Returns:
+            True  -> confirmed: reroute now.
+            False -> not yet confident: keep the committed route and keep looking.
+        """
+        if self.replan_confirm_conf <= 0.0:
+            return True                       # confidence gate disabled
+        conf = self._route_obstacle_confidence(points)
+        if conf is None:
+            return True                       # no confidence grid -> frame count only
+        if conf >= self.replan_confirm_conf:
+            return True
+        if (self.replan_collision_confirm_max > 0
+                and streak >= self.replan_collision_confirm_max):
+            rospy.logwarn("astar_planner: on-route obstacle still unconfirmed by "
+                          "confidence (%.2f < %.2f) after %d frames (ceiling %d) -- "
+                          "rerouting", conf, self.replan_confirm_conf, streak,
+                          self.replan_collision_confirm_max)
+            return True
+        rospy.loginfo_throttle(
+            1.0, "astar_planner: on-route obstacle confidence %.2f < %.2f -- keeping "
+            "route, re-observing (frame %d/%s)", conf, self.replan_confirm_conf,
+            streak, self.replan_collision_confirm_max or "inf")
+        return False
+
+    def _route_obstacle_confidence(self, points):
+        """Peak BEV confidence of the occupied cells ``points`` crosses, or None
+        when no confidence grid co-registered with the current BEV is available (the
+        caller then confirms on the frame count alone)."""
+        if (self.conf_grid is None or self.grid is None
+                or self._conf_key != self._grid_key_of(self.grid)):
+            return None
+        inflate_cells = int(round(self.params.inflate_radius_m / self.grid.resolution))
+        return route_obstacle_confidence(
+            self.grid, self.conf_grid, points, inflate_cells)
 
     # ─── Smart replanning (event-driven; ~smart_replan) ──────────────
     def _smart_evaluate(self):
@@ -520,7 +624,7 @@ class AStarPlannerNode:
                 1.0, "astar_planner: route collision unconfirmed %d/%d -- waiting "
                 "for more depth", self._collision_streak, self.replan_collision_confirm)
             return False
-        return True
+        return self._obstacle_confirmed(remaining, self._collision_streak)
 
     def _forced_replan(self):
         """Confirmed obstacle on the route: replan and adopt unconditionally (the
@@ -851,6 +955,11 @@ class AStarPlannerNode:
         L("  search_margin=%.1fm start_skip=%.2fm snap=%.1fm collision_replan=%s",
           p.search_margin_m, p.start_skip_m, p.goal_snap_radius_m, self.replan_on_collision)
         L("  collision replan confirm=%d frame(s)", self.replan_collision_confirm)
+        L("  obstacle confidence gate: conf_in=%s thresh=%.2f ceiling=%s",
+          self.conf_topic, self.replan_confirm_conf,
+          ("%d frames" % self.replan_collision_confirm_max
+           if self.replan_collision_confirm_max else "off")
+          if self.replan_confirm_conf > 0.0 else "DISABLED")
         L("  corner_round=%s merge=%.0fdeg max_turn=%.0fdeg chamfer<=%.0fdeg "
           "dist=%.2fm runup=%.2fm", p.corner_round, math.degrees(p.corner_merge_rad),
           math.degrees(p.corner_max_turn_rad), math.degrees(p.corner_chamfer_max_rad),
@@ -919,6 +1028,21 @@ if __name__ == "__main__":
 #       ~replan_min_new_cells (60) ~replan_commit_min_s (4.0)
 #       ~replan_improve_frac (0.15) ~replan_collision_confirm (2)
 #       ~stop_on_blocked_plan_fail (true). NavDP is the fallback if A* cannot plan.
+#   CONFIDENCE-AWARE obstacle confirmation (a SECOND gate after the frame count;
+#     only ever DELAYS a reroute, never bypasses the frame debounce):
+#       ~conf_topic (/falcon/bev_2d_conf) -- companion OccupancyGrid from the BEV
+#         publisher (int8 0..100 = temporal evidence / t_max).
+#       ~replan_confirm_conf (0.75) -- reroute only once the on-route obstacle's
+#         confidence reaches this fraction of full evidence; a marginal cell is
+#         kept on-route so the drone keeps observing (and can clean) it. Must be
+#         above the BEV's latch ratio t_on/t_max (else every latched cell already
+#         qualifies and the gate is a no-op). 0 disables the gate (frame count
+#         only). Without a co-registered ~conf_topic grid the node also falls back
+#         to the frame count.
+#       ~replan_collision_confirm_max (30) -- safety ceiling: reroute anyway once a
+#         collision has persisted this many frames even if the confidence gate is
+#         unmet (bounds flying toward a persistently-flagged, never-confirmed cell).
+#         0 = no ceiling (pure confidence gate).
 #   LEGACY cadence (~smart_replan:=false): ~plan_period_s (3.0) strict timer +
 #     the OPTIONAL mid-cycle hooks below (ALL OFF by default):
 #       ~replan_on_collision (false) ~replan_on_bev (false)
