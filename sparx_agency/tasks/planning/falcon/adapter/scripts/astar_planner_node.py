@@ -1005,6 +1005,10 @@ if __name__ == "__main__":
 #       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.3)
 #       ~los_smoothing (true) ~waypoint_spacing_m (3.0) ~goal_snap_radius_m (2.0)
 #       ~start_skip_m (0.4) ~max_expansions (200000)
+#       (When the drone reads INSIDE a wall -- hugging it / a noisy frame paints its
+#        cell occupied -- the planner clears the drone's own footprint + inflation
+#        skirt so A* plans out; a genuinely walled-in start returns NO_PATH and the
+#        node STOPs + hands off to NavDP rather than route through the wall.)
 #   corner rounding (gentler turns): ~corner_round (true) ~corner_merge_deg (8)
 #       ~corner_max_turn_deg (14) ~corner_chamfer_max_deg (28)
 #       ~corner_chamfer_dist_m (0.5) ~corner_min_runup_m (0.6)

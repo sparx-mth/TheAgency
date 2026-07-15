@@ -63,3 +63,25 @@ def test_passable_start_does_not_mask_real_obstacle_ahead():
     drone = Pose2D(0.5, 1.55)
     path = [drone, Pose2D(2.9, 1.55)]  # runs into the wall at col 20
     assert planner.path_collides(g, path, passable_start=drone)
+
+
+def test_passable_start_exempts_the_drones_own_truly_occupied_cell():
+    """A noisy frame paints an OCCUPIED cell right under the drone. The escape path
+    starts on that cell, but the collision check must not fire on the cell the
+    drone physically occupies (waypoint 0) -- while a wall AHEAD is still caught."""
+    data = np.zeros((30, 30), np.int16)
+    data[15, 5] = 100                          # the drone's own cell reads OCCUPIED
+    g = _grid(data)
+    planner = WeightedAStarPlanner2D(WeightedAStarParams(inflate_radius_m=0.0))
+    drone = Pose2D(0.55, 1.55)                 # gx=5, gy=15 -> on the occupied cell
+    dsx, dsy = g.world_to_grid(drone.x, drone.y)
+    assert data[dsy, dsx] == 100, "test setup: drone cell is truly occupied"
+    clear_ahead = [drone, Pose2D(1.85, 1.55)]  # leads out to the right, no wall ahead
+    assert planner.path_collides(g, clear_ahead), "raw: starts on an occupied cell"
+    assert not planner.path_collides(g, clear_ahead, passable_start=drone), \
+        "the drone's own cell must be exempted so the escape path is not a collision"
+    # A real wall AHEAD (not the drone's own cell) is still detected.
+    data[15, 12] = 100
+    g2 = _grid(data)
+    into_wall = [drone, Pose2D(1.85, 1.55)]    # crosses the col-12 wall
+    assert planner.path_collides(g2, into_wall, passable_start=drone)

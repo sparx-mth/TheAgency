@@ -140,12 +140,20 @@ class WeightedAStarPlanner2D:
                 )
             gx, gy = snapped
 
-        # Start is always passable (it may sit inside the inflation skirt). Only
-        # copy the cost map when we actually need to override, to keep the cache
-        # clean and avoid a per-plan allocation in the common case.
-        if not np.isfinite(cost[sy, sx]):
+        # Start relaxation. On a noisy map the drone often reads as sitting inside
+        # an obstacle: pressed against a wall (inside its inflation skirt) or, when
+        # a depth frame paints an occupied cell under it, on an occupied cell. The
+        # drone is PHYSICALLY at the start, so that space is passable -- never fail
+        # to plan because the start reads blocked. Clear the drone's own inscribed
+        # footprint (its own cell + its inflation skirt) so A* can step out toward
+        # the free space just beyond the skirt. Genuine obstacles are NOT cleared,
+        # so A* can never thread a real wall; if the drone is truly walled in, A*
+        # returns NO_PATH and the caller falls back to STOP + a reactive planner.
+        # Only copy the shared cost cache when we actually override.
+        start_blocked = not np.isfinite(cost[sy, sx])
+        if start_blocked:
             cost = cost.copy()
-            cost[sy, sx] = 1.0
+            self._clear_start_footprint(cost, occ, world, sx, sy)
 
         # Heading awareness: seed the search with the drone's facing (quantised to
         # a grid move) so the FIRST step is a turn like any other, and charge a
@@ -191,6 +199,19 @@ class WeightedAStarPlanner2D:
             # Start and goal share a cell (or trimming consumed the path):
             # the robot is effectively already there. Emit a valid 2-point path.
             pts = [request.start, request.goal]
+
+        # Safety net for a relaxed start: the drone's OWN cell is passable, but the
+        # flown route must never cross a real (truly-occupied) cell. Skirt-only
+        # footprint clearing already guarantees this (A* cannot traverse a genuine
+        # obstacle), but validate the emitted waypoints against TRUE occupancy so a
+        # degenerate on-wall start whose only route is straight through fails here
+        # (-> NO_PATH -> the caller STOPs and hands off to a reactive planner)
+        # rather than commanding the drone through a wall.
+        if start_blocked and self._path_crosses_true_obstacle(world, pts, sx, sy):
+            return PlanResult(
+                status=PlanStatus.NO_PATH,
+                message="start walled in: no route out without crossing an obstacle",
+            )
 
         return PlanResult(
             status=PlanStatus.SUCCESS,
@@ -251,23 +272,84 @@ class WeightedAStarPlanner2D:
                 return True
         return False
 
+    def _clear_start_footprint(self, cost: np.ndarray, occ: np.ndarray,
+                               world: OccupancyGrid2D, sx: int, sy: int) -> None:
+        """Relax the drone's own footprint in ``cost`` (in place) so a blocked start
+        can escape -- WITHOUT ever opening a real wall.
+
+        Two things are cleared to free cost:
+
+          * the drone's own cell -- it is physically there, so it is passable even
+            when a noisy depth frame paints that single cell OCCUPIED;
+          * cells in the inscribed disc that are inflated but NOT truly occupied
+            (the drone's own inflation *skirt*).
+
+        Genuine (truly-occupied) cells are left blocked. Because the disc radius is
+        the inflation radius, the skirt the drone sits in is fully cleared and A*
+        reaches the free space just past it -- while a real obstacle, or any
+        occupied blob larger than the drone's own cell, stays lethal so A* can
+        never thread a wall. The ``occ`` mask used for LOS smoothing / the collision
+        re-check is untouched.
+        """
+        cost[sy, sx] = 1.0                       # the drone's own cell: it is there
+        n = int(round(self.params.inflate_radius_m / world.resolution))
+        if n <= 0:
+            return
+        h, w = cost.shape
+        y0, y1 = max(0, sy - n), min(h, sy + n + 1)
+        x0, x1 = max(0, sx - n), min(w, sx + n + 1)
+        ys, xs = np.ogrid[y0:y1, x0:x1]
+        disc = (xs - sx) ** 2 + (ys - sy) ** 2 <= n * n
+        true_occ = world.grid == world.values.occupied
+        # inflation skirt only: inflated (in occ) but not a genuine obstacle
+        skirt = disc & occ[y0:y1, x0:x1] & ~true_occ[y0:y1, x0:x1]
+        cost[y0:y1, x0:x1][skirt] = 1.0
+
+    def _path_crosses_true_obstacle(self, world: OccupancyGrid2D,
+                                    points: Sequence[Pose2D], sx: int, sy: int) -> bool:
+        """True if any segment of ``points`` crosses a TRULY-occupied cell (real
+        obstacle), exempting only the drone's own cell ``(sx, sy)``.
+
+        Checked against raw occupancy (no inflation): a relaxed start is allowed to
+        sit on / next to its own inflation skirt, but the flown route must never run
+        through a genuine wall. Used only when the start was relaxed."""
+        true_occ = (world.grid == world.values.occupied).copy()
+        h, w = true_occ.shape
+        if 0 <= sx < w and 0 <= sy < h:
+            true_occ[sy, sx] = False
+        cells = [world.world_to_grid(pt.x, pt.y) for pt in points]
+        for (x0, y0), (x1, y1) in zip(cells[:-1], cells[1:]):
+            if not (0 <= x0 < w and 0 <= y0 < h and 0 <= x1 < w and 0 <= y1 < h):
+                continue
+            if not line_of_sight_clear(true_occ, x0, y0, x1, y1):
+                return True
+        return False
+
     def _exempt_footprint(self, world, occ, center):
-        """Return a COPY of ``occ`` with the drone's own footprint skirt cleared.
+        """Return a COPY of ``occ`` with the drone's own footprint cleared.
 
         The drone's own body inflates the cells around it, so those cells read as
-        lethal even though the drone is physically standing there. Within the
-        robot's inscribed radius of ``center`` we clear only cells that are
-        inflated but NOT truly ``occupied``: genuine walls stay lethal (so a real
-        obstacle next to or ahead of the drone is still detected), while the
-        drone's own skirt is ignored. Works on a copy so the cached mask A* shares
-        is never mutated.
+        lethal even though the drone is physically standing there. Two exemptions:
+
+          * the drone's OWN cell is always cleared -- you cannot collide with the
+            cell you occupy, even when a noisy frame paints it truly ``occupied``
+            (this is what lets an escape path off a wall-hugging start not read as
+            an instant collision at waypoint 0);
+          * within the inscribed radius of ``center`` we additionally clear cells
+            that are inflated but NOT truly ``occupied`` -- genuine walls in the
+            skirt stay lethal, so a real obstacle next to or ahead of the drone is
+            still detected, while the drone's own inflation skirt is ignored.
+
+        Works on a copy so the cached mask A* shares is never mutated.
         """
         occ = occ.copy()
+        h, w = occ.shape
+        cx, cy = world.world_to_grid(center.x, center.y)
+        if 0 <= cx < w and 0 <= cy < h:
+            occ[cy, cx] = False
         n = int(round(self.params.inflate_radius_m / world.resolution))
         if n <= 0:
             return occ
-        h, w = occ.shape
-        cx, cy = world.world_to_grid(center.x, center.y)
         true_occ = world.grid == world.values.occupied
         for yy in range(max(0, cy - n), min(h, cy + n + 1)):
             dy2 = (yy - cy) ** 2

@@ -421,6 +421,25 @@ def test_boxed_in_stops_once_and_signals_fallback():
     assert _last_status(node) is False
 
 
+def test_plans_and_holds_from_a_wall_hugging_start():
+    """The drone reads inside a wall's inflation skirt at the start. The planner
+    must still commit a route OUT (not fail), and a repeated identical BEV must not
+    churn -- the escape stays within the collision-exemption footprint, so it is not
+    re-flagged as a collision."""
+    node = _node()                       # default inflate 0.4m
+    g = _all_free()
+    g[:, 0:2] = OCC                       # left wall; the start (col 2) sits in its skirt
+    node._pose_cb(_pose_msg(0.2, 2.0))    # gx=2 -> inside the inflation skirt
+    node._goal_cb(_point(3.8, 2.0))
+    node._bev_cb(_occ_msg(g))             # first BEV -> plan from an in-skirt start
+    assert node.has_plan, "must plan out of a wall-hugging start"
+    n1 = _n_paths(node)
+    for _ in range(5):
+        _advance(1.0)
+        node._bev_cb(_occ_msg(g))
+    assert _n_paths(node) == n1, "a static map from an in-skirt start must not churn"
+
+
 def test_legacy_mode_still_plans_via_try_plan():
     """smart_replan:=false must fall back to the legacy periodic path unchanged."""
     node = _node(smart_replan=False)
