@@ -122,6 +122,10 @@ def _install_stubs():
         def __init__(self, data=False):
             self.data = data
 
+    class _String:
+        def __init__(self, data=""):
+            self.data = data
+
     class _Info:
         def __init__(self):
             self.width = 0
@@ -151,6 +155,7 @@ def _install_stubs():
     std = types.ModuleType("std_msgs")
     std_msg = types.ModuleType("std_msgs.msg")
     std_msg.Bool = _Bool
+    std_msg.String = _String
     std.msg = std_msg
     sys.modules["std_msgs"] = std
     sys.modules["std_msgs.msg"] = std_msg

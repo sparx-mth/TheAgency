@@ -228,6 +228,7 @@
   <arg name="los_smoothing"  default="false" />
   <arg name="corner_round"   default="false" />
   <arg name="turn_penalty"   default="0.3" />
+  <arg name="heading_penalty_m" default="1.5" /><!-- heading-aware A*: cost (m) for turning the drone AROUND at the start (fly the way it looks; only turn around if forced); 0 = off -->
 
   <!-- ── NavDP execution / display ────────────────────────────────
        navdp_execute_fraction: fly only the first fraction of the route, hold at
@@ -404,6 +405,7 @@
     <arg name="los_smoothing"           value="$(arg los_smoothing)" />
     <arg name="corner_round"            value="$(arg corner_round)" />
     <arg name="turn_penalty"            value="$(arg turn_penalty)" />
+    <arg name="heading_penalty_m"       value="$(arg heading_penalty_m)" />
     <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
     <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
   </include>

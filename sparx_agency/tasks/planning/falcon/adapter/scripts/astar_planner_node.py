@@ -49,8 +49,9 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
+from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Path2D, Pose2D, PlanStatus
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
@@ -111,6 +112,10 @@ class AStarPlannerNode:
         # sample per real planning attempt. The fallback arbiter (nav_mode:=fallback)
         # uses this to switch to NavDP after N failures and back after M successes.
         self.status_topic = G("~status_topic", "/path/astar_status")
+        # Human-readable replan events (std_msgs/String), for the BEV viewer HUD:
+        # first route, obstacle reroute, boxed-in STOP, discovery reroute. Distinct
+        # from ~status_topic (a per-attempt Bool the fallback arbiter counts).
+        self.event_topic = G("~event_topic", "/path/astar_event")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.frame_id = G("~frame_id", "world")
 
@@ -121,6 +126,7 @@ class AStarPlannerNode:
             unknown_cost=float(G("~unknown_cost", 1.0)),
             search_margin_m=float(G("~search_margin_m", 3.0)),
             turn_penalty=float(G("~turn_penalty", 0.3)),
+            heading_penalty_m=float(G("~heading_penalty_m", 1.5)),
             los_smoothing=_get_bool_param("~los_smoothing", True),
             waypoint_spacing_m=float(G("~waypoint_spacing_m", 3.0)),
             goal_snap_radius_m=float(G("~goal_snap_radius_m", 2.0)),
@@ -257,6 +263,7 @@ class AStarPlannerNode:
 
         self.pub_path = rospy.Publisher(self.path_topic, Path, queue_size=1, latch=True)
         self.pub_status = rospy.Publisher(self.status_topic, Bool, queue_size=1, latch=True)
+        self.pub_event = rospy.Publisher(self.event_topic, String, queue_size=5, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
@@ -277,10 +284,14 @@ class AStarPlannerNode:
     # ─── Callbacks ───────────────────────────────────────────────
     def _pose_cb(self, msg):
         first = self.pose is None
-        self.pose = Pose2D(float(msg.position.x), float(msg.position.y))
+        # Keep the drone's YAW: heading-aware A* (heading_penalty_m) reads
+        # request.start.yaw to prefer flying the way the drone already looks.
+        yaw = se3.yaw_from_quaternion((msg.orientation.x, msg.orientation.y,
+                                       msg.orientation.z, msg.orientation.w))
+        self.pose = Pose2D(float(msg.position.x), float(msg.position.y), float(yaw))
         if first:
-            rospy.loginfo("astar_planner: first pose start=(%.2f,%.2f)",
-                          self.pose.x, self.pose.y)
+            rospy.loginfo("astar_planner: first pose start=(%.2f,%.2f, yaw=%.0fdeg)",
+                          self.pose.x, self.pose.y, math.degrees(yaw))
 
     def _goal_cb(self, msg):
         new = Pose2D(float(msg.x), float(msg.y))
@@ -449,9 +460,12 @@ class AStarPlannerNode:
         # (1) No committed route yet, or recovering from a boxed-in STOP hold:
         #     keep planning every frame until A* succeeds, then commit + resume.
         if not self.has_plan or self._blocked_hold:
+            first, recovering = not self.has_plan, self._blocked_hold
             cand = self._plan_candidate()
             if cand is not None:
-                self._commit(cand)
+                self._commit(cand)            # clears has_plan/_blocked_hold
+                self._publish_event("PLAN: first route to goal" if first
+                                    else "REPLAN: route reopened -> resuming A*")
             else:
                 self._publish_status(False)   # A* cannot plan -> NavDP fallback
             return
@@ -516,6 +530,7 @@ class AStarPlannerNode:
                       "frame(s) -- replanning", self._collision_streak)
         cand = self._plan_candidate()
         if cand is not None:
+            self._publish_event("REPLAN: obstacle on route -> new route")
             self._commit(cand)      # follower stops-and-turns onto the new route
             return
         # Boxed in: no A* route around the obstacle. Report the failure (drives the
@@ -525,6 +540,7 @@ class AStarPlannerNode:
         if self.stop_on_blocked_plan_fail and not self._blocked_hold:
             self._publish_stop()
             self._blocked_hold = True
+            self._publish_event("STOP: boxed in - no A* route (NavDP takes over)")
             rospy.logwarn("astar_planner: no route around the obstacle -- STOP + "
                           "hold (status=False drives the NavDP fallback)")
 
@@ -548,6 +564,8 @@ class AStarPlannerNode:
         if new_len <= old_len * (1.0 - self.replan_improve_frac):
             rospy.loginfo("astar_planner: DISCOVERY replan adopted (%d new corridor "
                           "cells): remaining %.2fm -> %.2fm", n_new, old_len, new_len)
+            self._publish_event("REPLAN: shorter route found (%.1fm -> %.1fm)"
+                                % (old_len, new_len))
             self._commit(cand)     # resets _discovery_baseline + snapshot
         else:
             # Kept the route: raise the high-water mark so this same reveal does not
@@ -634,6 +652,11 @@ class AStarPlannerNode:
     def _publish_status(self, ok):
         """Publish one A* plan-attempt outcome (True=route, False=no route)."""
         self.pub_status.publish(Bool(data=bool(ok)))
+
+    def _publish_event(self, text):
+        """Announce a discrete A* planning event (String) for the viewer HUD."""
+        self.pub_event.publish(String(data=text))
+        rospy.loginfo("astar_planner event: %s", text)
 
     def _publish_stop(self):
         """Command the drone to STOP: a 2-point hold at the current pose collapses
@@ -865,6 +888,9 @@ if __name__ == "__main__":
 #         planning attempt -- True=route found, False=no route (res.ok False). Not
 #         emitted for the not-ready gates (no BEV/goal/pose, warmup). The fallback
 #         arbiter counts consecutive False/True to switch to/from NavDP.)
+#       ~event_topic (/path/astar_event; std_msgs/String, latched) -- human-readable
+#         replan events for the BEV viewer HUD: first route, obstacle reroute, boxed
+#         STOP, discovery reroute. Distinct from the per-attempt Bool status.
 #       ~frame_id (world) ~goal_x ~goal_y (initial goal; unset = wait for a click)
 #   planner: ~connectivity (8) ~inflate_radius_m (0.4) ~unknown_blocked (false)
 #       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.3)

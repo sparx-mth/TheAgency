@@ -276,6 +276,7 @@
   <arg name="unknown_cost"          default="1.0" />
   <arg name="los_smoothing"         default="true" />
   <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
+  <arg name="heading_penalty_m"     default="1.5" /><!-- HEADING-AWARE A*: cost (in m of extra path) for a route that turns the drone AROUND at the start, scaled by how backward the first step is (0 for flying forward or turning 90deg, full for a 180deg reversal). Makes A* fly the way the drone already looks (e.g. straight down a hallway) instead of spinning in place because the shortest path runs backward. 0 = off (purely geometric shortest path) -->
   <arg name="connectivity"          default="8" />
   <arg name="search_margin_m"       default="3.0" />
   <arg name="start_skip_m"          default="0.5" />
@@ -842,6 +843,7 @@
     <param name="unknown_cost"          value="$(arg unknown_cost)" />
     <param name="los_smoothing"         value="$(arg los_smoothing)" />
     <param name="turn_penalty"          value="$(arg turn_penalty)" />
+    <param name="heading_penalty_m"     value="$(arg heading_penalty_m)" />
     <param name="connectivity"          value="$(arg connectivity)" />
     <param name="search_margin_m"       value="$(arg search_margin_m)" />
     <param name="start_skip_m"          value="$(arg start_skip_m)" />

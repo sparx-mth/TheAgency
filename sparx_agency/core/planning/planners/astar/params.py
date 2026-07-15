@@ -102,6 +102,13 @@ class WeightedAStarParams:
     path_simplify_m: float = 0.0
     search_margin_m: float = 3.0
     turn_penalty: float = 0.3
+    # Heading awareness: cost (in metres of extra path) charged for a route that
+    # turns the drone AROUND at the start, scaled by how backward the first move is
+    # (0 for flying forward or turning 90 deg, full for a 180 deg reversal). Makes
+    # A* fly the way the drone already looks -- e.g. straight down a hallway --
+    # rather than spinning in place because the shortest path runs backward. Needs
+    # the start pose's ``yaw`` set (the planner reads ``request.start.yaw``). 0 = off.
+    heading_penalty_m: float = 0.0
     los_smoothing: bool = True
     waypoint_spacing_m: float = 3.0
     goal_snap_radius_m: float = 2.0

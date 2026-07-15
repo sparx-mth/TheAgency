@@ -16,7 +16,7 @@ does not inflate obstacles twice. It owns no ROS or world-IO concepts.
 """
 from __future__ import annotations
 
-from math import hypot
+from math import cos, hypot, sin
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -35,6 +35,18 @@ from ..common.grid_geometry_2d import (
     snap_to_free_cell,
 )
 from ..common.utils_2d import split_long_segments_2d
+
+
+def _yaw_to_move(yaw: float) -> Tuple[int, int]:
+    """Quantise a world heading (rad) to one of the 8 grid moves ``(dx, dy)``.
+
+    The BEV grid's +x/+y match world +x/+y (``world_to_grid`` is an affine shift),
+    so a heading ``(cos yaw, sin yaw)`` rounds directly to a grid step. Snapping to
+    the nearest 45 deg first guarantees a unit move in ``{-1,0,1}`` (never
+    ``(0,0)``)."""
+    from math import pi
+    q = round(yaw / (pi / 4.0)) * (pi / 4.0)
+    return int(round(cos(q))), int(round(sin(q)))
 
 
 def build_cost_grid(
@@ -135,6 +147,16 @@ class WeightedAStarPlanner2D:
             cost = cost.copy()
             cost[sy, sx] = 1.0
 
+        # Heading awareness: seed the search with the drone's facing (quantised to
+        # a grid move) so the FIRST step is a turn like any other, and charge a
+        # backward-scaled penalty (in cells) for turning around. Off when
+        # heading_penalty_m == 0 (the search then treats the start move as free).
+        start_dir = None
+        start_turn_penalty = 0.0
+        if p.heading_penalty_m > 0.0:
+            start_dir = _yaw_to_move(request.start.yaw)
+            start_turn_penalty = p.heading_penalty_m / res
+
         bbox = self._bbox(sx, sy, gx, gy, w, h, res)
         search = astar_cost_grid_2d(
             cost,
@@ -143,6 +165,8 @@ class WeightedAStarPlanner2D:
             connectivity=p.connectivity,
             bbox=bbox,
             turn_penalty=p.turn_penalty,
+            start_dir=start_dir,
+            start_turn_penalty=start_turn_penalty,
             max_expansions=p.max_expansions,
         )
         if not search.ok:
