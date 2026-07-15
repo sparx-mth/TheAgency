@@ -65,9 +65,9 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 
-from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from sparx_agency.core.common.math import se3
@@ -110,6 +110,15 @@ class BevClickGoalNode:
         self.lookahead_topic = G("~lookahead_topic", "/path/lookahead")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.pose_stamped_topic = G("~pose_stamped_topic", "")
+        # ── System-status HUD sources (top-left text box) ────────────
+        # who is planning now (A*/NavDP, published by the hybrid arbiter),
+        self.nav_status_topic = G("~nav_status_topic", "/nav/status")
+        # the nav_mode this run was launched with (context when no arbiter publishes),
+        self.nav_mode = str(G("~nav_mode", ""))
+        # the drone command, to show forward-flight vs rotation-in-place live,
+        self.cmd_vel_topic = G("~cmd_vel_topic", self.drone_ns + "/cmd_vel")
+        # and A* replan events (first route / obstacle reroute / boxed STOP / shorter).
+        self.astar_event_topic = G("~astar_event_topic", "/path/astar_event")
         self.refresh_hz = float(G("~refresh_hz", 5.0))
         self.arrow_len = float(G("~arrow_len_m", 0.5))
         # View window used until the first BEV map arrives, so the drone is
@@ -134,6 +143,11 @@ class BevClickGoalNode:
         self._lookahead_xy = None       # pure-pursuit lookahead aim point (blueviolet)
         self._drone_p = None            # (x, y, yaw)
         self._goal_xy = None
+        # System status (HUD): who plans, what the drone is doing, last A* event.
+        self._nav_status = None         # "A*" / "NavDP (reason)" (from ~nav_status_topic)
+        self._motion = None             # "FORWARD" / "ROTATING" / "HOLD" (from cmd_vel)
+        self._astar_event = None        # last A* replan event text
+        self._astar_event_t = None      # rospy.Time it arrived (for an age readout)
         self._lock = threading.Lock()
 
         # Live per-layer visibility. Each maps a number key to an overlay; a
@@ -143,7 +157,12 @@ class BevClickGoalNode:
         self._keymap = {"1": "full", "2": "raw", "3": "safe", "4": "path",
                         "5": "field", "6": "forces", "7": "pred",
                         "8": "smooth", "9": "lookahead", "a": "astar"}
-        self._show = {layer: bool(G("~show_" + layer, True))
+        # Declutter by default: show only the three overlays that matter for watching
+        # the A*/NavDP hybrid -- [a] A* global route, [1] NavDP full leg, [4] flown
+        # path -- and hide the rest. Any layer is still toggled live with its key, or
+        # forced on/off from a launch file via ~show_<layer>.
+        _default_on = {"astar", "full", "path"}
+        self._show = {layer: bool(G("~show_" + layer, layer in _default_on))
                       for layer in self._keymap.values()}
 
         self.goal_pub = rospy.Publisher(self.goal_topic, Point, queue_size=1, latch=True)
@@ -170,6 +189,14 @@ class BevClickGoalNode:
         if self.pose_stamped_topic:
             rospy.Subscriber(self.pose_stamped_topic, PoseStamped,
                              self._pose_stamped_cb, queue_size=10)
+        if self.nav_status_topic:
+            rospy.Subscriber(self.nav_status_topic, String, self._nav_status_cb,
+                             queue_size=1)
+        if self.cmd_vel_topic:
+            rospy.Subscriber(self.cmd_vel_topic, Twist, self._cmd_vel_cb, queue_size=1)
+        if self.astar_event_topic:
+            rospy.Subscriber(self.astar_event_topic, String, self._astar_event_cb,
+                             queue_size=5)
 
         self.fig, self.ax = plt.subplots(figsize=(9, 9))
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
@@ -182,6 +209,14 @@ class BevClickGoalNode:
         self.ax.set_ylabel("y (m)")
         self.ax.grid(True, alpha=0.25)
         self._add_legend()
+
+        # System-status HUD (top-left): who is planning, what the drone is doing,
+        # and the last A* replan event. Created once; _render updates its text.
+        self._hud = self.ax.text(
+            0.015, 0.985, "", transform=self.ax.transAxes, va="top", ha="left",
+            fontsize=9, family="monospace", zorder=21,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85,
+                      edgecolor="0.5"))
 
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
@@ -215,7 +250,11 @@ class BevClickGoalNode:
             rospy.loginfo("  pose in  = %s   (PoseStamped, direct)",
                           self.pose_stamped_topic)
         rospy.loginfo("  goal out = %s   (left-click to publish)", self.goal_topic)
-        rospy.loginfo("  toggles  = keys 1-9 per overlay, 0 = all on/off")
+        rospy.loginfo("  HUD in   = %s (planner) + %s (motion) + %s (A* events)",
+                      self.nav_status_topic, self.cmd_vel_topic, self.astar_event_topic)
+        rospy.loginfo("  overlays = default ON: [a] A* route, [1] NavDP leg, [4] flown "
+                      "path; others OFF")
+        rospy.loginfo("  toggles  = keys 1-9/a per overlay, 0 = all on/off")
         rospy.loginfo("=" * 64)
 
     # -- subscribers ----------------------------------------------------------
@@ -288,6 +327,35 @@ class BevClickGoalNode:
 
     def _pose_stamped_cb(self, msg):
         self._pose_cb(msg.pose)
+
+    # -- system status (HUD) --------------------------------------------------
+    def _nav_status_cb(self, msg):
+        with self._lock:
+            self._nav_status = msg.data
+
+    def _astar_event_cb(self, msg):
+        with self._lock:
+            self._astar_event = msg.data
+            self._astar_event_t = rospy.Time.now()
+
+    def _cmd_vel_cb(self, msg):
+        """Classify the live command into forward-flight vs rotation-in-place so the
+        HUD shows what the drone is doing right now (the one-axis follower does one
+        or the other; a holonomic controller may do both)."""
+        vx, vy, wz = msg.linear.x, msg.linear.y, msg.angular.z
+        speed = (vx * vx + vy * vy) ** 0.5
+        turning = abs(wz) >= 0.03            # rad/s
+        moving = speed >= 0.03               # m/s
+        if not moving and not turning:
+            motion = "HOLD (stopped)"
+        elif turning and not moving:
+            motion = "ROTATING (turn in place)"
+        elif moving and not turning:
+            motion = "FORWARD FLIGHT"
+        else:
+            motion = "FORWARD + TURN"
+        with self._lock:
+            self._motion = motion
 
     # -- click handler --------------------------------------------------------
     def _on_click(self, event):
@@ -395,6 +463,8 @@ class BevClickGoalNode:
             pred, score = list(self._pred_xy), self._pred_score
             smooth = list(self._smooth_xy)
             lookahead = self._lookahead_xy
+            nav_status, motion = self._nav_status, self._motion
+            event, event_t = self._astar_event, self._astar_event_t
 
         # Map background (optional): the drone is still drawn without it, so a
         # bridge+bag run with no bev_publisher up still shows where the drone is.
@@ -580,6 +650,16 @@ class BevClickGoalNode:
             self._lookahead_marker, = self.ax.plot(
                 [lookahead[0]], [lookahead[1]], "X", color="blueviolet",
                 markersize=13, markeredgecolor="black", zorder=7)
+
+        # System-status HUD (top-left)
+        mode = self.nav_mode.upper() if self.nav_mode else "?"
+        lines = ["mode: %s    planner: %s" % (mode, nav_status or "(awaiting status)"),
+                 "motion: %s" % (motion or "(no /cmd_vel yet)")]
+        if event:
+            age = ("  (%.0fs ago)" % (rospy.Time.now() - event_t).to_sec()
+                   if event_t is not None else "")
+            lines.append("A*: %s%s" % (event, age))
+        self._hud.set_text("\n".join(lines))
         return []
 
     def spin(self):

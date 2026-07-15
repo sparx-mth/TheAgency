@@ -21,13 +21,29 @@ from .map_change import (
 )
 from .path_metrics import polyline_length, remaining_polyline
 from .path_raster import corridor_mask, rasterize_path
+from .route_difficulty import (
+    RouteDifficulty,
+    assess_route_difficulty,
+    forward_window_2d,
+    net_turn_deg,
+    passage_free_width_2d,
+    passage_widths_2d,
+    windowed_turn_deg,
+)
 
 __all__ = [
+    "RouteDifficulty",
+    "assess_route_difficulty",
     "corridor_mask",
     "count_new_known_in_corridor",
+    "forward_window_2d",
     "known_mask",
+    "net_turn_deg",
     "newly_known_mask",
+    "passage_free_width_2d",
+    "passage_widths_2d",
     "polyline_length",
     "rasterize_path",
     "remaining_polyline",
+    "windowed_turn_deg",
 ]

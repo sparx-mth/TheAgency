@@ -365,9 +365,10 @@
        preferred; must describe the 504x294 stream — real drone only).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="use_navdp"                default="false" />
-  <!-- nav_mode = astar | navdp | combination | fallback. The mode selector. DEFAULT
-       is 'combination' (the A*+NavDP fusion runs automatically); use_navdp:=true is
-       the legacy shim that selects 'navdp'; pass nav_mode:=astar for plain A* only.
+  <!-- nav_mode = astar | navdp | combination | fallback | hybrid. The mode selector.
+       DEFAULT is 'hybrid' (A* on the easy stretches, NavDP only for hard maneuvers);
+       use_navdp:=true is the legacy shim that selects 'navdp'; pass nav_mode:=astar
+       for plain A* only, or nav_mode:=combination for the always-on A*+NavDP fusion.
          astar       : astar_planner -> /path/waypoints_astar
          navdp       : navdp_click   -> /path/waypoints_navdp (operator clicks a pixel)
          combination : astar_planner AND combination_planner run; A* plans the global
@@ -386,9 +387,21 @@
                        leg to its midpoint, re-inferring) until A* reports a route on
                        fallback_astar_ok_confirm consecutive attempts -> resume A*. The
                        hysteresis (larger ok than fail) prevents A*<->NavDP zig-zag at a
-                       hard turn / door. Publishes /path/waypoints_fallback. NavDP up. -->
+                       hard turn / door. Publishes /path/waypoints_fallback. NavDP up.
+         hybrid      : astar_planner AND hybrid_planner run (the DEFAULT). A* is PRIMARY:
+                       its route is echoed straight through on the easy stretches. Each
+                       tick hybrid_planner assesses the A* route just AHEAD of the drone
+                       for a DIFFICULT maneuver: a hard turn (heading change over
+                       hybrid_turn_thresh_deg) or a narrow passage / doorway (free width
+                       below hybrid_passage_width_m, measured perpendicular against the
+                       BEV). On hybrid_difficulty_confirm consecutive difficult ticks it
+                       STOPS and hands NavDP the farthest A* waypoint VISIBLE in frame,
+                       flying each leg to its midpoint and re-inferring, until the route
+                       ahead is easy again for hybrid_recover_confirm consecutive ticks
+                       -> resume A*. Also rescues a boxed-in A* (hybrid_engage_on_astar_fail,
+                       like fallback). Publishes /path/waypoints_hybrid. NavDP up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
-  <arg name="nav_mode" default="combination" />
+  <arg name="nav_mode" default="hybrid" />
   <!-- vla = navdp | flownav. Selects which VLA policy serves nav_mode:=navdp:
          navdp   = navdp_click_node (point-goal; operator clicks a pixel; NavDP server :navdp_port)
          flownav = flownav_node     (image-goal toward ~flownav_goal_image;  FlowNav server :flownav_port) -->
@@ -462,6 +475,42 @@
   <arg name="fallback_arrival_radius_m"         default="0.5" /><!-- within this of the mission goal NavDP has arrived -> hold (mission done) -->
 
   <!-- ══════════════════════════════════════════════════════════════
+       HYBRID (nav_mode:=hybrid, the DEFAULT) — A* on easy legs, NavDP on hard
+       maneuvers. A* stays PRIMARY; hybrid_planner assesses the A* route AHEAD each
+       tick and, on a confirmed hard turn or narrow passage / doorway, STOPS and
+       drives NavDP toward the farthest VISIBLE A* waypoint (combination-style legs)
+       until the hard part is behind -> resume A*. Reuses the navdp_* camera /
+       transport / server args. Needs the NavDP server up once a hard spot is reached.
+       ══════════════════════════════════════════════════════════════ -->
+  <!-- difficulty detector (core route_difficulty) -->
+  <arg name="hybrid_difficulty_lookahead_m" default="2.0" /><!-- how far ahead of the drone to assess the A* route for a hard maneuver (m) -->
+  <arg name="hybrid_difficulty_skip_m"      default="0.3" /><!-- skip this much past the drone (a maneuver it just finished must not keep reading as "ahead") (m) -->
+  <arg name="hybrid_merge_collinear_deg"    default="15.0" /><!-- SMOOTH the jagged raw A* first: drop vertices turning less than this before measuring, so grid-staircase noise on a straight corridor doesn't sum into a false hard turn (0 = assess the raw route) -->
+  <arg name="hybrid_turn_thresh_deg"        default="75.0" /><!-- total heading change (deg) over the window at/above which the turn is "hard" -> NavDP. HIGH on purpose: only a genuinely sharp corner engages NavDP, not every gentle bend. Lower it if hard turns are missed; raise it if easy routes still engage -->
+  <arg name="hybrid_passage_width_m"        default="0.75" /><!-- free width (m) below which the route is a doorway / narrow gap (measured perpendicular; tight on BOTH sides). Strict: only a real door-width gap engages NavDP. Raise to treat wider gaps as doorways -->
+  <arg name="hybrid_min_narrow_span_m"      default="0.3" /><!-- a doorway must stay narrow over at least this arclength (m) to count; rejects a single BEV speckle cell tripping a false doorway on an open corridor -->
+  <arg name="hybrid_sample_step_m"          default="0.1" /><!-- perpendicular-march / sampling step for the width test (~one BEV cell) (m) -->
+  <!-- hysteresis -->
+  <arg name="hybrid_difficulty_confirm"     default="3" /><!-- consecutive "difficult ahead" ticks before stopping & engaging NavDP (debounce) -->
+  <arg name="hybrid_recover_confirm"        default="5" /><!-- consecutive "easy again + A* has a route" ticks before resuming A* (keep >= difficulty_confirm; sticky, anti-zigzag) -->
+  <arg name="hybrid_min_pass_distance_m"    default="2.0" /><!-- do NOT return to A* until the drone has flown this far (m) from where NavDP engaged, i.e. THROUGH the maneuver, not the moment the route momentarily reads easy (~= the lookahead); 0 = off -->
+  <arg name="hybrid_engage_on_astar_fail"   default="false" /><!-- also engage NavDP when A* reports NO route (boxed in), like nav_mode:=fallback. OFF by default: hybrid is purely difficulty-triggered. On a flaky map (bag replay) A* status can drop out and this would drive NavDP the WHOLE route; use nav_mode:=fallback for real boxed-A* rescue -->
+  <arg name="hybrid_astar_fail_confirm"     default="3" /><!-- consecutive A* "no route" reports before that rescue engage -->
+  <arg name="hybrid_tick_hz"                default="5.0" /><!-- state-machine rate -->
+  <!-- NavDP leg (mirrors combination) -->
+  <arg name="hybrid_engage_settle_s"        default="1.0" /><!-- brake-settle before the first inference (clean, stationary frame) -->
+  <arg name="hybrid_navdp_timeout_s"        default="10.0" /><!-- NavDP HTTP step timeout for one inference; generous for a slow Jetson -->
+  <arg name="hybrid_leg_fraction"           default="0.5" /><!-- re-infer at the leg midpoint (the 2nd half buffers the inference latency) -->
+  <arg name="hybrid_final_handoff_m"        default="1.5" /><!-- hand the final approach straight to A* within this range of the mission goal -->
+  <arg name="hybrid_leg_timeout_s"          default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
+  <arg name="hybrid_leg_endpoint_radius_m"  default="0.4" /><!-- re-infer once the drone is within this of the leg end -->
+  <arg name="hybrid_max_wait_s"             default="30.0" /><!-- hold this long for a slow/blind inference before giving up to A* (checked before each attempt) -->
+  <arg name="hybrid_arrival_radius_m"       default="0.5" /><!-- within this of the mission goal a rescue NavDP leg has arrived -> hold -->
+  <arg name="hybrid_require_unoccluded"     default="true" /><!-- a waypoint is "visible" only with clear line-of-sight (depth), not merely in-FOV -->
+  <arg name="hybrid_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the depth occlusion test -->
+  <arg name="hybrid_min_goal_fwd_m"         default="0.5" /><!-- ignore A* waypoints nearer than this -->
+
+  <!-- ══════════════════════════════════════════════════════════════
        PATH CORRECTOR (path_corrector_node) — planner-agnostic SAFETY.
        Subscribes to the active planner's RAW path, recentres it off
        walls against the BEV (the repulsive potential field, by default)
@@ -474,12 +523,13 @@
   <arg name="corrector" default="potential_field" /><!-- core PathCorrector strategy: potential_field | esdf (raises on an unknown name) -->
   <!-- Which raw path the corrector reads, by nav_mode (and vla for navdp):
        combination -> /path/waypoints_combo; fallback -> /path/waypoints_fallback;
-       navdp+vla=flownav -> /path/waypoints_flownav; navdp -> /path/waypoints_navdp;
-       astar -> /path/waypoints_astar. The corrector owns /path/waypoints_safe; the
+       hybrid -> /path/waypoints_hybrid; navdp+vla=flownav -> /path/waypoints_flownav;
+       navdp -> /path/waypoints_navdp; astar -> /path/waypoints_astar. The corrector
+       owns /path/waypoints_safe; the
        trajectory_simplifier turns that into the flown /path/waypoints, so the
        follower still reads one topic. -->
   <arg name="planner_path_topic"
-       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_fallback' if arg('nav_mode') == 'fallback' else ('/path/waypoints_flownav' if (arg('nav_mode') == 'navdp' and arg('vla') == 'flownav') else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar'))))" />
+       default="$(eval '/path/waypoints_combo' if arg('nav_mode') == 'combination' else ('/path/waypoints_fallback' if arg('nav_mode') == 'fallback' else ('/path/waypoints_hybrid' if arg('nav_mode') == 'hybrid' else ('/path/waypoints_flownav' if (arg('nav_mode') == 'navdp' and arg('vla') == 'flownav') else ('/path/waypoints_navdp' if arg('nav_mode') == 'navdp' else '/path/waypoints_astar')))))" />
 
   <!-- ESDF corrector knobs (used only when corrector:=esdf). Ascend each waypoint
        up the gradient of the distance-to-wall field toward the corridor / doorway
@@ -776,7 +826,7 @@
        global route the combination_planner steers NavDP along). NOT in pure navdp. -->
   <node pkg="falcon_adapter" type="astar_planner_node.py"
         name="astar_planner" output="screen"
-        if="$(eval arg('nav_mode') in ('astar', 'combination', 'fallback'))">
+        if="$(eval arg('nav_mode') in ('astar', 'combination', 'fallback', 'hybrid'))">
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
     <!-- Raw A* path; path_corrector recentres it and republishes /path/waypoints. -->
@@ -985,6 +1035,74 @@
     <param name="leg_timeout_s"            value="$(arg fallback_leg_timeout_s)" />
     <param name="leg_endpoint_radius_m"    value="$(arg fallback_leg_endpoint_radius_m)" />
     <param name="arrival_radius_m"         value="$(arg fallback_arrival_radius_m)" />
+  </node>
+
+  <!-- Hybrid planner (nav_mode:=hybrid, the DEFAULT): A* stays PRIMARY (astar_planner
+       above publishes the route AND a per-attempt /path/astar_status Bool). This node
+       echoes A* on /path/waypoints_hybrid over the easy stretches; each tick it assesses
+       the A* route just AHEAD of the drone for a DIFFICULT maneuver: a hard turn or a
+       narrow passage / doorway (the latter measured perpendicular against the BEV). On
+       hybrid_difficulty_confirm consecutive difficult ticks it STOPS the drone and hands
+       NavDP the farthest A* waypoint VISIBLE in the current frame, flying each leg to its
+       midpoint and re-inferring, until the route ahead is easy again for
+       hybrid_recover_confirm consecutive ticks -> resume A*. Also rescues a boxed-in A*
+       (hybrid_engage_on_astar_fail). Reuses the navdp_* camera/transport/server args.
+       Needs the NavDP server up once a hard maneuver is reached. -->
+  <node pkg="falcon_adapter" type="hybrid_planner_node.py"
+        name="hybrid_planner" output="screen"
+        if="$(eval arg('nav_mode') == 'hybrid')">
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg navdp_rgb_topic)" />
+    <param name="depth_topic"       value="$(arg navdp_depth_topic)" />
+    <param name="pose_topic"        value="$(arg navdp_pose_topic)" />
+    <param name="pose_type"         value="$(arg navdp_pose_type)" />
+    <param name="camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+    <!-- A* status + route + BEV in; arbitrated raw path out (-> path_corrector). -->
+    <param name="astar_status_topic" value="/path/astar_status" />
+    <param name="astar_path_topic"  value="/path/waypoints_astar" />
+    <param name="bev_topic"         value="/falcon/bev_2d" />
+    <!-- Mission goal: used ONLY by the boxed-A* rescue to aim NavDP (body frame). -->
+    <param name="goal_topic"        value="/waypoint_nav/goal" />
+    <param name="goal_x"            value="$(arg goal_x)" />
+    <param name="goal_y"            value="$(arg goal_y)" />
+    <param name="path_topic"        value="/path/waypoints_hybrid" />
+    <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
+    <param name="frame_id"          value="world" />
+    <param name="port"              value="$(arg navdp_port)" />
+    <param name="depth_max_m"       value="$(arg navdp_depth_max_m)" />
+    <param name="fx"                value="$(arg navdp_fx)" />
+    <param name="fy"                value="$(arg navdp_fy)" />
+    <param name="cx"                value="$(arg navdp_cx)" />
+    <param name="cy"                value="$(arg navdp_cy)" />
+    <param name="img_width"         value="$(arg navdp_img_width)" />
+    <param name="img_height"        value="$(arg navdp_img_height)" />
+    <!-- Difficulty detector -->
+    <param name="difficulty_lookahead_m" value="$(arg hybrid_difficulty_lookahead_m)" />
+    <param name="difficulty_skip_m"      value="$(arg hybrid_difficulty_skip_m)" />
+    <param name="difficulty_merge_collinear_deg" value="$(arg hybrid_merge_collinear_deg)" />
+    <param name="turn_thresh_deg"        value="$(arg hybrid_turn_thresh_deg)" />
+    <param name="passage_width_m"        value="$(arg hybrid_passage_width_m)" />
+    <param name="min_narrow_span_m"      value="$(arg hybrid_min_narrow_span_m)" />
+    <param name="difficulty_sample_step_m" value="$(arg hybrid_sample_step_m)" />
+    <!-- Hysteresis -->
+    <param name="difficulty_confirm"     value="$(arg hybrid_difficulty_confirm)" />
+    <param name="recover_confirm"        value="$(arg hybrid_recover_confirm)" />
+    <param name="min_pass_distance_m"    value="$(arg hybrid_min_pass_distance_m)" />
+    <param name="engage_on_astar_fail"   value="$(arg hybrid_engage_on_astar_fail)" />
+    <param name="astar_fail_confirm"     value="$(arg hybrid_astar_fail_confirm)" />
+    <param name="tick_hz"                value="$(arg hybrid_tick_hz)" />
+    <!-- NavDP leg -->
+    <param name="engage_settle_s"        value="$(arg hybrid_engage_settle_s)" />
+    <param name="timeout_s"              value="$(arg hybrid_navdp_timeout_s)" />
+    <param name="leg_execute_fraction"   value="$(arg hybrid_leg_fraction)" />
+    <param name="final_handoff_m"        value="$(arg hybrid_final_handoff_m)" />
+    <param name="leg_timeout_s"          value="$(arg hybrid_leg_timeout_s)" />
+    <param name="leg_endpoint_radius_m"  value="$(arg hybrid_leg_endpoint_radius_m)" />
+    <param name="max_wait_s"             value="$(arg hybrid_max_wait_s)" />
+    <param name="arrival_radius_m"       value="$(arg hybrid_arrival_radius_m)" />
+    <param name="require_unoccluded"     value="$(arg hybrid_require_unoccluded)" />
+    <param name="visibility_depth_tol_m" value="$(arg hybrid_visibility_depth_tol_m)" />
+    <param name="min_goal_fwd_m"         value="$(arg hybrid_min_goal_fwd_m)" />
   </node>
 
   <!-- Path corrector (SAFETY): recentres whichever planner's raw path against the

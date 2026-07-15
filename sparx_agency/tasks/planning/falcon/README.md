@@ -43,6 +43,7 @@ falcon/
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
     │   ├── navdp_click_node.py     # click an RGB pixel -> NavDP point-goal policy -> world Path (core.planning.navdp); A* replacement
     │   ├── combination_planner_node.py # nav_mode:=combination — A* global route + NavDP local legs (farthest visible A* waypoint -> NavDP -> fly to midpoint -> re-infer); core.planning.navdp
+    │   ├── hybrid_planner_node.py  # nav_mode:=hybrid (DEFAULT) — A* on easy legs, NavDP only for hard turns/doorways (core.planning.replanning.route_difficulty)
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
@@ -183,7 +184,17 @@ already wired up.
 
 ### Open the 2D Map (BEV click-to-goal)
 
-In another new host terminal:
+`real_drone.launch` **auto-starts** this viewer by default (`bev_viewer:=false` to run
+headless), so you usually do not launch it by hand. It shows the map, the routes, and a
+**system-status HUD** (top-left): `mode:` (the nav_mode) + `planner:` (who is driving
+right now — `A*` or `NavDP (<reason>)`, from `/nav/status`), `motion:` (forward flight
+vs rotation-in-place, from `/cmd_vel`), and the last **A\* replan event** (first route /
+obstacle reroute / boxed-in STOP / shorter-route, from `/path/astar_event`). By default
+only three overlays are drawn — **[a]** A\* global route (teal), **[1]** NavDP leg (blue),
+**[4]** flown path (green) — so you can watch the hybrid hand-off cleanly; press keys
+`1`-`9`/`a` to toggle any overlay, `0` for all.
+
+To run it standalone instead (in another host terminal):
 
 ```bash
 docker exec -it falcon bash
@@ -337,6 +348,53 @@ Jetson inference is slower. Camera intrinsics, RGB/depth transport, pose source 
 the NavDP server reuse the same `navdp_*` / `cam_*` args as NavDP click-to-go above.
 The geometry and selection are ROS-free and unit-tested in `core.planning.navdp`
 (`world_to_body_2d`, `select_farthest_visible_waypoint`, `arclength_fraction_2d`).
+
+## Hybrid mode (A* on the easy legs, NavDP only for hard maneuvers) — the default
+
+`nav_mode:=hybrid` is the **default**. It flies plain A* on straight, open stretches
+and hands control to NavDP **only for a difficult maneuver** — a hard turn, an
+S-bend, or threading a doorway / narrow gap — then takes it straight back once the
+hard part is behind. This is the middle ground between `combination` (always fuses
+NavDP) and `fallback` (only rescues when A* finds *no* route): `hybrid` engages on a
+*geometric* difficulty A* solves cleanly but a stop-and-turn follower flies poorly.
+
+`hybrid_planner_node` is the arbiter on `/path/waypoints_hybrid` (the raw path the
+`path_corrector → trajectory_simplifier → waypoint_follower` chain flies). Two-mode
+hysteretic state machine:
+
+- **PRIMARY** — echo A* straight through. Each tick it assesses the route just
+  *ahead* of the drone (`hybrid_difficulty_lookahead_m`, 3 m) for a **hard turn**
+  (accumulated heading change ≥ `hybrid_turn_thresh_deg`, **75°**) or a **narrow
+  passage** (free width < `hybrid_passage_width_m`, **0.75 m** — measured
+  *perpendicular* to the route against the BEV, so it is tight on **both** sides like a
+  real doorway, not a route that merely clips one corner). The assessment runs on the
+  **smoothed** route, not the jagged raw A*: near-straight vertices are first merged
+  (`hybrid_merge_collinear_deg`, 15°) so grid-staircase / line-of-sight jog noise on a
+  straight corridor cannot sum into a false hard turn. Difficult on
+  `hybrid_difficulty_confirm` (3) consecutive ticks → STOP and engage NavDP. (It also
+  rescues a boxed-in A* like `fallback`, via `hybrid_engage_on_astar_fail`.)
+- **ENGAGED** — drive NavDP toward the farthest A* waypoint **visible** in the current
+  frame (the "furthest point on A* I can see"), fly each leg to its midpoint
+  (`hybrid_leg_fraction`, 0.5), then re-infer. Return to A* once the route ahead is
+  easy again **and** A* has a route, on `hybrid_recover_confirm` (5, sticky ≥ the
+  engage confirm — anti-zig-zag) consecutive ticks.
+
+```bash
+# hybrid is the default, so a plain launch already runs it (NavDP server up):
+roslaunch falcon_adapter real_drone.launch map_name:=office
+# Switch modes: nav_mode:=astar (plain A*) | nav_mode:=combination | nav_mode:=fallback | use_navdp:=true
+```
+
+Key knobs (all `hybrid_*` args, forwarded by `real_drone.launch`):
+`hybrid_turn_thresh_deg` (raise to hand off only sharper turns),
+`hybrid_passage_width_m` (raise to treat wider gaps as doorways),
+`hybrid_difficulty_lookahead_m`, `hybrid_difficulty_confirm` /
+`hybrid_recover_confirm` (the engage/return hysteresis),
+`hybrid_leg_fraction`, `hybrid_final_handoff_m`, and the Jetson timing
+`hybrid_navdp_timeout_s` / `hybrid_max_wait_s`. The difficulty detection is
+ROS-free and unit-tested in `core.planning.replanning.route_difficulty`
+(`assess_route_difficulty`, `windowed_turn_deg`, `passage_free_width_2d`); the NavDP
+leg reuses the same `navdp_*` / `cam_*` args and the `combination` leg engine.
 
 ## Object approach (hunt a named object while flying the route, then close on it)
 

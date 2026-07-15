@@ -313,8 +313,12 @@ PYTHONPATH=$PWD python \
     --port 8888
 
 # --- x86 dev box (RTX 5070 / sm120) ------------------------------------------
+# Run in the TRT env that BUILT the engines (has tensorrt + pycuda), NOT the
+# algorithms .venv — that venv has no tensorrt/pycuda and the server won't import.
+conda activate navdp
 cd ~/GIT/TheAgency
-NAVDP_REPO=${NAVDP_REPO:?set NAVDP_REPO to the NavDP repo (has policy_agent.py)} \
+# NavDP repo = the dir containing policy_network.py; adjust to wherever you cloned it.
+export NAVDP_REPO=~/PycharmProjects/NavDP/baselines/navdp
 PYTHONPATH=$PWD python \
     -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
     --engine-dir sparx_agency/tasks/planning/navdp/engines/nvidiageforcertx_sm120 \

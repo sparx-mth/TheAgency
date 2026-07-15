@@ -44,6 +44,12 @@
   <arg name="drone_ns" default="" />
   <arg name="gated_ns" default="/gated_drone" />
 
+  <!-- Interactive BEV window (bev_click_goal): the map, the routes, click-to-goal,
+       and the system-status HUD (who is planning A*/NavDP, forward-flight vs rotation,
+       and A* replan events). On by default; needs a display. Set bev_viewer:=false to
+       run headless. -->
+  <arg name="bev_viewer" default="true" />
+
   <!-- ── Real-drone localization ──────────────────────────────── -->
   <arg name="real_pose_topic" default="/xtend/localization" />
 <!--   <arg name="real_pose_topic" default="/flow_depth/pose_est" /> -->
@@ -116,16 +122,16 @@
   <arg name="use_navdp"               default="false" />
   <arg name="navdp_camera_info_topic" default="" />
 
-  <!-- ── Combination mode (A* global route + NavDP local legs) ──────
-       DEFAULT mode: nav_mode:=combination runs A* AND combination_planner together: A*
-       plans the route to the goal, combination_planner hands NavDP the farthest A*
-       waypoint visible in the current frame, flies that leg to its midpoint, then
-       re-infers. With combination_start_enabled:=true (the default) the fusion is on
-       from the first tick; set it false to start on A* and publish a 'std_msgs/Bool
-       True' on combination_enable_topic later. use_navdp:=true selects pure navdp;
-       nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
+  <!-- ── Nav mode selector (default: hybrid) ──────────────────────
+       DEFAULT mode: nav_mode:=hybrid runs A* AND hybrid_planner together: A* plans the
+       route and is flown directly on the easy stretches; hybrid_planner watches the A*
+       route just ahead and, on a hard turn or a narrow passage / doorway, hands NavDP
+       the farthest visible A* waypoint until the hard part is behind, then returns to A*.
+       nav_mode:=combination is the always-on A*+NavDP fusion; nav_mode:=fallback rescues
+       only a boxed-in A*; nav_mode:=astar is plain A*; use_navdp:=true selects pure navdp.
+       hybrid / combination / fallback all need the NavDP server up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
-  <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination | fallback-->
+  <arg name="nav_mode" default="hybrid" />  <!-- navdp | astar | combination | fallback | hybrid -->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/flownav/server/...). -->
@@ -161,6 +167,31 @@
   <arg name="fallback_leg_timeout_s"      default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
   <arg name="fallback_leg_endpoint_radius_m" default="0.4" /><!-- re-infer once within this of the leg end -->
   <arg name="fallback_arrival_radius_m"   default="0.5" /><!-- within this of the goal NavDP has arrived -> hold -->
+  <!-- hybrid (nav_mode:=hybrid, the DEFAULT): A* on easy legs, NavDP on hard maneuvers -->
+  <arg name="hybrid_difficulty_lookahead_m" default="2.0" /><!-- how far ahead of the drone to assess the A* route for a hard maneuver (m) -->
+  <arg name="hybrid_difficulty_skip_m"    default="0.3" /><!-- skip this much past the drone (a just-finished maneuver must not keep reading as "ahead") (m) -->
+  <arg name="hybrid_merge_collinear_deg"  default="15.0" /><!-- smooth the jagged raw A* first: drop vertices turning less than this before measuring (staircase noise on a straight corridor must not sum into a false hard turn); 0 = raw route -->
+  <arg name="hybrid_turn_thresh_deg"      default="75.0" /><!-- total heading change (deg) over the window = hard turn -> NavDP. HIGH: only a genuinely sharp corner engages; raise if easy routes still engage, lower if hard turns are missed -->
+  <arg name="hybrid_passage_width_m"      default="0.75" /><!-- free width (m) below which the route is a doorway (measured perpendicular; tight on BOTH sides). Strict; raise to treat wider gaps as doorways -->
+  <arg name="hybrid_min_narrow_span_m"    default="0.3" /><!-- a doorway must stay narrow over at least this arclength (m); rejects a single BEV speckle cell tripping a false doorway -->
+  <arg name="hybrid_sample_step_m"        default="0.1" /><!-- perpendicular-march / sampling step (~one BEV cell) (m) -->
+  <arg name="hybrid_difficulty_confirm"   default="3" /><!-- consecutive "difficult ahead" ticks before engaging NavDP -->
+  <arg name="hybrid_recover_confirm"      default="5" /><!-- consecutive "easy again + A* ok" ticks before resuming A* (keep >= difficulty_confirm; sticky) -->
+  <arg name="hybrid_min_pass_distance_m"  default="2.0" /><!-- do NOT return to A* until the drone has flown this far (m) through the maneuver from where NavDP engaged; 0 = off -->
+  <arg name="hybrid_engage_on_astar_fail" default="false" /><!-- also engage when A* reports NO route (boxed in). OFF: hybrid is purely difficulty-triggered; a flaky bag-replay A* would otherwise drive NavDP the whole route. Use nav_mode:=fallback for real boxed-A* rescue -->
+  <arg name="hybrid_astar_fail_confirm"   default="3" /><!-- consecutive A* "no route" reports before that rescue -->
+  <arg name="hybrid_tick_hz"              default="5.0" />
+  <arg name="hybrid_engage_settle_s"      default="1.0" /><!-- brake-settle before the first inference (clean, stationary frame) -->
+  <arg name="hybrid_navdp_timeout_s"      default="10.0" /><!-- NavDP HTTP step timeout for one inference -->
+  <arg name="hybrid_leg_fraction"         default="0.5" /><!-- re-infer at the leg midpoint -->
+  <arg name="hybrid_final_handoff_m"      default="1.5" /><!-- hand the final approach to A* within this range -->
+  <arg name="hybrid_leg_timeout_s"        default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
+  <arg name="hybrid_leg_endpoint_radius_m" default="0.4" /><!-- re-infer once within this of the leg end -->
+  <arg name="hybrid_max_wait_s"           default="30.0" /><!-- hold this long for a slow/blind inference before giving up to A* -->
+  <arg name="hybrid_arrival_radius_m"     default="0.5" /><!-- within this of the mission goal a rescue NavDP leg has arrived -> hold -->
+  <arg name="hybrid_require_unoccluded"   default="true" /><!-- visible = clear line-of-sight, not merely in-FOV -->
+  <arg name="hybrid_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the occlusion test -->
+  <arg name="hybrid_min_goal_fwd_m"       default="0.5" /><!-- ignore A* waypoints nearer than this -->
 
   <!-- ── Path-correction strategy ─────────────────────────────────
        corrector:=potential_field (default) | esdf. With esdf the route is
@@ -329,6 +360,30 @@
     <arg name="fallback_leg_timeout_s"         value="$(arg fallback_leg_timeout_s)" />
     <arg name="fallback_leg_endpoint_radius_m" value="$(arg fallback_leg_endpoint_radius_m)" />
     <arg name="fallback_arrival_radius_m"      value="$(arg fallback_arrival_radius_m)" />
+    <arg name="hybrid_difficulty_lookahead_m"  value="$(arg hybrid_difficulty_lookahead_m)" />
+    <arg name="hybrid_difficulty_skip_m"       value="$(arg hybrid_difficulty_skip_m)" />
+    <arg name="hybrid_merge_collinear_deg"     value="$(arg hybrid_merge_collinear_deg)" />
+    <arg name="hybrid_turn_thresh_deg"         value="$(arg hybrid_turn_thresh_deg)" />
+    <arg name="hybrid_passage_width_m"         value="$(arg hybrid_passage_width_m)" />
+    <arg name="hybrid_min_narrow_span_m"       value="$(arg hybrid_min_narrow_span_m)" />
+    <arg name="hybrid_sample_step_m"           value="$(arg hybrid_sample_step_m)" />
+    <arg name="hybrid_difficulty_confirm"      value="$(arg hybrid_difficulty_confirm)" />
+    <arg name="hybrid_recover_confirm"         value="$(arg hybrid_recover_confirm)" />
+    <arg name="hybrid_min_pass_distance_m"     value="$(arg hybrid_min_pass_distance_m)" />
+    <arg name="hybrid_engage_on_astar_fail"    value="$(arg hybrid_engage_on_astar_fail)" />
+    <arg name="hybrid_astar_fail_confirm"      value="$(arg hybrid_astar_fail_confirm)" />
+    <arg name="hybrid_tick_hz"                 value="$(arg hybrid_tick_hz)" />
+    <arg name="hybrid_engage_settle_s"         value="$(arg hybrid_engage_settle_s)" />
+    <arg name="hybrid_navdp_timeout_s"         value="$(arg hybrid_navdp_timeout_s)" />
+    <arg name="hybrid_leg_fraction"            value="$(arg hybrid_leg_fraction)" />
+    <arg name="hybrid_final_handoff_m"         value="$(arg hybrid_final_handoff_m)" />
+    <arg name="hybrid_leg_timeout_s"           value="$(arg hybrid_leg_timeout_s)" />
+    <arg name="hybrid_leg_endpoint_radius_m"   value="$(arg hybrid_leg_endpoint_radius_m)" />
+    <arg name="hybrid_max_wait_s"              value="$(arg hybrid_max_wait_s)" />
+    <arg name="hybrid_arrival_radius_m"        value="$(arg hybrid_arrival_radius_m)" />
+    <arg name="hybrid_require_unoccluded"      value="$(arg hybrid_require_unoccluded)" />
+    <arg name="hybrid_visibility_depth_tol_m"  value="$(arg hybrid_visibility_depth_tol_m)" />
+    <arg name="hybrid_min_goal_fwd_m"          value="$(arg hybrid_min_goal_fwd_m)" />
     <arg name="navdp_rgb_topic"         value="$(arg real_rgb_path_topic)" />
     <arg name="navdp_depth_topic"       value="$(arg real_depth_path_topic)" />
     <arg name="navdp_pose_topic"        value="$(arg real_pose_topic)" />
@@ -352,5 +407,18 @@
     <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
     <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
   </include>
+
+  <!-- Interactive BEV viewer + click-to-goal + system-status HUD (bev_viewer:=false
+       to disable). Draws the map, the A* route / NavDP leg / flown path (default
+       overlays [a]/[1]/[4]; others toggle with keys 1-9/a), and a top-left HUD:
+       who is planning (nav_mode + /nav/status: A*/NavDP), the live motion mode
+       (forward flight vs rotation, from /cmd_vel), and A* replan events
+       (/path/astar_event). Draws the drone from the localization pose directly. -->
+  <node pkg="falcon_adapter" type="bev_click_goal_node.py"
+        name="bev_click_goal" output="screen" if="$(arg bev_viewer)">
+    <param name="drone_ns"           value="$(arg drone_ns)" />
+    <param name="nav_mode"           value="$(arg nav_mode)" />
+    <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />
+  </node>
 
 </launch>
