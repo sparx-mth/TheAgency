@@ -123,9 +123,13 @@
        CONTROLLER SELECTION. "waypoint" (default) = the one-axis follower
        (pure X advance OR pure yaw, never both). "multi_axis" = the combined
        forward+lateral+yaw tracker that crabs (ROLL) for small offsets and yaws
-       only past a deadband, so the noisy yaw axis is used sparingly. Both hold
-       altitude (vz=0). Switch back to the legacy controller with controller:=waypoint. -->
-  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit -->
+       only past a deadband, so the noisy yaw axis is used sparingly. "roll_assist"
+       = the SAME one-axis 'waypoint' nav (align -> advance, discrete yaw), just
+       with a cross-track ROLL (linear.y) correction layered on top that pulls the
+       drone back onto its trajectory when it drifts sideways (full while advancing,
+       weak while turning, small while holding). All hold altitude (vz=0). Switch
+       back to the legacy controller with controller:=waypoint. -->
+  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist -->
 
   <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
        ~mx_* so they never collide with the one-axis params; cruise speed and the
@@ -192,6 +196,29 @@
   <!-- Visualization topics consumed by the BEV viewer (bev_click_goal_node) -->
   <arg name="smooth_path_topic"       default="/path/smooth" /><!-- splined trajectory (Path) -->
   <arg name="lookahead_topic"         default="/path/lookahead" /><!-- current aim point (PointStamped) -->
+
+  <!-- Roll-assist controller (only used when controller:=roll_assist): the one-axis
+       'waypoint' follower is UNCHANGED (same nav, discrete yaw, freeze/map-settle,
+       handshake) and only gains a lateral (ROLL, linear.y) correction that pulls the
+       drone back onto its trajectory when it drifts sideways. Cross-track error is
+       taken in the body frame off the active path segment; the gain is scaled by
+       regime. All ~ra_*; base vel_x / yaw_rate / pos_acquisition_radius are shared. -->
+  <arg name="ra_kp_lat"             default="0.8" /><!-- gain: cross-track error (m) -> lateral speed (m/s), before the per-regime scaling -->
+  <arg name="ra_lateral_speed_max"  default="0.25" /><!-- hard cap on the commanded ROLL speed (m/s) -->
+  <arg name="ra_deadband_m"         default="0.05" /><!-- cross-track error below this is left uncorrected (ride out localization noise) (m) -->
+  <arg name="ra_advance_frac"       default="1.0" /><!-- fraction of ra_kp_lat while ADVANCING (full: sticking to the track matters most and is safest here) -->
+  <arg name="ra_turn_frac"          default="0.35" /><!-- fraction of ra_kp_lat while turning in place (small: a big ROLL would spoil the rotation) -->
+  <arg name="ra_hold_frac"          default="0.25" /><!-- fraction of ra_kp_lat while stopped/holding (small: the platform is fairly stable at rest) -->
+  <arg name="ra_kp_fwd"             default="0.6" /><!-- gain: along-track error (m) -> forward/back speed (m/s); turning/holding only (advancing already drives forward) -->
+  <arg name="ra_forward_speed_max"  default="0.15" /><!-- hard cap on the along-track correction speed (m/s) -->
+  <arg name="ra_forward_deadband_m" default="0.08" /><!-- along-track error below this is left uncorrected (m) -->
+  <arg name="ra_turn_fwd_frac"      default="0.35" /><!-- fraction of ra_kp_fwd while turning -->
+  <arg name="ra_hold_fwd_frac"      default="0.25" /><!-- fraction of ra_kp_fwd while holding -->
+  <arg name="ra_min_vy"             default="0.06" /><!-- min lateral speed that actually moves the platform (m/s) -->
+  <arg name="ra_min_vx"             default="0.06" /><!-- min forward speed that actually moves the platform (m/s) -->
+  <arg name="ra_release_frac"       default="0.5" /><!-- below release_frac*min an axis is dropped to 0; between that and min it is snapped up -->
+  <arg name="ra_accel_limit"        default="1.0" /><!-- acceleration limit for slew-shaping the corrections (m/s^2) -->
+  <arg name="ra_yaw_active_eps"     default="0.05" /><!-- base yaw rate (rad/s) above which the tick counts as 'turning' (turn vs hold regime) -->
 
   <!-- Speeds & radii -->
   <arg name="vel_x"                  default="0.3" />
@@ -1310,6 +1337,23 @@
     <param name="pp_viz_sample_dt"       value="$(arg pp_viz_sample_dt)" />
     <param name="smooth_path_topic"      value="$(arg smooth_path_topic)" />
     <param name="lookahead_topic"        value="$(arg lookahead_topic)" />
+
+    <param name="ra_kp_lat"              value="$(arg ra_kp_lat)" />
+    <param name="ra_lateral_speed_max"   value="$(arg ra_lateral_speed_max)" />
+    <param name="ra_deadband_m"          value="$(arg ra_deadband_m)" />
+    <param name="ra_advance_frac"        value="$(arg ra_advance_frac)" />
+    <param name="ra_turn_frac"           value="$(arg ra_turn_frac)" />
+    <param name="ra_hold_frac"           value="$(arg ra_hold_frac)" />
+    <param name="ra_kp_fwd"              value="$(arg ra_kp_fwd)" />
+    <param name="ra_forward_speed_max"   value="$(arg ra_forward_speed_max)" />
+    <param name="ra_forward_deadband_m"  value="$(arg ra_forward_deadband_m)" />
+    <param name="ra_turn_fwd_frac"       value="$(arg ra_turn_fwd_frac)" />
+    <param name="ra_hold_fwd_frac"       value="$(arg ra_hold_fwd_frac)" />
+    <param name="ra_min_vy"              value="$(arg ra_min_vy)" />
+    <param name="ra_min_vx"              value="$(arg ra_min_vx)" />
+    <param name="ra_release_frac"        value="$(arg ra_release_frac)" />
+    <param name="ra_accel_limit"         value="$(arg ra_accel_limit)" />
+    <param name="ra_yaw_active_eps"      value="$(arg ra_yaw_active_eps)" />
   </node>
 
   <!-- voxel_reset_watcher: intentionally NOT transferred (diagnostics only).

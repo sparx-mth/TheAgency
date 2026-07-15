@@ -109,7 +109,8 @@
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
   <!-- Path tracker for the route follower: waypoint (one-axis, default) |
-       multi_axis (vx+vy+yaw crab) | pure_pursuit. Forwarded to nav_stack. -->
+       multi_axis (vx+vy+yaw crab) | pure_pursuit | roll_assist (one-axis nav +
+       cross-track ROLL to hold the line). Forwarded to nav_stack. -->
   <arg name="controller" default="waypoint" />
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
