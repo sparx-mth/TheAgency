@@ -164,7 +164,9 @@ def windowed_turn_deg(window: Sequence[Pose2D]) -> float:
     corner and a distributed multi-vertex bend register their full turn. NOTE this
     CUMULATIVE sum inflates on a straight-but-jagged route (a grid A* path weaving
     around occupancy speckle sums many small jogs into a large false turn); the
-    difficulty gate uses :func:`net_turn_deg` instead. Kept for reference/tests.
+    difficulty gate uses the per-corner net turn of
+    :func:`sparx_agency.core.planning.replanning.corner_scan_2d.scan_hard_turn_ahead`
+    instead. Kept for reference/tests.
     """
     if len(window) < 3:
         return 0.0
@@ -183,7 +185,9 @@ def net_turn_deg(window: Sequence[Pose2D], edge_span_m: float = 0.6) -> float:
     occupancy speckle -- those cancel between entry and exit -- while a genuine
     corner (a corridor turning into a room) shows its full turn. It also grows only
     as a real corner enters the window, so the hand-off happens near the turn, not
-    on the straight approach. This is the "hard turn" difficulty signal.
+    on the straight approach. Kept for reference/tests: the live hard-turn gate now
+    scans the per-corner net turn (:func:`net_turn_at_arclength_2d` via
+    :func:`scan_hard_turn_ahead`) to report the DISTANCE to the next hard corner.
     """
     if len(window) < 2:
         return 0.0

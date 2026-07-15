@@ -394,7 +394,33 @@ def test_no_target_without_rescue_or_goal():
     node = _make_node()
     node._select = lambda snap: None
     node._rescue = False
+    # A coincident STOP route (a boxed rescue's path) has no forward waypoint, so even
+    # the blind turn fallback finds nothing -> _NO_POINT.
     assert node._choose_target(_snap(node, [(0, 0), (0, 0)])) == hpn._NO_POINT
+
+
+def test_blind_target_drives_through_a_turn_when_nothing_visible():
+    # At a sharp turn the post-turn route leaves the camera FOV, so _select returns
+    # None. The drone must NOT stall: it aims NavDP at the farthest A* waypoint around
+    # the corner by geometry, pulling it LEFT through the turn (the requirement-gap fix).
+    node = _make_node()
+    node.pose_xyyaw = (2.9, 0.0, 0.0)             # just short of a corner at (3, 0)
+    node._select = lambda snap: None              # post-turn route not visible
+    snap = _snap(node, [(2.0, 0), (3.0, 0), (3.0, 1), (3.0, 2), (3.0, 3)])
+    target = node._choose_target(snap)
+    assert isinstance(target, tuple), "blind turn stalled -> would hold and revert to A*"
+    gx, gy, is_final, tag = target
+    assert gx > 0.0 and gy > 0.0, "target must pull NavDP forward-LEFT into corridor-2"
+
+
+def test_blind_target_disabled_holds():
+    # With ~blind_turn_target false the old behaviour is preserved: nothing visible and
+    # not a rescue -> _NO_POINT (hold), never a blind geometric goal.
+    node = _make_node(**{"~blind_turn_target": False})
+    node.pose_xyyaw = (2.9, 0.0, 0.0)
+    node._select = lambda snap: None
+    snap = _snap(node, [(2.0, 0), (3.0, 0), (3.0, 1), (3.0, 2), (3.0, 3)])
+    assert node._choose_target(snap) == hpn._NO_POINT
 
 
 def test_rescue_arrival_holds():

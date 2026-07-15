@@ -146,6 +146,6 @@ def scan_hard_turn_ahead(
             max_deg = deg
         if deg >= turn_thresh_deg and s < hard_dist:
             hard_dist = s                          # nearest hard corner (first in range)
-            hard_deg = deg
-            break                                  # nearest found; max_deg over [lo, s]
+            hard_deg = deg                         # keep scanning: max_deg spans the range,
+            #                                        the s<hard_dist guard keeps the nearest
     return hard_dist, hard_deg, max_deg, seg

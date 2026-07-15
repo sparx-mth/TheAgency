@@ -50,7 +50,7 @@ def test_turn_accumulates_a_distributed_bend():
     assert abs(windowed_turn_deg(pts) - 90.0) < 1e-6
 
 
-# ─── net_turn_deg (the difficulty signal; robust to weaving) ─────────────────
+# ─── net_turn_deg (window-level net turn; the per-corner scan is now the gate) ─
 def test_net_turn_zero_on_straight_run():
     assert net_turn_deg(_pts((0, 0), (1, 0), (2, 0), (3, 0))) < 1e-6
 

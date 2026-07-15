@@ -194,6 +194,7 @@
   <arg name="hybrid_require_unoccluded"   default="true" /><!-- visible = clear line-of-sight, not merely in-FOV -->
   <arg name="hybrid_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the occlusion test -->
   <arg name="hybrid_min_goal_fwd_m"       default="0.5" /><!-- ignore A* waypoints nearer than this -->
+  <arg name="hybrid_blind_turn_target"    default="true" /><!-- at a hard turn the post-turn route leaves the FOV: drive NavDP toward the farthest A* waypoint reachable by GEOMETRY around the corner so it flies THROUGH the turn instead of holding + reverting to A*; false = hold -->
 
   <!-- ── Path-correction strategy ─────────────────────────────────
        corrector:=potential_field (default) | esdf. With esdf the route is
@@ -387,6 +388,7 @@
     <arg name="hybrid_max_wait_s"              value="$(arg hybrid_max_wait_s)" />
     <arg name="hybrid_arrival_radius_m"        value="$(arg hybrid_arrival_radius_m)" />
     <arg name="hybrid_require_unoccluded"      value="$(arg hybrid_require_unoccluded)" />
+    <arg name="hybrid_blind_turn_target"       value="$(arg hybrid_blind_turn_target)" />
     <arg name="hybrid_visibility_depth_tol_m"  value="$(arg hybrid_visibility_depth_tol_m)" />
     <arg name="hybrid_min_goal_fwd_m"          value="$(arg hybrid_min_goal_fwd_m)" />
     <arg name="navdp_rgb_topic"         value="$(arg real_rgb_path_topic)" />

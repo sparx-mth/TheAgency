@@ -513,6 +513,7 @@
   <arg name="hybrid_require_unoccluded"     default="true" /><!-- a waypoint is "visible" only with clear line-of-sight (depth), not merely in-FOV -->
   <arg name="hybrid_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the depth occlusion test -->
   <arg name="hybrid_min_goal_fwd_m"         default="0.5" /><!-- ignore A* waypoints nearer than this -->
+  <arg name="hybrid_blind_turn_target"      default="true" /><!-- at a hard turn the post-turn route leaves the camera FOV so nothing is "visible": drive NavDP toward the farthest A* waypoint reachable by GEOMETRY around the corner (A* is collision-free, NavDP avoids near walls) so it flies THROUGH the turn instead of holding + reverting to A*. false = hold instead -->
 
   <!-- ══════════════════════════════════════════════════════════════
        PATH CORRECTOR (path_corrector_node) — planner-agnostic SAFETY.
@@ -1108,6 +1109,7 @@
     <param name="max_wait_s"             value="$(arg hybrid_max_wait_s)" />
     <param name="arrival_radius_m"       value="$(arg hybrid_arrival_radius_m)" />
     <param name="require_unoccluded"     value="$(arg hybrid_require_unoccluded)" />
+    <param name="blind_turn_target"      value="$(arg hybrid_blind_turn_target)" />
     <param name="visibility_depth_tol_m" value="$(arg hybrid_visibility_depth_tol_m)" />
     <param name="min_goal_fwd_m"         value="$(arg hybrid_min_goal_fwd_m)" />
   </node>

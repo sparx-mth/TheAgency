@@ -227,6 +227,12 @@ class HybridPlannerNode:
         self.vis_depth_tol_m = float(G("~visibility_depth_tol_m", 0.5))
         self.vis_patch_half = int(G("~visibility_patch_half_px", 6))
         self.min_goal_fwd_m = float(G("~min_goal_fwd_m", 0.5))
+        # At a hard turn the post-turn route swings OUT of the forward camera FOV, so
+        # the visibility-gated selection finds nothing. Rather than HOLD at the corner
+        # (then revert to A* after ~max_wait_s -- the stop-and-turn NavDP was engaged to
+        # avoid), drive NavDP toward the farthest A* waypoint reachable by GEOMETRY
+        # around the corner (see _blind_turn_target). Set false to hold instead.
+        self.blind_turn_target = _param_bool("~blind_turn_target", True)
 
         # ── Image transport (mirrors navdp_click / combination) ──────
         self.image_transport = str(G("~image_transport", "frame_path")).strip().lower()
@@ -524,11 +530,13 @@ class HybridPlannerNode:
         tag)`` or a terminal outcome code (``_NO_POINT`` / ``_FINAL`` / ``_ARRIVED``).
 
         Normally the farthest A* waypoint VISIBLE in the frame (the user's "furthest
-        point on A* I can see"). But a boxed-A* rescue (``self._rescue``) has no
-        forward A* waypoint -- the route is a coincident STOP at the drone -- so, like
-        ``nav_mode:=fallback``, NavDP is instead aimed at the mission goal in the body
-        frame (no visibility gate; the goal is past the door / around the corner A*
-        rejected). Without a rescue goal there is nothing to aim at -> ``_NO_POINT``.
+        point on A* I can see"). Three fallbacks when nothing is visible: a boxed-A*
+        rescue (``self._rescue``) aims NavDP at the mission goal in the body frame
+        (like ``nav_mode:=fallback``; the route is a coincident STOP so there is no
+        forward waypoint); a hard-turn engage aims at the farthest A* waypoint
+        reachable by GEOMETRY around the corner (:meth:`_blind_turn_target`) so NavDP
+        flies THROUGH the turn rather than stalling as the route leaves the FOV; and
+        with neither a target -> ``_NO_POINT``.
         """
         ox, oy, oyaw = snap["pose"]
         goal = self._select(snap)
@@ -546,7 +554,46 @@ class HybridPlannerNode:
             fwd, left = world_to_body_2d(gwx, gwy, ox, oy, oyaw)
             gx, gy = point_to_pointgoal(fwd, left)
             return (gx, gy, False, "goal body=(%.2f, %.2f)" % (fwd, left))
+        # Nothing VISIBLE, but this is a hard-turn engage (not a rescue): the post-turn
+        # route has swung out of the forward FOV. Drive NavDP THROUGH the turn toward
+        # the farthest A* waypoint reachable by geometry (around the corner) instead of
+        # holding here and reverting to A* -- the very stop-and-turn we engaged to avoid.
+        if self.blind_turn_target and not self._rescue:
+            blind = self._blind_turn_target(snap)
+            if blind is not None:
+                gx, gy, fwd, left, idx = blind
+                is_final = idx >= len(snap["waypoints"]) - 1
+                return (gx, gy, is_final,
+                        "A* wp[%d] blind body=(%.2f, %.2f)" % (idx, fwd, left))
         return _NO_POINT
+
+    def _blind_turn_target(self, snap):
+        """Farthest A* waypoint reachable by NavDP by GEOMETRY (no visibility gate).
+
+        At a hard turn the post-turn route leaves the forward camera FOV, so the
+        visibility-gated :meth:`_select` finds nothing and NavDP would hold at the
+        corner until ``max_wait_s`` and hand the turn back to A*. Instead aim it at
+        the farthest A* waypoint that is genuinely AHEAD of the drone (positive
+        forward -- a non-positive forward collapses to a straight-ahead goal in
+        :func:`point_to_pointgoal`, which would drive into the corner wall) and
+        inside NavDP's reachable box, ignoring visibility: A* already vouched the
+        route is collision-free and NavDP's local policy avoids the near walls, so
+        this yaws/drives the drone through the corner. As it rotates, the route
+        swings back into frame and the normal visible selection resumes.
+
+        Returns ``(gx, gy, fwd, left, index)`` for that waypoint, or ``None`` when no
+        forward, in-range waypoint exists (e.g. a boxed rescue's coincident stop).
+        """
+        ox, oy, oyaw = snap["pose"]
+        best = None
+        for i, (wx, wy) in enumerate(snap["waypoints"]):
+            fwd, left = world_to_body_2d(wx, wy, ox, oy, oyaw)
+            dist = math.hypot(fwd, left)
+            if (fwd >= 0.1 and self.min_goal_fwd_m <= dist <= NAVDP_MAX_FWD_M
+                    and abs(left) <= NAVDP_MAX_LAT_M):
+                gx, gy = point_to_pointgoal(fwd, left)
+                best = (gx, gy, fwd, left, i)      # keep the FARTHEST reachable (last)
+        return best
 
     # ─── One NavDP inference (BLOCKING) ──────────────────────────────
     def _run_inference(self):
@@ -963,6 +1010,10 @@ if __name__ == "__main__":
 #     ~visibility_depth_tol_m (0.5) slack on the occlusion test
 #     ~visibility_patch_half_px (6) depth patch half-size at the pixel
 #     ~min_goal_fwd_m (0.5)     ignore A* waypoints nearer than this
+#     ~blind_turn_target (true) at a hard turn the post-turn route leaves the FOV, so
+#                               nothing is "visible": aim NavDP at the farthest A*
+#                               waypoint reachable by GEOMETRY around the corner so it
+#                               flies THROUGH the turn (else it holds + reverts to A*)
 #   image transport (mirrors navdp_click / combination):
 #     ~image_transport (frame_path | topic)
 #     ~rgb_topic ~depth_topic ~pose_topic (/xtend/localization) ~pose_type (pose_stamped)

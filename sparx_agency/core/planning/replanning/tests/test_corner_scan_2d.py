@@ -54,6 +54,17 @@ def test_sharp_corner_reported_at_its_distance():
     assert mx >= deg
 
 
+def test_max_turn_deg_spans_full_range_not_just_first_hard_corner():
+    # Two hard corners: a 90 deg at 1 m and a sharp ~174 deg reversal at 2 m. hard_dist
+    # / hard_deg report the NEAREST hard corner; max_turn_deg is the sharpest in range
+    # (regression: an early break understated it as 90 rather than ~174).
+    route = _pts((0, 0), (1, 0), (1, 1), (0.9, 0))
+    dist, deg, mx, _ = scan_hard_turn_ahead(
+        route, Pose2D(0, 0), turn_thresh_deg=70.0, span_m=0.3, max_scan_m=8.0)
+    assert abs(dist - 1.0) < 1e-6 and abs(deg - 90.0) < 2.0
+    assert mx > 150.0          # the far reversal, not just the nearer 90 deg corner
+
+
 def test_corner_beyond_engage_range_is_not_flagged():
     # Corner 3 m ahead, engage range only 2 m: A* keeps flying (not close enough).
     dist, deg, _, _ = scan_hard_turn_ahead(
