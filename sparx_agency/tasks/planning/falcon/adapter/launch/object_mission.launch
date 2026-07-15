@@ -1,0 +1,160 @@
+<launch>
+  <!--
+    object_mission.launch — "pick an object, then fly to it and land".
+
+    The select-then-go mission on top of the FALCON stack. It is
+    real_drone_object_approach.launch with two differences:
+
+      1. GATED START. The nav stack comes up with NO initial goal (goal_x/goal_y
+         empty -> the planners idle "until a click") and object_approach comes up
+         DISABLED (start_enabled:=false). So NOTHING plans or flies until an object
+         is selected. (The platform still takes off and hovers in place — that is the
+         follower's baseline; only navigation is gated.)
+
+      2. A MISSION DIRECTOR. mission_director_node loads objects.json and, on
+         selection (random pick, or a click in its object-list window), publishes the
+         object's LABEL (-> YOLO re-prompt + object_approach gate, /object_approach/goal),
+         its WORLD (x,y) as the coordinate goal (-> planners, /waypoint_nav/goal), and
+         enable=True (-> arms object_approach). That single act starts the mission.
+
+    Reaching the object ends the mission by LANDING, two ways (both on by default here):
+      * VISUAL: the detector confirms the object en route, object_approach servos onto it
+        and lands when the depth range holds <= land_range_m.
+      * BY A* ALONE: the route reaches the coordinate goal still unconfirmed for
+        arrive_land_confirm_ticks ticks (land_at_goal:=true) — the goal IS the object's
+        location, so land there. Pose-based, needs no depth.
+    Either way the node stops /cmd_vel and requests 'finish' (stop -> land -> disarm via
+    the demo manager).
+
+    Run (in the FALCON container; the YOLO-World detector sidecar + bridge run on the
+    host, see run_object_mission.sh / the README):
+
+      roslaunch falcon_adapter object_mission.launch \
+          map_name:=office selection_mode:=gui nav_mode:=hybrid
+
+    NOTE: start from a fresh roscore (run_falcon.sh's ephemeral container gives one) so a
+    stale latched /waypoint_nav/goal from a previous run cannot pre-arm the planners.
+  -->
+
+  <!-- ── Shared / nav ─────────────────────────────────────────────── -->
+  <arg name="map_name"        default="office" />
+  <arg name="drone_ns"        default="" />
+  <arg name="image_transport" default="frame_path" /><!-- frame_path (real drone) | topic (sim / bag) -->
+  <!-- Localization source (world pose). Feeds the whole nav stack AND object_approach's
+       arrival detection (so arrival-land works). Set to your pose topic, e.g.
+       real_pose_topic:=/xtend/april_tag_pose for AprilTag localization. -->
+  <arg name="real_pose_topic" default="/xtend/localization" />
+  <arg name="real_pose_type"  default="pose_stamped" />     <!-- pose_stamped | pose -->
+  <!-- A*+NavDP by default (hybrid: A* on easy legs, NavDP on hard turns/doorways).
+       nav_mode:=astar for pure A*; combination for the always-on A*+NavDP fusion. -->
+  <arg name="nav_mode"        default="hybrid" />
+  <arg name="use_navdp"       default="false" />
+  <arg name="controller"      default="waypoint" />
+
+  <!-- Camera intrinsics (raw K; shared by the map AND the detector). -->
+  <arg name="cam_fx"          default="322.6351083474948" />
+  <arg name="cam_fy"          default="323.3893307141174" />
+  <arg name="cam_cx"          default="242.06479658679714" />
+  <arg name="cam_cy"          default="90.03019076680604" />
+  <arg name="cam_width"       default="504" />
+  <arg name="cam_height"      default="294" />
+
+  <!-- ── Mission director (object selection) ──────────────────────── -->
+  <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
+  <arg name="objects_file"    default="" />             <!-- '' => node's package-relative objects.json -->
+  <arg name="seed"            default="-1" />            <!-- >=0 => reproducible random pick -->
+
+  <!-- ── Object-approach mission (visual servo + landing) ──────────── -->
+  <arg name="lock_mode"       default="detector_tracker" />
+  <arg name="closure_mode"    default="multi_axis" />
+  <arg name="force_mode"      default="fixed" />
+  <!-- Acquisition radius for BOTH arrival-land and the give-up re-inject: how close to
+       the coordinate goal counts as "reached". -->
+  <arg name="arrive_radius_m" default="0.6" />
+  <arg name="target_range_m"  default="0.5" />          <!-- visual hover standoff -->
+  <!-- Visual-reach land distance (depth). land_range_m:=0 disables the visual land and
+       relies on arrival-land alone. -->
+  <arg name="land_range_m"       default="1.0" />
+  <arg name="land_confirm_ticks" default="3" />
+  <!-- Arrival-land (reached by A* alone): ON for this mission. -->
+  <arg name="land_at_goal"              default="true" />
+  <arg name="arrive_land_confirm_ticks" default="5" />
+  <arg name="min_score"       default="0.15" />
+  <arg name="n_confirm"       default="3" />
+
+  <!-- ── Viewers (need a display) ─────────────────────────────────── -->
+  <arg name="viewer"          default="true" />         <!-- live target-lock HUD window -->
+  <arg name="bev_viewer"      default="true" />         <!-- interactive BEV window (from real_drone.launch) -->
+  <arg name="publish_overlay" default="true" />
+
+  <!-- ══ Nav stack, GATED: no initial goal (goal_x/goal_y empty -> planners idle). ══ -->
+  <include file="$(find falcon_adapter)/launch/real_drone.launch">
+    <arg name="map_name"        value="$(arg map_name)" />
+    <arg name="drone_ns"        value="$(arg drone_ns)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <arg name="real_pose_topic" value="$(arg real_pose_topic)" />
+    <arg name="real_pose_type"  value="$(arg real_pose_type)" />
+    <!-- THE GATE: empty goals are omitted downstream, so nothing plans until selection. -->
+    <arg name="goal_x"          value="" />
+    <arg name="goal_y"          value="" />
+    <arg name="nav_mode"        value="$(arg nav_mode)" />
+    <arg name="use_navdp"       value="$(arg use_navdp)" />
+    <arg name="controller"      value="$(arg controller)" />
+    <arg name="bev_viewer"      value="$(arg bev_viewer)" />
+    <arg name="cam_fx"          value="$(arg cam_fx)" />
+    <arg name="cam_fy"          value="$(arg cam_fy)" />
+    <arg name="cam_cx"          value="$(arg cam_cx)" />
+    <arg name="cam_cy"          value="$(arg cam_cy)" />
+    <arg name="cam_width"       value="$(arg cam_width)" />
+    <arg name="cam_height"      value="$(arg cam_height)" />
+  </include>
+
+  <!-- ══ Object-approach mission, DISABLED at start (armed by the director). ══════ -->
+  <include file="$(find falcon_adapter)/launch/object_approach.launch">
+    <arg name="drone_ns"        value="$(arg drone_ns)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <!-- Arrival detection (arrival-land) must read the SAME localization as the nav
+         stack, so forward the pose topic/type (e.g. /xtend/april_tag_pose). -->
+    <arg name="pose_topic"      value="$(arg real_pose_topic)" />
+    <arg name="pose_type"       value="$(arg real_pose_type)" />
+    <!-- GATE: stays passive until the director publishes enable=True on selection. -->
+    <arg name="start_enabled"   value="false" />
+    <arg name="lock_mode"       value="$(arg lock_mode)" />
+    <arg name="closure_mode"    value="$(arg closure_mode)" />
+    <arg name="force_mode"      value="$(arg force_mode)" />
+    <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />
+    <arg name="target_range_m"  value="$(arg target_range_m)" />
+    <arg name="land_range_m"       value="$(arg land_range_m)" />
+    <arg name="land_confirm_ticks" value="$(arg land_confirm_ticks)" />
+    <arg name="land_at_goal"              value="$(arg land_at_goal)" />
+    <arg name="arrive_land_confirm_ticks" value="$(arg arrive_land_confirm_ticks)" />
+    <arg name="min_score"       value="$(arg min_score)" />
+    <arg name="n_confirm"       value="$(arg n_confirm)" />
+    <!-- No initial goal_x/goal_y: object_approach learns the goal from the director's
+         /waypoint_nav/goal publication (object_approach.launch omits empty goals). -->
+    <arg name="goal_x"          value="" />
+    <arg name="goal_y"          value="" />
+    <!-- Detector geometry MUST match the map (same raw K). -->
+    <arg name="fx"              value="$(arg cam_fx)" />
+    <arg name="fy"              value="$(arg cam_fy)" />
+    <arg name="cx"              value="$(arg cam_cx)" />
+    <arg name="cy"              value="$(arg cam_cy)" />
+    <arg name="img_width"       value="$(arg cam_width)" />
+    <arg name="img_height"      value="$(arg cam_height)" />
+    <arg name="viewer"          value="$(arg viewer)" />
+    <arg name="publish_overlay" value="$(arg publish_overlay)" />
+  </include>
+
+  <!-- ══ Mission director: select the object, then arm the mission. ══════════════ -->
+  <node pkg="falcon_adapter" type="mission_director_node.py"
+        name="mission_director" output="screen">
+    <param name="selection_mode" value="$(arg selection_mode)" />
+    <param name="seed"           value="$(arg seed)" />
+    <param name="objects_file"   value="$(arg objects_file)" if="$(eval arg('objects_file') != '')" />
+    <!-- Publishes: /object_approach/goal (label), /waypoint_nav/goal (x,y),
+         /object_approach/enable — all latched. -->
+    <param name="target_topic"   value="/object_approach/goal" />
+    <param name="goal_topic"     value="/waypoint_nav/goal" />
+    <param name="enable_topic"   value="/object_approach/enable" />
+  </node>
+</launch>

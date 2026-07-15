@@ -839,8 +839,11 @@
     <!-- Per-attempt plan status (Bool): consumed by astar_navdp_fallback in fallback mode. -->
     <param name="status_topic"       value="/path/astar_status" />
     <param name="goal_topic"         value="/waypoint_nav/goal" />
-    <param name="goal_x"             value="$(arg goal_x)" />
-    <param name="goal_y"             value="$(arg goal_y)" />
+    <!-- Initial goal is OPTIONAL: an empty goal_x/goal_y is omitted (guarded), so the
+         planner idles "until a click"; the mission gate (see object_mission.launch).
+         A numeric goal_x still sets it (backward compatible). -->
+    <param name="goal_x"             value="$(arg goal_x)" if="$(eval arg('goal_x') != '')" />
+    <param name="goal_y"             value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
     <param name="waypoint_spacing_m" value="$(arg waypoint_spacing_m)" />
     <param name="inflate_radius_m"      value="$(arg inflate_radius_m)" />
     <param name="unknown_blocked"       value="$(arg unknown_blocked)" />
@@ -1016,10 +1019,11 @@
     <!-- A* status + route in; arbitrated raw path out (-> path_corrector via planner_path_topic). -->
     <param name="astar_status_topic" value="/path/astar_status" />
     <param name="astar_path_topic"  value="/path/waypoints_astar" />
-    <!-- Mission goal (world); NavDP is aimed here, converted to the body frame. -->
+    <!-- Mission goal (world); NavDP is aimed here, converted to the body frame.
+         Empty goal_x/goal_y are omitted (guarded) so the mission gate leaves it unset. -->
     <param name="goal_topic"        value="/waypoint_nav/goal" />
-    <param name="goal_x"            value="$(arg goal_x)" />
-    <param name="goal_y"            value="$(arg goal_y)" />
+    <param name="goal_x"            value="$(arg goal_x)" if="$(eval arg('goal_x') != '')" />
+    <param name="goal_y"            value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
     <param name="path_topic"        value="/path/waypoints_fallback" />
     <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
     <param name="frame_id"          value="world" />
@@ -1067,10 +1071,11 @@
     <param name="astar_status_topic" value="/path/astar_status" />
     <param name="astar_path_topic"  value="/path/waypoints_astar" />
     <param name="bev_topic"         value="/falcon/bev_2d" />
-    <!-- Mission goal: used ONLY by the boxed-A* rescue to aim NavDP (body frame). -->
+    <!-- Mission goal: used ONLY by the boxed-A* rescue to aim NavDP (body frame).
+         Empty goal_x/goal_y are omitted (guarded) so the mission gate leaves it unset. -->
     <param name="goal_topic"        value="/waypoint_nav/goal" />
-    <param name="goal_x"            value="$(arg goal_x)" />
-    <param name="goal_y"            value="$(arg goal_y)" />
+    <param name="goal_x"            value="$(arg goal_x)" if="$(eval arg('goal_x') != '')" />
+    <param name="goal_y"            value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
     <param name="path_topic"        value="/path/waypoints_hybrid" />
     <param name="full_path_topic"   value="$(arg navdp_full_path_topic)" />
     <param name="frame_id"          value="world" />

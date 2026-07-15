@@ -351,15 +351,27 @@ class ObjectApproachNode(object):
         _land_range = float(G("~land_range_m", 1.0))
         self.land_range_m = _land_range if _land_range > 0.0 else None
         self.land_confirm_ticks = int(G("~land_confirm_ticks", 3))
+        # ── Terminal LAND on coordinate arrival (reached "by A* alone") ──
+        # When ~land_at_goal is true, arriving at the coordinate goal still
+        # unconfirmed is itself a terminal LAND: the goal IS the object's location,
+        # so having flown there with the planner (the detector never saw it) is a
+        # success -- land there instead of sweeping the room. This is POSE-based (it
+        # keys off _arrived_at_goal, ~arrive_radius_m) and needs NO depth, so it works
+        # even with ~use_depth false or ~land_range_m<=0. Off by default (arrival ->
+        # scan-at-goal, the legacy behaviour). Independent of the depth land above:
+        # either, both, or neither may be enabled.
+        self.land_at_goal = _param_bool("~land_at_goal", False)
+        self.arrive_land_confirm_ticks = int(G("~arrive_land_confirm_ticks", 5))
         if self.land_range_m is not None and not self.use_depth:
-            # The LAND trigger keys off the metric depth range, which is None whenever
-            # ~use_depth is false -- so it would never fire and the drone would hover
-            # forever instead of landing. Fail loud (don't silently no-op).
+            # The depth LAND trigger keys off the metric depth range, which is None
+            # whenever ~use_depth is false -- so it would never fire. (The pose-based
+            # ~land_at_goal trigger, if enabled, still lands on arrival.) Fail loud.
             rospy.logwarn(
                 "object_approach: ~land_range_m=%.2f set but ~use_depth is false -- "
-                "LAND needs depth and will NEVER trigger; the drone will hover-lock, "
-                "not land. Enable ~use_depth or set ~land_range_m<=0 to make this "
-                "explicit.", self.land_range_m)
+                "the DEPTH land will NEVER trigger; %s Enable ~use_depth, set "
+                "~land_range_m<=0, or rely on ~land_at_goal.", self.land_range_m,
+                "arrival-land (~land_at_goal) still applies." if self.land_at_goal
+                else "the drone will hover-lock, not land.")
 
         # On acquisition (target confirmed + tracker locked) hold a brief
         # stop-in-place before the visual approach begins: the node takes over
@@ -371,7 +383,9 @@ class ObjectApproachNode(object):
             recover_timeout_s=recover_timeout_s,
             acquire_stop_s=float(G("~acquire_stop_s", 1.5)),
             land_range_m=self.land_range_m,
-            land_confirm_ticks=self.land_confirm_ticks))
+            land_confirm_ticks=self.land_confirm_ticks,
+            land_at_goal=self.land_at_goal,
+            arrive_land_confirm_ticks=self.arrive_land_confirm_ticks))
 
         # ── Goal memory + re-inject ───────────────────────────────────
         # We remember the coordinate route's goal (from ~goal_x/y and any live
@@ -423,6 +437,11 @@ class ObjectApproachNode(object):
         # request FINISH, and never servo again (a late detection cannot restart us).
         self._landing = False
         self._land_stop_published = False
+        # True once we ever entered a visual approach (APPROACH/HOVER_LOCK). Lets
+        # _begin_land label the terminal LAND accurately: arrival-land fires only from
+        # SEARCH, so if this is still False the reach was "by A* alone", not a depth
+        # reach -- even if a stale tracker box happened to supply a range this tick.
+        self._entered_visual_approach = False
 
         # ── ROS I/O (publishers before subscribers) ──────────────────
         self.cmd_pub = rospy.Publisher(self.drone_ns + "/cmd_vel", Twist, queue_size=1)
@@ -662,8 +681,9 @@ class ObjectApproachNode(object):
                 track=track, intrinsics=self.intr, range_m=rng, dt=dt))
         at_target = bool(res is not None and res.at_target)
 
-        # Arrival at the coordinate goal (no done topic exists) lets the FSM switch
-        # from passive SEARCH to an active room SCAN when still unconfirmed.
+        # Arrival at the coordinate goal (no done topic exists) lets the FSM, when
+        # still unconfirmed, either land there (~land_at_goal: reached "by A* alone")
+        # or switch from passive SEARCH to an active room SCAN (the legacy behaviour).
         arrived = self._arrived_at_goal()
         # Feed the metric range so the FSM can commit to the terminal LAND at
         # land_range_m. res.range_m already respects ~use_depth (None when depth is
@@ -673,6 +693,8 @@ class ObjectApproachNode(object):
                               at_target=at_target, dt=dt, arrived_at_goal=arrived,
                               range_m=fsm_range)
         self._last_dec, self._last_res, self._last_track = dec, res, track
+        if dec.mode in ("APPROACH", "HOVER_LOCK"):
+            self._entered_visual_approach = True
 
         if dec.mode == LAND:
             # Reached the object: end the mission by landing. Stop closing (so the
@@ -814,8 +836,10 @@ class ObjectApproachNode(object):
     def _begin_land(self):
         """Commit to the terminal land sequence (idempotent).
 
-        The drone reached ``land_range_m`` of the locked object. Two things then
-        happen, in order and permanently:
+        The drone reached the object -- either the depth range to the locked target
+        fell within ``land_range_m`` (visual reach), or the coordinate route arrived
+        at the goal still unconfirmed with ``land_at_goal`` on (reached "by A* alone").
+        Two things then happen, in order and permanently:
           1. STOP sending motion. The servo streams ``/cmd_vel`` pulses and the
              platform coasts on them (discrete + inertial actuation), so going quiet
              is not enough -- we publish one clean zero-stop, then fall silent so the
@@ -832,10 +856,19 @@ class ObjectApproachNode(object):
         if not self._landing:
             self._landing = True
             rng = None if self._last_res is None else self._last_res.range_m
+            # Report the trigger that fired. A visual reach passes through
+            # APPROACH/HOVER_LOCK and has a depth range; arrival-land fires straight
+            # from SEARCH. Key off _entered_visual_approach (not merely "is a range
+            # present"), so a stale tracker box that supplies a range on the arrival
+            # tick cannot mislabel a coordinate reach as a depth reach.
+            if self._entered_visual_approach and self.land_range_m is not None \
+                    and rng is not None:
+                reason = "range=%.2f m <= land_range=%.2f m" % (rng, self.land_range_m)
+            else:
+                reason = "arrived at the coordinate goal (reached by A* alone)"
             rospy.logwarn(
-                "object_approach: REACHED TARGET (range=%s m <= land_range=%.2f m) -- "
-                "stopping commands and requesting FINISH (land)",
-                ("%.2f" % rng) if rng is not None else "?", float(self.land_range_m))
+                "object_approach: REACHED TARGET (%s) -- stopping commands and "
+                "requesting FINISH (land)", reason)
         self._drive_land()
 
     def _drive_land(self):
@@ -979,13 +1012,20 @@ class ObjectApproachNode(object):
           self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
           self.intr.width, self.intr.height)
         if self.land_range_m is not None:
-            L("  land      = reach range <= %.2f m (x%d ticks) -> STOP + FINISH "
+            L("  land(depth) = reach range <= %.2f m (x%d ticks) -> STOP + FINISH "
               "(stop->land->disarm via demo manager)",
               self.land_range_m, self.land_confirm_ticks)
             L("  success   = target reached within %.2f m -> land the drone",
               self.land_range_m)
         else:
-            L("  land      = disabled (~land_range_m <= 0): hover-lock, no land")
+            L("  land(depth) = disabled (~land_range_m <= 0): no visual-reach land")
+        if self.land_at_goal:
+            L("  land(goal)  = arrive within %.2fm of the goal (x%d ticks), unconfirmed "
+              "-> STOP + FINISH (reached by A* alone; pose-based, no depth)",
+              self.arrive_radius_m, self.arrive_land_confirm_ticks)
+        else:
+            L("  land(goal)  = disabled (~land_at_goal false): arrival -> room SCAN")
+        if self.land_range_m is None and not self.land_at_goal:
             L("  success   = target centred & within target_range/area (hover-lock)")
         L("=" * 64)
 
@@ -1042,15 +1082,21 @@ if __name__ == "__main__":
 #       coarse-yaw platform: ~yaw_deadband (0.22, larger than the crab deadband so
 #       fine centring is done by crab, not yaw) ~yaw_close_deadband (0.15, extra yaw
 #       deadband as we close so a yaw does not sweep the object out of frame)
-#   terminal land (reach the object -> stop + land, ends the mission): ~land_range_m
-#       (1.0, depth range at/below which the object is "reached"; needs ~use_depth;
-#       <= 0 disables and keeps the legacy hover-lock-forever terminal) ~land_confirm_ticks
-#       (3, consecutive in-range ticks required so one depth glitch cannot land). On
-#       trigger the node stops driving /cmd_vel (the twist bridge's watchdog then holds
-#       the drone) and requests the ~demo_mode_request_topic 'finish' mode; the ROS2
+#   terminal land (reach the object -> stop + land, ends the mission). TWO independent
+#       triggers, either/both/neither:
+#     VISUAL reach (depth): ~land_range_m (1.0, depth range at/below which the object is
+#       "reached"; needs ~use_depth; <= 0 disables) ~land_confirm_ticks (3, consecutive
+#       in-range ticks so one depth glitch cannot land). Fires during APPROACH/HOVER_LOCK.
+#     COORDINATE reach (pose): ~land_at_goal (false; true = arriving within ~arrive_radius_m
+#       of the goal still unconfirmed for ~arrive_land_confirm_ticks (5) ticks is itself a
+#       LAND -- the object was reached "by A* alone", so the goal is its location; land
+#       there instead of the arrival->SCAN room sweep). POSE-based, needs NO depth, so it
+#       works with ~use_depth false / ~land_range_m<=0. Fires from SEARCH only.
+#     On EITHER trigger the node stops driving /cmd_vel (the twist bridge's watchdog then
+#       holds the drone) and requests the ~demo_mode_request_topic 'finish' mode; the ROS2
 #       xtend_drone_demo_manager turns FINISH into stop -> land -> disarm on /xtend/cmd_nav
-#       (cmd_nav is NOT bridged into this container, so demo_mode_request is the only
-#       land path from here).
+#       (cmd_nav is NOT bridged into this container, so demo_mode_request is the only land
+#       path from here).
 #   flight-command shaping (discrete + inertial, on EVERY published command):
 #       ~force_mode (fixed | snap | none; default fixed = bang-bang 0/±pulse)
 #       ~min_vx (0.06) ~min_vy (0.06) ~min_wz_deg (8.0) ~force_release_frac (0.5)

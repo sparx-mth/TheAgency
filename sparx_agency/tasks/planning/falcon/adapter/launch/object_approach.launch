@@ -36,8 +36,11 @@
   <!-- ── Transport / topics ─────────────────────────────────────────── -->
   <arg name="drone_ns"          default="" />                 <!-- '' on the real drone -->
   <arg name="image_transport"   default="frame_path" />       <!-- frame_path | topic -->
-  <arg name="rgb_topic"         default="/xtend/rgb_frame_path" />
-  <arg name="depth_topic"       default="/xtend/depth_frame_path" />
+  <!-- RGB/depth topic names track image_transport: frame_path (String paths off disk,
+       real drone) or topic (raw sensor_msgs/Image, sim / bag replay). Mirrors the
+       real_drone.launch flip so a topic-transport run reads /xtend/rgb + /xtend/depth_m. -->
+  <arg name="rgb_topic"         default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
+  <arg name="depth_topic"       default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
   <arg name="pose_topic"        default="/xtend/localization" /><!-- arrival detection -->
   <arg name="pose_type"         default="pose_stamped" />
   <arg name="camera_info_topic" default="" />                 <!-- '' => use fx/fy/cx/cy -->
@@ -98,6 +101,15 @@
        land_range_m:=0 to disable and keep the legacy hover-lock (no land). -->
   <arg name="land_range_m"       default="1.0" />             <!-- reach distance; <=0 disables landing -->
   <arg name="land_confirm_ticks" default="3" />               <!-- consecutive in-range ticks before landing -->
+
+  <!-- ── Terminal land on COORDINATE arrival (reached "by A* alone") ──
+       When land_at_goal is true, arriving within arrive_radius_m of the goal still
+       unconfirmed for arrive_land_confirm_ticks ticks is itself a LAND: the goal IS the
+       object's location, so having flown there with the planner (the detector never saw
+       it) is success; land there instead of the arrival->SCAN room sweep. POSE-based:
+       needs no depth (works with use_depth:=false / land_range_m:=0). Off by default. -->
+  <arg name="land_at_goal"             default="false" />
+  <arg name="arrive_land_confirm_ticks" default="5" />         <!-- consecutive arrived ticks before landing -->
 
   <!-- ── Flight-command shaping (discrete + inertial actuation) ─────── -->
   <arg name="force_mode"        default="fixed" />            <!-- fixed | snap | none -->
@@ -190,6 +202,8 @@
     <param name="lateral_deadband"   value="$(arg lateral_deadband)" />
     <param name="land_range_m"       value="$(arg land_range_m)" />
     <param name="land_confirm_ticks" value="$(arg land_confirm_ticks)" />
+    <param name="land_at_goal"             value="$(arg land_at_goal)" />
+    <param name="arrive_land_confirm_ticks" value="$(arg arrive_land_confirm_ticks)" />
     <param name="force_mode"        value="$(arg force_mode)" />
     <param name="min_vx"            value="$(arg min_vx)" />
     <param name="min_vy"            value="$(arg min_vy)" />

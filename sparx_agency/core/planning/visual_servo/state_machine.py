@@ -22,13 +22,23 @@ States (string labels, à la
   * ``APPROACH``    — servo drives toward the target.
   * ``HOVER_LOCK``  — target centred and close: success, hold and keep tracking.
   * ``RECOVER``     — track lost; node sweeps to re-acquire (see the recovery policy).
-  * ``LAND``        — reached the object: the metric range to the target has stayed
-    ``<= land_range_m`` for ``land_confirm_ticks`` consecutive closure ticks. This is
-    a **terminal** state — the machine never leaves it, ``drive_cmd_vel`` goes False,
-    and the ``land`` flag is raised so the node stops sending motion commands and
-    triggers the platform's land sequence. Disabled (never entered) when
-    ``land_range_m is None`` (the default), preserving the hover-lock-forever
-    behaviour for missions that only want to hold in front of the object.
+  * ``LAND``        — reached the object: the machine never leaves this **terminal**
+    state, ``drive_cmd_vel`` goes False, and the ``land`` flag is raised so the node
+    stops sending motion commands and triggers the platform's land sequence. Two
+    independent triggers can enter it:
+      - **visual reach** (from APPROACH / HOVER_LOCK): the metric range to the target
+        has stayed ``<= land_range_m`` for ``land_confirm_ticks`` consecutive closure
+        ticks. Disabled (never entered) when ``land_range_m is None`` (the default),
+        preserving the hover-lock-forever behaviour for missions that only hold in
+        front of the object.
+      - **coordinate reach** (from SEARCH, ``land_at_goal`` on): the coordinate route
+        reached its goal (``arrived_at_goal``) still unconfirmed for
+        ``arrive_land_confirm_ticks`` consecutive ticks — the object was flown to "by
+        A* alone" (never seen by the detector), so the goal *is* the object and the
+        mission lands there instead of sweeping the room. Needs only the pose-based
+        ``arrived_at_goal`` flag, no depth. Off by default (``land_at_goal`` False),
+        which keeps the legacy arrival→SCAN sweep. The two triggers never contend: the
+        coordinate one lives only in SEARCH, the visual one only in APPROACH/HOVER_LOCK.
 
 Transitions are driven only by booleans the node already has (target confirmed,
 track valid, servo at-target, arrived-at-goal) plus the optional metric ``range_m``
@@ -82,6 +92,17 @@ class ApproachFSMConfig:
             required before entering LAND, so a single spurious depth reading cannot
             land the drone. The streak resets on any tick that is out of range or has
             no range, and on any state change out of the closure states.
+        land_at_goal: When True, arriving at the coordinate goal (``arrived_at_goal``)
+            still unconfirmed is itself a terminal-LAND trigger — the object was reached
+            "by A* alone" (the goal is its location), so the mission lands there rather
+            than sweeping the room. Pose-based: needs no depth / ``range_m``. ``False``
+            (default) keeps the legacy arrival→SCAN room sweep. Independent of
+            ``land_range_m`` (either, both, or neither may be enabled).
+        arrive_land_confirm_ticks: Consecutive SEARCH ticks with ``arrived_at_goal``
+            required before the ``land_at_goal`` trigger commits to LAND, so a brief
+            pose excursion into the arrival radius cannot land the drone. The streak
+            resets on any tick that is not arrived and on any state change. Only used
+            when ``land_at_goal`` is True.
     """
 
     recover_timeout_s: float = 6.0
@@ -90,6 +111,8 @@ class ApproachFSMConfig:
     acquire_stop_s: float = 0.0
     land_range_m: Optional[float] = None
     land_confirm_ticks: int = 3
+    land_at_goal: bool = False
+    arrive_land_confirm_ticks: int = 5
 
     def __post_init__(self) -> None:
         if self.recover_timeout_s <= 0.0:
@@ -104,6 +127,8 @@ class ApproachFSMConfig:
             raise ValueError("land_range_m must be > 0 when set (None disables LAND).")
         if self.land_confirm_ticks < 1:
             raise ValueError("land_confirm_ticks must be >= 1.")
+        if self.arrive_land_confirm_ticks < 1:
+            raise ValueError("arrive_land_confirm_ticks must be >= 1.")
 
 
 @dataclass(frozen=True)
@@ -149,6 +174,7 @@ class VisualApproachStateMachine:
         self._recover_valid = 0
         self._settle_for = 0.0
         self._land_confirm = 0
+        self._arrive_confirm = 0
 
     @property
     def state(self) -> str:
@@ -184,11 +210,30 @@ class VisualApproachStateMachine:
         if self._state == SEARCH:
             # Only leave SEARCH once BOTH confirmed and the tracker is actually
             # locked (the node seeds the tracker on confirmation). Otherwise, once
-            # the route has reached its goal, switch to a room sweep (SCAN).
+            # the route has reached its goal: with land_at_goal, a sustained arrival
+            # is itself a terminal LAND (the goal IS the object, reached by A* alone);
+            # without it, switch to a room sweep (SCAN), the legacy behaviour.
             if confirmed and track_valid:
                 self._acquire()
-            elif arrived_at_goal:
+            elif arrived_at_goal and self.cfg.land_at_goal and not confirmed:
+                # Reached the goal and the detector has NEVER seen the object
+                # ("by A* alone"): accumulate consecutive arrived+unconfirmed ticks
+                # in place (SEARCH stays passive, so the follower holds the drone at
+                # the goal) and land once it is sustained long enough to rule out a
+                # brief pose excursion into the radius. The ``not confirmed`` guard is
+                # essential: a target the detector HAS confirmed (but whose tracker
+                # cannot hold a box this tick) must NOT be blind-landed on the
+                # coordinate -- we keep holding for the tracker to re-acquire and
+                # visually approach it, never arrival-land on a seen object.
+                self._arrive_confirm += 1
+                if self._arrive_confirm >= self.cfg.arrive_land_confirm_ticks:
+                    self._enter(LAND)
+            elif arrived_at_goal and not self.cfg.land_at_goal:
                 self._enter(SCAN)
+            else:
+                # Not arrived, or arrived-but-confirmed (object seen): reset the
+                # arrival-land streak so it only counts sustained unconfirmed arrival.
+                self._arrive_confirm = 0
             return self._decide()
 
         if self._state == SCAN:
@@ -280,6 +325,9 @@ class VisualApproachStateMachine:
         # A state change breaks the closure: require a fresh consecutive in-range
         # streak (so e.g. a RECOVER excursion cannot carry stale land progress).
         self._land_confirm = 0
+        # Likewise reset the arrival-land streak whenever we leave (or re-enter)
+        # SEARCH, so a goal that was cleared and re-reached must re-confirm.
+        self._arrive_confirm = 0
         if new != RECOVER:
             self._lost_for = 0.0
         if new != HOVER_LOCK:

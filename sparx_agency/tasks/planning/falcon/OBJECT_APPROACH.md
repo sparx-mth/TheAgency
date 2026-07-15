@@ -200,10 +200,87 @@ RECOVER that outlasts `recover_timeout_s` falls back to SEARCH/SCAN.
   would smear every frame, so the sweep alternates rotate bursts with stops and begins
   with a pause (a clean look straight ahead the instant the drone arrives).
 
+## Select-then-go mission (mission director)
+
+The base recipe above flies to a *fixed* `goal_x/goal_y` while hunting a *fixed*
+`target_object`. The **mission director** turns that into "pick an object from a room
+catalogue, then fly to it and land" — the object's label AND its coordinate goal both
+come from the selection, and nothing flies until you pick.
+
+**Catalogue.** `objects.json` (this directory) is a JSON list of room objects, each with
+a `label` and a world `position_m` (x, y, z). It is loaded by the pure, ROS-free
+`core.planning.mission.ObjectCatalog` (see `core/planning/mission/README.md`).
+
+**Pieces.**
+- `adapter/scripts/mission_director_node.py` (ROS1) — loads the catalogue and selects an
+  object, two ways (`~selection_mode`): **`random`** (pick one uniformly at startup,
+  seedable via `~seed`) or **`gui`** (a matplotlib window listing every object; click a
+  row / press its number / `r` for random — and click another row anytime to **retarget
+  live**). matplotlib is the only GUI toolkit proven in the FALCON container. On selection
+  it publishes three latched topics: the **label** on `/object_approach/goal` (re-prompts
+  YOLO *and* re-keys the confirmation gate), the **(x, y)** on `/waypoint_nav/goal` (the
+  planners replan), and **`True`** on `/object_approach/enable` (arms object_approach).
+- Two small additions elsewhere: the FSM's coordinate-arrival LAND (below) and the
+  optional-goal gate in the launches.
+
+**The gate.** Until an object is selected, nothing plans or flies. The nav stack comes up
+with **no** initial goal (`goal_x/goal_y` empty → the planners idle "until a click"; the
+`nav_stack.launch` goal params are omitted when empty) and object_approach comes up
+**disabled** (`start_enabled:=false`). The director holds `enable=False` and publishes no
+goal until you select. (The platform still takes off and hovers — that is the follower's
+baseline; only navigation is gated. Start from a fresh roscore so a stale latched
+`/waypoint_nav/goal` cannot pre-arm the planners; `run_falcon.sh`'s ephemeral container
+gives one.)
+
+**Reach → land, two ways.** Both on by default in this mission:
+- **Visual** — the detector confirms the object en route, object_approach servos onto it
+  and lands when the depth range holds `<= land_range_m` (the base recipe's terminal).
+- **By A\* alone** (`land_at_goal:=true`) — the route reaches the coordinate goal still
+  unconfirmed for `arrive_land_confirm_ticks` ticks. The goal *is* the object's location,
+  so land there rather than sweeping the room. This is **pose-based** (keys off
+  `arrive_radius_m`), so it works with no depth. It fires only from SEARCH, so it never
+  interrupts an in-progress visual approach.
+
+**Run.** One command (host detector sidecar + bridge + container), like
+`run_object_approach_mission.sh` but with no target/goal on the CLI:
+
+```bash
+./run_object_mission.sh office              # gui select, hybrid A*+NavDP
+./run_object_mission.sh office random       # random pick
+NAV_MODE=astar ./run_object_mission.sh office gui land_range_m:=0   # A* only, arrival-land only
+```
+
+Or, with a nav stack + detector already up, just the launch:
+
+```bash
+roslaunch falcon_adapter object_mission.launch map_name:=office selection_mode:=gui
+```
+
+**Detector without TensorRT (x86 / laptop, no engines).** `yolo_detector_ros2_node.py`
+takes `backend:=ultralytics` to run the plain torch YOLO-World model instead of the TRT
+split (auto-downloads `yolov8s-worldv2.pt`; `device:=cpu` if no GPU):
+
+```bash
+python3 sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py --ros-args \
+    -p backend:=ultralytics -p weights:=yolov8s-worldv2.pt -p device:=cuda:0 \
+    -p image_transport:=topic -p rgb_topic:=/xtend/rgb \
+    -p target_object:=refrigerator -p conf_thresh:=0.05
+```
+
+**Sim / bag (`image_transport:=topic`) + a non-default pose.** `object_mission.launch`
+forwards `image_transport` (RGB/depth topics flip to `/xtend/rgb` + `/xtend/depth_m`) and
+`real_pose_topic` / `real_pose_type` to BOTH the nav stack and object_approach's arrival
+detection, so a run reads the right pose everywhere:
+
+```bash
+roslaunch falcon_adapter object_mission.launch map_name:=office selection_mode:=gui \
+    image_transport:=topic real_pose_topic:=/xtend/april_tag_pose
+```
+
 ## Limits / next
 
-- No landing by design. Vertical centring is available (`use_vertical:=true`) but off
-  by default (the platform holds altitude).
+- No landing by design in the base hover-lock recipe. Vertical centring is available
+  (`use_vertical:=true`) but off by default (the platform holds altitude).
 - Re-prompting the detector at runtime needs torch/ultralytics via `~text_weights`;
   precompute the text embeddings (`runtime.set_text_features`) for a fully torch-free
   deployment with a fixed target.

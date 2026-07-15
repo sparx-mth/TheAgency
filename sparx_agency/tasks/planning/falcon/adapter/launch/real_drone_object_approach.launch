@@ -106,6 +106,9 @@
     <arg name="cam_cy"          value="$(arg cam_cy)" />
     <arg name="cam_width"       value="$(arg cam_width)" />
     <arg name="cam_height"      value="$(arg cam_height)" />
+    <!-- real_drone.launch owns the interactive BEV window; do NOT also launch one
+         below, or roslaunch aborts on a duplicate /bev_click_goal node name. -->
+    <arg name="bev_viewer"      value="$(arg bev_viewer)" />
   </include>
 
   <!-- ══ The object-approach mission (detector + servo + HUD) ═══════── -->
@@ -137,7 +140,7 @@
     <arg name="publish_overlay" value="$(arg publish_overlay)" />
   </include>
 
-  <!-- ══ Interactive BEV window (map + click-to-set-goal) ══════════── -->
-  <node pkg="falcon_adapter" type="bev_click_goal_node.py"
-        name="bev_click_goal" output="screen" if="$(arg bev_viewer)" />
+  <!-- The interactive BEV window (map + click-to-set-goal) is launched by
+       real_drone.launch above (bev_viewer forwarded). It is NOT launched here too:
+       two nodes named /bev_click_goal would make roslaunch abort. -->
 </launch>
