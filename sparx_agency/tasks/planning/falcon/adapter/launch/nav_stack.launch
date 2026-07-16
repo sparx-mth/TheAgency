@@ -378,16 +378,21 @@
   <arg name="min_free_cells_to_plan" default="80" />
 
   <!-- SMART replanning (event-driven; the default). The committed route is FROZEN
-       and replanned only on (a) a CONFIRMED collision on the remaining route
-       (safety; STOPs the drone if boxed in, then NavDP fallback takes over) or
-       (b) a large, ROUTE-RELEVANT map discovery, adopted only if the new route is
-       meaningfully shorter (length hysteresis), so the slow stop-and-turn drone
-       is not whipsawed by a route that A* re-optimises every map frame. Set
-       smart_replan:=false to restore the legacy periodic timer + mid-cycle hooks
-       below. -->
+       and re-evaluated only on (a) a CONFIRMED collision on the remaining route
+       (safety; STOPs the drone if boxed in, then NavDP fallback takes over),
+       (b) a large map discovery, in the route corridor or MAP-WIDE (a reveal to
+       the side can open a shortcut), (c) a large yaw ROTATION (the camera swept
+       new terrain), or (d) a PERIODIC catch-all tick. All but the collision adopt
+       the new route only if it is meaningfully shorter (length hysteresis), so
+       the slow stop-and-turn drone is not whipsawed by a route that A*
+       re-optimises every map frame. Set smart_replan:=false to restore the
+       legacy periodic timer + mid-cycle hooks below. -->
   <arg name="smart_replan"            default="true" />
   <arg name="replan_corridor_radius_m" default="1.0" /><!-- route-corridor half-width for the discovery relevance test (m) -->
   <arg name="replan_min_new_cells"    default="60" /><!-- newly-observed corridor cells needed to consider an opportunistic replan ("many, not a few") -->
+  <arg name="replan_min_new_cells_any" default="240" /><!-- newly-observed cells ANYWHERE (an off-corridor reveal can open a shortcut); higher floor; 0 disables -->
+  <arg name="replan_rotation_min_deg" default="30.0" /><!-- yaw swing since the last commit/evaluation that re-evaluates the route (mid-turn or just finished); 0 disables -->
+  <arg name="replan_period_s"         default="7.0" /><!-- catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables -->
   <arg name="replan_commit_min_s"     default="4.0" /><!-- keep flying a committed route at least this long before an opportunistic replan may reconsider it (collision bypasses this) -->
   <arg name="replan_improve_frac"     default="0.15" /><!-- adopt a discovery candidate only if it is >= this fraction shorter than the remaining committed route (kills L/R flip-flop) -->
   <arg name="stop_on_blocked_plan_fail" default="true" /><!-- on a confirmed obstacle with NO route around it, STOP (2-pt hold) instead of leaving the colliding route latched -->
@@ -1014,6 +1019,9 @@
     <param name="smart_replan"          value="$(arg smart_replan)" />
     <param name="replan_corridor_radius_m" value="$(arg replan_corridor_radius_m)" />
     <param name="replan_min_new_cells"  value="$(arg replan_min_new_cells)" />
+    <param name="replan_min_new_cells_any" value="$(arg replan_min_new_cells_any)" />
+    <param name="replan_rotation_min_deg" value="$(arg replan_rotation_min_deg)" />
+    <param name="replan_period_s"       value="$(arg replan_period_s)" />
     <param name="replan_commit_min_s"   value="$(arg replan_commit_min_s)" />
     <param name="replan_improve_frac"   value="$(arg replan_improve_frac)" />
     <param name="stop_on_blocked_plan_fail" value="$(arg stop_on_blocked_plan_fail)" />

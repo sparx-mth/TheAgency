@@ -141,6 +141,9 @@
   <arg name="smart_replan"                  default="true" />
   <arg name="replan_corridor_radius_m"      default="1.0" />
   <arg name="replan_min_new_cells"          default="60" />
+  <arg name="replan_min_new_cells_any"      default="240" />
+  <arg name="replan_rotation_min_deg"       default="30.0" />
+  <arg name="replan_period_s"               default="7.0" />
   <arg name="replan_commit_min_s"           default="4.0" />
   <arg name="replan_improve_frac"           default="0.15" />
   <arg name="stop_on_blocked_plan_fail"     default="true" />
@@ -278,6 +281,9 @@
     <arg name="smart_replan"                  value="$(arg smart_replan)" />
     <arg name="replan_corridor_radius_m"      value="$(arg replan_corridor_radius_m)" />
     <arg name="replan_min_new_cells"          value="$(arg replan_min_new_cells)" />
+    <arg name="replan_min_new_cells_any"      value="$(arg replan_min_new_cells_any)" />
+    <arg name="replan_rotation_min_deg"       value="$(arg replan_rotation_min_deg)" />
+    <arg name="replan_period_s"               value="$(arg replan_period_s)" />
     <arg name="replan_commit_min_s"           value="$(arg replan_commit_min_s)" />
     <arg name="replan_improve_frac"           value="$(arg replan_improve_frac)" />
     <arg name="stop_on_blocked_plan_fail"     value="$(arg stop_on_blocked_plan_fail)" />

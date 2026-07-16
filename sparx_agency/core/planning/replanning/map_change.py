@@ -6,9 +6,10 @@ committed a route. On a later frame it compares that snapshot with the live grid
 to answer: "how many cells that I had never observed are now observed, AND lie in
 the corridor of the route I am flying?". A large count means a real chunk of new,
 route-relevant information arrived (e.g. the drone turned 90 deg and revealed a
-whole region the path crosses) -- worth re-optimising. A small count is noise or
-an off-route discovery and must NOT trigger a replan (that is the oscillation the
-policy exists to prevent).
+whole region the path crosses) -- worth re-optimising. A small count is noise and
+must NOT trigger a replan (that is the oscillation the policy exists to prevent).
+Off-corridor reveals can still open a shorter route, so the caller may ALSO sum
+:func:`newly_known_mask` map-wide against a higher floor rather than ignore them.
 
 Both masks must share the grid's shape; the caller guards grid compatibility
 (origin/resolution/shape) before diffing -- an index-wise diff is only meaningful

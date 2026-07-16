@@ -7,11 +7,15 @@ node's callbacks directly and assert on what it publishes. The point is to lock 
 the anti-oscillation contract the user asked for:
 
   * a static map never re-publishes (the drone is not whipsawed),
-  * discoveries off the route, or that do not shorten it, do not re-publish,
-  * a discovery that opens a meaningfully shorter route IS adopted,
+  * discoveries that do not shorten the route do not re-publish,
+  * a discovery that opens a meaningfully shorter route IS adopted -- whether it
+    lands in the route corridor or off to the side (map-wide floor),
+  * a large yaw rotation and the periodic catch-all re-EVALUATE the route, but
+    still only re-publish a meaningfully shorter candidate,
   * the commitment window holds the route for the slow platform,
   * a confirmed obstacle reroutes, and a boxed-in obstacle STOPS the drone once.
 """
+import math
 import pathlib
 import sys
 import types
@@ -185,10 +189,11 @@ def _occ_msg(grid2d):
     return m
 
 
-def _pose_msg(x, y):
+def _pose_msg(x, y, yaw=0.0):
     p = _Pose_t()
     p.position.x, p.position.y = x, y
-    p.orientation.w = 1.0
+    p.orientation.z = math.sin(yaw / 2.0)
+    p.orientation.w = math.cos(yaw / 2.0)
     return p
 
 
@@ -317,7 +322,8 @@ def test_suppressed_discovery_does_not_churn_astar():
     """After a discovery is evaluated and the route is kept, the SAME reveal must
     not re-run A* every commit window on an otherwise static map (the high-water
     mark latches it off); a genuine further reveal still fires."""
-    node = _node(replan_commit_min_s=0.5, replan_corridor_radius_m=1.0)
+    node = _node(replan_commit_min_s=0.5, replan_corridor_radius_m=1.0,
+                 replan_period_s=0)     # periodic off: isolate the discovery gate
     g0 = np.full((H, W), UNK, np.int16)
     g0[18:23, :] = FREE                    # known route band (warmup + straight route)
     _bootstrap(node, g0)
@@ -363,24 +369,115 @@ def test_discovery_adopts_a_shorter_route():
     assert _n_paths(node) == n0 + 1, "a >=15% shorter candidate must be adopted"
 
 
-def test_off_corridor_discovery_does_not_fire():
-    """A big reveal far from the route corridor yields zero relevant new cells."""
-    node = _node(replan_commit_min_s=1.0, replan_corridor_radius_m=0.5)
+def test_off_corridor_discovery_evaluates_but_keeps_route():
+    """A big reveal far from the corridor used to be ignored; now it triggers ONE
+    map-wide evaluation (a reveal to the side can open a shortcut), but a candidate
+    that is not meaningfully shorter is kept -- no re-publish, and the SAME reveal
+    must not churn A* on later frames."""
+    node = _node(replan_commit_min_s=1.0, replan_corridor_radius_m=0.5,
+                 replan_period_s=0)
     # Commit with the route corridor (around row 20) FREE, everything else UNKNOWN.
     g0 = np.full((H, W), UNK, np.int16)
     g0[15:26, :] = FREE                   # a known band containing the y=2.0 route
     _bootstrap(node, g0)
     assert node.has_plan
     n0 = _n_paths(node)
-    # Reveal a large region far from the corridor (rows 0..5) as free.
+    calls = {"n": 0}
+    orig = node._plan_candidate
+
+    def _counting():
+        calls["n"] += 1
+        return orig()
+    node._plan_candidate = _counting
+    # Reveal rows 0..5 (6*40 = 240 cells): zero corridor overlap, but at the
+    # default ~replan_min_new_cells_any (240) map-wide floor.
     g1 = g0.copy()
     g1[0:6, :] = FREE
     _advance(2.0)
-    # The relevance count must be ~0 (revealed cells are outside the corridor).
     node.grid = node._decode(_occ_msg(g1))
-    assert node._new_known_in_corridor() == 0
+    assert node._new_known_in_corridor() == 0, "reveal is fully off-corridor"
     node._bev_cb(_occ_msg(g1))
-    assert _n_paths(node) == n0, "off-corridor discovery must not replan"
+    assert calls["n"] == 1, "an off-corridor reveal must trigger a map-wide evaluation"
+    assert _n_paths(node) == n0, "a non-improving candidate must not re-publish"
+    for _ in range(5):                    # kept reveal is latched (high-water mark)
+        _advance(2.0)
+        node._bev_cb(_occ_msg(g1))
+    assert calls["n"] == 1, "a kept map-wide reveal must not churn A*"
+
+
+def test_off_corridor_reveal_adopts_a_shorter_route():
+    """The motivating case: a reveal to the SIDE of the route (zero corridor
+    overlap) that opens a meaningfully shorter route must be adopted."""
+    node = _node(replan_commit_min_s=1.0, replan_corridor_radius_m=0.5,
+                 replan_period_s=0)
+    g0 = np.full((H, W), UNK, np.int16)
+    g0[15:26, :] = FREE
+    _bootstrap(node, g0)
+    n0 = _n_paths(node)
+    # Candidate ~half the remaining committed route -> must be adopted.
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(2.0, 2.0)), frame_id="world")
+    g1 = g0.copy()
+    g1[0:6, :] = FREE                     # 240 new cells, all off-corridor
+    _advance(2.0)
+    node._bev_cb(_occ_msg(g1))
+    assert _n_paths(node) == n0 + 1, "a shorter route from a side reveal is adopted"
+
+
+def test_rotation_triggers_one_evaluation():
+    """A yaw swing >= ~replan_rotation_min_deg re-evaluates the route (the camera
+    swept new terrain), an unchanged candidate is kept (no re-publish), and the
+    held heading must not re-run A* (baseline latched); a small swing never fires."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=0)
+    _bootstrap(node, _all_free())
+    calls = {"n": 0}
+    orig = node._plan_candidate
+
+    def _counting():
+        calls["n"] += 1
+        return orig()
+    node._plan_candidate = _counting
+    _advance(2.0)                          # past the commit window
+    node._pose_cb(_pose_msg(0.2, 2.0, yaw=math.radians(20.0)))
+    node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 0, "a small yaw change must not trigger"
+    _advance(2.0)
+    node._pose_cb(_pose_msg(0.2, 2.0, yaw=math.radians(60.0)))   # >= 30 deg default
+    node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 1, "a large rotation must re-evaluate the route"
+    assert _n_paths(node) == 1, "an unchanged candidate is kept (no re-publish)"
+    for _ in range(5):                     # held heading on a static map
+        _advance(2.0)
+        node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 1, "the evaluated heading must not churn A*"
+
+
+def test_periodic_replan_reevaluates_without_republish():
+    """~replan_period_s is a catch-all: a quiet map still gets a fresh A*
+    evaluation every period, but the length hysteresis keeps the route, so a
+    static map never re-publishes (no follower reset)."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=3.0)
+    _bootstrap(node, _all_free())
+    calls = {"n": 0}
+    orig = node._plan_candidate
+
+    def _counting():
+        calls["n"] += 1
+        return orig()
+    node._plan_candidate = _counting
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 0, "before the period elapses: no evaluation"
+    _advance(2.0)                          # 4.0s since commit >= 3.0s period
+    node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 1, "period elapsed: one evaluation"
+    _advance(2.0)                          # only 2.0s since that evaluation
+    node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 1, "the clock restarts on every evaluation"
+    _advance(2.0)                          # 4.0s since the evaluation
+    node._bev_cb(_occ_msg(_all_free()))
+    assert calls["n"] == 2, "the periodic check re-fires every period"
+    assert _n_paths(node) == 1, "periodic evaluations never re-publish a kept route"
 
 
 # ─── obstacle handling ───────────────────────────────────────────────────────
