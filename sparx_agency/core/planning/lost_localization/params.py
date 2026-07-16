@@ -33,11 +33,21 @@ class LostLocalizationParams:
             confirmation would let a single flickering frame end the recovery.
             >1 debounces that flicker.
         back_speed: Reverse speed (m/s, positive) for a back-up rung. Commanded
-            as a negative body-x velocity.
+            as a negative body-x velocity. Unlike the climb, this axis IS what the
+            platform's thrust scale was calibrated against (0.3 m/s is the
+            reference point), so the number means roughly what it says.
         back_duration_s: How long one back-up rung drives. Distance is
             ``back_speed * back_duration_s`` and is OPEN LOOP -- with no pose
-            there is no odometry to close it on.
-        back_repeats: How many back-up rungs (each followed by a settle).
+            there is no odometry to close it on. Retreating is the first and most
+            likely-to-work rung (we were just there, and could see a tag then), so
+            it is worth enough distance to actually leave the spot that lost the
+            tag; too short and the drone just sits in the same bad place.
+        back_repeats: How many back-up rungs (each followed by a settle). Total
+            blind retreat is ``back_repeats * back_speed * back_duration_s``, and
+            NOTHING checks what is behind the drone -- the map is forward-looking
+            and is starved of poses anyway while lost. The saving grace is that it
+            retraces ground it just flew, so keep the total inside the distance the
+            drone has actually come.
         dwell_s: Stationary settle (s) after every motion rung. This is where the
             recovery actually happens: the drone is still, so the camera gets its
             cleanest look for a tag. Keep it >= a few localization periods.
@@ -61,7 +71,9 @@ class LostLocalizationParams:
         turn_enabled: Run the final slow 360 sweep.
         turn_rate: Yaw rate (rad/s, positive) for the sweep. Slow on purpose: the
             sweep exists to let the camera find a tag, and motion blur defeats it.
-        turn_dir: Sweep direction: +1 = left/CCW, -1 = right/CW.
+        turn_dir: Sweep direction: +1 = left/CCW, -1 = right/CW. Defaults to RIGHT
+            because that is what re-acquires a tag on this airframe; the sweep is a
+            search, so the side that finds one soonest is the whole point.
         turn_target_rad: Rotation to sweep before giving up (default a full turn).
         turn_timeout_s: Hard cap (s) on the sweep. This is what ends the sweep
             when no independent yaw source is available, so it MUST exceed
@@ -76,8 +88,8 @@ class LostLocalizationParams:
     stale_s: float = 0.3
     ladder_s: float = 1.0
     exit_confirm_poses: int = 2
-    back_speed: float = 0.25
-    back_duration_s: float = 1.0
+    back_speed: float = 0.30
+    back_duration_s: float = 1.5
     back_repeats: int = 2
     dwell_s: float = 1.5
     climb_enabled: bool = True
@@ -86,7 +98,7 @@ class LostLocalizationParams:
     climb_repeats: int = 2
     turn_enabled: bool = True
     turn_rate: float = 0.30
-    turn_dir: int = 1
+    turn_dir: int = -1                 # right; see the attribute docs
     turn_target_rad: float = 2.0 * pi
     turn_timeout_s: float = 40.0
 

@@ -77,6 +77,65 @@ launch:
   controller: waypoint        # waypoint | multi_axis | pure_pursuit | roll_assist
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
+
+  # -- Pure-pursuit yaw force (only used when controller: pure_pursuit) --
+  # This is the turn-force dial. Pure pursuit sets wz = speed * curvature and clips
+  # it at pp_max_yaw_rate; with the cruise/lookahead defaults that clip is reached
+  # beyond ~37 deg of angle to the lookahead, so EVERY real left/right turn commands
+  # exactly this rate. The XTEND converter scales it as |wz|/0.65*1000:
+  #
+  #   0.60 rad/s -> yaw axis 923 of 1000  (92% of full thrust -- turned too hard)
+  #   0.45 rad/s -> yaw axis 692
+  #   0.35 rad/s -> yaw axis 538
+  #
+  # Lowering it ONLY softens turns big enough to hit the cap; gentle corrections
+  # (below ~27 deg) are already under it and are unchanged. If the turns are still
+  # too sharp, the other lever is a longer pp_base_lookahead (0.6) -- that lowers
+  # the curvature itself rather than clipping the result, so the whole turn is
+  # rounder instead of just slower.
+  pp_max_yaw_rate: 0.35       # rad/s cap == the force of a left/right turn
+  pp_yaw_rate_smoothing: 0.3  # EMA into that rate (lower = softer onset, slower to commit)
+
+  # -- Pure-pursuit forward speed (only used when controller: pure_pursuit) --
+  # This is the TOP speed too: the profile only ever scales cruise DOWN (goal
+  # slowdown, curvature), so pp_max_speed never binds and this alone decides how
+  # fast the drone flies.
+  #
+  # IT IS NOT vel_x. vel_x (0.25) is the WAYPOINT follower's speed; pure pursuit
+  # ignores it, because the node's fallback to vel_x is shadowed by the launch
+  # always setting pp_cruise_speed. So switching to pure_pursuit silently sped the
+  # drone up 0.25 -> 0.30 while looking like a pure controller swap. Changing vel_x
+  # here does nothing while pure_pursuit is selected -- change THIS.
+  #
+  # And 0.3 does not mean what it means for the waypoint follower. Holonomic pure
+  # pursuit commands forward, lateral AND yaw at the same time (the bridge sends
+  # them as one set_axes), but the platform's translation calibration -- 0.3 m/s ==
+  # axis 400 -- was measured on forward ALONE. Blend three axes and the drone
+  # covers ground faster than the number claims, so the number has to come down:
+  #
+  #   cruise 0.30, 30 deg off the lookahead -> forward 346 + lateral 200 + yaw 538
+  #   cruise 0.20, 30 deg off the lookahead -> forward 231 + lateral 133 + yaw 538
+  pp_cruise_speed: 0.2        # m/s; nominal AND top speed under pure_pursuit
+
+  # -- Pure-pursuit ROLL (only used when controller: pure_pursuit) --
+  # true  = holonomic: the velocity points AT the lookahead, so the drone CRABS
+  #         sideways (roll) as well as yawing.  vy = speed * sin(alpha)
+  # false = unicycle:  vx = speed straight ahead, vy = 0 ALWAYS, yaw does all the
+  #         turning.  <- what we fly
+  #
+  # Roll is the one axis pure pursuit never bounds. multi_axis caps it
+  # (mx_lateral_speed_max 0.25) and roll_assist caps it (ra_lateral_speed_max 0.25);
+  # pure_pursuit has NO lateral cap, so roll just grows with cruise -- past ~60 deg
+  # off the lookahead the drone is mostly sliding sideways rather than flying
+  # forward (at 90 deg: forward axis 0, roll axis 267). Sideways is the worst
+  # direction to move blind here, because the camera and the BEV map both look
+  # FORWARD: a crab translates the drone into space nothing has seen.
+  # There is no separate roll force to turn down -- roll comes off pp_cruise_speed,
+  # the same dial as forward -- so it is either capped in code or switched off; this
+  # switches it off. Tight corners are still safe without the crab because
+  # pp_curvature_speed_factor already cuts the speed hard exactly where the angle is
+  # large. Expect cornering to FEEL different: it turns rather than slides.
+  pp_holonomic: false
   cruise_z: 1.0               # flight altitude (m); the BEV weight peak (bev_z_peak) follows it
 
   # -- How wide "in front of the next point" is (the ADVANCE gate) --
@@ -86,21 +145,25 @@ launch:
   # narrower far away -- capped by yaw_acquire_max_deg and floored by the ~11.5 deg
   # the platform physically cannot improve on (half a minimum burst plus its coast).
   #
-  #   radius 0.51 m  ->  0.5 m: 35 deg (capped) | 1.5 m: 20 deg | 3.0 m: 9.8 deg
-  #   radius 0.20 m  ->  0.5 m: 23.6 deg        | 1.5 m: 11.5 deg (the old default)
+  #   radius 0.20 m  ->  0.5 m: 23.6 deg | 1.5 m: 11.5 deg | 3.0 m: 11.5 deg
+  #   radius 0.51 m  ->  0.5 m: 35 deg   | 1.5 m: 20.0 deg | 3.0 m: 9.8 deg
   #
-  # yaw_acquisition_radius is THE knob: raising yaw_acquire_max_deg alone changes
-  # almost nothing at cruise, because it only binds inside ~0.35 m. Wider means
-  # fewer stop-and-turn cycles and a smoother, faster run, at the cost of cutting
-  # corners -- the drone accepts passing this far wide, and beyond pos_radius (0.35)
-  # waypoints get retired as "passed" rather than actually reached.
-  yaw_acquisition_radius: 0.51   # cross-track tolerance (m) -> ~20 deg at 1.5 m spacing
+  # KEEP THIS BELOW the waypoint acquisition radius (pos_acquisition_radius, 0.3).
+  # The gate only promises to pass within THIS distance of the waypoint, so a
+  # tolerance wider than the capture radius means the drone sails past waypoints
+  # without ever entering the radius that counts as reaching them: they stop being
+  # acquired at all, and are only retired once they are 100 deg behind
+  # (passed_bearing_deg). 0.51 (a ~20 deg gate) was tried on the real drone and
+  # flew WORSE in exactly that way, hence back at 0.20.
+  # Note yaw_acquire_max_deg is NOT the knob here: it only binds inside ~0.3 m, so
+  # changing it alone does almost nothing at cruise.
+  yaw_acquisition_radius: 0.2    # cross-track tol (m); MUST stay < pos_acquisition_radius
   yaw_acquire_max_deg: 35.0      # hard cap the gate will ever accept
   # The matching decision for the NEXT leg once a waypoint is retired: glide on if
   # its bearing is within this, else brake and re-align. Keep it in step with the
-  # gate, or the drone advances on a wide angle and then stops dead at the very next
-  # waypoint to re-align, undoing the point of widening it. RADIANS, not degrees.
-  skip_yaw_thresh: 0.35          # rad; 0.35 = 20 deg
+  # gate above. RADIANS, not degrees. 0.25 is the follower's own long-standing
+  # default; it is declared here only so it is tunable without editing the launch.
+  skip_yaw_thresh: 0.25          # rad; 0.25 = 14.3 deg
 
   # -- GO gate: nothing reaches the drone until you say so --
   # false = the whole pipeline runs (BEV, A*, detector, selection) but NOT ONE velocity
@@ -127,6 +190,18 @@ launch:
   recovery_enabled: true
   recovery_stale_s: 0.3       # pose this old (s) => STOP. Lower = twitchier.
   recovery_ladder_s: 1.0      # ...and still this old => start manoeuvring. > stale_s.
+  #
+  # Retreat: the FIRST rung, and the most likely to work -- we were standing
+  # somewhere with a tag in view seconds ago, so go back there. Worth enough
+  # distance to actually leave the spot that lost the tag; too short and the drone
+  # just sits in the same bad place. Unlike the climb, this axis IS what the thrust
+  # scale was calibrated against (0.3 m/s = the reference point), so these numbers
+  # mean roughly what they say: 0.30 x 1.5s = ~0.45 m per rung, run twice = ~0.9 m.
+  # NOTHING checks what is behind the drone (the map is forward-looking and is
+  # starved of poses while lost); it is only safe because it retraces ground just
+  # flown, so keep the total inside how far the drone has actually come.
+  recovery_back_speed: 0.30       # m/s
+  recovery_back_duration_s: 1.5   # per rung; 2 rungs by default
   # Climb rungs need the platform to honour linear.z, which on XTEND depends on which
   # Twist converter is running: online_nav_bridge's in-process one honours it, while
   # the standalone xtend_twist_to_cmd_nav.py drops it unless started with
@@ -146,7 +221,10 @@ launch:
   # these only against a climb you have actually measured.
   recovery_climb_speed: 0.08       # thrust dial (m/s nominal), NOT a real climb rate
   recovery_climb_duration_s: 0.2   # per rung; 2 rungs by default
-  recovery_turn_dir: left     # which way the final 360 sweeps: left | right
+  # Which way the final 360 sweeps: left | right. RIGHT by default -- field-tested:
+  # it is the side that actually re-acquires a tag on this airframe. The sweep is a
+  # search, so the direction that finds one soonest is the whole point of it.
+  recovery_turn_dir: right
 
   # -- Windows (all need a display) --
   viewer: false                # target-lock HUD
@@ -187,7 +265,10 @@ launch:
   min_free_cells_to_plan:        80            # SMART replanning (event-driven; the default). The committed rout...
   smart_replan:                  true        
   replan_corridor_radius_m:      1.0           # route-corridor half-width for the discovery relevance test (m)
-  replan_min_new_cells:          60            # newly-observed corridor cells needed to consider an opportunisti...
+  replan_min_new_cells:          60            # CHANGED corridor cells (new or flipped free<->occ) needed to consider an opportunistic replan
+  replan_min_new_cells_any:      240           # changed cells ANYWHERE on the BEV (off-corridor changes can still change the best route); 0 disables
+  replan_rotation_min_deg:       30.0          # yaw swing since the last commit/evaluation that re-evaluates the route (mid-turn or just finished); 0 disables
+  replan_period_s:               7.0           # catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables
   replan_commit_min_s:           4.0           # keep flying a committed route at least this long before an oppor...
   replan_improve_frac:           0.15          # adopt a discovery candidate only if it is >= this fraction short...
   stop_on_blocked_plan_fail:     true          # on a confirmed obstacle with NO route around it, STOP (2-pt hold...

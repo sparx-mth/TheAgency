@@ -113,11 +113,31 @@
   <arg name="vel_x"     default="0.25" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
-  <arg name="goal_y"    default="-3.0" />
+  <arg name="goal_y"    default="-2.0" />
   <!-- Path tracker for the route follower: waypoint (one-axis, default) |
        multi_axis (vx+vy+yaw crab) | pure_pursuit | roll_assist (one-axis nav +
        cross-track ROLL to hold the line). Forwarded to nav_stack. -->
   <arg name="controller" default="roll_assist" />
+
+  <!-- Pure-pursuit yaw force (only used when controller:=pure_pursuit). The
+       tracker sets wz = speed * curvature and clips at pp_max_yaw_rate, so with
+       the cruise/lookahead defaults every real turn sits AT this cap: it is the
+       turn-force dial. The converter scales |wz|/0.65*1000, so 0.45 -> axis 692
+       of 1000. pp_yaw_rate_smoothing is the EMA that ramps into it (lower =
+       softer onset, slower to commit). -->
+  <arg name="pp_max_yaw_rate"       default="0.45" />
+  <arg name="pp_yaw_rate_smoothing" default="0.3" />
+  <!-- Forward speed under pure_pursuit. NOT ~vel_x: that is the waypoint
+       follower's speed and pure pursuit ignores it (pp_cruise_speed shadows the
+       fallback). This is also the TOP speed, since the profile only scales cruise
+       down. Kept below vel_x because holonomic tracking blends forward+lateral+yaw
+       at once, while the platform's speed calibration was taken on forward alone. -->
+  <arg name="pp_cruise_speed"       default="0.2" />
+  <!-- false = unicycle: no ROLL at all, the yaw does all the turning. Pure pursuit
+       is the only controller with no lateral cap, so holonomic tracking lets roll
+       grow to the full cruise and crab the drone sideways into space the
+       forward-looking camera and map have not seen. -->
+  <arg name="pp_holonomic"          default="false" />
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
        use_navdp:=true swaps astar_planner for navdp_click. It consumes the
@@ -316,12 +336,14 @@
 
   <!-- How wide "in front of the next point" is. The ADVANCE gate is predictive:
        the accepted heading error is asin(yaw_acquisition_radius / distance),
-       capped by yaw_acquire_max_deg. At the 1.5 m waypoint spacing above, 0.51 m
-       gives ~20 deg. skip_yaw_thresh (RADIANS) is the matching decision for the
-       next leg after a waypoint is retired; keep the two in step. -->
-  <arg name="yaw_acquisition_radius"        default="0.51" />
+       capped by yaw_acquire_max_deg. Keep the radius BELOW the waypoint
+       acquisition radius (pos_acquisition_radius, 0.3) or the drone passes
+       waypoints without ever reaching them. skip_yaw_thresh
+       (RADIANS) is the matching decision for the next leg once a waypoint is
+       retired; keep the two in step. -->
+  <arg name="yaw_acquisition_radius"        default="0.2" />
   <arg name="yaw_acquire_max_deg"           default="35.0" />
-  <arg name="skip_yaw_thresh"               default="0.35" /><!-- rad; 20 deg -->
+  <arg name="skip_yaw_thresh"               default="0.25" /><!-- rad; 14.3 deg -->
   <arg name="inflate_radius_m"              default="0.1" />
   <arg name="unknown_blocked"               default="false" />
   <arg name="unknown_cost"                  default="1.0" />
@@ -441,10 +463,12 @@
   <arg name="recovery_bearing_units" default="auto" />
   <arg name="recovery_stale_s"       default="0.3" />
   <arg name="recovery_ladder_s"      default="1.0" />
+  <arg name="recovery_back_speed"      default="0.30" /><!-- ~0.45 m per rung, twice -->
+  <arg name="recovery_back_duration_s" default="1.5" />
   <arg name="recovery_climb_enabled" default="true" />
   <arg name="recovery_climb_speed"      default="0.08" /><!-- thrust dial; mind the ceiling -->
   <arg name="recovery_climb_duration_s" default="0.4" />
-  <arg name="recovery_turn_dir"      default="left" />
+  <arg name="recovery_turn_dir"      default="right" />
 
   <include file="$(find falcon_adapter)/launch/nav_stack.launch">
     <arg name="start_go"          value="$(arg start_go)" />
@@ -458,6 +482,8 @@
     <arg name="recovery_bearing_units" value="$(arg recovery_bearing_units)" />
     <arg name="recovery_stale_s"       value="$(arg recovery_stale_s)" />
     <arg name="recovery_ladder_s"      value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_back_speed"      value="$(arg recovery_back_speed)" />
+    <arg name="recovery_back_duration_s" value="$(arg recovery_back_duration_s)" />
     <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
     <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
     <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
@@ -593,6 +619,10 @@
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
     <arg name="controller"    value="$(arg controller)" />
+    <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
+    <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
+    <arg name="pp_cruise_speed"       value="$(arg pp_cruise_speed)" />
+    <arg name="pp_holonomic"          value="$(arg pp_holonomic)" />
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="nav_mode"                value="$(arg nav_mode)" />

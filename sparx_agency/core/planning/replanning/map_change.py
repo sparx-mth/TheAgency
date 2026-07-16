@@ -43,6 +43,48 @@ def newly_known_mask(prev_known: np.ndarray, grid: OccupancyGrid2D) -> np.ndarra
     return (~prev_known) & known_mask(grid)
 
 
+def changed_mask(prev_values: np.ndarray, grid: OccupancyGrid2D) -> np.ndarray:
+    """Cells whose occupancy VALUE changed since the snapshot.
+
+    A superset of :func:`newly_known_mask`: it also catches FREE<->OCCUPIED flips
+    in already-observed space (e.g. new obstacles appearing in mapped free area),
+    which a known-mask diff is blind to.
+
+    Args:
+        prev_values: Raw grid values (``grid.grid.copy()``) captured at the last
+            commit (same shape).
+        grid: Live grid.
+
+    Returns:
+        Boolean ``(H, W)`` mask, ``True`` where a cell's value changed.
+    """
+    return prev_values != grid.grid
+
+
+def count_changed_in_corridor(
+    prev_values: np.ndarray, grid: OccupancyGrid2D, corridor: np.ndarray
+) -> int:
+    """Count changed cells (vs ``prev_values``) that fall inside ``corridor``.
+
+    Args:
+        prev_values: Raw grid values captured at the last commit.
+        grid: Live grid (same shape as ``prev_values`` / ``corridor``).
+        corridor: Boolean route-corridor mask from :func:`path_raster.corridor_mask`.
+
+    Returns:
+        Number of route-relevant changed cells.
+
+    Raises:
+        ValueError: If the three arrays do not share a shape (the caller must have
+            let the grid change lattice without resnapshotting).
+    """
+    if prev_values.shape != grid.grid.shape or corridor.shape != grid.grid.shape:
+        raise ValueError(
+            "shape mismatch: prev_values=%r grid=%r corridor=%r"
+            % (prev_values.shape, grid.grid.shape, corridor.shape))
+    return int((changed_mask(prev_values, grid) & corridor).sum())
+
+
 def count_new_known_in_corridor(
     prev_known: np.ndarray, grid: OccupancyGrid2D, corridor: np.ndarray
 ) -> int:

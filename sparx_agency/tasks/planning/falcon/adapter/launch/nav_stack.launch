@@ -72,6 +72,16 @@
   <arg name="recovery_bearing_units" default="auto" /><!-- auto | rad | deg -->
   <arg name="recovery_stale_s"  default="0.3" /><!-- pose this cold => STOP -->
   <arg name="recovery_ladder_s" default="1.0" /><!-- ...and this cold => manoeuvre -->
+  <!-- The first and most likely-to-work rung: retreat the way we came, where a
+       tag was visible seconds ago. Worth enough distance to actually leave the
+       spot that lost it; too short and the drone sits in the same bad place.
+       Unlike the climb, this axis IS what the thrust scale was calibrated against
+       (0.3 m/s is the reference), so these numbers mean roughly what they say:
+       0.30 x 1.5s = ~0.45 m per rung, twice = ~0.9 m of blind retreat. Nothing
+       checks what is behind; it is only safe because it retraces ground just
+       flown, so keep the total inside how far the drone has actually come. -->
+  <arg name="recovery_back_speed"      default="0.30" />
+  <arg name="recovery_back_duration_s" default="1.5" />
   <!-- Climb rungs need the platform to honour linear.z. Set false for a platform
        that drops it (then the ladder skips the climbs instead of silently doing
        nothing). See the node's ~climb_enabled docs for which converters honour it.
@@ -86,7 +96,7 @@
   <arg name="recovery_climb_enabled" default="true" />
   <arg name="recovery_climb_speed" default="0.08" />
   <arg name="recovery_climb_duration_s" default="0.4" />
-  <arg name="recovery_turn_dir" default="left" /><!-- which way the 360 sweeps -->
+  <arg name="recovery_turn_dir" default="right" /><!-- which way the 360 sweeps; right finds tags on this airframe -->
   <arg name="recovery_go_topic" default="/mission/go_status" />
 
 
@@ -206,8 +216,33 @@
        PurePursuitTracker on a moving lookahead. Tracker tuning ~pp_*, spline
        ~pp_smooth_*. Holonomic so it crabs+yaws toward the lookahead (linear.y on,
        altitude held). Reuses the multi-axis ~mx_demo_mode/~mx_require_mode. -->
-  <arg name="pp_holonomic"            default="true" /><!-- velocity points at the lookahead (vx+vy); false = unicycle (yaw only) -->
-  <arg name="pp_cruise_speed"         default="0.3" /><!-- nominal tracking speed (m/s) -->
+  <!-- Holonomic tracking: the velocity points AT the lookahead, i.e. the drone
+       crabs (vy = speed*sin(alpha)) as well as yawing. FALSE makes it a plain
+       unicycle: vx = speed straight ahead, vy = 0 always, and the yaw does all of
+       the turning.
+       False here because roll is the one axis pure pursuit never bounds: unlike
+       multi_axis (mx_lateral_speed_max) and roll_assist (ra_lateral_speed_max) it
+       has NO lateral cap, so roll grows to the full cruise and past ~60 deg of
+       angle the drone is mostly sliding sideways rather than flying forward. That
+       is the worst direction to move blind on this airframe: the camera and the
+       BEV map both look FORWARD, so a crab translates it into space nothing has
+       seen. Tight corners stay safe without the crab because curvature_speed_factor
+       already cuts the speed hard exactly where alpha is large. -->
+  <arg name="pp_holonomic"            default="false" /><!-- false = unicycle: no roll, yaw does the turning -->
+  <!-- Nominal tracking speed (m/s), and the TOP speed: compute_target_speed only
+       ever scales cruise DOWN (goal slowdown, curvature), so pp_max_speed below
+       never binds and this alone sets how fast the drone flies.
+       Two reasons it is 0.20 rather than the 0.30 it shipped with:
+         * it is not the only axis. Holonomic pure pursuit sends forward, lateral
+           AND yaw simultaneously (the bridge's set_axes), whereas the platform's
+           translation calibration (0.3 m/s = axis 400) was measured on forward
+           ALONE. Blend three axes and the drone covers ground faster than the
+           number suggests, so the number has to come down.
+         * this SHADOWS ~vel_x. The node falls back to vel_x when pp_cruise_speed
+           is unset, but this arg is always set, so selecting controller:=pure_pursuit
+           silently sped the drone up from vel_x's 0.25 to 0.30 while looking like
+           a pure controller swap. -->
+  <arg name="pp_cruise_speed"         default="0.2" /><!-- nominal AND top tracking speed (m/s) -->
   <arg name="pp_min_speed"            default="0.1" /><!-- speed floor before goal (m/s) -->
   <arg name="pp_max_speed"            default="0.5" /><!-- speed cap (m/s) -->
   <arg name="pp_base_lookahead"       default="0.6" /><!-- base lookahead distance (m) -->
@@ -216,7 +251,15 @@
   <arg name="pp_lookahead_speed_gain" default="0.5" /><!-- lookahead grows with speed by this gain -->
   <arg name="pp_goal_tolerance"       default="0.35" /><!-- distance to goal that counts as reached (m) -->
   <arg name="pp_path_tolerance"       default="0.8" /><!-- cross-track error that stops tracking as diverged (m) -->
-  <arg name="pp_max_yaw_rate"         default="0.6" /><!-- yaw-rate cap (rad/s) -->
+  <!-- Yaw-rate cap (rad/s), and in practice the yaw FORCE dial on turns. Pure
+       pursuit sets wz = speed * curvature, so with the cruise/lookahead defaults
+       it hits this cap beyond ~37 deg of angle to the lookahead: every real
+       left/right turn commands exactly this rate, which the XTEND converter scales
+       as |wz|/0.65*1000, so 0.6 was asking for axis 923 of 1000, i.e. 92% of
+       full yaw thrust, and turned visibly too hard. 0.45 gives axis 692. Note this
+       ONLY affects turns big enough to saturate: gentle corrections below ~27 deg
+       are under the cap and command exactly what they did before. -->
+  <arg name="pp_max_yaw_rate"         default="0.45" /><!-- yaw-rate cap (rad/s); ~axis 692 -->
   <arg name="pp_curvature_speed_factor"     default="0.5" /><!-- slow down in curves -->
   <arg name="pp_curvature_lookahead_factor" default="0.8" /><!-- shorten lookahead in curves -->
   <arg name="pp_slow_down_distance"   default="1.0" /><!-- start decelerating this far from the goal (m) -->
@@ -277,14 +320,18 @@
        un-improvable ~11.5 deg (half of one minimum burst + its coast; derived
        from yaw_rate, ctrl_rate_hz, min_motion_ticks, yaw_coast_deg).
 
-         radius 0.51 m ->  0.5 m: 35 deg (capped) | 1.5 m: 20 deg | 3 m: 9.8 deg
+         radius 0.20 m ->  0.5 m: 23.6 deg | 1.5 m: 11.5 deg | 3 m: 11.5 deg
 
-       Raising yaw_acquire_max_deg alone does almost nothing at cruise; it only
-       binds inside ~0.35 m. THIS is the knob for a wider gate. Wider = fewer
-       stop-and-turn cycles, but the drone accepts passing this far wide of a
-       point, so it cuts corners; past pos_radius (0.35) waypoints are retired by
-       having been passed rather than actually reached. -->
-  <arg name="yaw_acquisition_radius" default="0.51" /><!-- cross-track tol (m) for the predictive ADVANCE gate; ~20 deg at 1.5m spacing -->
+       Keep this BELOW pos_acquisition_radius (0.3, declared below). The gate only
+       promises to pass within THIS distance of the waypoint, so a tolerance wider
+       than the capture radius means the drone sails past waypoints without ever
+       entering the radius that counts as reaching them: they stop being acquired
+       at all and are only retired by the passed_bearing_deg rule, which is 100 deg
+       (i.e. long after they are behind). Widening this to 0.51 (a ~20 deg gate)
+       was tried on the real drone and flew WORSE in exactly that way, so it is
+       back at 0.20. Raising yaw_acquire_max_deg alone does almost nothing at
+       cruise; it only binds inside ~0.3 m. -->
+  <arg name="yaw_acquisition_radius" default="0.2" /><!-- cross-track tol (m); MUST stay < pos_acquisition_radius -->
   <arg name="yaw_lead_pct"           default="10.0" /><!-- deprecated (unused by the pulse->settle yaw loop); kept for config compatibility -->
 
   <!-- Yaw: pulse -> settle -> re-measure (slow turn, strong inertia, jumpy yaw) -->
@@ -309,12 +356,12 @@
   <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
   <!-- The OTHER angle: on retiring a waypoint, glide straight on to the next one
-       if its bearing is within this, else brake and re-align. Kept in step with
-       the ADVANCE gate above (0.35 rad = 20 deg). Leaving it at the old 0.25
-       (14.3 deg) would let the drone advance on a wide angle and then stop dead at
-       the very next waypoint to re-align, undoing the wider gate. RADIANS (the
-       rosparam's existing unit), unlike yaw_acquire_max_deg. -->
-  <arg name="skip_yaw_thresh" default="0.35" /><!-- rad; 0.35 = 20 deg -->
+       if its bearing is within this, else brake and re-align. Keep it in step with
+       the ADVANCE gate above; 0.25 rad (14.3 deg) is the follower's own long
+       standing default, and matches the 0.20 gate. RADIANS (the rosparam's
+       existing unit), unlike yaw_acquire_max_deg. Declared here only so it is
+       tunable; the value is the one the node has always used. -->
+  <arg name="skip_yaw_thresh" default="0.25" /><!-- rad; 0.25 = 14.3 deg -->
 
   <!-- ══════════════════════════════════════════════════════════════
        GRADED-PULSE YAW + MID-BURST FEEDBACK + ANTI-DEADLOCK (real-drone yaw).
@@ -894,6 +941,8 @@
     <param name="enabled"        value="$(arg recovery_enabled)" />
     <param name="stale_s"        value="$(arg recovery_stale_s)" />
     <param name="ladder_s"       value="$(arg recovery_ladder_s)" />
+    <param name="back_speed"      value="$(arg recovery_back_speed)" />
+    <param name="back_duration_s" value="$(arg recovery_back_duration_s)" />
     <param name="climb_enabled"  value="$(arg recovery_climb_enabled)" />
     <param name="climb_speed"      value="$(arg recovery_climb_speed)" />
     <param name="climb_duration_s" value="$(arg recovery_climb_duration_s)" />

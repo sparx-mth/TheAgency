@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import radians
+from math import degrees, radians
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,10 @@ class WaypointFollowerParams:
         yaw_capture_tol_m: Cross-track tolerance for the predictive ADVANCE gate
             (m): advance once going straight on the current heading would pass
             within this distance of the waypoint. Wired from the launch's
-            ``yaw_acquisition_radius``.
+            ``yaw_acquisition_radius``. MUST be < ``pos_radius`` (validated): the
+            gate promises only to pass within this distance, so a tolerance wider
+            than the radius that counts as *reaching* a waypoint means none are
+            ever acquired.
         yaw_acquire_max: Hard cap on the heading error the predictive gate will
             ever accept (rad), regardless of how close the waypoint is.
         yaw_lead_pct: Deprecated (unused by the burst loop); kept so existing
@@ -163,3 +166,19 @@ class WaypointFollowerParams:
 
     # Behaviour
     forward_only: bool = False
+
+    def __post_init__(self) -> None:
+        # The predictive gate only promises to pass within yaw_capture_tol_m of the
+        # waypoint. If that is wider than the radius which COUNTS as reaching one,
+        # the drone flies a route it never acquires: every waypoint is missed and
+        # then retired late by passed_bearing_rad (100 deg, i.e. well behind it).
+        # This flies visibly worse and the cause is invisible from the outside --
+        # both numbers look individually reasonable, only the pair is wrong.
+        if self.yaw_capture_tol_m >= self.pos_radius:
+            raise ValueError(
+                "yaw_capture_tol_m (%.2f m) must be < pos_radius (%.2f m): the "
+                "ADVANCE gate would let the drone pass further from a waypoint "
+                "than the distance that counts as reaching it, so waypoints would "
+                "never be acquired -- only retired once %.0f deg behind."
+                % (self.yaw_capture_tol_m, self.pos_radius,
+                   degrees(self.passed_bearing_rad)))

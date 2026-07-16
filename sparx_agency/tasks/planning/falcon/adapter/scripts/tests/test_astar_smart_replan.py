@@ -289,7 +289,7 @@ def test_commitment_window_blocks_early_discovery():
     """Even with a big discovery, no opportunistic replan inside the commit window."""
     node = _node(replan_commit_min_s=5.0)
     _bootstrap(node, _all_free())
-    node._new_known_in_corridor = lambda: 10_000     # force the discovery gate open
+    node._changed_in_corridor = lambda: 10_000     # force the discovery gate open
     calls = {"n": 0}
     orig = node._opportunistic_replan
     node._opportunistic_replan = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1),
@@ -308,7 +308,7 @@ def test_discovery_suppressed_when_not_shorter():
     node = _node(replan_commit_min_s=1.0, replan_improve_frac=0.15)
     _bootstrap(node, _all_free())
     n0 = _n_paths(node)
-    node._new_known_in_corridor = lambda: 10_000
+    node._changed_in_corridor = lambda: 10_000
     # Candidate the SAME length as the remaining committed route -> suppress.
     node._plan_candidate = lambda: Path2D(
         points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
@@ -339,7 +339,7 @@ def test_suppressed_discovery_does_not_churn_astar():
     g1[15:18, :] = FREE                    # reveal a big in-corridor region
     _advance(1.0)
     node._bev_cb(_occ_msg(g1))
-    assert node._new_known_in_corridor() >= node.replan_min_new_cells
+    assert node._changed_in_corridor() >= node.replan_min_new_cells
     first = calls["n"]
     assert first == 1, "discovery evaluates A* exactly once"
     for _ in range(10):                    # same map, repeatedly, past the window
@@ -360,7 +360,7 @@ def test_discovery_adopts_a_shorter_route():
     node = _node(replan_commit_min_s=1.0, replan_improve_frac=0.15)
     _bootstrap(node, _all_free())
     n0 = _n_paths(node)
-    node._new_known_in_corridor = lambda: 10_000
+    node._changed_in_corridor = lambda: 10_000
     # Candidate ~half the length of the remaining committed route -> adopt.
     node._plan_candidate = lambda: Path2D(
         points=(Pose2D(0.2, 2.0), Pose2D(2.0, 2.0)), frame_id="world")
@@ -395,7 +395,7 @@ def test_off_corridor_discovery_evaluates_but_keeps_route():
     g1[0:6, :] = FREE
     _advance(2.0)
     node.grid = node._decode(_occ_msg(g1))
-    assert node._new_known_in_corridor() == 0, "reveal is fully off-corridor"
+    assert node._changed_in_corridor() == 0, "reveal is fully off-corridor"
     node._bev_cb(_occ_msg(g1))
     assert calls["n"] == 1, "an off-corridor reveal must trigger a map-wide evaluation"
     assert _n_paths(node) == n0, "a non-improving candidate must not re-publish"
@@ -478,6 +478,56 @@ def test_periodic_replan_reevaluates_without_republish():
     node._bev_cb(_occ_msg(_all_free()))
     assert calls["n"] == 2, "the periodic check re-fires every period"
     assert _n_paths(node) == 1, "periodic evaluations never re-publish a kept route"
+
+
+def test_new_obstacles_in_mapped_space_trigger_evaluation():
+    """Many FREE->OCCUPIED flips in already-mapped space (new obstacles appearing
+    on the BEV) must count as map change and trigger an evaluation -- a known-mask
+    diff was blind to them because the cells were never UNKNOWN."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=0)
+    _bootstrap(node, _all_free())          # everything already observed FREE
+    n0 = _n_paths(node)
+    calls = {"n": 0}
+    orig = node._plan_candidate
+
+    def _counting():
+        calls["n"] += 1
+        return orig()
+    node._plan_candidate = _counting
+    # 240 cells flip FREE->OCC far from the route (rows 0..5; route is row 20):
+    # no collision, zero newly-KNOWN cells, but a big map-wide CHANGE.
+    g1 = _all_free()
+    g1[0:6, :] = OCC
+    _advance(2.0)
+    node._bev_cb(_occ_msg(g1))
+    assert calls["n"] == 1, "new obstacles in mapped free space must re-evaluate"
+    assert _n_paths(node) == n0, "route unaffected by the far obstacles -> kept"
+
+
+def test_smart_tick_evaluates_when_bev_is_silent():
+    """The quiet-map tick: with the BEV silent (unchanged map / mapping frozen
+    during a turn), the rotation and periodic triggers must still be evaluated --
+    they do not depend on map changes. A recent BEV frame suppresses the tick."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=3.0)
+    _bootstrap(node, _all_free())          # last (only) BEV frame arrives here
+    calls = {"n": 0}
+    orig = node._plan_candidate
+
+    def _counting():
+        calls["n"] += 1
+        return orig()
+    node._plan_candidate = _counting
+    _advance(0.5)                          # BEV frame 0.5s ago -> tick defers
+    node._smart_tick(None)
+    assert calls["n"] == 0, "a fresh BEV frame suppresses the tick"
+    _advance(4.0)                          # silent BEV, 4.5s > 3.0s period
+    node._smart_tick(None)
+    assert calls["n"] == 1, "the tick must fire the periodic trigger on a silent BEV"
+    _advance(2.0)                          # rotate with the BEV still silent
+    node._pose_cb(_pose_msg(0.2, 2.0, yaw=math.radians(60.0)))
+    node._smart_tick(None)
+    assert calls["n"] == 2, "the tick must fire the rotation trigger on a silent BEV"
+    assert _n_paths(node) == 1, "tick evaluations never re-publish a kept route"
 
 
 # ─── obstacle handling ───────────────────────────────────────────────────────

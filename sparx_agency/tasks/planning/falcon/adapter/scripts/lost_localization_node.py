@@ -162,15 +162,22 @@ class LostLocalizationNode(object):
                 "would leave the drone flying the last recovery command"
                 % (self.release_zero_ticks,))
 
+        # Every default below comes from the core params, never a number retyped
+        # here. Duplicating them is how a tuning fix reaches the launch but not the
+        # node: the two then disagree, and which one flies depends on whether some
+        # launch happens to set that param -- silently, since both values look fine
+        # on their own. (Exactly the trap ~use_pose_estimator already sits in: node
+        # default False, launch default true.)
+        d = LostLocalizationParams()
         self.recovery = LostLocalizationRecovery(LostLocalizationParams(
-            enabled=_param_bool("~enabled", True),
-            stale_s=float(G("~stale_s", 0.3)),
-            ladder_s=float(G("~ladder_s", 1.0)),
-            exit_confirm_poses=int(G("~exit_confirm_poses", 2)),
-            back_speed=float(G("~back_speed", 0.25)),
-            back_duration_s=float(G("~back_duration_s", 1.0)),
-            back_repeats=int(G("~back_repeats", 2)),
-            dwell_s=float(G("~dwell_s", 1.5)),
+            enabled=_param_bool("~enabled", d.enabled),
+            stale_s=float(G("~stale_s", d.stale_s)),
+            ladder_s=float(G("~ladder_s", d.ladder_s)),
+            exit_confirm_poses=int(G("~exit_confirm_poses", d.exit_confirm_poses)),
+            back_speed=float(G("~back_speed", d.back_speed)),
+            back_duration_s=float(G("~back_duration_s", d.back_duration_s)),
+            back_repeats=int(G("~back_repeats", d.back_repeats)),
+            dwell_s=float(G("~dwell_s", d.dwell_s)),
             # Climb needs a platform that accepts a vertical velocity. On XTEND
             # that depends on WHICH Twist converter is running: the in-process one
             # inside online_nav_bridge honours linear.z, while the standalone
@@ -179,15 +186,17 @@ class LostLocalizationNode(object):
             # dropped axis produces no error, the drone simply does not rise), so
             # set this false when the climb cannot work and the ladder will skip
             # those rungs rather than burn seconds going nowhere.
-            climb_enabled=_param_bool("~climb_enabled", True),
-            climb_speed=float(G("~climb_speed", 0.20)),
-            climb_duration_s=float(G("~climb_duration_s", 1.0)),
-            climb_repeats=int(G("~climb_repeats", 2)),
-            turn_enabled=_param_bool("~turn_enabled", True),
-            turn_rate=math.radians(float(G("~turn_rate_deg_s", 17.2))),
-            turn_dir=_turn_dir(G("~turn_dir", "left")),
-            turn_target_rad=math.radians(float(G("~turn_target_deg", 360.0))),
-            turn_timeout_s=float(G("~turn_timeout_s", 40.0)),
+            climb_enabled=_param_bool("~climb_enabled", d.climb_enabled),
+            climb_speed=float(G("~climb_speed", d.climb_speed)),
+            climb_duration_s=float(G("~climb_duration_s", d.climb_duration_s)),
+            climb_repeats=int(G("~climb_repeats", d.climb_repeats)),
+            turn_enabled=_param_bool("~turn_enabled", d.turn_enabled),
+            turn_rate=math.radians(float(G("~turn_rate_deg_s",
+                                           math.degrees(d.turn_rate)))),
+            turn_dir=_turn_dir(G("~turn_dir", "left" if d.turn_dir > 0 else "right")),
+            turn_target_rad=math.radians(float(G("~turn_target_deg",
+                                                 math.degrees(d.turn_target_rad)))),
+            turn_timeout_s=float(G("~turn_timeout_s", d.turn_timeout_s)),
         ))
 
         # ── Live state ──

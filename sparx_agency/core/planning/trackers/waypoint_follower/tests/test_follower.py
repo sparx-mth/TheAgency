@@ -169,3 +169,16 @@ def test_live_index_reports_the_route_is_finished():
     pts = [(0.0, 0.0), (1.5, 0.0)]
     past_the_end = Pose2D(2.0, 0.0, 0.0)
     assert alg.live_waypoint_index(pts, past_the_end, 0.35, 2) == 2   # == len(pts)
+
+
+def test_gate_wider_than_the_capture_radius_is_refused():
+    """A gate that overshoots pos_radius means waypoints are never acquired.
+
+    Both numbers look reasonable alone; only the pair is wrong, and the symptom
+    in the air (the drone stops reaching waypoints and retires them 100 deg late)
+    points at neither. So it is refused at construction rather than flown.
+    """
+    import pytest
+    with pytest.raises(ValueError, match="must be < pos_radius"):
+        WaypointFollowerParams(yaw_capture_tol_m=0.51, pos_radius=0.30)
+    WaypointFollowerParams(yaw_capture_tol_m=0.20, pos_radius=0.30)   # the real pair

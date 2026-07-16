@@ -16,6 +16,8 @@ these functions directly rather than duplicating that state.
 """
 from .corner_scan_2d import net_turn_at_arclength_2d, scan_hard_turn_ahead
 from .map_change import (
+    changed_mask,
+    count_changed_in_corridor,
     count_new_known_in_corridor,
     known_mask,
     newly_known_mask,
@@ -40,7 +42,9 @@ from .route_difficulty import (
 __all__ = [
     "RouteDifficulty",
     "assess_route_difficulty",
+    "changed_mask",
     "corridor_mask",
+    "count_changed_in_corridor",
     "count_new_known_in_corridor",
     "forward_window_2d",
     "known_mask",

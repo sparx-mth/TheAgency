@@ -466,3 +466,35 @@ def test_turn_dir_accepts_operator_words():
     assert lost._turn_dir("right") == -1
     with pytest.raises(ValueError):
         lost._turn_dir("sideways")
+
+
+# ── Defaults must not drift from the core ───────────────────────────
+def test_node_defaults_are_the_core_defaults():
+    """With no rosparams set, the node must build exactly the core's params.
+
+    The node used to retype every default. They then drifted: a ceiling fix
+    lowered the core's climb to 0.08 while the node still said 0.20, and which
+    one flew depended on whether a launch happened to set that param. Both
+    numbers look fine alone, so nothing complains -- the drone just behaves like
+    the value nobody meant.
+    """
+    from sparx_agency.core.planning.lost_localization import LostLocalizationParams
+    node = _make()                     # _make sets only topics/thresholds, no tuning
+    assert node.recovery.p.back_speed == LostLocalizationParams().back_speed
+    assert node.recovery.p.back_duration_s == LostLocalizationParams().back_duration_s
+    assert node.recovery.p.climb_speed == LostLocalizationParams().climb_speed
+    assert node.recovery.p.climb_duration_s == LostLocalizationParams().climb_duration_s
+    assert node.recovery.p.turn_dir == LostLocalizationParams().turn_dir
+    assert node.recovery.p.turn_rate == pytest.approx(LostLocalizationParams().turn_rate,
+                                                      abs=1e-3)
+
+
+def test_the_sweep_goes_right_by_default():
+    """Field-tested: right is the side that re-acquires a tag."""
+    node = _make(stale_s=0.3, ladder_s=0.5, back_repeats=0, climb_enabled=False)
+    _tick(node, 1, tag=True)
+    _tick(node, 12)
+    turning = [m for m in _cmds(node) if abs(m.angular.z) > 1e-6]
+    assert turning, "the sweep must actually command a yaw"
+    assert all(m.angular.z < 0.0 for m in turning), \
+        "negative angular.z = clockwise = the converter's turn_right"

@@ -160,6 +160,22 @@ def test_climb_rung_drives_up_only():
         assert d.command.yaw_rate == 0.0
 
 
+def test_sweep_defaults_to_the_right():
+    """RIGHT is a field-tested requirement, not a preference.
+
+    A negative yaw rate is clockwise under REP-103, which the XTEND converter
+    turns into "turn_right". A sign flip anywhere in that chain is silent -- the
+    drone just sweeps the wrong way and fails to find the tag -- so pin it.
+    """
+    assert LostLocalizationParams().turn_dir == -1
+    rec = LostLocalizationRecovery(LostLocalizationParams(
+        stale_s=0.3, ladder_s=0.5, back_repeats=0, climb_enabled=False))
+    sweeps = [d for d in _drive(rec, [True] + [False] * 20)
+              if d.rung_label == "sweep360"]
+    assert sweeps
+    assert all(d.command.yaw_rate < 0.0 for d in sweeps), "must sweep RIGHT (CW)"
+
+
 def test_sweep_turns_slowly_to_the_configured_side():
     p = LostLocalizationParams(stale_s=0.3, ladder_s=0.5, back_repeats=0,
                                climb_enabled=False, turn_rate=0.3, turn_dir=-1)
@@ -211,7 +227,7 @@ def test_sweep_is_not_fooled_by_a_noisy_heading():
         if dec.state == GIVE_UP:
             break
 
-    swept_for_real = sweeps[-1][1]
+    swept_for_real = abs(sweeps[-1][1])        # magnitude: the sweep may go either way
     assert swept_for_real >= 2.0 * math.pi - 0.3, (
         "sweep ended after only %.0f deg of REAL rotation -- noise inflated it"
         % math.degrees(swept_for_real))

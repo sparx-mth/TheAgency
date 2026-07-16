@@ -34,7 +34,7 @@
   <arg name="drone_ns"      default="" />
   <arg name="image_transport" default="frame_path" />
   <arg name="goal_x"        default="0.0" />
-  <arg name="goal_y"        default="-3.0" />
+  <arg name="goal_y"        default="-2.0" />
   <arg name="nav_mode"      default="combination" /><!-- navdp | astar | combination -->
   <arg name="use_navdp"     default="false" />
   <!-- Route follower tracker. Independent of closure_mode below; defaults to the

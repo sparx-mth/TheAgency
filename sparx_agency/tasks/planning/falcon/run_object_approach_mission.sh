@@ -54,7 +54,7 @@ fi
 ENV_NAME="$1"; shift
 TARGET="${1:-gun}";  [[ $# -ge 1 ]] && shift || true
 GOAL_X="${1:-0.0}";  [[ $# -ge 1 ]] && shift || true
-GOAL_Y="${1:--3.0}"; [[ $# -ge 1 ]] && shift || true
+GOAL_Y="${1:--2.0}"; [[ $# -ge 1 ]] && shift || true
 EXTRA_ARGS=("$@")                          # any further launch args, verbatim
 
 NAV_MODE="${NAV_MODE:-combination}"
