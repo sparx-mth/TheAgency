@@ -44,6 +44,10 @@ class _Time:
     def __init__(self, secs=0.0):
         self.secs = float(secs)
 
+    def to_sec(self):
+        """Absolute seconds. The node stamps its thinking narration with this."""
+        return self.secs
+
     @staticmethod
     def now():
         return _Time(_CLOCK.t)

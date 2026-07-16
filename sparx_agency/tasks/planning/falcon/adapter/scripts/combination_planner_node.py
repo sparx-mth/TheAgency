@@ -76,6 +76,7 @@ from sparx_agency.core.planning.navdp import (
     select_farthest_visible_waypoint,
 )
 from sparx_agency.core.planning.planners.common.utils_2d import arclength_fraction_2d
+from thinking import Thinker
 
 # State machine (only meaningful while ENABLED; disabled -> A* echo in _astar_cb).
 _CRUISE = "cruise"     # follow A*, watch for an engage-able visible point
@@ -89,6 +90,18 @@ _UNAVAILABLE = "unavailable"  # NavDP unreachable / bad stream -> resume A*
 _FINAL = "final"           # the mission goal is the visible goal & close -> hand to A*
 _PENDING = "pending"       # transient/slow failure -> hold and retry
 _ABORTED = "aborted"       # disabled mid-call -> caller does nothing
+
+# Operator-facing (text, level) for every reason _resume_astar is called with: the
+# outcomes above that hand back to A*, plus the hold watchdog's "wait_timeout".
+# Kept beside the codes they narrate so a new outcome cannot be added silently.
+_RESUME_THOUGHTS = {
+    _NO_POINT: ("No waypoint in view for NavDP -- back on the A* route", "info"),
+    _UNAVAILABLE: ("NavDP is unavailable -- back on the A* route", "warn"),
+    _FINAL: ("The mission goal is close -- flying the last stretch on the A* route",
+             "info"),
+    "wait_timeout": ("NavDP never sent a leg -- giving up on it and going back to "
+                     "the A* route", "warn"),
+}
 
 
 def _param_bool(name, default):
@@ -218,6 +231,10 @@ class CombinationPlannerNode:
         self._got_cam_info = False
         self._reset_done = False
         self._streams_checked = False
+
+        # Narrates the leg lifecycle (engage / leg / hand back to A*) onto the
+        # shared thinking log; the per-tick loginfo below stays for the terminal.
+        self.thinker = Thinker("combination_planner")
 
         # ── Publishers (latched; created BEFORE subscribers so _astar_cb can
         #    echo an immediately-latched A* path without racing the publisher). ──
@@ -483,6 +500,9 @@ class CombinationPlannerNode:
                       "%d pts (infer %.1fs)%s", self.n_legs, goal.index, goal.world[0],
                       goal.world[1], goal.body[0], len(leg_world), dt,
                       "  (final)" if is_final else "")
+        self.thinker.say("NavDP leg ready -- flying it toward waypoint %d%s"
+                         % (goal.index, " (the mission goal)" if is_final else ""),
+                         category="plan")
         return _LEG
 
     # ─── State handlers ──────────────────────────────────────────────
@@ -504,10 +524,15 @@ class CombinationPlannerNode:
         if not self._ensure_reset():              # don't stop if NavDP is unreachable
             rospy.logwarn_throttle(2.0, "combination: point visible but NavDP "
                                    "unreachable -- staying on A*")
+            self.thinker.say("A waypoint is in view but NavDP is unreachable -- "
+                             "staying on the A* route", category="plan",
+                             level="warn", repeat_after_s=5.0)
             self.engage_confirm = 0
             return
         rospy.loginfo("combination: visible point at %.2fm (x%d) -- stopping to "
                       "engage NavDP", goal.body[0], self.engage_confirm)
+        self.thinker.say("Waypoint %d is in clear view ahead -- stopping to hand "
+                         "this stretch to NavDP" % goal.index, category="plan")
         self.engage_confirm = 0
         self._publish_hold()                      # STOP for a clean, stationary inference
         self.hold_t = rospy.Time.now()
@@ -538,6 +563,10 @@ class CombinationPlannerNode:
             self._resume_astar(outcome)
         else:
             rospy.loginfo_throttle(3.0, "combination: holding for NavDP route ...")
+            # Restated periodically: stopped-and-waiting looks identical to a stalled
+            # log, so the operator needs to see it is still the live state.
+            self.thinker.say("Stopped and waiting for NavDP to send a leg",
+                             category="plan", level="warn", repeat_after_s=5.0)
 
     def _follow(self):
         """Fly the leg; re-infer at the midpoint (the 2nd half is the buffer)."""
@@ -566,6 +595,8 @@ class CombinationPlannerNode:
         else:                                     # _PENDING: leg flies out, follower holds -> wait
             rospy.loginfo("combination: NavDP not ready -- flying out the leg, then "
                           "holding for the new route")
+            self.thinker.say("NavDP has not sent the next leg -- flying out this one, "
+                             "then holding for it", category="plan", level="warn")
             self.hold_t = rospy.Time.now()
             self.settle_until = None              # no extra settle; the leg is decelerating to its end
             self.state = _HOLD                    # do NOT publish a hold: let the latched leg coast to the end
@@ -573,6 +604,9 @@ class CombinationPlannerNode:
     def _resume_astar(self, reason):
         """Drop back to CRUISE and republish A* so the drone keeps making progress."""
         rospy.loginfo("combination: -> A* (%s)", reason)
+        thought = _RESUME_THOUGHTS.get(reason)
+        if thought is not None:
+            self.thinker.say(thought[0], category="plan", level=thought[1])
         self.state = _CRUISE
         self.leg_pts = None
         self.hold_t = None
@@ -624,8 +658,16 @@ class CombinationPlannerNode:
         if not self._ensure_reset():
             rospy.logwarn_throttle(2.0, "combination: new goal but NavDP unreachable "
                                    "-- staying on A*")
+            self.thinker.say("New goal, but NavDP is unreachable -- staying on the "
+                             "A* route", category="plan", level="warn",
+                             repeat_after_s=5.0)
             return False
         rospy.loginfo("combination: NEW GOAL -- stopping to re-infer immediately")
+        # A click restarts the leg story, so re-clicking the same spot -- which does
+        # force a fresh leg -- must narrate again rather than read as an unchanged repeat.
+        self.thinker.forget("plan")
+        self.thinker.say("New goal -- stopping to plan a fresh NavDP leg for it",
+                         category="plan")
         self.engage_confirm = 0
         self._publish_hold()                      # STOP for a clean, stationary inference
         self.hold_t = rospy.Time.now()
@@ -760,4 +802,6 @@ if __name__ == "__main__":
 #     ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #   NavDP server: ~port (8888) ~timeout_s (10.0; one inference, generous for Jetson) ~depth_max_m (5.0)
 #   misc: ~default_altitude (1.0; used until the first pose arrives) ~drone_ns ('')
+#   thinking (see thinking.py): ~thinking (true; false silences the leg-lifecycle
+#     narration) ~thinking_topic (/nav/thinking) ~thinking_echo (true; mirror to rosout)
 # ============================================================================

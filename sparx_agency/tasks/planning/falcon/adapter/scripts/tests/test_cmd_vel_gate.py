@@ -34,6 +34,22 @@ class _Pub:
         self.msgs.append(msg)
 
 
+class _Time:
+    """Minimal rospy.Time: the node stamps its thinking narration off this clock."""
+
+    t = 0.0
+
+    def __init__(self, secs=0.0):
+        self.secs = float(secs)
+
+    def to_sec(self):
+        return self.secs
+
+    @staticmethod
+    def now():
+        return _Time(_Time.t)
+
+
 class _Twist:
     def __init__(self):
         self.linear = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)
@@ -70,6 +86,7 @@ _rospy.Publisher = _Pub
 _rospy.Subscriber = _subscriber
 _rospy.Timer = lambda *a, **k: None
 _rospy.Duration = lambda *a, **k: None
+_rospy.Time = _Time
 _rospy.spin = lambda: None
 _rospy.loginfo = lambda *a, **k: None
 _rospy.logwarn = lambda *a, **k: None

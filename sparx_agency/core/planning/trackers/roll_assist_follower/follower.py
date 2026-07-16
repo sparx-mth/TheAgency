@@ -71,6 +71,15 @@ class RollAssistFollower:
         return self._base.state
 
     @property
+    def active_path(self):
+        """The base follower's re-anchored path; navigation is entirely its own.
+
+        Indices line up with ``FollowerCommand.wp_idx``, so a caller can resolve
+        the waypoint being pursued to a position.
+        """
+        return self._base.active_path
+
+    @property
     def done(self) -> bool:
         return self._base.done
 

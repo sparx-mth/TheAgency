@@ -82,6 +82,12 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             linear_delta=cmd_vel_linear_delta,
             timeout_sec=cmd_vel_timeout_sec,
             publish_stop_on_timeout=cmd_vel_stop_on_timeout,
+            # Pinned, not inherited: the vertical axis is load-bearing for the
+            # lost-localization recovery, whose climb rungs are a linear.z. It
+            # happened to match the converter's default, which is exactly why it
+            # is worth stating -- a change to that default would silently turn the
+            # climbs into no-ops with no error anywhere.
+            allow_multi_axes=True,
         )
         self._twist_sub = self.ros_node.create_subscription(
             Twist,

@@ -205,6 +205,8 @@ class XtendDroneDemoManager(Node):
             self.get_logger().info("Exiting TURNING mode")
         elif mode == DemoMode.VISUAL_SERVOING:
             self.get_logger().info("Exiting VISUAL_SERVOING mode")
+        elif mode == DemoMode.RECOVERY:
+            self.get_logger().warn("Exiting RECOVERY mode -- localization is back")
         elif mode == DemoMode.FINISH:
             # Leaving FINISH (e.g. a new approach re-requested visual_servoing): clear
             # the one-shot latch and cancel any pending disarm so a LATER FINISH runs a
@@ -222,6 +224,8 @@ class XtendDroneDemoManager(Node):
             self.on_enter_turning()
         elif mode == DemoMode.VISUAL_SERVOING:
             self.on_enter_visual_servoing()
+        elif mode == DemoMode.RECOVERY:
+            self.on_enter_recovery()
         elif mode == DemoMode.FINISH:
             self.on_enter_finish()
 
@@ -241,6 +245,15 @@ class XtendDroneDemoManager(Node):
         # First version only declares the mode.
         # Later this can coordinate object detector / image-center controller.
         pass
+
+    def on_enter_recovery(self) -> None:
+        self.get_logger().warn(
+            "RECOVERY mode active: the drone's pose has gone cold (no AprilTag in "
+            "view). lost_localization_node owns /cmd_vel and is manoeuvring blind to "
+            "re-acquire one; the waypoint follower is passive and the map is frozen. "
+            "Declaring the mode is all this manager does -- the recovery flies itself, "
+            "and will request FINISH (land) if it cannot re-localize."
+        )
 
     def on_enter_finish(self) -> None:
         self.start_finish_sequence()

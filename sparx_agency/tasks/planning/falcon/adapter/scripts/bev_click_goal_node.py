@@ -18,6 +18,17 @@ trajectory, and the last clicked goal:
     blueviolet X  = pure-pursuit lookahead aim point (/path/lookahead)
 The title shows the predicted-trajectory quality score (0..1) when available.
 
+A SECOND window -- "drone thinking" -- shows the drone's reasoning: the running
+narration every nav node publishes to /nav/thinking explaining why it is doing
+what it is doing ("Stopping to turn", "Reached waypoint 3, heading for waypoint
+4", "Replanning: obstacle on route", "Lost the chair from frame, searching").
+Newest line last, warnings in orange and hard stops in red; a line thought
+repeatedly collapses to "... (x3)" rather than flushing the reasoning that
+explains it off the top. It is a separate window so the map keeps its whole
+canvas and the log can be moved, resized or closed on its own -- closing it
+leaves the map (and the drone) running. ~thinking_lines sets how many lines it
+holds; ~thinking_topic:='' opens no log window at all.
+
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
 picks it up, replans, and the new path is drawn within one BEV update. This node
 is purely a viewer + click adapter -- it does not move the drone, plan, or alter
@@ -48,6 +59,7 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~lookahead_topic (PointStamped) /path/lookahead (pure-pursuit aim; blueviolet X; '' = off)
   in   ~drone_ns + /gt_pose (Pose)
   in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/localization
+  in   ~thinking_topic (String) /nav/thinking  (drone thinking log; '' = no window)
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
 
 The drone marker normally reads a bare Pose on ~drone_ns + /gt_pose (what the
@@ -71,6 +83,12 @@ from std_msgs.msg import Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from sparx_agency.core.common.math import se3
+from sparx_agency.core.common.thought_log import ThoughtLog
+from sparx_agency.core.common.thought_message import parse_thought_message
+
+# Thinking-panel line colours by level: normal reasoning stays quiet, trouble the
+# drone is handling reads orange, a decision it could not resolve reads red.
+_THOUGHT_COLORS = {"info": "0.15", "warn": "darkorange", "error": "red"}
 
 
 class BevClickGoalNode:
@@ -119,6 +137,16 @@ class BevClickGoalNode:
         self.cmd_vel_topic = G("~cmd_vel_topic", self.drone_ns + "/cmd_vel")
         # and A* replan events (first route / obstacle reroute / boxed STOP / shorter).
         self.astar_event_topic = G("~astar_event_topic", "/path/astar_event")
+        # ── Drone thinking log (panel under the map) ─────────────────
+        # Every nav node narrates its decisions here; see thinking.py. "" drops
+        # the panel and gives the whole window back to the map.
+        self.thinking_topic = G("~thinking_topic", "/nav/thinking")
+        self.thinking_lines = int(G("~thinking_lines", 8))
+        if self.thinking_topic and self.thinking_lines < 1:
+            raise ValueError(
+                "~thinking_lines must be >= 1, got %d. To turn the thinking "
+                "panel off and give the whole window to the map, set "
+                "~thinking_topic:='' instead." % self.thinking_lines)
         self.refresh_hz = float(G("~refresh_hz", 5.0))
         self.arrow_len = float(G("~arrow_len_m", 0.5))
         # View window used until the first BEV map arrives, so the drone is
@@ -148,6 +176,10 @@ class BevClickGoalNode:
         self._motion = None             # "FORWARD" / "ROTATING" / "HOLD" (from cmd_vel)
         self._astar_event = None        # last A* replan event text
         self._astar_event_t = None      # rospy.Time it arrived (for an age readout)
+        # Drone thinking: the rolling narration drawn in the panel under the map.
+        self._thoughts = ThoughtLog(capacity=max(1, self.thinking_lines))
+        self._thought_t0 = None         # stamp of the first thought (for "+12.3s")
+        self._thought_drops = 0         # malformed messages seen (heartbeat only)
         self._lock = threading.Lock()
 
         # Live per-layer visibility. Each maps a number key to an overlay; a
@@ -197,8 +229,19 @@ class BevClickGoalNode:
         if self.astar_event_topic:
             rospy.Subscriber(self.astar_event_topic, String, self._astar_event_cb,
                              queue_size=5)
+        if self.thinking_topic:
+            rospy.Subscriber(self.thinking_topic, String, self._thinking_cb,
+                             queue_size=20)
 
+        # The map owns its window outright. The thinking log gets a SEPARATE window
+        # rather than a panel in this figure: sharing one figure costs the map real
+        # estate on any fixed-height screen (the map shrinks by whatever the log
+        # takes), and the operator can move, resize or close the log independently
+        # of the map they are actually flying from.
         self.fig, self.ax = plt.subplots(figsize=(9, 9))
+        self.ax_log = self.fig_log = None      # stay None when the log is off
+        if self.thinking_topic:
+            self._init_thinking_window()
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self.fig.canvas.mpl_connect(
@@ -252,6 +295,9 @@ class BevClickGoalNode:
         rospy.loginfo("  goal out = %s   (left-click to publish)", self.goal_topic)
         rospy.loginfo("  HUD in   = %s (planner) + %s (motion) + %s (A* events)",
                       self.nav_status_topic, self.cmd_vel_topic, self.astar_event_topic)
+        rospy.loginfo("  think in = %s   (%s)", self.thinking_topic or "(disabled)",
+                      "%d-line log in its own window" % self.thinking_lines
+                      if self.thinking_topic else "no thinking window")
         rospy.loginfo("  overlays = default ON: [a] A* route, [1] NavDP leg, [4] flown "
                       "path; others OFF")
         rospy.loginfo("  toggles  = keys 1-9/a per overlay, 0 = all on/off")
@@ -337,6 +383,32 @@ class BevClickGoalNode:
         with self._lock:
             self._astar_event = msg.data
             self._astar_event_t = rospy.Time.now()
+
+    def _thinking_cb(self, msg):
+        """Record one narrated thought for the log panel.
+
+        A malformed payload is dropped rather than raised: one node publishing
+        junk must not take down the operator's view of every other node's
+        reasoning. It is not silent either -- each drop is warned (throttled) with
+        the reason, and counted for introspection.
+        """
+        try:
+            thought = parse_thought_message(msg.data, default_stamp=self._now())
+        except ValueError as e:
+            with self._lock:
+                self._thought_drops += 1
+            rospy.logwarn_throttle(10.0, "bev_click_goal: dropping malformed "
+                                         "thought on %s: %s", self.thinking_topic, e)
+            return
+        with self._lock:
+            if self._thought_t0 is None:
+                self._thought_t0 = thought.stamp
+            self._thoughts.add(thought)
+
+    @staticmethod
+    def _now():
+        """Wall/sim seconds, or 0.0 before the clock is up (bag not yet playing)."""
+        return rospy.Time.now().to_sec()
 
     def _cmd_vel_cb(self, msg):
         """Classify the live command into forward-flight vs rotation-in-place so the
@@ -448,6 +520,83 @@ class BevClickGoalNode:
                        framealpha=0.85, ncol=1,
                        title="routes & markers  (keys 1-9/a toggle, 0 = all)"
                        ).set_zorder(20)
+
+    # -- thinking window -------------------------------------------------------
+    def _init_thinking_window(self):
+        """Build the drone-thinking log's own window, beside the map's.
+
+        A second figure, so the map keeps its whole window and the operator can
+        move/resize/close this one independently. One text artist per line,
+        created once and updated in place, so a busy log costs no artist churn
+        per frame; the row count is fixed, which keeps the window's layout stable
+        rather than jumping as thoughts arrive.
+        """
+        self.fig_log = plt.figure("drone thinking  (%s)" % self.thinking_topic,
+                                  figsize=(11, 0.34 * self.thinking_lines + 0.5))
+        self.ax_log = self.fig_log.add_axes([0.0, 0.0, 1.0, 1.0])
+        self.ax_log.set_xticks([])
+        self.ax_log.set_yticks([])
+        for side in self.ax_log.spines.values():
+            side.set_visible(False)
+        # Closing the log must NOT take the node (or the map) down with it -- an
+        # operator who declutters their screen is not asking to stop flying. Drop
+        # the reference so _render stops touching a dead canvas.
+        self.fig_log.canvas.mpl_connect("close_event", self._on_log_close)
+        self._log_rows = [
+            self.ax_log.text(0.008, 1.0 - (i + 0.6) / self.thinking_lines, "",
+                             transform=self.ax_log.transAxes, va="center",
+                             ha="left", fontsize=9, family="monospace")
+            for i in range(self.thinking_lines)
+        ]
+        self._log_rows[0].set_text("(waiting for the drone's first thought)")
+        self._log_rows[0].set_color("0.55")
+
+    def _on_log_close(self, _evt):
+        """The operator closed the thinking window; keep flying without it."""
+        self.ax_log = None
+        self.fig_log = None
+        rospy.loginfo("bev_click_goal: thinking window closed; map keeps running")
+
+    def _render_thoughts(self):
+        """Refresh the thinking window: oldest at the top, newest at the bottom.
+
+        Bottom-anchored like a terminal tail, so the drone's latest thought is
+        always on the same line rather than wandering as the log fills. The
+        newest line is bold -- with a static screenshot of a flight, that is the
+        one an operator needs to find first.
+
+        Driven from the map's animation rather than a second FuncAnimation: one
+        timer keeps the two windows showing the same instant, and the log's canvas
+        is redrawn explicitly here because an animation only redraws its own
+        figure.
+        """
+        # Format inside the lock: entries() hands back LIVE entries, and a thought
+        # arriving on the subscriber thread mutates the newest one in place as it
+        # collapses a repeat. Rendering straight off them would read a half-updated
+        # entry. Copy out finished strings instead, and hold the lock only for that.
+        with self._lock:
+            entries = self._thoughts.entries(limit=self.thinking_lines)
+            # `t0 or ...` would be wrong here: the first thought's stamp is
+            # legitimately 0.0 under a fresh sim clock, and falsy 0.0 would
+            # re-baseline every line against itself -- printing +0.0s all flight.
+            base = self._thought_t0 if self._thought_t0 is not None else 0.0
+            lines = [("%+7.1fs  %-18.18s  %s"
+                      % (e.thought.stamp - base, e.thought.source,
+                         e.display_text()),
+                      _THOUGHT_COLORS.get(e.thought.level, "0.15"))
+                     for e in entries]
+        if not lines:
+            return
+        pad = self.thinking_lines - len(lines)        # bottom-anchor the tail
+        for i, row in enumerate(self._log_rows):
+            if i < pad:
+                row.set_text("")
+                continue
+            text, color = lines[i - pad]
+            row.set_text(text)
+            row.set_color(color)
+            row.set_fontweight("bold" if i == self.thinking_lines - 1 else "normal")
+        self.fig_log.canvas.draw_idle()
 
     # -- render (main thread, via FuncAnimation) ------------------------------
     def _render(self, _frame):
@@ -660,6 +809,10 @@ class BevClickGoalNode:
                    if event_t is not None else "")
             lines.append("A*: %s%s" % (event, age))
         self._hud.set_text("\n".join(lines))
+
+        # Drone thinking log (panel under the map)
+        if self.ax_log is not None:
+            self._render_thoughts()
         return []
 
     def spin(self):

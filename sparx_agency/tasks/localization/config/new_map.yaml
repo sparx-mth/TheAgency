@@ -14,14 +14,17 @@ tags:
     rpy: [-1.5708, 0,  -3.1416]
     size: 0.2
 
-
-# Enther the hallway to the right towards the MAMAD, same orientation as tag 5
+# Enter the hallway to the right towards the MAMAD, same orientation as tag 5
   10:
-    xyz: [3.13, -0.82, 1.0]
+    xyz: [3.13, -0.82, 1.03]
     rpy: [-1.5708,  0, -1.5708]
     size: 0.2
 
-
+ # hallway towards the comm room same orientation as tag 5, next to tag 10 - small version of tag 8
+  8:
+    xyz: [3.13, -1.75, 1.03]
+    rpy: [-1.5708, 0, -1.5708]
+    size: 0.15
 
  # MAMAD Door
   3:
@@ -47,11 +50,11 @@ tags:
     rpy: [-1.5708,  0, 1.5708]
     size: 0.28
 
- # Below SPARX logo, currently near the fridge, below window. orientation like the MAMAD door
-  8:
+ # Below SPARX logo, currently near the fridge, below window. orientation like the MAMAD door --replaced with 8
+  11:
     xyz: [0.15, -4.7, 1.0]
     rpy: [-1.5708,  0, -3.1416]
-    size: 0.195
+    size: 0.265
 
 
  # inside the MAMAD, near the weapon, orientation like exit office door

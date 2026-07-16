@@ -70,6 +70,25 @@ topics:
       reliability: best_effort
       durability: volatile
 
+  # The drone's own compass/IMU heading (radians), published by the XTEND
+  # WebSocket bridge at ~20 Hz. Bridged for the lost-localization recovery: it is
+  # the ONLY yaw source that does not come from AprilTag, and AprilTag is exactly
+  # what is dead when the recovery runs. Without it the recovery's 360 sweep has
+  # no feedback and can only run open-loop against an uncalibrated turn rate.
+  # Nothing else consumes it, so dropping this entry degrades the sweep rather
+  # than breaking the stack.
+  - topic: /xtend/bearing
+    type: std_msgs/msg/Float32
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      # Matches the drone-side publisher (a high-rate telemetry stream; drops are
+      # fine — the recovery treats a bearing older than ~bearing_max_age_s as
+      # absent and falls back to its timeout).
+      reliability: best_effort
+      durability: volatile
+
   - topic: /cmd_vel
     type: geometry_msgs/msg/Twist
     queue_size: 10

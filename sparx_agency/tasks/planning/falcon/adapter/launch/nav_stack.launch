@@ -54,6 +54,41 @@
   <arg name="start_go"          default="true" />
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
+  <!-- ── Lost-localization recovery (lost_localization_node) ──────────
+       AprilTag localization only publishes while a tag is in view; when the last
+       one leaves the frame the topic goes silent and every consumer keeps flying
+       on its cached (frozen) pose. This node watches the STAMPED localization and
+       when it goes cold takes the drone off the follower: stop, then back up,
+       climb, sweep for a tag, and land if none of it works.
+
+       recovery_enabled:=false makes it inert (it publishes nothing and never
+       touches demo_mode), i.e. exactly the behaviour before this node existed. -->
+  <arg name="recovery_enabled"  default="true" />
+  <arg name="recovery_pose_topic" default="/xtend/localization" />
+  <!-- The drone's own compass heading: the ONLY yaw source that is not AprilTag,
+       so the ONLY one alive during a recovery. Needs the /xtend/bearing entry in
+       bridge/bridge.yaml. Set '' to run the 360 sweep open-loop on its timeout. -->
+  <arg name="recovery_bearing_topic" default="/xtend/bearing" />
+  <arg name="recovery_bearing_units" default="auto" /><!-- auto | rad | deg -->
+  <arg name="recovery_stale_s"  default="0.3" /><!-- pose this cold => STOP -->
+  <arg name="recovery_ladder_s" default="1.0" /><!-- ...and this cold => manoeuvre -->
+  <!-- Climb rungs need the platform to honour linear.z. Set false for a platform
+       that drops it (then the ladder skips the climbs instead of silently doing
+       nothing). See the node's ~climb_enabled docs for which converters honour it.
+
+       MIND THE CEILING. recovery_climb_speed is a THRUST dial, not a speed: the
+       vertical axis is scaled by the FORWARD calibration (|v|/0.3*400) and XTEND
+       climbs far harder at a given number than it flies forward. The real height
+       gained is well above speed*duration, because commands are hold-style and the
+       drone keeps rising through the stop, and NOTHING measures altitude to catch
+       it. These defaults are deliberately tiny; raise them only against a measured
+       climb, and check your headroom (climb_repeats rungs, each with overshoot). -->
+  <arg name="recovery_climb_enabled" default="true" />
+  <arg name="recovery_climb_speed" default="0.08" />
+  <arg name="recovery_climb_duration_s" default="0.4" />
+  <arg name="recovery_turn_dir" default="left" /><!-- which way the 360 sweeps -->
+  <arg name="recovery_go_topic" default="/mission/go_status" />
+
 
   <!-- v4: input topic overrides. Defaults preserve the v3 sjtu_drone
        layout, so leaving these unset gives identical Gazebo behaviour. -->
@@ -231,10 +266,25 @@
   <arg name="ra_yaw_active_eps"     default="0.05" /><!-- base yaw rate (rad/s) above which the tick counts as 'turning' (turn vs hold regime) -->
 
   <!-- Speeds & radii -->
-  <arg name="vel_x"                  default="0.3" />
+  <arg name="vel_x"                  default="0.25" />
   <arg name="yaw_rate"               default="0.7" />
   <arg name="pos_acquisition_radius" default="0.3" />
-  <arg name="yaw_acquisition_radius" default="0.2" /><!-- now LIVE: cross-track tolerance (m) for the gentle predictive ADVANCE gate (was previously read by nobody) -->
+  <!-- ── How wide "in front of the next point" is ──────────────────────
+       The ADVANCE gate is PREDICTIVE, not a fixed angle: it flies as soon as
+       going straight would still pass within yaw_acquisition_radius of the
+       waypoint. So the accepted heading error is asin(radius / distance),
+       capped by yaw_acquire_max_deg and floored by the platform's own
+       un-improvable ~11.5 deg (half of one minimum burst + its coast; derived
+       from yaw_rate, ctrl_rate_hz, min_motion_ticks, yaw_coast_deg).
+
+         radius 0.51 m ->  0.5 m: 35 deg (capped) | 1.5 m: 20 deg | 3 m: 9.8 deg
+
+       Raising yaw_acquire_max_deg alone does almost nothing at cruise; it only
+       binds inside ~0.35 m. THIS is the knob for a wider gate. Wider = fewer
+       stop-and-turn cycles, but the drone accepts passing this far wide of a
+       point, so it cuts corners; past pos_radius (0.35) waypoints are retired by
+       having been passed rather than actually reached. -->
+  <arg name="yaw_acquisition_radius" default="0.51" /><!-- cross-track tol (m) for the predictive ADVANCE gate; ~20 deg at 1.5m spacing -->
   <arg name="yaw_lead_pct"           default="10.0" /><!-- deprecated (unused by the pulse->settle yaw loop); kept for config compatibility -->
 
   <!-- Yaw: pulse -> settle -> re-measure (slow turn, strong inertia, jumpy yaw) -->
@@ -258,6 +308,13 @@
   <arg name="cmd_commit_ticks"    default="2" /><!-- output guarantee: a stop (zero twist) never reaches the drone until the motion ran >=this many ticks; a lone motion->stop is held to the floor first -->
   <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
+  <!-- The OTHER angle: on retiring a waypoint, glide straight on to the next one
+       if its bearing is within this, else brake and re-align. Kept in step with
+       the ADVANCE gate above (0.35 rad = 20 deg). Leaving it at the old 0.25
+       (14.3 deg) would let the drone advance on a wide angle and then stop dead at
+       the very next waypoint to re-align, undoing the wider gate. RADIANS (the
+       rosparam's existing unit), unlike yaw_acquire_max_deg. -->
+  <arg name="skip_yaw_thresh" default="0.35" /><!-- rad; 0.35 = 20 deg -->
 
   <!-- ══════════════════════════════════════════════════════════════
        GRADED-PULSE YAW + MID-BURST FEEDBACK + ANTI-DEADLOCK (real-drone yaw).
@@ -810,6 +867,34 @@
     <param name="zero_on_close" value="$(arg zero_on_close)" />
   </node>
 
+  <!-- ══ LOST-LOCALIZATION RECOVERY ═══════════════════════════════════════════
+       Publishes cmd_vel_raw like every other follower, so recovery is still
+       behind the GO gate above and cannot move a drone nobody has cleared to fly;
+       it also watches the gate's status so it stays inert (rather than running a
+       ladder into a closed gate) while a human has the drone.
+       It takes cmd_vel from the follower via the demo-mode arbiter (requests
+       'recovery'; the follower goes passive) and hands it back by requesting
+       'fly_straight', which is mandatory rather than tidy-up: the follower stays
+       passive for as long as the latched mode reads 'recovery'. -->
+  <node pkg="falcon_adapter" type="lost_localization_node.py"
+        name="lost_localization" output="screen">
+    <param name="drone_ns"       value="$(arg drone_ns)" />
+    <param name="cmd_vel_topic"  value="$(arg cmd_vel_raw_topic)" />
+    <!-- NOT $(arg pose_topic): that is the bare-Pose /gt_pose, which has no
+         header and so cannot answer "how old is this pose?". -->
+    <param name="pose_topic"     value="$(arg recovery_pose_topic)" />
+    <param name="bearing_topic"  value="$(arg recovery_bearing_topic)" />
+    <param name="bearing_units"  value="$(arg recovery_bearing_units)" />
+    <param name="go_status_topic" value="$(arg recovery_go_topic)" />
+    <param name="enabled"        value="$(arg recovery_enabled)" />
+    <param name="stale_s"        value="$(arg recovery_stale_s)" />
+    <param name="ladder_s"       value="$(arg recovery_ladder_s)" />
+    <param name="climb_enabled"  value="$(arg recovery_climb_enabled)" />
+    <param name="climb_speed"      value="$(arg recovery_climb_speed)" />
+    <param name="climb_duration_s" value="$(arg recovery_climb_duration_s)" />
+    <param name="turn_dir"       value="$(arg recovery_turn_dir)" />
+  </node>
+
   <node pkg="falcon_adapter" type="sensor_gate_node.py"
         name="sensor_gate" output="screen">
     <param name="in_ns"              value="$(arg drone_ns)" />
@@ -1306,6 +1391,7 @@
     <param name="cmd_commit_ticks"       value="$(arg cmd_commit_ticks)" />
     <param name="cmd_stop_eps"           value="$(arg cmd_stop_eps)" />
     <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
+    <param name="skip_yaw_thresh"        value="$(arg skip_yaw_thresh)" />
     <param name="predict_hz"             value="$(arg predict_hz)" />
     <param name="predict_horizon_s"      value="$(arg predict_horizon_s)" />
     <param name="predict_yaw_tau_s"      value="$(arg predict_yaw_tau_s)" />

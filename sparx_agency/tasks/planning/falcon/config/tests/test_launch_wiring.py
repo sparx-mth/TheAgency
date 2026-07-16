@@ -131,3 +131,23 @@ def test_the_gate_is_not_forwarded_away():
     assert re.search(r'<arg name="goal_x"\s+value="" />', text)
     assert re.search(r'<arg name="goal_y"\s+value="" />', text)
     assert "goal_x" not in _config_launch_keys(), "mission.yaml must not set goal_x"
+
+
+# ── The launch files must actually PARSE ────────────────────────────
+# Everything else in this file reads the launch XML with regexes, which happily
+# match text that roslaunch itself cannot load. A launch file that does not parse
+# takes the WHOLE stack down at startup -- and the easiest way to write one is a
+# perfectly innocent-looking comment: XML forbids "--" inside <!-- -->, so a
+# comment mentioning a command-line flag like "--foo" is a syntax error.
+@pytest.mark.parametrize("launch", sorted(_LAUNCH_DIR.glob("*.launch")),
+                         ids=lambda p: p.name)
+def test_launch_file_is_well_formed_xml(launch):
+    import xml.dom.minidom
+    try:
+        xml.dom.minidom.parse(str(launch))
+    except Exception as e:  # noqa: BLE001 - any parse failure is the same bug
+        pytest.fail(
+            "%s is not well-formed XML, so roslaunch cannot load it and the whole "
+            "stack fails to start:\n  %s\n"
+            "If this mentions an invalid token, check for '--' inside an XML "
+            "comment (e.g. writing a --flag name in prose)." % (launch.name, e))

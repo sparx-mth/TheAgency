@@ -110,7 +110,7 @@
 
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
-  <arg name="vel_x"     default="0.3" />
+  <arg name="vel_x"     default="0.25" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
@@ -313,6 +313,15 @@
        Defaults mirror the layer below; see nav_stack.launch for the full
        per-parameter notes. Set these from config/mission.yaml. -->
   <arg name="waypoint_spacing_m"            default="1.5" />
+
+  <!-- How wide "in front of the next point" is. The ADVANCE gate is predictive:
+       the accepted heading error is asin(yaw_acquisition_radius / distance),
+       capped by yaw_acquire_max_deg. At the 1.5 m waypoint spacing above, 0.51 m
+       gives ~20 deg. skip_yaw_thresh (RADIANS) is the matching decision for the
+       next leg after a waypoint is retired; keep the two in step. -->
+  <arg name="yaw_acquisition_radius"        default="0.51" />
+  <arg name="yaw_acquire_max_deg"           default="35.0" />
+  <arg name="skip_yaw_thresh"               default="0.35" /><!-- rad; 20 deg -->
   <arg name="inflate_radius_m"              default="0.1" />
   <arg name="unknown_blocked"               default="false" />
   <arg name="unknown_cost"                  default="1.0" />
@@ -421,13 +430,40 @@
   <arg name="go_topic"          default="/mission/go" />
   <arg name="zero_on_close"     default="true" />
   <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
+
+  <!-- Lost-localization recovery. Watches the SAME source the stack localizes
+       from (real_pose_topic), not the header-less /gt_pose the follower reads. -->
+  <arg name="recovery_enabled"       default="true" />
+  <arg name="recovery_bearing_topic" default="/xtend/bearing" />
+  <arg name="recovery_bearing_units" default="auto" />
+  <arg name="recovery_stale_s"       default="0.3" />
+  <arg name="recovery_ladder_s"      default="1.0" />
+  <arg name="recovery_climb_enabled" default="true" />
+  <arg name="recovery_climb_speed"      default="0.08" /><!-- thrust dial; mind the ceiling -->
+  <arg name="recovery_climb_duration_s" default="0.4" />
+  <arg name="recovery_turn_dir"      default="left" />
+
   <include file="$(find falcon_adapter)/launch/nav_stack.launch">
     <arg name="start_go"          value="$(arg start_go)" />
     <arg name="go_topic"          value="$(arg go_topic)" />
     <arg name="zero_on_close"     value="$(arg zero_on_close)" />
     <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
+    <!-- Lost-localization recovery -->
+    <arg name="recovery_enabled"       value="$(arg recovery_enabled)" />
+    <arg name="recovery_pose_topic"    value="$(arg real_pose_topic)" />
+    <arg name="recovery_bearing_topic" value="$(arg recovery_bearing_topic)" />
+    <arg name="recovery_bearing_units" value="$(arg recovery_bearing_units)" />
+    <arg name="recovery_stale_s"       value="$(arg recovery_stale_s)" />
+    <arg name="recovery_ladder_s"      value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
+    <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
+    <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
+    <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
     <!-- A* planner (route search + replanning) -->
     <arg name="waypoint_spacing_m"            value="$(arg waypoint_spacing_m)" />
+    <arg name="yaw_acquisition_radius"        value="$(arg yaw_acquisition_radius)" />
+    <arg name="yaw_acquire_max_deg"           value="$(arg yaw_acquire_max_deg)" />
+    <arg name="skip_yaw_thresh"               value="$(arg skip_yaw_thresh)" />
     <arg name="inflate_radius_m"              value="$(arg inflate_radius_m)" />
     <arg name="unknown_blocked"               value="$(arg unknown_blocked)" />
     <arg name="unknown_cost"                  value="$(arg unknown_cost)" />

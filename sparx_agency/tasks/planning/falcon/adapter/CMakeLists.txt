@@ -6,9 +6,9 @@ catkin_package()
 # FALCON adapter nodes (rospy). They import the ROS-free algorithms from the
 # mounted sparx_agency repo (core.mapping.*, core.planning.*, core.localization)
 # and the robot-specific bits (robots.XTEND.demo_mode); run_falcon.sh mounts the
-# repo on PYTHONPATH. cloud_utils.py and pure_pursuit_follower.py are helper
-# modules (imported by the nodes, not run) so they are intentionally not listed
-# here -- run_falcon.sh bind-mounts them alongside the nodes.
+# repo on PYTHONPATH. cloud_utils.py, pure_pursuit_follower.py and thinking.py
+# are helper modules (imported by the nodes, not run) so they are intentionally
+# not listed here -- run_falcon.sh bind-mounts them alongside the nodes.
 catkin_install_python(PROGRAMS
   scripts/falcon_adapter_node.py
   scripts/sensor_gate_node.py
@@ -27,6 +27,7 @@ catkin_install_python(PROGRAMS
   scripts/sim_adapter_node.py
   scripts/mission_director_node.py
   scripts/cmd_vel_gate_node.py
+  scripts/lost_localization_node.py
   scripts/depth_debug.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

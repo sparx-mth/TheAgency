@@ -67,6 +67,7 @@ from sparx_agency.core.planning.navdp import (
     world_to_body_2d,
 )
 from sparx_agency.core.planning.planners.common.utils_2d import arclength_fraction_2d
+from thinking import Thinker
 
 # Top-level mode.
 _PRIMARY = "primary"     # echo A*; count consecutive A* failures
@@ -167,6 +168,11 @@ class AStarNavDPFallbackNode:
             timeout_s=float(G("~timeout_s", 10.0)),
             depth_max_m=self.depth_max_m,
             logger=rospy.logwarn)
+
+        # Narrates the arbitration to the operator's BEV thinking log. Two slots:
+        # the default "plan" slot tells the A* <-> NavDP switch story; "navdp_health"
+        # tells the independent story of whether NavDP can rescue us at all.
+        self.thinker = Thinker("astar_navdp_fallback")
 
         # ── Shared state (callbacks write, tick reads) ───────────────
         self.rgb = None
@@ -405,6 +411,9 @@ class AStarNavDPFallbackNode:
         self.n_legs += 1
         rospy.loginfo("fallback: leg #%d -> goal body=(%.2f, %.2f)  %d pts (infer %.1fs)",
                       self.n_legs, fwd, left, len(leg_world), dt)
+        # NavDP is producing routes again, so a LATER "no route" is fresh news and
+        # must not be gated as a repeat of the one before this leg.
+        self.thinker.forget("navdp_health")
         return _LEG
 
     # ─── Leg sub-state handlers (only while FALLBACK) ────────────────
@@ -423,6 +432,9 @@ class AStarNavDPFallbackNode:
             return
         else:
             rospy.loginfo_throttle(3.0, "fallback: holding for NavDP route ...")
+            self.thinker.say("NavDP has no route either, holding where I am",
+                             category="plan", level="error", key="navdp_health",
+                             repeat_after_s=5.0)
 
     def _follow(self):
         """Fly the leg; re-infer at the midpoint (the 2nd half is the buffer)."""
@@ -468,6 +480,10 @@ class AStarNavDPFallbackNode:
         """A* failed enough: STOP the drone and hand control to NavDP."""
         rospy.logwarn("fallback: A* found NO route on %d consecutive attempts -- "
                       "STOPPING and engaging NavDP", self.fail_streak)
+        self.thinker.say("A* has failed %d times, switching to NavDP"
+                         % self.fail_streak, category="plan", level="warn")
+        # NavDP just proved reachable and is now in charge: its health story restarts.
+        self.thinker.forget("navdp_health")
         self.mode = _FALLBACK
         self.fail_streak = 0
         self.ok_streak = 0
@@ -481,6 +497,7 @@ class AStarNavDPFallbackNode:
         """A* recovered: hand control back and republish the A* route."""
         rospy.loginfo("fallback: A* found a route on %d consecutive attempts -- "
                       "resuming A*", self.ok_streak)
+        self.thinker.say("A* is planning again, taking back over", category="plan")
         self.mode = _PRIMARY
         self.fail_streak = 0
         self.ok_streak = 0
@@ -531,6 +548,10 @@ class AStarNavDPFallbackNode:
                     else:
                         rospy.logwarn_throttle(2.0, "fallback: A* failing but NavDP "
                                                "unreachable -- staying on A*")
+                        self.thinker.say("A* has no route and NavDP is unreachable, "
+                                         "staying on A*", category="plan",
+                                         level="error", key="navdp_health",
+                                         repeat_after_s=5.0)
                 return
             # FALLBACK: recovery wins over continuing a leg (checked first every tick).
             if self.ok_streak >= self.ok_confirm:
@@ -547,6 +568,12 @@ class AStarNavDPFallbackNode:
             self.leg_pts = None
             self.fail_streak = 0
             self.ok_streak = 0
+            # This drops back to A* WITHOUT narrating it, so the switch story is
+            # left mid-sentence: a later re-switch on the same fail_streak would
+            # repeat the last line verbatim and be gated away, leaving the
+            # operator watching an unexplained hand-over to NavDP. Restart the
+            # slot so the next switch always speaks.
+            self.thinker.forget("plan")
             try:
                 self._echo_astar(force=True)
             except Exception:                     # noqa: BLE001
@@ -635,6 +662,8 @@ if __name__ == "__main__":
 #     ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #   NavDP server: ~port (8888) ~timeout_s (10.0) ~depth_max_m (5.0)
 #   misc: ~default_altitude (1.0; used until the first pose arrives)
+#   narration (see thinking.py): ~thinking (true) ~thinking_topic (/nav/thinking)
+#     ~thinking_echo (true) -- the A* <-> NavDP switch decisions on the BEV log
 #
 #   Behaviour: PRIMARY echoes A* on ~path_topic and watches ~astar_status_topic;
 #   after ~astar_fail_confirm consecutive failures it STOPS the drone and engages

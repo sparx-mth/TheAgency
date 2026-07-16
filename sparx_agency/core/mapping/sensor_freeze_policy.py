@@ -31,7 +31,17 @@ heartbeat, and drives both.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import FrozenSet, Optional, Tuple
+
+#: Modes that mean "freeze" besides the configured turning mode. The
+#: lost-localization recovery manoeuvres BLIND -- it only runs because the pose
+#: went cold, so nothing the drone sees while it backs up, climbs or sweeps has a
+#: trustworthy position to be fused at. In practice the map is already starved
+#: during recovery (a depth frame with no co-temporal pose is dropped), but the
+#: freeze is what protects the TAIL: the instant a tag reappears mid-sweep, poses
+#: resume, depth pairs again, and motion-smeared frames would fuse. Freezing also
+#: arms the gate's resume watermark, which discards exactly those in-flight frames.
+DEFAULT_EXTRA_FREEZE_MODES = ("recovery",)
 
 #: The mode topic is present and authoritative.
 SRC_MODE_AUTH = "mode_auth"
@@ -40,6 +50,32 @@ SRC_MODE_AUTH = "mode_auth"
 SRC_EXPLICIT_FALLBACK = "explicit_fallback"
 #: Mode-based freezing is disabled; only the explicit request controls freeze.
 SRC_EXPLICIT_ONLY = "explicit_only"
+
+
+def freeze_mode_names(turning_mode_name: str,
+                      extra: Optional[str] = None) -> FrozenSet[str]:
+    """Every demo-mode string that means "freeze the map".
+
+    Both mode-authoritative gates (``sensor_gate`` and ``mapping_sync``) match a
+    mode against this set, so the answer to "which modes freeze?" is defined once
+    rather than drifting between them.
+
+    Args:
+        turning_mode_name: The platform's rotating-in-place mode (e.g.
+            ``"turning"``); always included.
+        extra: Comma-separated extra mode names. ``None`` (the default) means
+            :data:`DEFAULT_EXTRA_FREEZE_MODES`; pass ``""`` to add none at all
+            and restore the turning-only behaviour.
+
+    Returns:
+        The mode names, lower-cased and stripped, as matched against the topic.
+    """
+    names = {str(turning_mode_name).strip().lower()}
+    if extra is None:
+        names.update(DEFAULT_EXTRA_FREEZE_MODES)
+    else:
+        names.update(n.strip().lower() for n in str(extra).split(",") if n.strip())
+    return frozenset(names)
 
 
 @dataclass

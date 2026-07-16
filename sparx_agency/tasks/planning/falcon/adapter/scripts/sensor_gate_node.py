@@ -53,7 +53,11 @@ from geometry_msgs.msg import Pose
 from sensor_msgs.msg import Image, CameraInfo
 
 from sparx_agency.core.mapping.depth_fusion_gate import DepthFusionGate
-from sparx_agency.core.mapping.sensor_freeze_policy import SensorFreezePolicy
+from sparx_agency.core.mapping.sensor_freeze_policy import (
+    SensorFreezePolicy,
+    freeze_mode_names,
+)
+from thinking import Thinker
 
 
 class SensorGateNode:
@@ -73,6 +77,12 @@ class SensorGateNode:
         # turn ends; bump it to also skip the brief physical settle).
         self.demo_mode_topic = G("~demo_mode_topic", "/xtend/demo_mode")
         self.turning_mode_name = str(G("~turning_mode_name", "turning")).strip().lower()
+        # Modes that mean freeze. Beyond turning_mode_name this picks up the
+        # lost-localization recovery, which manoeuvres with no pose at all -- see
+        # core.mapping.sensor_freeze_policy.DEFAULT_EXTRA_FREEZE_MODES.
+        # ~extra_freeze_modes is a comma-separated override; '' = turning only.
+        self.freeze_modes = freeze_mode_names(self.turning_mode_name,
+                                              G("~extra_freeze_modes", None))
         self.hb_period = float(G("~heartbeat_period_sec", 2.0))
         self.gate = DepthFusionGate(
             policy=SensorFreezePolicy(
@@ -99,6 +109,10 @@ class SensorGateNode:
         self._last_explicit_str = "(no msgs yet)"
         self._last_state = self._state_label()
         self._last_state_change_t = rospy.Time.now()
+
+        # This node is the only one that knows the map is running on a replayed
+        # snapshot, so it narrates the freeze for the operator's BEV log.
+        self.thinker = Thinker("sensor_gate")
 
         # ── Publishers ──
         self.pub_pose = rospy.Publisher(self.out_ns + "/gt_pose", Pose, queue_size=1)
@@ -147,6 +161,26 @@ class SensorGateNode:
                 self.gate.policy.explicit_freeze, self.gate.policy.mode_says_freeze,
                 self._last_mode_str, trigger)
             self._last_state = new
+            self._narrate_state(new)
+
+    def _narrate_state(self, state):
+        """Narrate the freeze/unfreeze decision behind a gate state change.
+
+        Called only from :meth:`_log_transition`, i.e. once per real change, so
+        the operator's log carries the reasoning and not the replay traffic.
+        """
+        if state == "FROZEN":
+            self.thinker.say(
+                "Freezing the map while I turn -- replaying my last good view "
+                "so the map does not smear", category="map")
+        elif state == "RESUME_WAIT":
+            self.thinker.say(
+                "Turn over -- still replaying until I get a view captured after "
+                "the turn", category="map")
+        else:
+            self.thinker.say(
+                "Fresh view after the turn -- unfreezing the map and mapping "
+                "live again", category="map")
 
     # ── Subscribers ──
     def _freeze_cb(self, msg):
@@ -164,7 +198,7 @@ class SensorGateNode:
     def _demo_mode_cb(self, msg):
         mode = (msg.data or "").strip().lower()
         self._last_mode_str = mode if mode else "(empty)"
-        self.gate.note_mode(mode == self.turning_mode_name)
+        self.gate.note_mode(mode in self.freeze_modes)
         self._log_transition("demo_mode=%r" % mode)
 
     def _reset_mode_freeze_cb(self, msg):
@@ -192,6 +226,13 @@ class SensorGateNode:
         if not fuse:
             if reason == "stale_after_rotation":
                 self._n_drop_stale += 1
+                # Own narration slot: this is a separate story from the gate
+                # state, and it repeats while the resume drags on so the
+                # operator can tell the wait from a stalled log.
+                self.thinker.say(
+                    "Dropping a depth frame captured during the turn -- it "
+                    "would smear the map", category="map", level="warn",
+                    key="stale_depth", repeat_after_s=5.0)
             else:
                 self._n_drop_frozen += 1
             return
@@ -282,4 +323,6 @@ if __name__ == "__main__":
 #   freeze: ~freeze_on_turning_mode (true) ~demo_mode_topic (/xtend/demo_mode)
 #       ~turning_mode_name (turning) ~resume_settle_sec (0.0)
 #       ~heartbeat_period_sec (2.0; 0 disables)
+#   narration (see thinking.py): ~thinking (true; false silences the freeze
+#       narration) ~thinking_topic (/nav/thinking) ~thinking_echo (true)
 # ============================================================================

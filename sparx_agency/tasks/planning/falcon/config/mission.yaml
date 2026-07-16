@@ -79,6 +79,29 @@ launch:
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # flight altitude (m); the BEV weight peak (bev_z_peak) follows it
 
+  # -- How wide "in front of the next point" is (the ADVANCE gate) --
+  # NOT a fixed angle. The gate is predictive: the drone starts flying as soon as
+  # going straight would still pass within yaw_acquisition_radius of the waypoint,
+  # so the accepted heading error is asin(radius / distance) -- wider up close,
+  # narrower far away -- capped by yaw_acquire_max_deg and floored by the ~11.5 deg
+  # the platform physically cannot improve on (half a minimum burst plus its coast).
+  #
+  #   radius 0.51 m  ->  0.5 m: 35 deg (capped) | 1.5 m: 20 deg | 3.0 m: 9.8 deg
+  #   radius 0.20 m  ->  0.5 m: 23.6 deg        | 1.5 m: 11.5 deg (the old default)
+  #
+  # yaw_acquisition_radius is THE knob: raising yaw_acquire_max_deg alone changes
+  # almost nothing at cruise, because it only binds inside ~0.35 m. Wider means
+  # fewer stop-and-turn cycles and a smoother, faster run, at the cost of cutting
+  # corners -- the drone accepts passing this far wide, and beyond pos_radius (0.35)
+  # waypoints get retired as "passed" rather than actually reached.
+  yaw_acquisition_radius: 0.51   # cross-track tolerance (m) -> ~20 deg at 1.5 m spacing
+  yaw_acquire_max_deg: 35.0      # hard cap the gate will ever accept
+  # The matching decision for the NEXT leg once a waypoint is retired: glide on if
+  # its bearing is within this, else brake and re-align. Keep it in step with the
+  # gate, or the drone advances on a wide angle and then stops dead at the very next
+  # waypoint to re-align, undoing the point of widening it. RADIANS, not degrees.
+  skip_yaw_thresh: 0.35          # rad; 0.35 = 20 deg
+
   # -- GO gate: nothing reaches the drone until you say so --
   # false = the whole pipeline runs (BEV, A*, detector, selection) but NOT ONE velocity
   # command is sent until GO, so you can launch before/while taking off by hand without
@@ -88,6 +111,42 @@ launch:
   start_go: false
   go_topic: /mission/go
   zero_on_close: true         # one zero twist when GO->false (a stop, not a hold)
+
+  # -- Lost-localization recovery: what to do when the drone stops knowing where it is --
+  # The AprilTag pose only exists while a tag is IN VIEW. Walk behind a pillar and
+  # /xtend/localization simply stops publishing -- but every consumer keeps its last
+  # value, so the drone happily keeps flying toward where it was seconds ago. This
+  # watches the pose and, when it goes cold, takes the drone off the follower:
+  #   stale_s  -> STOP and hold (cheap, instantly undone; ~2 frames at 7 Hz)
+  #   ladder_s -> back up, settle, back up, settle, climb, settle, climb, settle,
+  #               then a slow 360 sweep looking for any tag
+  #   nothing worked -> land (stop -> land -> disarm)
+  # Any fresh pose at any point abandons the ladder and hands the drone straight back.
+  # The gap between the two thresholds is the point: a routine one-frame tag dropout
+  # stops the drone but must never provoke a blind back-up.
+  recovery_enabled: true
+  recovery_stale_s: 0.3       # pose this old (s) => STOP. Lower = twitchier.
+  recovery_ladder_s: 1.0      # ...and still this old => start manoeuvring. > stale_s.
+  # Climb rungs need the platform to honour linear.z, which on XTEND depends on which
+  # Twist converter is running: online_nav_bridge's in-process one honours it, while
+  # the standalone xtend_twist_to_cmd_nav.py drops it unless started with
+  # --allow-multi-axes (a dropped axis is silent -- the drone just does not rise).
+  # Set false if the climb cannot work: the ladder then skips those rungs rather than
+  # spending ~5s going nowhere.
+  recovery_climb_enabled: true
+  #
+  # MIND THE CEILING. recovery_climb_speed is a THRUST dial, not a speed: the vertical
+  # axis is scaled by the FORWARD calibration (|v|/0.3*400) and there is no vertical
+  # constant anywhere -- XTEND climbs far harder at a given number than it flies
+  # forward at it. The height actually gained is well ABOVE speed*duration, because
+  # commands are hold-style and the drone keeps rising through the stop, and nothing
+  # in this stack measures altitude to catch the overshoot. (0.20/1.0 put the drone
+  # into the ceiling from cruise_z 1.0; these are ~6x gentler.) Two rungs run, each
+  # with its own overshoot -- budget for both against your real headroom, and raise
+  # these only against a climb you have actually measured.
+  recovery_climb_speed: 0.08       # thrust dial (m/s nominal), NOT a real climb rate
+  recovery_climb_duration_s: 0.2   # per rung; 2 rungs by default
+  recovery_turn_dir: left     # which way the final 360 sweeps: left | right
 
   # -- Windows (all need a display) --
   viewer: false                # target-lock HUD
@@ -115,7 +174,7 @@ launch:
 
   # ---- A* planner -- route search, replanning, corner handling (30) ----
   waypoint_spacing_m:            1.5         
-  inflate_radius_m:              0.1         
+  inflate_radius_m:              0.05
   unknown_blocked:               false       
   unknown_cost:                  1.0         
   los_smoothing:                 false       
@@ -132,7 +191,7 @@ launch:
   replan_commit_min_s:           4.0           # keep flying a committed route at least this long before an oppor...
   replan_improve_frac:           0.15          # adopt a discovery candidate only if it is >= this fraction short...
   stop_on_blocked_plan_fail:     true          # on a confirmed obstacle with NO route around it, STOP (2-pt hold...
-  replan_collision_confirm:      2             # consecutive colliding BEV frames before a collision replan (debo...
+  replan_collision_confirm:      4             # consecutive colliding BEV frames before a collision replan (debo...
   plan_period_s:                 10.0          # Optional LEGACY mid-cycle replans: OFF so the trajectory stays f...
   replan_on_collision:           false       
   replan_on_bev:                 false         # Corner rounding: merge near-collinear vertices + chamfer moderat...
@@ -154,7 +213,7 @@ launch:
   bev_bbox_margin:            1.0           # only used if the bbox_* args are removed (bounds then come from ...
   bev_publish_hz:             10.0          # was 2.0; caps the recompute+publish rate
   bev_occ_dilate:             0             # extra OCC inflation in cells (planner also inflates)
-  bev_z_floor:                0.70          # column z-range considered (wide band: walls reconstruct densely ...
+  bev_z_floor:                0.90          # column z-range considered (wide band: walls reconstruct densely ...
   bev_z_ceil:                 1.50        
   # bev_z_peak:                              # follows cruise_z (set cruise_z in mission: instead)
   bev_weight_profile:         triangular    # triangular | gaussian | flat

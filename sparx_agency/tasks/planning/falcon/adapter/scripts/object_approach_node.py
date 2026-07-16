@@ -89,10 +89,13 @@ from sparx_agency.core.planning.visual_servo import (
     TargetConfirmationGate, ConfirmationGateConfig, select_overlapping_target_detection,
     ReSearchPolicy, ReSearchConfig,
     VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN, ACQUIRE_STOP, LAND,
+    APPROACH, HOVER_LOCK, RECOVER,
     AxisForceProfile, PulseShaper,
     ClosureGait, ClosureGaitConfig,
     ScanSearchConfig, ScanSearchPolicy,
 )
+
+from thinking import Thinker
 
 # The live target-lock HUD (same renderer as the offline tool). Optional: if the
 # offline package is not importable in this runtime the mission still runs, only
@@ -110,6 +113,22 @@ except Exception as _e:                       # noqa: BLE001 -- viz is non-criti
 MODE_VISUAL_SERVOING = "visual_servoing"   # follower goes passive on this
 MODE_RELEASE = "fly_straight"              # hand control back to the follower
 MODE_FINISH = "finish"                     # ROS2 demo manager: stop -> land -> disarm
+MODE_RECOVERY = "recovery"                 # lost_localization owns /cmd_vel; WE go passive
+
+#: What each FSM state means for the operator, as one first-person (template,
+#: level) line about the target. Keyed by mode so the narration rides the state
+#: machine's own transitions -- the Thinker's gate turns a per-tick say() into one
+#: line per transition, so no edge bookkeeping is needed here. States the operator
+#: does not need narrated are simply absent: SEARCH (passive; the route follower
+#: narrates the flying) and LAND (the mission end, narrated by _begin_land).
+MODE_THOUGHTS = {
+    ACQUIRE_STOP: ("Locked onto the %s -- stopping to settle before I close in", "info"),
+    APPROACH: ("Homing on the %s", "info"),
+    HOVER_LOCK: ("Reached the %s -- holding position and keeping it in frame", "info"),
+    RECOVER: ("Lost the %s from frame -- searching", "warn"),
+    SCAN: ("Arrived at the goal without seeing the %s -- sweeping the room for it",
+           "info"),
+}
 
 
 def _param_bool(name, default):
@@ -454,6 +473,9 @@ class ObjectApproachNode(object):
         self.goal_pub = rospy.Publisher(self.goal_out_topic, Point, queue_size=1, latch=True)
         self.overlay_pub = (rospy.Publisher(self.overlay_topic, Image, queue_size=1)
                             if self.publish_overlay else None)
+        # Narrates the target story (lock -> home -> lost -> give up) and the
+        # mission end onto the shared thinking log the BEV viewer draws.
+        self.thinker = Thinker("object_approach")
 
         if _fp:
             rospy.Subscriber(self.rgb_topic, String, self._rgb_path_cb, queue_size=2)
@@ -658,6 +680,21 @@ class ObjectApproachNode(object):
             self._drive_land()
             return
 
+        # The drone does not know where it is: lost_localization owns /cmd_vel and
+        # is manoeuvring blind to re-acquire an AprilTag. Go fully passive, exactly
+        # as the follower does (waypoint_follower_node's MODE_RECOVERY check) --
+        # publish nothing and, crucially, request nothing: our usual
+        # visual_servoing claim would be re-asserted every 0.5s against the
+        # recovery's own, and a last-write-wins arbiter would flip modes at ~2 Hz
+        # with the drone alternating "back up" and "servo forward" while lost.
+        # We keep _requested_mode, so when the recovery hands back we simply
+        # re-claim visual_servoing on the next tick and the approach carries on.
+        if self.current_demo_mode == MODE_RECOVERY:
+            rospy.logwarn_throttle(
+                5.0, "object_approach: passive -- lost_localization is recovering "
+                     "the drone's position; the approach resumes when it releases")
+            return
+
         with self._mode_lock:
             enabled = self.enabled
         if not enabled:
@@ -696,6 +733,7 @@ class ObjectApproachNode(object):
                               at_target=at_target, dt=dt, arrived_at_goal=arrived,
                               range_m=fsm_range)
         self._last_dec, self._last_res, self._last_track = dec, res, track
+        self._narrate_mode(dec.mode)
         if dec.mode in ("APPROACH", "HOVER_LOCK"):
             self._entered_visual_approach = True
 
@@ -711,6 +749,8 @@ class ObjectApproachNode(object):
                 self.gate.reset()
                 self.tracker.reset()
                 self._confirmed = False
+            self.thinker.say("Could not find the %s, returning to A* navigation"
+                             % self.target, category="object", level="warn")
             # Lost the object for good: re-assert the goal so the planner flies us
             # back to the last/initial goal rather than stalling where we gave up.
             self._reinject_goal()
@@ -752,6 +792,18 @@ class ObjectApproachNode(object):
             # rhythm rather than one strong continuous run.
             c = res.command
             self._publish_cmd(c.x, c.y, c.yaw_rate, "servo:%s" % res.mode, gated=True)
+
+    def _narrate_mode(self, mode):
+        """Narrate what the FSM just decided about the target (see MODE_THOUGHTS).
+
+        Called every tick from the one decision funnel: the Thinker's gate drops the
+        unchanged line, so this emits once per transition without any edge state of
+        its own, and re-emits when the target itself changes (~target_topic).
+        """
+        thought = MODE_THOUGHTS.get(mode)
+        if thought is not None:
+            self.thinker.say(thought[0] % self.target, category="object",
+                             level=thought[1])
 
     def _drive_recovery(self, last_track, lost_for_s):
         # Recovery has its own bounded sweep cadence, so it is not gated; keep the
@@ -867,11 +919,18 @@ class ObjectApproachNode(object):
             if self._entered_visual_approach and self.land_range_m is not None \
                     and rng is not None:
                 reason = "range=%.2f m <= land_range=%.2f m" % (rng, self.land_range_m)
+                thought = ("Reached the %s -- stopping and landing to finish the "
+                           "mission" % self.target)
             else:
                 reason = "arrived at the coordinate goal (reached by A* alone)"
+                thought = ("Arrived at the goal without ever seeing the %s -- landing "
+                           "here to finish the mission" % self.target)
             rospy.logwarn(
                 "object_approach: REACHED TARGET (%s) -- stopping commands and "
                 "requesting FINISH (land)", reason)
+            # The node falls silent from here (it only re-requests FINISH), so this is
+            # the mission's last word in the operator's log.
+            self.thinker.say(thought, category="mission")
         self._drive_land()
 
     def _drive_land(self):
@@ -1134,4 +1193,7 @@ if __name__ == "__main__":
 #       ~scan_forward_s (0.0) ~scan_bursts_before_move (8)
 #   HUD overlay: ~publish_overlay (true) ~overlay_topic (/object_approach/overlay)
 #       ~viz_hz (10.0)  [sensor_msgs/Image bgr8; view with target_lock_viewer_node]
+#   thinking log (see thinking.py): ~thinking (true, false silences this node's
+#       narration) ~thinking_topic (/nav/thinking) ~thinking_echo (true, also mirror
+#       each thought to rosout)
 # ============================================================================

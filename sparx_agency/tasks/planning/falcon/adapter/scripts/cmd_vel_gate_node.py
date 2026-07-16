@@ -38,6 +38,8 @@ import rospy
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, String
 
+from thinking import Thinker
+
 
 def _param_bool(name, default):
     """rosparam bool that also accepts the strings roslaunch passes ('true'/'false')."""
@@ -69,6 +71,8 @@ class CmdVelGateNode(object):
         self._passed = 0          # commands forwarded since the gate last opened
         self._blocked = 0         # commands dropped while closed
 
+        self.thinker = Thinker("cmd_vel_gate")
+
         self.cmd_pub = rospy.Publisher(self.out_topic, Twist, queue_size=1)
         self.status_pub = rospy.Publisher(self.status_topic, String, queue_size=1,
                                           latch=True)
@@ -93,6 +97,12 @@ class CmdVelGateNode(object):
         if want == self.go:
             return
         self.go = want
+        # The operator's first question about a motionless drone is whether it is
+        # even allowed to move; narrate the transition here, never in _cmd_cb.
+        self.thinker.say(
+            "GO gate is open -- the drone may fly" if want else
+            "GO gate is shut -- holding the drone still, nobody can command it",
+            category="mission", level="info" if want else "warn")
         if want:
             rospy.logwarn("cmd_vel_gate: GO -- commands now reach the drone "
                           "(%d were blocked while closed)", self._blocked)
@@ -160,4 +170,6 @@ if __name__ == "__main__":
 #                                         every existing launch behaving as before;
 #                                         object_mission.launch sets it false.
 #   ~zero_on_close  (true)                send one zero twist when GO goes false
+#   ~thinking / ~thinking_topic / ~thinking_echo  -- inherited from thinking.Thinker;
+#                                         narration on/off, its topic, rosout mirror
 # ============================================================================

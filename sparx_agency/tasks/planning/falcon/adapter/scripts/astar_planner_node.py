@@ -61,6 +61,7 @@ from sparx_agency.core.planning.planners.astar import (
 from sparx_agency.core.planning.replanning import (
     corridor_mask, count_new_known_in_corridor, known_mask,
     polyline_length, remaining_polyline, route_obstacle_confidence)
+from thinking import Thinker
 
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -285,6 +286,10 @@ class AStarPlannerNode:
         self._predicted_stamp = rospy.Time(0)
         self._pred_collision_streak = 0
         self._predicted_replans = 0               # consecutive; reset when clear
+
+        # Narrates the same discrete planning events as ~event_topic, but in the
+        # operator's own words, onto the shared thinking log under the BEV map.
+        self.thinker = Thinker("astar_planner")
 
         self.pub_path = rospy.Publisher(self.path_topic, Path, queue_size=1, latch=True)
         self.pub_status = rospy.Publisher(self.status_topic, Bool, queue_size=1, latch=True)
@@ -568,8 +573,14 @@ class AStarPlannerNode:
             cand = self._plan_candidate()
             if cand is not None:
                 self._commit(cand)            # clears has_plan/_blocked_hold
-                self._publish_event("PLAN: first route to goal" if first
-                                    else "REPLAN: route reopened -> resuming A*")
+                if first:
+                    self._publish_event(
+                        "PLAN: first route to goal",
+                        "I have a route to the goal -- setting off")
+                else:
+                    self._publish_event(
+                        "REPLAN: route reopened -> resuming A*",
+                        "The way is open again -- resuming my own route")
             else:
                 self._publish_status(False)   # A* cannot plan -> NavDP fallback
             return
@@ -634,7 +645,10 @@ class AStarPlannerNode:
                       "frame(s) -- replanning", self._collision_streak)
         cand = self._plan_candidate()
         if cand is not None:
-            self._publish_event("REPLAN: obstacle on route -> new route")
+            self._publish_event(
+                "REPLAN: obstacle on route -> new route",
+                "Replanning: an obstacle is on my route -- rerouting around it",
+                level="warn")
             self._commit(cand)      # follower stops-and-turns onto the new route
             return
         # Boxed in: no A* route around the obstacle. Report the failure (drives the
@@ -644,7 +658,11 @@ class AStarPlannerNode:
         if self.stop_on_blocked_plan_fail and not self._blocked_hold:
             self._publish_stop()
             self._blocked_hold = True
-            self._publish_event("STOP: boxed in - no A* route (NavDP takes over)")
+            self._publish_event(
+                "STOP: boxed in - no A* route (NavDP takes over)",
+                "No possible route using A* -- I am boxed in. Stopping and "
+                "handing over to NavDP",
+                level="error")
             rospy.logwarn("astar_planner: no route around the obstacle -- STOP + "
                           "hold (status=False drives the NavDP fallback)")
 
@@ -668,8 +686,10 @@ class AStarPlannerNode:
         if new_len <= old_len * (1.0 - self.replan_improve_frac):
             rospy.loginfo("astar_planner: DISCOVERY replan adopted (%d new corridor "
                           "cells): remaining %.2fm -> %.2fm", n_new, old_len, new_len)
-            self._publish_event("REPLAN: shorter route found (%.1fm -> %.1fm)"
-                                % (old_len, new_len))
+            self._publish_event(
+                "REPLAN: shorter route found (%.1fm -> %.1fm)" % (old_len, new_len),
+                "The map opened up: taking a shorter route, %.1fm instead of "
+                "%.1fm" % (new_len, old_len))
             self._commit(cand)     # resets _discovery_baseline + snapshot
         else:
             # Kept the route: raise the high-water mark so this same reveal does not
@@ -718,6 +738,12 @@ class AStarPlannerNode:
         self._collision_streak = 0
         self._blocked_hold = False
         self.fail_reason = "(success)"
+        # A committed route restarts this node's narration too. Without it, the
+        # gate suppresses an unchanged line forever: the SECOND "obstacle on the
+        # route" reroute of a flight -- and every one after it -- would be
+        # silently swallowed as a repeat of the first, which is precisely the
+        # event the operator most needs to see.
+        self.thinker.forget("plan")
 
     def _new_known_in_corridor(self):
         """Count newly-observed cells (vs the last commit) inside the route corridor."""
@@ -757,10 +783,22 @@ class AStarPlannerNode:
         """Publish one A* plan-attempt outcome (True=route, False=no route)."""
         self.pub_status.publish(Bool(data=bool(ok)))
 
-    def _publish_event(self, text):
-        """Announce a discrete A* planning event (String) for the viewer HUD."""
+    def _publish_event(self, text, thought, level="info"):
+        """Announce a discrete A* planning event (String) for the viewer HUD.
+
+        The single funnel for every planning event, so it is also the single
+        place that narrates one. ``text`` keeps the terse wording the HUD parses;
+        ``thought`` is the first-person line the operator reads instead.
+
+        Args:
+            text: HUD event string, published verbatim on ~event_topic.
+            thought: First-person narration of the same event.
+            level: Severity of the narration; "warn" for a reroute the operator
+                should notice, "error" for the boxed-in STOP.
+        """
         self.pub_event.publish(String(data=text))
         rospy.loginfo("astar_planner event: %s", text)
+        self.thinker.say(thought, category="plan", level=level)
 
     def _publish_stop(self):
         """Command the drone to STOP: a 2-point hold at the current pose collapses
@@ -1001,6 +1039,10 @@ if __name__ == "__main__":
 #         replan events for the BEV viewer HUD: first route, obstacle reroute, boxed
 #         STOP, discovery reroute. Distinct from the per-attempt Bool status.
 #       ~frame_id (world) ~goal_x ~goal_y (initial goal; unset = wait for a click)
+#       thinking (inherited from thinking.Thinker): ~thinking (true; false silences
+#         this node's narration) ~thinking_topic (/nav/thinking; the shared thought
+#         log the BEV viewer renders) ~thinking_echo (true; also mirror to rosout).
+#         Each ~event_topic event is narrated there in the first person.
 #   planner: ~connectivity (8) ~inflate_radius_m (0.4) ~unknown_blocked (false)
 #       ~unknown_cost (1.0) ~search_margin_m (3.0) ~turn_penalty (0.3)
 #       ~los_smoothing (true) ~waypoint_spacing_m (3.0) ~goal_snap_radius_m (2.0)

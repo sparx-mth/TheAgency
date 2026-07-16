@@ -105,13 +105,15 @@ fi
 echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sparx_agency)"
 
 # ── Volume mounts ─────────────────────────────────────────────
-# Mount each adapter node (+ the cloud_utils helper) so host edits take effect
-# without a rebuild. Loop so a missing file is skipped with a log line instead
-# of docker silently creating an empty dir.
+# Mount each adapter node (+ the cloud_utils / pure_pursuit_follower / thinking
+# helpers) so host edits take effect without a rebuild. Loop so a missing file is
+# skipped with a log line instead of docker silently creating an empty dir.
+# NOTE: helper modules the nodes IMPORT must be listed here too -- an unmounted
+# helper is not a missing feature, it is an ImportError that takes the node down.
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py thinking.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else

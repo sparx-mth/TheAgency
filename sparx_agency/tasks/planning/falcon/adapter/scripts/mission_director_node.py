@@ -49,6 +49,7 @@ from std_msgs.msg import Bool, String
 
 import sparx_agency
 from sparx_agency.core.planning.mission import ObjectCatalog
+from thinking import Thinker
 
 
 def _default_objects_file():
@@ -89,6 +90,9 @@ class MissionDirectorNode(object):
         self.publish_enable = bool(G("~publish_enable", True))
         seed = int(G("~seed", -1))
         self._rng = random.Random() if seed < 0 else random.Random(seed)
+        # Constructed before the catalog load so the operator's log carries the reason
+        # the mission never came up, not just a logfatal in one terminal.
+        self.thinker = Thinker("mission_director")
 
         # ── Load the catalog (fail loud; no silent default) ───────────
         try:
@@ -96,10 +100,16 @@ class MissionDirectorNode(object):
         except (OSError, ValueError) as e:
             rospy.logfatal("mission_director: cannot load objects file %r: %s",
                            self.objects_file, e)
+            self.thinker.say("I cannot read the object catalog %s (%s) -- I have no "
+                             "targets, so no mission" % (self.objects_file, e),
+                             category="mission", level="error")
             raise
         if len(self.catalog) == 0:
             rospy.logfatal("mission_director: objects file %r has no objects",
                            self.objects_file)
+            self.thinker.say("The object catalog %s is empty -- there is nothing to "
+                             "fly to" % self.objects_file,
+                             category="mission", level="error")
             raise ValueError("empty object catalog: %s" % self.objects_file)
 
         self._selected = None
@@ -124,17 +134,27 @@ class MissionDirectorNode(object):
         if self.publish_enable:
             self.enable_pub.publish(Bool(data=False))
         self.status_pub.publish(String(data="NOT ARMED -- awaiting object selection"))
+        self.thinker.say("No object picked yet -- I am holding the mission disarmed, "
+                         "so nothing plans and nothing flies", category="mission")
 
         self._banner()
 
     # ── Selection (publish the mission) ───────────────────────────────
-    def _select(self, obj):
+    def _select(self, obj, how="you picked it"):
         """Arm the mission for ``obj``: publish label + coordinate goal + enable.
 
         Idempotent per object and safe to call again with a different object to RETARGET
         live (the planner replans, the detector re-prompts, object_approach re-keys).
+
+        Args:
+            obj: The catalog object to hunt and fly to.
+            how: First-person phrase saying how this target was chosen, narrated to the
+                operator (a random pick and a click are the same mission arming, but not
+                the same decision).
         """
         self._selected = obj
+        self.thinker.say("Target is the %s at (%.2f, %.2f) -- %s; arming the mission"
+                         % (obj.label, obj.x, obj.y, how), category="mission")
         self.target_pub.publish(String(data=obj.label))
         self.goal_pub.publish(Point(x=float(obj.x), y=float(obj.y), z=0.0))
         if self.publish_enable:
@@ -156,7 +176,8 @@ class MissionDirectorNode(object):
         obj = self.catalog.random(self._rng)
         rospy.loginfo("mission_director: RANDOM pick from %d objects -> %s",
                       len(self.catalog), obj.caption())
-        self._select(obj)
+        self._select(obj, how="I picked it at random out of %d objects"
+                             % len(self.catalog))
         # Stay alive so the latched publications persist for late-joining subscribers.
         try:
             while not rospy.is_shutdown():
@@ -178,9 +199,7 @@ class MissionDirectorNode(object):
         self.ax.axis("off")
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
-        self.fig.canvas.mpl_connect(
-            "close_event",
-            lambda _e: rospy.signal_shutdown("mission_director window closed"))
+        self.fig.canvas.mpl_connect("close_event", self._on_window_close)
 
         for i, obj in enumerate(self.catalog):
             self.ax.text(0.03, i, "%2d.  %s" % (i + 1, obj.caption()),
@@ -220,6 +239,14 @@ class MissionDirectorNode(object):
         except KeyboardInterrupt:
             pass
 
+    def _on_window_close(self, _event):
+        """Closing the selection window ends the node, and with it the latched mission
+        publications -- narrate that before shutting down, so the log explains why the
+        stack went quiet."""
+        self.thinker.say("Selection window closed -- aborting the mission",
+                         category="mission", level="warn")
+        rospy.signal_shutdown("mission_director window closed")
+
     def _poll_shutdown(self):
         """matplotlib-timer (GUI main thread) callback: close the window once ROS shuts
         down. Returns True to keep polling, False to stop the timer once closed."""
@@ -239,6 +266,11 @@ class MissionDirectorNode(object):
         self.go_pub.publish(Bool(data=go))
         rospy.logwarn("mission_director: %s", "GO -- commands may now reach the drone"
                       if go else "HOLD -- commands blocked at the gate")
+        # Its own slot: granting GO must not suppress the next target narration.
+        self.thinker.say("GO granted -- commands may now reach the drone" if go
+                         else "GO withheld -- I am blocking commands at the gate",
+                         category="mission", level="info" if go else "warn",
+                         key="mission_go")
         self._refresh_status()
 
     def _go_line(self):
@@ -262,10 +294,10 @@ class MissionDirectorNode(object):
             text.set_text(self._status_line())
             self.fig.canvas.draw_idle()
 
-    def _select_row(self, row):
+    def _select_row(self, row, how="you picked it"):
         if not (0 <= row < len(self.catalog)):
             return
-        self._select(self.catalog[row])
+        self._select(self.catalog[row], how=how)
         # Highlight the armed row (recreate the band each time; the artist is cheap).
         if self._highlight is not None:
             self._highlight.remove()
@@ -286,7 +318,9 @@ class MissionDirectorNode(object):
         if key.startswith("kp_"):
             key = key[3:]
         if key == "r":
-            self._select_row(self._rng.randrange(len(self.catalog)))
+            self._select_row(self._rng.randrange(len(self.catalog)),
+                             how="I picked it at random out of %d objects"
+                                 % len(self.catalog))
         elif key == "g":
             self._set_go(True)
         elif key == "h":
@@ -344,6 +378,9 @@ if __name__ == "__main__":
 #   gating: ~publish_enable (true = the director arms/gates object_approach's /enable;
 #       it publishes False at startup, True on selection. false = leave /enable to
 #       another owner and only publish target+goal on selection).
+#   narration (from thinking.Thinker): ~thinking (true = narrate mission decisions on
+#       ~thinking_topic, /nav/thinking, for the BEV thinking log) ~thinking_echo (true =
+#       also mirror each thought to rosout).
 #
 # THE GATE. Launch the planners with NO ~goal_x/~goal_y (they idle "until a click") and
 # object_approach start_enabled:=false. This node publishes no goal and holds enable

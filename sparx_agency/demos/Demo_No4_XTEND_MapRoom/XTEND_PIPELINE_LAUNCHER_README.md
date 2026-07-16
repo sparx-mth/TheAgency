@@ -322,8 +322,33 @@ Command:
 python3 /home/user/GIT/TheAgency/sparx_agency/robots/XTEND/adapters/xtend_twist_to_cmd_nav.py \
   --cmd-vel-topic /cmd_vel \
   --cmd-nav-topic /xtend/cmd_nav \
-  --timeout-sec 1.0
+  --timeout-sec 1.0 \
+  --allow-multi-axes
 ```
+
+`--allow-multi-axes` honours `linear.z` (up/down) and `linear.y` (left/right) as
+well as `linear.x` and `angular.z`. Pass it if you run **this** script and want the
+lost-localization recovery's climb rungs to work — its ladder climbs to see over
+whatever is hiding the AprilTag. Without the flag `linear.z` falls through to
+`{"action": "stop"}` and the climb rungs silently do nothing: no error, the drone
+just sits there. If you cannot pass it, set `recovery_climb_enabled:=false` so the
+ladder skips those rungs rather than wasting time on a no-op.
+
+> **Which converter am I actually running?** There are two, and only one of them
+> needs the flag:
+> * **this standalone script** (`xtend_twist_to_cmd_nav.py`, the recipe above) —
+>   vertical/lateral **OFF** unless you pass `--allow-multi-axes`;
+> * **the in-process converter** inside `online_nav_bridge*` (which subscribes
+>   `/cmd_vel` itself and converts via `TwistToCmdNavConverter`) — vertical/lateral
+>   already **ON**, nothing to pass.
+>
+> Check with `ros2 node list`. Running **both** at once converts `/cmd_vel` twice
+> and races two command streams into `cmd_queue` — pick one.
+
+One action at a time: the converter picks a single axis per Twist, in priority
+order `angular.z` → `linear.x` → `linear.z` → `linear.y`, and the XTEND bridge
+zeroes every other axis when it applies one. So a climb cannot be combined with a
+turn or a forward — which is why the recovery's rungs each drive exactly one axis.
 
 Calibration:
 
@@ -332,6 +357,10 @@ linear.x = 0.3 m/s  -> forward thrust 400
 forward max thrust  -> 600
 turn thrust default -> 1000
 ```
+
+The vertical axis reuses the **translation** calibration above (`|v| / 0.3 * 400`);
+there is no vertical-specific constant, and there is no altitude feedback anywhere
+in the stack, so a commanded climb is open-loop thrust-for-a-duration.
 
 Expected output:
 

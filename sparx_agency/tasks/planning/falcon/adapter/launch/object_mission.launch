@@ -74,6 +74,21 @@
   <arg name="zero_on_close"   default="true" />  <!-- one zero twist on GO to false -->
   <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
 
+  <!-- ── Lost-localization recovery ───────────────────────────────────
+       The AprilTag pose only exists while a tag is in view; when it goes cold the
+       drone would otherwise keep flying on its last cached pose. This stops it,
+       then backs up / climbs / sweeps for a tag, and lands if nothing works.
+       recovery_stale_s is the STOP (a couple of frames at ~7 Hz); recovery_ladder_s
+       is when it starts manoeuvring, and the gap between them is what keeps a
+       routine gap between markers from provoking a blind back-up. -->
+  <arg name="recovery_enabled"       default="true" />
+  <arg name="recovery_stale_s"       default="0.3" />
+  <arg name="recovery_ladder_s"      default="1.0" />
+  <arg name="recovery_climb_enabled" default="true" />
+  <arg name="recovery_climb_speed"      default="0.08" />
+  <arg name="recovery_climb_duration_s" default="0.4" />
+  <arg name="recovery_turn_dir"      default="left" />
+
   <!-- ── Mission director (object selection) ──────────────────────── -->
   <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
   <arg name="objects_file"    default="" />             <!-- '' => node's package-relative objects.json -->
@@ -107,6 +122,11 @@
        Defaults mirror the layer below; see nav_stack.launch for the full
        per-parameter notes. Set these from config/mission.yaml. -->
   <arg name="waypoint_spacing_m"            default="1.5" />
+
+  <!-- How wide "in front of the next point" is; see mission.yaml. -->
+  <arg name="yaw_acquisition_radius"        default="0.51" />
+  <arg name="yaw_acquire_max_deg"           default="35.0" />
+  <arg name="skip_yaw_thresh"               default="0.35" /><!-- rad; 20 deg -->
   <arg name="inflate_radius_m"              default="0.1" />
   <arg name="unknown_blocked"               default="false" />
   <arg name="unknown_cost"                  default="1.0" />
@@ -229,10 +249,21 @@
     <arg name="start_go"          value="$(arg start_go)" />
     <arg name="go_topic"          value="$(arg go_topic)" />
     <arg name="zero_on_close"     value="$(arg zero_on_close)" />
+    <!-- Lost-localization recovery (see above). -->
+    <arg name="recovery_enabled"       value="$(arg recovery_enabled)" />
+    <arg name="recovery_stale_s"       value="$(arg recovery_stale_s)" />
+    <arg name="recovery_ladder_s"      value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
+    <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
+    <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
+    <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
     <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
     <arg name="cruise_z"        value="$(arg cruise_z)" />
     <!-- A* planner (route search + replanning) -->
     <arg name="waypoint_spacing_m"            value="$(arg waypoint_spacing_m)" />
+    <arg name="yaw_acquisition_radius"        value="$(arg yaw_acquisition_radius)" />
+    <arg name="yaw_acquire_max_deg"           value="$(arg yaw_acquire_max_deg)" />
+    <arg name="skip_yaw_thresh"               value="$(arg skip_yaw_thresh)" />
     <arg name="inflate_radius_m"              value="$(arg inflate_radius_m)" />
     <arg name="unknown_blocked"               value="$(arg unknown_blocked)" />
     <arg name="unknown_cost"                  value="$(arg unknown_cost)" />

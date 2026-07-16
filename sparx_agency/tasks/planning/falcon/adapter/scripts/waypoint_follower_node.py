@@ -29,6 +29,7 @@ identical topics, message types and rosparam names.
   out  ~drone_ns + /takeoff (Empty)
   out  /sensor_gate/freeze (Bool)
   out  ~demo_mode_request_topic (String)  /xtend/demo_mode_request
+  out  ~thinking_topic (String)      /nav/thinking (narration; see thinking.py)
 
 See the file footer for the full rosparam list.
 """
@@ -73,6 +74,7 @@ from sparx_agency.core.planning.trackers.rotation_supervisor import (
     RotationReobserveSupervisor,
     RotationSupervisorParams,
 )
+from thinking import Thinker
 # NOTE: the pure_pursuit imports (core HermiteSmoother / PurePursuitTracker and the
 # sibling pure_pursuit_follower.py) are deliberately deferred into
 # _build_pure_pursuit() so they are loaded ONLY when ~controller:=pure_pursuit.
@@ -89,6 +91,14 @@ MODE_VISUAL_SERVOING = "visual_servoing"
 # goal while the drone is stopping/landing (which would defeat the land's stop and
 # fight the mode arbiter). Once the mission is landing there is nothing left to fly.
 MODE_FINISH = "finish"
+# Lost-localization recovery: our pose has gone cold (no AprilTag in view), so
+# lost_localization_node has taken the drone off us and is backing it up / climbing
+# / sweeping to re-acquire one. Stay passive (like visual_servoing) for two
+# reasons: there must be exactly one publisher on cmd_vel, and our own navigation
+# is meaningless right now anyway -- every pose we hold is stale, so any command we
+# computed would be aimed at where the drone was, not where it is. The recovery
+# actively requests fly_straight back when it releases; we resume from there.
+MODE_RECOVERY = "recovery"
 # "Forward flight" mode, requested during every stop (and at bring-up): it tells
 # the FC to hold heading (stop rotating) while we command zero velocity, so the
 # platform is stable for a clean voxel update -- "forward mode but not flying".
@@ -109,6 +119,22 @@ class _Bringup:
     RUNNING = "RUNNING"
 
 
+# What the operator hears as bring-up advances; narrated from the single _enter()
+# funnel. MAP_SETTLE is absent on purpose: that state IS a stop for the map, so it
+# is narrated as a map thought by _begin_map_wait (the same line every later stop
+# uses) rather than twice in two voices.
+_BRINGUP_THOUGHTS = {
+    _Bringup.WAIT_POSE: "Waiting for localization before I move",
+    _Bringup.TAKING_OFF: "Taking off",
+    _Bringup.HOVER_SETTLE: "Hovering to settle before I start navigating",
+    _Bringup.WAIT_PATH: "Waiting for a route from the planner",
+    _Bringup.RUNNING: "Flying the route",
+}
+# The stop-for-the-map line. One text for both the bring-up warm-up and every
+# mid-flight frozen-turn re-observation: to an operator it is the same decision.
+_THOUGHT_MAP_WAIT = "Stopping for a voxel map update"
+
+
 class WaypointFollowerNode:
     def __init__(self):
         rospy.init_node("waypoint_follower")
@@ -117,7 +143,7 @@ class WaypointFollowerNode:
         self.drone_ns = G("~drone_ns", "/simple_drone")
 
         self.follower = WaypointFollower(WaypointFollowerParams(
-            vel_x=float(G("~vel_x", 0.3)),
+            vel_x=float(G("~vel_x", 0.25)),
             yaw_rate=float(G("~yaw_rate", 0.7)),
             pos_radius=float(G("~pos_acquisition_radius", 0.35)),
             yaw_settle=float(G("~yaw_settle_thresh", 0.05)),
@@ -347,6 +373,13 @@ class WaypointFollowerNode:
         self._cmd_run = 0             # consecutive emits of that category
         self._cmd_vx = self._cmd_wz = 0.0   # last motion twist, repeated if held
 
+        # Narrate what this node DECIDES onto /nav/thinking: which waypoint it is
+        # aligning to or flying at, why it stopped, what it is waiting for.
+        self.thinker = Thinker("waypoint_follower")
+        # Waypoint hand-off is the one narration with no state of its own to
+        # describe -- it exists only on the wp_idx edge -- so it needs this.
+        self._prev_wp_idx = None
+
         # ── Topics ──
         # Default is the drone's own topic (unchanged). nav_stack points it at the
         # cmd_vel_gate's input instead, so the GO gate decides what actually reaches
@@ -559,12 +592,28 @@ class WaypointFollowerNode:
         pts = [Pose2D(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         if len(pts) < 2:
             rospy.logwarn("waypoint_follower: ignoring path with %d waypoints", len(pts))
+            self.thinker.say("Ignoring a route of %d waypoints -- too short to fly"
+                             % len(pts), category="plan", level="warn")
             return
+        changed = not self._same_route(pts, self._path_pts)
         self.follower.set_path(pts, pose2d)
         self._path_pts = pts
         self.have_path = True
         rospy.loginfo("[PATH] NEW PATH %d waypoints  start=(%.2f,%.2f) end=(%.2f,%.2f)",
                       len(pts), pts[0].x, pts[0].y, pts[-1].x, pts[-1].y)
+        # set_path re-anchors, restarting the index space, so the previous index is
+        # meaningless now whether or not the route itself changed.
+        self._prev_wp_idx = None
+        if changed:
+            # A fresh route restarts every story this node tells: "Aligning to
+            # waypoint 1" is news again even when the previous route ended on the
+            # same words. Only for a route that really IS fresh -- see _same_route.
+            self.thinker.forget()
+            length = sum(math.hypot(b.x - a.x, b.y - a.y)
+                         for a, b in zip(pts, pts[1:]))
+            self.thinker.say("New route: %d waypoints, %.1fm to the goal at "
+                             "(x=%.2f, y=%.2f)" % (len(pts), length, pts[-1].x,
+                                                   pts[-1].y), category="plan")
         self._publish_prediction()   # refresh the predicted trajectory at once
         if self.controller_kind == "pure_pursuit":
             self._publish_smooth_path()   # refresh the splined trajectory viz
@@ -577,6 +626,11 @@ class WaypointFollowerNode:
             if self.cur_pose is not None:
                 self._enter(_Bringup.TAKING_OFF if self.auto_takeoff
                             else _Bringup.HOVER_SETTLE)
+            else:
+                # WAIT_POSE is assigned at construction, so it is the one bring-up
+                # state that never passes through the _enter() funnel.
+                self.thinker.say(_BRINGUP_THOUGHTS[_Bringup.WAIT_POSE],
+                                 category="mission")
             return
 
         if self.state == _Bringup.TAKING_OFF:
@@ -603,8 +657,12 @@ class WaypointFollowerNode:
         # /cmd_vel; go fully passive so there is exactly one publisher. FINISH is the
         # terminal land: also stay passive (no node should drive /cmd_vel while the
         # drone is stopping/landing) so we neither re-drive the route nor fight the
-        # object-approach land over the demo-mode arbiter.
-        if self.current_demo_mode in (MODE_VISUAL_SERVOING, MODE_FINISH):
+        # object-approach land over the demo-mode arbiter. RECOVERY is the same deal
+        # for a cold pose: lost_localization_node owns /cmd_vel, and our pose is
+        # stale anyway, so anything we computed would aim at a stale position.
+        if self.current_demo_mode in (MODE_VISUAL_SERVOING, MODE_FINISH,
+                                      MODE_RECOVERY):
+            self._narrate_passive()
             return
 
         raw2d = self._pose2d()
@@ -628,6 +686,14 @@ class WaypointFollowerNode:
             est_hold = est.mode in ("invalid", "hold")
         else:
             pose2d = raw2d
+
+        if est_hold:
+            self.thinker.say("No localization -- holding", category="sensor",
+                             level="warn", repeat_after_s=5.0)
+        else:
+            # The hold is over. The sensor slot tells only this one story, so
+            # forget it now or the NEXT hold would be swallowed as a repeat.
+            self.thinker.forget("sensor")
 
         # Drive the DemoMode handshake for the axis the follower needs, and
         # tell it whether that axis is confirmed (until then it holds zero).
@@ -675,6 +741,7 @@ class WaypointFollowerNode:
                                  hold=hold, map_ready=self._map_ready(map_need))
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
         self._last_pub_vy = (cmd.vy if self._lateral else 0.0)
+        self._narrate_nav(cmd)
 
         if defer_stop_mode:
             # Coasting out of a frozen turn (cmd.freeze True) -> hold 'turning' so
@@ -705,6 +772,80 @@ class WaypointFollowerNode:
             self._publish_twist(cmd.vx, cmd.wz)
         if self.controller_kind == "pure_pursuit":
             self._publish_lookahead()   # smooth path is published on each new path
+
+    # ─── Narration ───────────────────────────────────────────────
+    def _narrate_passive(self):
+        """Narrate why this node has stopped driving /cmd_vel.
+
+        Going silent is itself a decision an operator needs explained: the drone
+        keeps flying, but somebody else is flying it."""
+        if self.current_demo_mode == MODE_VISUAL_SERVOING:
+            self.thinker.say("Handing control to visual servoing for the final "
+                             "approach")
+        elif self.current_demo_mode == MODE_FINISH:
+            self.thinker.say("Mission finished -- standing down while the drone "
+                             "lands", category="mission")
+        else:
+            self.thinker.say("No localization -- standing by while the recovery "
+                             "re-acquires it", category="sensor", level="warn",
+                             repeat_after_s=5.0)
+
+    def _waypoint_xy(self, idx):
+        """Position of the waypoint ``idx`` names, or None if out of range.
+
+        ``wp_idx`` indexes the follower's ACTIVE (re-anchored) path, not the path
+        this node received: set_path drops the waypoints already passed, so
+        ``self._path_pts[idx]`` would name a different point."""
+        path = self.follower.active_path
+        return path[idx] if 0 <= idx < len(path) else None
+
+    @staticmethod
+    def _same_route(pts, prev):
+        """True when a path is the route we are already flying (within float noise).
+
+        ``/path/waypoints`` is a STREAM, not a one-shot: a planner may re-publish
+        the route the drone is already on (an unchanged A* commit, a NavDP leg
+        echoed as it is re-flown). Those republishes must not count as a new
+        route, because a new route calls ``thinker.forget()`` -- which would wipe
+        every narration slot and replay the drone's whole train of thought from
+        the top, on repeat, burying the reasoning the log exists to show.
+        """
+        if not prev or len(pts) != len(prev):
+            return False
+        return all(abs(a.x - b.x) <= 1e-3 and abs(a.y - b.y) <= 1e-3
+                   for a, b in zip(pts, prev))
+
+    def _narrate_nav(self, cmd):
+        """Narrate the follower's decision for this tick.
+
+        Safe to call every tick: ``say`` is edge-triggered, so each line reaches
+        the log once -- when the decision actually changes -- and again when the
+        follower moves to the next waypoint."""
+        if cmd.done:
+            self.thinker.say("Reached the goal -- route complete")
+            return
+        # Pure pursuit's wp_idx walks the spline samples it flies rather than the
+        # route's corners, so per-waypoint lines would be a per-tick counter.
+        if self.controller_kind == "pure_pursuit":
+            return
+        total = cmd.num_waypoints
+        if (self._prev_wp_idx is not None and cmd.wp_idx > self._prev_wp_idx
+                and cmd.wp_idx < total):
+            self.thinker.say("Reached waypoint %d, heading for waypoint %d"
+                             % (self._prev_wp_idx + 1, cmd.wp_idx + 1))
+        self._prev_wp_idx = cmd.wp_idx
+        wp = self._waypoint_xy(cmd.wp_idx)
+        if wp is None:      # past the last waypoint: braking into the goal
+            return
+        n = cmd.wp_idx + 1
+        if cmd.required_axis == ControlAxis.YAW:
+            self.thinker.say("Aligning to waypoint %d/%d (x=%.2f, y=%.2f)"
+                             % (n, total, wp[0], wp[1]))
+        elif cmd.required_axis == ControlAxis.FORWARD:
+            self.thinker.say("Flying forward to waypoint %d/%d (x=%.2f, y=%.2f)"
+                             % (n, total, wp[0], wp[1]))
+        elif cmd.state == FollowerState.BRAKE:
+            self.thinker.say("Stopping to turn")
 
     # ─── ROS helpers ─────────────────────────────────────────────
     def _pose2d(self):
@@ -800,6 +941,7 @@ class WaypointFollowerNode:
         """Unfreeze and snapshot the BEV count so a fresh *post-stop* voxel
         update can be detected. Called when a stop begins (bring-up, or the
         unfrozen dwell of a RUNNING YAW_SETTLE)."""
+        self.thinker.say(_THOUGHT_MAP_WAIT, category="map")
         self._set_freeze(False)
         self._await_map = self.require_map_update
         self._await_baseline = self._bev_count
@@ -837,6 +979,7 @@ class WaypointFollowerNode:
         self._publish_twist(0.0, 0.0)
         if self._t_in() >= self.mapsettle_min_s and self._map_ready(self.mapsettle_min_updates):
             self._await_map = False
+            self.thinker.forget("map")   # so the next stop narrates the same line
             self._enter(_Bringup.WAIT_PATH if not self.have_path else _Bringup.RUNNING)
 
     def _update_map_wait(self, cmd, min_updates):
@@ -850,8 +993,10 @@ class WaypointFollowerNode:
             self._await_map = True
             self._await_baseline = self._bev_count
             self._await_t0 = rospy.Time.now()
+            self.thinker.say(_THOUGHT_MAP_WAIT, category="map")
         elif self._await_map and cmd.state != FollowerState.YAW_SETTLE:
             self._await_map = False
+            self.thinker.forget("map")   # so the next stop narrates the same line
 
     def _request_demo_mode(self, mode):
         """Rate-limited, latched DemoMode request with a soft timeout warning."""
@@ -961,6 +1106,9 @@ class WaypointFollowerNode:
             rospy.loginfo("[STATE] %s -> %s", self.state, new)
             self.state = new
             self.t_state = rospy.Time.now()
+            thought = _BRINGUP_THOUGHTS.get(new)
+            if thought is not None:
+                self.thinker.say(thought, category="mission")
 
     def _t_in(self):
         return (rospy.Time.now() - self.t_state).to_sec()
@@ -1146,4 +1294,6 @@ if __name__ == "__main__":
 #       ~startup_hold_sec (3.0) ~startup_delay_sec (1.0)
 #       ~request_repeat_sec (0.5) ~request_timeout_sec (5.0)
 #   logging: ~cmd_log_path (/home/falcon/runs/cmd_log_{ts}.jsonl; empty disables)
+#   narration (inherited from thinking.Thinker): ~thinking (true; false silences
+#       this node's thoughts) ~thinking_topic (/nav/thinking) ~thinking_echo (true)
 # ============================================================================

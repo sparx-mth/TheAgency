@@ -27,6 +27,7 @@ class XtendTwistToCmdNav(Node):
         linear_delta: float,
         timeout_sec: float,
         publish_stop_on_timeout: bool,
+        allow_multi_axes: bool = False,
     ):
         super().__init__("xtend_twist_to_cmd_nav")
 
@@ -39,7 +40,12 @@ class XtendTwistToCmdNav(Node):
 
         self.last_twist_time = 0.0
         self.last_action = None
-        self.allow_multi_axes = False
+        # Vertical (up/down) and lateral (left/right) axes. OFF by default: the
+        # planar nav stack hardwires linear.z = 0 and never crabs, so enabling
+        # them would only widen what a stray Twist can do. Turn it ON for a stack
+        # that genuinely commands a climb -- the lost-localization recovery does,
+        # and without this its climb rungs fall through to "stop" and do nothing.
+        self.allow_multi_axes = bool(allow_multi_axes)
 
         # Planner may publish short zero Twist messages between yaw commands.
         # XTEND commands are hold-style, so do not stop on the first zero Twist.
@@ -57,6 +63,10 @@ class XtendTwistToCmdNav(Node):
         self.get_logger().info(
             f"Defaults: forward={self.forward_value}, turn={self.turn_value}, "
             f"angular_delta={self.angular_delta}, linear_delta={self.linear_delta}"
+        )
+        self.get_logger().info(
+            f"Axes: x/yaw always; up-down + left-right "
+            f"{'ENABLED' if self.allow_multi_axes else 'DISABLED (linear.z -> stop)'}"
         )
 
     def publish_action(self, action: str, value: int = 0):
@@ -162,6 +172,17 @@ def parse_args():
 
     p.add_argument("--timeout-sec", type=float, default=1.5)
     p.add_argument("--no-stop-on-timeout", action="store_true")
+    p.add_argument(
+        "--allow-multi-axes",
+        action="store_true",
+        help="Honour linear.z (up/down) and linear.y (left/right) in addition to "
+             "linear.x and angular.z. Without it linear.z is silently dropped as "
+             "'stop'. Pass it if the stack commands a climb -- the "
+             "lost-localization recovery does. NOTE the sibling in-process "
+             "converter (TwistToCmdNavConverter, used by online_nav_bridge) has "
+             "these axes ON; this standalone script keeps them OFF by default so "
+             "its existing behaviour is unchanged.",
+    )
     return p.parse_args()
 
 
@@ -176,6 +197,7 @@ def main():
         linear_delta=args.linear_delta,
         timeout_sec=args.timeout_sec,
         publish_stop_on_timeout=not args.no_stop_on_timeout,
+        allow_multi_axes=args.allow_multi_axes,
     )
 
     try:

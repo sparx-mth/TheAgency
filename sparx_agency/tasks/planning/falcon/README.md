@@ -45,12 +45,13 @@ falcon/
     │   ├── combination_planner_node.py # nav_mode:=combination — A* global route + NavDP local legs (farthest visible A* waypoint -> NavDP -> fly to midpoint -> re-infer); core.planning.navdp
     │   ├── hybrid_planner_node.py  # nav_mode:=hybrid (DEFAULT) — A* on easy legs, NavDP only for hard turns/doorways (core.planning.replanning.route_difficulty)
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
-    │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal
+    │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal + the drone-thinking log panel
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
     │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common.intrinsic_remap + wall-clock restamp)
     │   ├── object_approach_node.py # detections -> track + visual servo + SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER (core.planning.visual_servo)
     │   ├── target_lock_viewer_node.py # on-screen live target-lock HUD (subscribes the overlay Image)
-    │   └── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
+    │   ├── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
+    │   └── thinking.py             # Thinker: narrate a node's decisions to /nav/thinking (imported, not a node)
     └── launch/
         ├── nav_stack.launch    # shared nav core (Gazebo sim)
         ├── real_drone.launch   # real drone — includes nav_stack.launch + pose/depth bridge
@@ -89,6 +90,53 @@ ROS-free algorithms** they call live in `core/`, each in its own domain:
 `PYTHONPATH=/opt` so `import sparx_agency.core...` resolves; `cloud_utils` is
 imported as a sibling. Adding a node = drop it in `scripts/`, list it in
 `adapter/CMakeLists.txt`, and add its name to the mount loop in `run_falcon.sh`.
+(A helper module the nodes *import* — `cloud_utils`, `pure_pursuit_follower`,
+`thinking` — skips CMakeLists but **must** still be in the `run_falcon.sh` mount
+loop, or every node importing it dies on `ImportError` inside the container.)
+
+## Debugging the drone's thinking
+
+Every nav node narrates its own decisions — why it stopped, which waypoint it is
+flying at, what it is replanning around, which object it is homing on, why it
+gave up — as first-person lines on one shared topic, `/nav/thinking`. The BEV
+viewer opens a **second window, "drone thinking"**, with a rolling log of them —
+separate from the map so the map keeps its whole canvas, and so the log can be
+moved, resized or closed on its own (closing it leaves the map and the drone
+running):
+
+```
+ +12.9s  waypoint_follower   Aligning to waypoint 1/4 (x=-1.20, y=-1.60)
+ +15.6s  waypoint_follower   Flying forward to waypoint 1/4 (x=-1.20, y=-1.60)
+ +21.3s  waypoint_follower   Reached waypoint 1, heading for waypoint 2
+ +24.7s  astar_planner       Replanning: obstacle on the route
+ +28.2s  object_approach     Lost the refrigerator from frame -- searching
+ +31.0s  hybrid_planner      No route from A* and NavDP returned nothing -- I am stuck
+```
+
+Warnings are orange, unresolved decisions red, and a line thought repeatedly
+collapses to `... (x3)` instead of flushing the reasoning that explains it off
+the top. Watch it live without the GUI with
+`rostopic echo /nav/thinking`.
+
+To narrate from a new node:
+
+```python
+from thinking import Thinker
+self.thinker = Thinker("my_node")          # in __init__, after rospy.init_node
+self.thinker.say("Stopping to turn", category="nav")
+```
+
+`say()` is **edge-triggered**: it drops a line whose text has not changed since
+the last call on the same slot, so calling it every control tick emits once per
+decision. That is the whole point — narrate decisions, not telemetry. A line
+whose numbers change every tick defeats the gate and buries the log; that belongs
+in the viewer's HUD. See `scripts/thinking.py` for the full contract
+(`key` slots, `repeat_after_s`, `forget()`), and `core/common/thought_message.py`
+for the wire format.
+
+Knobs: `~thinking:=false` silences one node, `~thinking_echo:=false` stops it
+mirroring to rosout, and on the viewer `~thinking_lines` sets the panel height
+while `~thinking_topic:=''` drops the panel and gives the whole window to the map.
 
 ## Build
 

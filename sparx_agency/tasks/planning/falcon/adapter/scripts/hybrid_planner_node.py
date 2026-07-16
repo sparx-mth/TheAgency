@@ -81,6 +81,7 @@ from sparx_agency.core.planning.navdp import (
 )
 from sparx_agency.core.planning.planners.common.utils_2d import arclength_fraction_2d
 from sparx_agency.core.planning.replanning import assess_route_difficulty
+from thinking import Thinker
 
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -101,6 +102,26 @@ _FINAL = "final"              # the visible goal is the mission goal & close -> 
 _ARRIVED = "arrived"          # NavDP reached the mission goal (rescue) -> hold
 _PENDING = "pending"          # transient/slow failure -> hold and retry
 _ABORTED = "aborted"          # left ENGAGED mid-call -> caller does nothing
+
+# Plain-English rendering of an engage reason (route_difficulty's verdict, or the
+# boxed-A* rescue) for the operator's thinking log: "turn+narrow" is our jargon,
+# not something an operator should have to decode mid-flight.
+_ENGAGE_WHY = {
+    "turn": "Sharp turn ahead",
+    "narrow": "Narrow passage ahead",
+    "turn+narrow": "Sharp turn through a narrow passage ahead",
+    "astar_no_route": "A* has no route",
+}
+
+# Likewise for a return to A*: WHY control came back, keyed by _resume_primary's
+# reason.
+_RESUME_WHY = {
+    "hard part cleared": "The hard part is behind me -- taking back control from "
+                         "NavDP and flying A* again",
+    "final_approach": "NavDP got me close to the goal -- A* flies the final approach",
+    "wait_timeout": "NavDP gave me nothing for too long -- dropping it and flying "
+                    "A* again",
+}
 
 
 def _fmt_dist(d):
@@ -263,6 +284,11 @@ class HybridPlannerNode:
             timeout_s=float(G("~timeout_s", 10.0)),
             depth_max_m=self.depth_max_m,
             logger=rospy.logwarn)
+
+        # Narrates the arbitration to the operator's BEV thinking log. Two slots:
+        # the default "plan" slot tells the A* <-> NavDP switch story; "navdp_health"
+        # tells the independent story of whether NavDP can take the hard part at all.
+        self.thinker = Thinker("hybrid_planner")
 
         # ── Shared state (callbacks write, tick reads) ───────────────
         self.rgb = None
@@ -663,7 +689,15 @@ class HybridPlannerNode:
         # block up to timeout_s, so checking only afterwards would let it overrun).
         if self.hold_t is not None and (rospy.Time.now() - self.hold_t).to_sec() > self.max_wait_s:
             rospy.logwarn("hybrid: waited %.0fs for NavDP -- resuming A*", self.max_wait_s)
+            # The rescue engaged BECAUSE A* was boxed in, so "back to A*" is only a
+            # recovery if A* found a route meanwhile. If it did not and NavDP never
+            # returned a leg either, there is no plan left -- say so rather than let
+            # the resume line imply A* has one. Read before _resume_primary clears it.
+            stuck = self._rescue and not self.astar_ok
             self._resume_primary("wait_timeout")
+            if stuck:
+                self.thinker.say("No route from A* and NavDP returned nothing -- "
+                                 "I am stuck", category="plan", level="error")
             return
         outcome = self._run_inference()
         if outcome == _LEG:
@@ -731,6 +765,13 @@ class HybridPlannerNode:
                       "engaging NavDP", reason, detail)
         self._publish_nav_status("NavDP  (%s)" % reason)
         self.mode = _ENGAGED
+        # Narrate only once the hand-over is real. say() raises on a mislabelled
+        # thought, and narration must never be able to abort a control transition
+        # and strand the arbiter half-engaged.
+        self.thinker.say("%s -- stopping and handing control to NavDP"
+                         % _ENGAGE_WHY.get(reason, reason), category="plan")
+        # NavDP just proved reachable and now has the controls: its health story restarts.
+        self.thinker.forget("navdp_health")
         self._rescue = reason == "astar_no_route"  # aim NavDP at the goal, not an A* wp
         self._engage_pos = ((self.pose_xyyaw[0], self.pose_xyyaw[1])
                             if self.pose_xyyaw is not None else None)
@@ -748,6 +789,8 @@ class HybridPlannerNode:
     def _resume_primary(self, reason):
         """The hard part is behind (or a bounded give-up): hand control back to A*."""
         rospy.loginfo("hybrid: -> A* (%s)", reason)
+        self.thinker.say(_RESUME_WHY.get(reason, "Handing control back to A* (%s)"
+                                         % reason), category="plan")
         self._publish_nav_status("A*")
         self.mode = _PRIMARY
         self._rescue = False
@@ -826,6 +869,9 @@ class HybridPlannerNode:
         if not self._ensure_reset():              # don't stop into a dead NavDP server
             rospy.logwarn_throttle(2.0, "hybrid: difficulty ahead (%s) but NavDP "
                                    "unreachable -- staying on A*", reason)
+            self.thinker.say("%s, but NavDP is unreachable -- staying on A*"
+                             % _ENGAGE_WHY.get(reason, reason), category="plan",
+                             level="error", key="navdp_health", repeat_after_s=5.0)
             self.difficulty_streak = 0
             return
         self._enter_engaged(reason, diff)
@@ -1021,6 +1067,9 @@ if __name__ == "__main__":
 #   camera (MUST match the live NavDP stream; launch wires these to navdp_*):
 #     ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #   NavDP server: ~port (8888) ~timeout_s (10.0) ~depth_max_m (5.0)
+#   narration (inherited from thinking.Thinker): ~thinking (true; false silences the
+#     A* <-> NavDP arbitration story) ~thinking_topic (/nav/thinking) ~thinking_echo
+#     (true; also mirror each thought to rosout)
 #   misc: ~default_altitude (1.0; used until the first pose arrives)
 #
 #   Behaviour: PRIMARY echoes A* on ~path_topic and assesses the route AHEAD each
