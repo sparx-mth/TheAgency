@@ -237,3 +237,4 @@ sparx_agency/tasks/planning/navdp/engines/
 *.pt
 *.pth
 *.weights
+/sparx_agency/theagency_venv/
