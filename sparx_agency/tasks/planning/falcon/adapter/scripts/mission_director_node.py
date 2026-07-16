@@ -78,6 +78,11 @@ class MissionDirectorNode(object):
         self.target_topic = G("~target_topic", "/object_approach/goal")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.enable_topic = G("~enable_topic", "/object_approach/enable")
+        # THE GO GATE (cmd_vel_gate_node). Selecting an object arms the mission, but no
+        # velocity reaches the drone until GO. We only ever publish on an explicit press:
+        # the gate's own ~start_go owns the INITIAL state, so a launch that opens the
+        # gate is not silently slammed shut by this window coming up.
+        self.go_topic = G("~go_topic", "/mission/go")
         self.status_topic = G("~status_topic", "/mission_director/status")
         # Whether the director also arms/gates object_approach's /enable. Leave true so
         # the mission is a single click; set false if some other node owns the enable.
@@ -108,6 +113,9 @@ class MissionDirectorNode(object):
                                           latch=True)
         self.status_pub = rospy.Publisher(self.status_topic, String, queue_size=1,
                                           latch=True)
+        # Latched: the gate picks up a GO pressed before it (re)started.
+        self.go_pub = rospy.Publisher(self.go_topic, Bool, queue_size=1, latch=True)
+        self._go = None                  # None = untouched; the gate's start_go rules
 
         # THE GATE: assert the mission is DISARMED until a selection. A latched False
         # holds object_approach passive even if it was launched start_enabled:=true, and
@@ -179,8 +187,23 @@ class MissionDirectorNode(object):
                          va="center", ha="left", fontsize=11, family="monospace")
         self.ax.set_title(
             "Select the object to fly to  (click a row / press its number 1-9 / r=random)\n"
-            "Nothing flies until you pick. Click another row anytime to change target.",
+            "Nothing flies until you pick AND press GO (g=GO, h=HOLD).",
             fontsize=10)
+
+        # ── GO / HOLD buttons ────────────────────────────────────────
+        # Selecting arms the mission; GO is what actually lets a velocity through the
+        # cmd_vel_gate. Keep them keyboard-reachable too (g / h): the buttons ride the
+        # same matplotlib event path as the row clicks, so if clicks are not being
+        # delivered the keys still work -- as does
+        #     rostopic pub -1 <go_topic> std_msgs/Bool "data: true"
+        from matplotlib.widgets import Button
+        self.fig.subplots_adjust(bottom=0.12 + 0.9 / max(fig_h, 1.0))
+        self._go_button = Button(self.fig.add_axes([0.08, 0.035, 0.18, 0.055]),
+                                 "GO", color="#b7e4c7", hovercolor="#74c69d")
+        self._go_button.on_clicked(lambda _e: self._set_go(True))
+        self._hold_button = Button(self.fig.add_axes([0.28, 0.035, 0.18, 0.055]),
+                                   "HOLD", color="#ffd6d6", hovercolor="#ff9b9b")
+        self._hold_button.on_clicked(lambda _e: self._set_go(False))
         self._highlight = None
         self._status_text = self.fig.text(0.5, 0.012, self._status_line(), ha="center",
                                           va="bottom", fontsize=10, color="0.15")
@@ -206,12 +229,38 @@ class MissionDirectorNode(object):
             return False
         return True
 
+    # ── GO gate ───────────────────────────────────────────────────────
+    def _set_go(self, go):
+        """Open (True) or close (False) the cmd_vel gate. Idempotent."""
+        go = bool(go)
+        if go == self._go:
+            return
+        self._go = go
+        self.go_pub.publish(Bool(data=go))
+        rospy.logwarn("mission_director: %s", "GO -- commands may now reach the drone"
+                      if go else "HOLD -- commands blocked at the gate")
+        self._refresh_status()
+
+    def _go_line(self):
+        if self._go is None:
+            return "GO not pressed (gate holds commands unless the launch opened it)"
+        return "GO: flying" if self._go else "HOLD: commands blocked"
+
     def _status_line(self):
         if self._selected is None:
-            return "NOT ARMED -- click an object to select it and arm the mission"
-        o = self._selected
-        return ("ARMED: hunting '%s', flying to (%.2f, %.2f)   -- click another to change"
-                % (o.label, o.x, o.y))
+            sel = "NOT ARMED -- click an object to select it and arm the mission"
+        else:
+            o = self._selected
+            sel = ("ARMED: hunting '%s', flying to (%.2f, %.2f)   -- click another to change"
+                   % (o.label, o.x, o.y))
+        return "%s   |   %s" % (sel, self._go_line())
+
+    def _refresh_status(self):
+        """Repaint the status caption if the window is up (no-op in random mode)."""
+        text = getattr(self, "_status_text", None)
+        if text is not None:
+            text.set_text(self._status_line())
+            self.fig.canvas.draw_idle()
 
     def _select_row(self, row):
         if not (0 <= row < len(self.catalog)):
@@ -222,8 +271,7 @@ class MissionDirectorNode(object):
             self._highlight.remove()
         self._highlight = self.ax.axhspan(row - 0.5, row + 0.5, color="limegreen",
                                           alpha=0.30, zorder=0)
-        self._status_text.set_text(self._status_line())
-        self.fig.canvas.draw_idle()
+        self._refresh_status()
 
     def _on_click(self, event):
         if event.inaxes != self.ax or event.button != 1 or event.ydata is None:
@@ -231,13 +279,18 @@ class MissionDirectorNode(object):
         self._select_row(int(round(event.ydata)))
 
     def _on_key(self, event):
-        """1-9 select that object; ``r`` picks a random one. The numeric keypad reports
-        ``kp_1`` etc. (backend/NumLock dependent), so strip that prefix."""
+        """1-9 select that object; ``r`` picks a random one; ``g``/``h`` open/close the
+        GO gate. The numeric keypad reports ``kp_1`` etc. (backend/NumLock dependent),
+        so strip that prefix."""
         key = (event.key or "").lower()
         if key.startswith("kp_"):
             key = key[3:]
         if key == "r":
             self._select_row(self._rng.randrange(len(self.catalog)))
+        elif key == "g":
+            self._set_go(True)
+        elif key == "h":
+            self._set_go(False)
         elif key.isdigit() and key != "0":
             self._select_row(int(key) - 1)   # 1-based; >9 objects use click
 

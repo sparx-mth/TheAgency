@@ -275,3 +275,56 @@ def test_bad_selection_mode_raises():
     except ValueError:
         return
     raise AssertionError("expected ValueError for a bad ~selection_mode")
+
+
+# ── The GO gate (the director is the button; the gate is the mechanism) ──────
+def test_startup_publishes_no_go_so_the_launch_owns_the_initial_state():
+    """The gate's ~start_go decides whether commands flow at boot. If the director
+    published a GO/HOLD just by opening, it would override the launch."""
+    node = _make()
+    assert node.go_pub.msgs == []
+    assert node._go is None
+
+
+def test_selecting_an_object_does_not_open_the_gate():
+    """Arming the mission and letting it move are deliberately separate acts."""
+    node = _gui_node()
+    node._on_click(_Event(inaxes=node.ax, button=1, ydata=0.0))
+    assert node.target_pub.last is not None, "selection should still arm"
+    assert node.go_pub.msgs == [], "selection must NOT let commands through"
+
+
+def test_g_key_opens_the_gate():
+    node = _gui_node()
+    node._on_key(_Event(key="g"))
+    assert node.go_pub.last.data is True
+
+
+def test_h_key_closes_the_gate():
+    node = _gui_node()
+    node._on_key(_Event(key="g"))
+    node._on_key(_Event(key="h"))
+    assert node.go_pub.last.data is False
+
+
+def test_go_is_idempotent():
+    node = _gui_node()
+    node._on_key(_Event(key="g"))
+    node._on_key(_Event(key="g"))
+    assert len(node.go_pub.msgs) == 1
+
+
+def test_go_shows_in_the_status_caption():
+    node = _gui_node()
+    node._on_key(_Event(key="g"))
+    assert "GO" in node._status_text.text
+    node._on_key(_Event(key="h"))
+    assert "HOLD" in node._status_text.text
+
+
+def test_go_key_does_not_disturb_the_selection():
+    node = _gui_node()
+    node._on_click(_Event(inaxes=node.ax, button=1, ydata=2.0))
+    label = node.target_pub.last.data
+    node._on_key(_Event(key="g"))
+    assert node.target_pub.last.data == label

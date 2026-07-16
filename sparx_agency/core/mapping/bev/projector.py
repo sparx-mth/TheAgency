@@ -16,6 +16,12 @@ Pipeline (each stage is gated by BevConfig; disable one to isolate it):
                            (ON by default; this rejects the view-dependent
                            monocular speckle that leaks into corridor openings)
   5. wall completion       bridge one-cell gaps in CONFIRMED walls
+  5b. speck removal        drop OCC components that are not wall-like -- no
+                           straight run of >=min_wall_run consecutive cells (and
+                           an optional raw-area gate). A spatial, view-independent
+                           cull of phantoms (a stuck voxel/clump in a turn opening
+                           the drone can never re-observe free to clear); runs
+                           AFTER wall completion so a bridged gapped wall survives
   6. compose               OCC > FREE > UNK, then stamp caller `force_occ` cells
   7. dilate                optional safety inflation (force_occ cells seed it too)
 
@@ -148,6 +154,28 @@ class BevProjector:
             mode=cfg.wall_fill_mode, n_neighbors=cfg.wall_fill_neighbors,
             iters=cfg.wall_fill_iters)
 
+        # 6b) speck removal. A phantom FALCON drops into a turn opening blocks the
+        #    planner but can never be re-observed free to clear it (the drone
+        #    can't route to look at it), so it deadlocks. Cull it SPATIALLY --
+        #    view-independently, no re-observation needed. Two gates, either may
+        #    fire: a linear-run test (a real wall is >=min_wall_run cells in a
+        #    line; a 2x2 clump or L-tromino is not) and a coarser raw-area test.
+        #    Runs AFTER wall completion so a real wall with a one-cell gap is
+        #    bridged into one component and survives, while a genuinely isolated
+        #    phantom (never bridged) stays small/clumpy and is removed.
+        n_speck = 0
+        for enabled, fn, arg in (
+                (cfg.min_wall_run > 1, morph.remove_non_wall_components,
+                 cfg.min_wall_run),
+                (cfg.min_component_cells > 1, morph.remove_small_components,
+                 cfg.min_component_cells)):
+            if enabled and occ.any():
+                kept, n = fn(occ, arg, cfg.component_connectivity)
+                if n and self.last_confidence is not None:
+                    self.last_confidence[occ & ~kept] = 0.0
+                occ = kept
+                n_speck += n
+
         # 7) compose label grid (OCC > FREE > UNK), keep openings free,
         #    then stamp caller-forced obstacles (manual/back walls) as OCC
         grid = np.full((lat.H, lat.W), UNKNOWN, np.int8)
@@ -173,6 +201,7 @@ class BevProjector:
 
         self.last_stats = dict(
             raw=n_raw, confirmed=n_conf, fill=n_fill, pending=n_pending,
+            speck=n_speck,
             occ=int((grid == OCCUPIED).sum()),
             free=int((grid == FREE).sum()),
             unknown=int((grid == UNKNOWN).sum()),

@@ -35,6 +35,13 @@
 
   <!-- ── Transport / topics ─────────────────────────────────────────── -->
   <arg name="drone_ns"          default="" />                 <!-- '' on the real drone -->
+  <!-- Where this node's velocity commands go. DEFAULT: straight at the drone, because
+       this launch is also run standalone (see the header) and there is then no
+       cmd_vel_gate to forward them; a cmd_vel_raw default would leave the drone
+       silently unable to move. The composite launches (object_mission,
+       real_drone_object_approach) DO bring up nav_stack's gate and override this to
+       drone_ns/cmd_vel_raw so the GO gate governs the visual servo too. -->
+  <arg name="cmd_vel_topic"     default="$(arg drone_ns)/cmd_vel" />
   <arg name="image_transport"   default="frame_path" />       <!-- frame_path | topic -->
   <!-- RGB/depth topic names track image_transport: frame_path (String paths off disk,
        real drone) or topic (raw sensor_msgs/Image, sim / bag replay). Mirrors the
@@ -165,6 +172,7 @@
   <node pkg="falcon_adapter" type="object_approach_node.py"
         name="object_approach" output="screen">
     <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="cmd_vel_topic"     value="$(arg cmd_vel_topic)" />
     <param name="image_transport"   value="$(arg image_transport)" />
     <param name="rgb_topic"         value="$(arg rgb_topic)" />
     <param name="depth_topic"       value="$(arg depth_topic)" />

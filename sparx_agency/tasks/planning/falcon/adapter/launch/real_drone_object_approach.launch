@@ -113,6 +113,7 @@
 
   <!-- ══ The object-approach mission (detector + servo + HUD) ═══════── -->
   <include file="$(find falcon_adapter)/launch/object_approach.launch">
+    <arg name="cmd_vel_topic"   value="$(arg drone_ns)/cmd_vel_raw" />
     <arg name="drone_ns"        value="$(arg drone_ns)" />
     <arg name="image_transport" value="$(arg image_transport)" />
     <arg name="target_object"   value="$(arg target_object)" />

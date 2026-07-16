@@ -59,6 +59,24 @@ class BevConfig:
         neighbors_3d: Connectivity 6 | 18 | 26.
         min_occ_neighbors_3d: Min occupied neighbours to survive.
 
+    Speck removal (stage after wall completion; two independent gates):
+        min_wall_run: Drop OCC components with no straight run of this many
+            CONSECUTIVE cells (horizontal, vertical, or either diagonal). A real
+            wall in a BEV is a line; a phantom -- even a compact 2x2 clump (4
+            cells) or an L-tromino -- is not, and is culled while a >=min_wall_run
+            wall segment survives. This is the "is it wall-like?" gate and the
+            preferred speck filter (shape-aware, not fooled by clump area). It
+            removes the stuck phantom SPATIALLY / view-independently, so a cell
+            the drone can never route to and re-observe free is cleared anyway.
+            <=1 disables.
+        min_component_cells: Secondary raw-AREA gate -- drop components with
+            fewer than this many cells total. Coarser than min_wall_run (keeps a
+            2x2 clump, drops a straight 3-run); left off by default. <=1 disables.
+        component_connectivity: 4 or 8 for the labelling; 8 (default) keeps an
+            L-corner as one component so its arms are judged together. Applied to
+            the post-wall-completion mask so a bridged gapped wall is one large
+            component; caller ``force_occ`` walls are stamped later and untouched.
+
     Door / window protection (stage 3):
         protect_openings: Never wall a cell that is open at flight height.
         door_band_m: Z-band around z_peak inspected for openness.
@@ -119,6 +137,11 @@ class BevConfig:
     neighbors_3d: int = 6
     min_occ_neighbors_3d: int = 1
 
+    # speck removal (linear-run gate + secondary area gate)
+    min_wall_run: int = 0
+    min_component_cells: int = 0
+    component_connectivity: int = 8
+
     # door / window protection
     protect_openings: bool = True
     door_band_m: float = 0.60
@@ -161,6 +184,13 @@ class BevConfig:
             raise ValueError(f"neighbors_3d must be one of {_CONN}")
         if self.occ_dilate_cells < 0:
             raise ValueError("occ_dilate_cells must be >= 0")
+        if self.min_wall_run < 0:
+            raise ValueError("min_wall_run must be >= 0")
+        if self.min_component_cells < 0:
+            raise ValueError("min_component_cells must be >= 0")
+        if self.component_connectivity not in (4, 8):
+            raise ValueError("component_connectivity must be 4 or 8, got "
+                             f"{self.component_connectivity}")
         if self.occ_conf_full <= self.occ_weight_thresh:
             raise ValueError(
                 f"occ_conf_full must be > occ_weight_thresh, got "

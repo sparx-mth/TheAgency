@@ -348,7 +348,10 @@ class WaypointFollowerNode:
         self._cmd_vx = self._cmd_wz = 0.0   # last motion twist, repeated if held
 
         # ── Topics ──
-        self.t_cmd_vel = self.drone_ns + "/cmd_vel"
+        # Default is the drone's own topic (unchanged). nav_stack points it at the
+        # cmd_vel_gate's input instead, so the GO gate decides what actually reaches
+        # the drone -- this node keeps publishing exactly as before either way.
+        self.t_cmd_vel = G("~cmd_vel_topic", self.drone_ns + "/cmd_vel")
         self.t_takeoff = self.drone_ns + "/takeoff"
         self.t_pose = self.drone_ns + "/gt_pose"
         self.t_dstate = self.drone_ns + "/state"

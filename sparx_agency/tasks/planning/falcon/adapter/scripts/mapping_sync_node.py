@@ -87,6 +87,34 @@ def _parse_topics(raw, fallback):
     return items or [fallback]
 
 
+def _mask_edge_columns(depth, frac):
+    """Zero the outer ``frac`` fraction of columns on the left AND right.
+
+    The left/right edges of the monocular-depth image are the least reliable
+    (lens distortion + the depth model extrapolating past the well-conditioned
+    centre), and the bad edge pixels project into spurious voxels at the FOV
+    limits. FALCON's depthToPointcloud skips pixels whose depth is exactly 0.0,
+    so zeroing the border columns drops them from the voxel map WITHOUT changing
+    the image dimensions -- the camera intrinsics FALCON reads from rosparam
+    stay valid (a real crop would shift cx and break the projection).
+
+    Args:
+        depth: (H, W) float32 depth image in metres. Mutated in place.
+        frac: Fraction of the width to blank on EACH side, in [0, 0.5).
+    Returns:
+        The same array, for chaining.
+    """
+    if frac <= 0.0:
+        return depth
+    w = depth.shape[1]
+    n = int(round(w * frac))
+    n = min(n, (w - 1) // 2)   # never blank the whole image
+    if n > 0:
+        depth[:, :n] = 0.0
+        depth[:, -n:] = 0.0
+    return depth
+
+
 class _PendingDepth:
     __slots__ = ("stamp", "msg", "wall")
 
@@ -120,6 +148,14 @@ class MappingSyncNode:
                                else "/xtend/depth_m")
         self.depth_topic = G("~depth_topic", default_depth_topic)
         self.depth_frame_id = G("~depth_frame_id", "camera")
+        # Blank the outer fraction of columns on each side of the depth image
+        # before FALCON fuses it: the left/right edges are the least reliable
+        # part of a monocular-depth frame and leak spurious FOV-limit voxels.
+        # 0.05 = drop 5% per side; 0.0 disables. Must be < 0.5.
+        self.edge_mask_frac = float(G("~edge_mask_frac", 0.05))
+        if not 0.0 <= self.edge_mask_frac < 0.5:
+            raise ValueError("~edge_mask_frac must be in [0.0, 0.5), got %r"
+                             % self.edge_mask_frac)
         self.out_pose_topic = G("~out_pose_topic", "/map_ros/pose")
         self.out_depth_topic = G("~out_depth_topic", "/map_ros/depth")
         self.world_frame = G("~world_frame", "world")
@@ -265,6 +301,7 @@ class MappingSyncNode:
             raise ValueError("depth %s has shape %r; expected HxW"
                              % (parsed.path, arr.shape))
         depth = np.ascontiguousarray(arr, dtype=np.float32)
+        _mask_edge_columns(depth, self.edge_mask_frac)
         msg = Image()
         msg.header.stamp = rospy.Time(parsed.sec, parsed.nsec)
         msg.header.frame_id = self.depth_frame_id
@@ -509,6 +546,9 @@ if __name__ == "__main__":
 #       topic -> ~depth_topic (/xtend/depth_m; raw sensor_msgs/Image, sim/bag)
 #       ~depth_frame_id (camera)  ~out_pose_topic (/map_ros/pose)
 #       ~out_depth_topic (/map_ros/depth)  ~world_frame (world)
+#       ~edge_mask_frac (0.05) blank this fraction of columns on EACH side of the
+#         depth image (unreliable monocular edges -> spurious FOV-limit voxels);
+#         zeroed pixels are skipped by FALCON, dims unchanged. 0 = off, must be <0.5
 #   timing: ~sync_tolerance (0.05) ~max_interp_gap (0.12, 0=off)
 #       ~match_hold_sec (0.5) ~pose_buffer_sec (5.0) ~depth_min_dt (0.0, off)
 #   freeze: ~demo_mode_topic (/xtend/demo_mode) ~turning_mode_name (turning)

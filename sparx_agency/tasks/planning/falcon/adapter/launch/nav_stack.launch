@@ -45,6 +45,16 @@
   <arg name="drone_ns" default="/simple_drone" />
   <arg name="gated_ns" default="/gated_drone" />
 
+  <!-- ── The GO gate (cmd_vel_gate_node) ──────────────────────────────
+       Followers publish cmd_vel_raw; ONLY the gate publishes <drone_ns>/cmd_vel.
+       start_go:=false holds every command until GO is published, so the whole stack
+       can run while you take off by hand. Default true = the pre-gate behaviour. -->
+  <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
+  <arg name="go_topic"          default="/mission/go" />
+  <arg name="start_go"          default="true" />
+  <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
+
+
   <!-- v4: input topic overrides. Defaults preserve the v3 sjtu_drone
        layout, so leaving these unset gives identical Gazebo behaviour. -->
   <arg name="pose_topic"
@@ -129,7 +139,7 @@
        drone back onto its trajectory when it drifts sideways (full while advancing,
        weak while turning, small while holding). All hold altitude (vz=0). Switch
        back to the legacy controller with controller:=waypoint. -->
-  <arg name="controller"            default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist -->
+  <arg name="controller"            default="roll_assist" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist -->
 
   <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
        ~mx_* so they never collide with the one-axis params; cruise speed and the
@@ -298,7 +308,7 @@
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
-  <arg name="inflate_radius_m"      default="0.2" />
+  <arg name="inflate_radius_m"      default="0.1" />
   <arg name="unknown_blocked"       default="false" />
   <arg name="unknown_cost"          default="1.0" />
   <arg name="los_smoothing"         default="true" />
@@ -430,7 +440,7 @@
                        -> resume A*. Also rescues a boxed-in A* (hybrid_engage_on_astar_fail,
                        like fallback). Publishes /path/waypoints_hybrid. NavDP up. -->
 <!--   <arg name="nav_mode" default="$(eval 'navdp' if use_navdp else 'combination')" /> -->
-  <arg name="nav_mode" default="hybrid" />
+  <arg name="nav_mode" default="fallback" />
   <!-- vla = navdp | flownav. Selects which VLA policy serves nav_mode:=navdp:
          navdp   = navdp_click_node (point-goal; operator clicks a pixel; NavDP server :navdp_port)
          flownav = flownav_node     (image-goal toward ~flownav_goal_image;  FlowNav server :flownav_port) -->
@@ -647,7 +657,7 @@
   <arg name="bev_occ_dilate"  default="0" />      <!-- extra OCC inflation in cells (planner also inflates) -->
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
-  <arg name="bev_z_floor"           default="1.00" />            <!-- column z-range considered -->
+  <arg name="bev_z_floor"           default="0.70" />            <!-- column z-range considered (wide band: walls reconstruct densely below cruise_z, a thin slice at flight height starves side walls) -->
   <arg name="bev_z_ceil"            default="1.50" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
@@ -661,6 +671,19 @@
   <arg name="bev_confirm_3d"           default="true" />
   <arg name="bev_neighbors_3d"         default="6" />            <!-- 6 | 18 | 26 -->
   <arg name="bev_min_occ_neighbors_3d" default="1" />            <!-- raise (e.g. 2) with conn=26 to kill streaks -->
+
+  <!-- speck removal (after wall completion) — kills a phantom voxel/clump FALCON
+       leaves in a turn opening: it blocks the planner but the drone can never
+       route to it to re-observe it free, so it deadlocks. Culled spatially (no
+       re-look needed) while real walls survive. Two gates, either may fire:
+         min_wall_run:  a wall is a LINE — keep only components with a straight run
+                        of >=N consecutive cells (H/V/diagonal); a 2x2 clump or an
+                        L-tromino is NOT a wall and is dropped. This is the main
+                        gate; matches "min 3 consecutive cells to be an obstacle".
+         min_component_cells: secondary raw-AREA gate (coarser); off by default. -->
+  <arg name="bev_min_wall_run"         default="3" />            <!-- >=3 consecutive cells to count as a wall; 0 = off -->
+  <arg name="bev_min_component_cells"  default="0" />            <!-- area gate, off; set e.g. 4 to also drop small blobs by total cell count -->
+  <arg name="bev_component_connectivity" default="8" />          <!-- 4 | 8; 8 keeps an L-corner one component -->
 
   <!-- door / window protection (stage 3) — never wall an opening that is open at flight height -->
   <arg name="bev_protect_openings"  default="true" />
@@ -772,6 +795,21 @@
        NODES
        ══════════════════════════════════════════════════════════════ -->
 
+  <!-- ══ THE GO GATE ══════════════════════════════════════════════════════════
+       The only node that publishes <drone_ns>/cmd_vel. Every follower publishes
+       cmd_vel_raw instead, so nothing reaches the drone unless this gate is open.
+       start_go defaults TRUE (pass-through, i.e. the behaviour before this node
+       existed); object_mission.launch sets it false to require an explicit GO. -->
+  <node pkg="falcon_adapter" type="cmd_vel_gate_node.py"
+        name="cmd_vel_gate" output="screen">
+    <param name="drone_ns"      value="$(arg drone_ns)" />
+    <param name="in_topic"      value="$(arg cmd_vel_raw_topic)" />
+    <param name="out_topic"     value="$(arg drone_ns)/cmd_vel" />
+    <param name="go_topic"      value="$(arg go_topic)" />
+    <param name="start_go"      value="$(arg start_go)" />
+    <param name="zero_on_close" value="$(arg zero_on_close)" />
+  </node>
+
   <node pkg="falcon_adapter" type="sensor_gate_node.py"
         name="sensor_gate" output="screen">
     <param name="in_ns"              value="$(arg drone_ns)" />
@@ -829,6 +867,10 @@
     <param name="confirm_3d"             value="$(arg bev_confirm_3d)" />
     <param name="neighbors_3d"           value="$(arg bev_neighbors_3d)" />
     <param name="min_occ_neighbors_3d"   value="$(arg bev_min_occ_neighbors_3d)" />
+    <!-- speck removal: linear-run gate (main) + raw-area gate (secondary) -->
+    <param name="min_wall_run"           value="$(arg bev_min_wall_run)" />
+    <param name="min_component_cells"    value="$(arg bev_min_component_cells)" />
+    <param name="component_connectivity" value="$(arg bev_component_connectivity)" />
     <!-- door / window protection -->
     <param name="protect_openings"       value="$(arg bev_protect_openings)" />
     <param name="door_band_m"            value="$(arg bev_door_band_m)" />
@@ -1219,6 +1261,8 @@
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"
         name="waypoint_follower" output="screen">
     <param name="drone_ns"               value="$(arg drone_ns)" />
+    <!-- Publish INTO the GO gate, never straight at the drone. -->
+    <param name="cmd_vel_topic"          value="$(arg cmd_vel_raw_topic)" />
     <param name="vel_x"                  value="$(arg vel_x)" />
     <param name="yaw_rate"               value="$(arg yaw_rate)" />
     <param name="pos_acquisition_radius" value="$(arg pos_acquisition_radius)" />

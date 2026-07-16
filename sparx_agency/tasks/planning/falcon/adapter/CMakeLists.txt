@@ -26,6 +26,7 @@ catkin_install_python(PROGRAMS
   scripts/pose_adapter_node.py
   scripts/sim_adapter_node.py
   scripts/mission_director_node.py
+  scripts/cmd_vel_gate_node.py
   scripts/depth_debug.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

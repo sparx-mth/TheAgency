@@ -67,6 +67,9 @@ class BevPublisherNode:
             confirm_3d=bool(G("~confirm_3d", True)),
             neighbors_3d=int(G("~neighbors_3d", 6)),
             min_occ_neighbors_3d=int(G("~min_occ_neighbors_3d", 1)),
+            min_wall_run=int(G("~min_wall_run", 0)),
+            min_component_cells=int(G("~min_component_cells", 0)),
+            component_connectivity=int(G("~component_connectivity", 8)),
             protect_openings=bool(G("~protect_openings", True)),
             door_band_m=float(G("~door_band_m", 0.60)),
             door_free_voxels=int(G("~door_free_voxels", 2)),
@@ -195,11 +198,12 @@ class BevPublisherNode:
     def _heartbeat(self, _evt):
         st = self.projector.last_stats
         rospy.loginfo("bev hb  in occ=%d free=%d  pub=%d  |  voxels raw=%d conf=%d  "
-                      "|  grid occ=%d free=%d unk=%d open=%d pend=%d fill=%d",
+                      "|  grid occ=%d free=%d unk=%d open=%d pend=%d fill=%d speck=%d",
                       self._hb["occ"], self._hb["free"], self._hb["pub"],
                       st.get("raw", 0), st.get("confirmed", 0), st.get("occ", 0),
                       st.get("free", 0), st.get("unknown", 0),
-                      st.get("openings", 0), st.get("pending", 0), st.get("fill", 0))
+                      st.get("openings", 0), st.get("pending", 0), st.get("fill", 0),
+                      st.get("speck", 0))
         # Loud warning when most occupied points fall outside the BEV bounds
         # (a strong hint the bbox / map_size is wrong for this environment).
         if self._occ.shape[0]:
@@ -274,6 +278,11 @@ if __name__ == "__main__":
 #     ~weight_profile (triangular) ~weight_sigma (.50) ~voxel_size_m (=resolution)
 #   occupancy: ~resolution (.15) ~occ_weight_thresh (1.2) ~occ_conf_full (3.0) ~min_occ_voxels (2) ~min_free_voxels (1)
 #   3D confirm: ~confirm_3d (true) ~neighbors_3d (6) ~min_occ_neighbors_3d (1)
+#   speck removal (kills a phantom in a turn opening the drone can never re-observe
+#     free): ~min_wall_run (0=off) drop OCC components with no straight run of N
+#     consecutive cells (a wall is a line; a 2x2 clump / L-tromino is not);
+#     ~min_component_cells (0=off) secondary raw-area gate; ~component_connectivity
+#     (8) 4|8 for labelling
 #   doors: ~protect_openings (true) ~door_band_m (.60) ~door_free_voxels (2) ~door_occ_tol (0)
 #   walls: ~wall_fill_mode (directional) ~wall_fill_neighbors (5) ~wall_fill_iters (1)
 #   temporal confirm (ON by default): ~temporal_filter (true) ~t_inc (1) ~t_dec (1) ~t_max (5) ~t_on (2) ~t_off (0.5)

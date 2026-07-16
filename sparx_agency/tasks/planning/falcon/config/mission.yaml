@@ -1,0 +1,227 @@
+# ============================================================================
+# mission.yaml -- every parameter run_object_mission.sh needs, in one place.
+#
+# Read on the HOST by config/mission_config.py and fanned out to the three worlds
+# the mission spans: host/docker values, roslaunch <arg> values, and the ROS2
+# detector sidecar's params.
+#
+# Precedence (highest first):
+#   1. the command line   ./run_object_mission.sh hospital random land_range_m:=0
+#   2. an environment var NAV_MODE=hybrid ./run_object_mission.sh
+#   3. THIS FILE
+#   4. the built-in default in run_object_mission.sh / the launch file
+#
+# So a value here is a default you can always override for one run without editing.
+# Comment a key out (or delete it) to fall back to the built-in default.
+#
+# Every key is validated: an unknown key is a hard error with a suggestion, never a
+# silent no-op. Keys under launch: are checked against the <arg> names that
+# adapter/launch/object_mission.launch actually declares.
+#
+# Use a different file for one run:  CONFIG_FILE=/path/to/other.yaml ./run_object_mission.sh
+# ============================================================================
+
+# ── The mission itself ──────────────────────────────────────────────────────
+mission:
+  map: office                 # maps/<map>.yaml -- the FALCON environment
+  selection_mode: gui         # gui = click a row in the object list | random
+  nav_mode: astar             # fallback | hybrid | astar | combination | navdp
+                              #   fallback : A* flies the route, NavDP rescues a boxed-in A*
+                              #   hybrid   : A* on easy legs, NavDP through hard turns/doorways
+                              #   astar    : pure A* (the only mode needing no NavDP server)
+                              #   combination: always-on A*+NavDP fusion
+  seed: -1                    # >=0 makes selection_mode:=random reproducible
+
+# ── YOLO-World detector (the host sidecar) ──────────────────────────────────
+detector:
+  model: x                    # s | m | l | x  (picks yolo_world_<model>.*.engine)
+  weights_dir: /home/user/Downloads     # holds yolov8<model>-worldv2.pt
+  conf_thresh: 0.1            # detection confidence floor; below this a detection
+                              #   is ignored, so the object is never confirmed and
+                              #   the mission lands by A* alone (see land_at_goal)
+  init_target: gun            # placeholder prompt before you select; the director
+                              #   re-prompts the detector with the chosen label
+  # engines_dir: /path/to/engines       # default: yolo_world_trt/engines/<target_tag>
+  # text_weights: /path/to/yolov8x-worldv2.pt   # default: <weights_dir>/yolov8<model>-worldv2.pt
+
+# ── Where the object catalog lives ──────────────────────────────────────────
+paths:
+  # The room mapper writes this on the host; run_falcon.sh bind-mounts the DIRECTORY
+  # into the container at the same path, so host and container agree.
+  objects_dir: /home/user/jetson-containers/data/captures/latest_room_map
+  # objects_file: /path/to/objects.json   # default: <objects_dir>/objects.json
+
+# ── Anything object_mission.launch declares as an <arg> ─────────────────────
+# Free-form passthrough: every key here is forwarded as key:=value. Validated
+# against the launch file, so a typo fails loudly instead of doing nothing.
+launch:
+  # -- Landing --
+  land_range_m: 1.0           # visual land distance (depth). 0 disables the visual
+                              #   land and relies on arrival-land alone
+  land_at_goal: true          # land on reaching the coordinate goal unconfirmed
+  arrive_radius_m: 0.6        # how close to the goal counts as "reached"
+  arrive_land_confirm_ticks: 5
+  land_confirm_ticks: 3
+
+  # -- Detection gate (how sure we must be it IS the object) --
+  min_score: 0.15             # score floor for the object_approach confirmation gate
+  n_confirm: 3                # consecutive hits needed before it counts as confirmed
+
+  # -- Visual servo --
+  target_range_m: 0.8         # hover standoff once locked on
+  lock_mode: detector_tracker
+  closure_mode: multi_axis
+  force_mode: fixed
+
+  # -- Nav --
+  controller: waypoint        # waypoint | multi_axis | pure_pursuit | roll_assist
+                              #   NOTE: real_drone.launch defaults to roll_assist, but the
+                              #   object mission has always pinned waypoint. Set it here.
+  cruise_z: 1.0               # flight altitude (m); the BEV weight peak (bev_z_peak) follows it
+
+  # -- GO gate: nothing reaches the drone until you say so --
+  # false = the whole pipeline runs (BEV, A*, detector, selection) but NOT ONE velocity
+  # command is sent until GO, so you can launch before/while taking off by hand without
+  # the stack fighting you. Press GO (or g) in the director window, or:
+  #   rostopic pub -1 /mission/go std_msgs/Bool "data: true"
+  # Set true to fly as soon as an object is selected, as before the gate existed.
+  start_go: false
+  go_topic: /mission/go
+  zero_on_close: true         # one zero twist when GO->false (a stop, not a hold)
+
+  # -- Windows (all need a display) --
+  viewer: false                # target-lock HUD
+  bev_viewer: true            # interactive BEV window
+  publish_overlay: false
+
+  # -- Localization: must match what actually publishes your world pose --
+  real_pose_topic: /xtend/localization
+  real_pose_type: pose_stamped
+
+  # -- Camera intrinsics: shared by the map AND the detector; keep them in sync --
+  cam_fx: 322.6351083474948
+  cam_fy: 323.3893307141174
+  cam_cx: 242.06479658679714
+  cam_cy: 90.03019076680604
+  cam_width: 504
+  cam_height: 294
+
+  # ══════════════════════════════════════════════════════════════════
+  # Below: the nav-stack parameters (A*, BEV, corrector, APF).
+  # Defaults mirror the launch files exactly -- editing one here changes the
+  # run; commenting it out falls back to the same value. See nav_stack.launch
+  # for the full per-parameter reasoning.
+  # ══════════════════════════════════════════════════════════════════
+
+  # ---- A* planner -- route search, replanning, corner handling (30) ----
+  waypoint_spacing_m:            1.5         
+  inflate_radius_m:              0.1         
+  unknown_blocked:               false       
+  unknown_cost:                  1.0         
+  los_smoothing:                 false       
+  turn_penalty:                  0.3           # was 0.0; discourage zig-zag/staircase corners so the path needs ...
+  heading_penalty_m:             1.5           # HEADING-AWARE A*: cost (in m of extra path) for a route that tur...
+  connectivity:                  4           
+  search_margin_m:               3.0         
+  start_skip_m:                  0.5         
+  goal_snap_radius_m:            2.0         
+  min_free_cells_to_plan:        80            # SMART replanning (event-driven; the default). The committed rout...
+  smart_replan:                  true        
+  replan_corridor_radius_m:      1.0           # route-corridor half-width for the discovery relevance test (m)
+  replan_min_new_cells:          60            # newly-observed corridor cells needed to consider an opportunisti...
+  replan_commit_min_s:           4.0           # keep flying a committed route at least this long before an oppor...
+  replan_improve_frac:           0.15          # adopt a discovery candidate only if it is >= this fraction short...
+  stop_on_blocked_plan_fail:     true          # on a confirmed obstacle with NO route around it, STOP (2-pt hold...
+  replan_collision_confirm:      2             # consecutive colliding BEV frames before a collision replan (debo...
+  plan_period_s:                 10.0          # Optional LEGACY mid-cycle replans: OFF so the trajectory stays f...
+  replan_on_collision:           false       
+  replan_on_bev:                 false         # Corner rounding: merge near-collinear vertices + chamfer moderat...
+  corner_round:                  false       
+  corner_merge_deg:              8.0           # drop interior vertices that turn less than this
+  corner_max_turn_deg:           14.0          # corners gentler than this are already glide-able (pair with skip...
+  corner_chamfer_max_deg:        28.0          # corners up to this are chamfered; sharper ones kept as genuine t...
+  corner_chamfer_dist_m:         0.5         
+  corner_min_runup_m:            0.6           # Dynamics-aware replan: replan when the follower's PREDICTED stop...
+  replan_on_predicted_collision: false       
+  max_predicted_replans:         3             # APF safety recentring: recentre the planner's raw path off walls...
+
+  # ---- BEV map -- the occupancy grid A* searches (39) ----
+  bev_resolution:             0.10          # m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1)....
+  bev_xmin:                   -6.0        
+  bev_ymin:                   -6.0        
+  bev_xmax:                   6.0         
+  bev_ymax:                   6.0         
+  bev_bbox_margin:            1.0           # only used if the bbox_* args are removed (bounds then come from ...
+  bev_publish_hz:             10.0          # was 2.0; caps the recompute+publish rate
+  bev_occ_dilate:             0             # extra OCC inflation in cells (planner also inflates)
+  bev_z_floor:                0.70          # column z-range considered (wide band: walls reconstruct densely ...
+  bev_z_ceil:                 1.50        
+  # bev_z_peak:                              # follows cruise_z (set cruise_z in mission: instead)
+  bev_weight_profile:         triangular    # triangular | gaussian | flat
+  bev_weight_sigma:           0.50          # gaussian width (profile=gaussian)
+  # bev_voxel_size:                          # follows bev_resolution
+  bev_occ_weight_thresh:      2.0           # min weighted column mass for OCC
+  bev_min_occ_voxels:         4             # AND min raw voxel count for OCC
+  bev_min_free_voxels:        1             # min voxels for a cell to read FREE
+  bev_confirm_3d:             true        
+  bev_neighbors_3d:           6             # 6 | 18 | 26
+  bev_min_occ_neighbors_3d:   1             # raise (e.g. 2) with conn=26 to kill streaks
+  bev_min_wall_run:           3             # >=3 consecutive cells to count as a wall; 0 = off
+  bev_min_component_cells:    0             # area gate, off; set e.g. 4 to also drop small blobs by total cel...
+  bev_component_connectivity: 8             # 4 | 8; 8 keeps an L-corner one component
+  bev_protect_openings:       true        
+  bev_door_band_m:            0.80          # z-band around z_peak inspected for openness
+  bev_door_free_voxels:       2             # free voxels in the band => it's an opening
+  bev_door_occ_tol:           0             # max occupied voxels tolerated in the band
+  bev_wall_fill_mode:         directional   # off | directional | count
+  bev_wall_fill_neighbors:    5             # count mode only
+  bev_wall_fill_iters:        1             # max bridge width; keep small (1-2)
+  bev_temporal_filter:        true        
+  bev_occ_conf_full:          3.0           # weighted column mass = full per-frame confidence; per-frame conf...
+  bev_t_inc:                  1.0           # evidence added per cloud, scaled by confidence
+  bev_t_dec:                  1.0           # evidence bled per cloud a cell is seen FREE (opening recovery)
+  bev_t_max:                  5.0           # evidence cap (memory of a confirmed wall)
+  bev_t_on:                   2.0           # evidence to confirm OCC; ~t_on/t_inc clouds of solid wall (~0.6s...
+  bev_t_off:                  0.5           # evidence to clear (Schmitt lower rail)
+  bev_always_recompute:       false         # recompute every tick vs only on a new cloud
+  bev_skip_unchanged_publish: true          # FALCON speed / safety / frontier
+
+  # ---- Path corrector / ESDF / simplifier (22) ----
+  corrector:                    potential_field  # core PathCorrector strategy: potential_field | esdf (raises on a...
+  esdf_target_clearance_m:      0.2           # 0 = centre on the ESDF ridge (corridor middle); >0 = stop once t...
+  esdf_max_total_shift_m:       0.5           # cap on a waypoint's total displacement off the planner path
+  esdf_max_step_m:              0.2           # cap on one ascent step
+  esdf_iterations:              12            # max ascent steps per waypoint
+  esdf_lateral_only:            true          # push perpendicular to the path (no fore/aft slide)
+  esdf_smooth_sigma_m:          0.1           # light blur on the distance field for a clean gradient (0 = none)
+  esdf_occ_thresh:              0.65          # Thin a dense input path to >= this spacing (m) BEFORE correcting...
+  resample_min_spacing_m:       0.3           # ══════════════════════════════════════════════════════════════ T...
+  simplify_debug:               true          # per-cycle in->out waypoint-count logging
+  simplify_merge:               true        
+  simplify_merge_radius_m:      0.20          # 2) flatten field-induced zig-zags: a middle point whose heading ...
+  simplify_zigzag:              true        
+  simplify_zigzag_angle_deg:    60.0        
+  simplify_zigzag_strength:     0.5         
+  simplify_zigzag_passes:       1             # 3) drop redundant collinear middles ("same plane"), but never cr...
+  simplify_collinear:           true        
+  simplify_collinear_angle_deg: 10.0          # heading change below this = same plane
+  simplify_max_segment_m:       3.0           # 4) min spacing on the straights = the SOFT FLOOR: thin straights...
+  simplify_min_spacing:         true        
+  simplify_min_spacing_m:       1.0         
+  simplify_turn_keep_deg:       25.0          # Takeoff & cruise
+
+  # ---- APF / safety correction -- pushes waypoints off walls (14) ----
+  safety_correct:            true        
+  apf_centering:             line_search   # line_search: move each waypoint to the lateral potential minimum...
+  apf_gain:                  0.5           # DESCENT MODE ONLY: repulsive-force scaling factor (line_search i...
+  apf_max_total_shift_m:     0.5           # hard cap on per-waypoint displacement; the main "visible shift" ...
+  apf_min_clearance_m:       0.2           # >0 also pushes waypoints to a min distance-to-wall
+  apf_debug:                 true          # TEMP: per-waypoint orig/push/new logging each plan cycle
+  apf_collision_recheck:     true          # revert to raw A* if the corrected path collides under inflation;...
+  apf_treat_unknown_as_free: true          # recentre waypoints over UNKNOWN cells too (pushed only by known ...
+  apf_unknown_damping:       true          # dampen the correction near unknown cells (no opposing wall to ba...
+  apf_unknown_radius_m:      0.5           # confidence-window radius (m): known-cell fraction within this of...
+  publish_forces:            true          # publish F_rep=-grad U_rep at each waypoint as a visualization_ms...
+  force_arrow_scale:         0.5           # arrow length = scale * |F_rep|; raise for longer/clearer arrows
+  publish_force_field:       true          # also draw a coarse F_rep field over the free cells (gold), showi...
+  force_field_stride:        4             # field arrow spacing in cells (4 = every 0.4m at 0.1m res); large...

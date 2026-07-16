@@ -30,7 +30,7 @@
     host, see run_object_mission.sh / the README):
 
       roslaunch falcon_adapter object_mission.launch \
-          map_name:=office selection_mode:=gui nav_mode:=hybrid
+          map_name:=office selection_mode:=gui nav_mode:=fallback
 
     NOTE: start from a fresh roscore (run_falcon.sh's ephemeral container gives one) so a
     stale latched /waypoint_nav/goal from a previous run cannot pre-arm the planners.
@@ -45,11 +45,14 @@
        real_pose_topic:=/xtend/april_tag_pose for AprilTag localization. -->
   <arg name="real_pose_topic" default="/xtend/localization" />
   <arg name="real_pose_type"  default="pose_stamped" />     <!-- pose_stamped | pose -->
-  <!-- A*+NavDP by default (hybrid: A* on easy legs, NavDP on hard turns/doorways).
-       nav_mode:=astar for pure A*; combination for the always-on A*+NavDP fusion. -->
-  <arg name="nav_mode"        default="hybrid" />
+  <!-- fallback by default, matching real_drone.launch: A* flies the route and NavDP
+       rescues only a boxed-in A*. nav_mode:=hybrid hands NavDP the hard turns/doorways;
+       astar is pure A*; combination is the always-on A*+NavDP fusion.
+       hybrid / combination / fallback all need the NavDP server up. -->
+  <arg name="nav_mode"        default="fallback" />
   <arg name="use_navdp"       default="false" />
   <arg name="controller"      default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist -->
+  <arg name="cruise_z"        default="1.0" />       <!-- flight altitude; bev_z_peak follows it -->
 
   <!-- Camera intrinsics (raw K; shared by the map AND the detector). -->
   <arg name="cam_fx"          default="322.6351083474948" />
@@ -58,6 +61,18 @@
   <arg name="cam_cy"          default="90.03019076680604" />
   <arg name="cam_width"       default="504" />
   <arg name="cam_height"      default="294" />
+
+  <!-- ── The GO gate ──────────────────────────────────────────────────
+       start_go:=false means the WHOLE pipeline runs (BEV, A*, detector, director,
+       even object selection) but NOT ONE velocity command reaches the drone until
+       GO. That is what lets you launch before/while taking off by hand without the
+       stack fighting you. Press GO in the director window, or:
+         rostopic pub -1 /mission/go std_msgs/Bool "data: true"
+       Set start_go:=true to fly immediately, as before this gate existed. -->
+  <arg name="start_go"        default="false" />
+  <arg name="go_topic"        default="/mission/go" />
+  <arg name="zero_on_close"   default="true" />  <!-- one zero twist on GO to false -->
+  <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
 
   <!-- ── Mission director (object selection) ──────────────────────── -->
   <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
@@ -88,7 +103,244 @@
   <arg name="publish_overlay" default="true" />
 
   <!-- ══ Nav stack, GATED: no initial goal (goal_x/goal_y empty -> planners idle). ══ -->
+  <!-- ══ A* planner (route search + replanning) ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="waypoint_spacing_m"            default="1.5" />
+  <arg name="inflate_radius_m"              default="0.1" />
+  <arg name="unknown_blocked"               default="false" />
+  <arg name="unknown_cost"                  default="1.0" />
+  <arg name="los_smoothing"                 default="false" />
+  <arg name="turn_penalty"                  default="0.3" />
+  <arg name="heading_penalty_m"             default="1.5" />
+  <arg name="connectivity"                  default="4" />
+  <arg name="search_margin_m"               default="3.0" />
+  <arg name="start_skip_m"                  default="0.5" />
+  <arg name="goal_snap_radius_m"            default="2.0" />
+  <arg name="min_free_cells_to_plan"        default="80" />
+  <arg name="smart_replan"                  default="true" />
+  <arg name="replan_corridor_radius_m"      default="1.0" />
+  <arg name="replan_min_new_cells"          default="60" />
+  <arg name="replan_commit_min_s"           default="4.0" />
+  <arg name="replan_improve_frac"           default="0.15" />
+  <arg name="stop_on_blocked_plan_fail"     default="true" />
+  <arg name="replan_collision_confirm"      default="2" />
+  <arg name="plan_period_s"                 default="10.0" />
+  <arg name="replan_on_collision"           default="false" />
+  <arg name="replan_on_bev"                 default="false" />
+  <arg name="corner_round"                  default="false" />
+  <arg name="corner_merge_deg"              default="8.0" />
+  <arg name="corner_max_turn_deg"           default="14.0" />
+  <arg name="corner_chamfer_max_deg"        default="28.0" />
+  <arg name="corner_chamfer_dist_m"         default="0.5" />
+  <arg name="corner_min_runup_m"            default="0.6" />
+  <arg name="replan_on_predicted_collision" default="false" />
+  <arg name="max_predicted_replans"         default="3" />
+
+  <!-- ══ BEV map (occupancy the planner searches) ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="bev_resolution"             default="0.10" />
+  <arg name="bev_xmin"                   default="-6.0" />
+  <arg name="bev_ymin"                   default="-6.0" />
+  <arg name="bev_xmax"                   default="6.0" />
+  <arg name="bev_ymax"                   default="6.0" />
+  <arg name="bev_bbox_margin"            default="1.0" />
+  <arg name="bev_publish_hz"             default="10.0" />
+  <arg name="bev_occ_dilate"             default="0" />
+  <arg name="bev_z_floor"                default="0.70" />
+  <arg name="bev_z_ceil"                 default="1.50" />
+  <arg name="bev_z_peak"                 default="$(arg cruise_z)" />
+  <arg name="bev_weight_profile"         default="triangular" />
+  <arg name="bev_weight_sigma"           default="0.50" />
+  <arg name="bev_voxel_size"             default="$(arg bev_resolution)" />
+  <arg name="bev_occ_weight_thresh"      default="2.0" />
+  <arg name="bev_min_occ_voxels"         default="4" />
+  <arg name="bev_min_free_voxels"        default="1" />
+  <arg name="bev_confirm_3d"             default="true" />
+  <arg name="bev_neighbors_3d"           default="6" />
+  <arg name="bev_min_occ_neighbors_3d"   default="1" />
+  <arg name="bev_min_wall_run"           default="3" />
+  <arg name="bev_min_component_cells"    default="0" />
+  <arg name="bev_component_connectivity" default="8" />
+  <arg name="bev_protect_openings"       default="true" />
+  <arg name="bev_door_band_m"            default="0.80" />
+  <arg name="bev_door_free_voxels"       default="2" />
+  <arg name="bev_door_occ_tol"           default="0" />
+  <arg name="bev_wall_fill_mode"         default="directional" />
+  <arg name="bev_wall_fill_neighbors"    default="5" />
+  <arg name="bev_wall_fill_iters"        default="1" />
+  <arg name="bev_temporal_filter"        default="true" />
+  <arg name="bev_occ_conf_full"          default="3.0" />
+  <arg name="bev_t_inc"                  default="1.0" />
+  <arg name="bev_t_dec"                  default="1.0" />
+  <arg name="bev_t_max"                  default="5.0" />
+  <arg name="bev_t_on"                   default="2.0" />
+  <arg name="bev_t_off"                  default="0.5" />
+  <arg name="bev_always_recompute"       default="false" />
+  <arg name="bev_skip_unchanged_publish" default="true" />
+
+  <!-- ══ Path corrector / ESDF / simplifier ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="corrector"                    default="potential_field" />
+  <arg name="esdf_target_clearance_m"      default="0.2" />
+  <arg name="esdf_max_total_shift_m"       default="0.5" />
+  <arg name="esdf_max_step_m"              default="0.2" />
+  <arg name="esdf_iterations"              default="12" />
+  <arg name="esdf_lateral_only"            default="true" />
+  <arg name="esdf_smooth_sigma_m"          default="0.1" />
+  <arg name="esdf_occ_thresh"              default="0.65" />
+  <arg name="resample_min_spacing_m"       default="0.3" />
+  <arg name="simplify_debug"               default="true" />
+  <arg name="simplify_merge"               default="true" />
+  <arg name="simplify_merge_radius_m"      default="0.20" />
+  <arg name="simplify_zigzag"              default="true" />
+  <arg name="simplify_zigzag_angle_deg"    default="60.0" />
+  <arg name="simplify_zigzag_strength"     default="0.5" />
+  <arg name="simplify_zigzag_passes"       default="1" />
+  <arg name="simplify_collinear"           default="true" />
+  <arg name="simplify_collinear_angle_deg" default="10.0" />
+  <arg name="simplify_max_segment_m"       default="3.0" />
+  <arg name="simplify_min_spacing"         default="true" />
+  <arg name="simplify_min_spacing_m"       default="1.0" />
+  <arg name="simplify_turn_keep_deg"       default="25.0" />
+
+  <!-- ══ APF / safety correction ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="safety_correct"            default="true" />
+  <arg name="apf_centering"             default="line_search" />
+  <arg name="apf_gain"                  default="0.5" />
+  <arg name="apf_max_total_shift_m"     default="0.5" />
+  <arg name="apf_min_clearance_m"       default="0.2" />
+  <arg name="apf_debug"                 default="true" />
+  <arg name="apf_collision_recheck"     default="true" />
+  <arg name="apf_treat_unknown_as_free" default="true" />
+  <arg name="apf_unknown_damping"       default="true" />
+  <arg name="apf_unknown_radius_m"      default="0.5" />
+  <arg name="publish_forces"            default="true" />
+  <arg name="force_arrow_scale"         default="0.5" />
+  <arg name="publish_force_field"       default="true" />
+  <arg name="force_field_stride"        default="4" />
+
   <include file="$(find falcon_adapter)/launch/real_drone.launch">
+    <!-- GO gate: hold every command until GO (see start_go above). -->
+    <arg name="start_go"          value="$(arg start_go)" />
+    <arg name="go_topic"          value="$(arg go_topic)" />
+    <arg name="zero_on_close"     value="$(arg zero_on_close)" />
+    <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
+    <arg name="cruise_z"        value="$(arg cruise_z)" />
+    <!-- A* planner (route search + replanning) -->
+    <arg name="waypoint_spacing_m"            value="$(arg waypoint_spacing_m)" />
+    <arg name="inflate_radius_m"              value="$(arg inflate_radius_m)" />
+    <arg name="unknown_blocked"               value="$(arg unknown_blocked)" />
+    <arg name="unknown_cost"                  value="$(arg unknown_cost)" />
+    <arg name="los_smoothing"                 value="$(arg los_smoothing)" />
+    <arg name="turn_penalty"                  value="$(arg turn_penalty)" />
+    <arg name="heading_penalty_m"             value="$(arg heading_penalty_m)" />
+    <arg name="connectivity"                  value="$(arg connectivity)" />
+    <arg name="search_margin_m"               value="$(arg search_margin_m)" />
+    <arg name="start_skip_m"                  value="$(arg start_skip_m)" />
+    <arg name="goal_snap_radius_m"            value="$(arg goal_snap_radius_m)" />
+    <arg name="min_free_cells_to_plan"        value="$(arg min_free_cells_to_plan)" />
+    <arg name="smart_replan"                  value="$(arg smart_replan)" />
+    <arg name="replan_corridor_radius_m"      value="$(arg replan_corridor_radius_m)" />
+    <arg name="replan_min_new_cells"          value="$(arg replan_min_new_cells)" />
+    <arg name="replan_commit_min_s"           value="$(arg replan_commit_min_s)" />
+    <arg name="replan_improve_frac"           value="$(arg replan_improve_frac)" />
+    <arg name="stop_on_blocked_plan_fail"     value="$(arg stop_on_blocked_plan_fail)" />
+    <arg name="replan_collision_confirm"      value="$(arg replan_collision_confirm)" />
+    <arg name="plan_period_s"                 value="$(arg plan_period_s)" />
+    <arg name="replan_on_collision"           value="$(arg replan_on_collision)" />
+    <arg name="replan_on_bev"                 value="$(arg replan_on_bev)" />
+    <arg name="corner_round"                  value="$(arg corner_round)" />
+    <arg name="corner_merge_deg"              value="$(arg corner_merge_deg)" />
+    <arg name="corner_max_turn_deg"           value="$(arg corner_max_turn_deg)" />
+    <arg name="corner_chamfer_max_deg"        value="$(arg corner_chamfer_max_deg)" />
+    <arg name="corner_chamfer_dist_m"         value="$(arg corner_chamfer_dist_m)" />
+    <arg name="corner_min_runup_m"            value="$(arg corner_min_runup_m)" />
+    <arg name="replan_on_predicted_collision" value="$(arg replan_on_predicted_collision)" />
+    <arg name="max_predicted_replans"         value="$(arg max_predicted_replans)" />
+    <!-- BEV map (occupancy the planner searches) -->
+    <arg name="bev_resolution"             value="$(arg bev_resolution)" />
+    <arg name="bev_xmin"                   value="$(arg bev_xmin)" />
+    <arg name="bev_ymin"                   value="$(arg bev_ymin)" />
+    <arg name="bev_xmax"                   value="$(arg bev_xmax)" />
+    <arg name="bev_ymax"                   value="$(arg bev_ymax)" />
+    <arg name="bev_bbox_margin"            value="$(arg bev_bbox_margin)" />
+    <arg name="bev_publish_hz"             value="$(arg bev_publish_hz)" />
+    <arg name="bev_occ_dilate"             value="$(arg bev_occ_dilate)" />
+    <arg name="bev_z_floor"                value="$(arg bev_z_floor)" />
+    <arg name="bev_z_ceil"                 value="$(arg bev_z_ceil)" />
+    <arg name="bev_z_peak"                 value="$(arg bev_z_peak)" />
+    <arg name="bev_weight_profile"         value="$(arg bev_weight_profile)" />
+    <arg name="bev_weight_sigma"           value="$(arg bev_weight_sigma)" />
+    <arg name="bev_voxel_size"             value="$(arg bev_voxel_size)" />
+    <arg name="bev_occ_weight_thresh"      value="$(arg bev_occ_weight_thresh)" />
+    <arg name="bev_min_occ_voxels"         value="$(arg bev_min_occ_voxels)" />
+    <arg name="bev_min_free_voxels"        value="$(arg bev_min_free_voxels)" />
+    <arg name="bev_confirm_3d"             value="$(arg bev_confirm_3d)" />
+    <arg name="bev_neighbors_3d"           value="$(arg bev_neighbors_3d)" />
+    <arg name="bev_min_occ_neighbors_3d"   value="$(arg bev_min_occ_neighbors_3d)" />
+    <arg name="bev_min_wall_run"           value="$(arg bev_min_wall_run)" />
+    <arg name="bev_min_component_cells"    value="$(arg bev_min_component_cells)" />
+    <arg name="bev_component_connectivity" value="$(arg bev_component_connectivity)" />
+    <arg name="bev_protect_openings"       value="$(arg bev_protect_openings)" />
+    <arg name="bev_door_band_m"            value="$(arg bev_door_band_m)" />
+    <arg name="bev_door_free_voxels"       value="$(arg bev_door_free_voxels)" />
+    <arg name="bev_door_occ_tol"           value="$(arg bev_door_occ_tol)" />
+    <arg name="bev_wall_fill_mode"         value="$(arg bev_wall_fill_mode)" />
+    <arg name="bev_wall_fill_neighbors"    value="$(arg bev_wall_fill_neighbors)" />
+    <arg name="bev_wall_fill_iters"        value="$(arg bev_wall_fill_iters)" />
+    <arg name="bev_temporal_filter"        value="$(arg bev_temporal_filter)" />
+    <arg name="bev_occ_conf_full"          value="$(arg bev_occ_conf_full)" />
+    <arg name="bev_t_inc"                  value="$(arg bev_t_inc)" />
+    <arg name="bev_t_dec"                  value="$(arg bev_t_dec)" />
+    <arg name="bev_t_max"                  value="$(arg bev_t_max)" />
+    <arg name="bev_t_on"                   value="$(arg bev_t_on)" />
+    <arg name="bev_t_off"                  value="$(arg bev_t_off)" />
+    <arg name="bev_always_recompute"       value="$(arg bev_always_recompute)" />
+    <arg name="bev_skip_unchanged_publish" value="$(arg bev_skip_unchanged_publish)" />
+    <!-- Path corrector / ESDF / simplifier -->
+    <arg name="corrector"                    value="$(arg corrector)" />
+    <arg name="esdf_target_clearance_m"      value="$(arg esdf_target_clearance_m)" />
+    <arg name="esdf_max_total_shift_m"       value="$(arg esdf_max_total_shift_m)" />
+    <arg name="esdf_max_step_m"              value="$(arg esdf_max_step_m)" />
+    <arg name="esdf_iterations"              value="$(arg esdf_iterations)" />
+    <arg name="esdf_lateral_only"            value="$(arg esdf_lateral_only)" />
+    <arg name="esdf_smooth_sigma_m"          value="$(arg esdf_smooth_sigma_m)" />
+    <arg name="esdf_occ_thresh"              value="$(arg esdf_occ_thresh)" />
+    <arg name="resample_min_spacing_m"       value="$(arg resample_min_spacing_m)" />
+    <arg name="simplify_debug"               value="$(arg simplify_debug)" />
+    <arg name="simplify_merge"               value="$(arg simplify_merge)" />
+    <arg name="simplify_merge_radius_m"      value="$(arg simplify_merge_radius_m)" />
+    <arg name="simplify_zigzag"              value="$(arg simplify_zigzag)" />
+    <arg name="simplify_zigzag_angle_deg"    value="$(arg simplify_zigzag_angle_deg)" />
+    <arg name="simplify_zigzag_strength"     value="$(arg simplify_zigzag_strength)" />
+    <arg name="simplify_zigzag_passes"       value="$(arg simplify_zigzag_passes)" />
+    <arg name="simplify_collinear"           value="$(arg simplify_collinear)" />
+    <arg name="simplify_collinear_angle_deg" value="$(arg simplify_collinear_angle_deg)" />
+    <arg name="simplify_max_segment_m"       value="$(arg simplify_max_segment_m)" />
+    <arg name="simplify_min_spacing"         value="$(arg simplify_min_spacing)" />
+    <arg name="simplify_min_spacing_m"       value="$(arg simplify_min_spacing_m)" />
+    <arg name="simplify_turn_keep_deg"       value="$(arg simplify_turn_keep_deg)" />
+    <!-- APF / safety correction -->
+    <arg name="safety_correct"            value="$(arg safety_correct)" />
+    <arg name="apf_centering"             value="$(arg apf_centering)" />
+    <arg name="apf_gain"                  value="$(arg apf_gain)" />
+    <arg name="apf_max_total_shift_m"     value="$(arg apf_max_total_shift_m)" />
+    <arg name="apf_min_clearance_m"       value="$(arg apf_min_clearance_m)" />
+    <arg name="apf_debug"                 value="$(arg apf_debug)" />
+    <arg name="apf_collision_recheck"     value="$(arg apf_collision_recheck)" />
+    <arg name="apf_treat_unknown_as_free" value="$(arg apf_treat_unknown_as_free)" />
+    <arg name="apf_unknown_damping"       value="$(arg apf_unknown_damping)" />
+    <arg name="apf_unknown_radius_m"      value="$(arg apf_unknown_radius_m)" />
+    <arg name="publish_forces"            value="$(arg publish_forces)" />
+    <arg name="force_arrow_scale"         value="$(arg force_arrow_scale)" />
+    <arg name="publish_force_field"       value="$(arg publish_force_field)" />
+    <arg name="force_field_stride"        value="$(arg force_field_stride)" />
+
     <arg name="map_name"        value="$(arg map_name)" />
     <arg name="drone_ns"        value="$(arg drone_ns)" />
     <arg name="image_transport" value="$(arg image_transport)" />
@@ -111,6 +363,8 @@
 
   <!-- ══ Object-approach mission, DISABLED at start (armed by the director). ══════ -->
   <include file="$(find falcon_adapter)/launch/object_approach.launch">
+    <!-- Route the visual servo INTO the gate too, not straight at the drone. -->
+    <arg name="cmd_vel_topic"   value="$(arg cmd_vel_raw_topic)" />
     <arg name="drone_ns"        value="$(arg drone_ns)" />
     <arg name="image_transport" value="$(arg image_transport)" />
     <!-- Arrival detection (arrival-land) must read the SAME localization as the nav

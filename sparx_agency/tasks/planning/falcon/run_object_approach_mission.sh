@@ -64,7 +64,7 @@ MODEL="${MODEL:-s}"
 PYTHON="${PYTHON:-python3}"
 
 # ── Locate the GPU engines + text weights (fail loudly if missing) ──
-TARGET_TAG="$(PYTHONPATH="$REPO_ROOT" "$PYTHON" -c \
+TARGET_TAG="$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
   "from sparx_agency.tasks.mapping.yolo_world_trt.hardware import detect; print(detect().target_tag)" \
   2>/dev/null || echo orin_sm87)"
 ENGINES_DIR="${ENGINES_DIR:-$HERE/../../mapping/yolo_world_trt/engines/$TARGET_TAG}"
@@ -119,7 +119,10 @@ trap cleanup EXIT INT TERM
 echo "[mission] 1/3 starting the YOLO-World detector sidecar (host, GPU) ..."
 # ROS setup scripts reference unbound vars / return nonzero -- guard set -e/-u.
 set +u +e; source /opt/ros/humble/setup.bash; set -u -e   # shellcheck disable=SC1091
-PYTHONPATH="$REPO_ROOT" "$PYTHON" \
+# PREPEND, never assign: the setup.bash above puts ROS's site-packages (rclpy et al)
+# on PYTHONPATH, and a bare PYTHONPATH="$REPO_ROOT" prefix would drop it -- the node
+# then dies on `import rclpy` even though the venv is fine.
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" \
   "$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py" \
   --ros-args \
     -p target_object:="$TARGET" \

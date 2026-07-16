@@ -80,6 +80,15 @@ echo "[INFO] FALCON env: ${ENV_NAME}  (config: ${SCRIPT_DIR}/maps/${ENV_NAME}.ya
 # aren't found. Harmless if they were already executable.
 chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
 
+# ── X display ─────────────────────────────────────────────────
+# RViz and the mission director's object-list window are X clients inside the
+# container, so DISPLAY must be set. Over a bare `ssh jetson` (no -X) it is unset,
+# and an empty --env DISPLAY= makes every GUI die on "cannot open display". Default
+# to the Jetson's local screen; an existing DISPLAY (e.g. ssh -X, or a desktop
+# session) is respected. Export so xhost below and the docker --env both see it.
+export DISPLAY="${DISPLAY:-:0}"
+echo "[INFO] DISPLAY: ${DISPLAY}"
+
 xhost +local:docker 2>/dev/null || true
 
 # ── sparx_agency repo (ROS-free algorithms used by the nodes) ──
@@ -102,7 +111,7 @@ echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sp
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else
@@ -141,6 +150,26 @@ for d in ${XTEND_FRAME_DIRS}; do
   fi
 done
 
+# ── Object catalog directory (the room map's objects.json) ────
+# The mission director runs INSIDE this container but the catalog is written on
+# the HOST by the room mapper, so its dir is bind-mounted at the SAME path for
+# the default objects_file to resolve (same trick as the frame dirs above).
+# We mount the DIRECTORY, not the file: a bind-mounted file pins one inode, so a
+# re-run of the mapper -- which REPLACES objects.json -- would leave the container
+# reading the stale catalog. Mounting the dir keeps it live.
+# Unlike the frame dirs we do NOT mkdir -p: an empty dir would mask a missing map
+# and the director would fly to nothing. Override with OBJECTS_DIR.
+OBJECTS_DIR="${OBJECTS_DIR:-/home/user/jetson-containers/data/captures/latest_room_map}"
+OBJECTS_MOUNT=()
+if [ -d "${OBJECTS_DIR}" ]; then
+  OBJECTS_MOUNT=( --volume "${OBJECTS_DIR}:${OBJECTS_DIR}:ro" )
+  echo "[INFO] Object catalog dir mounted (ro): ${OBJECTS_DIR}"
+else
+  echo "[WARN] Object catalog dir not found: ${OBJECTS_DIR}"
+  echo "[WARN]   Only matters for the object mission (mission_director)."
+  echo "[WARN]   Set OBJECTS_DIR=<host dir holding objects.json> to relocate it."
+fi
+
 # docker.sock is only needed when respawn_drone.py is in play
 # (sim-only). On Jetson it's harmless to mount but pointless.
 DOCKER_SOCK_MOUNT=()
@@ -164,6 +193,7 @@ docker run -it --rm \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
+    "${OBJECTS_MOUNT[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
     --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     --network host \

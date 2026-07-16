@@ -1,0 +1,133 @@
+"""The config -> launch -> node contract: nothing set in mission.yaml may be dropped.
+
+The mission's args funnel down three launch layers, each of which re-declares and
+forwards a subset by hand::
+
+    object_mission.launch  ->  real_drone.launch  ->  nav_stack.launch
+                           ->  object_approach.launch
+
+A parameter that is declared but never forwarded is the dangerous case: roslaunch
+accepts it, the config validates, and the value is silently ignored -- the node keeps
+its own default and the drone flies differently than the file says. These tests fail
+instead.
+
+Locked in here:
+  * every key of mission.yaml's ``launch:`` section is declared by object_mission.launch
+    AND actually used by it (forwarded to an include, or set as a node param);
+  * for keys that ultimately belong to nav_stack (the A* / BEV / corrector / APF ones),
+    the WHOLE chain forwards them, layer by layer;
+  * a forwarded arg is always declared by the layer it is forwarded to;
+  * object_mission's default matches the layer below, so the config's documented
+    default is the one that actually applies.
+
+Note the layers legitimately DISAGREE with each other: real_drone.launch deliberately
+overrides some of nav_stack's defaults (los_smoothing, connectivity, the ESDF/APF shift
+limits) because the real drone wants different values. So drift is asserted against the
+NEAREST layer below, never against nav_stack directly.
+"""
+import pathlib
+import re
+import sys
+
+import pytest
+
+_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[1]
+_LAUNCH_DIR = _CONFIG_DIR.parent / "adapter" / "launch"
+_OM = _LAUNCH_DIR / "object_mission.launch"
+_RD = _LAUNCH_DIR / "real_drone.launch"
+_NS = _LAUNCH_DIR / "nav_stack.launch"
+_SHIPPED = _CONFIG_DIR / "mission.yaml"
+
+sys.path.insert(0, str(_CONFIG_DIR))
+import mission_config as mc  # noqa: E402
+
+
+def _declared(path):
+    """name -> default, first declaration winning (as roslaunch resolves it)."""
+    out = {}
+    for m in re.finditer(r'<arg name="([a-z_0-9]+)"\s+default="([^"]*)"', path.read_text()):
+        out.setdefault(m.group(1), m.group(2))
+    return out
+
+
+def _forwarded(path, child):
+    """The arg names ``path`` passes into its ``<include>`` of ``child``."""
+    body = re.search(r'<include file="[^"]*%s".*?</include>' % child,
+                     path.read_text(), re.S)
+    return set(re.findall(r'<arg name="([a-z_0-9]+)"\s+value=', body.group(0))) if body else set()
+
+
+def _config_launch_keys():
+    _, args = mc.load(_SHIPPED, _OM)
+    return [a.split(":=")[0] for a in args]
+
+
+OM_DECL = _declared(_OM)
+RD_DECL = _declared(_RD)
+NS_DECL = _declared(_NS)
+OM_TO_RD = _forwarded(_OM, "real_drone.launch")
+RD_TO_NS = _forwarded(_RD, "nav_stack.launch")
+
+
+@pytest.mark.parametrize("key", _config_launch_keys())
+def test_every_config_key_is_declared_by_the_mission_launch(key):
+    assert key in OM_DECL, "%s is in mission.yaml but object_mission.launch declares no such arg" % key
+
+
+@pytest.mark.parametrize("key", _config_launch_keys())
+def test_every_config_key_is_actually_used(key):
+    """Declared but never referenced == silently ignored. That is the bug this catches."""
+    uses = len(re.findall(r"\$\(arg %s\)" % re.escape(key), _OM.read_text()))
+    assert uses > 0, "%s is declared but never used by object_mission.launch (value would be dropped)" % key
+
+
+@pytest.mark.parametrize("key", [k for k in _config_launch_keys() if k in NS_DECL])
+def test_nav_stack_keys_are_forwarded_the_whole_way_down(key):
+    assert key in OM_TO_RD, "%s never reaches real_drone.launch" % key
+    assert key in RD_DECL, "real_drone.launch does not declare %s" % key
+    assert key in RD_TO_NS, "%s never reaches nav_stack.launch" % key
+
+
+#: object_mission args that deliberately differ from real_drone's default, and why.
+#: Anything NOT listed here must agree, so a default cannot drift in unnoticed.
+INTENTIONAL_OVERRIDES = {
+    # real_drone.launch made roll_assist its default in 16983c9, AFTER object_mission.launch
+    # was written (a936611) pinning waypoint -- so the object mission does NOT pick up the
+    # roll_assist default. Left as-is pending a decision; mission.yaml exposes `controller`,
+    # so a run can select either. Remove this entry if the object mission should follow
+    # real_drone's default instead.
+    "controller": "predates real_drone's roll_assist default; see mission.yaml",
+    # THE POINT of the GO gate: the object mission holds every command until GO, while
+    # real_drone (and every launch that predates the gate) stays open so nothing that
+    # used to fly silently stops flying.
+    "start_go": "object mission requires an explicit GO; real_drone stays open",
+}
+
+
+@pytest.mark.parametrize("key", [k for k in _config_launch_keys() if k in NS_DECL])
+def test_mission_default_matches_the_layer_below(key):
+    """object_mission's default must equal real_drone's, so mission.yaml documents the
+    value that actually applies. Compared against the NEAREST layer: real_drone
+    intentionally overrides some of nav_stack's defaults."""
+    if key in INTENTIONAL_OVERRIDES:
+        pytest.skip("deliberate override: %s" % INTENTIONAL_OVERRIDES[key])
+    assert OM_DECL[key] == RD_DECL[key], (
+        "%s default drifted: object_mission=%r real_drone=%r"
+        % (key, OM_DECL[key], RD_DECL[key]))
+
+
+def test_forwarded_args_are_declared_by_the_child():
+    """A forward to an arg the child never declares is dead wiring."""
+    for name in sorted(OM_TO_RD):
+        assert name in RD_DECL, "object_mission forwards %s, real_drone declares no such arg" % name
+    for name in sorted(RD_TO_NS):
+        assert name in NS_DECL, "real_drone forwards %s, nav_stack declares no such arg" % name
+
+
+def test_the_gate_is_not_forwarded_away():
+    """goal_x/goal_y must stay pinned empty: that gate is what stops the drone flying
+    before an object is selected."""
+    text = _OM.read_text()
+    assert re.search(r'<arg name="goal_x"\s+value="" />', text)
+    assert re.search(r'<arg name="goal_y"\s+value="" />', text)
+    assert "goal_x" not in _config_launch_keys(), "mission.yaml must not set goal_x"

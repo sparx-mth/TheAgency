@@ -29,6 +29,11 @@ tags:
     rpy: [-1.5708, 0, -3.1416]
     size: 0.28
 
+# on the wall
+  7:
+    xyz: [ 1.95, -0.92, 1.245 ]
+    rpy: [-1.5708,  0, 1.5708]
+    size: 0.195
 
 #  inside MAMAD, in front of mamad's door facing the window
   6:

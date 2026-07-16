@@ -444,7 +444,10 @@ class ObjectApproachNode(object):
         self._entered_visual_approach = False
 
         # ── ROS I/O (publishers before subscribers) ──────────────────
-        self.cmd_pub = rospy.Publisher(self.drone_ns + "/cmd_vel", Twist, queue_size=1)
+        # Default is the drone's own topic (unchanged); object_approach.launch points it
+        # at the cmd_vel_gate's input so the GO gate governs the visual servo too.
+        self.cmd_vel_topic = str(G("~cmd_vel_topic", self.drone_ns + "/cmd_vel"))
+        self.cmd_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
         self.demo_req_pub = rospy.Publisher(self.demo_mode_request_topic, String,
                                             queue_size=1, latch=True)
         self.status_pub = rospy.Publisher(self.status_topic, String, queue_size=1)
