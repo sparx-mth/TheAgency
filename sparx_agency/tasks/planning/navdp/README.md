@@ -29,6 +29,28 @@ to the engines' precision.
   torch / onnx / tensorrt / the external NavDP repo; **dev/host only**, never
   imported by `core`.
 
+### Which checkout to run from (the workspace differs per machine)
+
+`engines/` is **gitignored build output** — a fresh clone never contains it, and
+the engines only exist in the checkout they were built in. That checkout is *not*
+the same path on every machine:
+
+| Machine | Run NavDP from | Note |
+|---|---|---|
+| **AGX Orin** (`user-agx1`) | `~/agency_ws` | the workspace holding the built `orin_sm87` engines |
+| **x86 dev box** | `~/GIT/TheAgency` | builds/runs the `nvidiageforcertx_sm120` engines |
+
+The Orin also has a plain `~/GIT/TheAgency` clone with an **empty `engines/`**.
+Running the server from there is the usual cause of:
+
+```
+[fatal] .../engines/orin_sm87 has no selected.json; run the benchmark to choose a precision first.
+```
+
+That message means "this checkout was never built", **not** that your build is
+broken — `cd ~/agency_ws` first. (The Orin's `agency` shell helper cds there for
+you.) The commands below use the right path for each machine.
+
 ## Two-stage build (engines are SM + TensorRT-build locked → build per device)
 
 The exported ONNX is portable; the built `.engine` is **not** (it deserializes
@@ -185,7 +207,7 @@ conda activate navdp
 export NAVDP_REPO=~/GIT/NavDP/baselines/navdp
 export CKPT=$NAVDP_REPO/checkpoints/best.pth
 export ENGINES=sparx_agency/tasks/planning/navdp/engines
-cd ~/GIT/TheAgency && export PYTHONPATH=$PWD
+cd ~/agency_ws && export PYTHONPATH=$PWD    # AGX workspace, NOT ~/GIT/TheAgency
 
 sudo nvpmodel -m <15W_id> && sudo nvpmodel -q          # 15W; do NOT run jetson_clocks
 
@@ -305,7 +327,7 @@ matches where you're running — engines are **not** portable across devices.
 # --- AGX Orin (the Jetson at the office) -------------------------------------
 # Run in MAXN + jetson_clocks, the same power mode the engines were built in.
 export NAVDP_REPO=~/GIT/NavDP/baselines/navdp/
-cd ~/GIT/TheAgency
+cd ~/agency_ws          # the checkout with the built engines, NOT ~/GIT/TheAgency
 PYTHONPATH=$PWD python \
     -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
     --engine-dir sparx_agency/tasks/planning/navdp/engines/orin_sm87 \
