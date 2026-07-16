@@ -40,7 +40,7 @@ tags:
 
 #  inside MAMAD, in front of mamad's door facing the window
   6:
-    xyz: [-0.25, -1.01, 1.35]
+    xyz: [-0.245, -1.01, 1.35]
     rpy: [ -1.5708, 0, 0 ]
     size: 0.2
 
