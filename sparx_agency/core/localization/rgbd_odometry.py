@@ -15,12 +15,16 @@ def _pinhole_from_yaml(camera_yaml: str, w: int, h: int) -> o3d.camera.PinholeCa
         data = yaml.safe_load(f)
     yaml_w = int(data["image_width"])
     yaml_h = int(data["image_height"])
-    if "projection_matrix" in data:
-        P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
-        fx, fy, cx, cy = P[0, 0], P[1, 1], P[0, 2], P[1, 2]
-    elif "camera_matrix" in data:
+    # Prefer camera_matrix (raw/distorted-image K) over projection_matrix (P):
+    # the RGB/depth frames fed into odometry are never undistorted, so P — valid
+    # only post-rectification — is the wrong K and can introduce a real fx/fy
+    # anisotropy (see run_room_mapper.py::_load_depth_K for the same fix).
+    if "camera_matrix" in data:
         K = np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
         fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    elif "projection_matrix" in data:
+        P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
+        fx, fy, cx, cy = P[0, 0], P[1, 1], P[0, 2], P[1, 2]
     else:
         fx, fy = float(data["fx"]), float(data["fy"])
         cx, cy = float(data["cx"]), float(data["cy"])

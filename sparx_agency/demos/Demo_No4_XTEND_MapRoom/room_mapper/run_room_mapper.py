@@ -49,12 +49,21 @@ _TRAJ_SMOOTH_WIN = 3      # rolling-average window for trajectory smoothing
 
 
 def _load_depth_K(calib_path: str) -> np.ndarray:
+    """Load the intrinsics matrix used to backproject depth pixels into world points.
+
+    Prefers camera_matrix (the raw/distorted-image K) over projection_matrix (P):
+    depth is inferred directly on the raw distorted frame (DA3 never undistorts
+    it), so P — valid only after rectification — is the wrong K here. Using P
+    introduced a real ~12% fx/fy anisotropy on this rig's calib, which combined
+    with per-frame yaw rotation to shear an actually-rectangular room into a
+    parallelogram once frames from different viewing angles were merged.
+    """
     with open(calib_path) as f:
         data = yaml.safe_load(f)
-    if "projection_matrix" in data:
-        P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
-        return P[:3, :3]
-    return np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
+    if "camera_matrix" in data:
+        return np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
+    P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
+    return P[:3, :3]
 
 
 def _parse_args() -> argparse.Namespace:
