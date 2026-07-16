@@ -28,13 +28,13 @@ runtime:
   # ~linear cut of the 71% denoise budget (rough end-to-end):
   #   10 -> 1.00x (baseline)   5 -> ~1.55x   4 -> ~1.74x   2 -> ~2.5x
   # NOTE: values < 10 REQUIRE sampler: ddim (DDPM cannot skip timesteps).
-  num_inference_steps: 10        # try 4 (with sampler: ddim); 10 = bit-faithful baseline
+  num_inference_steps: 4        # try 4 (with sampler: ddim); 10 = bit-faithful baseline
 
   # Sampler used to run `num_inference_steps`:
   #   ddpm : trained default; MUST use 10 steps (stochastic, bit-faithful).
   #   ddim : deterministic; subsamples the 10 trained timesteps -> allows < 10. [implemented]
   #   dpm  : DPM-Solver (fewer steps per quality) -- NOT yet implemented; use ddim.
-  sampler: ddpm                  # ddpm | ddim
+  sampler: ddim                  # ddpm | ddim
 
   # Startup safety gate (LIVE): when enabled, the server compares the configured
   # reduced-step sampler to the 10-step DDPM gold BEFORE serving and REFUSES to
