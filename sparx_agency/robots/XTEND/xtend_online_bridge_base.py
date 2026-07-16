@@ -15,7 +15,10 @@ from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
 import websockets
 
-from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import TwistToCmdNavConverter
+from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import (
+    AxesCommand,
+    TwistToCmdNavConverter,
+)
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
 from sparx_agency.core.common.spatial_math import yaw_to_quaternion
 
@@ -25,6 +28,20 @@ _FLIGHT_OPS = frozenset({"arm", "takeoff", "land", "disarm"})
 
 def clamp_axis(value: int, limit: int = 1000) -> int:
     return max(-limit, min(limit, int(value)))
+
+
+def _axes_command_dict(cmd: AxesCommand) -> dict[str, Any]:
+    """Wrap a combined AxesCommand for the cmd_queue. Distinct from the
+    single-axis {"action": "forward"/"turn_left"/..., "value": ...} shape used
+    by the discrete /xtend/cmd_nav JSON path (dome_main's timed rotation
+    chunks, arm/takeoff/land) — that path is untouched by this."""
+    return {
+        "action": "set_axes",
+        "forward": cmd.forward,
+        "lateral": cmd.lateral,
+        "vertical": cmd.vertical,
+        "yaw": cmd.yaw,
+    }
 
 
 class OnlineXtendBridgeBase(ControllerAutomation):
@@ -463,6 +480,34 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                 elif action == "stop":
                     self.stop_motion(reason="stop")
 
+                elif action == "set_axes":
+                    # Combined command from the Twist/cmd_vel planner path: all
+                    # four axes can be nonzero together (e.g. forward + yaw),
+                    # matching how the XTEND handheld controller is actually
+                    # flown — a free wrist angle blends pitch/roll/yaw already.
+                    forward = clamp_axis(int(command.get("forward", 0)))
+                    lateral = clamp_axis(int(command.get("lateral", 0)))
+                    vertical = clamp_axis(int(command.get("vertical", 0)))
+                    yaw = clamp_axis(int(command.get("yaw", 0)))
+                    axes_desc = AxesCommand(
+                        forward=forward, lateral=lateral, vertical=vertical, yaw=yaw,
+                    ).describe()
+                    if forward == 0 and lateral == 0 and vertical == 0 and yaw == 0:
+                        self.ros_node.get_logger().debug("[bridge] set_axes: stop")
+                        self.stop_motion(reason="twist_zero")
+                    else:
+                        self.ros_node.get_logger().debug(
+                            f"[bridge] set_axes: {axes_desc} "
+                            f"(f={forward} l={lateral} v={vertical} y={yaw})"
+                        )
+                        self.start_action_timer(
+                            f"set_axes_f{forward}_l{lateral}_v{vertical}_y{yaw}"
+                        )
+                        self.set_axes(
+                            lateral=lateral, vertical=vertical,
+                            forward=forward, yaw=yaw,
+                        )
+
                 elif action == "forward":
                     self.hold_forward(thrust)
 
@@ -499,18 +544,15 @@ class OnlineXtendBridgeBase(ControllerAutomation):
     def _twist_cb(self, msg: Twist) -> None:
         if self._flight_op_active:
             return
-        result = self._twist_converter.process(
+        cmd = self._twist_converter.process(
             msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z
         )
-        if result is None:
+        if cmd is None:
             return
-        action, value = result
         if self.loop is None:
             self.ros_node.get_logger().warn("Async loop not ready; dropping Twist command")
             return
-        self.loop.call_soon_threadsafe(
-            self.cmd_queue.put_nowait, {"action": action, "value": value}
-        )
+        self.loop.call_soon_threadsafe(self.cmd_queue.put_nowait, _axes_command_dict(cmd))
 
     async def _twist_watchdog_loop(self):
         try:
@@ -518,10 +560,9 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                 await asyncio.sleep(0.05)
                 if self._flight_op_active:
                     continue
-                result = self._twist_converter.check_timeout()
-                if result is not None:
-                    action, value = result
-                    await self.cmd_queue.put({"action": action, "value": value})
+                cmd = self._twist_converter.check_timeout()
+                if cmd is not None:
+                    await self.cmd_queue.put(_axes_command_dict(cmd))
         except asyncio.CancelledError:
             pass
 
