@@ -84,6 +84,9 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
         self.cmd_topic = cmd_topic
         self.cmd_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # Flight ops (arm/takeoff/land/disarm) go here instead, so they are
+        # never stuck waiting behind a backlog of movement commands.
+        self.priority_cmd_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.loop: asyncio.AbstractEventLoop | None = None
 
         self.ros_node = rclpy.create_node("xtend_online_bridge")
@@ -134,6 +137,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         self.z = None
 
         self._flight_op_active: bool = False
+        self._active_flight_op: str | None = None
 
         self.active_action: str | None = None
         self.active_action_start_t: float | None = None
@@ -177,7 +181,22 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                 self.ros_node.get_logger().warn("Async loop is not ready yet; dropping command")
                 return
             action = data.get("action", "")
-            if self._flight_op_active and action not in _FLIGHT_OPS:
+
+            if action in _FLIGHT_OPS:
+                if self._flight_op_active and action == self._active_flight_op:
+                    # Same flight op already running (e.g. a second "land"
+                    # press) — coalesce instead of queuing a duplicate full
+                    # cycle behind it. A *different* flight op (e.g. "disarm"
+                    # sent while "land" is running) is still let through, as
+                    # an emergency override.
+                    self.ros_node.get_logger().info(
+                        f"[bridge] {action!r} already in progress — dropping duplicate request"
+                    )
+                    return
+                self.loop.call_soon_threadsafe(self.priority_cmd_queue.put_nowait, data)
+                return
+
+            if self._flight_op_active:
                 self.ros_node.get_logger().info(
                     f"[bridge] flight op active — dropping cmd_nav action={action!r}"
                 )
@@ -436,11 +455,26 @@ class OnlineXtendBridgeBase(ControllerAutomation):
     async def handle_custom_command(self, command: dict[str, Any]) -> bool:
         return False
 
+    async def _get_next_command(self) -> tuple[asyncio.Queue, dict[str, Any]]:
+        """Drain priority_cmd_queue (arm/takeoff/land/disarm) ahead of
+        cmd_queue, so a flight op is never stuck waiting behind a backlog
+        of movement commands from the Twist/cmd_vel planner path."""
+        while True:
+            try:
+                return self.priority_cmd_queue, self.priority_cmd_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                cmd = await asyncio.wait_for(self.cmd_queue.get(), timeout=0.02)
+                return self.cmd_queue, cmd
+            except asyncio.TimeoutError:
+                continue
+
     async def dynamic_executor(self):
         print(f"ONLINE MODE: hold-style commands from {self.cmd_topic}")
 
         while True:
-            command = await self.cmd_queue.get()
+            queue, command = await self._get_next_command()
             action = command.get("action")
             thrust = int(command.get("thrust", command.get("value", 400)))
 
@@ -449,33 +483,56 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             try:
                 if action == "arm":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         await self.timed_async_action("arm", self.arm_robot())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "disarm":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         self.stop_motion(reason="disarm")
                         await self.timed_async_action("disarm", self.disarm_robot())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "takeoff":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         await self.timed_async_action("takeoff", self.takeoff())
+                    except Exception as exc:
+                        # Don't leave the drone armed in an unknown state
+                        # after a failed takeoff attempt — disarm instead.
+                        self.ros_node.get_logger().error(
+                            f"[bridge] takeoff failed: {exc!r} — auto-disarming"
+                        )
+                        self._active_flight_op = "disarm"
+                        self.stop_motion(reason="disarm")
+                        await self.timed_async_action("disarm", self.disarm_robot())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "land":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         self.stop_motion(reason="land")
                         await self.timed_async_action("land", self.land())
+                        # Auto-disarm once landed — avoids needing a manual
+                        # disarm fallback if a follow-up command reaches the
+                        # drone before it's explicitly disarmed.
+                        self._active_flight_op = "disarm"
+                        self.stop_motion(reason="disarm")
+                        await self.timed_async_action("disarm", self.disarm_robot())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "stop":
                     self.stop_motion(reason="stop")
@@ -539,7 +596,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                     print(f"[cmd] Unknown action: {action}")
 
             finally:
-                self.cmd_queue.task_done()
+                queue.task_done()
 
     def _twist_cb(self, msg: Twist) -> None:
         if self._flight_op_active:
