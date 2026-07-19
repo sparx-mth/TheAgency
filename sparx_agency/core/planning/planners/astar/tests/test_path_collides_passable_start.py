@@ -41,11 +41,11 @@ def test_passable_start_exempts_only_the_drone_cell():
     data[15, 5] = 100
     g = _grid(data)
     planner = WeightedAStarPlanner2D(WeightedAStarParams(inflate_radius_m=0.3))
-    _, occ = planner.cost_for(g)
+    _, lethal, _ = planner.cost_for(g)
     # Drone at a cell that is inflated (within 0.3m of the wall) but not the wall.
     drone = Pose2D(0.65, 1.55)  # ~2 cells right of the wall -> in the skirt
     dsx, dsy = g.world_to_grid(drone.x, drone.y)
-    assert occ[dsy, dsx], "test setup: drone cell should be inflated"
+    assert lethal[dsy, dsx], "test setup: drone cell should be inflated"
     # A short path forward that stays clear of the wall's inflation ahead.
     path = [drone, Pose2D(2.5, 1.55)]
     assert planner.path_collides(g, path), "without exemption the skirt reads blocked"

@@ -5,10 +5,20 @@ This is the ROS-free core behind the FALCON ``astar_planner`` node. It turns a
 clean, corner-preserving set of world waypoints by composing the reusable core
 primitives:
 
-    occupancy --build_cost_grid--> float cost map (inflation + UNKNOWN weight)
-              --astar_cost_grid_2d--> grid cell path (bbox-restricted, octile)
-              --los_smooth_cells----> any-angle corners
+    occupancy --build_cost_grid------> cost + lethal mask + clearance field
+              --astar_cost_grid_2d---> grid cell path (bbox-restricted, octile)
+              --simplify_path_cells--> fewer waypoints, same centred shape
               --split_long_segments_2d--> spaced world waypoints
+
+Cost-map construction (inflation, clearance shaping, confidence-weighted
+lethality) is a separate responsibility and lives in :mod:`.cost_grid_2d`; it is
+re-exported here so ``from ...weighted_planner_2d import build_cost_grid`` keeps
+working.
+
+The path is thinned with Douglas-Peucker rather than string-pulled. String-
+pulling makes a route taut, which would drag a clearance-centred path straight
+back onto the wall it was just pushed off; DP only deletes points that are
+near-collinear with their kept neighbours, so the centring survives.
 
 The planner is stateful only to cache the cost map per input grid (keyed on
 object identity), so a plan followed by a collision re-check on the same grid
@@ -27,14 +37,23 @@ from sparx_agency.core.planning.interfaces.planner import PlanRequest
 
 from .params import WeightedAStarParams
 from .algorithm_2d import astar_cost_grid_2d
+from .cost_grid_2d import (
+    CostFields,
+    assemble_cost_grid,
+    build_collision_mask,
+    build_cost_fields,
+    build_cost_grid,
+    split_by_confidence,
+)
 from ..common.corner_rounding_2d import round_corners_2d
 from ..common.grid_geometry_2d import (
-    dilate_mask,
     line_of_sight_clear,
-    los_smooth_cells,
+    simplify_path_cells,
     snap_to_free_cell,
 )
 from ..common.utils_2d import split_long_segments_2d
+
+__all__ = ["WeightedAStarPlanner2D", "build_cost_grid"]
 
 
 def _yaw_to_move(yaw: float) -> Tuple[int, int]:
@@ -49,33 +68,6 @@ def _yaw_to_move(yaw: float) -> Tuple[int, int]:
     return int(round(cos(q))), int(round(sin(q)))
 
 
-def build_cost_grid(
-    grid: OccupancyGrid2D, params: WeightedAStarParams
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Build the float cost map and inflated occupancy mask from a grid.
-
-    Args:
-        grid: Source occupancy grid (uses ``grid.values`` for OCC/UNKNOWN).
-        params: Weighting / inflation parameters.
-
-    Returns:
-        ``(cost, occ)`` where ``cost`` is an ``(H, W)`` float array
-        (1.0 free, ``inf`` blocked, ``unknown_cost`` for traversable UNKNOWN)
-        and ``occ`` is the inflated boolean obstacle mask used for LOS checks.
-    """
-    data = grid.grid
-    occ = data == grid.values.occupied
-    n = max(0, int(round(params.inflate_radius_m / grid.resolution)))
-    if n > 0:
-        occ = dilate_mask(occ, n)
-
-    cost = np.ones(data.shape, dtype=np.float64)
-    cost[occ] = np.inf
-    unk = (data == grid.values.unknown) & ~occ
-    cost[unk] = np.inf if params.unknown_blocked else float(params.unknown_cost)
-    return cost, occ
-
-
 class WeightedAStarPlanner2D:
     """Weighted, bbox-restricted A* with line-of-sight smoothing.
 
@@ -87,33 +79,203 @@ class WeightedAStarPlanner2D:
 
     def __init__(self, params: Optional[WeightedAStarParams] = None) -> None:
         self.params = params or WeightedAStarParams()
+        self._confidence: Optional[np.ndarray] = None
+        # Standoff the last successful plan was flown at. Collision detection must
+        # test the route against the radius it was PLANNED at: checking a relaxed
+        # route against the preferred radius would report a collision every frame.
+        self._last_inflate_m: float = self.params.inflate_radius_m
         self._cache_grid: Optional[OccupancyGrid2D] = None
+        self._cache_fields: Optional[CostFields] = None
         self._cache_cost: Optional[np.ndarray] = None
-        self._cache_occ: Optional[np.ndarray] = None
+        self._cache_lethal: Optional[np.ndarray] = None
+        self._cache_collision: Optional[np.ndarray] = None
+        self._cache_collision_grid: Optional[OccupancyGrid2D] = None
+        self._cache_collision_radius: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Cost cache (keyed on grid object identity)
     # ------------------------------------------------------------------
-    def cost_for(self, grid: OccupancyGrid2D) -> Tuple[np.ndarray, np.ndarray]:
-        """Return ``(cost, occ)`` for ``grid``, rebuilding only when it changes."""
-        if self._cache_grid is not grid or self._cache_cost is None:
-            self._cache_cost, self._cache_occ = build_cost_grid(grid, self.params)
+    def set_confidence(self, confidence: Optional[np.ndarray]) -> None:
+        """Install the per-cell OCCUPIED confidence grid and drop the cache.
+
+        Feeds ``params.lethal_confidence``: an OCCUPIED cell below that
+        confidence is costly rather than blocking, so single-frame depth speckle
+        cannot make the map infeasible. Pass None to go back to treating every
+        OCCUPIED cell as a confirmed obstacle.
+
+        Args:
+            confidence: ``(H, W)`` array in ``[0, 1]`` co-registered with the
+                grids subsequently passed to :meth:`plan`, or None.
+        """
+        self._confidence = confidence
+        self.invalidate_cache()
+
+    def fields_for(self, grid: OccupancyGrid2D) -> CostFields:
+        """Cached distance transforms for ``grid`` (independent of the standoff)."""
+        if self._cache_grid is not grid or self._cache_fields is None:
+            self._cache_fields = build_cost_fields(grid, self.params, self._confidence)
+            self._cache_cost = None
+            self._cache_lethal = None
             self._cache_grid = grid
-        return self._cache_cost, self._cache_occ
+        return self._cache_fields
+
+    def cost_for(
+        self, grid: OccupancyGrid2D
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(cost, lethal, clearance)`` at the PREFERRED standoff, cached."""
+        fields = self.fields_for(grid)
+        if self._cache_cost is None:
+            self._cache_cost, self._cache_lethal = assemble_cost_grid(
+                fields, self.params, self.params.inflate_radius_m)
+        return self._cache_cost, self._cache_lethal, fields.clearance
+
+    @property
+    def last_inflate_m(self) -> float:
+        """Standoff the most recent successful :meth:`plan` achieved (meters)."""
+        return self._last_inflate_m
+
+    def collision_mask_for(self, grid: OccupancyGrid2D) -> np.ndarray:
+        """Strict lethal mask for collision DETECTION, cached on its own.
+
+        Differs from the planning mask in two deliberate ways. It ignores
+        ``params.lethal_confidence``, so an unconfirmed cell stays *passable to
+        the search* (depth speckle cannot make the map infeasible) while
+        remaining *visible to detection*, leaving the caller's own confirm and
+        ceiling gates to decide whether to act. And it tests against
+        :attr:`last_inflate_m` rather than the preferred radius, so a route that
+        was deliberately squeezed through a pinch is judged by the standoff it
+        was actually planned at.
+
+        Cached independently of the cost map because the collision re-check runs
+        once per map frame while planning runs on a much slower timer: this way a
+        per-frame check costs one bounded transform, not a whole cost map.
+        """
+        if (self._cache_collision_grid is not grid
+                or self._cache_collision_radius != self._last_inflate_m
+                or self._cache_collision is None):
+            self._cache_collision = build_collision_mask(
+                grid, self.params, self._last_inflate_m)
+            self._cache_collision_grid = grid
+            self._cache_collision_radius = self._last_inflate_m
+        return self._cache_collision
 
     def invalidate_cache(self) -> None:
         """Drop the cached cost map (e.g. on an explicit replan request)."""
         self._cache_grid = None
+        self._cache_fields = None
         self._cache_cost = None
-        self._cache_occ = None
+        self._cache_lethal = None
+        self._cache_collision = None
+        self._cache_collision_grid = None
+        self._cache_collision_radius = None
 
     # ------------------------------------------------------------------
     # Planning
     # ------------------------------------------------------------------
     def plan(self, request: PlanRequest, world: OccupancyGrid2D) -> PlanResult:
+        """Plan at the preferred standoff, relaxing only as far as necessary.
+
+        Walks :meth:`standoff_ladder` from ``inflate_radius_m`` down to
+        ``inflate_floor_m`` and returns the FIRST success -- which is by
+        construction the safest feasible route, since clearance only decreases
+        down the ladder. The common case costs one search; only a pinched
+        corridor pays for more. The ladder always restarts at the preferred
+        standoff, so a relaxation is never carried over between calls.
+
+        On total failure the phantom probe runs (see :class:`WeightedAStarParams`)
+        and its verdict is attached to the returned failure.
+
+        Returns:
+            A :class:`PlanResult` whose ``artifacts["inflate_used_m"]`` records
+            the standoff achieved (also in ``path.metadata``).
+        """
+        fields = self.fields_for(world)
+        failed = None
+        for inflate_m in self.standoff_ladder():
+            if inflate_m == self.params.inflate_radius_m:
+                cost, lethal, _ = self.cost_for(world)      # cached preferred rung
+            else:
+                cost, lethal = assemble_cost_grid(fields, self.params, inflate_m)
+            result = self._plan_at(request, world, cost, lethal, inflate_m)
+            if result.ok:
+                self._last_inflate_m = inflate_m
+                return result
+            failed = result
+        return self._probe_for_phantom(request, world, fields, failed)
+
+    def standoff_ladder(self) -> List[float]:
+        """Standoffs to attempt, preferred first, descending to the flyable floor."""
+        p = self.params
+        ladder = [p.inflate_radius_m]
+        if p.inflate_floor_m >= p.inflate_radius_m or p.relax_step_m <= 0.0:
+            return ladder
+        k = 1
+        while True:
+            nxt = round(p.inflate_radius_m - k * p.relax_step_m, 6)
+            if nxt <= p.inflate_floor_m + 1e-9:
+                break
+            ladder.append(nxt)
+            k += 1
+        ladder.append(p.inflate_floor_m)
+        return ladder
+
+    def _probe_for_phantom(
+        self, request: PlanRequest, world: OccupancyGrid2D,
+        fields: CostFields, failed: PlanResult,
+    ) -> PlanResult:
+        """Tag a fully-failed ladder with whether the blockage looks spurious.
+
+        A route that appears only at a sub-airframe clearance means whatever is
+        blocking is thin -- far more likely a mis-detected voxel than a wall. The
+        probe path is NEVER returned (it cannot be flown); the caller is simply
+        told to re-observe rather than to conclude the mission is dead.
+        """
+        p = self.params
+        if p.probe_radius_m <= 0.0 or p.probe_radius_m >= p.inflate_floor_m:
+            return failed
+        cost, lethal = assemble_cost_grid(fields, p, p.probe_radius_m)
+        probe = self._plan_at(request, world, cost, lethal, p.probe_radius_m)
+        if not probe.ok:
+            return failed
+        # Where the probe route is least clear is where the obstruction is: the
+        # cells that closed every flyable rung. Reporting it turns "something is
+        # in the way" into "look here again".
+        pinch, pinch_xy = self._tightest_point(
+            world, fields.clearance, probe.path.points)
+        artifacts = dict(failed.artifacts)
+        artifacts["phantom_suspected"] = True
+        artifacts["probe_radius_m"] = p.probe_radius_m
+        artifacts["pinch_clearance_m"] = pinch
+        artifacts["pinch_xy"] = pinch_xy
+        where = (" at (%.2f, %.2f)" % pinch_xy) if pinch_xy else ""
+        return PlanResult(
+            status=failed.status,
+            message=("%s; but the whole route re-derives at %.2fm clearance, pinched "
+                     "to %.2fm%s -- thinner than the airframe, so most likely a "
+                     "mis-detected voxel rather than a wall. Re-observe before "
+                     "giving up."
+                     % (failed.message, p.probe_radius_m, pinch, where)),
+            artifacts=artifacts,
+        )
+
+    @staticmethod
+    def _tightest_point(world, clearance, points):
+        """``(clearance_m, (x, y))`` at the least-clear waypoint of ``points``."""
+        h, w = clearance.shape
+        best, best_xy = float("inf"), None
+        for pt in points:
+            gx, gy = world.world_to_grid(pt.x, pt.y)
+            if 0 <= gx < w and 0 <= gy < h and float(clearance[gy, gx]) < best:
+                best, best_xy = float(clearance[gy, gx]), (pt.x, pt.y)
+        return best, best_xy
+
+    def _plan_at(
+        self, request: PlanRequest, world: OccupancyGrid2D,
+        cost: np.ndarray, lethal: np.ndarray, inflate_m: float,
+    ) -> PlanResult:
+        """Run one full search at a single standoff ``inflate_m``."""
         p = self.params
         res = world.resolution
-        cost, occ = self.cost_for(world)
         h, w = cost.shape
 
         sx, sy = world.world_to_grid(request.start.x, request.start.y)
@@ -153,7 +315,7 @@ class WeightedAStarPlanner2D:
         start_blocked = not np.isfinite(cost[sy, sx])
         if start_blocked:
             cost = cost.copy()
-            self._clear_start_footprint(cost, occ, world, sx, sy)
+            self._clear_start_footprint(cost, lethal, world, sx, sy, inflate_m)
 
         # Heading awareness: seed the search with the drone's facing (quantised to
         # a grid move) so the FIRST step is a turn like any other, and charge a
@@ -186,13 +348,17 @@ class WeightedAStarPlanner2D:
 
         cells: Sequence[Tuple[int, int]] = search.path
         if p.los_smoothing:
-            cells = los_smooth_cells(cells, occ)
+            # Douglas-Peucker, NOT string-pulling: it only deletes points that are
+            # near-collinear with their kept neighbours, so a clearance-centred
+            # route keeps its offset instead of being pulled taut onto the wall.
+            eps_cells = (p.path_simplify_m / res) if p.path_simplify_m > 0.0 else 1.0
+            cells = simplify_path_cells(cells, lethal, eps_cells)
 
         pts = [Pose2D(*world.grid_to_world(cx, cy)) for cx, cy in cells]
         # Round corners BEFORE splitting: chamfering needs the true leg lengths,
         # which segment-splitting would hide behind collinear midpoints.
         if p.corner_round:
-            pts = round_corners_2d(pts, p, clear_fn=self._clear_fn(world, occ))
+            pts = round_corners_2d(pts, p, clear_fn=self._clear_fn(world, lethal))
         pts = split_long_segments_2d(pts, p.waypoint_spacing_m)
         pts = self._trim_start(pts, request.start, p.start_skip_m)
         if len(pts) < 2:
@@ -213,6 +379,7 @@ class WeightedAStarPlanner2D:
                 message="start walled in: no route out without crossing an obstacle",
             )
 
+        relaxed = inflate_m < p.inflate_radius_m
         return PlanResult(
             status=PlanStatus.SUCCESS,
             path=Path2D(
@@ -222,9 +389,14 @@ class WeightedAStarPlanner2D:
                     "planner": self.name,
                     "expanded": search.expanded,
                     "corners": len(cells),
+                    "inflate_used_m": inflate_m,
                 },
             ),
-            message=f"A* success, expanded={search.expanded}, waypoints={len(pts)}",
+            artifacts={"expanded": search.expanded, "inflate_used_m": inflate_m},
+            message=("A* success, expanded=%d, waypoints=%d%s"
+                     % (search.expanded, len(pts),
+                        (", standoff RELAXED to %.2fm (preferred %.2fm)"
+                         % (inflate_m, p.inflate_radius_m)) if relaxed else "")),
         )
 
     # ------------------------------------------------------------------
@@ -260,20 +432,22 @@ class WeightedAStarPlanner2D:
         """
         if len(points) < 2:
             return False
-        _, occ = self.cost_for(world)
+        lethal = self.collision_mask_for(world)
         if passable_start is not None:
-            occ = self._exempt_footprint(world, occ, passable_start)
-        h, w = occ.shape
+            lethal = self._exempt_footprint(
+                world, lethal, passable_start, self._last_inflate_m)
+        h, w = lethal.shape
         cells = [world.world_to_grid(pt.x, pt.y) for pt in points]
         for (x0, y0), (x1, y1) in zip(cells[:-1], cells[1:]):
             if not (0 <= x0 < w and 0 <= y0 < h and 0 <= x1 < w and 0 <= y1 < h):
                 continue
-            if not line_of_sight_clear(occ, x0, y0, x1, y1):
+            if not line_of_sight_clear(lethal, x0, y0, x1, y1):
                 return True
         return False
 
-    def _clear_start_footprint(self, cost: np.ndarray, occ: np.ndarray,
-                               world: OccupancyGrid2D, sx: int, sy: int) -> None:
+    def _clear_start_footprint(self, cost: np.ndarray, lethal: np.ndarray,
+                               world: OccupancyGrid2D, sx: int, sy: int,
+                               inflate_m: float) -> None:
         """Relax the drone's own footprint in ``cost`` (in place) so a blocked start
         can escape -- WITHOUT ever opening a real wall.
 
@@ -288,11 +462,11 @@ class WeightedAStarPlanner2D:
         the inflation radius, the skirt the drone sits in is fully cleared and A*
         reaches the free space just past it -- while a real obstacle, or any
         occupied blob larger than the drone's own cell, stays lethal so A* can
-        never thread a wall. The ``occ`` mask used for LOS smoothing / the collision
-        re-check is untouched.
+        never thread a wall. The ``lethal`` mask used for path simplification / the
+        collision re-check is untouched.
         """
         cost[sy, sx] = 1.0                       # the drone's own cell: it is there
-        n = int(round(self.params.inflate_radius_m / world.resolution))
+        n = int(round(inflate_m / world.resolution))
         if n <= 0:
             return
         h, w = cost.shape
@@ -301,8 +475,8 @@ class WeightedAStarPlanner2D:
         ys, xs = np.ogrid[y0:y1, x0:x1]
         disc = (xs - sx) ** 2 + (ys - sy) ** 2 <= n * n
         true_occ = world.grid == world.values.occupied
-        # inflation skirt only: inflated (in occ) but not a genuine obstacle
-        skirt = disc & occ[y0:y1, x0:x1] & ~true_occ[y0:y1, x0:x1]
+        # inflation skirt only: lethal but not a genuine obstacle
+        skirt = disc & lethal[y0:y1, x0:x1] & ~true_occ[y0:y1, x0:x1]
         cost[y0:y1, x0:x1][skirt] = 1.0
 
     def _path_crosses_true_obstacle(self, world: OccupancyGrid2D,
@@ -312,8 +486,17 @@ class WeightedAStarPlanner2D:
 
         Checked against raw occupancy (no inflation): a relaxed start is allowed to
         sit on / next to its own inflation skirt, but the flown route must never run
-        through a genuine wall. Used only when the start was relaxed."""
-        true_occ = (world.grid == world.values.occupied).copy()
+        through a genuine wall. Used only when the start was relaxed.
+
+        "Genuine" honours ``params.lethal_confidence``: a cell the map flags but
+        has not confirmed is exactly the depth speckle the relaxation exists to
+        fly through, so gating on raw occupancy here would veto every route the
+        relaxation just made possible -- and it fires precisely when the drone is
+        boxed in, which is when it most needs one."""
+        occupied = world.grid == world.values.occupied
+        confirmed, _ = split_by_confidence(
+            occupied, self._confidence, self.params.lethal_confidence)
+        true_occ = confirmed.copy()
         h, w = true_occ.shape
         if 0 <= sx < w and 0 <= sy < h:
             true_occ[sy, sx] = False
@@ -325,8 +508,8 @@ class WeightedAStarPlanner2D:
                 return True
         return False
 
-    def _exempt_footprint(self, world, occ, center):
-        """Return a COPY of ``occ`` with the drone's own footprint cleared.
+    def _exempt_footprint(self, world, lethal, center, inflate_m):
+        """Return a COPY of ``lethal`` with the drone's own footprint cleared.
 
         The drone's own body inflates the cells around it, so those cells read as
         lethal even though the drone is physically standing there. Two exemptions:
@@ -342,23 +525,22 @@ class WeightedAStarPlanner2D:
 
         Works on a copy so the cached mask A* shares is never mutated.
         """
-        occ = occ.copy()
-        h, w = occ.shape
+        lethal = lethal.copy()
+        h, w = lethal.shape
         cx, cy = world.world_to_grid(center.x, center.y)
         if 0 <= cx < w and 0 <= cy < h:
-            occ[cy, cx] = False
-        n = int(round(self.params.inflate_radius_m / world.resolution))
+            lethal[cy, cx] = False
+        n = int(round(inflate_m / world.resolution))
         if n <= 0:
-            return occ
+            return lethal
+        y0, y1 = max(0, cy - n), min(h, cy + n + 1)
+        x0, x1 = max(0, cx - n), min(w, cx + n + 1)
+        ys, xs = np.ogrid[y0:y1, x0:x1]
+        disc = (xs - cx) ** 2 + (ys - cy) ** 2 <= n * n
         true_occ = world.grid == world.values.occupied
-        for yy in range(max(0, cy - n), min(h, cy + n + 1)):
-            dy2 = (yy - cy) ** 2
-            for xx in range(max(0, cx - n), min(w, cx + n + 1)):
-                if (xx - cx) ** 2 + dy2 > n * n:
-                    continue
-                if occ[yy, xx] and not true_occ[yy, xx]:
-                    occ[yy, xx] = False
-        return occ
+        skirt = disc & lethal[y0:y1, x0:x1] & ~true_occ[y0:y1, x0:x1]
+        lethal[y0:y1, x0:x1][skirt] = False
+        return lethal
 
     # ------------------------------------------------------------------
     # Helpers
