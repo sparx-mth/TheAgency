@@ -505,15 +505,6 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                     self._active_flight_op = action
                     try:
                         await self.timed_async_action("takeoff", self.takeoff())
-                    except Exception as exc:
-                        # Don't leave the drone armed in an unknown state
-                        # after a failed takeoff attempt — disarm instead.
-                        self.ros_node.get_logger().error(
-                            f"[bridge] takeoff failed: {exc!r} — auto-disarming"
-                        )
-                        self._active_flight_op = "disarm"
-                        self.stop_motion(reason="disarm")
-                        await self.timed_async_action("disarm", self.disarm_robot())
                     finally:
                         self._flight_op_active = False
                         self._active_flight_op = None
@@ -524,12 +515,6 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                     try:
                         self.stop_motion(reason="land")
                         await self.timed_async_action("land", self.land())
-                        # Auto-disarm once landed — avoids needing a manual
-                        # disarm fallback if a follow-up command reaches the
-                        # drone before it's explicitly disarmed.
-                        self._active_flight_op = "disarm"
-                        self.stop_motion(reason="disarm")
-                        await self.timed_async_action("disarm", self.disarm_robot())
                     finally:
                         self._flight_op_active = False
                         self._active_flight_op = None
