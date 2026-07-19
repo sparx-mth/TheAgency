@@ -52,6 +52,31 @@
   <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
   <arg name="go_topic"          default="/mission/go" />
   <arg name="start_go"          default="true" />
+
+  <!-- ── Debug logging (master switch) ─────────────────────────────────
+       ONE flag for the whole stack's chatty per-cycle logging. false (the
+       default) keeps the console to real events: plans, replans, squeezes,
+       failures. true turns on the per-waypoint / per-cycle traces used when
+       tuning the corrector or the simplifier; verbose enough to hide
+       everything else during a flight, which is why it is off by default.
+       Each individual flag below still overrides it, e.g. to trace ONLY the
+       potential field:  debug:=false apf_debug:=true -->
+  <arg name="debug" default="false" />
+
+  <!-- ── Thought journal (the flight log of the stack's reasoning) ─────
+       Separate from `debug` on purpose: `debug` is console verbosity, this is
+       a FILE sink, so it costs nothing to leave on and the flight you most
+       want to read back is always the one you forgot to enable it for.
+       thought_log_path '' = a timestamped file under ~/.ros/falcon/.
+       thought_log_sources:=astar_planner records the planner alone;
+       thought_log_min_level:=warn records only trouble. -->
+  <arg name="thinking_topic"        default="/nav/thinking" />
+  <arg name="thought_log"           default="true" />
+  <arg name="thought_log_path"      default="" />
+  <arg name="thought_log_max_bytes" default="8388608" /><!-- 8 MB; 0 = unlimited -->
+  <arg name="thought_log_categories" default="" /><!-- '' = nav, plan, object, sensor, map, mission -->
+  <arg name="thought_log_sources"   default="" /><!-- '' = every narrating node -->
+  <arg name="thought_log_min_level" default="info" /><!-- info | warn | error -->
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
   <!-- ── Lost-localization recovery (lost_localization_node) ──────────
@@ -412,9 +437,44 @@
 
   <!-- A* / path -->
   <arg name="waypoint_spacing_m"    default="1.5" />
-  <arg name="inflate_radius_m"      default="0.1" />
+  <!-- HARD standoff: the planned route (the drone CENTRE) never comes closer
+       than this to a confirmed obstacle. 0.40 = the requested 40 cm wall
+       clearance. Raising it used to risk "no route at all" whenever depth
+       speckle painted a cell OCCUPIED; lethal_confidence below now keeps an
+       unconfirmed cell costly-but-passable, so the hard radius is safe to hold
+       at the real robot clearance. Corridors narrower than 2x this are
+       deliberately unplannable. -->
+  <arg name="inflate_radius_m"      default="0.40" />
   <arg name="unknown_blocked"       default="false" />
-  <arg name="unknown_cost"          default="1.0" />
+  <!-- Must stay above 1 + clearance_weight (the priciest known-free cell), or a
+       route prefers driving blind through gray to passing near a known wall. -->
+  <arg name="unknown_cost"          default="6.0" />
+  <!-- SOFT wall avoidance on top of the hard radius: cost peaks at the lethal
+       boundary and fades to 0 clearance_margin_m beyond it, so the route rides
+       the middle of a corridor when there is room but still plans a tight leg
+       when there is not. clearance_weight=0 restores binary free/blocked. -->
+  <arg name="clearance_weight"      default="3.0" />
+  <arg name="clearance_margin_m"    default="0.8" />
+  <!-- Confidence-weighted lethality: an OCCUPIED cell whose BEV evidence
+       (~conf_topic) is below this costs soft_obstacle_cost instead of blocking,
+       so one noisy depth frame can never make the map infeasible. 0 = every
+       OCCUPIED cell blocks (the classic behaviour). -->
+  <arg name="lethal_confidence"     default="0.5" />
+  <arg name="soft_obstacle_cost"    default="25.0" />
+  <!-- Relaxable standoff. A pinched corridor (a stably mis-detected voxel, or a
+       genuinely narrow spot) used to STOP the drone outright. Instead the search
+       retries at inflate_radius_m - relax_step_m, - 2*step, ... down to
+       inflate_floor_m = the airframe's real inscribed radius, and flies the
+       FIRST rung that fits, which is the safest feasible route. Every plan
+       restarts at inflate_radius_m, so a squeeze is never sticky.
+       probe_radius_m is DIAGNOSTIC ONLY (below the airframe, never flown): if a
+       route appears only there, the blockage is thinner than the drone and is
+       reported as a suspected mis-detected voxel so the stack re-observes
+       instead of declaring itself boxed in. 0 disables the probe. Set
+       inflate_floor_m >= inflate_radius_m to disable relaxation entirely. -->
+  <arg name="inflate_floor_m"       default="0.25" />
+  <arg name="relax_step_m"          default="0.05" />
+  <arg name="probe_radius_m"        default="0.10" />
   <arg name="los_smoothing"         default="true" />
   <arg name="turn_penalty"          default="0.3" /><!-- was 0.0; discourage zig-zag/staircase corners so the path needs fewer in-place yaws -->
   <arg name="heading_penalty_m"     default="1.5" /><!-- HEADING-AWARE A*: cost (in m of extra path) for a route that turns the drone AROUND at the start, scaled by how backward the first step is (0 for flying forward or turning 90deg, full for a 180deg reversal). Makes A* fly the way the drone already looks (e.g. straight down a hallway) instead of spinning in place because the shortest path runs backward. 0 = off (purely geometric shortest path) -->
@@ -440,6 +500,7 @@
   <arg name="replan_min_new_cells_any" default="240" /><!-- newly-observed cells ANYWHERE (an off-corridor reveal can open a shortcut); higher floor; 0 disables -->
   <arg name="replan_rotation_min_deg" default="30.0" /><!-- yaw swing since the last commit/evaluation that re-evaluates the route (mid-turn or just finished); 0 disables -->
   <arg name="replan_period_s"         default="7.0" /><!-- catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables -->
+  <arg name="replan_relaxed_period_s" default="4.0" /><!-- the same catch-all when the committed route was SQUEEZED: cadence falls linearly from replan_period_s at inflate_radius_m to this at inflate_floor_m, so a route with little clearance is re-checked far sooner (less margin for drift, and the pinch is usually transient) -->
   <arg name="replan_commit_min_s"     default="4.0" /><!-- keep flying a committed route at least this long before an opportunistic replan may reconsider it (collision bypasses this) -->
   <arg name="replan_improve_frac"     default="0.15" /><!-- adopt a discovery candidate only if it is >= this fraction shorter than the remaining committed route (kills L/R flip-flop) -->
   <arg name="stop_on_blocked_plan_fail" default="true" /><!-- on a confirmed obstacle with NO route around it, STOP (2-pt hold) instead of leaving the colliding route latched -->
@@ -483,7 +544,7 @@
   <arg name="apf_gain"              default="0.5" /><!-- DESCENT MODE ONLY: repulsive-force scaling factor (line_search ignores it) -->
   <arg name="apf_max_total_shift_m" default="1.0" /><!-- hard cap on per-waypoint displacement; the main "visible shift" lever -->
   <arg name="apf_min_clearance_m"   default="0.2" /><!-- >0 also pushes waypoints to a min distance-to-wall -->
-  <arg name="apf_debug"             default="true" /><!-- TEMP: per-waypoint orig/push/new logging each plan cycle -->
+  <arg name="apf_debug"             default="$(arg debug)" /><!-- per-waypoint orig/push/new logging each plan cycle; follows ~debug unless set explicitly -->
   <arg name="apf_collision_recheck" default="true" /><!-- revert to raw A* if the corrected path collides under inflation; false to view it -->
   <arg name="apf_treat_unknown_as_free" default="true" /><!-- recentre waypoints over UNKNOWN cells too (pushed only by known walls, like A*); false freezes them -->
   <arg name="apf_unknown_damping"   default="true" /><!-- dampen the correction near unknown cells (no opposing wall to balance the push); fades as the map fills -->
@@ -709,7 +770,7 @@
        simplify:=false for a verbatim passthrough (corrector path flown directly).
        ══════════════════════════════════════════════════════════════ -->
   <arg name="simplify"               default="true" /><!-- false = passthrough: fly the corrector's path uncleaned -->
-  <arg name="simplify_debug"         default="true" /><!-- per-cycle in->out waypoint-count logging -->
+  <arg name="simplify_debug"         default="$(arg debug)" /><!-- per-cycle in->out waypoint-count logging; follows ~debug unless set explicitly -->
   <!-- 1) merge near-duplicate waypoints = the HARD FLOOR: no two points in the
           final route end up closer than this, even at a turn (a tight cluster the
           field left is noise, not several turns). A genuinely required tight corner
@@ -1056,6 +1117,14 @@
     <param name="inflate_radius_m"      value="$(arg inflate_radius_m)" />
     <param name="unknown_blocked"       value="$(arg unknown_blocked)" />
     <param name="unknown_cost"          value="$(arg unknown_cost)" />
+    <param name="clearance_weight"      value="$(arg clearance_weight)" />
+    <param name="clearance_margin_m"    value="$(arg clearance_margin_m)" />
+    <param name="lethal_confidence"     value="$(arg lethal_confidence)" />
+    <param name="soft_obstacle_cost"    value="$(arg soft_obstacle_cost)" />
+    <param name="inflate_floor_m"       value="$(arg inflate_floor_m)" />
+    <param name="relax_step_m"          value="$(arg relax_step_m)" />
+    <param name="probe_radius_m"        value="$(arg probe_radius_m)" />
+    <param name="replan_relaxed_period_s" value="$(arg replan_relaxed_period_s)" />
     <param name="los_smoothing"         value="$(arg los_smoothing)" />
     <param name="turn_penalty"          value="$(arg turn_penalty)" />
     <param name="heading_penalty_m"     value="$(arg heading_penalty_m)" />
@@ -1541,6 +1610,29 @@
     <param name="ra_release_frac"        value="$(arg ra_release_frac)" />
     <param name="ra_accel_limit"         value="$(arg ra_accel_limit)" />
     <param name="ra_yaw_active_eps"      value="$(arg ra_yaw_active_eps)" />
+  </node>
+
+  <!-- ══════════════════════════════════════════════════════════════
+       THOUGHT LOGGER. Every node narrates WHY it acted onto /nav/thinking;
+       the BEV window shows that live and then it is gone. This appends the
+       same stream to a file so "what was the planner thinking when it did
+       that?" is answerable after landing, not only while watching.
+       On by default: it is a file sink, so it costs no console noise (that
+       is what `debug` controls) and the flight you most want to read back is
+       always the one you forgot to enable logging for.
+       Narrow it with thought_log_sources:=astar_planner (planner only) or
+       thought_log_min_level:=warn (trouble only). Empty path = a timestamped
+       file under ~/.ros/falcon/.
+       ══════════════════════════════════════════════════════════════ -->
+  <node if="$(arg thought_log)"
+        pkg="falcon_adapter" type="thought_logger_node.py"
+        name="thought_logger" output="screen">
+    <param name="thinking_topic"    value="$(arg thinking_topic)" />
+    <param name="journal_path"      value="$(arg thought_log_path)" />
+    <param name="journal_max_bytes" value="$(arg thought_log_max_bytes)" />
+    <param name="categories"        value="$(arg thought_log_categories)" />
+    <param name="sources"           value="$(arg thought_log_sources)" />
+    <param name="min_level"         value="$(arg thought_log_min_level)" />
   </node>
 
   <!-- voxel_reset_watcher: intentionally NOT transferred (diagnostics only).

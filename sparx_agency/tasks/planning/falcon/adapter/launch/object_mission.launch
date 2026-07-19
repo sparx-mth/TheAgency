@@ -52,6 +52,20 @@
   <arg name="nav_mode"        default="fallback" />
   <arg name="use_navdp"       default="false" />
   <arg name="controller"      default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist -->
+  <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint, this mission's default).
+       The one-axis follower never translates and rotates at once, so these are
+       independent: vel_x is every forward leg, yaw_rate every in-place turn.
+       Ignored under pure_pursuit, which uses pp_cruise_speed / pp_max_yaw_rate. -->
+  <arg name="vel_x"           default="0.25" /><!-- m/s forward -->
+  <arg name="yaw_rate"        default="0.7" /><!-- rad/s in-place turn -->
+  <!-- Debug logging master switch; see nav_stack.launch. -->
+  <arg name="debug"           default="false" />
+  <arg name="thought_log" default="true" />
+  <arg name="thought_log_path" default="" />
+  <arg name="thought_log_max_bytes" default="8388608" />
+  <arg name="thought_log_categories" default="" />
+  <arg name="thought_log_sources" default="" />
+  <arg name="thought_log_min_level" default="info" />
   <!-- Pure-pursuit speed + yaw force; see mission.yaml. Only used when
        controller:=pure_pursuit (pp_cruise_speed shadows ~vel_x there). -->
   <arg name="pp_max_yaw_rate"       default="0.45" />
@@ -135,9 +149,23 @@
   <arg name="yaw_acquisition_radius"        default="0.2" />
   <arg name="yaw_acquire_max_deg"           default="35.0" />
   <arg name="skip_yaw_thresh"               default="0.25" /><!-- rad; 14.3 deg -->
-  <arg name="inflate_radius_m"              default="0.1" />
+  <!-- 40 cm hard wall standoff on the CRUISE legs, matching the nav stack. If a
+       target object sits closer than this to a wall its goal cell is lethal and
+       gets snapped out by goal_snap_radius_m; lower this (or hand the terminal
+       leg to object_approach) when you must close on a wall-adjacent object. -->
+  <arg name="inflate_radius_m"              default="0.40" />
   <arg name="unknown_blocked"               default="false" />
-  <arg name="unknown_cost"                  default="1.0" />
+  <arg name="unknown_cost"                  default="6.0" />
+  <!-- Soft wall avoidance + confidence-weighted lethality; see nav_stack.launch. -->
+  <arg name="clearance_weight"              default="3.0" />
+  <arg name="clearance_margin_m"            default="0.8" />
+  <arg name="lethal_confidence"             default="0.5" />
+  <arg name="soft_obstacle_cost"            default="25.0" />
+  <!-- Relaxable standoff; see nav_stack.launch. -->
+  <arg name="inflate_floor_m"               default="0.25" />
+  <arg name="relax_step_m"                  default="0.05" />
+  <arg name="probe_radius_m"                default="0.10" />
+  <arg name="replan_relaxed_period_s"       default="4.0" />
   <arg name="los_smoothing"                 default="false" />
   <arg name="turn_penalty"                  default="0.3" />
   <arg name="heading_penalty_m"             default="1.5" />
@@ -223,7 +251,7 @@
   <arg name="esdf_smooth_sigma_m"          default="0.1" />
   <arg name="esdf_occ_thresh"              default="0.65" />
   <arg name="resample_min_spacing_m"       default="0.3" />
-  <arg name="simplify_debug"               default="true" />
+  <arg name="simplify_debug"               default="$(arg debug)" />
   <arg name="simplify_merge"               default="true" />
   <arg name="simplify_merge_radius_m"      default="0.20" />
   <arg name="simplify_zigzag"              default="true" />
@@ -245,7 +273,7 @@
   <arg name="apf_gain"                  default="0.5" />
   <arg name="apf_max_total_shift_m"     default="0.5" />
   <arg name="apf_min_clearance_m"       default="0.2" />
-  <arg name="apf_debug"                 default="true" />
+  <arg name="apf_debug"                 default="$(arg debug)" />
   <arg name="apf_collision_recheck"     default="true" />
   <arg name="apf_treat_unknown_as_free" default="true" />
   <arg name="apf_unknown_damping"       default="true" />
@@ -280,6 +308,14 @@
     <arg name="inflate_radius_m"              value="$(arg inflate_radius_m)" />
     <arg name="unknown_blocked"               value="$(arg unknown_blocked)" />
     <arg name="unknown_cost"                  value="$(arg unknown_cost)" />
+    <arg name="clearance_weight"              value="$(arg clearance_weight)" />
+    <arg name="clearance_margin_m"            value="$(arg clearance_margin_m)" />
+    <arg name="lethal_confidence"             value="$(arg lethal_confidence)" />
+    <arg name="soft_obstacle_cost"            value="$(arg soft_obstacle_cost)" />
+    <arg name="inflate_floor_m"               value="$(arg inflate_floor_m)" />
+    <arg name="relax_step_m"                  value="$(arg relax_step_m)" />
+    <arg name="probe_radius_m"                value="$(arg probe_radius_m)" />
+    <arg name="replan_relaxed_period_s"       value="$(arg replan_relaxed_period_s)" />
     <arg name="los_smoothing"                 value="$(arg los_smoothing)" />
     <arg name="turn_penalty"                  value="$(arg turn_penalty)" />
     <arg name="heading_penalty_m"             value="$(arg heading_penalty_m)" />
@@ -399,6 +435,15 @@
     <arg name="nav_mode"        value="$(arg nav_mode)" />
     <arg name="use_navdp"       value="$(arg use_navdp)" />
     <arg name="controller"      value="$(arg controller)" />
+    <arg name="vel_x"           value="$(arg vel_x)" />
+    <arg name="yaw_rate"        value="$(arg yaw_rate)" />
+    <arg name="debug"           value="$(arg debug)" />
+    <arg name="thought_log" value="$(arg thought_log)" />
+    <arg name="thought_log_path" value="$(arg thought_log_path)" />
+    <arg name="thought_log_max_bytes" value="$(arg thought_log_max_bytes)" />
+    <arg name="thought_log_categories" value="$(arg thought_log_categories)" />
+    <arg name="thought_log_sources" value="$(arg thought_log_sources)" />
+    <arg name="thought_log_min_level" value="$(arg thought_log_min_level)" />
     <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
     <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
     <arg name="pp_cruise_speed"       value="$(arg pp_cruise_speed)" />

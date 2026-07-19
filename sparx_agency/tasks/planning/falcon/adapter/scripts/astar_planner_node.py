@@ -133,7 +133,26 @@ class AStarPlannerNode:
             connectivity=int(G("~connectivity", 8)),
             inflate_radius_m=float(G("~inflate_radius_m", 0.4)),
             unknown_blocked=_get_bool_param("~unknown_blocked", False),
-            unknown_cost=float(G("~unknown_cost", 1.0)),
+            unknown_cost=float(G("~unknown_cost", 6.0)),
+            # Clearance shaping: a SOFT preference for open space on top of the
+            # hard inflation radius. Wall-hugging gets expensive, never
+            # impossible, so a tight corridor still yields a plan.
+            clearance_weight=float(G("~clearance_weight", 3.0)),
+            clearance_margin_m=float(G("~clearance_margin_m", 0.8)),
+            # Confidence-weighted lethality: an OCCUPIED cell below this
+            # confidence costs a lot but does not block, so single-frame depth
+            # speckle cannot make the map infeasible. Needs ~conf_topic.
+            lethal_confidence=float(G("~lethal_confidence", 0.5)),
+            soft_obstacle_cost=float(G("~soft_obstacle_cost", 25.0)),
+            # Relaxable standoff: a pinched corridor retries at ever smaller
+            # standoffs down to the airframe's real inscribed radius rather than
+            # stopping the drone. Every plan restarts at inflate_radius_m, so a
+            # squeeze is never carried over. probe_radius_m is diagnostic only:
+            # a route that appears only there means the blockage is thin (a
+            # mis-detected voxel), which is reported, never flown.
+            inflate_floor_m=float(G("~inflate_floor_m", 0.25)),
+            relax_step_m=float(G("~relax_step_m", 0.05)),
+            probe_radius_m=float(G("~probe_radius_m", 0.05)),
             search_margin_m=float(G("~search_margin_m", 3.0)),
             turn_penalty=float(G("~turn_penalty", 0.3)),
             heading_penalty_m=float(G("~heading_penalty_m", 1.5)),
@@ -276,6 +295,12 @@ class AStarPlannerNode:
         # re-evaluates but never re-publishes. <=0 disables. (Distinct from the
         # LEGACY ~plan_period_s strict re-publish timer.)
         self.replan_period_s = float(G("~replan_period_s", 7.0))
+        # Cadence at the relaxed floor. A route flown at the preferred standoff is
+        # trustworthy and is left alone for the full period; a squeezed one is
+        # re-checked much sooner, both because it has less margin for drift and
+        # because the pinch that forced it is usually transient -- looking again
+        # early is what gets the wide route back. Interpolated in between.
+        self.replan_relaxed_period_s = float(G("~replan_relaxed_period_s", 4.0))
         # On a confirmed obstacle with NO A* route around it, STOP the drone (2-pt
         # hold) instead of leaving the colliding route latched. status=False still
         # drives the NavDP fallback arbiter.
@@ -288,6 +313,7 @@ class AStarPlannerNode:
         self._commit_time = rospy.Time(0)
         self._progress_idx = 0           # forward-monotone projection hint
         self._blocked_hold = False       # published a STOP hold while boxed in
+        self._reported_inflate = None    # last standoff announced (event de-dupe)
         # High-water mark of changed corridor cells already evaluated: a
         # suppressed discovery (kept the route) raises this so the SAME reveal does
         # not re-fire A* every commit window; only a FURTHER reveal (n_new above the
@@ -407,6 +433,7 @@ class AStarPlannerNode:
         """
         first = self.grid is None
         self.grid = self._decode(msg)
+        self._install_confidence()
         self._last_bev_time = rospy.Time.now()
         if first:
             i = msg.info
@@ -440,6 +467,18 @@ class AStarPlannerNode:
         self.conf_grid = (data.reshape(i.height, i.width).astype(np.float32) / 100.0)
         self._conf_key = (i.height, i.width, round(i.origin.position.x, 6),
                           round(i.origin.position.y, 6), round(i.resolution, 6))
+
+    def _install_confidence(self):
+        """Hand the planner the confidence grid for the CURRENT BEV, or None.
+
+        Only a grid on the same lattice as ``self.grid`` is co-registered with the
+        cost map, so a stale or mismatched one is dropped rather than silently
+        mis-indexed. The planner then treats every OCCUPIED cell as confirmed --
+        the classic, more conservative behaviour, which is the safe way to fail.
+        """
+        ok = (self.conf_grid is not None
+              and self._conf_key == self._grid_key_of(self.grid))
+        self.planner.set_confidence(self.conf_grid if ok else None)
 
     def _predicted_cb(self, msg):
         """Store the follower's predicted trajectory (world Pose2D) + its stamp."""
@@ -745,11 +784,63 @@ class AStarPlannerNode:
             n_any = self._changed_total()
             if n_any - self._discovery_baseline_any >= self.replan_min_new_cells_any:
                 return "%d changed cells map-wide" % n_any
-        if (self.replan_period_s > 0.0
-                and (rospy.Time.now() - self._commit_time).to_sec()
-                >= self.replan_period_s):
-            return "periodic %.1fs check" % self.replan_period_s
+        period = self._effective_replan_period()
+        if (period > 0.0
+                and (rospy.Time.now() - self._commit_time).to_sec() >= period):
+            return "periodic %.1fs check" % period
         return None
+
+    def _effective_replan_period(self):
+        """Replan cadence, tightened in proportion to how squeezed the route is.
+
+        Full ``~replan_period_s`` at the preferred standoff, falling linearly to
+        ``~replan_relaxed_period_s`` at ``inflate_floor_m``: the less clearance
+        the committed route has, the less it should be trusted to stay valid.
+        """
+        p = self.params
+        used = self.planner.last_inflate_m
+        span = p.inflate_radius_m - p.inflate_floor_m
+        if span <= 0.0 or used >= p.inflate_radius_m:
+            return self.replan_period_s
+        frac = max(0.0, min(1.0, (used - p.inflate_floor_m) / span))
+        return (self.replan_relaxed_period_s
+                + frac * (self.replan_period_s - self.replan_relaxed_period_s))
+
+    def _report_standoff(self, res):
+        """Announce a squeezed route or a suspected phantom, once per change.
+
+        De-duplicated on the standoff itself so a periodic replan that keeps
+        reproducing the same squeeze does not spam the HUD every cycle.
+        """
+        want = self.params.inflate_radius_m
+        if res.ok:
+            used = res.artifacts.get("inflate_used_m", want)
+            if used >= want - 1e-9:
+                self._reported_inflate = used
+                return
+            if used == self._reported_inflate:
+                return
+            self._reported_inflate = used
+            self._publish_event(
+                "SQUEEZE: flying %.2fm clearance (want %.2fm)" % (used, want),
+                "No route at the preferred %.2fm standoff, so I am flying a "
+                "%.2fm squeeze and re-checking every %.1fs until the wider route "
+                "comes back" % (want, used, self._effective_replan_period()),
+                level="warn")
+            return
+        if res.artifacts.get("phantom_suspected") and self._reported_inflate != 0.0:
+            self._reported_inflate = 0.0
+            xy = res.artifacts.get("pinch_xy")
+            where = (" near (%.2f, %.2f)" % xy) if xy else ""
+            self._publish_event(
+                "BLOCKED by a thin obstruction%s -- re-observing" % where,
+                "No flyable route, but the whole route re-derives at %.2fm "
+                "clearance, pinched to %.2fm%s: thinner than the airframe, so "
+                "most likely a mis-detected voxel rather than a wall. Holding to "
+                "re-observe that spot instead of declaring the route dead."
+                % (res.artifacts.get("probe_radius_m", 0.0),
+                   res.artifacts.get("pinch_clearance_m", 0.0), where),
+                level="warn")
 
     def _opportunistic_replan(self, remaining, reason):
         """An opportunistic trigger fired (rotation / discovery / periodic): replan,
@@ -968,6 +1059,7 @@ class AStarPlannerNode:
         t0 = rospy.Time.now()
         req = PlanRequest(start=self.pose, goal=self.goal, frame_id=self.frame_id)
         res = self.planner.plan(req, self.grid)
+        self._report_standoff(res)
         if not res.ok:
             self.fail_reason = res.message
             self.pub_status.publish(Bool(data=False))   # no route this attempt

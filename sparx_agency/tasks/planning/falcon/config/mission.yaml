@@ -78,6 +78,23 @@ launch:
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
 
+  # -- WAYPOINT-controller speeds (the two dials for `controller: waypoint`) --
+  # The one-axis follower never translates and rotates at the same time: every
+  # command is EITHER a pure forward advance OR a pure in-place turn. So these two
+  # are fully independent -- vel_x is the speed of every straight leg, yaw_rate the
+  # speed of every corner. Nothing blends them.
+  #
+  # yaw_rate is not a continuous controller: the follower turns in discrete bursts
+  # (pulse -> settle -> re-measure), and yaw_rate is the rate DURING a burst. Raising
+  # it makes each burst sweep further per tick, so a big turn finishes in fewer
+  # bursts; lowering it turns more gently but spends longer stopped. 0.7 rad/s at the
+  # 10 Hz control rate is ~4 deg per tick.
+  #
+  # These are IGNORED under controller: pure_pursuit, which has its own pair below
+  # (pp_cruise_speed / pp_max_yaw_rate) -- that is the trap documented there.
+  vel_x: 0.25                 # m/s, forward flight speed on every straight leg
+  yaw_rate: 0.7               # rad/s, rotation speed during a turn burst
+
   # -- Pure-pursuit yaw force (only used when controller: pure_pursuit) --
   # This is the turn-force dial. Pure pursuit sets wz = speed * curvature and clips
   # it at pp_max_yaw_rate; with the cruise/lookahead defaults that clip is reached
@@ -231,6 +248,35 @@ launch:
   bev_viewer: true            # interactive BEV window
   publish_overlay: false
 
+  # -- Debug logging (ONE switch for the whole stack) --
+  # false = console shows real events only: plans, replans, squeezes, failures.
+  # true  = adds the chatty per-cycle traces (per-waypoint potential-field
+  #         pushes, per-cycle waypoint counts) used when tuning the corrector or
+  #         the simplifier. They are verbose enough to bury everything else, so
+  #         keep this off in flight and turn it on for a tuning session.
+  # To trace ONE subsystem, leave this false and set that flag alone on the
+  # command line, e.g.:  ./run_object_mission.sh apf_debug:=true
+  debug: false
+
+  # -- Thought journal: the flight log of WHY the stack did what it did --
+  # Every node narrates its decisions ("no route at 0.40m, flying a 0.25m
+  # squeeze", "obstacle confidence 0.4 < 0.75, keeping the route and looking
+  # again") onto /nav/thinking. The BEV window shows that live and then it is
+  # gone. This appends the same stream to a file, so after landing you can read
+  # back what the planner was thinking instead of having had to watch for it.
+  #
+  # Separate from `debug` on purpose: `debug` is console verbosity, this is a
+  # file sink -- it costs no console noise, so leave it on. Written flushed
+  # per line, so a kill or a flat battery still leaves the record.
+  #
+  # thought_log_path '' => ~/.ros/falcon/thoughts_<YYYYmmdd_HHMMSS>.log
+  thought_log: true
+  # thought_log_path: /path/to/flight.log
+  # thought_log_sources: astar_planner    # planner's thoughts ONLY ('' = all nodes)
+  # thought_log_min_level: warn           # only trouble ('' -> info = everything)
+  # thought_log_categories: plan          # nav | plan | object | sensor | map | mission
+  # thought_log_max_bytes: 8388608        # stop writing past this; 0 = unlimited
+
   # -- Localization: must match what actually publishes your world pose --
   real_pose_topic: /xtend/localization
   real_pose_type: pose_stamped
@@ -251,11 +297,53 @@ launch:
   # ══════════════════════════════════════════════════════════════════
 
   # ---- A* planner -- route search, replanning, corner handling (30) ----
-  waypoint_spacing_m:            1.5         
-  inflate_radius_m:              0.05
-  unknown_blocked:               false       
-  unknown_cost:                  1.0         
-  los_smoothing:                 false       
+  #
+  #   WALL STANDOFF, in three tiers. Read these four keys together:
+  #
+  #     inflate_radius_m 0.40   PREFERRED. What we fly whenever the map allows.
+  #     inflate_floor_m  0.25   FLYABLE FLOOR. A pinch relaxes 0.40 -> 0.35 ->
+  #                             0.30 -> 0.25 and flies the first rung that fits.
+  #                             Below 0.25 is dangerous, so nothing flies there.
+  #     probe_radius_m   0.10   DIAGNOSTIC ONLY, NEVER FLOWN. Re-derives the whole
+  #                             route with almost no standoff purely to answer
+  #                             "is this blockage even real?". A passage that only
+  #                             opens at 0.10 was closed by noise, not by a wall.
+  #     relax_step_m     0.05   granularity of the 0.40 -> 0.25 ladder.
+  #
+  #   Every replan restarts at 0.40, so a squeeze is never sticky. Do NOT lower
+  #   inflate_radius_m to "make planning work" -- that gives up 0.40 everywhere,
+  #   including the wide corridors where it was free. Let the ladder do it.
+  #
+  waypoint_spacing_m:            1.0
+  inflate_radius_m:              0.40          # PREFERRED standoff (m); the drone CENTRE never plans closer than...
+                                               # ...this to a confirmed obstacle. Relaxes toward inflate_floor_m ...
+                                               # ...only when the map leaves no other route.
+  unknown_blocked:               false
+  unknown_cost:                  6.0           # keep above 1 + clearance_weight, else a route prefers gray to a ...
+                                               # ...known-free cell that merely passes near a wall
+  clearance_weight:              3.0           # SOFT wall avoidance: extra cost peaking at the lethal boundary, ...
+                                               # ...fading to 0 clearance_margin_m beyond it. Rides corridor cent...
+                                               # ...res when there is room, still plans a tight leg when there is...
+                                               # ... not. 0 = binary free/blocked
+  clearance_margin_m:            0.8
+  lethal_confidence:             0.5           # BEV evidence an OCCUPIED cell needs to BLOCK. Below it the cell ...
+                                               # ...costs soft_obstacle_cost instead, so single-frame depth speck...
+                                               # ...le cannot make the map infeasible. 0 = every OCCUPIED blocks
+  soft_obstacle_cost:            25.0
+  inflate_floor_m:               0.25          # LOWEST FLYABLE standoff. The ladder stops here because below 0.2...
+                                               # ...5 is genuinely dangerous -- it is the airframe's inscribed ra...
+                                               # ...dius, not a tuning knob. Raise to 0.40 to disable relaxation.
+  relax_step_m:                  0.05
+  probe_radius_m:                0.10          # DIAGNOSTIC ONLY -- NEVER FLOWN, and not a 5th rung of the ladder...
+                                               # ...Once every flyable rung has failed, the route is re-derived e...
+                                               # ...nd to end at this standoff to ask whether the blockage is rea...
+                                               # ...l. If a passage opens here it was closed by depth noise, not ...
+                                               # ...a wall, so the stack holds and re-observes instead of declari...
+                                               # ...ng itself boxed in. Map cells are never auto-cleared. 0 = off
+  replan_relaxed_period_s:       4.0           # replan cadence at inflate_floor_m, rising linearly to replan_per...
+                                               # ...iod_s at 0.40: less clearance = trust the route less
+  los_smoothing:                 false         # now Douglas-Peucker thinning (shape-preserving), no longer the s...
+                                               # ...tring-puller; safe to enable if you want fewer waypoints
   turn_penalty:                  0.3           # was 0.0; discourage zig-zag/staircase corners so the path needs ...
   heading_penalty_m:             1.5           # HEADING-AWARE A*: cost (in m of extra path) for a route that tur...
   connectivity:                  4           
@@ -336,8 +424,10 @@ launch:
   esdf_smooth_sigma_m:          0.1           # light blur on the distance field for a clean gradient (0 = none)
   esdf_occ_thresh:              0.65          # Thin a dense input path to >= this spacing (m) BEFORE correcting...
   resample_min_spacing_m:       0.3           # ══════════════════════════════════════════════════════════════ T...
-  simplify_debug:               true          # per-cycle in->out waypoint-count logging
-  simplify_merge:               true        
+  # simplify_debug:             true          # per-cycle in->out waypoint-count logging. Commented out so it fo...
+                                               # ...llows the master `debug` switch above; uncomment to force it ...
+                                               # ...on (or off) independently of the rest.
+  simplify_merge:               true
   simplify_merge_radius_m:      0.20          # 2) flatten field-induced zig-zags: a middle point whose heading ...
   simplify_zigzag:              true        
   simplify_zigzag_angle_deg:    60.0        
@@ -356,7 +446,9 @@ launch:
   apf_gain:                  0.5           # DESCENT MODE ONLY: repulsive-force scaling factor (line_search i...
   apf_max_total_shift_m:     0.5           # hard cap on per-waypoint displacement; the main "visible shift" ...
   apf_min_clearance_m:       0.2           # >0 also pushes waypoints to a min distance-to-wall
-  apf_debug:                 true          # TEMP: per-waypoint orig/push/new logging each plan cycle
+  # apf_debug:               true          # per-waypoint orig/push/new logging each plan cycle. Commented out s...
+                                           # ...o it follows the master `debug` switch above; uncomment to force...
+                                           # ... it on (or off) independently of the rest.
   apf_collision_recheck:     true          # revert to raw A* if the corrected path collides under inflation;...
   apf_treat_unknown_as_free: true          # recentre waypoints over UNKNOWN cells too (pushed only by known ...
   apf_unknown_damping:       true          # dampen the correction near unknown cells (no opposing wall to ba...

@@ -109,8 +109,22 @@
   <arg name="cam_max_depth" default="10.0" />
 
 
+  <!-- ── Debug logging (master switch; see nav_stack.launch) ──────── -->
+  <arg name="debug"     default="false" />
+  <arg name="thought_log" default="true" />
+  <arg name="thought_log_path" default="" />
+  <arg name="thought_log_max_bytes" default="8388608" />
+  <arg name="thought_log_categories" default="" />
+  <arg name="thought_log_sources" default="" />
+  <arg name="thought_log_min_level" default="info" />
+
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
+  <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint). The one-axis follower
+       moves on exactly one axis at a time, so these are independent: vel_x is
+       every forward leg, yaw_rate is every in-place turn. Neither applies under
+       pure_pursuit (see pp_cruise_speed / pp_max_yaw_rate). -->
   <arg name="vel_x"     default="0.25" />
+  <arg name="yaw_rate"  default="0.7" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-2.0" />
@@ -248,12 +262,16 @@
   <!-- ── Square (Manhattan) path shape ────────────────────────────
        Produce axis-aligned, right-angle routes instead of diagonal cuts.
        Three settings must agree: connectivity=4 drops A*'s diagonal moves;
-       los_smoothing=false keeps the line-of-sight string-puller from collapsing
-       each L into a single diagonal; corner_round=false keeps 90 deg corners
+       los_smoothing=false keeps each L from being thinned toward a diagonal;
+       corner_round=false keeps 90 deg corners
        sharp instead of chamfering them into 45 deg bevels. turn_penalty biases
        4-connected A* toward clean single-turn L-shapes (raise it to suppress
        staircases). For the legacy diagonal behaviour set connectivity:=8
-       los_smoothing:=true corner_round:=true. -->
+       los_smoothing:=true corner_round:=true.
+       NOTE: los_smoothing no longer string-pulls; it is now Douglas-Peucker
+       thinning, which only drops points near-collinear with their neighbours
+       and so preserves a clearance-centred route. It is safe to enable purely
+       to cut waypoint count; it is kept false here only for the square shape. -->
   <arg name="connectivity"   default="4" />
   <arg name="los_smoothing"  default="false" />
   <arg name="corner_round"   default="false" />
@@ -344,9 +362,24 @@
   <arg name="yaw_acquisition_radius"        default="0.2" />
   <arg name="yaw_acquire_max_deg"           default="35.0" />
   <arg name="skip_yaw_thresh"               default="0.25" /><!-- rad; 14.3 deg -->
-  <arg name="inflate_radius_m"              default="0.1" />
+  <!-- HARD 40 cm wall standoff for the route (the drone centre). Safe to hold
+       this high because lethal_confidence keeps unconfirmed depth speckle
+       costly-but-passable, so a noisy frame no longer removes the only route.
+       Corridors narrower than 0.8 m are deliberately unplannable. -->
+  <arg name="inflate_radius_m"              default="0.40" />
   <arg name="unknown_blocked"               default="false" />
-  <arg name="unknown_cost"                  default="1.0" />
+  <!-- Keep above 1 + clearance_weight so a route never prefers gray to a
+       known-free cell that merely passes near a wall. -->
+  <arg name="unknown_cost"                  default="6.0" />
+  <arg name="clearance_weight"              default="3.0" />
+  <arg name="clearance_margin_m"            default="0.8" />
+  <arg name="lethal_confidence"             default="0.5" />
+  <arg name="soft_obstacle_cost"            default="25.0" />
+  <!-- Relaxable standoff: a pinched corridor retries down to the airframe's real
+       inscribed radius rather than stopping. See nav_stack.launch. -->
+  <arg name="inflate_floor_m"               default="0.25" />
+  <arg name="relax_step_m"                  default="0.05" />
+  <arg name="probe_radius_m"                default="0.10" />
   <arg name="search_margin_m"               default="3.0" />
   <arg name="start_skip_m"                  default="0.5" />
   <arg name="goal_snap_radius_m"            default="2.0" />
@@ -357,6 +390,7 @@
   <arg name="replan_min_new_cells_any"      default="240" />
   <arg name="replan_rotation_min_deg"       default="30.0" />
   <arg name="replan_period_s"               default="7.0" />
+  <arg name="replan_relaxed_period_s"       default="4.0" />
   <arg name="replan_commit_min_s"           default="4.0" />
   <arg name="replan_improve_frac"           default="0.15" />
   <arg name="stop_on_blocked_plan_fail"     default="true" />
@@ -423,7 +457,7 @@
   <arg name="esdf_lateral_only"            default="true" />
   <arg name="esdf_smooth_sigma_m"          default="0.1" />
   <arg name="esdf_occ_thresh"              default="0.65" />
-  <arg name="simplify_debug"               default="true" />
+  <arg name="simplify_debug"               default="$(arg debug)" />
   <arg name="simplify_merge"               default="true" />
   <arg name="simplify_merge_radius_m"      default="0.20" />
   <arg name="simplify_zigzag"              default="true" />
@@ -441,7 +475,7 @@
        Defaults mirror the layer below; see nav_stack.launch for the full
        per-parameter notes. Set these from config/mission.yaml. -->
   <arg name="safety_correct"            default="true" />
-  <arg name="apf_debug"                 default="true" />
+  <arg name="apf_debug"                 default="$(arg debug)" />
   <arg name="apf_collision_recheck"     default="true" />
   <arg name="apf_treat_unknown_as_free" default="true" />
   <arg name="apf_unknown_damping"       default="true" />
@@ -496,6 +530,13 @@
     <arg name="inflate_radius_m"              value="$(arg inflate_radius_m)" />
     <arg name="unknown_blocked"               value="$(arg unknown_blocked)" />
     <arg name="unknown_cost"                  value="$(arg unknown_cost)" />
+    <arg name="clearance_weight"              value="$(arg clearance_weight)" />
+    <arg name="clearance_margin_m"            value="$(arg clearance_margin_m)" />
+    <arg name="lethal_confidence"             value="$(arg lethal_confidence)" />
+    <arg name="soft_obstacle_cost"            value="$(arg soft_obstacle_cost)" />
+    <arg name="inflate_floor_m"               value="$(arg inflate_floor_m)" />
+    <arg name="relax_step_m"                  value="$(arg relax_step_m)" />
+    <arg name="probe_radius_m"                value="$(arg probe_radius_m)" />
     <arg name="search_margin_m"               value="$(arg search_margin_m)" />
     <arg name="start_skip_m"                  value="$(arg start_skip_m)" />
     <arg name="goal_snap_radius_m"            value="$(arg goal_snap_radius_m)" />
@@ -506,6 +547,7 @@
     <arg name="replan_min_new_cells_any"      value="$(arg replan_min_new_cells_any)" />
     <arg name="replan_rotation_min_deg"       value="$(arg replan_rotation_min_deg)" />
     <arg name="replan_period_s"               value="$(arg replan_period_s)" />
+    <arg name="replan_relaxed_period_s"       value="$(arg replan_relaxed_period_s)" />
     <arg name="replan_commit_min_s"           value="$(arg replan_commit_min_s)" />
     <arg name="replan_improve_frac"           value="$(arg replan_improve_frac)" />
     <arg name="stop_on_blocked_plan_fail"     value="$(arg stop_on_blocked_plan_fail)" />
@@ -615,6 +657,14 @@
     <arg name="cam_max_depth" value="$(arg cam_max_depth)" />
 
     <arg name="vel_x"         value="$(arg vel_x)" />
+    <arg name="yaw_rate"      value="$(arg yaw_rate)" />
+    <arg name="debug"         value="$(arg debug)" />
+    <arg name="thought_log" value="$(arg thought_log)" />
+    <arg name="thought_log_path" value="$(arg thought_log_path)" />
+    <arg name="thought_log_max_bytes" value="$(arg thought_log_max_bytes)" />
+    <arg name="thought_log_categories" value="$(arg thought_log_categories)" />
+    <arg name="thought_log_sources" value="$(arg thought_log_sources)" />
+    <arg name="thought_log_min_level" value="$(arg thought_log_min_level)" />
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
