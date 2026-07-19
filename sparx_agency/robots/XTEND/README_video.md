@@ -74,9 +74,9 @@ If you want a display:
 gst-launch-1.0 rtspsrc location=rtsp://192.0.0.15:8556/osd_snapshot latency=0 protocols=tcp \
   ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false
 ```
-display without overlay of specific drone XT42B drone_id = drnb177ede2
+display without overlay of specific drone XT42B drone_id = drndfb3eeb1
 ```bash 
-gst-launch-1.0 -v rtspsrc location=rtsp://192.0.0.15:8510/drone_video/drnb177ede2/low latency=0 protocols=tcp   ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false 
+gst-launch-1.0 -v rtspsrc location=rtsp://192.0.0.15:8510/drone_video/drndfb3eeb1/low latency=0 protocols=tcp   ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false 
 ```
 to see with port and drone id are connect run 
 ```bash 
@@ -114,7 +114,7 @@ connected ws://192.0.0.15:8000
   "content": {
     "data": [
       "rtsp://192.0.0.18:8510/drone_video/drn77f3b8f5/low",
-      "rtsp://192.0.0.18:8510/drone_video/drnb177ede2/low"
+      "rtsp://192.0.0.18:8510/drone_video/drndfb3eeb1/low"
     ]
   },
   "header": {

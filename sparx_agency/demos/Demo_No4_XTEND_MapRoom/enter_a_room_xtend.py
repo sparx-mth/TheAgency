@@ -275,7 +275,7 @@ def parse_args():
     p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--frequency", type=float, default=30.0)
-    p.add_argument("--robot-uid", default="drnb177ede2")
+    p.add_argument("--robot-uid", default="drndfb3eeb1")
 
     p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
     p.add_argument("--rtsp-latency-ms", type=int, default=0)
