@@ -30,6 +30,14 @@ mission:
                               #   hybrid   : A* on easy legs, NavDP through hard turns/doorways
                               #   astar    : pure A* (the only mode needing no NavDP server)
                               #   combination: always-on A*+NavDP fusion
+                              #   navdp    : NavDP alone, no A*. Two goal sources, either
+                              #     of which works on its own: CLICK a pixel in the camera
+                              #     window and press ENTER (one leg per keypress), or let it
+                              #     fly the WORLD goal hands-off -- it re-projects that point
+                              #     into the body frame and re-infers every ~2s, so no click
+                              #     is needed. A click takes over whenever you make one;
+                              #     press r to hand it back to the world goal.
+                              #     The world goal is stage_x/stage_y below (0, -2).
   seed: -1                    # >=0 makes selection_mode:=random reproducible
 
 # ── YOLO-World detector (the host sidecar) ──────────────────────────────────
@@ -521,7 +529,7 @@ launch:
   max_predicted_replans:         3             # APF safety recentring: recentre the planner's raw path off walls...
 
   # ---- BEV map -- the occupancy grid A* searches (39) ----
-  bev_resolution:             0.20          # m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1)....
+  bev_resolution:             0.10          # m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1)....
   bev_xmin:                   -6.0        
   bev_ymin:                   -6.0        
   bev_xmax:                   6.0         
@@ -590,8 +598,8 @@ launch:
   # ---- APF / safety correction -- pushes waypoints off walls (14) ----
   safety_correct:            true        
   apf_centering:             line_search   # line_search: move each waypoint to the lateral potential minimum...
-  apf_gain:                  0.5           # DESCENT MODE ONLY: repulsive-force scaling factor (line_search i...
-  apf_max_total_shift_m:     0.5           # hard cap on per-waypoint displacement; the main "visible shift" ...
+  apf_gain:                  0.4           # DESCENT MODE ONLY: repulsive-force scaling factor (line_search i...
+  apf_max_total_shift_m:     0.3           # hard cap on per-waypoint displacement; the main "visible shift" ...
   apf_min_clearance_m:       0.2           # >0 also pushes waypoints to a min distance-to-wall
   # apf_debug:               true          # per-waypoint orig/push/new logging each plan cycle. Commented out s...
                                            # ...o it follows the master `debug` switch above; uncomment to force...
