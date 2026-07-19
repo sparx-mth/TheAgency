@@ -7,7 +7,10 @@ The control half of the "lock onto a named object and approach it" capability:
   * :class:`VisualServoController` — turn a tracked box (+ optional depth range)
     into a body-frame velocity that centres and closes on the target;
   * :class:`ReSearchPolicy` — where to look when the track is lost;
-  * :class:`VisualApproachStateMachine` — the SEARCH / APPROACH / HOVER_LOCK /
+  * :class:`AimBearingPolicy` — swing the nose onto a known bearing and hold still
+    looking, for the staged approach that stands off rather than flying onto the
+    object's (imprecise) catalogued coordinate;
+  * :class:`VisualApproachStateMachine` — the SEARCH / AIM / APPROACH / HOVER_LOCK /
     RECOVER switch that decides when this node drives ``/cmd_vel``.
 
 The tracker feeding this lives in
@@ -41,12 +44,18 @@ from sparx_agency.core.planning.visual_servo.state_machine import (
     ApproachDecision,
     VisualApproachStateMachine,
     SEARCH,
+    AIM,
     SCAN,
     ACQUIRE_STOP,
     APPROACH,
     HOVER_LOCK,
     RECOVER,
     LAND,
+)
+from sparx_agency.core.planning.visual_servo.aim_bearing import (
+    AimBearingConfig,
+    AimBearingPolicy,
+    AimDecision,
 )
 from sparx_agency.core.planning.visual_servo.force_shaping import (
     FORCE_MODES,
@@ -82,7 +91,11 @@ __all__ = [
     "ApproachFSMConfig",
     "ApproachDecision",
     "VisualApproachStateMachine",
+    "AimBearingConfig",
+    "AimBearingPolicy",
+    "AimDecision",
     "SEARCH",
+    "AIM",
     "SCAN",
     "ACQUIRE_STOP",
     "APPROACH",

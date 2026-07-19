@@ -143,12 +143,36 @@
   <arg name="gait_settle_ticks"   default="4" />              <!-- forced stop ticks between bursts (0 => off) -->
   <arg name="gait_settle_on_transition" default="true" />     <!-- stop on turn<->forward change -->
 
-  <!-- ── Goal (arrival -> scan; re-inject on give-up) ───────────────── -->
+  <!-- ── Goal (arrival -> aim/scan; re-inject on give-up) ───────────── -->
   <arg name="goal_x"            default="0.0" />                 <!-- '' => no known goal -->
   <arg name="goal_y"            default="-2.0" />
   <arg name="arrive_radius_m"   default="0.6" />
   <arg name="goal_in_topic"     default="/waypoint_nav/goal" />
   <arg name="goal_out_topic"    default="/waypoint_nav/goal" />
+
+  <!-- ── Staged approach: stand off, AIM at the object, escalate if unseen ──
+       The goal above is normally a VANTAGE POINT, not the object: a catalogued
+       object position is only as accurate as the room map behind it, and flying
+       onto it can end with the object beside or behind the drone, out of frame.
+       mission_director publishes the object's own (x,y) on object_position_topic;
+       arriving at the goal still unconfirmed, the node turns the nose onto that
+       bearing and holds still looking (the camera resolves a bearing far better
+       than the map resolves a position). Only if that look fails does it publish
+       the object's (x,y) as the goal and let the planner fly the last leg.
+       With no object position published, none of this arms — arrival falls through
+       to land_at_goal / the room sweep exactly as before.
+       NEEDS a pose_topic that carries orientation; without one the node says so and
+       skips straight to the coordinate rather than turning down an unknown bearing. -->
+  <arg name="object_position_topic" default="/object_approach/object_position" />
+  <arg name="aim_before_direct"  default="true" />   <!-- false => never aim, fly the goal through -->
+  <arg name="aim_yaw_rate"       default="0.7" />    <!-- rad/s burst magnitude (= follower yaw_rate) -->
+  <arg name="aim_yaw_coast_deg"  default="15.0" />   <!-- post-burst coast; bursts aim this much short -->
+  <arg name="aim_tolerance_deg"  default="12.0" />   <!-- "on the bearing" (camera HFOV is ~76 deg) -->
+  <arg name="aim_min_burst_s"    default="0.2" />    <!-- below this the yaw deadband eats it -->
+  <arg name="aim_max_burst_s"    default="0.6" />    <!-- angle swept open-loop before re-measuring -->
+  <arg name="aim_settle_s"       default="1.0" />    <!-- stop between bursts (let the coast finish) -->
+  <arg name="aim_look_s"         default="4.0" />    <!-- hold still looking; size vs detector + n_confirm -->
+  <arg name="aim_timeout_s"      default="25.0" />   <!-- cap: a drone that will not turn still escalates -->
 
   <!-- ── Scan-at-goal sweep (rotate with stops) ─────────────────────── -->
   <arg name="scan_yaw_rate"     default="0.4" />
@@ -231,6 +255,16 @@
     <param name="goal_out_topic"    value="$(arg goal_out_topic)" />
     <param name="goal_x"            value="$(arg goal_x)" if="$(eval arg('goal_x') != '')" />
     <param name="goal_y"            value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
+    <param name="object_position_topic" value="$(arg object_position_topic)" />
+    <param name="aim_before_direct" value="$(arg aim_before_direct)" />
+    <param name="aim_yaw_rate"      value="$(arg aim_yaw_rate)" />
+    <param name="aim_yaw_coast_deg" value="$(arg aim_yaw_coast_deg)" />
+    <param name="aim_tolerance_deg" value="$(arg aim_tolerance_deg)" />
+    <param name="aim_min_burst_s"   value="$(arg aim_min_burst_s)" />
+    <param name="aim_max_burst_s"   value="$(arg aim_max_burst_s)" />
+    <param name="aim_settle_s"      value="$(arg aim_settle_s)" />
+    <param name="aim_look_s"        value="$(arg aim_look_s)" />
+    <param name="aim_timeout_s"     value="$(arg aim_timeout_s)" />
     <param name="scan_yaw_rate"     value="$(arg scan_yaw_rate)" />
     <param name="scan_rotate_s"     value="$(arg scan_rotate_s)" />
     <param name="scan_pause_s"      value="$(arg scan_pause_s)" />

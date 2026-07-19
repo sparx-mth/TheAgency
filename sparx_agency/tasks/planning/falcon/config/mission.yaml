@@ -85,26 +85,56 @@ launch:
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
 
-  # -- Where A* flies to (the coordinate goal, in map/world metres) --
-  # With a NUMBER here the planners have a route the moment the stack is up: A*
-  # plans immediately and the drone flies it as soon as you press GO, no object
-  # selection involved. That is the plain "fly to this coordinate" run.
+  # -- THE STAGING VANTAGE POINT: where the drone stands to look (world metres) --
+  # ONE place that decides all three coordinates that used to be set separately and
+  # could silently drift apart: the A* goal, object_approach's arrival goal, and what
+  # the mission director publishes when you pick an object.
   #
-  # Set BOTH to '' to idle instead -- nav_stack omits an empty goal, so the
-  # planners wait until the mission director publishes one. Use that when the point
-  # of the run is the select-then-go flow and a pre-planned route is just noise.
+  # WHY the drone is not simply sent at the object it is hunting: the object's
+  # position comes from the room map, and is only as accurate as that map. Fly onto
+  # it and a few tens of centimetres of error can leave the object beside, behind or
+  # past the drone -- out of frame, with nothing for the visual servo to lock onto.
+  # So picking an object flies the drone HERE instead, and from here it:
   #
-  # Selecting an object still wins either way: the director republishes
-  # /waypoint_nav/goal at the object's world (x,y) and the planners retarget.
+  #   1. TURNS to face the object's recorded bearing and holds still, looking. A
+  #      camera resolves a bearing far better than a map resolves a position, so
+  #      this is the shot most likely to end in a real visual lock -- and if it does,
+  #      the servo closes on an object it can actually see, which is the good ending.
+  #   2. only if that look finds nothing, re-targets the goal at the object's own
+  #      (x,y) and lets A* fly the last leg after all -- the old behaviour, kept as
+  #      the fallback rather than the plan.
   #
-  # This is the NAV goal only. object_approach's arrival-land goal is a separate
-  # (0.0, -2.0) set inside object_mission.launch -- if you move the drone's mission
-  # somewhere else, check whether that one should follow.
+  # So the drone can never land on this point by mistake: arriving here aims, and
+  # only arriving at the OBJECT's coordinate can trigger the arrival-land below.
+  #
+  # Set BOTH to '' to switch staging off entirely: selecting an object then publishes
+  # its own position as the goal and the drone flies straight onto it, as it did
+  # before. (For a plain "fly to this coordinate, no object" run, override the goal
+  # on the command line instead: ./run_object_mission.sh office gui goal_x:=1.0)
   #
   # The GO gate is independent of all this: with start_go: false below, not one
   # velocity command reaches the drone however good a route A* has found.
-  goal_x: 0.0                 # m, world/map frame
-  goal_y: -1.8                # m, world/map frame
+  stage_x: 0.0                # m, world/map frame -- the centre of the room
+  stage_y: -2.0               # m, world/map frame
+
+  # -- The AIM: how it turns to look, and how long it looks --
+  # The platform's yaw is discrete and coasts, so the turn is pulsed: each burst is
+  # commanded short by the coast and the coast lands the nose on the bearing, then
+  # the drone STOPS (aim_settle_s) and re-measures before the next one. Holding
+  # still to look matters as much as the turn: the detector runs at a few Hz and
+  # needs n_confirm consecutive clean, blur-free frames to confirm anything.
+  aim_before_direct: true     # false = never aim; fly the goal through as before
+  aim_tolerance_deg: 12.0     # "pointing at it". No point going tighter: the camera
+                              #   sees ~76 deg across, so the object is well inside
+                              #   the frame long before the nose is exact -- and a
+                              #   pulsed yaw cannot hold much better than this anyway
+  aim_look_s: 4.0             # hold still on the bearing this long before giving up
+                              #   on seeing it. Raise if the detector is slow or
+                              #   n_confirm is high; this is the whole chance it gets
+  aim_settle_s: 1.0           # stop between turn bursts so the coast finishes first
+  aim_timeout_s: 25.0         # hard cap on the whole aim, so a drone that will not
+                              #   turn (or a pose that never updates) still escalates
+                              #   to the object's coordinate instead of aiming forever
 
   # -- WAYPOINT-controller speeds (the two dials for `controller: waypoint`) --
   # EVERY SPEED DIAL IN THIS FILE, SI throughout, all rate-per-second:
@@ -300,8 +330,8 @@ launch:
   # recovery never happens at all. If it does not, the ladder runs exactly as before
   # -- delayed by the persist plus the look, never replaced.
   recovery_persist_enabled: true
-  recovery_persist_turn_s: 0.6    # ~3 of the follower's commands' worth of turn
-  recovery_persist_back_s: 0.6    # at ~0.3 m/s cruise, ~0.18 m given back
+  recovery_persist_turn_s: 0.8    # ~3 of the follower's commands' worth of turn
+  recovery_persist_back_s: 0.4    # at ~0.3 m/s cruise, ~0.18 m given back
   #
   # Retreat: the FIRST rung, and the most likely to work -- we were standing
   # somewhere with a tag in view seconds ago, so go back there. Worth enough
@@ -312,15 +342,15 @@ launch:
   # NOTHING checks what is behind the drone (the map is forward-looking and is
   # starved of poses while lost); it is only safe because it retraces ground just
   # flown, so keep the total inside how far the drone has actually come.
-  recovery_back_speed: 0.30       # m/s, backward flight speed during recovery
-  recovery_back_duration_s: 1.5   # per rung; 2 rungs by default
+  recovery_back_speed: 0.2       # m/s, backward flight speed during recovery
+  recovery_back_duration_s: 1.0   # per rung; 2 rungs by default
   # Climb rungs need the platform to honour linear.z, which on XTEND depends on which
   # Twist converter is running: online_nav_bridge's in-process one honours it, while
   # the standalone xtend_twist_to_cmd_nav.py drops it unless started with
   # --allow-multi-axes (a dropped axis is silent -- the drone just does not rise).
   # Set false if the climb cannot work: the ladder then skips those rungs rather than
   # spending ~5s going nowhere.
-  recovery_climb_enabled: true
+  recovery_climb_enabled: false
   #
   # MIND THE CEILING. recovery_climb_speed is a THRUST dial, not a speed: the vertical
   # axis is scaled by the FORWARD calibration (|v|/0.3*400) and there is no vertical
@@ -344,7 +374,7 @@ launch:
   # barely rotates -- and a sweep that never swept looks exactly like a sweep that
   # found nothing. Kept under yaw_rate all the same, because motion blur is what
   # defeats a tag detection.
-  recovery_turn_rate: 0.6        # rad/s, rotation speed during the recovery sweep
+  recovery_turn_rate: 0.7        # rad/s, rotation speed during the recovery sweep
 
   # -- Windows (all need a display) --
   viewer: false                # target-lock HUD
@@ -420,7 +450,7 @@ launch:
   #   including the wide corridors where it was free. Let the ladder do it.
   #
   waypoint_spacing_m:            1.0
-  inflate_radius_m:              0.35          # PREFERRED standoff (m); the drone CENTRE never plans closer than...
+  inflate_radius_m:              0.3          # PREFERRED standoff (m); the drone CENTRE never plans closer than...
                                                # ...this to a confirmed obstacle. Relaxes toward inflate_floor_m ...
                                                # ...only when the map leaves no other route.
   unknown_blocked:               false
@@ -491,7 +521,7 @@ launch:
   max_predicted_replans:         3             # APF safety recentring: recentre the planner's raw path off walls...
 
   # ---- BEV map -- the occupancy grid A* searches (39) ----
-  bev_resolution:             0.10          # m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1)....
+  bev_resolution:             0.20          # m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1)....
   bev_xmin:                   -6.0        
   bev_ymin:                   -6.0        
   bev_xmax:                   6.0         

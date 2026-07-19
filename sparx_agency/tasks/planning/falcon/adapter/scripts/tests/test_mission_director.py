@@ -345,3 +345,84 @@ def test_go_key_does_not_disturb_the_selection():
     label = node.target_pub.last.data
     node._on_key(_Event(key="g"))
     assert node.target_pub.last.data == label
+
+
+# ── the staging vantage point ──────────────────────────────────────────
+# With ~stage_x/~stage_y set, the goal handed to the planners is the VANTAGE POINT,
+# not the object: the drone flies there and looks at the object from a standoff
+# rather than trusting the room map's coordinate enough to fly onto it. The object's
+# own position always goes out separately, which is what object_approach aims at (and
+# falls back to). Without them, nothing changes -- the goal is the object, as before.
+def test_staging_publishes_the_vantage_point_as_the_goal():
+    node = _make(stage_x=0.0, stage_y=-2.0)
+    obj = node.catalog.by_label("refrigerator")[0]
+    node._select(obj)
+    assert (node.goal_pub.last.x, node.goal_pub.last.y) == (0.0, -2.0)
+    assert (node.goal_pub.last.x, node.goal_pub.last.y) != (obj.x, obj.y)
+
+
+def test_staging_still_publishes_the_object_position():
+    """The object is not hidden: it is what object_approach turns to look at."""
+    node = _make(stage_x=0.0, stage_y=-2.0)
+    obj = node.catalog.by_label("refrigerator")[0]
+    node._select(obj)
+    assert (node.object_pos_pub.last.x, node.object_pos_pub.last.y) == (obj.x, obj.y)
+    assert node.object_pos_pub.last.z == 0.0
+
+
+def test_object_position_is_published_before_the_goal():
+    """Order matters across the bridge: object_approach must know the goal is only a
+    staging point BY THE TIME it learns the goal, or the first arrival could be read
+    as arriving at the object -- and with land_at_goal, landed on."""
+    node = _make(stage_x=0.0, stage_y=-2.0)
+    order = []
+    node.object_pos_pub.publish = lambda m, _o=order: _o.append("object")
+    node.goal_pub.publish = lambda m, _o=order: _o.append("goal")
+    node._select(node.catalog[0])
+    assert order == ["object", "goal"]
+
+
+def test_without_staging_the_goal_is_the_object_as_before():
+    node = _make()
+    obj = node.catalog.by_label("refrigerator")[0]
+    node._select(obj)
+    assert (node.goal_pub.last.x, node.goal_pub.last.y) == (obj.x, obj.y)
+    # ...and the object position is published anyway, so aiming still applies if
+    # object_approach is flying to some other goal.
+    assert (node.object_pos_pub.last.x, node.object_pos_pub.last.y) == (obj.x, obj.y)
+
+
+def test_staging_retarget_republishes_both():
+    node = _make(stage_x=1.0, stage_y=2.0)
+    a, b = node.catalog[0], node.catalog[1]
+    node._select(a)
+    node._select(b)
+    assert (node.object_pos_pub.last.x, node.object_pos_pub.last.y) == (b.x, b.y)
+    assert (node.goal_pub.last.x, node.goal_pub.last.y) == (1.0, 2.0)  # unchanged
+    assert len(node.object_pos_pub.msgs) == 2
+
+
+def test_empty_stage_params_mean_no_staging():
+    """roslaunch's way of saying "unset" is an empty string, not a missing param."""
+    node = _make(stage_x="", stage_y="")
+    obj = node.catalog[0]
+    node._select(obj)
+    assert node.stage_xy is None
+    assert (node.goal_pub.last.x, node.goal_pub.last.y) == (obj.x, obj.y)
+
+
+def test_half_a_staging_point_is_refused():
+    """Setting only one axis is a mistake, not half a vantage point -- flying to a
+    guessed coordinate is worse than not staging at all."""
+    import pytest
+    with pytest.raises(ValueError):
+        _make(stage_x=0.0)
+    with pytest.raises(ValueError):
+        _make(stage_y=-2.0)
+
+
+def test_staging_point_appears_in_the_status_line():
+    node = _make(stage_x=0.0, stage_y=-2.0)
+    node._select(node.catalog.by_label("refrigerator")[0])
+    line = node.status_pub.last.data
+    assert "vantage" in line and "refrigerator" in line

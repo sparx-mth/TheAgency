@@ -10,13 +10,26 @@ together, start the mission:
   1. the object's LABEL on ``~target_topic`` (/object_approach/goal, std_msgs/String) --
      re-prompts the (already-running) YOLO-World detector to hunt that label AND re-keys
      the in-container object_approach confirmation gate. One publish fans out to both.
-  2. the object's WORLD (x, y) on ``~goal_topic`` (/waypoint_nav/goal, geometry_msgs/Point)
-     -- the coordinate goal every planner (A* / hybrid / combination / fallback / NavDP)
-     subscribes to and (re)plans a route toward. This is the point goal used "by A* alone".
-  3. ``True`` on ``~enable_topic`` (/object_approach/enable, std_msgs/Bool) -- arms the
+  2. a WORLD (x, y) on ``~goal_topic`` (/waypoint_nav/goal, geometry_msgs/Point) -- the
+     coordinate goal every planner (A* / hybrid / combination / fallback / NavDP)
+     subscribes to and (re)plans a route toward.
+  3. the object's OWN (x, y) on ``~object_position_topic``
+     (/object_approach/object_position, geometry_msgs/Point) -- what object_approach aims
+     at, and falls back to flying at.
+  4. ``True`` on ``~enable_topic`` (/object_approach/enable, std_msgs/Bool) -- arms the
      object_approach mission (tracker + visual servo + arrival-land), which starts disabled.
 
-All three are LATCHED so a late-joining planner / detector / bridge picks up the current
+THE STAGING POINT. (2) and (3) are the same place only when staging is off. A catalogued
+object position is only as accurate as the room map that produced it, and flying onto it
+can leave the drone beside or past the object with nothing in frame. So with ``~stage_x`` /
+``~stage_y`` set (the default), the goal published for the planners is that STAGING VANTAGE
+POINT -- typically the room centre -- while the object's real position goes out separately.
+object_approach then flies to the vantage point, turns to look down the object's bearing,
+and only falls back to the object's own coordinate if that look finds nothing. Clear both
+to publish the object's position as the goal directly (the older behaviour); the object
+position is published either way, so the aim still happens if the two differ.
+
+All four are LATCHED so a late-joining planner / detector / bridge picks up the current
 mission without a re-publish; latching also maps the label topic to TRANSIENT_LOCAL across
 the ROS1<->ROS2 bridge, which the detector REQUIRES (a volatile publish is dropped
 silently). See ``retarget_object.sh`` for the same durability note.
@@ -78,7 +91,12 @@ class MissionDirectorNode(object):
         self.objects_file = str(G("~objects_file", _default_objects_file()))
         self.target_topic = G("~target_topic", "/object_approach/goal")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
+        self.object_position_topic = G("~object_position_topic",
+                                       "/object_approach/object_position")
         self.enable_topic = G("~enable_topic", "/object_approach/enable")
+        # THE STAGING VANTAGE POINT (see the module docstring). Both unset ('' /
+        # absent) => no staging: the goal IS the object's position, as before.
+        self.stage_xy = self._stage_point(G("~stage_x", None), G("~stage_y", None))
         # THE GO GATE (cmd_vel_gate_node). Selecting an object arms the mission, but no
         # velocity reaches the drone until GO. We only ever publish on an explicit press:
         # the gate's own ~start_go owns the INITIAL state, so a launch that opens the
@@ -119,6 +137,8 @@ class MissionDirectorNode(object):
         self.target_pub = rospy.Publisher(self.target_topic, String, queue_size=1,
                                           latch=True)
         self.goal_pub = rospy.Publisher(self.goal_topic, Point, queue_size=1, latch=True)
+        self.object_pos_pub = rospy.Publisher(self.object_position_topic, Point,
+                                              queue_size=1, latch=True)
         self.enable_pub = rospy.Publisher(self.enable_topic, Bool, queue_size=1,
                                           latch=True)
         self.status_pub = rospy.Publisher(self.status_topic, String, queue_size=1,
@@ -139,12 +159,36 @@ class MissionDirectorNode(object):
 
         self._banner()
 
+    # ── Staging point ─────────────────────────────────────────────────
+    @staticmethod
+    def _stage_point(sx, sy):
+        """Parse ``~stage_x`` / ``~stage_y`` into an (x, y) vantage point, or None.
+
+        Both unset (or empty, roslaunch's way of saying "no value") disables staging.
+        Setting exactly one is a mistake, not half a point, so it is refused rather
+        than guessed at -- flying to a half-specified place is worse than not staging.
+        """
+        given = [v for v in (sx, sy) if v is not None and str(v).strip() != ""]
+        if not given:
+            return None
+        if len(given) != 2:
+            raise ValueError("~stage_x and ~stage_y must be set together (got "
+                             "stage_x=%r, stage_y=%r)" % (sx, sy))
+        return float(sx), float(sy)
+
     # ── Selection (publish the mission) ───────────────────────────────
     def _select(self, obj, how="you picked it"):
-        """Arm the mission for ``obj``: publish label + coordinate goal + enable.
+        """Arm the mission for ``obj``: publish label + goal + object position + enable.
 
         Idempotent per object and safe to call again with a different object to RETARGET
-        live (the planner replans, the detector re-prompts, object_approach re-keys).
+        live (the planner replans, the detector re-prompts, object_approach re-keys and
+        re-aims).
+
+        The GOAL is the staging vantage point when one is configured, NOT the object --
+        object_approach flies there, turns to look down the object's bearing, and only
+        falls back to the object's own coordinate if that look finds nothing. The object
+        position is published either way, so nothing about the object is hidden from the
+        rest of the stack.
 
         Args:
             obj: The catalog object to hunt and fly to.
@@ -153,14 +197,29 @@ class MissionDirectorNode(object):
                 the same decision).
         """
         self._selected = obj
-        self.thinker.say("Target is the %s at (%.2f, %.2f) -- %s; arming the mission"
-                         % (obj.label, obj.x, obj.y, how), category="mission")
+        goal = self.stage_xy if self.stage_xy is not None else (obj.x, obj.y)
+        if self.stage_xy is None:
+            self.thinker.say("Target is the %s at (%.2f, %.2f) -- %s; arming the mission"
+                             % (obj.label, obj.x, obj.y, how), category="mission")
+        else:
+            self.thinker.say(
+                "Target is the %s at (%.2f, %.2f) -- %s; I will fly to my vantage point "
+                "(%.2f, %.2f) first and look at it from there, rather than trusting its "
+                "recorded position enough to fly onto it"
+                % (obj.label, obj.x, obj.y, how, goal[0], goal[1]), category="mission")
         self.target_pub.publish(String(data=obj.label))
-        self.goal_pub.publish(Point(x=float(obj.x), y=float(obj.y), z=0.0))
+        # Object position BEFORE the goal: object_approach needs to know the goal is
+        # only a staging point at the moment it learns the goal, or the first arrival
+        # could be read as arriving at the object (and, with land_at_goal, landed on).
+        self.object_pos_pub.publish(Point(x=float(obj.x), y=float(obj.y), z=0.0))
+        self.goal_pub.publish(Point(x=float(goal[0]), y=float(goal[1]), z=0.0))
         if self.publish_enable:
             self.enable_pub.publish(Bool(data=True))
-        line = ("ARMED: hunting %r, flying to (%.2f, %.2f)%s"
+        line = ("ARMED: hunting %r at (%.2f, %.2f), flying to %s%s"
                 % (obj.label, obj.x, obj.y,
+                   "the vantage point (%.2f, %.2f) to look for it first"
+                   % (goal[0], goal[1]) if self.stage_xy is not None
+                   else "it directly",
                    "" if self.publish_enable else "  (enable not published)"))
         rospy.loginfo("mission_director: %s", line)
         self.status_pub.publish(String(data=line))
@@ -281,10 +340,15 @@ class MissionDirectorNode(object):
     def _status_line(self):
         if self._selected is None:
             sel = "NOT ARMED -- click an object to select it and arm the mission"
-        else:
+        elif self.stage_xy is None:
             o = self._selected
             sel = ("ARMED: hunting '%s', flying to (%.2f, %.2f)   -- click another to change"
                    % (o.label, o.x, o.y))
+        else:
+            o = self._selected
+            sel = ("ARMED: hunting '%s' at (%.2f, %.2f) via the vantage point "
+                   "(%.2f, %.2f)   -- click another to change"
+                   % (o.label, o.x, o.y, self.stage_xy[0], self.stage_xy[1]))
         return "%s   |   %s" % (sel, self._go_line())
 
     def _refresh_status(self):
@@ -340,6 +404,14 @@ class MissionDirectorNode(object):
           self.target_topic)
         L("  goal   out = %s   (geometry_msgs/Point x,y -> planners, latched)",
           self.goal_topic)
+        if self.stage_xy is None:
+            L("  staging    = off (~stage_x/~stage_y unset): the goal IS the object's "
+              "position -- the planner flies straight onto it")
+        else:
+            L("  staging    = (%.2f, %.2f): THAT is the goal the planners get; the "
+              "object's own position goes out on %s so object_approach can aim at it "
+              "from there and only fly onto it if the look fails",
+              self.stage_xy[0], self.stage_xy[1], self.object_position_topic)
         L("  enable out = %s   (std_msgs/Bool -> object_approach, latched, %s)",
           self.enable_topic, "on" if self.publish_enable else "NOT published")
         L("  GATE       = nothing published until an object is selected; "
@@ -373,8 +445,15 @@ if __name__ == "__main__":
 #   outputs (all latched): ~target_topic (/object_approach/goal, String label ->
 #       re-prompts YOLO AND re-keys object_approach's gate; latched = TRANSIENT_LOCAL
 #       across the bridge, required by the detector) ~goal_topic (/waypoint_nav/goal,
-#       Point x,y -> planners replan) ~enable_topic (/object_approach/enable, Bool ->
-#       arm object_approach) ~status_topic (/mission_director/status, String)
+#       Point x,y -> planners replan) ~object_position_topic
+#       (/object_approach/object_position, Point x,y -> object_approach aims at it)
+#       ~enable_topic (/object_approach/enable, Bool -> arm object_approach)
+#       ~status_topic (/mission_director/status, String)
+#   staging: ~stage_x / ~stage_y (the VANTAGE POINT published as the planners' goal
+#       instead of the object -- typically the room centre. object_approach flies
+#       there, turns onto the object's bearing and looks, and only falls back to the
+#       object's own coordinate if that fails. Both empty/unset = no staging: the goal
+#       is the object's position, as before. Setting only one raises.)
 #   gating: ~publish_enable (true = the director arms/gates object_approach's /enable;
 #       it publishes False at startup, True on selection. false = leave /enable to
 #       another owner and only publish target+goal on selection).

@@ -21,6 +21,19 @@ re-entering APPROACH if the object moves). While closing, if the track is lost t
 node actively re-searches in the direction the target left; if it cannot re-acquire
 it hands control back, re-asserts the goal, and returns to SEARCH.
 
+STAGED APPROACH. The coordinate goal the mission flies to is normally NOT the
+object: the director sends the drone to a vantage point (the room centre) and
+publishes the object's catalogued position on ``~object_position_topic``. That
+position is only as accurate as the room map that produced it, so flying onto it
+risks ending up beside or past the object with nothing in frame. Instead, on
+arriving at the vantage point still unconfirmed, the node enters AIM: it turns the
+nose onto the object's bearing in pulsed bursts and holds still, looking -- the
+camera resolves a bearing far better than the map resolves a position, so this is
+the best shot at handing the servo a lock. Only if the look fails does it ESCALATE,
+re-publishing the goal at the object's own (x, y) so the planner flies the last leg
+after all; from there the mission is the unstaged one. With no object position
+published (or ``~aim_before_direct`` false) none of this arms.
+
 Beyond the base search->approach loop this node adds four mission behaviours:
   1. DISCRETE/INERTIAL FLIGHT-COMMAND SHAPING of every published command (the
      platform yaws/advances at a fixed speed, ignores a lone control tick, and
@@ -40,7 +53,8 @@ All the maths is ROS-free and unit-tested:
   * bbox (+depth range) -> body velocity    core.planning.visual_servo.VisualServoController
   * N-consecutive-frame acquisition         core.planning.visual_servo.TargetConfirmationGate
   * where to look when lost                  core.planning.visual_servo.ReSearchPolicy
-  * SEARCH/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER  core.planning.visual_servo.VisualApproachStateMachine
+  * turn onto a bearing and hold, looking     core.planning.visual_servo.AimBearingPolicy
+  * SEARCH/AIM/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER  core.planning.visual_servo.VisualApproachStateMachine
   * min-burst + coast flight-command shaping core.planning.visual_servo.PulseShaper
   * rotate-with-stops room sweep             core.planning.visual_servo.ScanSearchPolicy
   * bbox + depth -> metric range             core.mapping.depth.bbox_to_xyz_cam_from_depth
@@ -54,8 +68,9 @@ Inputs  (mirrors navdp_click / combination transports):
   ~target_topic  std_msgs/String                  (the mission "goal", e.g. "hat")
   ~enable_topic  std_msgs/Bool                     (mode switch; ~start_enabled)
   ~demo_mode_topic  std_msgs/String                (to know we hold visual_servoing)
-  ~pose_topic    PoseStamped/Pose                  (arrival detection only)
+  ~pose_topic    PoseStamped/Pose                  (arrival detection + aim heading)
   ~goal_in_topic geometry_msgs/Point               (the coordinate route's goal)
+  ~object_position_topic geometry_msgs/Point       (the object's catalogued x,y)
 Outputs:
   <drone_ns>/cmd_vel  geometry_msgs/Twist          (force-shaped vx, vy, wz)
   ~demo_mode_request_topic  std_msgs/String        (visual_servoing / fly_straight / finish)
@@ -78,7 +93,10 @@ from std_msgs.msg import Bool, String
 
 from sparx_agency.core.common.detection_message import parse_detections_message
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
-from sparx_agency.core.common.types import ControlCommand, Intrinsics, KinematicLimits
+from sparx_agency.core.common.spatial_math import quat_to_yaw
+from sparx_agency.core.common.types import (
+    ControlCommand, Intrinsics, KinematicLimits, normalize_angle,
+)
 from sparx_agency.core.mapping.depth.depth_bbox_fusion import bbox_to_xyz_cam_from_depth
 from sparx_agency.core.mapping.tracking import (
     make_lock_tracker, TargetTrackerConfig, DetectionOnlyConfig,
@@ -89,10 +107,11 @@ from sparx_agency.core.planning.visual_servo import (
     TargetConfirmationGate, ConfirmationGateConfig, select_overlapping_target_detection,
     ReSearchPolicy, ReSearchConfig,
     VisualApproachStateMachine, ApproachFSMConfig, SEARCH, SCAN, ACQUIRE_STOP, LAND,
-    APPROACH, HOVER_LOCK, RECOVER,
+    APPROACH, HOVER_LOCK, RECOVER, AIM,
     AxisForceProfile, PulseShaper,
     ClosureGait, ClosureGaitConfig,
     ScanSearchConfig, ScanSearchPolicy,
+    AimBearingConfig, AimBearingPolicy,
 )
 
 from thinking import Thinker
@@ -128,6 +147,8 @@ MODE_THOUGHTS = {
     RECOVER: ("Lost the %s from frame -- searching", "warn"),
     SCAN: ("Arrived at the goal without seeing the %s -- sweeping the room for it",
            "info"),
+    AIM: ("Reached my vantage point -- turning to look at where the %s should be",
+          "info"),
 }
 
 
@@ -409,13 +430,52 @@ class ObjectApproachNode(object):
         # ── Goal memory + re-inject ───────────────────────────────────
         # We remember the coordinate route's goal (from ~goal_x/y and any live
         # /waypoint_nav/goal click) so that (a) we can tell when the drone has
-        # arrived (-> scan), and (b) on a lost-track give-up we re-assert it, so the
-        # planner resumes flying to the last/initial goal instead of stalling.
+        # arrived (-> aim/scan), and (b) on a lost-track give-up we re-assert it, so
+        # the planner resumes flying to the last/initial goal instead of stalling.
         self.goal_in_topic = G("~goal_in_topic", "/waypoint_nav/goal")
         self.goal_out_topic = G("~goal_out_topic", "/waypoint_nav/goal")
         gx, gy = G("~goal_x", None), G("~goal_y", None)
         self._goal_xy = None if gx is None or gy is None else (float(gx), float(gy))
         self._pose_xy = None
+        self._pose_yaw = None
+
+        # ── Staged approach: stand off, AIM, then close ───────────────
+        # The object's catalogued (x, y) is only as good as the room map that made
+        # it -- fly onto it and a few tens of cm of error can leave the object
+        # behind or beside us, out of frame, with nothing to servo onto. So the
+        # mission director sends us to a STAGING vantage point instead (the room
+        # centre) and publishes the object's own position here. On arriving at the
+        # staging point still unconfirmed we turn the nose onto the object's bearing
+        # and look: the camera resolves a bearing far better than the map resolves a
+        # position, so this is the shot most likely to hand the servo a lock.
+        # Only if that look fails do we ESCALATE -- re-target the coordinate goal at
+        # the object's own (x, y) and let the planner fly the last leg after all.
+        # Without an object position (no director, or ~aim_before_direct false) none
+        # of this arms and the node behaves exactly as before.
+        self.object_position_topic = G("~object_position_topic",
+                                       "/object_approach/object_position")
+        self.aim_enabled = _param_bool("~aim_before_direct", True)
+        self.aim = AimBearingPolicy(AimBearingConfig(
+            yaw_rate=float(G("~aim_yaw_rate", 0.7)),
+            # How far the platform keeps turning after a burst stops. The follower's
+            # calibration puts it at ~15 deg; each burst is aimed that much short.
+            yaw_coast_rad=math.radians(float(G("~aim_yaw_coast_deg", 15.0))),
+            # Being a few degrees off costs nothing: the camera's horizontal field of
+            # view is ~76 deg, so the object is well in frame long before the nose is
+            # exact -- and this is roughly the tightest a pulsed yaw can hold anyway.
+            tolerance_rad=math.radians(float(G("~aim_tolerance_deg", 12.0))),
+            min_burst_s=float(G("~aim_min_burst_s", 0.2)),
+            max_burst_s=float(G("~aim_max_burst_s", 0.6)),
+            settle_s=float(G("~aim_settle_s", 1.0)),
+            # Long enough for the detector (a few Hz) to produce the ~n_confirm
+            # consecutive hits the gate needs, with margin for a slow frame.
+            look_s=float(G("~aim_look_s", 4.0)),
+            timeout_s=float(G("~aim_timeout_s", 25.0))))
+        self._object_xy = None
+        # Latched once we have given up on aiming and re-targeted the goal at the
+        # object itself: from then on this IS an object goal, so arriving at it means
+        # what it always did (land there / sweep), and we must never aim again.
+        self._escalated = False
 
         # ── Live HUD (overlay Image) ──────────────────────────────────
         self.publish_overlay = _param_bool("~publish_overlay", True) and _HAVE_OVERLAY
@@ -492,6 +552,8 @@ class ObjectApproachNode(object):
         else:
             rospy.Subscriber(self.pose_topic, Pose, self._pose_cb, queue_size=5)
         rospy.Subscriber(self.goal_in_topic, Point, self._goal_cb, queue_size=1)
+        rospy.Subscriber(self.object_position_topic, Point, self._object_position_cb,
+                         queue_size=1)
         rospy.Subscriber(self.detections_topic, String, self._det_cb, queue_size=5)
         rospy.Subscriber(self.target_topic, String, self._target_cb, queue_size=1)
         rospy.Subscriber(self.enable_topic, Bool, self._enable_cb, queue_size=1)
@@ -584,14 +646,47 @@ class ObjectApproachNode(object):
 
     def _pose_stamped_cb(self, msg):
         self._pose_xy = (float(msg.pose.position.x), float(msg.pose.position.y))
+        self._pose_yaw = self._yaw_of(msg.pose.orientation)
 
     def _pose_cb(self, msg):
         self._pose_xy = (float(msg.position.x), float(msg.position.y))
+        self._pose_yaw = self._yaw_of(msg.orientation)
+
+    @staticmethod
+    def _yaw_of(q):
+        """Heading (rad) from a pose quaternion, or None if it carries no rotation.
+
+        A degenerate (all-zero) quaternion is not "yaw 0", it is a localization
+        source that never filled the field in -- and silently reading it as 0 would
+        aim the drone down whatever bearing that happens to be. Report it as absent
+        instead so the aim is skipped rather than flown blind.
+        """
+        n = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
+        if n < 1e-6:
+            return None
+        return quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
 
     def _goal_cb(self, msg):
         # Remember the coordinate route's live goal (a bev click). Ignore our own
         # latched re-inject (same value) so we never fight the planner over it.
         self._goal_xy = (float(msg.x), float(msg.y))
+
+    def _object_position_cb(self, msg):
+        """The mission director's catalogued position for the hunted object.
+
+        This is what makes the goal we are flying to a *staging* point rather than
+        the object: knowing both, we can tell them apart, aim from one at the other,
+        and fall back to the other if aiming fails. A new object (a live retarget)
+        clears the escalation latch so the fresh target gets its own aim.
+        """
+        xy = (float(msg.x), float(msg.y))
+        if xy == self._object_xy:
+            return
+        self._object_xy = xy
+        self._escalated = False
+        self.aim.reset()
+        rospy.loginfo("object_approach: object position (%.2f, %.2f) -- will aim at it "
+                      "from the goal before flying onto it", xy[0], xy[1])
 
     def _arrived_at_goal(self):
         """True once the drone is within ``arrive_radius_m`` of the known goal --
@@ -602,6 +697,36 @@ class ObjectApproachNode(object):
         dx = self._pose_xy[0] - self._goal_xy[0]
         dy = self._pose_xy[1] - self._goal_xy[1]
         return math.hypot(dx, dy) <= self.arrive_radius_m
+
+    def _aim_ready(self):
+        """True when arriving at the current goal should AIM rather than end there.
+
+        All of: aiming is enabled, we know where the object is, we have a heading to
+        turn from, we have not already escalated, and the goal really is a DIFFERENT
+        place from the object (a goal already on the object is not a staging point,
+        so there would be nothing to aim at or escalate to).
+        """
+        if not self.aim_enabled or self._escalated:
+            return False
+        if self._object_xy is None or self._goal_xy is None:
+            return False
+        if self._pose_yaw is None:
+            rospy.logwarn_throttle(
+                10.0, "object_approach: cannot aim at the %s -- %s carries no "
+                      "orientation, so there is no heading to turn from; falling back "
+                      "to flying at its coordinate", self.target, self.pose_topic)
+            return False
+        dx = self._goal_xy[0] - self._object_xy[0]
+        dy = self._goal_xy[1] - self._object_xy[1]
+        return math.hypot(dx, dy) > self.arrive_radius_m
+
+    def _heading_error_to_object(self):
+        """Signed angle (rad) from the drone's heading to the object's bearing."""
+        if self._object_xy is None or self._pose_xy is None or self._pose_yaw is None:
+            return None
+        bearing = math.atan2(self._object_xy[1] - self._pose_xy[1],
+                             self._object_xy[0] - self._pose_xy[0])
+        return normalize_angle(bearing - self._pose_yaw)
 
     # ─── Detections: confirm + (re)seed the tracker ──────────────────
     def _det_cb(self, msg):
@@ -722,16 +847,30 @@ class ObjectApproachNode(object):
         at_target = bool(res is not None and res.at_target)
 
         # Arrival at the coordinate goal (no done topic exists) lets the FSM, when
-        # still unconfirmed, either land there (~land_at_goal: reached "by A* alone")
-        # or switch from passive SEARCH to an active room SCAN (the legacy behaviour).
+        # still unconfirmed, AIM at the object from this vantage point (staged
+        # approach), land there (~land_at_goal: reached "by A* alone"), or switch
+        # from passive SEARCH to an active room SCAN (the legacy behaviour).
         arrived = self._arrived_at_goal()
+        # Step the aim manoeuvre while it owns the mission, exactly as the servo is
+        # stepped above: the FSM consumes its "finished" flag, we publish its command.
+        # Only once the hand-off is GRANTED, though (_driving): its settle/look timers
+        # measure real manoeuvring, and running them while the follower still owns
+        # /cmd_vel would burn the look window without the drone having turned at all --
+        # we would "look" down the bearing we arrived on and escalate having seen
+        # nothing. A cold pose (no heading error) pauses it for the same reason.
+        aim_dec = None
+        if self.fsm.state == AIM and self._driving():
+            err = self._heading_error_to_object()
+            if err is not None:
+                aim_dec = self.aim.update(err, dt)
         # Feed the metric range so the FSM can commit to the terminal LAND at
         # land_range_m. res.range_m already respects ~use_depth (None when depth is
         # off) and is None without a valid track, so LAND needs working depth.
         fsm_range = res.range_m if res is not None else None
         dec = self.fsm.update(confirmed=confirmed, track_valid=track_valid,
                               at_target=at_target, dt=dt, arrived_at_goal=arrived,
-                              range_m=fsm_range)
+                              range_m=fsm_range, aim_ready=self._aim_ready(),
+                              aim_done=bool(aim_dec is not None and aim_dec.finished))
         self._last_dec, self._last_res, self._last_track = dec, res, track
         self._narrate_mode(dec.mode)
         if dec.mode in ("APPROACH", "HOVER_LOCK"):
@@ -744,6 +883,13 @@ class ObjectApproachNode(object):
             self._begin_land()
             return
 
+        if dec.escalate_goal:
+            # Aimed at where the object should be and still did not see it. Give up
+            # on the standoff and re-target the goal at the object's own coordinate,
+            # so the planner flies the last leg it had deliberately been held back
+            # from -- and arriving THERE means what it always did (land / sweep).
+            self._escalate_to_object()
+
         if dec.reset_acquisition:
             with self._lock:
                 self.gate.reset()
@@ -755,10 +901,13 @@ class ObjectApproachNode(object):
             # back to the last/initial goal rather than stalling where we gave up.
             self._reinject_goal()
 
-        # The sweep is stateful: keep it reset unless we are actively scanning, so
-        # each SCAN episode starts from a clean look straight ahead.
+        # The sweep and the aim are stateful: keep each reset unless it is the one
+        # running, so every episode starts clean (the sweep from a look straight
+        # ahead, the aim from a stop that arrests the arrival motion).
         if dec.mode != SCAN:
             self.scan.reset()
+        if dec.mode != AIM:
+            self.aim.reset()
 
         if not dec.drive_cmd_vel:                 # SEARCH: hand /cmd_vel back
             self._release()
@@ -781,6 +930,14 @@ class ObjectApproachNode(object):
             # the closure gait reset so the approach opens with a fresh burst.
             self.gait.reset()
             self._publish_cmd(0.0, 0.0, 0.0, "acquire_stop")
+        elif dec.mode == AIM:                       # arrived, turning to look at it
+            # aim_dec is None on the tick the FSM ENTERS aim (the policy had not run
+            # yet) and whenever the pose goes cold mid-turn; a stop is the right
+            # command for both -- it is also how the manoeuvre opens.
+            c = None if aim_dec is None else aim_dec.command
+            phase = "start" if aim_dec is None else aim_dec.phase
+            self._publish_cmd(0.0 if c is None else c.x, 0.0 if c is None else c.y,
+                              0.0 if c is None else c.yaw_rate, "aim:%s" % phase)
         elif dec.mode == SCAN:                      # arrived, sweeping the room
             c = self.scan.command(dt)
             self._publish_cmd(c.x, c.y, c.yaw_rate, "scan:%s" % self.scan.phase)
@@ -970,6 +1127,32 @@ class ObjectApproachNode(object):
         self._last_cmd = shaped
         self._last_cmd_source = source
 
+    def _escalate_to_object(self):
+        """Re-target the coordinate goal at the object itself (idempotent).
+
+        The staged approach's fallback. We stood off at the vantage point, turned to
+        face where the catalogue says the object is, looked for ``~aim_look_s`` -- and
+        the detector still never confirmed it. So the standoff has bought us all it
+        can: publish the object's own (x, y) as the coordinate goal and let the
+        planner fly the last leg. From here the mission is exactly the unstaged one
+        (arrive there -> land with ~land_at_goal, or sweep), and the latch makes sure
+        we never aim again for this target -- the goal now IS the object.
+        """
+        if self._object_xy is None or self._escalated:
+            return
+        self._escalated = True
+        self._goal_xy = (self._object_xy[0], self._object_xy[1])
+        self.goal_pub.publish(Point(x=float(self._object_xy[0]),
+                                    y=float(self._object_xy[1]), z=0.0))
+        rospy.logwarn("object_approach: aimed at the %s from the goal and never saw "
+                      "it -- re-targeting the goal at its own position (%.2f, %.2f)",
+                      self.target, self._object_xy[0], self._object_xy[1])
+        self.thinker.say(
+            "Looked where the %s should be and could not see it -- flying to its "
+            "recorded position (%.2f, %.2f) instead"
+            % (self.target, self._object_xy[0], self._object_xy[1]),
+            category="object", level="warn")
+
     def _reinject_goal(self):
         """Re-publish the last/initial goal so the planner resumes to it (R2)."""
         if self._goal_xy is None:
@@ -1065,8 +1248,18 @@ class ObjectApproachNode(object):
         L("  gait      = %s  (move %d / settle %d ticks, transition-stop=%s)",
           "on" if self.gait.cfg.active else "off", self.gait.cfg.move_ticks,
           self.gait.cfg.settle_ticks, self.gait.cfg.settle_on_axis_change)
-        L("  nav goal  = %s  (in=%s out=%s, arrive<%.2fm -> SCAN)",
+        L("  nav goal  = %s  (in=%s out=%s, arrive<%.2fm)",
           self._goal_xy, self.goal_in_topic, self.goal_out_topic, self.arrive_radius_m)
+        if self.aim_enabled:
+            L("  staged    = on: arriving at the goal with a known object position "
+              "-> AIM at its bearing (+-%.0f deg), look %.1fs, then fly to it",
+              math.degrees(self.aim.cfg.tolerance_rad), self.aim.cfg.look_s)
+            L("              object position in = %s  (%s)", self.object_position_topic,
+              "unset -- no staging until the director publishes it"
+              if self._object_xy is None else str(self._object_xy))
+        else:
+            L("  staged    = off (~aim_before_direct false): the goal is flown "
+              "straight through, arrival -> land/scan as configured")
         L("  HUD out   = %s  @ %.1f Hz (%s)", self.overlay_topic, self.viz_hz,
           "on" if self.overlay_pub is not None else
           ("off" if _HAVE_OVERLAY else "overlay import failed: %s" % _OVERLAY_IMPORT_ERR))
@@ -1185,9 +1378,31 @@ if __name__ == "__main__":
 #       (0.6, one bounded forward nudge) ~recover_peek_roll (0.10, sidestep held to
 #       one side) ~recover_peek_orbit (true, yaw opposite the sidestep to keep
 #       looking around the occluder)
-#   goal (arrival -> SCAN, re-inject on give-up): ~goal_in_topic (/waypoint_nav/goal)
+#   goal (arrival -> AIM/SCAN, re-inject on give-up): ~goal_in_topic (/waypoint_nav/goal)
 #       ~goal_out_topic (/waypoint_nav/goal) ~goal_x/~goal_y (initial goal, unset =
 #       none) ~arrive_radius_m (0.6)
+#   staged approach (stand off at the goal, AIM at the object, escalate only if that
+#       fails). Arms itself the moment an object position arrives; without one the
+#       node behaves exactly as it did before:
+#       ~object_position_topic (/object_approach/object_position, geometry_msgs/Point
+#         -- the object's catalogued world (x,y), published by mission_director)
+#       ~aim_before_direct (true; false = fly the goal straight through, no aiming)
+#       ~aim_yaw_rate (0.7 rad/s, the burst magnitude the platform turns on)
+#       ~aim_yaw_coast_deg (15.0, how far it keeps turning after a burst -- each
+#         burst is aimed this much SHORT and the coast lands it)
+#       ~aim_tolerance_deg (12.0, "on the bearing"; the camera's ~76 deg horizontal
+#         FOV means a few degrees off still has the object well in frame)
+#       ~aim_min_burst_s (0.2, below this the yaw deadband eats the command)
+#       ~aim_max_burst_s (0.6, angle swept open-loop before re-measuring)
+#       ~aim_settle_s (1.0, stop between bursts so the coast finishes first)
+#       ~aim_look_s (4.0, hold still on the bearing -- size against the detector rate
+#         and ~n_confirm) ~aim_timeout_s (25.0, hard cap so a platform that will not
+#         turn still escalates instead of aiming forever)
+#       On the aim failing, the node publishes the object's (x,y) on ~goal_out_topic
+#       and the mission continues exactly as the unstaged one (arrive -> land/scan).
+#       NEEDS a pose with orientation: a localization source that publishes no
+#       quaternion cannot be aimed from, and the node says so and skips to the
+#       coordinate rather than turning down an unknown bearing.
 #   scan-at-goal sweep: ~scan_yaw_rate (0.4) ~scan_rotate_s (1.2) ~scan_pause_s (1.2)
 #       ~scan_direction (+1 CCW / -1 CW) ~scan_forward_speed (0.0 = in place)
 #       ~scan_forward_s (0.0) ~scan_bursts_before_move (8)

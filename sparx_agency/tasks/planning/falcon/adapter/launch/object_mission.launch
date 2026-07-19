@@ -18,15 +18,32 @@
       2. A MISSION DIRECTOR. mission_director_node loads objects.json and, on
          selection (random pick, or a click in its object-list window), publishes the
          object's LABEL (-> YOLO re-prompt + object_approach gate, /object_approach/goal),
-         its WORLD (x,y) as the coordinate goal (-> planners, /waypoint_nav/goal), and
-         enable=True (-> arms object_approach). That single act starts the mission.
+         a coordinate goal (-> planners, /waypoint_nav/goal), the object's own WORLD
+         (x,y) (-> /object_approach/object_position), and enable=True (-> arms
+         object_approach). That single act starts the mission.
+
+    THE STAGED APPROACH (stage_x / stage_y, on by default). The coordinate goal is NOT
+    the object: it is a VANTAGE POINT, normally the centre of the room. The catalogued
+    object position comes from the room map and is only as good as that map — fly onto
+    it and a small error can leave the object beside or behind the drone, out of frame,
+    with nothing to servo onto. So the mission instead:
+      1. flies to the vantage point;
+      2. TURNS to look down the object's bearing and holds still there (AIM), because a
+         camera resolves a bearing far better than a map resolves a position — this is
+         the shot most likely to give the visual servo a real lock;
+      3. only if that look finds nothing, re-publishes the goal at the object's own
+         (x,y) and lets the planner fly the last leg after all.
+    Clear stage_x/stage_y to switch this off and fly straight at the object, as before.
 
     Reaching the object ends the mission by LANDING, two ways (both on by default here):
-      * VISUAL: the detector confirms the object en route, object_approach servos onto it
-        and lands when the depth range holds <= land_range_m.
+      * VISUAL: the detector confirms the object (typically from the vantage point, which
+        is the point of aiming), object_approach servos onto it and lands when the depth
+        range holds <= land_range_m.
       * BY A* ALONE: the route reaches the coordinate goal still unconfirmed for
         arrive_land_confirm_ticks ticks (land_at_goal:=true) — the goal IS the object's
-        location, so land there. Pose-based, needs no depth.
+        location, so land there. Pose-based, needs no depth. NOTE this only fires once
+        the goal really is the object: arriving at the STAGING point aims instead, so
+        the drone can never land on the vantage point by mistake.
     Either way the node stops /cmd_vel and requests 'finish' (stop -> land -> disarm via
     the demo manager).
 
@@ -49,8 +66,30 @@
        real_pose_topic:=/xtend/april_tag_pose for AprilTag localization. -->
   <arg name="real_pose_topic" default="/xtend/localization" />
   <arg name="real_pose_type"  default="pose_stamped" />     <!-- pose_stamped | pose -->
+  <!-- ── The STAGING VANTAGE POINT ─────────────────────────────────────
+       ONE place that decides where the drone stands to look for the object —
+       typically the centre of the room. It is the single source of truth for all
+       three coordinates that used to be set separately and could silently drift
+       apart: the nav goal, object_approach's arrival goal, and what the mission
+       director publishes on selection.
+
+       WHY the drone does not simply fly at the object: the catalogued position
+       comes from the room map, and is only as accurate as that map. Fly onto it
+       and a few tens of centimetres of error can leave the object beside, behind
+       or past the drone — out of frame, with nothing for the visual servo to lock.
+       So the mission flies HERE, turns to look down the object's bearing (a camera
+       resolves a bearing far better than a map resolves a position), and only if
+       that look finds nothing does it fall back to flying at the object's own
+       coordinate. See the aim_* args below and object_approach.launch.
+
+       Clear BOTH ('') to switch staging off: the director then publishes the
+       object's own position as the goal and the drone flies straight onto it. -->
+  <arg name="stage_x"         default="0.0" />
+  <arg name="stage_y"         default="-2.0" />
+
   <!-- ── The A* coordinate goal ───────────────────────────────────────
-       Where the planners fly to. Set from config/mission.yaml.
+       Where the planners fly to before any selection. Defaults to the staging
+       point above, so the two cannot disagree.
 
        A NUMERIC goal (the default) means A* has a route the moment the stack is
        up: it plans immediately and flies it as soon as you press GO, with no
@@ -62,11 +101,10 @@
        run is the select-then-go flow and a pre-planned route would be noise.
 
        Either way, selecting an object still wins: the director republishes
-       /waypoint_nav/goal at the object's world (x,y) and the planners retarget.
-       This is the NAV goal only. object_approach's arrival-land goal is set
-       separately, at its own include below. -->
-  <arg name="goal_x"          default="0.0" />
-  <arg name="goal_y"          default="-2.0" />
+       /waypoint_nav/goal (at the staging point, or at the object when staging is
+       off) and the planners retarget. -->
+  <arg name="goal_x"          default="$(arg stage_x)" />
+  <arg name="goal_y"          default="$(arg stage_y)" />
   <!-- fallback by default, matching real_drone.launch: A* flies the route and NavDP
        rescues only a boxed-in A*. nav_mode:=hybrid hands NavDP the hard turns/doorways;
        astar is pure A*; combination is the always-on A*+NavDP fusion.
@@ -182,6 +220,21 @@
   <arg name="arrive_land_confirm_ticks" default="5" />
   <arg name="min_score"       default="0.15" />
   <arg name="n_confirm"       default="3" />
+
+  <!-- ── The AIM: what the drone does on reaching the staging point ────
+       Turn the nose onto the object's bearing in pulsed bursts (the platform's yaw
+       is discrete and coasts, so a burst is aimed aim_yaw_coast_deg short and the
+       coast lands it), then HOLD STILL for aim_look_s so the detector gets clean,
+       blur-free frames down that bearing. Confirming there is the good outcome:
+       the visual servo takes over and closes on the object it can actually see.
+       Failing that, the goal is re-published at the object's own (x,y) and the
+       mission continues exactly as it did before staging existed. -->
+  <arg name="aim_before_direct" default="true" />   <!-- false => no aim; fly the goal straight through -->
+  <arg name="aim_tolerance_deg" default="12.0" />   <!-- "pointing at it"; camera HFOV is ~76 deg -->
+  <arg name="aim_look_s"        default="4.0" />    <!-- look this long before giving up on seeing it -->
+  <arg name="aim_settle_s"      default="1.0" />    <!-- stop between bursts so the coast finishes -->
+  <arg name="aim_timeout_s"     default="25.0" />   <!-- cap: a drone that will not turn still escalates -->
+  <arg name="object_position_topic" default="/object_approach/object_position" />
 
   <!-- ── Viewers (need a display) ─────────────────────────────────── -->
   <arg name="viewer"          default="true" />         <!-- live target-lock HUD window -->
@@ -537,10 +590,21 @@
     <arg name="arrive_land_confirm_ticks" value="$(arg arrive_land_confirm_ticks)" />
     <arg name="min_score"       value="$(arg min_score)" />
     <arg name="n_confirm"       value="$(arg n_confirm)" />
-    <!-- No initial goal_x/goal_y: object_approach learns the goal from the director's
-         /waypoint_nav/goal publication (object_approach.launch omits empty goals). -->
-    <arg name="goal_x"          value="0.0" />
-    <arg name="goal_y"          value="-2.0" />
+    <!-- The arrival goal follows the STAGING POINT, so it cannot drift away from the
+         nav goal (it used to be a separate hard-coded pair). The director republishes
+         it on selection anyway; object_approach.launch omits an empty goal. -->
+    <arg name="goal_x"          value="$(arg stage_x)" />
+    <arg name="goal_y"          value="$(arg stage_y)" />
+    <!-- The staged approach: aim at the object from the staging point before ever
+         flying onto its (imprecise) catalogued coordinate. -->
+    <arg name="object_position_topic" value="$(arg object_position_topic)" />
+    <arg name="aim_before_direct" value="$(arg aim_before_direct)" />
+    <arg name="aim_tolerance_deg" value="$(arg aim_tolerance_deg)" />
+    <arg name="aim_look_s"        value="$(arg aim_look_s)" />
+    <arg name="aim_settle_s"      value="$(arg aim_settle_s)" />
+    <arg name="aim_timeout_s"     value="$(arg aim_timeout_s)" />
+    <!-- Aim with the same yaw magnitude the route follower turns on. -->
+    <arg name="aim_yaw_rate"      value="$(arg yaw_rate)" />
     <!-- Detector geometry MUST match the map (same raw K). -->
     <arg name="fx"              value="$(arg cam_fx)" />
     <arg name="fy"              value="$(arg cam_fy)" />
@@ -559,9 +623,17 @@
     <param name="seed"           value="$(arg seed)" />
     <param name="objects_file"   value="$(arg objects_file)" if="$(eval arg('objects_file') != '')" />
     <!-- Publishes: /object_approach/goal (label), /waypoint_nav/goal (x,y),
+         /object_approach/object_position (the object's own x,y),
          /object_approach/enable — all latched. -->
     <param name="target_topic"   value="/object_approach/goal" />
     <param name="goal_topic"     value="/waypoint_nav/goal" />
+    <param name="object_position_topic" value="$(arg object_position_topic)" />
     <param name="enable_topic"   value="/object_approach/enable" />
+    <!-- THE STAGING POINT: what the director publishes as the planners' goal on
+         selection, instead of the object itself. The object's own position goes out
+         on object_position_topic, and object_approach aims at it from here. Both
+         empty => no staging (the goal is the object, the pre-staging behaviour). -->
+    <param name="stage_x"        value="$(arg stage_x)" if="$(eval arg('stage_x') != '')" />
+    <param name="stage_y"        value="$(arg stage_y)" if="$(eval arg('stage_y') != '')" />
   </node>
 </launch>

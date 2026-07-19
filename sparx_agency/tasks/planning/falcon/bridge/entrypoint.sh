@@ -31,29 +31,12 @@ echo "  Bridge config  : ${BRIDGE_YAML}"
 echo "  Log file       : ${LOGFILE}"
 echo "================================================"
 
-# Wait for roscore
-echo "[bridge] Waiting for roscore..."
-until timeout 2 rostopic list >/dev/null 2>&1; do
-    sleep 1
-done
-echo "[bridge] roscore reachable."
-
 # Sanity-check the yaml is mounted/copied where we expect.
 if [ ! -f "${BRIDGE_YAML}" ]; then
     echo "[bridge] ERROR: ${BRIDGE_YAML} not found inside the container."
     echo "[bridge]        run_bridge.sh should mount it as /bridge.yaml"
     exit 1
 fi
-
-# Load the bridge config into the ROS1 parameter server.
-# parameter_bridge reads its topic/qos list from rosparam, not
-# directly from a yaml file — so we have to load it here first.
-# Loading under a namespace (here: empty / root) means parameter_bridge
-# finds it at the default location. If you want to load multiple
-# bridge configs side-by-side, load each under its own namespace
-# and pass the namespace name as parameter_bridge's first arg.
-echo "[bridge] Loading ${BRIDGE_YAML} into rosparam..."
-rosparam load "${BRIDGE_YAML}"
 
 # Source ROS2 + bridge workspace
 source /opt/ros/foxy/setup.bash
@@ -65,7 +48,32 @@ source /bridge_ws/install/setup.bash
 # topics like dynamic_bridge does, so if you add a topic on either
 # side at runtime, you have to edit bridge.yaml and restart this
 # container.
+#
+# The roscore wait and the rosparam load are INSIDE the loop, and that
+# placement is the whole point: the ROS1 master lives in the FALCON
+# container (roslaunch starts it) and dies whenever FALCON is restarted,
+# taking every parameter with it. Loaded once before the loop, a restarted
+# parameter_bridge would come up against the NEW master, find no topic
+# list, and bridge NOTHING — silently. Everything would look healthy while
+# no detection, pose or command crossed. Re-waiting and re-loading each
+# time makes the bridge survive a FALCON restart, which is what
+# `run_object_mission.sh --falcon-only` relies on.
 while true; do
+    echo "[bridge] Waiting for roscore..."
+    until timeout 2 rostopic list >/dev/null 2>&1; do
+        sleep 1
+    done
+    echo "[bridge] roscore reachable."
+
+    # parameter_bridge reads its topic/qos list from rosparam, not
+    # directly from a yaml file — so we have to load it here first.
+    # Loading under a namespace (here: empty / root) means parameter_bridge
+    # finds it at the default location. If you want to load multiple
+    # bridge configs side-by-side, load each under its own namespace
+    # and pass the namespace name as parameter_bridge's first arg.
+    echo "[bridge] Loading ${BRIDGE_YAML} into rosparam..."
+    rosparam load "${BRIDGE_YAML}"
+
     echo "[bridge] Starting parameter_bridge..."
     ros2 run ros1_bridge parameter_bridge
     echo "[bridge] parameter_bridge exited. Restarting in 3s..."

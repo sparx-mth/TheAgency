@@ -50,6 +50,22 @@ def _declared(path):
     return out
 
 
+def _effective(decl, value, _depth=0):
+    """Resolve a default that is itself ``$(arg other)`` to the value that applies.
+
+    An arg may take its default from another arg in the SAME file -- object_mission's
+    goal_x/goal_y default to the staging point, so the nav goal and the vantage point
+    cannot drift apart. The drift check below is about the value that actually reaches
+    the drone, so chase that one level (and any further) before comparing. An unknown
+    or cyclic reference is left as-is, which fails the comparison loudly rather than
+    resolving to something invented.
+    """
+    m = re.fullmatch(r"\$\(arg ([a-z_0-9]+)\)", str(value).strip())
+    if m is None or _depth > 4 or m.group(1) not in decl:
+        return value
+    return _effective(decl, decl[m.group(1)], _depth + 1)
+
+
 def _forwarded(path, child):
     """The arg names ``path`` passes into its ``<include>`` of ``child``."""
     body = re.search(r'<include file="[^"]*%s".*?</include>' % child,
@@ -108,12 +124,15 @@ INTENTIONAL_OVERRIDES = {
 def test_mission_default_matches_the_layer_below(key):
     """object_mission's default must equal real_drone's, so mission.yaml documents the
     value that actually applies. Compared against the NEAREST layer: real_drone
-    intentionally overrides some of nav_stack's defaults."""
+    intentionally overrides some of nav_stack's defaults. An object_mission default
+    written as ``$(arg other)`` is compared by its EFFECTIVE value, so chaining one
+    arg off another (goal_x off stage_x) is not drift."""
     if key in INTENTIONAL_OVERRIDES:
         pytest.skip("deliberate override: %s" % INTENTIONAL_OVERRIDES[key])
-    assert OM_DECL[key] == RD_DECL[key], (
-        "%s default drifted: object_mission=%r real_drone=%r"
-        % (key, OM_DECL[key], RD_DECL[key]))
+    om = _effective(OM_DECL, OM_DECL[key])
+    assert om == RD_DECL[key], (
+        "%s default drifted: object_mission=%r (effective %r) real_drone=%r"
+        % (key, OM_DECL[key], om, RD_DECL[key]))
 
 
 def test_forwarded_args_are_declared_by_the_child():
@@ -128,15 +147,40 @@ def test_the_nav_goal_reaches_the_planners():
     """goal_x/goal_y must be FORWARDED, not pinned to a literal.
 
     They used to be pinned empty, which idled the planners until an object was
-    selected. They are now args set from mission.yaml, so the mission can be a
-    plain "fly to this coordinate" run. Pinning them again -- to '' or to a
-    number -- would silently make the config key dead: mission.yaml would still
-    validate, and the value would still be ignored.
+    selected. They are now args, so the mission can also be a plain "fly to this
+    coordinate" run. Pinning them again -- to '' or to a number -- would silently
+    make the value unsettable: the config would still validate and still be ignored.
     """
     text = _OM.read_text()
     assert re.search(r'<arg name="goal_x"\s+value="\$\(arg goal_x\)" />', text)
     assert re.search(r'<arg name="goal_y"\s+value="\$\(arg goal_y\)" />', text)
-    assert "goal_x" in _config_launch_keys(), "mission.yaml must be able to set goal_x"
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_the_staging_point_is_the_single_source_of_the_mission_coordinate(axis):
+    """One coordinate drives the nav goal, object_approach's arrival goal AND the
+    director's published goal, so they cannot drift apart.
+
+    They used to be three separate values -- mission.yaml's goal_x/goal_y, a
+    hard-coded pair in object_mission's object_approach include, and whatever the
+    director published -- and a comment in mission.yaml warned you to remember to
+    change the second by hand. Moving the drone's mission then meant it would fly
+    to one place and decide it had "arrived" at another. All three now hang off
+    stage_x/stage_y, and this locks that down: re-pinning any of them to a literal
+    brings the drift back.
+    """
+    text = _OM.read_text()
+    stage = "stage_%s" % axis
+    assert stage in _config_launch_keys(), "mission.yaml must be able to set " + stage
+    # The nav goal defaults to it (so the planners fly to the staging point) ...
+    assert re.search(r'<arg name="goal_%s"\s+default="\$\(arg %s\)"' % (axis, stage),
+                     text), "the nav goal no longer follows the staging point"
+    # ... object_approach's arrival goal is it (so arriving there is not "arrived at
+    # the object") ... and the director publishes it as the goal on selection.
+    assert re.search(r'<arg name="goal_%s"\s+value="\$\(arg %s\)" />' % (axis, stage),
+                     text), "object_approach's arrival goal no longer follows the staging point"
+    assert re.search(r'<param name="%s"\s+value="\$\(arg %s\)"' % (stage, stage),
+                     text), "the mission director is not told the staging point"
 
 
 def test_the_go_gate_is_the_last_thing_holding_the_drone():

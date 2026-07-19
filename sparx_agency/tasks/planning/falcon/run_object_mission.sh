@@ -17,9 +17,33 @@
 #      inside the ROS1 container via object_mission.launch. Runs in the foreground.
 #
 # Usage:
-#   ./run_object_mission.sh [env] [SELECTION_MODE]
+#   ./run_object_mission.sh [--falcon-only|--detector-only] [env] [SELECTION_MODE]
 #     [env]            maps/<env>.yaml (e.g. office, hospital)  (default office).
 #     SELECTION_MODE   gui (default: window with the object list) | random.
+#
+# RESTARTING JUST FALCON. The detector sidecar is the slow part of a start (it loads
+# multi-hundred-MB TensorRT engines onto the GPU); FALCON is the part you actually
+# iterate on. Split them across two terminals and you can relaunch FALCON as often as
+# you like without paying for the engines again:
+#
+#   terminal A:  ./run_object_mission.sh --detector-only     # start it once, leave it
+#   terminal B:  ./run_object_mission.sh --falcon-only       # relaunch as often as you like
+#
+#   --detector-only  Run ONLY the YOLO-World detector sidecar, in the foreground, and
+#                    hold it until Ctrl+C. Nothing plans, nothing flies.
+#   --falcon-only    Run ONLY the mission: the bridge + the FALCON container. Reuses
+#                    the detector sidecar that is ALREADY running and never touches it
+#                    (neither starting nor, on exit, killing it) -- so no engines are
+#                    reloaded. Refuses to start if no sidecar is running, rather than
+#                    flying a mission whose detector will never publish a detection.
+#
+#                    The BRIDGE is restarted along with FALCON, and cannot sensibly be
+#                    kept: it is a ROS1 node against the roscore that roslaunch starts
+#                    INSIDE the FALCON container, so that master dies with the container
+#                    and takes the bridge's topic registrations with it. Restarting it
+#                    costs a couple of seconds; the engines are what you are saving.
+#                    (A fresh roscore per run is wanted anyway -- it is what stops a
+#                    stale latched /waypoint_nav/goal from pre-arming the planners.)
 #
 #   EVERY parameter below has its default in ONE file: config/mission.yaml. Edit that
 #   to change what a plain `./run_object_mission.sh` does. The env vars and the command
@@ -54,6 +78,8 @@
 #   ./run_object_mission.sh hospital             # another map, still gui select
 #   ./run_object_mission.sh office random        # random pick
 #   NAV_MODE=hybrid ./run_object_mission.sh office gui land_range_m:=0
+#   ./run_object_mission.sh --detector-only      # terminal A: engines up, stay up
+#   ./run_object_mission.sh --falcon-only office # terminal B: relaunch the mission
 # ============================================================
 set -euo pipefail
 
@@ -88,6 +114,24 @@ fi
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0
 fi
+
+# Which of the three processes this invocation owns (see the header). Parsed before
+# the positionals so the flag can lead: ./run_object_mission.sh --falcon-only office
+RUN_MODE=all                       # all | falcon | detector
+while [[ $# -ge 1 ]]; do
+  case "$1" in
+    --falcon-only|-f)   RUN_MODE=falcon;   shift ;;
+    --detector-only|-d) RUN_MODE=detector; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+WANT_DETECTOR=0; WANT_BRIDGE=0; WANT_FALCON=0
+case "$RUN_MODE" in
+  all)      WANT_DETECTOR=1; WANT_BRIDGE=1; WANT_FALCON=1 ;;
+  falcon)   WANT_BRIDGE=1;   WANT_FALCON=1 ;;   # bridge dies with FALCON's roscore
+  detector) WANT_DETECTOR=1 ;;
+esac
 # The map is optional: office is the default mission environment.
 ENV_NAME="${1:-${MISSION_CFG_MAP:-office}}"; [[ $# -ge 1 ]] && shift || true
 SELECTION_MODE="${1:-${MISSION_CFG_SELECTION_MODE:-gui}}"; [[ $# -ge 1 ]] && shift || true
@@ -121,19 +165,46 @@ HEAD="$ENGINES_DIR/yolo_world_${MODEL}.head.fp16.gpu.engine"
 WEIGHTS_DIR="${WEIGHTS_DIR:-${MISSION_CFG_WEIGHTS_DIR:-/home/user/Downloads}}"
 TEXT_WEIGHTS="${TEXT_WEIGHTS:-${MISSION_CFG_TEXT_WEIGHTS:-$WEIGHTS_DIR/yolov8${MODEL}-worldv2.pt}}"
 
-for f in "$BACKBONE" "$HEAD"; do
-  if [[ ! -f "$f" ]]; then
-    echo "[ERROR] engine not found: $f" >&2
-    echo "        Build the GPU split first, e.g.:" >&2
-    echo "          $HERE/../../mapping/yolo_world_trt/build_all.sh $MODEL" >&2
-    echo "        or point ENGINES_DIR at the folder holding the *.engine files." >&2
+# Only when we are the ones starting the detector: under --falcon-only the engines
+# are already loaded into a running sidecar, and blocking a FALCON relaunch because a
+# host path moved since would be a check working against its own purpose.
+if [[ $WANT_DETECTOR -eq 1 ]]; then
+  for f in "$BACKBONE" "$HEAD"; do
+    if [[ ! -f "$f" ]]; then
+      echo "[ERROR] engine not found: $f" >&2
+      echo "        Build the GPU split first, e.g.:" >&2
+      echo "          $HERE/../../mapping/yolo_world_trt/build_all.sh $MODEL" >&2
+      echo "        or point ENGINES_DIR at the folder holding the *.engine files." >&2
+      exit 1
+    fi
+  done
+  if [[ ! -f "$TEXT_WEIGHTS" ]]; then
+    echo "[ERROR] text weights (.pt) not found: $TEXT_WEIGHTS" >&2
+    echo "        Set TEXT_WEIGHTS=/path/to/yolov8${MODEL}-worldv2.pt (host path)." >&2
     exit 1
   fi
-done
-if [[ ! -f "$TEXT_WEIGHTS" ]]; then
-  echo "[ERROR] text weights (.pt) not found: $TEXT_WEIGHTS" >&2
-  echo "        Set TEXT_WEIGHTS=/path/to/yolov8${MODEL}-worldv2.pt (host path)." >&2
-  exit 1
+fi
+
+# ── --falcon-only: the sidecar we are about to rely on must exist ──
+# A mission whose detector is not running looks completely healthy -- it plans, it
+# flies, it just never confirms an object and lands "by A* alone" every time. That is
+# far worse than refusing to start, so check for the process rather than assume it.
+# Match an INTERPRETER running the node, not the bare filename: a bare-filename
+# pattern is also matched by anything that merely mentions it -- an editor, a
+# `tail -f` on the log, or the very shell command you typed to check -- and a guard
+# satisfied by an open editor is worse than no guard.
+DETECTOR_PATTERN="python.*yolo_detector_ros2_node\.py"
+if [[ $WANT_FALCON -eq 1 && $WANT_DETECTOR -eq 0 ]]; then
+  if ! pgrep -f "$DETECTOR_PATTERN" >/dev/null 2>&1; then
+    echo "[ERROR] --falcon-only: no detector sidecar is running." >&2
+    echo "        Nothing would ever publish a detection, so the mission could only" >&2
+    echo "        ever land by A* alone -- while looking perfectly healthy." >&2
+    echo "        Start one first, in another terminal:" >&2
+    echo "          $0 --detector-only" >&2
+    echo "        or drop the flag to run the whole stack: $0" >&2
+    exit 1
+  fi
+  echo "[mission] reusing the detector sidecar already running (pid $(pgrep -f "$DETECTOR_PATTERN" | head -1))"
 fi
 # Fail here rather than inside the container: a missing catalog is a stale/absent
 # room map, and the next-best candidate (the shipped objects.json) holds a DIFFERENT
@@ -144,7 +215,7 @@ CATALOG_ON_HOST="$OBJECTS_FILE"
 if [[ "$OBJECTS_FILE" == /opt/sparx_agency/* ]]; then
   CATALOG_ON_HOST="$REPO_ROOT/sparx_agency/${OBJECTS_FILE#/opt/sparx_agency/}"
 fi
-if [[ ! -f "$CATALOG_ON_HOST" ]]; then
+if [[ $WANT_FALCON -eq 1 && ! -f "$CATALOG_ON_HOST" ]]; then
   echo "[ERROR] object catalog not found: $OBJECTS_FILE" >&2
   [[ "$CATALOG_ON_HOST" != "$OBJECTS_FILE" ]] && \
     echo "        (resolved on the host to: $CATALOG_ON_HOST)" >&2
@@ -155,7 +226,7 @@ if [[ ! -f "$CATALOG_ON_HOST" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$HERE/maps/${ENV_NAME}.yaml" ]]; then
+if [[ $WANT_FALCON -eq 1 && ! -f "$HERE/maps/${ENV_NAME}.yaml" ]]; then
   echo "[ERROR] map not found: $HERE/maps/${ENV_NAME}.yaml" >&2
   echo "        Available: $(ls "$HERE/maps"/*.yaml 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')" >&2
   exit 1
@@ -194,62 +265,109 @@ for _cfg in ${MISSION_CFG_LAUNCH_ARGS[@]+"${MISSION_CFG_LAUNCH_ARGS[@]}"}; do
   [[ $_dup -eq 0 ]] && CFG_ARGS+=( "$_cfg" )
 done
 
-echo "== Object mission (select -> fly -> land) =="
-echo "   env/map     : $ENV_NAME"
-echo "   selection   : $SELECTION_MODE   (seed: $SEED)"
-echo "   nav_mode    : $NAV_MODE"
-echo "   objects     : $OBJECTS_FILE"
-echo "   detector    : GPU $MODEL  ($ENGINES_DIR), conf>=$CONF_THRESH, initial prompt '$INIT_TARGET' (re-prompted on select)"
+case "$RUN_MODE" in
+  all)      echo "== Object mission (select -> fly -> land) ==" ;;
+  falcon)   echo "== Object mission: FALCON ONLY (bridge + container; detector reused) ==" ;;
+  detector) echo "== Object mission: DETECTOR ONLY (engines up; nothing plans or flies) ==" ;;
+esac
+if [[ $WANT_FALCON -eq 1 ]]; then
+  echo "   env/map     : $ENV_NAME"
+  echo "   selection   : $SELECTION_MODE   (seed: $SEED)"
+  echo "   nav_mode    : $NAV_MODE"
+  echo "   objects     : $OBJECTS_FILE"
+fi
+if [[ $WANT_DETECTOR -eq 1 ]]; then
+  echo "   detector    : GPU $MODEL  ($ENGINES_DIR), conf>=$CONF_THRESH, initial prompt '$INIT_TARGET' (re-prompted on select)"
+else
+  echo "   detector    : REUSED -- the running sidecar keeps its engines; this run neither starts nor stops it"
+fi
 echo "   config      : ${CONFIG_FILE}$([[ -f "$CONFIG_FILE" ]] || echo '  (absent -- built-in defaults)')"
 echo "   logs        : $LOG_DIR/{sidecar,bridge}.log"
-[[ ${#CFG_ARGS[@]} -gt 0 ]] && echo "   from config : ${CFG_ARGS[*]}"
-[[ ${#EXTRA_ARGS[@]} -gt 0 ]] && echo "   overridden  : ${EXTRA_ARGS[*]}"
+if [[ $WANT_FALCON -eq 1 ]]; then
+  [[ ${#CFG_ARGS[@]} -gt 0 ]] && echo "   from config : ${CFG_ARGS[*]}"
+  [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && echo "   overridden  : ${EXTRA_ARGS[*]}"
+fi
 echo
 
-# ── Cleanup: stop the two background host helpers on any exit ──
+# ── Cleanup: stop ONLY what this invocation started ───────────
+# Under --falcon-only the sidecar belongs to another terminal: killing it on exit
+# would defeat the entire point of the flag (the next relaunch would reload the
+# engines), so the guards below are load-bearing, not defensive.
 cleanup() {
   echo
-  echo "[mission] shutting down the detector sidecar and bridge ..."
-  [[ -n "${SIDECAR_PID:-}" ]] && kill "$SIDECAR_PID" 2>/dev/null || true
-  docker rm -f ros1_bridge 2>/dev/null || true
-  docker rm -f falcon      2>/dev/null || true
+  echo "[mission] shutting down what this run started ..."
+  if [[ $WANT_DETECTOR -eq 1 && -n "${SIDECAR_PID:-}" ]]; then
+    kill "$SIDECAR_PID" 2>/dev/null || true
+  fi
+  [[ $WANT_BRIDGE -eq 1 ]] && docker rm -f ros1_bridge 2>/dev/null || true
+  [[ $WANT_FALCON -eq 1 ]] && docker rm -f falcon      2>/dev/null || true
+  return 0
 }
 trap cleanup EXIT INT TERM
 
-# ── 1. Detector sidecar (host, ROS2, GPU) ────────────────────
-echo "[mission] 1/3 starting the YOLO-World detector sidecar (host, GPU) ..."
+# ── ROS2 environment ─────────────────────────────────────────
+# Sourced in EVERY mode, not just the one that starts the detector: the bridge picks
+# up ROS_DOMAIN_ID / RMW_IMPLEMENTATION from this environment, so sourcing it only
+# sometimes would make --falcon-only bridge on a different domain than a full run.
 # ROS setup scripts reference unbound vars / return nonzero -- guard set -e/-u.
 set +u +e; source /opt/ros/humble/setup.bash; set -u -e   # shellcheck disable=SC1091
-# PREPEND, never assign: the setup.bash above puts ROS's site-packages (rclpy et al)
-# on PYTHONPATH, and a bare PYTHONPATH="$REPO_ROOT" prefix would drop it -- the node
-# then dies on `import rclpy` even though the venv is fine.
-PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" \
-  "$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py" \
-  --ros-args \
-    -p target_object:="$INIT_TARGET" \
-    -p conf_thresh:="$CONF_THRESH" \
-    -p backbone_engine:="$BACKBONE" \
-    -p head_engine:="$HEAD" \
-    -p text_weights:="$TEXT_WEIGHTS" \
-  >"$LOG_DIR/sidecar.log" 2>&1 &
-SIDECAR_PID=$!
-sleep 3
-if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
-  echo "[ERROR] detector sidecar died on startup -- see $LOG_DIR/sidecar.log" >&2
-  tail -n 20 "$LOG_DIR/sidecar.log" >&2 || true
-  exit 1
+
+# ── 1. Detector sidecar (host, ROS2, GPU) ────────────────────
+if [[ $WANT_DETECTOR -eq 1 ]]; then
+  echo "[mission] starting the YOLO-World detector sidecar (host, GPU) ..."
+  # PREPEND, never assign: the setup.bash above puts ROS's site-packages (rclpy et al)
+  # on PYTHONPATH, and a bare PYTHONPATH="$REPO_ROOT" prefix would drop it -- the node
+  # then dies on `import rclpy` even though the venv is fine.
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" \
+    "$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py" \
+    --ros-args \
+      -p target_object:="$INIT_TARGET" \
+      -p conf_thresh:="$CONF_THRESH" \
+      -p backbone_engine:="$BACKBONE" \
+      -p head_engine:="$HEAD" \
+      -p text_weights:="$TEXT_WEIGHTS" \
+    >"$LOG_DIR/sidecar.log" 2>&1 &
+  SIDECAR_PID=$!
+  sleep 3
+  if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
+    echo "[ERROR] detector sidecar died on startup -- see $LOG_DIR/sidecar.log" >&2
+    tail -n 20 "$LOG_DIR/sidecar.log" >&2 || true
+    exit 1
+  fi
+fi
+
+# ── --detector-only: hold the engines and stop here ──────────
+# Loading the engines is the expensive part of a start, so this mode exists purely to
+# pay it ONCE and keep it paid while --falcon-only relaunches the mission next door.
+if [[ $WANT_FALCON -eq 0 ]]; then
+  echo
+  echo "[mission] detector up (pid $SIDECAR_PID), log: $LOG_DIR/sidecar.log"
+  echo "[mission] leave this terminal open; relaunch the mission next door with:"
+  echo "            $0 --falcon-only ${ENV_NAME} ${SELECTION_MODE}"
+  echo "[mission] Ctrl+C here stops the detector."
+  # || true: a Ctrl+C makes wait report the signal, which set -e would turn into a
+  # failed exit for what is the normal way to end this mode.
+  wait "$SIDECAR_PID" || true
+  exit 0
 fi
 
 # ── 2. ros1<->ros2 bridge (host) ─────────────────────────────
-echo "[mission] 2/3 starting the ros1<->ros2 bridge ..."
+# Always restarted with FALCON: it is a ROS1 node against the roscore that roslaunch
+# starts inside the FALCON container, so that master -- and every topic registration
+# the bridge made against it -- dies when the container does.
+echo "[mission] starting the ros1<->ros2 bridge ..."
 "$HERE/bridge/run_bridge.sh" >"$LOG_DIR/bridge.log" 2>&1 &
 sleep 3
 
 # ── 3. FALCON nav + A*/NavDP + object-approach + director (container, foreground) ─
-echo "[mission] 3/3 launching FALCON (nav + object-approach + mission director) ..."
-# NOT exec: keep this shell alive so the EXIT/INT/TERM trap runs cleanup() (stop the
-# host detector sidecar + remove the bridge/falcon containers) when the launch ends --
-# on a node crash / normal teardown, not only on Ctrl+C. exec would discard the trap.
+# Clear any container left behind by a killed run: run_falcon.sh names it, so a stale
+# one makes docker refuse the name and the relaunch fails for a reason that has
+# nothing to do with the mission.
+docker rm -f falcon >/dev/null 2>&1 || true
+echo "[mission] launching FALCON (nav + object-approach + mission director) ..."
+# NOT exec: keep this shell alive so the EXIT/INT/TERM trap runs cleanup() (stop
+# whatever this run started) when the launch ends -- on a node crash / normal
+# teardown, not only on Ctrl+C. exec would discard the trap.
 "$HERE/run_falcon.sh" "$ENV_NAME" \
   roslaunch falcon_adapter object_mission.launch \
     ${CFG_ARGS[@]+"${CFG_ARGS[@]}"} \

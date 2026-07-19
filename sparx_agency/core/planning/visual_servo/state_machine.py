@@ -11,6 +11,15 @@ States (string labels, à la
 :class:`~sparx_agency.core.planning.trackers.rotation_supervisor.RotationReobserveSupervisor`):
 
   * ``SEARCH``      — planner flies the route; node passive (``drive_cmd_vel=False``).
+  * ``AIM``         — the route reached a *staging* goal (a vantage point, not the
+    object itself) without a confirmation, and the object's catalogued position IS
+    known: turn the nose onto its bearing and hold still, looking (see the
+    aim-bearing policy). Entered only when the caller reports ``aim_ready``; it
+    takes precedence over both SCAN and the arrival-land, because arriving at a
+    staging point is not arriving at the object. Ends one of two ways — the
+    detector confirms the object (→ acquire, the whole point of aiming), or the
+    caller reports ``aim_done``, which returns to SEARCH with ``escalate_goal``
+    raised so the mission re-targets the object's own coordinate.
   * ``SCAN``        — the route reached its goal without a confirmation, so the node
     drives a slow rotate-with-stops sweep of the room (see the scan-search policy)
     to look for the object. Still "searching", but the node now owns ``/cmd_vel``.
@@ -55,6 +64,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 SEARCH = "SEARCH"
+AIM = "AIM"
 SCAN = "SCAN"
 ACQUIRE_STOP = "ACQUIRE_STOP"
 APPROACH = "APPROACH"
@@ -137,12 +147,12 @@ class ApproachDecision:
 
     Attributes:
         mode: Current state label (one of
-            SEARCH/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER/LAND).
+            SEARCH/AIM/SCAN/ACQUIRE_STOP/APPROACH/HOVER_LOCK/RECOVER/LAND).
         drive_cmd_vel: True when this node owns ``/cmd_vel`` this tick (everything
-            except SEARCH — SCAN drives the sweep and ACQUIRE_STOP publishes the
-            settle stop, so they own it too). The node requests the
-            ``visual_servoing`` hand-off while this is True and releases the follower
-            when it goes False.
+            except SEARCH — SCAN drives the sweep, AIM drives the turn and
+            ACQUIRE_STOP publishes the settle stop, so they own it too). The node
+            requests the ``visual_servoing`` hand-off while this is True and releases
+            the follower when it goes False.
         reset_acquisition: True on the RECOVER->SEARCH give-up edge — the node
             clears the confirmation gate and tracker to re-acquire from scratch.
         lost_for_s: Seconds the track has been lost (0 outside RECOVER); pass to
@@ -150,6 +160,10 @@ class ApproachDecision:
         land: True only in the terminal LAND state — the mission reached the object
             and the node must stop driving ``/cmd_vel`` and land the drone. Once True
             it stays True (LAND never exits), so the node can latch its land sequence.
+        escalate_goal: True on the single AIM->SEARCH edge where aiming finished
+            without a confirmation — the node re-targets the coordinate goal at the
+            object's own catalogued position, so the planner flies the last leg it
+            had deliberately been held back from.
     """
 
     mode: str
@@ -157,6 +171,7 @@ class ApproachDecision:
     reset_acquisition: bool
     lost_for_s: float
     land: bool = False
+    escalate_goal: bool = False
 
 
 class VisualApproachStateMachine:
@@ -182,7 +197,8 @@ class VisualApproachStateMachine:
 
     def update(self, confirmed: bool, track_valid: bool, at_target: bool,
                dt: float, arrived_at_goal: bool = False,
-               range_m: Optional[float] = None) -> ApproachDecision:
+               range_m: Optional[float] = None, aim_ready: bool = False,
+               aim_done: bool = False) -> ApproachDecision:
         """Advance one tick.
 
         Args:
@@ -191,14 +207,20 @@ class VisualApproachStateMachine:
             at_target: The servo reports the target centred and close enough.
             dt: Seconds since the previous update (for the recovery timer).
             arrived_at_goal: The coordinate route has reached its goal. While True
-                and the target is not yet confirmed, the machine sits in SCAN and
-                the node sweeps the room; when it goes False (goal changed) SCAN
-                falls back to SEARCH so the planner flies the new route. Defaults
+                and the target is not yet confirmed, the machine sits in AIM or SCAN
+                and the node turns / sweeps; when it goes False (goal changed) both
+                fall back to SEARCH so the planner flies the new route. Defaults
                 False — an offline replay with no planner never scans.
             range_m: Metric range (m) to the tracked target this frame, or None when
                 unavailable (no depth). Only used for the LAND trigger; ignored when
                 ``land_range_m is None``. Defaults None — a caller that never lands
                 need not supply it.
+            aim_ready: The goal just reached is a *staging* point and the object's own
+                position is known, so arriving there should AIM at the object rather
+                than land on / sweep around the staging point. Defaults False, which
+                keeps the unstaged behaviour (arrival -> land-at-goal or SCAN).
+            aim_done: The aim policy has finished (looked, or timed out) without the
+                object being confirmed. Only read in AIM. Defaults False.
         """
         dt = max(0.0, float(dt))
 
@@ -210,11 +232,16 @@ class VisualApproachStateMachine:
         if self._state == SEARCH:
             # Only leave SEARCH once BOTH confirmed and the tracker is actually
             # locked (the node seeds the tracker on confirmation). Otherwise, once
-            # the route has reached its goal: with land_at_goal, a sustained arrival
-            # is itself a terminal LAND (the goal IS the object, reached by A* alone);
-            # without it, switch to a room sweep (SCAN), the legacy behaviour.
+            # the route has reached its goal: AIM first when the goal was only a
+            # staging point (aim_ready) -- arriving there is NOT arriving at the
+            # object, so neither the arrival-land nor the room sweep may fire yet.
+            # Failing that, with land_at_goal a sustained arrival is itself a terminal
+            # LAND (the goal IS the object, reached by A* alone); without it, switch
+            # to a room sweep (SCAN), the legacy behaviour.
             if confirmed and track_valid:
                 self._acquire()
+            elif arrived_at_goal and aim_ready and not confirmed:
+                self._enter(AIM)
             elif arrived_at_goal and self.cfg.land_at_goal and not confirmed:
                 # Reached the goal and the detector has NEVER seen the object
                 # ("by A* alone"): accumulate consecutive arrived+unconfirmed ticks
@@ -234,6 +261,21 @@ class VisualApproachStateMachine:
                 # Not arrived, or arrived-but-confirmed (object seen): reset the
                 # arrival-land streak so it only counts sustained unconfirmed arrival.
                 self._arrive_confirm = 0
+            return self._decide()
+
+        if self._state == AIM:
+            # Standing at the staging point with the nose swinging onto the object's
+            # bearing. Confirm+lock is the outcome we are aiming FOR -> acquire. If
+            # the aim finishes unseen, hand back to SEARCH and tell the node to
+            # escalate the goal to the object's own coordinate; if the goal moves out
+            # from under us (a retarget) just hand back so the planner flies it.
+            if confirmed and track_valid:
+                self._acquire()
+            elif not arrived_at_goal:
+                self._enter(SEARCH)
+            elif aim_done:
+                self._enter(SEARCH)
+                return self._decide(escalate_goal=True)
             return self._decide()
 
         if self._state == SCAN:
@@ -333,7 +375,8 @@ class VisualApproachStateMachine:
         if new != HOVER_LOCK:
             self._release_count = 0
 
-    def _decide(self, reset_acquisition: bool = False) -> ApproachDecision:
+    def _decide(self, reset_acquisition: bool = False,
+                escalate_goal: bool = False) -> ApproachDecision:
         return ApproachDecision(
             mode=self._state,
             # LAND owns /cmd_vel only to stop it; the node handles LAND before the
@@ -342,4 +385,5 @@ class VisualApproachStateMachine:
             reset_acquisition=reset_acquisition,
             lost_for_s=self._lost_for if self._state == RECOVER else 0.0,
             land=(self._state == LAND),
+            escalate_goal=escalate_goal,
         )

@@ -19,7 +19,7 @@ Pure, ROS-free, unit-tested core (222 tests):
 |---|---|---|
 | Detection | `core/mapping/detection/` | `DetectionModel` ABC + open-vocab YOLO-World backends; swap via the registry |
 | Tracking | `core/mapping/tracking/` | `ObjectLockTracker` with two closure strategies (`~lock_mode`): `TargetTracker` (detector + box tracker, default) or `DetectionOnlyTracker` (detector box only). Box backend defaults to the robust `MedianFlowBoxTracker` (forward-backward + median consensus + appearance validation — fails honestly instead of tracking the background); `ConstantVelocityBoxModel` predicts through dropouts + gives the re-search velocity → `Track2D` |
-| Control | `core/planning/visual_servo/` | `TargetConfirmationGate` (N-consecutive-frame acquisition, pose-free), `VisualServoController` (bbox[+depth] → body velocity), `ReSearchPolicy` (where to look when lost), `ScanSearchPolicy` (rotate-with-stops room sweep), `PulseShaper` (min-burst + coast/brake flight-command shaping), `VisualApproachStateMachine` (SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER) |
+| Control | `core/planning/visual_servo/` | `TargetConfirmationGate` (N-consecutive-frame acquisition, pose-free), `VisualServoController` (bbox[+depth] → body velocity), `ReSearchPolicy` (where to look when lost), `ScanSearchPolicy` (rotate-with-stops room sweep), `AimBearingPolicy` (pulsed turn onto a known bearing, then hold still and look), `PulseShaper` (min-burst + coast/brake flight-command shaping), `VisualApproachStateMachine` (SEARCH/AIM/SCAN/APPROACH/HOVER_LOCK/RECOVER) |
 | 2D→range | `core/mapping/depth/depth_bbox_fusion.py` | robust metric range to the box from depth |
 
 Wire format: `core/common/detection_message.py` — the single definition of the
@@ -57,15 +57,23 @@ RGB(frame_path) ─► yolo_detector ─╫─/object_approach/detections─► 
                                   ║        ║       │  TargetTracker (LK + motion)
 RGB  ─────────────────────────────╫────────╫────►  │
 depth ────────────────────────────╫────────╫────►  │  → range via depth_bbox_fusion
-pose  ────────────────────────────╫────────╫────►  │  → arrived_at_goal? (scan trigger)
+pose  ────────────────────────────╫────────╫────►  │  → arrived_at_goal? (aim/scan trigger)
+   (x, y AND yaw)                 ║        ║       │  → heading error to the object (aim)
                                   ║        ║       │  VisualServoController + FSM
+                                  ║        ║       │  AimBearingPolicy (turn + look)
                                   ║        ║       │  PulseShaper (min-burst + coast)
       re-prompt ◄─/object_approach/goal◄───╫───────┤
                                   ║        ║       ├─► demo_mode_request=visual_servoing
                                   ║        ║       ├─► /cmd_vel (vx, vy, wz)
-                                  ║        ║       ├─► /waypoint_nav/goal (re-inject on give-up)
+                                  ║        ║       ├─► /waypoint_nav/goal (re-inject on
+                                  ║        ║       │     give-up; escalate after a failed aim)
                                   ║        ║       └─► /object_approach/overlay (HUD Image)
                                   ║        ║               └─► target_lock_viewer_node
+                                  ║        ║
+        mission_director ─────────╫────────╫──┬─► /waypoint_nav/goal  = the STAGING point
+        (in-container; listed     ║        ║  └─► /object_approach/object_position
+         here for the goals)      ║        ║        = the object's own (x, y), what AIM
+                                  ║        ║          turns toward and falls back to
 ```
 
 Only the two String topics cross the bridge. The detector reads the frame-path topic
@@ -113,7 +121,12 @@ resets the unconfirmed timer. So keep `conf_thresh ≤ soft_confirm_min_score < 
 ## State machine
 
 ```
-                    ┌──── arrived at goal, still unconfirmed ────► SCAN
+                    ┌── arrived at a STAGING goal, unconfirmed ──► AIM
+                    │   (node turns onto the object's bearing,     │ confirmed → acquire
+                    │    holds still and looks)                    │ looked in vain →
+                    │                                              │  re-target the goal
+                    │                                              │  at the OBJECT, SEARCH
+                    ├──── arrived at goal, still unconfirmed ────► SCAN
                     │     (node sweeps: pause → rotate → pause)    │
                     │                                              │
 SEARCH ─────────────┴─ confirmed(N) + lock ──► APPROACH ──centred&close──► HOVER_LOCK
@@ -124,9 +137,13 @@ SEARCH ─────────────┴─ confirmed(N) + lock ──�
              (+ re-inject last goal)      (chase where it left / peek round occluder)
 ```
 
-`drive_cmd_vel` is true in every state **except** SEARCH — SCAN owns `/cmd_vel` too,
-because the sweep is the node's own motion. HOVER_LOCK is **not terminal**: a moving
-object drops it back to APPROACH, so there is no stopping condition, only a condition.
+`drive_cmd_vel` is true in every state **except** SEARCH — AIM and SCAN own `/cmd_vel`
+too, because the turn and the sweep are the node's own motion. HOVER_LOCK is **not
+terminal**: a moving object drops it back to APPROACH, so there is no stopping
+condition, only a condition.
+
+**AIM outranks both SCAN and the arrival-land**, because arriving at a staging point is
+not arriving at the object — see the staged approach below.
 
 **A brief loss stays in APPROACH, not RECOVER.** The tracker coasts (dead-reckons on
 the last velocity) for `max_predict_s` through a few-frame dropout — blur, a thin
@@ -217,11 +234,53 @@ a `label` and a world `position_m` (x, y, z). It is loaded by the pure, ROS-free
   seedable via `~seed`) or **`gui`** (a matplotlib window listing every object; click a
   row / press its number / `r` for random — and click another row anytime to **retarget
   live**). matplotlib is the only GUI toolkit proven in the FALCON container. On selection
-  it publishes three latched topics: the **label** on `/object_approach/goal` (re-prompts
-  YOLO *and* re-keys the confirmation gate), the **(x, y)** on `/waypoint_nav/goal` (the
-  planners replan), and **`True`** on `/object_approach/enable` (arms object_approach).
+  it publishes four latched topics: the **label** on `/object_approach/goal` (re-prompts
+  YOLO *and* re-keys the confirmation gate), a coordinate goal on `/waypoint_nav/goal`
+  (the planners replan), the object's **own (x, y)** on
+  `/object_approach/object_position` (what the aim turns toward), and **`True`** on
+  `/object_approach/enable` (arms object_approach).
 - Two small additions elsewhere: the FSM's coordinate-arrival LAND (below) and the
   optional-goal gate in the launches.
+
+### The staged approach — stand off and look, don't fly onto the coordinate
+
+The goal published for the planners is **not** the object: it is a **staging vantage
+point** (`stage_x` / `stage_y`, default `(0.0, -2.0)` — the centre of the room).
+
+*Why.* The object's coordinate comes from the room map and is only as accurate as that
+map. Fly onto it and a few tens of centimetres of error leaves the object beside, behind
+or past the drone — out of frame, with nothing for the visual servo to lock onto. The
+failure is quiet: the mission "arrives", sees nothing, and lands on empty floor.
+
+So the mission instead:
+
+1. **flies to the vantage point** (the planners' goal);
+2. **AIMs** — turns the nose onto the object's bearing and holds still, looking. A camera
+   resolves a bearing far better than a map resolves a position, so this is the shot most
+   likely to end in a real lock; confirming here hands the servo an object it can *see*,
+   and closure proceeds normally from a clean standoff;
+3. **escalates only if that fails** — re-publishes `/waypoint_nav/goal` at the object's
+   own (x, y) and lets A\* fly the last leg after all, which is exactly the pre-staging
+   behaviour, now the fallback rather than the plan.
+
+The turn is pulsed, like the route follower's: each burst is commanded `aim_yaw_coast_deg`
+short of the measured error and the platform's coast lands the nose on the bearing, then
+it stops (`aim_settle_s`) and re-measures. Holding still to look (`aim_look_s`) matters as
+much as the turn — the detector needs `n_confirm` consecutive blur-free frames.
+`aim_timeout_s` caps the whole thing, so a drone that will not turn (or a pose that never
+updates) still escalates instead of aiming forever.
+
+Because the goal is a staging point, **arriving at it can never land the drone**: AIM
+outranks the arrival-land, which only fires once the goal really is the object (after an
+escalation, or with staging off). Set `stage_x`/`stage_y` empty to switch staging off and
+fly straight at the object as before; the maths lives in the pure, unit-tested
+`core.planning.visual_servo.AimBearingPolicy`.
+
+**One coordinate, one place.** `stage_x`/`stage_y` drive the nav goal, object_approach's
+arrival goal *and* what the director publishes. These used to be three separate values
+(with a comment in `mission.yaml` reminding you to change the second by hand), so moving
+the mission meant the drone could fly to one place and decide it had "arrived" at another.
+`config/tests/test_launch_wiring.py` now locks the single source down.
 
 **The gate.** Until an object is selected, nothing plans or flies. The nav stack comes up
 with **no** initial goal (`goal_x/goal_y` empty → the planners idle "until a click"; the
@@ -239,7 +298,9 @@ gives one.)
   unconfirmed for `arrive_land_confirm_ticks` ticks. The goal *is* the object's location,
   so land there rather than sweeping the room. This is **pose-based** (keys off
   `arrive_radius_m`), so it works with no depth. It fires only from SEARCH, so it never
-  interrupts an in-progress visual approach.
+  interrupts an in-progress visual approach — and, with staging on, only once the goal
+  has been escalated to the object itself, so the drone can never land on the vantage
+  point instead.
 
 **Run.** One command (host detector sidecar + bridge + container), like
 `run_object_approach_mission.sh` but with no target/goal on the CLI:
@@ -249,6 +310,31 @@ gives one.)
 ./run_object_mission.sh office random       # random pick
 NAV_MODE=astar ./run_object_mission.sh office gui land_range_m:=0   # A* only, arrival-land only
 ```
+
+**Relaunching just FALCON.** Loading the detector's TensorRT engines is the slow part of
+a start; FALCON is the part you iterate on. Split them across two terminals and the
+engines are paid for once:
+
+```bash
+# terminal A — start the detector once and leave it up
+./run_object_mission.sh --detector-only
+
+# terminal B — relaunch the mission as often as you like (seconds, no engine reload)
+./run_object_mission.sh --falcon-only office
+```
+
+`--falcon-only` reuses the running sidecar and never touches it — it neither starts it
+nor kills it on exit — and **refuses to start if none is running**, because a mission
+whose detector is absent looks perfectly healthy: it plans, it flies, it just never
+confirms an object and lands "by A\* alone" every time.
+
+The **bridge restarts with FALCON** and cannot sensibly be kept: it is a ROS1 node
+against the roscore that `roslaunch` starts *inside* the FALCON container, so that master
+— and every topic registration made against it — dies with the container. That costs a
+couple of seconds, and a fresh roscore per run is wanted anyway: it is what stops a stale
+latched `/waypoint_nav/goal` from pre-arming the planners. (`bridge/entrypoint.sh` waits
+for the master and reloads its topic list *inside* its restart loop, so the bridge comes
+back correctly instead of silently bridging nothing.)
 
 Or, with a nav stack + detector already up, just the launch:
 
