@@ -505,7 +505,7 @@
   <arg name="recovery_climb_speed"      default="0.08" /><!-- thrust dial; mind the ceiling -->
   <arg name="recovery_climb_duration_s" default="0.4" />
   <arg name="recovery_turn_dir"      default="right" />
-  <arg name="recovery_turn_rate_deg_s" default="28.6" /><!-- floor matters more than ceiling -->
+  <arg name="recovery_turn_rate"     default="0.5" /><!-- rad/s; floor matters more than ceiling -->
 
   <include file="$(find falcon_adapter)/launch/nav_stack.launch">
     <arg name="start_go"          value="$(arg start_go)" />
@@ -528,7 +528,7 @@
     <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
     <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
     <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
-    <arg name="recovery_turn_rate_deg_s" value="$(arg recovery_turn_rate_deg_s)" />
+    <arg name="recovery_turn_rate"     value="$(arg recovery_turn_rate)" />
     <!-- A* planner (route search + replanning) -->
     <arg name="waypoint_spacing_m"            value="$(arg waypoint_spacing_m)" />
     <arg name="yaw_acquisition_radius"        value="$(arg yaw_acquisition_radius)" />

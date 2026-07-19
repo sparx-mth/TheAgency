@@ -594,12 +594,22 @@ def test_node_defaults_are_the_core_defaults():
     assert node.recovery.p.climb_speed == LostLocalizationParams().climb_speed
     assert node.recovery.p.climb_duration_s == LostLocalizationParams().climb_duration_s
     assert node.recovery.p.turn_dir == LostLocalizationParams().turn_dir
-    assert node.recovery.p.turn_rate == pytest.approx(LostLocalizationParams().turn_rate,
-                                                      abs=1e-3)
+    # Exact, not approx: ~turn_rate is rad/s straight through, so there is no
+    # degrees round-trip left to lose precision in.
+    assert node.recovery.p.turn_rate == LostLocalizationParams().turn_rate
     assert node.recovery.p.persist_enabled == LostLocalizationParams().persist_enabled
     assert node.recovery.p.persist_turn_s == LostLocalizationParams().persist_turn_s
     assert node.recovery.p.persist_back_s == LostLocalizationParams().persist_back_s
     assert node.recovery.p.persist_settle_s == LostLocalizationParams().persist_settle_s
+
+
+def test_the_sweep_rate_is_radians_per_second():
+    """~turn_rate is rad/s, the same unit as the follower's ~yaw_rate. Read as
+    degrees it would be ~57x too fast; read as radians a degrees value would be
+    ~57x too slow. Both look like a plausible number in a launch file."""
+    node = _make(turn_rate=0.5)
+    assert node.recovery.p.turn_rate == 0.5
+    assert math.degrees(node.recovery.p.turn_rate) == pytest.approx(28.6, abs=0.1)
 
 
 def test_the_sweep_goes_right_by_default():

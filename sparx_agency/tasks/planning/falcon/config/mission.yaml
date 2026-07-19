@@ -79,6 +79,23 @@ launch:
                               #   object mission has always pinned waypoint. Set it here.
 
   # -- WAYPOINT-controller speeds (the two dials for `controller: waypoint`) --
+  # EVERY SPEED DIAL IN THIS FILE, SI throughout, all rate-per-second:
+  #
+  #     vel_x                m/s    forward flight,  normal navigation   <- here
+  #     yaw_rate             rad/s  rotation,        normal navigation   <- here
+  #     recovery_back_speed  m/s    backward flight, lost-loc recovery   <- recovery block
+  #     recovery_turn_rate   rad/s  rotation,        lost-loc recovery   <- recovery block
+  #
+  # There is no recovery FORWARD speed and no normal-navigation BACKWARD speed, and
+  # neither is an oversight: recovery only ever retreats (it is getting away from
+  # whatever swallowed the tag), and the follower only ever advances (it turns to
+  # face a waypoint rather than reversing toward it).
+  # The recovery persist stage has no speed of its own either, on purpose: it
+  # CONTINUES the move that was already in flight, so it reuses whichever of the two
+  # navigation dials above was live at the moment the pose went cold.
+  # (controller: pure_pursuit ignores vel_x/yaw_rate entirely and uses
+  # pp_cruise_speed / pp_max_yaw_rate below -- the trap documented under those keys.)
+  #
   # The one-axis follower never translates and rotates at the same time: every
   # command is EITHER a pure forward advance OR a pure in-place turn. So these two
   # are fully independent -- vel_x is the speed of every straight leg, yaw_rate the
@@ -239,7 +256,7 @@ launch:
   # NOTHING checks what is behind the drone (the map is forward-looking and is
   # starved of poses while lost); it is only safe because it retraces ground just
   # flown, so keep the total inside how far the drone has actually come.
-  recovery_back_speed: 0.30       # m/s
+  recovery_back_speed: 0.30       # m/s, backward flight speed during recovery
   recovery_back_duration_s: 1.5   # per rung; 2 rungs by default
   # Climb rungs need the platform to honour linear.z, which on XTEND depends on which
   # Twist converter is running: online_nav_bridge's in-process one honours it, while
@@ -264,12 +281,14 @@ launch:
   # it is the side that actually re-acquires a tag on this airframe. The sweep is a
   # search, so the direction that finds one soonest is the whole point of it.
   recovery_turn_dir: right
-  # How hard it sweeps. This number has a FLOOR as well as a ceiling, and the floor
-  # is the one that bites: too low and the commanded yaw never overcomes the
-  # airframe, so the drone barely rotates -- and a sweep that never swept looks
-  # exactly like a sweep that found nothing. Still kept well under the follower's
-  # own yaw rate, because motion blur is what defeats a tag detection.
-  recovery_turn_rate_deg_s: 28.6
+  # How hard it sweeps. RAD/S, the same unit as yaw_rate above, so the airframe's
+  # two rotation dials can be read against each other directly.
+  # This number has a FLOOR as well as a ceiling, and the floor is the one that
+  # bites: too low and the commanded yaw never overcomes the airframe, so the drone
+  # barely rotates -- and a sweep that never swept looks exactly like a sweep that
+  # found nothing. Kept under yaw_rate all the same, because motion blur is what
+  # defeats a tag detection.
+  recovery_turn_rate: 0.6        # rad/s, rotation speed during the recovery sweep
 
   # -- Windows (all need a display) --
   viewer: false                # target-lock HUD
@@ -345,7 +364,7 @@ launch:
   #   including the wide corridors where it was free. Let the ladder do it.
   #
   waypoint_spacing_m:            1.0
-  inflate_radius_m:              0.40          # PREFERRED standoff (m); the drone CENTRE never plans closer than...
+  inflate_radius_m:              0.35          # PREFERRED standoff (m); the drone CENTRE never plans closer than...
                                                # ...this to a confirmed obstacle. Relaxes toward inflate_floor_m ...
                                                # ...only when the map leaves no other route.
   unknown_blocked:               false

@@ -113,7 +113,7 @@
   <arg name="recovery_back_speed"      default="0.30" /><!-- ~0.45 m per rung, twice -->
   <arg name="recovery_back_duration_s" default="1.5" />
   <arg name="recovery_turn_dir"      default="right" />
-  <arg name="recovery_turn_rate_deg_s" default="28.6" /><!-- too slow = a sweep that never sweeps -->
+  <arg name="recovery_turn_rate"     default="0.5" /><!-- rad/s; too slow = a sweep that never sweeps -->
 
   <!-- ── Mission director (object selection) ──────────────────────── -->
   <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
@@ -305,7 +305,7 @@
     <arg name="recovery_back_speed"      value="$(arg recovery_back_speed)" />
     <arg name="recovery_back_duration_s" value="$(arg recovery_back_duration_s)" />
     <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
-    <arg name="recovery_turn_rate_deg_s" value="$(arg recovery_turn_rate_deg_s)" />
+    <arg name="recovery_turn_rate"     value="$(arg recovery_turn_rate)" />
     <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
     <arg name="cruise_z"        value="$(arg cruise_z)" />
     <!-- A* planner (route search + replanning) -->

@@ -148,7 +148,7 @@
        the airframe, so the drone barely rotates and a sweep that never swept looks
        exactly like a sweep that found nothing. Kept well under the follower's own
        yaw rate because motion blur is what defeats a tag detection. -->
-  <arg name="recovery_turn_rate_deg_s" default="28.6" />
+  <arg name="recovery_turn_rate" default="0.5" /><!-- rad/s, same unit as the follower's yaw_rate -->
   <arg name="recovery_go_topic" default="/mission/go_status" />
 
 
@@ -1038,7 +1038,7 @@
     <param name="climb_speed"      value="$(arg recovery_climb_speed)" />
     <param name="climb_duration_s" value="$(arg recovery_climb_duration_s)" />
     <param name="turn_dir"       value="$(arg recovery_turn_dir)" />
-    <param name="turn_rate_deg_s" value="$(arg recovery_turn_rate_deg_s)" />
+    <param name="turn_rate"       value="$(arg recovery_turn_rate)" />
   </node>
 
   <node pkg="falcon_adapter" type="sensor_gate_node.py"

@@ -226,8 +226,11 @@ class LostLocalizationNode(object):
             climb_duration_s=float(G("~climb_duration_s", d.climb_duration_s)),
             climb_repeats=int(G("~climb_repeats", d.climb_repeats)),
             turn_enabled=_param_bool("~turn_enabled", d.turn_enabled),
-            turn_rate=math.radians(float(G("~turn_rate_deg_s",
-                                           math.degrees(d.turn_rate)))),
+            # rad/s, like every other rotation rate in this stack (the follower's
+            # ~yaw_rate, the core's turn_rate). A degrees-facing knob here would be
+            # the third unit convention on one airframe, and the bearing topic has
+            # already shown what that costs.
+            turn_rate=float(G("~turn_rate", d.turn_rate)),
             turn_dir=_turn_dir(G("~turn_dir", "left" if d.turn_dir > 0 else "right")),
             turn_target_rad=math.radians(float(G("~turn_target_deg",
                                                  math.degrees(d.turn_target_rad)))),
@@ -569,10 +572,11 @@ class LostLocalizationNode(object):
             L("            xtend_twist_to_cmd_nav.py needs --allow-multi-axes.")
         else:
             L("  climb   = OFF (ladder skips the climb rungs)")
-        L("  sweep    = %.1f deg/s to the %s, %.0f deg, %.0fs cap  (bearing: %s)",
-          math.degrees(p.turn_rate), "left" if p.turn_dir > 0 else "right",
-          math.degrees(p.turn_target_rad), p.turn_timeout_s,
-          self.bearing_topic or "none -- OPEN LOOP")
+        L("  sweep    = %.2f rad/s (%.0f deg/s) to the %s, %.0f deg, %.0fs cap",
+          p.turn_rate, math.degrees(p.turn_rate),
+          "left" if p.turn_dir > 0 else "right",
+          math.degrees(p.turn_target_rad), p.turn_timeout_s)
+        L("             bearing: %s", self.bearing_topic or "none -- OPEN LOOP")
         L("=" * 64)
 
 
@@ -629,12 +633,16 @@ if __name__ == "__main__":
 #           NOTE: the standalone xtend_twist_to_cmd_nav.py needs --allow-multi-axes
 #           or it silently drops linear.z and the rung does nothing (the in-process
 #           converter in online_nav_bridge honours it already).
-#   sweep:  ~turn_enabled (true) ~turn_rate_deg_s (28.6) ~turn_dir (right)
+#   sweep:  ~turn_enabled (true) ~turn_rate (0.50 rad/s) ~turn_dir (right)
 #           ~turn_target_deg (360.0) ~turn_timeout_s (40.0)
-#           ~turn_rate_deg_s has a FLOOR as well as a ceiling, and the floor is the
-#           one that bites: too low and the commanded yaw never overcomes the
-#           airframe, so the drone barely rotates and a sweep that never swept
-#           looks exactly like a sweep that found nothing.
+#           ~turn_rate is rad/s, the same unit as the follower's ~yaw_rate (0.7),
+#           so the two rotation dials on this airframe are directly comparable.
+#           (~turn_target_deg stays in degrees: it is an EXTENT, not a rate, and a
+#           full sweep reads better as 360 than as 6.28.)
+#           ~turn_rate has a FLOOR as well as a ceiling, and the floor is the one
+#           that bites: too low and the commanded yaw never overcomes the airframe,
+#           so the drone barely rotates and a sweep that never swept looks exactly
+#           like a sweep that found nothing.
 #   modes:  ~require_mode_confirm (false)  see the __init__ comment: false so a
 #           demo manager that does not know 'recovery' cannot mute the recovery
 #           ~request_repeat_sec (0.5)
