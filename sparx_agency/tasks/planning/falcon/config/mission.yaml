@@ -258,24 +258,26 @@ launch:
   # command line, e.g.:  ./run_object_mission.sh apf_debug:=true
   debug: false
 
-  # -- Thought journal: the flight log of WHY the stack did what it did --
+  # -- Drone "thinking": the stack's own account of WHY it acted --
   # Every node narrates its decisions ("no route at 0.40m, flying a 0.25m
   # squeeze", "obstacle confidence 0.4 < 0.75, keeping the route and looking
-  # again") onto /nav/thinking. The BEV window shows that live and then it is
-  # gone. This appends the same stream to a file, so after landing you can read
-  # back what the planner was thinking instead of having had to watch for it.
+  # again"). Two independent switches, BOTH OFF by default:
   #
-  # Separate from `debug` on purpose: `debug` is console verbosity, this is a
-  # file sink -- it costs no console noise, so leave it on. Written flushed
-  # per line, so a kill or a flat battery still leaves the record.
+  #   thinking_log     append every thought to one file for the run, so after
+  #                    landing you can read what the planner was thinking rather
+  #                    than having had to watch for it. Each node writes the file
+  #                    itself, flushed per line, so a kill or a flat battery
+  #                    still leaves the record. Costs no window and no display.
+  #   thinking_window  the live "drone thinking" window beside the BEV map.
+  #                    Needs a display, so leave it off for a headless Jetson
+  #                    run -- the log above is the durable record either way.
   #
-  # thought_log_path '' => ~/.ros/falcon/thoughts_<YYYYmmdd_HHMMSS>.log
-  thought_log: true
-  # thought_log_path: /path/to/flight.log
-  # thought_log_sources: astar_planner    # planner's thoughts ONLY ('' = all nodes)
-  # thought_log_min_level: warn           # only trouble ('' -> info = everything)
-  # thought_log_categories: plan          # nav | plan | object | sensor | map | mission
-  # thought_log_max_bytes: 8388608        # stop writing past this; 0 = unlimited
+  # Under run_falcon.sh the log lands on the HOST in falcon/logs/ (the container
+  # is --rm, so a log written inside it would die with the run). Set
+  # thinking_log_path to choose the file yourself.
+  thinking_log: false
+  thinking_window: false
+  # thinking_log_path: /falcon_logs/my_flight.log
 
   # -- Localization: must match what actually publishes your world pose --
   real_pose_topic: /xtend/localization

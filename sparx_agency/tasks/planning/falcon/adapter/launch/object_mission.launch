@@ -60,12 +60,9 @@
   <arg name="yaw_rate"        default="0.7" /><!-- rad/s in-place turn -->
   <!-- Debug logging master switch; see nav_stack.launch. -->
   <arg name="debug"           default="false" />
-  <arg name="thought_log" default="true" />
-  <arg name="thought_log_path" default="" />
-  <arg name="thought_log_max_bytes" default="8388608" />
-  <arg name="thought_log_categories" default="" />
-  <arg name="thought_log_sources" default="" />
-  <arg name="thought_log_min_level" default="info" />
+  <arg name="thinking_log" default="false" />
+  <arg name="thinking_log_path" default="$(optenv FALCON_THOUGHT_LOG)" />
+  <arg name="thinking_window" default="false" />
   <!-- Pure-pursuit speed + yaw force; see mission.yaml. Only used when
        controller:=pure_pursuit (pp_cruise_speed shadows ~vel_x there). -->
   <arg name="pp_max_yaw_rate"       default="0.45" />
@@ -438,12 +435,9 @@
     <arg name="vel_x"           value="$(arg vel_x)" />
     <arg name="yaw_rate"        value="$(arg yaw_rate)" />
     <arg name="debug"           value="$(arg debug)" />
-    <arg name="thought_log" value="$(arg thought_log)" />
-    <arg name="thought_log_path" value="$(arg thought_log_path)" />
-    <arg name="thought_log_max_bytes" value="$(arg thought_log_max_bytes)" />
-    <arg name="thought_log_categories" value="$(arg thought_log_categories)" />
-    <arg name="thought_log_sources" value="$(arg thought_log_sources)" />
-    <arg name="thought_log_min_level" value="$(arg thought_log_min_level)" />
+    <arg name="thinking_log" value="$(arg thinking_log)" />
+    <arg name="thinking_log_path" value="$(arg thinking_log_path)" />
+    <arg name="thinking_window" value="$(arg thinking_window)" />
     <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
     <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
     <arg name="pp_cruise_speed"       value="$(arg pp_cruise_speed)" />
@@ -482,8 +476,8 @@
     <arg name="n_confirm"       value="$(arg n_confirm)" />
     <!-- No initial goal_x/goal_y: object_approach learns the goal from the director's
          /waypoint_nav/goal publication (object_approach.launch omits empty goals). -->
-    <arg name="goal_x"          value="" />
-    <arg name="goal_y"          value="" />
+    <arg name="goal_x"          value="0.0" />
+    <arg name="goal_y"          value="-2.0" />
     <!-- Detector geometry MUST match the map (same raw K). -->
     <arg name="fx"              value="$(arg cam_fx)" />
     <arg name="fy"              value="$(arg cam_fy)" />

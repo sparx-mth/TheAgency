@@ -27,7 +27,13 @@ repeatedly collapses to "... (x3)" rather than flushing the reasoning that
 explains it off the top. It is a separate window so the map keeps its whole
 canvas and the log can be moved, resized or closed on its own -- closing it
 leaves the map (and the drone) running. ~thinking_lines sets how many lines it
-holds; ~thinking_topic:='' opens no log window at all.
+holds.
+
+That window is OFF by default (~thinking_window:=true opens it). The reasoning
+is persisted to a file by thought_logger_node regardless, so the window is a
+convenience for a desk-side run rather than the record -- and the drone often
+flies headless on the Jetson, where a stack that tries to open a GUI has
+nowhere to put it.
 
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
 picks it up, replans, and the new path is drawn within one BEV update. This node
@@ -60,6 +66,8 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~drone_ns + /gt_pose (Pose)
   in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/localization
   in   ~thinking_topic (String) /nav/thinking  (drone thinking log; '' = no window)
+  ~thinking_window (bool, FALSE) open the thinking window at all; off suits a
+       headless run and the thought_logger file keeps the record either way
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
 
 The drone marker normally reads a bare Pose on ~drone_ns + /gt_pose (what the
@@ -85,6 +93,28 @@ from visualization_msgs.msg import Marker, MarkerArray
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.thought_log import ThoughtLog
 from sparx_agency.core.common.thought_message import parse_thought_message
+
+
+def _get_bool_param(name, default):
+    """Read a boolean rosparam, raising on a value that is not clearly boolean.
+
+    roslaunch coerces ``value="true"`` / ``value="false"`` to a real Python bool
+    but leaves an UNRECOGNISED string (the typo ``"fales"``) as a raw string --
+    and ``bool("fales")`` is ``True``. A plain cast therefore looks like
+    sanitisation while silently flipping a default-OFF flag ON, which for a
+    window flag means a headless Jetson trying to open a GUI. Raise instead.
+
+    (Also defined in astar_planner_node / trajectory_simplifier_node; worth
+    hoisting into a shared adapter helper next time one of them is touched.)
+    """
+    value = rospy.get_param(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise ValueError(
+        "%s must be a boolean (true/false), got %r -- refusing to guess"
+        % (name, value))
 
 # Thinking-panel line colours by level: normal reasoning stays quiet, trouble the
 # drone is handling reads orange, a decision it could not resolve reads red.
@@ -137,16 +167,23 @@ class BevClickGoalNode:
         self.cmd_vel_topic = G("~cmd_vel_topic", self.drone_ns + "/cmd_vel")
         # and A* replan events (first route / obstacle reroute / boxed STOP / shorter).
         self.astar_event_topic = G("~astar_event_topic", "/path/astar_event")
-        # ── Drone thinking log (panel under the map) ─────────────────
-        # Every nav node narrates its decisions here; see thinking.py. "" drops
-        # the panel and gives the whole window back to the map.
+        # ── Drone thinking log (its own window) ──────────────────────
+        # Every nav node narrates its decisions here; see thinking.py.
+        # OFF by default: the reasoning is recorded to a file by thought_logger
+        # (see thought_journal.py), so the window is a convenience for a
+        # desk-side run, not the record -- and on a headless Jetson a stack that
+        # tries to open one has nowhere to put it. Set ~thinking_window:=true
+        # for the live view.
         self.thinking_topic = G("~thinking_topic", "/nav/thinking")
+        self.thinking_window = _get_bool_param("~thinking_window", False)
         self.thinking_lines = int(G("~thinking_lines", 8))
-        if self.thinking_topic and self.thinking_lines < 1:
+        # Only the window needs the stream; with it off, do not subscribe at all.
+        self.show_thinking = bool(self.thinking_topic) and self.thinking_window
+        if self.show_thinking and self.thinking_lines < 1:
             raise ValueError(
                 "~thinking_lines must be >= 1, got %d. To turn the thinking "
-                "panel off and give the whole window to the map, set "
-                "~thinking_topic:='' instead." % self.thinking_lines)
+                "window off, set ~thinking_window:=false instead."
+                % self.thinking_lines)
         self.refresh_hz = float(G("~refresh_hz", 5.0))
         self.arrow_len = float(G("~arrow_len_m", 0.5))
         # View window used until the first BEV map arrives, so the drone is
@@ -229,7 +266,7 @@ class BevClickGoalNode:
         if self.astar_event_topic:
             rospy.Subscriber(self.astar_event_topic, String, self._astar_event_cb,
                              queue_size=5)
-        if self.thinking_topic:
+        if self.show_thinking:
             rospy.Subscriber(self.thinking_topic, String, self._thinking_cb,
                              queue_size=20)
 
@@ -240,7 +277,7 @@ class BevClickGoalNode:
         # of the map they are actually flying from.
         self.fig, self.ax = plt.subplots(figsize=(9, 9))
         self.ax_log = self.fig_log = None      # stay None when the log is off
-        if self.thinking_topic:
+        if self.show_thinking:
             self._init_thinking_window()
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
@@ -295,9 +332,11 @@ class BevClickGoalNode:
         rospy.loginfo("  goal out = %s   (left-click to publish)", self.goal_topic)
         rospy.loginfo("  HUD in   = %s (planner) + %s (motion) + %s (A* events)",
                       self.nav_status_topic, self.cmd_vel_topic, self.astar_event_topic)
-        rospy.loginfo("  think in = %s   (%s)", self.thinking_topic or "(disabled)",
+        rospy.loginfo("  think in = %s   (%s)",
+                      self.thinking_topic if self.show_thinking else "(disabled)",
                       "%d-line log in its own window" % self.thinking_lines
-                      if self.thinking_topic else "no thinking window")
+                      if self.show_thinking
+                      else "no window; thought_logger still records to file")
         rospy.loginfo("  overlays = default ON: [a] A* route, [1] NavDP leg, [4] flown "
                       "path; others OFF")
         rospy.loginfo("  toggles  = keys 1-9/a per overlay, 0 = all on/off")

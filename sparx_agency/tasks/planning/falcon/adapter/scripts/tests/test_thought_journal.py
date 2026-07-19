@@ -40,22 +40,53 @@ def test_writes_a_readable_line_per_thought(tmp_path):
     assert j.lines == 1
 
 
-def test_ros_stamps_are_relative_to_the_first_thought(tmp_path):
-    """The +s column is what lines the log up with a bag and exposes cadence,
-    so it must start at zero and track the thoughts' own stamps -- not the
-    wall clock, which barely moves when thoughts arrive in a burst."""
+def test_ros_stamps_are_absolute_so_writers_share_one_scale(tmp_path):
+    """Several nodes append to ONE file, so the ROS column must be absolute: a
+    per-journal origin would make the column mean something different on every
+    other line. Absolute is also what lines a thought up with a bag."""
     path = tmp_path / "thoughts.log"
     j = ThoughtJournal(str(path), wall_clock=lambda: 1_700_000_000.0)
     j.write(_thought(text="first", stamp=100.0))
     j.write(_thought(text="second", stamp=101.5))
-    j.write(_thought(text="third", stamp=107.25))
     j.close()
     lines = [ln for ln in path.read_text().splitlines() if not ln.startswith("#")]
-    assert "+0.00" in lines[0].replace(" ", "")
-    assert "+1.50" in lines[1].replace(" ", "")
-    assert "+7.25" in lines[2].replace(" ", "")
-    # And the absolute origin must be recorded, or "relative" means nothing.
-    assert "# ros t0 = 100.000000" in path.read_text()
+    assert "100.00" in lines[0] and "101.50" in lines[1]
+
+
+def test_many_writers_share_one_file_with_one_header(tmp_path):
+    """Every narrating node opens its own journal on the same path. The header
+    belongs to the FILE, not the writer, or a twelve-node stack starts its log
+    with twelve headers."""
+    path = tmp_path / "thoughts.log"
+    planner = ThoughtJournal(str(path))
+    follower = ThoughtJournal(str(path))
+    mapper = ThoughtJournal(str(path))
+    planner.write(_thought(text="planner thought", source="astar_planner"))
+    follower.write(_thought(text="follower thought", source="waypoint_follower"))
+    mapper.write(_thought(text="mapper thought", source="mapping_sync"))
+    body = path.read_text()
+    assert body.count("# falcon thought journal") == 1
+    for text in ("planner thought", "follower thought", "mapper thought"):
+        assert text in body
+    # Every line must be whole: interleaved appends would corrupt the record.
+    for line in body.splitlines():
+        assert line.startswith("#") or "[" in line, "torn line: %r" % line
+
+
+def test_the_size_cap_is_shared_across_writers(tmp_path):
+    """A per-writer byte count would let N nodes write N times the cap between
+    them, which on the Orin is how the rootfs fills mid-mission."""
+    path = tmp_path / "thoughts.log"
+    first = ThoughtJournal(str(path), max_bytes=400)
+    while not first.capped:
+        first.write(_thought(text="filling the journal up"))
+    size_at_cap = path.stat().st_size
+    # A node starting later must see the file is already full, not start at zero.
+    late = ThoughtJournal(str(path), max_bytes=400)
+    late.write(_thought(text="from a late-starting node"))
+    assert late.capped
+    assert "from a late-starting node" not in path.read_text()
+    assert path.stat().st_size < size_at_cap + 200
 
 
 def test_each_line_is_flushed_so_a_kill_keeps_the_record(tmp_path):

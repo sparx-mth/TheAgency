@@ -63,20 +63,29 @@
        potential field:  debug:=false apf_debug:=true -->
   <arg name="debug" default="false" />
 
-  <!-- ── Thought journal (the flight log of the stack's reasoning) ─────
-       Separate from `debug` on purpose: `debug` is console verbosity, this is
-       a FILE sink, so it costs nothing to leave on and the flight you most
-       want to read back is always the one you forgot to enable it for.
-       thought_log_path '' = a timestamped file under ~/.ros/falcon/.
-       thought_log_sources:=astar_planner records the planner alone;
-       thought_log_min_level:=warn records only trouble. -->
+  <!-- ── Drone "thinking": the stack's own account of why it acted ─────
+       Every node narrates its decisions onto thinking_topic. Two independent,
+       both OFF by default:
+
+         thinking_log    append every thought to a shared file, so after landing
+                         you can read what the planner was thinking. Written
+                         IN-PROCESS by each node (see thinking.py): a logger node
+                         subscribing to the topic would burn a whole Python
+                         process on the Orin for one write() per thought.
+                         thinking_log_path '' = the per-run file run_falcon.sh
+                         set via FALCON_THOUGHT_LOG, else ~/.ros/falcon/.
+         thinking_window open the live "drone thinking" window beside the BEV
+                         map. Needs a display, so it stays off for a headless
+                         Jetson run; the log above is the durable record. -->
   <arg name="thinking_topic"        default="/nav/thinking" />
-  <arg name="thought_log"           default="true" />
-  <arg name="thought_log_path"      default="" />
-  <arg name="thought_log_max_bytes" default="8388608" /><!-- 8 MB; 0 = unlimited -->
-  <arg name="thought_log_categories" default="" /><!-- '' = nav, plan, object, sensor, map, mission -->
-  <arg name="thought_log_sources"   default="" /><!-- '' = every narrating node -->
-  <arg name="thought_log_min_level" default="info" /><!-- info | warn | error -->
+  <arg name="thinking_log"          default="false" />
+  <arg name="thinking_log_path"     default="$(optenv FALCON_THOUGHT_LOG)" />
+  <arg name="thinking_window"       default="false" />
+  <!-- GLOBAL (not node-private): one setting has to reach all twelve narrating
+       nodes, and they must agree on ONE file. Unset when thinking_log is false,
+       so Thinker sees '' and opens nothing. -->
+  <param name="/thinking/log_path" value="$(arg thinking_log_path)"
+         if="$(arg thinking_log)" />
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
   <!-- ── Lost-localization recovery (lost_localization_node) ──────────
@@ -1610,29 +1619,6 @@
     <param name="ra_release_frac"        value="$(arg ra_release_frac)" />
     <param name="ra_accel_limit"         value="$(arg ra_accel_limit)" />
     <param name="ra_yaw_active_eps"      value="$(arg ra_yaw_active_eps)" />
-  </node>
-
-  <!-- ══════════════════════════════════════════════════════════════
-       THOUGHT LOGGER. Every node narrates WHY it acted onto /nav/thinking;
-       the BEV window shows that live and then it is gone. This appends the
-       same stream to a file so "what was the planner thinking when it did
-       that?" is answerable after landing, not only while watching.
-       On by default: it is a file sink, so it costs no console noise (that
-       is what `debug` controls) and the flight you most want to read back is
-       always the one you forgot to enable logging for.
-       Narrow it with thought_log_sources:=astar_planner (planner only) or
-       thought_log_min_level:=warn (trouble only). Empty path = a timestamped
-       file under ~/.ros/falcon/.
-       ══════════════════════════════════════════════════════════════ -->
-  <node if="$(arg thought_log)"
-        pkg="falcon_adapter" type="thought_logger_node.py"
-        name="thought_logger" output="screen">
-    <param name="thinking_topic"    value="$(arg thinking_topic)" />
-    <param name="journal_path"      value="$(arg thought_log_path)" />
-    <param name="journal_max_bytes" value="$(arg thought_log_max_bytes)" />
-    <param name="categories"        value="$(arg thought_log_categories)" />
-    <param name="sources"           value="$(arg thought_log_sources)" />
-    <param name="min_level"         value="$(arg thought_log_min_level)" />
   </node>
 
   <!-- voxel_reset_watcher: intentionally NOT transferred (diagnostics only).

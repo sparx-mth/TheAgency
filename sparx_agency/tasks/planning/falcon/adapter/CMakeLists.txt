@@ -29,7 +29,6 @@ catkin_install_python(PROGRAMS
   scripts/mission_director_node.py
   scripts/cmd_vel_gate_node.py
   scripts/lost_localization_node.py
-  scripts/thought_logger_node.py
   scripts/depth_debug.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

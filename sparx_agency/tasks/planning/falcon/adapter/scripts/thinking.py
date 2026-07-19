@@ -40,16 +40,33 @@ TRANSPORT
     replaying a latched backlog would show old thoughts as if they were being
     thought now. A viewer that starts late has simply missed them.
 
+PERSISTENCE
+    The topic is live-only: the viewer draws it in a rolling window and it is
+    gone. With ``/thinking/log_path`` set, each node ALSO appends its thoughts
+    to that file, so "what was the planner thinking when it did that?" survives
+    the flight. Written here, in-process, rather than by a node subscribing to
+    the topic: that would cost a whole extra Python process on the Orin to do
+    what one ``write()`` does in the node that already formatted the line. Every
+    node appends to the same file; see ``thought_journal.py`` for why that is
+    safe. The path is a GLOBAL param, not ``~``, so one setting covers all
+    twelve narrating nodes and they agree on one file per run.
+
   out  ~thinking_topic (std_msgs/String, JSON per core.common.thought_message)
        /nav/thinking            -- shared by every narrating node
   ~thinking       (bool, true)  -- false silences this node's narration
   ~thinking_echo  (bool, true)  -- also mirror each thought to rosout
+  /thinking/log_path (str, '')  -- append every thought here; '' = no file
 """
 import rospy
 from std_msgs.msg import String
 
 from sparx_agency.core.common.thought_gate import ThoughtGate
-from sparx_agency.core.common.thought_message import encode_thought
+from sparx_agency.core.common.thought_message import Thought, encode_thought
+
+from thought_journal import ThoughtJournal
+
+#: Global (not ``~``) param naming the shared flight log; '' disables the file.
+LOG_PATH_PARAM = "/thinking/log_path"
 
 #: The one topic every narrating node publishes to and the BEV viewer reads.
 THINKING_TOPIC = "/nav/thinking"
@@ -80,8 +97,20 @@ class Thinker(object):
         # Not latched -- see the module docstring.
         self._pub = (rospy.Publisher(self.topic, String, queue_size=queue_size)
                      if self.enabled else None)
+        # Shared flight log. A journal that cannot be opened must not take a
+        # flight node down over a diagnostic, so fall back to narrating live and
+        # say why -- loudly enough that "the log is empty" is never a mystery.
+        self._journal = None
+        log_path = str(rospy.get_param(LOG_PATH_PARAM, "") or "").strip()
+        if log_path:
+            try:
+                self._journal = ThoughtJournal(log_path)
+            except (IOError, OSError) as e:
+                rospy.logerr("%s: cannot open the thought log %s (%s); "
+                             "narrating live only", self.source, log_path, e)
         if self.enabled:
-            rospy.loginfo("%s: thinking out loud on %s", self.source, self.topic)
+            rospy.loginfo("%s: thinking out loud on %s%s", self.source, self.topic,
+                          " (+ log %s)" % log_path if self._journal else "")
 
     def say(self, text, category="nav", level="info", key=None,
             repeat_after_s=None):
@@ -106,7 +135,7 @@ class Thinker(object):
                 unknown -- a mislabelled thought is a bug, not something to
                 quietly mis-colour in the operator's log.
         """
-        if self._pub is None:
+        if self._pub is None and self._journal is None:
             return False
         now = rospy.Time.now().to_sec()
         # Encode (and so validate) BEFORE consulting the gate. should_emit records
@@ -118,7 +147,12 @@ class Thinker(object):
                                  source=self.source)
         if not self._gate.should_emit(key or category, text, now, repeat_after_s):
             return False
-        self._pub.publish(String(data=payload))
+        if self._journal is not None:
+            self._journal.write(Thought(stamp=now, text=text.strip(),
+                                        category=category, level=level,
+                                        source=self.source))
+        if self._pub is not None:
+            self._pub.publish(String(data=payload))
         if self._echo:
             log = rospy.logwarn if level in ("warn", "error") else rospy.loginfo
             log("%s: %s", self.source, text)

@@ -111,12 +111,9 @@
 
   <!-- ── Debug logging (master switch; see nav_stack.launch) ──────── -->
   <arg name="debug"     default="false" />
-  <arg name="thought_log" default="true" />
-  <arg name="thought_log_path" default="" />
-  <arg name="thought_log_max_bytes" default="8388608" />
-  <arg name="thought_log_categories" default="" />
-  <arg name="thought_log_sources" default="" />
-  <arg name="thought_log_min_level" default="info" />
+  <arg name="thinking_log" default="false" />
+  <arg name="thinking_log_path" default="$(optenv FALCON_THOUGHT_LOG)" />
+  <arg name="thinking_window" default="false" />
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
   <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint). The one-axis follower
@@ -659,12 +656,9 @@
     <arg name="vel_x"         value="$(arg vel_x)" />
     <arg name="yaw_rate"      value="$(arg yaw_rate)" />
     <arg name="debug"         value="$(arg debug)" />
-    <arg name="thought_log" value="$(arg thought_log)" />
-    <arg name="thought_log_path" value="$(arg thought_log_path)" />
-    <arg name="thought_log_max_bytes" value="$(arg thought_log_max_bytes)" />
-    <arg name="thought_log_categories" value="$(arg thought_log_categories)" />
-    <arg name="thought_log_sources" value="$(arg thought_log_sources)" />
-    <arg name="thought_log_min_level" value="$(arg thought_log_min_level)" />
+    <arg name="thinking_log" value="$(arg thinking_log)" />
+    <arg name="thinking_log_path" value="$(arg thinking_log_path)" />
+    <arg name="thinking_window" value="$(arg thinking_window)" />
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
@@ -770,6 +764,7 @@
     <param name="drone_ns"           value="$(arg drone_ns)" />
     <param name="nav_mode"           value="$(arg nav_mode)" />
     <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />
+    <param name="thinking_window"    value="$(arg thinking_window)" />
   </node>
 
 </launch>

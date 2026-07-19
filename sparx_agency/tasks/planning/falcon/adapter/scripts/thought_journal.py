@@ -2,21 +2,28 @@
 """
 thought_journal.py -- persist the nav stack's narrated thoughts to a flight log.
 
-Helper module (imported by ``thought_logger_node``, not run as a node). Every
-node in the stack already narrates WHY it did something onto ``/nav/thinking``
-(see ``thinking.py``), but that stream is live-only: the BEV viewer draws it in a
-rolling window and it is gone. After a flight, the one question worth asking is
-"what was the planner thinking when it did that?", and by then the window has
-scrolled and the terminal is closed.
+Helper module (imported by ``thinking.py``, not run as a node). Every node in the
+stack already narrates WHY it did something onto ``/nav/thinking``, but that
+stream is live-only: the BEV viewer draws it in a rolling window and it is gone.
+After a flight, the one question worth asking is "what was the planner thinking
+when it did that?", and by then the window has scrolled and the terminal is
+closed.
 
-This writes the same stream to a file, one line per thought::
+This writes the same thoughts to a file, one line per thought::
 
-    14:32:07.412  WARN   astar_planner[plan]   No route at the preferred 0.40m
-                                               standoff, so I am flying a 0.25m
-                                               squeeze
+    14:32:07.412   1700000000.25  WARN   astar_planner[plan]  No route at the
+                                                              preferred 0.40m
+                                                              standoff...
 
 Design notes:
 
+  * **Written in-process, by each narrating node.** A separate logger node
+    subscribing to the topic would cost ~40 MB of Python and a scheduler slot on
+    the Orin to do what one ``write()`` does in the node that already formatted
+    the string. Every node appends to the SAME file; on Linux a ``write()`` to a
+    handle opened ``O_APPEND`` (which ``open(path, "a")`` is) holds the inode
+    lock, so concurrent appends cannot interleave or clobber each other, and
+    flushing per line means each line is exactly one such write.
   * **Flushed per line.** A flight log that is lost when the node is killed (or
     the battery goes) records exactly the flights you most want to read back, so
     durability beats throughput here. The stream is edge-triggered upstream, so
@@ -33,10 +40,10 @@ Python 3.8 compatible: the FALCON ROS1/Noetic adapter runs these scripts under
 import os
 import time
 
-#: Written once at the top of a new journal so absolute time is recoverable.
-_HEADER = "# falcon thought journal -- opened %s\n"
-#: Written on the first thought, so the relative ROS column has a stated origin.
-_ORIGIN = "# ros t0 = %.6f (the +s column is relative to this)\n"
+#: Written once, only into a NEW (empty) file: every narrating node opens the
+#: same shared journal, so a header per instance would mean twelve of them.
+_HEADER = ("# falcon thought journal -- opened %s\n"
+           "# columns: wall clock | ros stamp | level | node[category] | thought\n")
 
 
 #: Env var naming the log directory. run_falcon.sh sets it to a HOST directory
@@ -88,7 +95,6 @@ class ThoughtJournal(object):
         self._written = 0
         self._lines = 0
         self._capped = False
-        self._t0 = None          # ROS stamp of the first thought (relative origin)
         parent = os.path.dirname(self.path)
         if parent:
             try:
@@ -97,8 +103,16 @@ class ThoughtJournal(object):
                 if not os.path.isdir(parent):
                     raise
         self._fh = open(self.path, "a")
-        self._emit(_HEADER % time.strftime("%Y-%m-%d %H:%M:%S",
-                                           time.localtime(self._wall_clock())))
+        # Seed from what is already on disk, not from zero. Every narrating node
+        # opens its OWN journal on the SAME shared file, so a per-instance byte
+        # count would let N nodes write N times the cap between them.
+        try:
+            self._written = os.path.getsize(self.path)
+        except OSError:
+            self._written = 0
+        if self._written == 0:
+            self._emit(_HEADER % time.strftime("%Y-%m-%d %H:%M:%S",
+                                               time.localtime(self._wall_clock())))
 
     @property
     def lines(self):
@@ -125,30 +139,26 @@ class ThoughtJournal(object):
                        "raise ~journal_max_bytes to keep recording\n"
                        % (self.max_bytes, self._lines))
             return False
-        if self._t0 is None:
-            self._t0 = float(thought.stamp)
-            self._emit(_ORIGIN % self._t0)
-        self._emit(self.format(thought, self._wall_clock(),
-                               float(thought.stamp) - self._t0))
+        self._emit(self.format(thought, self._wall_clock()))
         self._lines += 1
         return True
 
     @staticmethod
-    def format(thought, wall_s, rel_s):
+    def format(thought, wall_s):
         """Render one thought as a log line.
 
         Two clocks, because they answer different questions. The wall clock
-        leads: that is what an operator correlates against a video, a note or
-        another process's log. The relative ROS stamp follows: that is what
-        lines the thought up with a bag, and reading down the column shows the
-        CADENCE of the stack's decisions -- which is usually the tell when a
-        planner is thrashing.
+        leads: that is what an operator correlates against a video or a note.
+        The ROS stamp follows, ABSOLUTE rather than relative to this journal's
+        first line: several nodes share one file, so a per-node origin would
+        make the column incomparable between them -- and absolute is what lines
+        a thought up with a bag anyway.
         """
         clock = time.strftime("%H:%M:%S", time.localtime(wall_s))
         millis = int((wall_s - int(wall_s)) * 1000.0)
-        return "%s.%03d  %+8.2f  %-5s  %s[%s]  %s\n" % (
-            clock, millis, rel_s, str(thought.level).upper(), thought.source,
-            thought.category, thought.text)
+        return "%s.%03d  %14.2f  %-5s  %s[%s]  %s\n" % (
+            clock, millis, float(thought.stamp), str(thought.level).upper(),
+            thought.source, thought.category, thought.text)
 
     def close(self):
         """Write a footer and close. Safe to call more than once."""
