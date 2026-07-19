@@ -406,6 +406,7 @@
   <arg name="min_motion_ticks"    default="2" /><!-- min consecutive ctrl ticks for forward OR yaw; a lone 5Hz pulse can't overcome the deadband (drone neither turns nor moves) -->
   <arg name="cmd_commit_ticks"    default="2" /><!-- output guarantee: a stop (zero twist) never reaches the drone until the motion ran >=this many ticks; a lone motion->stop is held to the floor first -->
   <arg name="cmd_stop_eps"        default="0.001" /><!-- |vx| and |wz| both below this = "stop" for the commit gate -->
+  <arg name="yaw_pitch_bias"      default="0.05" /><!-- m/s forward PITCH ridden on a pure-yaw twist so a turn-in-place bites instead of coasting flat; 0 = pure yaw -->
   <arg name="yaw_acquire_max_deg" default="35.0" /><!-- hardest heading error the gentle ADVANCE gate will ever accept -->
   <!-- The OTHER angle: on retiring a waypoint, glide straight on to the next one
        if its bearing is within this, else brake and re-align. Keep it in step with
@@ -1581,6 +1582,7 @@
     <param name="est_fresh_tau_s"        value="$(arg est_fresh_tau_s)" />
     <param name="cmd_commit_ticks"       value="$(arg cmd_commit_ticks)" />
     <param name="cmd_stop_eps"           value="$(arg cmd_stop_eps)" />
+    <param name="yaw_pitch_bias"         value="$(arg yaw_pitch_bias)" />
     <param name="yaw_acquire_max_deg"    value="$(arg yaw_acquire_max_deg)" />
     <param name="skip_yaw_thresh"        value="$(arg skip_yaw_thresh)" />
     <param name="predict_hz"             value="$(arg predict_hz)" />

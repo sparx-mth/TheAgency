@@ -14,6 +14,13 @@ tags:
     rpy: [-1.5708, 0,  -3.1416]
     size: 0.2
 
+# Communication room-2
+  17:
+    xyz: [2.75, -2.3, 1.34]
+    rpy: [-1.5708, 0,  -3.1416]
+    size: 0.265
+
+
 # Enter the hallway to the right towards the MAMAD, same orientation as tag 5
   10:
     xyz: [3.13, -0.82, 1.03]
@@ -38,6 +45,12 @@ tags:
     rpy: [-1.5708,  0, 1.5708]
     size: 0.195
 
+# on the wall-2
+  15:
+    xyz: [ 1.80, -1.07, 1.16 ]
+    rpy: [-1.5708, 0,  -3.1416]
+    size: 0.265
+
 #  inside MAMAD, in front of mamad's door facing the window
   6:
     xyz: [-0.245, -1.01, 1.35]
@@ -54,6 +67,12 @@ tags:
   11:
     xyz: [0.15, -4.7, 1.0]
     rpy: [-1.5708,  0, -3.1416]
+    size: 0.265
+
+# on a cardboard box, below the desk, on a trash can
+  14:
+    xyz: [ -0.585, -1.16, 0.71 ]
+    rpy: [-1.5708,  0, 1.5708]
     size: 0.265
 
 

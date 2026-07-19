@@ -176,7 +176,14 @@ launch:
   # These are IGNORED under controller: pure_pursuit, which has its own pair below
   # (pp_cruise_speed / pp_max_yaw_rate) -- that is the trap documented there.
   vel_x: 0.25                 # m/s, forward flight speed on every straight leg
-  yaw_rate: 0.7               # rad/s, rotation speed during a turn burst
+  yaw_rate: 0.8               # rad/s, rotation speed during a turn burst
+
+  # -- A little PITCH under every yaw --
+  # A pure-yaw twist (wz alone) leaves the platform flat, so a turn bites late and
+  # then coasts sloppily. This much forward speed rides along with any twist that is
+  # otherwise a pure yaw, giving the turn something to bite on. It is NOT added to a
+  # commanded forward leg -- only to turns in place. 0.0 restores pure yaw.
+  yaw_pitch_bias: 0.05        # m/s forward ridden on a turn-in-place
 
   # -- How far ONE yaw pulse turns (the burst size) --
   # yaw_rate above is the SPEED of a burst; this is its LENGTH. Graded pulses size

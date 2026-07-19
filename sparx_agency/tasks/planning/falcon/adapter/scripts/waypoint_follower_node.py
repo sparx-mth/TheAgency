@@ -373,6 +373,14 @@ class WaypointFollowerNode:
         self._cmd_run = 0             # consecutive emits of that category
         self._cmd_vx = self._cmd_wz = 0.0   # last motion twist, repeated if held
 
+        # Turn-in-place PITCH bias: a pure-yaw twist (wz only, vx=0) is a weak
+        # command on this platform -- it yaws without ever tilting, so the turn
+        # starts late and coasts sloppily. Riding a small forward PITCH along with
+        # the yaw gives the turn something to bite on. Applied only when the twist
+        # is otherwise a pure yaw, so it never adds to a commanded forward run;
+        # set 0.0 to restore the old pure-yaw behaviour.
+        self.yaw_pitch_bias = float(G("~yaw_pitch_bias", 0.05))
+
         # Narrate what this node DECIDES onto /nav/thinking: which waypoint it is
         # aligning to or flying at, why it stopped, what it is waiting for.
         self.thinker = Thinker("waypoint_follower")
@@ -1023,6 +1031,29 @@ class WaypointFollowerNode:
         self.freeze_pub.publish(Bool(data=bool(want)))
         self.last_freeze = want
 
+    def _with_yaw_pitch_bias(self, vx, wz):
+        """Ride a small forward PITCH on a turn-in-place command.
+
+        A twist that is pure yaw (``wz`` alive, ``vx`` at rest) leaves the
+        platform flat, so the turn bites late and coasts. ``~yaw_pitch_bias``
+        (m/s) is added as forward speed for exactly those twists; a twist that
+        already commands forward motion, or one that commands no yaw at all, is
+        returned untouched.
+
+        Args:
+            vx: Forward speed about to be published, in m/s.
+            wz: Yaw rate about to be published, in rad/s.
+
+        Returns:
+            The forward speed to publish, in m/s.
+        """
+        if self.yaw_pitch_bias <= 0.0:
+            return vx
+        eps = self.cmd_stop_eps
+        if abs(wz) < eps or abs(vx) >= eps:
+            return vx
+        return self.yaw_pitch_bias
+
     def _publish_twist(self, vx, wz, vy=0.0):
         """Assemble the Twist. linear.z = 0 is hardwired; the core has already
         enforced the invariant, saturated and slew-limited.
@@ -1050,6 +1081,9 @@ class WaypointFollowerNode:
         if cat != (0, 0):
             self._cmd_vx, self._cmd_wz = vx, wz   # remember motion twist to repeat
 
+        # After the gate, so the commitment category stays that of the pure yaw.
+        vx = self._with_yaw_pitch_bias(vx, wz)
+
         m = Twist()
         m.linear.x = vx
         m.linear.y = vy   # 0 for the one-axis controller; ROLL correction for roll_assist
@@ -1072,6 +1106,7 @@ class WaypointFollowerNode:
         linear.z=0 hardwired (fixed altitude). No command-commitment gate -- the
         multi-axis controller emits continuous, minimum-force-shaped commands, so
         it never needs the lone-pulse protection the one-axis path uses."""
+        vx = self._with_yaw_pitch_bias(vx, wz)
         m = Twist()
         m.linear.x = vx
         m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller
