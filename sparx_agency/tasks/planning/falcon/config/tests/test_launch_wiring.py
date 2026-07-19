@@ -124,13 +124,36 @@ def test_forwarded_args_are_declared_by_the_child():
         assert name in NS_DECL, "real_drone forwards %s, nav_stack declares no such arg" % name
 
 
-def test_the_gate_is_not_forwarded_away():
-    """goal_x/goal_y must stay pinned empty: that gate is what stops the drone flying
-    before an object is selected."""
+def test_the_nav_goal_reaches_the_planners():
+    """goal_x/goal_y must be FORWARDED, not pinned to a literal.
+
+    They used to be pinned empty, which idled the planners until an object was
+    selected. They are now args set from mission.yaml, so the mission can be a
+    plain "fly to this coordinate" run. Pinning them again -- to '' or to a
+    number -- would silently make the config key dead: mission.yaml would still
+    validate, and the value would still be ignored.
+    """
     text = _OM.read_text()
-    assert re.search(r'<arg name="goal_x"\s+value="" />', text)
-    assert re.search(r'<arg name="goal_y"\s+value="" />', text)
-    assert "goal_x" not in _config_launch_keys(), "mission.yaml must not set goal_x"
+    assert re.search(r'<arg name="goal_x"\s+value="\$\(arg goal_x\)" />', text)
+    assert re.search(r'<arg name="goal_y"\s+value="\$\(arg goal_y\)" />', text)
+    assert "goal_x" in _config_launch_keys(), "mission.yaml must be able to set goal_x"
+
+
+def test_the_go_gate_is_the_last_thing_holding_the_drone():
+    """start_go must default CLOSED, and object_approach must start disabled.
+
+    This is what the empty-goal pin used to back up. Now that goal_x/goal_y
+    default to a real coordinate, A* has a route the moment the stack is up, so
+    the GO gate is the ONLY thing between startup and a drone flying it -- there
+    is no longer a second layer that also required an object selection first.
+    Defaulting start_go true would therefore mean launching IS taking off.
+    """
+    assert OM_DECL["start_go"] == "false", (
+        "start_go must default closed: with a numeric goal_x the planners have a "
+        "route at startup, and this gate is all that holds the drone")
+    assert re.search(r'<arg name="start_enabled"\s+value="false" />', _OM.read_text()), (
+        "object_approach must still come up disabled, or the visual servo and the "
+        "landing could fire before an object is ever selected")
 
 
 # ── The launch files must actually PARSE ────────────────────────────

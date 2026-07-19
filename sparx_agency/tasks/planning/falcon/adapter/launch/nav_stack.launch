@@ -526,6 +526,17 @@
   <arg name="replan_min_new_cells"    default="60" /><!-- newly-observed corridor cells needed to consider an opportunistic replan ("many, not a few") -->
   <arg name="replan_min_new_cells_any" default="240" /><!-- newly-observed cells ANYWHERE (an off-corridor reveal can open a shortcut); higher floor; 0 disables -->
   <arg name="replan_rotation_min_deg" default="30.0" /><!-- yaw swing since the last commit/evaluation that re-evaluates the route (mid-turn or just finished); 0 disables -->
+  <!-- Let the PERIODIC tick adopt its candidate with no length test at all.
+       Length is the wrong question for that trigger: the route is re-derived from
+       where the drone IS, against the map as it is NOW, so an equal-length
+       candidate is still better information than a route committed from a pose the
+       drone has since left. And a route made safer by walls discovered since can
+       be LONGER, which is why replan_improve_frac:=0 is not the same thing (that
+       gate is still new_len at-most old_len).
+       Rotation and discovery keep the hysteresis: they can fire back to back, and
+       the flip-flop this bypass is safe from is exactly what they would cause.
+       The commit window (replan_commit_min_s) still applies. -->
+  <arg name="replan_periodic_always"  default="false" />
   <arg name="replan_period_s"         default="7.0" /><!-- catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables -->
   <arg name="replan_relaxed_period_s" default="4.0" /><!-- the same catch-all when the committed route was SQUEEZED: cadence falls linearly from replan_period_s at inflate_radius_m to this at inflate_floor_m, so a route with little clearance is re-checked far sooner (less margin for drift, and the pinch is usually transient) -->
   <arg name="replan_commit_min_s"     default="4.0" /><!-- keep flying a committed route at least this long before an opportunistic replan may reconsider it (collision bypasses this) -->
@@ -1170,6 +1181,7 @@
     <param name="replan_min_new_cells"  value="$(arg replan_min_new_cells)" />
     <param name="replan_min_new_cells_any" value="$(arg replan_min_new_cells_any)" />
     <param name="replan_rotation_min_deg" value="$(arg replan_rotation_min_deg)" />
+    <param name="replan_periodic_always" value="$(arg replan_periodic_always)" />
     <param name="replan_period_s"       value="$(arg replan_period_s)" />
     <param name="replan_commit_min_s"   value="$(arg replan_commit_min_s)" />
     <param name="replan_improve_frac"   value="$(arg replan_improve_frac)" />

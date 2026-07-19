@@ -480,6 +480,193 @@ def test_periodic_replan_reevaluates_without_republish():
     assert _n_paths(node) == 1, "periodic evaluations never re-publish a kept route"
 
 
+# ─── observability: a kept route is still a visible decision ────────────────
+# Smart replanning freezes the committed route and republishes ONLY on adoption,
+# so from outside the node a planner re-deriving the same route every period is
+# indistinguishable from one that has died -- nothing on the BEV ever moves. These
+# lock in the evidence that it ran: the route it considered, and what it decided.
+def _n_evals(node):
+    return len(node.pub_eval.msgs)
+
+
+def _last_eval(node):
+    return node.pub_eval.msgs[-1].data if node.pub_eval.msgs else None
+
+
+def _last_candidate(node):
+    return node.pub_candidate.msgs[-1] if node.pub_candidate.msgs else None
+
+
+def test_a_kept_route_still_reports_the_evaluation():
+    """The headline: nothing changed, so nothing is republished -- but the planner
+    must still say it ran, or a working planner looks like a dead one."""
+    node = _node(replan_commit_min_s=1.0, replan_improve_frac=0.15)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    node._changed_in_corridor = lambda: 10_000
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_paths(node) == n0, "the committed route must stay frozen"
+    assert _n_evals(node) == 1, "...but the evaluation must be reported"
+    assert "kept route" in _last_eval(node)
+
+
+def test_a_kept_evaluation_publishes_the_route_it_considered():
+    """The candidate is what the BEV draws. Without it the operator has a line of
+    text claiming a route was considered and no way to see it."""
+    node = _node(replan_commit_min_s=1.0, replan_improve_frac=0.15)
+    _bootstrap(node, _all_free())
+    node._changed_in_corridor = lambda: 10_000
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(1.0, 3.0), Pose2D(3.8, 2.0)),
+        frame_id="world")
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    cand = _last_candidate(node)
+    assert cand is not None and len(cand.poses) == 3
+
+
+def test_the_verdict_says_what_it_would_have_taken():
+    """'kept route' alone invites the same question again. Reporting the threshold
+    it missed is what turns 'nothing happened' into a decision you can read."""
+    node = _node(replan_commit_min_s=1.0, replan_improve_frac=0.15)
+    _bootstrap(node, _all_free())
+    node._changed_in_corridor = lambda: 10_000
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert "needs <=" in _last_eval(node)
+
+
+def test_an_adopted_replan_reports_adoption():
+    node = _node(replan_commit_min_s=1.0, replan_improve_frac=0.15)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    node._changed_in_corridor = lambda: 10_000
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(2.0, 2.0)), frame_id="world")
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_paths(node) == n0 + 1
+    assert "ADOPTED" in _last_eval(node)
+
+
+def test_a_failed_evaluation_clears_the_candidate():
+    """A* found nothing this time. Publish an EMPTY candidate rather than leaving
+    the last one latched, or the BEV would keep drawing a route that is no longer
+    on the table -- the one failure mode worse than drawing nothing."""
+    node = _node(replan_commit_min_s=1.0)
+    _bootstrap(node, _all_free())
+    node._changed_in_corridor = lambda: 10_000
+    node._plan_candidate = lambda: None
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    cand = _last_candidate(node)
+    assert cand is not None and len(cand.poses) == 0
+    assert "no route found" in _last_eval(node)
+
+
+def test_the_periodic_check_keeps_reporting_on_a_static_map():
+    """The operator's actual question -- 'it has been 6 seconds and I see nothing'
+    -- answered as a rising evaluation count on a map where nothing happens."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=3.0)
+    _bootstrap(node, _all_free())
+    for _ in range(3):
+        _advance(4.0)
+        node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_evals(node) == 3, "every periodic check must leave a trace"
+    assert _n_paths(node) == 1, "...without ever disturbing the committed route"
+
+
+# ─── ~replan_periodic_always: the periodic tick adopts unconditionally ──────
+def test_periodic_always_adopts_an_equal_length_route():
+    """The point of the bypass: an equal-length candidate is still BETTER, because
+    it is re-derived from where the drone is now against the map as it is now."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=3.0,
+                 replan_periodic_always=True)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
+    _advance(4.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_paths(node) == n0 + 1, "the periodic tick must adopt regardless"
+    assert "REFRESHED" in _last_eval(node)
+
+
+def test_periodic_always_adopts_a_LONGER_route():
+    """The case replan_improve_frac:=0 cannot express. A route made safer by walls
+    discovered since is often longer, and that gate is still `new_len <= old_len`."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=3.0,
+                 replan_periodic_always=True)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    node._plan_candidate = lambda: Path2D(   # a detour: clearly longer
+        points=(Pose2D(0.2, 2.0), Pose2D(2.0, 3.5), Pose2D(3.8, 2.0)),
+        frame_id="world")
+    _advance(4.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_paths(node) == n0 + 1, "a longer but better-informed route is adopted"
+
+
+def test_periodic_always_does_not_loosen_discovery():
+    """Scoped to the rate-limited trigger. Rotation and discovery can fire back to
+    back, so they keep the hysteresis that stops the L/R flip-flop."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=0,   # periodic off
+                 replan_improve_frac=0.15, replan_periodic_always=True)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    node._changed_in_corridor = lambda: 10_000
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
+    _advance(2.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_paths(node) == n0, "a discovery must still clear the length bar"
+    assert "kept route" in _last_eval(node)
+
+
+def test_periodic_always_is_off_by_default():
+    """The bypass is opt-in: unset, a static map still never re-publishes."""
+    node = _node(replan_commit_min_s=1.0, replan_period_s=3.0)
+    _bootstrap(node, _all_free())
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
+    _advance(4.0)
+    node._bev_cb(_occ_msg(_all_free()))
+
+    assert _n_paths(node) == 1
+    assert "kept route" in _last_eval(node)
+
+
+def test_periodic_always_still_respects_the_commit_window():
+    """'No constraints' means no LENGTH constraint. The commit window is what stops
+    the route changing under a slow stop-and-turn drone faster than it can fly it."""
+    node = _node(replan_commit_min_s=5.0, replan_period_s=1.0,
+                 replan_periodic_always=True)
+    _bootstrap(node, _all_free())
+    n0 = _n_paths(node)
+    node._plan_candidate = lambda: Path2D(
+        points=(Pose2D(0.2, 2.0), Pose2D(3.8, 2.0)), frame_id="world")
+    _advance(2.0)                       # period elapsed, commit window has not
+    node._bev_cb(_occ_msg(_all_free()))
+    assert _n_paths(node) == n0, "the commit window still gates the adoption"
+    _advance(4.0)                       # now past replan_commit_min_s
+    node._bev_cb(_occ_msg(_all_free()))
+    assert _n_paths(node) == n0 + 1
+
+
 def test_new_obstacles_in_mapped_space_trigger_evaluation():
     """Many FREE->OCCUPIED flips in already-mapped space (new obstacles appearing
     on the BEV) must count as map change and trigger an evaluation -- a known-mask

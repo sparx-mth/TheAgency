@@ -8,6 +8,8 @@ trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
     red path     = raw A*  (shortest -- hugs walls / cuts corners)
     teal dashed  = A* global route (whole plan; stays put as a NavDP leg flies it)
+    orange dotted= the route A* last CONSIDERED (halo under teal = re-checked,
+                   kept the current one; diverging = the shorter route it rejected)
     magenta path = APF-safe (recentred off walls -- before cleanup)
     green path   = cleaned/flown (simplified APF-safe path -- the path flown)
     blue dashed = full planner route (e.g. NavDP) when only its near prefix flies
@@ -44,7 +46,7 @@ Overlays can be toggled live with the number keys to declutter the view (the
 drone dot and goal star always stay on):
     1 full route   2 raw A*    3 safe    4 flown path   5 F_rep field
     6 F_rep arrows 7 predicted 8 smooth  9 lookahead    a A* global route
-    0 all on/off
+    c A* candidate route                                 0 all on/off
 Initial visibility can also be preset per layer via the ~show_<layer> params
 (e.g. ~show_pred:=false to start with the predicted trajectory hidden).
 
@@ -56,6 +58,10 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~path_topic (Path)           /path/waypoints      (cleaned/flown; drawn green)
   in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
   in   ~astar_path_topic (Path)     /path/waypoints_astar (A* global route; teal dashed; '' = off)
+  in   ~astar_candidate_topic (Path) /path/waypoints_astar_candidate (route last
+       considered; orange dotted; '' = off)
+  in   ~astar_eval_topic (String)   /path/astar_eval  (every evaluation, incl. the
+       ones that change nothing -- the planner's proof of life in the HUD)
   in   ~safe_path_topic (Path)      /path/waypoints_safe (APF-safe pre-cleanup; magenta; '' = off)
   in   ~full_path_topic (Path)      /path/waypoints_navdp_full  (full route, blue dashed; '' = off)
   in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
@@ -138,6 +144,14 @@ class BevClickGoalNode:
         # (follow) -- so the global A* route is otherwise invisible while a NavDP
         # leg flies. Drawn teal-dashed; "" disables it.
         self.astar_path_topic = G("~astar_path_topic", "/path/waypoints_astar")
+        # The route A* CONSIDERED on its last opportunistic evaluation, drawn
+        # orange-dotted. Between adoptions the committed teal route is frozen and
+        # never republished, so without this a planner that keeps re-deriving the
+        # same route looks identical to one that has stopped: nothing on the map
+        # ever moves. This layer is that evaluation made visible -- when it sits on
+        # top of the teal route, A* just re-checked and preferred what it had.
+        self.astar_candidate_topic = G("~astar_candidate_topic",
+                                       "/path/waypoints_astar_candidate")
         # The corrector's safe path BEFORE the trajectory_simplifier cleans it.
         # Drawn magenta so safety-corrected vs final-flown is visible while tuning
         # the simplifier. "" disables it (no publisher -> nothing drawn anyway).
@@ -167,6 +181,10 @@ class BevClickGoalNode:
         self.cmd_vel_topic = G("~cmd_vel_topic", self.drone_ns + "/cmd_vel")
         # and A* replan events (first route / obstacle reroute / boxed STOP / shorter).
         self.astar_event_topic = G("~astar_event_topic", "/path/astar_event")
+        # Every opportunistic evaluation, including the ones that change nothing.
+        # This is the planner's proof of life: the events above only fire when the
+        # route actually changes, so on a clean run they are silent for minutes.
+        self.astar_eval_topic = G("~astar_eval_topic", "/path/astar_eval")
         # ── Drone thinking log (its own window) ──────────────────────
         # Every nav node narrates its decisions here; see thinking.py.
         # OFF by default: the reasoning is recorded to a file by thought_logger
@@ -198,6 +216,7 @@ class BevClickGoalNode:
         self._path_xy = []              # cleaned, flown path (green)
         self._raw_xy = []               # raw planner path (red) -- shortest, viz only
         self._astar_xy = []             # A* GLOBAL route (teal) -- independent overlay
+        self._cand_xy = []              # route the last evaluation CONSIDERED (orange)
         self._safe_xy = []              # corrector's safe path (magenta) -- pre-cleanup
         self._full_xy = []              # full planner route (blue dashed) -- ref only
         self._forces = []               # (x,y,dx,dy) per-waypoint force arrows (yellow)
@@ -213,6 +232,8 @@ class BevClickGoalNode:
         self._motion = None             # "FORWARD" / "ROTATING" / "HOLD" (from cmd_vel)
         self._astar_event = None        # last A* replan event text
         self._astar_event_t = None      # rospy.Time it arrived (for an age readout)
+        self._astar_eval = None         # last evaluation verdict (fires even when
+        self._astar_eval_t = None       # nothing changed -- the planner's pulse)
         # Drone thinking: the rolling narration drawn in the panel under the map.
         self._thoughts = ThoughtLog(capacity=max(1, self.thinking_lines))
         self._thought_t0 = None         # stamp of the first thought (for "+12.3s")
@@ -225,12 +246,13 @@ class BevClickGoalNode:
         # launch file can start with a cluttered overlay (e.g. pred) hidden.
         self._keymap = {"1": "full", "2": "raw", "3": "safe", "4": "path",
                         "5": "field", "6": "forces", "7": "pred",
-                        "8": "smooth", "9": "lookahead", "a": "astar"}
+                        "8": "smooth", "9": "lookahead", "a": "astar",
+                        "c": "cand"}
         # Declutter by default: show only the three overlays that matter for watching
         # the A*/NavDP hybrid -- [a] A* global route, [1] NavDP full leg, [4] flown
         # path -- and hide the rest. Any layer is still toggled live with its key, or
         # forced on/off from a launch file via ~show_<layer>.
-        _default_on = {"astar", "full", "path"}
+        _default_on = {"astar", "full", "path", "cand"}
         self._show = {layer: bool(G("~show_" + layer, layer in _default_on))
                       for layer in self._keymap.values()}
 
@@ -241,6 +263,9 @@ class BevClickGoalNode:
         if self.astar_path_topic:
             rospy.Subscriber(self.astar_path_topic, Path, self._astar_path_cb,
                              queue_size=1)
+        if self.astar_candidate_topic:
+            rospy.Subscriber(self.astar_candidate_topic, Path,
+                             self._astar_candidate_cb, queue_size=1)
         if self.safe_path_topic:
             rospy.Subscriber(self.safe_path_topic, Path, self._safe_path_cb, queue_size=1)
         if self.full_path_topic:
@@ -264,6 +289,8 @@ class BevClickGoalNode:
         if self.cmd_vel_topic:
             rospy.Subscriber(self.cmd_vel_topic, Twist, self._cmd_vel_cb, queue_size=1)
         if self.astar_event_topic:
+            rospy.Subscriber(self.astar_eval_topic, String, self._astar_eval_cb,
+                             queue_size=1)
             rospy.Subscriber(self.astar_event_topic, String, self._astar_event_cb,
                              queue_size=5)
         if self.show_thinking:
@@ -301,6 +328,7 @@ class BevClickGoalNode:
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
         self._astar_line = None          # A* global route (teal dashed)
+        self._cand_line = None           # considered route (orange dotted)
         self._safe_line = None           # corrector safe path (magenta)
         self._full_line = None           # full planner route (blue dashed)
         self._smooth_line = None         # pure-pursuit splined trajectory (cyan)
@@ -418,6 +446,16 @@ class BevClickGoalNode:
         with self._lock:
             self._nav_status = msg.data
 
+    def _astar_candidate_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._cand_xy = pts
+
+    def _astar_eval_cb(self, msg):
+        with self._lock:
+            self._astar_eval = msg.data
+            self._astar_eval_t = rospy.Time.now()
+
     def _astar_event_cb(self, msg):
         with self._lock:
             self._astar_event = msg.data
@@ -481,6 +519,7 @@ class BevClickGoalNode:
             self._path_xy = []          # drop the stale flown path; replan redraws it
             self._raw_xy = []           # and the stale raw planner path
             self._astar_xy = []         # and the stale A* global route
+            self._cand_xy = []          # and whatever it last considered
             self._safe_xy = []          # and the stale corrector safe path
             self._full_xy = []          # and the stale full planner route
             self._forces = []           # and the stale force arrows
@@ -550,6 +589,8 @@ class BevClickGoalNode:
                    label="[9] pure-pursuit lookahead (/path/lookahead)"),
             Line2D([0], [0], color="teal", marker="s", markersize=4, linestyle="--",
                    label="[a] A* global route (/path/waypoints_astar)"),
+            Line2D([0], [0], color="darkorange", linestyle=":", lw=3,
+                   label="[c] A* candidate: last route considered (halo = unchanged)"),
             Line2D([0], [0], color="red", marker="o", markeredgecolor="black",
                    markersize=8, linestyle="None", label="drone pose + heading"),
             Line2D([0], [0], color="lime", marker="*", markeredgecolor="black",
@@ -557,7 +598,7 @@ class BevClickGoalNode:
         ]
         self.ax.legend(handles=handles, loc="upper right", fontsize=7,
                        framealpha=0.85, ncol=1,
-                       title="routes & markers  (keys 1-9/a toggle, 0 = all)"
+                       title="routes & markers  (keys 1-9/a/c toggle, 0 = all)"
                        ).set_zorder(20)
 
     # -- thinking window -------------------------------------------------------
@@ -643,6 +684,7 @@ class BevClickGoalNode:
             bev, path = self._bev, list(self._path_xy)
             raw = list(self._raw_xy)
             astar = list(self._astar_xy)
+            cand = list(self._cand_xy)
             safe = list(self._safe_xy)
             full = list(self._full_xy)
             forces = list(self._forces)
@@ -653,6 +695,7 @@ class BevClickGoalNode:
             lookahead = self._lookahead_xy
             nav_status, motion = self._nav_status, self._motion
             event, event_t = self._astar_event, self._astar_event_t
+            ev, ev_t = self._astar_eval, self._astar_eval_t
 
         # Map background (optional): the drone is still drawn without it, so a
         # bridge+bag run with no bev_publisher up still shows where the drone is.
@@ -719,6 +762,20 @@ class BevClickGoalNode:
             self._astar_line, = self.ax.plot(axs, ays, "--s", color="teal",
                                              linewidth=1.4, markersize=3,
                                              alpha=0.7, zorder=1.5)
+
+        # The route the last evaluation CONSIDERED. Drawn WIDER and UNDER the
+        # committed teal route on purpose: when A* re-derives the same geometry the
+        # orange shows as a halo around the teal, which reads as "just re-checked,
+        # kept it" -- the thing that was previously indistinguishable from a dead
+        # planner. When the two diverge, the orange is the road not taken, and the
+        # HUD's "A* check" line says by how much it missed.
+        if self._cand_line is not None:
+            self._cand_line.remove()
+            self._cand_line = None
+        if self._show["cand"] and len(cand) >= 2:
+            cxs, cys = [p[0] for p in cand], [p[1] for p in cand]
+            self._cand_line, = self.ax.plot(cxs, cys, ":", color="darkorange",
+                                            linewidth=3.0, alpha=0.85, zorder=1.4)
 
         # Path overlays: raw A* (red, underneath) vs APF-safe path (green, on
         # top). The green path is what the drone actually flies; the red shows
@@ -847,6 +904,14 @@ class BevClickGoalNode:
             age = ("  (%.0fs ago)" % (rospy.Time.now() - event_t).to_sec()
                    if event_t is not None else "")
             lines.append("A*: %s%s" % (event, age))
+        if ev:
+            # Distinct from the "A*:" line above, which only speaks when the route
+            # actually CHANGES and is therefore silent for minutes on a clean run.
+            # This one ticks on every evaluation, so a stalled planner shows up as
+            # an age that keeps climbing past ~replan_period_s.
+            age = ("  (%.0fs ago)" % (rospy.Time.now() - ev_t).to_sec()
+                   if ev_t is not None else "")
+            lines.append("A* check: %s%s" % (ev, age))
         self._hud.set_text("\n".join(lines))
 
         # Drone thinking log (panel under the map)

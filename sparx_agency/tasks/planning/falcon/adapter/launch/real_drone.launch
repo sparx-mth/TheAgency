@@ -122,6 +122,17 @@
        pure_pursuit (see pp_cruise_speed / pp_max_yaw_rate). -->
   <arg name="vel_x"     default="0.25" />
   <arg name="yaw_rate"  default="0.7" />
+  <!-- How big one in-place yaw pulse may get, in control ticks. Graded pulses
+       size a burst by DURATION: the tick count is snapped to an even number and
+       clamped to [min_motion_ticks, this], so the grades are 2/4/6/... ticks and
+       this sets the strongest one. At yaw_rate 0.7 and ctrl_rate_hz 10 a tick is
+       ~4 deg, and the platform coasts a further ~15 deg after the command stops,
+       so 8 ticks is ~32 deg commanded and ~47 deg of actual turn per burst.
+       Raising it makes a big turn finish in fewer stop-and-measure cycles; the
+       cost is more angle swept open-loop before the settle re-measures.
+       NOTE yaw_burst_max_deg does NOT do this: it feeds the legacy swept-angle
+       branch, which yaw_graded_pulses (on by default) bypasses entirely. -->
+  <arg name="yaw_burst_grade_max_ticks" default="6" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-2.0" />
@@ -386,6 +397,8 @@
   <arg name="replan_min_new_cells"          default="60" />
   <arg name="replan_min_new_cells_any"      default="240" />
   <arg name="replan_rotation_min_deg"       default="30.0" />
+  <!-- Periodic tick adopts with no length test; see nav_stack.launch. -->
+  <arg name="replan_periodic_always"        default="false" />
   <arg name="replan_period_s"               default="7.0" />
   <arg name="replan_relaxed_period_s"       default="4.0" />
   <arg name="replan_commit_min_s"           default="4.0" />
@@ -553,6 +566,7 @@
     <arg name="replan_min_new_cells"          value="$(arg replan_min_new_cells)" />
     <arg name="replan_min_new_cells_any"      value="$(arg replan_min_new_cells_any)" />
     <arg name="replan_rotation_min_deg"       value="$(arg replan_rotation_min_deg)" />
+    <arg name="replan_periodic_always"        value="$(arg replan_periodic_always)" />
     <arg name="replan_period_s"               value="$(arg replan_period_s)" />
     <arg name="replan_relaxed_period_s"       value="$(arg replan_relaxed_period_s)" />
     <arg name="replan_commit_min_s"           value="$(arg replan_commit_min_s)" />
@@ -665,6 +679,7 @@
 
     <arg name="vel_x"         value="$(arg vel_x)" />
     <arg name="yaw_rate"      value="$(arg yaw_rate)" />
+    <arg name="yaw_burst_grade_max_ticks" value="$(arg yaw_burst_grade_max_ticks)" />
     <arg name="debug"         value="$(arg debug)" />
     <arg name="thinking_log" value="$(arg thinking_log)" />
     <arg name="thinking_log_path" value="$(arg thinking_log_path)" />

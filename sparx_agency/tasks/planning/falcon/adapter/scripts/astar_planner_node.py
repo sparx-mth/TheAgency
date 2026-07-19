@@ -126,6 +126,15 @@ class AStarPlannerNode:
         # first route, obstacle reroute, boxed-in STOP, discovery reroute. Distinct
         # from ~status_topic (a per-attempt Bool the fallback arbiter counts).
         self.event_topic = G("~event_topic", "/path/astar_event")
+        # The route each opportunistic evaluation CONSIDERED (nav_msgs/Path), and a
+        # one-line summary of what it decided (std_msgs/String). Both exist because
+        # smart replanning is otherwise invisible: between adoptions the committed
+        # route is frozen and never republished, so a working planner that keeps
+        # re-deriving the same route looks exactly like a planner that has stopped
+        # running. These publish on EVERY evaluation, adopted or not, which is what
+        # makes "it is alive and still prefers the current route" observable.
+        self.candidate_topic = G("~candidate_topic", "/path/waypoints_astar_candidate")
+        self.eval_topic = G("~eval_topic", "/path/astar_eval")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.frame_id = G("~frame_id", "world")
 
@@ -295,6 +304,19 @@ class AStarPlannerNode:
         # re-evaluates but never re-publishes. <=0 disables. (Distinct from the
         # LEGACY ~plan_period_s strict re-publish timer.)
         self.replan_period_s = float(G("~replan_period_s", 7.0))
+        # Let the PERIODIC tick adopt its candidate unconditionally, skipping the
+        # length hysteresis. Length is the wrong test for this trigger: the route
+        # is re-derived FROM THE DRONE'S CURRENT POSE against the CURRENT map, so
+        # an equal-length candidate is still strictly better information -- it
+        # starts where the drone actually is rather than where it was when the
+        # route was committed, and it routes around walls discovered since. Those
+        # walls can even make the better route slightly LONGER, which is why
+        # lowering ~replan_improve_frac to 0 is not the same thing: that gate is
+        # `new_len <= old_len`, so it still throws away a safer, longer route.
+        # Rotation and discovery keep the hysteresis (see ~replan_improve_frac):
+        # they can fire back-to-back, and they are the flip-flop risk this bypass
+        # is safe from precisely because the periodic tick is rate-limited.
+        self.replan_periodic_always = _get_bool_param("~replan_periodic_always", False)
         # Cadence at the relaxed floor. A route flown at the preferred standoff is
         # trustworthy and is left alone for the full period; a squeezed one is
         # re-checked much sooner, both because it has less margin for drift and
@@ -357,6 +379,10 @@ class AStarPlannerNode:
         self.pub_path = rospy.Publisher(self.path_topic, Path, queue_size=1, latch=True)
         self.pub_status = rospy.Publisher(self.status_topic, Bool, queue_size=1, latch=True)
         self.pub_event = rospy.Publisher(self.event_topic, String, queue_size=5, latch=True)
+        self.pub_candidate = rospy.Publisher(self.candidate_topic, Path,
+                                             queue_size=1, latch=True)
+        self.pub_eval = rospy.Publisher(self.eval_topic, String,
+                                        queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.conf_topic, OccupancyGrid, self._conf_cb, queue_size=1)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
@@ -703,9 +729,9 @@ class AStarPlannerNode:
         # (5) Opportunistic triggers: rotation / discovery / periodic. One A*
         #     evaluation consumes every pending trigger (the high-water marks stop
         #     a kept reveal or turn from re-running A* every commit window).
-        reason = self._opportunistic_trigger(pose)
+        reason, periodic = self._opportunistic_trigger(pose)
         if reason is not None:
-            self._opportunistic_replan(remaining, reason)
+            self._opportunistic_replan(remaining, reason, periodic)
 
     def _collision_confirmed(self, remaining, pose):
         """True once the remaining route has collided on ``replan_collision_confirm``
@@ -772,23 +798,30 @@ class AStarPlannerNode:
             anywhere (an off-route reveal or new obstacles in mapped free space
             can still change the best route).
           * PERIODIC -- ~replan_period_s since the last A* evaluation: catch-all.
+
+        Returns:
+            ``(reason, periodic)``, or ``(None, False)`` when nothing fired.
+            ``periodic`` flags the catch-all specifically, because it is the one
+            trigger allowed to adopt without the length hysteresis (see
+            ``~replan_periodic_always``) -- it is rate-limited, so it cannot
+            whipsaw the route the way a rotation or a reveal could.
         """
         if self.replan_rotation_min_deg > 0.0:
             turned = abs(math.degrees(normalize_angle(pose.yaw - self._yaw_baseline)))
             if turned >= self.replan_rotation_min_deg:
-                return "rotated %.0f deg" % turned
+                return "rotated %.0f deg" % turned, False
         n_corr = self._changed_in_corridor()
         if n_corr - self._discovery_baseline >= self.replan_min_new_cells:
-            return "%d changed corridor cells" % n_corr
+            return "%d changed corridor cells" % n_corr, False
         if self.replan_min_new_cells_any > 0:
             n_any = self._changed_total()
             if n_any - self._discovery_baseline_any >= self.replan_min_new_cells_any:
-                return "%d changed cells map-wide" % n_any
+                return "%d changed cells map-wide" % n_any, False
         period = self._effective_replan_period()
         if (period > 0.0
                 and (rospy.Time.now() - self._commit_time).to_sec() >= period):
-            return "periodic %.1fs check" % period
-        return None
+            return "periodic %.1fs check" % period, True
+        return None, False
 
     def _effective_replan_period(self):
         """Replan cadence, tightened in proportion to how squeezed the route is.
@@ -842,11 +875,24 @@ class AStarPlannerNode:
                    res.artifacts.get("pinch_clearance_m", 0.0), where),
                 level="warn")
 
-    def _opportunistic_replan(self, remaining, reason):
+    def _opportunistic_replan(self, remaining, reason, periodic=False):
         """An opportunistic trigger fired (rotation / discovery / periodic): replan,
         and ADOPT the candidate only if it is meaningfully shorter than the
         remaining committed route. Refresh the commit clock either way so
-        opportunistic A* runs at most once per commit window (never per frame)."""
+        opportunistic A* runs at most once per commit window (never per frame).
+
+        With ``~replan_periodic_always`` the PERIODIC tick skips that length test
+        and always adopts. Length is the wrong question for it: the candidate is
+        re-derived from where the drone IS, against the map as it is NOW, so an
+        equal-length route is still the better one -- and a route made safer by
+        walls discovered since may well be longer.
+
+        Args:
+            remaining: The un-flown part of the committed route.
+            reason: The trigger that fired, for the log and the HUD.
+            periodic: True when the catch-all tick fired (as opposed to a rotation
+                or a discovery), i.e. when the bypass above may apply.
+        """
         cand = self._plan_candidate()
         # One evaluation regardless of outcome. Do NOT reset _map_at_commit here:
         # a gradual reveal must keep accumulating toward the threshold; only an
@@ -857,16 +903,32 @@ class AStarPlannerNode:
             # (the collision gate passed and already published status=True this
             # frame). Keep flying it; do not emit a spurious failure. Baselines are
             # NOT raised: the trigger stays armed and retries next commit window.
+            self._publish_evaluation(reason, None, 0.0, 0.0, False)
             return
         old_len = polyline_length(remaining)
         new_len = polyline_length(cand.points)
-        if new_len <= old_len * (1.0 - self.replan_improve_frac):
+        always = periodic and self.replan_periodic_always
+        adopt = always or new_len <= old_len * (1.0 - self.replan_improve_frac)
+        self._publish_evaluation(reason, cand, old_len, new_len, adopt,
+                                 unconditional=always)
+        if adopt:
             rospy.loginfo("astar_planner: replan adopted (%s): remaining "
                           "%.2fm -> %.2fm", reason, old_len, new_len)
-            self._publish_event(
-                "REPLAN: shorter route found (%.1fm -> %.1fm)" % (old_len, new_len),
-                "The map opened up (%s): taking a shorter route, %.1fm instead "
-                "of %.1fm" % (reason, new_len, old_len))
+            if always:
+                # Do NOT call this a shorter route: this branch adopts regardless
+                # of length, and often the whole point is a route that is not.
+                self._publish_event(
+                    "REPLAN: refreshed from here (%.1fm -> %.1fm)"
+                    % (old_len, new_len),
+                    "Routine %s: re-routing from where I am now against what I "
+                    "have mapped since, %.1fm instead of %.1fm"
+                    % (reason, new_len, old_len))
+            else:
+                self._publish_event(
+                    "REPLAN: shorter route found (%.1fm -> %.1fm)"
+                    % (old_len, new_len),
+                    "The map opened up (%s): taking a shorter route, %.1fm "
+                    "instead of %.1fm" % (reason, new_len, old_len))
             self._commit(cand)     # resets the snapshot + every trigger baseline
         else:
             # Kept the route: raise every high-water mark so the same reveal/turn
@@ -876,6 +938,49 @@ class AStarPlannerNode:
                 5.0, "astar_planner: %s but candidate not %.0f%% shorter "
                 "(%.2fm vs %.2fm) -- keeping committed route",
                 reason, 100.0 * self.replan_improve_frac, new_len, old_len)
+
+    def _publish_evaluation(self, reason, cand, old_len, new_len, adopted,
+                            unconditional=False):
+        """Report one opportunistic evaluation: the route considered, and the verdict.
+
+        Deliberately published on EVERY evaluation, including -- especially -- the
+        ones that change nothing. Smart replanning freezes the committed route and
+        republishes only on adoption, so from outside the node a planner happily
+        re-deriving the same route every ``~replan_period_s`` is indistinguishable
+        from one that has died. This is the difference: a candidate route to draw
+        and a line saying when it last ran and why it kept what it had.
+
+        Not routed through :meth:`_publish_event`, which narrates to the thinking
+        log: that log is for things the operator should ACT on, and a periodic
+        "still fine" every few seconds would bury them.
+
+        Args:
+            reason: The trigger that fired ("periodic 6.0s check", "rotated 42 deg").
+            cand: The planner result considered, or None when A* found nothing.
+            old_len: Remaining length (m) of the committed route.
+            new_len: Length (m) of the candidate.
+            adopted: Whether the candidate won.
+            unconditional: The candidate was taken without the length test
+                (``~replan_periodic_always``). Reported distinctly so a route that
+                got longer does not read as a planner that has started choosing
+                worse routes.
+        """
+        pts = list(cand.points) if cand is not None else []
+        self.pub_candidate.publish(self._path_msg(pts))
+        if cand is None:
+            line = "%s: no route found, keeping committed route" % reason
+        elif unconditional:
+            line = ("%s: REFRESHED from here %.1fm (was %.1fm), no length test"
+                    % (reason, new_len, old_len))
+        elif adopted:
+            line = "%s: ADOPTED %.1fm (was %.1fm)" % (reason, new_len, old_len)
+        else:
+            # Say what it WOULD have taken, so a route that never changes reads as
+            # a considered decision rather than a planner that is not running.
+            need = old_len * (1.0 - self.replan_improve_frac)
+            line = ("%s: kept route -- candidate %.1fm vs %.1fm, needs <= %.1fm"
+                    % (reason, new_len, old_len, need))
+        self.pub_eval.publish(String(data=line))
 
     def _raise_trigger_baselines(self):
         """High-water marks after a kept (non-adopting) evaluation: the current

@@ -5,11 +5,15 @@
     The select-then-go mission on top of the FALCON stack. It is
     real_drone_object_approach.launch with two differences:
 
-      1. GATED START. The nav stack comes up with NO initial goal (goal_x/goal_y
-         empty -> the planners idle "until a click") and object_approach comes up
-         DISABLED (start_enabled:=false). So NOTHING plans or flies until an object
-         is selected. (The platform still takes off and hovers in place — that is the
-         follower's baseline; only navigation is gated.)
+      1. GATED START. object_approach comes up DISABLED (start_enabled:=false), so
+         no visual servo runs and nothing lands until an object is selected. (The
+         platform still takes off and hovers in place — that is the follower's
+         baseline; only the mission is gated.)
+         The nav stack takes goal_x/goal_y, which default to a real coordinate, so
+         A* DOES plan a route at startup and flies it on GO. Set them empty to
+         restore the older behaviour where the planners idle until a click too.
+         Note the GO gate is separate and independent: with start_go:=false not one
+         velocity command reaches the drone whatever the planners are doing.
 
       2. A MISSION DIRECTOR. mission_director_node loads objects.json and, on
          selection (random pick, or a click in its object-list window), publishes the
@@ -45,6 +49,24 @@
        real_pose_topic:=/xtend/april_tag_pose for AprilTag localization. -->
   <arg name="real_pose_topic" default="/xtend/localization" />
   <arg name="real_pose_type"  default="pose_stamped" />     <!-- pose_stamped | pose -->
+  <!-- ── The A* coordinate goal ───────────────────────────────────────
+       Where the planners fly to. Set from config/mission.yaml.
+
+       A NUMERIC goal (the default) means A* has a route the moment the stack is
+       up: it plans immediately and flies it as soon as you press GO, with no
+       object selection involved. That is the plain "fly to this coordinate" run.
+
+       EMPTY ('') restores the older gated start instead: nav_stack omits an empty
+       goal (guarded <param ... if>), so the planners idle until the mission
+       director publishes one on selection. Use that when the whole point of the
+       run is the select-then-go flow and a pre-planned route would be noise.
+
+       Either way, selecting an object still wins: the director republishes
+       /waypoint_nav/goal at the object's world (x,y) and the planners retarget.
+       This is the NAV goal only. object_approach's arrival-land goal is set
+       separately, at its own include below. -->
+  <arg name="goal_x"          default="0.0" />
+  <arg name="goal_y"          default="-2.0" />
   <!-- fallback by default, matching real_drone.launch: A* flies the route and NavDP
        rescues only a boxed-in A*. nav_mode:=hybrid hands NavDP the hard turns/doorways;
        astar is pure A*; combination is the always-on A*+NavDP fusion.
@@ -58,6 +80,17 @@
        Ignored under pure_pursuit, which uses pp_cruise_speed / pp_max_yaw_rate. -->
   <arg name="vel_x"           default="0.25" /><!-- m/s forward -->
   <arg name="yaw_rate"        default="0.7" /><!-- rad/s in-place turn -->
+  <!-- How big one in-place yaw pulse may get, in control ticks. Graded pulses
+       size a burst by DURATION: the tick count is snapped to an even number and
+       clamped to [min_motion_ticks, this], so the grades are 2/4/6/... ticks and
+       this sets the strongest one. At yaw_rate 0.7 and ctrl_rate_hz 10 a tick is
+       ~4 deg, and the platform coasts a further ~15 deg after the command stops,
+       so 8 ticks is ~32 deg commanded and ~47 deg of actual turn per burst.
+       Raising it makes a big turn finish in fewer stop-and-measure cycles; the
+       cost is more angle swept open-loop before the settle re-measures.
+       NOTE yaw_burst_max_deg does NOT do this: it feeds the legacy swept-angle
+       branch, which yaw_graded_pulses (on by default) bypasses entirely. -->
+  <arg name="yaw_burst_grade_max_ticks" default="6" />
   <!-- Debug logging master switch; see nav_stack.launch. -->
   <arg name="debug"           default="false" />
   <arg name="thinking_log" default="false" />
@@ -115,6 +148,18 @@
   <arg name="recovery_turn_dir"      default="right" />
   <arg name="recovery_turn_rate"     default="0.5" /><!-- rad/s; too slow = a sweep that never sweeps -->
 
+  <!-- The object object_approach filters detections for BEFORE anything is
+       selected. run_object_mission.sh sets this from the same config value it
+       prompts the detector with (detector.init_target), because the two must
+       agree: the detector publishes detections under its prompt's label, and
+       object_approach ignores every label but this one. Left to disagree, the
+       mission simply never confirms an object and never lands visually, with
+       nothing louder than two heartbeats naming different things.
+       The director overwrites both the moment an object is selected, so this only
+       governs the window before that, which is also the whole of a run with no
+       selection (or one whose director failed to start). -->
+  <arg name="target_object"   default="refrigerator" />
+
   <!-- ── Mission director (object selection) ──────────────────────── -->
   <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
   <arg name="objects_file"    default="" />             <!-- '' => node's package-relative objects.json -->
@@ -143,7 +188,7 @@
   <arg name="bev_viewer"      default="true" />         <!-- interactive BEV window (from real_drone.launch) -->
   <arg name="publish_overlay" default="true" />
 
-  <!-- ══ Nav stack, GATED: no initial goal (goal_x/goal_y empty -> planners idle). ══ -->
+  <!-- ══ Nav stack: flies to goal_x/goal_y (empty => idle until selection). ══ -->
   <!-- ══ A* planner (route search + replanning) ══
        Defaults mirror the layer below; see nav_stack.launch for the full
        per-parameter notes. Set these from config/mission.yaml. -->
@@ -183,6 +228,8 @@
   <arg name="replan_min_new_cells"          default="60" />
   <arg name="replan_min_new_cells_any"      default="240" />
   <arg name="replan_rotation_min_deg"       default="30.0" />
+  <!-- Periodic tick adopts with no length test; see nav_stack.launch. -->
+  <arg name="replan_periodic_always"        default="false" />
   <arg name="replan_period_s"               default="7.0" />
   <arg name="replan_commit_min_s"           default="4.0" />
   <arg name="replan_improve_frac"           default="0.15" />
@@ -337,6 +384,7 @@
     <arg name="replan_min_new_cells"          value="$(arg replan_min_new_cells)" />
     <arg name="replan_min_new_cells_any"      value="$(arg replan_min_new_cells_any)" />
     <arg name="replan_rotation_min_deg"       value="$(arg replan_rotation_min_deg)" />
+    <arg name="replan_periodic_always"        value="$(arg replan_periodic_always)" />
     <arg name="replan_period_s"               value="$(arg replan_period_s)" />
     <arg name="replan_commit_min_s"           value="$(arg replan_commit_min_s)" />
     <arg name="replan_improve_frac"           value="$(arg replan_improve_frac)" />
@@ -437,14 +485,16 @@
     <arg name="image_transport" value="$(arg image_transport)" />
     <arg name="real_pose_topic" value="$(arg real_pose_topic)" />
     <arg name="real_pose_type"  value="$(arg real_pose_type)" />
-    <!-- THE GATE: empty goals are omitted downstream, so nothing plans until selection. -->
-    <arg name="goal_x"          value="" />
-    <arg name="goal_y"          value="" />
+    <!-- The A* goal (see the arg's docs above). Numeric => the planners have a
+         route at startup; '' => they idle until the director publishes one. -->
+    <arg name="goal_x"          value="$(arg goal_x)" />
+    <arg name="goal_y"          value="$(arg goal_y)" />
     <arg name="nav_mode"        value="$(arg nav_mode)" />
     <arg name="use_navdp"       value="$(arg use_navdp)" />
     <arg name="controller"      value="$(arg controller)" />
     <arg name="vel_x"           value="$(arg vel_x)" />
     <arg name="yaw_rate"        value="$(arg yaw_rate)" />
+    <arg name="yaw_burst_grade_max_ticks" value="$(arg yaw_burst_grade_max_ticks)" />
     <arg name="debug"           value="$(arg debug)" />
     <arg name="thinking_log" value="$(arg thinking_log)" />
     <arg name="thinking_log_path" value="$(arg thinking_log_path)" />
@@ -474,6 +524,8 @@
     <arg name="pose_type"       value="$(arg real_pose_type)" />
     <!-- GATE: stays passive until the director publishes enable=True on selection. -->
     <arg name="start_enabled"   value="false" />
+    <!-- Must match the detector's prompt; see the arg's docs above. -->
+    <arg name="target_object"   value="$(arg target_object)" />
     <arg name="lock_mode"       value="$(arg lock_mode)" />
     <arg name="closure_mode"    value="$(arg closure_mode)" />
     <arg name="force_mode"      value="$(arg force_mode)" />

@@ -175,6 +175,14 @@ LAUNCH_ARGS=(
   seed:="$SEED"
   nav_mode:="$NAV_MODE"
   objects_file:="$OBJECTS_FILE"
+  # The SAME placeholder the detector sidecar gets (-p target_object above).
+  # There are two pre-selection targets -- what YOLO is prompted with, and what
+  # object_approach filters detections for -- and they must be the same word. Left
+  # unset, object_approach kept its own 'refrigerator' default while the detector
+  # was prompted with init_target, so the detector published a label nothing was
+  # listening for: no confirmation, no visual land, and the only clue was the two
+  # heartbeats quietly disagreeing. The director overwrites both on selection.
+  target_object:="$INIT_TARGET"
 )
 _arg_key() { printf '%s' "${1%%:=*}"; }
 CFG_ARGS=()

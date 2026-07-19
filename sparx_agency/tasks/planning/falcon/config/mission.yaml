@@ -39,8 +39,15 @@ detector:
   conf_thresh: 0.1            # detection confidence floor; below this a detection
                               #   is ignored, so the object is never confirmed and
                               #   the mission lands by A* alone (see land_at_goal)
-  init_target: gun            # placeholder prompt before you select; the director
-                              #   re-prompts the detector with the chosen label
+  init_target: gun            # placeholder target before you select. Drives BOTH
+                              #   pre-selection targets and they must not diverge:
+                              #   the detector's YOLO prompt, and the label
+                              #   object_approach filters detections for. Set them
+                              #   differently and the detector publishes a label
+                              #   nothing is listening for -- no confirmation, no
+                              #   visual land, and the only symptom is two
+                              #   heartbeats naming different objects.
+                              #   The director overwrites both on selection.
   # engines_dir: /path/to/engines       # default: yolo_world_trt/engines/<target_tag>
   # text_weights: /path/to/yolov8x-worldv2.pt   # default: <weights_dir>/yolov8<model>-worldv2.pt
 
@@ -78,6 +85,27 @@ launch:
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
 
+  # -- Where A* flies to (the coordinate goal, in map/world metres) --
+  # With a NUMBER here the planners have a route the moment the stack is up: A*
+  # plans immediately and the drone flies it as soon as you press GO, no object
+  # selection involved. That is the plain "fly to this coordinate" run.
+  #
+  # Set BOTH to '' to idle instead -- nav_stack omits an empty goal, so the
+  # planners wait until the mission director publishes one. Use that when the point
+  # of the run is the select-then-go flow and a pre-planned route is just noise.
+  #
+  # Selecting an object still wins either way: the director republishes
+  # /waypoint_nav/goal at the object's world (x,y) and the planners retarget.
+  #
+  # This is the NAV goal only. object_approach's arrival-land goal is a separate
+  # (0.0, -2.0) set inside object_mission.launch -- if you move the drone's mission
+  # somewhere else, check whether that one should follow.
+  #
+  # The GO gate is independent of all this: with start_go: false below, not one
+  # velocity command reaches the drone however good a route A* has found.
+  goal_x: 0.0                 # m, world/map frame
+  goal_y: -1.8                # m, world/map frame
+
   # -- WAYPOINT-controller speeds (the two dials for `controller: waypoint`) --
   # EVERY SPEED DIAL IN THIS FILE, SI throughout, all rate-per-second:
   #
@@ -111,6 +139,34 @@ launch:
   # (pp_cruise_speed / pp_max_yaw_rate) -- that is the trap documented there.
   vel_x: 0.25                 # m/s, forward flight speed on every straight leg
   yaw_rate: 0.7               # rad/s, rotation speed during a turn burst
+
+  # -- How far ONE yaw pulse turns (the burst size) --
+  # yaw_rate above is the SPEED of a burst; this is its LENGTH. Graded pulses size
+  # a burst by duration: the tick count is snapped to an even number and clamped to
+  # [min_motion_ticks (2), this], so the grades are 2/4/6/8 ticks and this picks the
+  # strongest. At yaw_rate 0.7 and ctrl_rate_hz 10 one tick is ~4 deg, and the
+  # platform coasts a further ~15 deg after the command stops (the burst aims short
+  # on purpose and lets the coast finish the turn):
+  #
+  #     2 ticks (min)   8 deg commanded  -> ~23 deg actual   error 11.5-25 deg
+  #     4 ticks        16 deg            -> ~31 deg          error 25.5-33 deg
+  #     6 ticks        24 deg            -> ~39 deg          error 33.5-41 deg
+  #     8 ticks (max)  32 deg            -> ~47 deg          error >= 41.5 deg
+  #
+  # Raising this lets a big turn finish in fewer stop-settle-remeasure cycles (90 deg
+  # in ~2 bursts instead of ~4). The cost is more angle swept OPEN LOOP before the
+  # settle re-measures, and past freeze_yaw_thresh_rad (20 deg) the map is frozen for
+  # the whole turn, so a longer burst also fuses nothing across a wider arc.
+  # Overshoot is caught: yaw_burst_live_feedback cuts a burst short on a confirmed
+  # overshoot (one-way, never reverses mid-flight).
+  #
+  # The MINIMUM is min_motion_ticks (2), not this, and it is deliberately left alone:
+  # 2 ticks is what clears the yaw deadband, and raising it would coarsen every small
+  # correction. Do NOT raise yaw_rate to get bigger turns either -- that scales every
+  # grade including the minimum.
+  # And note yaw_burst_max_deg is NOT this knob: it feeds the legacy swept-angle
+  # branch, which yaw_graded_pulses (on) bypasses, so changing it does nothing.
+  yaw_burst_grade_max_ticks: 8   # ticks; 8 = ~32 deg commanded, ~47 deg actual
 
   # -- Pure-pursuit yaw force (only used when controller: pure_pursuit) --
   # This is the turn-force dial. Pure pursuit sets wz = speed * curvature and clips
@@ -379,7 +435,7 @@ launch:
                                                # ...costs soft_obstacle_cost instead, so single-frame depth speck...
                                                # ...le cannot make the map infeasible. 0 = every OCCUPIED blocks
   soft_obstacle_cost:            25.0
-  inflate_floor_m:               0.25          # LOWEST FLYABLE standoff. The ladder stops here because below 0.2...
+  inflate_floor_m:               0.20          # LOWEST FLYABLE standoff. The ladder stops here because below 0.2...
                                                # ...5 is genuinely dangerous -- it is the airframe's inscribed ra...
                                                # ...dius, not a tuning knob. Raise to 0.40 to disable relaxation.
   relax_step_m:                  0.05
@@ -405,8 +461,20 @@ launch:
   replan_min_new_cells:          60            # CHANGED corridor cells (new or flipped free<->occ) needed to consider an opportunistic replan
   replan_min_new_cells_any:      240           # changed cells ANYWHERE on the BEV (off-corridor changes can still change the best route); 0 disables
   replan_rotation_min_deg:       30.0          # yaw swing since the last commit/evaluation that re-evaluates the route (mid-turn or just finished); 0 disables
-  replan_period_s:               7.0           # catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables
-  replan_commit_min_s:           4.0           # keep flying a committed route at least this long before an oppor...
+  replan_period_s:               5.0           # catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables
+  # The periodic tick above ADOPTS whatever it finds, with no length test at all.
+  # Length is the wrong question for it: that candidate is re-derived from where the
+  # drone IS, against the map as it is NOW, so even an identical-length route is
+  # better information than one committed from a pose the drone left seconds ago --
+  # and a route made safer by walls discovered since (too few new cells to trip the
+  # discovery trigger, but enough to matter) is often slightly LONGER.
+  # That is also why replan_improve_frac: 0.0 would NOT do this: that gate is still
+  # "new_len <= old_len", so it keeps throwing the safer-but-longer route away.
+  # Rotation and discovery keep the hysteresis below: they can fire back to back, and
+  # the L/R flip-flop this bypass is safe from is exactly what they would cause.
+  # replan_commit_min_s still applies, so the route can never change faster than that.
+  replan_periodic_always:        true          # every replan_period_s, re-route from here regardless of length
+  replan_commit_min_s:           3.0           # keep flying a committed route at least this long before an oppor...
   replan_improve_frac:           0.15          # adopt a discovery candidate only if it is >= this fraction short...
   stop_on_blocked_plan_fail:     true          # on a confirmed obstacle with NO route around it, STOP (2-pt hold...
   replan_collision_confirm:      4             # consecutive colliding BEV frames before a collision replan (debo...
