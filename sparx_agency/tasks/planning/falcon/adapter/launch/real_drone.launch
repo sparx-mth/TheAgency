@@ -494,12 +494,18 @@
   <arg name="recovery_bearing_units" default="auto" />
   <arg name="recovery_stale_s"       default="0.3" />
   <arg name="recovery_ladder_s"      default="1.0" />
+  <!-- Finish the interrupted move before falling back to the search: keep turning
+       through a turn, give the metres back after an advance. See nav_stack.launch. -->
+  <arg name="recovery_persist_enabled" default="true" />
+  <arg name="recovery_persist_turn_s"  default="0.6" />
+  <arg name="recovery_persist_back_s"  default="0.6" />
   <arg name="recovery_back_speed"      default="0.30" /><!-- ~0.45 m per rung, twice -->
   <arg name="recovery_back_duration_s" default="1.5" />
   <arg name="recovery_climb_enabled" default="true" />
   <arg name="recovery_climb_speed"      default="0.08" /><!-- thrust dial; mind the ceiling -->
   <arg name="recovery_climb_duration_s" default="0.4" />
   <arg name="recovery_turn_dir"      default="right" />
+  <arg name="recovery_turn_rate_deg_s" default="28.6" /><!-- floor matters more than ceiling -->
 
   <include file="$(find falcon_adapter)/launch/nav_stack.launch">
     <arg name="start_go"          value="$(arg start_go)" />
@@ -513,12 +519,16 @@
     <arg name="recovery_bearing_units" value="$(arg recovery_bearing_units)" />
     <arg name="recovery_stale_s"       value="$(arg recovery_stale_s)" />
     <arg name="recovery_ladder_s"      value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_persist_enabled" value="$(arg recovery_persist_enabled)" />
+    <arg name="recovery_persist_turn_s"  value="$(arg recovery_persist_turn_s)" />
+    <arg name="recovery_persist_back_s"  value="$(arg recovery_persist_back_s)" />
     <arg name="recovery_back_speed"      value="$(arg recovery_back_speed)" />
     <arg name="recovery_back_duration_s" value="$(arg recovery_back_duration_s)" />
     <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
     <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
     <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
     <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
+    <arg name="recovery_turn_rate_deg_s" value="$(arg recovery_turn_rate_deg_s)" />
     <!-- A* planner (route search + replanning) -->
     <arg name="waypoint_spacing_m"            value="$(arg waypoint_spacing_m)" />
     <arg name="yaw_acquisition_radius"        value="$(arg yaw_acquisition_radius)" />

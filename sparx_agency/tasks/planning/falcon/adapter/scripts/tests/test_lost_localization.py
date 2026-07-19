@@ -168,6 +168,14 @@ def _tick(node, n=1, *, tag=False, bearing=None):
         _TIMERS[0](None)
 
 
+def _nav_cmd(node, vx=0.0, wz=0.0):
+    """Deliver a navigator Twist on cmd_vel, as the follower publishes it."""
+    m = _Twist()
+    m.linear.x = vx
+    m.angular.z = wz
+    _SUBS[node.cmd_vel_topic](m)
+
+
 def _cmds(node):
     return node.cmd_pub.msgs
 
@@ -468,6 +476,107 @@ def test_turn_dir_accepts_operator_words():
         lost._turn_dir("sideways")
 
 
+# ── Reading what the navigator was flying (the persist prelude) ─────
+def test_the_node_watches_the_topic_it_publishes_on():
+    """Deliberate: the last command on cmd_vel is what the navigator was flying,
+    whoever sent it, which keeps this decoupled from which controller is running."""
+    node = _make()
+    assert node.cmd_vel_topic in _SUBS
+
+
+def test_a_mid_turn_dropout_persists_the_turn():
+    """The tag left the frame because we rotated it out; the next one is often
+    already swinging in. Keep going -- the same way, at the navigator's rate."""
+    node = _make()
+    _tick(node, 1, tag=True)
+    _nav_cmd(node, wz=0.7)
+    _tick(node, 5)
+
+    yawing = [m for m in _cmds(node) if abs(m.angular.z) > 1e-6]
+    assert yawing, "a mid-turn dropout must keep turning"
+    assert all(m.angular.z == pytest.approx(0.7) for m in yawing), \
+        "the navigator's own rate, not the sweep's (which also turns the other way)"
+    assert all(abs(m.linear.x) < 1e-6 for m in yawing), "one axis at a time"
+
+
+def test_a_mid_advance_dropout_gives_the_metres_back():
+    """Losing a tag while advancing means we advanced INTO something."""
+    node = _make()
+    _tick(node, 1, tag=True)
+    _nav_cmd(node, vx=0.25)
+    _tick(node, 5)
+
+    moving = [m for m in _cmds(node) if abs(m.linear.x) > 1e-6]
+    assert moving, "a mid-advance dropout must retreat"
+    assert all(m.linear.x == pytest.approx(-0.25) for m in moving)
+
+
+def test_the_pause_between_yaw_bursts_is_still_a_turn():
+    """The follower publishes zeros while it settles between bursts. The drone is
+    stationary but is still mid-turn, and that is the intent to finish -- so a
+    stop must never overwrite the move it is a pause in."""
+    node = _make()
+    _tick(node, 1, tag=True)
+    _nav_cmd(node, wz=0.7)                      # a yaw burst...
+    for _ in range(3):                          # ...then the settle after it
+        _nav_cmd(node)
+        _tick(node, 1, tag=True)
+    _tick(node, 5)                              # and NOW the tag goes
+
+    yawing = [m for m in _cmds(node) if abs(m.angular.z) > 1e-6]
+    assert yawing and all(m.angular.z > 0.0 for m in yawing)
+
+
+def test_the_node_never_learns_from_its_own_commands():
+    """We publish on the topic we watch, so our own Twists come back. Persisting
+    them would make the NEXT dropout finish the last recovery manoeuvre instead of
+    the navigator's move -- the sweep would read as 'we were turning'."""
+    node = _make()
+    _tick(node, 1, tag=True)
+    _nav_cmd(node, wz=0.7)
+    for _ in range(20):                         # go cold, echoing our own output
+        _tick(node, 1)
+        if _cmds(node):
+            _SUBS[node.cmd_vel_topic](_cmds(node)[-1])
+
+    assert any(abs(m.linear.x) > 1e-6 for m in _cmds(node)), \
+        "the ladder must have reached a back-up rung, or this test proves nothing"
+    assert node._last_cmd == pytest.approx((0.0, 0.7))
+
+
+def test_a_move_from_long_ago_is_not_a_context():
+    """A turn a minute back, with a whole hover since, is no answer at all."""
+    node = _make(context_max_age_s=1.0)
+    _tick(node, 1, tag=True)
+    _nav_cmd(node, wz=0.7)
+    _tick(node, 15, tag=True)                   # 1.5s of healthy flight since
+    _tick(node, 5)
+
+    assert _cmds(node), "it must still stop the drone"
+    assert all(abs(m.angular.z) < 1e-6 for m in _cmds(node)), \
+        "nothing recent to finish => the plain stop, not a stale manoeuvre"
+
+
+def test_never_having_commanded_means_no_prelude():
+    node = _make()
+    _tick(node, 1, tag=True)
+    _tick(node, 5)
+
+    assert _cmds(node), "a cold pose must still stop the drone"
+    assert all(abs(m.linear.x) < 1e-6 and abs(m.angular.z) < 1e-6
+               for m in _cmds(node))
+
+
+def test_the_prelude_can_be_turned_off():
+    """Off => a dropout goes straight to the stop, as before the stage existed."""
+    node = _make(persist_enabled=False)
+    _tick(node, 1, tag=True)
+    _nav_cmd(node, wz=0.7)
+    _tick(node, 5)
+
+    assert all(abs(m.angular.z) < 1e-6 for m in _cmds(node))
+
+
 # ── Defaults must not drift from the core ───────────────────────────
 def test_node_defaults_are_the_core_defaults():
     """With no rosparams set, the node must build exactly the core's params.
@@ -487,6 +596,10 @@ def test_node_defaults_are_the_core_defaults():
     assert node.recovery.p.turn_dir == LostLocalizationParams().turn_dir
     assert node.recovery.p.turn_rate == pytest.approx(LostLocalizationParams().turn_rate,
                                                       abs=1e-3)
+    assert node.recovery.p.persist_enabled == LostLocalizationParams().persist_enabled
+    assert node.recovery.p.persist_turn_s == LostLocalizationParams().persist_turn_s
+    assert node.recovery.p.persist_back_s == LostLocalizationParams().persist_back_s
+    assert node.recovery.p.persist_settle_s == LostLocalizationParams().persist_settle_s
 
 
 def test_the_sweep_goes_right_by_default():

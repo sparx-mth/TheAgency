@@ -8,12 +8,14 @@ Flat re-exports so callers import from the package rather than its modules::
 """
 from .ladder import BACK, CLIMB, STOP, TURN, Rung, build_ladder
 from .params import LostLocalizationParams
+from .persist import FORWARD, TURNING, UNKNOWN, MotionContext, build_persist
 from .state_machine import (
     DISABLED,
     GIVE_UP,
     HOLD,
     LADDER,
     NOMINAL,
+    PERSIST,
     LostLocalizationRecovery,
     RecoveryDecision,
 )
@@ -25,10 +27,16 @@ __all__ = [
     "TURN",
     "Rung",
     "build_ladder",
+    "FORWARD",
+    "TURNING",
+    "UNKNOWN",
+    "MotionContext",
+    "build_persist",
     "LostLocalizationParams",
     "LostLocalizationRecovery",
     "RecoveryDecision",
     "NOMINAL",
+    "PERSIST",
     "HOLD",
     "LADDER",
     "GIVE_UP",

@@ -101,12 +101,19 @@
   <arg name="recovery_enabled"       default="true" />
   <arg name="recovery_stale_s"       default="0.3" />
   <arg name="recovery_ladder_s"      default="1.0" />
+  <!-- Before the stop, finish the move that was interrupted: mid-turn keep
+       turning (the tag left the frame because we rotated it out), mid-advance
+       give the metres back (we flew too close to it). Then hold still and look. -->
+  <arg name="recovery_persist_enabled" default="true" />
+  <arg name="recovery_persist_turn_s"  default="0.6" />
+  <arg name="recovery_persist_back_s"  default="0.6" />
   <arg name="recovery_climb_enabled" default="true" />
   <arg name="recovery_climb_speed"      default="0.08" />
   <arg name="recovery_climb_duration_s" default="0.4" />
   <arg name="recovery_back_speed"      default="0.30" /><!-- ~0.45 m per rung, twice -->
   <arg name="recovery_back_duration_s" default="1.5" />
   <arg name="recovery_turn_dir"      default="right" />
+  <arg name="recovery_turn_rate_deg_s" default="28.6" /><!-- too slow = a sweep that never sweeps -->
 
   <!-- ── Mission director (object selection) ──────────────────────── -->
   <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
@@ -289,12 +296,16 @@
     <arg name="recovery_enabled"       value="$(arg recovery_enabled)" />
     <arg name="recovery_stale_s"       value="$(arg recovery_stale_s)" />
     <arg name="recovery_ladder_s"      value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_persist_enabled" value="$(arg recovery_persist_enabled)" />
+    <arg name="recovery_persist_turn_s"  value="$(arg recovery_persist_turn_s)" />
+    <arg name="recovery_persist_back_s"  value="$(arg recovery_persist_back_s)" />
     <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
     <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
     <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
     <arg name="recovery_back_speed"      value="$(arg recovery_back_speed)" />
     <arg name="recovery_back_duration_s" value="$(arg recovery_back_duration_s)" />
     <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
+    <arg name="recovery_turn_rate_deg_s" value="$(arg recovery_turn_rate_deg_s)" />
     <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
     <arg name="cruise_z"        value="$(arg cruise_z)" />
     <!-- A* planner (route search + replanning) -->

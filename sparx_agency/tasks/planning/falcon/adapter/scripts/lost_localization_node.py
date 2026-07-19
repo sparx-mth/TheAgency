@@ -11,26 +11,28 @@ Nothing today notices out loud: the follower quietly stops (and only if
 This node watches the pose stream and, when it dies, takes the drone off the
 follower and recovers it:
 
-    /xtend/localization ─[ how old? ]─> HOLD ─> ladder ─> GIVE_UP
-                                         │        │          │
-                                       stop    back/climb   land
-                                              /sweep
+    /xtend/localization ─[ how old? ]─> PERSIST ──> HOLD ─> ladder ─> GIVE_UP
+                                           │          │       │         │
+                                     finish the     stop  back/climb   land
+                                     move, or undo it      /sweep
 
-All of the escalation logic -- the two thresholds, the ladder, the sweep, the
-exit debounce -- lives in the ROS-free, unit-tested
+All of the escalation logic -- the two thresholds, the persist prelude, the
+ladder, the sweep, the exit debounce -- lives in the ROS-free, unit-tested
 ``sparx_agency.core.planning.lost_localization``. This node owns ONLY ROS and
 platform concerns: rosparams -> params, the clock (the core is clock-free and is
-handed an age and a ``dt``), the demo-mode claim/release handshake, and turning
-one ``ControlCommand`` into one ``geometry_msgs/Twist``.
+handed an age and a ``dt``), the demo-mode claim/release handshake, observing what
+the navigator was flying, and turning one ``ControlCommand`` into one
+``geometry_msgs/Twist``.
 
   in   ~pose_topic (PoseStamped)          /xtend/localization -- the thing we watch
   in   ~bearing_topic (Float32)           /xtend/bearing -- tag-INDEPENDENT heading
   in   ~demo_mode_topic (String)          /xtend/demo_mode
+  in   ~cmd_vel_topic (Twist)             what the navigator is flying -- see below
   out  ~cmd_vel_topic (Twist)             <drone_ns>/cmd_vel_raw (via the GO gate)
   out  ~demo_mode_request_topic (String)  /xtend/demo_mode_request
   out  ~status_topic (String, latched)    /recovery/status
 
-Three things about this node are easy to get wrong and are deliberate:
+Four things about this node are easy to get wrong and are deliberate:
 
 * **It watches the STAMPED topic, and uses ARRIVAL time, not ``header.stamp``.**
   ``pose_adapter_node`` republishes the pose as a bare ``Pose``, throwing the
@@ -51,6 +53,15 @@ Three things about this node are easy to get wrong and are deliberate:
   requests ``fly_straight`` (the rule, and the reason, are the same as
   ``object_approach_node._release``), and then holds the drone still with a short
   burst of zeros while that request round-trips through the demo manager.
+* **It SUBSCRIBES to the topic it publishes on.** The persist prelude needs to
+  know what the navigator was flying when the pose died, and the honest answer is
+  whatever was last commanded on cmd_vel -- by the follower, by object_approach,
+  by whoever had the drone. Reading the commands themselves rather than asking
+  the follower keeps this node decoupled from which controller is running and
+  from the demo_mode handshake's latency. The obvious hazard is hearing our OWN
+  Twists back and persisting our own recovery, so observation stops the instant
+  we claim the mode: from then on the context is a fact about the past, already
+  latched by the core.
 
 See the file footer for the full rosparam list.
 """
@@ -65,6 +76,7 @@ from sparx_agency.core.planning.lost_localization import (
     GIVE_UP,
     LostLocalizationParams,
     LostLocalizationRecovery,
+    MotionContext,
 )
 
 #: The stop this node publishes when it hands control back.
@@ -83,6 +95,11 @@ def _param_bool(name, default):
         return v
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
+
+#: Below this a commanded axis is noise, not a move (m/s and rad/s alike). Used to
+#: tell a real command from the zeros the follower emits between yaw bursts -- a
+#: stop expresses no intent, so it must never become the thing the persist finishes.
+_CMD_EPS = 1e-3
 
 #: |bearing| above this cannot be radians (2*pi + margin), so it is degrees.
 #: Same rule as xtend_dome_main._bearing_to_rad, which is the only other consumer
@@ -131,6 +148,15 @@ class LostLocalizationNode(object):
         self.status_topic = str(G("~status_topic", "/recovery/status"))
 
         self.rate_hz = float(G("~rate_hz", 10.0))
+        # How long a navigator command stays a valid answer to "what were we
+        # doing". Comfortably longer than the follower's settle between yaw
+        # bursts -- that stationary gap is still part of a turn and must persist
+        # as one -- but short enough that a move from a minute ago, with a whole
+        # hover since, is treated as no answer at all rather than a stale one.
+        self.context_max_age_s = float(G("~context_max_age_s", 3.0))
+        if self.context_max_age_s <= 0.0:
+            raise ValueError("~context_max_age_s must be > 0, got %r"
+                             % (self.context_max_age_s,))
         # Beyond this the bearing is not trusted to close the sweep, and the sweep
         # falls back to its timeout rather than to a heading that has stopped moving.
         self.bearing_max_age_s = float(G("~bearing_max_age_s", 0.5))
@@ -173,6 +199,15 @@ class LostLocalizationNode(object):
             enabled=_param_bool("~enabled", d.enabled),
             stale_s=float(G("~stale_s", d.stale_s)),
             ladder_s=float(G("~ladder_s", d.ladder_s)),
+            # Finish the move that was in flight before falling back to the
+            # stop-and-search ladder: keep turning through a turn, give the metres
+            # back after an advance. Needs ~cmd_vel_topic to carry the navigator's
+            # commands (it does -- we publish there too); with nothing observed the
+            # context is unknown and the prelude is skipped on its own.
+            persist_enabled=_param_bool("~persist_enabled", d.persist_enabled),
+            persist_turn_s=float(G("~persist_turn_s", d.persist_turn_s)),
+            persist_back_s=float(G("~persist_back_s", d.persist_back_s)),
+            persist_settle_s=float(G("~persist_settle_s", d.persist_settle_s)),
             exit_confirm_poses=int(G("~exit_confirm_poses", d.exit_confirm_poses)),
             back_speed=float(G("~back_speed", d.back_speed)),
             back_duration_s=float(G("~back_duration_s", d.back_duration_s)),
@@ -204,6 +239,8 @@ class LostLocalizationNode(object):
         self._pose_count = 0          # monotonic; the core diffs it to spot arrivals
         self._bearing = None
         self._bearing_rx = None
+        self._last_cmd = None         # (vx, wz) of the last MOVE the navigator sent
+        self._last_cmd_rx = None      # ...and when it sent it
         self.current_demo_mode = None
         self._requested_mode = None
         self._last_request_pub_t = None
@@ -226,6 +263,10 @@ class LostLocalizationNode(object):
         rospy.Subscriber(self.pose_topic, PoseStamped, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.demo_mode_topic, String, self._demo_mode_cb,
                          queue_size=10)
+        # Yes, the topic we publish on: this is how we learn what the navigator
+        # was flying. See the module docstring for why, and _cmd_cb for how our
+        # own Twists are kept out of it.
+        rospy.Subscriber(self.cmd_vel_topic, Twist, self._cmd_cb, queue_size=10)
         if self.bearing_topic:
             rospy.Subscriber(self.bearing_topic, Float32, self._bearing_cb,
                              queue_size=10)
@@ -269,6 +310,53 @@ class LostLocalizationNode(object):
                     "explicitly to pin this.", self.bearing_topic, b)
         self._bearing = math.radians(b) if self._bearing_is_deg else b
         self._bearing_rx = rospy.Time.now()
+
+    def _cmd_cb(self, msg):
+        """Remember the last MOVE the navigator asked for, and when.
+
+        Two filters, both load-bearing:
+
+        * **Not while we own cmd_vel.** Our own Twists come back on this
+          subscription, and a recovery that read them would persist its own
+          output -- the back-up rung would look like "we were flying backwards",
+          the sweep like "we were turning". ``_requested_mode`` is set before the
+          first command goes out and cleared only after the last release zero, so
+          it brackets our ownership exactly.
+        * **Zeros are not moves.** The follower publishes zeros constantly: while
+          it settles between yaw bursts, while it brakes, while it waits for a
+          mode. Those are the moments the drone is stationary but still very much
+          mid-turn, and treating them as the last command would erase the very
+          intent the persist exists to finish. Keeping only real moves is what
+          makes "lost during the pause between two yaw bursts" persist as a turn.
+        """
+        if self._requested_mode is not None:
+            return
+        vx, wz = float(msg.linear.x), float(msg.angular.z)
+        if abs(vx) < _CMD_EPS and abs(wz) < _CMD_EPS:
+            return
+        self._last_cmd = (vx, wz)
+        self._last_cmd_rx = rospy.Time.now()
+
+    def _motion_context(self, now):
+        """What the navigator was flying, for the core's persist prelude.
+
+        Translation beats yaw when a controller drives both (the continuous ones
+        do; the one-axis follower never does): the two responses are opposites, so
+        the tie has to break toward the failure that actually hurts. Losing a tag
+        while advancing usually means we advanced INTO something -- close enough
+        that the marker left the frame -- and giving those metres back is both the
+        fix and the safe thing to do. Over-turning is merely unhelpful.
+        """
+        if self._last_cmd is None or self._last_cmd_rx is None:
+            return MotionContext.unknown()
+        if (now - self._last_cmd_rx).to_sec() > self.context_max_age_s:
+            # Nothing recent enough to call a move in progress. Say so, rather
+            # than finish a manoeuvre that ended a minute ago.
+            return MotionContext.unknown()
+        vx, wz = self._last_cmd
+        if abs(vx) >= _CMD_EPS:
+            return MotionContext.forward(vx)
+        return MotionContext.turning(wz)
 
     def _demo_mode_cb(self, msg):
         self.current_demo_mode = (msg.data or "").strip().lower()
@@ -321,7 +409,8 @@ class LostLocalizationNode(object):
             age = (now - self._last_rx).to_sec()
 
         dec = self.recovery.update(age, dt, self._pose_count,
-                                   yaw=self._fresh_bearing(now))
+                                   yaw=self._fresh_bearing(now),
+                                   context=self._motion_context(now))
         self._log_transition(dec)
         self._publish_status(dec)
 
@@ -453,6 +542,15 @@ class LostLocalizationNode(object):
         L("  cmd out  = %s  (through the GO gate)", self.cmd_vel_topic)
         L("  enabled  = %s", p.enabled)
         L("  stop at  = %.2fs cold      ladder at = %.2fs cold", p.stale_s, p.ladder_s)
+        if p.persist_enabled:
+            L("  persist  = ON: mid-turn -> %.1fs more turn; mid-advance -> %.1fs back,",
+              p.persist_turn_s, p.persist_back_s)
+            L("            then %.1fs still to look. Reads the last move off %s;",
+              p.persist_settle_s, self.cmd_vel_topic)
+            L("            nothing seen in %.1fs => no prelude, straight to the stop.",
+              self.context_max_age_s)
+        else:
+            L("  persist  = OFF (a dropout goes straight to the stop)")
         if self.recovery.ladder:
             L("  ladder   = %s", " -> ".join(r.label for r in self.recovery.ladder))
         else:
@@ -493,6 +591,9 @@ if __name__ == "__main__":
 # ============================================================================
 # ROSPARAMS (all private ~; defaults in parentheses)
 #   IO: ~drone_ns ('') ~cmd_vel_topic (<drone_ns>/cmd_vel_raw)
+#           BOTH an output and an input: we publish recovery commands here AND
+#           watch it to learn what the navigator was flying (see the persist
+#           block below and _cmd_cb).
 #       ~pose_topic (/xtend/localization)   the STAMPED source, not /gt_pose
 #       ~bearing_topic (/xtend/bearing)     '' => sweep runs open loop
 #       ~bearing_units (auto)  auto|rad|deg. The repo disagrees with itself about
@@ -506,7 +607,16 @@ if __name__ == "__main__":
 #       ~status_topic (/recovery/status)    ~rate_hz (10.0)
 #   detect: ~enabled (true) ~stale_s (0.3) ~ladder_s (1.0)
 #           ~exit_confirm_poses (2)
-#   back:   ~back_speed (0.25) ~back_duration_s (1.0) ~back_repeats (2)
+#   persist: finish the move that was in flight before falling back to the ladder.
+#           ~persist_enabled (true) ~persist_turn_s (0.6) ~persist_back_s (0.6)
+#           ~persist_settle_s (0.5) ~context_max_age_s (3.0)
+#           Mid-turn we keep turning at the navigator's OWN rate (the tag left the
+#           frame because we rotated it out; the next one is often already coming
+#           in). Mid-advance we reverse instead, at the speed we advanced at capped
+#           by ~back_speed (losing a tag while advancing means we flew too close to
+#           it). Either way we then hold still and look. A dropout during the
+#           settle BETWEEN yaw bursts counts as mid-turn -- zeros are not moves.
+#   back:   ~back_speed (0.30) ~back_duration_s (1.5) ~back_repeats (2)
 #   settle: ~dwell_s (1.5)
 #   climb:  ~climb_enabled (true) ~climb_speed (0.08) ~climb_duration_s (0.4)
 #           ~climb_repeats (2)
@@ -519,8 +629,12 @@ if __name__ == "__main__":
 #           NOTE: the standalone xtend_twist_to_cmd_nav.py needs --allow-multi-axes
 #           or it silently drops linear.z and the rung does nothing (the in-process
 #           converter in online_nav_bridge honours it already).
-#   sweep:  ~turn_enabled (true) ~turn_rate_deg_s (17.2) ~turn_dir (left)
+#   sweep:  ~turn_enabled (true) ~turn_rate_deg_s (28.6) ~turn_dir (right)
 #           ~turn_target_deg (360.0) ~turn_timeout_s (40.0)
+#           ~turn_rate_deg_s has a FLOOR as well as a ceiling, and the floor is the
+#           one that bites: too low and the commanded yaw never overcomes the
+#           airframe, so the drone barely rotates and a sweep that never swept
+#           looks exactly like a sweep that found nothing.
 #   modes:  ~require_mode_confirm (false)  see the __init__ comment: false so a
 #           demo manager that does not know 'recovery' cannot mute the recovery
 #           ~request_repeat_sec (0.5)

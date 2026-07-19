@@ -195,18 +195,40 @@ launch:
   # -- Lost-localization recovery: what to do when the drone stops knowing where it is --
   # The AprilTag pose only exists while a tag is IN VIEW. Walk behind a pillar and
   # /xtend/localization simply stops publishing -- but every consumer keeps its last
-  # value, so the drone happily keeps flying toward where it was seconds ago. This
+# value, so the drone happily keeps flying toward where it was seconds ago. This
   # watches the pose and, when it goes cold, takes the drone off the follower:
+  #   persist  -> finish the move that was interrupted (see below)
   #   stale_s  -> STOP and hold (cheap, instantly undone; ~2 frames at 7 Hz)
   #   ladder_s -> back up, settle, back up, settle, climb, settle, climb, settle,
   #               then a slow 360 sweep looking for any tag
   #   nothing worked -> land (stop -> land -> disarm)
   # Any fresh pose at any point abandons the ladder and hands the drone straight back.
   # The gap between the two thresholds is the point: a routine one-frame tag dropout
-  # stops the drone but must never provoke a blind back-up.
+  # must never provoke the ladder's metre-scale blind retreat. It costs at most the
+  # persist below -- a fraction of a second of the move that was already in flight.
   recovery_enabled: true
   recovery_stale_s: 0.3       # pose this old (s) => STOP. Lower = twitchier.
   recovery_ladder_s: 1.0      # ...and still this old => start manoeuvring. > stale_s.
+  #
+  # Persist: what to do in the INSTANT the tag goes, before any of the above. Most
+  # dropouts are caused by the move that was under way and are undone by finishing
+  # or reversing it -- and at that instant we still know which move it was.
+  #   mid-TURN    -> keep turning, same direction, at the navigator's own rate. The
+  #                  tag left the frame because we rotated it out, so the next one is
+  #                  often already swinging in; stopping dead strands the camera
+  #                  pointed at the one heading we know is empty. Losing it during
+  #                  the settle BETWEEN two yaw bursts counts as mid-turn -- the
+  #                  drone is stationary but is still in a turn.
+  #   mid-ADVANCE -> the opposite: give the metres back. Losing a tag while flying at
+  #                  it means we flew too close, so continuing is the one thing that
+  #                  cannot help. Reverses at the speed we advanced at, capped by
+  #                  recovery_back_speed.
+  # Either way the drone then holds still and looks, and if the pose comes back the
+  # recovery never happens at all. If it does not, the ladder runs exactly as before
+  # -- delayed by the persist plus the look, never replaced.
+  recovery_persist_enabled: true
+  recovery_persist_turn_s: 0.6    # ~3 of the follower's commands' worth of turn
+  recovery_persist_back_s: 0.6    # at ~0.3 m/s cruise, ~0.18 m given back
   #
   # Retreat: the FIRST rung, and the most likely to work -- we were standing
   # somewhere with a tag in view seconds ago, so go back there. Worth enough
@@ -242,6 +264,12 @@ launch:
   # it is the side that actually re-acquires a tag on this airframe. The sweep is a
   # search, so the direction that finds one soonest is the whole point of it.
   recovery_turn_dir: right
+  # How hard it sweeps. This number has a FLOOR as well as a ceiling, and the floor
+  # is the one that bites: too low and the commanded yaw never overcomes the
+  # airframe, so the drone barely rotates -- and a sweep that never swept looks
+  # exactly like a sweep that found nothing. Still kept well under the follower's
+  # own yaw rate, because motion blur is what defeats a tag detection.
+  recovery_turn_rate_deg_s: 28.6
 
   # -- Windows (all need a display) --
   viewer: false                # target-lock HUD

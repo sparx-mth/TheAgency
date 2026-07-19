@@ -15,6 +15,13 @@ Two thresholds, because they answer different questions:
     the drone has been standing still since ``stale_s``, so every rung starts
     from a standstill.
 
+Before the stop there is one short, context-dependent prelude: the persist stage
+(see :mod:`.persist`). At the instant the tag leaves the frame we still know what
+the navigator was in the middle of, and that is worth acting on -- keep turning
+through a turn, give the metres back after an advance -- because the commonest
+dropouts are caused by the move itself and are undone by finishing or reversing
+it. It is bounded, it ends stationary, and if it works recovery never happens.
+
 The ladder (see :mod:`.ladder`) retreats the way we came, then climbs, then
 sweeps -- cheapest and most-likely-to-work first, each rung followed by a settle
 because a stationary camera is what actually re-acquires a tag. Any fresh pose at
@@ -36,15 +43,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Optional
+from typing import Optional, Tuple
 
 from sparx_agency.core.common.types import ControlCommand, normalize_angle
 
 from .ladder import BACK, CLIMB, STOP, TURN, Rung, build_ladder
 from .params import LostLocalizationParams
+from .persist import MotionContext, build_persist
 
 #: Recovery states (also carried on the decision for logging).
 NOMINAL = "NOMINAL"    # localization is fresh (or never seen); we own nothing
+PERSIST = "PERSIST"    # finishing the move that was in flight when it went cold
 HOLD = "HOLD"          # pose is cold: stopped, waiting to see if it returns
 LADDER = "LADDER"      # running a rung of the ladder
 GIVE_UP = "GIVE_UP"    # ladder exhausted; stopped and asking to land (terminal)
@@ -103,6 +112,7 @@ class LostLocalizationRecovery(object):
         new instance if that is genuinely what you want.
         """
         self._state = NOMINAL
+        self._seq = ()             # type: Tuple[Rung, ...] -- persist, then ladder
         self._rung = 0
         self._rung_s = 0.0
         self._elapsed_s = 0.0
@@ -117,7 +127,8 @@ class LostLocalizationRecovery(object):
         return self._state
 
     def update(self, pose_age_s: float, dt: float, pose_count: int,
-               yaw: Optional[float] = None) -> RecoveryDecision:
+               yaw: Optional[float] = None,
+               context: Optional[MotionContext] = None) -> RecoveryDecision:
         """Advance one tick and return this tick's decision.
 
         Args:
@@ -137,6 +148,13 @@ class LostLocalizationRecovery(object):
             yaw: A localization-INDEPENDENT heading (rad), e.g. the platform's own
                 bearing, used to close the sweep on angle. None => the sweep runs
                 open loop and ends on its timeout.
+            context: What the navigator was flying when the pose went cold, which
+                selects the persist prelude (see :mod:`.persist`). Read ONLY on
+                the transition out of NOMINAL and latched for the whole episode:
+                once recovery owns the drone, the last command anyone can observe
+                is recovery's own, so re-reading it later would just feed the
+                stage its own output. None => :meth:`MotionContext.unknown`, i.e.
+                no prelude and a plain stop.
 
         Returns:
             The decision; see :class:`RecoveryDecision`.
@@ -173,12 +191,16 @@ class LostLocalizationRecovery(object):
             # the drone would sit in HOLD for ever with the follower passive.
             self._fresh_poses = 0
         if self._state == NOMINAL:
-            self._enter(HOLD)
+            # The one moment the context is worth anything: the move it describes
+            # is still physically under way. Latch the prelude it selects here.
+            self._seq = build_persist(self.p, context or MotionContext.unknown())
+            self._rung = 0
+            self._enter(PERSIST if self._seq else HOLD)
         self._elapsed_s += dt
 
         if self._state == HOLD:
             return self._hold(pose_age_s, dt)
-        return self._ladder(pose_age_s, dt, yaw)
+        return self._run_rungs(pose_age_s, dt, yaw)
 
     # ── states ──────────────────────────────────────────────────────
     def _fresh(self, pose_age_s: float, arrived: bool) -> RecoveryDecision:
@@ -187,14 +209,20 @@ class LostLocalizationRecovery(object):
             return RecoveryDecision(False, None, NOMINAL, pose_age_s=pose_age_s)
         if arrived:
             self._fresh_poses += 1
-            if self._state == LADDER:
+            if self._state in (PERSIST, LADDER):
                 # A pose landed, so we are no longer totally lost -- and a blind
-                # manoeuvre is only justified while we are. Abandon the ladder and
-                # fall back to a plain stop. Not just cosmetic: without this the
-                # state stays LADDER, so the NEXT stale tick routes straight back
-                # into a rung at stale_s (0.3s) instead of ladder_s (1.0s), and
-                # the drone resumes reversing mid-rung on a 0.3s dropout. The rung
-                # resets too -- the next escalation starts from the top.
+                # manoeuvre is only justified while we are. Abandon the sequence
+                # and fall back to a plain stop. Not just cosmetic: without this
+                # the state stays LADDER, so the NEXT stale tick routes straight
+                # back into a rung at stale_s (0.3s) instead of ladder_s (1.0s),
+                # and the drone resumes reversing mid-rung on a 0.3s dropout. The
+                # rung resets too -- the next escalation starts from the top.
+                #
+                # A persist stops here for a second reason: it exists to bring a
+                # tag back into frame, so the moment one lands it has succeeded,
+                # and holding still is what keeps it in view while the exit
+                # debounces. Continuing to turn would sweep it straight out again.
+                self._seq = ()
                 self._rung = 0
                 self._enter(HOLD)
         if self._fresh_poses < self.p.exit_confirm_poses:
@@ -209,17 +237,24 @@ class LostLocalizationRecovery(object):
         if pose_age_s >= self.p.ladder_s:
             if not self.ladder:
                 return self._give_up(pose_age_s)
+            self._seq = self.ladder
+            self._rung = 0
             self._enter(LADDER)
-            return self._ladder(pose_age_s, dt, None)
+            return self._run_rungs(pose_age_s, dt, None)
         return self._decide(HOLD, _ZERO, pose_age_s=pose_age_s)
 
-    def _ladder(self, pose_age_s: float, dt: float,
-                yaw: Optional[float]) -> RecoveryDecision:
-        """Run the current rung; advance when it is done; give up at the end."""
-        if self._rung >= len(self.ladder):
-            return self._give_up(pose_age_s)
+    def _run_rungs(self, pose_age_s: float, dt: float,
+                   yaw: Optional[float]) -> RecoveryDecision:
+        """Run the current rung of the active sequence; advance when it is done.
 
-        rung = self.ladder[self._rung]
+        One executor serves both sequences -- the persist prelude and the ladder
+        -- because running a rung is the same job either way; only what happens
+        when the sequence runs out differs (see :meth:`_sequence_done`).
+        """
+        if self._rung >= len(self._seq):
+            return self._sequence_done(pose_age_s, dt)
+
+        rung = self._seq[self._rung]
         self._rung_s += dt
         if rung.kind == TURN:
             self._accumulate_sweep(yaw)
@@ -230,17 +265,37 @@ class LostLocalizationRecovery(object):
             self._sweep_rad = 0.0
             self._sweep_net_rad = 0.0
             self._prev_yaw = None
-            if self._rung >= len(self.ladder):
-                return self._give_up(pose_age_s)
-            rung = self.ladder[self._rung]
+            if self._rung >= len(self._seq):
+                return self._sequence_done(pose_age_s, dt)
+            rung = self._seq[self._rung]
 
-        return self._decide(LADDER, self._command(rung), rung=self._rung,
+        return self._decide(self._state, self._command(rung), rung=self._rung,
                             rung_label=rung.label, pose_age_s=pose_age_s)
+
+    def _sequence_done(self, pose_age_s: float, dt: float) -> RecoveryDecision:
+        """The active sequence ran out: hand the persist on, or give up.
+
+        A finished persist falls into HOLD rather than straight into the ladder,
+        so the escalation is decided by pose age alone and reads identically
+        whether or not a prelude ran. If the prelude outlasted ``ladder_s`` --
+        which it may, it is never cut short -- HOLD escalates on this same tick.
+        """
+        if self._state == PERSIST:
+            self._seq = ()
+            self._rung = 0
+            self._enter(HOLD)
+            return self._hold(pose_age_s, dt)
+        return self._give_up(pose_age_s)
 
     # ── helpers ─────────────────────────────────────────────────────
     def _rung_done(self, rung: Rung) -> bool:
-        """A rung ends on its duration; a sweep may end early, on angle."""
-        if rung.kind == TURN and self._sweep_rad >= self.p.turn_target_rad:
+        """A rung ends on its duration; one carrying a target may end on angle.
+
+        Only the ladder's sweep carries a target: it is a search, and it is done
+        when it has looked everywhere. A persist turn is a deliberate, bounded
+        continuation of a move already in progress, so it ends on its clock.
+        """
+        if rung.target_rad is not None and self._sweep_rad >= rung.target_rad:
             return True
         return self._rung_s >= rung.duration_s
 
@@ -269,14 +324,23 @@ class LostLocalizationRecovery(object):
         self._prev_yaw = yaw
 
     def _command(self, rung: Rung) -> ControlCommand:
-        """The single-axis velocity a rung drives (see :mod:`.ladder`)."""
+        """The single-axis velocity a rung drives (see :mod:`.ladder`).
+
+        ``rung.rate`` overrides the stage's tuning where a rung carries one, which
+        is how a persist flies the navigator's own rate rather than the recovery's.
+        BACK is negated here whatever the sign it is handed: a rung that retreats
+        must never be able to fly the drone forwards.
+        """
         if rung.kind == BACK:
-            return ControlCommand.velocity(-self.p.back_speed, 0.0, 0.0, 0.0)
+            speed = self.p.back_speed if rung.rate is None else rung.rate
+            return ControlCommand.velocity(-abs(speed), 0.0, 0.0, 0.0)
         if rung.kind == CLIMB:
-            return ControlCommand.velocity(0.0, 0.0, self.p.climb_speed, 0.0)
+            speed = self.p.climb_speed if rung.rate is None else rung.rate
+            return ControlCommand.velocity(0.0, 0.0, speed, 0.0)
         if rung.kind == TURN:
-            return ControlCommand.velocity(
-                0.0, 0.0, 0.0, self.p.turn_rate * self.p.turn_dir)
+            rate = (self.p.turn_rate * self.p.turn_dir
+                    if rung.rate is None else rung.rate)
+            return ControlCommand.velocity(0.0, 0.0, 0.0, rate)
         return _ZERO   # STOP
 
     def _give_up(self, pose_age_s: float) -> RecoveryDecision:

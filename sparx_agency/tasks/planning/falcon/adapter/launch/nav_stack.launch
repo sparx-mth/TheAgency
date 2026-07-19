@@ -106,6 +106,18 @@
   <arg name="recovery_bearing_units" default="auto" /><!-- auto | rad | deg -->
   <arg name="recovery_stale_s"  default="0.3" /><!-- pose this cold => STOP -->
   <arg name="recovery_ladder_s" default="1.0" /><!-- ...and this cold => manoeuvre -->
+  <!-- Before the stop: finish the move that was in flight, because the commonest
+       dropouts are caused by that move and undone by finishing or reversing it.
+       Mid-TURN we keep turning, the same way, at the navigator's own rate: the
+       tag left the frame because we rotated it out, so the next one is often
+       already swinging in, and stopping dead strands the camera pointed at the one
+       heading we know is empty. Mid-ADVANCE we do the opposite and give the metres
+       back, because losing a tag while flying at it means we flew too close. Either
+       way the drone then holds still and looks. A dropout during the settle BETWEEN
+       two yaw bursts counts as mid-turn: a stop is a pause in a move, not a move. -->
+  <arg name="recovery_persist_enabled" default="true" />
+  <arg name="recovery_persist_turn_s"  default="0.6" /><!-- ~3 follower commands -->
+  <arg name="recovery_persist_back_s"  default="0.6" />
   <!-- The first and most likely-to-work rung: retreat the way we came, where a
        tag was visible seconds ago. Worth enough distance to actually leave the
        spot that lost it; too short and the drone sits in the same bad place.
@@ -131,6 +143,12 @@
   <arg name="recovery_climb_speed" default="0.08" />
   <arg name="recovery_climb_duration_s" default="0.4" />
   <arg name="recovery_turn_dir" default="right" /><!-- which way the 360 sweeps; right finds tags on this airframe -->
+  <!-- How hard the 360 sweep turns. This has a FLOOR as well as a ceiling, and the
+       floor is the one that bites: too low and the commanded yaw never overcomes
+       the airframe, so the drone barely rotates and a sweep that never swept looks
+       exactly like a sweep that found nothing. Kept well under the follower's own
+       yaw rate because motion blur is what defeats a tag detection. -->
+  <arg name="recovery_turn_rate_deg_s" default="28.6" />
   <arg name="recovery_go_topic" default="/mission/go_status" />
 
 
@@ -1011,12 +1029,16 @@
     <param name="enabled"        value="$(arg recovery_enabled)" />
     <param name="stale_s"        value="$(arg recovery_stale_s)" />
     <param name="ladder_s"       value="$(arg recovery_ladder_s)" />
+    <param name="persist_enabled" value="$(arg recovery_persist_enabled)" />
+    <param name="persist_turn_s"  value="$(arg recovery_persist_turn_s)" />
+    <param name="persist_back_s"  value="$(arg recovery_persist_back_s)" />
     <param name="back_speed"      value="$(arg recovery_back_speed)" />
     <param name="back_duration_s" value="$(arg recovery_back_duration_s)" />
     <param name="climb_enabled"  value="$(arg recovery_climb_enabled)" />
     <param name="climb_speed"      value="$(arg recovery_climb_speed)" />
     <param name="climb_duration_s" value="$(arg recovery_climb_duration_s)" />
     <param name="turn_dir"       value="$(arg recovery_turn_dir)" />
+    <param name="turn_rate_deg_s" value="$(arg recovery_turn_rate_deg_s)" />
   </node>
 
   <node pkg="falcon_adapter" type="sensor_gate_node.py"

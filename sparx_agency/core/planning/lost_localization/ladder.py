@@ -10,7 +10,7 @@ are, on platforms whose bridge refuses a vertical velocity) instead of deleted.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .params import LostLocalizationParams
 
@@ -29,14 +29,26 @@ class Rung:
 
     Attributes:
         kind: One of :data:`BACK`, :data:`STOP`, :data:`CLIMB`, :data:`TURN`.
-        duration_s: How long the rung drives. For :data:`TURN` this is the
-            timeout, not the target -- the sweep normally ends on angle.
+        duration_s: How long the rung drives. For a :data:`TURN` that carries a
+            ``target_rad`` this is the timeout, not the target -- that sweep
+            normally ends on angle.
         label: Human name for logs and the status topic (e.g. ``"back#2"``).
+        rate: Magnitude to drive this rung's axis at, overriding the tuning's
+            default for that stage. SIGNED for :data:`TURN` (+ = left/CCW);
+            unsigned for :data:`BACK`, which always retreats. None => use the
+            tuning. Exists so :mod:`.persist` can hand back the rate the
+            navigator was already flying rather than the recovery's own.
+        target_rad: Rotation (rad) that ends a :data:`TURN` early. None => the
+            rung runs its full ``duration_s``. This is what makes the ladder's
+            360 sweep a search for a tag rather than a fixed-length spin, and
+            what keeps a short, deliberate turn (a persist) from inheriting it.
     """
 
     kind: str
     duration_s: float
     label: str
+    rate: Optional[float] = None
+    target_rad: Optional[float] = None
 
 
 def build_ladder(p: LostLocalizationParams) -> Tuple[Rung, ...]:
@@ -62,5 +74,6 @@ def build_ladder(p: LostLocalizationParams) -> Tuple[Rung, ...]:
             rungs.append(Rung(CLIMB, p.climb_duration_s, "climb#%d" % (i + 1)))
             rungs.append(Rung(STOP, p.dwell_s, "settle-after-climb#%d" % (i + 1)))
     if p.turn_enabled:
-        rungs.append(Rung(TURN, p.turn_timeout_s, "sweep360"))
+        rungs.append(Rung(TURN, p.turn_timeout_s, "sweep360",
+                          target_rad=p.turn_target_rad))
     return tuple(rungs)
