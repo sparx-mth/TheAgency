@@ -332,9 +332,17 @@ The **bridge restarts with FALCON** and cannot sensibly be kept: it is a ROS1 no
 against the roscore that `roslaunch` starts *inside* the FALCON container, so that master
 — and every topic registration made against it — dies with the container. That costs a
 couple of seconds, and a fresh roscore per run is wanted anyway: it is what stops a stale
-latched `/waypoint_nav/goal` from pre-arming the planners. (`bridge/entrypoint.sh` waits
-for the master and reloads its topic list *inside* its restart loop, so the bridge comes
-back correctly instead of silently bridging nothing.)
+latched `/waypoint_nav/goal` from pre-arming the planners.
+
+> `bridge/entrypoint.sh` loads its topic list into rosparam **once**, before its restart
+> loop, so the bridge cannot outlive the master it registered against — restarting the
+> container is what re-establishes it, which is why `--falcon-only` does exactly that.
+> Moving that load inside the loop looks like an obvious robustness win and is a trap:
+> `rostopic`/`rosparam` are ROS1 tools and the loop body runs *after*
+> `source /opt/ros/foxy/setup.bash`, where the ROS2 environment shadows them. The
+> roscore check then fails forever against a perfectly healthy master, the loop spins,
+> `parameter_bridge` never starts, and **every** bridged topic reads zero while the rest
+> of the stack looks fine. Do ROS1 work before the ROS2 source, or not at all.
 
 Or, with a nav stack + detector already up, just the launch:
 
