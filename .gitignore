@@ -238,3 +238,6 @@ sparx_agency/tasks/planning/navdp/engines/
 *.pth
 *.weights
 /sparx_agency/theagency_venv/
+
+# FALCON flight logs (thought journal); see tasks/planning/falcon/run_falcon.sh
+sparx_agency/tasks/planning/falcon/logs/

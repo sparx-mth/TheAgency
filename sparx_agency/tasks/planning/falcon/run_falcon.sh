@@ -113,7 +113,7 @@ echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sp
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py thinking.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py thinking.py thought_journal.py thought_logger_node.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else
@@ -179,8 +179,19 @@ if [ "${ARCH}" != "aarch64" ] && [ -S /var/run/docker.sock ]; then
   DOCKER_SOCK_MOUNT=( --volume /var/run/docker.sock:/var/run/docker.sock )
 fi
 
+# ── Flight logs (thought journal) ─────────────────────────────
+# The thought logger writes INSIDE the container, which runs --rm, so without a
+# host bind-mount the log of the flight you just did is deleted the moment it
+# lands. Mount a host directory read-write and point the node at it via
+# FALCON_LOG_DIR (see adapter/scripts/thought_journal.py).
+LOG_HOST="${FALCON_LOG_DIR:-${SCRIPT_DIR}/logs}"
+mkdir -p "${LOG_HOST}"
+echo "[INFO] Thought journal -> ${LOG_HOST}"
+
 # ── Run ───────────────────────────────────────────────────────
 docker run -it --rm \
+    --volume "${LOG_HOST}:/falcon_logs" \
+    --env FALCON_LOG_DIR=/falcon_logs \
     --name "${CONTAINER}" \
     ${GPU_ARGS} \
     --env DISPLAY="${DISPLAY}" \
