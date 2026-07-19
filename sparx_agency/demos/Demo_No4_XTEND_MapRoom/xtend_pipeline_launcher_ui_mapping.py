@@ -382,7 +382,8 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \
   -p frame_path_topic:=/xtend/rgb_frame_path \
   -p tag_map_path:=/home/user/agency_ws/sparx_agency/tasks/localization/config/new_map.yaml \
   -p camera_calib_path:=/home/user/agency_ws/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \
-  -p tag_size_m:=0.13
+  -p tag_size_m:=0.13 \
+  -p alpha:=0.2
 """,
     ),
     LaunchItem(

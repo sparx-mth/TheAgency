@@ -56,6 +56,12 @@ tags:
     rpy: [-1.5708,  0, -3.1416]
     size: 0.265
 
+# on a cardboard box, below the desk, on a trash can
+  14:
+    xyz: [ -0.585, -1.16, 0.71 ]
+    rpy: [-1.5708,  0, 1.5708]
+    size: 0.265
+
 
  # inside the MAMAD, near the weapon, orientation like exit office door
   0:
