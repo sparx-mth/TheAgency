@@ -144,8 +144,8 @@
   <arg name="gait_settle_on_transition" default="true" />     <!-- stop on turn<->forward change -->
 
   <!-- ── Goal (arrival -> scan; re-inject on give-up) ───────────────── -->
-  <arg name="goal_x"            default="" />                 <!-- '' => no known goal -->
-  <arg name="goal_y"            default="" />
+  <arg name="goal_x"            default="0.0" />                 <!-- '' => no known goal -->
+  <arg name="goal_y"            default="-2.0" />
   <arg name="arrive_radius_m"   default="0.6" />
   <arg name="goal_in_topic"     default="/waypoint_nav/goal" />
   <arg name="goal_out_topic"    default="/waypoint_nav/goal" />
