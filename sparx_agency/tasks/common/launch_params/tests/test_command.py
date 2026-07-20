@@ -28,6 +28,28 @@ def test_argparse_options_are_recovered():
         ("frequency", "10.0"), ("out-dir", "/tmp/frames")]
 
 
+def test_a_remap_stays_a_remap_and_does_not_swallow_the_next_flag():
+    """`-r a:=b` rewires a name; writing it as `-p` would set a dead parameter."""
+    text = "ros2 run pkg node --ros-args -r __ns:=/foo -p k:=1"
+    parsed = parse(text)
+    assert [(p.name, p.syntax) for p in parsed.params] == [
+        ("__ns", "ros2_remap"), ("k", ROS2)]
+    assert render(parsed, ParamSet(parsed.params)) == \
+        "ros2 run pkg node --ros-args -p k:=1 -r __ns:=/foo"
+
+
+def test_the_long_remap_spelling_is_understood_too():
+    parsed = parse("ros2 run p n --ros-args --remap cloud_in:=/points")
+    assert [(p.name, p.value) for p in parsed.params] == [("cloud_in", "/points")]
+
+
+def test_an_option_before_ros_args_stays_before_it():
+    """Re-emitting it after the marker would put it inside the ros-args region,
+    where rcl rejects it -- and would leave a second --ros-args behind."""
+    text = "ros2 run pkg node --my-flag v --ros-args -p k:=1"
+    assert roundtrip(text) == text
+
+
 def test_a_negative_number_is_a_value_not_another_option():
     """`--roll -1.5708` must not read as a bare flag followed by junk."""
     parsed = parse("ros2 run tf2_ros stp --roll -1.5708 --frame-id map")
@@ -59,10 +81,10 @@ def test_line_continuations_are_joined_before_parsing():
     assert [p.name for p in parsed.params] == ["a"]
 
 
-def test_unparsed_trailing_tokens_survive_in_order():
-    """`--remap` must stay after the -p block, where ROS2 expects it."""
-    text = "ros2 run p n --ros-args -p a:=1 --remap in:=/topic"
-    assert roundtrip(text) == text
+def test_remaps_are_emitted_after_the_parameters_in_the_short_form():
+    """Both spellings normalise to `-r`, which is what ROS2's own docs use."""
+    assert roundtrip("ros2 run p n --ros-args -p a:=1 --remap in:=/topic") == \
+        "ros2 run p n --ros-args -p a:=1 -r in:=/topic"
 
 
 def test_a_discovered_parameter_gets_the_ros_args_marker_it_needs():

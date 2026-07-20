@@ -150,6 +150,16 @@ NAV_MODE=hybrid ./run_object_mission.sh --falcon-only office gui dp_cruise_speed
 **Changed only** narrows to what you have moved — useful before flying, to see
 exactly how this run differs from a default one.
 
+**One knob per decision.** Six of `object_mission.launch`'s arguments are filled
+in by `run_object_mission.sh` itself, from its own environment variables and
+positionals: `map_name`, `selection_mode`, `seed`, `nav_mode`, `objects_file` and
+`target_object`. They are deliberately *not* offered as `key:=value` overrides —
+set them through the uppercase parameters (`NAV_MODE`, `MAP`, `SELECTION_MODE`,
+`SEED`, `OBJECTS_FILE`, `INIT_TARGET`) instead. `nav_mode` is why this matters:
+the launch file defaults it to `fallback` while `mission.yaml` sets `NAV_MODE` to
+`astar`, so picking `fallback` on the launch-file side would have changed nothing
+and flown `astar` — with no NavDP rescue — while looking correct.
+
 **Saving.** *Save these as my defaults* writes the changed parameters to
 `~/.config/sparx_agency/launcher_params.json` and restores them next session.
 Only changed values are stored, so an improvement to a node's own default is not

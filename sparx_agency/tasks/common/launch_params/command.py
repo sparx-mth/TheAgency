@@ -21,10 +21,17 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from .spec import CLI, ENV, FLAG, ROS2, ROSLAUNCH, ParamSet, ParamSpec
+from .spec import (CLI, ENV, FLAG, ROS2, ROS2_REMAP, ROSLAUNCH, ParamSet,
+                   ParamSpec)
 
 #: Marker that switches a ROS2 command line into parameter mode.
 ROS_ARGS = "--ros-args"
+
+#: Flags whose next token is a ``name:=value`` pair, and what that pair means.
+#: Both spellings of each are accepted; both are re-emitted in the short form,
+#: which is what ROS2's own documentation uses.
+_ASSIGN_FLAGS = {"-p": ROS2, "--param": ROS2,
+                 "-r": ROS2_REMAP, "--remap": ROS2_REMAP}
 
 #: ``name:=value`` -- a roslaunch arg, or the payload of a ``-p``.
 _ASSIGN_RE = re.compile(r"^(?P<name>[A-Za-z_][\w./-]*):=(?P<value>.*)$", re.S)
@@ -105,7 +112,15 @@ def parse(command: str, *, source: str = "command") -> ParsedCommand:
         parsed.raw = statements[-1]
         return parsed
 
-    index, seen_command_word = 0, False
+    # `--ros-args` is a boundary, not just a token. Anything before it is the
+    # PROGRAM's own option; anything after belongs to ROS. Recovering an option
+    # from the near side would re-emit it on the far side, inside the ros-args
+    # region, where rcl rejects it -- so the near side stays fixed text.
+    if ROS_ARGS in tokens:
+        boundary = tokens.index(ROS_ARGS) + 1
+        parsed.head, tokens = tokens[:boundary], tokens[boundary:]
+
+    index, seen_command_word = 0, bool(parsed.head)
     while index < len(tokens):
         token = tokens[index]
         step = 1
@@ -117,10 +132,11 @@ def parse(command: str, *, source: str = "command") -> ParsedCommand:
         if not seen_command_word and env_match and not assign_match:
             param = ParamSpec(name=env_match.group("name"), default=env_match.group("value"),
                               syntax=ENV, pinned=True, source=source)
-        elif token == "-p" and index + 1 < len(tokens) and _ASSIGN_RE.match(tokens[index + 1]):
+        elif (token in _ASSIGN_FLAGS and index + 1 < len(tokens)
+                and _ASSIGN_RE.match(tokens[index + 1])):
             inner = _ASSIGN_RE.match(tokens[index + 1])
             param = ParamSpec(name=inner.group("name"), default=inner.group("value"),
-                              syntax=ROS2, pinned=True, source=source)
+                              syntax=_ASSIGN_FLAGS[token], pinned=True, source=source)
             step = 2
         elif assign_match:
             seen_command_word = True
@@ -199,12 +215,13 @@ def render(parsed: ParsedCommand, params: ParamSet) -> str:
         head.append(ROS_ARGS)
 
     groups: list[list[str]] = [head]
-    for syntax in (ROS2, CLI, FLAG, ROSLAUNCH):
+    for syntax in (ROS2, ROS2_REMAP, CLI, FLAG, ROSLAUNCH):
         groups.extend(p.tokens() for p in params.rendered(syntax) if p.tokens())
     if parsed.tail:
         groups.append(parsed.tail)
 
-    env = " ".join(" ".join(p.tokens()) for p in params.rendered(ENV))
+    env = " ".join(shlex.quote(t) for p in params.rendered(ENV)
+                   for t in p.tokens())
     body = _wrap([g for g in groups if g])
     if env:
         body = env + " " + body
@@ -256,5 +273,5 @@ def render_template(template: str, params: ParamSet) -> str:
     slots["env"] = environment + " " if environment else ""
     slots["params"] = " ".join(filter(None, (
         quote([t for p in overflow if p.syntax == syntax for t in p.tokens()])
-        for syntax in (ROS2, CLI, FLAG, ROSLAUNCH))))
+        for syntax in (ROS2, ROS2_REMAP, CLI, FLAG, ROSLAUNCH))))
     return template.format_map(slots).strip()

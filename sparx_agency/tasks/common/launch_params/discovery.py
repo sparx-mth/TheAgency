@@ -48,6 +48,12 @@ class Source:
             launcher cannot drift from the script that consumes the config.
         only_groups: For ``yaml`` sources: restrict to these top-level groups,
             when a command uses only part of a shared config.
+        suppress: Parameter names this source declares that the COMMAND sets
+            itself, and which must therefore not be offered again. A launch file
+            declares every argument it accepts, including the ones the wrapper
+            script fills in from its own environment variables and positionals --
+            offer those and the operator gets two knobs for one decision, sets
+            the one that is never emitted, and flies something else entirely.
         defines_defaults: Whether this source is authoritative about the VALUES
             it lists, not merely about which parameters exist. Set False for a
             launch file read after the config that overrides it: the file
@@ -60,6 +66,7 @@ class Source:
     path: str
     env_schema_from: str = ""
     only_groups: tuple[str, ...] = ()
+    suppress: tuple[str, ...] = ()
     defines_defaults: bool = True
 
     def __post_init__(self) -> None:
@@ -132,8 +139,9 @@ def discover(sources: tuple[Source, ...]) -> Discovery:
                                                   source.only_groups)
             else:
                 discovered = READERS[source.kind](source.absolute)
-            found.params.extend(discovered,
-                                override_default=source.defines_defaults)
+            found.params.extend(
+                [p for p in discovered if p.name not in source.suppress],
+                override_default=source.defines_defaults)
         except Exception as error:  # noqa: BLE001 - reported, never swallowed
             found.problems.append("%s (%s): %s: %s" % (
                 source.path, source.kind, type(error).__name__, error))

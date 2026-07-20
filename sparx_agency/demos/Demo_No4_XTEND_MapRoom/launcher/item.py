@@ -11,7 +11,7 @@ never from a second list that has to be kept in step with the first.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from sparx_agency.tasks.common.launch_params import command as cmd
@@ -106,12 +106,19 @@ class LaunchPlan:
         plan = cls(item=item, params=found.params,
                    problems=list(found.problems), machine=item.machine)
 
+        # COPY the declared parameters. They are module-level constants, shared
+        # between items on purpose (every container command wants the same
+        # `container` knob) -- but a ParamSet holds them by reference and the
+        # editor writes into them, so without this, setting the container on the
+        # RViz screen would silently change the BEV viewer's too, and each would
+        # save an override the operator never made there.
+        declared = [replace(param) for param in item.params]
         if item.template:
-            plan.params.extend(item.params)
+            plan.params.extend(declared)
         else:
             plan.parsed = cmd.parse(item.command)
             plan.params.extend(plan.parsed.params)
-            plan.params.extend(item.params)
+            plan.params.extend(declared)
 
         if store is not None:
             unknown = plan.params.apply(store.get(item.tmux_name))

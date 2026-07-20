@@ -113,6 +113,9 @@ class XtendPipelineLauncher(tk.Tk):
         ttk.Label(bar, text="Run on:").pack(side="left")
         ttk.Combobox(bar, textvariable=self.machine, values=list(MACHINES),
                      state="readonly", width=9).pack(side="left", padx=(4, 12))
+        # Remember the choice on the plan, or re-selecting the command would put
+        # it straight back to the catalog default and the change would not stick.
+        self.machine.trace_add("write", lambda *_: self._remember_machine())
         ttk.Button(bar, text="Save these as my defaults",
                    command=self.save_defaults).pack(side="left", padx=3)
         ttk.Button(bar, text="Forget saved",
@@ -124,8 +127,9 @@ class XtendPipelineLauncher(tk.Tk):
     def _build_command_tab(self) -> None:
         tab = ttk.Frame(self.tabs)
         self.tabs.add(tab, text="Command")
-        ttk.Label(tab, text="This is what Start runs. Editing here overrides the "
-                            "parameters — until you change one, which rewrites it.",
+        ttk.Label(tab, text="This is what “Start selected” runs. Editing here is a "
+                            "one-off — changing any parameter rewrites it, and "
+                            "“Start checked” / AUTO always build from the parameters.",
                   foreground="#444444").pack(anchor="w", padx=6, pady=(6, 2))
         self.command_text = tk.Text(tab, wrap="none", height=20)
         self.command_text.pack(fill="both", expand=True, padx=6)
@@ -174,29 +178,55 @@ class XtendPipelineLauncher(tk.Tk):
             item.description))
 
     def refresh_command(self) -> None:
-        """Re-render the Command tab from the current parameter values."""
+        """Re-render the Command tab from the current parameter values.
+
+        A command that cannot be rendered -- a template slot whose parameter was
+        commented out of the config, say -- puts the reason in the box. Leaving
+        it blank would be far worse: Start would cheerfully open a tmux session
+        running nothing at all, and the only clue would be a traceback on a
+        terminal nobody is looking at.
+        """
         if self._selected is None:
             return
+        try:
+            text = self.plan_for(self._selected).command_text()
+        except (KeyError, ValueError) as error:
+            text = ("# This command cannot be built right now:\n#   %s\n"
+                    "# Fix the parameter above, or edit this box by hand." % error)
+            self.status.set("Cannot build the command for %s: %s"
+                            % (self._selected.tmux_name, error))
         self.command_text.delete("1.0", "end")
-        self.command_text.insert("end", self.plan_for(self._selected).command_text())
+        self.command_text.insert("end", text)
 
     def current_command(self) -> str:
-        """Whatever is in the Command box, which is what Start runs."""
+        """Whatever is in the Command box, which is what Start selected runs."""
         return normalize_command(self.command_text.get("1.0", "end"))
 
     # ── saved defaults ────────────────────────────────────────────
 
     def save_defaults(self) -> None:
+        """Persist the changed parameters, saying accurately what happened.
+
+        Saving a screen with nothing changed CLEARS that command's stored
+        overrides -- which is right ("my defaults are the built-ins now") but is
+        also how yesterday's settings get thrown away, so it must never be
+        reported as "nothing was saved".
+        """
         if self._selected is None:
             return
         plan = self.plan_for(self._selected)
-        changed = len(plan.params.changed())
-        self._guarded(
-            lambda: plan.save(self.store),
-            "Saved %d changed parameter(s) for %s to %s"
-            % (changed, self._selected.tmux_name, self.store.path) if changed else
-            "Nothing is changed from default, so nothing was saved for %s"
-            % self._selected.tmux_name)
+        key = self._selected.tmux_name
+        changed, had = len(plan.params.changed()), len(self.store.get(key))
+        if changed:
+            message = "Saved %d changed parameter(s) for %s to %s" % (
+                changed, key, self.store.path)
+        elif had:
+            message = ("Nothing is changed from default, so the %d saved override(s) "
+                       "for %s were CLEARED. It now starts at its built-in defaults."
+                       % (had, key))
+        else:
+            message = "Nothing is changed from default, so there was nothing to save."
+        self._guarded(lambda: plan.save(self.store), message)
 
     def forget_defaults(self) -> None:
         if self._selected is None:
@@ -208,9 +238,21 @@ class XtendPipelineLauncher(tk.Tk):
 
     # ── starting and stopping ─────────────────────────────────────
 
+    @staticmethod
+    def _has_something_to_run(command: str) -> bool:
+        """True when the text is more than blank lines and comments."""
+        return any(line.strip() and not line.strip().startswith("#")
+                   for line in command.splitlines())
+
     def start_selected(self) -> None:
         """Start the highlighted command on whichever machine is chosen."""
         if self._selected is None:
+            return
+        if not self._has_something_to_run(self.current_command()):
+            messagebox.showerror(
+                "Nothing to run",
+                "The command box holds no command — see the note in it. Starting "
+                "would open an empty session that looks like a running node.")
             return
         machine = self.machine.get()
         if machine == "manual":
@@ -235,12 +277,23 @@ class XtendPipelineLauncher(tk.Tk):
 
     def start_checked(self) -> None:
         """Start every ticked Jetson command, each with its own parameters."""
-        started = []
+        started, failed = [], []
         for item in self.items:
-            if item.machine == "jetson" and self.checked[item.tmux_name].get():
-                self._start_on_jetson(item, self.plan_for(item).command_text(), quiet=True)
-                started.append(item.tmux_name)
-        self.status.set("Started %d session(s): %s" % (len(started), ", ".join(started)))
+            if item.machine != "jetson" or not self.checked[item.tmux_name].get():
+                continue
+            try:
+                command = self.plan_for(item).command_text()
+            except (KeyError, ValueError) as error:
+                failed.append("%s (%s)" % (item.tmux_name, error))
+                continue
+            self._start_on_jetson(item, command, quiet=True)
+            started.append(item.tmux_name)
+        self.status.set("Started %d session(s): %s%s" % (
+            len(started), ", ".join(started),
+            "  |  COULD NOT BUILD: " + "; ".join(failed) if failed else ""))
+        if failed:
+            messagebox.showerror("Some commands could not be built",
+                                 "\n".join(failed))
 
     def start_auto(self) -> None:
         """Run the scripted perception bring-up, with the current parameters in it."""
@@ -310,6 +363,11 @@ class XtendPipelineLauncher(tk.Tk):
         self.status.set("Copied %s to the clipboard." % label)
 
     # ── helpers ───────────────────────────────────────────────────
+
+    def _remember_machine(self) -> None:
+        """Keep the “Run on” choice with the command it was made for."""
+        if self._selected is not None:
+            self.plan_for(self._selected).machine = self.machine.get()
 
     def _item(self, tmux_name: str) -> LaunchItem:
         """The catalog item with this session name.

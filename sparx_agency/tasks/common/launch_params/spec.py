@@ -17,6 +17,10 @@ from typing import Iterable, Iterator, Sequence
 
 #: ``-p name:=value`` after ``--ros-args`` (a ROS2 node parameter).
 ROS2 = "ros2"
+#: ``-r from:=to`` after ``--ros-args`` (a ROS2 remapping). A separate syntax
+#: because it is not a parameter of the node: it rewires a name, and writing it
+#: with ``-p`` would set a parameter nobody reads instead of remapping anything.
+ROS2_REMAP = "ros2_remap"
 #: ``name:=value`` (a roslaunch ``<arg>``, or a mission-script launch override).
 ROSLAUNCH = "roslaunch"
 #: ``--name value`` (an argparse option).
@@ -30,7 +34,7 @@ ENV = "env"
 #: is never written out as an option, because it is part of the command's shape.
 SLOT = "slot"
 
-SYNTAXES = (ROS2, ROSLAUNCH, CLI, FLAG, ENV, SLOT)
+SYNTAXES = (ROS2, ROS2_REMAP, ROSLAUNCH, CLI, FLAG, ENV, SLOT)
 
 #: Values a FLAG parameter may take. "on" renders the flag, "off" omits it.
 FLAG_CHOICES = ("off", "on")
@@ -108,8 +112,9 @@ class ParamSpec:
         """
         if self.syntax == SLOT:
             return []
-        if self.syntax == ROS2:
-            return ["-p", "%s:=%s" % (self.name, self.value)]
+        if self.syntax in (ROS2, ROS2_REMAP):
+            flag = "-p" if self.syntax == ROS2 else "-r"
+            return [flag, "%s:=%s" % (self.name, self.value)]
         if self.syntax in (ROSLAUNCH, ENV):
             joiner = ":=" if self.syntax == ROSLAUNCH else "="
             return ["%s%s%s" % (self.name, joiner, self.value)]

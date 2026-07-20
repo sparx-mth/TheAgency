@@ -27,7 +27,8 @@ the server over ``--network host`` loopback.
 from __future__ import annotations
 
 from sparx_agency.tasks.common.launch_params.discovery import Source
-from sparx_agency.tasks.common.launch_params.spec import CLI, SLOT, ParamSpec
+from sparx_agency.tasks.common.launch_params.spec import (CLI, ENV, SLOT,
+                                                          ParamSpec)
 
 from .environments import FALCON_DIR, JETSON_DISPLAY, JETSON_REPO
 from .item import LaunchItem
@@ -39,6 +40,17 @@ MISSION_SCHEMA = _FALCON + "/config/mission_config.py"
 MISSION_LAUNCH = _FALCON + "/adapter/launch/object_mission.launch"
 NAVDP_SERVER = "sparx_agency/tasks/planning/navdp/server/navdp_trt_server.py"
 
+#: The launch arguments run_object_mission.sh fills in ITSELF, from its
+#: environment variables and positionals -- see its LAUNCH_ARGS block. They must
+#: not also be offered as `key:=value` overrides: the script would then pass each
+#: one to roslaunch twice, and, worse, the two knobs disagree. `nav_mode` is the
+#: case that bites: the launch file defaults it to `fallback` while mission.yaml
+#: sets NAV_MODE to `astar`, so an operator who picked `fallback` from the launch
+#: side would change nothing and fly `astar` -- with no NavDP rescue -- believing
+#: otherwise. Set these through the env parameters (NAV_MODE, MAP, ...) instead.
+SCRIPT_OWNED_LAUNCH_ARGS = ("map_name", "selection_mode", "seed", "nav_mode",
+                            "objects_file", "target_object")
+
 #: Parameter sources for a command that runs the whole mission.
 #:
 #: Order is the mission's own precedence. ``mission.yaml`` first, because a value
@@ -49,8 +61,18 @@ NAVDP_SERVER = "sparx_agency/tasks/planning/navdp/server/navdp_trt_server.py"
 #: they are set to, since the config was read after it.
 MISSION_SOURCES = (
     Source("yaml", MISSION_YAML, env_schema_from=MISSION_SCHEMA),
-    Source("roslaunch", MISSION_LAUNCH, defines_defaults=False),
+    Source("roslaunch", MISSION_LAUNCH, defines_defaults=False,
+           suppress=SCRIPT_OWNED_LAUNCH_ARGS),
 )
+
+#: OBJECTS_FILE is commented out in mission.yaml (the script derives it from
+#: OBJECTS_DIR), so it is not discovered -- but it is the override you need when
+#: the catalog is not at the default name. Empty means "let the script derive it".
+_OBJECTS_FILE_PARAM = ParamSpec(
+    name="OBJECTS_FILE", default="", syntax=ENV, section="OBJECT CATALOG",
+    doc="Path to the objects JSON. Empty derives <objects_dir>/objects.json. Must "
+        "be visible inside the container: under OBJECTS_DIR, or under the repo "
+        "mounted at /opt/sparx_agency.")
 
 #: Slot for the directory the mission scripts are run from.
 _FALCON_DIR_PARAM = ParamSpec(
@@ -140,15 +162,15 @@ FALCON_ITEMS: list[LaunchItem] = [
         params=(
             _FALCON_DIR_PARAM,
             ParamSpec(name="ENGINES_DIR", default="", section="Detector engines",
-                      syntax="env",
+                      syntax=ENV,
                       doc="Host dir with the *.engine files. Empty derives it from the "
                           "detected hardware tag: yolo_world_trt/engines/<tag>."),
             ParamSpec(name="TEXT_WEIGHTS", default="", section="Detector engines",
-                      syntax="env",
+                      syntax=ENV,
                       doc="Full path to yolov8<model>-worldv2.pt. Empty derives it as "
                           "<weights_dir>/yolov8<model>-worldv2.pt."),
             ParamSpec(name="PYTHON", default="", section="Detector engines",
-                      syntax="env",
+                      syntax=ENV,
                       doc="Interpreter with tensorrt + pycuda (+ torch/ultralytics). "
                           "Empty uses python3 from the activated environment."),
         ),
@@ -180,7 +202,7 @@ FALCON_ITEMS: list[LaunchItem] = [
         template=True,
         enabled_by_default=False,
         param_sources=MISSION_SOURCES,
-        params=(_FALCON_DIR_PARAM,),
+        params=(_FALCON_DIR_PARAM, _OBJECTS_FILE_PARAM),
     ),
     LaunchItem(
         name="14. FALCON: full object mission (detector + bridge + container)",
@@ -199,7 +221,7 @@ FALCON_ITEMS: list[LaunchItem] = [
         template=True,
         enabled_by_default=False,
         param_sources=MISSION_SOURCES,
-        params=(_FALCON_DIR_PARAM,),
+        params=(_FALCON_DIR_PARAM, _OBJECTS_FILE_PARAM),
     ),
     LaunchItem(
         name="15. FALCON RViz (3D view inside the container)",

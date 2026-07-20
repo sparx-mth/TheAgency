@@ -65,6 +65,36 @@ def test_the_mission_environment_overrides_are_the_ones_the_script_reads():
                        "WEIGHTS_DIR", "CONF_THRESH", "INIT_TARGET", "OBJECTS_DIR"}
 
 
+def test_the_mission_offers_one_knob_per_decision_not_two():
+    """The bug this guards: object_mission.launch declares nav_mode (default
+    'fallback') and mission.yaml sets NAV_MODE (default 'astar'). Offering both
+    let an operator select 'fallback', have it match the shown default so it was
+    never emitted, and fly astar -- with no NavDP rescue -- believing otherwise.
+    """
+    from sparx_agency.demos.Demo_No4_XTEND_MapRoom.launcher.falcon_items import (
+        MISSION_SOURCES, SCRIPT_OWNED_LAUNCH_ARGS)
+
+    params = discover(MISSION_SOURCES).params
+    for name in SCRIPT_OWNED_LAUNCH_ARGS:
+        assert name not in params, \
+            "%s is set by run_object_mission.sh itself and must not be offered" % name
+    assert params["NAV_MODE"].default == "astar", "what a plain run really flies"
+
+
+def test_a_declared_parameter_is_not_shared_between_two_commands():
+    """The catalog reuses ParamSpec constants; a plan must copy, not alias."""
+    from sparx_agency.demos.Demo_No4_XTEND_MapRoom.launcher.item import LaunchPlan
+    from sparx_agency.demos.Demo_No4_XTEND_MapRoom.launcher.items import LAUNCH_ITEMS
+
+    def plan(key):
+        return LaunchPlan.build(next(i for i in LAUNCH_ITEMS if i.tmux_name == key))
+
+    rviz, viewer = plan("falcon_rviz"), plan("falcon_bev_goal")
+    rviz.params["container"].value = "falcon_dev"
+    assert viewer.params["container"].value == "falcon"
+    assert viewer.params.as_dict() == {}, "and it saves no override it never made"
+
+
 def test_the_store_round_trips_and_drops_an_emptied_entry(tmp_path):
     store = ParamStore(tmp_path / "params.json")
     store.put("falcon_mission", {"NAV_MODE": "hybrid"})

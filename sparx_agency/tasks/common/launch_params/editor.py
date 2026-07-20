@@ -70,8 +70,12 @@ class ParameterEditor(ttk.Frame):
         entry = ttk.Entry(bar, textvariable=self._search, width=26)
         entry.pack(side="left", padx=(4, 10))
         self._search.trace_add("write", lambda *_: self._apply_filter())
-        ttk.Checkbutton(bar, text="Changed only", variable=self._changed_only,
-                        command=self._apply_filter).pack(side="left")
+        # Trace rather than `command=`, so the filter follows the variable however
+        # it is set -- a click, a restored preference, or a caller -- instead of
+        # only when the box itself is clicked.
+        ttk.Checkbutton(bar, text="Changed only",
+                        variable=self._changed_only).pack(side="left")
+        self._changed_only.trace_add("write", lambda *_: self._apply_filter())
         ttk.Button(bar, text="Reset all to defaults",
                    command=self.reset_all).pack(side="right", padx=2)
 
@@ -121,6 +125,10 @@ class ParameterEditor(ttk.Frame):
 
         self._scroller.to_top()
         self._refresh_summary()
+        # Re-apply the filter the operator left set. Without this, switching
+        # commands quietly shows everything again while "Changed only" is still
+        # ticked and the search box still has text in it.
+        self._apply_filter()
 
     def clear(self) -> None:
         """Empty the form."""
@@ -240,11 +248,15 @@ class ParameterEditor(ttk.Frame):
                 else:
                     widget.grid_remove()
 
+        # Re-pack every section in declaration order. `pack` appends, so packing
+        # only the ones that reappeared would shuffle them behind the ones that
+        # never left -- and on a 292-parameter form, a section that moves each
+        # time you type in the filter box is one you cannot find again.
+        for frame in self._sections.values():
+            frame.pack_forget()
         for frame in self._sections.values():
             if visible_per_section.get(frame, 0):
                 frame.pack(fill="x", padx=2, pady=3)
-            else:
-                frame.pack_forget()
 
     def _refresh_summary(self) -> None:
         changed = self._params.changed()
