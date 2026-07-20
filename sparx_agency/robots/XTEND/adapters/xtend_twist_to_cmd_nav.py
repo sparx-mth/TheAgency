@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+"""Standalone Twist -> /xtend/cmd_nav relay.
+
+TWO MODES, and picking the wrong one silently breaks a multi-axis controller:
+
+  * **single-axis (default)** -- emits one discrete ``{"action": ..., "value": ...}``
+    per Twist, choosing ONE axis by priority (yaw, then forward, then, if
+    ``--allow-multi-axes``, vertical/lateral). Every other axis is DISCARDED. This
+    is fine for a controller that only ever drives one axis at a time (the legacy
+    waypoint follower), and wrong for anything else: a controller that flies
+    forward while correcting sideways would have its correction thrown away on
+    every tick where forward is non-zero, i.e. all of them.
+  * **combined (``--combined``)** -- routes the Twist through the shared
+    :class:`TwistToCmdNavConverter` and emits a single ``set_axes`` command with
+    all four axes populated. Required by any multi-axis controller, including
+    ``drift_pid``, ``multi_axis``, ``pure_pursuit`` and ``roll_assist``.
+
+Note the in-process sibling used by ``online_nav_bridge`` (``OnlineXtendBridgeBase``)
+has always been combined; only this standalone relay defaults to single-axis, and
+only for backward compatibility.
+"""
 from __future__ import annotations
 
 import argparse
@@ -10,13 +30,20 @@ from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from std_msgs.msg import String
 
-FORWARD_REF_VEL = 0.3
-FORWARD_REF_VALUE = 400
-FORWARD_MAX_VALUE = 600
+from sparx_agency.robots.XTEND.adapters.axis_calibration import XTEND_CALIBRATION
+from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import (
+    TwistToCmdNavConverter,
+)
 
-TURN_REF_ANGULAR = 0.65
-TURN_REF_VALUE = 1000
-TURN_MAX_VALUE = 1000
+# Derived from the single source of truth so a re-calibration cannot leave this
+# file disagreeing with the converter. See axis_calibration.py.
+FORWARD_REF_VEL = XTEND_CALIBRATION.forward.ref_velocity
+FORWARD_REF_VALUE = XTEND_CALIBRATION.forward.ref_counts
+FORWARD_MAX_VALUE = XTEND_CALIBRATION.forward.max_counts
+
+TURN_REF_ANGULAR = XTEND_CALIBRATION.yaw.ref_velocity
+TURN_REF_VALUE = XTEND_CALIBRATION.yaw.ref_counts
+TURN_MAX_VALUE = XTEND_CALIBRATION.yaw.max_counts
 
 class XtendTwistToCmdNav(Node):
     def __init__(
@@ -28,6 +55,7 @@ class XtendTwistToCmdNav(Node):
         timeout_sec: float,
         publish_stop_on_timeout: bool,
         allow_multi_axes: bool = False,
+        combined: bool = False,
     ):
         super().__init__("xtend_twist_to_cmd_nav")
 
@@ -46,6 +74,16 @@ class XtendTwistToCmdNav(Node):
         # that genuinely commands a climb -- the lost-localization recovery does,
         # and without this its climb rungs fall through to "stop" and do nothing.
         self.allow_multi_axes = bool(allow_multi_axes)
+        # Combined mode: emit one set_axes with every axis populated, instead of
+        # one discrete single-axis action. Mandatory for a multi-axis controller
+        # -- see the module docstring.
+        self.combined = bool(combined)
+        self._converter = TwistToCmdNavConverter(
+            angular_delta=angular_delta,
+            linear_delta=linear_delta,
+            timeout_sec=timeout_sec,
+            publish_stop_on_timeout=publish_stop_on_timeout,
+        ) if self.combined else None
 
         # Planner may publish short zero Twist messages between yaw commands.
         # XTEND commands are hold-style, so do not stop on the first zero Twist.
@@ -64,10 +102,21 @@ class XtendTwistToCmdNav(Node):
             f"Defaults: forward={self.forward_value}, turn={self.turn_value}, "
             f"angular_delta={self.angular_delta}, linear_delta={self.linear_delta}"
         )
-        self.get_logger().info(
-            f"Axes: x/yaw always; up-down + left-right "
-            f"{'ENABLED' if self.allow_multi_axes else 'DISABLED (linear.z -> stop)'}"
-        )
+        if self.combined:
+            self.get_logger().info(
+                "Mode: COMBINED -- one set_axes per Twist, all four axes kept"
+            )
+        else:
+            self.get_logger().info(
+                f"Axes: x/yaw always; up-down + left-right "
+                f"{'ENABLED' if self.allow_multi_axes else 'DISABLED (linear.z -> stop)'}"
+            )
+            self.get_logger().warn(
+                "Mode: SINGLE-AXIS -- only the highest-priority axis of each "
+                "Twist is sent, the rest are DISCARDED. Pass --combined for any "
+                "multi-axis controller (drift_pid / multi_axis / pure_pursuit / "
+                "roll_assist), or its corrections will never reach the drone."
+            )
 
     def publish_action(self, action: str, value: int = 0):
         # Avoid spamming same hold command at 30 Hz.
@@ -126,8 +175,29 @@ class XtendTwistToCmdNav(Node):
 
         return "stop", 0
 
+    def publish_axes(self, cmd) -> None:
+        """Publish one combined set_axes command (all four axes at once)."""
+        msg = String()
+        msg.data = json.dumps({
+            "action": "set_axes",
+            "forward": cmd.forward,
+            "lateral": cmd.lateral,
+            "vertical": cmd.vertical,
+            "yaw": cmd.yaw,
+        })
+        self.pub.publish(msg)
+        self.get_logger().info("Published: %s (%s)" % (msg.data, cmd.describe()))
+
     def twist_cb(self, msg: Twist):
         self.last_twist_time = time.time()
+
+        if self.combined:
+            # The converter owns dedup and the stop debounce in this mode.
+            cmd = self._converter.process(
+                msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z)
+            if cmd is not None:
+                self.publish_axes(cmd)
+            return
 
         action, value = self.choose_cmd_from_twist(msg)
 
@@ -152,6 +222,12 @@ class XtendTwistToCmdNav(Node):
         self.publish_action(action, value)
 
     def watchdog_cb(self):
+        if self.combined:
+            cmd = self._converter.check_timeout()
+            if cmd is not None:
+                self.publish_axes(cmd)
+            return
+
         if self.last_twist_time <= 0.0:
             return
 
@@ -183,6 +259,16 @@ def parse_args():
              "these axes ON; this standalone script keeps them OFF by default so "
              "its existing behaviour is unchanged.",
     )
+    p.add_argument(
+        "--combined",
+        action="store_true",
+        help="Emit ONE set_axes command with all four axes populated instead of "
+             "a single discrete action per Twist. REQUIRED by any multi-axis "
+             "controller (drift_pid, multi_axis, pure_pursuit, roll_assist): "
+             "without it the relay keeps only the highest-priority axis and "
+             "silently discards the rest, so e.g. a sideways drift correction "
+             "riding along with forward flight never reaches the drone.",
+    )
     return p.parse_args()
 
 
@@ -198,6 +284,7 @@ def main():
         timeout_sec=args.timeout_sec,
         publish_stop_on_timeout=not args.no_stop_on_timeout,
         allow_multi_axes=args.allow_multi_axes,
+        combined=args.combined,
     )
 
     try:

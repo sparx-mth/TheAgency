@@ -109,6 +109,12 @@ MODE_FORWARD = AXIS_TO_MODE[ControlAxis.FORWARD]
 MODE_TURNING = AXIS_TO_MODE[ControlAxis.YAW]
 
 
+#: Every controller ~controller accepts. An unknown value is an error, not a
+#: silent fallback to the one-axis follower.
+_CONTROLLERS = frozenset(
+    {"waypoint", "multi_axis", "pure_pursuit", "roll_assist", "drift_pid"})
+
+
 class _Bringup:
     """Node-side platform bring-up states (the core owns navigation states)."""
     WAIT_POSE = "WAIT_POSE"
@@ -208,6 +214,12 @@ class WaypointFollowerNode:
         #                  top that only pulls the drone back onto its trajectory
         #                  when it drifts sideways -- full while advancing, weak
         #                  while turning, small while holding.
+        #   "drift_pid"    continuous multi-axis tracker whose three PID loops
+        #                  LEARN the standing per-axis drift (their integral IS the
+        #                  drift estimate) instead of only pushing back against it,
+        #                  behind a per-axis + combined force envelope, scheduled by
+        #                  localization confidence, with reflexes for walls the
+        #                  camera cannot see. See core/.../trackers/drift_pid.
         # Altitude is never commanded by any of them (vz = 0). The one-axis
         # follower is always constructed above; multi_axis/pure_pursuit replace the
         # handle, roll_assist WRAPS it. ``_holonomic`` groups the two continuous
@@ -215,9 +227,19 @@ class WaypointFollowerNode:
         # ``_lateral`` groups everyone that drives linear.y (adds roll_assist,
         # which still uses the one-axis handshake) so the loop branches once.
         self.controller_kind = str(G("~controller", "waypoint")).strip().lower()
-        self._holonomic = self.controller_kind in ("multi_axis", "pure_pursuit")
+        if self.controller_kind not in _CONTROLLERS:
+            # Previously an unknown string fell silently through to the one-axis
+            # follower, so a typo flew a controller nobody selected.
+            raise ValueError(
+                "~controller=%r is not a known controller. Choose one of: %s"
+                % (self.controller_kind, ", ".join(sorted(_CONTROLLERS))))
+        self._holonomic = self.controller_kind in (
+            "multi_axis", "pure_pursuit", "drift_pid")
         self._lateral = self.controller_kind in (
-            "multi_axis", "pure_pursuit", "roll_assist")
+            "multi_axis", "pure_pursuit", "roll_assist", "drift_pid")
+        # drift_pid consumes the localization confidence signals; nothing else does.
+        self.quality = None
+        self.drift_telemetry = None
         # DemoMode the holonomic controllers request (best effort) and, if
         # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
         # so the per-axis handshake of the legacy path does not apply to them.
@@ -230,6 +252,8 @@ class WaypointFollowerNode:
             self.follower = self._build_pure_pursuit(G)
         elif self.controller_kind == "roll_assist":
             self.follower = self._build_roll_assist(G)
+        elif self.controller_kind == "drift_pid":
+            self.follower = self._build_drift_pid(G)
 
         # ── Rotation supervisor (holonomic controllers only) ─────────
         # The one-axis follower freezes + re-observes inside its own state machine.
@@ -504,6 +528,36 @@ class WaypointFollowerNode:
         ))
         return RollAssistFollower(self.follower, corrector)
 
+    def _build_drift_pid(self, G):
+        """Construct the drift-cancelling PID tracker and its ROS plumbing.
+
+        Three PID loops (cross-track, along-track, heading) whose INTEGRAL terms
+        are the learned per-axis drift, behind a force envelope that caps each
+        axis and the combined multi-axis demand. Tuning is namespaced ~dp_*.
+
+        Unlike the other controllers this one consumes localization QUALITY, so
+        it also brings up the monitor for the four confidence topics and the
+        publishers that expose what it has learned (/falcon/drift) and where it
+        could not get through (/falcon/blockage).
+
+        Imported HERE rather than at module load so the other controllers keep
+        starting even if this module is not deployed in the container."""
+        from drift_pid_follower import (          # sibling in scripts/
+            DriftTelemetryPublisher, build_drift_pid, param_bool)
+        from localization_quality import LocalizationQualityMonitor
+        follower = build_drift_pid(G)
+        self.quality = LocalizationQualityMonitor(
+            conf_topic=G("~dp_conf_topic", "/xtend/localization_confidence"),
+            std_topic=G("~dp_std_topic", "/xtend/localization_pos_std"),
+            eff_topic=G("~dp_eff_topic", "/xtend/localization_cmd_effectiveness"),
+            source_topic=G("~dp_source_topic", "/xtend/localization_source"),
+            require=param_bool("~dp_require_quality", False))
+        self.drift_telemetry = DriftTelemetryPublisher(
+            drift_topic=G("~dp_drift_topic", "/falcon/drift"),
+            blockage_topic=G("~dp_blockage_topic", "/falcon/blockage"),
+            rate_hz=float(G("~dp_telemetry_hz", 2.0)))
+        return follower
+
     def _build_pure_pursuit(self, G):
         """Construct the spline-then-Pure-Pursuit follower from rosparams.
 
@@ -745,8 +799,15 @@ class WaypointFollowerNode:
         hold = (est_hold
                 or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec
                 or (sup is not None and sup.hold))   # supervisor mid-turn stop
+        if self.quality is not None:
+            # drift_pid decides its own speed, gains and whether to learn drift
+            # from how much the pose can be trusted THIS tick. Fed before step so
+            # the controller and the estimator see the same instant.
+            self.follower.set_quality(self.quality.snapshot())
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready(map_need))
+        if self.drift_telemetry is not None:
+            self._publish_drift(cmd, pose2d)
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
         self._last_pub_vy = (cmd.vy if self._lateral else 0.0)
         self._narrate_nav(cmd)
@@ -780,6 +841,53 @@ class WaypointFollowerNode:
             self._publish_twist(cmd.vx, cmd.wz)
         if self.controller_kind == "pure_pursuit":
             self._publish_lookahead()   # smooth path is published on each new path
+
+    def _narrate_drift(self, cmd):
+        """Narrate the drift-PID controller's decision for this tick.
+
+        Says the things an operator cannot see from the outside: which waypoint
+        it is flying at, that it is escaping, that it has slowed down because the
+        pose got vague, and -- the one worth watching -- how much standing drift
+        it has learned it must fight."""
+        t = cmd.telemetry
+        if t.escape_state != "IDLE":
+            self.thinker.say(t.authority or "Working my way free",
+                             category="plan", level="warn")
+            return
+        if cmd.state == "HOLD" and not cmd.done:
+            self.thinker.say(t.authority, category="sensor", level="warn",
+                             repeat_after_s=5.0)
+            return
+        wp = self._waypoint_xy(cmd.wp_idx)
+        if wp is None:
+            return
+        drift_cms = abs(t.drift_vy) * 100.0
+        drift_note = ""
+        if drift_cms >= 1.0:
+            drift_note = " (holding %.0f cm/s of %s roll against the drift)" % (
+                drift_cms, "left" if t.drift_vy > 0.0 else "right")
+        self.thinker.say(
+            "Flying to waypoint %d/%d (x=%.2f, y=%.2f), %.0f cm off the line%s"
+            % (cmd.wp_idx + 1, cmd.num_waypoints, wp[0], wp[1],
+               abs(t.cross_track_m) * 100.0, drift_note))
+
+    def _publish_drift(self, cmd, pose2d):
+        """Expose what the drift-PID controller has learned, and where it stuck.
+
+        ``report_blocked`` is edge-triggered by the core (true once per exhausted
+        blockage episode), so forwarding it straight through cannot spam the
+        planner with the same obstacle."""
+        telemetry = getattr(cmd, "telemetry", None)
+        if telemetry is None:
+            return
+        self.drift_telemetry.publish_drift(telemetry)
+        if getattr(cmd, "report_blocked", False):
+            self.drift_telemetry.publish_blockage(pose2d, self.frame_id,
+                                                  telemetry.blocked_axis)
+            self.thinker.say(
+                "Something I cannot see is blocking me and backing off did not "
+                "clear it -- asking the planner for another way round",
+                category="plan", level="warn")
 
     # ─── Narration ───────────────────────────────────────────────
     def _narrate_passive(self):
@@ -835,6 +943,9 @@ class WaypointFollowerNode:
         # Pure pursuit's wp_idx walks the spline samples it flies rather than the
         # route's corners, so per-waypoint lines would be a per-tick counter.
         if self.controller_kind == "pure_pursuit":
+            return
+        if self.controller_kind == "drift_pid":
+            self._narrate_drift(cmd)
             return
         total = cmd.num_waypoints
         if (self._prev_wp_idx is not None and cmd.wp_idx > self._prev_wp_idx
@@ -901,7 +1012,14 @@ class WaypointFollowerNode:
         check. No map here, so the score is dynamics-only (no clearance)."""
         # Pure pursuit has no stop-and-turn rollout; its smooth path + lookahead
         # are the visualization instead, so skip the predicted-trajectory rollout.
-        if self.controller_kind == "pure_pursuit":
+        # drift_pid is skipped for a harder reason: the rollout below is called
+        # with self.follower.params, and both predictors require the one-axis /
+        # multi-axis param dataclasses. Handing either a DriftPidParams raises
+        # AttributeError, which the except clause does NOT catch -- so this guard
+        # is load-bearing, not cosmetic. The planner treats /path/predicted as
+        # optional, so the only cost is that its dynamics-aware collision check
+        # falls back to the geometric one.
+        if self.controller_kind in ("pure_pursuit", "drift_pid"):
             return
         pose2d = self._pose2d()
         if pose2d is None or len(self._path_pts) < 2:
@@ -1206,6 +1324,40 @@ class WaypointFollowerNode:
             L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
             L("=" * 72)
             return
+        if self.controller_kind == "drift_pid":
+            e, c = p.envelope, p.confidence
+            L("waypoint_follower (core DriftPidFollower)  X+Y+YAW, drift-cancelling")
+            L("  drone_ns = %s   ctrl=%dHz", self.drone_ns, int(self.ctrl_rate_hz))
+            L("  cruise=%.2f m/s  lookahead=%.2f m  pos_radius=%.2f m",
+              p.cruise_speed, p.lookahead_m, p.pos_radius)
+            L("  ENVELOPE  vx<=%.2f  vy<=%.2f m/s  wz<=%.2f rad/s  |v|<=%.2f m/s",
+              e.max_vx, e.max_vy, e.max_wz, e.max_translation)
+            L("            combined effort <= %.2f (1.0 = one axis at its max)",
+              e.combined_effort)
+            L("            min force: vx=%.3f vy=%.3f m/s  wz=%.0f deg/s",
+              e.min_vx, e.min_vy, math.degrees(e.min_wz))
+            L("            accel: xy=%.2f m/s2  yaw=%.2f rad/s2", e.accel_xy,
+              e.accel_wz)
+            L("  DRIFT PID (kp/ki/kd -> max correction)")
+            L("    cross-track %.2f/%.2f/%.2f -> %.2f m/s   deadband %.2f m",
+              p.lateral_pid.kp, p.lateral_pid.ki, p.lateral_pid.kd,
+              p.lateral_pid.out_limit, p.lateral_pid.deadband)
+            L("    along-track %.2f/%.2f/%.2f -> %.2f m/s   deadband %.2f m",
+              p.forward_pid.kp, p.forward_pid.ki, p.forward_pid.kd,
+              p.forward_pid.out_limit, p.forward_pid.deadband)
+            L("    heading    %.2f/%.2f/%.2f -> %.2f rad/s  deadband %.1f deg",
+              p.yaw_pid.kp, p.yaw_pid.ki, p.yaw_pid.kd, p.yaw_pid.out_limit,
+              math.degrees(p.yaw_pid.deadband))
+            L("  CONFIDENCE  full>=%.2f  floor<=%.2f (speed x%.2f)  learn>=%.2f  "
+              "hold<%.2f  age<=%.2fs", c.conf_full, c.conf_min, c.speed_floor,
+              c.conf_integrate, c.conf_hold, c.max_age_s)
+            L("  BLOCKAGE  %.1fs window, confirm %d ticks, progress<%.0f%%  "
+              "-> escape x%d", p.blockage.window_s, p.blockage.confirm_ticks,
+              p.blockage.progress_frac * 100.0, p.escape.max_attempts)
+            L("  telemetry -> /falcon/drift    blockage -> /falcon/blockage")
+            L("  PUBLISHED Twist invariants:  vz=0  (vx, vy, wz combined)")
+            L("=" * 72)
+            return
         if self.controller_kind == "roll_assist":
             rp = self.follower.roll_params
             L("waypoint_follower (core RollAssistFollower)  X+YAW nav + cross-track ROLL")
@@ -1287,7 +1439,28 @@ if __name__ == "__main__":
 #     ~mapsettle_min_updates (2; fresh updates before the FIRST move at bring-up)
 #   takeoff: ~auto_takeoff (true) ~takeoff_z (1.0) ~takeoff_z_thresh (0.5)
 #       ~takeoff_timeout (30) ~takeoff_retry_sec (1.0) ~hover_settle_sec (2.5)
-#   controller: ~controller (waypoint | multi_axis | pure_pursuit | roll_assist).
+#   controller: ~controller (waypoint | multi_axis | pure_pursuit | roll_assist |
+#       drift_pid). An unrecognised value now RAISES at startup rather than falling
+#       silently through to the one-axis follower.
+#     drift_pid is the continuous multi-axis tracker that LEARNS the drift: three
+#       PID loops (cross-track / along-track / heading) whose integral term IS the
+#       per-axis drift estimate, so a steady sideways push stops leaving a standing
+#       offset the way a P-only law does. On top of that: a force envelope capping
+#       each axis AND the combined multi-axis demand (this platform is markedly
+#       faster when several axes are driven together), speed/gain scheduling from
+#       localization confidence with the integrators FROZEN while the pose is
+#       coasted, and reflexes for walls the camera cannot see (brake -> back off ->
+#       probe sideways). When the reflexes are spent it reports the spot once on
+#       /falcon/blockage and the PLANNER reroutes -- the controller never edits the
+#       route. Publishes /falcon/drift (what it has learned, m/s per axis).
+#       Consumes the four ROS2 localization quality topics; they must be present in
+#       bridge.yaml or it flies without confidence gating (and warns loudly).
+#       All ~78 dials are namespaced ~dp_* and exposed in mission.yaml under
+#       "CONTROLLER 5"; see core/planning/trackers/drift_pid/README.md for the
+#       design and the tuning order. Extra topics/behaviour params:
+#       ~dp_require_quality (false) ~dp_telemetry_hz (2.0) ~dp_drift_topic
+#       (/falcon/drift) ~dp_blockage_topic (/falcon/blockage) ~dp_conf_topic
+#       ~dp_std_topic ~dp_eff_topic ~dp_source_topic.
 #     roll_assist keeps the one-axis waypoint follower UNCHANGED (same align->advance
 #       nav, discrete yaw, freeze/map gates, per-axis handshake) and layers a
 #       cross-track ROLL (linear.y) correction on top: it only pulls the drone back

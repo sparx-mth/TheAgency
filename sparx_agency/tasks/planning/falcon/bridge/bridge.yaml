@@ -70,6 +70,63 @@ topics:
       reliability: best_effort
       durability: volatile
 
+  # ── Localization quality (ROS2 localization_node -> ROS1 controller) ──
+  # The pose above says WHERE; these four say HOW MUCH TO BELIEVE IT. All four are
+  # published in the same callback as the pose, one set per camera frame, so a
+  # consumer can pair them by arrival without matching stamps.
+  #
+  # The drift_pid controller consumes all four: it flies slower when the pose is
+  # vague, freezes its drift-learning integrators when the pose is a guess rather
+  # than a measurement, and uses cmd_effectiveness as a second opinion on whether
+  # its commands are reaching the world at all.
+  #
+  # Two traps worth writing down, because both are silent:
+  #   * SILENCE IS A SIGNAL. A rejected frame, an exhausted coast budget, or a
+  #     non-AprilTag provider all publish NOTHING. Never assume these tick; the
+  #     controller runs its own arrival-age watchdog.
+  #   * localization_source is the ONLY machine-readable "this pose is dead
+  #     reckoning" flag ("apriltag_coast"). Confidence cannot substitute: a coasted
+  #     pose caps at 0.25 and a genuine single-tag fix caps near 0.21, so the two
+  #     are numerically indistinguishable.
+  # QoS matches the publisher (best_effort/volatile); a mismatch means no data
+  # flows at all, which is the same trap the depth topic hit.
+
+  - topic: /xtend/localization_confidence
+    type: std_msgs/msg/Float32
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /xtend/localization_pos_std
+    type: std_msgs/msg/Float32
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /xtend/localization_cmd_effectiveness
+    type: std_msgs/msg/Float32
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /xtend/localization_source
+    type: std_msgs/msg/String
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: best_effort
+      durability: volatile
+
   # The drone's own compass/IMU heading (radians), published by the XTEND
   # WebSocket bridge at ~20 Hz. Bridged for the lost-localization recovery: it is
   # the ONLY yaw source that does not come from AprilTag, and AprilTag is exactly

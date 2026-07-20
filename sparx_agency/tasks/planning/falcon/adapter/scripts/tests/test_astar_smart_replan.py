@@ -126,6 +126,13 @@ def _install_stubs():
             self.y = y
             self.z = z
 
+    class _PointStamped:
+        """A blockage report: where the controller proved it could not get through."""
+
+        def __init__(self):
+            self.header = _Header()
+            self.point = _Point()
+
     class _Bool:
         def __init__(self, data=False):
             self.data = data
@@ -149,6 +156,7 @@ def _install_stubs():
     geo = types.ModuleType("geometry_msgs")
     geo_msg = types.ModuleType("geometry_msgs.msg")
     geo_msg.Pose, geo_msg.PoseStamped, geo_msg.Point = _Pose, _PoseStamped, _Point
+    geo_msg.PointStamped = _PointStamped
     geo.msg = geo_msg
     sys.modules["geometry_msgs"] = geo
     sys.modules["geometry_msgs.msg"] = geo_msg

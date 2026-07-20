@@ -49,7 +49,7 @@ import math
 
 import numpy as np
 import rospy
-from geometry_msgs.msg import Pose, PoseStamped, Point
+from geometry_msgs.msg import Pose, PointStamped, PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
 from std_msgs.msg import Bool, String
 
@@ -57,6 +57,8 @@ from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Path2D, Pose2D, PlanStatus, normalize_angle
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
+from sparx_agency.core.planning.environment.blockage_memory import (
+    BlockageMemory, BlockageMemoryParams)
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.planners.astar import (
     WeightedAStarPlanner2D, WeightedAStarParams)
@@ -244,6 +246,22 @@ class AStarPlannerNode:
         self.replan_collision_confirm_max = max(
             0, int(G("~replan_collision_confirm_max", 30)))
         self.conf_grid = None            # (H,W) float32 [0,1], from ~conf_topic
+
+        # ── Blockage memory (obstacles the camera cannot see) ──────────
+        # The controller is the only part of the stack that can detect a wall the
+        # depth map does not contain -- glass, a thin pole, a chair leg under the
+        # height band -- because it notices that a command is not reaching the
+        # world. When its escape reflexes fail it reports the spot here. Without
+        # this memory the planner would route straight back through it forever:
+        # the map shows nothing there, and flying at it again produces no new map
+        # evidence either. Every remembered point is stamped OCCUPIED into each
+        # freshly decoded BEV, because a new BEV overwrites the last one.
+        self.blockage_topic = G("~blockage_topic", "/falcon/blockage")
+        self.use_blockage_memory = _get_bool_param("~use_blockage_memory", True)
+        self.blockage_memory = BlockageMemory(BlockageMemoryParams(
+            radius_m=float(G("~blockage_radius_m", 0.35)),
+            ttl_s=float(G("~blockage_ttl_s", 0.0)),
+            max_entries=int(G("~blockage_max_entries", 32))))
         self._conf_key = None            # lattice key of the stored conf grid
 
         # ── Smart replanning (event-driven; supersedes the periodic + mid-cycle
@@ -385,6 +403,9 @@ class AStarPlannerNode:
                                         queue_size=1, latch=True)
         rospy.Subscriber(self.bev_topic, OccupancyGrid, self._bev_cb, queue_size=1)
         rospy.Subscriber(self.conf_topic, OccupancyGrid, self._conf_cb, queue_size=1)
+        if self.use_blockage_memory:
+            rospy.Subscriber(self.blockage_topic, PointStamped,
+                             self._blockage_cb, queue_size=5)
         rospy.Subscriber(self.drone_ns + "/gt_pose", Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
         if self.replan_on_predicted_collision:
@@ -459,6 +480,12 @@ class AStarPlannerNode:
         """
         first = self.grid is None
         self.grid = self._decode(msg)
+        # Re-apply remembered blockages to EVERY new map. The BEV is rebuilt from
+        # depth each frame, so an obstacle the camera cannot see reads as free
+        # again the instant this map replaces the last one -- and the planner
+        # would route back through it.
+        if self.use_blockage_memory and len(self.blockage_memory):
+            self.blockage_memory.stamp(self.grid, rospy.Time.now().to_sec())
         self._install_confidence()
         self._last_bev_time = rospy.Time.now()
         if first:
@@ -477,6 +504,42 @@ class AStarPlannerNode:
             self._collision_replan_check()
         if self.has_plan and self.replan_on_predicted_collision:
             self._predicted_collision_check()
+
+    def _blockage_cb(self, msg):
+        """The controller could not get through here; remember it and reroute.
+
+        This arrives only after the controller's escape reflexes have already
+        failed, so it is not a hint -- it is the drone reporting a wall it proved
+        exists. Remember it, stamp it into the map we are holding, and replan at
+        once: the route we are flying goes straight through it.
+
+        A repeat report inside an existing blockage's radius refreshes it rather
+        than adding a second entry, so grinding against the same wall cannot
+        force a replan storm.
+        """
+        x, y = float(msg.point.x), float(msg.point.y)
+        fresh = self.blockage_memory.add(x, y, rospy.Time.now().to_sec())
+        if not fresh:
+            rospy.loginfo("astar_planner: blockage at (%.2f, %.2f) already known",
+                          x, y)
+            return
+        rospy.logwarn("astar_planner: remembering a blockage the map cannot see "
+                      "at (%.2f, %.2f) r=%.2fm (%d remembered)", x, y,
+                      self.blockage_memory.params.radius_m,
+                      len(self.blockage_memory))
+        self._publish_event(
+            "BLOCKAGE: unseen obstacle at (%.2f, %.2f) -> reroute" % (x, y),
+            "The drone hit something the camera cannot see -- marking it on my "
+            "map so I stop routing through it, and finding another way",
+            level="warn")
+        if self.grid is not None:
+            self.blockage_memory.stamp(self.grid)
+            # Re-install so the new cells get full confidence NOW, not at the next
+            # BEV -- the forced replan below runs immediately and would otherwise
+            # search a cost map that still treats them as cheap.
+            self._install_confidence()
+            self._raise_trigger_baselines()
+            self._forced_replan()
 
     def _conf_cb(self, msg):
         """Store the BEV per-cell OCCUPIED confidence (int8 0..100 -> [0,1]).
@@ -504,6 +567,13 @@ class AStarPlannerNode:
         """
         ok = (self.conf_grid is not None
               and self._conf_key == self._grid_key_of(self.grid))
+        if ok and self.use_blockage_memory and len(self.blockage_memory):
+            # A remembered blockage carries NO map confidence -- the sensors never
+            # saw it. Since the planner downgrades a low-confidence OCCUPIED cell
+            # to "expensive but passable", leaving it at its map value would let
+            # A* route straight back through the one obstacle the drone has
+            # physically proved exists. Force it to certain.
+            self.blockage_memory.stamp_confidence(self.conf_grid, self.grid)
         self.planner.set_confidence(self.conf_grid if ok else None)
 
     def _predicted_cb(self, msg):

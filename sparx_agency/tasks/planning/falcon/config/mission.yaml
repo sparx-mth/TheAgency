@@ -133,7 +133,7 @@ launch:
   # ==================================================================================================
   # CONTROL  --  how the drone flies the route it was given
   # ==================================================================================================
-  # Four controllers. All hold altitude; they differ in which axes they use.
+  # Five controllers. All hold altitude; they differ in which axes they use.
   #   1. waypoint     one axis at a time: a pure forward advance OR a pure in-place
   #                   yaw, never both. The legacy follower.  <- what this mission flies
   #   2. roll_assist  the SAME nav as waypoint, plus a cross-track ROLL that pulls the
@@ -141,8 +141,15 @@ launch:
   #   3. multi_axis   forward + lateral + yaw together: crabs (ROLL) for small offsets
   #                   and yaws only past a deadband, sparing the noisy yaw axis.
   #   4. pure_pursuit splines the path and tracks a moving lookahead point.
+  #   5. drift_pid    LEARNS the standing drift on each axis (three PID loops whose
+  #                   integral IS the drift estimate) instead of only pushing back
+  #                   against it, so a steady sideways push stops leaving a standing
+  #                   offset. Adds a per-axis + combined force envelope, slows down
+  #                   when the AprilTag pose gets vague, freezes its learning while
+  #                   dead-reckoning, and has reflexes for walls the camera cannot
+  #                   see. Its dials are the CONTROLLER 5 section below.
   # Each has its OWN speed dials below, so a value in the wrong block does nothing.
-  controller: waypoint        # waypoint | roll_assist | multi_axis | pure_pursuit
+  controller: waypoint        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight
@@ -198,6 +205,122 @@ launch:
                               #   the worst direction to move blind, since the camera and
                               #   the BEV map both look FORWARD
 
+  # drift_pid controller (controller:=drift_pid) - generated block BEGIN 
+  # ==================================================================================================
+  # CONTROLLER 5: drift_pid  --  learns the drift instead of just resisting it
+  # ==================================================================================================
+  # Select it with `controller: drift_pid` above. Every dial below is ignored by
+  # the other four controllers, and they ignore these.
+  #
+  # Three PID loops (cross-track / along-track / heading) whose INTEGRAL term is
+  # the learned per-axis drift, behind a force envelope that caps each axis AND
+  # the combined multi-axis demand, scheduled by how much the AprilTag pose can
+  # be trusted, with reflexes for walls the camera cannot see.
+  #
+  # TUNING ORDER (start slow, raise one dial at a time):
+  #   1. dp_cruise_speed / dp_max_wz    until it flies the route at a good pace
+  #   2. dp_combined_effort             if it feels fast when turning WHILE flying
+  #   3. dp_lat_kp then dp_lat_ki       until the standing sideways offset is gone
+  #   4. dp_lat_deadband_m              LAST: it is the tracking floor
+  # Watch /falcon/drift while flying: it publishes what the controller has
+  # learned it must hold against, in m/s per axis.
+  # -- SPEED AND FORCE  --  the per-axis envelope, and the multi-axis budget -------------------------
+  dp_cruise_speed: 0.18       # m/s on a straight leg. THE main speed dial -- raise this first
+  dp_max_vx: 0.25             # m/s hard cap forward/back. 0.45 = full XTEND pitch thrust
+  dp_max_vy: 0.12             # m/s hard cap sideways (ROLL). Weaker axis; keep well under max_vx
+  dp_max_wz: 0.35             # rad/s hard cap yaw. 0.65 = full XTEND yaw thrust
+  dp_max_translation: 0.25    # m/s cap on the (vx,vy) vector, so a diagonal is not faster than an axis
+  dp_combined_effort: 1.4     # |vx|/max + |vy|/max + |wz|/max budget. 1.0 = one axis at full.
+  dp_accel_xy: 0.35           # m/s2 how fast translation may change. Low = gradual, keeps DA3 depth usable
+  dp_accel_wz: 1.0            # rad/s2 how fast the yaw rate may change
+  dp_min_vx: 0.06             # m/s smallest forward command the motors actually act on
+  dp_min_vy: 0.06             # m/s smallest sideways command the motors actually act on
+  dp_min_wz_deg: 8.0          # deg/s smallest yaw command that actually rotates the drone
+  dp_release_frac: 0.5        # below this fraction of a min the command is dropped to 0, above it snapped up
+
+  # -- NAVIGATION  --  how it gets to the next waypoint ----------------------------------------------
+  dp_approach_yaw_rate: 0.30  # rad/s cap on the turn onto a leg
+  dp_pos_radius: 0.30         # m waypoint capture radius
+  dp_slow_radius: 0.80        # m start slowing this far from the FINAL goal
+  dp_arrive_speed_min: 0.08   # m/s floor outside pos_radius, so it never crawls to a noisy stop
+  dp_lookahead_m: 0.60        # m how far ahead the heading aims. Bigger = smoother but cuts corners
+  dp_yaw_engage_deg: 22.0     # deg heading error above which it turns; below it corrects with ROLL only
+  dp_yaw_release_deg: 9.0     # deg error at which turning stops. MUST be < engage: the anti-chatter gap
+  dp_travel_cone_deg: 70.0    # deg widest angle off straight-ahead it will fly -- never fast where the camera cannot see
+  dp_suppress_deg: 110.0      # deg error at which translation drops to suppress_floor (turn first, then fly)
+  dp_suppress_floor: 0.15     # fraction of speed kept beyond suppress_deg. >0 so it keeps creeping
+  dp_passed_bearing_deg: 110.0 # deg a non-final waypoint this far behind counts as passed, not turned back for
+
+  # -- STATION KEEPING  --  holding still, which is where fore/aft drift shows up --------------------
+  dp_hold_deadband_m: 0.06    # m position error ignored while holding
+  dp_forward_track_frac: 0.0  # along-track PID during a straight leg. 0 = the cruise owns that axis
+  dp_lateral_turn_frac: 0.40  # fraction of the ROLL correction used while turning (a big roll spoils a turn)
+  dp_settle_map_updates: 0    # fresh voxel updates to wait for while stopped. 0 = do not force any
+
+  # -- DRIFT PID  --  the loops that LEARN the drift instead of just resisting it --------------------
+  dp_lat_kp: 0.55             # cross-track P: metres of error -> m/s of ROLL
+  dp_lat_ki: 0.06             # cross-track I: LEARNS the standing sideways drift. Raise to kill a constant offset
+  dp_lat_kd: 0.12             # cross-track D: damping
+  dp_lat_i_limit: 0.05        # m/s biggest standing sideways push it may assume exists
+  dp_lat_max: 0.10            # m/s cap on the whole cross-track correction. Must be <= dp_max_vy
+  dp_lat_deadband_m: 0.04     # m error ignored. THE TRACKING FLOOR -- shrink to hold tighter, at the cost of chasing noise
+  dp_lat_d_tau_s: 0.4         # s low-pass on the derivative (a 10Hz noisy pose differentiates to noise)
+  dp_fwd_kp: 0.50             # along-track P: metres -> m/s of PITCH, while turning or holding
+  dp_fwd_ki: 0.05             # along-track I: LEARNS the standing fore/aft drift
+  dp_fwd_kd: 0.10             # along-track D: damping
+  dp_fwd_i_limit: 0.05        # m/s biggest standing fore/aft push it may assume
+  dp_fwd_max: 0.10            # m/s cap on the along-track correction
+  dp_fwd_deadband_m: 0.06     # m along-track error ignored
+  dp_fwd_d_tau_s: 0.4         # s low-pass on the along-track derivative
+  dp_yaw_kp: 0.90             # heading P: rad of error -> rad/s of YAW
+  dp_yaw_ki: 0.08             # heading I: LEARNS the standing yaw drift (the rarest of the three)
+  dp_yaw_kd: 0.15             # heading D: damping
+  dp_yaw_i_limit: 0.08        # rad/s biggest standing yaw push it may assume
+  dp_yaw_max: 0.35            # rad/s cap on the heading correction. Must be <= dp_max_wz
+  dp_yaw_deadband_deg: 2.0    # deg heading error ignored
+  dp_yaw_d_tau_s: 0.35        # s low-pass on the heading derivative
+  dp_drift_leak_s: 180.0      # s over which a learned drift fades. Long: it belongs to the airframe, not the minute
+
+  # -- LOCALIZATION TRUST  --  fly slower, and stop learning, when the pose is poor ------------------
+  dp_conf_full: 0.35          # confidence at/above which it flies full speed. NOT 0.9: a lone tag caps near 0.21
+  dp_conf_min: 0.10           # confidence at/below which it flies at dp_speed_floor
+  dp_speed_floor: 0.35        # slowest speed multiplier on a poor pose. >0: creeping beats stopping in a corridor
+  dp_gain_floor: 0.25         # smallest P/D scale on a poor pose. Lower than speed_floor: reacting to a vague pose is what injects noise
+  dp_conf_integrate: 0.18     # below this the drift loops FREEZE -- never learn drift from a pose you do not trust
+  dp_conf_hold: 0.05          # below this the drone stops and holds
+  dp_max_age_s: 0.6           # s since the last pose before it stops. Silence is a signal on this stack
+  dp_coast_speed_scale: 0.5   # extra speed multiplier while dead-reckoning (no tag in view, ~0.5s budget)
+  dp_eff_floor: 0.15          # cmd_effectiveness at/below which the commands are not reaching the world
+  dp_eff_full: 0.60           # cmd_effectiveness at/above which commands count as fully effective
+  dp_require_quality: false   # true HOLDS the drone until the confidence topics arrive; false flies without them (and warns)
+
+  # -- STUCK DETECTION  --  noticing a wall the camera cannot see ------------------------------------
+  dp_block_window_s: 1.2      # s trailing window over which progress is measured
+  dp_block_min_vx: 0.07       # m/s below this the tick does not count as trying to move
+  dp_block_min_wz_deg: 8.6    # deg/s below this the tick does not count as trying to turn
+  dp_block_min_dist_m: 0.06   # m commanded distance needed in the window before the ratio means anything
+  dp_block_min_yaw_deg: 7.0   # deg commanded rotation needed in the window
+  dp_block_progress_frac: 0.30 # achieved/commanded below this = not moving. Not 0: a heavy drone always under-delivers
+  dp_block_confirm_ticks: 5   # consecutive bad ticks before declaring a blockage (ticks, never a wall clock)
+  dp_block_clear_ticks: 3     # consecutive good ticks before clearing one
+  dp_block_use_effectiveness: true # also believe the localization's own cmd_effectiveness verdict
+
+  # -- ESCAPE REFLEXES  --  what it does about it (planning owns the reroute) ------------------------
+  dp_escape_brake_s: 0.4      # s stopped before doing anything -- start the escape from rest, not from inertia
+  dp_escape_back_s: 0.7       # s reversing after a blocked forward, to break contact
+  dp_escape_back_speed: 0.10  # m/s of that reverse
+  dp_escape_probe_s: 0.8      # s rolling sideways to test whether that side is open
+  dp_escape_probe_speed: 0.10 # m/s of that sideways probe
+  dp_escape_settle_s: 0.5     # s held still afterwards, so the depth model gets a stationary frame
+  dp_escape_yaw_probe_s: 1.0  # s rolling clear of a wall that blocked a TURN (longer: escaping, not asking)
+  dp_escape_yaw_invert: false # flip which way it rolls to escape a blocked turn. THE one sign worth checking against reality
+  dp_escape_max_attempts: 2   # escapes per obstacle before it gives up and tells the planner (2 = one probe each way)
+
+  # -- BLOCKAGE MEMORY  --  the planner remembering what the controller found ------------------------
+  use_blockage_memory: true   # remember unseen obstacles and stop routing through them
+  blockage_radius_m: 0.35     # m marked impassable around a reported spot. >= the drone's half-width
+  blockage_ttl_s: 0.0         # s a blockage is remembered. 0 = forever, right for a static building
+  # drift_pid controller - generated block END 
   # ==================================================================================================
   # A* GLOBAL PLANNER  --  the route through the BEV map
   # ==================================================================================================
