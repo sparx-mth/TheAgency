@@ -147,6 +147,12 @@ launch:
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight
                               #   peak (bev_z_peak) follows it
+  # Extra pose denoising INSIDE the follower (windowed least-squares fit blended with
+  # the command being executed). false = fly the localization stream exactly as
+  # published, so its real jitter and lag are visible instead of filtered away. Keep
+  # it false while judging localization quality; the source now filters itself by
+  # confidence, so this second layer mostly just adds delay.
+  use_pose_estimator: false
 
   # -- Speeds for controllers 1 & 2 (waypoint / roll_assist) -----------------------------------------
   # These are IGNORED under pure_pursuit, which has its own pair below.

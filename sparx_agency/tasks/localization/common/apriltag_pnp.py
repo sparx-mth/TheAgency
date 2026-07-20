@@ -84,6 +84,14 @@ class CameraPoseResult:
         reproj_rms_px: RMS reprojection error over all used corners (px).
         ambiguity: 0 (unique/robust) .. 1 (two branches equally good). Only a
             single, fronto-parallel tag is typically near 1.
+        geometry: 0 (degenerate) .. 1 (well conditioned) — how much the used tags
+            actually constrain the pose. Driven by how far apart they sit in the
+            world and whether they are coplanar. A lone tag scores 0.
+        min_tag_px: Apparent size (px) of the SMALLEST used tag; small tags carry
+            most of the corner noise.
+        max_tag_dist_m: Distance to the FARTHEST used tag.
+        worst_tag_rms_px: Largest per-tag reprojection residual. A tag whose map
+            entry is wrong shows up here long before the pooled RMS notices.
     """
 
     world_T_cam: np.ndarray
@@ -91,6 +99,10 @@ class CameraPoseResult:
     n_tags: int
     reproj_rms_px: float
     ambiguity: float
+    geometry: float = 0.0
+    min_tag_px: float = 0.0
+    max_tag_dist_m: float = 0.0
+    worst_tag_rms_px: float = 0.0
 
 
 # --- small SE(3) / reprojection helpers --------------------------------------
@@ -142,6 +154,62 @@ def _world_corners(det: TagDetection, world_T_tag: np.ndarray) -> np.ndarray:
     obj = tag_object_points(det.size_m)
     homog = np.concatenate([obj, np.ones((4, 1))], axis=1)  # (4, 4)
     return (world_T_tag @ homog.T).T[:, :3]
+
+
+def _apparent_px(det: TagDetection) -> float:
+    """Largest image extent of the tag, in pixels.
+
+    Corner-localisation noise is roughly constant in pixels, so this is the
+    directly useful measure of how much a tag can be trusted: a 12 px tag carries
+    the same absolute pixel noise as a 90 px one but over a far shorter baseline.
+    """
+    c = np.asarray(det.corners, dtype=np.float64).reshape(4, 2)
+    return float(max(c[:, 0].max() - c[:, 0].min(), c[:, 1].max() - c[:, 1].min()))
+
+
+def _geometry_score(world_pts: np.ndarray) -> float:
+    """0 (degenerate) .. 1 (well conditioned) for a set of pooled world corners.
+
+    Two independent things make a tag set weak, and both show up in the spread of
+    the points about their centroid:
+
+    * a single tag (or several nearly on top of each other) gives a very short
+      baseline, so small angular errors swing the position a long way;
+    * a perfectly coplanar set leaves the planar mirror ambiguity intact, which is
+      what makes one wall of tags much weaker than two.
+
+    The singular values of the centred points measure exactly this: the second
+    gives the in-plane baseline, the third how far the set departs from a plane.
+    """
+    if world_pts.shape[0] < 4:
+        return 0.0
+    centred = world_pts - world_pts.mean(axis=0)
+    sv = np.linalg.svd(centred, compute_uv=False)
+    if sv[0] <= 1e-9:
+        return 0.0
+    # Baseline: how wide the set is in world metres (saturating at ~1 m).
+    baseline = float(min(1.0, sv[1] / 0.5))
+    # Out-of-plane extent relative to the largest, i.e. "are these all one wall?"
+    out_of_plane = float(min(1.0, (sv[2] / sv[0]) / 0.05))
+    # A coplanar but wide set is still decent; a wide non-coplanar set is ideal.
+    return float(max(0.0, min(1.0, 0.35 * baseline + 0.65 * max(baseline, out_of_plane))))
+
+
+def _per_tag_rms(dets: Sequence[TagDetection], poses: Dict[int, TagWorldPose],
+                 K: np.ndarray, D: np.ndarray, rvec: np.ndarray,
+                 tvec: np.ndarray) -> Dict[int, float]:
+    """Reprojection RMS of each tag individually under one common pose.
+
+    The pooled RMS hides a single bad tag among the good ones (least squares
+    spreads the blame). Per-tag residuals name it, which is what turns "the map is
+    wrong somewhere" into "tag 8 is wrong".
+    """
+    out = {}
+    for det in dets:
+        wc = _world_corners(det, world_T_tag_from_pose(poses[det.tag_id]))
+        img = np.asarray(det.corners, dtype=np.float64).reshape(4, 2)
+        out[det.tag_id] = _reproj_rms(wc, img, K, D, rvec, tvec)
+    return out
 
 
 # --- branch disambiguation ----------------------------------------------------
@@ -215,7 +283,11 @@ def _solve_single(det: TagDetection, world_T_tag: np.ndarray, K: np.ndarray,
     rvec, tvec = _refine_vvs(obj, img, K, D, rvec, tvec)
     world_T_cam = world_T_tag @ _inv_T(_rt_to_T(rvec, tvec))
     rms = _reproj_rms(obj, img, K, D, rvec, tvec)
-    return CameraPoseResult(world_T_cam, [det.tag_id], 1, rms, ambiguity)
+    dist = float(np.linalg.norm(world_T_cam[:3, 3] - world_T_tag[:3, 3]))
+    # A lone tag has no baseline and is coplanar by construction: geometry = 0.
+    return CameraPoseResult(world_T_cam, [det.tag_id], 1, rms, ambiguity,
+                            geometry=0.0, min_tag_px=_apparent_px(det),
+                            max_tag_dist_m=dist, worst_tag_rms_px=rms)
 
 
 def _solve_multi(dets: Sequence[TagDetection], poses: Dict[int, TagWorldPose],
@@ -252,7 +324,17 @@ def _solve_multi(dets: Sequence[TagDetection], poses: Dict[int, TagWorldPose],
     rvec, tvec = _refine_vvs(world_pts_arr, img_pts_arr, K, D, rvec, tvec)
     world_T_cam = _inv_T(_rt_to_T(rvec, tvec))
     rms = _reproj_rms(world_pts_arr, img_pts_arr, K, D, rvec, tvec)
-    return CameraPoseResult(world_T_cam, list(used), len(used), rms, ambiguity)
+
+    per_tag = _per_tag_rms(dets, poses, K, D, rvec, tvec)
+    cam_pos = world_T_cam[:3, 3]
+    dists = [float(np.linalg.norm(np.mean(_world_corners(d, world_T_tag_from_pose(poses[d.tag_id])),
+                                          axis=0) - cam_pos)) for d in dets]
+    return CameraPoseResult(
+        world_T_cam, list(used), len(used), rms, ambiguity,
+        geometry=_geometry_score(world_pts_arr),
+        min_tag_px=min(_apparent_px(d) for d in dets),
+        max_tag_dist_m=max(dists) if dists else 0.0,
+        worst_tag_rms_px=max(per_tag.values()) if per_tag else rms)
 
 
 def estimate_camera_pose(
@@ -324,10 +406,36 @@ def estimate_camera_pose(
 def pose_confidence(result: CameraPoseResult) -> float:
     """Map a :class:`CameraPoseResult` to a 0..1 confidence.
 
-    More tags, lower reprojection error and lower ambiguity all raise confidence.
-    An ambiguous single tag is strongly penalised so it does not inject jumps.
+    This number is meant to be *acted on* — the filter downstream uses it as its
+    gain, so it has to track real accuracy rather than merely look plausible.
+    The weights come from measured behaviour on the deployed tag map, where a
+    single tag localises to 5-50 cm depending on which one it is, two tags to
+    ~3-9 cm and three to ~1 cm.
+
+    Five independent things degrade a fix, and any one of them alone is enough to
+    make the pose untrustworthy, so they multiply rather than average:
+
+    * **how many tags** — the single biggest factor, and the reason a lone tag can
+      never score high no matter how crisp its corners look;
+    * **geometry** — a wide, non-coplanar set pins the pose; one wall does not;
+    * **pooled reprojection** — overall fit quality;
+    * **worst single tag** — a mis-mapped tag that the pooled RMS averages away;
+    * **ambiguity** — the planar mirror being live.
     """
-    tag_term = min(1.0, 0.4 + 0.3 * result.n_tags)          # 1 tag -> 0.7, >=2 -> 1.0
-    rms_term = 1.0 / (1.0 + (result.reproj_rms_px / 1.5))    # 0px -> 1.0, 1.5px -> 0.5
-    amb_term = 1.0 - 0.5 * result.ambiguity                 # ambiguous -> halve
-    return float(max(0.0, min(1.0, tag_term * rms_term * amb_term)))
+    n = result.n_tags
+    # 1 -> 0.35, 2 -> 0.70, 3 -> 0.90, 4+ -> 1.0. A lone tag is capped low on
+    # purpose: measured error for one tag spans 5-50 cm with no way to tell which
+    # you got, so it must never drive the filter at full gain.
+    tag_term = {0: 0.0, 1: 0.35, 2: 0.70, 3: 0.90}.get(n, 1.0)
+
+    geom_term = 0.6 + 0.4 * float(max(0.0, min(1.0, result.geometry)))
+    rms_term = 1.0 / (1.0 + (result.reproj_rms_px / 1.5))
+    amb_term = 1.0 - 0.5 * float(max(0.0, min(1.0, result.ambiguity)))
+
+    # A single tag reprojecting badly under the shared pose means its map entry
+    # (or its size) is wrong. Pooled RMS hides that; this does not.
+    worst = result.worst_tag_rms_px if result.worst_tag_rms_px > 0.0 else result.reproj_rms_px
+    outlier_term = 1.0 / (1.0 + max(0.0, worst - 2.0) / 2.0)
+
+    return float(max(0.0, min(1.0, tag_term * geom_term * rms_term
+                              * amb_term * outlier_term)))

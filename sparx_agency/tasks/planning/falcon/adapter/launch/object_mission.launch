@@ -112,6 +112,9 @@
   <arg name="nav_mode"        default="fallback" />
   <arg name="use_navdp"       default="false" />
   <arg name="controller"      default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist -->
+  <!-- Follower-side pose denoising. false = fly the localization stream as
+       published, so its own jitter and lag are visible rather than filtered. -->
+  <arg name="use_pose_estimator" default="true" />
   <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint, this mission's default).
        The one-axis follower never translates and rotates at once, so these are
        independent: vel_x is every forward leg, yaw_rate every in-place turn.
@@ -549,6 +552,7 @@
     <arg name="nav_mode"        value="$(arg nav_mode)" />
     <arg name="use_navdp"       value="$(arg use_navdp)" />
     <arg name="controller"      value="$(arg controller)" />
+    <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
     <arg name="vel_x"           value="$(arg vel_x)" />
     <arg name="yaw_rate"        value="$(arg yaw_rate)" />
     <arg name="yaw_pitch_bias"  value="$(arg yaw_pitch_bias)" />

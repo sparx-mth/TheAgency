@@ -33,7 +33,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 
 from sparx_agency.core.common.types.perception import Observation, RGBFrame
 from sparx_agency.core.localization.base import BaseLocalizationProvider, LocalizationEstimate
@@ -51,6 +51,12 @@ _PROVIDERS = {
 
 _OUTPUT_TOPIC = "/xtend/localization"
 _SOURCE_TOPIC = "/xtend/localization_source"
+#: How much to trust the pose on _OUTPUT_TOPIC, 0..1, published per fix.
+#: PoseStamped has nowhere to carry this, and it is the difference between a
+#: 1 cm three-tag fix and a 30 cm lone-tag guess, so it goes out alongside.
+_CONF_TOPIC = "/xtend/localization_confidence"
+#: Same instant, in metres: the expected position error of that pose.
+_STD_TOPIC = "/xtend/localization_pos_std"
 
 
 def _parse_path_msg(data: str):
@@ -82,7 +88,13 @@ class LocalizationNode(Node):
         self.declare_parameter("tag_size_m", 0.13)
         self.declare_parameter("tag_family", "tag36h11")
         self.declare_parameter("min_margin", 10.0)
-        self.declare_parameter("alpha", 0.1)
+        # Filter gain at FULL confidence. 1.0 = publish the raw solve. The old
+        # 0.1 cost ~0.9 s of lag on every move; the gain is now confidence-scaled
+        # (see AprilTagLocalizationProvider._gain) so this can be fast.
+        self.declare_parameter("alpha", 0.8)
+        self.declare_parameter("alpha_min", 0.15)
+        self.declare_parameter("max_jump_m", 1.0)
+        self.declare_parameter("max_jump_frames", 3)
         # optical_flow params
         self.declare_parameter("depth_frame_path_topic", "")
         self.declare_parameter("bearing_topic", "")
@@ -137,6 +149,8 @@ class LocalizationNode(Node):
 
         self._pub_pose = self.create_publisher(PoseStamped, _OUTPUT_TOPIC, 10)
         self._pub_source = self.create_publisher(String, _SOURCE_TOPIC, 10)
+        self._pub_conf = self.create_publisher(Float32, _CONF_TOPIC, 10)
+        self._pub_std = self.create_publisher(Float32, _STD_TOPIC, 10)
 
         if provider_type in ("optical_flow", "amcl"):
             self._setup_optical_flow_subs(qos)
@@ -199,6 +213,9 @@ class LocalizationNode(Node):
                 tag_family=str(self.get_parameter("tag_family").value),
                 min_margin=float(self.get_parameter("min_margin").value),
                 alpha=float(self.get_parameter("alpha").value),
+                alpha_min=float(self.get_parameter("alpha_min").value),
+                max_jump_m=float(self.get_parameter("max_jump_m").value),
+                max_jump_frames=int(self.get_parameter("max_jump_frames").value),
             )
         if provider_type == "optical_flow":
             calib = self.get_parameter("camera_calib_path").value
@@ -298,6 +315,10 @@ class LocalizationNode(Node):
         src_msg = String()
         src_msg.data = estimate.source
         self._pub_source.publish(src_msg)
+        # Published on every fix and in the same callback as the pose, so a
+        # consumer can pair them by arrival without needing a stamp match.
+        self._pub_conf.publish(Float32(data=float(estimate.confidence)))
+        self._pub_std.publish(Float32(data=float(estimate.pos_std_m)))
 
 
 def _amcl_loc_json(x_m: float, y_m: float) -> str:
@@ -308,6 +329,13 @@ def _amcl_loc_json(x_m: float, y_m: float) -> str:
 
 
 def _to_pose_stamped(est: LocalizationEstimate) -> PoseStamped:
+    """PoseStamped in the world frame.
+
+    ``position.z`` is the solved camera altitude, not a placeholder: the mapper
+    projects its point cloud at the drone's height, so a wrong or constant z tilts
+    the whole map. Orientation is a pure yaw rotation (x = y = 0), matching the
+    flat-flight assumption the rest of the stack makes.
+    """
     msg = PoseStamped()
     msg.header.frame_id = "world"
     msg.header.stamp.sec = int(est.stamp_sec)
