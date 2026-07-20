@@ -1,4 +1,4 @@
-# ============================================================================
+# ====================================================================================================
 # mission.yaml -- every parameter run_object_mission.sh needs, in one place.
 #
 # Read on the HOST by config/mission_config.py and fanned out to the three worlds
@@ -12,610 +12,528 @@
 #   4. the built-in default in run_object_mission.sh / the launch file
 #
 # So a value here is a default you can always override for one run without editing.
-# Comment a key out (or delete it) to fall back to the built-in default.
-#
-# Every key is validated: an unknown key is a hard error with a suggestion, never a
-# silent no-op. Keys under launch: are checked against the <arg> names that
-# adapter/launch/object_mission.launch actually declares.
+# Comment a key out to fall back to the built-in default. An unknown key is a hard
+# error with a suggestion, never a silent no-op.
 #
 # Use a different file for one run:  CONFIG_FILE=/path/to/other.yaml ./run_object_mission.sh
-# ============================================================================
+# ====================================================================================================
 
-# ── The mission itself ──────────────────────────────────────────────────────
+# ====================================================================================================
+# THE MISSION ITSELF  --  what to fly, where, and with which planner
+# ====================================================================================================
 mission:
   map: office                 # maps/<map>.yaml -- the FALCON environment
-  selection_mode: gui         # gui = click a row in the object list | random
-  nav_mode: astar             # fallback | hybrid | astar | combination | navdp
-                              #   fallback : A* flies the route, NavDP rescues a boxed-in A*
-                              #   hybrid   : A* on easy legs, NavDP through hard turns/doorways
-                              #   astar    : pure A* (the only mode needing no NavDP server)
-                              #   combination: always-on A*+NavDP fusion
-                              #   navdp    : NavDP alone, no A*. Two goal sources, either
-                              #     of which works on its own: CLICK a pixel in the camera
-                              #     window and press ENTER (one leg per keypress), or let it
-                              #     fly the WORLD goal hands-off -- it re-projects that point
-                              #     into the body frame and re-infers every ~2s, so no click
-                              #     is needed. A click takes over whenever you make one;
-                              #     press r to hand it back to the world goal.
-                              #     The world goal is stage_x/stage_y below (0, -2).
+  selection_mode: gui         # how the target is picked: gui (click a row) | random
+  # Which planner flies the route:
+  #   astar      : pure A* only (the only mode that needs no NavDP server)
+  #   fallback   : A* flies the route, NavDP rescues a boxed-in A*
+  #   hybrid     : A* on easy legs, NavDP through hard turns/doorways
+  #   combination: always-on A* + NavDP fusion
+  #   navdp      : NavDP alone. Either click a pixel in the camera window and press
+  #                ENTER (one leg per keypress), or let it fly the world goal
+  #                (stage_x/stage_y) hands-off. A click takes over; press r to hand back.
+  nav_mode: astar
   seed: -1                    # >=0 makes selection_mode:=random reproducible
 
-# ── YOLO-World detector (the host sidecar) ──────────────────────────────────
+# ====================================================================================================
+# YOLO-WORLD DETECTOR  --  the host sidecar that finds the object
+# ====================================================================================================
 detector:
-  model: x                    # s | m | l | x  (picks yolo_world_<model>.*.engine)
-  weights_dir: /home/user/Downloads     # holds yolov8<model>-worldv2.pt
-  conf_thresh: 0.1            # detection confidence floor; below this a detection
-                              #   is ignored, so the object is never confirmed and
-                              #   the mission lands by A* alone (see land_at_goal)
-  init_target: gun            # placeholder target before you select. Drives BOTH
-                              #   pre-selection targets and they must not diverge:
-                              #   the detector's YOLO prompt, and the label
-                              #   object_approach filters detections for. Set them
-                              #   differently and the detector publishes a label
-                              #   nothing is listening for -- no confirmation, no
-                              #   visual land, and the only symptom is two
-                              #   heartbeats naming different objects.
-                              #   The director overwrites both on selection.
-  # engines_dir: /path/to/engines       # default: yolo_world_trt/engines/<target_tag>
+  model: x                    # s | m | l | x -- picks yolo_world_<model>.*.engine
+  weights_dir: /home/user/Downloads   # holds yolov8<model>-worldv2.pt
+  conf_thresh: 0.1            # detections below this are ignored, so the object is
+                              #   never confirmed and the mission lands by A* alone
+  init_target: gun            # placeholder target before you select one. Sets BOTH the
+                              #   YOLO prompt and the label object_approach filters on,
+                              #   which must never diverge. Overwritten on selection.
+  # engines_dir: /path/to/engines               # default: yolo_world_trt/engines/<target_tag>
   # text_weights: /path/to/yolov8x-worldv2.pt   # default: <weights_dir>/yolov8<model>-worldv2.pt
 
-# ── Where the object catalog lives ──────────────────────────────────────────
+# ====================================================================================================
+# OBJECT CATALOG  --  where the room map writes the object list
+# ====================================================================================================
 paths:
   # The room mapper writes this on the host; run_falcon.sh bind-mounts the DIRECTORY
   # into the container at the same path, so host and container agree.
   objects_dir: /home/user/jetson-containers/data/captures/latest_room_map
   # objects_file: /path/to/objects.json   # default: <objects_dir>/objects.json
 
-# ── Anything object_mission.launch declares as an <arg> ─────────────────────
-# Free-form passthrough: every key here is forwarded as key:=value. Validated
+# ====================================================================================================
+# launch:  anything object_mission.launch declares as an <arg>.
+# Free-form passthrough: every key here is forwarded as key:=value and validated
 # against the launch file, so a typo fails loudly instead of doing nothing.
+# ====================================================================================================
 launch:
-  # -- Landing --
-  land_range_m: 1.0           # visual land distance (depth). 0 disables the visual
-                              #   land and relies on arrival-land alone
-  land_at_goal: true          # land on reaching the coordinate goal unconfirmed
-  arrive_radius_m: 0.6        # how close to the goal counts as "reached"
-  arrive_land_confirm_ticks: 5
-  land_confirm_ticks: 3
 
-  # -- Detection gate (how sure we must be it IS the object) --
-  min_score: 0.15             # score floor for the object_approach confirmation gate
-  n_confirm: 3                # consecutive hits needed before it counts as confirmed
-
-  # -- Visual servo --
-  target_range_m: 0.8         # hover standoff once locked on
-  lock_mode: detector_tracker
-  closure_mode: multi_axis
-  force_mode: fixed
-
-  # -- Nav --
-  controller: waypoint        # waypoint | multi_axis | pure_pursuit | roll_assist
-                              #   NOTE: real_drone.launch defaults to roll_assist, but the
-                              #   object mission has always pinned waypoint. Set it here.
-
-  # -- THE STAGING VANTAGE POINT: where the drone stands to look (world metres) --
-  # ONE place that decides all three coordinates that used to be set separately and
-  # could silently drift apart: the A* goal, object_approach's arrival goal, and what
-  # the mission director publishes when you pick an object.
+  # ==================================================================================================
+  # THE GOAL  --  where the drone flies to, and why not onto the object
+  # ==================================================================================================
+  # The STAGING VANTAGE POINT (world metres). One place that sets all three
+  # coordinates that used to drift apart: the A* goal, object_approach's arrival
+  # goal, and what the director publishes when you pick an object.
   #
-  # WHY the drone is not simply sent at the object it is hunting: the object's
-  # position comes from the room map, and is only as accurate as that map. Fly onto
-  # it and a few tens of centimetres of error can leave the object beside, behind or
-  # past the drone -- out of frame, with nothing for the visual servo to lock onto.
-  # So picking an object flies the drone HERE instead, and from here it:
+  # The drone is NOT sent onto the object itself. The object's position comes from
+  # the room map and is only as accurate as that map, so flying onto it can leave
+  # the object beside or behind the drone, out of frame. Instead it flies HERE and:
+  #   1. turns to the object's recorded bearing and holds still, looking. A camera
+  #      resolves a bearing far better than a map resolves a position, so this is
+  #      the shot most likely to end in a real visual lock.
+  #   2. only if that finds nothing, re-targets the object's own (x,y) and lets A*
+  #      fly the last leg -- the old behaviour, kept as the fallback.
+  # Arriving here therefore aims; only arriving at the OBJECT can trigger a landing.
   #
-  #   1. TURNS to face the object's recorded bearing and holds still, looking. A
-  #      camera resolves a bearing far better than a map resolves a position, so
-  #      this is the shot most likely to end in a real visual lock -- and if it does,
-  #      the servo closes on an object it can actually see, which is the good ending.
-  #   2. only if that look finds nothing, re-targets the goal at the object's own
-  #      (x,y) and lets A* fly the last leg after all -- the old behaviour, kept as
-  #      the fallback rather than the plan.
-  #
-  # So the drone can never land on this point by mistake: arriving here aims, and
-  # only arriving at the OBJECT's coordinate can trigger the arrival-land below.
-  #
-  # Set BOTH to '' to switch staging off entirely: selecting an object then publishes
-  # its own position as the goal and the drone flies straight onto it, as it did
-  # before. (For a plain "fly to this coordinate, no object" run, override the goal
-  # on the command line instead: ./run_object_mission.sh office gui goal_x:=1.0)
-  #
-  # The GO gate is independent of all this: with start_go: false below, not one
-  # velocity command reaches the drone however good a route A* has found.
+  # Set BOTH to '' to switch staging off: selecting an object then publishes its own
+  # position as the goal and the drone flies straight onto it.
   stage_x: 0.0                # m, world/map frame -- the centre of the room
   stage_y: -2.0               # m, world/map frame
 
-  # -- The AIM: how it turns to look, and how long it looks --
-  # The platform's yaw is discrete and coasts, so the turn is pulsed: each burst is
-  # commanded short by the coast and the coast lands the nose on the bearing, then
-  # the drone STOPS (aim_settle_s) and re-measures before the next one. Holding
-  # still to look matters as much as the turn: the detector runs at a few Hz and
+  # -- The AIM: how it turns to look, and how long it looks ------------------------------------------
+  # Yaw is discrete and coasts, so the turn is pulsed: each burst is commanded short,
+  # the coast lands the nose on the bearing, then the drone STOPS and re-measures.
+  # Holding still matters as much as turning -- the detector runs at a few Hz and
   # needs n_confirm consecutive clean, blur-free frames to confirm anything.
-  aim_before_direct: true     # false = never aim; fly the goal through as before
-  aim_tolerance_deg: 12.0     # "pointing at it". No point going tighter: the camera
-                              #   sees ~76 deg across, so the object is well inside
-                              #   the frame long before the nose is exact -- and a
-                              #   pulsed yaw cannot hold much better than this anyway
+  aim_before_direct: true     # false = never aim; fly the goal straight through
+  aim_tolerance_deg: 12.0     # "pointing at it"; no point going tighter than the ~76 deg
+                              #   the camera sees, or than a pulsed yaw can hold
   aim_look_s: 4.0             # hold still on the bearing this long before giving up
-                              #   on seeing it. Raise if the detector is slow or
-                              #   n_confirm is high; this is the whole chance it gets
   aim_settle_s: 1.0           # stop between turn bursts so the coast finishes first
-  aim_timeout_s: 25.0         # hard cap on the whole aim, so a drone that will not
-                              #   turn (or a pose that never updates) still escalates
-                              #   to the object's coordinate instead of aiming forever
+  aim_timeout_s: 25.0         # hard cap on the whole aim; a drone that will not turn
+                              #   still escalates to the object's coordinate
 
-  # -- WAYPOINT-controller speeds (the two dials for `controller: waypoint`) --
-  # EVERY SPEED DIAL IN THIS FILE, SI throughout, all rate-per-second:
-  #
-  #     vel_x                m/s    forward flight,  normal navigation   <- here
-  #     yaw_rate             rad/s  rotation,        normal navigation   <- here
-  #     recovery_back_speed  m/s    backward flight, lost-loc recovery   <- recovery block
-  #     recovery_turn_rate   rad/s  rotation,        lost-loc recovery   <- recovery block
-  #
-  # There is no recovery FORWARD speed and no normal-navigation BACKWARD speed, and
-  # neither is an oversight: recovery only ever retreats (it is getting away from
-  # whatever swallowed the tag), and the follower only ever advances (it turns to
-  # face a waypoint rather than reversing toward it).
-  # The recovery persist stage has no speed of its own either, on purpose: it
-  # CONTINUES the move that was already in flight, so it reuses whichever of the two
-  # navigation dials above was live at the moment the pose went cold.
-  # (controller: pure_pursuit ignores vel_x/yaw_rate entirely and uses
-  # pp_cruise_speed / pp_max_yaw_rate below -- the trap documented under those keys.)
-  #
-  # The one-axis follower never translates and rotates at the same time: every
-  # command is EITHER a pure forward advance OR a pure in-place turn. So these two
-  # are fully independent -- vel_x is the speed of every straight leg, yaw_rate the
-  # speed of every corner. Nothing blends them.
-  #
-  # yaw_rate is not a continuous controller: the follower turns in discrete bursts
-  # (pulse -> settle -> re-measure), and yaw_rate is the rate DURING a burst. Raising
-  # it makes each burst sweep further per tick, so a big turn finishes in fewer
-  # bursts; lowering it turns more gently but spends longer stopped. 0.7 rad/s at the
-  # 10 Hz control rate is ~4 deg per tick.
-  #
-  # These are IGNORED under controller: pure_pursuit, which has its own pair below
-  # (pp_cruise_speed / pp_max_yaw_rate) -- that is the trap documented there.
-  vel_x: 0.25                 # m/s, forward flight speed on every straight leg
-  yaw_rate: 0.8               # rad/s, rotation speed during a turn burst
+  # -- Detection gate: how sure we must be it IS the object ------------------------------------------
+  min_score: 0.15             # score floor for a detection to count
+  n_confirm: 3                # consecutive hits needed before the object is confirmed
 
-  # -- A little PITCH under every yaw --
-  # A pure-yaw twist (wz alone) leaves the platform flat, so a turn bites late and
-  # then coasts sloppily. This much forward speed rides along with any twist that is
-  # otherwise a pure yaw, giving the turn something to bite on. It is NOT added to a
-  # commanded forward leg -- only to turns in place. 0.0 restores pure yaw.
-  yaw_pitch_bias: 0.05        # m/s forward ridden on a turn-in-place
+  # -- Visual servo: closing on the object once it is locked -----------------------------------------
+  target_range_m: 0.8         # m, hover standoff once locked on
+  lock_mode: detector_tracker # detector_tracker = detector seeds a tracker | detector = box alone
+  closure_mode: multi_axis    # how it closes the distance: multi_axis | waypoint
+  force_mode: fixed           # flight-command shaping: fixed | snap | none
 
-  # -- How far ONE yaw pulse turns (the burst size) --
-  # yaw_rate above is the SPEED of a burst; this is its LENGTH. Graded pulses size
-  # a burst by duration: the tick count is snapped to an even number and clamped to
-  # [min_motion_ticks (2), this], so the grades are 2/4/6/8 ticks and this picks the
-  # strongest. At yaw_rate 0.7 and ctrl_rate_hz 10 one tick is ~4 deg, and the
-  # platform coasts a further ~15 deg after the command stops (the burst aims short
-  # on purpose and lets the coast finish the turn):
-  #
-  #     2 ticks (min)   8 deg commanded  -> ~23 deg actual   error 11.5-25 deg
-  #     4 ticks        16 deg            -> ~31 deg          error 25.5-33 deg
-  #     6 ticks        24 deg            -> ~39 deg          error 33.5-41 deg
-  #     8 ticks (max)  32 deg            -> ~47 deg          error >= 41.5 deg
-  #
-  # Raising this lets a big turn finish in fewer stop-settle-remeasure cycles (90 deg
-  # in ~2 bursts instead of ~4). The cost is more angle swept OPEN LOOP before the
-  # settle re-measures, and past freeze_yaw_thresh_rad (20 deg) the map is frozen for
-  # the whole turn, so a longer burst also fuses nothing across a wider arc.
-  # Overshoot is caught: yaw_burst_live_feedback cuts a burst short on a confirmed
-  # overshoot (one-way, never reverses mid-flight).
-  #
-  # The MINIMUM is min_motion_ticks (2), not this, and it is deliberately left alone:
-  # 2 ticks is what clears the yaw deadband, and raising it would coarsen every small
-  # correction. Do NOT raise yaw_rate to get bigger turns either -- that scales every
-  # grade including the minimum.
-  # And note yaw_burst_max_deg is NOT this knob: it feeds the legacy swept-angle
-  # branch, which yaw_graded_pulses (on) bypasses, so changing it does nothing.
-  yaw_burst_grade_max_ticks: 8   # ticks; 8 = ~32 deg commanded, ~47 deg actual
+  # -- Landing: two independent ways the mission can end ---------------------------------------------
+  # 1. VISUAL land -- the object is confirmed and within land_range_m (needs depth).
+  # 2. ARRIVAL land -- the coordinate goal is reached, the object never confirmed.
+  land_range_m: 1.0           # m, visual land distance; 0 disables the visual land
+  land_confirm_ticks: 3       # consecutive in-range ticks before the visual land
+  land_at_goal: true          # enable the arrival land
+  arrive_radius_m: 0.6        # m, how close to the goal counts as "reached"
+  arrive_land_confirm_ticks: 5  # consecutive arrived ticks before the arrival land
 
-  # -- Pure-pursuit yaw force (only used when controller: pure_pursuit) --
-  # This is the turn-force dial. Pure pursuit sets wz = speed * curvature and clips
-  # it at pp_max_yaw_rate; with the cruise/lookahead defaults that clip is reached
-  # beyond ~37 deg of angle to the lookahead, so EVERY real left/right turn commands
-  # exactly this rate. The XTEND converter scales it as |wz|/0.65*1000:
-  #
-  #   0.60 rad/s -> yaw axis 923 of 1000  (92% of full thrust -- turned too hard)
-  #   0.45 rad/s -> yaw axis 692
-  #   0.35 rad/s -> yaw axis 538
-  #
-  # Lowering it ONLY softens turns big enough to hit the cap; gentle corrections
-  # (below ~27 deg) are already under it and are unchanged. If the turns are still
-  # too sharp, the other lever is a longer pp_base_lookahead (0.6) -- that lowers
-  # the curvature itself rather than clipping the result, so the whole turn is
-  # rounder instead of just slower.
-  pp_max_yaw_rate: 0.35       # rad/s cap == the force of a left/right turn
-  pp_yaw_rate_smoothing: 0.3  # EMA into that rate (lower = softer onset, slower to commit)
-
-  # -- Pure-pursuit forward speed (only used when controller: pure_pursuit) --
-  # This is the TOP speed too: the profile only ever scales cruise DOWN (goal
-  # slowdown, curvature), so pp_max_speed never binds and this alone decides how
-  # fast the drone flies.
-  #
-  # IT IS NOT vel_x. vel_x (0.25) is the WAYPOINT follower's speed; pure pursuit
-  # ignores it, because the node's fallback to vel_x is shadowed by the launch
-  # always setting pp_cruise_speed. So switching to pure_pursuit silently sped the
-  # drone up 0.25 -> 0.30 while looking like a pure controller swap. Changing vel_x
-  # here does nothing while pure_pursuit is selected -- change THIS.
-  #
-  # And 0.3 does not mean what it means for the waypoint follower. Holonomic pure
-  # pursuit commands forward, lateral AND yaw at the same time (the bridge sends
-  # them as one set_axes), but the platform's translation calibration -- 0.3 m/s ==
-  # axis 400 -- was measured on forward ALONE. Blend three axes and the drone
-  # covers ground faster than the number claims, so the number has to come down:
-  #
-  #   cruise 0.30, 30 deg off the lookahead -> forward 346 + lateral 200 + yaw 538
-  #   cruise 0.20, 30 deg off the lookahead -> forward 231 + lateral 133 + yaw 538
-  pp_cruise_speed: 0.2        # m/s; nominal AND top speed under pure_pursuit
-
-  # -- Pure-pursuit ROLL (only used when controller: pure_pursuit) --
-  # true  = holonomic: the velocity points AT the lookahead, so the drone CRABS
-  #         sideways (roll) as well as yawing.  vy = speed * sin(alpha)
-  # false = unicycle:  vx = speed straight ahead, vy = 0 ALWAYS, yaw does all the
-  #         turning.  <- what we fly
-  #
-  # Roll is the one axis pure pursuit never bounds. multi_axis caps it
-  # (mx_lateral_speed_max 0.25) and roll_assist caps it (ra_lateral_speed_max 0.25);
-  # pure_pursuit has NO lateral cap, so roll just grows with cruise -- past ~60 deg
-  # off the lookahead the drone is mostly sliding sideways rather than flying
-  # forward (at 90 deg: forward axis 0, roll axis 267). Sideways is the worst
-  # direction to move blind here, because the camera and the BEV map both look
-  # FORWARD: a crab translates the drone into space nothing has seen.
-  # There is no separate roll force to turn down -- roll comes off pp_cruise_speed,
-  # the same dial as forward -- so it is either capped in code or switched off; this
-  # switches it off. Tight corners are still safe without the crab because
-  # pp_curvature_speed_factor already cuts the speed hard exactly where the angle is
-  # large. Expect cornering to FEEL different: it turns rather than slides.
-  pp_holonomic: false
-  cruise_z: 1.0               # flight altitude (m); the BEV weight peak (bev_z_peak) follows it
-
-  # -- How wide "in front of the next point" is (the ADVANCE gate) --
-  # NOT a fixed angle. The gate is predictive: the drone starts flying as soon as
-  # going straight would still pass within yaw_acquisition_radius of the waypoint,
-  # so the accepted heading error is asin(radius / distance) -- wider up close,
-  # narrower far away -- capped by yaw_acquire_max_deg and floored by the ~11.5 deg
-  # the platform physically cannot improve on (half a minimum burst plus its coast).
-  #
-  #   radius 0.20 m  ->  0.5 m: 23.6 deg | 1.5 m: 11.5 deg | 3.0 m: 11.5 deg
-  #   radius 0.51 m  ->  0.5 m: 35 deg   | 1.5 m: 20.0 deg | 3.0 m: 9.8 deg
-  #
-  # KEEP THIS BELOW the waypoint acquisition radius (pos_acquisition_radius, 0.3).
-  # The gate only promises to pass within THIS distance of the waypoint, so a
-  # tolerance wider than the capture radius means the drone sails past waypoints
-  # without ever entering the radius that counts as reaching them: they stop being
-  # acquired at all, and are only retired once they are 100 deg behind
-  # (passed_bearing_deg). 0.51 (a ~20 deg gate) was tried on the real drone and
-  # flew WORSE in exactly that way, hence back at 0.20.
-  # Note yaw_acquire_max_deg is NOT the knob here: it only binds inside ~0.3 m, so
-  # changing it alone does almost nothing at cruise.
-  yaw_acquisition_radius: 0.2    # cross-track tol (m); MUST stay < pos_acquisition_radius
-  yaw_acquire_max_deg: 35.0      # hard cap the gate will ever accept
-  # The matching decision for the NEXT leg once a waypoint is retired: glide on if
-  # its bearing is within this, else brake and re-align. Keep it in step with the
-  # gate above. RADIANS, not degrees. 0.25 is the follower's own long-standing
-  # default; it is declared here only so it is tunable without editing the launch.
-  skip_yaw_thresh: 0.25          # rad; 0.25 = 14.3 deg
-
-  # -- GO gate: nothing reaches the drone until you say so --
-  # false = the whole pipeline runs (BEV, A*, detector, selection) but NOT ONE velocity
-  # command is sent until GO, so you can launch before/while taking off by hand without
-  # the stack fighting you. Press GO (or g) in the director window, or:
+  # ==================================================================================================
+  # THE GO GATE  --  nothing reaches the drone until you say so
+  # ==================================================================================================
+  # false = the whole pipeline runs (BEV, A*, detector, selection) but NOT ONE
+  # velocity command is sent until GO, so you can launch before or while taking off
+  # by hand without the stack fighting you. Press GO (or g) in the director window, or:
   #   rostopic pub -1 /mission/go std_msgs/Bool "data: true"
-  # Set true to fly as soon as an object is selected, as before the gate existed.
-  start_go: false
-  go_topic: /mission/go
+  start_go: false             # true = fly as soon as an object is selected
+  go_topic: /mission/go       # topic the gate listens on
   zero_on_close: true         # one zero twist when GO->false (a stop, not a hold)
 
-  # -- Lost-localization recovery: what to do when the drone stops knowing where it is --
-  # The AprilTag pose only exists while a tag is IN VIEW. Walk behind a pillar and
-  # /xtend/localization simply stops publishing -- but every consumer keeps its last
-# value, so the drone happily keeps flying toward where it was seconds ago. This
-  # watches the pose and, when it goes cold, takes the drone off the follower:
-  #   persist  -> finish the move that was interrupted (see below)
-  #   stale_s  -> STOP and hold (cheap, instantly undone; ~2 frames at 7 Hz)
-  #   ladder_s -> back up, settle, back up, settle, climb, settle, climb, settle,
-  #               then a slow 360 sweep looking for any tag
+  # ==================================================================================================
+  # CONTROL  --  how the drone flies the route it was given
+  # ==================================================================================================
+  # Four controllers. All hold altitude; they differ in which axes they use.
+  #   1. waypoint     one axis at a time: a pure forward advance OR a pure in-place
+  #                   yaw, never both. The legacy follower.  <- what this mission flies
+  #   2. roll_assist  the SAME nav as waypoint, plus a cross-track ROLL that pulls the
+  #                   drone back onto its line when it drifts sideways.
+  #   3. multi_axis   forward + lateral + yaw together: crabs (ROLL) for small offsets
+  #                   and yaws only past a deadband, sparing the noisy yaw axis.
+  #   4. pure_pursuit splines the path and tracks a moving lookahead point.
+  # Each has its OWN speed dials below, so a value in the wrong block does nothing.
+  controller: waypoint        # waypoint | roll_assist | multi_axis | pure_pursuit
+                              #   NOTE: real_drone.launch defaults to roll_assist, but the
+                              #   object mission has always pinned waypoint. Set it here.
+  cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight
+                              #   peak (bev_z_peak) follows it
+
+  # -- Speeds for controllers 1 & 2 (waypoint / roll_assist) -----------------------------------------
+  # These are IGNORED under pure_pursuit, which has its own pair below.
+  # The one-axis follower never translates and rotates at the same time, so the two
+  # are fully independent: vel_x is the speed of every straight leg, yaw_rate the
+  # speed of every corner. yaw_rate is not a continuous controller either -- the
+  # follower turns in discrete bursts (pulse -> settle -> re-measure) and this is the
+  # rate DURING a burst. There is no reverse speed: the follower turns to face a
+  # waypoint rather than backing toward one.
+  vel_x: 0.25                 # m/s, forward speed on every straight leg
+  yaw_rate: 0.65              # rad/s, rotation speed during a turn burst. 0.65 is the
+                              #   XTEND yaw calibration point: the converter scales
+                              #   |wz|/0.65*1000, so anything above this clamps to full
+                              #   thrust and turns no faster -- it only makes the burst
+                              #   grading assume a bigger tick angle than the drone flies
+  yaw_pitch_bias: 0.05        # m/s forward ridden on a turn-in-place so it bites instead
+                              #   of coasting flat; added to turns only. 0 = pure yaw
+  yaw_burst_grade_max_ticks: 8  # longest single yaw burst, in ticks. Bigger = a large turn
+                              #   finishes in fewer stop-settle cycles, but more angle is
+                              #   swept open-loop before the next measurement
+
+  # -- When the follower stops turning and starts flying (the ADVANCE gate) --------------------------
+  # Not a fixed angle: it advances as soon as flying straight would still pass within
+  # yaw_acquisition_radius of the waypoint, so the accepted heading error is wider up
+  # close and narrower far away.
+  yaw_acquisition_radius: 0.2   # m, cross-track tolerance. MUST stay below the 0.3 m
+                                #   capture radius, or the drone sails past waypoints
+                                #   without ever entering the radius that retires them
+  yaw_acquire_max_deg: 35.0     # hard cap on the heading error the gate will ever accept
+  skip_yaw_thresh: 0.25         # rad (0.25 = 14.3 deg); on retiring a waypoint, glide
+                                #   straight on if the next bearing is within this, else
+                                #   brake and re-align. Keep in step with the gate above
+
+  # -- Speeds for controller 4 (pure_pursuit) --------------------------------------------------------
+  # This block REPLACES vel_x / yaw_rate: pure pursuit ignores those entirely, so
+  # changing vel_x does nothing while pure_pursuit is selected.
+  pp_cruise_speed: 0.2        # m/s, nominal AND top speed (the profile only scales down)
+  pp_max_yaw_rate: 0.35       # rad/s cap = the force of a left/right turn. Every real turn
+                              #   saturates it; gentle corrections stay below and are unchanged
+  pp_yaw_rate_smoothing: 0.3  # EMA into that rate (lower = softer onset, slower to commit)
+  pp_holonomic: false         # false = unicycle: yaw does all the turning, no roll. true
+                              #   crabs sideways toward the lookahead -- uncapped here, and
+                              #   the worst direction to move blind, since the camera and
+                              #   the BEV map both look FORWARD
+
+  # ==================================================================================================
+  # A* GLOBAL PLANNER  --  the route through the BEV map
+  # ==================================================================================================
+  # Defaults mirror the launch files exactly -- editing one here changes the run;
+  # commenting it out falls back to the same value. See nav_stack.launch for the full
+  # per-parameter reasoning. (NavDP, used by the other nav_modes, has no knobs here:
+  # it is configured on its own inference server.)
+
+  # -- Wall standoff, in three tiers. Read these four keys together ----------------------------------
+  #   inflate_radius_m  PREFERRED. What we fly whenever the map allows.
+  #   inflate_floor_m   FLYABLE FLOOR. A pinch relaxes down this ladder in
+  #                     relax_step_m rungs and flies the first rung that fits.
+  #   probe_radius_m    DIAGNOSTIC ONLY, NEVER FLOWN. Re-derives the whole route with
+  #                     almost no standoff purely to answer "is this blockage even
+  #                     real?" -- a passage that only opens there was closed by noise.
+  # Every replan restarts at inflate_radius_m, so a squeeze is never sticky. Do NOT
+  # lower inflate_radius_m to "make planning work": that gives it up everywhere,
+  # including the wide corridors where it was free. Let the ladder do it.
+  inflate_radius_m:              0.3   # m, preferred standoff: the drone CENTRE never
+                                       #   plans closer than this to a confirmed obstacle
+  inflate_floor_m:               0.20  # m, lowest flyable standoff -- the ladder stops here
+                                       #   because below it is genuinely dangerous
+  relax_step_m:                  0.05  # m, granularity of that ladder
+  probe_radius_m:                0.10  # m, diagnostic-only standoff; 0 = off
+
+  # -- Cost shaping: what the search prefers, short of blocking it -----------------------------------
+  clearance_weight:              3.0   # SOFT wall avoidance: extra cost peaking at the
+                                       #   lethal boundary, so routes ride corridor centres
+                                       #   when there is room. 0 = binary free/blocked
+  clearance_margin_m:            0.8   # m, how far past the standoff that soft cost fades
+  unknown_blocked:               false # true = UNKNOWN ("gray") cells are impassable
+  unknown_cost:                  6.0   # cost of crossing gray; keep above 1 + clearance_weight,
+                                       #   else a route prefers gray to a cell near a wall
+  lethal_confidence:             0.5   # BEV evidence an OCCUPIED cell needs to BLOCK. Below it
+                                       #   the cell only costs soft_obstacle_cost, so single-frame
+                                       #   speckle cannot make the map infeasible. 0 = all block
+  soft_obstacle_cost:            25.0  # cost of an OCCUPIED cell that did not reach it
+  turn_penalty:                  0.3   # extra cost per direction change; discourages zig-zag
+                                       #   and staircase corners, so fewer in-place yaws
+  heading_penalty_m:             1.5   # m of extra path charged for a route that turns the
+                                       #   drone AROUND at the start, so A* flies the way it
+                                       #   already looks instead of spinning. 0 = off
+
+  # -- Search window and waypoint output -------------------------------------------------------------
+  connectivity:                  4     # grid neighbours: 4 | 8
+  search_margin_m:               3.0   # m of margin around the start/goal box the search may use
+  goal_snap_radius_m:            2.0   # m; if the goal cell is blocked, snap to the nearest free one
+  start_skip_m:                  0.5   # m; drop leading waypoints this close to the drone
+  waypoint_spacing_m:            1.0   # m, target spacing between output waypoints
+  los_smoothing:                 false # thin the path (Douglas-Peucker, shape-preserving) first
+  min_free_cells_to_plan:        80    # warmup gate: do not plan until the map has this many
+                                       #   free cells, so the drone never cruises a blind map
+
+  # -- Corner rounding: chamfer corners so the follower can glide them -------------------------------
+  corner_round:                  false # master switch for this block
+  corner_merge_deg:              8.0   # drop interior vertices that turn less than this
+  corner_max_turn_deg:           14.0  # corners gentler than this are already glide-able
+  corner_chamfer_max_deg:        28.0  # corners up to this are chamfered into two half-angle
+                                       #   turns; sharper ones are kept as genuine turns
+  corner_chamfer_dist_m:         0.5   # m, how far back from a corner to cut it
+  corner_min_runup_m:            0.6   # m, minimum straight leg on both sides to allow a chamfer
+
+  # -- Replanning: SMART mode (event-driven, the default) --------------------------------------------
+  # The committed route is FROZEN and re-evaluated only on: a confirmed collision, a
+  # large map discovery, a large yaw swing, or a periodic tick. All but the collision
+  # must also beat the committed route by replan_improve_frac, so the slow
+  # stop-and-turn drone is not whipsawed by a route A* re-optimises every map frame.
+  smart_replan:                  true  # false restores the legacy timer + hooks below
+  replan_collision_confirm:      4     # consecutive colliding BEV frames before a collision
+                                       #   replan (debounces single-frame depth noise)
+  stop_on_blocked_plan_fail:     true  # confirmed obstacle with NO route around it => STOP,
+                                       #   instead of leaving the colliding route latched
+  replan_corridor_radius_m:      1.0   # m, half-width of the route corridor for the discovery test
+  replan_min_new_cells:          60    # changed corridor cells needed to consider a replan
+  replan_min_new_cells_any:      240   # changed cells ANYWHERE (an off-corridor reveal can open
+                                       #   a shortcut); higher floor. 0 disables
+  replan_rotation_min_deg:       30.0  # yaw swing since the last evaluation that re-checks the
+                                       #   route (the camera swept new terrain). 0 disables
+  replan_period_s:               5.0   # s, catch-all: re-evaluate this long after the last
+                                       #   evaluation even with no other trigger. 0 disables
+  # The periodic tick ADOPTS what it finds with no length test: that candidate is
+  # re-derived from where the drone IS against the map as it is NOW, so even an
+  # equal-length route is better information than one committed from a pose the drone
+  # has left -- and a route made safer by walls discovered since is often longer.
+  replan_periodic_always:        true  # false makes the periodic tick obey the length test too
+  replan_commit_min_s:           3.0   # s, keep flying a committed route at least this long
+                                       #   before reconsidering it (a collision bypasses this)
+  replan_improve_frac:           0.15  # adopt a discovery route only if it is this fraction
+                                       #   shorter than what remains (kills L/R flip-flop)
+  replan_relaxed_period_s:       4.0   # s, faster replan cadence when the route was SQUEEZED,
+                                       #   rising to replan_period_s at full clearance
+
+  # -- Replanning: LEGACY mode (only when smart_replan: false) ---------------------------------------
+  plan_period_s:                 10.0  # s, strict A* timer; the trajectory is frozen between ticks
+  replan_on_collision:           false # also replan mid-cycle when the route collides
+  replan_on_bev:                 false # also replan mid-cycle on every new BEV map
+  replan_on_predicted_collision: false # replan when the follower's PREDICTED stop-and-turn
+                                       #   trajectory collides even if the path does not
+  max_predicted_replans:         3     # consecutive cap on those predicted-collision replans
+
+  # ==================================================================================================
+  # BEV MAP  --  the occupancy grid A* searches
+  # ==================================================================================================
+  # Built by projecting the depth point cloud down into 2D cells. Each stage below is
+  # a toggle -- set a gate to its "off" value to isolate one idea. The defaults
+  # already de-noise the map out of the box.
+
+  # -- Geometry, publishing and runtime --------------------------------------------------------------
+  bev_resolution:             0.10        # m per cell; MUST match FALCON voxel_mapping
+                                          #   resolution_fine, or narrow openings quantize shut
+  bev_xmin:                   -6.0        # m, map bounds in the world frame
+  bev_ymin:                   -6.0
+  bev_xmax:                   6.0
+  bev_ymax:                   6.0
+  bev_bbox_margin:            1.0         # m, only used if the bounds above are removed
+  bev_publish_hz:             10.0        # caps the recompute + publish rate
+  bev_occ_dilate:             0           # extra OCC inflation in cells (the planner also inflates)
+  bev_always_recompute:       false       # recompute every tick vs only on a new cloud
+  bev_skip_unchanged_publish: true        # do not republish a map that did not change
+
+  # -- Stage 1: which slice of each column counts, and how much --------------------------------------
+  bev_z_floor:                0.90        # m, bottom of the height band considered. A wide band
+                                          #   is deliberate: walls reconstruct densely below
+                                          #   cruise_z, a thin slice starves the side walls
+  bev_z_ceil:                 1.50        # m, top of that band
+  # bev_z_peak:                           # the most-trusted height; follows cruise_z (set that)
+  bev_weight_profile:         triangular  # how weight falls off from the peak: triangular | gaussian | flat
+  bev_weight_sigma:           0.50        # gaussian width (profile: gaussian only)
+  # bev_voxel_size:                       # follows bev_resolution
+  bev_occ_weight_thresh:      2.0         # minimum weighted column mass for a cell to read OCC
+  bev_min_occ_voxels:         4           # AND minimum raw voxel count for OCC
+  bev_min_free_voxels:        1           # minimum voxels for a cell to read FREE
+
+  # -- Stage 2: 3D neighbour confirm -- drops isolated depth speckle ---------------------------------
+  bev_confirm_3d:             true        # master switch for this block
+  bev_neighbors_3d:           6           # neighbourhood size: 6 | 18 | 26
+  bev_min_occ_neighbors_3d:   1           # occupied neighbours a voxel needs to survive;
+                                          #   raise (e.g. 2) with 26 to kill streaks
+
+  # -- Stage 3: speck removal -- a wall is a LINE, a small clump is noise ----------------------------
+  # Kills the phantom voxel FALCON leaves in a turn opening: it blocks the planner, but
+  # the drone can never route to it to re-observe it free, so the mission deadlocks.
+  bev_min_wall_run:           3           # keep only components with this many cells in a
+                                          #   straight run (H/V/diagonal); 0 = off
+  bev_min_component_cells:    0           # secondary area gate by total cell count; 0 = off
+  bev_component_connectivity: 8           # 4 | 8; 8 keeps an L-corner as one component
+
+  # -- Stage 4: opening protection -- never wall a door that is open ---------------------------------
+  bev_protect_openings:       true        # master switch for this block
+  bev_door_band_m:            0.80        # m, z-band around the peak height inspected for openness
+  bev_door_free_voxels:       2           # free voxels in that band => it is an opening
+  bev_door_occ_tol:           0           # occupied voxels tolerated in that band
+
+  # -- Stage 5: wall completion -- bridge FOV / occlusion gaps in a wall -----------------------------
+  bev_wall_fill_mode:         directional # off | directional | count
+  bev_wall_fill_neighbors:    5           # occupied neighbours needed to fill (count mode only)
+  bev_wall_fill_iters:        1           # max bridge width in cells; keep small (1-2)
+
+  # -- Stage 6: temporal confirmation -- seen occupied across several clouds -------------------------
+  # Evidence rises by t_inc while a cell is seen occupied and bleeds by t_dec while it
+  # is seen free; the cell reads OCC above t_on and clears below t_off. The two rails
+  # make it a Schmitt trigger, so it does not flicker. This is what rejects the
+  # view-dependent monocular-depth speckle FALCON leaks into corridor openings.
+  bev_temporal_filter:        true        # master switch for this block
+  bev_occ_conf_full:          3.0         # column mass counting as full per-frame confidence.
+                                          #   MUST be > bev_occ_weight_thresh; raise to make
+                                          #   persistent peripheral speckle harder to confirm
+  bev_t_inc:                  1.0         # evidence added per cloud, scaled by that confidence
+  bev_t_dec:                  1.0         # evidence bled per cloud a cell is seen FREE
+  bev_t_max:                  5.0         # evidence cap = how long a confirmed wall is remembered
+  bev_t_on:                   2.0         # evidence needed to confirm OCC (~2 clouds of solid wall)
+  bev_t_off:                  0.5         # evidence at which the cell clears again
+
+  # ==================================================================================================
+  # PATH CORRECTION  --  pushing the raw route off the walls
+  # ==================================================================================================
+  # A route is only as good as the grid it was searched on, so a corner can end up
+  # hugging the inside wall. The corrector re-centres each waypoint against the BEV
+  # and publishes the SAFE path; the simplifier below then cleans that into what is
+  # actually flown. In the BEV viewer: red = raw planner, magenta = safe, green = flown.
+  # It is planner-agnostic -- it corrects A* and NavDP paths alike.
+  #
+  # Two strategies, picked by `corrector`. Only the matching block applies:
+  #   1. potential_field  each waypoint is pushed away from walls by a repulsive field
+  #   2. esdf             each waypoint climbs the distance-to-wall field toward the
+  #                       middle of the corridor
+  safety_correct:            true          # false makes the corrector a passthrough (fly raw)
+  corrector:                 potential_field  # potential_field | esdf
+  resample_min_spacing_m:    0.3           # m; thin a dense input path to this BEFORE correcting,
+                                           #   so near-coincident waypoints cannot be pushed
+                                           #   opposite ways. No-op for A*; 0 disables
+
+  # -- 1. Potential field (APF), used when corrector: potential_field --------------------------------
+  apf_centering:             line_search   # line_search = move each waypoint to the lateral
+                                           #   potential minimum (single-pass) | descent = legacy
+  apf_gain:                  0.4           # repulsive-force scale; DESCENT MODE ONLY
+  apf_max_total_shift_m:     0.3           # m, hard cap on how far one waypoint may move --
+                                           #   the main "visible shift" lever
+  apf_min_clearance_m:       0.2           # m; >0 also pushes waypoints out to this distance
+
+  # -- 2. ESDF, used when corrector: esdf ------------------------------------------------------------
+  esdf_target_clearance_m:   0.2           # m from walls to stop at; 0 = ride the ridge (middle)
+  esdf_max_total_shift_m:    0.5           # m, cap on a waypoint's total displacement off the path
+  esdf_max_step_m:           0.2           # m, cap on one ascent step
+  esdf_iterations:           12            # max ascent steps per waypoint
+  esdf_lateral_only:         true          # push perpendicular to the path only (no fore/aft slide)
+  esdf_smooth_sigma_m:       0.1           # m of blur on the distance field for a clean gradient
+  esdf_occ_thresh:           0.65          # occupancy above which a cell counts as a wall
+
+  # -- Shared by both strategies ---------------------------------------------------------------------
+  apf_collision_recheck:     true          # revert to the raw path if the corrected one collides
+  apf_treat_unknown_as_free: true          # also re-centre waypoints over UNKNOWN cells (they are
+                                           #   pushed only by known walls); false freezes them
+  apf_unknown_damping:       true          # dampen the correction near unknown cells, where there
+                                           #   is no opposing wall to balance the push
+  apf_unknown_radius_m:      0.5           # m, window whose known-cell fraction scales that damping
+  # apf_debug:               true          # per-waypoint push logging; follows the master `debug`
+                                           #   switch unless uncommented here
+
+  # -- Force visualisation (BEV / RViz only, no effect on flight) ------------------------------------
+  publish_forces:            true          # draw the repulsive force at each waypoint as an arrow
+  force_arrow_scale:         0.5           # arrow length = this * force
+  publish_force_field:       true          # also draw a coarse force field over the free cells (gold)
+  force_field_stride:        4             # field arrow spacing in cells (4 = every 0.4 m at 0.1 m)
+
+  # ==================================================================================================
+  # TRAJECTORY SIMPLIFIER  --  cleaning that path into what is flown
+  # ==================================================================================================
+  # Runs after the corrector and owns the flown route. Four passes, each validated
+  # against the map: a move that would clip an obstacle is rejected, so a genuinely
+  # required tight corner always survives.
+  #
+  # 1) merge near-duplicates = the HARD FLOOR: no two flown points end up closer than
+  #    this, even at a turn (a tight cluster the field left is noise, not several turns)
+  simplify_merge:               true
+  simplify_merge_radius_m:      0.20        # m, that floor
+  # 2) flatten field-induced zig-zags: a kinked middle point is pulled back toward the
+  #    line between its neighbours (kept, not deleted)
+  simplify_zigzag:              true
+  simplify_zigzag_angle_deg:    60.0        # heading change above which a point is a zig-zag
+  simplify_zigzag_strength:     0.5         # 0..1, how far it is pulled toward that line
+  simplify_zigzag_passes:       1           # how many times to repeat the pass
+  # 3) drop redundant collinear middles ("same plane"), without coarsening the path
+  simplify_collinear:           true
+  simplify_collinear_angle_deg: 10.0        # heading change below this = same plane
+  simplify_max_segment_m:       3.0         # m, never drop a point if the bypass leg exceeds this
+  # 4) min spacing on the straights = the SOFT FLOOR: thin straights out, but let
+  #    genuine turns sit closer where they must (never below the hard floor in 1)
+  simplify_min_spacing:         true
+  simplify_min_spacing_m:       1.0         # m, target spacing along a straight
+  simplify_turn_keep_deg:       25.0        # turns sharper than this may sit closer than that
+  # simplify_debug:             true        # per-cycle in->out waypoint counts; follows the
+                                            #   master `debug` switch unless uncommented here
+
+  # ==================================================================================================
+  # LOST-LOCALIZATION RECOVERY  --  when it stops knowing where it is
+  # ==================================================================================================
+  # The AprilTag pose only exists while a tag is IN VIEW. Walk behind a pillar and the
+  # pose topic simply stops publishing -- but every consumer keeps its last value, so
+  # the drone happily keeps flying toward where it was seconds ago. This watches the
+  # pose and, when it goes cold, takes the drone off the follower in stages:
+  #   persist  -> finish the move that was interrupted
+  #   stale_s  -> STOP and hold (cheap, instantly undone)
+  #   ladder_s -> back up, settle, climb, settle, then a slow 360 looking for any tag
   #   nothing worked -> land (stop -> land -> disarm)
   # Any fresh pose at any point abandons the ladder and hands the drone straight back.
-  # The gap between the two thresholds is the point: a routine one-frame tag dropout
-  # must never provoke the ladder's metre-scale blind retreat. It costs at most the
-  # persist below -- a fraction of a second of the move that was already in flight.
-  recovery_enabled: true
-  recovery_stale_s: 0.3       # pose this old (s) => STOP. Lower = twitchier.
-  recovery_ladder_s: 1.0      # ...and still this old => start manoeuvring. > stale_s.
-  #
-  # Persist: what to do in the INSTANT the tag goes, before any of the above. Most
-  # dropouts are caused by the move that was under way and are undone by finishing
-  # or reversing it -- and at that instant we still know which move it was.
-  #   mid-TURN    -> keep turning, same direction, at the navigator's own rate. The
-  #                  tag left the frame because we rotated it out, so the next one is
-  #                  often already swinging in; stopping dead strands the camera
-  #                  pointed at the one heading we know is empty. Losing it during
-  #                  the settle BETWEEN two yaw bursts counts as mid-turn -- the
-  #                  drone is stationary but is still in a turn.
-  #   mid-ADVANCE -> the opposite: give the metres back. Losing a tag while flying at
-  #                  it means we flew too close, so continuing is the one thing that
-  #                  cannot help. Reverses at the speed we advanced at, capped by
-  #                  recovery_back_speed.
-  # Either way the drone then holds still and looks, and if the pose comes back the
-  # recovery never happens at all. If it does not, the ladder runs exactly as before
-  # -- delayed by the persist plus the look, never replaced.
-  recovery_persist_enabled: true
-  recovery_persist_turn_s: 0.8    # ~3 of the follower's commands' worth of turn
-  recovery_persist_back_s: 0.4    # at ~0.3 m/s cruise, ~0.18 m given back
-  #
-  # Retreat: the FIRST rung, and the most likely to work -- we were standing
-  # somewhere with a tag in view seconds ago, so go back there. Worth enough
-  # distance to actually leave the spot that lost the tag; too short and the drone
-  # just sits in the same bad place. Unlike the climb, this axis IS what the thrust
-  # scale was calibrated against (0.3 m/s = the reference point), so these numbers
-  # mean roughly what they say: 0.30 x 1.5s = ~0.45 m per rung, run twice = ~0.9 m.
-  # NOTHING checks what is behind the drone (the map is forward-looking and is
-  # starved of poses while lost); it is only safe because it retraces ground just
-  # flown, so keep the total inside how far the drone has actually come.
-  recovery_back_speed: 0.2       # m/s, backward flight speed during recovery
-  recovery_back_duration_s: 1.0   # per rung; 2 rungs by default
-  # Climb rungs need the platform to honour linear.z, which on XTEND depends on which
-  # Twist converter is running: online_nav_bridge's in-process one honours it, while
-  # the standalone xtend_twist_to_cmd_nav.py drops it unless started with
-  # --allow-multi-axes (a dropped axis is silent -- the drone just does not rise).
-  # Set false if the climb cannot work: the ladder then skips those rungs rather than
-  # spending ~5s going nowhere.
-  recovery_climb_enabled: false
-  #
+  # The gap between the two thresholds is the point: a routine one-frame dropout must
+  # never provoke the ladder's metre-scale blind retreat.
+  recovery_enabled:          true
+  recovery_stale_s:          0.3   # s; a pose this old => STOP. Lower = twitchier
+  recovery_ladder_s:         1.0   # s; ...and still this old => start manoeuvring. > stale_s
+
+  # -- Persist: finish the move that was in flight, before anything else -----------------------------
+  # Most dropouts are caused by that move and are undone by finishing or reversing it,
+  # and at that instant we still know which move it was. Mid-TURN we keep turning the
+  # same way (the tag was rotated out of frame, so the next is often already swinging
+  # in, and stopping dead strands the camera on the one heading we know is empty).
+  # Mid-ADVANCE we do the opposite and give the metres back: losing a tag while flying
+  # at it means we flew too close, so continuing is the one thing that cannot help.
+  recovery_persist_enabled:  true
+  recovery_persist_turn_s:   0.8   # s of continued turn (~3 of the follower's commands)
+  recovery_persist_back_s:   0.4   # s of reversal (~0.18 m given back at cruise)
+
+  # -- Rung 1, retreat: go back where a tag was visible seconds ago ----------------------------------
+  # The most likely rung to work, and worth enough distance to actually leave the spot
+  # that lost the tag. NOTHING checks what is behind the drone; this is only safe
+  # because it retraces ground just flown, so keep the total inside how far it has come.
+  recovery_back_speed:       0.2   # m/s, backward speed
+  recovery_back_duration_s:  1.0   # s per rung; 2 rungs run
+
+  # -- Rung 2, climb: OFF unless the platform honours linear.z ---------------------------------------
   # MIND THE CEILING. recovery_climb_speed is a THRUST dial, not a speed: the vertical
-  # axis is scaled by the FORWARD calibration (|v|/0.3*400) and there is no vertical
-  # constant anywhere -- XTEND climbs far harder at a given number than it flies
-  # forward at it. The height actually gained is well ABOVE speed*duration, because
-  # commands are hold-style and the drone keeps rising through the stop, and nothing
-  # in this stack measures altitude to catch the overshoot. (0.20/1.0 put the drone
-  # into the ceiling from cruise_z 1.0; these are ~6x gentler.) Two rungs run, each
-  # with its own overshoot -- budget for both against your real headroom, and raise
-  # these only against a climb you have actually measured.
-  recovery_climb_speed: 0.08       # thrust dial (m/s nominal), NOT a real climb rate
-  recovery_climb_duration_s: 0.2   # per rung; 2 rungs by default
-  # Which way the final 360 sweeps: left | right. RIGHT by default -- field-tested:
-  # it is the side that actually re-acquires a tag on this airframe. The sweep is a
-  # search, so the direction that finds one soonest is the whole point of it.
-  recovery_turn_dir: right
-  # How hard it sweeps. RAD/S, the same unit as yaw_rate above, so the airframe's
-  # two rotation dials can be read against each other directly.
-  # This number has a FLOOR as well as a ceiling, and the floor is the one that
-  # bites: too low and the commanded yaw never overcomes the airframe, so the drone
-  # barely rotates -- and a sweep that never swept looks exactly like a sweep that
-  # found nothing. Kept under yaw_rate all the same, because motion blur is what
-  # defeats a tag detection.
-  recovery_turn_rate: 0.7        # rad/s, rotation speed during the recovery sweep
+  # axis is scaled by the FORWARD calibration, and XTEND climbs far harder at a given
+  # number than it flies forward at it. The height actually gained is well above
+  # speed x duration, and nothing in this stack measures altitude to catch it. Two
+  # rungs run, each with its own overshoot -- budget for both against your headroom.
+  recovery_climb_enabled:    false # false = skip these rungs rather than go nowhere
+  recovery_climb_speed:      0.08  # thrust dial (nominal m/s), NOT a real climb rate
+  recovery_climb_duration_s: 0.2   # s per rung; 2 rungs run
 
-  # -- Windows (all need a display) --
-  viewer: false                # target-lock HUD
-  bev_viewer: true            # interactive BEV window
-  publish_overlay: false
+  # -- Rung 3, the 360 sweep: look for any tag at all ------------------------------------------------
+  recovery_turn_dir:         right # left | right; right re-acquires tags on this airframe
+  recovery_turn_rate:        0.7   # rad/s (same unit as yaw_rate). Has a FLOOR as well as a
+                                   #   ceiling, and the floor bites: too low and the drone
+                                   #   barely rotates, which looks just like finding nothing
 
-  # -- Debug logging (ONE switch for the whole stack) --
-  # false = console shows real events only: plans, replans, squeezes, failures.
-  # true  = adds the chatty per-cycle traces (per-waypoint potential-field
-  #         pushes, per-cycle waypoint counts) used when tuning the corrector or
-  #         the simplifier. They are verbose enough to bury everything else, so
-  #         keep this off in flight and turn it on for a tuning session.
-  # To trace ONE subsystem, leave this false and set that flag alone on the
-  # command line, e.g.:  ./run_object_mission.sh apf_debug:=true
+  # ==================================================================================================
+  # HARDWARE  --  localization topic and camera intrinsics
+  # ==================================================================================================
+  real_pose_topic: /xtend/localization  # must match what actually publishes your world pose
+  real_pose_type: pose_stamped          # message type on that topic
+
+  # Camera intrinsics -- shared by the map AND the detector; keep them in sync.
+  cam_fx: 322.6351083474948   # focal length x, px
+  cam_fy: 323.3893307141174   # focal length y, px
+  cam_cx: 242.06479658679714  # principal point x, px
+  cam_cy: 90.03019076680604   # principal point y, px
+  cam_width: 504              # image width, px
+  cam_height: 294             # image height, px
+
+  # ==================================================================================================
+  # WINDOWS AND LOGGING  --  no effect on how the drone flies
+  # ==================================================================================================
+  # -- Windows (all need a display) ------------------------------------------------------------------
+  viewer: false               # target-lock HUD window
+  bev_viewer: true            # interactive BEV window: map, routes, click-to-goal, status
+  publish_overlay: false      # publish the HUD overlay as a topic (needs no display)
+
+  # -- Debug logging: ONE switch for the whole stack -------------------------------------------------
+  # false = the console shows real events only: plans, replans, squeezes, failures.
+  # true  = adds the chatty per-cycle traces (per-waypoint field pushes, per-cycle
+  #         waypoint counts) used when tuning the corrector or the simplifier. They
+  #         are verbose enough to bury everything else, so keep this off in flight.
+  # To trace ONE subsystem, leave this false and set that flag alone on the command
+  # line, e.g.:  ./run_object_mission.sh apf_debug:=true
   debug: false
 
-  # -- Drone "thinking": the stack's own account of WHY it acted --
-  # Every node narrates its decisions ("no route at 0.40m, flying a 0.25m
-  # squeeze", "obstacle confidence 0.4 < 0.75, keeping the route and looking
-  # again"). Two independent switches, BOTH OFF by default:
-  #
-  #   thinking_log     append every thought to one file for the run, so after
-  #                    landing you can read what the planner was thinking rather
-  #                    than having had to watch for it. Each node writes the file
-  #                    itself, flushed per line, so a kill or a flat battery
-  #                    still leaves the record. Costs no window and no display.
-  #   thinking_window  the live "drone thinking" window beside the BEV map.
-  #                    Needs a display, so leave it off for a headless Jetson
-  #                    run -- the log above is the durable record either way.
-  #
-  # Under run_falcon.sh the log lands on the HOST in falcon/logs/ (the container
-  # is --rm, so a log written inside it would die with the run). Set
-  # thinking_log_path to choose the file yourself.
-  thinking_log: false
-  thinking_window: false
-  # thinking_log_path: /falcon_logs/my_flight.log
-
-  # -- Localization: must match what actually publishes your world pose --
-  real_pose_topic: /xtend/localization
-  real_pose_type: pose_stamped
-
-  # -- Camera intrinsics: shared by the map AND the detector; keep them in sync --
-  cam_fx: 322.6351083474948
-  cam_fy: 323.3893307141174
-  cam_cx: 242.06479658679714
-  cam_cy: 90.03019076680604
-  cam_width: 504
-  cam_height: 294
-
-  # ══════════════════════════════════════════════════════════════════
-  # Below: the nav-stack parameters (A*, BEV, corrector, APF).
-  # Defaults mirror the launch files exactly -- editing one here changes the
-  # run; commenting it out falls back to the same value. See nav_stack.launch
-  # for the full per-parameter reasoning.
-  # ══════════════════════════════════════════════════════════════════
-
-  # ---- A* planner -- route search, replanning, corner handling (30) ----
-  #
-  #   WALL STANDOFF, in three tiers. Read these four keys together:
-  #
-  #     inflate_radius_m 0.40   PREFERRED. What we fly whenever the map allows.
-  #     inflate_floor_m  0.25   FLYABLE FLOOR. A pinch relaxes 0.40 -> 0.35 ->
-  #                             0.30 -> 0.25 and flies the first rung that fits.
-  #                             Below 0.25 is dangerous, so nothing flies there.
-  #     probe_radius_m   0.10   DIAGNOSTIC ONLY, NEVER FLOWN. Re-derives the whole
-  #                             route with almost no standoff purely to answer
-  #                             "is this blockage even real?". A passage that only
-  #                             opens at 0.10 was closed by noise, not by a wall.
-  #     relax_step_m     0.05   granularity of the 0.40 -> 0.25 ladder.
-  #
-  #   Every replan restarts at 0.40, so a squeeze is never sticky. Do NOT lower
-  #   inflate_radius_m to "make planning work" -- that gives up 0.40 everywhere,
-  #   including the wide corridors where it was free. Let the ladder do it.
-  #
-  waypoint_spacing_m:            1.0
-  inflate_radius_m:              0.3          # PREFERRED standoff (m); the drone CENTRE never plans closer than...
-                                               # ...this to a confirmed obstacle. Relaxes toward inflate_floor_m ...
-                                               # ...only when the map leaves no other route.
-  unknown_blocked:               false
-  unknown_cost:                  6.0           # keep above 1 + clearance_weight, else a route prefers gray to a ...
-                                               # ...known-free cell that merely passes near a wall
-  clearance_weight:              3.0           # SOFT wall avoidance: extra cost peaking at the lethal boundary, ...
-                                               # ...fading to 0 clearance_margin_m beyond it. Rides corridor cent...
-                                               # ...res when there is room, still plans a tight leg when there is...
-                                               # ... not. 0 = binary free/blocked
-  clearance_margin_m:            0.8
-  lethal_confidence:             0.5           # BEV evidence an OCCUPIED cell needs to BLOCK. Below it the cell ...
-                                               # ...costs soft_obstacle_cost instead, so single-frame depth speck...
-                                               # ...le cannot make the map infeasible. 0 = every OCCUPIED blocks
-  soft_obstacle_cost:            25.0
-  inflate_floor_m:               0.20          # LOWEST FLYABLE standoff. The ladder stops here because below 0.2...
-                                               # ...5 is genuinely dangerous -- it is the airframe's inscribed ra...
-                                               # ...dius, not a tuning knob. Raise to 0.40 to disable relaxation.
-  relax_step_m:                  0.05
-  probe_radius_m:                0.10          # DIAGNOSTIC ONLY -- NEVER FLOWN, and not a 5th rung of the ladder...
-                                               # ...Once every flyable rung has failed, the route is re-derived e...
-                                               # ...nd to end at this standoff to ask whether the blockage is rea...
-                                               # ...l. If a passage opens here it was closed by depth noise, not ...
-                                               # ...a wall, so the stack holds and re-observes instead of declari...
-                                               # ...ng itself boxed in. Map cells are never auto-cleared. 0 = off
-  replan_relaxed_period_s:       4.0           # replan cadence at inflate_floor_m, rising linearly to replan_per...
-                                               # ...iod_s at 0.40: less clearance = trust the route less
-  los_smoothing:                 false         # now Douglas-Peucker thinning (shape-preserving), no longer the s...
-                                               # ...tring-puller; safe to enable if you want fewer waypoints
-  turn_penalty:                  0.3           # was 0.0; discourage zig-zag/staircase corners so the path needs ...
-  heading_penalty_m:             1.5           # HEADING-AWARE A*: cost (in m of extra path) for a route that tur...
-  connectivity:                  4           
-  search_margin_m:               3.0         
-  start_skip_m:                  0.5         
-  goal_snap_radius_m:            2.0         
-  min_free_cells_to_plan:        80            # SMART replanning (event-driven; the default). The committed rout...
-  smart_replan:                  true        
-  replan_corridor_radius_m:      1.0           # route-corridor half-width for the discovery relevance test (m)
-  replan_min_new_cells:          60            # CHANGED corridor cells (new or flipped free<->occ) needed to consider an opportunistic replan
-  replan_min_new_cells_any:      240           # changed cells ANYWHERE on the BEV (off-corridor changes can still change the best route); 0 disables
-  replan_rotation_min_deg:       30.0          # yaw swing since the last commit/evaluation that re-evaluates the route (mid-turn or just finished); 0 disables
-  replan_period_s:               5.0           # catch-all: re-evaluate this long after the last A* evaluation even with no other trigger; 0 disables
-  # The periodic tick above ADOPTS whatever it finds, with no length test at all.
-  # Length is the wrong question for it: that candidate is re-derived from where the
-  # drone IS, against the map as it is NOW, so even an identical-length route is
-  # better information than one committed from a pose the drone left seconds ago --
-  # and a route made safer by walls discovered since (too few new cells to trip the
-  # discovery trigger, but enough to matter) is often slightly LONGER.
-  # That is also why replan_improve_frac: 0.0 would NOT do this: that gate is still
-  # "new_len <= old_len", so it keeps throwing the safer-but-longer route away.
-  # Rotation and discovery keep the hysteresis below: they can fire back to back, and
-  # the L/R flip-flop this bypass is safe from is exactly what they would cause.
-  # replan_commit_min_s still applies, so the route can never change faster than that.
-  replan_periodic_always:        true          # every replan_period_s, re-route from here regardless of length
-  replan_commit_min_s:           3.0           # keep flying a committed route at least this long before an oppor...
-  replan_improve_frac:           0.15          # adopt a discovery candidate only if it is >= this fraction short...
-  stop_on_blocked_plan_fail:     true          # on a confirmed obstacle with NO route around it, STOP (2-pt hold...
-  replan_collision_confirm:      4             # consecutive colliding BEV frames before a collision replan (debo...
-  plan_period_s:                 10.0          # Optional LEGACY mid-cycle replans: OFF so the trajectory stays f...
-  replan_on_collision:           false       
-  replan_on_bev:                 false         # Corner rounding: merge near-collinear vertices + chamfer moderat...
-  corner_round:                  false       
-  corner_merge_deg:              8.0           # drop interior vertices that turn less than this
-  corner_max_turn_deg:           14.0          # corners gentler than this are already glide-able (pair with skip...
-  corner_chamfer_max_deg:        28.0          # corners up to this are chamfered; sharper ones kept as genuine t...
-  corner_chamfer_dist_m:         0.5         
-  corner_min_runup_m:            0.6           # Dynamics-aware replan: replan when the follower's PREDICTED stop...
-  replan_on_predicted_collision: false       
-  max_predicted_replans:         3             # APF safety recentring: recentre the planner's raw path off walls...
-
-  # ---- BEV map -- the occupancy grid A* searches (39) ----
-  bev_resolution:             0.10          # m / cell; MUST match FALCON voxel_mapping resolution_fine (0.1)....
-  bev_xmin:                   -6.0        
-  bev_ymin:                   -6.0        
-  bev_xmax:                   6.0         
-  bev_ymax:                   6.0         
-  bev_bbox_margin:            1.0           # only used if the bbox_* args are removed (bounds then come from ...
-  bev_publish_hz:             10.0          # was 2.0; caps the recompute+publish rate
-  bev_occ_dilate:             0             # extra OCC inflation in cells (planner also inflates)
-  bev_z_floor:                0.90          # column z-range considered (wide band: walls reconstruct densely ...
-  bev_z_ceil:                 1.50        
-  # bev_z_peak:                              # follows cruise_z (set cruise_z in mission: instead)
-  bev_weight_profile:         triangular    # triangular | gaussian | flat
-  bev_weight_sigma:           0.50          # gaussian width (profile=gaussian)
-  # bev_voxel_size:                          # follows bev_resolution
-  bev_occ_weight_thresh:      2.0           # min weighted column mass for OCC
-  bev_min_occ_voxels:         4             # AND min raw voxel count for OCC
-  bev_min_free_voxels:        1             # min voxels for a cell to read FREE
-  bev_confirm_3d:             true        
-  bev_neighbors_3d:           6             # 6 | 18 | 26
-  bev_min_occ_neighbors_3d:   1             # raise (e.g. 2) with conn=26 to kill streaks
-  bev_min_wall_run:           3             # >=3 consecutive cells to count as a wall; 0 = off
-  bev_min_component_cells:    0             # area gate, off; set e.g. 4 to also drop small blobs by total cel...
-  bev_component_connectivity: 8             # 4 | 8; 8 keeps an L-corner one component
-  bev_protect_openings:       true        
-  bev_door_band_m:            0.80          # z-band around z_peak inspected for openness
-  bev_door_free_voxels:       2             # free voxels in the band => it's an opening
-  bev_door_occ_tol:           0             # max occupied voxels tolerated in the band
-  bev_wall_fill_mode:         directional   # off | directional | count
-  bev_wall_fill_neighbors:    5             # count mode only
-  bev_wall_fill_iters:        1             # max bridge width; keep small (1-2)
-  bev_temporal_filter:        true        
-  bev_occ_conf_full:          3.0           # weighted column mass = full per-frame confidence; per-frame conf...
-  bev_t_inc:                  1.0           # evidence added per cloud, scaled by confidence
-  bev_t_dec:                  1.0           # evidence bled per cloud a cell is seen FREE (opening recovery)
-  bev_t_max:                  5.0           # evidence cap (memory of a confirmed wall)
-  bev_t_on:                   2.0           # evidence to confirm OCC; ~t_on/t_inc clouds of solid wall (~0.6s...
-  bev_t_off:                  0.5           # evidence to clear (Schmitt lower rail)
-  bev_always_recompute:       false         # recompute every tick vs only on a new cloud
-  bev_skip_unchanged_publish: true          # FALCON speed / safety / frontier
-
-  # ---- Path corrector / ESDF / simplifier (22) ----
-  corrector:                    potential_field  # core PathCorrector strategy: potential_field | esdf (raises on a...
-  esdf_target_clearance_m:      0.2           # 0 = centre on the ESDF ridge (corridor middle); >0 = stop once t...
-  esdf_max_total_shift_m:       0.5           # cap on a waypoint's total displacement off the planner path
-  esdf_max_step_m:              0.2           # cap on one ascent step
-  esdf_iterations:              12            # max ascent steps per waypoint
-  esdf_lateral_only:            true          # push perpendicular to the path (no fore/aft slide)
-  esdf_smooth_sigma_m:          0.1           # light blur on the distance field for a clean gradient (0 = none)
-  esdf_occ_thresh:              0.65          # Thin a dense input path to >= this spacing (m) BEFORE correcting...
-  resample_min_spacing_m:       0.3           # ══════════════════════════════════════════════════════════════ T...
-  # simplify_debug:             true          # per-cycle in->out waypoint-count logging. Commented out so it fo...
-                                               # ...llows the master `debug` switch above; uncomment to force it ...
-                                               # ...on (or off) independently of the rest.
-  simplify_merge:               true
-  simplify_merge_radius_m:      0.20          # 2) flatten field-induced zig-zags: a middle point whose heading ...
-  simplify_zigzag:              true        
-  simplify_zigzag_angle_deg:    60.0        
-  simplify_zigzag_strength:     0.5         
-  simplify_zigzag_passes:       1             # 3) drop redundant collinear middles ("same plane"), but never cr...
-  simplify_collinear:           true        
-  simplify_collinear_angle_deg: 10.0          # heading change below this = same plane
-  simplify_max_segment_m:       3.0           # 4) min spacing on the straights = the SOFT FLOOR: thin straights...
-  simplify_min_spacing:         true        
-  simplify_min_spacing_m:       1.0         
-  simplify_turn_keep_deg:       25.0          # Takeoff & cruise
-
-  # ---- APF / safety correction -- pushes waypoints off walls (14) ----
-  safety_correct:            true        
-  apf_centering:             line_search   # line_search: move each waypoint to the lateral potential minimum...
-  apf_gain:                  0.4           # DESCENT MODE ONLY: repulsive-force scaling factor (line_search i...
-  apf_max_total_shift_m:     0.3           # hard cap on per-waypoint displacement; the main "visible shift" ...
-  apf_min_clearance_m:       0.2           # >0 also pushes waypoints to a min distance-to-wall
-  # apf_debug:               true          # per-waypoint orig/push/new logging each plan cycle. Commented out s...
-                                           # ...o it follows the master `debug` switch above; uncomment to force...
-                                           # ... it on (or off) independently of the rest.
-  apf_collision_recheck:     true          # revert to raw A* if the corrected path collides under inflation;...
-  apf_treat_unknown_as_free: true          # recentre waypoints over UNKNOWN cells too (pushed only by known ...
-  apf_unknown_damping:       true          # dampen the correction near unknown cells (no opposing wall to ba...
-  apf_unknown_radius_m:      0.5           # confidence-window radius (m): known-cell fraction within this of...
-  publish_forces:            true          # publish F_rep=-grad U_rep at each waypoint as a visualization_ms...
-  force_arrow_scale:         0.5           # arrow length = scale * |F_rep|; raise for longer/clearer arrows
-  publish_force_field:       true          # also draw a coarse F_rep field over the free cells (gold), showi...
-  force_field_stride:        4             # field arrow spacing in cells (4 = every 0.4m at 0.1m res); large...
+  # -- Drone "thinking": the stack's own account of WHY it acted -------------------------------------
+  # Every node narrates its decisions ("no route at 0.40m, flying a 0.25m squeeze",
+  # "obstacle confidence 0.4 < 0.75, keeping the route"). Two independent switches.
+  thinking_log: false         # append every thought to one file for the run, flushed per
+                              #   line, so a kill still leaves the record. No display needed
+  thinking_window: false      # the live "drone thinking" window beside the BEV map; needs a
+                              #   display, so leave it off for a headless Jetson run
+  # thinking_log_path: /falcon_logs/my_flight.log   # default: falcon/logs/ on the HOST
