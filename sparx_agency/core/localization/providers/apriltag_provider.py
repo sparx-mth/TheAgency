@@ -96,6 +96,19 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             runs for tags that actually vanished).
         cmd_trust_max: Ceiling on the command prior fed via :meth:`set_command`
             (see :class:`CommandMotionModel`). 0 ignores commands entirely.
+        coast_frames: With NO tag in view at all (not every wall has one), keep
+            publishing for up to this many frames by dead-reckoning on the
+            earned-trust command prior — confidence collapsing steeply and
+            ``source`` marked ``apriltag_coast`` so nothing can mistake a guess
+            for a fix. A drone that has just proven it moves as commanded coasts
+            along that motion; one whose commands were doing nothing coasts in
+            place, which for a stuck drone is the correct guess. NOTE this
+            delays the control-level stale-pose trigger (recovery_stale_s) by
+            coast_frames / frame-rate — the recovery still runs, just that much
+            later. 0 disables coasting entirely (a blind frame publishes
+            nothing, exactly the old behaviour); it is also inert while
+            ``cmd_trust_max`` is 0, because with no command feed a coast would
+            add repetition, not information.
     """
 
     source_name = "apriltag"
@@ -117,6 +130,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         margin_keep: float = 5.0,
         roi_rescue: bool = True,
         cmd_trust_max: float = 0.7,
+        coast_frames: int = 5,
     ) -> None:
         self._tag_map, self._tag_sizes = _load_tag_world_map(tag_map_path, tag_size_m)
         self._default_tag_size = float(tag_size_m)
@@ -144,6 +158,9 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._last_meas: Optional[np.ndarray] = None
         self._last_yaw_raw: Optional[float] = None
         self._last_stamp: Optional[float] = None
+        self._coast_frames = int(coast_frames)
+        self._coast_count = 0
+        self._last_conf = 0.0             # confidence of the last accepted fix
 
         self._P = float(process_std_m) ** 2
         self._pos: Optional[np.ndarray] = None
@@ -178,6 +195,8 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._last_meas = None
         self._last_yaw_raw = None
         self._last_stamp = None
+        self._coast_count = 0
+        self._last_conf = 0.0
 
     def set_command(self, vx: float, vy: float, wz: float, stamp_sec: float) -> None:
         """Feed the twist currently commanded to the platform (body frame).
@@ -215,6 +234,66 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._P *= (1.0 - K)
         return float(max(self._alpha_min, min(self._alpha, K)))
 
+    def _coast(self, stamp_sec: float) -> Optional[LocalizationEstimate]:
+        """A blind frame: dead-reckon briefly on the earned-trust command prior.
+
+        Runs when NO tag was usable this frame. For up to ``coast_frames``
+        frames the last pose is advanced by the commanded motion scaled by the
+        learned effectiveness — the same prediction the filter uses as its
+        prior, published on its own because there is no measurement to correct
+        it. The estimate cannot be mistaken for a fix: ``source`` says
+        ``apriltag_coast`` and confidence collapses by frame (0.25 → 0.15 →
+        0.09 → ...), never exceeding 0.25. After the budget the provider goes
+        silent and the control-level stale-pose recovery takes over exactly as
+        before, just ``coast_frames`` frames later.
+        """
+        if (self._coast_frames <= 0 or not self._cmd.enabled
+                or self._pos is None or self._filtered_q is None):
+            return None
+        if self._coast_count >= self._coast_frames:
+            return None
+        self._coast_count += 1
+
+        qx, qy, qz, qw = self._filtered_q
+        yaw_f = math.atan2(2.0 * (qw * qz + qx * qy),
+                           1.0 - 2.0 * (qy * qy + qz * qz))
+        dx, dy, dyaw, rdx, rdy, rdyaw = self._cmd.consume(stamp_sec, yaw_f)
+        self._pos = self._pos + np.array([dx, dy, 0.0])
+        if abs(dyaw) > 1e-9:
+            half = 0.5 * dyaw
+            qd = np.array([0.0, 0.0, math.sin(half), math.cos(half)])
+            self._filtered_q = _quat_mul(qd, self._filtered_q)
+            self._filtered_q /= np.linalg.norm(self._filtered_q)
+        # Keep the ledger aligned so the fix that ends the gap still teaches the
+        # model about the WHOLE blind interval, and seed the single-tag
+        # disambiguation with the coasted position rather than a stale one.
+        self._raw_cmd[0] += rdx
+        self._raw_cmd[1] += rdy
+        self._raw_cmd[2] += rdyaw
+        self._prev_cam_pos = self._pos.copy()
+        # No measurement corrected this step, so uncertainty only grows — which
+        # also makes the first real fix after the gap snap in at high gain.
+        self._P += self._process_var
+
+        k = self._coast_count
+        confidence = max(0.02, min(0.25, self._last_conf) * (0.6 ** k))
+        qx, qy, qz, qw = self._filtered_q
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        self._log.info(
+            f"[apriltag] COAST {k}/{self._coast_frames}: no tag in view, "
+            f"dead-reckoning on commands (eff={self._cmd.effectiveness_lin:.2f}"
+            f"/{self._cmd.effectiveness_yaw:.2f}) conf={confidence:.2f}")
+        return LocalizationEstimate(
+            pose=Pose3D(x=float(self._pos[0]), y=float(self._pos[1]),
+                        z=float(self._pos[2]), yaw=yaw),
+            source=self.source_name + "_coast",
+            confidence=confidence,
+            stamp_sec=stamp_sec,
+            pos_std_m=min(0.5, 0.10 + 0.08 * k),
+            yaw_std_rad=min(0.6, 0.10 + 0.06 * k),
+            cmd_effectiveness=self._cmd.effectiveness_lin,
+        )
+
     def update(self, obs: Observation) -> Optional[LocalizationEstimate]:
         if obs.rgb is None:
             return None
@@ -238,7 +317,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             for d in kept]
 
         if not tag_dets:
-            return None
+            return self._coast(stamp_sec)
 
         # One joint PnP over all tags (>= 2), or a disambiguated IPPE-square
         # solve for a single tag, seeded with the previous position.
@@ -247,7 +326,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             prev_cam_pos_world=self._prev_cam_pos,
         )
         if est is None:
-            return None
+            return self._coast(stamp_sec)
 
         confidence = pose_confidence(est)
 
@@ -299,6 +378,8 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
                    self._rejected, self._max_jump_frames))
             return None
         self._rejected = 0
+        self._coast_count = 0
+        self._last_conf = confidence
         self._prev_cam_pos = est.world_T_cam[:3, 3].copy()
 
         # Teach the command model: what the camera says actually happened over

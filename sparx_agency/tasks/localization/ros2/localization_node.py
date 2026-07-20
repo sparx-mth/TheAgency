@@ -107,6 +107,11 @@ class LocalizationNode(Node):
         # so a stuck drone stops being believed on its own; 0 disables entirely.
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("cmd_trust_max", 0.7)
+        # Blind frames (no tag on any visible wall): dead-reckon on the earned-
+        # trust command prior for up to this many frames, source=apriltag_coast,
+        # confidence collapsing. Delays the recovery node's stale-pose trigger
+        # by the same amount; 0 restores publish-nothing-when-blind.
+        self.declare_parameter("coast_frames", 5)
         # optical_flow params
         self.declare_parameter("depth_frame_path_topic", "")
         self.declare_parameter("bearing_topic", "")
@@ -245,6 +250,7 @@ class LocalizationNode(Node):
                 margin_keep=float(self.get_parameter("margin_keep").value),
                 roi_rescue=bool(self.get_parameter("roi_rescue").value),
                 cmd_trust_max=float(self.get_parameter("cmd_trust_max").value),
+                coast_frames=int(self.get_parameter("coast_frames").value),
             )
         if provider_type == "optical_flow":
             calib = self.get_parameter("camera_calib_path").value
