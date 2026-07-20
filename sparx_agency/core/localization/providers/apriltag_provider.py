@@ -12,6 +12,10 @@ import yaml
 from sparx_agency.core.common.types.geometry import Pose3D
 from sparx_agency.core.common.types.perception import Observation
 from sparx_agency.core.localization.base import BaseLocalizationProvider, LocalizationEstimate
+from sparx_agency.core.localization.command_motion_model import (
+    CommandMotionModel,
+    CommandMotionParams,
+)
 from sparx_agency.core.localization.providers.tag_persistence import (
     TagPersistence,
     TagPersistenceParams,
@@ -90,6 +94,8 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         roi_rescue: Re-detect a just-lost tag inside a 2x-upscaled crop around
             its last position before accepting that it is gone (sub-ms, and only
             runs for tags that actually vanished).
+        cmd_trust_max: Ceiling on the command prior fed via :meth:`set_command`
+            (see :class:`CommandMotionModel`). 0 ignores commands entirely.
     """
 
     source_name = "apriltag"
@@ -110,6 +116,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         process_std_m: float = 0.05,
         margin_keep: float = 5.0,
         roi_rescue: bool = True,
+        cmd_trust_max: float = 0.7,
     ) -> None:
         self._tag_map, self._tag_sizes = _load_tag_world_map(tag_map_path, tag_size_m)
         self._default_tag_size = float(tag_size_m)
@@ -129,6 +136,14 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._persist = TagPersistence(self._detector, TagPersistenceParams(
             enter_margin=float(min_margin), keep_margin=float(margin_keep),
             rescue=bool(roi_rescue)))
+        # Command prior with earned trust; its effectiveness doubles as the
+        # "commanded but not moving" stuck signal published downstream.
+        self._cmd = CommandMotionModel(CommandMotionParams(
+            trust_max=float(cmd_trust_max)))
+        self._raw_cmd = [0.0, 0.0, 0.0]   # unscaled commanded motion since last accept
+        self._last_meas: Optional[np.ndarray] = None
+        self._last_yaw_raw: Optional[float] = None
+        self._last_stamp: Optional[float] = None
 
         self._P = float(process_std_m) ** 2
         self._pos: Optional[np.ndarray] = None
@@ -158,6 +173,21 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._rejected = 0
         self._P = self._process_var
         self._persist.reset()
+        self._cmd.reset()
+        self._raw_cmd = [0.0, 0.0, 0.0]
+        self._last_meas = None
+        self._last_yaw_raw = None
+        self._last_stamp = None
+
+    def set_command(self, vx: float, vy: float, wz: float, stamp_sec: float) -> None:
+        """Feed the twist currently commanded to the platform (body frame).
+
+        Called by the node layer from the command topic. The commands are used
+        only through :class:`CommandMotionModel`, i.e. scaled by how much of the
+        commanded motion the drone has recently PROVEN to achieve — a drone
+        pressed against a wall stops being believed within about a second.
+        """
+        self._cmd.set_command(vx, vy, wz, stamp_sec)
 
     def _gain(self, pos_std_m: float) -> float:
         """Filter gain for this frame, from the fix's own expected error.
@@ -224,11 +254,39 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         world_T_ros = est.world_T_cam @ _CV_TO_ROS
         meas = np.array([world_T_ros[0, 3], world_T_ros[1, 3], world_T_ros[2, 3]],
                         dtype=float)
+        q_raw = np.array(_quat_from_matrix(world_T_ros), dtype=float)
+        yaw_raw = math.atan2(2.0 * (q_raw[3] * q_raw[2] + q_raw[0] * q_raw[1]),
+                             1.0 - 2.0 * (q_raw[1] * q_raw[1] + q_raw[2] * q_raw[2]))
+
+        # Command prior: move the filtered state by the commanded motion, scaled
+        # by how much of it the drone has recently PROVEN to achieve. This is what
+        # keeps the pose current through a low-confidence stretch (single far tag,
+        # short dropout) instead of freezing — while a stuck drone, whose commands
+        # demonstrably do nothing, moves the prior almost not at all.
+        if self._pos is not None and self._cmd.enabled:
+            yaw_f = math.atan2(
+                2.0 * (self._filtered_q[3] * self._filtered_q[2]
+                       + self._filtered_q[0] * self._filtered_q[1]),
+                1.0 - 2.0 * (self._filtered_q[1] * self._filtered_q[1]
+                             + self._filtered_q[2] * self._filtered_q[2]))
+            dx, dy, dyaw, rdx, rdy, rdyaw = self._cmd.consume(stamp_sec, yaw_f)
+            self._pos = self._pos + np.array([dx, dy, 0.0])
+            if abs(dyaw) > 1e-9:
+                half = 0.5 * dyaw
+                qd = np.array([0.0, 0.0, math.sin(half), math.cos(half)])
+                self._filtered_q = _quat_mul(qd, self._filtered_q)
+                self._filtered_q /= np.linalg.norm(self._filtered_q)
+            self._raw_cmd[0] += rdx
+            self._raw_cmd[1] += rdy
+            self._raw_cmd[2] += rdyaw
+
         # Jump gate. A fix that puts the drone a metre from where it was one frame
         # ago is not a fast drone, it is a bad solve -- most often the visible tag
         # set changing under us. Drop it, but only for a few frames in a row: a
         # genuine re-localisation (or a gate mis-tuned for the real flight speed)
-        # must never be able to lock the estimate out permanently.
+        # must never be able to lock the estimate out permanently. The gate
+        # compares against the command-predicted pose, so genuinely commanded
+        # motion does not eat into the jump budget.
         if (self._pos is not None and self._max_jump_m > 0.0
                 and float(np.linalg.norm(meas - self._pos)) > self._max_jump_m
                 and self._rejected < self._max_jump_frames):
@@ -243,6 +301,28 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._rejected = 0
         self._prev_cam_pos = est.world_T_cam[:3, 3].copy()
 
+        # Teach the command model: what the camera says actually happened over
+        # the interval, against the RAW commanded motion over that same interval.
+        # Only confident fixes teach (the model enforces its own floor) — the
+        # measured deltas are between accepted measurements, not filtered poses,
+        # so the filter's own smoothing cannot flatter the commands.
+        if self._cmd.enabled and self._last_meas is not None \
+                and self._last_yaw_raw is not None:
+            dyaw_meas = math.atan2(math.sin(yaw_raw - self._last_yaw_raw),
+                                   math.cos(yaw_raw - self._last_yaw_raw))
+            self._cmd.observe(float(meas[0] - self._last_meas[0]),
+                              float(meas[1] - self._last_meas[1]), dyaw_meas,
+                              self._raw_cmd[0], self._raw_cmd[1],
+                              self._raw_cmd[2], confidence)
+        elif self._cmd.enabled and self._last_meas is None:
+            # First accepted fix: flush any command backlog so it cannot dump
+            # a stale burst of "motion" into the second fix's interval.
+            self._cmd.consume(stamp_sec, 0.0)
+        self._raw_cmd = [0.0, 0.0, 0.0]
+        self._last_meas = meas.copy()
+        self._last_yaw_raw = yaw_raw
+        self._last_stamp = stamp_sec
+
         # Position spread measured on the deployed map: ~1 cm for a crisp
         # multi-tag fix rising to ~30 cm for a lone distant tag. This drives the
         # filter gain, so it has to be an honest error estimate rather than a
@@ -255,7 +335,6 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             self._pos = gain * meas + (1.0 - gain) * self._pos
         x, y, z = (float(v) for v in self._pos)
 
-        q_raw = np.array(_quat_from_matrix(world_T_ros), dtype=float)
         if self._filtered_q is None:
             self._filtered_q = q_raw
         else:
@@ -267,12 +346,14 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         qx, qy, qz, qw = self._filtered_q
         yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
+        eff = self._cmd.effectiveness_lin if self._cmd.enabled else None
         used_ids = sorted(est.used_tag_ids)
         self._log.info(
             f"[apriltag] pose: conf={confidence:.2f} gain={gain:.2f} n_tags={est.n_tags} "
             f"used={used_ids} rms={est.reproj_rms_px:.2f}px worst={est.worst_tag_rms_px:.2f}px "
             f"amb={est.ambiguity:.2f} geom={est.geometry:.2f} "
-            f"min_px={est.min_tag_px:.0f} far={est.max_tag_dist_m:.1f}m")
+            f"min_px={est.min_tag_px:.0f} far={est.max_tag_dist_m:.1f}m"
+            + (f" eff={eff:.2f}/{self._cmd.effectiveness_yaw:.2f}" if eff is not None else ""))
 
         return LocalizationEstimate(
             pose=Pose3D(x=float(x), y=float(y), z=float(z), yaw=yaw),
@@ -281,7 +362,20 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             stamp_sec=stamp_sec,
             pos_std_m=pos_std,
             yaw_std_rad=0.02 + 0.20 * (1.0 - confidence) ** 2,
+            cmd_effectiveness=eff,
         )
+
+
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product a ⊗ b for (x, y, z, w) quaternions."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ])
 
 
 def _quat_from_matrix(M: np.ndarray) -> Tuple[float, float, float, float]:

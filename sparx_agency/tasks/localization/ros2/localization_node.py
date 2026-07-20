@@ -32,7 +32,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from std_msgs.msg import Float32, String
 
 from sparx_agency.core.common.types.perception import Observation, RGBFrame
@@ -57,6 +57,10 @@ _SOURCE_TOPIC = "/xtend/localization_source"
 _CONF_TOPIC = "/xtend/localization_confidence"
 #: Same instant, in metres: the expected position error of that pose.
 _STD_TOPIC = "/xtend/localization_pos_std"
+#: Fraction of the COMMANDED motion the drone is measurably achieving, 0..1.
+#: Low while commands flow = the drone is being told to move and is not — the
+#: direct "stuck against something" signal, learned inside the provider.
+_EFF_TOPIC = "/xtend/localization_cmd_effectiveness"
 
 
 def _parse_path_msg(data: str):
@@ -98,6 +102,11 @@ class LocalizationNode(Node):
         # Set-flicker defence: hysteresis lower rail + ROI re-detect of dropouts.
         self.declare_parameter("margin_keep", 5.0)
         self.declare_parameter("roi_rescue", True)
+        # Command prior: which twist topic to watch, and the trust ceiling.
+        # Trust is EARNED per-axis by comparing commanded with measured motion,
+        # so a stuck drone stops being believed on its own; 0 disables entirely.
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_trust_max", 0.7)
         # optical_flow params
         self.declare_parameter("depth_frame_path_topic", "")
         self.declare_parameter("bearing_topic", "")
@@ -154,11 +163,25 @@ class LocalizationNode(Node):
         self._pub_source = self.create_publisher(String, _SOURCE_TOPIC, 10)
         self._pub_conf = self.create_publisher(Float32, _CONF_TOPIC, 10)
         self._pub_std = self.create_publisher(Float32, _STD_TOPIC, 10)
+        self._pub_eff = self.create_publisher(Float32, _EFF_TOPIC, 10)
 
         if provider_type in ("optical_flow", "amcl"):
             self._setup_optical_flow_subs(qos)
         else:
             self._setup_single_stream_subs(qos)
+
+        # Feed the provider the twist being commanded, if it knows what to do
+        # with one (only the apriltag provider does today). The provider itself
+        # decides how much to believe it — see CommandMotionModel.
+        cmd_topic = str(self.get_parameter("cmd_vel_topic").value).strip()
+        if cmd_topic and hasattr(self._provider, "set_command"):
+            self.create_subscription(Twist, cmd_topic, self._on_cmd_vel, 10)
+            self.get_logger().info(f"Watching commands on {cmd_topic}")
+
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self._provider.set_command(float(msg.linear.x), float(msg.linear.y),
+                                   float(msg.angular.z), now)
 
     def _setup_single_stream_subs(self, qos: QoSProfile) -> None:
         """AprilTag and similar single-stream providers."""
@@ -221,6 +244,7 @@ class LocalizationNode(Node):
                 max_jump_frames=int(self.get_parameter("max_jump_frames").value),
                 margin_keep=float(self.get_parameter("margin_keep").value),
                 roi_rescue=bool(self.get_parameter("roi_rescue").value),
+                cmd_trust_max=float(self.get_parameter("cmd_trust_max").value),
             )
         if provider_type == "optical_flow":
             calib = self.get_parameter("camera_calib_path").value
@@ -324,6 +348,8 @@ class LocalizationNode(Node):
         # consumer can pair them by arrival without needing a stamp match.
         self._pub_conf.publish(Float32(data=float(estimate.confidence)))
         self._pub_std.publish(Float32(data=float(estimate.pos_std_m)))
+        if estimate.cmd_effectiveness is not None:
+            self._pub_eff.publish(Float32(data=float(estimate.cmd_effectiveness)))
 
 
 def _amcl_loc_json(x_m: float, y_m: float) -> str:

@@ -21,6 +21,11 @@ class LocalizationEstimate:
     stamp_sec: float
     pos_std_m: float = 0.05
     yaw_std_rad: float = 0.05
+    #: How much of the COMMANDED motion the drone is actually achieving, 0..1,
+    #: or None for providers that do not watch the command stream. Low while
+    #: commands are being sent is the direct signature of a drone pressed
+    #: against an obstacle: it is told to move and the world says it did not.
+    cmd_effectiveness: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.confidence <= 1.0):
