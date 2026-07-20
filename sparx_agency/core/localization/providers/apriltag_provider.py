@@ -12,6 +12,10 @@ import yaml
 from sparx_agency.core.common.types.geometry import Pose3D
 from sparx_agency.core.common.types.perception import Observation
 from sparx_agency.core.localization.base import BaseLocalizationProvider, LocalizationEstimate
+from sparx_agency.core.localization.providers.tag_persistence import (
+    TagPersistence,
+    TagPersistenceParams,
+)
 from sparx_agency.core.localization.tag_triangulation import TagWorldPose
 from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     load_camera_calib_yaml,
@@ -80,6 +84,12 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             frame. 0 disables the gate.
         max_jump_frames: Consecutive rejections allowed before a jump is accepted
             anyway, so a genuine re-localisation can never be locked out forever.
+        margin_keep: Hysteresis lower rail — a tag already in the used set stays
+            down to this ``decision_margin`` (new tags still need ``min_margin``).
+            Set equal to ``min_margin`` to disable.
+        roi_rescue: Re-detect a just-lost tag inside a 2x-upscaled crop around
+            its last position before accepting that it is gone (sub-ms, and only
+            runs for tags that actually vanished).
     """
 
     source_name = "apriltag"
@@ -98,6 +108,8 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         max_jump_m: float = 1.0,
         max_jump_frames: int = 3,
         process_std_m: float = 0.05,
+        margin_keep: float = 5.0,
+        roi_rescue: bool = True,
     ) -> None:
         self._tag_map, self._tag_sizes = _load_tag_world_map(tag_map_path, tag_size_m)
         self._default_tag_size = float(tag_size_m)
@@ -111,6 +123,13 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._process_var = float(process_std_m) ** 2
         self._fuse_method = fuse_method
 
+        # Set-flicker defence: margin hysteresis + ROI rescue of dropouts. The
+        # rescue reuses the SAME detector instance -- a second used Detector
+        # makes pupil_apriltags segfault at interpreter teardown.
+        self._persist = TagPersistence(self._detector, TagPersistenceParams(
+            enter_margin=float(min_margin), keep_margin=float(margin_keep),
+            rescue=bool(roi_rescue)))
+
         self._P = float(process_std_m) ** 2
         self._pos: Optional[np.ndarray] = None
         self._filtered_q: Optional[np.ndarray] = None
@@ -120,8 +139,14 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._rejected: int = 0
         self._healthy = True
 
-        import rclpy.logging
-        self._log = rclpy.logging.get_logger("apriltag_provider")
+        # Core stays importable without ROS2: rclpy only supplies a nicer logger.
+        try:
+            import rclpy.logging
+            self._log = rclpy.logging.get_logger("apriltag_provider")
+        except ImportError:
+            import logging
+            self._log = logging.getLogger("apriltag_provider")
+            self._log.warn = self._log.warning  # rclpy-logger API shim
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -132,6 +157,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._prev_cam_pos = None
         self._rejected = 0
         self._P = self._process_var
+        self._persist.reset()
 
     def _gain(self, pos_std_m: float) -> float:
         """Filter gain for this frame, from the fix's own expected error.
@@ -169,21 +195,17 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         dets = self._detector.detect(gray)
 
-        tag_dets: List[TagDetection] = []
+        # Hysteresis + ROI rescue: the per-frame defence against the visible tag
+        # SET changing, which is what actually makes the published pose jump.
+        kept = self._persist.filter(gray, dets, self._tag_map.keys())
+        rescued = [d.tag_id for d in kept if d.rescued]
+        if rescued:
+            self._log.info(f"[apriltag] rescued {rescued} via ROI re-detect")
 
-        for d in dets:
-            tag_id = int(d.tag_id)
-            margin = d.decision_margin
-            if margin < self._min_margin:
-                self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(low < {self._min_margin:.1f})")
-                continue
-            if tag_id not in self._tag_map:
-                self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} SKIP(not in map)")
-                continue
-            corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
-            size_m = self._tag_sizes.get(tag_id, self._default_tag_size)
-            self._log.info(f"[apriltag] tag {tag_id}: margin={margin:.1f} USED")
-            tag_dets.append(TagDetection(tag_id=tag_id, corners=corners, size_m=size_m))
+        tag_dets: List[TagDetection] = [
+            TagDetection(tag_id=d.tag_id, corners=d.corners,
+                         size_m=self._tag_sizes.get(d.tag_id, self._default_tag_size))
+            for d in kept]
 
         if not tag_dets:
             return None
@@ -202,7 +224,6 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         world_T_ros = est.world_T_cam @ _CV_TO_ROS
         meas = np.array([world_T_ros[0, 3], world_T_ros[1, 3], world_T_ros[2, 3]],
                         dtype=float)
-
         # Jump gate. A fix that puts the drone a metre from where it was one frame
         # ago is not a fast drone, it is a bad solve -- most often the visible tag
         # set changing under us. Drop it, but only for a few frames in a row: a

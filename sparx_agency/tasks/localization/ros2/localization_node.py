@@ -95,6 +95,9 @@ class LocalizationNode(Node):
         self.declare_parameter("alpha_min", 0.15)
         self.declare_parameter("max_jump_m", 1.0)
         self.declare_parameter("max_jump_frames", 3)
+        # Set-flicker defence: hysteresis lower rail + ROI re-detect of dropouts.
+        self.declare_parameter("margin_keep", 5.0)
+        self.declare_parameter("roi_rescue", True)
         # optical_flow params
         self.declare_parameter("depth_frame_path_topic", "")
         self.declare_parameter("bearing_topic", "")
@@ -216,6 +219,8 @@ class LocalizationNode(Node):
                 alpha_min=float(self.get_parameter("alpha_min").value),
                 max_jump_m=float(self.get_parameter("max_jump_m").value),
                 max_jump_frames=int(self.get_parameter("max_jump_frames").value),
+                margin_keep=float(self.get_parameter("margin_keep").value),
+                roi_rescue=bool(self.get_parameter("roi_rescue").value),
             )
         if provider_type == "optical_flow":
             calib = self.get_parameter("camera_calib_path").value
