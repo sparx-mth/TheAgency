@@ -1351,6 +1351,11 @@ class WaypointFollowerNode:
             L("  CONFIDENCE  full>=%.2f  floor<=%.2f (speed x%.2f)  learn>=%.2f  "
               "hold<%.2f  age<=%.2fs", c.conf_full, c.conf_min, c.speed_floor,
               c.conf_integrate, c.conf_hold, c.max_age_s)
+            L("  QUALITY   latency lead=%.2fs (earned, off while coasting)  "
+              "earned-speed floor=%.2f", c.latency_s, c.eff_speed_floor)
+            L("            std->deadband +%.2f m/m above %.2f m (cap +%.2f m)  "
+              "brake %.2f/%.2f m/s2", c.std_deadband_gain, c.std_ref_m,
+              c.deadband_extra_max_m, e.decel_xy, e.accel_xy)
             L("  BLOCKAGE  %.1fs window, confirm %d ticks, progress<%.0f%%  "
               "-> escape x%d", p.blockage.window_s, p.blockage.confirm_ticks,
               p.blockage.progress_frac * 100.0, p.escape.max_attempts)

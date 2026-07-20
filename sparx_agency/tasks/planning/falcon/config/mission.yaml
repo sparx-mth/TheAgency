@@ -217,29 +217,43 @@ launch:
   # the combined multi-axis demand, scheduled by how much the AprilTag pose can
   # be trusted, with reflexes for walls the camera cannot see.
   #
+  # It also reads the pose's honesty signals every tick: the deadbands WIDEN
+  # with the provider's own pos_std (never correct an error smaller than the
+  # pose's stated accuracy), the steering pose is LED along the last command to
+  # cancel the camera->control delay (dp_latency_s, earned via effectiveness,
+  # off while coasting), speed is EARNED as the world proves the commands work
+  # (dp_eff_speed_floor), braking is faster than accelerating (dp_decel_*), and
+  # reverse -- always blind -- is capped harder than forward (dp_max_vx_back).
+  #
+  # Keep use_pose_estimator: false with this controller -- it does its own
+  # latency lead, and stacking the estimator's smoothing on top only adds lag.
+  #
   # TUNING ORDER (start slow, raise one dial at a time):
   #   1. dp_cruise_speed / dp_max_wz    until it flies the route at a good pace
   #   2. dp_combined_effort             if it feels fast when turning WHILE flying
   #   3. dp_lat_kp then dp_lat_ki       until the standing sideways offset is gone
-  #   4. dp_lat_deadband_m              LAST: it is the tracking floor
-  # Watch /falcon/drift while flying: it publishes what the controller has
-  # learned it must hold against, in m/s per axis.
+  #   4. dp_lat_deadband_m              LAST: it is the tracking floor on a crisp pose
+  # Watch /falcon/drift while flying: it publishes the learned per-axis drift
+  # (m/s), the live lead, and how far the deadbands are opened right now.
   # -- SPEED AND FORCE  --  the per-axis envelope, and the multi-axis budget -------------------------
   dp_cruise_speed: 0.18       # m/s on a straight leg. THE main speed dial -- raise this first
-  dp_max_vx: 0.25             # m/s hard cap forward/back. 0.45 = full XTEND pitch thrust
+  dp_max_vx: 0.25             # m/s hard cap FORWARD. 0.45 = full XTEND pitch thrust (600 counts)
+  dp_max_vx_back: 0.12        # m/s hard cap in REVERSE. Harder than forward: no rear camera, every backward metre is blind
   dp_max_vy: 0.12             # m/s hard cap sideways (ROLL). Weaker axis; keep well under max_vx
-  dp_max_wz: 0.35             # rad/s hard cap yaw. 0.65 = full XTEND yaw thrust
+  dp_max_wz: 0.40             # rad/s hard cap yaw (615 of 1000 counts). 0.65 = full XTEND yaw thrust
   dp_max_translation: 0.25    # m/s cap on the (vx,vy) vector, so a diagonal is not faster than an axis
   dp_combined_effort: 1.4     # |vx|/max + |vy|/max + |wz|/max budget. 1.0 = one axis at full.
   dp_accel_xy: 0.35           # m/s2 how fast translation may change. Low = gradual, keeps DA3 depth usable
-  dp_accel_wz: 1.0            # rad/s2 how fast the yaw rate may change
+  dp_accel_wz: 1.2            # rad/s2 ramp-up rate of the yaw command
+  dp_decel_xy: 0.60           # m/s2 how fast translation may be taken OFF. >= accel: braking is never rate-limited by the gentle ramp-up
+  dp_decel_wz: 2.0            # rad/s2 how fast the yaw command may be taken off
   dp_min_vx: 0.06             # m/s smallest forward command the motors actually act on
   dp_min_vy: 0.06             # m/s smallest sideways command the motors actually act on
-  dp_min_wz_deg: 8.0          # deg/s smallest yaw command that actually rotates the drone
+  dp_min_wz_deg: 10.0         # deg/s smallest yaw command that actually rotates the drone (yaw bites late on this airframe)
   dp_release_frac: 0.5        # below this fraction of a min the command is dropped to 0, above it snapped up
 
   # -- NAVIGATION  --  how it gets to the next waypoint ----------------------------------------------
-  dp_approach_yaw_rate: 0.30  # rad/s cap on the turn onto a leg
+  dp_approach_yaw_rate: 0.35  # rad/s cap on the turn onto a leg
   dp_pos_radius: 0.30         # m waypoint capture radius
   dp_slow_radius: 0.80        # m start slowing this far from the FINAL goal
   dp_arrive_speed_min: 0.08   # m/s floor outside pos_radius, so it never crawls to a noisy stop
@@ -263,14 +277,14 @@ launch:
   dp_lat_kd: 0.12             # cross-track D: damping
   dp_lat_i_limit: 0.05        # m/s biggest standing sideways push it may assume exists
   dp_lat_max: 0.10            # m/s cap on the whole cross-track correction. Must be <= dp_max_vy
-  dp_lat_deadband_m: 0.04     # m error ignored. THE TRACKING FLOOR -- shrink to hold tighter, at the cost of chasing noise
+  dp_lat_deadband_m: 0.03     # m error ignored on a CRISP pose. THE TRACKING FLOOR; widens automatically as pos_std grows
   dp_lat_d_tau_s: 0.4         # s low-pass on the derivative (a 10Hz noisy pose differentiates to noise)
   dp_fwd_kp: 0.50             # along-track P: metres -> m/s of PITCH, while turning or holding
   dp_fwd_ki: 0.05             # along-track I: LEARNS the standing fore/aft drift
   dp_fwd_kd: 0.10             # along-track D: damping
   dp_fwd_i_limit: 0.05        # m/s biggest standing fore/aft push it may assume
   dp_fwd_max: 0.10            # m/s cap on the along-track correction
-  dp_fwd_deadband_m: 0.06     # m along-track error ignored
+  dp_fwd_deadband_m: 0.05     # m along-track error ignored on a crisp pose; widens with pos_std
   dp_fwd_d_tau_s: 0.4         # s low-pass on the along-track derivative
   dp_yaw_kp: 0.90             # heading P: rad of error -> rad/s of YAW
   dp_yaw_ki: 0.08             # heading I: LEARNS the standing yaw drift (the rarest of the three)
@@ -292,12 +306,17 @@ launch:
   dp_coast_speed_scale: 0.5   # extra speed multiplier while dead-reckoning (no tag in view, ~0.5s budget)
   dp_eff_floor: 0.15          # cmd_effectiveness at/below which the commands are not reaching the world
   dp_eff_full: 0.60           # cmd_effectiveness at/above which commands count as fully effective
+  dp_eff_speed_floor: 0.5     # speed multiplier while commands are UNPROVEN (effectiveness starts at 0.3): first metres fly cautious, then speed is earned. 1.0 disables
+  dp_latency_s: 0.12          # s camera->control delay compensated by leading the pose along the last command; earned via effectiveness, 0 while coasting. 0 disables
+  dp_std_ref_m: 0.05          # m pos_std at/below which the pose counts as crisp (multi-tag fixes sit at 0.01-0.05)
+  dp_std_deadband_gain: 0.6   # extra tracking deadband per metre of pos_std above the crisp reference: never correct (or learn from) errors smaller than the pose's own stated accuracy
+  dp_deadband_extra_max_m: 0.15 # m cap on that widening, so a coasting pose (std up to 0.5) cannot switch corrections off entirely
   dp_require_quality: false   # true HOLDS the drone until the confidence topics arrive; false flies without them (and warns)
 
   # -- STUCK DETECTION  --  noticing a wall the camera cannot see ------------------------------------
   dp_block_window_s: 1.2      # s trailing window over which progress is measured
   dp_block_min_vx: 0.07       # m/s below this the tick does not count as trying to move
-  dp_block_min_wz_deg: 8.6    # deg/s below this the tick does not count as trying to turn
+  dp_block_min_wz_deg: 12.0   # deg/s below this the tick does not count as trying to turn. Keep above dp_min_wz_deg
   dp_block_min_dist_m: 0.06   # m commanded distance needed in the window before the ratio means anything
   dp_block_min_yaw_deg: 7.0   # deg commanded rotation needed in the window
   dp_block_progress_frac: 0.30 # achieved/commanded below this = not moving. Not 0: a heavy drone always under-delivers

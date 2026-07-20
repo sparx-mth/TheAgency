@@ -142,6 +142,7 @@ class AxisPid:
         self._i = 0.0
         self._prev_error = None      # type: Optional[float]
         self._d_filt = 0.0
+        self._stale_dt = 0.0
 
     def reset_derivative(self):
         # type: () -> None
@@ -154,6 +155,7 @@ class AxisPid:
         """
         self._prev_error = None
         self._d_filt = 0.0
+        self._stale_dt = 0.0
 
     @property
     def drift(self):
@@ -166,8 +168,9 @@ class AxisPid:
         """
         return _clamp(self.gains.ki * self._i, self.gains.i_limit)
 
-    def update(self, error, dt, integrate=True, gain_scale=1.0):
-        # type: (float, float, bool, float) -> float
+    def update(self, error, dt, integrate=True, gain_scale=1.0,
+               deadband_extra=0.0, fresh=True):
+        # type: (float, float, bool, float, float, bool) -> float
         """Advance the controller one tick and return the axis command.
 
         Args:
@@ -181,6 +184,18 @@ class AxisPid:
                 deliberately NOT scaled — a drift learned while the pose was good
                 stays valid when it degrades, and that feed-forward is exactly
                 what carries the drone through a bad patch.
+            deadband_extra: Widens the deadband for this tick only (error units,
+                >= 0). Fed from the localization's own error estimate: when the
+                provider says this pose is only good to +-20 cm, a 3 cm error is
+                not a fact to correct, and definitely not one to learn drift from.
+            fresh: False when NO new measurement arrived since the previous call
+                (the ~10 Hz vision pose is event-driven; the control loop is not).
+                A held pose repeats the previous error exactly, so differentiating
+                it yields 0 and then a double-height spike when the next frame
+                lands. On a stale tick the derivative is held and the elapsed time
+                is banked; the next fresh tick differentiates over the TRUE
+                interval. The integral keeps running — a zero-order-held error is
+                still the best available estimate of the continuous error.
 
         Returns:
             The commanded output for this axis, clamped to ``out_limit``.
@@ -188,20 +203,27 @@ class AxisPid:
         if dt <= 0.0:
             raise ValueError("AxisPid.update: dt must be > 0")
         g = self.gains
-        err = _deadband(float(error), g.deadband)
+        band = g.deadband + (deadband_extra if deadband_extra > 0.0 else 0.0)
+        err = _deadband(float(error), band)
 
-        # Derivative on error, low-pass filtered. Inside the deadband err is 0,
-        # so a drone sitting quietly on track produces no derivative at all.
-        if self._prev_error is None:
-            raw_d = 0.0
+        # Derivative on error, low-pass filtered, only across FRESH measurements.
+        # Inside the deadband err is 0, so a drone sitting quietly on track
+        # produces no derivative at all.
+        if not fresh:
+            self._stale_dt += dt
         else:
-            raw_d = (err - self._prev_error) / dt
-        self._prev_error = err
-        if g.d_tau_s > 0.0:
-            alpha = dt / (g.d_tau_s + dt)
-            self._d_filt += alpha * (raw_d - self._d_filt)
-        else:
-            self._d_filt = raw_d
+            span = dt + self._stale_dt
+            self._stale_dt = 0.0
+            if self._prev_error is None:
+                raw_d = 0.0
+            else:
+                raw_d = (err - self._prev_error) / span
+            self._prev_error = err
+            if g.d_tau_s > 0.0:
+                alpha = span / (g.d_tau_s + span)
+                self._d_filt += alpha * (raw_d - self._d_filt)
+            else:
+                self._d_filt = raw_d
 
         scale = max(0.0, float(gain_scale))
         p_term = g.kp * err * scale

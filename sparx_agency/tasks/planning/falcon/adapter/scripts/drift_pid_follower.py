@@ -70,17 +70,20 @@ def build_drift_pid_params(G):
     """
     envelope = EnvelopeParams(
         max_vx=float(G("~dp_max_vx", 0.25)),
+        max_vx_back=float(G("~dp_max_vx_back", 0.12)),
         max_vy=float(G("~dp_max_vy", 0.12)),
-        max_wz=float(G("~dp_max_wz", 0.35)),
+        max_wz=float(G("~dp_max_wz", 0.40)),
         max_translation=float(G("~dp_max_translation", 0.25)),
         combined_effort=float(G("~dp_combined_effort", 1.4)),
         min_vx=float(G("~dp_min_vx", 0.06)),
         min_vy=float(G("~dp_min_vy", 0.06)),
-        min_wz=math.radians(float(G("~dp_min_wz_deg", 8.0))),
+        min_wz=math.radians(float(G("~dp_min_wz_deg", 10.0))),
         release_frac=float(G("~dp_release_frac", 0.5)),
         cmd_zero_eps=float(G("~dp_cmd_zero_eps", 1e-3)),
         accel_xy=float(G("~dp_accel_xy", 0.35)),
-        accel_wz=float(G("~dp_accel_wz", 1.0)),
+        decel_xy=float(G("~dp_decel_xy", 0.60)),
+        accel_wz=float(G("~dp_accel_wz", 1.2)),
+        decel_wz=float(G("~dp_decel_wz", 2.0)),
     )
     lateral_pid = PidGains(
         kp=float(G("~dp_lat_kp", 0.55)),
@@ -88,7 +91,7 @@ def build_drift_pid_params(G):
         kd=float(G("~dp_lat_kd", 0.12)),
         i_limit=float(G("~dp_lat_i_limit", 0.05)),
         d_tau_s=float(G("~dp_lat_d_tau_s", 0.4)),
-        deadband=float(G("~dp_lat_deadband_m", 0.04)),
+        deadband=float(G("~dp_lat_deadband_m", 0.03)),
         out_limit=float(G("~dp_lat_max", 0.10)),
     )
     forward_pid = PidGains(
@@ -97,7 +100,7 @@ def build_drift_pid_params(G):
         kd=float(G("~dp_fwd_kd", 0.10)),
         i_limit=float(G("~dp_fwd_i_limit", 0.05)),
         d_tau_s=float(G("~dp_fwd_d_tau_s", 0.4)),
-        deadband=float(G("~dp_fwd_deadband_m", 0.06)),
+        deadband=float(G("~dp_fwd_deadband_m", 0.05)),
         out_limit=float(G("~dp_fwd_max", 0.10)),
     )
     yaw_pid = PidGains(
@@ -120,11 +123,16 @@ def build_drift_pid_params(G):
         coast_speed_scale=float(G("~dp_coast_speed_scale", 0.5)),
         eff_floor=float(G("~dp_eff_floor", 0.15)),
         eff_full=float(G("~dp_eff_full", 0.60)),
+        eff_speed_floor=float(G("~dp_eff_speed_floor", 0.5)),
+        latency_s=float(G("~dp_latency_s", 0.12)),
+        std_ref_m=float(G("~dp_std_ref_m", 0.05)),
+        std_deadband_gain=float(G("~dp_std_deadband_gain", 0.6)),
+        deadband_extra_max_m=float(G("~dp_deadband_extra_max_m", 0.15)),
     )
     blockage = BlockageParams(
         window_s=float(G("~dp_block_window_s", 1.2)),
         min_cmd_vx=float(G("~dp_block_min_vx", 0.07)),
-        min_cmd_wz=math.radians(float(G("~dp_block_min_wz_deg", 8.6))),
+        min_cmd_wz=math.radians(float(G("~dp_block_min_wz_deg", 12.0))),
         min_cmd_distance_m=float(G("~dp_block_min_dist_m", 0.06)),
         min_cmd_yaw_rad=math.radians(float(G("~dp_block_min_yaw_deg", 7.0))),
         progress_frac=float(G("~dp_block_progress_frac", 0.30)),
@@ -146,7 +154,7 @@ def build_drift_pid_params(G):
     )
     return DriftPidParams(
         cruise_speed=float(G("~dp_cruise_speed", 0.18)),
-        approach_yaw_rate=float(G("~dp_approach_yaw_rate", 0.30)),
+        approach_yaw_rate=float(G("~dp_approach_yaw_rate", 0.35)),
         pos_radius=float(G("~dp_pos_radius",
                            float(G("~pos_acquisition_radius", 0.30)))),
         slow_radius=float(G("~dp_slow_radius", 0.80)),
@@ -218,6 +226,8 @@ class DriftTelemetryPublisher(object):
             "heading_err_deg": round(math.degrees(telemetry.heading_err_rad), 2),
             "effort": round(telemetry.effort, 3),
             "speed_scale": round(telemetry.speed_scale, 3),
+            "lead_s": round(telemetry.lead_s, 3),
+            "deadband_extra_m": round(telemetry.deadband_extra_m, 3),
             "authority": telemetry.authority,
             "blocked_axis": telemetry.blocked_axis,
             "escape_state": telemetry.escape_state,

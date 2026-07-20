@@ -56,6 +56,11 @@ class DriftTelemetry:
         effort: Fraction of the airframe's combined force budget the published
             command is spending (1.0 = one axis at its own maximum).
         speed_scale: Confidence-derived speed multiplier in force this tick.
+        lead_s: Latency compensation applied to the steering pose this tick (s).
+            0 while coasting or while the commands are unproven.
+        deadband_extra_m: How far the tracking deadbands were widened this tick
+            by the pose's own reported error (m). When this is large, a small
+            cross-track number is noise, not drift.
         authority: Why the controller has the authority it has (human-readable).
         blocked_axis: ``""``, ``"forward"`` or ``"yaw"``.
         escape_state: Phase of the escape reflex, or ``"IDLE"``.
@@ -69,6 +74,8 @@ class DriftTelemetry:
     heading_err_rad: float = 0.0
     effort: float = 0.0
     speed_scale: float = 1.0
+    lead_s: float = 0.0
+    deadband_extra_m: float = 0.0
     authority: str = ""
     blocked_axis: str = ""
     escape_state: str = "IDLE"

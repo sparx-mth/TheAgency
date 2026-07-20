@@ -40,6 +40,8 @@ from sparx_agency.core.planning.trackers.multi_axis_follower.allocation import (
     yaw_engaged,
 )
 
+from math import cos, sin
+
 from . import geometry as geo
 from .blockage import BlockageMonitor
 from .confidence import ConfidenceScheduler, LocalizationQuality
@@ -84,6 +86,7 @@ class DriftPidFollower:
         self._quality = LocalizationQuality()
         self._last = (0.0, 0.0, 0.0)
         self._reported = False
+        self._prev_age = None      # type: Optional[float]
         for pid in (self._lat, self._fwd, self._yaw):
             pid.reset()
         self._envelope.reset()
@@ -164,9 +167,13 @@ class DriftPidFollower:
         if dt <= 0.0:
             raise ValueError("DriftPidFollower.step: dt must be > 0")
         auth = self._scheduler.evaluate(self._quality)
+        fresh = self._measurement_fresh()
         if len(self._path) < 2:
             return self._emit(0.0, 0.0, 0.0, DriftPidState.IDLE, dt, auth)
 
+        # The blockage detector sees the RAW pose, always. The latency-led pose
+        # below is advanced by the drone's own commands — feed that to a stuck
+        # detector and a pinned drone would appear to obey every command.
         last_vx, _, last_wz = self._last
         blocked = self._blockage.update(pose, last_vx, last_wz, dt, self._quality)
         frozen = bool(hold) or not map_ready or auth.hold
@@ -190,8 +197,49 @@ class DriftPidFollower:
         if frozen:
             return self._hold_still(pose, dt, auth, blocked, report)
 
-        self._retire(pose)
-        return self._navigate(pose, dt, auth, blocked, report)
+        steer = self._lead_pose(pose, auth.lead_s)
+        self._retire(steer)
+        return self._navigate(steer, dt, auth, blocked, report, fresh)
+
+    # ─── Measurement bookkeeping ─────────────────────────────────
+    def _measurement_fresh(self):
+        # type: () -> bool
+        """True when a new localization frame arrived since the previous tick.
+
+        The pose stream is event-driven (~10 Hz with gaps) while the control loop
+        is a timer, so some ticks re-see the held previous pose. Detected from
+        the quality snapshot's age: a new frame RESETS the age, so an age that
+        did not grow by a control period means a new measurement landed. Only the
+        derivative terms consume this — differentiating a held value produces a
+        zero then a spike, which is exactly the noise the D low-pass should not
+        have to eat.
+        """
+        age = self._quality.age_s
+        prev = self._prev_age
+        self._prev_age = age
+        if prev is None:
+            return True
+        return age <= prev
+
+    def _lead_pose(self, pose, lead_s):
+        # type: (Pose2D, float) -> Pose2D
+        """The pose the drone is at NOW, estimated from the delayed measurement.
+
+        Advances the measured pose along the last commanded body velocity for the
+        vision loop's transport delay, so steering reacts to the present rather
+        than to ``latency_s`` ago. The scheduler has already zeroed ``lead_s``
+        while coasting (the provider's coast is command-propagated — leading it
+        would double-count) and scaled it by proven effectiveness (commands that
+        demonstrably do not move the drone must not move its pose estimate).
+        """
+        if lead_s <= 0.0:
+            return pose
+        vx, vy, wz = self._last
+        cos_y = cos(pose.yaw)
+        sin_y = sin(pose.yaw)
+        return Pose2D(pose.x + (vx * cos_y - vy * sin_y) * lead_s,
+                      pose.y + (vx * sin_y + vy * cos_y) * lead_s,
+                      pose.yaw + wz * lead_s)
 
     # ─── Regimes ─────────────────────────────────────────────────
     def _run_escape(self, pose, blocked, frozen, dt, auth):
@@ -232,9 +280,13 @@ class DriftPidFollower:
         return self._emit(0.0, 0.0, 0.0, DriftPidState.HOLD, dt, auth, blocked,
                           report_blocked=report, reason=auth.reason)
 
-    def _navigate(self, pose, dt, auth, blocked, report):
-        # type: (Pose2D, float, object, object, bool) -> DriftPidCommand
-        """The normal control law: TRACK a leg, TURN onto it, or HOLD the goal."""
+    def _navigate(self, pose, dt, auth, blocked, report, fresh):
+        # type: (Pose2D, float, object, object, bool, bool) -> DriftPidCommand
+        """The normal control law: TRACK a leg, TURN onto it, or HOLD the goal.
+
+        ``pose`` here is the latency-led steering pose; every error below is
+        therefore measured against where the drone is now, not a frame ago.
+        """
         p = self.params
         integrate = auth.integrate
         gain = auth.gain_scale
@@ -243,7 +295,7 @@ class DriftPidFollower:
             self._turning = False
             self._latch_anchor(pose, at_goal=True)
             vx, vy, wz, e_fwd, e_lat, e_yaw = self._station_keep(
-                pose, dt, integrate, gain, self._anchor_yaw)
+                pose, dt, auth, fresh, self._anchor_yaw)
             return self._emit(vx, vy, wz, DriftPidState.HOLD, dt, auth, blocked,
                               report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
                               e_yaw=e_yaw)
@@ -254,14 +306,16 @@ class DriftPidFollower:
         self._turning = yaw_engaged(self._turning, e_yaw, p.yaw_engage_rad,
                                     p.yaw_release_rad)
         wz = saturate(self._yaw.update(e_yaw, dt, integrate=integrate,
-                                       gain_scale=gain), p.approach_yaw_rate)
+                                       gain_scale=gain,
+                                       deadband_extra=auth.yaw_deadband_extra_rad,
+                                       fresh=fresh), p.approach_yaw_rate)
 
         if self._turning:
             # Rotate onto the leg while station-keeping, so the drone comes out of
             # the turn where it went in rather than a drift-width downwind of it.
             self._latch_anchor(pose, on_track=True)
             vx, vy, e_fwd, e_lat = self._anchor_correction(
-                pose, dt, integrate, gain, lateral_frac=p.lateral_turn_frac)
+                pose, dt, auth, fresh, lateral_frac=p.lateral_turn_frac)
             vx *= alignment_gate(e_yaw, p.travel_cone_rad,
                                  p.translate_suppress_rad,
                                  p.translate_suppress_floor)
@@ -273,44 +327,56 @@ class DriftPidFollower:
         self._anchor = None
         e_fwd, e_lat, _ = geo.cross_track_error(self._path, self._idx,
                                                 pose.x, pose.y, pose.yaw)
-        vy = self._lat.update(e_lat, dt, integrate=integrate, gain_scale=gain)
+        vy = self._lat.update(e_lat, dt, integrate=integrate, gain_scale=gain,
+                              deadband_extra=auth.deadband_extra_m, fresh=fresh)
         vx = approach_speed(self._distance_to_goal(pose), p.pos_radius,
                             p.slow_radius, p.cruise_speed, p.arrive_speed_min)
         vx *= alignment_gate(e_yaw, p.travel_cone_rad, p.translate_suppress_rad,
                              p.translate_suppress_floor)
         if p.forward_track_frac > 0.0:
             vx += p.forward_track_frac * self._fwd.update(
-                e_fwd, dt, integrate=integrate, gain_scale=gain)
+                e_fwd, dt, integrate=integrate, gain_scale=gain,
+                deadband_extra=auth.deadband_extra_m, fresh=fresh)
         else:
             # Keep the loop's memory current so switching regimes does not start
             # it from a stale error, but let it contribute nothing here.
-            self._fwd.update(e_fwd, dt, integrate=False, gain_scale=0.0)
+            self._fwd.update(e_fwd, dt, integrate=False, gain_scale=0.0,
+                             fresh=fresh)
         return self._emit(vx, vy, wz, DriftPidState.TRACK, dt, auth, blocked,
                           report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
                           e_yaw=e_yaw)
 
     # ─── Helpers ─────────────────────────────────────────────────
-    def _station_keep(self, pose, dt, integrate, gain, hold_yaw):
-        # type: (Pose2D, float, bool, float, float) -> Tuple[float, ...]
+    def _station_keep(self, pose, dt, auth, fresh, hold_yaw):
+        # type: (Pose2D, float, object, bool, float) -> Tuple[float, ...]
         """Full 2-axis position hold on the anchor plus a heading hold."""
-        vx, vy, e_fwd, e_lat = self._anchor_correction(pose, dt, integrate, gain)
+        vx, vy, e_fwd, e_lat = self._anchor_correction(pose, dt, auth, fresh)
         e_yaw = normalize_angle(hold_yaw - pose.yaw)
-        wz = saturate(self._yaw.update(e_yaw, dt, integrate=integrate,
-                                       gain_scale=gain),
+        wz = saturate(self._yaw.update(e_yaw, dt, integrate=auth.integrate,
+                                       gain_scale=auth.gain_scale,
+                                       deadband_extra=auth.yaw_deadband_extra_rad,
+                                       fresh=fresh),
                       self.params.approach_yaw_rate)
         return vx, vy, wz, e_fwd, e_lat, e_yaw
 
-    def _anchor_correction(self, pose, dt, integrate, gain, lateral_frac=1.0):
-        # type: (Pose2D, float, bool, float, float) -> Tuple[float, float, float, float]
-        """Body-frame correction pulling the drone back onto its latched anchor."""
+    def _anchor_correction(self, pose, dt, auth, fresh, lateral_frac=1.0):
+        # type: (Pose2D, float, object, bool, float) -> Tuple[float, float, float, float]
+        """Body-frame correction pulling the drone back onto its latched anchor.
+
+        The hold deadband widens with the provider's own error estimate: while
+        the pose is only good to +-20 cm, a 5 cm "wander" around the anchor is
+        the measurement moving, not the drone.
+        """
         ax, ay = self._anchor if self._anchor else (pose.x, pose.y)
         e_fwd, e_lat = geo.body_offset_to_point(pose.x, pose.y, pose.yaw, ax, ay)
-        db = self.params.hold_deadband_m
+        db = self.params.hold_deadband_m + auth.deadband_extra_m
         vx = self._fwd.update(e_fwd if abs(e_fwd) > db else 0.0, dt,
-                              integrate=integrate, gain_scale=gain)
+                              integrate=auth.integrate,
+                              gain_scale=auth.gain_scale, fresh=fresh)
         vy = lateral_frac * self._lat.update(e_lat if abs(e_lat) > db else 0.0,
-                                             dt, integrate=integrate,
-                                             gain_scale=gain)
+                                             dt, integrate=auth.integrate,
+                                             gain_scale=auth.gain_scale,
+                                             fresh=fresh)
         return vx, vy, e_fwd, e_lat
 
     def _latch_anchor(self, pose, on_track=False, at_goal=False):
@@ -379,7 +445,9 @@ class DriftPidFollower:
             drift_vy=self._lat.drift, drift_vx=self._fwd.drift,
             drift_wz=self._yaw.drift, cross_track_m=e_lat, along_track_m=e_fwd,
             heading_err_rad=e_yaw, effort=self._envelope.effort(vx, vy, wz),
-            speed_scale=auth.speed_scale, authority=reason or auth.reason,
+            speed_scale=auth.speed_scale, lead_s=auth.lead_s,
+            deadband_extra_m=auth.deadband_extra_m,
+            authority=reason or auth.reason,
             blocked_axis=blocked.axis if blocked is not None else "",
             escape_state=escape_state)
         return DriftPidCommand(

@@ -8,15 +8,22 @@ a standing offset and stays there.
 
 Measured on the closed-loop test in `tests/`, with a 0.035 m/s sideways push:
 
-| | settled cross-track error |
+| | settled cross-track error (worst) |
 |---|---|
-| P only (`ki = 0`) | 0.096 m |
-| P + drift integral | 0.044 m |
+| P only (`ki = 0`) | 0.085 m |
+| P + drift integral | 0.040 m |
+| P + I, pose delivered a full frame (100 ms) late | 0.039 m |
 
-The residual lands on the cross-track **deadband** (0.04 m), and that is the
-single most important thing to know when tuning: *the deadband is the floor on
-how well the drone can hold its line.* Shrink it and the drone tracks tighter and
-chases more localization noise; grow it and the drone is calmer and sloppier.
+The last row is the latency lead doing its job: the tracking quality survives the
+vision pipeline's real transport delay unchanged.
+
+The residual lands on the cross-track **deadband** (0.03 m on a crisp pose), and
+that is the single most important thing to know when tuning: *the deadband is the
+floor on how well the drone can hold its line.* Shrink it and the drone tracks
+tighter and chases more localization noise; grow it and the drone is calmer and
+sloppier. The deadband is also **not constant**: it widens automatically with the
+provider's own `pos_std` (see below), so the configured value is the floor for a
+*good* pose, not a promise for a bad one.
 
 ## The three drifts, and where each is cancelled
 
@@ -51,6 +58,36 @@ where the user observes it.
 The anchor is latched onto the **trajectory**, not under the drone, so holding
 still also finishes closing whatever cross-track error was open when the hold
 began.
+
+## The quality loop: the pose's own honesty signals, used every tick
+
+Localization publishes more than a pose, and each extra signal drives exactly one
+mechanism:
+
+| signal | mechanism |
+|---|---|
+| `pos_std` (m) | **Adaptive deadbands.** Tracking deadbands widen by `std_deadband_gain` per metre of reported error above the crisp reference (`std_ref_m`), capped. An error smaller than the pose's own stated accuracy is noise — it is neither corrected nor learned from. The heading loop gets the same treatment via the provider's known yaw-std law (`0.02 + 0.20·(1−conf)²`), which is not published but is reconstructable from confidence. |
+| `cmd_effectiveness` | **Earned speed** — a fresh flight starts near `eff_speed_floor × cruise` (the EMA starts unproven at 0.3) and speeds up over the first metres as the world confirms the commands work. Also **earns the latency lead** (below): commands that demonstrably do not move the drone must not move its pose estimate either. |
+| `confidence` | Speed/gain schedule, integrator freeze, hold — as before. |
+| `source == coast` | Lead forced to zero (a coasted pose is *already* command-propagated — leading it counts the same commands twice), integrators frozen, blockage evidence discarded. |
+| arrival timing | **Fresh-measurement derivative.** The ~10 Hz pose is event-driven while the control loop is a timer, so some ticks re-see a held pose. Differentiating a held value gives 0 then a doubled spike; the D term instead banks stale time and differentiates over the true interval, detected from the quality age resetting. |
+
+**Latency lead** (`latency_s`): the controller steers a pose advanced along the
+last *commanded* velocity by the camera→control transport delay, so P/D react to
+where the drone is, not where it was a frame ago. Three guards make it safe: it
+is scaled by proven effectiveness, zeroed while coasting, and **never fed to the
+blockage detector** — a stuck drone whose pose was advanced by its own commands
+would look obedient, which is precisely the failure the detector exists to catch.
+
+## The envelope's two asymmetries
+
+- **Braking beats accelerating** (`decel_* ≥ accel_*`, validated). The ramp-up is
+  deliberately gentle to keep the 2.5 Hz depth model fed with usable frames; the
+  ramp-down must not inherit that gentleness, because taking thrust off is what
+  obstacle response is made of.
+- **Reverse is capped harder than forward** (`max_vx_back < max_vx`, validated).
+  There is no rear camera; every backward metre is blind. Reverse exists to break
+  contact, never to travel.
 
 ## What is control here, and what is planning
 
@@ -110,7 +147,11 @@ Start slow and raise, one dial at a time:
 2. `combined_effort` if it feels fast specifically when turning *while* flying.
 3. `lateral_pid.kp` until it returns to the line without overshooting, then
    `lateral_pid.ki` until the standing offset disappears.
-4. `deadband` last — it is the tracking floor, and shrinking it is what makes the
-   drone chase noise.
+4. `latency_s` if corrections consistently overshoot then swing back — that
+   signature usually means the assumed transport delay is wrong, not the gains.
+5. `deadband` last — it is the tracking floor on a crisp pose, and shrinking it
+   is what makes the drone chase noise.
 
-Everything is exposed in `mission.yaml` under the `CONTROLLER 5` section.
+Everything is exposed in `mission.yaml` under the `CONTROLLER 5` section. Keep
+`use_pose_estimator: false` with this controller: it does its own latency lead,
+and stacking the estimator's smoothing on top only adds lag.

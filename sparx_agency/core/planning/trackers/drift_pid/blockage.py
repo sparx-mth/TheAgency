@@ -56,7 +56,9 @@ class BlockageParams:
             to translate" (m/s). Must sit above the minimum-force floor, or ticks
             the motors ignored would be counted as attempts.
         min_cmd_wz: Yaw rate below which the tick does not count as "trying to
-            rotate" (rad/s).
+            rotate" (rad/s). Keep it above the envelope's yaw minimum-force
+            floor, or ticks the motors ignored by design would count as failed
+            attempts.
         min_cmd_distance_m: Commanded distance that must accumulate inside the
             window before the ratio means anything (m). Guards against declaring
             a blockage from a couple of ticks of rounding.
@@ -77,7 +79,7 @@ class BlockageParams:
 
     window_s: float = 1.2
     min_cmd_vx: float = 0.07
-    min_cmd_wz: float = 0.15
+    min_cmd_wz: float = 0.21
     min_cmd_distance_m: float = 0.06
     min_cmd_yaw_rad: float = 0.12
     progress_frac: float = 0.30

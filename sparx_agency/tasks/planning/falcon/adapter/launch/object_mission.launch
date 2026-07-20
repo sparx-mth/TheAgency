@@ -114,19 +114,22 @@
   <!-- drift_pid controller (controller:=drift_pid) - generated block BEGIN -->
   <!-- SPEED AND FORCE  -  the per-axis envelope, and the multi-axis budget -->
   <arg name="dp_cruise_speed"            default="0.18" /><!-- m/s on a straight leg. THE main speed dial - raise this first -->
-  <arg name="dp_max_vx"                  default="0.25" /><!-- m/s hard cap forward/back. 0.45 = full XTEND pitch thrust -->
+  <arg name="dp_max_vx"                  default="0.25" /><!-- m/s hard cap FORWARD. 0.45 = full XTEND pitch thrust (600 counts) -->
+  <arg name="dp_max_vx_back"             default="0.12" /><!-- m/s hard cap in REVERSE. Harder than forward: no rear camera, every backward metre is blind -->
   <arg name="dp_max_vy"                  default="0.12" /><!-- m/s hard cap sideways (ROLL). Weaker axis; keep well under max_vx -->
-  <arg name="dp_max_wz"                  default="0.35" /><!-- rad/s hard cap yaw. 0.65 = full XTEND yaw thrust -->
+  <arg name="dp_max_wz"                  default="0.40" /><!-- rad/s hard cap yaw (615 of 1000 counts). 0.65 = full XTEND yaw thrust -->
   <arg name="dp_max_translation"         default="0.25" /><!-- m/s cap on the (vx,vy) vector, so a diagonal is not faster than an axis -->
   <arg name="dp_combined_effort"         default="1.4" /><!-- |vx|/max + |vy|/max + |wz|/max budget. 1.0 = one axis at full. -->
   <arg name="dp_accel_xy"                default="0.35" /><!-- m/s2 how fast translation may change. Low = gradual, keeps DA3 depth usable -->
-  <arg name="dp_accel_wz"                default="1.0" /><!-- rad/s2 how fast the yaw rate may change -->
+  <arg name="dp_accel_wz"                default="1.2" /><!-- rad/s2 ramp-up rate of the yaw command -->
+  <arg name="dp_decel_xy"                default="0.60" /><!-- m/s2 how fast translation may be taken OFF. >= accel: braking is never rate-limited by the gentle ramp-up -->
+  <arg name="dp_decel_wz"                default="2.0" /><!-- rad/s2 how fast the yaw command may be taken off -->
   <arg name="dp_min_vx"                  default="0.06" /><!-- m/s smallest forward command the motors actually act on -->
   <arg name="dp_min_vy"                  default="0.06" /><!-- m/s smallest sideways command the motors actually act on -->
-  <arg name="dp_min_wz_deg"              default="8.0" /><!-- deg/s smallest yaw command that actually rotates the drone -->
+  <arg name="dp_min_wz_deg"              default="10.0" /><!-- deg/s smallest yaw command that actually rotates the drone (yaw bites late on this airframe) -->
   <arg name="dp_release_frac"            default="0.5" /><!-- below this fraction of a min the command is dropped to 0, above it snapped up -->
   <!-- NAVIGATION  -  how it gets to the next waypoint -->
-  <arg name="dp_approach_yaw_rate"       default="0.30" /><!-- rad/s cap on the turn onto a leg -->
+  <arg name="dp_approach_yaw_rate"       default="0.35" /><!-- rad/s cap on the turn onto a leg -->
   <arg name="dp_pos_radius"              default="0.30" /><!-- m waypoint capture radius -->
   <arg name="dp_slow_radius"             default="0.80" /><!-- m start slowing this far from the FINAL goal -->
   <arg name="dp_arrive_speed_min"        default="0.08" /><!-- m/s floor outside pos_radius, so it never crawls to a noisy stop -->
@@ -148,14 +151,14 @@
   <arg name="dp_lat_kd"                  default="0.12" /><!-- cross-track D: damping -->
   <arg name="dp_lat_i_limit"             default="0.05" /><!-- m/s biggest standing sideways push it may assume exists -->
   <arg name="dp_lat_max"                 default="0.10" /><!-- m/s cap on the whole cross-track correction. Must be <= dp_max_vy -->
-  <arg name="dp_lat_deadband_m"          default="0.04" /><!-- m error ignored. THE TRACKING FLOOR - shrink to hold tighter, at the cost of chasing noise -->
+  <arg name="dp_lat_deadband_m"          default="0.03" /><!-- m error ignored on a CRISP pose. THE TRACKING FLOOR; widens automatically as pos_std grows -->
   <arg name="dp_lat_d_tau_s"             default="0.4" /><!-- s low-pass on the derivative (a 10Hz noisy pose differentiates to noise) -->
   <arg name="dp_fwd_kp"                  default="0.50" /><!-- along-track P: metres -> m/s of PITCH, while turning or holding -->
   <arg name="dp_fwd_ki"                  default="0.05" /><!-- along-track I: LEARNS the standing fore/aft drift -->
   <arg name="dp_fwd_kd"                  default="0.10" /><!-- along-track D: damping -->
   <arg name="dp_fwd_i_limit"             default="0.05" /><!-- m/s biggest standing fore/aft push it may assume -->
   <arg name="dp_fwd_max"                 default="0.10" /><!-- m/s cap on the along-track correction -->
-  <arg name="dp_fwd_deadband_m"          default="0.06" /><!-- m along-track error ignored -->
+  <arg name="dp_fwd_deadband_m"          default="0.05" /><!-- m along-track error ignored on a crisp pose; widens with pos_std -->
   <arg name="dp_fwd_d_tau_s"             default="0.4" /><!-- s low-pass on the along-track derivative -->
   <arg name="dp_yaw_kp"                  default="0.90" /><!-- heading P: rad of error -> rad/s of YAW -->
   <arg name="dp_yaw_ki"                  default="0.08" /><!-- heading I: LEARNS the standing yaw drift (the rarest of the three) -->
@@ -176,11 +179,16 @@
   <arg name="dp_coast_speed_scale"       default="0.5" /><!-- extra speed multiplier while dead-reckoning (no tag in view, ~0.5s budget) -->
   <arg name="dp_eff_floor"               default="0.15" /><!-- cmd_effectiveness at/below which the commands are not reaching the world -->
   <arg name="dp_eff_full"                default="0.60" /><!-- cmd_effectiveness at/above which commands count as fully effective -->
+  <arg name="dp_eff_speed_floor"         default="0.5" /><!-- speed multiplier while commands are UNPROVEN (effectiveness starts at 0.3): first metres fly cautious, then speed is earned. 1.0 disables -->
+  <arg name="dp_latency_s"               default="0.12" /><!-- s camera->control delay compensated by leading the pose along the last command; earned via effectiveness, 0 while coasting. 0 disables -->
+  <arg name="dp_std_ref_m"               default="0.05" /><!-- m pos_std at/below which the pose counts as crisp (multi-tag fixes sit at 0.01-0.05) -->
+  <arg name="dp_std_deadband_gain"       default="0.6" /><!-- extra tracking deadband per metre of pos_std above the crisp reference: never correct (or learn from) errors smaller than the pose's own stated accuracy -->
+  <arg name="dp_deadband_extra_max_m"    default="0.15" /><!-- m cap on that widening, so a coasting pose (std up to 0.5) cannot switch corrections off entirely -->
   <arg name="dp_require_quality"         default="false" /><!-- true HOLDS the drone until the confidence topics arrive; false flies without them (and warns) -->
   <!-- STUCK DETECTION  -  noticing a wall the camera cannot see -->
   <arg name="dp_block_window_s"          default="1.2" /><!-- s trailing window over which progress is measured -->
   <arg name="dp_block_min_vx"            default="0.07" /><!-- m/s below this the tick does not count as trying to move -->
-  <arg name="dp_block_min_wz_deg"        default="8.6" /><!-- deg/s below this the tick does not count as trying to turn -->
+  <arg name="dp_block_min_wz_deg"        default="12.0" /><!-- deg/s below this the tick does not count as trying to turn. Keep above dp_min_wz_deg -->
   <arg name="dp_block_min_dist_m"        default="0.06" /><!-- m commanded distance needed in the window before the ratio means anything -->
   <arg name="dp_block_min_yaw_deg"       default="7.0" /><!-- deg commanded rotation needed in the window -->
   <arg name="dp_block_progress_frac"     default="0.30" /><!-- achieved/commanded below this = not moving. Not 0: a heavy drone always under-delivers -->
@@ -645,12 +653,15 @@
     <!-- drift_pid controller (controller:=drift_pid) - generated block BEGIN forwarding -->
     <arg name="dp_cruise_speed"            value="$(arg dp_cruise_speed)" />
     <arg name="dp_max_vx"                  value="$(arg dp_max_vx)" />
+    <arg name="dp_max_vx_back"             value="$(arg dp_max_vx_back)" />
     <arg name="dp_max_vy"                  value="$(arg dp_max_vy)" />
     <arg name="dp_max_wz"                  value="$(arg dp_max_wz)" />
     <arg name="dp_max_translation"         value="$(arg dp_max_translation)" />
     <arg name="dp_combined_effort"         value="$(arg dp_combined_effort)" />
     <arg name="dp_accel_xy"                value="$(arg dp_accel_xy)" />
     <arg name="dp_accel_wz"                value="$(arg dp_accel_wz)" />
+    <arg name="dp_decel_xy"                value="$(arg dp_decel_xy)" />
+    <arg name="dp_decel_wz"                value="$(arg dp_decel_wz)" />
     <arg name="dp_min_vx"                  value="$(arg dp_min_vx)" />
     <arg name="dp_min_vy"                  value="$(arg dp_min_vy)" />
     <arg name="dp_min_wz_deg"              value="$(arg dp_min_wz_deg)" />
@@ -702,6 +713,11 @@
     <arg name="dp_coast_speed_scale"       value="$(arg dp_coast_speed_scale)" />
     <arg name="dp_eff_floor"               value="$(arg dp_eff_floor)" />
     <arg name="dp_eff_full"                value="$(arg dp_eff_full)" />
+    <arg name="dp_eff_speed_floor"         value="$(arg dp_eff_speed_floor)" />
+    <arg name="dp_latency_s"               value="$(arg dp_latency_s)" />
+    <arg name="dp_std_ref_m"               value="$(arg dp_std_ref_m)" />
+    <arg name="dp_std_deadband_gain"       value="$(arg dp_std_deadband_gain)" />
+    <arg name="dp_deadband_extra_max_m"    value="$(arg dp_deadband_extra_max_m)" />
     <arg name="dp_require_quality"         value="$(arg dp_require_quality)" />
     <arg name="dp_block_window_s"          value="$(arg dp_block_window_s)" />
     <arg name="dp_block_min_vx"            value="$(arg dp_block_min_vx)" />

@@ -98,7 +98,8 @@ def test_combined_budget_scales_every_axis_together():
     """Multi-axis demand is cut proportionally, so the command keeps its shape."""
     env = ForceEnvelope(EnvelopeParams(
         max_vx=0.3, max_vy=0.3, max_wz=0.3, max_translation=1.0,
-        combined_effort=1.0, accel_xy=100.0, accel_wz=100.0,
+        combined_effort=1.0, accel_xy=100.0, decel_xy=100.0,
+        accel_wz=100.0, decel_wz=100.0,
         min_vx=0.01, min_vy=0.01, min_wz=0.01))
     vx, vy, wz = env.apply(0.3, 0.3, 0.3, DT)
     assert env.effort(vx, vy, wz) == pytest.approx(1.0, abs=1e-6)
@@ -116,7 +117,7 @@ def test_slew_limits_how_fast_a_command_may_change():
 def test_minimum_force_snaps_up_or_drops_to_zero():
     """Below the motor floor a command is either committed or abandoned."""
     env = ForceEnvelope(EnvelopeParams(min_vx=0.06, release_frac=0.5,
-                                       accel_xy=100.0))
+                                       accel_xy=100.0, decel_xy=100.0))
     assert env.apply(0.04, 0.0, 0.0, DT)[0] == pytest.approx(0.06)
     env.reset()
     assert env.apply(0.01, 0.0, 0.0, DT)[0] == 0.0
@@ -125,7 +126,8 @@ def test_minimum_force_snaps_up_or_drops_to_zero():
 def test_speed_scale_shrinks_the_caps_not_the_floors():
     """A low-confidence pose flies the same command, slower -- but still flyably."""
     env = ForceEnvelope(EnvelopeParams(max_vx=0.3, max_translation=0.3,
-                                       min_vx=0.06, accel_xy=100.0))
+                                       min_vx=0.06, accel_xy=100.0,
+                                       decel_xy=100.0))
     vx, _, _ = env.apply(0.3, 0.0, 0.0, DT, speed_scale=0.5)
     assert vx == pytest.approx(0.15, abs=1e-9)
 
@@ -134,6 +136,60 @@ def test_unreachable_per_axis_cap_is_rejected():
     """A max_translation below max_vx would make the forward dial a no-op."""
     with pytest.raises(ValueError, match="max_translation"):
         EnvelopeParams(max_vx=0.4, max_translation=0.2)
+
+
+def test_reverse_is_capped_harder_than_forward():
+    """Backward flight is blind; it must never be the fast direction."""
+    env = ForceEnvelope(EnvelopeParams(max_vx=0.30, max_vx_back=0.10,
+                                       max_translation=0.30,
+                                       accel_xy=100.0, decel_xy=100.0))
+    assert env.apply(0.5, 0.0, 0.0, DT)[0] == pytest.approx(0.30)
+    env.reset()
+    assert env.apply(-0.5, 0.0, 0.0, DT)[0] == pytest.approx(-0.10)
+    with pytest.raises(ValueError, match="max_vx_back"):
+        EnvelopeParams(max_vx=0.2, max_vx_back=0.3)
+
+
+def test_braking_is_faster_than_accelerating():
+    """Taking thrust off must not be rate-limited by the ramp-up's gentleness."""
+    env = ForceEnvelope(EnvelopeParams(accel_xy=0.35, decel_xy=0.70,
+                                       min_vx=0.001))
+    up = env.apply(0.25, 0.0, 0.0, DT)[0]
+    assert up == pytest.approx(0.035, abs=1e-9)         # one accel step
+    for _ in range(20):
+        env.apply(0.25, 0.0, 0.0, DT)                    # reach cruise
+    down = env.brake(DT)[0]
+    assert down == pytest.approx(0.25 - 0.070, abs=1e-9)  # one decel step
+    with pytest.raises(ValueError, match="decel"):
+        EnvelopeParams(accel_xy=0.5, decel_xy=0.3)
+
+
+def test_stale_ticks_do_not_double_the_derivative():
+    """A held pose repeated for a tick must not turn into a derivative spike.
+
+    The error steps 0 -> 0.1 across TWO ticks (one stale, one fresh). Honest
+    rate: 0.1 / (2*DT). A naive implementation differentiates over one DT and
+    reports double.
+    """
+    honest = AxisPid(PidGains(kd=1.0, d_tau_s=0.0, out_limit=10.0))
+    honest.update(0.0, DT, fresh=True)
+    honest.update(0.0, DT, fresh=False)          # stale: pose stream gapped
+    out = honest.update(0.1, DT, fresh=True)
+    assert out == pytest.approx(0.1 / (2 * DT), abs=1e-9)
+
+    naive = AxisPid(PidGains(kd=1.0, d_tau_s=0.0, out_limit=10.0))
+    naive.update(0.0, DT, fresh=True)
+    naive.update(0.0, DT, fresh=True)            # mislabeled as fresh
+    assert naive.update(0.1, DT, fresh=True) == pytest.approx(0.1 / DT, abs=1e-9)
+
+
+def test_wider_deadband_for_this_tick_suppresses_the_error():
+    """deadband_extra widens the band: a within-noise error is not corrected."""
+    pid = AxisPid(PidGains(kp=1.0, ki=1.0, i_limit=1.0, deadband=0.03,
+                           out_limit=1.0))
+    assert pid.update(0.08, DT, deadband_extra=0.10) == pytest.approx(0.0)
+    assert pid.drift == pytest.approx(0.0)       # and nothing was learned
+    assert pid.update(0.08, DT, deadband_extra=0.0) > 0.0
 
 
 # ── Confidence scheduling ────────────────────────────────────────
@@ -158,6 +214,51 @@ def test_lone_tag_confidence_still_flies():
     """A one-tag fix caps near 0.21; the schedule must not treat that as failure."""
     auth = ConfidenceScheduler(ConfidenceParams()).evaluate(_good(conf=0.21))
     assert not auth.hold and auth.speed_scale > 0.5
+
+
+def test_a_vague_pose_widens_the_deadbands():
+    """pos_std above the crisp reference opens the tracking deadband honestly."""
+    sched = ConfidenceScheduler(ConfidenceParams(std_ref_m=0.05,
+                                                 std_deadband_gain=0.6,
+                                                 deadband_extra_max_m=0.15))
+    crisp = sched.evaluate(LocalizationQuality(confidence=0.5, pos_std_m=0.02,
+                                               age_s=0.05, valid=True))
+    assert crisp.deadband_extra_m == pytest.approx(0.0)
+    vague = sched.evaluate(LocalizationQuality(confidence=0.5, pos_std_m=0.25,
+                                               age_s=0.05, valid=True))
+    assert vague.deadband_extra_m == pytest.approx(0.6 * 0.20, abs=1e-9)
+    coasting = sched.evaluate(LocalizationQuality(confidence=0.15, pos_std_m=0.5,
+                                                  age_s=0.05, coasting=True,
+                                                  valid=True))
+    assert coasting.deadband_extra_m == pytest.approx(0.15)   # capped
+    # Low confidence widens the yaw deadband via the provider's yaw-std law
+    # (0.02 + 0.20*(1-conf)^2): barely at mid confidence, decisively when low.
+    assert vague.yaw_deadband_extra_rad == pytest.approx(0.012, abs=1e-3)
+    low = sched.evaluate(LocalizationQuality(confidence=0.12, pos_std_m=0.25,
+                                             age_s=0.05, valid=True))
+    assert low.yaw_deadband_extra_rad > 0.05
+
+
+def test_unproven_commands_earn_their_speed():
+    """A fresh flight starts near the earned-speed floor and speeds up as the
+    effectiveness EMA learns that commands really move the drone."""
+    sched = ConfidenceScheduler(ConfidenceParams(eff_speed_floor=0.5))
+    unproven = sched.evaluate(_good(conf=0.5, eff=0.15))
+    proven = sched.evaluate(_good(conf=0.5, eff=0.9))
+    assert unproven.speed_scale == pytest.approx(0.5)
+    assert proven.speed_scale == pytest.approx(1.0)
+    assert not unproven.hold                       # throttled, never grounded
+
+
+def test_latency_lead_is_earned_and_never_applied_while_coasting():
+    sched = ConfidenceScheduler(ConfidenceParams(latency_s=0.12))
+    assert sched.evaluate(_good(eff=1.0)).lead_s == pytest.approx(0.12)
+    assert sched.evaluate(_good(eff=0.10)).lead_s == pytest.approx(0.0)
+    coasting = LocalizationQuality(confidence=0.2, age_s=0.05, coasting=True,
+                                   cmd_effectiveness=1.0, valid=True)
+    # A coasted pose is ALREADY propagated by the commands: leading it would
+    # count the same commands twice.
+    assert sched.evaluate(coasting).lead_s == pytest.approx(0.0)
 
 
 # ── Blockage detection ───────────────────────────────────────────
@@ -311,10 +412,37 @@ def test_constant_sideways_drift_is_learned_and_cancelled():
     follower.set_path([Pose2D(0.0, 0.0), Pose2D(6.0, 0.0)], plant.pose)
     worst = _fly(follower, plant, ticks=2000)
     assert follower._lat.drift > 0.02, "the controller never learned the drift"
-    # The same run with ki=0 settles at ~0.096 m, so this threshold genuinely
+    # The same run with ki=0 settles at ~0.085 m, so this threshold genuinely
     # distinguishes "learned the drift" from "P-only pushing back against it".
-    # The residual floor is the cross-track deadband (0.04 m) by design.
-    assert worst < 0.07, "settled cross-track error is too large: %.3f" % worst
+    # The residual floor is the cross-track deadband (0.03 m) by design.
+    assert worst < 0.055, "settled cross-track error is too large: %.3f" % worst
+
+
+def test_drift_is_still_cancelled_through_measurement_latency():
+    """The vision pose arrives a frame late; the command lead absorbs it.
+
+    Same drifting plant, but the follower only ever sees the pose from one
+    control tick ago (~100 ms) — the realistic AprilTag pipeline delay. Without
+    the latency lead this phase lag costs tracking margin; with it, settled
+    error stays at the no-delay level.
+    """
+    follower = DriftPidFollower(DriftPidParams())
+    plant = _Plant(drift_vy=-0.035)
+    follower.set_path([Pose2D(0.0, 0.0), Pose2D(6.0, 0.0)], plant.pose)
+    delayed = [plant.pose, plant.pose]
+    worst = 0.0
+    for i in range(2000):
+        follower.set_quality(_good())
+        cmd = follower.step(delayed[0], DT)      # a tick-old measurement
+        plant.apply(cmd.vx, cmd.vy, cmd.wz, DT)
+        delayed.append(plant.pose)
+        delayed.pop(0)
+        if i > 300:
+            worst = max(worst, abs(cmd.telemetry.cross_track_m))
+        if cmd.done:
+            break
+    assert follower.done
+    assert worst < 0.06, "latency destroyed the tracking: %.3f" % worst
 
 
 def test_controller_holds_when_localization_dies():

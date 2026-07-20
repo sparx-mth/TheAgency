@@ -43,7 +43,7 @@ def _default_lateral_pid():
     controller may hold on its own.
     """
     return PidGains(kp=0.55, ki=0.06, kd=0.12, i_limit=0.05, d_tau_s=0.4,
-                    deadband=0.04, out_limit=0.10)
+                    deadband=0.03, out_limit=0.10)
 
 
 def _default_forward_pid():
@@ -55,7 +55,7 @@ def _default_forward_pid():
     standing still.
     """
     return PidGains(kp=0.50, ki=0.05, kd=0.10, i_limit=0.05, d_tau_s=0.4,
-                    deadband=0.06, out_limit=0.10)
+                    deadband=0.05, out_limit=0.10)
 
 
 def _default_yaw_pid():
@@ -125,7 +125,7 @@ class DriftPidParams:
 
     # ── Feed-forward: how fast we fly ──
     cruise_speed: float = 0.18
-    approach_yaw_rate: float = 0.30
+    approach_yaw_rate: float = 0.35
     pos_radius: float = 0.30
     slow_radius: float = 0.80
     arrive_speed_min: float = 0.08
@@ -195,3 +195,19 @@ class DriftPidParams:
                 "DriftPidParams.lateral_pid.out_limit (%.2f) exceeds "
                 "envelope.max_vy (%.2f) -- corrections must stay inside the axis"
                 % (self.lateral_pid.out_limit, self.envelope.max_vy))
+        if self.forward_pid.out_limit > self.envelope.max_vx_back:
+            raise ValueError(
+                "DriftPidParams.forward_pid.out_limit (%.2f) exceeds "
+                "envelope.max_vx_back (%.2f) -- a station-keeping correction can "
+                "push BACKWARD, so it must fit inside the blind-reverse cap"
+                % (self.forward_pid.out_limit, self.envelope.max_vx_back))
+        if self.yaw_pid.out_limit > self.envelope.max_wz:
+            raise ValueError(
+                "DriftPidParams.yaw_pid.out_limit (%.2f) exceeds envelope.max_wz "
+                "(%.2f) -- corrections must stay inside the axis"
+                % (self.yaw_pid.out_limit, self.envelope.max_wz))
+        if self.approach_yaw_rate > self.envelope.max_wz:
+            raise ValueError(
+                "DriftPidParams.approach_yaw_rate (%.2f) exceeds envelope.max_wz "
+                "(%.2f) -- the turn rate would be clamped away every tick"
+                % (self.approach_yaw_rate, self.envelope.max_wz))

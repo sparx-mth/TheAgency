@@ -45,7 +45,11 @@ class EnvelopeParams:
     """Per-axis and combined limits for :class:`ForceEnvelope` (SI units).
 
     Attributes:
-        max_vx: Cap on forward/back speed (m/s).
+        max_vx: Cap on forward speed (m/s).
+        max_vx_back: Cap on reverse speed (m/s). Deliberately harder than
+            forward: the drone has no rear camera, so every backward metre is
+            flown blind. Reverse is only ever an escape move — breaking contact —
+            never a way to travel.
         max_vy: Cap on lateral (ROLL / crab) speed (m/s). Usually well below
             ``max_vx``: lateral authority is weaker and it moves the drone
             sideways into space the forward-facing camera has not seen.
@@ -62,31 +66,42 @@ class EnvelopeParams:
         release_frac: A per-axis command below ``release_frac * min_*`` is dropped
             to zero; between there and ``min_*`` it is snapped up. 0..1.
         cmd_zero_eps: Magnitude treated as exactly zero (numerical dust guard).
-        accel_xy: Slew limit on the translation axes (m/s^2).
-        accel_wz: Slew limit on the yaw axis (rad/s^2).
+        accel_xy: Slew limit on the translation axes while the demand GROWS
+            (m/s^2). Low on purpose: a heavy drone ramping gently is what keeps
+            the ~2.5 Hz depth model fed with usable frames.
+        decel_xy: Slew limit while the demand SHRINKS or reverses (m/s^2). Must
+            be >= ``accel_xy``: the one asymmetry a heavy drone in a closed room
+            always wants is to be able to take thrust off faster than it puts
+            thrust on — braking for an obstacle must not be rate-limited by the
+            same gentleness that shapes the ramp-up.
+        accel_wz: Slew limit on the yaw axis while the demand grows (rad/s^2).
+        decel_wz: Slew limit on the yaw axis while the demand shrinks (rad/s^2).
     """
 
     max_vx: float = 0.25
+    max_vx_back: float = 0.12
     max_vy: float = 0.12
-    max_wz: float = 0.35
+    max_wz: float = 0.40
     max_translation: float = 0.25
     combined_effort: float = 1.4
 
     min_vx: float = 0.06
     min_vy: float = 0.06
-    min_wz: float = 0.14
+    min_wz: float = 0.175
     release_frac: float = 0.5
     cmd_zero_eps: float = 1e-3
 
     accel_xy: float = 0.35
-    accel_wz: float = 1.0
+    decel_xy: float = 0.60
+    accel_wz: float = 1.2
+    decel_wz: float = 2.0
 
     def __post_init__(self):
         # type: () -> None
         """Validate the invariants the envelope relies on."""
-        for name in ("max_vx", "max_vy", "max_wz", "max_translation",
-                     "combined_effort", "min_vx", "min_vy", "min_wz",
-                     "accel_xy", "accel_wz"):
+        for name in ("max_vx", "max_vx_back", "max_vy", "max_wz",
+                     "max_translation", "combined_effort", "min_vx", "min_vy",
+                     "min_wz", "accel_xy", "decel_xy", "accel_wz", "decel_wz"):
             if getattr(self, name) <= 0.0:
                 raise ValueError("EnvelopeParams." + name + " must be > 0")
         if not 0.0 <= self.release_frac <= 1.0:
@@ -97,6 +112,21 @@ class EnvelopeParams:
                 "max_vy (%.2f) -- the per-axis cap would be unreachable, so the "
                 "dial would silently do nothing"
                 % (self.max_translation, self.max_vx, self.max_vy))
+        if self.max_vx_back > self.max_vx:
+            raise ValueError(
+                "EnvelopeParams.max_vx_back (%.2f) exceeds max_vx (%.2f) -- "
+                "reverse is flown blind and must never be the faster direction"
+                % (self.max_vx_back, self.max_vx))
+        if self.min_vx >= self.max_vx_back:
+            raise ValueError(
+                "EnvelopeParams.min_vx (%.3f) must be below max_vx_back (%.3f) "
+                "-- otherwise every reverse command snaps to the floor and the "
+                "escape's back-off has exactly one speed" % (self.min_vx,
+                                                             self.max_vx_back))
+        if self.decel_xy < self.accel_xy or self.decel_wz < self.accel_wz:
+            raise ValueError(
+                "EnvelopeParams.decel_* must be >= accel_* -- braking may never "
+                "be slower than accelerating")
         for axis, floor, ceiling in (("vx", self.min_vx, self.max_vx),
                                      ("vy", self.min_vy, self.max_vy),
                                      ("wz", self.min_wz, self.max_wz)):
@@ -154,8 +184,13 @@ class ForceEnvelope:
         p = self.params
         s = min(1.0, max(0.0, float(speed_scale)))
 
-        # 1. per-axis caps, scaled by confidence
-        vx = saturate(float(vx), p.max_vx * s)
+        # 1. per-axis caps, scaled by confidence. Forward and reverse are
+        #    asymmetric on purpose: reverse is flown blind.
+        vx = float(vx)
+        if vx >= 0.0:
+            vx = min(vx, p.max_vx * s)
+        else:
+            vx = max(vx, -p.max_vx_back * s)
         vy = saturate(float(vy), p.max_vy * s)
         wz = saturate(float(wz), p.max_wz * s)
         vx, vy = saturate_translation(vx, vy, p.max_translation * s)
@@ -167,12 +202,13 @@ class ForceEnvelope:
             k = p.combined_effort / demand
             vx, vy, wz = vx * k, vy * k, wz * k
 
-        # 3. slew, remembering the continuous (pre-shape) value
-        step_xy = p.accel_xy * dt
-        step_wz = p.accel_wz * dt
-        vx = slew(vx, self._vx, step_xy)
-        vy = slew(vy, self._vy, step_xy)
-        wz = slew(wz, self._wz, step_wz)
+        # 3. slew, remembering the continuous (pre-shape) value. Two rates per
+        #    axis: a demand moving AWAY from zero ramps at accel (gentle, keeps
+        #    the depth model fed); a demand shrinking or reversing ramps at decel
+        #    (braking is never rate-limited by the ramp-up's gentleness).
+        vx = slew(vx, self._vx, self._step(vx, self._vx, p.accel_xy, p.decel_xy, dt))
+        vy = slew(vy, self._vy, self._step(vy, self._vy, p.accel_xy, p.decel_xy, dt))
+        wz = slew(wz, self._wz, self._step(wz, self._wz, p.accel_wz, p.decel_wz, dt))
         self._vx, self._vy, self._wz = vx, vy, wz
 
         # 4. minimum force, last
@@ -181,9 +217,20 @@ class ForceEnvelope:
         wz = shape_axis(wz, p.min_wz, p.release_frac, p.cmd_zero_eps)
         return vx, vy, wz
 
+    @staticmethod
+    def _step(target, current, accel, decel, dt):
+        # type: (float, float, float, float, float) -> float
+        """Slew step for this axis and tick: accel growing, decel shrinking.
+
+        "Shrinking" is any demand whose magnitude drops or whose sign flips —
+        both are the drone taking thrust off this axis.
+        """
+        braking = abs(target) < abs(current) or target * current < 0.0
+        return (decel if braking else accel) * dt
+
     def brake(self, dt):
         # type: (float) -> Tuple[float, float, float]
-        """Ramp every axis toward zero at the slew limit.
+        """Ramp every axis toward zero at the DECEL slew limit.
 
         A stop is a command like any other: snapping to zero throws the drone
         forward on its own inertia, which is exactly the motion that ruins the

@@ -123,6 +123,9 @@ def test_every_param_is_actually_read():
         "~dp_block_confirm_ticks": 9,
         "~dp_escape_back_s": 1.25,
         "~dp_yaw_engage_deg": 33.0,
+        "~dp_latency_s": 0.25,
+        "~dp_decel_xy": 0.9,
+        "~dp_std_deadband_gain": 1.1,
     })
     tuned = build_drift_pid_params(_rospy.get_param)
     assert tuned.cruise_speed == 0.11 != defaults.cruise_speed
@@ -132,6 +135,10 @@ def test_every_param_is_actually_read():
     assert tuned.blockage.confirm_ticks == 9 != defaults.blockage.confirm_ticks
     assert tuned.escape.back_s == 1.25 != defaults.escape.back_s
     assert abs(tuned.yaw_engage_rad - 0.5759) < 1e-3
+    assert tuned.confidence.latency_s == 0.25 != defaults.confidence.latency_s
+    assert tuned.envelope.decel_xy == 0.9 != defaults.envelope.decel_xy
+    assert (tuned.confidence.std_deadband_gain == 1.1
+            != defaults.confidence.std_deadband_gain)
 
 
 def test_degree_params_are_converted_to_radians():
