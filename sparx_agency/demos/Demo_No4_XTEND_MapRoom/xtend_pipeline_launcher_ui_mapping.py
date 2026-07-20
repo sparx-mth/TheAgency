@@ -126,7 +126,8 @@ python3 /home/user/agency_ws/sparx_agency/robots/XTEND/online_nav_bridge_dir_pub
   --path-topic /xtend/rgb_frame_path \
   --preprocess-mode resize \
   --output-width 504 \
-  --output-height 294
+  --output-height 294 \
+  --debug
 '
 
 wait_for_topic_name /xtend/rgb_frame_path 20
@@ -301,7 +302,8 @@ python3 /home/user/agency_ws/sparx_agency/robots/XTEND/online_nav_bridge_dir_pub
   --path-topic /xtend/rgb_frame_path \
   --preprocess-mode resize \
   --output-width 504 \
-  --output-height 294
+  --output-height 294 \
+  --debug
 """,
     ),
     LaunchItem(

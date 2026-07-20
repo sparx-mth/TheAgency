@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
-from geometry_msgs.msg import Twist
+from rclpy.logging import LoggingSeverity
+from geometry_msgs.msg import PoseStamped, Twist
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
 import websockets
@@ -20,7 +21,7 @@ from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import (
     TwistToCmdNavConverter,
 )
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
-from sparx_agency.core.common.spatial_math import yaw_to_quaternion
+from sparx_agency.core.common.spatial_math import quat_to_yaw, yaw_to_quaternion
 
 
 _FLIGHT_OPS = frozenset({"arm", "takeoff", "land", "disarm"})
@@ -76,6 +77,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         cmd_vel_stop_on_timeout: bool = True,
         telemetry_topic: str = "/xtend/local_telemetry",
         bearing_topic: str = "/xtend/bearing",
+        localization_topic: str = "/xtend/localization",
         telemetry_frame_id: str = "odom",
         telemetry_child_frame_id: str = "xtend_camera",
         log_dir: str | Path = "./xtend_online_logs",
@@ -130,6 +132,20 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
         print(f"[bridge] telemetry topic: {self.telemetry_topic}")
         print(f"[bridge] bearing topic:   {self.bearing_topic}")
+
+        # The telemetry CSV logs pose from here rather than the WebSocket's
+        # own local_telemetry field — the latter was found to go stale
+        # (frozen at a fixed fallback value) exactly when the drone is near
+        # a wall, which is the case we most need reliable pose data for.
+        self.localization_topic = localization_topic
+        self._localization_pose: PoseStamped | None = None
+        self.localization_sub = self.ros_node.create_subscription(
+            PoseStamped,
+            self.localization_topic,
+            self._localization_cb,
+            10,
+        )
+        print(f"[bridge] localization topic: {self.localization_topic}")
 
         self.last_xtend_state: dict[str, Any] | None = None
         self.x = None
@@ -204,6 +220,19 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             self.loop.call_soon_threadsafe(self.cmd_queue.put_nowait, data)
         except Exception as exc:
             self.ros_node.get_logger().error(f"Failed to parse command: {exc}")
+
+    def _localization_cb(self, msg: PoseStamped) -> None:
+        self._localization_pose = msg
+        if self.ros_node.get_logger().get_effective_level() <= LoggingSeverity.DEBUG:
+            yaw = quat_to_yaw(
+                msg.pose.orientation.x, msg.pose.orientation.y,
+                msg.pose.orientation.z, msg.pose.orientation.w,
+            )
+            self.ros_node.get_logger().debug(
+                f"[bridge] localization: x={msg.pose.position.x:.3f} "
+                f"y={msg.pose.position.y:.3f} z={msg.pose.position.z:.3f} "
+                f"yaw={yaw:.3f}"
+            )
 
     def set_axes(
         self,
@@ -382,19 +411,30 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         now = time.time()
         iso_time = datetime.fromtimestamp(now).isoformat(timespec="milliseconds")
 
-        local = robot.get("local_telemetry", {}) or {}
-        telemetry = robot.get("telemetry", {}) or {}
-        details = telemetry.get("details", {}) or {}
         axes = self.send_command.get("axes", [0, 0, 0, 0, 0])
+
+        pose = self._localization_pose
+        if pose is not None:
+            x = pose.pose.position.x
+            y = pose.pose.position.y
+            z = pose.pose.position.z
+            bearing = quat_to_yaw(
+                pose.pose.orientation.x,
+                pose.pose.orientation.y,
+                pose.pose.orientation.z,
+                pose.pose.orientation.w,
+            )
+        else:
+            x = y = z = bearing = ""
 
         self.telemetry_writer.writerow([
             now,
             iso_time,
             robot.get("robot_uid", self.robot_uid),
-            local.get("x", ""),
-            local.get("y", ""),
-            local.get("z", ""),
-            details.get("bearing", ""),
+            x,
+            y,
+            z,
+            bearing,
             self.active_action or "",
             axes[0],
             axes[1],

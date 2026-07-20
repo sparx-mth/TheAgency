@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 import rclpy
+from rclpy.logging import LoggingSeverity
 from std_msgs.msg import String
 
 from sparx_agency.robots.XTEND.xtend_online_bridge_base import OnlineXtendBridgeBase
@@ -216,7 +217,7 @@ def parse_args():
     p.add_argument("--host", default="192.0.0.15")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--frequency", type=float, default=10.0)
-    p.add_argument("--robot-uid", default="drnb177ede2")
+    p.add_argument("--robot-uid", default="drndfb3eeb1")
     p.add_argument("--rtsp-uri", default="rtsp://192.0.0.15:8510/active_drone_fpv")
 
     p.add_argument("--out-dir", default="./frames")
@@ -249,6 +250,7 @@ def parse_args():
     p.add_argument("--telemetry-frame-id", default="odom")
     p.add_argument("--telemetry-child-frame-id", default="xtend_camera")
     p.add_argument("--log-dir", default="./xtend_dir_publisher_logs")
+    p.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging on the bridge's ROS logger")
     return p.parse_args()
 
 
@@ -282,6 +284,9 @@ async def async_main():
         bad_frame_log_every=args.bad_frame_log_every,
         log_dir=args.log_dir,
     )
+
+    if args.debug:
+        bridge.ros_node.get_logger().set_level(LoggingSeverity.DEBUG)
 
     await bridge.run_bridge()
 

@@ -108,7 +108,8 @@ XTEND_SERVICES: list[Service] = [
         cmd=f"""python3 {JETSON_REPO}/sparx_agency/robots/XTEND/online_nav_bridge_dir_publisher.py \\
   --frequency 10.0 --out-dir /tmp/xtend_frames \\
   --path-topic /xtend/rgb_frame_path \\
-  --preprocess-mode resize --output-width 504 --output-height 294""",
+  --preprocess-mode resize --output-width 504 --output-height 294 \\
+  --debug""",
     ),
     Service(
         name="Depth DA3",
