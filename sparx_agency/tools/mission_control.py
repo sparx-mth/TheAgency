@@ -65,6 +65,17 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export PYTHONUNBUFFERED=1
 """
 
+# Host-side env for XTEND PC tools (Manual UI, etc.). "ros" is Jetson-only
+# (/opt/ros/humble + the Jetson venv), so PC-side XTEND services need this
+# instead: this host runs ROS2 Jazzy and its own repo venv, but must still
+# match the XTEND stack's ROS_DOMAIN_ID=5 to see its topics.
+_XTEND_PC_ENV = """
+source /opt/ros/jazzy/setup.bash
+source /home/user1/GIT/TheAgency/.venv/bin/activate
+export ROS_DOMAIN_ID=5
+export PYTHONUNBUFFERED=1
+"""
+
 _ENVS = {
     "ros":       _ROS_ENV,
     "depth_ws":  _DEPTH_WS_ENV,
@@ -72,6 +83,7 @@ _ENVS = {
     "none":      "",
     "container": _CONTAINER_ENV,
     "rooster_pc": _ROOSTER_PC_ENV,
+    "xtend_pc":  _XTEND_PC_ENV,
 }
 
 
@@ -247,6 +259,7 @@ python3 -m sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.run_room_mapper
         cmd="rviz2 -d /home/user1/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/rgbd_mapping.rviz",
         env="ros",
         machine="pc",
+        proc_pattern="rgbd_mapping.rviz",
     ),
     Service(
         name="Manual UI",
@@ -254,8 +267,9 @@ python3 -m sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.run_room_mapper
         group="pc",
         description="ARM / TAKEOFF / LAND / DISARM / STOP UI + optional Twist publishing.",
         cmd="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/XTEND/ui.py",
-        env="ros",
+        env="xtend_pc",
         machine="pc",
+        proc_pattern="robots/XTEND/ui.py",
     ),
 ]
 
@@ -418,6 +432,7 @@ ROBOTICAN_SERVICES: list[Service] = [
         cmd="python3 /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/ui.py --ros-args -p rooster_id:=R1",
         env="rooster_pc",
         machine="pc",
+        proc_pattern="robots/ROBOTICAN/ui.py",
     ),
     # ── Monitors ──────────────────────────────────────────────────────────────
     Service(
@@ -532,7 +547,17 @@ def get_all_states() -> dict[str, bool]:
         elif svc.env == "docker":
             states[svc.key] = svc.docker_container in docker_containers
         elif svc.machine == "pc":
-            states[svc.key] = False
+            if svc.proc_pattern:
+                try:
+                    r = subprocess.run(
+                        ["pgrep", "-f", svc.proc_pattern],
+                        capture_output=True, check=False, timeout=2,
+                    )
+                    states[svc.key] = r.returncode == 0
+                except Exception:
+                    states[svc.key] = False
+            else:
+                states[svc.key] = False
         else:
             states[svc.key] = svc.key in tmux_sessions
 
@@ -576,7 +601,12 @@ def start_service(svc: Service) -> str | None:
     """Start service. Returns error string or None on success."""
     if svc.machine == "pc":
         env = _ENVS.get(svc.env, "")
-        script = f"{env}\n{svc.cmd}"
+        if svc.proc_pattern:
+            subprocess.run(
+                ["pkill", "-f", svc.proc_pattern],
+                capture_output=True, check=False, timeout=5,
+            )
+        script = f"{env}\n{svc.cmd} 2>&1 | tee {svc.log_file()}"
         try:
             subprocess.Popen(
                 ["bash", "-lc", script],
@@ -618,7 +648,16 @@ def start_service(svc: Service) -> str | None:
 def stop_service(svc: Service) -> str | None:
     """Stop service. Returns error string or None on success."""
     if svc.machine == "pc":
-        return None  # user closes the window manually
+        if not svc.proc_pattern:
+            return None  # no pattern to match — user closes the window manually
+        try:
+            subprocess.run(
+                ["pkill", "-f", svc.proc_pattern],
+                capture_output=True, check=False, timeout=5,
+            )
+        except Exception as exc:
+            return str(exc)
+        return None
 
     if svc.machine == "container":
         if not svc.proc_pattern:
@@ -655,6 +694,14 @@ def get_logs(svc: Service, lines: int = 120) -> str:
             return r.stdout or r.stderr or "(empty)"
         except Exception as exc:
             return f"docker exec error: {exc}"
+
+    if svc.machine == "pc":
+        cmd = f"tail -n {lines} {svc.log_file()} 2>/dev/null || echo 'No log yet: {svc.log_file()}'"
+        try:
+            r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=5)
+            return r.stdout or r.stderr or "(empty)"
+        except Exception as exc:
+            return f"Local exec error: {exc}"
 
     if svc.env == "docker":
         cmd = f"docker logs --tail {lines} {svc.docker_container} 2>&1 || echo 'No container logs'"
