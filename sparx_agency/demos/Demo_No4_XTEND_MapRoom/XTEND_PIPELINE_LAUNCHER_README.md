@@ -115,33 +115,81 @@ export PYTHONPATH=/usr/lib/python3.12/dist-packages:/opt/ros/jazzy/lib/python3.1
 
 ---
 
+## Parameters
+
+Selecting a command shows **every parameter it accepts** on the Parameters tab —
+not only the handful its command line spells out. The localization node declares
+37 parameters and its command names 6; the object mission has some 290 and names 4.
+
+They are read from whatever *declares* them, so the list can never drift from the
+code:
+
+| Command | Parameters come from |
+| --- | --- |
+| A ROS2 node | its `declare_parameter(...)` calls |
+| An argparse script | its `add_argument(...)` calls |
+| The object mission | `config/mission.yaml` + `adapter/launch/object_mission.launch` |
+
+The comments the author wrote next to each one come too, so every knob arrives
+explained, grouped under the same headings its source file uses.
+
+**Defaults and reset.** Each parameter is shown against the value a plain start
+would use — which is what the command spells out where it spells one out, and the
+underlying declaration otherwise. A value you move is marked with a dot and shown
+in blue; `↺` puts one back, **Reset all to defaults** puts the whole screen back.
+
+**Only what you changed is sent.** The command is rebuilt from the parameters, and
+carries the ones the command already named plus the ones you actually moved. A
+mission with 290 available knobs still starts as:
+
+```bash
+NAV_MODE=hybrid ./run_object_mission.sh --falcon-only office gui dp_cruise_speed:=0.22
+```
+
+**Finding things.** The filter box searches names, documentation and sections;
+**Changed only** narrows to what you have moved — useful before flying, to see
+exactly how this run differs from a default one.
+
+**Saving.** *Save these as my defaults* writes the changed parameters to
+`~/.config/sparx_agency/launcher_params.json` and restores them next session.
+Only changed values are stored, so an improvement to a node's own default is not
+overridden by a stale copy of yesterday's. *Forget saved* drops them again.
+
+**Run on.** Overrides where this command starts — `jetson` (SSH + tmux), `pc`
+(a local terminal), or `manual` (copy to the clipboard).
+
+The Command tab always shows what Start will run, and is editable for a one-off;
+changing any parameter rewrites it.
+
+---
+
 ## Launcher UI Buttons
 
 ### Start selected
 
-Starts the selected item.
+Starts the selected item with the parameters currently on screen.
 
-If the item is a Jetson command, it starts it over SSH inside a named `tmux` session.
-
-If the item is a PC command, it opens a local terminal.
-
-Manual/container commands are copied to the clipboard.
+If the item is set to run on the Jetson, it starts over SSH inside a named `tmux`
+session. On the PC, it opens a local terminal. Manual items are copied to the
+clipboard.
 
 ---
 
-### Start checked Jetson core
+### Start checked
 
-Starts all checked Jetson pipeline nodes in separate `tmux` sessions.
+Starts every ticked Jetson command in its own `tmux` session, each with its own
+parameters.
 
 Typical core sessions:
 
 ```text
 xtend_bridge
 xtend_depth
-xtend_twist_converter
-xtend_flow_depth
-xtend_velocity_integrator
+xtend_demo_manager
+xtend_apriltag
 xtend_static_tf
+xtend_pose_to_tf
+xtend_octomap
 ```
 
 Check active sessions on Jetson:
@@ -529,28 +577,82 @@ STOP should publish zero Twist and {"action": "stop", "value": 0}
 
 ---
 
-## Planner / FALCON
+## Planner / FALCON — the object mission
 
-### Start Hospital World
+The planner side is the **select-then-go object mission**: pick an object from the
+room map's catalog, and the drone flies to it and lands. It is driven by
+`tasks/planning/falcon/run_object_mission.sh`, and the launcher items below start
+exactly what that script documents.
 
-Runs manually on Jetson:
+### The two-terminal workflow (items 12 and 13)
+
+Loading the YOLO-World TensorRT engines is the slow part of a start; FALCON is the
+part worth iterating on. So they are two separate commands:
 
 ```bash
-cd /home/user/GIT/TheAgency
-./run_hospital.sh office
+# terminal A — start the detector once and leave it up
+./run_object_mission.sh --detector-only
+
+# terminal B — relaunch the mission as often as you like (seconds, no engine reload)
+./run_object_mission.sh --falcon-only
 ```
 
-### Inside Planner Container
+- **`--detector-only`** runs *only* the YOLO-World detector, a ROS2 sidecar on the
+  host (the FALCON container has no CUDA/TensorRT/pycuda). Nothing plans, nothing
+  flies. It starts on a placeholder prompt and is re-prompted by the mission
+  director the moment you select an object.
+- **`--falcon-only`** runs the ros1↔ros2 bridge and the FALCON container (nav +
+  A*/NavDP + object-approach + the mission director), reusing the sidecar already
+  running — it neither starts nor, on exit, stops it. It **refuses to start** when
+  no sidecar is running: nothing would ever publish a detection, so the mission
+  could only ever land by A* alone while looking perfectly healthy.
+
+The bridge is restarted with FALCON every time and cannot be kept: it is a ROS1
+node against the roscore that roslaunch starts *inside* the container, so that
+master dies with the container. A fresh roscore is wanted anyway — it is what
+stops a stale latched goal from pre-arming the planners.
+
+Item **14** runs all three in one session, for a one-shot run.
+
+### NavDP inference server (item 11)
+
+Every `nav_mode` except `astar` calls the NavDP point-goal policy, so start this
+**before** the mission:
 
 ```bash
-roslaunch falcon_adapter real_drone.launch map_name:=office
+cd /home/user/agency_ws
+export NAVDP_REPO=/home/user/GIT/NavDP/baselines/navdp
+PYTHONPATH=$PWD python3 \
+  -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
+  --port 8888 --engine-dir sparx_agency/tasks/planning/navdp/engines/orin_sm87
 ```
 
-### ROS Bridge Docker
+It runs on the FALCON **host**, not in the container: the Noetic image ships no
+TensorRT, and FALCON reaches it over `--network host` loopback. Engines are built
+per device and are not portable, so `--engine-dir` must name the tag of the machine
+running it. Start it in the same power mode the engines were built in (MAXN +
+`jetson_clocks`).
+
+### Viewers (items 15 and 16)
 
 ```bash
-cd /home/user/GIT/sjtu_project/ros_bridge_docker
-./run_bridge.sh
+# RViz: BEV map, planned path and odometry, already wired up
+docker exec -it falcon bash -lc 'export DISPLAY=:0 && source /catkin_ws/devel/setup.bash && roslaunch exploration_manager rviz.launch'
+
+# The interactive 2D BEV map with click-to-goal and the status HUD
+docker exec -it falcon bash -lc 'export DISPLAY=:0 && source /catkin_ws/devel/setup.bash && rosrun falcon_adapter bev_click_goal_node.py'
+```
+
+The mission normally starts the BEV viewer itself (`bev_viewer` defaults to true),
+so item 16 is only for a mission launched headless with `bev_viewer:=false`.
+
+### Start-up order
+
+```text
+item 11  NavDP server        (skip only if nav_mode is astar)
+item 12  FALCON A: detector  (start once, leave it up)
+item 13  FALCON B: mission   (restart this as often as you like)
+item 15  RViz                (optional)
 ```
 
 ---
