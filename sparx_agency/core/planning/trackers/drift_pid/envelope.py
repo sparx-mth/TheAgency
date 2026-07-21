@@ -162,8 +162,8 @@ class ForceEnvelope:
         p = self.params
         return (abs(vx) / p.max_vx + abs(vy) / p.max_vy + abs(wz) / p.max_wz)
 
-    def apply(self, vx, vy, wz, dt, speed_scale=1.0):
-        # type: (float, float, float, float, float) -> Tuple[float, float, float]
+    def apply(self, vx, vy, wz, dt, speed_scale=1.0, yaw_speed_scale=None):
+        # type: (float, float, float, float, float, Optional[float]) -> Tuple[float, float, float]
         """Clamp, budget, slew and shape one desired body velocity.
 
         Args:
@@ -175,6 +175,10 @@ class ForceEnvelope:
                 clamping (0..1), so a low-confidence pose flies the same shape of
                 command, slower. The minimum-force floors are NOT scaled — they
                 are a property of the motors, not of the plan.
+            yaw_speed_scale: Separate multiplier for the YAW cap (0..1); None
+                falls back to ``speed_scale``. Exists because slowing the
+                translation on a vague pose is prudence, while slowing the
+                rotation just delays the camera sweep that would fix the pose.
 
         Returns:
             ``(vx, vy, wz)`` ready to publish.
@@ -183,6 +187,8 @@ class ForceEnvelope:
             raise ValueError("ForceEnvelope.apply: dt must be > 0")
         p = self.params
         s = min(1.0, max(0.0, float(speed_scale)))
+        s_yaw = s if yaw_speed_scale is None else min(
+            1.0, max(0.0, float(yaw_speed_scale)))
 
         # 1. per-axis caps, scaled by confidence. Forward and reverse are
         #    asymmetric on purpose: reverse is flown blind.
@@ -192,7 +198,7 @@ class ForceEnvelope:
         else:
             vx = max(vx, -p.max_vx_back * s)
         vy = saturate(float(vy), p.max_vy * s)
-        wz = saturate(float(wz), p.max_wz * s)
+        wz = saturate(float(wz), p.max_wz * s_yaw)
         vx, vy = saturate_translation(vx, vy, p.max_translation * s)
 
         # 2. combined budget -- scale ALL axes together so the command keeps its

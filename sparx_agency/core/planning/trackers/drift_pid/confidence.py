@@ -127,6 +127,16 @@ class ConfidenceParams:
         deadband_extra_max_m: Cap on that extra deadband (m), so a coasting pose
             (std up to 0.5) cannot open the deadband so far the drone stops
             correcting at all.
+        yaw_scale_floor: Floor on the speed scale as applied to the YAW axis
+            (0..1). The confidence ramp exists because flying fast on a vague
+            pose grows the position error -- but rotating in place carries no
+            position risk, and on this platform it is the cure: sweeping the
+            camera is what brings tags back into view and sharpens the pose.
+            Measured on the deployed airframe, halving the yaw counts (the
+            default scaling at conf ~0.3) left a 90-degree turn undeliverable
+            for 20 s. 0 keeps the old behaviour (yaw scaled like translation);
+            1 gives yaw full authority whenever the drone may move at all.
+            A hold still zeroes every axis, yaw included.
     """
 
     conf_full: float = 0.35
@@ -144,6 +154,7 @@ class ConfidenceParams:
     std_ref_m: float = 0.05
     std_deadband_gain: float = 0.6
     deadband_extra_max_m: float = 0.15
+    yaw_scale_floor: float = 0.0
 
     def __post_init__(self):
         # type: () -> None
@@ -157,7 +168,7 @@ class ConfidenceParams:
         if self.eff_floor >= self.eff_full:
             raise ValueError("ConfidenceParams.eff_floor must be below eff_full")
         for name in ("speed_floor", "gain_floor", "coast_speed_scale",
-                     "eff_speed_floor"):
+                     "eff_speed_floor", "yaw_scale_floor"):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ValueError("ConfidenceParams." + name + " must be in [0, 1]")
         if self.max_age_s <= 0.0:
@@ -181,6 +192,10 @@ class ControlAuthority:
         speed_scale: Multiplier on every per-axis speed cap (0..1). Folds
             together the confidence ramp, the coast slow-down and the
             earned-speed (proven effectiveness) factor.
+        yaw_speed_scale: Multiplier applied to the YAW cap specifically (0..1).
+            ``max(speed_scale, yaw_scale_floor)`` — never below the translation
+            scale, optionally pinned high so a vague pose slows the flying but
+            not the turning (turning is what un-vagues the pose). 0 on a hold.
         gain_scale: Multiplier on the P and D terms (0..1). The integral is never
             scaled — see :class:`~.pid.AxisPid`.
         integrate: False freezes every integrator this tick.
@@ -201,6 +216,7 @@ class ControlAuthority:
     """
 
     speed_scale: float = 1.0
+    yaw_speed_scale: float = 1.0
     gain_scale: float = 1.0
     integrate: bool = True
     hold: bool = False
@@ -237,17 +253,19 @@ class ConfidenceScheduler:
         """
         p = self.params
         if not quality.valid:
-            return ControlAuthority(speed_scale=0.0, gain_scale=0.0,
-                                    integrate=False, hold=True,
+            return ControlAuthority(speed_scale=0.0, yaw_speed_scale=0.0,
+                                    gain_scale=0.0, integrate=False, hold=True,
                                     reason="no localization yet")
         if quality.age_s > p.max_age_s:
             return ControlAuthority(
-                speed_scale=0.0, gain_scale=0.0, integrate=False, hold=True,
+                speed_scale=0.0, yaw_speed_scale=0.0, gain_scale=0.0,
+                integrate=False, hold=True,
                 reason="pose is %.2fs old (limit %.2fs)" % (quality.age_s,
                                                             p.max_age_s))
         if quality.confidence < p.conf_hold:
             return ControlAuthority(
-                speed_scale=0.0, gain_scale=0.0, integrate=False, hold=True,
+                speed_scale=0.0, yaw_speed_scale=0.0, gain_scale=0.0,
+                integrate=False, hold=True,
                 reason="localization confidence %.2f below the hold floor %.2f"
                        % (quality.confidence, p.conf_hold))
 
@@ -290,7 +308,11 @@ class ConfidenceScheduler:
                 quality.confidence, int(round(speed * 100.0)))
         else:
             reason = "localization healthy"
-        return ControlAuthority(speed_scale=speed, gain_scale=gain,
+        # Yaw is scheduled separately: a vague pose is a reason to FLY slower,
+        # not to TURN slower -- turning is what brings tags back into view.
+        yaw_speed = max(speed, p.yaw_scale_floor)
+        return ControlAuthority(speed_scale=speed, yaw_speed_scale=yaw_speed,
+                                gain_scale=gain,
                                 integrate=integrate, hold=False, lead_s=lead,
                                 deadband_extra_m=extra,
                                 yaw_deadband_extra_rad=yaw_extra, reason=reason)
