@@ -108,6 +108,15 @@ class DriftPidParams:
         lateral_turn_frac: Fraction of the cross-track PID applied while
             rotating (0..1). Reduced: a large ROLL during a turn perturbs the
             rotation itself.
+        turn_pitch_bias: Forward speed ridden during a TURN whose translation
+            would otherwise be zero (m/s). A pure yaw leaves this airframe flat,
+            so the turn bites late and coasts -- measured on the deployed drone
+            at ~11% yaw delivery in place versus 30-68% while translating. The
+            same trick the one-axis follower's ``yaw_pitch_bias`` applies at
+            publish time, done here inside the control law so the envelope,
+            telemetry and logs all see the command that actually flies. Only
+            replaces a smaller |vx|; a real station-keeping correction that is
+            already larger wins. 0 disables (a pure yaw stays pure).
         settle_map_updates: Fresh voxel updates the controller asks the adapter to
             wait for while stopped. Exposed for interface parity with the one-axis
             follower's map-settle gate.
@@ -143,6 +152,7 @@ class DriftPidParams:
     hold_deadband_m: float = 0.06
     forward_track_frac: float = 0.0
     lateral_turn_frac: float = 0.40
+    turn_pitch_bias: float = 0.0
     settle_map_updates: int = 0
 
     # ── Feedback: how tightly we hold ──
@@ -178,6 +188,13 @@ class DriftPidParams:
                      "lateral_turn_frac"):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ValueError("DriftPidParams." + name + " must be in [0, 1]")
+        if self.turn_pitch_bias < 0.0:
+            raise ValueError("DriftPidParams.turn_pitch_bias must be >= 0")
+        if self.turn_pitch_bias > self.envelope.max_vx:
+            raise ValueError(
+                "DriftPidParams.turn_pitch_bias (%.2f) exceeds envelope.max_vx "
+                "(%.2f) -- the bias is a nudge that makes a turn bite, not a "
+                "flight speed" % (self.turn_pitch_bias, self.envelope.max_vx))
         if self.cruise_speed > self.envelope.max_vx:
             raise ValueError(
                 "DriftPidParams.cruise_speed (%.2f) exceeds envelope.max_vx "

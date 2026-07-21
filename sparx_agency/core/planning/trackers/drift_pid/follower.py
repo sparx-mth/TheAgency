@@ -188,9 +188,14 @@ class DriftPidFollower:
             return escaped
 
         report = False
-        if blocked.blocked and self._escape.exhausted and not self._reported:
-            # The reflexes have had their turn and the drone is still stuck. Say
-            # so once; deciding what to do about it is the planner's job.
+        if (blocked.blocked and self._escape.exhausted and not self._reported
+                and not frozen):
+            # The reflexes have had their turn and the drone is still stuck AND it
+            # is actually trying to fly. A frozen drone (held by the adapter, lost
+            # localization, GO not given, or waiting on a map update) was told to
+            # stop -- it is not "blocked", and reporting a blockage from a spot it
+            # was never allowed to fly through only teaches the planner a phantom
+            # obstacle. Say it once, when it is real; the planner owns the reroute.
             self._reported = True
             report = True
 
@@ -319,6 +324,13 @@ class DriftPidFollower:
             vx *= alignment_gate(e_yaw, p.travel_cone_rad,
                                  p.translate_suppress_rad,
                                  p.translate_suppress_floor)
+            if (p.turn_pitch_bias > 0.0 and abs(wz) > 1e-3
+                    and abs(vx) < p.turn_pitch_bias):
+                # A pure yaw coasts flat on this airframe (measured ~11% yaw
+                # delivery in place vs 30-68% while translating): ride a small
+                # forward pitch so the turn has something to bite on. A larger
+                # genuine station-keeping correction wins over the bias.
+                vx = p.turn_pitch_bias
             return self._emit(vx, vy, wz, DriftPidState.TURN, dt, auth, blocked,
                               report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
                               e_yaw=e_yaw)
@@ -437,8 +449,9 @@ class DriftPidFollower:
               reason="", report_blocked=False, e_fwd=0.0, e_lat=0.0, e_yaw=0.0):
         # type: (...) -> DriftPidCommand
         """Push the desired velocity through the force envelope and package it."""
-        vx, vy, wz = self._envelope.apply(vx, vy, wz, dt,
-                                          speed_scale=auth.speed_scale)
+        vx, vy, wz = self._envelope.apply(
+            vx, vy, wz, dt, speed_scale=auth.speed_scale,
+            yaw_speed_scale=getattr(auth, "yaw_speed_scale", None))
         self._last = (vx, vy, wz)
         self._state = state
         telemetry = DriftTelemetry(
