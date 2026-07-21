@@ -286,6 +286,75 @@ def test_envelope_scales_yaw_separately_from_translation():
     assert wz == pytest.approx(0.6)            # yaw keeps its full cap
 
 
+def test_track_yaw_is_gentle_while_turn_yaw_is_strong():
+    """Mid-leg the roll owns the line and yaw only trims (track_yaw_rate);
+    turning onto a leg still gets the full approach rate."""
+    p = DriftPidParams(approach_yaw_rate=0.65, track_yaw_rate=0.25,
+                       yaw_pid=PidGains(kp=5.0, ki=0.0, kd=0.0, i_limit=0.01,
+                                        out_limit=0.65),
+                       envelope=EnvelopeParams(max_wz=0.65),
+                       # the pose is pinned in this test -- keep the wedged-drone
+                       # detector from hijacking the regime under inspection
+                       blockage=BlockageParams(enabled=False),
+                       yaw_engage_rad=radians(30.0))
+    f = DriftPidFollower(p)
+    f.set_quality(_good())
+    # Straight-ahead path with a ~15 deg heading error: below engage -> TRACK,
+    # and the huge kp saturates whichever cap applies.
+    f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(3.0, 0.0, 0.0)])
+    cmd = None
+    for _ in range(20):
+        cmd = f.step(Pose2D(0.0, 0.0, radians(-15.0)), DT)
+    assert cmd.state == DriftPidState.TRACK
+    assert abs(cmd.wz) <= 0.25 + 1e-6            # the gentle track cap binds
+
+    turn = DriftPidFollower(p)
+    turn.set_quality(_good())
+    turn.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 3.0, 0.0)])  # 90 deg left
+    for _ in range(20):
+        cmd = turn.step(Pose2D(0.0, 0.0, 0.0), DT)
+    assert cmd.state == DriftPidState.TURN
+    assert abs(cmd.wz) > 0.25                    # turning exceeds the track cap
+
+
+def test_straight_flight_cruises_harder_than_yaw_corrected_flight():
+    """The straight-flight bonus: quiet yaw -> the fast cruise; a yaw correction
+    at the track cap -> back down to the base cruise."""
+    p = DriftPidParams(cruise_speed=0.20, cruise_speed_straight=0.45,
+                       track_yaw_rate=0.25,
+                       envelope=EnvelopeParams(max_vx=0.45, max_translation=0.45,
+                                               accel_xy=100.0, decel_xy=100.0),
+                       blockage=BlockageParams(enabled=False),
+                       yaw_engage_rad=radians(30.0))
+    # Dead-straight path, zero heading error: yaw quiet -> fast cruise.
+    f = DriftPidFollower(p)
+    f.set_quality(_good())
+    f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(6.0, 0.0, 0.0)])
+    cmd = None
+    for _ in range(10):
+        cmd = f.step(Pose2D(0.0, 0.0, 0.0), DT)
+    assert cmd.state == DriftPidState.TRACK
+    assert cmd.vx == pytest.approx(0.45, abs=0.02)
+
+    # Same leg with a standing ~15 deg heading error: yaw correcting -> slower.
+    g = DriftPidFollower(p)
+    g.set_quality(_good())
+    g.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(6.0, 0.0, 0.0)])
+    for _ in range(10):
+        cmd = g.step(Pose2D(0.0, 0.0, radians(-15.0)), DT)
+    assert cmd.state == DriftPidState.TRACK
+    assert cmd.vx < 0.40                       # the bonus blended away
+
+    # Disabled (0): the old single-cruise behaviour.
+    q = DriftPidFollower(DriftPidParams(cruise_speed=0.20,
+                                        blockage=BlockageParams(enabled=False)))
+    q.set_quality(_good())
+    q.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(6.0, 0.0, 0.0)])
+    for _ in range(10):
+        cmd = q.step(Pose2D(0.0, 0.0, 0.0), DT)
+    assert cmd.vx == pytest.approx(0.20, abs=0.02)
+
+
 def test_turn_rides_a_pitch_bias_so_the_yaw_bites():
     """A pure in-place yaw coasts flat on this airframe; the bias converts the
     turn into the measured 3-6x better turning-while-translating regime."""
