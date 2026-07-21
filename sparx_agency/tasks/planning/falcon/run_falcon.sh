@@ -113,7 +113,7 @@ echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sp
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py drift_pid_follower.py localization_quality.py thinking.py thought_journal.py certainty_log.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py drift_pid_follower.py altitude_hold.py localization_quality.py thinking.py thought_journal.py certainty_log.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else
