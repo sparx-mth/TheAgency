@@ -261,6 +261,56 @@ def test_latency_lead_is_earned_and_never_applied_while_coasting():
     assert sched.evaluate(coasting).lead_s == pytest.approx(0.0)
 
 
+def test_yaw_scale_floor_keeps_the_turn_at_full_authority_on_a_vague_pose():
+    """A vague pose slows the flying, never the turning: turning in place is
+    what sweeps tags back into view, and it carries no position risk."""
+    sched = ConfidenceScheduler(ConfidenceParams(yaw_scale_floor=1.0))
+    vague = _good(conf=0.15)                   # between conf_min and conf_full
+    auth = sched.evaluate(vague)
+    assert auth.speed_scale < 1.0              # translation slowed
+    assert auth.yaw_speed_scale == pytest.approx(1.0)   # yaw untouched
+    held = sched.evaluate(LocalizationQuality(confidence=0.01, age_s=0.05,
+                                              valid=True))
+    assert held.hold and held.yaw_speed_scale == 0.0    # a hold still holds
+
+
+def test_envelope_scales_yaw_separately_from_translation():
+    env = ForceEnvelope(EnvelopeParams(max_vx=0.4, max_wz=0.6,
+                                       max_translation=0.4,
+                                       combined_effort=5.0,
+                                       accel_xy=100.0, accel_wz=100.0,
+                                       decel_xy=100.0, decel_wz=100.0))
+    vx, _, wz = env.apply(1.0, 0.0, 1.0, DT, speed_scale=0.5,
+                          yaw_speed_scale=1.0)
+    assert vx == pytest.approx(0.2)            # halved by speed_scale
+    assert wz == pytest.approx(0.6)            # yaw keeps its full cap
+
+
+def test_turn_rides_a_pitch_bias_so_the_yaw_bites():
+    """A pure in-place yaw coasts flat on this airframe; the bias converts the
+    turn into the measured 3-6x better turning-while-translating regime."""
+    p = DriftPidParams(turn_pitch_bias=0.08,
+                       yaw_engage_rad=radians(22.0))
+    f = DriftPidFollower(p)
+    f.set_quality(_good())
+    # Path 90 degrees to the left: heading error far above engage -> TURN.
+    f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 3.0, 0.0)])
+    cmd = None
+    for _ in range(10):
+        cmd = f.step(Pose2D(0.0, 0.0, 0.0), DT)
+    assert cmd.state == DriftPidState.TURN
+    assert cmd.wz > 0.0                        # turning left
+    assert cmd.vx >= p.envelope.min_vx         # and riding the forward bias
+
+    unbiased = DriftPidFollower(DriftPidParams(yaw_engage_rad=radians(22.0)))
+    unbiased.set_quality(_good())
+    unbiased.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 3.0, 0.0)])
+    for _ in range(10):
+        cmd = unbiased.step(Pose2D(0.0, 0.0, 0.0), DT)
+    assert cmd.state == DriftPidState.TURN
+    assert cmd.vx == pytest.approx(0.0)        # default: the pure yaw of old
+
+
 # ── Blockage detection ───────────────────────────────────────────
 def test_wedged_drone_is_detected_on_the_forward_axis():
     mon = BlockageMonitor(BlockageParams(window_s=0.5, confirm_ticks=3))
@@ -305,6 +355,53 @@ def test_blocked_turn_is_detected_on_the_yaw_axis():
     for _ in range(30):
         verdict = mon.update(Pose2D(0.0, 0.0, 0.0), 0.0, 0.4, DT, _good())
     assert verdict.axis == AXIS_YAW and verdict.sign == 1
+
+
+def test_disabled_monitor_never_blocks_and_drops_a_standing_verdict():
+    """The kill switch for a platform that under-delivers on every axis: honest
+    weakness looks exactly like a wall, so the operator must be able to turn the
+    detector off outright -- and flipping it off must also clear a verdict that
+    latched before the switch."""
+    mon = BlockageMonitor(BlockageParams(window_s=0.5, confirm_ticks=3))
+    pose = Pose2D(0.0, 0.0, 0.0)
+    for _ in range(30):                       # wedged: forward confirmed
+        verdict = mon.update(pose, 0.2, 0.0, DT, _good())
+    assert verdict.blocked
+    mon.params = BlockageParams(window_s=0.5, confirm_ticks=3, enabled=False)
+    verdict = mon.update(pose, 0.2, 0.0, DT, _good())
+    assert not verdict.blocked                # standing verdict dropped
+    for _ in range(30):                       # and it can never re-confirm
+        verdict = mon.update(pose, 0.2, 0.0, DT, _good())
+    assert not verdict.blocked
+
+
+def test_stale_blockage_clears_once_the_drone_stops_pushing_into_it():
+    """A phantom block must not latch the drone forever. Once it stops driving
+    into the spot -- boxed in, rerouted away, or held -- the verdict goes stale."""
+    mon = BlockageMonitor(BlockageParams(window_s=0.5, confirm_ticks=3,
+                                         clear_ticks=3, stale_clear_s=1.0))
+    pose = Pose2D(0.0, 0.0, 0.0)
+    for _ in range(30):                       # wedged: forward confirmed
+        verdict = mon.update(pose, 0.2, 0.0, DT, _good())
+    assert verdict.axis == AXIS_FORWARD
+    for _ in range(int(1.0 / DT) + 2):        # stop commanding forward for > 1 s
+        verdict = mon.update(pose, 0.0, 0.0, DT, _good())
+    assert not verdict.blocked
+
+
+def test_a_live_escape_does_not_clear_its_own_blockage():
+    """stale_clear_s must outlast an escape's idle phases (~2 s of brake/probe/
+    settle), or the detector would drop the blockage the escape is reacting to and
+    hand it a fresh, endless set of attempts."""
+    mon = BlockageMonitor(BlockageParams(window_s=0.5, confirm_ticks=3,
+                                         stale_clear_s=2.0))
+    pose = Pose2D(0.0, 0.0, 0.0)
+    for _ in range(30):
+        verdict = mon.update(pose, 0.2, 0.0, DT, _good())
+    assert verdict.axis == AXIS_FORWARD
+    for _ in range(15):                       # 1.5 s of no forward command < 2 s
+        verdict = mon.update(pose, 0.0, 0.0, DT, _good())
+    assert verdict.blocked and verdict.axis == AXIS_FORWARD
 
 
 # ── Escape reflexes ──────────────────────────────────────────────
