@@ -71,12 +71,27 @@ class BlockageParams:
             a tick count, never a wall-clock timer: the controller must react to
             evidence, not to a clock that keeps running while it holds still.
         clear_ticks: Consecutive good ticks needed to clear one.
+        stale_clear_s: Seconds of NOT pushing an axis after which a standing
+            blockage on it is dropped as stale (0 disables). A blockage claims
+            "pushing here does nothing"; once the follower/planner has stopped
+            driving into it -- rerouted away, boxed in, or held -- that claim is
+            no longer being tested, and left latched it freezes the drone against
+            a spot nothing is re-probing. This must comfortably exceed the idle
+            stretch of an escape manoeuvre (its brake/probe/settle phases, ~2 s),
+            so a live escape can never clear the very blockage it is escaping.
         use_effectiveness: Whether to also believe the localization provider's
             ``cmd_effectiveness``.
         eff_floor: ``cmd_effectiveness`` at/below which the provider is taken to
             be reporting a stuck drone.
+        enabled: False disables the detector outright: it never confirms a
+            blockage, so no escape reflex ever runs and nothing is reported to
+            the planner. The kill switch for flights where the platform itself
+            under-delivers on every axis (weak battery, payload, trim) -- there
+            the detector reads honest weakness as walls and the escapes consume
+            the flight. Re-enable once the airframe demonstrably responds again.
     """
 
+    enabled: bool = True
     window_s: float = 1.2
     min_cmd_vx: float = 0.07
     min_cmd_wz: float = 0.21
@@ -85,6 +100,7 @@ class BlockageParams:
     progress_frac: float = 0.30
     confirm_ticks: int = 5
     clear_ticks: int = 3
+    stale_clear_s: float = 4.0
     use_effectiveness: bool = True
     eff_floor: float = 0.15
 
@@ -100,6 +116,8 @@ class BlockageParams:
         for name in ("confirm_ticks", "clear_ticks"):
             if getattr(self, name) < 1:
                 raise ValueError("BlockageParams." + name + " must be >= 1")
+        if self.stale_clear_s < 0.0:
+            raise ValueError("BlockageParams.stale_clear_s must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -146,6 +164,8 @@ class BlockageMonitor:
         self._bad_yaw = 0
         self._good_fwd = 0
         self._good_yaw = 0
+        self._idle_fwd_s = 0.0    # seconds the forward axis has gone un-pushed
+        self._idle_yaw_s = 0.0    # seconds the yaw axis has gone un-pushed
         self._verdict = Blockage()
 
     @property
@@ -173,6 +193,11 @@ class BlockageMonitor:
         if dt <= 0.0:
             raise ValueError("BlockageMonitor.update: dt must be > 0")
         p = self.params
+        if not p.enabled:
+            # Killed by config: never confirm, and drop any standing verdict so
+            # a blockage latched before the switch flipped cannot linger.
+            self._verdict = Blockage()
+            return self._verdict
 
         # A coasted (or absent) pose is propagated BY the command, so it can only
         # ever agree with it. Drop the window rather than poison it.
@@ -202,6 +227,7 @@ class BlockageMonitor:
         # ── forward axis ──
         fwd_ratio = 1.0
         if abs(cmd_vx) >= p.min_cmd_vx and want_dist >= p.min_cmd_distance_m:
+            self._idle_fwd_s = 0.0
             # Progress along the direction that was commanded at window start,
             # not raw displacement: sideways drift is not forward progress.
             moved = ((pose.x - x0) * cos(yaw0) + (pose.y - y0) * sin(yaw0))
@@ -215,13 +241,22 @@ class BlockageMonitor:
                 self._good_fwd += 1
                 self._bad_fwd = 0
         else:
-            # Not trying: neither confirm nor clear. A blockage found while
-            # pushing stays believed until motion disproves it.
-            pass
+            # Not pushing this axis. Break the bad streak -- confirmation needs
+            # CONSECUTIVE bad ticks and an un-pushed tick is not evidence, so a
+            # stale streak must not keep re-confirming the verdict -- and start
+            # timing the idle. A confirmed blockage cannot GROW here, and a standing
+            # one goes stale: nobody is driving into it, so "pushing here does
+            # nothing" is no longer under test. Without this a block found once
+            # latches the drone forever the moment the follower stops pushing (an
+            # escape probe, a hold, or a boxed-in reroute) -- a phantom obstacle
+            # turned into a permanent freeze. _decide drops it after stale_clear_s.
+            self._bad_fwd = 0
+            self._idle_fwd_s += dt
 
         # ── yaw axis ──
         yaw_ratio = 1.0
         if abs(cmd_wz) >= p.min_cmd_wz and want_yaw >= p.min_cmd_yaw_rad:
+            self._idle_yaw_s = 0.0
             turned = normalize_angle(pose.yaw - yaw0)
             if cmd_wz < 0.0:
                 turned = -turned
@@ -232,6 +267,10 @@ class BlockageMonitor:
             else:
                 self._good_yaw += 1
                 self._bad_yaw = 0
+        else:
+            # Not turning: break the bad streak and time the idle (see forward).
+            self._bad_yaw = 0
+            self._idle_yaw_s += dt
 
         return self._decide(cmd_vx, cmd_wz, fwd_ratio, yaw_ratio, eff_says_stuck)
 
@@ -250,9 +289,14 @@ class BlockageMonitor:
             self._verdict = Blockage(AXIS_YAW, 1 if cmd_wz >= 0.0 else -1,
                                      yaw_ratio, eff_says_stuck)
         elif self._verdict.blocked:
-            cleared = (self._good_fwd >= p.clear_ticks
-                       if self._verdict.axis == AXIS_FORWARD
-                       else self._good_yaw >= p.clear_ticks)
-            if cleared:
+            if self._verdict.axis == AXIS_FORWARD:
+                good, idle = self._good_fwd, self._idle_fwd_s
+            else:
+                good, idle = self._good_yaw, self._idle_yaw_s
+            # Cleared by motion (the drone got through) OR by going stale (the
+            # drone stopped pushing into it long enough that the claim no longer
+            # stands).
+            stale = p.stale_clear_s > 0.0 and idle >= p.stale_clear_s
+            if good >= p.clear_ticks or stale:
                 self._verdict = Blockage()
         return self._verdict
