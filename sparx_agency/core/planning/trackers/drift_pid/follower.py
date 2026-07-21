@@ -310,10 +310,16 @@ class DriftPidFollower:
         e_yaw = geo.bearing_error(pose.x, pose.y, pose.yaw, carrot[0], carrot[1])
         self._turning = yaw_engaged(self._turning, e_yaw, p.yaw_engage_rad,
                                     p.yaw_release_rad)
+        # Two yaw regimes, two caps: TURNING owns the rotation and gets the
+        # strong approach rate; TRACKING only trims it -- there the cross-track
+        # ROLL owns the line, and an unthrottled yaw would swing the nose off
+        # course on every pose wobble.
         wz = saturate(self._yaw.update(e_yaw, dt, integrate=integrate,
                                        gain_scale=gain,
                                        deadband_extra=auth.yaw_deadband_extra_rad,
-                                       fresh=fresh), p.approach_yaw_rate)
+                                       fresh=fresh),
+                      p.approach_yaw_rate if self._turning
+                      else p.track_yaw_rate)
 
         if self._turning:
             # Rotate onto the leg while station-keeping, so the drone comes out of
@@ -341,8 +347,16 @@ class DriftPidFollower:
                                                 pose.x, pose.y, pose.yaw)
         vy = self._lat.update(e_lat, dt, integrate=integrate, gain_scale=gain,
                               deadband_extra=auth.deadband_extra_m, fresh=fresh)
+        # Straight-flight bonus: while the yaw correction is quiet the drone may
+        # cruise harder; as |wz| grows toward the track cap the speed blends back
+        # to the base cruise -- never sprint and swing the nose at once.
+        cruise = p.cruise_speed
+        if p.cruise_speed_straight > 0.0:
+            yaw_frac = min(1.0, abs(wz) / p.track_yaw_rate)
+            cruise = (p.cruise_speed_straight
+                      - (p.cruise_speed_straight - p.cruise_speed) * yaw_frac)
         vx = approach_speed(self._distance_to_goal(pose), p.pos_radius,
-                            p.slow_radius, p.cruise_speed, p.arrive_speed_min)
+                            p.slow_radius, cruise, p.arrive_speed_min)
         vx *= alignment_gate(e_yaw, p.travel_cone_rad, p.translate_suppress_rad,
                              p.translate_suppress_floor)
         if p.forward_track_frac > 0.0:
@@ -361,14 +375,17 @@ class DriftPidFollower:
     # ─── Helpers ─────────────────────────────────────────────────
     def _station_keep(self, pose, dt, auth, fresh, hold_yaw):
         # type: (Pose2D, float, object, bool, float) -> Tuple[float, ...]
-        """Full 2-axis position hold on the anchor plus a heading hold."""
+        """Full 2-axis position hold on the anchor plus a heading hold.
+
+        The heading hold uses the gentle TRACK cap: holding station is trimming,
+        not turning onto a leg."""
         vx, vy, e_fwd, e_lat = self._anchor_correction(pose, dt, auth, fresh)
         e_yaw = normalize_angle(hold_yaw - pose.yaw)
         wz = saturate(self._yaw.update(e_yaw, dt, integrate=auth.integrate,
                                        gain_scale=auth.gain_scale,
                                        deadband_extra=auth.yaw_deadband_extra_rad,
                                        fresh=fresh),
-                      self.params.approach_yaw_rate)
+                      self.params.track_yaw_rate)
         return vx, vy, wz, e_fwd, e_lat, e_yaw
 
     def _anchor_correction(self, pose, dt, auth, fresh, lateral_frac=1.0):

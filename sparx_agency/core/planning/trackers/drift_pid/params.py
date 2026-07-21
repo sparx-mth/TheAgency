@@ -72,8 +72,22 @@ class DriftPidParams:
     Attributes:
         cruise_speed: Forward speed on a straight leg (m/s). The main "how fast"
             dial; the envelope's ``max_vx`` is the ceiling it may never exceed.
-        approach_yaw_rate: Yaw rate commanded on a full-size heading error (rad/s)
-            before the yaw PID's own output limit applies.
+        approach_yaw_rate: Yaw rate cap while TURNING onto a leg (rad/s) --
+            rotation is the mission then, so it gets the strong cap.
+        track_yaw_rate: Yaw rate cap while TRACKING a leg or station-keeping
+            (rad/s). Deliberately far below ``approach_yaw_rate``: mid-leg the
+            heading error is small and the cross-track PID (ROLL) owns the line,
+            so yaw only trims -- an unthrottled yaw here swings the nose on
+            every pose wobble and steers the drone off course, which is exactly
+            what the flight logs showed. Must not exceed ``approach_yaw_rate``.
+        cruise_speed_straight: Forward speed when the yaw correction is QUIET
+            (m/s). The straight-flight bonus: while the heading needs no work
+            the drone may fly harder, and as the yaw command grows toward
+            ``track_yaw_rate`` the speed blends smoothly back down to
+            ``cruise_speed`` -- correcting the nose and sprinting at once is
+            what smears the depth frames and overshoots the line. 0 disables
+            (fly ``cruise_speed`` everywhere, the old behaviour); otherwise it
+            must sit in [cruise_speed, envelope.max_vx].
         pos_radius: Waypoint capture radius (m). Inside it, the waypoint is
             retired.
         slow_radius: Distance to the FINAL goal at which the speed starts ramping
@@ -134,7 +148,9 @@ class DriftPidParams:
 
     # ── Feed-forward: how fast we fly ──
     cruise_speed: float = 0.18
+    cruise_speed_straight: float = 0.0
     approach_yaw_rate: float = 0.35
+    track_yaw_rate: float = 0.35
     pos_radius: float = 0.30
     slow_radius: float = 0.80
     arrive_speed_min: float = 0.08
@@ -228,3 +244,18 @@ class DriftPidParams:
                 "DriftPidParams.approach_yaw_rate (%.2f) exceeds envelope.max_wz "
                 "(%.2f) -- the turn rate would be clamped away every tick"
                 % (self.approach_yaw_rate, self.envelope.max_wz))
+        if not 0.0 < self.track_yaw_rate <= self.approach_yaw_rate:
+            raise ValueError(
+                "DriftPidParams.track_yaw_rate (%.2f) must be in (0, "
+                "approach_yaw_rate=%.2f] -- tracking trims the heading, turning "
+                "owns it; a track cap above the turn cap is a contradiction"
+                % (self.track_yaw_rate, self.approach_yaw_rate))
+        if self.cruise_speed_straight != 0.0 and not (
+                self.cruise_speed <= self.cruise_speed_straight
+                <= self.envelope.max_vx):
+            raise ValueError(
+                "DriftPidParams.cruise_speed_straight (%.2f) must be 0 (off) or "
+                "in [cruise_speed=%.2f, max_vx=%.2f] -- the straight-flight "
+                "bonus can only ever ADD speed, inside the axis"
+                % (self.cruise_speed_straight, self.cruise_speed,
+                   self.envelope.max_vx))
