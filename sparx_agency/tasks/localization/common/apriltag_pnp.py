@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -73,6 +73,27 @@ class TagDetection:
     size_m: float
 
 
+class PerTagStat(NamedTuple):
+    """Per-tag contribution to one fix — the numbers that tell a good tag from a bad one.
+
+    Attributes:
+        tag_id: AprilTag id.
+        reproj_rms_px: This tag's own reprojection residual under the shared pose
+            (px). A tag whose MAP ENTRY (position, orientation or size) is wrong
+            reprojects far worse than the others; the pooled RMS averages that
+            away, this does not.
+        apparent_px: The tag's largest image extent (px) — how big it looked. A
+            perpetually small value means the tag is too far or too grazing to be
+            trusted, wherever the drone was.
+        dist_m: Camera-to-tag distance for this fix (m).
+    """
+
+    tag_id: int
+    reproj_rms_px: float
+    apparent_px: float
+    dist_m: float
+
+
 @dataclass(frozen=True)
 class CameraPoseResult:
     """Estimated camera pose plus quality metrics for confidence gating.
@@ -92,6 +113,9 @@ class CameraPoseResult:
         max_tag_dist_m: Distance to the FARTHEST used tag.
         worst_tag_rms_px: Largest per-tag reprojection residual. A tag whose map
             entry is wrong shows up here long before the pooled RMS notices.
+        per_tag: One :class:`PerTagStat` per used tag — the same residual/size/
+            distance numbers as above but named per tag, so a diagnostic log can
+            attribute quality to individual tags across a whole flight.
     """
 
     world_T_cam: np.ndarray
@@ -103,6 +127,7 @@ class CameraPoseResult:
     min_tag_px: float = 0.0
     max_tag_dist_m: float = 0.0
     worst_tag_rms_px: float = 0.0
+    per_tag: Tuple[PerTagStat, ...] = ()
 
 
 # --- small SE(3) / reprojection helpers --------------------------------------
@@ -284,10 +309,12 @@ def _solve_single(det: TagDetection, world_T_tag: np.ndarray, K: np.ndarray,
     world_T_cam = world_T_tag @ _inv_T(_rt_to_T(rvec, tvec))
     rms = _reproj_rms(obj, img, K, D, rvec, tvec)
     dist = float(np.linalg.norm(world_T_cam[:3, 3] - world_T_tag[:3, 3]))
+    apparent = _apparent_px(det)
     # A lone tag has no baseline and is coplanar by construction: geometry = 0.
     return CameraPoseResult(world_T_cam, [det.tag_id], 1, rms, ambiguity,
-                            geometry=0.0, min_tag_px=_apparent_px(det),
-                            max_tag_dist_m=dist, worst_tag_rms_px=rms)
+                            geometry=0.0, min_tag_px=apparent,
+                            max_tag_dist_m=dist, worst_tag_rms_px=rms,
+                            per_tag=(PerTagStat(det.tag_id, rms, apparent, dist),))
 
 
 def _solve_multi(dets: Sequence[TagDetection], poses: Dict[int, TagWorldPose],
@@ -327,14 +354,18 @@ def _solve_multi(dets: Sequence[TagDetection], poses: Dict[int, TagWorldPose],
 
     per_tag = _per_tag_rms(dets, poses, K, D, rvec, tvec)
     cam_pos = world_T_cam[:3, 3]
-    dists = [float(np.linalg.norm(np.mean(_world_corners(d, world_T_tag_from_pose(poses[d.tag_id])),
-                                          axis=0) - cam_pos)) for d in dets]
+    dists = {d.tag_id: float(np.linalg.norm(
+        np.mean(_world_corners(d, world_T_tag_from_pose(poses[d.tag_id])), axis=0)
+        - cam_pos)) for d in dets}
+    stats = tuple(PerTagStat(d.tag_id, per_tag[d.tag_id], _apparent_px(d),
+                             dists[d.tag_id]) for d in dets)
     return CameraPoseResult(
         world_T_cam, list(used), len(used), rms, ambiguity,
         geometry=_geometry_score(world_pts_arr),
         min_tag_px=min(_apparent_px(d) for d in dets),
-        max_tag_dist_m=max(dists) if dists else 0.0,
-        worst_tag_rms_px=max(per_tag.values()) if per_tag else rms)
+        max_tag_dist_m=max(dists.values()) if dists else 0.0,
+        worst_tag_rms_px=max(per_tag.values()) if per_tag else rms,
+        per_tag=stats)
 
 
 def estimate_camera_pose(
