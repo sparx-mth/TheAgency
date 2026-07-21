@@ -254,8 +254,11 @@
   <arg name="thinking_log_path" default="$(optenv FALCON_THOUGHT_LOG)" />
   <arg name="thinking_window" default="false" />
   <!-- Certainty log (AprilTag/drift confidence vs. command); see nav_stack.launch. -->
-  <arg name="certainty_log" default="false" />
+  <arg name="certainty_log" default="true" />
   <arg name="certainty_log_path" default="$(optenv FALCON_CERTAINTY_LOG)" />
+  <!-- Record BEV + routes + replan events for offline visual replay; see
+       nav_stack.launch and tasks/planning/nav_debug/. -->
+  <arg name="nav_debug_record" default="true" />
   <!-- Pure-pursuit speed + yaw force; see mission.yaml. Only used when
        controller:=pure_pursuit (pp_cruise_speed shadows ~vel_x there). -->
   <arg name="pp_max_yaw_rate"       default="0.45" />
@@ -782,6 +785,7 @@
     <arg name="thinking_window" value="$(arg thinking_window)" />
     <arg name="certainty_log" value="$(arg certainty_log)" />
     <arg name="certainty_log_path" value="$(arg certainty_log_path)" />
+    <arg name="nav_debug_record" value="$(arg nav_debug_record)" />
     <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
     <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
     <arg name="pp_cruise_speed"       value="$(arg pp_cruise_speed)" />

@@ -94,11 +94,16 @@
        confidence dip can be matched against what the drone did about it.
        certainty_log_path '' = the per-run file run_falcon.sh set via
        FALCON_CERTAINTY_LOG, else ~/.ros/falcon/. See adapter/scripts/certainty_log.py. -->
-  <arg name="certainty_log"         default="false" />
+  <arg name="certainty_log"         default="true" />
   <arg name="certainty_log_path"    default="$(optenv FALCON_CERTAINTY_LOG)" />
   <!-- GLOBAL, same reasoning as /thinking/log_path above. -->
   <param name="/certainty/log_path" value="$(arg certainty_log_path)"
          if="$(arg certainty_log)" />
+  <!-- Offline visual replay: record the BEV map + the three route layers +
+       replan events into a run folder beside the certainty CSV, so a flight can
+       be replayed frame by frame (tasks/planning/nav_debug/run_folder_nav_debug.py).
+       Diagnostic-only sink; subscribes only, touches no flight code. -->
+  <arg name="nav_debug_record"      default="true" />
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
   <!-- ── Lost-localization recovery (lost_localization_node) ──────────
@@ -1154,6 +1159,20 @@
     <param name="go_topic"      value="$(arg go_topic)" />
     <param name="start_go"      value="$(arg start_go)" />
     <param name="zero_on_close" value="$(arg zero_on_close)" />
+  </node>
+
+  <!-- ══ NAV-DEBUG RECORDER ═══════════════════════════════════════════════════
+       Records the BEV map, the raw/corrected/final routes and the replan events
+       into a timestamped run folder next to the certainty CSV, for offline visual
+       replay. Purely a diagnostic sink (subscribes only, publishes nothing), so
+       it cannot affect flight. nav_debug_record:=false (default) leaves it out.
+       cmd_topic is the POST-gate command (what actually feeds the converter). -->
+  <node pkg="falcon_adapter" type="nav_debug_recorder_node.py"
+        name="nav_debug_recorder" output="screen"
+        if="$(arg nav_debug_record)">
+    <param name="pose_topic"         value="$(arg drone_ns)/gt_pose" />
+    <param name="cmd_topic"          value="$(arg drone_ns)/cmd_vel" />
+    <param name="certainty_log_path" value="$(arg certainty_log_path)" />
   </node>
 
   <!-- ══ LOST-LOCALIZATION RECOVERY ═══════════════════════════════════════════

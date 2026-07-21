@@ -115,8 +115,11 @@
   <arg name="thinking_log_path" default="$(optenv FALCON_THOUGHT_LOG)" />
   <arg name="thinking_window" default="false" />
   <!-- Certainty log (AprilTag/drift confidence vs. command); see nav_stack.launch. -->
-  <arg name="certainty_log" default="false" />
+  <arg name="certainty_log" default="true" />
   <arg name="certainty_log_path" default="$(optenv FALCON_CERTAINTY_LOG)" />
+  <!-- Record BEV + routes + replan events for offline visual replay; see
+       nav_stack.launch and tasks/planning/nav_debug/. -->
+  <arg name="nav_debug_record" default="true" />
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
   <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint). The one-axis follower
@@ -818,6 +821,7 @@
     <arg name="thinking_window" value="$(arg thinking_window)" />
     <arg name="certainty_log" value="$(arg certainty_log)" />
     <arg name="certainty_log_path" value="$(arg certainty_log_path)" />
+    <arg name="nav_debug_record" value="$(arg nav_debug_record)" />
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
