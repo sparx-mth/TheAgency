@@ -82,6 +82,40 @@ class AxesCommand:
         return " + ".join(parts)
 
 
+def twist_to_axes(lx: float, ly: float, lz: float, az: float,
+                  calibration: XtendAxisCalibration = None,
+                  linear_delta: float = 0.05,
+                  angular_delta: float = 0.05) -> AxesCommand:
+    """Pure, stateless translation of Twist fields to XTEND axis counts.
+
+    Exactly the mapping :meth:`TwistToCmdNavConverter._compute_axes` applies
+    before its dedup / stop-debounce state machine, factored out so a caller that
+    only wants to KNOW what a Twist becomes -- e.g. logging the command the drone
+    will actually receive next to the Twist that produced it -- can compute it
+    without driving (or perturbing) a live converter's state.
+
+    Args:
+        lx, ly, lz: Linear velocity components (m/s): forward, left, up.
+        az: Yaw rate (rad/s), positive = turn left.
+        calibration: Axis calibration; defaults to :data:`XTEND_CALIBRATION`.
+        linear_delta, angular_delta: Deadzone half-widths -- a command inside
+            them maps to 0 counts (the motors ignore it). Defaults match the
+            converter's own defaults.
+
+    Returns:
+        The :class:`AxesCommand` (forward, lateral, vertical, yaw counts) the
+        drone would receive, sign conventions included: lateral and yaw are
+        inverted relative to the Twist, matching the XTEND controller.
+    """
+    c = calibration or XTEND_CALIBRATION
+    return AxesCommand(
+        forward=_signed_axis(lx, linear_delta, c.forward),
+        lateral=-_signed_axis(ly, linear_delta, c.lateral),
+        vertical=_signed_axis(lz, linear_delta, c.vertical),
+        yaw=-_signed_axis(az, angular_delta, c.yaw),
+    )
+
+
 class TwistToCmdNavConverter:
     """
     Stateful, ROS-free converter from Twist fields to a combined AxesCommand.
@@ -119,18 +153,11 @@ class TwistToCmdNavConverter:
         self.zero_stop_count: int = 0
 
     def _compute_axes(self, lx: float, ly: float, lz: float, az: float) -> AxesCommand:
-        c = self.calibration
-        return AxesCommand(
-            forward=_signed_axis(lx, self.linear_delta, c.forward),
-            # ly>0 ("left" in Twist convention) maps to a negative lateral axis,
-            # matching hold_lateral_left()'s sign in xtend_online_bridge_base.py.
-            lateral=-_signed_axis(ly, self.linear_delta, c.lateral),
-            vertical=_signed_axis(lz, self.linear_delta, c.vertical),
-            # XTEND's yaw axis is inverted relative to Twist's angular.z (positive
-            # angular.z = turn_left = negative yaw axis), matching the sign
-            # hold_turn_left()/hold_turn_right() use in xtend_online_bridge_base.py.
-            yaw=-_signed_axis(az, self.angular_delta, c.yaw),
-        )
+        # Sign conventions (ly>0 "left" -> negative lateral axis; positive
+        # angular.z "turn_left" -> negative yaw axis) live in twist_to_axes, which
+        # this and every count-mirroring caller share so they can never drift.
+        return twist_to_axes(lx, ly, lz, az, self.calibration,
+                             self.linear_delta, self.angular_delta)
 
     def process(self, lx: float, ly: float, lz: float, az: float) -> AxesCommand | None:
         """
