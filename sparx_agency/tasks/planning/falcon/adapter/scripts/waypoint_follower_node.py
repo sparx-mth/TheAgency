@@ -444,6 +444,21 @@ class WaypointFollowerNode:
         self.lookahead_pub = rospy.Publisher(self.lookahead_topic, PointStamped,
                                              queue_size=1, latch=True)
 
+        # GO gate awareness. cmd_vel_gate is the single choke point for VELOCITY,
+        # but this node's blockage detection, escape reflexes and blockage reports
+        # to the planner have side effects the velocity gate cannot stop: a held
+        # drone that keeps "trying" to fly measures no progress, invents an unseen
+        # obstacle and makes A* box itself in -- all before GO is ever pressed.
+        # So mirror lost_localization_node: read the gate's latched status string
+        # and HOLD the whole follower (not just mute its output) while it says
+        # HELD. No gate => the topic never arrives => _go_allowed stays True and
+        # nothing changes for existing launches. '' disables the coupling.
+        self.go_status_topic = str(G("~go_status_topic", "/mission/go_status")).strip()
+        self._go_allowed = True
+        if self.go_status_topic:
+            rospy.Subscriber(self.go_status_topic, String, self._go_status_cb,
+                             queue_size=1)
+
         rospy.Subscriber(self.t_pose, Pose, self._pose_cb, queue_size=10)
         rospy.Subscriber(self.t_dstate, Int8, self._dstate_cb, queue_size=10)
         rospy.Subscriber(self.t_path, Path, self._path_cb, queue_size=1)
@@ -552,6 +567,21 @@ class WaypointFollowerNode:
             DriftTelemetryPublisher, build_drift_pid, param_bool)
         from localization_quality import LocalizationQualityMonitor
         from certainty_log import CertaintyLog
+        # Mirror the SI->axis-counts translation the XTEND bridge applies AFTER the
+        # GO gate, so each certainty row can also carry the command the DRONE
+        # actually receives (forward/lateral/vertical/yaw of -1000..1000) next to
+        # the Twist that produced it. Uses the real converter as the single source
+        # of truth. Defensive: a missing XTEND package logs the Twist alone rather
+        # than take the flight node down over a diagnostic.
+        self._twist_to_axes = None
+        try:
+            from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter \
+                import twist_to_axes
+            self._twist_to_axes = twist_to_axes
+        except Exception as exc:   # pragma: no cover - import guard
+            rospy.logwarn("drift_pid: XTEND axis translation unavailable (%s) -- "
+                          "certainty log will carry the Twist but not drone counts",
+                          exc)
         follower = build_drift_pid(G)
         self.quality = LocalizationQualityMonitor(
             conf_topic=G("~dp_conf_topic", "/xtend/localization_confidence"),
@@ -818,6 +848,7 @@ class WaypointFollowerNode:
         # live correction -> no stationary re-observation is forced.
         map_need = getattr(self.follower, "settle_map_updates_required", 0)
         hold = (est_hold
+                or not self._go_allowed                # GO gate says HELD -> freeze
                 or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec
                 or (sup is not None and sup.hold))   # supervisor mid-turn stop
         if self.quality is not None:
@@ -911,6 +942,12 @@ class WaypointFollowerNode:
         self.drift_telemetry.publish_drift(telemetry)
         if self.certainty_log is not None and self._last_quality is not None:
             wp_idx = getattr(cmd, "wp_idx", None)
+            # The command the DRONE receives: (vx, vy, 0, wz) put through the same
+            # SI->counts translation the XTEND bridge runs after the gate. vy rides
+            # linear.y (drift_pid is holonomic) and linear.z is 0, matching what is
+            # published this tick.
+            axes = (self._twist_to_axes(cmd.vx, cmd.vy, 0.0, cmd.wz)
+                    if self._twist_to_axes is not None else None)
             self.certainty_log.write(
                 ros_stamp=rospy.Time.now().to_sec(),
                 pose2d=pose2d,
@@ -919,7 +956,15 @@ class WaypointFollowerNode:
                 target_xy=self._waypoint_xy(wp_idx) if wp_idx is not None else None,
                 wp_idx=wp_idx,
                 num_waypoints=getattr(cmd, "num_waypoints", None),
-                cmd_vx=cmd.vx, cmd_vy=cmd.vy, cmd_wz=cmd.wz)
+                cmd_vx=cmd.vx, cmd_vy=cmd.vy, cmd_wz=cmd.wz,
+                # Altitude + regime: this platform has no altitude hold, so a
+                # falling pos_z with linear.z pinned at 0 is the ROLL/PITCH tilt
+                # bleeding height; state tells forward-flight (TRACK) apart from an
+                # arrived/held tick, which is why vx can be 0 with a live route.
+                pos_z=(self.cur_pose.position.z
+                       if self.cur_pose is not None else None),
+                state=getattr(cmd, "state", ""),
+                axes=axes)
         if getattr(cmd, "report_blocked", False):
             self.drift_telemetry.publish_blockage(pose2d, self.frame_id,
                                                   telemetry.blocked_axis)
@@ -927,6 +972,25 @@ class WaypointFollowerNode:
                 "Something I cannot see is blocking me and backing off did not "
                 "clear it -- asking the planner for another way round",
                 category="plan", level="warn")
+
+    def _go_status_cb(self, msg):
+        """Track the GO gate: HELD means freeze the follower, not just its output.
+
+        Mirrors ``lost_localization_node`` -- the gate publishes a latched status
+        string and a leading ``GO`` is the only thing that clears this node to fly.
+        While HELD the control loop forces ``hold`` (see ``_on_timer``), so the
+        drift_pid follower ramps to zero and freezes its drift learning AND -- the
+        reason this is not left to the velocity gate alone -- runs no blockage
+        detection, escape or blockage report, so a drone waiting for GO cannot
+        invent an obstacle and box itself in before it has ever been allowed to
+        move."""
+        allowed = (msg.data or "").strip().upper().startswith("GO")
+        if allowed != self._go_allowed:
+            self._go_allowed = allowed
+            self.thinker.say(
+                "GO given -- clear to fly the route" if allowed else
+                "No GO yet -- holding still and not trying to force a way through",
+                category="mission", level="info" if allowed else "warn")
 
     # ─── Narration ───────────────────────────────────────────────
     def _narrate_passive(self):
