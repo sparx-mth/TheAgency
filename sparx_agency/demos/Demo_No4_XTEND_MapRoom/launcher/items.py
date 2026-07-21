@@ -117,7 +117,10 @@ python3 {JETSON_REPO}/sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_drone_demo
             "This is the world pose the whole planner stack flies on, so its parameters "
             "are worth knowing: alpha is the filter gain at full confidence, coast_frames "
             "is how long it dead-reckons with no tag in view, and the cmd_* parameters "
-            "control how much the last velocity command is trusted while blind."
+            "control how much the last velocity command is trusted while blind.\n\n"
+            "apriltag_log:=true writes a per-tag quality CSV (one row per detected tag "
+            "per frame) to /tmp/falcon, for finding a poorly-placed or mis-mapped tag; "
+            "set apriltag_log_path to move it."
         ),
         command=f"""
 python3 -m sparx_agency.tasks.localization.ros2.localization_node \\
@@ -127,7 +130,8 @@ python3 -m sparx_agency.tasks.localization.ros2.localization_node \\
   -p tag_map_path:={JETSON_REPO}/sparx_agency/tasks/localization/config/new_map.yaml \\
   -p camera_calib_path:={JETSON_REPO}/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_504_294_resize.yaml \\
   -p tag_size_m:=0.13 \\
-  -p alpha:=0.2
+  -p alpha:=0.2 \\
+  -p apriltag_log:=true
 """,
         param_sources=(Source("ros2_node",
                               "sparx_agency/tasks/localization/ros2/localization_node.py"),),
