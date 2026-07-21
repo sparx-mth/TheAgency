@@ -113,7 +113,7 @@ echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sp
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py drift_pid_follower.py altitude_hold.py localization_quality.py thinking.py thought_journal.py certainty_log.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py drift_pid_follower.py altitude_hold.py localization_quality.py thinking.py thought_journal.py certainty_log.py nav_debug_recorder_node.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else
@@ -190,17 +190,22 @@ fi
 # certainty_log:=true; see adapter/scripts/thought_journal.py and
 # adapter/scripts/certainty_log.py.
 LOG_HOST="${FALCON_LOG_DIR:-/tmp/falcon}"
-mkdir -p "${LOG_HOST}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-THOUGHT_LOG="/falcon_logs/thoughts_${STAMP}.log"
-CERTAINTY_LOG="/falcon_logs/certainty_${STAMP}.csv"
-echo "[INFO] Thought log (with thinking_log:=true) -> ${LOG_HOST}/$(basename "${THOUGHT_LOG}")"
-echo "[INFO] Certainty log (with certainty_log:=true) -> ${LOG_HOST}/$(basename "${CERTAINTY_LOG}")"
+# One folder per run: the thought journal, the certainty CSV and the nav-debug
+# recording (BEV maps + routes + events) all land TOGETHER under a single
+# timestamped run dir sharing ONE stamp, instead of three separately-stamped files
+# scattered across ${LOG_HOST}. FALCON_RUN_DIR points the recorder at the same dir.
+RUN_DIR="/falcon_logs/nav_debug_${STAMP}"          # container path (mount below)
+mkdir -p "${LOG_HOST}/nav_debug_${STAMP}"          # host side of the same mount
+THOUGHT_LOG="${RUN_DIR}/thoughts_${STAMP}.log"
+CERTAINTY_LOG="${RUN_DIR}/certainty_${STAMP}.csv"
+echo "[INFO] Run folder -> ${LOG_HOST}/nav_debug_${STAMP}/  (thoughts + certainty + nav_debug together)"
 
 # ── Run ───────────────────────────────────────────────────────
 docker run -it --rm \
     --volume "${LOG_HOST}:/falcon_logs" \
     --env FALCON_LOG_DIR=/falcon_logs \
+    --env FALCON_RUN_DIR="${RUN_DIR}" \
     --env FALCON_THOUGHT_LOG="${THOUGHT_LOG}" \
     --env FALCON_CERTAINTY_LOG="${CERTAINTY_LOG}" \
     --name "${CONTAINER}" \
