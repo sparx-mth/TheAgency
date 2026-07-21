@@ -387,6 +387,10 @@
   <arg name="dp_suppress_floor"          default="0.15" /><!-- fraction of speed kept beyond suppress_deg. >0 so it keeps creeping -->
   <arg name="dp_passed_bearing_deg"      default="110.0" /><!-- deg a non-final waypoint this far behind counts as passed, not turned back for -->
   <!-- STATION KEEPING  -  holding still, which is where fore/aft drift shows up -->
+  <arg name="dp_alt_hold"                default="false" /><!-- altitude hold on the solved pose z: keep the drone at the tag-plane height (target follows cruise_z) -->
+  <arg name="dp_alt_climb_max"           default="0.06" /><!-- m/s cap on UP; the guarded direction, keep tiny (vertical axis climbs far harder than nominal) -->
+  <arg name="dp_alt_ceiling_m"           default="1.2" /><!-- m; at/above this measured altitude a climb is NEVER commanded -->
+  <arg name="dp_alt_conf_min"            default="0.35" /><!-- pose confidence required to climb; never climbs on a vague or coasted pose -->
   <arg name="dp_hold_deadband_m"         default="0.06" /><!-- m position error ignored while holding -->
   <arg name="dp_forward_track_frac"      default="0.0" /><!-- along-track PID during a straight leg. 0 = the cruise owns that axis -->
   <arg name="dp_lateral_turn_frac"       default="0.40" /><!-- fraction of the ROLL correction used while turning (a big roll spoils a turn) -->
@@ -551,6 +555,7 @@
        hover drift when stopped, recovers the true rate while turning. Decoupled
        from the control loop (ingests every /gt_pose). use_pose_estimator:=false
        feeds the raw pose. -->
+  <arg name="cmd_vy_sign" default="1.0" /><!-- lateral (linear.y) sign at publish: -1 corrects the inversion measured on this airframe; must be exactly 1 or -1 -->
   <arg name="use_pose_estimator"    default="true" />
   <arg name="est_window_s"          default="0.6" /><!-- least-squares fit window (s); ~6 samples @10Hz -->
   <arg name="est_min_samples"       default="2" />
@@ -1689,6 +1694,7 @@
     <param name="yaw_accept_growth_deg"  value="$(arg yaw_accept_growth_deg)" />
     <param name="yaw_burst_max_ticks"    value="$(arg yaw_burst_max_ticks)" />
     <!-- pose estimator -->
+    <param name="cmd_vy_sign"     value="$(arg cmd_vy_sign)" />
     <param name="use_pose_estimator"     value="$(arg use_pose_estimator)" />
     <param name="est_window_s"           value="$(arg est_window_s)" />
     <param name="est_min_samples"        value="$(arg est_min_samples)" />
@@ -1809,6 +1815,10 @@
     <param name="dp_suppress_deg"            value="$(arg dp_suppress_deg)" />
     <param name="dp_suppress_floor"          value="$(arg dp_suppress_floor)" />
     <param name="dp_passed_bearing_deg"      value="$(arg dp_passed_bearing_deg)" />
+    <param name="dp_alt_hold"                value="$(arg dp_alt_hold)" />
+    <param name="dp_alt_climb_max"           value="$(arg dp_alt_climb_max)" />
+    <param name="dp_alt_ceiling_m"           value="$(arg dp_alt_ceiling_m)" />
+    <param name="dp_alt_conf_min"            value="$(arg dp_alt_conf_min)" />
     <param name="dp_hold_deadband_m"         value="$(arg dp_hold_deadband_m)" />
     <param name="dp_forward_track_frac"      value="$(arg dp_forward_track_frac)" />
     <param name="dp_lateral_turn_frac"       value="$(arg dp_lateral_turn_frac)" />

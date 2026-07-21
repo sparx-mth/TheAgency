@@ -182,6 +182,10 @@
   <arg name="dp_suppress_floor"          default="0.15" /><!-- fraction of speed kept beyond suppress_deg. >0 so it keeps creeping -->
   <arg name="dp_passed_bearing_deg"      default="110.0" /><!-- deg a non-final waypoint this far behind counts as passed, not turned back for -->
   <!-- STATION KEEPING  -  holding still, which is where fore/aft drift shows up -->
+  <arg name="dp_alt_hold"                default="false" /><!-- altitude hold on the solved pose z: keep the drone at the tag-plane height (target follows cruise_z) -->
+  <arg name="dp_alt_climb_max"           default="0.06" /><!-- m/s cap on UP; the guarded direction, keep tiny (vertical axis climbs far harder than nominal) -->
+  <arg name="dp_alt_ceiling_m"           default="1.2" /><!-- m; at/above this measured altitude a climb is NEVER commanded -->
+  <arg name="dp_alt_conf_min"            default="0.35" /><!-- pose confidence required to climb; never climbs on a vague or coasted pose -->
   <arg name="dp_hold_deadband_m"         default="0.06" /><!-- m position error ignored while holding -->
   <arg name="dp_forward_track_frac"      default="0.0" /><!-- along-track PID during a straight leg. 0 = the cruise owns that axis -->
   <arg name="dp_lateral_turn_frac"       default="0.40" /><!-- fraction of the ROLL correction used while turning (a big roll spoils a turn) -->
@@ -260,6 +264,7 @@
        to fly on the localization stream exactly as published, which is what you
        want when judging how good that stream is on its own: any smoothing here
        hides the source's real jitter and lag. Forwarded to nav_stack. -->
+  <arg name="cmd_vy_sign" default="1.0" /><!-- lateral (linear.y) sign at publish: -1 corrects the inversion measured on this airframe; must be exactly 1 or -1 -->
   <arg name="use_pose_estimator" default="true" />
 
   <!-- Pure-pursuit yaw force (only used when controller:=pure_pursuit). The
@@ -839,6 +844,10 @@
     <arg name="dp_suppress_deg"            value="$(arg dp_suppress_deg)" />
     <arg name="dp_suppress_floor"          value="$(arg dp_suppress_floor)" />
     <arg name="dp_passed_bearing_deg"      value="$(arg dp_passed_bearing_deg)" />
+    <arg name="dp_alt_hold"                value="$(arg dp_alt_hold)" />
+    <arg name="dp_alt_climb_max"           value="$(arg dp_alt_climb_max)" />
+    <arg name="dp_alt_ceiling_m"           value="$(arg dp_alt_ceiling_m)" />
+    <arg name="dp_alt_conf_min"            value="$(arg dp_alt_conf_min)" />
     <arg name="dp_hold_deadband_m"         value="$(arg dp_hold_deadband_m)" />
     <arg name="dp_forward_track_frac"      value="$(arg dp_forward_track_frac)" />
     <arg name="dp_lateral_turn_frac"       value="$(arg dp_lateral_turn_frac)" />
@@ -906,6 +915,7 @@
     <arg name="blockage_ttl_s"             value="$(arg blockage_ttl_s)" />
     <!-- drift_pid controller - generated block END forwarding -->
     <arg name="controller"    value="$(arg controller)" />
+    <arg name="cmd_vy_sign" value="$(arg cmd_vy_sign)" />
     <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
     <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
     <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
