@@ -5,8 +5,13 @@ tags:
   5:
     xyz: [4.5, 0, 1.33]
     rpy: [-1.5708, 0, -1.5708]
-    size: 0.29
+    size: 0.285
 
+ # Inbal's Office
+  19:
+    xyz: [3.1, 0.81, 1.21]
+    rpy: [-1.5708, 0, 0]
+    size: 0.265
 
 # Communication room
   2:
@@ -37,7 +42,7 @@ tags:
   3:
     xyz: [1.45, -2.07, 1.07]
     rpy: [-1.5708, 0, -3.1416]
-    size: 0.28
+    size: 0.285
 
 # on the wall
   7:
@@ -61,7 +66,7 @@ tags:
   9:
     xyz: [-1.55, -1.64, 1.11]
     rpy: [-1.5708,  0, 1.5708]
-    size: 0.28
+    size: 0.285
 
  # Below SPARX logo, currently near the fridge, below window. orientation like the MAMAD door --replaced with 8
   11:
