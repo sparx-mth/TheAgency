@@ -86,6 +86,19 @@
        so Thinker sees '' and opens nothing. -->
   <param name="/thinking/log_path" value="$(arg thinking_log_path)"
          if="$(arg thinking_log)" />
+
+  <!-- ── Certainty log: AprilTag/drift confidence vs. the command sent ─
+       drift_pid appends one CSV row per control tick: position/yaw, AprilTag
+       confidence + pos_std + cmd_effectiveness, the learned drift corrections,
+       the target waypoint and the flight command actually sent, so a
+       confidence dip can be matched against what the drone did about it.
+       certainty_log_path '' = the per-run file run_falcon.sh set via
+       FALCON_CERTAINTY_LOG, else ~/.ros/falcon/. See adapter/scripts/certainty_log.py. -->
+  <arg name="certainty_log"         default="false" />
+  <arg name="certainty_log_path"    default="$(optenv FALCON_CERTAINTY_LOG)" />
+  <!-- GLOBAL, same reasoning as /thinking/log_path above. -->
+  <param name="/certainty/log_path" value="$(arg certainty_log_path)"
+         if="$(arg certainty_log)" />
   <arg name="zero_on_close"     default="true" /><!-- one zero twist when GO->false -->
 
   <!-- ── Lost-localization recovery (lost_localization_node) ──────────

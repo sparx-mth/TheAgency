@@ -113,7 +113,7 @@ echo "[INFO] sparx_agency repo: ${SPARX_PARENT}/sparx_agency (mounted at /opt/sp
 SCRIPTS_HOST="${SCRIPT_DIR}/adapter/scripts"
 SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 SCRIPT_MOUNTS=()
-for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py drift_pid_follower.py localization_quality.py thinking.py thought_journal.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
+for f in falcon_adapter_node.py sensor_gate_node.py bev_publisher_node.py mapping_sync_node.py bev_click_goal_node.py astar_planner_node.py navdp_click_node.py flownav_node.py combination_planner_node.py astar_navdp_fallback_node.py hybrid_planner_node.py path_corrector_node.py trajectory_simplifier_node.py waypoint_follower_node.py pose_adapter_node.py sim_adapter_node.py cloud_utils.py pure_pursuit_follower.py drift_pid_follower.py localization_quality.py thinking.py thought_journal.py certainty_log.py object_approach_node.py target_lock_viewer_node.py mission_director_node.py cmd_vel_gate_node.py lost_localization_node.py depth_debug.py; do
   if [ -f "${SCRIPTS_HOST}/${f}" ]; then
     SCRIPT_MOUNTS+=( --volume "${SCRIPTS_HOST}/${f}:${SCRIPTS_TARGET}/${f}" )
   else
@@ -179,23 +179,30 @@ if [ "${ARCH}" != "aarch64" ] && [ -S /var/run/docker.sock ]; then
   DOCKER_SOCK_MOUNT=( --volume /var/run/docker.sock:/var/run/docker.sock )
 fi
 
-# ── Flight logs (thought journal) ─────────────────────────────
+# ── Flight logs (thought journal + certainty log) ─────────────
 # The nodes write INSIDE the container, which runs --rm, so without a host
 # bind-mount the log of the flight you just did is deleted the moment it lands.
-# Mount a host directory read-write and name ONE file for this run: every
-# narrating node appends to it, so the filename cannot be decided per node (each
-# would stamp its own). Only used when the stack is launched with
-# thinking_log:=true; see adapter/scripts/thought_journal.py.
-LOG_HOST="${FALCON_LOG_DIR:-${SCRIPT_DIR}/logs}"
+# Mount a host directory read-write and name ONE file per log for this run:
+# every narrating node appends to the SAME thought journal, so the filename
+# cannot be decided per node (each would stamp its own). Defaults to /tmp/falcon
+# so a Jetson run needs no extra setup; override with FALCON_LOG_DIR. Only
+# populated when the stack is launched with thinking_log:=true /
+# certainty_log:=true; see adapter/scripts/thought_journal.py and
+# adapter/scripts/certainty_log.py.
+LOG_HOST="${FALCON_LOG_DIR:-/tmp/falcon}"
 mkdir -p "${LOG_HOST}"
-THOUGHT_LOG="/falcon_logs/thoughts_$(date +%Y%m%d_%H%M%S).log"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+THOUGHT_LOG="/falcon_logs/thoughts_${STAMP}.log"
+CERTAINTY_LOG="/falcon_logs/certainty_${STAMP}.csv"
 echo "[INFO] Thought log (with thinking_log:=true) -> ${LOG_HOST}/$(basename "${THOUGHT_LOG}")"
+echo "[INFO] Certainty log (with certainty_log:=true) -> ${LOG_HOST}/$(basename "${CERTAINTY_LOG}")"
 
 # ── Run ───────────────────────────────────────────────────────
 docker run -it --rm \
     --volume "${LOG_HOST}:/falcon_logs" \
     --env FALCON_LOG_DIR=/falcon_logs \
     --env FALCON_THOUGHT_LOG="${THOUGHT_LOG}" \
+    --env FALCON_CERTAINTY_LOG="${CERTAINTY_LOG}" \
     --name "${CONTAINER}" \
     ${GPU_ARGS} \
     --env DISPLAY="${DISPLAY}" \

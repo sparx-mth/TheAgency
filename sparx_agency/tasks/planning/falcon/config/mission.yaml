@@ -149,7 +149,7 @@ launch:
   #                   dead-reckoning, and has reflexes for walls the camera cannot
   #                   see. Its dials are the CONTROLLER 5 section below.
   # Each has its OWN speed dials below, so a value in the wrong block does nothing.
-  controller: waypoint        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
+  controller: drift_pid        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight
@@ -680,8 +680,17 @@ launch:
   # -- Drone "thinking": the stack's own account of WHY it acted -------------------------------------
   # Every node narrates its decisions ("no route at 0.40m, flying a 0.25m squeeze",
   # "obstacle confidence 0.4 < 0.75, keeping the route"). Two independent switches.
-  thinking_log: false         # append every thought to one file for the run, flushed per
+  thinking_log: true          # append every thought to one file for the run, flushed per
                               #   line, so a kill still leaves the record. No display needed
   thinking_window: false      # the live "drone thinking" window beside the BEV map; needs a
                               #   display, so leave it off for a headless Jetson run
-  # thinking_log_path: /falcon_logs/my_flight.log   # default: falcon/logs/ on the HOST
+  # thinking_log_path: /falcon_logs/my_flight.log   # default: /tmp/falcon on the HOST
+                              #   (run_falcon.sh; override with FALCON_LOG_DIR)
+
+  # -- Certainty log: AprilTag/drift confidence vs. the command sent ----------------------------------
+  # One CSV row per drift_pid control tick: position/yaw, AprilTag confidence + pos_std +
+  # cmd_effectiveness, the learned drift corrections, the target waypoint and the flight
+  # command actually sent -- so a confidence dip can be matched against what the drone did
+  # about it. See adapter/scripts/certainty_log.py.
+  certainty_log: true         # append one row per tick to a CSV for the run
+  # certainty_log_path: /falcon_logs/my_flight_certainty.csv   # default: /tmp/falcon on the HOST

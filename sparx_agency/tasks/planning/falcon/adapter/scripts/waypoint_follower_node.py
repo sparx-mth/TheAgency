@@ -75,6 +75,10 @@ from sparx_agency.core.planning.trackers.rotation_supervisor import (
     RotationSupervisorParams,
 )
 from thinking import Thinker
+# Global (not ~) param naming the shared per-tick certainty CSV; '' disables it.
+# Global for the same reason /thinking/log_path is: only drift_pid narrates here
+# today, but a global name leaves room for another controller to log to it too.
+CERTAINTY_LOG_PATH_PARAM = "/certainty/log_path"
 # NOTE: the pure_pursuit imports (core HermiteSmoother / PurePursuitTracker and the
 # sibling pure_pursuit_follower.py) are deliberately deferred into
 # _build_pure_pursuit() so they are loaded ONLY when ~controller:=pure_pursuit.
@@ -240,6 +244,8 @@ class WaypointFollowerNode:
         # drift_pid consumes the localization confidence signals; nothing else does.
         self.quality = None
         self.drift_telemetry = None
+        self.certainty_log = None
+        self._last_quality = None
         # DemoMode the holonomic controllers request (best effort) and, if
         # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
         # so the per-axis handshake of the legacy path does not apply to them.
@@ -545,6 +551,7 @@ class WaypointFollowerNode:
         from drift_pid_follower import (          # sibling in scripts/
             DriftTelemetryPublisher, build_drift_pid, param_bool)
         from localization_quality import LocalizationQualityMonitor
+        from certainty_log import CertaintyLog
         follower = build_drift_pid(G)
         self.quality = LocalizationQualityMonitor(
             conf_topic=G("~dp_conf_topic", "/xtend/localization_confidence"),
@@ -556,6 +563,20 @@ class WaypointFollowerNode:
             drift_topic=G("~dp_drift_topic", "/falcon/drift"),
             blockage_topic=G("~dp_blockage_topic", "/falcon/blockage"),
             rate_hz=float(G("~dp_telemetry_hz", 2.0)))
+        # Per-tick certainty CSV: AprilTag confidence, drift corrections and the
+        # command sent, all on one row, so a confidence dip can be matched
+        # against what the drone actually did about it. Opt-in, like the thought
+        # journal: '' (the default) disables it. A journal that cannot be opened
+        # must not take a flight node down over a diagnostic.
+        cert_path = str(rospy.get_param(CERTAINTY_LOG_PATH_PARAM, "") or "").strip()
+        if cert_path:
+            try:
+                self.certainty_log = CertaintyLog(cert_path)
+                rospy.loginfo("drift_pid: logging certainty + commands to %s",
+                              cert_path)
+            except (IOError, OSError) as e:
+                rospy.logerr("drift_pid: cannot open the certainty log %s (%s); "
+                             "flying without it", cert_path, e)
         return follower
 
     def _build_pure_pursuit(self, G):
@@ -802,8 +823,11 @@ class WaypointFollowerNode:
         if self.quality is not None:
             # drift_pid decides its own speed, gains and whether to learn drift
             # from how much the pose can be trusted THIS tick. Fed before step so
-            # the controller and the estimator see the same instant.
-            self.follower.set_quality(self.quality.snapshot())
+            # the controller and the estimator see the same instant. Cached so
+            # the certainty log below reports the SAME snapshot the controller
+            # actually acted on, not a slightly later one.
+            self._last_quality = self.quality.snapshot()
+            self.follower.set_quality(self._last_quality)
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready(map_need))
         if self.drift_telemetry is not None:
@@ -874,6 +898,10 @@ class WaypointFollowerNode:
     def _publish_drift(self, cmd, pose2d):
         """Expose what the drift-PID controller has learned, and where it stuck.
 
+        Also appends one row to the certainty log (if enabled): position/yaw,
+        AprilTag confidence, the drift corrections, the target waypoint and the
+        command sent, all from the SAME tick.
+
         ``report_blocked`` is edge-triggered by the core (true once per exhausted
         blockage episode), so forwarding it straight through cannot spam the
         planner with the same obstacle."""
@@ -881,6 +909,17 @@ class WaypointFollowerNode:
         if telemetry is None:
             return
         self.drift_telemetry.publish_drift(telemetry)
+        if self.certainty_log is not None and self._last_quality is not None:
+            wp_idx = getattr(cmd, "wp_idx", None)
+            self.certainty_log.write(
+                ros_stamp=rospy.Time.now().to_sec(),
+                pose2d=pose2d,
+                quality=self._last_quality,
+                telemetry=telemetry,
+                target_xy=self._waypoint_xy(wp_idx) if wp_idx is not None else None,
+                wp_idx=wp_idx,
+                num_waypoints=getattr(cmd, "num_waypoints", None),
+                cmd_vx=cmd.vx, cmd_vy=cmd.vy, cmd_wz=cmd.wz)
         if getattr(cmd, "report_blocked", False):
             self.drift_telemetry.publish_blockage(pose2d, self.frame_id,
                                                   telemetry.blocked_axis)
