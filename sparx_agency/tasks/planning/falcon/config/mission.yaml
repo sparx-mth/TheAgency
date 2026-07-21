@@ -160,12 +160,13 @@ launch:
   # it false while judging localization quality; the source now filters itself by
   # confidence, so this second layer mostly just adds delay.
   use_pose_estimator: false
-  # Lateral (linear.y) sign at publish. MEASURED inverted on this airframe across
-  # five flights: commanded left -> moved right at ~full magnitude (-97%),
-  # commanded right -> nothing (the inverted push cancels the ambient drift).
-  # -1 corrects it. If the next flight's LATERAL delivery goes NEGATIVE again,
-  # set back to 1 -- one dial, clean A/B.
-  cmd_vy_sign: -1.0
+  # Lateral (linear.y) sign at publish. The A/B settled it: with -1 the pooled
+  # lateral delivery got WORSE (-41% over the 17:0x flights vs the mixed pre-flip
+  # numbers), so the 'inversion' was really a WEAK roll axis swamped by an
+  # error-correlated push -- the drone commands left exactly when it is being
+  # shoved right, and the shove was winning either way. Sign restored to +1
+  # (clean REP-103) and the roll AUTHORITY raised instead (dp_lat_* below).
+  cmd_vy_sign: 1.0
 
   # -- Speeds for controllers 1 & 2 (waypoint / roll_assist) -----------------------------------------
   # These are IGNORED under pure_pursuit, which has its own pair below.
@@ -249,10 +250,11 @@ launch:
   # cleanly at 13:31. The speeds below are set to the platform caps so the stack
   # commands everything the airframe has; if delivery is still ~0 on the next flight,
   # the problem is the drone, not a parameter.
-  dp_cruise_speed: 0.32       # m/s on a straight leg. THE main speed dial. 0.32 = 427 of the 600-count forward cap. Trimmed from 0.40: runs 1527xx/1537xx measured actual TRACK speeds peaking 0.54-0.66 m/s -- operator judged it a little fast indoors, and less forward pitch also bleeds less altitude
+  dp_cruise_speed: 0.38       # m/s on a straight leg. THE main speed dial. 0.38 = 507 of the 600-count forward cap. Nudged up from 0.36 per the 17:0x flights ("can fly a little faster forward, but no more") -- actual delivered TRACK speed runs ~55% of this
+  dp_cruise_straight: 0.45  # m/s while the yaw correction is QUIET = full forward thrust (600 counts); blends down to dp_cruise_speed as |wz| grows toward dp_track_yaw_rate. The 17:3x flights: straights crawled at ~0.17 m/s delivered while the yaw-active speed already felt right
   dp_max_vx: 0.45             # m/s hard cap FORWARD = full XTEND pitch thrust (600 counts). At the platform ceiling
   dp_max_vx_back: 0.12        # m/s hard cap in REVERSE. Harder than forward: no rear camera, every backward metre is blind
-  dp_max_vy: 0.12             # m/s hard cap sideways (ROLL). Weaker axis; keep well under max_vx. Every ROLL count tilts the thrust vector and, with no altitude hold, costs altitude -- do not raise this
+  dp_max_vy: 0.15             # m/s hard cap sideways (ROLL). Raised from 0.12 (with the altitude hold now compensating the tilt cost): the 17:0x flights showed roll pinned at its minimum-force floor while yaw did all the correcting -- roll needs room to be the primary line-keeper
   dp_max_wz: 0.65             # rad/s hard cap yaw = FULL XTEND yaw thrust (1000 counts). Runs 150227/150434 measured in-place yaw delivering only ~11% of command -- the axis needs everything it has (above 0.65 the converter clamps, so there is nothing further)
   dp_max_translation: 0.45    # m/s cap on the (vx,vy) vector, so a diagonal is not faster than an axis. Follows max_vx
   dp_combined_effort: 1.8     # |vx|/max + |vy|/max + |wz|/max budget. 1.0 = one axis at full. Raised from 1.4: on a weak airframe a turn must not steal the forward push
@@ -261,12 +263,13 @@ launch:
   dp_decel_xy: 0.60           # m/s2 how fast translation may be taken OFF. >= accel: braking is never rate-limited by the gentle ramp-up
   dp_decel_wz: 2.0            # rad/s2 how fast the yaw command may be taken off
   dp_min_vx: 0.06             # m/s smallest forward command the motors actually act on
-  dp_min_vy: 0.06             # m/s smallest sideways command the motors actually act on
+  dp_min_vy: 0.05             # m/s smallest sideways command the motors actually act on. Lowered from 0.06: roll corrections were pinned at this floor every tick -- give the shaper a finer bottom step
   dp_min_wz_deg: 10.0         # deg/s smallest yaw command that actually rotates the drone (yaw bites late on this airframe)
   dp_release_frac: 0.5        # below this fraction of a min the command is dropped to 0, above it snapped up
 
   # -- NAVIGATION  --  how it gets to the next waypoint ----------------------------------------------
-  dp_approach_yaw_rate: 0.65  # rad/s cap on the turn onto a leg = full yaw thrust. Run 150434: a 90-deg corridor turn stalled for 20 s at ~500 of 1000 counts; the turn gets the whole axis now
+  dp_approach_yaw_rate: 0.65  # rad/s cap on the turn onto a leg = full yaw thrust (TURN state only; run 150434 stalled a 90-deg turn at less)
+  dp_track_yaw_rate: 0.25    # rad/s yaw cap while TRACKING a leg / station-keeping (385 of 1000 counts). THE fix for over-strong yaw: mid-leg the heading error is 6-11 deg and ROLL owns the line, so yaw only trims -- turns onto a leg still get the full dp_approach_yaw_rate
   dp_turn_pitch_bias: 0.08    # m/s forward ridden during a TURN whose translation would otherwise be zero. THE fix for the stalled turn: measured yaw delivery is ~11% in place but 30-68% while translating -- a pure yaw leaves the airframe flat and the turn coasts, so give it something to bite on (the same trick the one-axis follower's yaw_pitch_bias has always used). 0 = pure yaw
   dp_pos_radius: 0.30         # m waypoint capture radius
   dp_slow_radius: 0.80        # m start slowing this far from the FINAL goal
@@ -291,8 +294,18 @@ launch:
   # forgiving -- so a climb needs a trusted pose (dp_alt_conf_min, never while
   # coasting), is capped tiny (dp_alt_climb_max), and is REFUSED outright at the
   # ceiling. Descending only needs the z itself to be believed.
+  # CLIMB-PULSE (run 163030): the hold was maxed at its old 0.06 m/s cap (80 of the
+  # ~600-count vertical range) and STILL sank -- 80 counts barely offset the airframe's
+  # own sink, and it was climbing WHILE flying forward, whose tilt steals the very lift
+  # a climb needs. Verified the vertical axis is NOT inverted (commanding up slowed the
+  # sink) and the bridge honours linear.z, so the fix is power + separation: raise the
+  # cap, and on a real sag do a dedicated PULSE that stops translating and climbs, then
+  # resumes flying. Yaw is left alone (it costs no lift and re-acquires tags).
   dp_alt_hold: true           # master switch. false = the old behaviour (linear.z stays 0)
-  dp_alt_climb_max: 0.06      # m/s cap on UP. Deliberately timid -- gradual and slow is the brief
+  dp_alt_climb_max: 0.22      # m/s cap on UP (~293 counts). Raised from 0.15: the 17:3x flights measured NET climb ~0 while commanding up (the taper only cancelled the sink). Overshoot stays covered by the taper + half-trigger release (z peaked 1.24, not 1.6)
+  dp_alt_kp: 0.7              # altitude P gain (was code-default 0.5): with the taper, kp*err is the actual demand -- 0.7 reaches the cap from 0.31 m of sag instead of 0.44, so the mid-band climbs harder while the near-target taper still kills the momentum
+  dp_alt_pulse_trigger_m: 0.20 # m below target that starts a dedicated climb pulse (target 1.0 -> pulse below 0.80). A real sag, not the deadband's trim wander
+  dp_alt_pulse_tscale: 0.2    # (vx,vy) kept during a pulse: 20%. Low so the platform's thrust goes to lift, not to the forward/lateral tilt that bleeds it. 0 = stop flat and climb
   dp_alt_ceiling_m: 1.2       # m; at/above this measured altitude a climb is NEVER commanded.
                               #   The operator's line: 1.3 m must not be reached, 1.5 m is dangerous
   dp_alt_conf_min: 0.35       # pose confidence required to climb ("quite sure of localization");
@@ -305,11 +318,11 @@ launch:
   dp_settle_map_updates: 0    # fresh voxel updates to wait for while stopped. 0 = do not force any
 
   # -- DRIFT PID  --  the loops that LEARN the drift instead of just resisting it --------------------
-  dp_lat_kp: 0.55             # cross-track P: metres of error -> m/s of ROLL
+  dp_lat_kp: 0.80             # cross-track P: metres of error -> m/s of ROLL. Raised from 0.55: roll is now the PRIMARY line-keeper (yaw only trims in TRACK), so it needs to reach past its minimum-force floor on a 10 cm error
   dp_lat_ki: 0.06             # cross-track I: LEARNS the standing sideways drift. Raise to kill a constant offset
   dp_lat_kd: 0.12             # cross-track D: damping
-  dp_lat_i_limit: 0.05        # m/s biggest standing sideways push it may assume exists
-  dp_lat_max: 0.10            # m/s cap on the whole cross-track correction. Must be <= dp_max_vy
+  dp_lat_i_limit: 0.08        # m/s biggest standing sideways push it may assume exists. Raised with the roll authority
+  dp_lat_max: 0.12            # m/s cap on the whole cross-track correction. Must be <= dp_max_vy. Raised from 0.10 with the roll-first rebalance
   dp_lat_deadband_m: 0.03     # m error ignored on a CRISP pose. THE TRACKING FLOOR; widens automatically as pos_std grows
   dp_lat_d_tau_s: 0.4         # s low-pass on the derivative (a 10Hz noisy pose differentiates to noise)
   dp_fwd_kp: 0.50             # along-track P: metres -> m/s of PITCH, while turning or holding
@@ -319,12 +332,12 @@ launch:
   dp_fwd_max: 0.10            # m/s cap on the along-track correction
   dp_fwd_deadband_m: 0.05     # m along-track error ignored on a crisp pose; widens with pos_std
   dp_fwd_d_tau_s: 0.4         # s low-pass on the along-track derivative
-  dp_yaw_kp: 0.90             # heading P: rad of error -> rad/s of YAW
+  dp_yaw_kp: 0.70             # heading P: rad of error -> rad/s of YAW. Lowered from 0.90: the 17:0x flights showed yaw over-correcting (median |wz| 0.2-0.3 rad/s on 6-11 deg errors) and steering the drone off course
   dp_yaw_ki: 0.08             # heading I: LEARNS the standing yaw drift (the rarest of the three)
   dp_yaw_kd: 0.15             # heading D: damping
   dp_yaw_i_limit: 0.08        # rad/s biggest standing yaw push it may assume
   dp_yaw_max: 0.65            # rad/s cap on the heading correction. Must be <= dp_max_wz. At the full yaw ceiling: measured in-place delivery ~11%, the loop needs every count there is
-  dp_yaw_deadband_deg: 2.0    # deg heading error ignored
+  dp_yaw_deadband_deg: 4.0    # deg heading error ignored. Widened from 2: a 10 Hz vision pose wobbles a few degrees; correcting inside that band is chasing noise with the nose
   dp_yaw_d_tau_s: 0.35        # s low-pass on the heading derivative
   dp_drift_leak_s: 180.0      # s over which a learned drift fades. Long: it belongs to the airframe, not the minute
 
