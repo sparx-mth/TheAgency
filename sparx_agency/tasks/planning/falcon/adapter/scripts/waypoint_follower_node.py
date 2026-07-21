@@ -246,6 +246,11 @@ class WaypointFollowerNode:
         self.drift_telemetry = None
         self.certainty_log = None
         self._last_quality = None
+        # Altitude hold: defaults BEFORE the controller dispatch below, because
+        # _build_drift_pid assigns the real AltitudeHold -- a default set after
+        # it would silently overwrite the built hold back to None.
+        self.alt_hold = None
+        self._alt_vz = 0.0
         # DemoMode the holonomic controllers request (best effort) and, if
         # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
         # so the per-axis handshake of the legacy path does not apply to them.
@@ -444,6 +449,15 @@ class WaypointFollowerNode:
         self.lookahead_pub = rospy.Publisher(self.lookahead_topic, PointStamped,
                                              queue_size=1, latch=True)
 
+        # Lateral axis sign, applied at publish (holonomic path). +1 = REP-103
+        # as-is; -1 corrects the inversion MEASURED on this airframe (five
+        # flights: commanded left -> moved right at ~full magnitude, commanded
+        # right -> nothing). One reversible dial, so the next flight is a clean
+        # A/B rather than a blind platform-wide sign flip.
+        self.cmd_vy_sign = float(G("~cmd_vy_sign", 1.0))
+        if self.cmd_vy_sign not in (-1.0, 1.0):
+            raise ValueError("~cmd_vy_sign must be exactly 1 or -1, got %r"
+                             % self.cmd_vy_sign)
         # GO gate awareness. cmd_vel_gate is the single choke point for VELOCITY,
         # but this node's blockage detection, escape reflexes and blockage reports
         # to the planner have side effects the velocity gate cannot stop: a held
@@ -583,6 +597,29 @@ class WaypointFollowerNode:
                           "certainty log will carry the Twist but not drone counts",
                           exc)
         follower = build_drift_pid(G)
+        # Altitude hold: keep the drone at the tag-plane height. The target
+        # follows ~cruise_z (the altitude the whole stack already assumes)
+        # unless ~dp_alt_z overrides it. Climbing is confidence-gated and
+        # ceiling-capped inside the helper -- see altitude_hold.py.
+        if param_bool("~dp_alt_hold", False):
+            from altitude_hold import AltitudeHold, AltitudeHoldParams
+            self.alt_hold = AltitudeHold(AltitudeHoldParams(
+                target_z=float(G("~dp_alt_z", float(G("~cruise_z", 1.0)))),
+                deadband_m=float(G("~dp_alt_deadband_m", 0.10)),
+                kp=float(G("~dp_alt_kp", 0.5)),
+                climb_max=float(G("~dp_alt_climb_max", 0.06)),
+                descend_max=float(G("~dp_alt_descend_max", 0.10)),
+                ceiling_m=float(G("~dp_alt_ceiling_m", 1.2)),
+                conf_min_climb=float(G("~dp_alt_conf_min", 0.35)),
+                conf_min_descend=float(G("~dp_alt_conf_descend", 0.10)),
+                min_z_m=float(G("~dp_alt_min_z_m", 0.2))))
+            rospy.loginfo(
+                "drift_pid: altitude hold ON -- target %.2fm, ceiling %.2fm, "
+                "climb <= %.2fm/s (conf >= %.2f), descend <= %.2fm/s",
+                self.alt_hold.params.target_z, self.alt_hold.params.ceiling_m,
+                self.alt_hold.params.climb_max,
+                self.alt_hold.params.conf_min_climb,
+                self.alt_hold.params.descend_max)
         self.quality = LocalizationQualityMonitor(
             conf_topic=G("~dp_conf_topic", "/xtend/localization_confidence"),
             std_topic=G("~dp_std_topic", "/xtend/localization_pos_std"),
@@ -861,6 +898,19 @@ class WaypointFollowerNode:
             self.follower.set_quality(self._last_quality)
         cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
                                  hold=hold, map_ready=self._map_ready(map_need))
+        # Altitude hold (drift_pid only): a cautious vz on the solved pose z,
+        # computed BEFORE the certainty log so the logged axis counts include it.
+        # Gated hard inside the helper: never while held, never on a coasted or
+        # vague pose, never above the ceiling. 0.0 whenever any gate says no.
+        self._alt_vz = 0.0
+        if self.alt_hold is not None:
+            q = self._last_quality
+            self._alt_vz = self.alt_hold.update(
+                z=(self.cur_pose.position.z if self.cur_pose is not None else None),
+                confidence=(q.confidence if q is not None else 0.0),
+                coasting=(q.coasting if q is not None else True),
+                pose_valid=(q is not None and q.valid),
+                flying=not hold)
         if self.drift_telemetry is not None:
             self._publish_drift(cmd, pose2d)
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
@@ -886,7 +936,7 @@ class WaypointFollowerNode:
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
         self._update_map_wait(cmd, map_need)
         if self._holonomic:
-            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz)
+            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz, vz=self._alt_vz)
         elif self._lateral:
             # roll_assist: the base (vx, wz) still flow through the command-commitment
             # gate (the one-axis follower emits discrete pulses that need it); the
@@ -942,11 +992,12 @@ class WaypointFollowerNode:
         self.drift_telemetry.publish_drift(telemetry)
         if self.certainty_log is not None and self._last_quality is not None:
             wp_idx = getattr(cmd, "wp_idx", None)
-            # The command the DRONE receives: (vx, vy, 0, wz) put through the same
-            # SI->counts translation the XTEND bridge runs after the gate. vy rides
-            # linear.y (drift_pid is holonomic) and linear.z is 0, matching what is
-            # published this tick.
-            axes = (self._twist_to_axes(cmd.vx, cmd.vy, 0.0, cmd.wz)
+            # The command the DRONE receives: the published twist put through the
+            # same SI->counts translation the XTEND bridge runs after the gate --
+            # including the ~cmd_vy_sign lateral flip and the altitude-hold vz,
+            # so the log mirrors what actually flies, not the core's intent.
+            axes = (self._twist_to_axes(cmd.vx, cmd.vy * self.cmd_vy_sign,
+                                        self._alt_vz, cmd.wz)
                     if self._twist_to_axes is not None else None)
             self.certainty_log.write(
                 ros_stamp=rospy.Time.now().to_sec(),
@@ -1322,23 +1373,35 @@ class WaypointFollowerNode:
             except Exception as e:
                 rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
 
-    def _publish_twist_multi(self, vx, vy, wz):
-        """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz;
-        linear.z=0 hardwired (fixed altitude). No command-commitment gate -- the
-        multi-axis controller emits continuous, minimum-force-shaped commands, so
-        it never needs the lone-pulse protection the one-axis path uses."""
+    def _publish_twist_multi(self, vx, vy, wz, vz=0.0):
+        """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz.
+
+        ``linear.y`` is multiplied by ``~cmd_vy_sign`` on the way out: the flight
+        logs measured the LATERAL axis inverted on this airframe (commanded left
+        -> moved right at ~full magnitude; commanded right -> nothing), so the
+        sign is correctable here, at the single point every holonomic command
+        passes through -- the core keeps computing in clean REP-103 and the flip
+        is one reversible dial away from an A/B test.
+
+        ``linear.z`` carries the altitude-hold correction (0 unless the hold is
+        enabled and decides to act) -- no longer hardwired: the platform's own
+        height drifts, and the tags all sit at one altitude. No command-
+        commitment gate -- the multi-axis controller emits continuous,
+        minimum-force-shaped commands, so it never needs the lone-pulse
+        protection the one-axis path uses."""
         vx = self._with_yaw_pitch_bias(vx, wz)
+        vy = vy * self.cmd_vy_sign
         m = Twist()
         m.linear.x = vx
         m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller
-        m.linear.z = 0.0  # HARDWIRED -- fixed altitude (platform holds it)
+        m.linear.z = float(vz)  # altitude-hold correction (0 = platform's own hold)
         m.angular.z = wz
         self.cmd_vel_pub.publish(m)
         if self._log_file is not None:
             try:
                 self._log_file.write(json.dumps({
                     "t": rospy.Time.now().to_sec(),
-                    "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
+                    "linear": {"x": float(vx), "y": float(vy), "z": float(vz)},
                     "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
                 }) + "\n")
                 self._log_file.flush()

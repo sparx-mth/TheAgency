@@ -55,7 +55,7 @@ class _Pub:
         self.sent.append(msg)
 
 
-def _node(bias=BIAS, commit_ticks=1):
+def _node(bias=BIAS, commit_ticks=1, vy_sign=1.0):
     """A bare node wired with just what the publish path touches."""
     n = wfn.WaypointFollowerNode.__new__(wfn.WaypointFollowerNode)
     n.yaw_pitch_bias = bias
@@ -64,6 +64,7 @@ def _node(bias=BIAS, commit_ticks=1):
     n._cmd_cat = None
     n._cmd_run = 0
     n._cmd_vx = n._cmd_wz = 0.0
+    n.cmd_vy_sign = vy_sign
     n.cmd_vel_pub = _Pub()
     n._log_file = None
     return n
@@ -121,6 +122,26 @@ def test_the_multi_axis_crab_is_untouched_by_the_bias():
     sent = n.cmd_vel_pub.sent[-1]
     assert sent.linear.x == pytest.approx(BIAS)
     assert sent.linear.y == pytest.approx(0.2)
+
+
+def test_cmd_vy_sign_flips_the_published_lateral_only():
+    """The measured lateral inversion is corrected at publish: linear.y flips,
+    everything else is untouched."""
+    n = _node(vy_sign=-1.0)
+    n._publish_twist_multi(0.1, 0.2, 0.7)
+    sent = n.cmd_vel_pub.sent[-1]
+    assert sent.linear.y == pytest.approx(-0.2)
+    assert sent.linear.x == pytest.approx(0.1)
+    assert sent.angular.z == pytest.approx(0.7)
+
+
+def test_altitude_hold_vz_rides_linear_z():
+    """vz passes through to linear.z; omitted -> 0 exactly as before."""
+    n = _node()
+    n._publish_twist_multi(0.1, 0.0, 0.0, vz=0.06)
+    assert n.cmd_vel_pub.sent[-1].linear.z == pytest.approx(0.06)
+    n._publish_twist_multi(0.1, 0.0, 0.0)
+    assert n.cmd_vel_pub.sent[-1].linear.z == pytest.approx(0.0)
 
 
 def test_the_commitment_gate_still_sees_a_turn_as_a_turn():
