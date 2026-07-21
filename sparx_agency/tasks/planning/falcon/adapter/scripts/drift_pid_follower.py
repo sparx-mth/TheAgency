@@ -128,8 +128,10 @@ def build_drift_pid_params(G):
         std_ref_m=float(G("~dp_std_ref_m", 0.05)),
         std_deadband_gain=float(G("~dp_std_deadband_gain", 0.6)),
         deadband_extra_max_m=float(G("~dp_deadband_extra_max_m", 0.15)),
+        yaw_scale_floor=float(G("~dp_yaw_scale_floor", 0.0)),
     )
     blockage = BlockageParams(
+        enabled=param_bool("~dp_block_enabled", True),
         window_s=float(G("~dp_block_window_s", 1.2)),
         min_cmd_vx=float(G("~dp_block_min_vx", 0.07)),
         min_cmd_wz=math.radians(float(G("~dp_block_min_wz_deg", 12.0))),
@@ -138,6 +140,7 @@ def build_drift_pid_params(G):
         progress_frac=float(G("~dp_block_progress_frac", 0.30)),
         confirm_ticks=int(G("~dp_block_confirm_ticks", 5)),
         clear_ticks=int(G("~dp_block_clear_ticks", 3)),
+        stale_clear_s=float(G("~dp_block_stale_clear_s", 4.0)),
         use_effectiveness=param_bool("~dp_block_use_effectiveness", True),
         eff_floor=float(G("~dp_eff_floor", 0.15)),
     )
@@ -169,6 +172,7 @@ def build_drift_pid_params(G):
         hold_deadband_m=float(G("~dp_hold_deadband_m", 0.06)),
         forward_track_frac=float(G("~dp_forward_track_frac", 0.0)),
         lateral_turn_frac=float(G("~dp_lateral_turn_frac", 0.40)),
+        turn_pitch_bias=float(G("~dp_turn_pitch_bias", 0.0)),
         settle_map_updates=int(G("~dp_settle_map_updates", 0)),
         lateral_pid=lateral_pid,
         forward_pid=forward_pid,

@@ -25,14 +25,15 @@ from thought_journal import LOG_DIR_ENV
 #: CSV column order. Kept in one place so the header and every row agree.
 FIELDNAMES = [
     "wall_clock", "ros_stamp",
-    "pos_x", "pos_y", "yaw_deg",
+    "pos_x", "pos_y", "pos_z", "yaw_deg",
     "confidence", "pos_std_m", "cmd_effectiveness", "coasting", "age_s",
     "target_wp_idx", "num_waypoints", "target_x", "target_y",
     "drift_vx", "drift_vy", "drift_wz",
     "cross_track_m", "along_track_m", "heading_err_deg",
     "effort", "speed_scale", "lead_s", "deadband_extra_m",
-    "authority", "blocked_axis", "escape_state",
+    "authority", "state", "blocked_axis", "escape_state",
     "cmd_vx", "cmd_vy", "cmd_wz",
+    "axis_forward", "axis_lateral", "axis_vertical", "axis_yaw",
 ]
 
 
@@ -107,13 +108,22 @@ class CertaintyLog(object):
         return self._capped
 
     def write(self, ros_stamp, pose2d, quality, telemetry, target_xy,
-              wp_idx, num_waypoints, cmd_vx, cmd_vy, cmd_wz):
+              wp_idx, num_waypoints, cmd_vx, cmd_vy, cmd_wz, pos_z=None, state="",
+              axes=None):
         """Append one certainty row. Returns True if it was written.
 
         Args:
             ros_stamp: ROS time (seconds) of this control tick.
             pose2d: The drone's own ``Pose2D`` (x, y, yaw) this tick -- where it
                 believes it is, independent of how much that belief is trusted.
+            pos_z: Altitude (m) this tick, or None if unknown. Logged because this
+                platform has no altitude hold (``linear.z`` is always 0), so a
+                roll/pitch tilt bleeds height with nothing commanding it -- and
+                that only shows up as a falling ``pos_z`` here, not in any command.
+            state: The controller regime this tick (IDLE/TRACK/TURN/HOLD/ESCAPE).
+                Answers "the drone had a route but sent no forward command": TRACK
+                means it was flying the leg, HOLD/IDLE means it thought it had
+                arrived or was told to hold, so zero vx is expected.
             quality: The ``core.planning.trackers.drift_pid.LocalizationQuality``
                 snapshot fed to the controller this tick -- the AprilTag pose's
                 confidence, pos_std, coasting flag, cmd_effectiveness (the
@@ -129,6 +139,13 @@ class CertaintyLog(object):
             cmd_vx, cmd_vy, cmd_wz: The flight command actually sent this tick
                 to reach the target waypoint, so a confidence dip can be
                 matched against what the drone was told to do about it.
+            axes: The XTEND axis counts that ``(cmd_vx, cmd_vy, 0, cmd_wz)``
+                translates to downstream of the GO gate -- the command the DRONE
+                actually receives (forward / lateral / vertical / yaw of -1000..
+                1000), or None if the translation was unavailable. Logging both
+                sides of the SI->counts conversion shows when a Twist is too small
+                to move the motors (it lands inside the deadzone -> 0 counts) and,
+                on the vertical axis, that we never command height (always 0).
         """
         if self._capped:
             return False
@@ -145,6 +162,7 @@ class CertaintyLog(object):
             "ros_stamp": "%.3f" % float(ros_stamp),
             "pos_x": "%.4f" % float(pose2d.x),
             "pos_y": "%.4f" % float(pose2d.y),
+            "pos_z": "" if pos_z is None else "%.4f" % float(pos_z),
             "yaw_deg": "%.2f" % (float(pose2d.yaw) * 57.29577951308232),
             "confidence": "%.4f" % float(quality.confidence),
             "pos_std_m": "%.4f" % float(quality.pos_std_m),
@@ -166,11 +184,16 @@ class CertaintyLog(object):
             "lead_s": "%.3f" % float(telemetry.lead_s),
             "deadband_extra_m": "%.3f" % float(telemetry.deadband_extra_m),
             "authority": telemetry.authority,
+            "state": str(state),
             "blocked_axis": telemetry.blocked_axis,
             "escape_state": telemetry.escape_state,
             "cmd_vx": "%.4f" % float(cmd_vx),
             "cmd_vy": "%.4f" % float(cmd_vy),
             "cmd_wz": "%.4f" % float(cmd_wz),
+            "axis_forward": "" if axes is None else int(axes.forward),
+            "axis_lateral": "" if axes is None else int(axes.lateral),
+            "axis_vertical": "" if axes is None else int(axes.vertical),
+            "axis_yaw": "" if axes is None else int(axes.yaw),
         }
         self._writer.writerow(row)
         self._fh.flush()
