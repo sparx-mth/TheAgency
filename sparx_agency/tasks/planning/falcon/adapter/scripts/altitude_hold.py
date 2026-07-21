@@ -29,6 +29,28 @@ twist. Python 3.8 compatible (runs under the Noetic adapter).
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
+
+class AltitudeCommand(NamedTuple):
+    """One tick's vertical decision, plus how much to yield the horizontal axes.
+
+    Attributes:
+        vz: Vertical velocity to command (m/s, + up).
+        translation_scale: Multiplier the follower applies to horizontal
+            TRANSLATION (vx, vy) this tick, 0..1. 1.0 normally; low during a
+            climb PULSE, because pitching/rolling tilts the thrust vector and
+            steals the very lift a climb needs -- so a real climb briefly stops
+            translating, gains height, and hands the drone back. Yaw is left
+            alone (it costs no lift, and sweeping tags in helps the pose a climb
+            needs to be trusted).
+        reason: Short human-readable account, for narration/logging.
+    """
+
+    vz: float
+    translation_scale: float
+    reason: str
+
 
 class AltitudeHoldParams(object):
     """Tuning for :class:`AltitudeHold` (SI units).
@@ -52,11 +74,22 @@ class AltitudeHoldParams(object):
             direction -- but not zero: the z being corrected must be believed.
         min_z_m: Below this measured altitude the loop does nothing (not
             airborne, or the solve is broken).
+        pulse_trigger_m: Sag below target (m) at which a CLIMB PULSE begins:
+            the drone stops translating and dedicates thrust to the (tapered)
+            climb. The pulse releases at HALF this sag, so the final stretch is
+            flown as a gentle trim and the platform's momentum dies before the
+            target rather than past it. Must exceed ``deadband_m`` -- a pulse is
+            for a real height loss, not the trim wander the deadband absorbs.
+            Set huge (e.g. 10) to disable pulsing and only ever trim.
+        pulse_translation_scale: The (vx, vy) multiplier held during a pulse
+            (0..1). Low so the platform's thrust goes to lift, not to tilting.
+            0 stops horizontal translation dead while climbing.
     """
 
-    def __init__(self, target_z=1.0, deadband_m=0.10, kp=0.5, climb_max=0.06,
+    def __init__(self, target_z=1.0, deadband_m=0.10, kp=0.5, climb_max=0.15,
                  descend_max=0.10, ceiling_m=1.2, conf_min_climb=0.35,
-                 conf_min_descend=0.10, min_z_m=0.2):
+                 conf_min_descend=0.10, min_z_m=0.2, pulse_trigger_m=0.20,
+                 pulse_translation_scale=0.2):
         self.target_z = float(target_z)
         self.deadband_m = float(deadband_m)
         self.kp = float(kp)
@@ -66,11 +99,21 @@ class AltitudeHoldParams(object):
         self.conf_min_climb = float(conf_min_climb)
         self.conf_min_descend = float(conf_min_descend)
         self.min_z_m = float(min_z_m)
+        self.pulse_trigger_m = float(pulse_trigger_m)
+        self.pulse_translation_scale = float(pulse_translation_scale)
         if self.target_z <= 0.0:
             raise ValueError("AltitudeHoldParams.target_z must be > 0")
         for name in ("deadband_m", "kp", "climb_max", "descend_max"):
             if getattr(self, name) <= 0.0:
                 raise ValueError("AltitudeHoldParams." + name + " must be > 0")
+        if self.pulse_trigger_m <= self.deadband_m:
+            raise ValueError(
+                "AltitudeHoldParams.pulse_trigger_m (%.2f) must exceed deadband "
+                "(%.2f) -- a climb pulse is for a real sag, not deadband wander"
+                % (self.pulse_trigger_m, self.deadband_m))
+        if not 0.0 <= self.pulse_translation_scale <= 1.0:
+            raise ValueError("AltitudeHoldParams.pulse_translation_scale must be "
+                             "in [0, 1]")
         if self.ceiling_m <= self.target_z + self.deadband_m:
             raise ValueError(
                 "AltitudeHoldParams.ceiling_m (%.2f) must exceed target_z + "
@@ -88,15 +131,33 @@ class AltitudeHoldParams(object):
 
 
 class AltitudeHold(object):
-    """The loop. Stateless between ticks: every decision is this tick's alone."""
+    """The loop. One bit of state -- whether a climb PULSE is in progress."""
 
     def __init__(self, params=None):
         self.params = params or AltitudeHoldParams()
         #: Human-readable account of the last decision, for narration/logging.
         self.last_reason = "idle"
+        #: True while a dedicated climb pulse is running (hysteresis: it latches
+        #: on at pulse_trigger_m of sag and off at half that, so it does not
+        #: chatter, and the last half is flown as a trim, killing the platform's
+        #: climb momentum before the target instead of past it).
+        self._pulse = False
+
+    @property
+    def pulsing(self):
+        # type: () -> bool
+        """True while a climb pulse is suppressing horizontal translation."""
+        return self._pulse
+
+    def _hold(self, reason):
+        # type: (str) -> AltitudeCommand
+        """No vertical command, full horizontal authority, pulse cleared."""
+        self._pulse = False
+        self.last_reason = reason
+        return AltitudeCommand(0.0, 1.0, reason)
 
     def update(self, z, confidence, coasting, pose_valid, flying):
-        """Decide this tick's vertical command.
+        """Decide this tick's vertical command and horizontal yield.
 
         Args:
             z: Measured altitude (m, solved pose z), or None if unknown.
@@ -109,48 +170,63 @@ class AltitudeHold(object):
                 startup) -- a held drone must not be nudged vertically either.
 
         Returns:
-            vz in m/s, + up. 0.0 whenever any gate says no.
+            An :class:`AltitudeCommand`. ``vz`` is 0 and ``translation_scale``
+            is 1 whenever any gate says no.
         """
         p = self.params
         if not flying:
-            self.last_reason = "held -- no vertical authority"
-            return 0.0
+            return self._hold("held -- no vertical authority")
         if z is None or not pose_valid or coasting:
-            self.last_reason = "pose not trustworthy -- holding throttle"
-            return 0.0
+            return self._hold("pose not trustworthy -- holding throttle")
         z = float(z)
         if z < p.min_z_m:
-            self.last_reason = "below %.2fm -- not airborne, hands off" % p.min_z_m
-            return 0.0
+            return self._hold("below %.2fm -- not airborne, hands off" % p.min_z_m)
 
         err = p.target_z - z
         if abs(err) <= p.deadband_m:
-            self.last_reason = "on altitude (%.2fm)" % z
-            return 0.0
+            return self._hold("on altitude (%.2fm)" % z)
 
         if err > 0.0:
             # CLIMB: the guarded direction.
             if z >= p.ceiling_m:
-                self.last_reason = ("at the %.2fm ceiling -- climb refused"
-                                    % p.ceiling_m)
-                return 0.0
+                return self._hold("at the %.2fm ceiling -- climb refused"
+                                  % p.ceiling_m)
             if confidence < p.conf_min_climb:
-                self.last_reason = ("confidence %.2f below %.2f -- not climbing "
-                                    "on a vague pose" % (confidence,
-                                                         p.conf_min_climb))
-                return 0.0
+                return self._hold("confidence %.2f below %.2f -- not climbing on "
+                                  "a vague pose" % (confidence, p.conf_min_climb))
+            # The vertical demand always TAPERS toward the target (kp * err,
+            # capped). Never hold climb_max flat until arrival: this platform
+            # climbs far harder than the nominal m/s, and a flat-out climb
+            # released only at the deadband coasted to 1.5-1.6 m on the logs --
+            # straight through the ceiling into the operator's danger zone.
             vz = min(p.kp * err, p.climb_max)
-            self.last_reason = "climbing %.2f -> %.2fm at %.2fm/s" % (
+            # A big sag latches a dedicated PULSE (yield translation, climb);
+            # it releases at HALF the trigger -- early, so the last stretch is
+            # flown as a gentle trim and the platform's momentum has room to
+            # die before the target, not after it.
+            if err >= p.pulse_trigger_m:
+                self._pulse = True
+            elif err <= 0.5 * p.pulse_trigger_m:
+                self._pulse = False
+            if self._pulse:
+                self.last_reason = ("climb pulse: holding still to regain "
+                                    "%.2fm (at %.2fm, %.2fm/s)"
+                                    % (p.target_z, z, vz))
+                return AltitudeCommand(vz, p.pulse_translation_scale,
+                                       self.last_reason)
+            # Small sag: trim up gently while still flying the route.
+            self.last_reason = "trimming up %.2f -> %.2fm at %.2fm/s" % (
                 z, p.target_z, vz)
-            return vz
+            return AltitudeCommand(vz, 1.0, self.last_reason)
 
-        # DESCEND: the safe direction, but the z must still be believed.
+        # DESCEND: the safe direction (away from the ceiling, toward the tags),
+        # and it does not steal lift, so it never suppresses translation.
+        self._pulse = False
         if confidence < p.conf_min_descend:
-            self.last_reason = ("confidence %.2f below %.2f -- not trusting the "
-                                "altitude enough to descend on it"
-                                % (confidence, p.conf_min_descend))
-            return 0.0
+            return self._hold("confidence %.2f below %.2f -- not trusting the "
+                              "altitude enough to descend on it"
+                              % (confidence, p.conf_min_descend))
         vz = max(p.kp * err, -p.descend_max)
         self.last_reason = "descending %.2f -> %.2fm at %.2fm/s" % (
             z, p.target_z, -vz)
-        return vz
+        return AltitudeCommand(vz, 1.0, self.last_reason)
