@@ -375,6 +375,7 @@
   <arg name="dp_release_frac"            default="0.5" /><!-- below this fraction of a min the command is dropped to 0, above it snapped up -->
   <!-- NAVIGATION  -  how it gets to the next waypoint -->
   <arg name="dp_approach_yaw_rate"       default="0.35" /><!-- rad/s cap on the turn onto a leg -->
+  <arg name="dp_turn_pitch_bias"         default="0.0" /><!-- m/s forward ridden during a TURN whose translation would otherwise be zero; a pure yaw coasts flat on this airframe, a small pitch makes it bite. 0 = pure yaw -->
   <arg name="dp_pos_radius"              default="0.30" /><!-- m waypoint capture radius -->
   <arg name="dp_slow_radius"             default="0.80" /><!-- m start slowing this far from the FINAL goal -->
   <arg name="dp_arrive_speed_min"        default="0.08" /><!-- m/s floor outside pos_radius, so it never crawls to a noisy stop -->
@@ -417,6 +418,7 @@
   <arg name="dp_conf_full"               default="0.35" /><!-- confidence at/above which it flies full speed. NOT 0.9: a lone tag caps near 0.21 -->
   <arg name="dp_conf_min"                default="0.10" /><!-- confidence at/below which it flies at dp_speed_floor -->
   <arg name="dp_speed_floor"             default="0.35" /><!-- slowest speed multiplier on a poor pose. >0: creeping beats stopping in a corridor -->
+  <arg name="dp_yaw_scale_floor"         default="0.0" /><!-- floor on the confidence speed scale as applied to YAW (1.0 = a vague pose never slows the turning, only the flying; turning is what sweeps tags back into view) -->
   <arg name="dp_gain_floor"              default="0.25" /><!-- smallest P/D scale on a poor pose. Lower than speed_floor: reacting to a vague pose is what injects noise -->
   <arg name="dp_conf_integrate"          default="0.18" /><!-- below this the drift loops FREEZE - never learn drift from a pose you do not trust -->
   <arg name="dp_conf_hold"               default="0.05" /><!-- below this the drone stops and holds -->
@@ -431,6 +433,7 @@
   <arg name="dp_deadband_extra_max_m"    default="0.15" /><!-- m cap on that widening, so a coasting pose (std up to 0.5) cannot switch corrections off entirely -->
   <arg name="dp_require_quality"         default="false" /><!-- true HOLDS the drone until the confidence topics arrive; false flies without them (and warns) -->
   <!-- STUCK DETECTION  -  noticing a wall the camera cannot see -->
+  <arg name="dp_block_enabled"          default="true" /><!-- master switch: false = never detect a blockage, never escape, never report one -->
   <arg name="dp_block_window_s"          default="1.2" /><!-- s trailing window over which progress is measured -->
   <arg name="dp_block_min_vx"            default="0.07" /><!-- m/s below this the tick does not count as trying to move -->
   <arg name="dp_block_min_wz_deg"        default="12.0" /><!-- deg/s below this the tick does not count as trying to turn. Keep above dp_min_wz_deg -->
@@ -1795,6 +1798,7 @@
     <param name="dp_min_wz_deg"              value="$(arg dp_min_wz_deg)" />
     <param name="dp_release_frac"            value="$(arg dp_release_frac)" />
     <param name="dp_approach_yaw_rate"       value="$(arg dp_approach_yaw_rate)" />
+    <param name="dp_turn_pitch_bias"         value="$(arg dp_turn_pitch_bias)" />
     <param name="dp_pos_radius"              value="$(arg dp_pos_radius)" />
     <param name="dp_slow_radius"             value="$(arg dp_slow_radius)" />
     <param name="dp_arrive_speed_min"        value="$(arg dp_arrive_speed_min)" />
@@ -1834,6 +1838,7 @@
     <param name="dp_conf_full"               value="$(arg dp_conf_full)" />
     <param name="dp_conf_min"                value="$(arg dp_conf_min)" />
     <param name="dp_speed_floor"             value="$(arg dp_speed_floor)" />
+    <param name="dp_yaw_scale_floor"         value="$(arg dp_yaw_scale_floor)" />
     <param name="dp_gain_floor"              value="$(arg dp_gain_floor)" />
     <param name="dp_conf_integrate"          value="$(arg dp_conf_integrate)" />
     <param name="dp_conf_hold"               value="$(arg dp_conf_hold)" />
@@ -1847,6 +1852,7 @@
     <param name="dp_std_deadband_gain"       value="$(arg dp_std_deadband_gain)" />
     <param name="dp_deadband_extra_max_m"    value="$(arg dp_deadband_extra_max_m)" />
     <param name="dp_require_quality"         value="$(arg dp_require_quality)" />
+    <param name="dp_block_enabled"           value="$(arg dp_block_enabled)" />
     <param name="dp_block_window_s"          value="$(arg dp_block_window_s)" />
     <param name="dp_block_min_vx"            value="$(arg dp_block_min_vx)" />
     <param name="dp_block_min_wz_deg"        value="$(arg dp_block_min_wz_deg)" />
