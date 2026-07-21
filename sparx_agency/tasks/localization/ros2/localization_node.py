@@ -112,6 +112,13 @@ class LocalizationNode(Node):
         # confidence collapsing. Delays the recovery node's stale-pose trigger
         # by the same amount; 0 restores publish-nothing-when-blind.
         self.declare_parameter("coast_frames", 5)
+        # Per-tag quality log (apriltag provider only): one CSV row per detected
+        # tag per frame, so a poorly-placed or mis-mapped tag can be found on the
+        # wall instead of hiding inside the aggregate confidence. Off by default;
+        # the path defaults to $FALCON_LOG_DIR (else /tmp/falcon), next to the
+        # flight's other logs.
+        self.declare_parameter("apriltag_log", False)
+        self.declare_parameter("apriltag_log_path", "")
         # optical_flow params
         self.declare_parameter("depth_frame_path_topic", "")
         self.declare_parameter("bearing_topic", "")
@@ -149,6 +156,22 @@ class LocalizationNode(Node):
         self._provider: BaseLocalizationProvider = self._build_provider(provider_type)
         self._provider_type = provider_type
         self.get_logger().info(f"Localization provider: {provider_type} → {_OUTPUT_TOPIC}")
+
+        # Per-tag quality log: only the apriltag provider produces per-frame tag
+        # diagnostics (last_frame_diag), so only it can feed this.
+        self._tag_log = None
+        if provider_type == "apriltag" and bool(self.get_parameter("apriltag_log").value):
+            from sparx_agency.tasks.localization.apriltag_quality_log import (
+                AprilTagQualityLog, default_apriltag_log_path)
+            path = (str(self.get_parameter("apriltag_log_path").value).strip()
+                    or default_apriltag_log_path())
+            try:
+                self._tag_log = AprilTagQualityLog(path)
+                self.get_logger().info(f"AprilTag quality log → {path}")
+            except (IOError, OSError) as e:
+                self.get_logger().error(
+                    f"Cannot open AprilTag quality log {path} ({e}); "
+                    f"continuing without it")
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -303,12 +326,25 @@ class LocalizationNode(Node):
             return
         obs = Observation(rgb=RGBFrame(image=frame, stamp_sec=stamp_sec))
         self._publish_estimate(self._provider.update(obs))
+        self._log_apriltag_quality()
 
     def _on_image(self, msg) -> None:
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         obs = Observation(rgb=RGBFrame(image=frame, stamp_sec=stamp_sec))
         self._publish_estimate(self._provider.update(obs))
+        self._log_apriltag_quality()
+
+    def _log_apriltag_quality(self) -> None:
+        """Append this frame's per-tag diagnostics, if the log is enabled.
+
+        Reads the diagnostic the provider stashed during ``update()`` -- present
+        every frame, fix or not -- so a blind stretch is logged as itself."""
+        if self._tag_log is None:
+            return
+        diag = getattr(self._provider, "last_frame_diag", None)
+        if diag is not None:
+            self._tag_log.write(diag)
 
     # ------------------------------------------------------------------
     # Optical-flow callbacks
@@ -356,6 +392,12 @@ class LocalizationNode(Node):
         self._pub_std.publish(Float32(data=float(estimate.pos_std_m)))
         if estimate.cmd_effectiveness is not None:
             self._pub_eff.publish(Float32(data=float(estimate.cmd_effectiveness)))
+
+    def destroy_node(self) -> None:
+        """Flush the tag-quality log before the node goes down."""
+        if self._tag_log is not None:
+            self._tag_log.close()
+        super().destroy_node()
 
 
 def _amcl_loc_json(x_m: float, y_m: float) -> str:

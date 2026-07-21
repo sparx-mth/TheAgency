@@ -25,6 +25,9 @@ from sparx_agency.tasks.localization.common.apriltag_cv_common import (
     load_camera_calib_yaml,
     make_detector,
 )
+from sparx_agency.tasks.localization.common.apriltag_frame_diag import (
+    build_frame_diag,
+)
 from sparx_agency.tasks.localization.common.apriltag_pnp import (
     TagDetection,
     estimate_camera_pose,
@@ -161,6 +164,10 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._coast_frames = int(coast_frames)
         self._coast_count = 0
         self._last_conf = 0.0             # confidence of the last accepted fix
+        #: Per-frame AprilTag diagnostics (which tags, how good each), rebuilt every
+        #: update() for an optional quality logger to read. None until the first
+        #: frame. The provider only BUILDS it; persisting it is the ROS layer's job.
+        self.last_frame_diag = None
 
         self._P = float(process_std_m) ** 2
         self._pos: Optional[np.ndarray] = None
@@ -197,6 +204,23 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
         self._last_stamp = None
         self._coast_count = 0
         self._last_conf = 0.0
+        self.last_frame_diag = None
+
+    def _record_no_fix_diag(self, dets, stamp_sec):
+        """Coast/blind: record what was seen, then dead-reckon as before.
+
+        Runs the normal coast and, alongside it, stashes a diagnostic frame from
+        the RAW detections so a stretch with no usable tag is still attributable
+        to what the camera did (or did not) see. ``source`` distinguishes a coast
+        (a pose was propagated) from a truly blind frame (nothing published)."""
+        est = self._coast(stamp_sec)
+        self.last_frame_diag = build_frame_diag(
+            dets, None, self._tag_map.keys(),
+            confidence=(est.confidence if est else 0.0),
+            pos_std_m=(est.pos_std_m if est else 1.0),
+            source=(self.source_name + "_coast" if est else "blind"),
+            stamp_sec=stamp_sec)
+        return est
 
     def set_command(self, vx: float, vy: float, wz: float, stamp_sec: float) -> None:
         """Feed the twist currently commanded to the platform (body frame).
@@ -317,7 +341,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             for d in kept]
 
         if not tag_dets:
-            return self._coast(stamp_sec)
+            return self._record_no_fix_diag(dets, stamp_sec)
 
         # One joint PnP over all tags (>= 2), or a disambiguated IPPE-square
         # solve for a single tag, seeded with the previous position.
@@ -326,7 +350,7 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             prev_cam_pos_world=self._prev_cam_pos,
         )
         if est is None:
-            return self._coast(stamp_sec)
+            return self._record_no_fix_diag(dets, stamp_sec)
 
         confidence = pose_confidence(est)
 
@@ -376,6 +400,9 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
                 % (float(np.linalg.norm(meas - self._pos)), self._max_jump_m,
                    confidence, est.n_tags, sorted(est.used_tag_ids),
                    self._rejected, self._max_jump_frames))
+            self.last_frame_diag = build_frame_diag(
+                dets, est, self._tag_map.keys(), confidence,
+                0.01 + 0.30 * (1.0 - confidence) ** 2, "rejected", stamp_sec)
             return None
         self._rejected = 0
         self._coast_count = 0
@@ -435,6 +462,10 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
             f"amb={est.ambiguity:.2f} geom={est.geometry:.2f} "
             f"min_px={est.min_tag_px:.0f} far={est.max_tag_dist_m:.1f}m"
             + (f" eff={eff:.2f}/{self._cmd.effectiveness_yaw:.2f}" if eff is not None else ""))
+
+        self.last_frame_diag = build_frame_diag(
+            dets, est, self._tag_map.keys(), confidence, pos_std,
+            self.source_name, stamp_sec)
 
         return LocalizationEstimate(
             pose=Pose3D(x=float(x), y=float(y), z=float(z), yaw=yaw),
