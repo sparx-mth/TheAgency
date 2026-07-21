@@ -251,6 +251,7 @@ class WaypointFollowerNode:
         # it would silently overwrite the built hold back to None.
         self.alt_hold = None
         self._alt_vz = 0.0
+        self._alt_tscale = 1.0
         # DemoMode the holonomic controllers request (best effort) and, if
         # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
         # so the per-axis handshake of the legacy path does not apply to them.
@@ -607,18 +608,24 @@ class WaypointFollowerNode:
                 target_z=float(G("~dp_alt_z", float(G("~cruise_z", 1.0)))),
                 deadband_m=float(G("~dp_alt_deadband_m", 0.10)),
                 kp=float(G("~dp_alt_kp", 0.5)),
-                climb_max=float(G("~dp_alt_climb_max", 0.06)),
+                climb_max=float(G("~dp_alt_climb_max", 0.15)),
                 descend_max=float(G("~dp_alt_descend_max", 0.10)),
                 ceiling_m=float(G("~dp_alt_ceiling_m", 1.2)),
                 conf_min_climb=float(G("~dp_alt_conf_min", 0.35)),
                 conf_min_descend=float(G("~dp_alt_conf_descend", 0.10)),
-                min_z_m=float(G("~dp_alt_min_z_m", 0.2))))
+                min_z_m=float(G("~dp_alt_min_z_m", 0.2)),
+                pulse_trigger_m=float(G("~dp_alt_pulse_trigger_m", 0.20)),
+                pulse_translation_scale=float(G("~dp_alt_pulse_tscale", 0.2))))
             rospy.loginfo(
                 "drift_pid: altitude hold ON -- target %.2fm, ceiling %.2fm, "
-                "climb <= %.2fm/s (conf >= %.2f), descend <= %.2fm/s",
+                "climb <= %.2fm/s (conf >= %.2f), pulse below %.2fm (translation "
+                "x%.2f), descend <= %.2fm/s",
                 self.alt_hold.params.target_z, self.alt_hold.params.ceiling_m,
                 self.alt_hold.params.climb_max,
                 self.alt_hold.params.conf_min_climb,
+                self.alt_hold.params.target_z
+                - self.alt_hold.params.pulse_trigger_m,
+                self.alt_hold.params.pulse_translation_scale,
                 self.alt_hold.params.descend_max)
         self.quality = LocalizationQualityMonitor(
             conf_topic=G("~dp_conf_topic", "/xtend/localization_confidence"),
@@ -903,14 +910,23 @@ class WaypointFollowerNode:
         # Gated hard inside the helper: never while held, never on a coasted or
         # vague pose, never above the ceiling. 0.0 whenever any gate says no.
         self._alt_vz = 0.0
+        self._alt_tscale = 1.0
         if self.alt_hold is not None:
             q = self._last_quality
-            self._alt_vz = self.alt_hold.update(
+            alt = self.alt_hold.update(
                 z=(self.cur_pose.position.z if self.cur_pose is not None else None),
                 confidence=(q.confidence if q is not None else 0.0),
                 coasting=(q.coasting if q is not None else True),
                 pose_valid=(q is not None and q.valid),
                 flying=not hold)
+            self._alt_vz = alt.vz
+            # During a climb PULSE the translation is yielded so the platform's
+            # thrust goes to lift, not to the tilt that flying costs -- the logs
+            # showed a maxed-out climb LOSING while forward flight stole the lift.
+            self._alt_tscale = alt.translation_scale
+            if alt.translation_scale < 1.0:
+                self.thinker.say(alt.reason, category="sensor",
+                                 repeat_after_s=2.0)
         if self.drift_telemetry is not None:
             self._publish_drift(cmd, pose2d)
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
@@ -936,7 +952,8 @@ class WaypointFollowerNode:
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
         self._update_map_wait(cmd, map_need)
         if self._holonomic:
-            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz, vz=self._alt_vz)
+            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz, vz=self._alt_vz,
+                                      translation_scale=self._alt_tscale)
         elif self._lateral:
             # roll_assist: the base (vx, wz) still flow through the command-commitment
             # gate (the one-axis follower emits discrete pulses that need it); the
@@ -996,7 +1013,8 @@ class WaypointFollowerNode:
             # same SI->counts translation the XTEND bridge runs after the gate --
             # including the ~cmd_vy_sign lateral flip and the altitude-hold vz,
             # so the log mirrors what actually flies, not the core's intent.
-            axes = (self._twist_to_axes(cmd.vx, cmd.vy * self.cmd_vy_sign,
+            axes = (self._twist_to_axes(cmd.vx * self._alt_tscale,
+                                        cmd.vy * self.cmd_vy_sign * self._alt_tscale,
                                         self._alt_vz, cmd.wz)
                     if self._twist_to_axes is not None else None)
             self.certainty_log.write(
@@ -1373,7 +1391,7 @@ class WaypointFollowerNode:
             except Exception as e:
                 rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
 
-    def _publish_twist_multi(self, vx, vy, wz, vz=0.0):
+    def _publish_twist_multi(self, vx, vy, wz, vz=0.0, translation_scale=1.0):
         """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz.
 
         ``linear.y`` is multiplied by ``~cmd_vy_sign`` on the way out: the flight
@@ -1383,14 +1401,18 @@ class WaypointFollowerNode:
         passes through -- the core keeps computing in clean REP-103 and the flip
         is one reversible dial away from an A/B test.
 
+        ``translation_scale`` (0..1) shrinks the horizontal TRANSLATION (vx, vy)
+        without touching yaw -- it is how a climb pulse yields the tilt axes to
+        the climb. 1.0 is the normal pass-through.
+
         ``linear.z`` carries the altitude-hold correction (0 unless the hold is
         enabled and decides to act) -- no longer hardwired: the platform's own
         height drifts, and the tags all sit at one altitude. No command-
         commitment gate -- the multi-axis controller emits continuous,
         minimum-force-shaped commands, so it never needs the lone-pulse
         protection the one-axis path uses."""
-        vx = self._with_yaw_pitch_bias(vx, wz)
-        vy = vy * self.cmd_vy_sign
+        vx = self._with_yaw_pitch_bias(vx, wz) * translation_scale
+        vy = vy * self.cmd_vy_sign * translation_scale
         m = Twist()
         m.linear.x = vx
         m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller

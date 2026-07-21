@@ -157,7 +157,10 @@ def build_drift_pid_params(G):
     )
     return DriftPidParams(
         cruise_speed=float(G("~dp_cruise_speed", 0.18)),
+        cruise_speed_straight=float(G("~dp_cruise_straight", 0.0)),
         approach_yaw_rate=float(G("~dp_approach_yaw_rate", 0.35)),
+        track_yaw_rate=float(G("~dp_track_yaw_rate",
+                               float(G("~dp_approach_yaw_rate", 0.35)))),
         pos_radius=float(G("~dp_pos_radius",
                            float(G("~pos_acquisition_radius", 0.30)))),
         slow_radius=float(G("~dp_slow_radius", 0.80)),
