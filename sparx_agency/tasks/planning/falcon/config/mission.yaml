@@ -160,6 +160,12 @@ launch:
   # it false while judging localization quality; the source now filters itself by
   # confidence, so this second layer mostly just adds delay.
   use_pose_estimator: false
+  # Lateral (linear.y) sign at publish. MEASURED inverted on this airframe across
+  # five flights: commanded left -> moved right at ~full magnitude (-97%),
+  # commanded right -> nothing (the inverted push cancels the ambient drift).
+  # -1 corrects it. If the next flight's LATERAL delivery goes NEGATIVE again,
+  # set back to 1 -- one dial, clean A/B.
+  cmd_vy_sign: -1.0
 
   # -- Speeds for controllers 1 & 2 (waypoint / roll_assist) -----------------------------------------
   # These are IGNORED under pure_pursuit, which has its own pair below.
@@ -243,7 +249,7 @@ launch:
   # cleanly at 13:31. The speeds below are set to the platform caps so the stack
   # commands everything the airframe has; if delivery is still ~0 on the next flight,
   # the problem is the drone, not a parameter.
-  dp_cruise_speed: 0.40       # m/s on a straight leg. THE main speed dial. 0.40 = 533 of the 600-count forward cap. NOTE this platform has NO altitude hold (linear.z is always 0), so more forward pitch also means more altitude bleed -- watch pos_z in the log and back off if it sinks
+  dp_cruise_speed: 0.32       # m/s on a straight leg. THE main speed dial. 0.32 = 427 of the 600-count forward cap. Trimmed from 0.40: runs 1527xx/1537xx measured actual TRACK speeds peaking 0.54-0.66 m/s -- operator judged it a little fast indoors, and less forward pitch also bleeds less altitude
   dp_max_vx: 0.45             # m/s hard cap FORWARD = full XTEND pitch thrust (600 counts). At the platform ceiling
   dp_max_vx_back: 0.12        # m/s hard cap in REVERSE. Harder than forward: no rear camera, every backward metre is blind
   dp_max_vy: 0.12             # m/s hard cap sideways (ROLL). Weaker axis; keep well under max_vx. Every ROLL count tilts the thrust vector and, with no altitude hold, costs altitude -- do not raise this
@@ -272,6 +278,25 @@ launch:
   dp_suppress_deg: 110.0      # deg error at which translation drops to suppress_floor (turn first, then fly)
   dp_suppress_floor: 0.15     # fraction of speed kept beyond suppress_deg. >0 so it keeps creeping
   dp_passed_bearing_deg: 110.0 # deg a non-final waypoint this far behind counts as passed, not turned back for
+
+  # -- ALTITUDE HOLD  --  keep the drone on the tag plane ---------------------------------------------
+  # The platform's own height hold drifts (the logs show it sinking at hover with
+  # ZERO commands, overshooting to 1.25 m, and losing height hardest in turns),
+  # and every AprilTag sits at ~1.0 m -- so height errors directly starve the
+  # localization. This closes a timid P loop on the SOLVED pose z, riding
+  # linear.z on the published twist. The target follows cruise_z (1.0 m).
+  #
+  # CLIMBING IS THE GUARDED DIRECTION: the vertical axis borrows the forward
+  # calibration and climbs far harder than nominal, and nothing above is
+  # forgiving -- so a climb needs a trusted pose (dp_alt_conf_min, never while
+  # coasting), is capped tiny (dp_alt_climb_max), and is REFUSED outright at the
+  # ceiling. Descending only needs the z itself to be believed.
+  dp_alt_hold: true           # master switch. false = the old behaviour (linear.z stays 0)
+  dp_alt_climb_max: 0.06      # m/s cap on UP. Deliberately timid -- gradual and slow is the brief
+  dp_alt_ceiling_m: 1.2       # m; at/above this measured altitude a climb is NEVER commanded.
+                              #   The operator's line: 1.3 m must not be reached, 1.5 m is dangerous
+  dp_alt_conf_min: 0.35       # pose confidence required to climb ("quite sure of localization");
+                              #   0.35 = the full-trust threshold, i.e. a solid multi-tag fix
 
   # -- STATION KEEPING  --  holding still, which is where fore/aft drift shows up --------------------
   dp_hold_deadband_m: 0.06    # m position error ignored while holding
