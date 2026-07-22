@@ -33,6 +33,17 @@ MAX_AXIS = 1000.0
 ARM_SETTLE_SEC = 0.3
 ARM_CONFIRM_TIMEOUT_SEC = 2.0
 
+# Landing must never free-fall: ranger (downward rangefinder, meters) is the
+# ground-truth signal for "has it actually landed", not the throttle value.
+# The commanded throttle only ever ramps down to a fraction of hover thrust,
+# so a landing that hasn't reached the ground yet keeps sinking gently
+# instead of cutting power mid-air (confirmed live: starting a land from an
+# abnormal altitude with the old "disarm once throttle hits 0" logic caused
+# a real free-fall crash, because throttle bottomed out long before the
+# drone had actually descended).
+LAND_MIN_THROTTLE_FRACTION = 0.3
+GROUND_RANGER_M = 0.3
+
 
 class AxisModel:
     """Manual-control axes (x/y/z/r), each clamped to [-1000, 1000]."""
@@ -85,6 +96,7 @@ class RoosterUnit:
 
         self.armed = False
         self.airborne = False
+        self.ranger = float("inf")
         self.arm_pending = False
         self.busy_action: Optional[str] = None  # "takeoff" | "land" | None
         self._cancel_event = threading.Event()
@@ -105,6 +117,7 @@ class RoosterUnit:
     def _state_cb(self, msg: RoosterState):
         self.armed = msg.armed
         self.airborne = msg.airborne
+        self.ranger = msg.ranger
 
     # ---- publish (called by the owning node's timers) ----
 
@@ -287,7 +300,7 @@ class RoosterUnit:
     def land(self, on_landed: Optional[Callable[[], None]] = None):
         """Step z down by land_step every land_step_interval_sec, starting
         from whatever altitude it's currently holding, until telemetry
-        reports not-airborne or throttle bottoms out, then disarm."""
+        reports not-airborne or ranger confirms ground, then disarm."""
         if self.busy_action:
             self.node.get_logger().warn(f"[{self.id}] Busy with '{self.busy_action}', ignoring land.")
             return
@@ -297,6 +310,7 @@ class RoosterUnit:
 
     def _do_land(self, on_landed):
         deadline = time.time() + self.land_timeout_sec
+        min_throttle = self.hover_z * LAND_MIN_THROTTLE_FRACTION
         reason = "timeout"
         while time.time() < deadline:
             if self._cancel_event.is_set():
@@ -305,15 +319,13 @@ class RoosterUnit:
                 if on_landed:
                     on_landed()
                 return
-            if not self.airborne:
-                reason = "airborne false"
-                break
-            if self.axes.z <= 0.0:
-                reason = "throttle at 0"
+            if not self.airborne or self.ranger <= GROUND_RANGER_M:
+                reason = f"airborne={self.airborne}, ranger={self.ranger:.2f}m"
                 break
             time.sleep(self.land_step_interval_sec)
-            self.axes.set(z=max(0.0, self.axes.z - self.land_step))
-            self.node.get_logger().info(f"[{self.id}] Landing: z={self.axes.z:.0f}")
+            self.axes.set(z=max(min_throttle, self.axes.z - self.land_step))
+            self.node.get_logger().info(
+                f"[{self.id}] Landing: z={self.axes.z:.0f}, ranger={self.ranger:.2f}m")
         self.axes.reset()
         time.sleep(ARM_SETTLE_SEC)
         self.disarm()
