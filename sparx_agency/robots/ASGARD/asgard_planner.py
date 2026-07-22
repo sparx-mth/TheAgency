@@ -2,12 +2,12 @@ import time
 import json
 import random
 from sparx_agency.robots.ASGARD.asgard_controller import Controller
-from sparx_agency.robots.ASGARD.utils import Utils
+from sparx_agency.robots.ASGARD.geometric import Geometric
 import numpy as np
 import ast
 
 
-class Researcher:
+class AsgardPlanner:
     """
     Researcher wraps all agent abilities and behaviors.
     """
@@ -47,7 +47,7 @@ class Researcher:
             self.controller.moveToPosition(self.agent_location, 10)
             self.get_drone_data()
             drone_pos = self.controller.extractPosition(self.drone_data['position'])
-            distance = Utils.calculate_distance(drone_pos, self.agent_location)
+            distance = Geometric.calculate_distance(drone_pos, self.agent_location)
         print(self.drone['droneID'] + ' Arrived to starting location!')
 
     def loop(self):
@@ -201,13 +201,13 @@ class Researcher:
     def check_drones_down(self):
         if self.agents_locs is None:
             return False
-        height_differences = Utils.calculate_height_differences(self.my_loc, self.agents_locs)
+        height_differences = Geometric.calculate_height_differences(self.my_loc, self.agents_locs)
         return any(difference > self.threshold for difference in height_differences)
 
     def check_another_drones_on_target(self):
         if self.agents_locs is None:
             return False
-        height_differences = Utils.calculate_height_differences(self.my_loc, self.agents_locs)
+        height_differences = Geometric.calculate_height_differences(self.my_loc, self.agents_locs)
         return any(abs(difference) < self.threshold for difference in height_differences)
 
     def go_to_target(self):
@@ -218,7 +218,7 @@ class Researcher:
         min_distance = 1000
         for pest in self.pest_list:
             pest_post = self.controller.extractPosition(pest['position'])
-            distance = Utils.calculate_distance(drone_pos, pest_post)
+            distance = Geometric.calculate_distance(drone_pos, pest_post)
             if min_distance > distance:
                 min_distance = distance
                 target_pest_pos = pest_post
@@ -232,7 +232,7 @@ class Researcher:
         min_distance = 1000
         for pest in self.pest_list:
             pest_post = self.controller.extractPosition(pest['position'])
-            distance = Utils.calculate_distance(drone_pos, pest_post)
+            distance = Geometric.calculate_distance(drone_pos, pest_post)
             if min_distance > distance:
                 min_distance = distance
                 target_pest_pos = pest_post
