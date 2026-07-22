@@ -13,6 +13,13 @@ cmd_nav payload (std_msgs/String, JSON):
     {"action": "arm|disarm|takeoff|land|forward|backward|left|right|
                 up|down|turn_left|turn_right|stop|video_on|video_off",
      "value": <float, optional axis magnitude, default 400>}
+
+    {"action": "move", "axes": {"x": <float>, "y": <float>, "r": <float>}}
+    Continuous-control variant for a planner (e.g. rooster_twist_control_adapter.py
+    translating FALCON's /cmd_vel): sets any subset of x/y/r directly instead of a
+    single named direction. z is deliberately never accepted here - same reason
+    the named directional actions preserve it (it's throttle/altitude-hold;
+    a planner has no business touching it, only the takeoff/land climb logic).
 """
 
 from __future__ import annotations
@@ -148,6 +155,18 @@ class RoosterCommandUnitNode(Node):
             # flying without this fix caused an immediate fall).
             axes = dict(x=unit.axes.x, y=unit.axes.y, z=unit.axes.z, r=unit.axes.r)
             axes.update({axis: sign * value for axis, sign in _MOVE_ACTIONS[action].items()})
+            unit.set_axes(**axes)
+        elif action == "move":
+            # Continuous-control variant for a planner (see module docstring):
+            # an explicit {"x":..,"y":..,"r":..} dict instead of one named
+            # direction. Same z-preservation rule as _MOVE_ACTIONS above -
+            # z is never accepted here, only x/y/r are ever taken from the
+            # payload, so a planner can never touch throttle/altitude-hold.
+            requested = cmd.get("axes") or {}
+            axes = dict(x=unit.axes.x, y=unit.axes.y, z=unit.axes.z, r=unit.axes.r)
+            for axis in ("x", "y", "r"):
+                if axis in requested:
+                    axes[axis] = float(requested[axis])
             unit.set_axes(**axes)
         else:
             self.get_logger().warn(f"Unknown cmd_nav action: {action!r}")
