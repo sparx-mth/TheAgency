@@ -11,6 +11,9 @@ States (string labels, à la
 :class:`~sparx_agency.core.planning.trackers.rotation_supervisor.RotationReobserveSupervisor`):
 
   * ``SEARCH``      — planner flies the route; node passive (``drive_cmd_vel=False``).
+    Also the pre-arm hold: while ``arm_ready`` is False the machine cannot leave SEARCH
+    at all (no confirmation, arrival or aim takes it out), so the obstacle-aware follower
+    keeps control until the drone has flown the hard part of the route into the room.
   * ``AIM``         — the route reached a *staging* goal (a vantage point, not the
     object itself) without a confirmation, and the object's catalogued position IS
     known: turn the nose onto its bearing and hold still, looking (see the
@@ -18,11 +21,17 @@ States (string labels, à la
     takes precedence over both SCAN and the arrival-land, because arriving at a
     staging point is not arriving at the object. Ends one of two ways — the
     detector confirms the object (→ acquire, the whole point of aiming), or the
-    caller reports ``aim_done``, which returns to SEARCH with ``escalate_goal``
-    raised so the mission re-targets the object's own coordinate.
+    caller reports ``aim_done``. What ``aim_done`` does depends on
+    ``aim_fail_to_scan``: by default it returns to SEARCH with ``escalate_goal``
+    raised so the mission re-targets the object's own coordinate, but with
+    ``aim_fail_to_scan`` it hands off to SCAN instead — sweep the room in place
+    rather than ever fly onto the object's imprecise catalogued position.
   * ``SCAN``        — the route reached its goal without a confirmation, so the node
     drives a slow rotate-with-stops sweep of the room (see the scan-search policy)
     to look for the object. Still "searching", but the node now owns ``/cmd_vel``.
+    With ``scan_land_revolutions`` set, the sweep is bounded: the caller feeds the
+    per-tick swept angle and the machine commits to the terminal LAND once the sweep
+    has turned that many full revolutions without a confirmation (the give-up land).
   * ``ACQUIRE_STOP`` — the target was just confirmed+locked: hold a brief
     stop-in-place (``acquire_stop_s``) before approaching, so the drone arrests any
     inherited route (A*/NavDP) motion and no stale follower command lingers into the
@@ -33,7 +42,7 @@ States (string labels, à la
   * ``RECOVER``     — track lost; node sweeps to re-acquire (see the recovery policy).
   * ``LAND``        — reached the object: the machine never leaves this **terminal**
     state, ``drive_cmd_vel`` goes False, and the ``land`` flag is raised so the node
-    stops sending motion commands and triggers the platform's land sequence. Two
+    stops sending motion commands and triggers the platform's land sequence. Three
     independent triggers can enter it:
       - **visual reach** (from APPROACH / HOVER_LOCK): the metric range to the target
         has stayed ``<= land_range_m`` for ``land_confirm_ticks`` consecutive closure
@@ -46,8 +55,13 @@ States (string labels, à la
         A* alone" (never seen by the detector), so the goal *is* the object and the
         mission lands there instead of sweeping the room. Needs only the pose-based
         ``arrived_at_goal`` flag, no depth. Off by default (``land_at_goal`` False),
-        which keeps the legacy arrival→SCAN sweep. The two triggers never contend: the
-        coordinate one lives only in SEARCH, the visual one only in APPROACH/HOVER_LOCK.
+        which keeps the legacy arrival→SCAN sweep.
+      - **sweep exhausted** (from SCAN, ``scan_land_revolutions`` > 0): the room sweep
+        turned its configured number of full revolutions without a confirmation, so
+        the object is nowhere in view — give up and land in place. Off by default
+        (``scan_land_revolutions`` 0), which keeps the sweep-forever behaviour.
+    The triggers never contend: the coordinate one lives only in SEARCH, the visual
+    one only in APPROACH/HOVER_LOCK, and the sweep one only in SCAN.
 
 Transitions are driven only by booleans the node already has (target confirmed,
 track valid, servo at-target, arrived-at-goal) plus the optional metric ``range_m``
@@ -60,6 +74,7 @@ tracker (from SEARCH it re-enters SCAN on the next tick if still at the goal).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -113,6 +128,17 @@ class ApproachFSMConfig:
             pose excursion into the arrival radius cannot land the drone. The streak
             resets on any tick that is not arrived and on any state change. Only used
             when ``land_at_goal`` is True.
+        aim_fail_to_scan: When True, an AIM that finishes unseen (``aim_done``) hands
+            off to SCAN — sweep the room in place looking for the object — instead of
+            returning to SEARCH with ``escalate_goal``. It is how a mission looks for
+            the object from the vantage point without EVER flying onto its imprecise
+            catalogued coordinate. ``False`` (default) keeps the legacy escalate.
+        scan_land_revolutions: Number of full in-place revolutions the room SCAN may
+            turn before giving up and committing to the terminal LAND (the object was
+            never found). The caller feeds the per-tick swept angle as
+            ``scan_swept_delta`` and the machine accumulates it while in SCAN, landing
+            once it reaches this many turns. ``0`` (default) disables the cap, so SCAN
+            sweeps until the target is confirmed or the goal changes.
     """
 
     recover_timeout_s: float = 6.0
@@ -123,6 +149,8 @@ class ApproachFSMConfig:
     land_confirm_ticks: int = 3
     land_at_goal: bool = False
     arrive_land_confirm_ticks: int = 5
+    aim_fail_to_scan: bool = False
+    scan_land_revolutions: float = 0.0
 
     def __post_init__(self) -> None:
         if self.recover_timeout_s <= 0.0:
@@ -139,6 +167,8 @@ class ApproachFSMConfig:
             raise ValueError("land_confirm_ticks must be >= 1.")
         if self.arrive_land_confirm_ticks < 1:
             raise ValueError("arrive_land_confirm_ticks must be >= 1.")
+        if self.scan_land_revolutions < 0.0:
+            raise ValueError("scan_land_revolutions must be >= 0 (0 disables the cap).")
 
 
 @dataclass(frozen=True)
@@ -190,6 +220,7 @@ class VisualApproachStateMachine:
         self._settle_for = 0.0
         self._land_confirm = 0
         self._arrive_confirm = 0
+        self._scan_swept = 0.0
 
     @property
     def state(self) -> str:
@@ -198,7 +229,9 @@ class VisualApproachStateMachine:
     def update(self, confirmed: bool, track_valid: bool, at_target: bool,
                dt: float, arrived_at_goal: bool = False,
                range_m: Optional[float] = None, aim_ready: bool = False,
-               aim_done: bool = False) -> ApproachDecision:
+               aim_done: bool = False,
+               scan_swept_delta: float = 0.0,
+               arm_ready: bool = True) -> ApproachDecision:
         """Advance one tick.
 
         Args:
@@ -221,6 +254,16 @@ class VisualApproachStateMachine:
                 keeps the unstaged behaviour (arrival -> land-at-goal or SCAN).
             aim_done: The aim policy has finished (looked, or timed out) without the
                 object being confirmed. Only read in AIM. Defaults False.
+            scan_swept_delta: Radians the drone has turned since the previous tick,
+                accumulated only while in SCAN toward the ``scan_land_revolutions``
+                give-up cap. Ignored outside SCAN and when the cap is disabled, so a
+                caller that never bounds the sweep need not supply it. Defaults 0.
+            arm_ready: Whether the mission may leave SEARCH at all. ``False`` pins the
+                machine in passive SEARCH regardless of confirmation or arrival, so the
+                obstacle-aware route follower keeps control -- used to forbid the BLIND
+                visual take-over until the drone has flown the hard part of the route
+                into the room (the caller latches it True on reaching an entry point).
+                Defaults True (no gate), so callers that never gate are unaffected.
         """
         dt = max(0.0, float(dt))
 
@@ -230,6 +273,12 @@ class VisualApproachStateMachine:
             return self._decide()
 
         if self._state == SEARCH:
+            # The BLIND visual take-over must not engage until the drone has flown the
+            # hard part of the route into the room: while not armed, stay passive so the
+            # obstacle-aware follower keeps control, whatever the detector/arrival say.
+            if not arm_ready:
+                self._arrive_confirm = 0
+                return self._decide()
             # Only leave SEARCH once BOTH confirmed and the tracker is actually
             # locked (the node seeds the tracker on confirmation). Otherwise, once
             # the route has reached its goal: AIM first when the goal was only a
@@ -265,27 +314,36 @@ class VisualApproachStateMachine:
 
         if self._state == AIM:
             # Standing at the staging point with the nose swinging onto the object's
-            # bearing. Confirm+lock is the outcome we are aiming FOR -> acquire. If
-            # the aim finishes unseen, hand back to SEARCH and tell the node to
-            # escalate the goal to the object's own coordinate; if the goal moves out
-            # from under us (a retarget) just hand back so the planner flies it.
+            # bearing. Confirm+lock is the outcome we are aiming FOR -> acquire. If the
+            # goal moves out from under us (a retarget) just hand back so the planner
+            # flies it. If the aim finishes unseen, either sweep the room in place for
+            # it (aim_fail_to_scan -- never fly onto the imprecise coordinate) or hand
+            # back to SEARCH and tell the node to escalate the goal to the object's own
+            # coordinate (the legacy staged fallback).
             if confirmed and track_valid:
                 self._acquire()
             elif not arrived_at_goal:
                 self._enter(SEARCH)
             elif aim_done:
-                self._enter(SEARCH)
-                return self._decide(escalate_goal=True)
+                if self.cfg.aim_fail_to_scan:
+                    self._enter(SCAN)
+                else:
+                    self._enter(SEARCH)
+                    return self._decide(escalate_goal=True)
             return self._decide()
 
         if self._state == SCAN:
             # Sweeping the room at the goal. Confirm+lock -> acquire (settle then
             # approach); if the goal moves out from under us (arrived_at_goal
-            # cleared) hand back to the planner via SEARCH.
+            # cleared) hand back to the planner via SEARCH. Failing both, keep
+            # sweeping -- but bound it: once the sweep has turned scan_land_revolutions
+            # full turns without finding the object, give up and land in place.
             if confirmed and track_valid:
                 self._acquire()
             elif not arrived_at_goal:
                 self._enter(SEARCH)
+            elif self._sweep_exhausted(scan_swept_delta):
+                self._enter(LAND)
             return self._decide()
 
         if self._state == ACQUIRE_STOP:
@@ -358,6 +416,21 @@ class VisualApproachStateMachine:
         self._land_confirm += 1
         return self._land_confirm >= self.cfg.land_confirm_ticks
 
+    def _sweep_exhausted(self, scan_swept_delta: float) -> bool:
+        """Accumulate the room sweep's swept angle and report whether it has run its
+        configured number of revolutions.
+
+        Adds ``scan_swept_delta`` (radians turned this tick) to the running total and
+        returns True once it reaches ``scan_land_revolutions`` full turns, so the SCAN
+        gives up and lands. Always False (and a no-op) when the cap is disabled
+        (``scan_land_revolutions`` 0). The accumulator is reset on entering SCAN, so
+        each sweep episode counts its revolutions from zero.
+        """
+        if self.cfg.scan_land_revolutions <= 0.0:
+            return False
+        self._scan_swept += max(0.0, float(scan_swept_delta))
+        return self._scan_swept >= self.cfg.scan_land_revolutions * 2.0 * math.pi
+
     def _enter(self, new: str) -> None:
         if new == self._state:
             return
@@ -370,6 +443,10 @@ class VisualApproachStateMachine:
         # Likewise reset the arrival-land streak whenever we leave (or re-enter)
         # SEARCH, so a goal that was cleared and re-reached must re-confirm.
         self._arrive_confirm = 0
+        # A fresh sweep counts its revolutions from zero (a re-entered SCAN after an
+        # excursion must not carry a stale angle that lands the drone early).
+        if new == SCAN:
+            self._scan_swept = 0.0
         if new != RECOVER:
             self._lost_for = 0.0
         if new != HOVER_LOCK:
