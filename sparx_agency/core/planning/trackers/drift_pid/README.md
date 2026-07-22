@@ -59,6 +59,43 @@ The anchor is latched onto the **trajectory**, not under the drone, so holding
 still also finishes closing whatever cross-track error was open when the hold
 began.
 
+## Turn coordination: the progress vector decides whether the yaw works
+
+Measured on the deployed airframe (nav_debug run of 2026-07-21), the yaw the
+platform *delivers* depends on the direction of the translation riding under it:
+
+| translation under an active yaw | delivered rotation |
+|---|---|
+| forward (+0.08 m/s) | correct direction, immediate bite |
+| none (in place) | ~11% of commanded, coasts |
+| backward (−0.10 m/s) | degrades, then **reverses** — the drone turned *left* against a saturated right-yaw command |
+
+So while the yaw axis is genuinely active (above the envelope's minimum-force
+release point), every regime shapes its translation into a forward cone
+(`turn_coordination` in the shared allocation module):
+
+* **`vx` is floored** — at `turn_pitch_bias` in a TURN (the forward bite the
+  rotation needs), at 0 everywhere else (never backward while yawing). A
+  station-keeping correction that wants reverse is *deferred, not lost*: the
+  position error stays open, and the loops close it once the yaw quietens —
+  rotate first, translate after.
+* **`|vy|` is capped at `tan(turn_side_cone_rad)·vx`** — YAW+ROLL is not the
+  same manoeuvre as YAW+forward, so roll may season the progress vector but
+  never dominate it. At cruise speed the cap sits above the lateral PID's own
+  limit, so it only bites when the drone is slow and yawing hard — exactly
+  where the coupling lives.
+
+## The climb yield lives inside the control law
+
+When the adapter's altitude hold runs a climb pulse it passes
+`translation_scale` into `step()` rather than scaling the published twist: the
+yield is folded in **before** the envelope, so slew memory, minimum-force
+shaping, effort, the blockage monitor and the certainty log all see the command
+that actually flies. (The old after-the-fact scaling had the controller
+believing it commanded cruise while the drone got a fifth of it — which reads
+as "the converter dropped my forward command" in the logs and poisons the
+effectiveness estimate.) Yaw is never scaled: rotating costs no lift.
+
 ## The quality loop: the pose's own honesty signals, used every tick
 
 Localization publishes more than a pose, and each extra signal drives exactly one
