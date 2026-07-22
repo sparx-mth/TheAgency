@@ -1,0 +1,36 @@
+{
+  "engine_key": "flownav_vfield",
+  "precision": "fp16",
+  "trt_version": "11.1.0.106",
+  "sm": 120,
+  "target_tag": "nvidiageforcertx_sm120",
+  "gpu_name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "onnx_sha256": "0c6b0b87fb1f19220b04459d407873a6b5160decad24fbb97d8356b3d6f9702c",
+  "inputs": [
+    "sample",
+    "timestep",
+    "global_cond"
+  ],
+  "outputs": [
+    "vfield"
+  ],
+  "shapes": {
+    "sample": [
+      8,
+      8,
+      2
+    ],
+    "timestep": [
+      1
+    ],
+    "global_cond": [
+      8,
+      256
+    ],
+    "vfield": [
+      8,
+      8,
+      2
+    ]
+  }
+}

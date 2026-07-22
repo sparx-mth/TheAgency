@@ -1,0 +1,34 @@
+"""
+RRT* planners implementing BasePlanner protocol (2D and 3D).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from sparx_agency.core.common.types import PlanResult
+from sparx_agency.core.planning.environment import Costmap2D
+from sparx_agency.core.planning.interfaces.planner import PlanRequest, PlanRequest3D, BasePlanner, BasePlanner3D
+
+from .params import RRTStarOmplParams, RRTStarOmpl3DParams
+from .algorithm import plan_rrtstar, plan_rrtstar_3d
+
+
+@dataclass
+class RRTStarOmplPlanner:
+    """2D RRT* planner."""
+    name: str = field(default="rrtstar_ompl", init=False)
+    params: RRTStarOmplParams = field(default_factory=RRTStarOmplParams)
+
+    def plan(self, request: PlanRequest, world: Costmap2D) -> PlanResult:
+        return plan_rrtstar(start=request.start, goal=request.goal, costmap=world, params=self.params)
+
+
+@dataclass
+class RRTStarOmpl3DPlanner:
+    """3D RRT* planner."""
+    name: str = field(default="rrtstar_ompl_3d", init=False)
+    params: RRTStarOmpl3DParams = field(default_factory=RRTStarOmpl3DParams)
+
+    def plan(self, request: PlanRequest3D, world) -> PlanResult:
+        return plan_rrtstar_3d(start=request.start, goal=request.goal, voxelmap=world, params=self.params)

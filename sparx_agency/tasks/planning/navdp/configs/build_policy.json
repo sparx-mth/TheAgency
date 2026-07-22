@@ -1,0 +1,23 @@
+{
+  "_comment": "Version-controlled NavDP TensorRT build + gate policy. JSON (not YAML) because the repo .gitignore globs *.yaml. Tunables read by engine/inspect_onnx.py and benchmark/bench.py.",
+  "fp_keep_keywords": [
+    "layernorm", "norm", "head", "softmax", "pos_embed",
+    "former_pe", "former_query", "reducemean", "instancenorm"
+  ],
+  "builder_optimization_level": {
+    "orin_15w": 5,
+    "default": 5
+  },
+  "prefer_precision_constraints_int8": true,
+  "_strongly_typed_note": "TensorRT >=11 removed weak typing, so FP16 is forced via an FP16 ONNX. The deep DINOv2 ViT encoder drifts badly when its 24-block residual stream is stored+accumulated in FP16 (no per-layer fallback like TRT-10). So on the strongly-typed path these engines are built FP32; on TRT-10 (the Orin) weak typing handles all three in mixed FP16 and this list is ignored.",
+  "strongly_typed_fp32_engines": ["navdp_encoder"],
+  "accuracy_gates": {
+    "fp16": {"argmax_flip": 0.05, "stop_match": 0.98, "zero_match": 0.98},
+    "int8": {"argmax_flip": 0.02, "stop_match": 0.99, "zero_match": 0.99}
+  },
+  "parity_tolerances": {
+    "encoder_rel_l2": 1.0e-3,
+    "denoise_rel_l2": 2.0e-3,
+    "critic_rel_l2": 2.0e-3
+  }
+}

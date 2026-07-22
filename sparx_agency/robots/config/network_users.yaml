@@ -1,0 +1,49 @@
+profiles:
+  adsl:
+    hosts:
+      agx1: { user: "user",  ip: "172.16.17.15" }
+      agx2: { user: "user",   ip: "172.16.17.9" }
+      nano: { user: "user",  ip: "172.16.17.14" }
+    services:
+      comm_manager:   { host: "agx1", port: 5050 }
+      vila_api:       { host: "agx1", port: 8080 }
+      nanoowl:        { host: "agx1", port: 5060 }
+      depth:          { host: "agx1", port: 5070 }
+      display_server: { host: "agx1", port: 8090 }
+      vllm:           { host: "nano", port: 8000 }
+      ingest_json:    { host: "agx2", port: 9090 }   # /ingest
+
+  robotican:
+    hosts:
+      agx1: { user: "user",  ip: "192.168.131.22" }
+      agx2: { user: "user",   ip: "192.168.131.23" }
+      nano: { user: "user",  ip: "192.168.131.21" }
+    services:
+      comm_manager:   { host: "agx1", port: 5050 }
+      vila_api:       { host: "agx1", port: 8080 }
+      nanoowl:        { host: "agx1", port: 5060 }
+      depth:          { host: "agx1", port: 5070 }
+      display_server: { host: "agx1", port: 8090 }
+      vllm:           { host: "nano", port: 8000 }
+      ingest_json:    { host: "agx2", port: 9090 }
+
+  xtend:
+    hosts:
+      adsl_daphna: {user: "user1", ip: "192.0.0.88"}
+      agx1: { user: "user",  ip: "192.0.0.89" }
+      agx2: { user: "user",  ip: "192.0.0.90" }
+      nano: { user: "user",  ip: "192.0.0.91" }
+      adsl_shir: {user: "user1", ip: "192.0.0.92"}
+    services:
+      comm_manager: { host: "agx1", port: 5050 }
+      vila_api: { host: "agx1", port: 8080 }
+      nanoowl: { host: "agx1", port: 5060 }
+      depth: { host: "agx1", port: 5070 }
+      display_server: { host: "agx1", port: 8090 }
+      vllm: { host: "nano", port: 8000 }
+      ingest_json: { host: "agx2", port: 9090 }
+      ollama: { host: "agx2", port: 11434 }
+
+defaults:
+  profile: "xtend"
+  ssh_flags: "-X"

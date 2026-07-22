@@ -373,7 +373,7 @@ class SingleDroneFlying(Node):
                 if (now - self.spread_start_time) > SPREAD_DURATION:
                     self.pattern_index = 0
                     vx, vy = self.pattern[self.pattern_index]
-                    self.manual_control.z =
+                    self.manual_control.z = 100
                     self.manual_control.x = vx
                     self.manual_control.y = vy
                     self.last_pattern_switch_time = now

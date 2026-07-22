@@ -46,3 +46,31 @@ def get_logger(args):
 
 def get_device(cuda=True, gpus='0'):
     return torch.device("cuda:" + gpus if torch.cuda.is_available() and cuda else "cpu")
+
+
+class XYZAccumulator:
+    def __init__(self, max_len: int = 10):
+        self.max_len = max_len
+        self.samples = []
+
+    def add(self, xyz):
+        xyz = np.asarray(xyz, dtype=np.float32)
+        self.samples.append(xyz)
+        if len(self.samples) > self.max_len:
+            self.samples.pop(0)
+
+    def is_full(self) -> bool:
+        return len(self.samples) >= self.max_len
+
+    def mean(self):
+        if not self.samples:
+            return None
+        return np.mean(self.samples, axis=0)
+
+    def std(self):
+        if not self.samples:
+            return None
+        return np.std(self.samples, axis=0)
+
+    def as_array(self):
+        return np.vstack(self.samples) if self.samples else None

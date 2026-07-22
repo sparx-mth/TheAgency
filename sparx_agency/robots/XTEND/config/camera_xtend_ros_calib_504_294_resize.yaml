@@ -1,0 +1,70 @@
+# Camera intrinsic parameters configuration file (YAML format)
+# XTEND Xtender camera calibration
+# Derived from camera_xtend_ros_calib_720_420.yaml by full-frame resize.
+#
+# Transform:
+#   original: 720 x 420
+#   resized:  504 x 294
+#   scale_x = 504 / 720 = 0.7000000000000000
+#   scale_y = 294 / 420 = 0.7000000000000000
+#
+# This keeps the original horizontal FOV. No crop, no padding.
+# For DA3METRIC-LARGE 294x504 depth-only engine.
+
+image_width: 504
+image_height: 294
+
+# Raw camera intrinsic parameters scaled from 720x420
+fx: 322.635108347494793
+fy: 323.389330714117420
+cx: 242.064796586797144
+cy: 90.030190766806044
+
+distortion_model: "plumb_bob"
+
+# Distortion coefficients are unchanged for resized normalized coordinates.
+k1: -0.2971784717997778
+k2: 0.0801022287036127
+p1: -0.0037003783730540
+p2: -0.0006276968382346
+k3: 0.0
+
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [
+    322.635108347494793, 0.0, 242.064796586797144,
+    0.0, 323.389330714117420, 90.030190766806044,
+    0.0, 0.0, 1.0
+  ]
+
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [
+    -0.2971784717997778,
+    0.0801022287036127,
+    -0.0037003783730540,
+    -0.0006276968382346,
+    0.0
+  ]
+
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0
+  ]
+
+# Projection matrix scaled from 720x420 calibration.
+# Use this as the effective K after rectification/undistortion.
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [
+    253.066668300591147, 0.0, 236.140442706411449, 0.0,
+    0.0, 287.535109816403349, 81.734160313465040, 0.0,
+    0.0, 0.0, 1.0, 0.0
+  ]

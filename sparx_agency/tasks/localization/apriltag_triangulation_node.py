@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""
+Tag Triangulation (world_T_cam) using AprilTags + OpenCV (no ROS).
+
+Pipeline:
+  1) Known tag poses in WORLD (YAML): world_T_tag
+  2) AprilTag detection (pupil_apriltags) -> 2D corners
+  3) solvePnP (OpenCV IPPE_SQUARE) -> tag_T_cam (TAG -> CAM)
+  4) Invert -> cam_T_tag (CAM -> TAG)
+  5) Estimate camera pose in world: world_T_cam from multiple tags
+
+Outputs:
+  - Prints / overlays (x,y,z) + quaternion (qx,qy,qz,qw)
+  - Optional JSONL logging per frame
+
+Usage example:
+  python tag_triangulation_opencv_task.py \
+      --tag_map_path tags_world.yaml \
+      --camera_calib_path camera.yaml \
+      --tag_size_m 0.16 \
+      --source 0 \
+      --out_json /tmp/triangulation_log.jsonl
+"""
+
+from __future__ import annotations
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+import argparse
+import json
+import math
+from operator import inv
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
+import cv2
+import numpy as np
+import yaml
+from pupil_apriltags import Detector
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Int32MultiArray, String
+from cv_bridge import CvBridge
+
+from sparx_agency.core.localization.tag_triangulation import (
+    TagWorldPose,
+    transform_to_pose,
+    print_transform_debug,
+    world_T_tag_from_pose,
+)
+from sparx_agency.core.common.filters import ExponentialMovingAverage
+
+from sparx_agency.tasks.localization.common.apriltag_cv_common import (
+    load_camera_calib_yaml,
+    make_detector,
+)
+from sparx_agency.tasks.localization.common.apriltag_pnp import (
+    TagDetection,
+    estimate_camera_pose,
+)
+
+
+
+def load_tag_world_map(path: str, default_size: float) -> Tuple[Dict[int, TagWorldPose], Dict[int, float]]:
+    """
+    YAML format:
+      tags:
+        14:
+          xyz: [x,y,z]
+          rpy: [roll,pitch,yaw]   # radians
+          size: 0.16              # optional, meters
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"tag_map_path does not exist: {path}")
+
+    with p.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    tags = data.get("tags", data)
+
+    out_poses: Dict[int, TagWorldPose] = {}
+    out_sizes: Dict[int, float] = {}
+
+    for k, v in tags.items():
+        tid = int(k)
+        xyz = tuple(float(x) for x in v["xyz"])
+        rpy = tuple(float(x) for x in v["rpy"])
+        out_poses[tid] = TagWorldPose(xyz=xyz, rpy=rpy)
+
+        # Pull size from YAML, fallback to default_size if not specified
+        out_sizes[tid] = float(v.get("size", default_size))
+
+    if not out_poses:
+        raise ValueError(f"No tags loaded from: {path}")
+    return out_poses, out_sizes
+
+
+class TagTriangulationOpenCVTask:
+    """
+    OpenCV adapter (no ROS):
+      - Detect AprilTags
+      - solvePnP -> tag_T_cam (TAG -> CAM)
+      - Convert to cam_T_tag (CAM -> TAG) for core estimator input
+      - Compute world_T_cam from known world tag poses
+    """
+
+    def __init__(
+            self,
+            tag_map_path: str,
+            camera_calib_path: str = "",
+            tag_size_m: float = 0.13,
+            video_source: Union[int, str] = 0,
+            ros_topic: str = "",
+            frame_path_topic: str = "",
+            camera_info_topic: str = "/xtend/camera_info",
+            tag_family: str = "tag36h11",
+            visualize: bool = True,
+            out_json_path: str = "",
+            fuse_method: str = "avg_translation_keep_first_rotation",
+            nthreads: int = 2,
+            qos_policy: str = "best_effort",
+            min_margin: float = 10.0,
+    ):
+        self.default_tag_size = float(tag_size_m)
+        self.tag_map, self.tag_sizes = load_tag_world_map(tag_map_path, self.default_tag_size)
+        for tag_id, pose in self.tag_map.items():
+            print(f"\n[DEBUG] Loaded tag {tag_id} with size {self.tag_sizes[tag_id]}m")
+            print(f"xyz: {pose.xyz}")
+            print(f"rpy input rad: {pose.rpy}")
+            print(f"rpy input deg: {[math.degrees(v) for v in pose.rpy]}")
+
+            world_T_tag = world_T_tag_from_pose(pose)
+            print_transform_debug(f"world_T_tag for tag {tag_id}", world_T_tag)
+
+        # 1. Initialize ROS Node FIRST (Always required for publishers/subscribers)
+        rclpy.init()
+        self.ros_node = rclpy.create_node('opencv_ros_hybrid')
+
+        reliability = QoSReliabilityPolicy.RELIABLE if qos_policy == "reliable" else QoSReliabilityPolicy.BEST_EFFORT
+        qos_profile = QoSProfile(
+            reliability=reliability,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        self.calib_ready = False
+        self.K = None
+        self.D = None
+
+        if camera_calib_path:
+            self.calib = load_camera_calib_yaml(camera_calib_path)
+            self.K = self.calib.K
+            self.D = self.calib.D
+            self.calib_ready = True
+            print(f"[DEBUG] Loaded camera calibration from YAML: {camera_calib_path}")
+        else:
+            print(f"[DEBUG] No calibration YAML provided. Waiting for CameraInfo on topic: {camera_info_topic}...")
+            self.ros_node.create_subscription(CameraInfo, camera_info_topic, self.camera_info_cb, qos_profile)
+
+        # self.obj_pts = tag_object_points(float(tag_size_m))
+
+        self.detector = make_detector(tag_family, nthreads=nthreads)
+
+        self.visualize = bool(visualize)
+        self.fuse_method = str(fuse_method)
+
+        self.out_json_path = out_json_path.strip()
+        self._json_f = None
+        if self.out_json_path:
+            out_p = Path(self.out_json_path).expanduser().resolve()
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            self._json_f = out_p.open("a", buffering=1)  # line-buffered
+
+        self.image_dir: Optional[Path] = None
+        self.cap: Optional[cv2.VideoCapture] = None
+
+        self.ros_topic = ros_topic
+        self.use_ros_image = (str(video_source).lower() == "ros")
+        self.latest_ros_image = None
+        self.latest_ros_stamp = None
+
+        self.frame_path_topic = frame_path_topic.strip()
+        self.latest_frame_path: Optional[str] = None
+        self.latest_frame_stamp_sec: Optional[float] = None
+
+        # self.ros_node = rclpy.create_node('opencv_ros_hybrid')
+        self.bridge = CvBridge()
+        self.pose_pub = self.ros_node.create_publisher(PoseStamped, '/xtend/april_tag_pose', 10)
+
+        self.alpha = 0.1
+        self._pos_ema = ExponentialMovingAverage(alpha=self.alpha)
+        self.filtered_q = None
+        # Previous camera position in world, used to disambiguate the planar
+        # (IPPE) two-fold pose ambiguity of a single tag via temporal continuity.
+        self._prev_cam_pos = None
+        self.min_margin = float(min_margin)
+
+        if self.use_ros_image:
+            # Use the custom QoS profile instead of the default '10'
+            self.ros_node.create_subscription(Image, self.ros_topic, self.ros_image_cb, qos_profile)
+
+        if self.frame_path_topic:
+            self.ros_node.create_subscription(String, self.frame_path_topic, self.frame_path_cb, qos_profile)
+
+        if self.use_ros_image or self.frame_path_topic:
+            pass  # input handled via ROS subscription, skip OpenCV VideoCapture
+        elif isinstance(video_source, str) and video_source.startswith("dir:"):
+            self.image_dir = Path(video_source[4:]).expanduser().resolve()
+            if not self.image_dir.exists():
+                raise FileNotFoundError(f"Image dir does not exist: {self.image_dir}")
+        else:
+            self.cap = cv2.VideoCapture(video_source)
+            if not self.cap.isOpened():
+                raise RuntimeError(f"Could not open video source: {video_source}")
+
+    def ros_image_cb(self, msg: Image):
+        try:
+            self.latest_ros_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            self.latest_ros_stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        except Exception as e:
+            print(f"CV Bridge error: {e}")
+
+    def frame_path_cb(self, msg: String):
+        # Format from bridge: "{abs_path} {sec} {nanosec}"
+        parts = msg.data.rsplit(" ", 2)
+        self.latest_frame_path = parts[0]
+        if len(parts) == 3:
+            self.latest_frame_stamp_sec = int(parts[1]) + int(parts[2]) * 1e-9
+        else:
+            self.latest_frame_stamp_sec = None
+
+    def camera_info_cb(self, msg: CameraInfo):
+        """ Callback to extract K and D matrices directly from ROS """
+        if not self.calib_ready:
+            # msg.k is a flat array of 9 elements, reshape to 3x3
+            self.K = np.array(msg.k, dtype=np.float64).reshape(3, 3)
+            # msg.d is a flat array of distortion coefficients
+            self.D = np.array(msg.d, dtype=np.float64)
+            self.calib_ready = True
+            print("[DEBUG] Received CameraInfo from ROS! Calibration is ready.")
+
+    def _log_json(self, record: dict):
+        if self._json_f is None:
+            return
+        self._json_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _iter_images_in_dir(self, exts=(".png", ".jpg", ".jpeg", ".bmp")) -> List[Path]:
+        assert self.image_dir is not None
+        files = [p for p in self.image_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+        files.sort()
+        return files
+
+    def run(self):
+        processed: set[str] = set()
+
+        try:
+            while True:
+                # --- get frame ---
+                rclpy.spin_once(self.ros_node, timeout_sec=0.01)
+
+                if self.use_ros_image:
+                    if self.latest_ros_image is None:
+                        continue
+                    frame = self.latest_ros_image.copy()
+                    stamp_sec = self.latest_ros_stamp
+                    src_name = self.ros_topic
+                    src_type = "ros"
+                    self.latest_ros_image = None
+
+                elif self.frame_path_topic:
+                    if self.latest_frame_path is None:
+                        continue
+                    path = self.latest_frame_path
+                    stamp_sec = self.latest_frame_stamp_sec or float(time.time())
+                    self.latest_frame_path = None
+                    self.latest_frame_stamp_sec = None
+                    frame = cv2.imread(path, cv2.IMREAD_COLOR)
+                    if frame is None:
+                        print(f"[frame_path] failed to read: {path}")
+                        continue
+                    src_name = Path(path).name
+                    src_type = "file_path"
+
+                elif self.image_dir is not None:
+                    files = self._iter_images_in_dir()
+                    next_file = None
+                    for f in files:
+                        if str(f) not in processed:
+                            next_file = f
+                            break
+                    if next_file is None:
+                        time.sleep(0.2)
+                        continue
+
+                    frame = cv2.imread(str(next_file), cv2.IMREAD_COLOR)
+                    processed.add(str(next_file))
+                    if frame is None:
+                        print(f"Failed to read image: {next_file}")
+                        continue
+
+                    stamp_sec = float(next_file.stat().st_mtime)
+                    src_name = next_file.name
+                    src_type = "dir"
+                else:
+                    assert self.cap is not None
+                    ok, frame = self.cap.read()
+                    if not ok:
+                        break
+                    stamp_sec = float(time.time())
+                    src_name = "camera/video"
+                    src_type = "video"
+
+                record_base = {
+                    "timestamp_sec": stamp_sec,
+                    "source_name": src_name,
+                    "source_type": src_type,
+                }
+
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                if not self.calib_ready:
+                    # Skip frame processing until we get the camera calibration
+                    continue
+
+                dets = self.detector.detect(gray)
+
+                tag_dets: List[TagDetection] = []
+                detections_info = []
+
+                for d in dets:
+                    tag_id = int(d.tag_id)
+                    margin = d.decision_margin
+
+                    if margin < self.min_margin:
+                        print(f"[DEBUG] Skipping tag {tag_id} - Margin {margin:.2f} too low")
+                        continue
+                    if tag_id not in self.tag_map:
+                        continue
+
+                    corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+                    specific_tag_size = self.tag_sizes.get(tag_id, self.default_tag_size)
+
+                    tag_dets.append(TagDetection(
+                        tag_id=tag_id,
+                        corners=corners,
+                        size_m=specific_tag_size,
+                    ))
+
+                    detections_info.append(
+                        {
+                            "tag_id": tag_id,
+                            "area_px2": float(cv2.contourArea(corners.astype(np.float32))),
+                            "corners_px": [[float(x), float(y)] for (x, y) in corners],
+                        }
+                    )
+
+                if not tag_dets:
+                    if self.visualize:
+                        cv2.putText(
+                            frame,
+                            f"{src_name} | No known tags visible",
+                            (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (255, 255, 255),
+                            2,
+                        )
+                        cv2.imshow("tag_triangulation", frame)
+
+                        # Wait 1ms to refresh the display. Press 'q' or 'ESC' to quit.
+                        k = cv2.waitKey(1) & 0xFF
+                        if k in (27, ord("q")):
+                            break
+
+                    self._log_json(
+                        {
+                            **record_base,
+                            "found": False,
+                            "pose": None,
+                            "used_tag_ids": [],
+                            "detections": detections_info,
+                        }
+                    )
+                    continue
+
+                # One joint PnP over all tags' pooled corners when >= 2 tags are
+                # visible; a disambiguated IPPE-square solve for a single tag.
+                est = estimate_camera_pose(
+                    detections=tag_dets,
+                    tag_world_poses=self.tag_map,
+                    K=self.K,
+                    D=self.D,
+                    prev_cam_pos_world=self._prev_cam_pos,
+                )
+
+                if est is None:
+                    self._log_json(
+                        {
+                            **record_base,
+                            "found": False,
+                            "pose": None,
+                            "used_tag_ids": [],
+                            "detections": detections_info,
+                        }
+                    )
+                    continue
+
+                # Seed next frame's temporal disambiguation with this (unfiltered)
+                # camera position; translation is identical in the CV and ROS frames.
+                self._prev_cam_pos = est.world_T_cam[:3, 3].copy()
+
+                cv_to_ros = np.array([
+                    [0.0, -1.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]
+                ], dtype=float)
+
+                world_T_ros = est.world_T_cam @ cv_to_ros
+
+                (x, y, z), (qx, qy, qz, qw) = transform_to_pose(world_T_ros)
+
+                x, y, z = self._pos_ema.update(np.array([x, y, z], dtype=float))
+
+                q_raw = np.array([qx, qy, qz, qw])
+                if self.filtered_q is None:
+                    self.filtered_q = q_raw
+                else:
+                    if np.dot(self.filtered_q, q_raw) < 0.0:
+                        q_raw = -q_raw
+
+                    self.filtered_q = self.alpha * q_raw + (1 - self.alpha) * self.filtered_q
+                    self.filtered_q /= np.linalg.norm(self.filtered_q)
+
+                qx, qy, qz, qw = self.filtered_q
+
+                # --- Format and print clean summary ---
+                # yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+
+                yaw_rad = math.atan2(
+                    2.0 * (qw * qz + qx * qy),
+                    1.0 - 2.0 * (qy * qy + qz * qz)
+                )
+
+                yaw_deg = math.degrees(yaw_rad)
+
+                print(f"\n--- Pose Update [{stamp_sec:.2f}] ---")
+                print(f"Position: X={x:.3f}, Y={y:.3f}, Z={z:.3f} | Yaw={yaw_deg:.1f} deg")
+                print("Tags Detected:")
+                for d in dets:
+                    tid = int(d.tag_id)
+                    margin = d.decision_margin
+                    if tid in est.used_tag_ids:
+                        size = self.tag_sizes.get(tid, self.default_tag_size)
+                        # Calculate the area again specifically for the printout
+                        corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+                        area = float(cv2.contourArea(corners.astype(np.float32)))
+                        print(f"  -> ID: {tid} | Margin: {margin:.1f} | Size: {size}m | Weight: {area:.0f}px")
+                print("-----------------------------------")
+
+                out_pose = {
+                    "position_xyz_m": [float(x), float(y), float(z)],
+                    "quat_xyzw": [float(qx), float(qy), float(qz), float(qw)],
+                }
+
+                used_ids = [int(i) for i in sorted(set(est.used_tag_ids))]
+
+                pose_msg = PoseStamped()
+                pose_msg.header.frame_id = "world"
+                pose_msg.header.stamp.sec = int(stamp_sec)
+                pose_msg.header.stamp.nanosec = int((stamp_sec - int(stamp_sec)) * 1e9)
+
+                pose_msg.pose.position.x = float(x)
+                pose_msg.pose.position.y = float(y)
+                pose_msg.pose.position.z = float(z)
+                pose_msg.pose.orientation.x = float(qx)
+                pose_msg.pose.orientation.y = float(qy)
+                pose_msg.pose.orientation.z = float(qz)
+                pose_msg.pose.orientation.w = float(qw)
+
+                self.pose_pub.publish(pose_msg)
+
+                self._log_json(
+                    {
+                        **record_base,
+                        "found": True,
+                        "pose": out_pose,
+                        "used_tag_ids": used_ids,
+                        "detections": detections_info,
+                    }
+                )
+
+                if self.visualize:
+                    used_set = set(used_ids)
+                    for d in dets:
+                        tid = int(d.tag_id)
+                        # print(f"[DEBUG] Detected tag {tid} with margin {margin:.2f}")
+                        if tid not in used_set:
+                            continue
+
+                        corners = np.array(d.corners, dtype=np.float64).reshape(4, 2)
+                        cv2.polylines(frame, [corners.astype(np.int32)], True, (0, 255, 0), 2)
+                        cx = int(np.mean(corners[:, 0]))
+                        cy = int(np.mean(corners[:, 1]))
+                        cv2.putText(
+                            frame,
+                            f"id={tid}",
+                            (cx, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 0),
+                            2,
+                        )
+
+                    line1 = f"{src_name} | used={sorted(list(used_set))}"
+                    line2 = f"world pose: x={x:.2f} y={y:.2f} z={z:.2f}"
+                    line3 = f"quat: [{qx:.3f}, {qy:.3f}, {qz:.3f}, {qw:.3f}]"
+
+                    yaw_rad = math.atan2(world_T_ros[1, 0], world_T_ros[0, 0])
+                    yaw_deg = math.degrees(yaw_rad)
+                    line4 = f"yaw: {yaw_deg:.1f} deg"
+
+                    cv2.putText(frame, line1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    cv2.putText(frame, line2, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    cv2.putText(frame, line3, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.putText(frame, line4, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                    cv2.imshow("tag_triangulation", frame)
+
+                    k = cv2.waitKey(1) & 0xFF
+                    if k in (27, ord("q")):
+                        break
+                else:
+                    print(f"[{stamp_sec:.3f}] world(x,y,z)=({x:.2f},{y:.2f},{z:.2f}) used={used_ids}")
+
+        except KeyboardInterrupt:
+            print("interrupted by user, exiting...")
+
+        finally:
+            self.ros_node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+            if self.cap is not None:
+                self.cap.release()
+            if self._json_f is not None:
+                self._json_f.close()
+                self._json_f = None
+            cv2.destroyAllWindows()
+            print("Cleaned up resources, exiting.")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag_map_path", required=True, help="YAML: tag_id -> {xyz:[...], rpy:[...]} (radians)")
+    ap.add_argument("--camera_calib_path", default="",
+                    help="YAML camera intrinsics/distortion. If empty, listens to ROS camera_info")
+    ap.add_argument("--camera_info_topic", default="/xtend/camera_info", help="ROS topic for CameraInfo")
+    ap.add_argument("--tag_size_m", type=float, required=True)
+    ap.add_argument("--source", default="0", help="camera index (0) or video path")
+    ap.add_argument("--image_dir", default="", help="Directory to read images from (instead of camera/video).")
+    ap.add_argument("--tag_family", default="tag36h11")
+    ap.add_argument("--nthreads", type=int, default=2)
+    ap.add_argument("--no_vis", action="store_true")
+    ap.add_argument("--out_json", default="", help="Path to output JSONL log (one JSON per frame).")
+    ap.add_argument("--fuse_method", default="avg_translation_keep_first_rotation")
+    ap.add_argument("--image_topic", default="/xtend/rgb", help="ROS image topic to listen to")
+    ap.add_argument("--frame_path_topic", default="", help="ROS String topic that publishes saved frame file paths (e.g. /xtend/rgb_frame_path)")
+    ap.add_argument("--qos", choices=["best_effort", "reliable"], default="best_effort",
+                    help="QoS reliability policy for ROS subscription")
+    ap.add_argument("--min_margin", type=float, default=10.0, help="Minimum decision margin to accept a tag")
+    args = ap.parse_args()
+
+    src: Union[int, str]
+    if args.image_dir:
+        src = f"dir:{args.image_dir}"
+    else:
+        src = int(args.source) if isinstance(args.source, str) and args.source.isdigit() else args.source
+
+    task = TagTriangulationOpenCVTask(
+        tag_map_path=args.tag_map_path,
+        camera_calib_path=args.camera_calib_path,
+        tag_size_m=args.tag_size_m,
+        video_source=src,
+        ros_topic=args.image_topic,
+        frame_path_topic=args.frame_path_topic,
+        camera_info_topic=args.camera_info_topic,
+        tag_family=args.tag_family,
+        visualize=(not args.no_vis),
+        out_json_path=args.out_json,
+        fuse_method=args.fuse_method,
+        nthreads=args.nthreads,
+        qos_policy=args.qos,
+        min_margin=args.min_margin,
+    )
+    task.run()
+
+
+if __name__ == "__main__":
+    main()

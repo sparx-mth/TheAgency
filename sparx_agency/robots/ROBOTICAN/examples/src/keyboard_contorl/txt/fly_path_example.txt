@@ -1,0 +1,24 @@
+# Fly path example – POSITION mode (FLIGHT_MODE_POSITION = 3)
+# All values use the ManualControl axis scale [-1000, 1000]
+# name      x     y     z     r    duration_sec
+
+# Phase 1: climb (z is already set by arm sequence; this keeps it stable)
+Hover_UP    0     0     600   0    3
+
+# Phase 2: fly forward
+Forward     250   0     580   0    5
+
+# Phase 3: strafe right
+Strafe_R    200   200   570   0    4
+
+# Phase 4: yaw 90° right while holding position
+Yaw_R       0     0     570   300  3
+
+# Phase 5: fly forward in new heading
+Fwd_2       250   0     570   0    5
+
+# Phase 6: return to centre, descend slightly
+Return      0     0     540   0    6
+
+# Phase 7: slow descent towards landing (operator should take over below)
+Descend     0     0     400   0    4

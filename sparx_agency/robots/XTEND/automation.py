@@ -1,10 +1,10 @@
-﻿#!/usr/bin/env python3
+# !/usr/bin/env python3
 """
 WebSocket Virtual Controller Client
 Sends and/or receives virtual controller data via WebSocket at a configurable rate.
 Supports send-only, listen-only, and bidirectional modes.
 """
-
+import copy
 import json
 import math
 import asyncio
@@ -50,15 +50,15 @@ class ControllerAutomation:
                 0,  # Joystick - off
             ],
             "axes": [
-                0,   # Joystick Horizontal 
+                0,   # Joystick Horizontal
                 0,   # Joystick Vertical
                 0,   # Trigger
-                0,   # Marker Horizontal 
+                0,   # Marker Horizontal
                 0    # Marker Vertical
             ]
         }
 
-        self.send_command = self.base_command
+        self.send_command = copy.deepcopy(self.base_command)
 
     async def run(self):
         
@@ -72,7 +72,14 @@ class ControllerAutomation:
                 scenario_task = asyncio.create_task(self.create_scenario())
                 
                 # Wait for both tasks
-                await asyncio.gather(send_task, receive_task, scenario_task)
+                try:
+                    # Wait only for scenario to finish (success or error)
+                    await scenario_task
+                finally:
+                    # Stop background loops cleanly
+                    for t in (send_task, receive_task):
+                        t.cancel()
+                    await asyncio.gather(send_task, receive_task, return_exceptions=True)
                     
         except websockets.exceptions.WebSocketException as e:
             print(f"✗ WebSocket error: {e}")
@@ -87,12 +94,8 @@ class ControllerAutomation:
     async def send_message(self, websocket):
         try:
             while True:
-
                 self.virtual_controller['content'] = self.send_command
-                # Convert to JSON
-                message_json = json.dumps(self.virtual_controller, indent=2)
-                
-                # Send message
+                message_json = json.dumps(self.virtual_controller, separators=(',', ':'))
                 await websocket.send(message_json)
                 
                 # Wait for next interval
@@ -102,31 +105,44 @@ class ControllerAutomation:
             raise
 
     async def receive_message(self, websocket):
+        """Receive XTEND telemetry, store latest state, and log telemetry."""
         try:
             async for message in websocket:
-                
                 try:
-                    # Parse the JSON message
                     data = json.loads(message)
-                    
-                    # Extract key information
-                    header = data.get('header', {})
-                    content = data.get('content', {})
-                    command = header.get('command', 'N/A')
+                    header = data.get("header", {}) or {}
+                    content = data.get("content", {}) or {}
 
-                    # Display the received message
-                    if command == "ROBOT_STATUS":
-                        for robot in content['robots']:
-                            if robot['robot_uid'] == self.robot_uid:
-                                self.update_robot_telemetry(robot['telemetry']['details']['bearing'])
-                                break
+                    if header.get("command") != "ROBOT_STATUS":
+                        continue
+
+                    for robot in content.get("robots", []) or []:
+                        if robot.get("robot_uid") != self.robot_uid:
+                            continue
+
+                        self.last_xtend_state = robot
+
+                        telemetry = robot.get("telemetry", {}) or {}
+                        details = telemetry.get("details", {}) or {}
+                        bearing = details.get("bearing")
+
+                        if bearing is not None:
+                            self.update_robot_telemetry(float(bearing))
+
+                        local = robot.get("local_telemetry", {}) or {}
+                        self.x = local.get("x", getattr(self, "x", None))
+                        self.y = local.get("y", getattr(self, "y", None))
+                        self.z = local.get("z", getattr(self, "z", None))
+
+                        break
 
                 except json.JSONDecodeError:
-                    print(f"[RECV] Received non-JSON message")
-                except Exception as e:
-                    print(f"[RECV] Error: {e}")
+                    print("[RECV] Received non-JSON message")
+                except Exception as exc:
+                    print(f"[RECV] Error: {exc}")
+
         except asyncio.CancelledError:
-            print(f"Receiver stopped.")
+            print("Receiver stopped.")
             raise
 
     async def arm_robot(self):
@@ -157,83 +173,84 @@ class ControllerAutomation:
 
         print(f"Robot disarmed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
-    async def takeoff(self):
+    async def takeoff(self,  duration=3.3, value=1000,):
         """Get the robot status"""
         print(f"Taking off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = 1000
-        await asyncio.sleep(3.1)
+        self.send_command['axes'][1] = value
+        # await asyncio.sleep(3.1)  original from Tamir xtend
+        await asyncio.sleep(duration) # + 0.2 sec
         print(f"Taken off... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         self.send_command['axes'][1] = 0
 
-    async def land(self):
+    async def land(self, duration=4.1):
         """Land the robot"""
         print(f"Landing... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 1
-        await asyncio.sleep(3.1)
+        # await asyncio.sleep(3.1) original from Tamir xtend
+        await asyncio.sleep(duration) # +1 sec
         print(f"Landed... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['buttons'][3] = 0
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)
 
-    async def move_forward(self, duration: float):
+    async def move_forward(self, duration: float, value=500):
         """Move the robot forward"""
 
         print(f"Moving forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][2] = 700
+        self.send_command['axes'][2] = value # original from Tamir Xtend 700
         await asyncio.sleep(duration * 0.001)
         print(f"Moved forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][2] = 0
 
         await asyncio.sleep(2)
     
-    async def move_backward(self, duration: float):
+    async def move_backward(self, duration: float, value=700):
         """Move the robot backward"""
         
         print(f"Moving forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][2] = -700
+        self.send_command['axes'][2] = -value
         await asyncio.sleep(duration * 0.001)
         print(f"Moved forward... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][2] = 0
 
         await asyncio.sleep(2)
     
-    async def move_left(self, duration: float):
-        """Move the robot left"""
+    async def move_left(self, duration: float, value=700):
+        """Move the robot left. duration in milliseconds."""
+        print(f"Moving left...")
+        self.send_command['axes'][0] = -value
+        await asyncio.sleep(duration * 0.001)
+        self.send_command['axes'][0] = 0
 
-        print(f"Moving left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][0] = -700
+    async def move_right(self, duration: float, value=700):
+        """Move the robot right. duration in milliseconds."""
+        print(f"Moving right...")
+        self.send_command['axes'][0] = value
         await asyncio.sleep(duration * 0.001)
+        print(f"Moved right.")
         self.send_command['axes'][0] = 0
-    
-    async def move_right(self, duration: float):
-        """Move the robot right"""
-        print(f"Moving right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][0] = 700
+
+    async def move_up(self, duration: float, value=700):
+        """Move the robot up. duration in milliseconds."""
+        print(f"Moving up...")
+        self.send_command['axes'][1] = value
         await asyncio.sleep(duration * 0.001)
-        print(f"Moved right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][0] = 0
-    
-    async def move_up(self, duration: float):
-        """Move the robot up"""
-        print(f"Moving up... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = 700
+        print(f"Moved up.")
+        self.send_command['axes'][1] = 0
+
+    async def move_down(self, duration: float, value=500):
+        """Move the robot down. duration in milliseconds."""
+        print(f"Moving down...")
+        self.send_command['axes'][1] = -value
         await asyncio.sleep(duration * 0.001)
-        print(f"Moved up... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"Moved down.")
         self.send_command['axes'][1] = 0
     
-    async def move_down(self, duration: float):
-        """Move the robot down"""
-        print(f"Moving down... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = -700
-        await asyncio.sleep(duration * 0.001)
-        print(f"Moved down... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][1] = 0
-    
-    async def rotate_left(self, duration: float = 0.0):
+    async def rotate_left(self, duration: float = 0.0, value=1000):
         """Rotate the robot left"""
         print(f"Rotating left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][3] = -1000
+        self.send_command['axes'][3] = -value
         if duration == 0:
             starting_yaw = self.current_yaw
             while starting_yaw != self.current_yaw:
@@ -243,11 +260,11 @@ class ControllerAutomation:
         print(f"Rotated left... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.send_command['axes'][3] = 0
     
-    async def rotate_right(self, duration: float = 0.0):
+    async def rotate_right(self, duration: float = 0.0, value=1000):
         """Rotate the robot right"""
         
         print(f"Rotating right... !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.send_command['axes'][3] = 1000
+        self.send_command['axes'][3] = value
         if duration == 0:
             starting_yaw = self.current_yaw
             while starting_yaw != self.current_yaw:
@@ -265,11 +282,10 @@ class ControllerAutomation:
             await self.rotate_right()
         else:
             raise ValueError("Invalid direction. Must be 1 or -1.")
-        pass
 
     def hover(self):
         """Hover the robot"""
-        self.send_command = self.base_command
+        self.send_command = copy.deepcopy(self.base_command)
 
     def update_robot_telemetry(self, yaw: float):
         """Update the robot telemetry with the given yaw"""

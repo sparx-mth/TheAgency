@@ -1,0 +1,13 @@
+# Simplified snippet of tasks/mapping/config/nav2_params.yaml
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        observation_sources: depth_scan
+        depth_scan:
+          topic: /intel_realsense/depth_cloud  # Topic from your depth_processor_node.py
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
