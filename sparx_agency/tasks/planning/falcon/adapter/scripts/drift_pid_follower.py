@@ -176,6 +176,7 @@ def build_drift_pid_params(G):
         forward_track_frac=float(G("~dp_forward_track_frac", 0.0)),
         lateral_turn_frac=float(G("~dp_lateral_turn_frac", 0.40)),
         turn_pitch_bias=float(G("~dp_turn_pitch_bias", 0.0)),
+        turn_side_cone_rad=math.radians(float(G("~dp_turn_side_cone_deg", 35.0))),
         settle_map_updates=int(G("~dp_settle_map_updates", 0)),
         lateral_pid=lateral_pid,
         forward_pid=forward_pid,
