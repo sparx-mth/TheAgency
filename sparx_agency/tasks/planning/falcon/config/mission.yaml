@@ -173,7 +173,7 @@ launch:
   #                   dead-reckoning, and has reflexes for walls the camera cannot
   #                   see. Its dials are the CONTROLLER 5 section below.
   # Each has its OWN speed dials below, so a value in the wrong block does nothing.
-  controller: waypoint        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
+  controller: drift_pid        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight
