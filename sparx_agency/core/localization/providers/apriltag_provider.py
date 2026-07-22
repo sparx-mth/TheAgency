@@ -354,6 +354,8 @@ class AprilTagLocalizationProvider(BaseLocalizationProvider):
 
         confidence = pose_confidence(est)
 
+        self._prev_cam_pos = est.world_T_cam[:3, 3].copy()
+
         world_T_ros = est.world_T_cam @ _CV_TO_ROS
         meas = np.array([world_T_ros[0, 3], world_T_ros[1, 3], world_T_ros[2, 3]],
                         dtype=float)
