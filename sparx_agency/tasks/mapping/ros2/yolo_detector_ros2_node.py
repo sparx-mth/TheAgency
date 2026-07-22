@@ -238,6 +238,14 @@ class YoloDetectorRos2Node(Node):
             return
         h, w = rgb.shape[:2]
         self.pub.publish(String(data=encode_detections(dets, stamp, w, h)))
+        # Log what YOLO saw this frame: the CERTAINTY (score) and the pixel BBOX per
+        # detection, so a run's log shows exactly what was found and how sure it was.
+        # Only when something is detected, so an empty scan stays quiet.
+        for d in dets:
+            x1, y1, x2, y2 = (int(v) for v in d.bbox_xyxy)
+            self.get_logger().info(
+                "detected %r  certainty=%.3f  bbox=[%d, %d, %d, %d]  (%dx%d px)"
+                % (d.label, d.score, x1, y1, x2, y2, x2 - x1, y2 - y1))
 
     def _warn(self, text):
         self.get_logger().warn(text, throttle_duration_sec=5.0)
