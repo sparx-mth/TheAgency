@@ -229,7 +229,7 @@
     <param name="out_topic" value="$(arg drone_ns)/gt_pose" />
   </node>
 
-  <node pkg="falcon_adapter" type="mapping_sync_node.py" name="mapping_sync" output="screen">
+  <node pkg="falcon_adapter" type="mapping_sync_node_sphera.py" name="mapping_sync" output="screen">
     <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/localization -->
     <!-- Depth as a frame-path String: mapping_sync loads the .npy and rebuilds the
          32FC1 Image at the message's capture stamp. mapping_sync is the SOLE voxel
