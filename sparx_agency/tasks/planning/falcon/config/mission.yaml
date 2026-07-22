@@ -270,7 +270,8 @@ launch:
   # -- NAVIGATION  --  how it gets to the next waypoint ----------------------------------------------
   dp_approach_yaw_rate: 0.65  # rad/s cap on the turn onto a leg = full yaw thrust (TURN state only; run 150434 stalled a 90-deg turn at less)
   dp_track_yaw_rate: 0.25    # rad/s yaw cap while TRACKING a leg / station-keeping (385 of 1000 counts). THE fix for over-strong yaw: mid-leg the heading error is 6-11 deg and ROLL owns the line, so yaw only trims -- turns onto a leg still get the full dp_approach_yaw_rate
-  dp_turn_pitch_bias: 0.08    # m/s forward ridden during a TURN whose translation would otherwise be zero. THE fix for the stalled turn: measured yaw delivery is ~11% in place but 30-68% while translating -- a pure yaw leaves the airframe flat and the turn coasts, so give it something to bite on (the same trick the one-axis follower's yaw_pitch_bias has always used). 0 = pure yaw
+  dp_turn_pitch_bias: 0.08    # m/s FLOOR on forward speed while a TURN's yaw is active. THE fix for the stalled AND the reversed turn: yaw delivery is ~11% in place vs 30-68% while translating, and a BACKWARD pitch under a turn inverts the delivered yaw outright (run 170502 frames 268-275: full right yaw riding -0.10 m/s turned the drone LEFT; the same yaw riding +0.08 turned right at once). The floor beats any backward station-keeping pull for as long as the yaw is active; the deferred correction runs after the turn. 0 = no bite added (backward still forbidden while yawing)
+  dp_turn_side_cone_deg: 35.0 # deg half-angle of the sideslip cone the translation may occupy while the yaw axis is active. YAW+ROLL is not the same manoeuvre as YAW+forward: |vy| is capped at tan(cone)*vx during an active yaw, so roll seasons the progress vector but never dominates it
   dp_pos_radius: 0.30         # m waypoint capture radius
   dp_slow_radius: 0.80        # m start slowing this far from the FINAL goal
   dp_arrive_speed_min: 0.08   # m/s floor outside pos_radius, so it never crawls to a noisy stop
@@ -298,14 +299,17 @@ launch:
   # ~600-count vertical range) and STILL sank -- 80 counts barely offset the airframe's
   # own sink, and it was climbing WHILE flying forward, whose tilt steals the very lift
   # a climb needs. Verified the vertical axis is NOT inverted (commanding up slowed the
-  # sink) and the bridge honours linear.z, so the fix is power + separation: raise the
-  # cap, and on a real sag do a dedicated PULSE that stops translating and climbs, then
-  # resumes flying. Yaw is left alone (it costs no lift and re-acquires tags).
+  # sink) and the bridge honours linear.z, so the fix is power + a partial yield: raise
+  # the cap, and on a real sag give the climb the larger share of thrust while the route
+  # still advances. Run 170502 showed the old 0.2 yield reading as "the converter
+  # dropped my forward command" (whole legs at a fifth of cruise), so the yield is now
+  # folded into the controller itself (visible in its telemetry) and set to keep half
+  # the flight. Yaw is left alone (it costs no lift and re-acquires tags).
   dp_alt_hold: true           # master switch. false = the old behaviour (linear.z stays 0)
   dp_alt_climb_max: 0.22      # m/s cap on UP (~293 counts). Raised from 0.15: the 17:3x flights measured NET climb ~0 while commanding up (the taper only cancelled the sink). Overshoot stays covered by the taper + half-trigger release (z peaked 1.24, not 1.6)
   dp_alt_kp: 0.7              # altitude P gain (was code-default 0.5): with the taper, kp*err is the actual demand -- 0.7 reaches the cap from 0.31 m of sag instead of 0.44, so the mid-band climbs harder while the near-target taper still kills the momentum
   dp_alt_pulse_trigger_m: 0.20 # m below target that starts a dedicated climb pulse (target 1.0 -> pulse below 0.80). A real sag, not the deadband's trim wander
-  dp_alt_pulse_tscale: 0.2    # (vx,vy) kept during a pulse: 20%. Low so the platform's thrust goes to lift, not to the forward/lateral tilt that bleeds it. 0 = stop flat and climb
+  dp_alt_pulse_tscale: 0.5    # (vx,vy) kept during a pulse: half. Below 1 so the climb wins the larger share of thrust, high enough that forward flight CONTINUES through the climb (0.2 flew whole legs at a fifth of cruise on run 170502 and read as a dead converter). 0 = stop flat and climb; 1 = climb and cruise simultaneously at full speed
   dp_alt_ceiling_m: 1.2       # m; at/above this measured altitude a climb is NEVER commanded.
                               #   The operator's line: 1.3 m must not be reached, 1.5 m is dangerous
   dp_alt_conf_min: 0.35       # pose confidence required to climb ("quite sure of localization");
