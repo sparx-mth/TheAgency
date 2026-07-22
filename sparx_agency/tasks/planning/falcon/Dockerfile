@@ -31,10 +31,19 @@ ENV GLOG_logtostderr=1
 ENV GLOG_colorlogtostderr=1
 
 # ── 1. Common system tools ────────────────────────────────────
+# python3-requests/python3-pil (apt, not pip — WITH_SIM=0/Jetson never
+# installs pip, see below): core/planning/navdp/client.py lazily imports
+# requests + Pillow inside reset()/pointgoal_step() so importing the
+# module itself stays numpy-only for the Python-3.8 adapter (see that
+# file's docstring) -- but nothing previously installed either package
+# into the container at all, so the first real call crashed with
+# ModuleNotFoundError. Unconditional (not just WITH_SIM=1) since
+# combination_planner_node.py's NavDP path isn't simulator-only.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget git gnupg2 lsb-release ca-certificates \
         pkg-config \
         python3-tk python3-matplotlib \
+        python3-requests python3-pil \
         locales \
     && if [ "$WITH_SIM" = "1" ]; then \
          apt-get install -y --no-install-recommends \
