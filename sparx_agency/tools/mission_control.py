@@ -383,7 +383,7 @@ ROBOTICAN_SERVICES: list[Service] = [
             "  -p rooster_ids:=R1 \\\n"
             "  -p step:=50.0 \\\n"
             "  -p climb_z:=700.0 \\\n"
-            "  -p hover_z:=550.0 \\\n"
+            "  -p hover_z:=700.0 \\\n"
             "  -p climb_duration_sec:=5.0 \\\n"
             "  -p log_dir:=/tmp"
         ),
@@ -413,7 +413,7 @@ ROBOTICAN_SERVICES: list[Service] = [
             "  --ros-args \\\n"
             "  -p rooster_id:=R1 \\\n"
             "  -p climb_z:=700.0 \\\n"
-            "  -p hover_z:=550.0 \\\n"
+            "  -p hover_z:=700.0 \\\n"
             "  -p climb_duration_sec:=5.0"
         ),
         env="container",
@@ -433,6 +433,180 @@ ROBOTICAN_SERVICES: list[Service] = [
         env="rooster_pc",
         machine="pc",
         proc_pattern="robots/ROBOTICAN/ui.py",
+    ),
+    # ── Vision (host, domain 9) ──────────────────────────────────────────────
+    # Unlike XTEND (Jetson-hosted), ROBOTICAN's whole vision stack runs on
+    # this PC — frame capture needs the container's network_mode: host UDP
+    # port, and this PC also has its own DA3-TRT engine, so depth doesn't
+    # need the Jetson either. Both scripts already set ROS_DOMAIN_ID=9 +
+    # CycloneDDS + CYCLONEDDS_URI themselves (see the scripts) — don't
+    # replicate that here via `env=`, just call them directly.
+    Service(
+        name="Rooster Frame Capture (R1)",
+        key="rooster_frame_capture_R1",
+        group="rooster_vision",
+        description="Decodes R1's UDP/RTP-H264 stream, saves JPEGs to /tmp/rooster_frames, publishes /R1/rgb_frame_path.",
+        cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_rooster_frame_dir_publisher.sh",
+        env="none",
+        machine="pc",
+        proc_pattern="rooster_frame_dir_publisher",
+    ),
+    Service(
+        name="Rooster Depth Processor (R1)",
+        key="rooster_depth_R1",
+        group="rooster_vision",
+        description="DA3-TRT depth from /R1/rgb_frame_path, publishes /R1/depth_frame_path. Requires Rooster Frame Capture (R1) running.",
+        cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_depth_processor.sh",
+        env="none",
+        machine="pc",
+        proc_pattern="rooster_depth_processor",
+    ),
+    Service(
+        name="Rooster Video Trigger (R1)",
+        key="rooster_video_trigger_R1",
+        group="rooster_vision",
+        description=(
+            "Calls /R1/video_handler/set_video_mode (playing=True) and holds "
+            "gcs_keep_alive so R1 actually streams its camera to this PC:5001. "
+            "Without this, video_handler never sends a single frame and "
+            "Rooster Frame Capture (R1) silently sits empty — must run before it."
+        ),
+        cmd=(
+            "bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_video_trigger.sh "
+            "--drone-id R1 --host-ip 127.0.0.1 --port 5001 --width 540 --height 360"
+        ),
+        env="none",
+        machine="pc",
+        proc_container="it",
+        proc_pattern="video_trigger.py",
+        stop_extra="docker exec it bash -lc 'pkill -f video_trigger.py || true' 2>/dev/null || true",
+    ),
+    # ── Planner (Falcon), host, domain 9 — mirrors XTEND's "planner" group ──
+    Service(
+        name="Rooster Falcon Container",
+        key="rooster_planner_falcon",
+        group="rooster_planner",
+        description="Start falcon-ros Docker container (sphera_jail map) for ROBOTICAN. Must be running before Rooster Falcon Adapter.",
+        # run_falcon_sphera.sh is a Rooster-only duplicate of run_falcon.sh
+        # (which XTEND/colleagues also edit) -- keeps this repo's own RViz-
+        # view mount addition out of a file shared with other maps/users.
+        cmd="cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon && ./run_falcon_sphera.sh sphera_jail",
+        env="docker",
+        machine="pc",
+        docker_container="falcon",
+        stop_extra="docker rm -f falcon 2>/dev/null || true",
+    ),
+    Service(
+        name="Rooster Falcon Adapter",
+        key="rooster_planner_adapter",
+        group="rooster_planner",
+        description="ROS1 Falcon planner inside the falcon container, wired to R1's topics/camera intrinsics (requires falcon container + Rooster ROS1<->ROS2 Bridge running).",
+        cmd=(
+            "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter sphera_drone.launch "
+            "map_name:=sphera_jail "
+            "real_pose_topic:=/R1/localization "
+            "real_depth_path_topic:=/R1/depth_frame_path "
+            "real_rgb_path_topic:=/R1/rgb_frame_path "
+            "cam_fx:=125.903068 cam_fy:=180.0 cam_cx:=269.5 cam_cy:=179.5 "
+            "cam_width:=540 cam_height:=360 "
+            # Rooster's ground-truth pose is stamped independently from depth
+            # (unlike XTEND, where both share one capture event) — the
+            # launch default is 0.0/0.0 (exact-timestamp-only, correct for
+            # XTEND) which mapping_sync can never satisfy for Rooster, so
+            # every depth frame gets dropped as "dropout" despite a pose
+            # arriving within ~0.5ms. These match mapping_sync_node.py's own
+            # documented defaults for this exact case.
+            "sync_tolerance:=0.05 max_interp_gap:=0.12 "
+            # goal_x/goal_y default to (0.0, -3.0) -- correct for XTEND,
+            # where the drone starts near the origin, but /gt_pose is a
+            # direct passthrough of Rooster's raw Sphera-world pose
+            # (confirmed live: no re-zeroing), which starts at roughly
+            # (-54.75, 14.66). The unmodified default goal sat ~57m away,
+            # entirely outside sphera_jail.yaml's own box bounds, so
+            # astar_planner could never find a reachable target. This is
+            # the same 3m-south-of-spawn offset the default intended,
+            # just expressed in Rooster's actual world coordinates.
+            "goal_x:=-54.75 goal_y:=11.66 "
+            # bev_xmin/ymin/xmax/ymax default to a 12x12m box at world
+            # origin (0,0) -- correct for XTEND's near-origin office/hospital
+            # maps, but Rooster's real spawn is ~55m away at (-54.75, 14.66),
+            # so the BEV click map (and every click on it) was pointed at an
+            # empty patch of world far from the drone. These match
+            # sphera_jail.yaml's doubled box bounds, centered on the real
+            # spawn -- this is why the adapter launches sphera_drone.launch
+            # (a Sphera-only fork of real_drone.launch) instead: only that
+            # file forwards bev_* to nav_stack.launch.
+            "bev_xmin:=-70.75 bev_ymin:=-1.34 bev_xmax:=-38.75 bev_ymax:=30.66'"
+        ),
+        env="none",
+        machine="pc",
+        proc_container="falcon",
+        proc_pattern="real_drone.launch",
+        stop_extra="docker exec falcon bash -lc 'pkill -f real_drone.launch || true; pkill -f roslaunch || true' 2>/dev/null || true",
+    ),
+    Service(
+        name="Rooster ROS1<->ROS2 Bridge",
+        key="rooster_planner_bridge",
+        group="rooster_planner",
+        description="ROS1<->ROS2 bridge container for R1 — CycloneDDS/domain 9 (Rooster is Jazzy, not XTEND's Foxy/FastRTPS). Forwards /R1/localization, /R1/rgb_frame_path, /R1/depth_frame_path, cmd_vel.",
+        cmd=(
+            "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/bridge && "
+            "ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+            "CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh"
+        ),
+        env="docker",
+        machine="pc",
+        docker_container="ros1_bridge",
+        stop_extra="docker rm -f ros1_bridge 2>/dev/null || true",
+    ),
+    # RViz/BEV-click below mirror the XTEND "planner" group's identically
+    # named services, but XTEND's are Jetson-hosted (machine defaults to
+    # "jetson", checked/started over SSH) because XTEND's whole vision stack
+    # lives on the Jetson. Rooster's falcon container runs on this PC (see
+    # the vision-group note above), so these must be machine="pc" +
+    # proc_container="falcon" like Rooster Falcon Adapter, not SSH'd.
+    Service(
+        name="Rooster Falcon RViz",
+        key="rooster_planner_rviz",
+        group="rooster_planner",
+        description="RViz inside the falcon container (host-side), visualising R1's occupancy map/plan.",
+        # DISPLAY/XAUTHORITY are already set correctly in the container's own
+        # environment (run_falcon_sphera.sh passes through the host's actual
+        # $DISPLAY at `docker run` time) -- do NOT override with :0 here;
+        # confirmed live that :0 is wrong on this PC (the container's real
+        # DISPLAY was :1) and silently fails with "couldn't connect to
+        # display" instead of erroring loudly.
+        cmd=(
+            "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && "
+            "roslaunch exploration_manager rviz.launch'"
+        ),
+        env="none",
+        machine="pc",
+        proc_container="falcon",
+        proc_pattern="rviz.launch",
+        stop_extra=(
+            "docker exec falcon bash -lc 'pkill -f rviz.launch || true; "
+            "pkill -f lib/rviz/rviz || true' 2>/dev/null || true"
+        ),
+    ),
+    Service(
+        name="Rooster BEV Click Goal",
+        key="rooster_planner_bev_goal",
+        group="rooster_planner",
+        description="Bird's-eye-view click-to-goal UI inside the falcon container (host-side) for R1.",
+        # See the DISPLAY note on Rooster Falcon RViz above -- same reasoning.
+        cmd=(
+            "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && "
+            "rosrun falcon_adapter bev_click_goal_node.py'"
+        ),
+        env="none",
+        machine="pc",
+        proc_container="falcon",
+        proc_pattern="bev_click_goal_node.py",
+        stop_extra="docker exec falcon bash -lc 'pkill -f bev_click_goal_node.py || true' 2>/dev/null || true",
     ),
     # ── Monitors ──────────────────────────────────────────────────────────────
     Service(
@@ -503,10 +677,20 @@ def get_all_states() -> dict[str, bool]:
     states: dict[str, bool] = {}
 
     # ── Jetson services — single SSH call ────────────────────────────────────
-    proc_containers = {svc.proc_container for svc in ALL_SERVICES if svc.proc_pattern and svc.proc_container}
+    # machine="pc" is excluded here even when it has proc_container/env=="docker"
+    # set (e.g. Rooster Falcon Container/Adapter, which docker-run/exec on THIS
+    # PC, not the Jetson) — those are checked locally below instead. Before this
+    # split, any proc_container+proc_pattern service was checked via SSH to the
+    # Jetson unconditionally, so a PC-hosted "falcon" container always read as
+    # not-running even while genuinely up (confirmed live: real_drone.launch and
+    # all its child nodes running fine inside the container, dashboard still red).
+    jetson_proc_containers = {
+        svc.proc_container for svc in ALL_SERVICES
+        if svc.proc_pattern and svc.proc_container and svc.machine != "pc"
+    }
     proc_exec_cmds = "".join(
         f"echo '=PROCS:{c}='; docker exec {c} ps -eo args 2>/dev/null || true; "
-        for c in sorted(proc_containers)
+        for c in sorted(jetson_proc_containers)
     )
     cmd = (
         "echo '=TMUX='; tmux ls 2>/dev/null | cut -d: -f1; "
@@ -517,7 +701,7 @@ def get_all_states() -> dict[str, bool]:
         result = _ssh(cmd)
         tmux_sessions: set[str] = set()
         docker_containers: set[str] = set()
-        container_procs: dict[str, list[str]] = {c: [] for c in proc_containers}
+        container_procs: dict[str, list[str]] = {c: [] for c in jetson_proc_containers}
         section = None
         for line in result.stdout.splitlines():
             line = line.strip()
@@ -538,16 +722,41 @@ def get_all_states() -> dict[str, bool]:
         docker_containers = set()
         container_procs = {}
 
+    # ── PC services — local docker ps / docker exec (no SSH) ─────────────────
+    pc_proc_containers = {
+        svc.proc_container for svc in ALL_SERVICES
+        if svc.proc_pattern and svc.proc_container and svc.machine == "pc"
+    }
+    pc_docker_containers: set[str] = set()
+    pc_container_procs: dict[str, list[str]] = {c: [] for c in pc_proc_containers}
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        pc_docker_containers = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    except Exception:
+        pass
+    for c in pc_proc_containers:
+        try:
+            r = subprocess.run(
+                ["docker", "exec", c, "ps", "-eo", "args"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            pc_container_procs[c] = r.stdout.splitlines()
+        except Exception:
+            pc_container_procs[c] = []
+
     for svc in ALL_SERVICES:
         if svc.machine == "container":
             continue  # handled below
-        if svc.proc_pattern and svc.proc_container:
-            procs = container_procs.get(svc.proc_container, [])
-            states[svc.key] = any(svc.proc_pattern in p for p in procs)
-        elif svc.env == "docker":
-            states[svc.key] = svc.docker_container in docker_containers
-        elif svc.machine == "pc":
-            if svc.proc_pattern:
+        if svc.machine == "pc":
+            if svc.proc_container and svc.proc_pattern:
+                procs = pc_container_procs.get(svc.proc_container, [])
+                states[svc.key] = any(svc.proc_pattern in p for p in procs)
+            elif svc.env == "docker":
+                states[svc.key] = svc.docker_container in pc_docker_containers
+            elif svc.proc_pattern:
                 try:
                     r = subprocess.run(
                         ["pgrep", "-f", svc.proc_pattern],
@@ -558,6 +767,11 @@ def get_all_states() -> dict[str, bool]:
                     states[svc.key] = False
             else:
                 states[svc.key] = False
+        elif svc.proc_pattern and svc.proc_container:
+            procs = container_procs.get(svc.proc_container, [])
+            states[svc.key] = any(svc.proc_pattern in p for p in procs)
+        elif svc.env == "docker":
+            states[svc.key] = svc.docker_container in docker_containers
         else:
             states[svc.key] = svc.key in tmux_sessions
 
@@ -607,9 +821,18 @@ def start_service(svc: Service) -> str | None:
                 capture_output=True, check=False, timeout=5,
             )
         script = f"{env}\n{svc.cmd} 2>&1 | tee {svc.log_file()}"
+        # Wrapped in `script` to allocate a real PTY: some commands (e.g.
+        # docker run -it, used by run_falcon.sh/run_bridge.sh) refuse to
+        # start at all without one ("cannot attach stdin to a TTY-enabled
+        # container because stdin is not a terminal") when launched from a
+        # plain detached subprocess, which has no controlling terminal.
+        # tmux would do the same job (like the Jetson/SSH path below does)
+        # but isn't installed on this PC; `script` (util-linux, already
+        # present) is a dependency-free stand-in.
+        pty_cmd = f"script -qc {shlex.quote(script)} /dev/null"
         try:
             subprocess.Popen(
-                ["bash", "-lc", script],
+                ["bash", "-lc", pty_cmd],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -648,13 +871,28 @@ def start_service(svc: Service) -> str | None:
 def stop_service(svc: Service) -> str | None:
     """Stop service. Returns error string or None on success."""
     if svc.machine == "pc":
-        if not svc.proc_pattern:
-            return None  # no pattern to match — user closes the window manually
+        # A proc_container here means the actual process runs inside a
+        # docker container on this PC (e.g. Rooster Falcon Adapter) — the
+        # container has its own PID namespace (no --pid=host), so a bare
+        # host-level pkill can never see it; has to be pkill'd from inside
+        # via docker exec, same as the machine=="container" branch below.
         try:
-            subprocess.run(
-                ["pkill", "-f", svc.proc_pattern],
-                capture_output=True, check=False, timeout=5,
-            )
+            if svc.proc_container and svc.proc_pattern:
+                kill_cmd = f"pkill -f {shlex.quote(svc.proc_pattern)} 2>/dev/null || true"
+                subprocess.run(
+                    ["docker", "exec", svc.proc_container, "bash", "-c", kill_cmd],
+                    capture_output=True, check=False, timeout=5,
+                )
+            elif svc.proc_pattern:
+                subprocess.run(
+                    ["pkill", "-f", svc.proc_pattern],
+                    capture_output=True, check=False, timeout=5,
+                )
+            if svc.stop_extra:
+                subprocess.run(
+                    ["bash", "-lc", svc.stop_extra],
+                    capture_output=True, check=False, timeout=10,
+                )
         except Exception as exc:
             return str(exc)
         return None
@@ -967,6 +1205,12 @@ with tab_rooster:
 
     st.markdown("#### Core")
     _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_core"], states)
+
+    st.markdown("#### Vision")
+    _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_vision"], states)
+
+    st.markdown("#### Planner (Falcon)")
+    _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_planner"], states)
 
     with st.expander("📊  Monitors", expanded=False):
         _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_monitor"], states)
