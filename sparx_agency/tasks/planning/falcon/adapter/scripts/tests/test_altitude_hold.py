@@ -37,6 +37,17 @@ def test_big_sag_pulses_climb_and_yields_translation():
     assert cmd.vz == 0.20 and cmd.translation_scale == 0.2 and h.pulsing
 
 
+def test_a_pulse_keeps_flying_by_default():
+    """The default yield must never read as a dropped forward command: the
+    2026-07-21 flight crawled at a fifth of cruise through every climb pulse
+    and the operator saw 'the converter ignored my forward'. Half the
+    translation continues through a climb unless deliberately tuned lower."""
+    h = _hold(target_z=1.0)
+    cmd = _up(h, 0.70)                            # 0.30 below -> pulse
+    assert h.pulsing
+    assert cmd.translation_scale == 0.5
+
+
 def test_pulse_climb_tapers_near_the_target_never_flat_out():
     """The platform climbs far harder than nominal -- a flat-out pulse coasted
     to 1.5-1.6 m on the logs. The demand must shrink as the target nears."""

@@ -37,13 +37,16 @@ class AltitudeCommand(NamedTuple):
 
     Attributes:
         vz: Vertical velocity to command (m/s, + up).
-        translation_scale: Multiplier the follower applies to horizontal
-            TRANSLATION (vx, vy) this tick, 0..1. 1.0 normally; low during a
-            climb PULSE, because pitching/rolling tilts the thrust vector and
-            steals the very lift a climb needs -- so a real climb briefly stops
-            translating, gains height, and hands the drone back. Yaw is left
-            alone (it costs no lift, and sweeping tags in helps the pose a climb
-            needs to be trusted).
+        translation_scale: Fraction of the horizontal TRANSLATION (vx, vy) the
+            follower keeps this tick, 0..1 (fed to ``DriftPidFollower.step`` as
+            ``translation_scale``, so the yield happens INSIDE the control law
+            -- envelope, telemetry and blockage detection all see the command
+            that actually flies). 1.0 normally; reduced during a climb PULSE,
+            because pitching/rolling tilts the thrust vector and steals lift
+            from the climb. It reduces, never stops: the operator flies climb
+            and forward together, so the route keeps advancing (slower) while
+            the height is regained. Yaw is left alone (it costs no lift, and
+            sweeping tags in helps the pose a climb needs to be trusted).
         reason: Short human-readable account, for narration/logging.
     """
 
@@ -75,21 +78,25 @@ class AltitudeHoldParams(object):
         min_z_m: Below this measured altitude the loop does nothing (not
             airborne, or the solve is broken).
         pulse_trigger_m: Sag below target (m) at which a CLIMB PULSE begins:
-            the drone stops translating and dedicates thrust to the (tapered)
+            the drone yields translation and dedicates thrust to the (tapered)
             climb. The pulse releases at HALF this sag, so the final stretch is
             flown as a gentle trim and the platform's momentum dies before the
             target rather than past it. Must exceed ``deadband_m`` -- a pulse is
             for a real height loss, not the trim wander the deadband absorbs.
             Set huge (e.g. 10) to disable pulsing and only ever trim.
         pulse_translation_scale: The (vx, vy) multiplier held during a pulse
-            (0..1). Low so the platform's thrust goes to lift, not to tilting.
-            0 stops horizontal translation dead while climbing.
+            (0..1). Below 1 so the climb gets the larger share of thrust, but
+            high enough that forward flight CONTINUES through the climb -- the
+            2026-07-21 flight showed the old 0.2 read as "the converter dropped
+            my forward command" while the drone crawled at a fifth of cruise
+            for whole legs. 0 stops horizontal translation dead while climbing;
+            1 climbs and flies at full speed simultaneously.
     """
 
     def __init__(self, target_z=1.0, deadband_m=0.10, kp=0.5, climb_max=0.15,
                  descend_max=0.10, ceiling_m=1.2, conf_min_climb=0.35,
                  conf_min_descend=0.10, min_z_m=0.2, pulse_trigger_m=0.20,
-                 pulse_translation_scale=0.2):
+                 pulse_translation_scale=0.5):
         self.target_z = float(target_z)
         self.deadband_m = float(deadband_m)
         self.kp = float(kp)
@@ -209,9 +216,11 @@ class AltitudeHold(object):
             elif err <= 0.5 * p.pulse_trigger_m:
                 self._pulse = False
             if self._pulse:
-                self.last_reason = ("climb pulse: holding still to regain "
-                                    "%.2fm (at %.2fm, %.2fm/s)"
-                                    % (p.target_z, z, vz))
+                self.last_reason = ("climb pulse: yielding %.0f%% of "
+                                    "translation to regain %.2fm (at %.2fm, "
+                                    "%.2fm/s)"
+                                    % ((1.0 - p.pulse_translation_scale) * 100.0,
+                                       p.target_z, z, vz))
                 return AltitudeCommand(vz, p.pulse_translation_scale,
                                        self.last_reason)
             # Small sag: trim up gently while still flying the route.
