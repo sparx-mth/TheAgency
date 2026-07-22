@@ -331,7 +331,18 @@ class ObjectApproachNode(object):
             wz=_axis(min_wz, self.limits.max_yaw_rate,
                      math.radians(float(G("~fixed_wz_deg", math.degrees(0.7))))),
             min_burst_ticks=int(G("~min_burst_ticks", 2)),
-            brake_ticks=int(G("~brake_ticks", 1)))
+            # 0 (no reverse brake pulse): a full-magnitude backward tick after every
+            # forward approach burst made the drone net-REVERSE while locked on (forward
+            # is delivered weakly on this airframe, the reverse brake is not). The
+            # coast-aware deadbands + the closure gait already stop it early.
+            brake_ticks=int(G("~brake_ticks", 0)))
+
+        # HARD no-reverse guarantee (enforced in _publish_cmd): while object_approach
+        # drives the drone -- lock/approach, aim, scan, recovery -- it must NEVER command
+        # backward motion. The servo law already never reverses and brake_ticks is 0, so
+        # this is a belt-and-braces clamp that holds even if either is re-tuned: a lock
+        # can then never drive the drone backward. ~allow_reverse opts out.
+        self.allow_reverse = _param_bool("~allow_reverse", False)
 
         # ── Pulse-and-settle closure gait ────────────────────────────
         # A cadence post-filter on the shaped SERVO command: the shaper sets the
@@ -413,6 +424,16 @@ class ObjectApproachNode(object):
                 "arrival-land (~land_at_goal) still applies." if self.land_at_goal
                 else "the drone will hover-lock, not land.")
 
+        # ── Aim-fail -> sweep, and a bounded sweep ────────────────────
+        # ~aim_fail_to_scan: when the aim looks down the object's bearing and does
+        # not see it, sweep the room in place for it (SCAN) rather than escalating
+        # the goal onto the object's imprecise catalogued coordinate -- for a small
+        # room where that position is not trusted enough to fly onto.
+        # ~scan_land_revolutions: bound that sweep -- after this many full in-place
+        # turns without a detection, give up and land where we are (0 = sweep forever).
+        self.aim_fail_to_scan = _param_bool("~aim_fail_to_scan", False)
+        self.scan_land_revolutions = float(G("~scan_land_revolutions", 0.0))
+
         # On acquisition (target confirmed + tracker locked) hold a brief
         # stop-in-place before the visual approach begins: the node takes over
         # /cmd_vel and actively publishes a zero-velocity stop for ~acquire_stop_s
@@ -425,7 +446,9 @@ class ObjectApproachNode(object):
             land_range_m=self.land_range_m,
             land_confirm_ticks=self.land_confirm_ticks,
             land_at_goal=self.land_at_goal,
-            arrive_land_confirm_ticks=self.arrive_land_confirm_ticks))
+            arrive_land_confirm_ticks=self.arrive_land_confirm_ticks,
+            aim_fail_to_scan=self.aim_fail_to_scan,
+            scan_land_revolutions=self.scan_land_revolutions))
 
         # ── Goal memory + re-inject ───────────────────────────────────
         # We remember the coordinate route's goal (from ~goal_x/y and any live
@@ -438,6 +461,20 @@ class ObjectApproachNode(object):
         self._goal_xy = None if gx is None or gy is None else (float(gx), float(gy))
         self._pose_xy = None
         self._pose_yaw = None
+
+        # ── Arm gate: no blind visual take-over until we are in the room ──
+        # The visual servo does NOT avoid obstacles, so it must not engage while the
+        # drone is still flying the hard part of the route (door, corridor). The
+        # mission's entry point (~arm_point_x/~arm_point_y -- normally the pre-selection
+        # target, which sits INSIDE the room) is the gate: only once the drone has come
+        # within ~arm_point_radius_m of it is the take-over allowed. LATCHED -- once
+        # armed it stays armed, so a target seen later (even on the way to the
+        # room-centre goal) can be closed on. Unset (both empty) => armed at once, the
+        # legacy behaviour. The radius is deliberately forgiving: it is a fly-through.
+        apx, apy = G("~arm_point_x", None), G("~arm_point_y", None)
+        self._arm_xy = None if apx is None or apy is None else (float(apx), float(apy))
+        self.arm_point_radius_m = float(G("~arm_point_radius_m", 0.8))
+        self._position_armed = self._arm_xy is None
 
         # ── Staged approach: stand off, AIM, then close ───────────────
         # The object's catalogued (x, y) is only as good as the room map that made
@@ -521,6 +558,9 @@ class ObjectApproachNode(object):
         # SEARCH, so if this is still False the reach was "by A* alone", not a depth
         # reach -- even if a stale tracker box happened to supply a range this tick.
         self._entered_visual_approach = False
+        # True once the room sweep ever ran, so _begin_land can tell a give-up land
+        # (swept scan_land_revolutions turns unseen) from a coordinate/visual reach.
+        self._entered_scan = False
 
         # ── ROS I/O (publishers before subscribers) ──────────────────
         # Default is the drone's own topic (unchanged); object_approach.launch points it
@@ -851,6 +891,20 @@ class ObjectApproachNode(object):
         # approach), land there (~land_at_goal: reached "by A* alone"), or switch
         # from passive SEARCH to an active room SCAN (the legacy behaviour).
         arrived = self._arrived_at_goal()
+        # Latch the position arm the first time we reach the entry point (see
+        # __init__): from here the blind visual take-over is allowed. Kept latched, so
+        # a target seen after this -- even before the room-centre goal -- can be closed.
+        if not self._position_armed and self._arm_xy is not None \
+                and self._pose_xy is not None:
+            dx = self._pose_xy[0] - self._arm_xy[0]
+            dy = self._pose_xy[1] - self._arm_xy[1]
+            if math.hypot(dx, dy) <= self.arm_point_radius_m:
+                self._position_armed = True
+                rospy.loginfo("object_approach: reached the entry point (%.2f, %.2f) -- "
+                              "visual take-over now armed", self._arm_xy[0],
+                              self._arm_xy[1])
+                self.thinker.say("I have reached the room -- the visual approach is now "
+                                 "armed", category="mission")
         # Step the aim manoeuvre while it owns the mission, exactly as the servo is
         # stepped above: the FSM consumes its "finished" flag, we publish its command.
         # Only once the hand-off is GRANTED, though (_driving): its settle/look timers
@@ -867,14 +921,26 @@ class ObjectApproachNode(object):
         # land_range_m. res.range_m already respects ~use_depth (None when depth is
         # off) and is None without a valid track, so LAND needs working depth.
         fsm_range = res.range_m if res is not None else None
+        # Radians turned since the previous tick, for the SCAN revolution cap. Taken
+        # from the last published (shaped) yaw command, so it measures what was
+        # actually sent to the motors -- no pose needed, and the sweep therefore
+        # always terminates. Only meaningful while sweeping; the FSM accumulates it
+        # solely in SCAN, so feeding it every tick is harmless.
+        scan_swept_delta = (abs(self._last_cmd.yaw_rate) * dt
+                            if self.fsm.state == SCAN and self._last_cmd is not None
+                            else 0.0)
         dec = self.fsm.update(confirmed=confirmed, track_valid=track_valid,
                               at_target=at_target, dt=dt, arrived_at_goal=arrived,
                               range_m=fsm_range, aim_ready=self._aim_ready(),
-                              aim_done=bool(aim_dec is not None and aim_dec.finished))
+                              aim_done=bool(aim_dec is not None and aim_dec.finished),
+                              scan_swept_delta=scan_swept_delta,
+                              arm_ready=self._position_armed)
         self._last_dec, self._last_res, self._last_track = dec, res, track
         self._narrate_mode(dec.mode)
         if dec.mode in ("APPROACH", "HOVER_LOCK"):
             self._entered_visual_approach = True
+        if dec.mode == SCAN:
+            self._entered_scan = True
 
         if dec.mode == LAND:
             # Reached the object: end the mission by landing. Stop closing (so the
@@ -1078,6 +1144,13 @@ class ObjectApproachNode(object):
                 reason = "range=%.2f m <= land_range=%.2f m" % (rng, self.land_range_m)
                 thought = ("Reached the %s -- stopping and landing to finish the "
                            "mission" % self.target)
+            elif self._entered_scan and self.scan_land_revolutions > 0.0:
+                # Gave up: the room sweep turned its full quota without a confirmation.
+                reason = ("swept the room %.0f turns without seeing the %s"
+                          % (self.scan_land_revolutions, self.target))
+                thought = ("Turned around %.0f times looking for the %s and never saw "
+                           "it -- landing here to finish the mission"
+                           % (self.scan_land_revolutions, self.target))
             else:
                 reason = "arrived at the coordinate goal (reached by A* alone)"
                 thought = ("Arrived at the goal without ever seeing the %s -- landing "
@@ -1118,6 +1191,13 @@ class ObjectApproachNode(object):
             ControlCommand.velocity(float(vx), float(vy), 0.0, float(wz)))
         if gated:
             shaped = self.gait.step(shaped)
+        # HARD no-reverse guarantee: a lock must never drive the drone BACKWARD (the
+        # airframe is blind behind and the mission only ever closes on or holds the
+        # object). Clamp any negative forward command to 0 -- the final word before the
+        # wire, so no source (a coast brake, a smoothing undershoot) can reverse it.
+        if not self.allow_reverse and shaped.x < 0.0:
+            shaped = ControlCommand.velocity(0.0, float(shaped.y), 0.0,
+                                             float(shaped.yaw_rate))
         m = Twist()
         m.linear.x = float(shaped.x)
         m.linear.y = float(shaped.y)    # holonomic crab (0 in waypoint closure)
@@ -1245,15 +1325,25 @@ class ObjectApproachNode(object):
         L("  closure   = %s   force=%s (min vx=%.3f vy=%.3f wz=%.0f deg/s)",
           self.closure_mode, self.force_mode, self.shaper.vx.min_magnitude,
           self.shaper.vy.min_magnitude, math.degrees(self.shaper.wz.min_magnitude))
+        L("  no-reverse = %s  (a lock never commands the drone backward)",
+          "on" if not self.allow_reverse else "OFF (~allow_reverse true)")
         L("  gait      = %s  (move %d / settle %d ticks, transition-stop=%s)",
           "on" if self.gait.cfg.active else "off", self.gait.cfg.move_ticks,
           self.gait.cfg.settle_ticks, self.gait.cfg.settle_on_axis_change)
         L("  nav goal  = %s  (in=%s out=%s, arrive<%.2fm)",
           self._goal_xy, self.goal_in_topic, self.goal_out_topic, self.arrive_radius_m)
+        if self._arm_xy is None:
+            L("  arm gate  = off (~arm_point_* unset): visual take-over armed at start")
+        else:
+            L("  arm gate  = reach (%.2f, %.2f) within %.2fm before ANY visual take-over "
+              "(%s)", self._arm_xy[0], self._arm_xy[1], self.arm_point_radius_m,
+              "ARMED" if self._position_armed else "not armed yet")
         if self.aim_enabled:
+            _aim_fail = ("then sweep the room in place for it"
+                         if self.aim_fail_to_scan else "then fly to its coordinate")
             L("  staged    = on: arriving at the goal with a known object position "
-              "-> AIM at its bearing (+-%.0f deg), look %.1fs, then fly to it",
-              math.degrees(self.aim.cfg.tolerance_rad), self.aim.cfg.look_s)
+              "-> AIM at its bearing (+-%.0f deg), look %.1fs, %s",
+              math.degrees(self.aim.cfg.tolerance_rad), self.aim.cfg.look_s, _aim_fail)
             L("              object position in = %s  (%s)", self.object_position_topic,
               "unset -- no staging until the director publishes it"
               if self._object_xy is None else str(self._object_xy))
@@ -1279,8 +1369,15 @@ class ObjectApproachNode(object):
               "-> STOP + FINISH (reached by A* alone; pose-based, no depth)",
               self.arrive_radius_m, self.arrive_land_confirm_ticks)
         else:
-            L("  land(goal)  = disabled (~land_at_goal false): arrival -> room SCAN")
-        if self.land_range_m is None and not self.land_at_goal:
+            L("  land(goal)  = disabled (~land_at_goal false): arrival -> AIM/room SCAN")
+        if self.scan_land_revolutions > 0.0:
+            L("  land(scan)  = sweep %.0f full turns unconfirmed -> STOP + FINISH "
+              "(give up; the object is nowhere in the room)", self.scan_land_revolutions)
+        else:
+            L("  land(scan)  = disabled (~scan_land_revolutions 0): the room sweep "
+              "runs until the object is found or the goal changes")
+        if self.land_range_m is None and not self.land_at_goal \
+                and self.scan_land_revolutions <= 0.0:
             L("  success   = target centred & within target_range/area (hover-lock)")
         L("=" * 64)
 
@@ -1360,7 +1457,11 @@ if __name__ == "__main__":
 #       ~fixed_vy (0.3 m/s lateral ROLL pulse; assumed same as the forward force)
 #       ~min_burst_ticks (2, hold any motion >=N ticks so a lone tick that the
 #       platform ignores becomes a real burst) ~brake_ticks (0, opposite pulses to
-#       bleed off the coast after a burst; 0 = rely on the yaw deadband stopping early)
+#       bleed off the coast after a burst; 0 = rely on the yaw deadband stopping early --
+#       a reverse brake made the drone fly backward when locked on this airframe)
+#       ~allow_reverse (false): HARD guarantee that object_approach never commands
+#       backward vx while it drives the drone, so a lock cannot drive it backward
+#       whatever the shaping does. true only if a mission genuinely needs to reverse.
 #   closure gait (move-a-little / stop-and-look cadence on the SERVO command only):
 #       ~gait_enabled (true) ~gait_move_ticks (2, max motion ticks per burst)
 #       ~gait_settle_ticks (4, forced-stop ticks after a burst / on a turn<->forward
@@ -1380,7 +1481,14 @@ if __name__ == "__main__":
 #       looking around the occluder)
 #   goal (arrival -> AIM/SCAN, re-inject on give-up): ~goal_in_topic (/waypoint_nav/goal)
 #       ~goal_out_topic (/waypoint_nav/goal) ~goal_x/~goal_y (initial goal, unset =
-#       none) ~arrive_radius_m (0.6)
+#       none) ~arrive_radius_m (0.6, how close to the goal counts as "arrived")
+#   arm gate (no blind visual take-over until in the room): ~arm_point_x/~arm_point_y
+#       (the entry point to reach first -- normally the pre-selection target, which sits
+#       inside the room; both unset = armed from the start) ~arm_point_radius_m (0.8,
+#       forgiving -- a fly-through). Until the drone comes within that radius of the
+#       entry point the FSM is pinned in passive SEARCH, so the obstacle-aware follower
+#       flies the door/corridor and the obstacle-blind visual servo never takes over
+#       early; latched on, so a target seen after arming can still be closed on.
 #   staged approach (stand off at the goal, AIM at the object, escalate only if that
 #       fails). Arms itself the moment an object position arrives; without one the
 #       node behaves exactly as it did before:
@@ -1397,15 +1505,21 @@ if __name__ == "__main__":
 #       ~aim_settle_s (1.0, stop between bursts so the coast finishes first)
 #       ~aim_look_s (4.0, hold still on the bearing -- size against the detector rate
 #         and ~n_confirm) ~aim_timeout_s (25.0, hard cap so a platform that will not
-#         turn still escalates instead of aiming forever)
-#       On the aim failing, the node publishes the object's (x,y) on ~goal_out_topic
-#       and the mission continues exactly as the unstaged one (arrive -> land/scan).
+#         turn still escalates/sweeps instead of aiming forever)
+#       ~aim_fail_to_scan (false): what a failed aim does. false = publish the object's
+#         (x,y) on ~goal_out_topic and fly onto it (the mission continues as the
+#         unstaged one, arrive -> land/scan). true = sweep the room in place for it
+#         (SCAN) and NEVER fly onto the imprecise coordinate -- for a small room whose
+#         catalogued position is not trusted enough to approach directly.
 #       NEEDS a pose with orientation: a localization source that publishes no
 #       quaternion cannot be aimed from, and the node says so and skips to the
 #       coordinate rather than turning down an unknown bearing.
 #   scan-at-goal sweep: ~scan_yaw_rate (0.4) ~scan_rotate_s (1.2) ~scan_pause_s (1.2)
 #       ~scan_direction (+1 CCW / -1 CW) ~scan_forward_speed (0.0 = in place)
 #       ~scan_forward_s (0.0) ~scan_bursts_before_move (8)
+#       ~scan_land_revolutions (0.0 = sweep forever): bound the sweep -- after this
+#         many full in-place turns unconfirmed, give up and land where we are (STOP +
+#         FINISH). The give-up terminal for a "look around the room, then land" mission.
 #   HUD overlay: ~publish_overlay (true) ~overlay_topic (/object_approach/overlay)
 #       ~viz_hz (10.0)  [sensor_msgs/Image bgr8; view with target_lock_viewer_node]
 #   thinking log (see thinking.py): ~thinking (true, false silences this node's

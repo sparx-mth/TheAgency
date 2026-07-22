@@ -124,7 +124,18 @@
   <arg name="min_vy"            default="0.06" />
   <arg name="min_wz_deg"        default="8.0" />
   <arg name="min_burst_ticks"   default="2" />                <!-- min consecutive ticks per motion -->
-  <arg name="brake_ticks"       default="1" />                <!-- opposite pulses to bleed off coast -->
+  <!-- Coast brake: opposite pulses after a burst ends (for vx, a BACKWARD pulse after
+       every forward approach burst). 0 = off (the shaper's own default) and the right
+       value here: on this airframe forward is delivered weakly while a full-magnitude
+       reverse brake is not, so a brake tick after each gait-chopped approach burst made
+       the drone net-REVERSE while locked on. The servo already bleeds its coast by
+       stopping early (its coast-aware deadbands plus the closure gait). -->
+  <arg name="brake_ticks"       default="0" />
+  <!-- HARD no-reverse guarantee: false = object_approach never commands backward vx
+       while it drives the drone (lock/approach, aim, scan, recovery), so a lock can
+       never drive it backward whatever the shaping does. true = allow reverse (only if
+       a mission genuinely needs it). -->
+  <arg name="allow_reverse"     default="false" />
 
   <arg name="force_release_frac" default="0.5" />
   <!-- Fixed pulse magnitudes = the working waypoint follower's proven vel_x/yaw_rate.
@@ -146,9 +157,19 @@
   <!-- ── Goal (arrival -> aim/scan; re-inject on give-up) ───────────── -->
   <arg name="goal_x"            default="0.0" />                 <!-- '' => no known goal -->
   <arg name="goal_y"            default="-2.0" />
-  <arg name="arrive_radius_m"   default="0.6" />
+  <arg name="arrive_radius_m"   default="0.6" />                <!-- how close counts as "arrived" -->
   <arg name="goal_in_topic"     default="/waypoint_nav/goal" />
   <arg name="goal_out_topic"    default="/waypoint_nav/goal" />
+
+  <!-- ── Arm gate: no blind visual take-over until in the room ───────── -->
+  <!-- The visual servo does NOT avoid obstacles, so it must not engage while the drone
+       is still flying the hard part of the route (door, corridor). Reaching this entry
+       point (within arm_point_radius_m) ARMS the take-over; latched on afterwards. Both
+       coords empty => armed from the start (legacy). Normally the pre-selection target,
+       which sits inside the room. The radius is forgiving: it is a fly-through. -->
+  <arg name="arm_point_x"        default="" />
+  <arg name="arm_point_y"        default="" />
+  <arg name="arm_point_radius_m" default="0.8" />
 
   <!-- ── Staged approach: stand off, AIM at the object, escalate if unseen ──
        The goal above is normally a VANTAGE POINT, not the object: a catalogued
@@ -172,7 +193,11 @@
   <arg name="aim_max_burst_s"    default="0.6" />    <!-- angle swept open-loop before re-measuring -->
   <arg name="aim_settle_s"       default="1.0" />    <!-- stop between bursts (let the coast finish) -->
   <arg name="aim_look_s"         default="4.0" />    <!-- hold still looking; size vs detector + n_confirm -->
-  <arg name="aim_timeout_s"      default="25.0" />   <!-- cap: a drone that will not turn still escalates -->
+  <arg name="aim_timeout_s"      default="25.0" />   <!-- cap: a drone that will not turn still escalates/sweeps -->
+  <!-- What a failed aim does: false publishes the object's (x,y) and flies onto it
+       (the legacy staged fallback); true sweeps the room in place for it (SCAN) and
+       NEVER flies onto the imprecise catalogued coordinate. -->
+  <arg name="aim_fail_to_scan"   default="false" />
 
   <!-- ── Scan-at-goal sweep (rotate with stops) ─────────────────────── -->
   <arg name="scan_yaw_rate"     default="0.4" />
@@ -181,6 +206,9 @@
   <arg name="scan_direction"    default="1.0" />              <!-- +1 CCW / -1 CW -->
   <arg name="scan_forward_speed" default="0.0" />             <!-- 0 => sweep in place -->
   <arg name="scan_forward_s"    default="0.0" />
+  <!-- Bound the sweep: after this many full in-place turns with no detection, give up
+       and land where we are. 0 = sweep forever (until found or the goal changes). -->
+  <arg name="scan_land_revolutions" default="0" />
 
   <!-- ── Recovery ───────────────────────────────────────────────────── -->
   <arg name="search_yaw_rate"   default="0.5" />
@@ -242,6 +270,7 @@
     <param name="min_wz_deg"        value="$(arg min_wz_deg)" />
     <param name="min_burst_ticks"   value="$(arg min_burst_ticks)" />
     <param name="brake_ticks"       value="$(arg brake_ticks)" />
+    <param name="allow_reverse"     value="$(arg allow_reverse)" />
     <param name="force_release_frac" value="$(arg force_release_frac)" />
     <param name="fixed_vx"          value="$(arg fixed_vx)" />
     <param name="fixed_vy"          value="$(arg fixed_vy)" />
@@ -255,6 +284,9 @@
     <param name="goal_out_topic"    value="$(arg goal_out_topic)" />
     <param name="goal_x"            value="$(arg goal_x)" if="$(eval arg('goal_x') != '')" />
     <param name="goal_y"            value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
+    <param name="arm_point_x"       value="$(arg arm_point_x)" if="$(eval arg('arm_point_x') != '')" />
+    <param name="arm_point_y"       value="$(arg arm_point_y)" if="$(eval arg('arm_point_y') != '')" />
+    <param name="arm_point_radius_m" value="$(arg arm_point_radius_m)" />
     <param name="object_position_topic" value="$(arg object_position_topic)" />
     <param name="aim_before_direct" value="$(arg aim_before_direct)" />
     <param name="aim_yaw_rate"      value="$(arg aim_yaw_rate)" />
@@ -265,12 +297,14 @@
     <param name="aim_settle_s"      value="$(arg aim_settle_s)" />
     <param name="aim_look_s"        value="$(arg aim_look_s)" />
     <param name="aim_timeout_s"     value="$(arg aim_timeout_s)" />
+    <param name="aim_fail_to_scan"  value="$(arg aim_fail_to_scan)" />
     <param name="scan_yaw_rate"     value="$(arg scan_yaw_rate)" />
     <param name="scan_rotate_s"     value="$(arg scan_rotate_s)" />
     <param name="scan_pause_s"      value="$(arg scan_pause_s)" />
     <param name="scan_direction"    value="$(arg scan_direction)" />
     <param name="scan_forward_speed" value="$(arg scan_forward_speed)" />
     <param name="scan_forward_s"    value="$(arg scan_forward_s)" />
+    <param name="scan_land_revolutions" value="$(arg scan_land_revolutions)" />
     <param name="search_yaw_rate"   value="$(arg search_yaw_rate)" />
     <param name="recover_timeout_s" value="$(arg recover_timeout_s)" />
     <param name="publish_overlay"   value="$(arg publish_overlay)" />
