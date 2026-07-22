@@ -51,7 +51,15 @@ class RoosterGroundTruthLocalization(Node):
         )
 
     def _on_state(self, msg: SpheraPawnState):
-        yaw = float(msg.rotation.yaw)
+        # Sphera/Unreal yaw is clockwise-positive (left-handed); ROS/FLU
+        # (and the z=sin(yaw/2),w=cos(yaw/2) encoding below) expects
+        # counter-clockwise-positive about +Z. Confirmed live: without this
+        # negation, FALCON's voxel map was built BEHIND the drone instead of
+        # in front of it -- the camera-forward direction derived from this
+        # pose was mirrored. This is a different bug from the already-fixed
+        # turn_left/turn_right manual-control sign in rooster_command_unit.py
+        # (that's the FCU's ManualControl.r axis; this is telemetry->pose).
+        yaw = -float(msg.rotation.yaw)
         pose = PoseStamped()
         pose.header = msg.header
         pose.pose.position.x = float(msg.location.x)
