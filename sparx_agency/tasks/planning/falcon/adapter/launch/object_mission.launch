@@ -329,6 +329,12 @@
   <arg name="lock_mode"       default="detector_tracker" />
   <arg name="closure_mode"    default="multi_axis" />
   <arg name="force_mode"      default="fixed" />
+  <!-- Forward power of the closure (visual servo). In force_mode:=fixed the forward
+       pulse magnitude IS fixed_vx; vx_max caps the servo's analog demand before the
+       shaper snaps it to that pulse. Raise for more push toward the object (the
+       airframe's forward ceiling is ~0.45 m/s). -->
+  <arg name="vx_max"          default="0.4" />
+  <arg name="fixed_vx"        default="0.4" />
   <!-- Acquisition radius: how close to the room-centre goal counts as "arrived" (the
        AIM trigger). Forgiving on purpose, as the room centre is a vantage point to look
        from, not a precise target to nail. -->
@@ -828,6 +834,8 @@
     <arg name="lock_mode"       value="$(arg lock_mode)" />
     <arg name="closure_mode"    value="$(arg closure_mode)" />
     <arg name="force_mode"      value="$(arg force_mode)" />
+    <arg name="vx_max"          value="$(arg vx_max)" />
+    <arg name="fixed_vx"        value="$(arg fixed_vx)" />
     <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />
     <arg name="target_range_m"  value="$(arg target_range_m)" />
     <arg name="land_range_m"       value="$(arg land_range_m)" />

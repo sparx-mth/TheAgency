@@ -116,6 +116,12 @@ launch:
   lock_mode: detector_tracker # detector_tracker = detector seeds a tracker | detector = box alone
   closure_mode: multi_axis    # how it closes the distance: multi_axis | waypoint
   force_mode: fixed           # flight-command shaping: fixed | snap | none
+  # Forward power while closing on the object. In force_mode: fixed the forward pulse
+  # magnitude IS fixed_vx (m/s) -- raise it for more push; vx_max caps the servo's analog
+  # demand before shaping. Ceiling is the airframe's ~0.45 m/s forward (max_speed_xy caps
+  # the pulse at 0.4 by default, so raise that too if you go past 0.4).
+  fixed_vx: 0.4               # m/s forward pulse while closing (was 0.3)
+  vx_max: 0.4                 # m/s cap on the servo's forward demand (was 0.35)
 
   # -- Landing: how the mission ends -----------------------------------------------------------------
   # 1. VISUAL land (the success) -- the object is confirmed and reached within land_range_m.
