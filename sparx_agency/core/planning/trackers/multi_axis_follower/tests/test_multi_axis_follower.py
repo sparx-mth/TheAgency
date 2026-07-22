@@ -329,6 +329,26 @@ def test_predict_collision_flag():
     assert res3.collides is True            # occupied at the start pose
 
 
+def test_turn_coordination_confines_translation_to_a_forward_cone():
+    """While the yaw axis is active: no backward, at least the floor forward,
+    and the lateral capped inside the sideslip cone. A quiet yaw passes the
+    translation through untouched."""
+    cone = math.radians(45.0)   # tan = 1: the cap equals the forward speed
+    # Quiet yaw: nothing is touched, backward included.
+    assert alloc.turn_coordination(-0.1, 0.2, 0.01, 0.05, 0.08, cone) == (-0.1, 0.2)
+    # Active yaw: backward becomes the floor, the roll is capped at tan*vx.
+    vx, vy = alloc.turn_coordination(-0.1, 0.2, 0.3, 0.05, 0.08, cone)
+    assert vx == 0.08
+    assert abs(vy - 0.08) < 1e-9
+    # No floor: never backward, and with vx 0 the cone closes fully.
+    vx, vy = alloc.turn_coordination(-0.1, -0.2, 0.3, 0.05, 0.0, cone)
+    assert vx == 0.0 and vy == 0.0
+    # A forward speed above the floor is left alone; only the roll is shaped.
+    vx, vy = alloc.turn_coordination(0.3, -0.4, -0.3, 0.05, 0.08, cone)
+    assert vx == 0.3
+    assert abs(vy - (-0.3)) < 1e-9
+
+
 if __name__ == "__main__":
     import sys
     mod = sys.modules[__name__]
