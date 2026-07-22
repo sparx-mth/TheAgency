@@ -67,5 +67,11 @@ class FollowerCommand:
         return self.command.x
 
     @property
+    def vy(self) -> float:
+        """Lateral velocity command (m/s, +left). Always 0 for the one-axis
+        follower; carries the ROLL correction when a roll-assist layer wraps it."""
+        return self.command.y
+
+    @property
     def wz(self) -> float:
         return self.command.yaw_rate

@@ -74,7 +74,11 @@ from sparx_agency.core.localization.temporal_transform_buffer import (
     MultiSourceTemporalMatcher, EXACT, NEAREST)
 from sparx_agency.core.mapping.depth_fusion_gate import (
     DepthFusionGate, FROZEN_ROTATING)
-from sparx_agency.core.mapping.sensor_freeze_policy import SensorFreezePolicy
+from sparx_agency.core.mapping.sensor_freeze_policy import (
+    SensorFreezePolicy,
+    freeze_mode_names,
+)
+from thinking import Thinker
 
 
 def _parse_topics(raw, fallback):
@@ -85,6 +89,34 @@ def _parse_topics(raw, fallback):
              else [s.strip() for s in str(raw).split(",")])
     items = [s for s in items if s]
     return items or [fallback]
+
+
+def _mask_edge_columns(depth, frac):
+    """Zero the outer ``frac`` fraction of columns on the left AND right.
+
+    The left/right edges of the monocular-depth image are the least reliable
+    (lens distortion + the depth model extrapolating past the well-conditioned
+    centre), and the bad edge pixels project into spurious voxels at the FOV
+    limits. FALCON's depthToPointcloud skips pixels whose depth is exactly 0.0,
+    so zeroing the border columns drops them from the voxel map WITHOUT changing
+    the image dimensions -- the camera intrinsics FALCON reads from rosparam
+    stay valid (a real crop would shift cx and break the projection).
+
+    Args:
+        depth: (H, W) float32 depth image in metres. Mutated in place.
+        frac: Fraction of the width to blank on EACH side, in [0, 0.5).
+    Returns:
+        The same array, for chaining.
+    """
+    if frac <= 0.0:
+        return depth
+    w = depth.shape[1]
+    n = int(round(w * frac))
+    n = min(n, (w - 1) // 2)   # never blank the whole image
+    if n > 0:
+        depth[:, :n] = 0.0
+        depth[:, -n:] = 0.0
+    return depth
 
 
 class _PendingDepth:
@@ -120,6 +152,14 @@ class MappingSyncNode:
                                else "/xtend/depth_m")
         self.depth_topic = G("~depth_topic", default_depth_topic)
         self.depth_frame_id = G("~depth_frame_id", "camera")
+        # Blank the outer fraction of columns on each side of the depth image
+        # before FALCON fuses it: the left/right edges are the least reliable
+        # part of a monocular-depth frame and leak spurious FOV-limit voxels.
+        # 0.05 = drop 5% per side; 0.0 disables. Must be < 0.5.
+        self.edge_mask_frac = float(G("~edge_mask_frac", 0.05))
+        if not 0.0 <= self.edge_mask_frac < 0.5:
+            raise ValueError("~edge_mask_frac must be in [0.0, 0.5), got %r"
+                             % self.edge_mask_frac)
         self.out_pose_topic = G("~out_pose_topic", "/map_ros/pose")
         self.out_depth_topic = G("~out_depth_topic", "/map_ros/depth")
         self.world_frame = G("~world_frame", "world")
@@ -137,6 +177,12 @@ class MappingSyncNode:
         # clock. turning_mode_name is the demo-mode string that means "freeze".
         self.demo_mode_topic = G("~demo_mode_topic", "/xtend/demo_mode")
         self.turning_mode_name = str(G("~turning_mode_name", "turning")).strip().lower()
+        # Modes that mean freeze. Beyond turning_mode_name this picks up the
+        # lost-localization recovery, which manoeuvres with no pose at all -- see
+        # core.mapping.sensor_freeze_policy.DEFAULT_EXTRA_FREEZE_MODES.
+        # ~extra_freeze_modes is a comma-separated override; '' = turning only.
+        self.freeze_modes = freeze_mode_names(self.turning_mode_name,
+                                              G("~extra_freeze_modes", None))
         self.gate = DepthFusionGate(
             policy=SensorFreezePolicy(
                 freeze_on_turning_mode=bool(G("~freeze_on_turning_mode", True))),
@@ -164,6 +210,8 @@ class MappingSyncNode:
                                [-1.0, 0.0, 0.0, cam[1]],
                                [0.0, -1.0, 0.0, cam[2]],
                                [0.0, 0.0, 0.0, 1.0]])
+
+        self.thinker = Thinker("mapping_sync")
 
         self._lock = threading.Lock()
         self._matcher = MultiSourceTemporalMatcher(self.nsrc, self.buffer_sec)
@@ -195,6 +243,13 @@ class MappingSyncNode:
         rospy.Timer(rospy.Duration(0.05), self._sweep_timer)
         rospy.Timer(rospy.Duration(2.0), self._heartbeat)
         self._banner(cam)
+        if self._warming_up:
+            # One-shot: warm-up is usually over within the first heartbeat, so the
+            # operator would never see it narrated from the heartbeat's state.
+            self.thinker.say("Warming up: seeding the map from the first %d "
+                             "depth/pose pairs before I honour any freeze"
+                             % self.warmup_emits,
+                             category="map", key="map_warmup")
 
     # -- localization in (one callback per source via callback_args) ----------
     def _pose_cb(self, msg, src):
@@ -234,7 +289,7 @@ class MappingSyncNode:
             # Arm/clear the freeze in the capture clock: at the turn->resume edge
             # the watermark becomes the newest pose stamp, so every frame
             # captured during the turn (stamp <= now) is rejected on resume.
-            self.gate.note_mode(mode == self.turning_mode_name,
+            self.gate.note_mode(mode in self.freeze_modes,
                                 now=self._newest_pose_stamp)
 
     # -- depth frame-path in (load -> Image -> _depth_cb) ---------------------
@@ -265,6 +320,7 @@ class MappingSyncNode:
             raise ValueError("depth %s has shape %r; expected HxW"
                              % (parsed.path, arr.shape))
         depth = np.ascontiguousarray(arr, dtype=np.float32)
+        _mask_edge_columns(depth, self.edge_mask_frac)
         msg = Image()
         msg.header.stamp = rospy.Time(parsed.sec, parsed.nsec)
         msg.header.frame_id = self.depth_frame_id
@@ -347,11 +403,24 @@ class MappingSyncNode:
 
     def _record_drop_locked(self, td):
         dt = self._matcher.nearest_dt(td)              # classify the drop
+        # The only place in the stack that tells a CLOCK SKEW apart from a real
+        # pose DROPOUT: every other node can see only "no pose". Narrate the two
+        # as separate diagnoses -- they need opposite fixes -- and never mention
+        # the measured dt, which would change on every drop and defeat the gate.
+        # The consequence ("holding") is the waypoint_follower's line, not ours.
         if dt is not None and dt > self.clock_warn_sec:
             self._n_drop_far += 1                       # poses exist but FAR -> clocks
             self._last_far = dt
+            self.thinker.say("Dropping depth frames: poses are arriving but their "
+                             "timestamps are far from the frames -- depth and "
+                             "localization are on different clocks",
+                             category="sensor", level="warn", repeat_after_s=5.0)
         else:
             self._n_drop_empty += 1                     # nothing near -> real dropout
+            self.thinker.say("Dropping depth frames: no pose anywhere near their "
+                             "capture time -- the localization pose stream has gone "
+                             "silent", category="sensor", level="warn",
+                             repeat_after_s=5.0)
 
     def _build_emit_locked(self, depth_msg, T_body, kind, src):
         if kind == EXACT:
@@ -397,6 +466,9 @@ class MappingSyncNode:
                 rospy.loginfo("mapping_sync: warm-up complete (%d voxel pairs "
                               "fused) -- forward-flight baseline set; demo_mode "
                               "freeze now active", self._n_warmup)
+                self.thinker.say("Warm-up done: the map is seeded, so from now on "
+                                 "I stop mapping while the drone turns in place",
+                                 category="map", key="map_warmup")
 
     # -- timers ---------------------------------------------------------------
     def _sweep_timer(self, _evt):
@@ -435,6 +507,17 @@ class MappingSyncNode:
                       src_str, n_depth, emit, ex, ne, it,
                       pend, d_load, d_empty, d_far, d_thr, d_frozen, d_stale,
                       gate_state, pose_age)
+        # Narrate the gate state the heartbeat has already classified. RESUME_WAIT
+        # is this node's alone -- nothing else can tell the operator why the map
+        # stays still for a moment after a turn has visibly ended. FROZEN is left
+        # to whoever commands the turn; FUSING only closes the resume story.
+        if gate_state == "RESUME_WAIT":
+            self.thinker.say("Turn is over -- not mapping yet, I am waiting for a "
+                             "depth frame captured after it so the turn does not "
+                             "smear the map", category="map", key="map_gate")
+        elif gate_state == "FUSING":
+            self.thinker.say("Mapping: pairing each depth frame with the pose from "
+                             "the same instant", category="map", key="map_gate")
         if self.nsrc > 1 and ndis > 0:
             rospy.logwarn_throttle(5.0, "mapping_sync: %d co-temporal frames where "
                                    "sources disagree by up to %.2fm -- they may be in "
@@ -509,11 +592,16 @@ if __name__ == "__main__":
 #       topic -> ~depth_topic (/xtend/depth_m; raw sensor_msgs/Image, sim/bag)
 #       ~depth_frame_id (camera)  ~out_pose_topic (/map_ros/pose)
 #       ~out_depth_topic (/map_ros/depth)  ~world_frame (world)
+#       ~edge_mask_frac (0.05) blank this fraction of columns on EACH side of the
+#         depth image (unreliable monocular edges -> spurious FOV-limit voxels);
+#         zeroed pixels are skipped by FALCON, dims unchanged. 0 = off, must be <0.5
 #   timing: ~sync_tolerance (0.05) ~max_interp_gap (0.12, 0=off)
 #       ~match_hold_sec (0.5) ~pose_buffer_sec (5.0) ~depth_min_dt (0.0, off)
 #   freeze: ~demo_mode_topic (/xtend/demo_mode) ~turning_mode_name (turning)
 #       ~freeze_on_turning_mode (true) ~resume_settle_sec (0.0)
 #   diagnostics: ~clock_warn_sec (0.5) ~disagree_warn_m (0.30)
+#   narration (see thinking.Thinker): ~thinking (true, false silences this node)
+#       ~thinking_topic (/nav/thinking)  ~thinking_echo (true, mirror to rosout)
 #   frame (mirror falcon_adapter): ~pose_is_camera_frame (false)
 #       ~cam_offset_x/y/z (0.2/0.0/0.0)
 # ============================================================================

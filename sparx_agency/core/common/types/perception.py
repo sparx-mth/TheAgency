@@ -95,3 +95,74 @@ class Detection3D:
     xyz_world: Tuple[float, float, float]
     xyz_cam: Optional[Tuple[float, float, float]] = None
 
+
+@dataclass(frozen=True)
+class Track2D:
+    """One frame of a tracked target's 2D image state.
+
+    Produced by a visual tracker (e.g. the Lucas-Kanade box tracker) and consumed
+    by the visual-servo control law. Unlike :class:`Detection2D` (a single
+    detector output) a track is *persistent* across frames and carries validity,
+    image-plane velocity, and a ``predicted`` flag so a controller can tell a
+    measured box from one carried by a motion model through a brief dropout.
+
+    The box is stored subpixel (float) ``x1,y1,x2,y2`` in image pixels, origin
+    top-left, ``+x`` right, ``+y`` down.
+
+    Attributes:
+        label: Class label of the tracked object.
+        bbox_xyxy: ``(x1, y1, x2, y2)`` in pixels (float, subpixel).
+        frame_w: Image width (px) the box lives in.
+        frame_h: Image height (px) the box lives in.
+        valid: False when the tracker has lost lock this frame (box is stale).
+        n_matches: Surviving tracked features (LK) that produced the box; 0 when
+            the box is predicted or freshly seeded.
+        score: Detector confidence of the detection that last (re)seeded the track.
+        velocity_px: Bounding-box centre velocity ``(vx, vy)`` in px/s, image frame.
+        predicted: True when ``bbox_xyxy`` came from the motion model rather than
+            a measurement (i.e. the object was not directly observed this frame).
+        age_s: Seconds since the track was first seeded.
+    """
+
+    label: str
+    bbox_xyxy: Tuple[float, float, float, float]
+    frame_w: int
+    frame_h: int
+    valid: bool = True
+    n_matches: int = 0
+    score: float = 0.0
+    velocity_px: Tuple[float, float] = (0.0, 0.0)
+    predicted: bool = False
+    age_s: float = 0.0
+
+    @property
+    def cx(self) -> float:
+        """Box centre x (px)."""
+        return 0.5 * (self.bbox_xyxy[0] + self.bbox_xyxy[2])
+
+    @property
+    def cy(self) -> float:
+        """Box centre y (px)."""
+        return 0.5 * (self.bbox_xyxy[1] + self.bbox_xyxy[3])
+
+    @property
+    def w(self) -> float:
+        """Box width (px), >= 0."""
+        return max(0.0, self.bbox_xyxy[2] - self.bbox_xyxy[0])
+
+    @property
+    def h(self) -> float:
+        """Box height (px), >= 0."""
+        return max(0.0, self.bbox_xyxy[3] - self.bbox_xyxy[1])
+
+    @property
+    def area(self) -> float:
+        """Box area (px^2)."""
+        return self.w * self.h
+
+    @property
+    def area_frac(self) -> float:
+        """Box area as a fraction of the whole image (a monotone proximity proxy)."""
+        denom = float(max(1, self.frame_w) * max(1, self.frame_h))
+        return self.area / denom
+

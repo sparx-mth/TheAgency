@@ -1,0 +1,46 @@
+# NavDP fine-tune configuration. Keep the DDPM scheduler untouched (10 steps,
+# squaredcos_cap_v2, epsilon, clip_sample) -- only the weights/LRs below change.
+model: navdp
+
+data:
+  recording: null          # path to a flight recording directory (REQUIRED)
+  labels_dir: null         # optional precomputed labels (else generated online)
+  memory_size: 8
+  goal_lookahead: 24
+  navdp_horizon: 24
+  seed_from_flight: true
+
+augment:                   # viewpoint/height gap-closer (recommended ON)
+  enabled: true
+  pitch_deg_range: [-8.0, 8.0]
+  depth_scale_range: [0.85, 1.15]
+  depth_offset_m: 0.15
+  brightness_range: [0.8, 1.2]
+
+finetune:
+  train_depth_encoder: false   # stage-1: false (head only); stage-2/PEFT: true
+  lr_head: 1.0e-4
+  lr_backbone: 1.0e-5
+
+loss:
+  use_critic: true
+  critic_weight: 1.0
+  d_safe_m: 0.5
+  progress_alpha: 0.1
+  esdf:
+    margin_m: 0.35
+    weight: 0.5
+    clamp_grad_m: 4.0
+
+optim:
+  epochs: 30
+  batch_size: 16
+  warmup_epochs: 4
+  weight_decay: 0.01
+  ema_decay: 0.999
+  l2sp_weight: 1.0e-3
+  grad_clip: 1.0
+
+checkpoint:
+  out_dir: runs/navdp_finetune
+  save_every: 1

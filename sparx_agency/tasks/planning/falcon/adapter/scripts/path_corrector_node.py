@@ -54,6 +54,7 @@ from sparx_agency.core.planning.planners.common.utils_2d import decimate_min_spa
 from sparx_agency.core.planning.safety.path_correction import (
     EsdfCorrectorConfig, PotentialFieldCorrectorConfig, PotentialFieldPathCorrector,
     make_path_corrector)
+from thinking import Thinker
 
 # nav_msgs/OccupancyGrid int8 convention published by bev_publisher_node.
 BEV_VALUES = OccupancyValues(free=0, occupied=100, unknown=-1)
@@ -119,6 +120,11 @@ class PathCorrectorNode:
 
         self.grid = None          # OccupancyGrid2D (latest BEV)
         self.n_corrected = 0
+
+        # Narrate only what this node DECIDES about a path. A republished path is
+        # not news (every stage republishes); an actual correction -- or a failure
+        # to make one -- is.
+        self.thinker = Thinker("path_corrector")
 
         self.pub_path = rospy.Publisher(self.path_topic, Path, queue_size=1, latch=True)
         self.pub_raw = rospy.Publisher(self.raw_path_topic, Path, queue_size=1, latch=True)
@@ -212,6 +218,11 @@ class PathCorrectorNode:
             rospy.logwarn_throttle(
                 5.0, "path_corrector: no BEV yet -- passing the input path through "
                 "on %s uncorrected", self.path_topic)
+            # Persistent trouble: restate it so the operator knows the path they
+            # see is still unchecked, not that the log stalled.
+            self.thinker.say("No map yet -- flying the planner's path without a "
+                             "safety check", category="plan", level="warn",
+                             repeat_after_s=5.0)
             self._publish(pts, corrected=False)
             return
 
@@ -232,12 +243,18 @@ class PathCorrectorNode:
                 5.0, "path_corrector: %s recentred %d/%d waypoint(s) (input %d -> %d)",
                 self.corrector_name, result.num_moved, result.num_points,
                 len(pts), len(cond))
+            if result.num_moved > 0:
+                self.thinker.say("Nudged %d waypoints away from the walls"
+                                 % result.num_moved, category="plan")
             if self._apf_debug:
                 self._log_debug(cond, out)
         except Exception as exc:                          # noqa: BLE001 -- stay flying
             rospy.logwarn_throttle(
                 5.0, "path_corrector: correction failed (%s) -- publishing the "
                 "(uncorrected) input path on %s", exc, self.path_topic)
+            self.thinker.say("Could not correct this path (%s) -- flying the "
+                             "planner's path uncorrected" % exc,
+                             category="plan", level="warn", repeat_after_s=5.0)
             self._publish(cond, corrected=False)
             return
 
@@ -499,4 +516,6 @@ if __name__ == "__main__":
 #       ~force_arrow_scale (1.0) ~force_arrow_z (0.0)
 #       ~publish_force_field (true; coarse gold F_rep field over free cells)
 #       ~force_field_stride (4; field-arrow spacing in cells)
+#   narration (inherited from thinking.Thinker): ~thinking (true; false silences
+#       this node's thoughts) ~thinking_topic (/nav/thinking) ~thinking_echo (true)
 # ============================================================================

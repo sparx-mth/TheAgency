@@ -56,7 +56,6 @@ cover/
 *.pot
 
 # Django stuff:
-*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -180,7 +179,12 @@ gz-sim-environment
 ROBOTICAN/examples
 ORB-SLAM3-ROS2-Docker
 
-*.png
+# NOTE: no bare `*.png` here. The repo commits images routinely (1200+ tracked
+# diagrams, calibration shots, README figures), which survived a former bare rule
+# only because git ignores the ignore rule for already-tracked files. All it did
+# was silently swallow NEW ones -- docs/diagrams/launch_demo.drawio.png is still
+# untracked because of it. Generated images are ignored by their output dir
+# instead (isaac_sim/, xtend_capture_out/, depth_optical/ ... below).
 sparx_agency/build/
 sparx_agency/log/
 sparx_agency/install/
@@ -193,23 +197,26 @@ requirements/active.txt
 # ROS2 Bags
 rosbag2_*/
 *.mcap
-*.yaml
+# Bag metadata by NAME, never a bare `*.yaml`. A bare rule matched every config in
+# the repo -- maps, mission presets, camera calibrations, bridge configs. The 42
+# tracked ones survived only because git ignores the ignore rule for a file that is
+# already tracked, so the rule silently swallowed exactly one thing: any config a
+# developer ADDED. That failure is invisible locally (the file is right there and
+# the node runs) and only surfaces as a missing file on the drone.
+metadata.yaml
+
+# Runtime logs. Also deliberately not bare: `*.log` would swallow a log someone
+# means to commit (a captured failure, a test fixture) the same silent way. Ignore
+# where logs are PRODUCED, so a new one has to be listed here -- visibly.
+**/logs/
+sparx_agency/tasks/planning/falcon/bridge/bridge.log
 
 sparx_agency/tasks/common/bearings_placeholder.csv
 sparx_agency/tasks/localization/data/
 sparx_agency/tasks/localization/ros2/depth_optical/
 /graphify-out/
 /.claude/
-
-sparx_agency/tasks/localization/ros2/depth_optical/bags_files/*
-/graphify-out/
-/.claude/
-
-/graphify-out/
-/.claude/
-
-/graphify-out/
-/.claude/
+CLAUDE.md
 
 
 # NavDP TensorRT build artifacts (large, per-machine, SM/TRT-version locked).
@@ -223,3 +230,14 @@ sparx_agency/tasks/planning/navdp/engines/
 *.plan
 *.ckpt
 *.calib
+
+# Model weights are downloaded/built on the target, never committed: the YOLO(-World)
+# and other checkpoints (e.g. yolov8s-worldv2.pt, auto-downloaded by ultralytics into
+# the CWD on first run) and PyTorch state dicts.
+*.pt
+*.pth
+*.weights
+/sparx_agency/theagency_venv/
+
+# FALCON flight logs (thought journal); see tasks/planning/falcon/run_falcon.sh
+sparx_agency/tasks/planning/falcon/logs/

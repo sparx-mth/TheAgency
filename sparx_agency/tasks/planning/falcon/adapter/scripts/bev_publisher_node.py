@@ -31,6 +31,11 @@ class BevPublisherNode:
         G = rospy.get_param
 
         self.out_topic = G("~out_topic", "/falcon/bev_2d")
+        # Companion per-cell OCCUPIED confidence grid (int8 0..100 = temporal
+        # evidence / t_max). Published co-registered with the BEV so the planner
+        # can gate an obstacle reroute on a *confident* obstacle, not a single
+        # low-confidence depth speckle. Empty when the temporal filter is off.
+        self.conf_topic = G("~conf_topic", "/falcon/bev_2d_conf")
         self.occ_topic = G("~occ_topic", "/voxel_mapping/occupancy_grid_occupied")
         self.free_topic = G("~free_topic", "/voxel_mapping/occupancy_grid_free")
         self.publish_hz = float(G("~publish_hz", 10.0))
@@ -62,6 +67,9 @@ class BevPublisherNode:
             confirm_3d=bool(G("~confirm_3d", True)),
             neighbors_3d=int(G("~neighbors_3d", 6)),
             min_occ_neighbors_3d=int(G("~min_occ_neighbors_3d", 1)),
+            min_wall_run=int(G("~min_wall_run", 0)),
+            min_component_cells=int(G("~min_component_cells", 0)),
+            component_connectivity=int(G("~component_connectivity", 8)),
             protect_openings=bool(G("~protect_openings", True)),
             door_band_m=float(G("~door_band_m", 0.60)),
             door_free_voxels=int(G("~door_free_voxels", 2)),
@@ -88,11 +96,14 @@ class BevPublisherNode:
         self._occ = np.empty((0, 3), np.float32)
         self._free = np.empty((0, 3), np.float32)
         self._grid = None
+        self._conf = None            # (H,W) float [0,1] from the projector, or None
         self._dirty = True
         self._hb = dict(occ=0, free=0, pub=0)
 
         self.pub = rospy.Publisher(self.out_topic, OccupancyGrid,
                                    queue_size=1, latch=True)
+        self.pub_conf = rospy.Publisher(self.conf_topic, OccupancyGrid,
+                                        queue_size=1, latch=True)
         rospy.Subscriber(self.occ_topic, PointCloud2, self._occ_cb, queue_size=2)
         rospy.Subscriber(self.free_topic, PointCloud2, self._free_cb, queue_size=2)
         rospy.Timer(rospy.Duration(1.0 / self.publish_hz), self._tick)
@@ -154,11 +165,14 @@ class BevPublisherNode:
             self._dirty = False
             _, self._grid = self.projector.project(
                 self._occ, self._free, force_occ=self.force_occ)
+            self._conf = self.projector.last_confidence
             self._publish()
         elif not self.skip_unchanged:
             self._publish()
 
-    def _publish(self):
+    def _grid_msg(self, data_int8):
+        """Build a latched nav_msgs/OccupancyGrid from an (H,W) int8 array on the
+        current lattice (shared by the BEV grid and its confidence companion)."""
         s = self.spec
         m = OccupancyGrid()
         m.header.stamp = rospy.Time.now()
@@ -169,18 +183,27 @@ class BevPublisherNode:
         m.info.origin.position.x = s.origin_x
         m.info.origin.position.y = s.origin_y
         m.info.origin.orientation.w = 1.0
-        m.data = self._grid.flatten().tolist()
-        self.pub.publish(m)
+        m.data = data_int8.flatten().tolist()
+        return m
+
+    def _publish(self):
+        self.pub.publish(self._grid_msg(self._grid))
         self._hb["pub"] += 1
+        # Companion confidence grid (int8 0..100 = evidence / t_max). Only when the
+        # temporal filter is on; consumers that lack it fall back to a frame count.
+        if self._conf is not None:
+            conf8 = np.clip(np.rint(self._conf * 100.0), 0, 100).astype(np.int8)
+            self.pub_conf.publish(self._grid_msg(conf8))
 
     def _heartbeat(self, _evt):
         st = self.projector.last_stats
         rospy.loginfo("bev hb  in occ=%d free=%d  pub=%d  |  voxels raw=%d conf=%d  "
-                      "|  grid occ=%d free=%d unk=%d open=%d pend=%d fill=%d",
+                      "|  grid occ=%d free=%d unk=%d open=%d pend=%d fill=%d speck=%d",
                       self._hb["occ"], self._hb["free"], self._hb["pub"],
                       st.get("raw", 0), st.get("confirmed", 0), st.get("occ", 0),
                       st.get("free", 0), st.get("unknown", 0),
-                      st.get("openings", 0), st.get("pending", 0), st.get("fill", 0))
+                      st.get("openings", 0), st.get("pending", 0), st.get("fill", 0),
+                      st.get("speck", 0))
         # Loud warning when most occupied points fall outside the BEV bounds
         # (a strong hint the bbox / map_size is wrong for this environment).
         if self._occ.shape[0]:
@@ -220,6 +243,8 @@ class BevPublisherNode:
         L(" in  occ =%s", self.occ_topic)
         L(" in  free=%s", self.free_topic)
         L(" out     =%s  @%.1fHz latched", self.out_topic, self.publish_hz)
+        L(" conf    =%s  (0..100 = evidence/t_max; %s)", self.conf_topic,
+          "on" if c.temporal_filter else "off -- temporal filter disabled")
         L("=" * 64)
 
 
@@ -243,12 +268,21 @@ if __name__ == "__main__":
 #   IO / runtime
 #     ~out_topic (/falcon/bev_2d)  ~occ_topic (/voxel_mapping/occupancy_grid_occupied)
 #     ~free_topic (/voxel_mapping/occupancy_grid_free)  ~frame_id (world)
+#     ~conf_topic (/falcon/bev_2d_conf; companion OccupancyGrid, int8 0..100 =
+#       temporal evidence / t_max, co-registered with ~out_topic. Empty when the
+#       temporal filter is off. The A* planner reads it to reroute only on a
+#       CONFIDENT on-route obstacle, not a single low-confidence depth speckle.)
 #     ~publish_hz (10.0)  ~always_recompute (false)  ~skip_unchanged_publish (true)
 #   bounds: ~bbox_{xmin,xmax,ymin,ymax} (launch) > /map_config/map_size/* (+~bbox_margin_m, 1.0) > +-12
 #   column/height: ~z_floor (.30) ~z_ceil (2.20) ~z_peak (1.00)
 #     ~weight_profile (triangular) ~weight_sigma (.50) ~voxel_size_m (=resolution)
 #   occupancy: ~resolution (.15) ~occ_weight_thresh (1.2) ~occ_conf_full (3.0) ~min_occ_voxels (2) ~min_free_voxels (1)
 #   3D confirm: ~confirm_3d (true) ~neighbors_3d (6) ~min_occ_neighbors_3d (1)
+#   speck removal (kills a phantom in a turn opening the drone can never re-observe
+#     free): ~min_wall_run (0=off) drop OCC components with no straight run of N
+#     consecutive cells (a wall is a line; a 2x2 clump / L-tromino is not);
+#     ~min_component_cells (0=off) secondary raw-area gate; ~component_connectivity
+#     (8) 4|8 for labelling
 #   doors: ~protect_openings (true) ~door_band_m (.60) ~door_free_voxels (2) ~door_occ_tol (0)
 #   walls: ~wall_fill_mode (directional) ~wall_fill_neighbors (5) ~wall_fill_iters (1)
 #   temporal confirm (ON by default): ~temporal_filter (true) ~t_inc (1) ~t_dec (1) ~t_max (5) ~t_on (2) ~t_off (0.5)

@@ -9,7 +9,7 @@ Body frame is REP-103: ``+forward (vx)``, ``+left (vy)``, ``+CCW (wz)``.
 """
 from __future__ import annotations
 
-from math import atan2, copysign, cos, hypot, sin
+from math import atan2, copysign, cos, hypot, sin, tan
 from typing import Tuple
 
 from sparx_agency.core.common.types import normalize_angle
@@ -116,6 +116,43 @@ def allocate_translation(
         vy = lateral_max
     elif vy < -lateral_max:
         vy = -lateral_max
+    return vx, vy
+
+
+def turn_coordination(
+    vx: float, vy: float, wz: float, yaw_active: float,
+    forward_floor: float, side_cone: float,
+) -> Tuple[float, float]:
+    """Shape the translation vector so an ACTIVE yaw keeps its authority.
+
+    Measured on the deployed airframe (nav_debug 2026-07-21): the delivered
+    rotation depends on the direction of the progress vector. Riding a small
+    FORWARD speed, a commanded right yaw turned right immediately; the same yaw
+    riding a backward station-keeping correction degraded and then reversed —
+    the drone rotated LEFT against a saturated right-yaw command. YAW+forward,
+    YAW+ROLL and YAW+backward are three different manoeuvres, and only the
+    first is trustworthy. So while the yaw axis is genuinely active
+    (``|wz| >= yaw_active``) the translation is confined to a forward cone:
+
+      * ``vx`` is floored at ``forward_floor`` (>= 0) — never backward while
+        yawing, and on an airframe whose in-place yaw barely bites, at least
+        the forward speed the rotation needs to grip.
+      * ``|vy|`` is capped at ``tan(side_cone) * vx`` — roll may season the
+        progress vector but never dominate it.
+
+    A backward or sideways correction suppressed here is deferred, not lost:
+    the position error it was serving is still open once the yaw quietens, and
+    the station-keeping loops correct it then, from a heading that lets them.
+    Below ``yaw_active`` (or with ``side_cone <= 0``) translation passes
+    through untouched — without a real rotation there is no coupling to
+    respect.
+    """
+    if abs(wz) < yaw_active:
+        return vx, vy
+    if vx < forward_floor:
+        vx = forward_floor
+    if side_cone > 0.0:
+        vy = saturate(vy, tan(side_cone) * max(vx, 0.0))
     return vx, vy
 
 

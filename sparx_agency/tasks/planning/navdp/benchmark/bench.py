@@ -101,7 +101,10 @@ def gen_scenarios(num, seed=0):
 def _chosen(result):
     """(executed trajectory, argmax index, critic.max, chosen-sample zeroed?)."""
     all_traj, critic, positive, _ = result
-    idx = int(np.argmax(critic[0]))
+    # Use the SAME ordering that produced the executed trajectory (positive[0,0]
+    # comes from argsort(-critic)), so the flip/zero checks describe the sample
+    # the drone would actually fly, even on an exact critic tie.
+    idx = int(np.argsort(-critic[0])[0])
     length = float(np.linalg.norm(all_traj[0, idx, -1, 0:2]))
     return positive[0, 0], idx, float(critic[0].max()), length < 0.5
 
@@ -132,6 +135,24 @@ def fps(policy, scenario, warmup=3, iters=20):
     t0 = time.perf_counter()
     for _ in range(iters):
         policy.predict_pointgoal_action(goal, img, dep, init_noise=init_noise, variance_noises=var)
+    dt = (time.perf_counter() - t0) / iters
+    return {"latency_ms": dt * 1000.0, "hz": 1.0 / dt}
+
+
+def fps_ref(ref, scenario, warmup=2, iters=8):
+    """End-to-end Hz of the FP32 torch reference (the non-TRT model), same op
+    point as :func:`fps`. Times the full ``encoder + 10x denoise + critic`` run on
+    the same device; syncs CUDA so the GPU work is actually captured."""
+    goal, img, dep, init_noise, var = scenario
+    for _ in range(warmup):
+        ref.run(goal, img, dep, init_noise, var)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        ref.run(goal, img, dep, init_noise, var)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     dt = (time.perf_counter() - t0) / iters
     return {"latency_ms": dt * 1000.0, "hz": 1.0 / dt}
 
@@ -177,29 +198,42 @@ def main():
     policy_torch = build_navdp_policy(args.ckpt, navdp_repo=args.navdp_repo, device=device)
     ref = TorchReference(policy_torch, npz, device)
     scenarios = gen_scenarios(args.num_scenarios)
+    torch_perf = fps_ref(ref, scenarios[0])
+    print("[bench] non-TRT torch reference: %.2f Hz (%.1f ms/decision)"
+          % (torch_perf["hz"], torch_perf["latency_ms"]))
 
     rows = []
-    for precision in ("fp16", "int8"):
-        if all((engine_dir / ("%s.%s.engine" % (k, precision))).exists()
-               for k in build_engine.ENGINE_KEYS):
-            print("[bench] evaluating", precision)
-            rows.append(evaluate(precision, engine_dir, npz, ref, scenarios, args.stop_threshold))
-
-    if not rows:
-        raise RuntimeError("No engines found in %s" % engine_dir)
-    passing = [r for r in rows if r["passed"]]
-    if not passing:
-        raise RuntimeError("No precision passed the accuracy gate: %s" % rows)
+    try:
+        for precision in ("fp16", "int8"):
+            if all((engine_dir / ("%s.%s.engine" % (k, precision))).exists()
+                   for k in build_engine.ENGINE_KEYS):
+                print("[bench] evaluating", precision)
+                rows.append(evaluate(precision, engine_dir, npz, ref, scenarios, args.stop_threshold))
+        if not rows:
+            raise RuntimeError("No engines found in %s" % engine_dir)
+        passing = [r for r in rows if r["passed"]]
+        if not passing:
+            raise RuntimeError("No precision passed the accuracy gate: %s" % rows)
+    except BaseException:
+        # evaluate() writes selected.json per-precision as a side effect (the
+        # policy resolves its engines only from that file). If no precision is
+        # blessed -- or a scenario crashes mid-loop -- never leave selected.json
+        # pointing at an unvalidated / gate-failed engine for the server to load.
+        (engine_dir / "selected.json").unlink(missing_ok=True)
+        raise
     # Prefer the fastest passing precision; FP16 wins ties (safer).
     winner = max(passing, key=lambda r: (r["hz"], r["precision"] == "fp16"))
     _write_selected(engine_dir, winner["precision"])
-    report = {"target": detect().target_tag, "winner": winner["precision"], "rows": rows}
+    report = {"target": detect().target_tag, "winner": winner["precision"],
+              "torch_hz": torch_perf["hz"], "rows": rows}
     (engine_dir / "bench_report.json").write_text(json.dumps(report, indent=2))
     print("[done] selected", winner["precision"], "->", engine_dir / "selected.json")
+    print("  torch  hz=%.1f  (non-TRT FP32 baseline; accuracy is the reference, flip=0)"
+          % torch_perf["hz"])
     for r in rows:
-        print("  %-5s pass=%s hz=%.1f flip=%.3f stop=%.3f zero=%.3f"
+        print("  %-5s pass=%s hz=%.1f flip=%.3f stop=%.3f zero=%.3f  speedup_vs_torch=%.1fx"
               % (r["precision"], r["passed"], r["hz"], r["argmax_flip"],
-                 r["stop_match"], r["zero_match"]))
+                 r["stop_match"], r["zero_match"], r["hz"] / torch_perf["hz"]))
 
 
 if __name__ == "__main__":

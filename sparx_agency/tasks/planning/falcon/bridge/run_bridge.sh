@@ -49,7 +49,18 @@ echo "  Config   : ${SCRIPT_DIR}/${BRIDGE_CFG}  (editable; restart container)"
 echo "  Log      : ${LOGFILE_HOST}"
 echo "================================================"
 
-docker run -it --rm \
+# -i/-t ONLY when stdin and stdout really are terminals. run_object_mission.sh starts
+# this script in the BACKGROUND with its output redirected to a log file, so stdin is
+# not a terminal and `docker run -it` hard-fails with "cannot attach stdin to a
+# TTY-enabled container because stdin is not a terminal": the container never starts
+# and NO topics cross the bridge, while the mission carries on looking healthy.
+# Interactive runs still get -it (colours, Ctrl+C).
+DOCKER_TTY=()
+if [ -t 0 ] && [ -t 1 ]; then
+    DOCKER_TTY=( -it )
+fi
+
+docker run "${DOCKER_TTY[@]}" --rm \
     --net=host \
     --ipc=host \
     --name="${CONTAINER}" \

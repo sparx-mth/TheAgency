@@ -184,6 +184,17 @@ class PurePursuitFollower:
     def done(self) -> bool:
         return self._done
 
+    @property
+    def active_path(self) -> List[XY]:
+        """The sampled smooth trajectory as ``(x, y)`` tuples (read-only copy).
+
+        This tracker flies the spline, not the input corners, so the spline IS
+        its path -- and ``wp_idx`` (the tracker's ``progress_idx``) indexes into
+        it. Mirrors ``WaypointFollower.active_path`` so a caller can resolve the
+        waypoint being pursued to a position under any follower.
+        """
+        return list(self.smooth_xy)
+
     def required_axis(self) -> Optional[str]:
         """Pure Pursuit drives all axes at once; no per-axis handshake."""
         return None

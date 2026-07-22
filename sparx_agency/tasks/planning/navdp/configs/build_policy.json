@@ -5,7 +5,7 @@
     "former_pe", "former_query", "reducemean", "instancenorm"
   ],
   "builder_optimization_level": {
-    "orin_15w": 3,
+    "orin_15w": 5,
     "default": 5
   },
   "prefer_precision_constraints_int8": true,

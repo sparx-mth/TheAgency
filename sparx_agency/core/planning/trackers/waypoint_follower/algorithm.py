@@ -160,6 +160,72 @@ def advance_gate(
     return False
 
 
+def closest_segment(points: Sequence[XY], cx: float, cy: float,
+                    from_seg: int = 0) -> int:
+    """Index of the path segment the point (cx, cy) lies nearest to.
+
+    Segment ``i`` runs ``points[i] -> points[i+1]``; the pose is projected onto
+    each (clamped to the segment, so the ends count) and the nearest wins.
+    ``from_seg`` restricts the search to segments at or after it, which is what
+    keeps a live search from ever re-targeting part of the route already flown.
+    """
+    best_i, best_d = from_seg, float("inf")
+    for i in range(max(0, from_seg), len(points) - 1):
+        ax, ay = points[i]
+        bx, by = points[i + 1]
+        ex, ey = bx - ax, by - ay
+        seg_sq = ex * ex + ey * ey
+        if seg_sq < 1e-9:
+            px, py = ax, ay
+        else:
+            t = ((cx - ax) * ex + (cy - ay) * ey) / seg_sq
+            t = min(max(t, 0.0), 1.0)
+            px, py = ax + t * ex, ay + t * ey
+        d = hypot(cx - px, cy - py)
+        if d < best_d:
+            best_d, best_i = d, i
+    return best_i
+
+
+def live_waypoint_index(points: Sequence[XY], pose: Pose2D, pos_radius: float,
+                        from_idx: int) -> int:
+    """The first waypoint still worth flying to, judged against the WHOLE route.
+
+    Answers "where am I on this path?" geometrically rather than "is the thing I
+    happen to be pointing at behind me?". Projecting onto the route (see
+    :func:`closest_segment`) and taking the waypoint after the nearest segment
+    means a robot that cut a corner wide -- passing one waypoint without ever
+    entering ``pos_radius`` of it, and sailing on past the next -- targets the
+    first point genuinely AHEAD of it. Stepping the index by one instead would
+    hand it a waypoint it has already flown past, and it would turn around and go
+    back for it.
+
+    Args:
+        points: The path.
+        pose: Where the robot is now (heading is not used -- being past a point
+            is a fact about the route, not about which way you happen to face).
+        pos_radius: Waypoint acquisition radius; a waypoint already within this
+            counts as reached and is skipped too.
+        from_idx: Never return less than this, so the target only ever moves
+            forward along the route.
+
+    Returns:
+        A waypoint index, or ``len(points)`` when the whole route is behind.
+    """
+    n = len(points)
+    if n == 0:
+        return 0
+    if from_idx >= n or n < 2:
+        return max(from_idx, 0)
+    # Segment (from_idx-1 -> from_idx) is the leg currently being flown; anything
+    # earlier is already behind us by construction.
+    best_i = closest_segment(points, pose.x, pose.y, max(0, from_idx - 1))
+    idx = best_i + 1
+    if idx < n and hypot(points[idx][0] - pose.x, points[idx][1] - pose.y) < pos_radius:
+        idx += 1                       # already standing on it: take the next
+    return max(from_idx, min(idx, n))
+
+
 def reanchor_path(
     points: Sequence[XY],
     pose: Optional[Pose2D],
@@ -177,28 +243,7 @@ def reanchor_path(
     if pose is None or len(pts) < 2:
         return pts
 
-    cx, cy = pose.x, pose.y
-    best_i, best_d = 0, float("inf")
-    for i in range(len(pts) - 1):
-        ax, ay = pts[i]
-        bx, by = pts[i + 1]
-        ex, ey = bx - ax, by - ay
-        seg_sq = ex * ex + ey * ey
-        if seg_sq < 1e-9:
-            px, py = ax, ay
-        else:
-            t = ((cx - ax) * ex + (cy - ay) * ey) / seg_sq
-            t = min(max(t, 0.0), 1.0)
-            px, py = ax + t * ex, ay + t * ey
-        d = hypot(cx - px, cy - py)
-        if d < best_d:
-            best_d, best_i = d, i
-
-    drop = best_i + 1
-    if drop < len(pts):
-        ex, ey = pts[drop]
-        if hypot(ex - cx, ey - cy) < pos_radius:
-            drop += 1
+    drop = live_waypoint_index(pts, pose, pos_radius, 0)
     if drop >= len(pts):
         return pts[-1:]
     return pts[drop:]

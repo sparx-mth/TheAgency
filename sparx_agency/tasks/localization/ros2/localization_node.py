@@ -32,8 +32,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String
+from geometry_msgs.msg import PoseStamped, Twist
+from std_msgs.msg import Float32, String
 
 from sparx_agency.core.common.types.perception import Observation, RGBFrame
 from sparx_agency.core.localization.base import BaseLocalizationProvider, LocalizationEstimate
@@ -51,6 +51,16 @@ _PROVIDERS = {
 
 _OUTPUT_TOPIC = "/xtend/localization"
 _SOURCE_TOPIC = "/xtend/localization_source"
+#: How much to trust the pose on _OUTPUT_TOPIC, 0..1, published per fix.
+#: PoseStamped has nowhere to carry this, and it is the difference between a
+#: 1 cm three-tag fix and a 30 cm lone-tag guess, so it goes out alongside.
+_CONF_TOPIC = "/xtend/localization_confidence"
+#: Same instant, in metres: the expected position error of that pose.
+_STD_TOPIC = "/xtend/localization_pos_std"
+#: Fraction of the COMMANDED motion the drone is measurably achieving, 0..1.
+#: Low while commands flow = the drone is being told to move and is not — the
+#: direct "stuck against something" signal, learned inside the provider.
+_EFF_TOPIC = "/xtend/localization_cmd_effectiveness"
 
 
 def _parse_path_msg(data: str):
@@ -82,7 +92,33 @@ class LocalizationNode(Node):
         self.declare_parameter("tag_size_m", 0.13)
         self.declare_parameter("tag_family", "tag36h11")
         self.declare_parameter("min_margin", 10.0)
-        self.declare_parameter("alpha", 0.1)
+        # Filter gain at FULL confidence. 1.0 = publish the raw solve. The old
+        # 0.1 cost ~0.9 s of lag on every move; the gain is now confidence-scaled
+        # (see AprilTagLocalizationProvider._gain) so this can be fast.
+        self.declare_parameter("alpha", 0.8)
+        self.declare_parameter("alpha_min", 0.15)
+        self.declare_parameter("max_jump_m", 1.0)
+        self.declare_parameter("max_jump_frames", 3)
+        # Set-flicker defence: hysteresis lower rail + ROI re-detect of dropouts.
+        self.declare_parameter("margin_keep", 5.0)
+        self.declare_parameter("roi_rescue", True)
+        # Command prior: which twist topic to watch, and the trust ceiling.
+        # Trust is EARNED per-axis by comparing commanded with measured motion,
+        # so a stuck drone stops being believed on its own; 0 disables entirely.
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_trust_max", 0.7)
+        # Blind frames (no tag on any visible wall): dead-reckon on the earned-
+        # trust command prior for up to this many frames, source=apriltag_coast,
+        # confidence collapsing. Delays the recovery node's stale-pose trigger
+        # by the same amount; 0 restores publish-nothing-when-blind.
+        self.declare_parameter("coast_frames", 5)
+        # Per-tag quality log (apriltag provider only): one CSV row per detected
+        # tag per frame, so a poorly-placed or mis-mapped tag can be found on the
+        # wall instead of hiding inside the aggregate confidence. Off by default;
+        # the path defaults to $FALCON_LOG_DIR (else /tmp/falcon), next to the
+        # flight's other logs.
+        self.declare_parameter("apriltag_log", False)
+        self.declare_parameter("apriltag_log_path", "")
         # optical_flow params
         self.declare_parameter("depth_frame_path_topic", "")
         self.declare_parameter("bearing_topic", "")
@@ -121,6 +157,22 @@ class LocalizationNode(Node):
         self._provider_type = provider_type
         self.get_logger().info(f"Localization provider: {provider_type} → {_OUTPUT_TOPIC}")
 
+        # Per-tag quality log: only the apriltag provider produces per-frame tag
+        # diagnostics (last_frame_diag), so only it can feed this.
+        self._tag_log = None
+        if provider_type == "apriltag" and bool(self.get_parameter("apriltag_log").value):
+            from sparx_agency.tasks.localization.apriltag_quality_log import (
+                AprilTagQualityLog, default_apriltag_log_path)
+            path = (str(self.get_parameter("apriltag_log_path").value).strip()
+                    or default_apriltag_log_path())
+            try:
+                self._tag_log = AprilTagQualityLog(path)
+                self.get_logger().info(f"AprilTag quality log → {path}")
+            except (IOError, OSError) as e:
+                self.get_logger().error(
+                    f"Cannot open AprilTag quality log {path} ({e}); "
+                    f"continuing without it")
+
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -137,11 +189,27 @@ class LocalizationNode(Node):
 
         self._pub_pose = self.create_publisher(PoseStamped, _OUTPUT_TOPIC, 10)
         self._pub_source = self.create_publisher(String, _SOURCE_TOPIC, 10)
+        self._pub_conf = self.create_publisher(Float32, _CONF_TOPIC, 10)
+        self._pub_std = self.create_publisher(Float32, _STD_TOPIC, 10)
+        self._pub_eff = self.create_publisher(Float32, _EFF_TOPIC, 10)
 
         if provider_type in ("optical_flow", "amcl"):
             self._setup_optical_flow_subs(qos)
         else:
             self._setup_single_stream_subs(qos)
+
+        # Feed the provider the twist being commanded, if it knows what to do
+        # with one (only the apriltag provider does today). The provider itself
+        # decides how much to believe it — see CommandMotionModel.
+        cmd_topic = str(self.get_parameter("cmd_vel_topic").value).strip()
+        if cmd_topic and hasattr(self._provider, "set_command"):
+            self.create_subscription(Twist, cmd_topic, self._on_cmd_vel, 10)
+            self.get_logger().info(f"Watching commands on {cmd_topic}")
+
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self._provider.set_command(float(msg.linear.x), float(msg.linear.y),
+                                   float(msg.angular.z), now)
 
     def _setup_single_stream_subs(self, qos: QoSProfile) -> None:
         """AprilTag and similar single-stream providers."""
@@ -199,6 +267,13 @@ class LocalizationNode(Node):
                 tag_family=str(self.get_parameter("tag_family").value),
                 min_margin=float(self.get_parameter("min_margin").value),
                 alpha=float(self.get_parameter("alpha").value),
+                alpha_min=float(self.get_parameter("alpha_min").value),
+                max_jump_m=float(self.get_parameter("max_jump_m").value),
+                max_jump_frames=int(self.get_parameter("max_jump_frames").value),
+                margin_keep=float(self.get_parameter("margin_keep").value),
+                roi_rescue=bool(self.get_parameter("roi_rescue").value),
+                cmd_trust_max=float(self.get_parameter("cmd_trust_max").value),
+                coast_frames=int(self.get_parameter("coast_frames").value),
             )
         if provider_type == "optical_flow":
             calib = self.get_parameter("camera_calib_path").value
@@ -251,12 +326,25 @@ class LocalizationNode(Node):
             return
         obs = Observation(rgb=RGBFrame(image=frame, stamp_sec=stamp_sec))
         self._publish_estimate(self._provider.update(obs))
+        self._log_apriltag_quality()
 
     def _on_image(self, msg) -> None:
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         obs = Observation(rgb=RGBFrame(image=frame, stamp_sec=stamp_sec))
         self._publish_estimate(self._provider.update(obs))
+        self._log_apriltag_quality()
+
+    def _log_apriltag_quality(self) -> None:
+        """Append this frame's per-tag diagnostics, if the log is enabled.
+
+        Reads the diagnostic the provider stashed during ``update()`` -- present
+        every frame, fix or not -- so a blind stretch is logged as itself."""
+        if self._tag_log is None:
+            return
+        diag = getattr(self._provider, "last_frame_diag", None)
+        if diag is not None:
+            self._tag_log.write(diag)
 
     # ------------------------------------------------------------------
     # Optical-flow callbacks
@@ -298,6 +386,18 @@ class LocalizationNode(Node):
         src_msg = String()
         src_msg.data = estimate.source
         self._pub_source.publish(src_msg)
+        # Published on every fix and in the same callback as the pose, so a
+        # consumer can pair them by arrival without needing a stamp match.
+        self._pub_conf.publish(Float32(data=float(estimate.confidence)))
+        self._pub_std.publish(Float32(data=float(estimate.pos_std_m)))
+        if estimate.cmd_effectiveness is not None:
+            self._pub_eff.publish(Float32(data=float(estimate.cmd_effectiveness)))
+
+    def destroy_node(self) -> None:
+        """Flush the tag-quality log before the node goes down."""
+        if self._tag_log is not None:
+            self._tag_log.close()
+        super().destroy_node()
 
 
 def _amcl_loc_json(x_m: float, y_m: float) -> str:
@@ -308,6 +408,13 @@ def _amcl_loc_json(x_m: float, y_m: float) -> str:
 
 
 def _to_pose_stamped(est: LocalizationEstimate) -> PoseStamped:
+    """PoseStamped in the world frame.
+
+    ``position.z`` is the solved camera altitude, not a placeholder: the mapper
+    projects its point cloud at the drone's height, so a wrong or constant z tilts
+    the whole map. Orientation is a pure yaw rotation (x = y = 0), matching the
+    flat-flight assumption the rest of the stack makes.
+    """
     msg = PoseStamped()
     msg.header.frame_id = "world"
     msg.header.stamp.sec = int(est.stamp_sec)

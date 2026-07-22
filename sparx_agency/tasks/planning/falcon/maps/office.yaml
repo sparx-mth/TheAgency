@@ -19,8 +19,8 @@ map_config:
   # corridor. Each entry: horizontal wall at given y, spanning x in
   # [x_min, x_max], with thickness in the y direction.
   walls:
-    - { y:  0.8, x_min: -6.0, x_max: 1.5, thickness: 0.15 }   # left/top wall
-    - { y: -0.8, x_min: -6.0, x_max: 1.5, thickness: 0.15 }   # right/bottom wall
+    - { y:  0.8, x_min: -6.0, x_max: 2.2, thickness: 0.15 }   # left/top wall
+    - { y: -0.8, x_min: -6.0, x_max: 2.2, thickness: 0.15 }   # right/bottom wall
 
   # ── Bounds ───────────────────────────────────────────────────────
   # The office is a ±6 m room. `box` is the hard boundary FALCON maps

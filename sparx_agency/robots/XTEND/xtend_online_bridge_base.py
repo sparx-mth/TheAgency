@@ -15,7 +15,10 @@ from std_msgs.msg import String, Float32
 from nav_msgs.msg import Odometry
 import websockets
 
-from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import TwistToCmdNavConverter
+from sparx_agency.robots.XTEND.adapters.twist_to_cmd_nav_converter import (
+    AxesCommand,
+    TwistToCmdNavConverter,
+)
 from sparx_agency.robots.XTEND.automation import ControllerAutomation
 from sparx_agency.core.common.spatial_math import yaw_to_quaternion
 
@@ -25,6 +28,20 @@ _FLIGHT_OPS = frozenset({"arm", "takeoff", "land", "disarm"})
 
 def clamp_axis(value: int, limit: int = 1000) -> int:
     return max(-limit, min(limit, int(value)))
+
+
+def _axes_command_dict(cmd: AxesCommand) -> dict[str, Any]:
+    """Wrap a combined AxesCommand for the cmd_queue. Distinct from the
+    single-axis {"action": "forward"/"turn_left"/..., "value": ...} shape used
+    by the discrete /xtend/cmd_nav JSON path (dome_main's timed rotation
+    chunks, arm/takeoff/land) — that path is untouched by this."""
+    return {
+        "action": "set_axes",
+        "forward": cmd.forward,
+        "lateral": cmd.lateral,
+        "vertical": cmd.vertical,
+        "yaw": cmd.yaw,
+    }
 
 
 class OnlineXtendBridgeBase(ControllerAutomation):
@@ -67,6 +84,9 @@ class OnlineXtendBridgeBase(ControllerAutomation):
 
         self.cmd_topic = cmd_topic
         self.cmd_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # Flight ops (arm/takeoff/land/disarm) go here instead, so they are
+        # never stuck waiting behind a backlog of movement commands.
+        self.priority_cmd_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.loop: asyncio.AbstractEventLoop | None = None
 
         self.ros_node = rclpy.create_node("xtend_online_bridge")
@@ -117,6 +137,7 @@ class OnlineXtendBridgeBase(ControllerAutomation):
         self.z = None
 
         self._flight_op_active: bool = False
+        self._active_flight_op: str | None = None
 
         self.active_action: str | None = None
         self.active_action_start_t: float | None = None
@@ -160,7 +181,22 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                 self.ros_node.get_logger().warn("Async loop is not ready yet; dropping command")
                 return
             action = data.get("action", "")
-            if self._flight_op_active and action not in _FLIGHT_OPS:
+
+            if action in _FLIGHT_OPS:
+                if self._flight_op_active and action == self._active_flight_op:
+                    # Same flight op already running (e.g. a second "land"
+                    # press) — coalesce instead of queuing a duplicate full
+                    # cycle behind it. A *different* flight op (e.g. "disarm"
+                    # sent while "land" is running) is still let through, as
+                    # an emergency override.
+                    self.ros_node.get_logger().info(
+                        f"[bridge] {action!r} already in progress — dropping duplicate request"
+                    )
+                    return
+                self.loop.call_soon_threadsafe(self.priority_cmd_queue.put_nowait, data)
+                return
+
+            if self._flight_op_active:
                 self.ros_node.get_logger().info(
                     f"[bridge] flight op active — dropping cmd_nav action={action!r}"
                 )
@@ -419,11 +455,26 @@ class OnlineXtendBridgeBase(ControllerAutomation):
     async def handle_custom_command(self, command: dict[str, Any]) -> bool:
         return False
 
+    async def _get_next_command(self) -> tuple[asyncio.Queue, dict[str, Any]]:
+        """Drain priority_cmd_queue (arm/takeoff/land/disarm) ahead of
+        cmd_queue, so a flight op is never stuck waiting behind a backlog
+        of movement commands from the Twist/cmd_vel planner path."""
+        while True:
+            try:
+                return self.priority_cmd_queue, self.priority_cmd_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                cmd = await asyncio.wait_for(self.cmd_queue.get(), timeout=0.02)
+                return self.cmd_queue, cmd
+            except asyncio.TimeoutError:
+                continue
+
     async def dynamic_executor(self):
         print(f"ONLINE MODE: hold-style commands from {self.cmd_topic}")
 
         while True:
-            command = await self.cmd_queue.get()
+            queue, command = await self._get_next_command()
             action = command.get("action")
             thrust = int(command.get("thrust", command.get("value", 400)))
 
@@ -432,36 +483,72 @@ class OnlineXtendBridgeBase(ControllerAutomation):
             try:
                 if action == "arm":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         await self.timed_async_action("arm", self.arm_robot())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "disarm":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         self.stop_motion(reason="disarm")
                         await self.timed_async_action("disarm", self.disarm_robot())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "takeoff":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         await self.timed_async_action("takeoff", self.takeoff())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "land":
                     self._flight_op_active = True
+                    self._active_flight_op = action
                     try:
                         self.stop_motion(reason="land")
                         await self.timed_async_action("land", self.land())
                     finally:
                         self._flight_op_active = False
+                        self._active_flight_op = None
 
                 elif action == "stop":
                     self.stop_motion(reason="stop")
+
+                elif action == "set_axes":
+                    # Combined command from the Twist/cmd_vel planner path: all
+                    # four axes can be nonzero together (e.g. forward + yaw),
+                    # matching how the XTEND handheld controller is actually
+                    # flown — a free wrist angle blends pitch/roll/yaw already.
+                    forward = clamp_axis(int(command.get("forward", 0)))
+                    lateral = clamp_axis(int(command.get("lateral", 0)))
+                    vertical = clamp_axis(int(command.get("vertical", 0)))
+                    yaw = clamp_axis(int(command.get("yaw", 0)))
+                    axes_desc = AxesCommand(
+                        forward=forward, lateral=lateral, vertical=vertical, yaw=yaw,
+                    ).describe()
+                    if forward == 0 and lateral == 0 and vertical == 0 and yaw == 0:
+                        self.ros_node.get_logger().debug("[bridge] set_axes: stop")
+                        self.stop_motion(reason="twist_zero")
+                    else:
+                        self.ros_node.get_logger().debug(
+                            f"[bridge] set_axes: {axes_desc} "
+                            f"(f={forward} l={lateral} v={vertical} y={yaw})"
+                        )
+                        self.start_action_timer(
+                            f"set_axes_f{forward}_l{lateral}_v{vertical}_y{yaw}"
+                        )
+                        self.set_axes(
+                            lateral=lateral, vertical=vertical,
+                            forward=forward, yaw=yaw,
+                        )
 
                 elif action == "forward":
                     self.hold_forward(thrust)
@@ -494,23 +581,20 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                     print(f"[cmd] Unknown action: {action}")
 
             finally:
-                self.cmd_queue.task_done()
+                queue.task_done()
 
     def _twist_cb(self, msg: Twist) -> None:
         if self._flight_op_active:
             return
-        result = self._twist_converter.process(
+        cmd = self._twist_converter.process(
             msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z
         )
-        if result is None:
+        if cmd is None:
             return
-        action, value = result
         if self.loop is None:
             self.ros_node.get_logger().warn("Async loop not ready; dropping Twist command")
             return
-        self.loop.call_soon_threadsafe(
-            self.cmd_queue.put_nowait, {"action": action, "value": value}
-        )
+        self.loop.call_soon_threadsafe(self.cmd_queue.put_nowait, _axes_command_dict(cmd))
 
     async def _twist_watchdog_loop(self):
         try:
@@ -518,10 +602,9 @@ class OnlineXtendBridgeBase(ControllerAutomation):
                 await asyncio.sleep(0.05)
                 if self._flight_op_active:
                     continue
-                result = self._twist_converter.check_timeout()
-                if result is not None:
-                    action, value = result
-                    await self.cmd_queue.put({"action": action, "value": value})
+                cmd = self._twist_converter.check_timeout()
+                if cmd is not None:
+                    await self.cmd_queue.put(_axes_command_dict(cmd))
         except asyncio.CancelledError:
             pass
 

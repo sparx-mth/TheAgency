@@ -411,3 +411,62 @@ def test_split_preserves_endpoints_and_corner_vertices():
     assert pts[0] == Pose2D(0.0, 0.0)
     assert pts[-1] == Pose2D(5.0, 5.0)
     assert any(p.x == corner.x and p.y == corner.y for p in pts)
+
+
+# --------------------------------------------------------------------------
+# heading-aware A* (prefer flying the way the drone looks; avoid turning around)
+# --------------------------------------------------------------------------
+from sparx_agency.core.planning.planners.astar.algorithm_2d import _backward_weight
+
+
+def _plen(pts):
+    return sum(math.hypot(b.x - a.x, b.y - a.y) for a, b in zip(pts[:-1], pts[1:]))
+
+
+def test_backward_weight_free_forward_and_90_full_reversal():
+    assert _backward_weight((1, 0), (1, 0)) == 0.0        # forward: free
+    assert _backward_weight((1, 0), (0, 1)) == 0.0        # 90 deg turn: free
+    assert abs(_backward_weight((1, 0), (-1, 1)) - 2 ** -0.5) < 1e-9  # 135 deg
+    assert abs(_backward_weight((1, 0), (-1, 0)) - 1.0) < 1e-9        # 180 deg: full
+
+
+def test_kernel_heading_avoids_a_start_reversal():
+    cost = np.ones((9, 9))
+    start, goal = (4, 4), (4, 0)                          # goal straight DOWN (-y)
+    # Facing DOWN (toward the goal): straight down, first step is (4, 3).
+    toward = astar_cost_grid_2d(cost, start, goal, connectivity=4,
+                                start_dir=(0, -1), start_turn_penalty=20.0)
+    assert toward.path[1] == (4, 3)
+    # Facing UP (away): a big reversal penalty makes it step SIDEWAYS first rather
+    # than spin 180 deg in place -- so the first move stays on the y=4 row.
+    away = astar_cost_grid_2d(cost, start, goal, connectivity=4,
+                              start_dir=(0, 1), start_turn_penalty=20.0)
+    assert away.path[1] != (4, 3) and away.path[1][1] == 4
+
+
+def test_kernel_heading_off_is_plain_shortest_path():
+    cost = np.ones((9, 9))
+    r = astar_cost_grid_2d(cost, (4, 4), (4, 0), connectivity=4)   # no start_dir
+    assert r.path[1] == (4, 3)                            # plain shortest: straight down
+
+
+def test_planner_heading_picks_the_side_the_drone_faces():
+    # A central wall (x=19..21, y=10..30) blocks the middle; the goal on the far
+    # side is reachable equally over the TOP or under the BOTTOM. With no heading
+    # the choice is an arbitrary tie; heading awareness picks the way the drone is
+    # already facing so it flies on instead of turning around.
+    arr = _free(40, 40)
+    arr[10:31, 19:22] = 100                              # vertical wall with gaps top & bottom
+    grid = _grid(arr)
+    params = WeightedAStarParams(heading_penalty_m=1.5, los_smoothing=True,
+                                 waypoint_spacing_m=0.3, corner_round=False,
+                                 inflate_radius_m=0.0)
+    planner = WeightedAStarPlanner2D(params)
+    start_xy, goal = (1.0, 2.0), Pose2D(3.0, 2.0)        # left -> right of the wall
+    up = planner.plan(PlanRequest(Pose2D(*start_xy, math.pi / 2), goal), grid)    # facing +y
+    down = planner.plan(PlanRequest(Pose2D(*start_xy, -math.pi / 2), goal), grid)  # facing -y
+    assert up.ok and down.ok
+    # Facing up -> route goes OVER the top of the wall (reaches high y); facing down
+    # -> UNDER the bottom (reaches low y). Wall top is y=3.0m, bottom y=1.0m.
+    assert max(p.y for p in up.path.points) > 3.0
+    assert min(p.y for p in down.path.points) < 1.0

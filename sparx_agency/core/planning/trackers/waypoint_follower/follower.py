@@ -98,6 +98,16 @@ class WaypointFollower:
     def done(self) -> bool:
         return self._state == FollowerState.DONE
 
+    @property
+    def active_path(self) -> List[alg.XY]:
+        """The current re-anchored path as ``(x, y)`` tuples (read-only copy).
+
+        Exposed so a wrapping layer (e.g. the roll-assist cross-track corrector)
+        can measure the drone's offset from the exact trajectory the follower is
+        flying, without reaching into private state.
+        """
+        return list(self._path)
+
     def required_axis(self) -> Optional[ControlAxis]:
         """Axis the follower needs confirmed before it will command motion."""
         if self._state == FollowerState.YAW_ALIGN:
@@ -341,7 +351,17 @@ class WaypointFollower:
         captured = d < p.pos_radius
         passed = abs(bearing_err) > p.passed_bearing_rad
         if captured or passed:
-            self._wp_idx += 1
+            # Re-anchor against the WHOLE route rather than stepping one index.
+            # The advance gate is predictive -- it starts flying as soon as going
+            # straight would pass within yaw_capture_tol_m -- so a waypoint is
+            # routinely retired without the drone ever entering pos_radius of it,
+            # and on a tight corner the drone can already be level with, or past,
+            # the one after it. Stepping by one would then hand it a waypoint
+            # BEHIND it: next_err comes out huge, this brakes, and the drone turns
+            # around and flies back for a point it has already been to. Projecting
+            # onto the route instead picks the first waypoint genuinely ahead.
+            self._wp_idx = alg.live_waypoint_index(self._path, pose, p.pos_radius,
+                                                   self._wp_idx + 1)
             if self._wp_idx >= len(self._path):
                 self._enter(FollowerState.BRAKE, pose)
                 return self._emit(self._finalize(0.0, 0.0, dt), freeze=False)

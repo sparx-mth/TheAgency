@@ -1,0 +1,320 @@
+<launch>
+  <!-- object_approach.launch — "lock onto a named object and fly up to it".
+
+       Runs the visual-approach state machine (tracker + servo + HUD) ALONGSIDE a
+       running nav stack (nav_stack.launch / real_drone.launch), consuming detections
+       from the external TensorRT detector sidecar over the bridge. While
+       the target is not confirmed the drone flies its normal A*/NavDP route; once
+       the detector sees the target for ~n_confirm consecutive frames, object_approach
+       takes over /cmd_vel via the visual_servoing demo-mode hand-off (the follower
+       goes passive) and servos up to the object. On reaching it (sustained depth
+       range <= land_range_m, default 1.0 m) the mission ENDS by landing: the node
+       stops driving /cmd_vel and requests the 'finish' demo mode, whose manager sends
+       stop -> land -> disarm on /xtend/cmd_nav. Set land_range_m:=0 to keep the legacy
+       hover-lock terminal instead (no landing; it keeps tracking a moving object).
+       Losing the track triggers an active re-search; a prolonged loss hands control
+       back, re-asserts the goal, and returns to SEARCH. If the route reaches its goal
+       still unconfirmed, the node sweeps the room (slow rotate-with-stops) to find it.
+
+       Every published command is force-shaped to the platform's per-axis min/max
+       force (default "fixed" bang-bang). ~closure_mode picks multi_axis (holonomic
+       vx+vy+yaw, the default) or waypoint (yaw-XOR-forward). A live HUD is published
+       as an Image and shown by target_lock_viewer (on by default).
+
+       Usage:
+         # start the detector sidecar + bridge on the host (see the README), then
+         # bring up the nav stack, then in another shell:
+         roslaunch falcon_adapter object_approach.launch target_object:=refrigerator
+         # change the goal at runtime:
+         rostopic pub -1 /object_approach/goal std_msgs/String "data: 'hat'"
+         # arm/disarm:
+         rostopic pub -1 /object_approach/enable std_msgs/Bool "data: true"
+
+       Intrinsics MUST match the live RGB/depth stream (raw K, not P). Defaults are
+       the real-XTEND raw K at 504x294; override to match your camera. -->
+
+  <!-- ── Transport / topics ─────────────────────────────────────────── -->
+  <arg name="drone_ns"          default="" />                 <!-- '' on the real drone -->
+  <!-- Where this node's velocity commands go. DEFAULT: straight at the drone, because
+       this launch is also run standalone (see the header) and there is then no
+       cmd_vel_gate to forward them; a cmd_vel_raw default would leave the drone
+       silently unable to move. The composite launches (object_mission,
+       real_drone_object_approach) DO bring up nav_stack's gate and override this to
+       drone_ns/cmd_vel_raw so the GO gate governs the visual servo too. -->
+  <arg name="cmd_vel_topic"     default="$(arg drone_ns)/cmd_vel" />
+  <arg name="image_transport"   default="frame_path" />       <!-- frame_path | topic -->
+  <!-- RGB/depth topic names track image_transport: frame_path (String paths off disk,
+       real drone) or topic (raw sensor_msgs/Image, sim / bag replay). Mirrors the
+       real_drone.launch flip so a topic-transport run reads /xtend/rgb + /xtend/depth_m. -->
+  <arg name="rgb_topic"         default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
+  <arg name="depth_topic"       default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
+  <arg name="pose_topic"        default="/xtend/localization" /><!-- arrival detection -->
+  <arg name="pose_type"         default="pose_stamped" />
+  <arg name="camera_info_topic" default="" />                 <!-- '' => use fx/fy/cx/cy -->
+
+  <arg name="detections_topic"  default="/object_approach/detections" />
+  <arg name="target_topic"      default="/object_approach/goal" />
+  <arg name="enable_topic"      default="/object_approach/enable" />
+
+  <!-- ── Mission ────────────────────────────────────────────────────── -->
+  <arg name="target_object"     default="refrigerator" />
+  <arg name="start_enabled"     default="true" />
+  <arg name="n_confirm"         default="3" />
+  <arg name="min_score"         default="0.30" />
+  <!-- Stop-in-place settle after the target is confirmed+locked, before the
+       visual approach: the node takes over /cmd_vel and publishes a zero-stop for
+       this long so the drone brakes off inherited A*/NavDP motion (and the
+       follower's last command lapses) before flying in. 0 => approach at once. -->
+  <arg name="acquire_stop_s"    default="1.5" />
+
+  <!-- ── Camera intrinsics (match the live stream) ──────────────────── -->
+  <arg name="fx"                default="322.6351083474948" />
+  <arg name="fy"                default="323.3893307141174" />
+  <arg name="cx"                default="242.06479658679714" />
+  <arg name="cy"                default="90.03019076680604" />
+  <arg name="img_width"         default="504" />
+  <arg name="img_height"        default="294" />
+
+  <!-- ── Closure strategy + servo ───────────────────────────────────── -->
+  <!-- What keeps the box on the target: detector_tracker (default) = detector
+       seeds an optical-flow tracker propagated every frame; detector = the
+       detector's box alone, no tracking (for when the detector keeps up with the
+       RGB stream). -->
+  <arg name="lock_mode"         default="detector_tracker" /> <!-- detector_tracker | detector -->
+  <arg name="max_det_age_s"     default="0.5" />              <!-- detector mode: hold-last-box window -->
+  <arg name="closure_mode"      default="multi_axis" />       <!-- multi_axis | waypoint -->
+  <arg name="use_depth"         default="true" />
+  <arg name="target_range_m"    default="0.5" />              <!-- stop distance: hold ~0.5 m from the object -->
+  <arg name="slowdown_range_m"  default="2.0" />
+  <arg name="target_area_frac"  default="0.12" />             <!-- fallback when no depth -->
+  <arg name="vx_max"            default="0.35" />
+  <arg name="max_lateral_speed" default="0.25" />
+  <arg name="max_speed_xy"      default="0.4" />
+  <arg name="max_yaw_rate"      default="0.7" />             <!-- >= fixed_wz pulse (waypoint follower's yaw_rate) -->
+
+  <arg name="ctrl_hz"           default="10.0" />             <!-- matches the route follower's tick calibration -->
+  <!-- Coarse-yaw platform: a large yaw deadband (fine centring uses crab, not yaw)
+       that grows as we close so a yaw doesn't sweep the object out of frame. -->
+  <arg name="yaw_deadband"       default="0.35" />            <!-- yaw acquisition angle (min-burst + coast) -->
+  <arg name="yaw_close_deadband" default="0.15" />
+  <arg name="lateral_deadband"   default="0.10" />            <!-- coast-aware crab deadband (fine centring) -->
+
+  <!-- ── Terminal land: reach the object -> stop + land (ends the mission) ──
+       When the depth range to the locked target holds <= land_range_m for
+       land_confirm_ticks consecutive ticks, the node stops driving /cmd_vel and
+       requests the 'finish' demo mode; the ROS2 demo manager then sends
+       stop -> land -> disarm on /xtend/cmd_nav (the only land path reachable from
+       this ROS1 container). Needs working depth (use_depth:=true). Set
+       land_range_m:=0 to disable and keep the legacy hover-lock (no land). -->
+  <arg name="land_range_m"       default="1.0" />             <!-- reach distance; <=0 disables landing -->
+  <arg name="land_confirm_ticks" default="3" />               <!-- consecutive in-range ticks before landing -->
+
+  <!-- ── Terminal land on COORDINATE arrival (reached "by A* alone") ──
+       When land_at_goal is true, arriving within arrive_radius_m of the goal still
+       unconfirmed for arrive_land_confirm_ticks ticks is itself a LAND: the goal IS the
+       object's location, so having flown there with the planner (the detector never saw
+       it) is success; land there instead of the arrival->SCAN room sweep. POSE-based:
+       needs no depth (works with use_depth:=false / land_range_m:=0). Off by default. -->
+  <arg name="land_at_goal"             default="false" />
+  <arg name="arrive_land_confirm_ticks" default="5" />         <!-- consecutive arrived ticks before landing -->
+
+  <!-- ── Flight-command shaping (discrete + inertial actuation) ─────── -->
+  <arg name="force_mode"        default="fixed" />            <!-- fixed | snap | none -->
+  <arg name="min_vx"            default="0.06" />
+  <arg name="min_vy"            default="0.06" />
+  <arg name="min_wz_deg"        default="8.0" />
+  <arg name="min_burst_ticks"   default="2" />                <!-- min consecutive ticks per motion -->
+  <!-- Coast brake: opposite pulses after a burst ends (for vx, a BACKWARD pulse after
+       every forward approach burst). 0 = off (the shaper's own default) and the right
+       value here: on this airframe forward is delivered weakly while a full-magnitude
+       reverse brake is not, so a brake tick after each gait-chopped approach burst made
+       the drone net-REVERSE while locked on. The servo already bleeds its coast by
+       stopping early (its coast-aware deadbands plus the closure gait). -->
+  <arg name="brake_ticks"       default="0" />
+  <!-- HARD no-reverse guarantee: false = object_approach never commands backward vx
+       while it drives the drone (lock/approach, aim, scan, recovery), so a lock can
+       never drive it backward whatever the shaping does. true = allow reverse (only if
+       a mission genuinely needs it). -->
+  <arg name="allow_reverse"     default="false" />
+
+  <arg name="force_release_frac" default="0.5" />
+  <!-- Fixed pulse magnitudes = the working waypoint follower's proven vel_x/yaw_rate.
+       These are the magnitudes the platform's deadband actually moves on (the tiny
+       min_* floor was too weak: a yaw pulse fired but the drone did not turn). -->
+  <arg name="fixed_vx"          default="0.3" />              <!-- forward pulse (= follower vel_x) -->
+  <arg name="fixed_vy"          default="0.3" />              <!-- lateral ROLL pulse (same 0.3 m/s force) -->
+  <arg name="fixed_wz_deg"      default="40.1" />             <!-- yaw pulse = 0.7 rad/s (= follower yaw_rate) -->
+
+  <!-- ── Closure gait: move-a-little / stop-and-look cadence on the servo ──
+       Breaks the servo's continuous closing into short bursts with a stop between
+       them (drone coasts to rest, camera gets a fresh bbox), and stops when a turn
+       gives way to forward flight. Applies to the APPROACH servo only. -->
+  <arg name="gait_enabled"        default="true" />
+  <arg name="gait_move_ticks"     default="2" />              <!-- max motion ticks per burst -->
+  <arg name="gait_settle_ticks"   default="4" />              <!-- forced stop ticks between bursts (0 => off) -->
+  <arg name="gait_settle_on_transition" default="true" />     <!-- stop on turn<->forward change -->
+
+  <!-- ── Goal (arrival -> aim/scan; re-inject on give-up) ───────────── -->
+  <arg name="goal_x"            default="0.0" />                 <!-- '' => no known goal -->
+  <arg name="goal_y"            default="-2.0" />
+  <arg name="arrive_radius_m"   default="0.6" />                <!-- how close counts as "arrived" -->
+  <arg name="goal_in_topic"     default="/waypoint_nav/goal" />
+  <arg name="goal_out_topic"    default="/waypoint_nav/goal" />
+
+  <!-- ── Arm gate: no blind visual take-over until in the room ───────── -->
+  <!-- The visual servo does NOT avoid obstacles, so it must not engage while the drone
+       is still flying the hard part of the route (door, corridor). Reaching this entry
+       point (within arm_point_radius_m) ARMS the take-over; latched on afterwards. Both
+       coords empty => armed from the start (legacy). Normally the pre-selection target,
+       which sits inside the room. The radius is forgiving: it is a fly-through. -->
+  <arg name="arm_point_x"        default="" />
+  <arg name="arm_point_y"        default="" />
+  <arg name="arm_point_radius_m" default="0.8" />
+
+  <!-- ── Staged approach: stand off, AIM at the object, escalate if unseen ──
+       The goal above is normally a VANTAGE POINT, not the object: a catalogued
+       object position is only as accurate as the room map behind it, and flying
+       onto it can end with the object beside or behind the drone, out of frame.
+       mission_director publishes the object's own (x,y) on object_position_topic;
+       arriving at the goal still unconfirmed, the node turns the nose onto that
+       bearing and holds still looking (the camera resolves a bearing far better
+       than the map resolves a position). Only if that look fails does it publish
+       the object's (x,y) as the goal and let the planner fly the last leg.
+       With no object position published, none of this arms — arrival falls through
+       to land_at_goal / the room sweep exactly as before.
+       NEEDS a pose_topic that carries orientation; without one the node says so and
+       skips straight to the coordinate rather than turning down an unknown bearing. -->
+  <arg name="object_position_topic" default="/object_approach/object_position" />
+  <arg name="aim_before_direct"  default="true" />   <!-- false => never aim, fly the goal through -->
+  <arg name="aim_yaw_rate"       default="0.7" />    <!-- rad/s burst magnitude (= follower yaw_rate) -->
+  <arg name="aim_yaw_coast_deg"  default="15.0" />   <!-- post-burst coast; bursts aim this much short -->
+  <arg name="aim_tolerance_deg"  default="12.0" />   <!-- "on the bearing" (camera HFOV is ~76 deg) -->
+  <arg name="aim_min_burst_s"    default="0.2" />    <!-- below this the yaw deadband eats it -->
+  <arg name="aim_max_burst_s"    default="0.6" />    <!-- angle swept open-loop before re-measuring -->
+  <arg name="aim_settle_s"       default="1.0" />    <!-- stop between bursts (let the coast finish) -->
+  <arg name="aim_look_s"         default="4.0" />    <!-- hold still looking; size vs detector + n_confirm -->
+  <arg name="aim_timeout_s"      default="25.0" />   <!-- cap: a drone that will not turn still escalates/sweeps -->
+  <!-- What a failed aim does: false publishes the object's (x,y) and flies onto it
+       (the legacy staged fallback); true sweeps the room in place for it (SCAN) and
+       NEVER flies onto the imprecise catalogued coordinate. -->
+  <arg name="aim_fail_to_scan"   default="false" />
+
+  <!-- ── Scan-at-goal sweep (rotate with stops) ─────────────────────── -->
+  <arg name="scan_yaw_rate"     default="0.4" />
+  <arg name="scan_rotate_s"     default="1.2" />
+  <arg name="scan_pause_s"      default="1.2" />
+  <arg name="scan_direction"    default="1.0" />              <!-- +1 CCW / -1 CW -->
+  <arg name="scan_forward_speed" default="0.0" />             <!-- 0 => sweep in place -->
+  <arg name="scan_forward_s"    default="0.0" />
+  <!-- Bound the sweep: after this many full in-place turns with no detection, give up
+       and land where we are. 0 = sweep forever (until found or the goal changes). -->
+  <arg name="scan_land_revolutions" default="0" />
+
+  <!-- ── Recovery ───────────────────────────────────────────────────── -->
+  <arg name="search_yaw_rate"   default="0.5" />
+  <arg name="recover_timeout_s" default="6.0" /><!-- governs re-search duration -->
+
+  <!-- ── Live HUD overlay + viewer ──────────────────────────────────── -->
+  <arg name="publish_overlay"   default="true" />
+  <arg name="overlay_topic"     default="/object_approach/overlay" />
+  <arg name="viz_hz"            default="10.0" />
+  <arg name="viewer"            default="true" />             <!-- on-screen HUD window -->
+
+  <!-- The tracker + visual servo + search/scan/approach state machine (torch-free). -->
+  <node pkg="falcon_adapter" type="object_approach_node.py"
+        name="object_approach" output="screen">
+    <param name="drone_ns"          value="$(arg drone_ns)" />
+    <param name="cmd_vel_topic"     value="$(arg cmd_vel_topic)" />
+    <param name="image_transport"   value="$(arg image_transport)" />
+    <param name="rgb_topic"         value="$(arg rgb_topic)" />
+    <param name="depth_topic"       value="$(arg depth_topic)" />
+    <param name="pose_topic"        value="$(arg pose_topic)" />
+    <param name="pose_type"         value="$(arg pose_type)" />
+    <param name="camera_info_topic" value="$(arg camera_info_topic)" />
+    <param name="detections_topic"  value="$(arg detections_topic)" />
+    <param name="target_topic"      value="$(arg target_topic)" />
+    <param name="enable_topic"      value="$(arg enable_topic)" />
+    <param name="target_object"     value="$(arg target_object)" />
+    <param name="start_enabled"     value="$(arg start_enabled)" />
+    <param name="n_confirm"         value="$(arg n_confirm)" />
+    <param name="min_score"         value="$(arg min_score)" />
+    <param name="acquire_stop_s"    value="$(arg acquire_stop_s)" />
+    <param name="fx"                value="$(arg fx)" />
+    <param name="fy"                value="$(arg fy)" />
+    <param name="cx"                value="$(arg cx)" />
+    <param name="cy"                value="$(arg cy)" />
+    <param name="img_width"         value="$(arg img_width)" />
+    <param name="img_height"        value="$(arg img_height)" />
+    <param name="lock_mode"         value="$(arg lock_mode)" />
+    <param name="max_det_age_s"     value="$(arg max_det_age_s)" />
+    <param name="closure_mode"      value="$(arg closure_mode)" />
+    <param name="use_depth"         value="$(arg use_depth)" />
+    <param name="target_range_m"    value="$(arg target_range_m)" />
+    <param name="slowdown_range_m"  value="$(arg slowdown_range_m)" />
+    <param name="target_area_frac"  value="$(arg target_area_frac)" />
+    <param name="vx_max"            value="$(arg vx_max)" />
+    <param name="max_lateral_speed" value="$(arg max_lateral_speed)" />
+    <param name="max_speed_xy"      value="$(arg max_speed_xy)" />
+    <param name="max_yaw_rate"      value="$(arg max_yaw_rate)" />
+    <param name="ctrl_hz"           value="$(arg ctrl_hz)" />
+    <param name="yaw_deadband"       value="$(arg yaw_deadband)" />
+    <param name="yaw_close_deadband" value="$(arg yaw_close_deadband)" />
+    <param name="lateral_deadband"   value="$(arg lateral_deadband)" />
+    <param name="land_range_m"       value="$(arg land_range_m)" />
+    <param name="land_confirm_ticks" value="$(arg land_confirm_ticks)" />
+    <param name="land_at_goal"             value="$(arg land_at_goal)" />
+    <param name="arrive_land_confirm_ticks" value="$(arg arrive_land_confirm_ticks)" />
+    <param name="force_mode"        value="$(arg force_mode)" />
+    <param name="min_vx"            value="$(arg min_vx)" />
+    <param name="min_vy"            value="$(arg min_vy)" />
+    <param name="min_wz_deg"        value="$(arg min_wz_deg)" />
+    <param name="min_burst_ticks"   value="$(arg min_burst_ticks)" />
+    <param name="brake_ticks"       value="$(arg brake_ticks)" />
+    <param name="allow_reverse"     value="$(arg allow_reverse)" />
+    <param name="force_release_frac" value="$(arg force_release_frac)" />
+    <param name="fixed_vx"          value="$(arg fixed_vx)" />
+    <param name="fixed_vy"          value="$(arg fixed_vy)" />
+    <param name="fixed_wz_deg"      value="$(arg fixed_wz_deg)" />
+    <param name="gait_enabled"      value="$(arg gait_enabled)" />
+    <param name="gait_move_ticks"   value="$(arg gait_move_ticks)" />
+    <param name="gait_settle_ticks" value="$(arg gait_settle_ticks)" />
+    <param name="gait_settle_on_transition" value="$(arg gait_settle_on_transition)" />
+    <param name="arrive_radius_m"   value="$(arg arrive_radius_m)" />
+    <param name="goal_in_topic"     value="$(arg goal_in_topic)" />
+    <param name="goal_out_topic"    value="$(arg goal_out_topic)" />
+    <param name="goal_x"            value="$(arg goal_x)" if="$(eval arg('goal_x') != '')" />
+    <param name="goal_y"            value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
+    <param name="arm_point_x"       value="$(arg arm_point_x)" if="$(eval arg('arm_point_x') != '')" />
+    <param name="arm_point_y"       value="$(arg arm_point_y)" if="$(eval arg('arm_point_y') != '')" />
+    <param name="arm_point_radius_m" value="$(arg arm_point_radius_m)" />
+    <param name="object_position_topic" value="$(arg object_position_topic)" />
+    <param name="aim_before_direct" value="$(arg aim_before_direct)" />
+    <param name="aim_yaw_rate"      value="$(arg aim_yaw_rate)" />
+    <param name="aim_yaw_coast_deg" value="$(arg aim_yaw_coast_deg)" />
+    <param name="aim_tolerance_deg" value="$(arg aim_tolerance_deg)" />
+    <param name="aim_min_burst_s"   value="$(arg aim_min_burst_s)" />
+    <param name="aim_max_burst_s"   value="$(arg aim_max_burst_s)" />
+    <param name="aim_settle_s"      value="$(arg aim_settle_s)" />
+    <param name="aim_look_s"        value="$(arg aim_look_s)" />
+    <param name="aim_timeout_s"     value="$(arg aim_timeout_s)" />
+    <param name="aim_fail_to_scan"  value="$(arg aim_fail_to_scan)" />
+    <param name="scan_yaw_rate"     value="$(arg scan_yaw_rate)" />
+    <param name="scan_rotate_s"     value="$(arg scan_rotate_s)" />
+    <param name="scan_pause_s"      value="$(arg scan_pause_s)" />
+    <param name="scan_direction"    value="$(arg scan_direction)" />
+    <param name="scan_forward_speed" value="$(arg scan_forward_speed)" />
+    <param name="scan_forward_s"    value="$(arg scan_forward_s)" />
+    <param name="scan_land_revolutions" value="$(arg scan_land_revolutions)" />
+    <param name="search_yaw_rate"   value="$(arg search_yaw_rate)" />
+    <param name="recover_timeout_s" value="$(arg recover_timeout_s)" />
+    <param name="publish_overlay"   value="$(arg publish_overlay)" />
+    <param name="overlay_topic"     value="$(arg overlay_topic)" />
+    <param name="viz_hz"            value="$(arg viz_hz)" />
+  </node>
+
+  <!-- On-screen live target-lock HUD (needs a display). Disable with viewer:=false. -->
+  <node pkg="falcon_adapter" type="target_lock_viewer_node.py"
+        name="target_lock_viewer" output="screen" if="$(arg viewer)">
+    <param name="image_topic" value="$(arg overlay_topic)" />
+  </node>
+</launch>

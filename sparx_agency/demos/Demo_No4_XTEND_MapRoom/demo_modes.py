@@ -14,6 +14,12 @@ class DemoMode(str, Enum):
     FLY_STRAIGHT = "fly_straight"
     TURNING = "turning"
     VISUAL_SERVOING = "visual_servoing"
+    # The lost-localization recovery owns cmd_vel: the drone's pose has gone cold
+    # and it is being backed up / climbed / swept to re-acquire a tag. Like
+    # TURNING it means "do not trust the sensors" (the drone is manoeuvring blind,
+    # so nothing it sees may be fused into the map); like VISUAL_SERVOING it means
+    # "someone else is flying" (the waypoint follower must stay passive).
+    RECOVERY = "recovery"
     FINISH = "finish"
 
     @classmethod
@@ -35,6 +41,10 @@ class DemoMode(str, Enum):
             "object_servo": cls.VISUAL_SERVOING,
             "track_object": cls.VISUAL_SERVOING,
             "center_object": cls.VISUAL_SERVOING,
+            "recovery": cls.RECOVERY,
+            "recover": cls.RECOVERY,
+            "lost": cls.RECOVERY,
+            "relocalize": cls.RECOVERY,
             "finish": cls.FINISH,
             "arrived": cls.FINISH,
             "done": cls.FINISH,
