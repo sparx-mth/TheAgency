@@ -54,11 +54,11 @@ def _effective(decl, value, _depth=0):
     """Resolve a default that is itself ``$(arg other)`` to the value that applies.
 
     An arg may take its default from another arg in the SAME file -- object_mission's
-    goal_x/goal_y default to the staging point, so the nav goal and the vantage point
-    cannot drift apart. The drift check below is about the value that actually reaches
-    the drone, so chase that one level (and any further) before comparing. An unknown
-    or cyclic reference is left as-is, which fails the comparison loudly rather than
-    resolving to something invented.
+    bev_z_peak defaults to $(arg cruise_z), so the map's trust peak follows the flight
+    altitude. The drift check below is about the value that actually reaches the drone,
+    so chase that one level (and any further) before comparing. An unknown or cyclic
+    reference is left as-is, which fails the comparison loudly rather than resolving to
+    something invented.
     """
     m = re.fullmatch(r"\$\(arg ([a-z_0-9]+)\)", str(value).strip())
     if m is None or _depth > 4 or m.group(1) not in decl:
@@ -126,7 +126,7 @@ def test_mission_default_matches_the_layer_below(key):
     value that actually applies. Compared against the NEAREST layer: real_drone
     intentionally overrides some of nav_stack's defaults. An object_mission default
     written as ``$(arg other)`` is compared by its EFFECTIVE value, so chaining one
-    arg off another (goal_x off stage_x) is not drift."""
+    arg off another (bev_z_peak off cruise_z) is not drift."""
     if key in INTENTIONAL_OVERRIDES:
         pytest.skip("deliberate override: %s" % INTENTIONAL_OVERRIDES[key])
     om = _effective(OM_DECL, OM_DECL[key])
@@ -157,30 +157,39 @@ def test_the_nav_goal_reaches_the_planners():
 
 
 @pytest.mark.parametrize("axis", ["x", "y"])
-def test_the_staging_point_is_the_single_source_of_the_mission_coordinate(axis):
-    """One coordinate drives the nav goal, object_approach's arrival goal AND the
-    director's published goal, so they cannot drift apart.
+def test_the_two_mission_points_are_wired_distinctly(axis):
+    """The pre-selection target and the room centre are DISTINCT and correctly routed.
 
-    They used to be three separate values -- mission.yaml's goal_x/goal_y, a
-    hard-coded pair in object_mission's object_approach include, and whatever the
-    director published -- and a comment in mission.yaml warned you to remember to
-    change the second by hand. Moving the drone's mission then meant it would fly
-    to one place and decide it had "arrived" at another. All three now hang off
-    stage_x/stage_y, and this locks that down: re-pinning any of them to a literal
-    brings the drift back.
+    Two points now, not one: goal_x/goal_y is the pre-selection target the drone flies
+    to and HOLDS at before any object is picked; stage_x/stage_y is the room centre it
+    works from after. The wiring that keeps them straight, locked down here:
+      * the nav goal (goal_x/goal_y) is a plain literal, NOT chained to the staging
+        point -- the two must be independently settable and genuinely different;
+      * object_approach's arrival goal follows the STAGING point (so arriving there is
+        "arrived at the room centre"), and the director publishes that same point;
+      * the arm point that gates the blind visual take-over follows the PRE-SELECTION
+        target, so the take-over is armed by reaching 0,-2, not 0,-3.
+    Re-chaining the goal to the staging point, or the arm point to it, brings back the
+    old single-point behaviour and fails here.
     """
     text = _OM.read_text()
-    stage = "stage_%s" % axis
-    assert stage in _config_launch_keys(), "mission.yaml must be able to set " + stage
-    # The nav goal defaults to it (so the planners fly to the staging point) ...
-    assert re.search(r'<arg name="goal_%s"\s+default="\$\(arg %s\)"' % (axis, stage),
-                     text), "the nav goal no longer follows the staging point"
-    # ... object_approach's arrival goal is it (so arriving there is not "arrived at
-    # the object") ... and the director publishes it as the goal on selection.
-    assert re.search(r'<arg name="goal_%s"\s+value="\$\(arg %s\)" />' % (axis, stage),
-                     text), "object_approach's arrival goal no longer follows the staging point"
-    assert re.search(r'<param name="%s"\s+value="\$\(arg %s\)"' % (stage, stage),
-                     text), "the mission director is not told the staging point"
+    goal, stage = "goal_%s" % axis, "stage_%s" % axis
+    keys = _config_launch_keys()
+    assert goal in keys and stage in keys, \
+        "mission.yaml must be able to set both %s and %s" % (goal, stage)
+    # The nav goal is a decoupled literal, distinct from the staging point ...
+    assert re.search(r'<arg name="%s"\s+default="-?[0-9]' % goal, text), \
+        "the pre-selection target must be a literal, distinct from the staging point"
+    assert not re.search(r'<arg name="%s"\s+default="\$\(arg %s\)"' % (goal, stage), text), \
+        "the nav goal must NOT chain to the staging point (they are two distinct points)"
+    # ... object_approach's arrival goal + the director both follow the STAGING point ...
+    assert re.search(r'<arg name="%s"\s+value="\$\(arg %s\)" />' % (goal, stage), text), \
+        "object_approach's arrival goal no longer follows the staging point"
+    assert re.search(r'<param name="%s"\s+value="\$\(arg %s\)"' % (stage, stage), text), \
+        "the mission director is not told the staging point"
+    # ... and the arm point follows the PRE-SELECTION target (the room-entry point).
+    assert re.search(r'<arg name="arm_point_%s"\s+value="\$\(arg %s\)" />' % (axis, goal), text), \
+        "the arm point must follow the pre-selection target, not the room centre"
 
 
 def test_the_go_gate_is_the_last_thing_holding_the_drone():

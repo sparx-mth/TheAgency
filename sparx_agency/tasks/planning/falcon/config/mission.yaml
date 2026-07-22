@@ -66,26 +66,29 @@ paths:
 launch:
 
   # ==================================================================================================
-  # THE GOAL  --  where the drone flies to, and why not onto the object
+  # THE TWO POINTS  --  where it waits before selection, and where it looks after
   # ==================================================================================================
-  # The STAGING VANTAGE POINT (world metres). One place that sets all three
-  # coordinates that used to drift apart: the A* goal, object_approach's arrival
-  # goal, and what the director publishes when you pick an object.
+  # Two DISTINCT places (world metres), independently tunable:
   #
-  # The drone is NOT sent onto the object itself. The object's position comes from
-  # the room map and is only as accurate as that map, so flying onto it can leave
-  # the object beside or behind the drone, out of frame. Instead it flies HERE and:
-  #   1. turns to the object's recorded bearing and holds still, looking. A camera
-  #      resolves a bearing far better than a map resolves a position, so this is
-  #      the shot most likely to end in a real visual lock.
-  #   2. only if that finds nothing, re-targets the object's own (x,y) and lets A*
-  #      fly the last leg -- the old behaviour, kept as the fallback.
-  # Arriving here therefore aims; only arriving at the OBJECT can trigger a landing.
+  #   goal_x/goal_y  -- THE PRE-SELECTION TARGET. Before any object is picked the drone
+  #                     flies here and HOLDS, in the air. object_approach is disabled
+  #                     until a selection, so nothing aims, sweeps, hands off /cmd_vel
+  #                     or lands -- it just waits. ('' idles the planners instead.)
+  #   stage_x/stage_y-- THE ROOM CENTRE. On picking an object the director sends the
+  #                     drone HERE (not onto the object) to look for it: it turns to the
+  #                     object's recorded bearing and holds still looking (AIM), and if
+  #                     that finds nothing it sweeps the room in place (aim_fail_to_scan
+  #                     below). It is also object_approach's arrival goal.
   #
-  # Set BOTH to '' to switch staging off: selecting an object then publishes its own
-  # position as the goal and the drone flies straight onto it.
-  stage_x: 0.0                # m, world/map frame -- the centre of the room
-  stage_y: -2.0               # m, world/map frame
+  # WHY not fly onto the object: its position comes from the room map and is only as
+  # accurate as that map, so flying onto it can leave it beside or behind the drone,
+  # out of frame. A camera resolves a bearing far better than a map resolves a
+  # position, so standing off at the room centre and looking is the robust move.
+  # Set BOTH stage_x/stage_y to '' to switch staging off (fly straight onto the object).
+  goal_x: 0.0                 # m -- pre-selection target: fly here and hold
+  goal_y: -2.0                # m
+  stage_x: 0.0                # m -- room centre: look for the object from here
+  stage_y: -3.0               # m
 
   # -- The AIM: how it turns to look, and how long it looks ------------------------------------------
   # Yaw is discrete and coasts, so the turn is pulsed: each burst is commanded short,
@@ -98,7 +101,11 @@ launch:
   aim_look_s: 4.0             # hold still on the bearing this long before giving up
   aim_settle_s: 1.0           # stop between turn bursts so the coast finishes first
   aim_timeout_s: 25.0         # hard cap on the whole aim; a drone that will not turn
-                              #   still escalates to the object's coordinate
+                              #   still escalates/sweeps rather than aiming forever
+  # A failed aim SWEEPS the room in place for the object rather than flying onto its
+  # imprecise coordinate; the sweep gives up and lands after scan_land_revolutions turns.
+  aim_fail_to_scan: true      # false = fly onto the object's (x,y) instead (legacy escalate)
+  scan_land_revolutions: 3    # full in-place turns to sweep before the give-up land; 0 = forever
 
   # -- Detection gate: how sure we must be it IS the object ------------------------------------------
   min_score: 0.15             # score floor for a detection to count
@@ -110,14 +117,25 @@ launch:
   closure_mode: multi_axis    # how it closes the distance: multi_axis | waypoint
   force_mode: fixed           # flight-command shaping: fixed | snap | none
 
-  # -- Landing: two independent ways the mission can end ---------------------------------------------
-  # 1. VISUAL land -- the object is confirmed and within land_range_m (needs depth).
-  # 2. ARRIVAL land -- the coordinate goal is reached, the object never confirmed.
+  # -- Landing: how the mission ends -----------------------------------------------------------------
+  # 1. VISUAL land (the success) -- the object is confirmed and reached within land_range_m.
+  # 2. GIVE-UP land -- the room sweep ran scan_land_revolutions turns unseen (above).
+  # ARRIVAL land ("by A* alone") is OFF: arriving at the room centre AIMS/SWEEPS, it must
+  # never land by mere arrival.
   land_range_m: 1.0           # m, visual land distance; 0 disables the visual land
   land_confirm_ticks: 3       # consecutive in-range ticks before the visual land
-  land_at_goal: true          # enable the arrival land
-  arrive_radius_m: 0.6        # m, how close to the goal counts as "reached"
-  arrive_land_confirm_ticks: 5  # consecutive arrived ticks before the arrival land
+  land_at_goal: false         # OFF: arrival at the room centre aims/sweeps, never lands
+
+  # -- Acquisition radii: how close counts as "reached" (both points are fly-through) ----------------
+  # Forgiving on purpose: 0,-2 is an intermediate point and 0,-3 a vantage point, so the
+  # drone need not nail either exactly.
+  arrive_radius_m: 0.8        # m, how close to the room centre (0,-3) counts as "arrived" (AIM)
+  arrive_land_confirm_ticks: 5  # consecutive arrived ticks (unused while land_at_goal off)
+  # No blind visual take-over until the drone has reached the pre-selection target
+  # (goal_x/goal_y, 0,-2): it must fly the hard part of the route (door, corridor) on the
+  # obstacle-aware nav first, because the visual servo does not avoid obstacles. This is
+  # how close to that entry point counts as "reached" and arms the take-over.
+  arm_point_radius_m: 0.8     # m, forgiving radius on the entry point that arms the take-over
 
   # ==================================================================================================
   # THE GO GATE  --  nothing reaches the drone until you say so
@@ -149,7 +167,7 @@ launch:
   #                   dead-reckoning, and has reflexes for walls the camera cannot
   #                   see. Its dials are the CONTROLLER 5 section below.
   # Each has its OWN speed dials below, so a value in the wrong block does nothing.
-  controller: drift_pid        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
+  controller: waypoint        # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight
@@ -616,7 +634,7 @@ launch:
   # -- 1. Potential field (APF), used when corrector: potential_field --------------------------------
   apf_centering:             line_search   # line_search = move each waypoint to the lateral
                                            #   potential minimum (single-pass) | descent = legacy
-  apf_gain:                  0.4           # repulsive-force scale; DESCENT MODE ONLY
+  apf_gain:                  0.3           # repulsive-force scale; DESCENT MODE ONLY
   apf_max_total_shift_m:     0.3           # m, hard cap on how far one waypoint may move --
                                            #   the main "visible shift" lever
   apf_min_clearance_m:       0.2           # m; >0 also pushes waypoints out to this distance
