@@ -122,15 +122,27 @@ class DriftPidParams:
         lateral_turn_frac: Fraction of the cross-track PID applied while
             rotating (0..1). Reduced: a large ROLL during a turn perturbs the
             rotation itself.
-        turn_pitch_bias: Forward speed ridden during a TURN whose translation
-            would otherwise be zero (m/s). A pure yaw leaves this airframe flat,
-            so the turn bites late and coasts -- measured on the deployed drone
-            at ~11% yaw delivery in place versus 30-68% while translating. The
-            same trick the one-axis follower's ``yaw_pitch_bias`` applies at
-            publish time, done here inside the control law so the envelope,
-            telemetry and logs all see the command that actually flies. Only
-            replaces a smaller |vx|; a real station-keeping correction that is
-            already larger wins. 0 disables (a pure yaw stays pure).
+        turn_pitch_bias: FLOOR on the forward speed while a TURN's yaw is
+            active (m/s). A pure yaw leaves this airframe flat, so the turn
+            bites late and coasts -- measured on the deployed drone at ~11% yaw
+            delivery in place versus 30-68% while translating; worse, a
+            BACKWARD translation degrades the delivered yaw until it reverses
+            (nav_debug 2026-07-21: full right yaw riding -0.10 m/s turned the
+            drone LEFT; the same yaw riding +0.08 m/s turned right at once).
+            So while the yaw axis is active the forward command is clamped to
+            at least this value -- a backward station-keeping correction never
+            rides a turn; it waits until the yaw quietens. Applied inside the
+            control law so the envelope, telemetry and logs all see the command
+            that actually flies. 0 still forbids backward-while-yawing, it just
+            adds no forward bite of its own.
+        turn_side_cone_rad: Half-angle of the sideslip cone the translation may
+            occupy while the yaw axis is active (rad). YAW+ROLL is not the same
+            manoeuvre as YAW+forward on this airframe, so during an active yaw
+            the lateral command is capped at ``tan(cone) * vx`` -- roll seasons
+            the progress vector, forward defines it. Applies in every regime
+            (TURN, TRACK trims, station-keeping); at cruise speeds the cap sits
+            above the lateral PID's own limit, so it only ever bites when the
+            drone is slow and yawing hard -- exactly where the coupling lives.
         settle_map_updates: Fresh voxel updates the controller asks the adapter to
             wait for while stopped. Exposed for interface parity with the one-axis
             follower's map-settle gate.
@@ -169,6 +181,7 @@ class DriftPidParams:
     forward_track_frac: float = 0.0
     lateral_turn_frac: float = 0.40
     turn_pitch_bias: float = 0.0
+    turn_side_cone_rad: float = radians(35.0)
     settle_map_updates: int = 0
 
     # ── Feedback: how tightly we hold ──
@@ -206,6 +219,11 @@ class DriftPidParams:
                 raise ValueError("DriftPidParams." + name + " must be in [0, 1]")
         if self.turn_pitch_bias < 0.0:
             raise ValueError("DriftPidParams.turn_pitch_bias must be >= 0")
+        if not 0.0 < self.turn_side_cone_rad < radians(90.0):
+            raise ValueError(
+                "DriftPidParams.turn_side_cone_rad must be in (0, 90deg) "
+                "exclusive -- it is the half-angle of the sideslip cone the "
+                "translation may occupy while the yaw axis is active")
         if self.turn_pitch_bias > self.envelope.max_vx:
             raise ValueError(
                 "DriftPidParams.turn_pitch_bias (%.2f) exceeds envelope.max_vx "

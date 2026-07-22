@@ -13,6 +13,10 @@ the same drift in each:
     wherever the drone happened to be, so a turn also pulls it back on track.
     Both translation PIDs run against that anchor, which is what cancels the
     fore/aft drift that only shows up when the drone is not flying forward.
+    The anchor pull is *coordinated with the rotation*: while the yaw axis is
+    active the translation vector is confined to a forward cone (measured on
+    this airframe, a backward pitch under a turn degrades and then INVERTS the
+    delivered yaw), so a correction that needs reverse waits its turn.
 
 On top of that sit two things the platform forces on any honest controller here:
 localization that degrades gracefully rather than failing cleanly (see
@@ -37,6 +41,7 @@ from sparx_agency.core.planning.trackers.multi_axis_follower.allocation import (
     alignment_gate,
     approach_speed,
     saturate,
+    turn_coordination,
     yaw_engaged,
 )
 
@@ -87,6 +92,7 @@ class DriftPidFollower:
         self._last = (0.0, 0.0, 0.0)
         self._reported = False
         self._prev_age = None      # type: Optional[float]
+        self._yield_scale = 1.0
         for pid in (self._lat, self._fwd, self._yaw):
             pid.reset()
         self._envelope.reset()
@@ -147,8 +153,9 @@ class DriftPidFollower:
             self._retire(pose)
 
     # ─── Control ─────────────────────────────────────────────────
-    def step(self, pose, dt, axis_confirmed=True, hold=False, map_ready=True):
-        # type: (Pose2D, float, bool, bool, bool) -> DriftPidCommand
+    def step(self, pose, dt, axis_confirmed=True, hold=False, map_ready=True,
+             translation_scale=1.0):
+        # type: (Pose2D, float, bool, bool, bool, float) -> DriftPidCommand
         """Advance one control tick.
 
         Args:
@@ -159,6 +166,14 @@ class DriftPidFollower:
             hold: External stop request from the adapter.
             map_ready: False means the adapter is waiting for a fresh voxel
                 update; treated exactly like ``hold``.
+            translation_scale: Fraction of the horizontal translation an outside
+                authority (the altitude hold, during a climb pulse) leaves to
+                this controller this tick (0..1). Folded in BEFORE the envelope
+                so slew, minimum-force shaping, effort, the blockage monitor and
+                the published telemetry all see the command that actually
+                flies -- a yield applied after the fact would leave the
+                controller believing it commanded speed the drone never got.
+                Yaw is untouched: rotating costs no lift.
 
         Returns:
             The command to publish, plus what the controller has learned.
@@ -166,6 +181,10 @@ class DriftPidFollower:
         del axis_confirmed
         if dt <= 0.0:
             raise ValueError("DriftPidFollower.step: dt must be > 0")
+        if not 0.0 <= translation_scale <= 1.0:
+            raise ValueError("DriftPidFollower.step: translation_scale must be "
+                             "in [0, 1], got %r" % (translation_scale,))
+        self._yield_scale = float(translation_scale)
         auth = self._scheduler.evaluate(self._quality)
         fresh = self._measurement_fresh()
         if len(self._path) < 2:
@@ -330,13 +349,11 @@ class DriftPidFollower:
             vx *= alignment_gate(e_yaw, p.travel_cone_rad,
                                  p.translate_suppress_rad,
                                  p.translate_suppress_floor)
-            if (p.turn_pitch_bias > 0.0 and abs(wz) > 1e-3
-                    and abs(vx) < p.turn_pitch_bias):
-                # A pure yaw coasts flat on this airframe (measured ~11% yaw
-                # delivery in place vs 30-68% while translating): ride a small
-                # forward pitch so the turn has something to bite on. A larger
-                # genuine station-keeping correction wins over the bias.
-                vx = p.turn_pitch_bias
+            # The turn owns the translation direction: forward at least
+            # turn_pitch_bias (backward flips the delivered yaw on this
+            # airframe), lateral confined to the sideslip cone.
+            vx, vy = turn_coordination(vx, vy, wz, self._yaw_active_rad(),
+                                       p.turn_pitch_bias, p.turn_side_cone_rad)
             return self._emit(vx, vy, wz, DriftPidState.TURN, dt, auth, blocked,
                               report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
                               e_yaw=e_yaw)
@@ -368,6 +385,11 @@ class DriftPidFollower:
             # it from a stale error, but let it contribute nothing here.
             self._fwd.update(e_fwd, dt, integrate=False, gain_scale=0.0,
                              fresh=fresh)
+        # Mid-leg yaw trims obey the same coupling as turns: while the trim is
+        # genuinely rotating the airframe, never let the translation point
+        # backward or sideways-first (floor 0: the cruise already owns forward).
+        vx, vy = turn_coordination(vx, vy, wz, self._yaw_active_rad(), 0.0,
+                                   p.turn_side_cone_rad)
         return self._emit(vx, vy, wz, DriftPidState.TRACK, dt, auth, blocked,
                           report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
                           e_yaw=e_yaw)
@@ -386,6 +408,13 @@ class DriftPidFollower:
                                        deadband_extra=auth.yaw_deadband_extra_rad,
                                        fresh=fresh),
                       self.params.track_yaw_rate)
+        # Rotate first, translate after: while the heading trim is actively
+        # rotating the airframe a backward (or roll-first) correction inverts
+        # the delivered yaw, so it is deferred until the trim quietens. The
+        # position error stays open and is closed then. Floor 0: a hold never
+        # invents forward motion the anchor did not ask for.
+        vx, vy = turn_coordination(vx, vy, wz, self._yaw_active_rad(), 0.0,
+                                   self.params.turn_side_cone_rad)
         return vx, vy, wz, e_fwd, e_lat, e_yaw
 
     def _anchor_correction(self, pose, dt, auth, fresh, lateral_frac=1.0):
@@ -430,6 +459,19 @@ class DriftPidFollower:
         for pid in (self._lat, self._fwd, self._yaw):
             pid.reset_derivative()
 
+    def _yaw_active_rad(self):
+        # type: () -> float
+        """Yaw command at/above which the airframe will actually rotate.
+
+        The envelope's minimum-force shaping snaps anything above
+        ``release_frac * min_wz`` up to ``min_wz``, so that release point — not
+        ``min_wz`` itself — is where a raw yaw demand starts moving the drone,
+        and with it the translation-direction coupling the turn coordination
+        exists to respect.
+        """
+        env = self.params.envelope
+        return env.release_frac * env.min_wz
+
     def _distance_to_goal(self, pose):
         # type: (Pose2D) -> float
         """Straight-line range to the FINAL waypoint (drives the arrival ramp)."""
@@ -466,6 +508,11 @@ class DriftPidFollower:
               reason="", report_blocked=False, e_fwd=0.0, e_lat=0.0, e_yaw=0.0):
         # type: (...) -> DriftPidCommand
         """Push the desired velocity through the force envelope and package it."""
+        # An external yield (climb pulse) shrinks the horizontal translation
+        # BEFORE the envelope, so the slew memory, minimum-force shaping and the
+        # blockage monitor's notion of "what was commanded" all stay truthful.
+        vx *= self._yield_scale
+        vy *= self._yield_scale
         vx, vy, wz = self._envelope.apply(
             vx, vy, wz, dt, speed_scale=auth.speed_scale,
             yaw_speed_scale=getattr(auth, "yaw_speed_scale", None))

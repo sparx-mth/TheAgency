@@ -380,6 +380,95 @@ def test_turn_rides_a_pitch_bias_so_the_yaw_bites():
     assert cmd.vx == pytest.approx(0.0)        # default: the pure yaw of old
 
 
+# ── Turn coordination: the progress vector during a rotation ─────
+def test_turn_never_rides_backward_while_yawing():
+    """The 2026-07-21 failure: the drone sat AHEAD of its turn anchor, so the
+    station-keeping loop pulled backward under a saturated right-yaw -- and the
+    airframe answered by turning the WRONG way. The forward floor must win over
+    the backward pull for as long as the yaw is active, bias or no bias."""
+    for bias in (0.08, 0.0):
+        p = DriftPidParams(turn_pitch_bias=bias,
+                           blockage=BlockageParams(enabled=False))
+        f = DriftPidFollower(p)
+        f.set_quality(_good())
+        # Path runs +y; the drone sits 0.5 m off it facing +x, so the anchor
+        # foot is BEHIND the drone and the heading error is huge: a TURN whose
+        # along-track correction wants reverse.
+        f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 3.0, 0.0)])
+        cmd = None
+        for _ in range(30):
+            cmd = f.step(Pose2D(0.5, 0.0, 0.0), DT)
+            assert cmd.vx >= 0.0, \
+                "commanded %.3f m/s backward under an active yaw" % -cmd.vx
+        assert cmd.state == DriftPidState.TURN
+        assert abs(cmd.wz) > 0.0
+        if bias > 0.0:
+            assert cmd.vx >= p.envelope.min_vx   # riding the forward bite
+
+
+def test_turn_sideslip_cone_caps_the_roll():
+    """YAW+ROLL is not YAW+forward: while the yaw axis is active the lateral
+    command may never dominate the progress vector. With no forward floor the
+    cone closes completely -- rotate first, translate after."""
+    p = DriftPidParams(turn_pitch_bias=0.0,
+                       blockage=BlockageParams(enabled=False))
+    f = DriftPidFollower(p)
+    f.set_quality(_good())
+    f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 3.0, 0.0)])
+    yaw_active = p.envelope.release_frac * p.envelope.min_wz
+    for _ in range(30):
+        # Off the path both along and across: the lateral loop wants a roll.
+        cmd = f.step(Pose2D(0.5, -0.3, 0.0), DT)
+        if abs(cmd.wz) >= yaw_active:
+            assert cmd.vy == pytest.approx(0.0), \
+                "rolled %.3f m/s during an active yaw with no forward speed" % cmd.vy
+
+
+def test_station_keep_defers_backward_until_the_yaw_quietens():
+    """A HOLD that needs both a heading trim and a backward correction must
+    rotate first: backward + yaw is the coupling that turns the drone the wrong
+    way. Once the trim is done, the backward correction gets its turn."""
+    p = DriftPidParams(blockage=BlockageParams(enabled=False))
+    f = DriftPidFollower(p)
+    f.set_quality(_good())
+    f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(1.5, 0.0, 0.0)])
+    # Capture the goal (anchor latches at (1.5, 0), anchor_yaw 0).
+    cmd = f.step(Pose2D(1.4, 0.0, 0.0), DT)
+    assert cmd.done and cmd.state == DriftPidState.HOLD
+    # Now overshot past the anchor AND twisted off the held heading: the yaw
+    # trim is active, so the backward pull must wait.
+    for _ in range(10):
+        cmd = f.step(Pose2D(1.9, 0.0, 0.6), DT)
+        assert cmd.vx >= 0.0
+    assert abs(cmd.wz) > 0.0
+    # Heading recovered: the still-open backward correction now runs.
+    cmd = None
+    for _ in range(30):
+        cmd = f.step(Pose2D(1.9, 0.0, 0.0), DT)
+    assert cmd.vx < 0.0, "the deferred backward correction never happened"
+
+
+def test_translation_yield_scales_the_flight_not_the_yaw():
+    """The climb pulse's yield is folded in before the envelope: half the
+    translation flies at half speed, and an out-of-range scale is refused."""
+    full = DriftPidFollower(DriftPidParams(blockage=BlockageParams(enabled=False)))
+    half = DriftPidFollower(DriftPidParams(blockage=BlockageParams(enabled=False)))
+    for f in (full, half):
+        f.set_quality(_good())
+        f.set_path([Pose2D(0.0, 0.0, 0.0), Pose2D(6.0, 0.0, 0.0)])
+    cmd_full = cmd_half = None
+    for _ in range(20):
+        cmd_full = full.step(Pose2D(0.0, 0.0, 0.0), DT)
+        cmd_half = half.step(Pose2D(0.0, 0.0, 0.0), DT, translation_scale=0.5)
+    assert cmd_full.vx == pytest.approx(0.18, abs=0.02)   # the cruise
+    assert cmd_half.vx == pytest.approx(0.09, abs=0.02)   # half of it, honestly
+    assert cmd_half.wz == cmd_full.wz                      # yaw costs no lift
+    with pytest.raises(ValueError, match="translation_scale"):
+        full.step(Pose2D(0.0, 0.0, 0.0), DT, translation_scale=1.5)
+    with pytest.raises(ValueError, match="translation_scale"):
+        full.step(Pose2D(0.0, 0.0, 0.0), DT, translation_scale=-0.1)
+
+
 # ── Blockage detection ───────────────────────────────────────────
 def test_wedged_drone_is_detected_on_the_forward_axis():
     mon = BlockageMonitor(BlockageParams(window_s=0.5, confirm_ticks=3))
