@@ -4,21 +4,6 @@ import yaml
 from sensor_msgs.msg import CameraInfo
 
 
-def clamp(value: float, lo: float, hi: float) -> float:
-    """Clamp value to [lo, hi]."""
-    return max(lo, min(hi, float(value)))
-
-
-def clamp_symmetric(value: float, limit: float) -> float:
-    """Clamp value to [-limit, limit]."""
-    return max(-float(limit), min(float(limit), float(value)))
-
-
-def clamp_axis(value: float, limit: float = 1000.0) -> int:
-    """Clamp to [-limit, limit] and cast to int (for drone controller axis values)."""
-    return int(clamp_symmetric(value, limit))
-
-
 def matrix_from_yaml_dict(data: dict, key: str, shape: tuple,
                           allow_missing: bool = False) -> "np.ndarray | None":
     """Extract and reshape a matrix stored as {key: {data: [...]}} in a ROS YAML dict.

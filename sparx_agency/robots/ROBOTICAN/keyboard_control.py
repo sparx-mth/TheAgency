@@ -75,7 +75,7 @@ class KeyboardTeleopNode(Node):
         print(MSG)
 
     def clamp(self, v: float) -> float:
-        from sparx_agency.robots.common.helpers import clamp_symmetric
+        from sparx_agency.robots.common.math_utils import clamp_symmetric
         return clamp_symmetric(v, self.max_cmd)
 
     def publish_manual(self):

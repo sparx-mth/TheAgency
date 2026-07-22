@@ -16,12 +16,29 @@ the legacy bev_publisher.py: identical topics and message types.
 
 See the bottom of this file for the full rosparam list and a launch snippet.
 """
+import os
+import sys
+
 import numpy as np
 import rospy
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import PointCloud2
 
 from sparx_agency.core.mapping.bev import BevConfig, BevProjector, OCCUPIED
+
+# ============== ROBOTICAN FIX ==============
+# General bugfix, not Rooster-specific -- this node is shared by XTEND and
+# Rooster alike (included via nav_stack.launch / real_drone.launch on both).
+# Catkin's devel-space relay (script.py.in) execs this file's source rather
+# than running it directly, so Python never auto-prepends this script's own
+# directory to sys.path the way a plain `python3 bev_publisher_node.py`
+# would -- the bare `from cloud_utils import ...` below then fails with
+# ModuleNotFoundError regardless of platform (confirmed by running the
+# node directly here: "No module named 'cloud_utils'"). Not something
+# newly broken by any Sphera/Rooster change; root cause is the catkin
+# relay mechanism itself, which both platforms share.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ============================================
 from cloud_utils import cloud_to_xyz   # sibling module in this scripts/ dir
 
 

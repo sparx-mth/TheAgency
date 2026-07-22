@@ -75,6 +75,13 @@ TURTLE_SCALE = 0.4
 YAW_RATE = 150.0      # axis units (out of 1000) – tune to taste
 YAW_TIMEOUT = 0.5     # seconds before r auto-resets to 0 after last key press
 
+# Arming: let zeroed axes reach the FCU before arming, then confirm via
+# telemetry rather than trusting the force_arm service response alone -
+# the FCU can accept the request and still reject arming afterwards
+# (e.g. preflight throttle-centering check).
+ARM_SETTLE_SEC = 0.3
+ARM_CONFIRM_TIMEOUT_SEC = 2.0
+
 
 # ---------------------------------------------------------------------------
 # Per-drone axis model
@@ -123,7 +130,7 @@ class AxisModel:
 
     @staticmethod
     def _clamp(v: float) -> float:
-        from sparx_agency.robots.common.helpers import clamp
+        from sparx_agency.robots.common.math_utils import clamp
         return clamp(v, MIN_AXIS, MAX_AXIS)
 
 
@@ -214,6 +221,7 @@ class DroneHandle:
 
     def publish_keep_alive(self):
         msg = KeepAlive()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.is_active = True
         msg.requested_flight_mode = FLIGHT_MODE_POSITION
         msg.command_reboot = False
@@ -249,6 +257,10 @@ class DroneHandle:
         self.node.get_logger().info(f"[{self.id}] Zeroed axes, requesting ARM...")
 
         def _do_arm():
+            # Give the FCU a moment to actually receive the zeroed
+            # manual_control before arming - otherwise it can still see the
+            # stale pre-reset throttle value and reject the arm request.
+            time.sleep(ARM_SETTLE_SEC)
             if not self.force_arm_client.service_is_ready():
                 self.node.get_logger().warn(f"[{self.id}] force_arm service not ready, waiting 2s...")
                 time.sleep(2.0)
@@ -263,17 +275,32 @@ class DroneHandle:
                     self.node.get_logger().error(f"[{self.id}] force_arm error: {e}")
                     self.arm_pending = False
                     return
-                if resp.success:
-                    self.node.get_logger().info(f"[{self.id}] Armed! Climbing...")
-                    self.arm_pending = False
-                    self._climb(on_done)
-                else:
+                if not resp.success:
                     self.node.get_logger().warn(f"[{self.id}] Arm refused: {resp.message}")
                     self.arm_pending = False
+                    return
+                threading.Thread(target=self._confirm_armed, args=(on_done,), daemon=True).start()
 
             future.add_done_callback(_done)
 
         threading.Thread(target=_do_arm, daemon=True).start()
+
+    def _confirm_armed(self, on_done=None):
+        """force_arm succeeding only means the FCU accepted the request - the
+        FCU (e.g. PX4 preflight checks) can still refuse to actually arm.
+        Poll real /state telemetry before trusting we're airborne."""
+        deadline = time.time() + ARM_CONFIRM_TIMEOUT_SEC
+        while time.time() < deadline:
+            if self.armed:
+                self.arm_pending = False
+                self.node.get_logger().info(f"[{self.id}] Armed! Climbing...")
+                self._climb(on_done)
+                return
+            time.sleep(0.1)
+        self.arm_pending = False
+        self.node.get_logger().error(
+            f"[{self.id}] force_arm accepted but FCU never confirmed armed "
+            f"(no takeoff sent) - check FCU preflight/arming checks.")
 
     def _climb(self, on_done=None):
         self.axes.set(0.0, 0.0, self.climb_z, 0.0)

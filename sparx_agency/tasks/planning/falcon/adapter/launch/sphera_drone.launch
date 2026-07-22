@@ -1,0 +1,362 @@
+<launch>
+  <!--
+    sphera_drone.launch — ROBOTICAN/Sphera-only fork of real_drone.launch.
+    Does not touch real_drone.launch (XTEND's path); same relationship as
+    maps/sphera_jail.yaml to office.yaml. Only difference from
+    real_drone.launch: adds bev_xmin/ymin/xmax/ymax args, forwarded to
+    nav_stack.launch, so the BEV click viewport can be pointed at Rooster's
+    real Sphera-world spawn instead of nav_stack.launch's office-centric
+    default (a fixed 12x12m box at world origin). See mission_control.py's
+    "Rooster Falcon Adapter" service for the actual override values (they
+    match maps/sphera_jail.yaml's box bounds, centered on init_x/init_y).
+
+    Architecture (only one new node vs. the Gazebo path):
+
+       <real pose topic, e.g. PoseStamped>
+                  │
+                  ▼
+            pose_adapter   (this launch)
+                  │   bare Pose
+                  ▼
+           /<drone_ns>/gt_pose
+                  │
+                  └──► everything downstream is identical to
+                        the Gazebo run — sensor_gate / falcon_adapter /
+                        astar_planner / waypoint_follower / bev_click_goal
+                        all see the same topic name and message type
+                        they always saw.
+
+    camera_info is intentionally NOT bridged for real-drone runs
+    (bridge_camera_info defaults to false in nav_stack.launch).
+    Camera intrinsics are passed as args below and loaded into rosparam,
+    where FALCON's exploration_node reads them.
+
+    Defaults match the xtend drone:
+      pose : /xtend/localization        (PoseStamped)
+      depth: /xtend/depth_frame_path    (String "<path> <sec> <nsec>" -> .npy, 504x294)
+      rgb  : /xtend/rgb_frame_path      (String "<path> <sec> <nsec>" -> .jpg)
+      K    : fx=322.635 fy=323.389 cx=242.065 cy=90.030
+             (RAW/unrectified intrinsics from the 504x294 calibration.
+              FALCON projects the RAW depth with NO undistortion, so the
+              correct focals are K's — NOT the rectified P matrix. P's
+              smaller, asymmetric fx (253 vs fy 287) over-scaled the cloud
+              ~27%, so a 90 cm corridor mapped as ~110 cm.)
+      Rooster overrides all of these — see mission_control.py.
+
+    Run example:
+      roslaunch falcon_adapter sphera_drone.launch map_name:=sphera_jail
+  -->
+
+  <!-- ── Forwarded to the included nav launch ─────────────────── -->
+  <arg name="map_name" default="office" />
+  <arg name="drone_ns" default="" />
+  <arg name="gated_ns" default="/gated_drone" />
+
+  <!-- ── Real-drone localization ──────────────────────────────── -->
+  <arg name="real_pose_topic" default="/xtend/localization" />
+<!--   <arg name="real_pose_topic" default="/flow_depth/pose_est" /> -->
+  <arg name="real_pose_type"  default="pose_stamped" />
+
+  <!-- ── RGB/depth transport ────────────────────────────────────────
+       frame_path (default, the real drone): each frame is saved to disk and a
+       tiny std_msgs/String "<path> <sec> <nsec>" is published; mapping_sync
+       (depth) and navdp_click (depth+rgb) load the .npy / .jpg and reuse the
+       localization-synchronized stamp. topic: raw sensor_msgs/Image straight off
+       the wire (Gazebo sim via sim_adapter, or an old bag replay) — set
+       image_transport:=topic and the depth/rgb topic defaults below flip to the
+       raw /xtend/depth_m + /xtend/rgb. -->
+  <arg name="image_transport" default="frame_path" /><!-- frame_path | topic -->
+
+  <!-- ── Real-drone depth / rgb (transport-dependent topic names) ──── -->
+  <arg name="real_depth_path_topic" default="$(eval '/xtend/depth_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/depth_m')" />
+  <arg name="real_rgb_path_topic"   default="$(eval '/xtend/rgb_frame_path' if arg('image_transport') == 'frame_path' else '/xtend/rgb')" />
+  <!-- Legacy raw-depth Image topic. Kept ONLY as sensor_gate's input name; on the
+       real drone nothing publishes it anymore (depth now arrives as a frame-path),
+       so sensor_gate's depth path is inert here. mapping_sync is the sole voxel
+       feeder and loads depth from real_depth_path_topic, so this does not affect
+       the map. (sensor_gate's turning-freeze is disabled below for the same reason.) -->
+  <arg name="real_depth_topic" default="/xtend/depth_m" />
+
+  <!-- ── mapping_sync depth/pose pairing tolerance ───────────────
+       Default (0.0/0.0, exact-only) is correct for XTEND, where the
+       depth frame-path and pose share the SAME capture stamp by
+       construction. Override to non-zero (e.g. 0.05 / 0.12, the
+       node's own defaults) for sources where depth and pose are
+       stamped independently, e.g. ROBOTICAN/Rooster's ground-truth
+       localization (rooster_ground_truth_localization.py) stamps from
+       Sphera's own state message, not from the depth capture, so an
+       exact nanosecond match will (almost) never occur, and every
+       depth frame drops as "dropout" until this is relaxed. -->
+  <arg name="sync_tolerance"  default="0.0" />
+  <arg name="max_interp_gap"  default="0.0" />
+
+  <!-- ── Camera intrinsics (xtend K-matrix defaults for 504x392) ──
+       MUST match the actual depth stream. If image_width/image_height
+       don't match what the drone publishes, exploration_node silently
+       drops frames. Override on the command line for a different camera:
+         cam_fx:=... cam_fy:=... cam_cx:=... cam_cy:=...
+         cam_width:=... cam_height:=... -->
+  <!-- K-matrix (raw, unrectified) intrinsics. FALCON projects the RAW depth
+       image with no undistortion, so the correct focals are K's (fx~=fy, as
+       expected for square pixels), NOT the rectified P matrix. Using P's
+       smaller fx (253) inflated every metric dimension by fx_K/fx_P ~= 1.27
+       (a 90 cm corridor read as ~110 cm). If you ever feed RECTIFIED depth
+       instead, switch these back to the P-matrix values. -->
+  <arg name="cam_fx"        default="322.6351083474948" />
+  <arg name="cam_fy"        default="323.3893307141174" />
+  <arg name="cam_cx"        default="242.06479658679714" />
+  <arg name="cam_cy"        default="90.03019076680604" />
+  <arg name="cam_width"     default="504" />
+  <arg name="cam_height"    default="294" />
+  <arg name="cam_min_depth" default="0.1" />
+  <arg name="cam_max_depth" default="10.0" />
+
+  <!-- ── Optional flight-tuning overrides ────────────────────────-->
+  <arg name="vel_x"     default="0.3" />
+  <arg name="cruise_z"  default="1.0" />
+  <arg name="goal_x"    default="0.0" />
+  <arg name="goal_y"    default="-3.0" />
+
+  <!-- BEV click/viewport bounds, forwarded to nav_stack.launch's bev_* args.
+       Defaults match nav_stack.launch's own -6/-6/6/6 (office-centric); this
+       is the whole reason this file exists instead of adding these to
+       real_drone.launch — Rooster overrides them to sphera_jail.yaml's real
+       spawn-centered box (see mission_control.py). -->
+  <arg name="bev_xmin"  default="-6.0" />
+  <arg name="bev_ymin"  default="-6.0" />
+  <arg name="bev_xmax"  default="6.0" />
+  <arg name="bev_ymax"  default="6.0" />
+
+  <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
+       use_navdp:=true swaps astar_planner for navdp_click. It consumes the
+       same /xtend/rgb_frame_path + /xtend/depth_frame_path frames FALCON maps, so
+       its intrinsics inherit the cam_* (raw K) args above automatically — nothing to pass.
+       The overlay tracks the live pose altitude. Set
+       navdp_camera_info_topic:=/xtend/camera_info to auto-sync intrinsics from
+       the (bridged) camera_info (K; must describe the 504x294 stream) instead. -->
+  <arg name="use_navdp"               default="false" />
+  <arg name="navdp_camera_info_topic" default="" />
+
+  <!-- ── Combination mode (A* global route + NavDP local legs) ──────
+       DEFAULT mode: nav_mode:=combination runs A* AND combination_planner together: A*
+       plans the route to the goal, combination_planner hands NavDP the farthest A*
+       waypoint visible in the current frame, flies that leg to its midpoint, then
+       re-infers. With combination_start_enabled:=true (the default) the fusion is on
+       from the first tick; set it false to start on A* and publish a 'std_msgs/Bool
+       True' on combination_enable_topic later. use_navdp:=true selects pure navdp;
+       nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
+  <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
+  <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
+       nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
+       and start the FlowNav TRT server (tasks/planning/flownav/server/...). -->
+  <arg name="vla"                      default="navdp" />
+  <arg name="flownav_goal_image"       default="" />
+  <arg name="flownav_goal_image_topic" default="" />
+  <arg name="flownav_port"             default="8889" />
+  <arg name="flownav_rate_hz"          default="4.0" />
+  <arg name="flownav_execute_fraction" default="1.0" />
+  <arg name="flownav_arrival_distance" default="0.0" />
+  <arg name="flownav_display"          default="false" />
+  <arg name="combination_enable_topic"   default="/combination/enable" />
+  <arg name="combination_start_enabled"  default="true" />
+  <arg name="combination_tick_hz"        default="5.0" />
+  <arg name="combination_min_engage_fwd_m" default="1.5" /><!-- cruise A* until a visible point is at least this far ahead, then stop & engage NavDP -->
+  <arg name="combination_engage_confirm_ticks" default="2" /><!-- consecutive engage-able detections before stopping (debounce flicker) -->
+  <arg name="combination_engage_settle_s"  default="1.0" /><!-- brake-settle before the first inference (clean, stationary frame) -->
+  <arg name="combination_max_wait_s"       default="30.0" /><!-- hold this long for a slow re-infer before giving up to A* (raise for a slow Jetson) -->
+  <arg name="combination_navdp_timeout_s"  default="10.0" /><!-- NavDP HTTP step timeout for one inference; generous for a slow Jetson -->
+  <arg name="combination_leg_fraction"   default="0.5" /><!-- re-infer at the leg midpoint -->
+  <arg name="combination_final_handoff_m" default="1.5" /><!-- fly A* straight in for the final approach within this range -->
+  <arg name="combination_leg_timeout_s"  default="8.0" /><!-- watchdog: re-infer if a leg runs this long -->
+  <arg name="combination_require_unoccluded"     default="true" /><!-- visible = clear line-of-sight, not merely in-FOV -->
+  <arg name="combination_visibility_depth_tol_m" default="0.5" /><!-- slack (m) on the occlusion test -->
+  <arg name="combination_min_goal_fwd_m" default="0.5" /><!-- ignore A* waypoints nearer than this -->
+
+  <!-- ── Path-correction strategy ─────────────────────────────────
+       corrector:=potential_field (default) | esdf. With esdf the route is
+       nudged up the distance-to-wall gradient toward the corridor/doorway
+       centre. esdf_target_clearance_m: 0 = centre on the ESDF ridge, >0 =
+       stop once that far from walls (a safety floor). -->
+  <arg name="corrector"               default="potential_field" />
+  <arg name="esdf_target_clearance_m" default="0.2" />
+  <arg name="esdf_max_total_shift_m"  default="0.5" />
+  <!-- Thin a dense input path before correcting (NavDP zig-zag fix); no-op for A*. -->
+  <arg name="resample_min_spacing_m"  default="0.3" />
+
+  <!-- ── Wall standoff / push strength (potential_field corrector) ──
+       How hard the corrector pushes A*/NavDP waypoints off walls. In the
+       default line_search centering, apf_min_clearance_m is the lever: raise it
+       (e.g. 0.3-0.4) to force a larger min distance to walls; apf_max_total_shift_m
+       must be high enough not to clip the push. apf_gain ONLY applies when
+       apf_centering=descent (line_search ignores it). -->
+  <arg name="apf_centering"           default="line_search" />
+  <arg name="apf_min_clearance_m"     default="0.2" />
+  <arg name="apf_max_total_shift_m"   default="0.5" />
+  <arg name="apf_gain"                default="0.5" />
+
+  <!-- ── Square (Manhattan) path shape ────────────────────────────
+       Produce axis-aligned, right-angle routes instead of diagonal cuts.
+       Three settings must agree: connectivity=4 drops A*'s diagonal moves;
+       los_smoothing=false keeps the line-of-sight string-puller from collapsing
+       each L into a single diagonal; corner_round=false keeps 90 deg corners
+       sharp instead of chamfering them into 45 deg bevels. turn_penalty biases
+       4-connected A* toward clean single-turn L-shapes (raise it to suppress
+       staircases). For the legacy diagonal behaviour set connectivity:=8
+       los_smoothing:=true corner_round:=true. -->
+  <arg name="connectivity"   default="4" />
+  <arg name="los_smoothing"  default="false" />
+  <arg name="corner_round"   default="false" />
+  <arg name="turn_penalty"   default="0.3" />
+
+  <!-- ── NavDP execution / display ────────────────────────────────
+       navdp_execute_fraction: fly only the first fraction of the route, hold at
+       the prefix end until the next ENTER (NavDP drifts further out). The full
+       route is still shown on the BEV viewer. navdp_display_mode: full = RGB +
+       depth + snapshot panels | rgb_only = just the clickable RGB panel. -->
+  <arg name="navdp_execute_fraction"  default="0.5" />
+  <arg name="navdp_display_mode"      default="full" />
+
+  <arg name="publish_mapping_inputs" value="false" />
+  <!-- ══════════════════════════════════════════════════════════════
+       Pose adapter — converts the real-drone localization message
+       into the bare geometry_msgs/Pose every consumer expects on
+       /<drone_ns>/gt_pose.
+       ══════════════════════════════════════════════════════════════ -->
+  <node pkg="falcon_adapter" type="pose_adapter_node.py"
+        name="pose_adapter" output="screen">
+    <param name="in_topic"  value="$(arg real_pose_topic)" />
+    <param name="in_type"   value="$(arg real_pose_type)" />
+    <param name="out_topic" value="$(arg drone_ns)/gt_pose" />
+  </node>
+
+  <node pkg="falcon_adapter" type="mapping_sync_node_sphera.py" name="mapping_sync" output="screen">
+    <param name="pose_stamped_topic" value="$(arg real_pose_topic)" />               <!-- /xtend/localization -->
+    <!-- Depth as a frame-path String: mapping_sync loads the .npy and rebuilds the
+         32FC1 Image at the message's capture stamp. mapping_sync is the SOLE voxel
+         feeder here (falcon_adapter runs with publish_mapping_inputs=false) and
+         owns the authoritative rotation freeze below, so it must see true capture
+         stamps: the frame-path stamp is the same capture time /xtend/localization
+         carries (both derived from the depth frame), so they pair exactly. -->
+    <param name="depth_transport"    value="$(arg image_transport)" />              <!-- frame_path -> load .npy from a String path; topic -> raw Image -->
+    <param name="depth_topic"        value="$(arg real_depth_path_topic)" />         <!-- /xtend/depth_frame_path (frame_path) | /xtend/depth_m (topic) -->
+    <param name="out_pose_topic"     value="/map_ros/pose" />
+    <param name="out_depth_topic"    value="/map_ros/depth" />
+    <!-- Pairing tolerance. By design the depth frame-path and /xtend/localization
+         carry the SAME capture stamp, so the ideal pair is an exact (dt==0) match.
+         These windows are kept NON-zero on purpose: depth and AprilTag pose are
+         independent consumers of the RGB stream running at DIFFERENT cadences
+         (depth on nearly every frame, the tag pose ONLY while a tag is in view),
+         so a given depth frame often has no byte-identical pose. sync_tolerance
+         lets it pair with the NEAREST pose within 50 ms; max_interp_gap lets it
+         SLERP a pose across a bracket up to 120 ms when none is near. This trades a
+         small, bounded pairing error (a depth frame may fuse a pose from a slightly
+         different instant) for keeping the voxel map fed when localization is not
+         in lockstep; without it, strict exact-only would DROP most depth frames.
+         To enforce the strict-timestamp architecture instead (exact-only, no
+         mis-pair, but frames without a co-stamped pose are dropped): set
+         sync_tolerance=0.0 AND max_interp_gap=0.0. Downstream FALCON pairing is
+         unaffected, since mapping_sync re-stamps the emitted pose to the depth
+         stamp, so /transformer (timestamp_tolerance 0.02) always matches exactly. -->
+    <param name="sync_tolerance"     value="$(arg sync_tolerance)" />    <!-- 0 = exact-only (dt==0) -->
+    <param name="max_interp_gap"     value="$(arg max_interp_gap)" />    <!-- 0 = no interpolation (nearest-only) -->
+    <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
+    <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
+    <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
+         /xtend/demo_mode == turning, and drop the stale in-flight turn frame on
+         resume, all in the capture clock. -->
+    <param name="demo_mode_topic"      value="/xtend/demo_mode" />
+    <param name="turning_mode_name"    value="turning" />
+    <param name="resume_settle_sec"    value="0.0" />
+    <!-- Startup warm-up: force-fuse the first N voxel pairs ignoring demo_mode
+         (so a stale latched 'turning' can't freeze mapping at pickup), then reset
+         to a forward-flight baseline. 0 disables the warm-up. -->
+    <param name="warmup_emits"         value="2" />
+  </node>
+  <!-- ══════════════════════════════════════════════════════════════
+       The actual nav stack — same launch as Gazebo, just with the
+       real-drone depth topic and camera intrinsics passed in.
+       ══════════════════════════════════════════════════════════════ -->
+  <include file="$(find falcon_adapter)/launch/nav_stack.launch">
+    <arg name="map_name"      value="$(arg map_name)" />
+    <arg name="drone_ns"      value="$(arg drone_ns)" />
+    <arg name="gated_ns"      value="$(arg gated_ns)" />
+    <arg name="publish_mapping_inputs" value="$(arg publish_mapping_inputs)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <!-- sensor_gate's raw-depth Image input name; see real_depth_topic. -->
+    <arg name="depth_topic"   value="$(arg real_depth_topic)" />
+    <!-- frame_path: depth never reaches sensor_gate (it arrives as a frame-path the
+         voxel feeder mapping_sync loads), so its depth-driven resume can't fire —
+         disable its turning-freeze (mapping_sync owns the authoritative freeze).
+         topic: raw depth DOES reach sensor_gate, so keep the freeze on (the Gazebo
+         default), restoring the pre-frame-path behaviour. -->
+    <arg name="sensor_gate_freeze_on_turning_mode" value="$(eval 'false' if arg('image_transport') == 'frame_path' else 'true')" />
+
+    <arg name="cam_fx"        value="$(arg cam_fx)" />
+    <arg name="cam_fy"        value="$(arg cam_fy)" />
+    <arg name="cam_cx"        value="$(arg cam_cx)" />
+    <arg name="cam_cy"        value="$(arg cam_cy)" />
+    <arg name="cam_width"     value="$(arg cam_width)" />
+    <arg name="cam_height"    value="$(arg cam_height)" />
+    <arg name="cam_min_depth" value="$(arg cam_min_depth)" />
+    <arg name="cam_max_depth" value="$(arg cam_max_depth)" />
+
+    <arg name="vel_x"         value="$(arg vel_x)" />
+    <arg name="cruise_z"      value="$(arg cruise_z)" />
+    <arg name="goal_x"        value="$(arg goal_x)" />
+    <arg name="goal_y"        value="$(arg goal_y)" />
+
+    <!-- BEV viewport bounds — see the arg comment above for why this file exists. -->
+    <arg name="bev_xmin"      value="$(arg bev_xmin)" />
+    <arg name="bev_ymin"      value="$(arg bev_ymin)" />
+    <arg name="bev_xmax"      value="$(arg bev_xmax)" />
+    <arg name="bev_ymax"      value="$(arg bev_ymax)" />
+
+    <arg name="use_navdp"               value="$(arg use_navdp)" />
+    <arg name="nav_mode"                value="$(arg nav_mode)" />
+    <arg name="vla"                      value="$(arg vla)" />
+    <arg name="flownav_goal_image"       value="$(arg flownav_goal_image)" />
+    <arg name="flownav_goal_image_topic" value="$(arg flownav_goal_image_topic)" />
+    <arg name="flownav_port"             value="$(arg flownav_port)" />
+    <arg name="flownav_rate_hz"          value="$(arg flownav_rate_hz)" />
+    <arg name="flownav_execute_fraction" value="$(arg flownav_execute_fraction)" />
+    <arg name="flownav_arrival_distance" value="$(arg flownav_arrival_distance)" />
+    <arg name="flownav_display"          value="$(arg flownav_display)" />
+    <arg name="combination_enable_topic"       value="$(arg combination_enable_topic)" />
+    <arg name="combination_start_enabled"      value="$(arg combination_start_enabled)" />
+    <arg name="combination_tick_hz"            value="$(arg combination_tick_hz)" />
+    <arg name="combination_min_engage_fwd_m"   value="$(arg combination_min_engage_fwd_m)" />
+    <arg name="combination_engage_confirm_ticks" value="$(arg combination_engage_confirm_ticks)" />
+    <arg name="combination_engage_settle_s"    value="$(arg combination_engage_settle_s)" />
+    <arg name="combination_max_wait_s"         value="$(arg combination_max_wait_s)" />
+    <arg name="combination_navdp_timeout_s"    value="$(arg combination_navdp_timeout_s)" />
+    <arg name="combination_leg_fraction"       value="$(arg combination_leg_fraction)" />
+    <arg name="combination_final_handoff_m"    value="$(arg combination_final_handoff_m)" />
+    <arg name="combination_leg_timeout_s"      value="$(arg combination_leg_timeout_s)" />
+    <arg name="combination_require_unoccluded"     value="$(arg combination_require_unoccluded)" />
+    <arg name="combination_visibility_depth_tol_m" value="$(arg combination_visibility_depth_tol_m)" />
+    <arg name="combination_min_goal_fwd_m"     value="$(arg combination_min_goal_fwd_m)" />
+    <arg name="navdp_rgb_topic"         value="$(arg real_rgb_path_topic)" />
+    <arg name="navdp_depth_topic"       value="$(arg real_depth_path_topic)" />
+    <arg name="navdp_pose_topic"        value="$(arg real_pose_topic)" />
+    <!-- Forward the localization message type so navdp_click / combination read the
+         right type (real_pose_type:=pose would otherwise mismatch the PoseStamped default). -->
+    <arg name="navdp_pose_type"         value="$(arg real_pose_type)" />
+    <arg name="navdp_camera_info_topic" value="$(arg navdp_camera_info_topic)" />
+
+    <arg name="corrector"               value="$(arg corrector)" />
+    <arg name="esdf_target_clearance_m" value="$(arg esdf_target_clearance_m)" />
+    <arg name="esdf_max_total_shift_m"  value="$(arg esdf_max_total_shift_m)" />
+    <arg name="resample_min_spacing_m"  value="$(arg resample_min_spacing_m)" />
+    <arg name="apf_centering"           value="$(arg apf_centering)" />
+    <arg name="apf_min_clearance_m"     value="$(arg apf_min_clearance_m)" />
+    <arg name="apf_max_total_shift_m"   value="$(arg apf_max_total_shift_m)" />
+    <arg name="apf_gain"                value="$(arg apf_gain)" />
+    <arg name="connectivity"            value="$(arg connectivity)" />
+    <arg name="los_smoothing"           value="$(arg los_smoothing)" />
+    <arg name="corner_round"            value="$(arg corner_round)" />
+    <arg name="turn_penalty"            value="$(arg turn_penalty)" />
+    <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
+    <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
+  </include>
+
+</launch>

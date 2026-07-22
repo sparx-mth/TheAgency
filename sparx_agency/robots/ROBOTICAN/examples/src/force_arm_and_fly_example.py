@@ -57,6 +57,10 @@ class Flying(Node):
             print("Set throttle 0")
             self.step = 2
         if 2 == self.step:
+            if not self.force_arm.service_is_ready():
+                print("Waiting for force_arm service...")
+                return
+            self.step = 2.5  # arm request in flight - don't re-fire until it resolves
             print("Request Arm")
             self.arm_req = SetBool.Request()
             self.arm_req.data = True
@@ -67,7 +71,8 @@ class Flying(Node):
                     print("Armed, can set throttle up")
                     self.step = 3
                 else:
-                    print("Arm failed")
+                    print(f"Arm failed: {result.message}, retrying")
+                    self.step = 2
             future.add_done_callback(arm_callback)
         if 3 == self.step:
             self.manual_control.z = 600.0

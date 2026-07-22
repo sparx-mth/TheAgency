@@ -34,6 +34,7 @@ from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.map_visualizer import
 from sparx_agency.demos.Demo_No4_XTEND_MapRoom.room_mapper.object_placer import (
     ObjectMarker, load_labels, load_labels_from_session, place_objects, cluster_objects,
     flag_objects_beyond_tags, flag_objects_outside_map, snap_objects_to_free_space,
+    save_objects_json,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -48,12 +49,21 @@ _TRAJ_SMOOTH_WIN = 3      # rolling-average window for trajectory smoothing
 
 
 def _load_depth_K(calib_path: str) -> np.ndarray:
+    """Load the intrinsics matrix used to backproject depth pixels into world points.
+
+    Prefers camera_matrix (the raw/distorted-image K) over projection_matrix (P):
+    depth is inferred directly on the raw distorted frame (DA3 never undistorts
+    it), so P — valid only after rectification — is the wrong K here. Using P
+    introduced a real ~12% fx/fy anisotropy on this rig's calib, which combined
+    with per-frame yaw rotation to shear an actually-rectangular room into a
+    parallelogram once frames from different viewing angles were merged.
+    """
     with open(calib_path) as f:
         data = yaml.safe_load(f)
-    if "projection_matrix" in data:
-        P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
-        return P[:3, :3]
-    return np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
+    if "camera_matrix" in data:
+        return np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
+    P = np.array(data["projection_matrix"]["data"], dtype=np.float64).reshape(3, 4)
+    return P[:3, :3]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -179,6 +189,7 @@ def main() -> None:
     frame_tag_ids: Dict[int, List[int]] = {}
     frame_tag_areas: Dict[int, float] = {}
     frame_world_anchored: Dict[int, bool] = {}
+    frame_depth_scales: Dict[int, float] = {}
     depth_cache: Dict[int, np.ndarray] = {}
     _prev_tag_set: frozenset = frozenset()
 
@@ -245,6 +256,7 @@ def main() -> None:
         # DA3 model has a proportional error that the tag-based scale corrects.
         if not args.no_scale_correction and fuser.last_depth_scale is not None:
             depth_m = depth_m * fuser.last_depth_scale
+        frame_depth_scales[rec.frame_idx] = fuser.last_depth_scale or 1.0
 
         # Check if this frame is near-perpendicular to the wall (angle filtering)
         _angle_ok = True
@@ -322,8 +334,11 @@ def main() -> None:
         # by passing frame_tag_ids=None (None means "skip reliability filter").
         _ftids = None if args.sidecar_pose else frame_tag_ids
         _fanchored = None if args.sidecar_pose else frame_world_anchored
+        _fscales = None if args.sidecar_pose else frame_depth_scales
+        _tag_xyz = None if args.sidecar_pose else fuser.tag_world_xyz
         objects = place_objects(_raw_labels, frame_poses, lambda fidx: depth_cache[fidx],
                                 K_depth, _ftids, frame_tag_areas,
+                                frame_depth_scales=_fscales, tag_world_xyz=_tag_xyz,
                                 frame_world_anchored=_fanchored)
         print(f"[mapper] Placed {len(objects)} raw object markers")
 
@@ -352,6 +367,9 @@ def main() -> None:
             print(f"         {obj.label:20s}  "
                   f"({obj.world_x:+.2f}, {obj.world_y:+.2f}, {obj.world_z:+.2f})m  "
                   f"tags={obj.tag_ids}")
+
+        save_objects_json(objects, str(out_dir / "objects.json"))
+        print(f"[mapper] Saved {len(objects)} object poses to {out_dir / 'objects.json'}")
 
     np.save(str(out_dir / "trajectory.npy"), np.array(trajectory))
 

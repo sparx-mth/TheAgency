@@ -81,6 +81,25 @@
        the map. (sensor_gate's turning-freeze is disabled below for the same reason.) -->
   <arg name="real_depth_topic" default="/xtend/depth_m" />
 
+  <!-- ============== ROBOTICAN FIX ==============
+       These two were bare <param value="0.0"/> lines with no arg, i.e. not
+       overridable from the command line at all. Turned into args so a
+       Rooster run can override them; DEFAULT stays 0.0/0.0, so an XTEND
+       run with no override is byte-identical to before this change.
+       ── mapping_sync depth/pose pairing tolerance ───────────────
+       Default (0.0/0.0, exact-only) is correct for XTEND, where the
+       depth frame-path and pose share the SAME capture stamp by
+       construction. Override to non-zero (e.g. 0.05 / 0.12, the
+       node's own defaults) for sources where depth and pose are
+       stamped independently, e.g. ROBOTICAN/Rooster's ground-truth
+       localization (rooster_ground_truth_localization.py) stamps from
+       Sphera's own state message, not from the depth capture, so an
+       exact nanosecond match will (almost) never occur, and every
+       depth frame drops as "dropout" until this is relaxed.
+       ============================================ -->
+  <arg name="sync_tolerance"  default="0.0" />
+  <arg name="max_interp_gap"  default="0.0" />
+
   <!-- ── Camera intrinsics (xtend K-matrix defaults for 504x392) ──
        MUST match the actual depth stream. If image_width/image_height
        don't match what the drone publishes, exploration_node silently
@@ -471,8 +490,12 @@
          sync_tolerance=0.0 AND max_interp_gap=0.0. Downstream FALCON pairing is
          unaffected, since mapping_sync re-stamps the emitted pose to the depth
          stamp, so /transformer (timestamp_tolerance 0.02) always matches exactly. -->
-    <param name="sync_tolerance"     value="0.0" />    <!-- 0 = exact-only (dt==0) -->
-    <param name="max_interp_gap"     value="0.0" />    <!-- 0 = no interpolation (nearest-only) -->
+    <!-- ============== ROBOTICAN FIX ==============
+         value was a hardcoded "0.0" literal (not overridable); now reads
+         the arg above, which still defaults to 0.0, so XTEND is unaffected.
+         ============================================ -->
+    <param name="sync_tolerance"     value="$(arg sync_tolerance)" />    <!-- 0 = exact-only (dt==0) -->
+    <param name="max_interp_gap"     value="$(arg max_interp_gap)" />    <!-- 0 = no interpolation (nearest-only) -->
     <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
     <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
     <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while

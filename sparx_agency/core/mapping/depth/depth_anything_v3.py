@@ -132,7 +132,7 @@ class DA3TensorRTModel(DepthModel):
                 f"for tensor {self.depth_output['name']}"
             )
 
-        depth = self.depth_output["host"].reshape(h, w).astype(np.float32, copy=False)
+        depth = self.depth_output["host"].reshape(h, w).astype(np.float32, copy=True)
         t5 = time.perf_counter()
 
         now = time.perf_counter()

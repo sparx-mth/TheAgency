@@ -44,6 +44,46 @@ topics:
   # the topic, so there's no reason to drag /xtend/camera_info across.
   # If you ever need it back, re-add the entry here AND set
   # bridge_camera_info:=true on the ROS1 sensor_gate.
+
+  # ============== ROBOTICAN FIX ==============
+  # Purely additive block below: new /R1/* entries only, no existing
+  # /xtend/* entry above was touched, so an XTEND/Jetson bridge run
+  # (bridge_topic.yaml or this file) bridges exactly what it always did.
+  # ── ROBOTICAN/Sphera (Rooster "R1") ────────────────────────────────
+  # Same frame-path transport as XTEND, just published under /R1/* by
+  # run_rooster_frame_dir_publisher.sh + run_depth_processor.sh instead of
+  # /xtend/*. Launch FALCON's real_drone.launch with real_depth_path_topic:=
+  # /R1/depth_frame_path real_rgb_path_topic:=/R1/rgb_frame_path
+  # real_pose_topic:=/R1/localization to match. Requires the bridge run with
+  # ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp (Rooster is Jazzy/
+  # CycloneDDS, not Foxy/FastRTPS like XTEND) — see run_bridge.sh.
+  - topic: /R1/depth_frame_path
+    type: std_msgs/msg/String
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /R1/rgb_frame_path
+    type: std_msgs/msg/String
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: best_effort
+      durability: volatile
+
+  - topic: /R1/localization
+    type: geometry_msgs/msg/PoseStamped
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: best_effort
+      durability: volatile
+
 #- topic: /flow_depth/pose_est
 #  - topic: /xtend/amcl_pose
 #  - topic: /flow_depth/pose_est
