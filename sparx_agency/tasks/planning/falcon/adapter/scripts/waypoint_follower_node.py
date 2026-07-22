@@ -251,7 +251,6 @@ class WaypointFollowerNode:
         # it would silently overwrite the built hold back to None.
         self.alt_hold = None
         self._alt_vz = 0.0
-        self._alt_tscale = 1.0
         # DemoMode the holonomic controllers request (best effort) and, if
         # ~mx_require_mode, gate on. The platform now accepts multi-axis commands,
         # so the per-axis handshake of the legacy path does not apply to them.
@@ -266,6 +265,14 @@ class WaypointFollowerNode:
             self.follower = self._build_roll_assist(G)
         elif self.controller_kind == "drift_pid":
             self.follower = self._build_drift_pid(G)
+
+        # drift_pid coordinates its own turn pitch inside the control law
+        # (~dp_turn_pitch_bias, a floor while the yaw axis is active), so the
+        # publish-time ~yaw_pitch_bias must stay out of its way: a second,
+        # invisible forward injection would corrupt the envelope's slew memory,
+        # the effectiveness estimate and the certainty log's mirror of what
+        # actually flew.
+        self._core_owns_pitch_bias = (self.controller_kind == "drift_pid")
 
         # ── Rotation supervisor (holonomic controllers only) ─────────
         # The one-axis follower freezes + re-observes inside its own state machine.
@@ -868,8 +875,8 @@ class WaypointFollowerNode:
             # from last tick's commanded yaw rate + the heading + the voxel count it
             # decides freeze (-> request 'turning', which the mode-authoritative gate
             # freezes on) and hold (-> stop the tracker for a stationary re-observe).
-            sup = self.rot_sup.update(pose2d.yaw, self._last_pub_wz, self.dt,
-                                      self._bev_count)
+            sup = self.rot_sup.update(pose2d.yaw, self._supervisor_cmd_wz(),
+                                      self.dt, self._bev_count)
             want_mode = MODE_TURNING if sup.freeze else self.multi_axis_demo_mode
             self._request_demo_mode(want_mode)
             # Do not gate the tracker on 'turning' confirmation (that would deadlock
@@ -903,14 +910,16 @@ class WaypointFollowerNode:
             # actually acted on, not a slightly later one.
             self._last_quality = self.quality.snapshot()
             self.follower.set_quality(self._last_quality)
-        cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
-                                 hold=hold, map_ready=self._map_ready(map_need))
         # Altitude hold (drift_pid only): a cautious vz on the solved pose z,
-        # computed BEFORE the certainty log so the logged axis counts include it.
-        # Gated hard inside the helper: never while held, never on a coasted or
-        # vague pose, never above the ceiling. 0.0 whenever any gate says no.
+        # decided BEFORE the follower steps so a climb pulse's translation
+        # yield is folded into the control law itself -- the envelope's slew
+        # memory, the effort/effectiveness accounting, the blockage monitor and
+        # the certainty log then all see the command that actually flies, and
+        # the publish path below stays a dumb pass-through. Gated hard inside
+        # the helper: never while held, never on a coasted or vague pose, never
+        # above the ceiling. 0.0 whenever any gate says no.
         self._alt_vz = 0.0
-        self._alt_tscale = 1.0
+        step_kwargs = {}
         if self.alt_hold is not None:
             q = self._last_quality
             alt = self.alt_hold.update(
@@ -920,13 +929,13 @@ class WaypointFollowerNode:
                 pose_valid=(q is not None and q.valid),
                 flying=not hold)
             self._alt_vz = alt.vz
-            # During a climb PULSE the translation is yielded so the platform's
-            # thrust goes to lift, not to the tilt that flying costs -- the logs
-            # showed a maxed-out climb LOSING while forward flight stole the lift.
-            self._alt_tscale = alt.translation_scale
+            step_kwargs["translation_scale"] = alt.translation_scale
             if alt.translation_scale < 1.0:
                 self.thinker.say(alt.reason, category="sensor",
                                  repeat_after_s=2.0)
+        cmd = self.follower.step(pose2d, self.dt, axis_confirmed=confirmed,
+                                 hold=hold, map_ready=self._map_ready(map_need),
+                                 **step_kwargs)
         if self.drift_telemetry is not None:
             self._publish_drift(cmd, pose2d)
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
@@ -952,8 +961,7 @@ class WaypointFollowerNode:
             self._set_freeze(cmd.freeze and self.freeze_during_yaw)
         self._update_map_wait(cmd, map_need)
         if self._holonomic:
-            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz, vz=self._alt_vz,
-                                      translation_scale=self._alt_tscale)
+            self._publish_twist_multi(cmd.vx, cmd.vy, cmd.wz, vz=self._alt_vz)
         elif self._lateral:
             # roll_assist: the base (vx, wz) still flow through the command-commitment
             # gate (the one-axis follower emits discrete pulses that need it); the
@@ -963,6 +971,25 @@ class WaypointFollowerNode:
             self._publish_twist(cmd.vx, cmd.wz)
         if self.controller_kind == "pure_pursuit":
             self._publish_lookahead()   # smooth path is published on each new path
+
+    def _supervisor_cmd_wz(self):
+        """Yaw command fed to the rotation supervisor: real turns only.
+
+        drift_pid trims its heading MID-LEG with yaw rates that can cross the
+        supervisor's ``wz_turn_on`` (2026-07-21 flight: a -0.23 rad/s TRACK trim
+        armed it, and the moment the trim quietened the supervisor stopped a
+        cleanly tracking drone mid-corridor for a stationary re-observe; the
+        drone coasted, drifted sideways and had to re-acquire the leg it was
+        already on). The follower knows the difference between trimming and
+        turning, so let it speak: only its TURN and ESCAPE regimes count as
+        rotation worth the freeze + stop-and-re-observe discipline. TRACK and
+        HOLD yaw is a trim -- the map stays live and the flight is never
+        interrupted for it. The other holonomic trackers have no regime signal,
+        so their commanded rate passes through unchanged."""
+        if (self.controller_kind == "drift_pid"
+                and self.follower.state not in ("TURN", "ESCAPE")):
+            return 0.0
+        return self._last_pub_wz
 
     def _narrate_drift(self, cmd):
         """Narrate the drift-PID controller's decision for this tick.
@@ -1010,11 +1037,14 @@ class WaypointFollowerNode:
         if self.certainty_log is not None and self._last_quality is not None:
             wp_idx = getattr(cmd, "wp_idx", None)
             # The command the DRONE receives: the published twist put through the
-            # same SI->counts translation the XTEND bridge runs after the gate --
-            # including the ~cmd_vy_sign lateral flip and the altitude-hold vz,
-            # so the log mirrors what actually flies, not the core's intent.
-            axes = (self._twist_to_axes(cmd.vx * self._alt_tscale,
-                                        cmd.vy * self.cmd_vy_sign * self._alt_tscale,
+            # same SI->counts translation the XTEND bridge runs after the gate.
+            # The core command already carries the turn pitch and any climb
+            # yield (they live inside the control law now), so the only
+            # publish-side differences left are the ~cmd_vy_sign lateral flip
+            # and the altitude-hold vz -- both applied here so the log mirrors
+            # what actually flies.
+            axes = (self._twist_to_axes(cmd.vx,
+                                        cmd.vy * self.cmd_vy_sign,
                                         self._alt_vz, cmd.wz)
                     if self._twist_to_axes is not None else None)
             self.certainty_log.write(
@@ -1391,8 +1421,13 @@ class WaypointFollowerNode:
             except Exception as e:
                 rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
 
-    def _publish_twist_multi(self, vx, vy, wz, vz=0.0, translation_scale=1.0):
+    def _publish_twist_multi(self, vx, vy, wz, vz=0.0):
         """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz.
+
+        This path is deliberately DUMB: every piece of flight wisdom (turn
+        pitch, climb yield, saturation, slew) has already happened inside the
+        controller, so what arrives here is what flies. Only two platform
+        conventions are applied, both simple sign/route facts:
 
         ``linear.y`` is multiplied by ``~cmd_vy_sign`` on the way out: the flight
         logs measured the LATERAL axis inverted on this airframe (commanded left
@@ -1401,18 +1436,22 @@ class WaypointFollowerNode:
         passes through -- the core keeps computing in clean REP-103 and the flip
         is one reversible dial away from an A/B test.
 
-        ``translation_scale`` (0..1) shrinks the horizontal TRANSLATION (vx, vy)
-        without touching yaw -- it is how a climb pulse yields the tilt axes to
-        the climb. 1.0 is the normal pass-through.
-
         ``linear.z`` carries the altitude-hold correction (0 unless the hold is
         enabled and decides to act) -- no longer hardwired: the platform's own
-        height drifts, and the tags all sit at one altitude. No command-
-        commitment gate -- the multi-axis controller emits continuous,
-        minimum-force-shaped commands, so it never needs the lone-pulse
-        protection the one-axis path uses."""
-        vx = self._with_yaw_pitch_bias(vx, wz) * translation_scale
-        vy = vy * self.cmd_vy_sign * translation_scale
+        height drifts, and the tags all sit at one altitude.
+
+        The publish-time ``~yaw_pitch_bias`` only applies to trackers whose core
+        does not coordinate the turn itself; drift_pid owns that in-law
+        (``~dp_turn_pitch_bias``), so for it the bias here is OFF -- a second,
+        invisible forward injection would desynchronize the envelope, the
+        effectiveness estimate and the certainty log from what actually flew.
+
+        No command-commitment gate -- the multi-axis controllers emit
+        continuous, minimum-force-shaped commands, so they never need the
+        lone-pulse protection the one-axis path uses."""
+        if not getattr(self, "_core_owns_pitch_bias", False):
+            vx = self._with_yaw_pitch_bias(vx, wz)
+        vy = vy * self.cmd_vy_sign
         m = Twist()
         m.linear.x = vx
         m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller

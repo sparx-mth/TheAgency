@@ -144,6 +144,19 @@ def test_altitude_hold_vz_rides_linear_z():
     assert n.cmd_vel_pub.sent[-1].linear.z == pytest.approx(0.0)
 
 
+def test_a_core_that_owns_its_own_pitch_bias_gets_a_dumb_publish_path():
+    """drift_pid coordinates the turn pitch inside its control law
+    (~dp_turn_pitch_bias); injecting the publish-time bias on top would fly a
+    command the envelope, telemetry and certainty log never saw. With the
+    ownership flag set, a pure-yaw twist goes out exactly as commanded."""
+    n = _node()
+    n._core_owns_pitch_bias = True
+    n._publish_twist_multi(0.0, 0.0, 0.7)
+    sent = n.cmd_vel_pub.sent[-1]
+    assert sent.linear.x == pytest.approx(0.0)
+    assert sent.angular.z == pytest.approx(0.7)
+
+
 def test_the_commitment_gate_still_sees_a_turn_as_a_turn():
     """The bias is applied AFTER the gate: were it applied before, every turn
     would categorise as forward+yaw and a held turn would repeat the bias as if
