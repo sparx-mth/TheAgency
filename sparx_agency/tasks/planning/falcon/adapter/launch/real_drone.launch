@@ -175,7 +175,8 @@
   <!-- NAVIGATION  -  how it gets to the next waypoint -->
   <arg name="dp_approach_yaw_rate"       default="0.35" /><!-- rad/s cap on the turn onto a leg -->
   <arg name="dp_track_yaw_rate" default="0.35" /><!-- rad/s yaw cap while TRACKING/station-keeping (turns onto a leg use dp_approach_yaw_rate); low = yaw only trims mid-leg and ROLL owns the line -->
-  <arg name="dp_turn_pitch_bias"         default="0.0" /><!-- m/s forward ridden during a TURN whose translation would otherwise be zero; a pure yaw coasts flat on this airframe, a small pitch makes it bite. 0 = pure yaw -->
+  <arg name="dp_turn_pitch_bias"         default="0.08" /><!-- m/s FLOOR on forward speed while a TURN's yaw is active. Never backward while yawing: a backward pitch under a turn inverts the delivered yaw on this airframe (measured 2026-07-21); a small forward pitch makes the yaw bite (11% delivery in place vs 30-68% translating). 0 = no bite added, backward still forbidden -->
+  <arg name="dp_turn_side_cone_deg"      default="35.0" /><!-- deg half-angle of the sideslip cone the translation may occupy while the yaw axis is active. YAW+ROLL is not the same manoeuvre as YAW+forward: |vy| is capped at tan(cone)*vx during an active yaw, so roll seasons the progress vector but never dominates it -->
   <arg name="dp_pos_radius"              default="0.30" /><!-- m waypoint capture radius -->
   <arg name="dp_slow_radius"             default="0.80" /><!-- m start slowing this far from the FINAL goal -->
   <arg name="dp_arrive_speed_min"        default="0.08" /><!-- m/s floor outside pos_radius, so it never crawls to a noisy stop -->
@@ -191,7 +192,7 @@
   <arg name="dp_alt_climb_max"           default="0.06" /><!-- m/s cap on UP; the guarded direction, keep tiny (vertical axis climbs far harder than nominal) -->
   <arg name="dp_alt_kp" default="0.5" /><!-- altitude-hold P gain, metres of height error -> m/s of climb/descent demand (tapered by this, capped by dp_alt_climb_max) -->
   <arg name="dp_alt_pulse_trigger_m" default="0.20" /><!-- m below target that starts a dedicated climb pulse (stop translating, climb, resume) -->
-  <arg name="dp_alt_pulse_tscale" default="0.2" /><!-- (vx,vy) kept during a climb pulse; low so thrust goes to lift not tilt -->
+  <arg name="dp_alt_pulse_tscale" default="0.5" /><!-- (vx,vy) kept during a climb pulse. Below 1 so the climb wins the larger share of thrust, but high enough that forward flight CONTINUES through the climb (0.2 read as "no forward command" on the 2026-07-21 flight). 1.0 = climb and cruise at full speed simultaneously -->
   <arg name="dp_alt_ceiling_m"           default="1.2" /><!-- m; at/above this measured altitude a climb is NEVER commanded -->
   <arg name="dp_alt_conf_min"            default="0.35" /><!-- pose confidence required to climb; never climbs on a vague or coasted pose -->
   <arg name="dp_hold_deadband_m"         default="0.06" /><!-- m position error ignored while holding -->
@@ -845,6 +846,7 @@
     <arg name="dp_approach_yaw_rate"       value="$(arg dp_approach_yaw_rate)" />
     <arg name="dp_track_yaw_rate" value="$(arg dp_track_yaw_rate)" />
     <arg name="dp_turn_pitch_bias"         value="$(arg dp_turn_pitch_bias)" />
+    <arg name="dp_turn_side_cone_deg"      value="$(arg dp_turn_side_cone_deg)" />
     <arg name="dp_pos_radius"              value="$(arg dp_pos_radius)" />
     <arg name="dp_slow_radius"             value="$(arg dp_slow_radius)" />
     <arg name="dp_arrive_speed_min"        value="$(arg dp_arrive_speed_min)" />
