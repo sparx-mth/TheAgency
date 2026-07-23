@@ -20,6 +20,24 @@ The bridged topics are exactly the ones the FALCON adapters consume/produce
 frame to disk and bridges a tiny `std_msgs/String` "<path> <sec> <nsec>" the
 consumers load, which removes the per-frame image serialization cost.
 
+**============== ROBOTICAN FIX ==============**
+Docs-only additions below (this paragraph + the env var table rows further
+down): describes new, additive `bridge.yaml` entries and `run_bridge.sh`
+env vars that default to XTEND's existing behavior when unset. Nothing
+XTEND/Jetson-facing was changed.
+
+`bridge.yaml` also bridges the equivalent ROBOTICAN/Sphera ("Rooster R1")
+topics — `/R1/depth_frame_path`, `/R1/rgb_frame_path`, `/R1/localization` —
+published by `run_depth_processor.sh` / `run_rooster_frame_dir_publisher.sh` /
+`run_ground_truth_localization.sh` in `../../../robots/ROBOTICAN/`. Same
+frame-path transport as XTEND, just a different topic namespace. Launch FALCON
+with `real_depth_path_topic:=/R1/depth_frame_path
+real_rgb_path_topic:=/R1/rgb_frame_path real_pose_topic:=/R1/localization` to
+match. Rooster is Jazzy/CycloneDDS (not Foxy/FastRTPS like XTEND), so the
+bridge itself must also be started with `ROS_DOMAIN_ID=9
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml`
+— see the Environment variables table below.
+
 ### Transport modes (frame-path vs topic)
 
 Two transports are supported, selected by which config the bridge mounts:
@@ -80,8 +98,9 @@ The bridge tolerates ordering (it waits for roscore and restarts
 
 | Variable | Default (in `run_bridge.sh`) | Notes |
 |---|---|---|
-| `ROS_DOMAIN_ID` | `5` | **Must match** the ROS2 sim/drone |
-| `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` | **Must match** the ROS2 side (Foxy default fastrtps; Humble/Jazzy default cyclonedds) |
+| `ROS_DOMAIN_ID` | `5` | **Must match** the ROS2 sim/drone. Rooster/Sphera uses `9` |
+| `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` | **Must match** the ROS2 side (XTEND/Foxy default fastrtps; Rooster/Sphera is Jazzy, uses `rmw_cyclonedds_cpp`) |
+| `CYCLONEDDS_URI` | _(unset)_ | Only needed with `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`. Must be a `file://` URI; `run_bridge.sh` bind-mounts that exact path into the container. Rooster/Sphera: `file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml` — pins the same network interface R1 lands on (see the CycloneDDS interface-selection notes for this host) |
 | `ROS_MASTER_URI` | `http://localhost:11311` | ROS1 master |
 | `BRIDGE_CFG` | `bridge.yaml` | Which host config to mount (`bridge.yaml` = frame-path, `bridge_topic.yaml` = raw Images) |
 | `BRIDGE_YAML` | `/bridge.yaml` | Path inside the container (bind-mounted) |

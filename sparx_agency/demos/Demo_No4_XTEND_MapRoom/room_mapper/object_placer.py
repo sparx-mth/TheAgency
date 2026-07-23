@@ -26,6 +26,22 @@ class ObjectMarker:
     suspicious: bool = False       # True if far from trajectory — placement may be wrong
 
 
+def save_objects_json(markers: List[ObjectMarker], output_path: str) -> None:
+    """Write placed object markers as a JSON list of {label, position_m, ...}."""
+    data = [
+        {
+            "label": m.label,
+            "position_m": {"x": m.world_x, "y": m.world_y, "z": m.world_z},
+            "frame_idx": m.frame_idx,
+            "tag_ids": m.tag_ids,
+            "tag_confidence": round(m.tag_confidence, 3),
+        }
+        for m in markers
+    ]
+    with open(output_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
 def load_labels(labels_path: str) -> list:
     """
     Load labels JSON.

@@ -1,0 +1,62 @@
+# ROBOTICAN/Rooster camera calibration - Sphera simulator, R1, 540x360.
+#
+# Simulated camera, so this is NOT from a chessboard calibration - it's the
+# ideal-pinhole approximation for the wide-angle/fisheye FOV already assumed
+# elsewhere in this codebase (hfov=130deg, vfov=90deg), computed the same way
+# as adapters/rooster_video_adapter.py:VideoStreamManager.intrinsic_from_fov().
+#
+# CAUTION: this has NOT been verified against Sphera's actual R1 camera
+# sensor definition - if Sphera's scenario config specifies a different FOV
+# (or real fisheye distortion) for R1's camera, replace fx/fy/cx/cy below to
+# match it. Distortion is zeroed (ideal pinhole) because nothing downstream
+# (DA3, AprilTag PnP via apriltag_cv_common.py) uses a proper fisheye
+# distortion model - accuracy will degrade toward the image edges for an
+# actual fisheye lens.
+
+image_width: 540
+image_height: 360
+
+# fx = W / (2*tan(hfov/2)), fy = H / (2*tan(vfov/2)), hfov=130deg, vfov=90deg
+fx: 125.903068
+fy: 180.000000
+cx: 269.500000
+cy: 179.500000
+
+distortion_model: "plumb_bob"
+k1: 0.0
+k2: 0.0
+p1: 0.0
+p2: 0.0
+k3: 0.0
+
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [
+    125.903068, 0.0, 269.500000,
+    0.0, 180.000000, 179.500000,
+    0.0, 0.0, 1.0
+  ]
+
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0
+  ]
+
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [
+    125.903068, 0.0, 269.500000, 0.0,
+    0.0, 180.000000, 179.500000, 0.0,
+    0.0, 0.0, 1.0, 0.0
+  ]

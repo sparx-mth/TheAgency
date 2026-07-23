@@ -41,10 +41,34 @@ if [ -n "${BAG_DIR:-}" ]; then
     echo "[INFO] Mounting rosbag dir: ${BAG_DIR} -> /bag"
 fi
 
+# ============== ROBOTICAN FIX ==============
+# CYCLONEDDS_URI (needed for ROBOTICAN/Sphera, unset by default for XTEND's
+# fastrtps profile). A file:// URI only resolves if the file exists at that
+# same path INSIDE the container, so bind-mount it there read-only. Example
+# for Sphera (matches run_depth_processor.sh / run_rooster_frame_dir_publisher.sh):
+#   ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+#   CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh
+# CYCLONEDDS_ENV stays empty (no -e flag added at all) when CYCLONEDDS_URI is
+# unset, so a plain XTEND run's container environment is byte-identical to
+# before this change -- not even an empty-string CYCLONEDDS_URI is injected.
+CYCLONEDDS_MOUNT=()
+CYCLONEDDS_ENV=()
+if [ -n "${CYCLONEDDS_URI:-}" ] && [[ "${CYCLONEDDS_URI}" == file://* ]]; then
+    CDDS_HOST_PATH="${CYCLONEDDS_URI#file://}"
+    if [ -f "${CDDS_HOST_PATH}" ]; then
+        CYCLONEDDS_MOUNT=( -v "${CDDS_HOST_PATH}:${CDDS_HOST_PATH}:ro" )
+        CYCLONEDDS_ENV=( -e "CYCLONEDDS_URI=${CYCLONEDDS_URI}" )
+    else
+        echo "[WARN] CYCLONEDDS_URI file not found on host: ${CDDS_HOST_PATH}"
+    fi
+fi
+# ============================================
+
 echo "================================================"
 echo "  Launching ${CONTAINER}"
 echo "  Domain   : ${ROS_DOMAIN_ID:-5}"
 echo "  RMW      : ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+echo "  CycloneDDS URI : ${CYCLONEDDS_URI:-(unset)}"
 echo "  Config   : ${SCRIPT_DIR}/${BRIDGE_CFG}  (editable; restart container)"
 echo "  Log      : ${LOGFILE_HOST}"
 echo "================================================"
@@ -79,5 +103,7 @@ docker run "${DOCKER_TTY[@]}" --rm \
     -v ~/Downloads/OneDrive_1_6-1-2026:/bag_1:ro \
     -v ~/Documents/record:/bag:ro \
     "${BAG_MOUNT[@]}" \
+    "${CYCLONEDDS_MOUNT[@]}" \
+    "${CYCLONEDDS_ENV[@]}" \
     --entrypoint /entrypoint.sh \
     "${IMAGE}"

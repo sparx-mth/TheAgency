@@ -1,6 +1,6 @@
 import rclpy
 
-from sparx_agency.core.mapping.depth import DepthAnythingV2DepthModel
+from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2DepthModel
 from sparx_agency.core.mapping.depth.depth_anything_v2 import DepthAnythingV2Config
 from sparx_agency.core.mapping.pipeline.mapping_pipeline import MappingPipeline, PinholeCloudGenerator
 from sparx_agency.core.mapping.costmap.probabilistic_grid import ProbabilisticGridCostmap

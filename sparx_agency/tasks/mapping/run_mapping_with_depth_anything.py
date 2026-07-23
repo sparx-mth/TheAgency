@@ -170,7 +170,7 @@ class RoosterPlugin:
     def build_runner(self, args: argparse.Namespace, pipeline: MappingPipeline, costmap: ProbabilisticGridCostmap) -> RunnerFn:
         def _run():
             from sparx_agency.core.common.spatial_math import intrinsics_from_fov
-            from sparx_agency.robots.ROBOTICAN.adapters import RoosterIngestor
+            from sparx_agency.robots.ROBOTICAN.adapters.rooster_ingestor import RoosterIngestor
 
             intr = intrinsics_from_fov(
                 width=args.width,

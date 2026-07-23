@@ -13,7 +13,7 @@
 services:
 
   # ── x86_64 + Gazebo (Hospital world) ──────────────────────
-  falcon-hospital:
+  falcon-pc:
     build:
       context: .
       dockerfile: Dockerfile

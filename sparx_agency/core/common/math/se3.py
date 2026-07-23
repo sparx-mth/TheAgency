@@ -91,3 +91,13 @@ def yaw_from_quaternion(q: Sequence[float]) -> float:
     """Yaw (rotation about +z) of a [x,y,z,w] quaternion, in radians."""
     x, y, z, w = (float(v) for v in q)
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def tilt_from_vertical(q: Sequence[float]) -> float:
+    """Angle (radians, [0, pi]) between the body's +z axis and world +z.
+
+    0 = level, pi/2 = on its side, pi = upside down. Independent of yaw.
+    Used to reject poses captured during a physical upset (e.g. a collision)
+    rather than a normal, level flight attitude."""
+    T = quaternion_matrix(q)
+    return math.acos(max(-1.0, min(1.0, float(T[2, 2]))))

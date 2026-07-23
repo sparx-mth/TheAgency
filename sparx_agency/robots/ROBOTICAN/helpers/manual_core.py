@@ -10,7 +10,7 @@ from fcu_driver_interfaces.msg import ManualControl, UAVState
 from rclpy.node import Node
 from datetime import datetime
 
-from sparx_agency.robots.common.helpers import clamp_symmetric
+from sparx_agency.robots.common.math_utils import clamp_symmetric
 
 
 @dataclass
