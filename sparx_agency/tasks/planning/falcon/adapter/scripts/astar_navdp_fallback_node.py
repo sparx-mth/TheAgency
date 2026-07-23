@@ -31,7 +31,7 @@ gate: the final goal is usually NOT visible (it is around the corner / past the
 door -- exactly why A* failed), so NavDP is handed the bearing to the goal and
 left to plan the local avoidance.
 
-All the maths is ROS-free and unit-tested in ``core.planning.navdp`` /
+All the maths is ROS-free and unit-tested in ``core.planning.vlas.navdp`` /
 ``core.planning.planners.common``:
   * world goal -> body-frame point-goal   (geometry.world_to_body_2d + point_to_pointgoal)
   * NavDP HTTP request/response           (client.NavDPPointgoalClient)
@@ -59,7 +59,7 @@ from std_msgs.msg import Bool, String
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics, Pose2D
-from sparx_agency.core.planning.navdp import (
+from sparx_agency.core.planning.vlas.navdp import (
     NavDPError,
     NavDPPointgoalClient,
     anchor_trajectory_to_world,
@@ -632,7 +632,7 @@ if __name__ == "__main__":
 
 # ============================================================================
 # ROSPARAMS (all private ~; defaults in parentheses). The geometry, HTTP and
-# progress maths live in core.planning.navdp / core.planning.planners; this node
+# progress maths live in core.planning.vlas.navdp / core.planning.planners; this node
 # owns ROS I/O and the PRIMARY <-> FALLBACK hysteretic state machine.
 #
 #   sources/outputs:

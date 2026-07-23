@@ -32,7 +32,7 @@ ENV GLOG_colorlogtostderr=1
 
 # ── 1. Common system tools ────────────────────────────────────
 # python3-requests/python3-pil (apt, not pip — WITH_SIM=0/Jetson never
-# installs pip, see below): core/planning/navdp/client.py lazily imports
+# installs pip, see below): core/planning/vlas/navdp/client.py lazily imports
 # requests + Pillow inside reset()/pointgoal_step() so importing the
 # module itself stays numpy-only for the Python-3.8 adapter (see that
 # file's docstring) -- but nothing previously installed either package

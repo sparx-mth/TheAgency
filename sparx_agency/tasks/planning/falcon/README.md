@@ -41,8 +41,8 @@ falcon/
     │   ├── bev_publisher_node.py   # FALCON voxel clouds -> 2D OccupancyGrid (core.mapping.bev)
     │   ├── mapping_sync_node.py    # depth<->pose pairing + localization gate + authoritative rotation freeze (core.localization + core.mapping.depth_fusion_gate)
     │   ├── astar_planner_node.py   # 2D BEV -> smoothed waypoints (core.planning.planners.astar)
-    │   ├── navdp_click_node.py     # click an RGB pixel -> NavDP point-goal policy -> world Path (core.planning.navdp); A* replacement
-    │   ├── combination_planner_node.py # nav_mode:=combination — A* global route + NavDP local legs (farthest visible A* waypoint -> NavDP -> fly to midpoint -> re-infer); core.planning.navdp
+    │   ├── navdp_click_node.py     # click an RGB pixel -> NavDP point-goal policy -> world Path (core.planning.vlas.navdp); A* replacement
+    │   ├── combination_planner_node.py # nav_mode:=combination — A* global route + NavDP local legs (farthest visible A* waypoint -> NavDP -> fly to midpoint -> re-infer); core.planning.vlas.navdp
     │   ├── hybrid_planner_node.py  # nav_mode:=hybrid (DEFAULT) — A* on easy legs, NavDP only for hard turns/doorways (core.planning.replanning.route_difficulty)
     │   ├── waypoint_follower_node.py # waypoints -> /cmd_vel, X+YAW only (core.planning.trackers.waypoint_follower)
     │   ├── bev_click_goal_node.py  # matplotlib BEV viewer + click-to-goal + the drone-thinking log panel
@@ -76,7 +76,7 @@ ROS-free algorithms** they call live in `core/`, each in its own domain:
 - `core/localization` (incl. `se3`, `temporal_transform_buffer`,
   `dead_reckoning_noise`)
 - `core/planning/planners/astar`, `core/planning/trackers/waypoint_follower`
-- `core/planning/navdp` (point-goal geometry + NavDP HTTP client used by
+- `core/planning/vlas/navdp` (point-goal geometry + NavDP HTTP client used by
   `navdp_click_node`)
 - `core/mapping/tracking` + `core/planning/visual_servo` (the object-approach
   mission: acquisition gate, robust Median-Flow tracker (or detector-only, via
@@ -394,7 +394,7 @@ merely in-FOV), `combination_final_handoff_m` (1.5). **Jetson timing:**
 (30.0, how long to hold for a slow route before resuming A*) — raise both if your
 Jetson inference is slower. Camera intrinsics, RGB/depth transport, pose source and
 the NavDP server reuse the same `navdp_*` / `cam_*` args as NavDP click-to-go above.
-The geometry and selection are ROS-free and unit-tested in `core.planning.navdp`
+The geometry and selection are ROS-free and unit-tested in `core.planning.vlas.navdp`
 (`world_to_body_2d`, `select_farthest_visible_waypoint`, `arclength_fraction_2d`).
 
 ## Hybrid mode (A* on the easy legs, NavDP only for hard maneuvers) — the default

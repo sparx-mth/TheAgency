@@ -429,7 +429,7 @@ class TestNavDpEntryPath:
         (forward, left) maps onto world (x, y) and a path hugging the low-y wall
         of a tight corridor gets pulled toward the centre.
         """
-        from sparx_agency.core.planning.navdp.geometry import anchor_trajectory_to_world
+        from sparx_agency.core.planning.vlas.navdp.geometry import anchor_trajectory_to_world
 
         h, w, res = 30, 120, 0.1
         u = _gaussian_repulsion(_horizontal_corridor(h, w, wall=10), sigma_px=6.0)

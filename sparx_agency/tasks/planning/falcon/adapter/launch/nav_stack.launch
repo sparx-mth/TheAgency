@@ -852,7 +852,7 @@
        Reuses navdp_rgb_topic / navdp_pose_topic / navdp_pose_type / image_transport
        above (FlowNav needs NO depth and NO intrinsics). Requires the FlowNav TRT host
        server up (default 127.0.0.1:flownav_port) — see
-       tasks/planning/flownav/server/flownav_trt_server.py. -->
+       tasks/planning/vlas/flownav/serve/flownav_trt_server.py. -->
   <arg name="flownav_port"             default="8889" /><!-- FlowNav server loopback port (distinct from navdp_port 8888) -->
   <arg name="flownav_goal_image"       default="" /><!-- path to the target RGB image to steer toward (set this for vla:=flownav) -->
   <arg name="flownav_goal_image_topic" default="" /><!-- optional sensor_msgs/Image live-goal topic (overrides the file) -->

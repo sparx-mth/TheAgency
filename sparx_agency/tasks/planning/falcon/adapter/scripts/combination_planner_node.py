@@ -32,7 +32,7 @@ through (plain ``nav_mode:=astar``). When ENABLED (a ``std_msgs/Bool True`` on
 If no waypoint is visible at a re-infer, or NavDP is unreachable, the node falls
 back to flying A* -- the drone always has a route and never dead-stalls.
 
-All the maths is ROS-free and unit-tested in ``core.planning.navdp`` /
+All the maths is ROS-free and unit-tested in ``core.planning.vlas.navdp`` /
 ``core.planning.planners.common``:
   * world A* waypoint -> body-frame goal     (geometry.world_to_body_2d + point_to_pointgoal)
   * farthest visible waypoint                (local_goal.select_farthest_visible_waypoint)
@@ -67,7 +67,7 @@ from std_msgs.msg import Bool, String
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics, Pose2D
-from sparx_agency.core.planning.navdp import (
+from sparx_agency.core.planning.vlas.navdp import (
     NAVDP_MAX_FWD_M,
     NAVDP_MAX_LAT_M,
     NavDPError,
@@ -764,7 +764,7 @@ if __name__ == "__main__":
 
 # ============================================================================
 # ROSPARAMS (all private ~; defaults in parentheses). The geometry, selection,
-# HTTP and progress maths live in core.planning.navdp / core.planning.planners;
+# HTTP and progress maths live in core.planning.vlas.navdp / core.planning.planners;
 # this node owns ROS I/O and the CRUISE -> HOLD -> FOLLOW state machine.
 #
 #   sources/outputs:
