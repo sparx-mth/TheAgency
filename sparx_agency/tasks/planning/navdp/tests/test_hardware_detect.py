@@ -14,7 +14,9 @@ def test_detect_never_raises_and_sets_arch():
     assert p.arch
     assert isinstance(p.is_jetson, bool)
     assert p.recommended_workspace_bytes > 0
-    assert p.allow_dla is False           # never DLA for these graphs
+    # allow_dla reports hardware capability, not a per-model recommendation --
+    # NavDP's own build path never reads it (see hardware/detect.py docstring).
+    assert isinstance(p.allow_dla, bool)
     assert p.target_tag
 
 
