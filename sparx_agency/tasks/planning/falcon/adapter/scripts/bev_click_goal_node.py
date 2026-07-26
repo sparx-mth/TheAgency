@@ -8,6 +8,8 @@ trajectory, and the last clicked goal:
     gray = unknown (-1)   white = free (0)   black = occupied (100)
     red path     = raw A*  (shortest -- hugs walls / cuts corners)
     teal dashed  = A* global route (whole plan; stays put as a NavDP leg flies it)
+    orange dotted= the route A* last CONSIDERED (halo under teal = re-checked,
+                   kept the current one; diverging = the shorter route it rejected)
     magenta path = APF-safe (recentred off walls -- before cleanup)
     green path   = cleaned/flown (simplified APF-safe path -- the path flown)
     blue dashed = full planner route (e.g. NavDP) when only its near prefix flies
@@ -18,6 +20,23 @@ trajectory, and the last clicked goal:
     blueviolet X  = pure-pursuit lookahead aim point (/path/lookahead)
 The title shows the predicted-trajectory quality score (0..1) when available.
 
+A SECOND window -- "drone thinking" -- shows the drone's reasoning: the running
+narration every nav node publishes to /nav/thinking explaining why it is doing
+what it is doing ("Stopping to turn", "Reached waypoint 3, heading for waypoint
+4", "Replanning: obstacle on route", "Lost the chair from frame, searching").
+Newest line last, warnings in orange and hard stops in red; a line thought
+repeatedly collapses to "... (x3)" rather than flushing the reasoning that
+explains it off the top. It is a separate window so the map keeps its whole
+canvas and the log can be moved, resized or closed on its own -- closing it
+leaves the map (and the drone) running. ~thinking_lines sets how many lines it
+holds.
+
+That window is OFF by default (~thinking_window:=true opens it). The reasoning
+is persisted to a file by thought_logger_node regardless, so the window is a
+convenience for a desk-side run rather than the record -- and the drone often
+flies headless on the Jetson, where a stack that tries to open a GUI has
+nowhere to put it.
+
 LEFT-CLICK anywhere publishes a geometry_msgs/Point to ~goal_topic; the planner
 picks it up, replans, and the new path is drawn within one BEV update. This node
 is purely a viewer + click adapter -- it does not move the drone, plan, or alter
@@ -27,7 +46,7 @@ Overlays can be toggled live with the number keys to declutter the view (the
 drone dot and goal star always stay on):
     1 full route   2 raw A*    3 safe    4 flown path   5 F_rep field
     6 F_rep arrows 7 predicted 8 smooth  9 lookahead    a A* global route
-    0 all on/off
+    c A* candidate route                                 0 all on/off
 Initial visibility can also be preset per layer via the ~show_<layer> params
 (e.g. ~show_pred:=false to start with the predicted trajectory hidden).
 
@@ -39,6 +58,10 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~path_topic (Path)           /path/waypoints      (cleaned/flown; drawn green)
   in   ~raw_path_topic (Path)       /path/waypoints_raw  (raw A*; drawn red)
   in   ~astar_path_topic (Path)     /path/waypoints_astar (A* global route; teal dashed; '' = off)
+  in   ~astar_candidate_topic (Path) /path/waypoints_astar_candidate (route last
+       considered; orange dotted; '' = off)
+  in   ~astar_eval_topic (String)   /path/astar_eval  (every evaluation, incl. the
+       ones that change nothing -- the planner's proof of life in the HUD)
   in   ~safe_path_topic (Path)      /path/waypoints_safe (APF-safe pre-cleanup; magenta; '' = off)
   in   ~full_path_topic (Path)      /path/waypoints_navdp_full  (full route, blue dashed; '' = off)
   in   ~forces_topic (MarkerArray)  /path/forces         (F_rep; drawn yellow)
@@ -48,6 +71,9 @@ Requires matplotlib (apt-get install -y python3-matplotlib if missing).
   in   ~lookahead_topic (PointStamped) /path/lookahead (pure-pursuit aim; blueviolet X; '' = off)
   in   ~drone_ns + /gt_pose (Pose)
   in   ~pose_stamped_topic (PoseStamped, optional)  e.g. /xtend/localization
+  in   ~thinking_topic (String) /nav/thinking  (drone thinking log; '' = no window)
+  ~thinking_window (bool, FALSE) open the thinking window at all; off suits a
+       headless run and the thought_logger file keeps the record either way
   out  ~goal_topic (Point, latched) /waypoint_nav/goal
 
 The drone marker normally reads a bare Pose on ~drone_ns + /gt_pose (what the
@@ -65,12 +91,40 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 
-from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from sparx_agency.core.common.math import se3
+from sparx_agency.core.common.thought_log import ThoughtLog
+from sparx_agency.core.common.thought_message import parse_thought_message
+
+
+def _get_bool_param(name, default):
+    """Read a boolean rosparam, raising on a value that is not clearly boolean.
+
+    roslaunch coerces ``value="true"`` / ``value="false"`` to a real Python bool
+    but leaves an UNRECOGNISED string (the typo ``"fales"``) as a raw string --
+    and ``bool("fales")`` is ``True``. A plain cast therefore looks like
+    sanitisation while silently flipping a default-OFF flag ON, which for a
+    window flag means a headless Jetson trying to open a GUI. Raise instead.
+
+    (Also defined in astar_planner_node / trajectory_simplifier_node; worth
+    hoisting into a shared adapter helper next time one of them is touched.)
+    """
+    value = rospy.get_param(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise ValueError(
+        "%s must be a boolean (true/false), got %r -- refusing to guess"
+        % (name, value))
+
+# Thinking-panel line colours by level: normal reasoning stays quiet, trouble the
+# drone is handling reads orange, a decision it could not resolve reads red.
+_THOUGHT_COLORS = {"info": "0.15", "warn": "darkorange", "error": "red"}
 
 
 class BevClickGoalNode:
@@ -90,6 +144,14 @@ class BevClickGoalNode:
         # (follow) -- so the global A* route is otherwise invisible while a NavDP
         # leg flies. Drawn teal-dashed; "" disables it.
         self.astar_path_topic = G("~astar_path_topic", "/path/waypoints_astar")
+        # The route A* CONSIDERED on its last opportunistic evaluation, drawn
+        # orange-dotted. Between adoptions the committed teal route is frozen and
+        # never republished, so without this a planner that keeps re-deriving the
+        # same route looks identical to one that has stopped: nothing on the map
+        # ever moves. This layer is that evaluation made visible -- when it sits on
+        # top of the teal route, A* just re-checked and preferred what it had.
+        self.astar_candidate_topic = G("~astar_candidate_topic",
+                                       "/path/waypoints_astar_candidate")
         # The corrector's safe path BEFORE the trajectory_simplifier cleans it.
         # Drawn magenta so safety-corrected vs final-flown is visible while tuning
         # the simplifier. "" disables it (no publisher -> nothing drawn anyway).
@@ -110,6 +172,36 @@ class BevClickGoalNode:
         self.lookahead_topic = G("~lookahead_topic", "/path/lookahead")
         self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
         self.pose_stamped_topic = G("~pose_stamped_topic", "")
+        # ── System-status HUD sources (top-left text box) ────────────
+        # who is planning now (A*/NavDP, published by the hybrid arbiter),
+        self.nav_status_topic = G("~nav_status_topic", "/nav/status")
+        # the nav_mode this run was launched with (context when no arbiter publishes),
+        self.nav_mode = str(G("~nav_mode", ""))
+        # the drone command, to show forward-flight vs rotation-in-place live,
+        self.cmd_vel_topic = G("~cmd_vel_topic", self.drone_ns + "/cmd_vel")
+        # and A* replan events (first route / obstacle reroute / boxed STOP / shorter).
+        self.astar_event_topic = G("~astar_event_topic", "/path/astar_event")
+        # Every opportunistic evaluation, including the ones that change nothing.
+        # This is the planner's proof of life: the events above only fire when the
+        # route actually changes, so on a clean run they are silent for minutes.
+        self.astar_eval_topic = G("~astar_eval_topic", "/path/astar_eval")
+        # ── Drone thinking log (its own window) ──────────────────────
+        # Every nav node narrates its decisions here; see thinking.py.
+        # OFF by default: the reasoning is recorded to a file by thought_logger
+        # (see thought_journal.py), so the window is a convenience for a
+        # desk-side run, not the record -- and on a headless Jetson a stack that
+        # tries to open one has nowhere to put it. Set ~thinking_window:=true
+        # for the live view.
+        self.thinking_topic = G("~thinking_topic", "/nav/thinking")
+        self.thinking_window = _get_bool_param("~thinking_window", False)
+        self.thinking_lines = int(G("~thinking_lines", 8))
+        # Only the window needs the stream; with it off, do not subscribe at all.
+        self.show_thinking = bool(self.thinking_topic) and self.thinking_window
+        if self.show_thinking and self.thinking_lines < 1:
+            raise ValueError(
+                "~thinking_lines must be >= 1, got %d. To turn the thinking "
+                "window off, set ~thinking_window:=false instead."
+                % self.thinking_lines)
         self.refresh_hz = float(G("~refresh_hz", 5.0))
         self.arrow_len = float(G("~arrow_len_m", 0.5))
         # View window used until the first BEV map arrives, so the drone is
@@ -124,6 +216,7 @@ class BevClickGoalNode:
         self._path_xy = []              # cleaned, flown path (green)
         self._raw_xy = []               # raw planner path (red) -- shortest, viz only
         self._astar_xy = []             # A* GLOBAL route (teal) -- independent overlay
+        self._cand_xy = []              # route the last evaluation CONSIDERED (orange)
         self._safe_xy = []              # corrector's safe path (magenta) -- pre-cleanup
         self._full_xy = []              # full planner route (blue dashed) -- ref only
         self._forces = []               # (x,y,dx,dy) per-waypoint force arrows (yellow)
@@ -134,6 +227,17 @@ class BevClickGoalNode:
         self._lookahead_xy = None       # pure-pursuit lookahead aim point (blueviolet)
         self._drone_p = None            # (x, y, yaw)
         self._goal_xy = None
+        # System status (HUD): who plans, what the drone is doing, last A* event.
+        self._nav_status = None         # "A*" / "NavDP (reason)" (from ~nav_status_topic)
+        self._motion = None             # "FORWARD" / "ROTATING" / "HOLD" (from cmd_vel)
+        self._astar_event = None        # last A* replan event text
+        self._astar_event_t = None      # rospy.Time it arrived (for an age readout)
+        self._astar_eval = None         # last evaluation verdict (fires even when
+        self._astar_eval_t = None       # nothing changed -- the planner's pulse)
+        # Drone thinking: the rolling narration drawn in the panel under the map.
+        self._thoughts = ThoughtLog(capacity=max(1, self.thinking_lines))
+        self._thought_t0 = None         # stamp of the first thought (for "+12.3s")
+        self._thought_drops = 0         # malformed messages seen (heartbeat only)
         self._lock = threading.Lock()
 
         # Live per-layer visibility. Each maps a number key to an overlay; a
@@ -142,8 +246,14 @@ class BevClickGoalNode:
         # launch file can start with a cluttered overlay (e.g. pred) hidden.
         self._keymap = {"1": "full", "2": "raw", "3": "safe", "4": "path",
                         "5": "field", "6": "forces", "7": "pred",
-                        "8": "smooth", "9": "lookahead", "a": "astar"}
-        self._show = {layer: bool(G("~show_" + layer, True))
+                        "8": "smooth", "9": "lookahead", "a": "astar",
+                        "c": "cand"}
+        # Declutter by default: show only the three overlays that matter for watching
+        # the A*/NavDP hybrid -- [a] A* global route, [1] NavDP full leg, [4] flown
+        # path -- and hide the rest. Any layer is still toggled live with its key, or
+        # forced on/off from a launch file via ~show_<layer>.
+        _default_on = {"astar", "full", "path", "cand"}
+        self._show = {layer: bool(G("~show_" + layer, layer in _default_on))
                       for layer in self._keymap.values()}
 
         self.goal_pub = rospy.Publisher(self.goal_topic, Point, queue_size=1, latch=True)
@@ -153,6 +263,9 @@ class BevClickGoalNode:
         if self.astar_path_topic:
             rospy.Subscriber(self.astar_path_topic, Path, self._astar_path_cb,
                              queue_size=1)
+        if self.astar_candidate_topic:
+            rospy.Subscriber(self.astar_candidate_topic, Path,
+                             self._astar_candidate_cb, queue_size=1)
         if self.safe_path_topic:
             rospy.Subscriber(self.safe_path_topic, Path, self._safe_path_cb, queue_size=1)
         if self.full_path_topic:
@@ -170,8 +283,29 @@ class BevClickGoalNode:
         if self.pose_stamped_topic:
             rospy.Subscriber(self.pose_stamped_topic, PoseStamped,
                              self._pose_stamped_cb, queue_size=10)
+        if self.nav_status_topic:
+            rospy.Subscriber(self.nav_status_topic, String, self._nav_status_cb,
+                             queue_size=1)
+        if self.cmd_vel_topic:
+            rospy.Subscriber(self.cmd_vel_topic, Twist, self._cmd_vel_cb, queue_size=1)
+        if self.astar_event_topic:
+            rospy.Subscriber(self.astar_eval_topic, String, self._astar_eval_cb,
+                             queue_size=1)
+            rospy.Subscriber(self.astar_event_topic, String, self._astar_event_cb,
+                             queue_size=5)
+        if self.show_thinking:
+            rospy.Subscriber(self.thinking_topic, String, self._thinking_cb,
+                             queue_size=20)
 
+        # The map owns its window outright. The thinking log gets a SEPARATE window
+        # rather than a panel in this figure: sharing one figure costs the map real
+        # estate on any fixed-height screen (the map shrinks by whatever the log
+        # takes), and the operator can move, resize or close the log independently
+        # of the map they are actually flying from.
         self.fig, self.ax = plt.subplots(figsize=(9, 9))
+        self.ax_log = self.fig_log = None      # stay None when the log is off
+        if self.show_thinking:
+            self._init_thinking_window()
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self.fig.canvas.mpl_connect(
@@ -183,9 +317,18 @@ class BevClickGoalNode:
         self.ax.grid(True, alpha=0.25)
         self._add_legend()
 
+        # System-status HUD (top-left): who is planning, what the drone is doing,
+        # and the last A* replan event. Created once; _render updates its text.
+        self._hud = self.ax.text(
+            0.015, 0.985, "", transform=self.ax.transAxes, va="top", ha="left",
+            fontsize=9, family="monospace", zorder=21,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85,
+                      edgecolor="0.5"))
+
         # Persistent artists (created lazily, updated in place)
         self._im = self._raw_line = self._path_line = self._pred_line = None
         self._astar_line = None          # A* global route (teal dashed)
+        self._cand_line = None           # considered route (orange dotted)
         self._safe_line = None           # corrector safe path (magenta)
         self._full_line = None           # full planner route (blue dashed)
         self._smooth_line = None         # pure-pursuit splined trajectory (cyan)
@@ -215,7 +358,16 @@ class BevClickGoalNode:
             rospy.loginfo("  pose in  = %s   (PoseStamped, direct)",
                           self.pose_stamped_topic)
         rospy.loginfo("  goal out = %s   (left-click to publish)", self.goal_topic)
-        rospy.loginfo("  toggles  = keys 1-9 per overlay, 0 = all on/off")
+        rospy.loginfo("  HUD in   = %s (planner) + %s (motion) + %s (A* events)",
+                      self.nav_status_topic, self.cmd_vel_topic, self.astar_event_topic)
+        rospy.loginfo("  think in = %s   (%s)",
+                      self.thinking_topic if self.show_thinking else "(disabled)",
+                      "%d-line log in its own window" % self.thinking_lines
+                      if self.show_thinking
+                      else "no window; thought_logger still records to file")
+        rospy.loginfo("  overlays = default ON: [a] A* route, [1] NavDP leg, [4] flown "
+                      "path; others OFF")
+        rospy.loginfo("  toggles  = keys 1-9/a per overlay, 0 = all on/off")
         rospy.loginfo("=" * 64)
 
     # -- subscribers ----------------------------------------------------------
@@ -289,6 +441,71 @@ class BevClickGoalNode:
     def _pose_stamped_cb(self, msg):
         self._pose_cb(msg.pose)
 
+    # -- system status (HUD) --------------------------------------------------
+    def _nav_status_cb(self, msg):
+        with self._lock:
+            self._nav_status = msg.data
+
+    def _astar_candidate_cb(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        with self._lock:
+            self._cand_xy = pts
+
+    def _astar_eval_cb(self, msg):
+        with self._lock:
+            self._astar_eval = msg.data
+            self._astar_eval_t = rospy.Time.now()
+
+    def _astar_event_cb(self, msg):
+        with self._lock:
+            self._astar_event = msg.data
+            self._astar_event_t = rospy.Time.now()
+
+    def _thinking_cb(self, msg):
+        """Record one narrated thought for the log panel.
+
+        A malformed payload is dropped rather than raised: one node publishing
+        junk must not take down the operator's view of every other node's
+        reasoning. It is not silent either -- each drop is warned (throttled) with
+        the reason, and counted for introspection.
+        """
+        try:
+            thought = parse_thought_message(msg.data, default_stamp=self._now())
+        except ValueError as e:
+            with self._lock:
+                self._thought_drops += 1
+            rospy.logwarn_throttle(10.0, "bev_click_goal: dropping malformed "
+                                         "thought on %s: %s", self.thinking_topic, e)
+            return
+        with self._lock:
+            if self._thought_t0 is None:
+                self._thought_t0 = thought.stamp
+            self._thoughts.add(thought)
+
+    @staticmethod
+    def _now():
+        """Wall/sim seconds, or 0.0 before the clock is up (bag not yet playing)."""
+        return rospy.Time.now().to_sec()
+
+    def _cmd_vel_cb(self, msg):
+        """Classify the live command into forward-flight vs rotation-in-place so the
+        HUD shows what the drone is doing right now (the one-axis follower does one
+        or the other; a holonomic controller may do both)."""
+        vx, vy, wz = msg.linear.x, msg.linear.y, msg.angular.z
+        speed = (vx * vx + vy * vy) ** 0.5
+        turning = abs(wz) >= 0.03            # rad/s
+        moving = speed >= 0.03               # m/s
+        if not moving and not turning:
+            motion = "HOLD (stopped)"
+        elif turning and not moving:
+            motion = "ROTATING (turn in place)"
+        elif moving and not turning:
+            motion = "FORWARD FLIGHT"
+        else:
+            motion = "FORWARD + TURN"
+        with self._lock:
+            self._motion = motion
+
     # -- click handler --------------------------------------------------------
     def _on_click(self, event):
         if event.inaxes != self.ax or event.button != 1:        # left only
@@ -302,6 +519,7 @@ class BevClickGoalNode:
             self._path_xy = []          # drop the stale flown path; replan redraws it
             self._raw_xy = []           # and the stale raw planner path
             self._astar_xy = []         # and the stale A* global route
+            self._cand_xy = []          # and whatever it last considered
             self._safe_xy = []          # and the stale corrector safe path
             self._full_xy = []          # and the stale full planner route
             self._forces = []           # and the stale force arrows
@@ -371,6 +589,8 @@ class BevClickGoalNode:
                    label="[9] pure-pursuit lookahead (/path/lookahead)"),
             Line2D([0], [0], color="teal", marker="s", markersize=4, linestyle="--",
                    label="[a] A* global route (/path/waypoints_astar)"),
+            Line2D([0], [0], color="darkorange", linestyle=":", lw=3,
+                   label="[c] A* candidate: last route considered (halo = unchanged)"),
             Line2D([0], [0], color="red", marker="o", markeredgecolor="black",
                    markersize=8, linestyle="None", label="drone pose + heading"),
             Line2D([0], [0], color="lime", marker="*", markeredgecolor="black",
@@ -378,8 +598,85 @@ class BevClickGoalNode:
         ]
         self.ax.legend(handles=handles, loc="upper right", fontsize=7,
                        framealpha=0.85, ncol=1,
-                       title="routes & markers  (keys 1-9/a toggle, 0 = all)"
+                       title="routes & markers  (keys 1-9/a/c toggle, 0 = all)"
                        ).set_zorder(20)
+
+    # -- thinking window -------------------------------------------------------
+    def _init_thinking_window(self):
+        """Build the drone-thinking log's own window, beside the map's.
+
+        A second figure, so the map keeps its whole window and the operator can
+        move/resize/close this one independently. One text artist per line,
+        created once and updated in place, so a busy log costs no artist churn
+        per frame; the row count is fixed, which keeps the window's layout stable
+        rather than jumping as thoughts arrive.
+        """
+        self.fig_log = plt.figure("drone thinking  (%s)" % self.thinking_topic,
+                                  figsize=(11, 0.34 * self.thinking_lines + 0.5))
+        self.ax_log = self.fig_log.add_axes([0.0, 0.0, 1.0, 1.0])
+        self.ax_log.set_xticks([])
+        self.ax_log.set_yticks([])
+        for side in self.ax_log.spines.values():
+            side.set_visible(False)
+        # Closing the log must NOT take the node (or the map) down with it -- an
+        # operator who declutters their screen is not asking to stop flying. Drop
+        # the reference so _render stops touching a dead canvas.
+        self.fig_log.canvas.mpl_connect("close_event", self._on_log_close)
+        self._log_rows = [
+            self.ax_log.text(0.008, 1.0 - (i + 0.6) / self.thinking_lines, "",
+                             transform=self.ax_log.transAxes, va="center",
+                             ha="left", fontsize=9, family="monospace")
+            for i in range(self.thinking_lines)
+        ]
+        self._log_rows[0].set_text("(waiting for the drone's first thought)")
+        self._log_rows[0].set_color("0.55")
+
+    def _on_log_close(self, _evt):
+        """The operator closed the thinking window; keep flying without it."""
+        self.ax_log = None
+        self.fig_log = None
+        rospy.loginfo("bev_click_goal: thinking window closed; map keeps running")
+
+    def _render_thoughts(self):
+        """Refresh the thinking window: oldest at the top, newest at the bottom.
+
+        Bottom-anchored like a terminal tail, so the drone's latest thought is
+        always on the same line rather than wandering as the log fills. The
+        newest line is bold -- with a static screenshot of a flight, that is the
+        one an operator needs to find first.
+
+        Driven from the map's animation rather than a second FuncAnimation: one
+        timer keeps the two windows showing the same instant, and the log's canvas
+        is redrawn explicitly here because an animation only redraws its own
+        figure.
+        """
+        # Format inside the lock: entries() hands back LIVE entries, and a thought
+        # arriving on the subscriber thread mutates the newest one in place as it
+        # collapses a repeat. Rendering straight off them would read a half-updated
+        # entry. Copy out finished strings instead, and hold the lock only for that.
+        with self._lock:
+            entries = self._thoughts.entries(limit=self.thinking_lines)
+            # `t0 or ...` would be wrong here: the first thought's stamp is
+            # legitimately 0.0 under a fresh sim clock, and falsy 0.0 would
+            # re-baseline every line against itself -- printing +0.0s all flight.
+            base = self._thought_t0 if self._thought_t0 is not None else 0.0
+            lines = [("%+7.1fs  %-18.18s  %s"
+                      % (e.thought.stamp - base, e.thought.source,
+                         e.display_text()),
+                      _THOUGHT_COLORS.get(e.thought.level, "0.15"))
+                     for e in entries]
+        if not lines:
+            return
+        pad = self.thinking_lines - len(lines)        # bottom-anchor the tail
+        for i, row in enumerate(self._log_rows):
+            if i < pad:
+                row.set_text("")
+                continue
+            text, color = lines[i - pad]
+            row.set_text(text)
+            row.set_color(color)
+            row.set_fontweight("bold" if i == self.thinking_lines - 1 else "normal")
+        self.fig_log.canvas.draw_idle()
 
     # -- render (main thread, via FuncAnimation) ------------------------------
     def _render(self, _frame):
@@ -387,6 +684,7 @@ class BevClickGoalNode:
             bev, path = self._bev, list(self._path_xy)
             raw = list(self._raw_xy)
             astar = list(self._astar_xy)
+            cand = list(self._cand_xy)
             safe = list(self._safe_xy)
             full = list(self._full_xy)
             forces = list(self._forces)
@@ -395,6 +693,9 @@ class BevClickGoalNode:
             pred, score = list(self._pred_xy), self._pred_score
             smooth = list(self._smooth_xy)
             lookahead = self._lookahead_xy
+            nav_status, motion = self._nav_status, self._motion
+            event, event_t = self._astar_event, self._astar_event_t
+            ev, ev_t = self._astar_eval, self._astar_eval_t
 
         # Map background (optional): the drone is still drawn without it, so a
         # bridge+bag run with no bev_publisher up still shows where the drone is.
@@ -461,6 +762,20 @@ class BevClickGoalNode:
             self._astar_line, = self.ax.plot(axs, ays, "--s", color="teal",
                                              linewidth=1.4, markersize=3,
                                              alpha=0.7, zorder=1.5)
+
+        # The route the last evaluation CONSIDERED. Drawn WIDER and UNDER the
+        # committed teal route on purpose: when A* re-derives the same geometry the
+        # orange shows as a halo around the teal, which reads as "just re-checked,
+        # kept it" -- the thing that was previously indistinguishable from a dead
+        # planner. When the two diverge, the orange is the road not taken, and the
+        # HUD's "A* check" line says by how much it missed.
+        if self._cand_line is not None:
+            self._cand_line.remove()
+            self._cand_line = None
+        if self._show["cand"] and len(cand) >= 2:
+            cxs, cys = [p[0] for p in cand], [p[1] for p in cand]
+            self._cand_line, = self.ax.plot(cxs, cys, ":", color="darkorange",
+                                            linewidth=3.0, alpha=0.85, zorder=1.4)
 
         # Path overlays: raw A* (red, underneath) vs APF-safe path (green, on
         # top). The green path is what the drone actually flies; the red shows
@@ -580,6 +895,28 @@ class BevClickGoalNode:
             self._lookahead_marker, = self.ax.plot(
                 [lookahead[0]], [lookahead[1]], "X", color="blueviolet",
                 markersize=13, markeredgecolor="black", zorder=7)
+
+        # System-status HUD (top-left)
+        mode = self.nav_mode.upper() if self.nav_mode else "?"
+        lines = ["mode: %s    planner: %s" % (mode, nav_status or "(awaiting status)"),
+                 "motion: %s" % (motion or "(no /cmd_vel yet)")]
+        if event:
+            age = ("  (%.0fs ago)" % (rospy.Time.now() - event_t).to_sec()
+                   if event_t is not None else "")
+            lines.append("A*: %s%s" % (event, age))
+        if ev:
+            # Distinct from the "A*:" line above, which only speaks when the route
+            # actually CHANGES and is therefore silent for minutes on a clean run.
+            # This one ticks on every evaluation, so a stalled planner shows up as
+            # an age that keeps climbing past ~replan_period_s.
+            age = ("  (%.0fs ago)" % (rospy.Time.now() - ev_t).to_sec()
+                   if ev_t is not None else "")
+            lines.append("A* check: %s%s" % (ev, age))
+        self._hud.set_text("\n".join(lines))
+
+        # Drone thinking log (panel under the map)
+        if self.ax_log is not None:
+            self._render_thoughts()
         return []
 
     def spin(self):

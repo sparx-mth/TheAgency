@@ -1,0 +1,904 @@
+<launch>
+  <!--
+    object_mission.launch — "pick an object, then fly to it and land".
+
+    The select-then-go mission on top of the FALCON stack. It is
+    real_drone_object_approach.launch with two differences:
+
+      1. GATED START. object_approach comes up DISABLED (start_enabled:=false), so
+         no visual servo runs and nothing lands until an object is selected. (The
+         platform still takes off and hovers in place — that is the follower's
+         baseline; only the mission is gated.)
+         The nav stack takes goal_x/goal_y, which default to a real coordinate, so
+         A* DOES plan a route at startup and flies it on GO. Set them empty to
+         restore the older behaviour where the planners idle until a click too.
+         Note the GO gate is separate and independent: with start_go:=false not one
+         velocity command reaches the drone whatever the planners are doing.
+
+      2. A MISSION DIRECTOR. mission_director_node loads objects.json and, on
+         selection (random pick, or a click in its object-list window), publishes the
+         object's LABEL (-> YOLO re-prompt + object_approach gate, /object_approach/goal),
+         a coordinate goal (-> planners, /waypoint_nav/goal), the object's own WORLD
+         (x,y) (-> /object_approach/object_position), and enable=True (-> arms
+         object_approach). That single act starts the mission.
+
+    TWO POINTS. Before any object is picked the drone flies to a PRE-SELECTION TARGET
+    (goal_x/goal_y, 0,-2) and simply HOLDS there in the air — object_approach is
+    disabled, so nothing aims, sweeps, hands off /cmd_vel or lands. Picking an object
+    arms the mission and sends the drone to a SEPARATE ROOM CENTRE (stage_x/stage_y,
+    0,-3), which is where it looks for the object.
+
+    THE STAGED APPROACH (stage_x / stage_y, on by default). The post-selection goal is
+    NOT the object: it is the room centre. The catalogued object position comes from
+    the room map and is only as good as that map — fly onto it and a small error can
+    leave the object beside or behind the drone, out of frame, with nothing to servo
+    onto. So on selection the mission:
+      1. flies to the room centre;
+      2. TURNS to look down the object's bearing and holds still there (AIM), because a
+         camera resolves a bearing far better than a map resolves a position — this is
+         the shot most likely to give the visual servo a real lock;
+      3. if that look finds nothing, SWEEPS the room in place for it (aim_fail_to_scan),
+         a slow rotate-with-stops turn — it never flies onto the object's own imprecise
+         coordinate. (Set aim_fail_to_scan:=false to fall back to the older escalate:
+         re-publish the goal at the object's (x,y) and fly the last leg.)
+    Clear stage_x/stage_y to switch staging off and fly straight at the object, as before.
+
+    Reaching the object ends the mission by LANDING; and if it is never found, the sweep
+    gives up and lands too:
+      * VISUAL reach (the success land): the detector confirms the object, object_approach
+        servos onto it and lands when the depth range holds <= land_range_m.
+      * GIVE-UP after the sweep: the room sweep turned scan_land_revolutions full turns
+        (3) without a confirmation — the object is nowhere in the room, so land where we
+        are. Arrival-land "by A* alone" is OFF here (land_at_goal:=false), so arriving at
+        the room centre aims/sweeps and never lands by mere arrival.
+    Either way the node stops /cmd_vel and requests 'finish' (stop -> land -> disarm via
+    the demo manager).
+
+    Run (in the FALCON container; the YOLO-World detector sidecar + bridge run on the
+    host, see run_object_mission.sh / the README):
+
+      roslaunch falcon_adapter object_mission.launch \
+          map_name:=office selection_mode:=gui nav_mode:=fallback
+
+    NOTE: start from a fresh roscore (run_falcon.sh's ephemeral container gives one) so a
+    stale latched /waypoint_nav/goal from a previous run cannot pre-arm the planners.
+  -->
+
+  <!-- ── Shared / nav ─────────────────────────────────────────────── -->
+  <arg name="map_name"        default="office" />
+  <arg name="drone_ns"        default="" />
+  <arg name="image_transport" default="frame_path" /><!-- frame_path (real drone) | topic (sim / bag) -->
+  <!-- Localization source (world pose). Feeds the whole nav stack AND object_approach's
+       arrival detection (so arrival-land works). Set to your pose topic, e.g.
+       real_pose_topic:=/xtend/april_tag_pose for AprilTag localization. -->
+  <arg name="real_pose_topic" default="/xtend/localization" />
+  <arg name="real_pose_type"  default="pose_stamped" />     <!-- pose_stamped | pose -->
+  <!-- ══ TWO DISTINCT POINTS: the room centre, and the pre-selection target ══════
+       This mission waits at one fixed point BEFORE any object is picked, then works
+       from a SEPARATE vantage point once one is. The two used to be the same
+       coordinate; they are now independent, so the drone can hold at 0,-2 and look
+       for objects from 0,-3.
+
+       stage_x/stage_y — THE ROOM CENTRE (post-selection vantage point). On selecting
+         an object the director republishes /waypoint_nav/goal HERE, NOT onto the
+         object: the drone flies over, turns to look down the object's bearing (AIM),
+         and if it does not see it, sweeps the room in place for it. It is also
+         object_approach's arrival goal, so the two cannot drift apart.
+         WHY not fly at the object itself: its catalogued position comes from the room
+         map and is only as accurate as that map; a few tens of cm of error can leave
+         it beside or behind the drone, out of frame, with nothing to servo onto.
+         Standing off and looking is robust — a camera resolves a bearing far better
+         than a map resolves a position. Clear BOTH ('') to switch staging off.
+
+       goal_x/goal_y — THE PRE-SELECTION TARGET. Where A* flies the drone the moment
+         the stack is up (a numeric goal => a route at once, flown on GO); it then
+         HOLDS there, in the air, with nothing else happening — object_approach is
+         disabled until a selection, so there is no aim, no sweep, no landing, no
+         /cmd_vel hand-off. This is the "reach 0,-2 and wait" leg. EMPTY ('') instead
+         idles the planners until a selection (no pre-planned route). Selecting an
+         object always wins: the director republishes the goal at the room centre. -->
+  <arg name="stage_x"         default="0.0" />   <!-- room centre: look for the object from here -->
+  <arg name="stage_y"         default="-3.0" />
+  <arg name="goal_x"          default="0.0" />   <!-- pre-selection target: fly here and hold -->
+  <arg name="goal_y"          default="-2.0" />
+  <!-- fallback by default, matching real_drone.launch: A* flies the route and NavDP
+       rescues only a boxed-in A*. nav_mode:=hybrid hands NavDP the hard turns/doorways;
+       astar is pure A*; combination is the always-on A*+NavDP fusion.
+       hybrid / combination / fallback all need the NavDP server up. -->
+  <arg name="nav_mode"        default="fallback" />
+  <arg name="use_navdp"       default="false" />
+  <!-- drift_pid controller (controller:=drift_pid) - generated block BEGIN -->
+  <!-- SPEED AND FORCE  -  the per-axis envelope, and the multi-axis budget -->
+  <arg name="dp_cruise_speed"            default="0.18" /><!-- m/s on a straight leg. THE main speed dial - raise this first -->
+  <arg name="dp_cruise_straight" default="0.0" /><!-- m/s forward speed while the yaw correction is QUIET; blends down to dp_cruise_speed as yaw activity grows. 0 = off (single cruise everywhere) -->
+  <arg name="dp_max_vx"                  default="0.25" /><!-- m/s hard cap FORWARD. 0.45 = full XTEND pitch thrust (600 counts) -->
+  <arg name="dp_max_vx_back"             default="0.12" /><!-- m/s hard cap in REVERSE. Harder than forward: no rear camera, every backward metre is blind -->
+  <arg name="dp_max_vy"                  default="0.12" /><!-- m/s hard cap sideways (ROLL). Weaker axis; keep well under max_vx -->
+  <arg name="dp_max_wz"                  default="0.40" /><!-- rad/s hard cap yaw (615 of 1000 counts). 0.65 = full XTEND yaw thrust -->
+  <arg name="dp_max_translation"         default="0.25" /><!-- m/s cap on the (vx,vy) vector, so a diagonal is not faster than an axis -->
+  <arg name="dp_combined_effort"         default="1.4" /><!-- |vx|/max + |vy|/max + |wz|/max budget. 1.0 = one axis at full. -->
+  <arg name="dp_accel_xy"                default="0.35" /><!-- m/s2 how fast translation may change. Low = gradual, keeps DA3 depth usable -->
+  <arg name="dp_accel_wz"                default="1.2" /><!-- rad/s2 ramp-up rate of the yaw command -->
+  <arg name="dp_decel_xy"                default="0.60" /><!-- m/s2 how fast translation may be taken OFF. >= accel: braking is never rate-limited by the gentle ramp-up -->
+  <arg name="dp_decel_wz"                default="2.0" /><!-- rad/s2 how fast the yaw command may be taken off -->
+  <arg name="dp_min_vx"                  default="0.06" /><!-- m/s smallest forward command the motors actually act on -->
+  <arg name="dp_min_vy"                  default="0.06" /><!-- m/s smallest sideways command the motors actually act on -->
+  <arg name="dp_min_wz_deg"              default="10.0" /><!-- deg/s smallest yaw command that actually rotates the drone (yaw bites late on this airframe) -->
+  <arg name="dp_release_frac"            default="0.5" /><!-- below this fraction of a min the command is dropped to 0, above it snapped up -->
+  <!-- NAVIGATION  -  how it gets to the next waypoint -->
+  <arg name="dp_approach_yaw_rate"       default="0.35" /><!-- rad/s cap on the turn onto a leg -->
+  <arg name="dp_track_yaw_rate" default="0.35" /><!-- rad/s yaw cap while TRACKING/station-keeping (turns onto a leg use dp_approach_yaw_rate); low = yaw only trims mid-leg and ROLL owns the line -->
+  <arg name="dp_turn_pitch_bias"         default="0.08" /><!-- m/s FLOOR on forward speed while a TURN's yaw is active. Never backward while yawing: a backward pitch under a turn inverts the delivered yaw on this airframe (measured 2026-07-21); a small forward pitch makes the yaw bite (11% delivery in place vs 30-68% translating). 0 = no bite added, backward still forbidden -->
+  <arg name="dp_turn_side_cone_deg"      default="35.0" /><!-- deg half-angle of the sideslip cone the translation may occupy while the yaw axis is active. YAW+ROLL is not the same manoeuvre as YAW+forward: |vy| is capped at tan(cone)*vx during an active yaw, so roll seasons the progress vector but never dominates it -->
+  <arg name="dp_pos_radius"              default="0.30" /><!-- m waypoint capture radius -->
+  <arg name="dp_slow_radius"             default="0.80" /><!-- m start slowing this far from the FINAL goal -->
+  <arg name="dp_arrive_speed_min"        default="0.08" /><!-- m/s floor outside pos_radius, so it never crawls to a noisy stop -->
+  <arg name="dp_lookahead_m"             default="0.60" /><!-- m how far ahead the heading aims. Bigger = smoother but cuts corners -->
+  <arg name="dp_yaw_engage_deg"          default="22.0" /><!-- deg heading error above which it turns; below it corrects with ROLL only -->
+  <arg name="dp_yaw_release_deg"         default="9.0" /><!-- deg error at which turning stops. MUST be < engage: the anti-chatter gap -->
+  <arg name="dp_travel_cone_deg"         default="70.0" /><!-- deg widest angle off straight-ahead it will fly - never fast where the camera cannot see -->
+  <arg name="dp_suppress_deg"            default="110.0" /><!-- deg error at which translation drops to suppress_floor (turn first, then fly) -->
+  <arg name="dp_suppress_floor"          default="0.15" /><!-- fraction of speed kept beyond suppress_deg. >0 so it keeps creeping -->
+  <arg name="dp_passed_bearing_deg"      default="110.0" /><!-- deg a non-final waypoint this far behind counts as passed, not turned back for -->
+  <!-- STATION KEEPING  -  holding still, which is where fore/aft drift shows up -->
+  <arg name="dp_alt_hold"                default="false" /><!-- altitude hold on the solved pose z: keep the drone at the tag-plane height (target follows cruise_z) -->
+  <arg name="dp_alt_climb_max"           default="0.06" /><!-- m/s cap on UP; the guarded direction, keep tiny (vertical axis climbs far harder than nominal) -->
+  <arg name="dp_alt_kp" default="0.5" /><!-- altitude-hold P gain, metres of height error -> m/s of climb/descent demand (tapered by this, capped by dp_alt_climb_max) -->
+  <arg name="dp_alt_pulse_trigger_m" default="0.20" /><!-- m below target that starts a dedicated climb pulse (stop translating, climb, resume) -->
+  <arg name="dp_alt_pulse_tscale" default="0.5" /><!-- (vx,vy) kept during a climb pulse. Below 1 so the climb wins the larger share of thrust, but high enough that forward flight CONTINUES through the climb (0.2 read as "no forward command" on the 2026-07-21 flight). 1.0 = climb and cruise at full speed simultaneously -->
+  <arg name="dp_alt_ceiling_m"           default="1.2" /><!-- m; at/above this measured altitude a climb is NEVER commanded -->
+  <arg name="dp_alt_conf_min"            default="0.35" /><!-- pose confidence required to climb; never climbs on a vague or coasted pose -->
+  <arg name="dp_hold_deadband_m"         default="0.06" /><!-- m position error ignored while holding -->
+  <arg name="dp_forward_track_frac"      default="0.0" /><!-- along-track PID during a straight leg. 0 = the cruise owns that axis -->
+  <arg name="dp_lateral_turn_frac"       default="0.40" /><!-- fraction of the ROLL correction used while turning (a big roll spoils a turn) -->
+  <arg name="dp_settle_map_updates"      default="0" /><!-- fresh voxel updates to wait for while stopped. 0 = do not force any -->
+  <!-- DRIFT PID  -  the loops that LEARN the drift instead of just resisting it -->
+  <arg name="dp_lat_kp"                  default="0.55" /><!-- cross-track P: metres of error -> m/s of ROLL -->
+  <arg name="dp_lat_ki"                  default="0.06" /><!-- cross-track I: LEARNS the standing sideways drift. Raise to kill a constant offset -->
+  <arg name="dp_lat_kd"                  default="0.12" /><!-- cross-track D: damping -->
+  <arg name="dp_lat_i_limit"             default="0.05" /><!-- m/s biggest standing sideways push it may assume exists -->
+  <arg name="dp_lat_max"                 default="0.10" /><!-- m/s cap on the whole cross-track correction. Must be <= dp_max_vy -->
+  <arg name="dp_lat_deadband_m"          default="0.03" /><!-- m error ignored on a CRISP pose. THE TRACKING FLOOR; widens automatically as pos_std grows -->
+  <arg name="dp_lat_d_tau_s"             default="0.4" /><!-- s low-pass on the derivative (a 10Hz noisy pose differentiates to noise) -->
+  <arg name="dp_fwd_kp"                  default="0.50" /><!-- along-track P: metres -> m/s of PITCH, while turning or holding -->
+  <arg name="dp_fwd_ki"                  default="0.05" /><!-- along-track I: LEARNS the standing fore/aft drift -->
+  <arg name="dp_fwd_kd"                  default="0.10" /><!-- along-track D: damping -->
+  <arg name="dp_fwd_i_limit"             default="0.05" /><!-- m/s biggest standing fore/aft push it may assume -->
+  <arg name="dp_fwd_max"                 default="0.10" /><!-- m/s cap on the along-track correction -->
+  <arg name="dp_fwd_deadband_m"          default="0.05" /><!-- m along-track error ignored on a crisp pose; widens with pos_std -->
+  <arg name="dp_fwd_d_tau_s"             default="0.4" /><!-- s low-pass on the along-track derivative -->
+  <arg name="dp_yaw_kp"                  default="0.90" /><!-- heading P: rad of error -> rad/s of YAW -->
+  <arg name="dp_yaw_ki"                  default="0.08" /><!-- heading I: LEARNS the standing yaw drift (the rarest of the three) -->
+  <arg name="dp_yaw_kd"                  default="0.15" /><!-- heading D: damping -->
+  <arg name="dp_yaw_i_limit"             default="0.08" /><!-- rad/s biggest standing yaw push it may assume -->
+  <arg name="dp_yaw_max"                 default="0.35" /><!-- rad/s cap on the heading correction. Must be <= dp_max_wz -->
+  <arg name="dp_yaw_deadband_deg"        default="2.0" /><!-- deg heading error ignored -->
+  <arg name="dp_yaw_d_tau_s"             default="0.35" /><!-- s low-pass on the heading derivative -->
+  <arg name="dp_drift_leak_s"            default="180.0" /><!-- s over which a learned drift fades. Long: it belongs to the airframe, not the minute -->
+  <!-- LOCALIZATION TRUST  -  fly slower, and stop learning, when the pose is poor -->
+  <arg name="dp_conf_full"               default="0.35" /><!-- confidence at/above which it flies full speed. NOT 0.9: a lone tag caps near 0.21 -->
+  <arg name="dp_conf_min"                default="0.10" /><!-- confidence at/below which it flies at dp_speed_floor -->
+  <arg name="dp_speed_floor"             default="0.35" /><!-- slowest speed multiplier on a poor pose. >0: creeping beats stopping in a corridor -->
+  <arg name="dp_yaw_scale_floor"         default="0.0" /><!-- floor on the confidence speed scale as applied to YAW (1.0 = a vague pose never slows the turning, only the flying; turning is what sweeps tags back into view) -->
+  <arg name="dp_gain_floor"              default="0.25" /><!-- smallest P/D scale on a poor pose. Lower than speed_floor: reacting to a vague pose is what injects noise -->
+  <arg name="dp_conf_integrate"          default="0.18" /><!-- below this the drift loops FREEZE - never learn drift from a pose you do not trust -->
+  <arg name="dp_conf_hold"               default="0.05" /><!-- below this the drone stops and holds -->
+  <arg name="dp_max_age_s"               default="0.6" /><!-- s since the last pose before it stops. Silence is a signal on this stack -->
+  <arg name="dp_coast_speed_scale"       default="0.5" /><!-- extra speed multiplier while dead-reckoning (no tag in view, ~0.5s budget) -->
+  <arg name="dp_eff_floor"               default="0.15" /><!-- cmd_effectiveness at/below which the commands are not reaching the world -->
+  <arg name="dp_eff_full"                default="0.60" /><!-- cmd_effectiveness at/above which commands count as fully effective -->
+  <arg name="dp_eff_speed_floor"         default="0.5" /><!-- speed multiplier while commands are UNPROVEN (effectiveness starts at 0.3): first metres fly cautious, then speed is earned. 1.0 disables -->
+  <arg name="dp_latency_s"               default="0.12" /><!-- s camera->control delay compensated by leading the pose along the last command; earned via effectiveness, 0 while coasting. 0 disables -->
+  <arg name="dp_std_ref_m"               default="0.05" /><!-- m pos_std at/below which the pose counts as crisp (multi-tag fixes sit at 0.01-0.05) -->
+  <arg name="dp_std_deadband_gain"       default="0.6" /><!-- extra tracking deadband per metre of pos_std above the crisp reference: never correct (or learn from) errors smaller than the pose's own stated accuracy -->
+  <arg name="dp_deadband_extra_max_m"    default="0.15" /><!-- m cap on that widening, so a coasting pose (std up to 0.5) cannot switch corrections off entirely -->
+  <arg name="dp_require_quality"         default="false" /><!-- true HOLDS the drone until the confidence topics arrive; false flies without them (and warns) -->
+  <!-- STUCK DETECTION  -  noticing a wall the camera cannot see -->
+  <arg name="dp_block_enabled"          default="true" /><!-- master switch: false = never detect a blockage, never escape, never report one -->
+  <arg name="dp_block_window_s"          default="1.2" /><!-- s trailing window over which progress is measured -->
+  <arg name="dp_block_min_vx"            default="0.07" /><!-- m/s below this the tick does not count as trying to move -->
+  <arg name="dp_block_min_wz_deg"        default="12.0" /><!-- deg/s below this the tick does not count as trying to turn. Keep above dp_min_wz_deg -->
+  <arg name="dp_block_min_dist_m"        default="0.06" /><!-- m commanded distance needed in the window before the ratio means anything -->
+  <arg name="dp_block_min_yaw_deg"       default="7.0" /><!-- deg commanded rotation needed in the window -->
+  <arg name="dp_block_progress_frac"     default="0.30" /><!-- achieved/commanded below this = not moving. Not 0: a heavy drone always under-delivers -->
+  <arg name="dp_block_confirm_ticks"     default="5" /><!-- consecutive bad ticks before declaring a blockage (ticks, never a wall clock) -->
+  <arg name="dp_block_clear_ticks"       default="3" /><!-- consecutive good ticks before clearing one -->
+  <arg name="dp_block_use_effectiveness" default="true" /><!-- also believe the localization's own cmd_effectiveness verdict -->
+  <!-- ESCAPE REFLEXES  -  what it does about it (planning owns the reroute) -->
+  <arg name="dp_escape_brake_s"          default="0.4" /><!-- s stopped before doing anything - start the escape from rest, not from inertia -->
+  <arg name="dp_escape_back_s"           default="0.7" /><!-- s reversing after a blocked forward, to break contact -->
+  <arg name="dp_escape_back_speed"       default="0.10" /><!-- m/s of that reverse -->
+  <arg name="dp_escape_probe_s"          default="0.8" /><!-- s rolling sideways to test whether that side is open -->
+  <arg name="dp_escape_probe_speed"      default="0.10" /><!-- m/s of that sideways probe -->
+  <arg name="dp_escape_settle_s"         default="0.5" /><!-- s held still afterwards, so the depth model gets a stationary frame -->
+  <arg name="dp_escape_yaw_probe_s"      default="1.0" /><!-- s rolling clear of a wall that blocked a TURN (longer: escaping, not asking) -->
+  <arg name="dp_escape_yaw_invert"       default="false" /><!-- flip which way it rolls to escape a blocked turn. THE one sign worth checking against reality -->
+  <arg name="dp_escape_max_attempts"     default="2" /><!-- escapes per obstacle before it gives up and tells the planner (2 = one probe each way) -->
+  <!-- BLOCKAGE MEMORY  -  the planner remembering what the controller found -->
+  <arg name="use_blockage_memory"        default="true" /><!-- remember unseen obstacles and stop routing through them -->
+  <arg name="blockage_radius_m"          default="0.35" /><!-- m marked impassable around a reported spot. >= the drone's half-width -->
+  <arg name="blockage_ttl_s"             default="0.0" /><!-- s a blockage is remembered. 0 = forever, right for a static building -->
+  <!-- drift_pid controller - generated block END -->
+  <arg name="controller"      default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist | drift_pid -->
+  <!-- Follower-side pose denoising. false = fly the localization stream as
+       published, so its own jitter and lag are visible rather than filtered. -->
+  <arg name="cmd_vy_sign" default="1.0" /><!-- lateral (linear.y) sign at publish: -1 corrects the inversion measured on this airframe; must be exactly 1 or -1 -->
+  <arg name="use_pose_estimator" default="true" />
+  <!-- WAYPOINT-CONTROLLER SPEEDS (controller:=waypoint, this mission's default).
+       The one-axis follower never translates and rotates at once, so these are
+       independent: vel_x is every forward leg, yaw_rate every in-place turn.
+       Ignored under pure_pursuit, which uses pp_cruise_speed / pp_max_yaw_rate. -->
+  <arg name="vel_x"           default="0.25" /><!-- m/s forward -->
+  <arg name="yaw_rate"        default="0.7" /><!-- rad/s in-place turn -->
+  <!-- A pure-yaw twist leaves the platform flat, so the turn bites late and coasts.
+       This much forward PITCH rides along with an otherwise pure-yaw twist; it is
+       never added to a commanded forward leg. 0 = pure yaw (the old behaviour). -->
+  <arg name="yaw_pitch_bias"  default="0.05" /><!-- m/s forward ridden on a turn in place -->
+  <!-- How big one in-place yaw pulse may get, in control ticks. Graded pulses
+       size a burst by DURATION: the tick count is snapped to an even number and
+       clamped to [min_motion_ticks, this], so the grades are 2/4/6/... ticks and
+       this sets the strongest one. At yaw_rate 0.7 and ctrl_rate_hz 10 a tick is
+       ~4 deg, and the platform coasts a further ~15 deg after the command stops,
+       so 8 ticks is ~32 deg commanded and ~47 deg of actual turn per burst.
+       Raising it makes a big turn finish in fewer stop-and-measure cycles; the
+       cost is more angle swept open-loop before the settle re-measures.
+       NOTE yaw_burst_max_deg does NOT do this: it feeds the legacy swept-angle
+       branch, which yaw_graded_pulses (on by default) bypasses entirely. -->
+  <arg name="yaw_burst_grade_max_ticks" default="6" />
+  <!-- Debug logging master switch; see nav_stack.launch. -->
+  <arg name="debug"           default="false" />
+  <arg name="thinking_log" default="false" />
+  <arg name="thinking_log_path" default="$(optenv FALCON_THOUGHT_LOG)" />
+  <arg name="thinking_window" default="false" />
+  <!-- Certainty log (AprilTag/drift confidence vs. command); see nav_stack.launch. -->
+  <arg name="certainty_log" default="true" />
+  <arg name="certainty_log_path" default="$(optenv FALCON_CERTAINTY_LOG)" />
+  <!-- Record BEV + routes + replan events for offline visual replay; see
+       nav_stack.launch and tasks/planning/nav_debug/. -->
+  <arg name="nav_debug_record" default="true" />
+  <!-- Pure-pursuit speed + yaw force; see mission.yaml. Only used when
+       controller:=pure_pursuit (pp_cruise_speed shadows ~vel_x there). -->
+  <arg name="pp_max_yaw_rate"       default="0.45" />
+  <arg name="pp_yaw_rate_smoothing" default="0.3" />
+  <arg name="pp_cruise_speed"       default="0.2" />
+  <arg name="pp_holonomic"          default="false" /><!-- false = no ROLL; yaw turns -->
+  <arg name="cruise_z"        default="1.0" />       <!-- flight altitude; bev_z_peak follows it -->
+
+  <!-- Camera intrinsics (raw K; shared by the map AND the detector). -->
+  <arg name="cam_fx"          default="322.6351083474948" />
+  <arg name="cam_fy"          default="323.3893307141174" />
+  <arg name="cam_cx"          default="242.06479658679714" />
+  <arg name="cam_cy"          default="90.03019076680604" />
+  <arg name="cam_width"       default="504" />
+  <arg name="cam_height"      default="294" />
+
+  <!-- ── The GO gate ──────────────────────────────────────────────────
+       start_go:=false means the WHOLE pipeline runs (BEV, A*, detector, director,
+       even object selection) but NOT ONE velocity command reaches the drone until
+       GO. That is what lets you launch before/while taking off by hand without the
+       stack fighting you. Press GO in the director window, or:
+         rostopic pub -1 /mission/go std_msgs/Bool "data: true"
+       Set start_go:=true to fly immediately, as before this gate existed. -->
+  <arg name="start_go"        default="false" />
+  <arg name="go_topic"        default="/mission/go" />
+  <arg name="zero_on_close"   default="true" />  <!-- one zero twist on GO to false -->
+  <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
+
+  <!-- ── Lost-localization recovery ───────────────────────────────────
+       The AprilTag pose only exists while a tag is in view; when it goes cold the
+       drone would otherwise keep flying on its last cached pose. This stops it,
+       then backs up / climbs / sweeps for a tag, and lands if nothing works.
+       recovery_stale_s is the STOP (a couple of frames at ~7 Hz); recovery_ladder_s
+       is when it starts manoeuvring, and the gap between them is what keeps a
+       routine gap between markers from provoking a blind back-up. -->
+  <arg name="recovery_enabled"       default="true" />
+  <arg name="recovery_stale_s"       default="0.3" />
+  <arg name="recovery_ladder_s"      default="1.0" />
+  <!-- Before the stop, finish the move that was interrupted: mid-turn keep
+       turning (the tag left the frame because we rotated it out), mid-advance
+       give the metres back (we flew too close to it). Then hold still and look. -->
+  <arg name="recovery_persist_enabled" default="true" />
+  <arg name="recovery_persist_turn_s"  default="0.6" />
+  <arg name="recovery_persist_back_s"  default="0.6" />
+  <arg name="recovery_climb_enabled" default="true" />
+  <arg name="recovery_climb_speed"      default="0.08" />
+  <arg name="recovery_climb_duration_s" default="0.4" />
+  <arg name="recovery_back_speed"      default="0.30" /><!-- ~0.45 m per rung, twice -->
+  <arg name="recovery_back_duration_s" default="1.5" />
+  <arg name="recovery_turn_dir"      default="right" />
+  <arg name="recovery_turn_rate"     default="0.5" /><!-- rad/s; too slow = a sweep that never sweeps -->
+
+  <!-- The object object_approach filters detections for BEFORE anything is
+       selected. run_object_mission.sh sets this from the same config value it
+       prompts the detector with (detector.init_target), because the two must
+       agree: the detector publishes detections under its prompt's label, and
+       object_approach ignores every label but this one. Left to disagree, the
+       mission simply never confirms an object and never lands visually, with
+       nothing louder than two heartbeats naming different things.
+       The director overwrites both the moment an object is selected, so this only
+       governs the window before that, which is also the whole of a run with no
+       selection (or one whose director failed to start). -->
+  <arg name="target_object"   default="refrigerator" />
+
+  <!-- ── Mission director (object selection) ──────────────────────── -->
+  <arg name="selection_mode"  default="gui" />          <!-- gui | random -->
+  <arg name="objects_file"    default="" />             <!-- '' => node's package-relative objects.json -->
+  <arg name="seed"            default="-1" />            <!-- >=0 => reproducible random pick -->
+
+  <!-- ── Object-approach mission (visual servo + landing) ──────────── -->
+  <arg name="lock_mode"       default="detector_tracker" />
+  <arg name="closure_mode"    default="multi_axis" />
+  <arg name="force_mode"      default="fixed" />
+  <!-- Forward power of the closure (visual servo). In force_mode:=fixed the forward
+       pulse magnitude IS fixed_vx; vx_max caps the servo's analog demand before the
+       shaper snaps it to that pulse. Raise for more push toward the object (the
+       airframe's forward ceiling is ~0.45 m/s). -->
+  <arg name="vx_max"          default="0.4" />
+  <arg name="fixed_vx"        default="0.4" />
+  <!-- Acquisition radius: how close to the room-centre goal counts as "arrived" (the
+       AIM trigger). Forgiving on purpose, as the room centre is a vantage point to look
+       from, not a precise target to nail. -->
+  <arg name="arrive_radius_m" default="0.8" />
+  <!-- Forgiving radius on the pre-selection ENTRY point (goal_x/goal_y) that arms the
+       visual take-over: no blind visual servo until the drone has flown into the room. -->
+  <arg name="arm_point_radius_m" default="0.8" />
+  <arg name="target_range_m"  default="0.5" />          <!-- visual hover standoff -->
+  <!-- Visual-reach land distance (depth). land_range_m:=0 disables the visual land and
+       relies on arrival-land alone. -->
+  <arg name="land_range_m"       default="1.0" />
+  <arg name="land_confirm_ticks" default="3" />
+  <!-- Arrival-land (reached "by A* alone", from SEARCH): OFF for this mission.
+       Arriving at the room centre must AIM then SWEEP, never land on arrival. The
+       give-up land is scan_land_revolutions (below); a real object reach still lands
+       via land_range_m. -->
+  <arg name="land_at_goal"              default="false" />
+  <arg name="arrive_land_confirm_ticks" default="5" />
+  <arg name="min_score"       default="0.15" />
+  <arg name="n_confirm"       default="3" />
+
+  <!-- ── The AIM: what the drone does on reaching the staging point ────
+       Turn the nose onto the object's bearing in pulsed bursts (the platform's yaw
+       is discrete and coasts, so a burst is aimed aim_yaw_coast_deg short and the
+       coast lands it), then HOLD STILL for aim_look_s so the detector gets clean,
+       blur-free frames down that bearing. Confirming there is the good outcome:
+       the visual servo takes over and closes on the object it can actually see.
+       Failing that, the goal is re-published at the object's own (x,y) and the
+       mission continues exactly as it did before staging existed. -->
+  <arg name="aim_before_direct" default="true" />   <!-- false => no aim; fly the goal straight through -->
+  <arg name="aim_tolerance_deg" default="12.0" />   <!-- "pointing at it"; camera HFOV is ~76 deg -->
+  <arg name="aim_look_s"        default="4.0" />    <!-- look this long before giving up on seeing it -->
+  <arg name="aim_settle_s"      default="1.0" />    <!-- stop between bursts so the coast finishes -->
+  <arg name="aim_timeout_s"     default="25.0" />   <!-- cap: a drone that will not turn still escalates/sweeps -->
+  <!-- A failed aim SWEEPS the room in place for the object (true) rather than flying
+       onto its imprecise catalogued coordinate (false). ON for this mission: the
+       small-room position is not trusted enough to fly onto. -->
+  <arg name="aim_fail_to_scan"  default="true" />
+  <!-- Give-up land: after this many full in-place turns of the sweep with no
+       detection, land where we are. 0 = sweep forever. -->
+  <arg name="scan_land_revolutions" default="3" />
+  <arg name="object_position_topic" default="/object_approach/object_position" />
+
+  <!-- ── Viewers (need a display) ─────────────────────────────────── -->
+  <arg name="viewer"          default="true" />         <!-- live target-lock HUD window -->
+  <arg name="bev_viewer"      default="true" />         <!-- interactive BEV window (from real_drone.launch) -->
+  <arg name="publish_overlay" default="true" />
+
+  <!-- ══ Nav stack: flies to goal_x/goal_y (empty => idle until selection). ══ -->
+  <!-- ══ A* planner (route search + replanning) ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="waypoint_spacing_m"            default="1.5" />
+
+  <!-- How wide "in front of the next point" is; see mission.yaml. -->
+  <arg name="yaw_acquisition_radius"        default="0.2" />
+  <arg name="yaw_acquire_max_deg"           default="35.0" />
+  <arg name="skip_yaw_thresh"               default="0.25" /><!-- rad; 14.3 deg -->
+  <!-- 40 cm hard wall standoff on the CRUISE legs, matching the nav stack. If a
+       target object sits closer than this to a wall its goal cell is lethal and
+       gets snapped out by goal_snap_radius_m; lower this (or hand the terminal
+       leg to object_approach) when you must close on a wall-adjacent object. -->
+  <arg name="inflate_radius_m"              default="0.40" />
+  <arg name="unknown_blocked"               default="false" />
+  <arg name="unknown_cost"                  default="6.0" />
+  <!-- Soft wall avoidance + confidence-weighted lethality; see nav_stack.launch. -->
+  <arg name="clearance_weight"              default="3.0" />
+  <arg name="clearance_margin_m"            default="0.8" />
+  <arg name="lethal_confidence"             default="0.5" />
+  <arg name="soft_obstacle_cost"            default="25.0" />
+  <!-- Relaxable standoff; see nav_stack.launch. -->
+  <arg name="inflate_floor_m"               default="0.25" />
+  <arg name="relax_step_m"                  default="0.05" />
+  <arg name="probe_radius_m"                default="0.10" />
+  <arg name="replan_relaxed_period_s"       default="4.0" />
+  <arg name="los_smoothing"                 default="false" />
+  <arg name="turn_penalty"                  default="0.3" />
+  <arg name="heading_penalty_m"             default="1.5" />
+  <arg name="connectivity"                  default="4" />
+  <arg name="search_margin_m"               default="3.0" />
+  <arg name="start_skip_m"                  default="0.5" />
+  <arg name="goal_snap_radius_m"            default="2.0" />
+  <arg name="min_free_cells_to_plan"        default="80" />
+  <arg name="smart_replan"                  default="true" />
+  <arg name="replan_corridor_radius_m"      default="1.0" />
+  <arg name="replan_min_new_cells"          default="60" />
+  <arg name="replan_min_new_cells_any"      default="240" />
+  <arg name="replan_rotation_min_deg"       default="30.0" />
+  <!-- Periodic tick adopts with no length test; see nav_stack.launch. -->
+  <arg name="replan_periodic_always"        default="false" />
+  <arg name="replan_period_s"               default="7.0" />
+  <arg name="replan_commit_min_s"           default="4.0" />
+  <arg name="replan_improve_frac"           default="0.15" />
+  <arg name="stop_on_blocked_plan_fail"     default="true" />
+  <arg name="replan_collision_confirm"      default="2" />
+  <arg name="plan_period_s"                 default="10.0" />
+  <arg name="replan_on_collision"           default="false" />
+  <arg name="replan_on_bev"                 default="false" />
+  <arg name="corner_round"                  default="false" />
+  <arg name="corner_merge_deg"              default="8.0" />
+  <arg name="corner_max_turn_deg"           default="14.0" />
+  <arg name="corner_chamfer_max_deg"        default="28.0" />
+  <arg name="corner_chamfer_dist_m"         default="0.5" />
+  <arg name="corner_min_runup_m"            default="0.6" />
+  <arg name="replan_on_predicted_collision" default="false" />
+  <arg name="max_predicted_replans"         default="3" />
+
+  <!-- ══ BEV map (occupancy the planner searches) ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="bev_resolution"             default="0.10" />
+  <arg name="bev_xmin"                   default="-6.0" />
+  <arg name="bev_ymin"                   default="-6.0" />
+  <arg name="bev_xmax"                   default="6.0" />
+  <arg name="bev_ymax"                   default="6.0" />
+  <arg name="bev_bbox_margin"            default="1.0" />
+  <arg name="bev_publish_hz"             default="10.0" />
+  <arg name="bev_occ_dilate"             default="0" />
+  <arg name="bev_z_floor"                default="0.70" />
+  <arg name="bev_z_ceil"                 default="1.50" />
+  <arg name="bev_z_peak"                 default="$(arg cruise_z)" />
+  <arg name="bev_weight_profile"         default="triangular" />
+  <arg name="bev_weight_sigma"           default="0.50" />
+  <arg name="bev_voxel_size"             default="$(arg bev_resolution)" />
+  <arg name="bev_occ_weight_thresh"      default="2.0" />
+  <arg name="bev_min_occ_voxels"         default="4" />
+  <arg name="bev_min_free_voxels"        default="1" />
+  <arg name="bev_confirm_3d"             default="true" />
+  <arg name="bev_neighbors_3d"           default="6" />
+  <arg name="bev_min_occ_neighbors_3d"   default="1" />
+  <arg name="bev_min_wall_run"           default="3" />
+  <arg name="bev_min_component_cells"    default="0" />
+  <arg name="bev_component_connectivity" default="8" />
+  <arg name="bev_protect_openings"       default="true" />
+  <arg name="bev_door_band_m"            default="0.80" />
+  <arg name="bev_door_free_voxels"       default="2" />
+  <arg name="bev_door_occ_tol"           default="0" />
+  <arg name="bev_wall_fill_mode"         default="directional" />
+  <arg name="bev_wall_fill_neighbors"    default="5" />
+  <arg name="bev_wall_fill_iters"        default="1" />
+  <arg name="bev_temporal_filter"        default="true" />
+  <arg name="bev_occ_conf_full"          default="3.0" />
+  <arg name="bev_t_inc"                  default="1.0" />
+  <arg name="bev_t_dec"                  default="1.0" />
+  <arg name="bev_t_max"                  default="5.0" />
+  <arg name="bev_t_on"                   default="2.0" />
+  <arg name="bev_t_off"                  default="0.5" />
+  <arg name="bev_always_recompute"       default="false" />
+  <arg name="bev_skip_unchanged_publish" default="true" />
+
+  <!-- ══ Path corrector / ESDF / simplifier ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="corrector"                    default="potential_field" />
+  <arg name="esdf_target_clearance_m"      default="0.2" />
+  <arg name="esdf_max_total_shift_m"       default="0.5" />
+  <arg name="esdf_max_step_m"              default="0.2" />
+  <arg name="esdf_iterations"              default="12" />
+  <arg name="esdf_lateral_only"            default="true" />
+  <arg name="esdf_smooth_sigma_m"          default="0.1" />
+  <arg name="esdf_occ_thresh"              default="0.65" />
+  <arg name="resample_min_spacing_m"       default="0.3" />
+  <arg name="simplify_debug"               default="$(arg debug)" />
+  <arg name="simplify_merge"               default="true" />
+  <arg name="simplify_merge_radius_m"      default="0.20" />
+  <arg name="simplify_zigzag"              default="true" />
+  <arg name="simplify_zigzag_angle_deg"    default="60.0" />
+  <arg name="simplify_zigzag_strength"     default="0.5" />
+  <arg name="simplify_zigzag_passes"       default="1" />
+  <arg name="simplify_collinear"           default="true" />
+  <arg name="simplify_collinear_angle_deg" default="10.0" />
+  <arg name="simplify_max_segment_m"       default="3.0" />
+  <arg name="simplify_min_spacing"         default="true" />
+  <arg name="simplify_min_spacing_m"       default="1.0" />
+  <arg name="simplify_turn_keep_deg"       default="25.0" />
+
+  <!-- ══ APF / safety correction ══
+       Defaults mirror the layer below; see nav_stack.launch for the full
+       per-parameter notes. Set these from config/mission.yaml. -->
+  <arg name="safety_correct"            default="true" />
+  <arg name="apf_centering"             default="line_search" />
+  <arg name="apf_gain"                  default="0.5" />
+  <arg name="apf_max_total_shift_m"     default="0.5" />
+  <arg name="apf_min_clearance_m"       default="0.2" />
+  <arg name="apf_debug"                 default="$(arg debug)" />
+  <arg name="apf_collision_recheck"     default="true" />
+  <arg name="apf_treat_unknown_as_free" default="true" />
+  <arg name="apf_unknown_damping"       default="true" />
+  <arg name="apf_unknown_radius_m"      default="0.5" />
+  <arg name="publish_forces"            default="true" />
+  <arg name="force_arrow_scale"         default="0.5" />
+  <arg name="publish_force_field"       default="true" />
+  <arg name="force_field_stride"        default="4" />
+
+  <include file="$(find falcon_adapter)/launch/real_drone.launch">
+    <!-- GO gate: hold every command until GO (see start_go above). -->
+    <arg name="start_go"          value="$(arg start_go)" />
+    <arg name="go_topic"          value="$(arg go_topic)" />
+    <arg name="zero_on_close"     value="$(arg zero_on_close)" />
+    <!-- Lost-localization recovery (see above). -->
+    <arg name="recovery_enabled"       value="$(arg recovery_enabled)" />
+    <arg name="recovery_stale_s"       value="$(arg recovery_stale_s)" />
+    <arg name="recovery_ladder_s"      value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_persist_enabled" value="$(arg recovery_persist_enabled)" />
+    <arg name="recovery_persist_turn_s"  value="$(arg recovery_persist_turn_s)" />
+    <arg name="recovery_persist_back_s"  value="$(arg recovery_persist_back_s)" />
+    <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
+    <arg name="recovery_climb_speed"      value="$(arg recovery_climb_speed)" />
+    <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
+    <arg name="recovery_back_speed"      value="$(arg recovery_back_speed)" />
+    <arg name="recovery_back_duration_s" value="$(arg recovery_back_duration_s)" />
+    <arg name="recovery_turn_dir"      value="$(arg recovery_turn_dir)" />
+    <arg name="recovery_turn_rate"     value="$(arg recovery_turn_rate)" />
+    <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
+    <arg name="cruise_z"        value="$(arg cruise_z)" />
+    <!-- A* planner (route search + replanning) -->
+    <arg name="waypoint_spacing_m"            value="$(arg waypoint_spacing_m)" />
+    <arg name="yaw_acquisition_radius"        value="$(arg yaw_acquisition_radius)" />
+    <arg name="yaw_acquire_max_deg"           value="$(arg yaw_acquire_max_deg)" />
+    <arg name="skip_yaw_thresh"               value="$(arg skip_yaw_thresh)" />
+    <arg name="inflate_radius_m"              value="$(arg inflate_radius_m)" />
+    <arg name="unknown_blocked"               value="$(arg unknown_blocked)" />
+    <arg name="unknown_cost"                  value="$(arg unknown_cost)" />
+    <arg name="clearance_weight"              value="$(arg clearance_weight)" />
+    <arg name="clearance_margin_m"            value="$(arg clearance_margin_m)" />
+    <arg name="lethal_confidence"             value="$(arg lethal_confidence)" />
+    <arg name="soft_obstacle_cost"            value="$(arg soft_obstacle_cost)" />
+    <arg name="inflate_floor_m"               value="$(arg inflate_floor_m)" />
+    <arg name="relax_step_m"                  value="$(arg relax_step_m)" />
+    <arg name="probe_radius_m"                value="$(arg probe_radius_m)" />
+    <arg name="replan_relaxed_period_s"       value="$(arg replan_relaxed_period_s)" />
+    <arg name="los_smoothing"                 value="$(arg los_smoothing)" />
+    <arg name="turn_penalty"                  value="$(arg turn_penalty)" />
+    <arg name="heading_penalty_m"             value="$(arg heading_penalty_m)" />
+    <arg name="connectivity"                  value="$(arg connectivity)" />
+    <arg name="search_margin_m"               value="$(arg search_margin_m)" />
+    <arg name="start_skip_m"                  value="$(arg start_skip_m)" />
+    <arg name="goal_snap_radius_m"            value="$(arg goal_snap_radius_m)" />
+    <arg name="min_free_cells_to_plan"        value="$(arg min_free_cells_to_plan)" />
+    <arg name="smart_replan"                  value="$(arg smart_replan)" />
+    <arg name="replan_corridor_radius_m"      value="$(arg replan_corridor_radius_m)" />
+    <arg name="replan_min_new_cells"          value="$(arg replan_min_new_cells)" />
+    <arg name="replan_min_new_cells_any"      value="$(arg replan_min_new_cells_any)" />
+    <arg name="replan_rotation_min_deg"       value="$(arg replan_rotation_min_deg)" />
+    <arg name="replan_periodic_always"        value="$(arg replan_periodic_always)" />
+    <arg name="replan_period_s"               value="$(arg replan_period_s)" />
+    <arg name="replan_commit_min_s"           value="$(arg replan_commit_min_s)" />
+    <arg name="replan_improve_frac"           value="$(arg replan_improve_frac)" />
+    <arg name="stop_on_blocked_plan_fail"     value="$(arg stop_on_blocked_plan_fail)" />
+    <arg name="replan_collision_confirm"      value="$(arg replan_collision_confirm)" />
+    <arg name="plan_period_s"                 value="$(arg plan_period_s)" />
+    <arg name="replan_on_collision"           value="$(arg replan_on_collision)" />
+    <arg name="replan_on_bev"                 value="$(arg replan_on_bev)" />
+    <arg name="corner_round"                  value="$(arg corner_round)" />
+    <arg name="corner_merge_deg"              value="$(arg corner_merge_deg)" />
+    <arg name="corner_max_turn_deg"           value="$(arg corner_max_turn_deg)" />
+    <arg name="corner_chamfer_max_deg"        value="$(arg corner_chamfer_max_deg)" />
+    <arg name="corner_chamfer_dist_m"         value="$(arg corner_chamfer_dist_m)" />
+    <arg name="corner_min_runup_m"            value="$(arg corner_min_runup_m)" />
+    <arg name="replan_on_predicted_collision" value="$(arg replan_on_predicted_collision)" />
+    <arg name="max_predicted_replans"         value="$(arg max_predicted_replans)" />
+    <!-- BEV map (occupancy the planner searches) -->
+    <arg name="bev_resolution"             value="$(arg bev_resolution)" />
+    <arg name="bev_xmin"                   value="$(arg bev_xmin)" />
+    <arg name="bev_ymin"                   value="$(arg bev_ymin)" />
+    <arg name="bev_xmax"                   value="$(arg bev_xmax)" />
+    <arg name="bev_ymax"                   value="$(arg bev_ymax)" />
+    <arg name="bev_bbox_margin"            value="$(arg bev_bbox_margin)" />
+    <arg name="bev_publish_hz"             value="$(arg bev_publish_hz)" />
+    <arg name="bev_occ_dilate"             value="$(arg bev_occ_dilate)" />
+    <arg name="bev_z_floor"                value="$(arg bev_z_floor)" />
+    <arg name="bev_z_ceil"                 value="$(arg bev_z_ceil)" />
+    <arg name="bev_z_peak"                 value="$(arg bev_z_peak)" />
+    <arg name="bev_weight_profile"         value="$(arg bev_weight_profile)" />
+    <arg name="bev_weight_sigma"           value="$(arg bev_weight_sigma)" />
+    <arg name="bev_voxel_size"             value="$(arg bev_voxel_size)" />
+    <arg name="bev_occ_weight_thresh"      value="$(arg bev_occ_weight_thresh)" />
+    <arg name="bev_min_occ_voxels"         value="$(arg bev_min_occ_voxels)" />
+    <arg name="bev_min_free_voxels"        value="$(arg bev_min_free_voxels)" />
+    <arg name="bev_confirm_3d"             value="$(arg bev_confirm_3d)" />
+    <arg name="bev_neighbors_3d"           value="$(arg bev_neighbors_3d)" />
+    <arg name="bev_min_occ_neighbors_3d"   value="$(arg bev_min_occ_neighbors_3d)" />
+    <arg name="bev_min_wall_run"           value="$(arg bev_min_wall_run)" />
+    <arg name="bev_min_component_cells"    value="$(arg bev_min_component_cells)" />
+    <arg name="bev_component_connectivity" value="$(arg bev_component_connectivity)" />
+    <arg name="bev_protect_openings"       value="$(arg bev_protect_openings)" />
+    <arg name="bev_door_band_m"            value="$(arg bev_door_band_m)" />
+    <arg name="bev_door_free_voxels"       value="$(arg bev_door_free_voxels)" />
+    <arg name="bev_door_occ_tol"           value="$(arg bev_door_occ_tol)" />
+    <arg name="bev_wall_fill_mode"         value="$(arg bev_wall_fill_mode)" />
+    <arg name="bev_wall_fill_neighbors"    value="$(arg bev_wall_fill_neighbors)" />
+    <arg name="bev_wall_fill_iters"        value="$(arg bev_wall_fill_iters)" />
+    <arg name="bev_temporal_filter"        value="$(arg bev_temporal_filter)" />
+    <arg name="bev_occ_conf_full"          value="$(arg bev_occ_conf_full)" />
+    <arg name="bev_t_inc"                  value="$(arg bev_t_inc)" />
+    <arg name="bev_t_dec"                  value="$(arg bev_t_dec)" />
+    <arg name="bev_t_max"                  value="$(arg bev_t_max)" />
+    <arg name="bev_t_on"                   value="$(arg bev_t_on)" />
+    <arg name="bev_t_off"                  value="$(arg bev_t_off)" />
+    <arg name="bev_always_recompute"       value="$(arg bev_always_recompute)" />
+    <arg name="bev_skip_unchanged_publish" value="$(arg bev_skip_unchanged_publish)" />
+    <!-- Path corrector / ESDF / simplifier -->
+    <arg name="corrector"                    value="$(arg corrector)" />
+    <arg name="esdf_target_clearance_m"      value="$(arg esdf_target_clearance_m)" />
+    <arg name="esdf_max_total_shift_m"       value="$(arg esdf_max_total_shift_m)" />
+    <arg name="esdf_max_step_m"              value="$(arg esdf_max_step_m)" />
+    <arg name="esdf_iterations"              value="$(arg esdf_iterations)" />
+    <arg name="esdf_lateral_only"            value="$(arg esdf_lateral_only)" />
+    <arg name="esdf_smooth_sigma_m"          value="$(arg esdf_smooth_sigma_m)" />
+    <arg name="esdf_occ_thresh"              value="$(arg esdf_occ_thresh)" />
+    <arg name="resample_min_spacing_m"       value="$(arg resample_min_spacing_m)" />
+    <arg name="simplify_debug"               value="$(arg simplify_debug)" />
+    <arg name="simplify_merge"               value="$(arg simplify_merge)" />
+    <arg name="simplify_merge_radius_m"      value="$(arg simplify_merge_radius_m)" />
+    <arg name="simplify_zigzag"              value="$(arg simplify_zigzag)" />
+    <arg name="simplify_zigzag_angle_deg"    value="$(arg simplify_zigzag_angle_deg)" />
+    <arg name="simplify_zigzag_strength"     value="$(arg simplify_zigzag_strength)" />
+    <arg name="simplify_zigzag_passes"       value="$(arg simplify_zigzag_passes)" />
+    <arg name="simplify_collinear"           value="$(arg simplify_collinear)" />
+    <arg name="simplify_collinear_angle_deg" value="$(arg simplify_collinear_angle_deg)" />
+    <arg name="simplify_max_segment_m"       value="$(arg simplify_max_segment_m)" />
+    <arg name="simplify_min_spacing"         value="$(arg simplify_min_spacing)" />
+    <arg name="simplify_min_spacing_m"       value="$(arg simplify_min_spacing_m)" />
+    <arg name="simplify_turn_keep_deg"       value="$(arg simplify_turn_keep_deg)" />
+    <!-- APF / safety correction -->
+    <arg name="safety_correct"            value="$(arg safety_correct)" />
+    <arg name="apf_centering"             value="$(arg apf_centering)" />
+    <arg name="apf_gain"                  value="$(arg apf_gain)" />
+    <arg name="apf_max_total_shift_m"     value="$(arg apf_max_total_shift_m)" />
+    <arg name="apf_min_clearance_m"       value="$(arg apf_min_clearance_m)" />
+    <arg name="apf_debug"                 value="$(arg apf_debug)" />
+    <arg name="apf_collision_recheck"     value="$(arg apf_collision_recheck)" />
+    <arg name="apf_treat_unknown_as_free" value="$(arg apf_treat_unknown_as_free)" />
+    <arg name="apf_unknown_damping"       value="$(arg apf_unknown_damping)" />
+    <arg name="apf_unknown_radius_m"      value="$(arg apf_unknown_radius_m)" />
+    <arg name="publish_forces"            value="$(arg publish_forces)" />
+    <arg name="force_arrow_scale"         value="$(arg force_arrow_scale)" />
+    <arg name="publish_force_field"       value="$(arg publish_force_field)" />
+    <arg name="force_field_stride"        value="$(arg force_field_stride)" />
+
+    <arg name="map_name"        value="$(arg map_name)" />
+    <arg name="drone_ns"        value="$(arg drone_ns)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <arg name="real_pose_topic" value="$(arg real_pose_topic)" />
+    <arg name="real_pose_type"  value="$(arg real_pose_type)" />
+    <!-- The A* goal (see the arg's docs above). Numeric => the planners have a
+         route at startup; '' => they idle until the director publishes one. -->
+    <arg name="goal_x"          value="$(arg goal_x)" />
+    <arg name="goal_y"          value="$(arg goal_y)" />
+    <arg name="nav_mode"        value="$(arg nav_mode)" />
+    <arg name="use_navdp"       value="$(arg use_navdp)" />
+    <!-- drift_pid controller (controller:=drift_pid) - generated block BEGIN forwarding -->
+    <arg name="dp_cruise_speed"            value="$(arg dp_cruise_speed)" />
+    <arg name="dp_cruise_straight" value="$(arg dp_cruise_straight)" />
+    <arg name="dp_max_vx"                  value="$(arg dp_max_vx)" />
+    <arg name="dp_max_vx_back"             value="$(arg dp_max_vx_back)" />
+    <arg name="dp_max_vy"                  value="$(arg dp_max_vy)" />
+    <arg name="dp_max_wz"                  value="$(arg dp_max_wz)" />
+    <arg name="dp_max_translation"         value="$(arg dp_max_translation)" />
+    <arg name="dp_combined_effort"         value="$(arg dp_combined_effort)" />
+    <arg name="dp_accel_xy"                value="$(arg dp_accel_xy)" />
+    <arg name="dp_accel_wz"                value="$(arg dp_accel_wz)" />
+    <arg name="dp_decel_xy"                value="$(arg dp_decel_xy)" />
+    <arg name="dp_decel_wz"                value="$(arg dp_decel_wz)" />
+    <arg name="dp_min_vx"                  value="$(arg dp_min_vx)" />
+    <arg name="dp_min_vy"                  value="$(arg dp_min_vy)" />
+    <arg name="dp_min_wz_deg"              value="$(arg dp_min_wz_deg)" />
+    <arg name="dp_release_frac"            value="$(arg dp_release_frac)" />
+    <arg name="dp_approach_yaw_rate"       value="$(arg dp_approach_yaw_rate)" />
+    <arg name="dp_track_yaw_rate" value="$(arg dp_track_yaw_rate)" />
+    <arg name="dp_turn_pitch_bias"         value="$(arg dp_turn_pitch_bias)" />
+    <arg name="dp_turn_side_cone_deg"      value="$(arg dp_turn_side_cone_deg)" />
+    <arg name="dp_pos_radius"              value="$(arg dp_pos_radius)" />
+    <arg name="dp_slow_radius"             value="$(arg dp_slow_radius)" />
+    <arg name="dp_arrive_speed_min"        value="$(arg dp_arrive_speed_min)" />
+    <arg name="dp_lookahead_m"             value="$(arg dp_lookahead_m)" />
+    <arg name="dp_yaw_engage_deg"          value="$(arg dp_yaw_engage_deg)" />
+    <arg name="dp_yaw_release_deg"         value="$(arg dp_yaw_release_deg)" />
+    <arg name="dp_travel_cone_deg"         value="$(arg dp_travel_cone_deg)" />
+    <arg name="dp_suppress_deg"            value="$(arg dp_suppress_deg)" />
+    <arg name="dp_suppress_floor"          value="$(arg dp_suppress_floor)" />
+    <arg name="dp_passed_bearing_deg"      value="$(arg dp_passed_bearing_deg)" />
+    <arg name="dp_alt_hold"                value="$(arg dp_alt_hold)" />
+    <arg name="dp_alt_climb_max"           value="$(arg dp_alt_climb_max)" />
+    <arg name="dp_alt_kp" value="$(arg dp_alt_kp)" />
+    <arg name="dp_alt_pulse_trigger_m" value="$(arg dp_alt_pulse_trigger_m)" />
+    <arg name="dp_alt_pulse_tscale" value="$(arg dp_alt_pulse_tscale)" />
+    <arg name="dp_alt_ceiling_m"           value="$(arg dp_alt_ceiling_m)" />
+    <arg name="dp_alt_conf_min"            value="$(arg dp_alt_conf_min)" />
+    <arg name="dp_hold_deadband_m"         value="$(arg dp_hold_deadband_m)" />
+    <arg name="dp_forward_track_frac"      value="$(arg dp_forward_track_frac)" />
+    <arg name="dp_lateral_turn_frac"       value="$(arg dp_lateral_turn_frac)" />
+    <arg name="dp_settle_map_updates"      value="$(arg dp_settle_map_updates)" />
+    <arg name="dp_lat_kp"                  value="$(arg dp_lat_kp)" />
+    <arg name="dp_lat_ki"                  value="$(arg dp_lat_ki)" />
+    <arg name="dp_lat_kd"                  value="$(arg dp_lat_kd)" />
+    <arg name="dp_lat_i_limit"             value="$(arg dp_lat_i_limit)" />
+    <arg name="dp_lat_max"                 value="$(arg dp_lat_max)" />
+    <arg name="dp_lat_deadband_m"          value="$(arg dp_lat_deadband_m)" />
+    <arg name="dp_lat_d_tau_s"             value="$(arg dp_lat_d_tau_s)" />
+    <arg name="dp_fwd_kp"                  value="$(arg dp_fwd_kp)" />
+    <arg name="dp_fwd_ki"                  value="$(arg dp_fwd_ki)" />
+    <arg name="dp_fwd_kd"                  value="$(arg dp_fwd_kd)" />
+    <arg name="dp_fwd_i_limit"             value="$(arg dp_fwd_i_limit)" />
+    <arg name="dp_fwd_max"                 value="$(arg dp_fwd_max)" />
+    <arg name="dp_fwd_deadband_m"          value="$(arg dp_fwd_deadband_m)" />
+    <arg name="dp_fwd_d_tau_s"             value="$(arg dp_fwd_d_tau_s)" />
+    <arg name="dp_yaw_kp"                  value="$(arg dp_yaw_kp)" />
+    <arg name="dp_yaw_ki"                  value="$(arg dp_yaw_ki)" />
+    <arg name="dp_yaw_kd"                  value="$(arg dp_yaw_kd)" />
+    <arg name="dp_yaw_i_limit"             value="$(arg dp_yaw_i_limit)" />
+    <arg name="dp_yaw_max"                 value="$(arg dp_yaw_max)" />
+    <arg name="dp_yaw_deadband_deg"        value="$(arg dp_yaw_deadband_deg)" />
+    <arg name="dp_yaw_d_tau_s"             value="$(arg dp_yaw_d_tau_s)" />
+    <arg name="dp_drift_leak_s"            value="$(arg dp_drift_leak_s)" />
+    <arg name="dp_conf_full"               value="$(arg dp_conf_full)" />
+    <arg name="dp_conf_min"                value="$(arg dp_conf_min)" />
+    <arg name="dp_speed_floor"             value="$(arg dp_speed_floor)" />
+    <arg name="dp_yaw_scale_floor"         value="$(arg dp_yaw_scale_floor)" />
+    <arg name="dp_gain_floor"              value="$(arg dp_gain_floor)" />
+    <arg name="dp_conf_integrate"          value="$(arg dp_conf_integrate)" />
+    <arg name="dp_conf_hold"               value="$(arg dp_conf_hold)" />
+    <arg name="dp_max_age_s"               value="$(arg dp_max_age_s)" />
+    <arg name="dp_coast_speed_scale"       value="$(arg dp_coast_speed_scale)" />
+    <arg name="dp_eff_floor"               value="$(arg dp_eff_floor)" />
+    <arg name="dp_eff_full"                value="$(arg dp_eff_full)" />
+    <arg name="dp_eff_speed_floor"         value="$(arg dp_eff_speed_floor)" />
+    <arg name="dp_latency_s"               value="$(arg dp_latency_s)" />
+    <arg name="dp_std_ref_m"               value="$(arg dp_std_ref_m)" />
+    <arg name="dp_std_deadband_gain"       value="$(arg dp_std_deadband_gain)" />
+    <arg name="dp_deadband_extra_max_m"    value="$(arg dp_deadband_extra_max_m)" />
+    <arg name="dp_require_quality"         value="$(arg dp_require_quality)" />
+    <arg name="dp_block_enabled"           value="$(arg dp_block_enabled)" />
+    <arg name="dp_block_window_s"          value="$(arg dp_block_window_s)" />
+    <arg name="dp_block_min_vx"            value="$(arg dp_block_min_vx)" />
+    <arg name="dp_block_min_wz_deg"        value="$(arg dp_block_min_wz_deg)" />
+    <arg name="dp_block_min_dist_m"        value="$(arg dp_block_min_dist_m)" />
+    <arg name="dp_block_min_yaw_deg"       value="$(arg dp_block_min_yaw_deg)" />
+    <arg name="dp_block_progress_frac"     value="$(arg dp_block_progress_frac)" />
+    <arg name="dp_block_confirm_ticks"     value="$(arg dp_block_confirm_ticks)" />
+    <arg name="dp_block_clear_ticks"       value="$(arg dp_block_clear_ticks)" />
+    <arg name="dp_block_use_effectiveness" value="$(arg dp_block_use_effectiveness)" />
+    <arg name="dp_escape_brake_s"          value="$(arg dp_escape_brake_s)" />
+    <arg name="dp_escape_back_s"           value="$(arg dp_escape_back_s)" />
+    <arg name="dp_escape_back_speed"       value="$(arg dp_escape_back_speed)" />
+    <arg name="dp_escape_probe_s"          value="$(arg dp_escape_probe_s)" />
+    <arg name="dp_escape_probe_speed"      value="$(arg dp_escape_probe_speed)" />
+    <arg name="dp_escape_settle_s"         value="$(arg dp_escape_settle_s)" />
+    <arg name="dp_escape_yaw_probe_s"      value="$(arg dp_escape_yaw_probe_s)" />
+    <arg name="dp_escape_yaw_invert"       value="$(arg dp_escape_yaw_invert)" />
+    <arg name="dp_escape_max_attempts"     value="$(arg dp_escape_max_attempts)" />
+    <arg name="use_blockage_memory"        value="$(arg use_blockage_memory)" />
+    <arg name="blockage_radius_m"          value="$(arg blockage_radius_m)" />
+    <arg name="blockage_ttl_s"             value="$(arg blockage_ttl_s)" />
+    <!-- drift_pid controller - generated block END forwarding -->
+    <arg name="controller"      value="$(arg controller)" />
+    <arg name="cmd_vy_sign" value="$(arg cmd_vy_sign)" />
+    <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
+    <arg name="vel_x"           value="$(arg vel_x)" />
+    <arg name="yaw_rate"        value="$(arg yaw_rate)" />
+    <arg name="yaw_pitch_bias"  value="$(arg yaw_pitch_bias)" />
+    <arg name="yaw_burst_grade_max_ticks" value="$(arg yaw_burst_grade_max_ticks)" />
+    <arg name="debug"           value="$(arg debug)" />
+    <arg name="thinking_log" value="$(arg thinking_log)" />
+    <arg name="thinking_log_path" value="$(arg thinking_log_path)" />
+    <arg name="thinking_window" value="$(arg thinking_window)" />
+    <arg name="certainty_log" value="$(arg certainty_log)" />
+    <arg name="certainty_log_path" value="$(arg certainty_log_path)" />
+    <arg name="nav_debug_record" value="$(arg nav_debug_record)" />
+    <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
+    <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
+    <arg name="pp_cruise_speed"       value="$(arg pp_cruise_speed)" />
+    <arg name="pp_holonomic"          value="$(arg pp_holonomic)" />
+    <arg name="bev_viewer"      value="$(arg bev_viewer)" />
+    <arg name="cam_fx"          value="$(arg cam_fx)" />
+    <arg name="cam_fy"          value="$(arg cam_fy)" />
+    <arg name="cam_cx"          value="$(arg cam_cx)" />
+    <arg name="cam_cy"          value="$(arg cam_cy)" />
+    <arg name="cam_width"       value="$(arg cam_width)" />
+    <arg name="cam_height"      value="$(arg cam_height)" />
+  </include>
+
+  <!-- ══ Object-approach mission, DISABLED at start (armed by the director). ══════ -->
+  <include file="$(find falcon_adapter)/launch/object_approach.launch">
+    <!-- Route the visual servo INTO the gate too, not straight at the drone. -->
+    <arg name="cmd_vel_topic"   value="$(arg cmd_vel_raw_topic)" />
+    <arg name="drone_ns"        value="$(arg drone_ns)" />
+    <arg name="image_transport" value="$(arg image_transport)" />
+    <!-- Arrival detection (arrival-land) must read the SAME localization as the nav
+         stack, so forward the pose topic/type (e.g. /xtend/april_tag_pose). -->
+    <arg name="pose_topic"      value="$(arg real_pose_topic)" />
+    <arg name="pose_type"       value="$(arg real_pose_type)" />
+    <!-- GATE: stays passive until the director publishes enable=True on selection. -->
+    <arg name="start_enabled"   value="false" />
+    <!-- Must match the detector's prompt; see the arg's docs above. -->
+    <arg name="target_object"   value="$(arg target_object)" />
+    <arg name="lock_mode"       value="$(arg lock_mode)" />
+    <arg name="closure_mode"    value="$(arg closure_mode)" />
+    <arg name="force_mode"      value="$(arg force_mode)" />
+    <arg name="vx_max"          value="$(arg vx_max)" />
+    <arg name="fixed_vx"        value="$(arg fixed_vx)" />
+    <arg name="arrive_radius_m" value="$(arg arrive_radius_m)" />
+    <arg name="target_range_m"  value="$(arg target_range_m)" />
+    <arg name="land_range_m"       value="$(arg land_range_m)" />
+    <arg name="land_confirm_ticks" value="$(arg land_confirm_ticks)" />
+    <arg name="land_at_goal"              value="$(arg land_at_goal)" />
+    <arg name="arrive_land_confirm_ticks" value="$(arg arrive_land_confirm_ticks)" />
+    <arg name="min_score"       value="$(arg min_score)" />
+    <arg name="n_confirm"       value="$(arg n_confirm)" />
+    <!-- The arrival goal follows the STAGING POINT, so it cannot drift away from the
+         nav goal (it used to be a separate hard-coded pair). The director republishes
+         it on selection anyway; object_approach.launch omits an empty goal. -->
+    <arg name="goal_x"          value="$(arg stage_x)" />
+    <arg name="goal_y"          value="$(arg stage_y)" />
+    <!-- Arm the blind visual take-over only once the drone has reached the
+         PRE-SELECTION target (the mission's goal_x/goal_y, inside the room): until then
+         the obstacle-aware follower flies the door/corridor and the visual servo, which
+         does not avoid obstacles, never engages. Forgiving radius (a fly-through). -->
+    <arg name="arm_point_x"     value="$(arg goal_x)" />
+    <arg name="arm_point_y"     value="$(arg goal_y)" />
+    <arg name="arm_point_radius_m" value="$(arg arm_point_radius_m)" />
+    <!-- The staged approach: aim at the object from the staging point before ever
+         flying onto its (imprecise) catalogued coordinate. -->
+    <arg name="object_position_topic" value="$(arg object_position_topic)" />
+    <arg name="aim_before_direct" value="$(arg aim_before_direct)" />
+    <arg name="aim_tolerance_deg" value="$(arg aim_tolerance_deg)" />
+    <arg name="aim_look_s"        value="$(arg aim_look_s)" />
+    <arg name="aim_settle_s"      value="$(arg aim_settle_s)" />
+    <arg name="aim_timeout_s"     value="$(arg aim_timeout_s)" />
+    <!-- A failed aim sweeps the room in place, bounded to scan_land_revolutions
+         full turns before the give-up land (never fly onto the object's coordinate). -->
+    <arg name="aim_fail_to_scan"  value="$(arg aim_fail_to_scan)" />
+    <arg name="scan_land_revolutions" value="$(arg scan_land_revolutions)" />
+    <!-- Aim with the same yaw magnitude the route follower turns on. -->
+    <arg name="aim_yaw_rate"      value="$(arg yaw_rate)" />
+    <!-- Detector geometry MUST match the map (same raw K). -->
+    <arg name="fx"              value="$(arg cam_fx)" />
+    <arg name="fy"              value="$(arg cam_fy)" />
+    <arg name="cx"              value="$(arg cam_cx)" />
+    <arg name="cy"              value="$(arg cam_cy)" />
+    <arg name="img_width"       value="$(arg cam_width)" />
+    <arg name="img_height"      value="$(arg cam_height)" />
+    <arg name="viewer"          value="$(arg viewer)" />
+    <arg name="publish_overlay" value="$(arg publish_overlay)" />
+  </include>
+
+  <!-- ══ Mission director: select the object, then arm the mission. ══════════════ -->
+  <node pkg="falcon_adapter" type="mission_director_node.py"
+        name="mission_director" output="screen">
+    <param name="selection_mode" value="$(arg selection_mode)" />
+    <param name="seed"           value="$(arg seed)" />
+    <param name="objects_file"   value="$(arg objects_file)" if="$(eval arg('objects_file') != '')" />
+    <!-- Publishes: /object_approach/goal (label), /waypoint_nav/goal (x,y),
+         /object_approach/object_position (the object's own x,y),
+         /object_approach/enable — all latched. -->
+    <param name="target_topic"   value="/object_approach/goal" />
+    <param name="goal_topic"     value="/waypoint_nav/goal" />
+    <param name="object_position_topic" value="$(arg object_position_topic)" />
+    <param name="enable_topic"   value="/object_approach/enable" />
+    <!-- THE STAGING POINT: what the director publishes as the planners' goal on
+         selection, instead of the object itself. The object's own position goes out
+         on object_position_topic, and object_approach aims at it from here. Both
+         empty => no staging (the goal is the object, the pre-staging behaviour). -->
+    <param name="stage_x"        value="$(arg stage_x)" if="$(eval arg('stage_x') != '')" />
+    <param name="stage_y"        value="$(arg stage_y)" if="$(eval arg('stage_y') != '')" />
+  </node>
+</launch>

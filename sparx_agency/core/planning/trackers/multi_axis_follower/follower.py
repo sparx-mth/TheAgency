@@ -76,6 +76,17 @@ class MultiAxisFollower:
         """True once the final goal is reached (station-keeping)."""
         return self._state == MultiAxisState.HOLD
 
+    @property
+    def active_path(self) -> List[Tuple[float, float]]:
+        """The current re-anchored path as ``(x, y)`` tuples (read-only copy).
+
+        Indices line up with ``FollowerCommand.wp_idx``, so a caller can resolve
+        the waypoint being pursued to a position. Matches
+        :attr:`WaypointFollower.active_path`; the two are used interchangeably by
+        the adapter, which picks a follower by rosparam.
+        """
+        return list(self._path)
+
     def required_axis(self) -> Optional[str]:
         """The multi-axis tracker needs no per-axis handshake; always ``None``."""
         return None

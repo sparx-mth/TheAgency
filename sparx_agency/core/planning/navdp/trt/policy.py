@@ -28,6 +28,7 @@ from typing import Optional
 
 import numpy as np
 
+from sparx_agency.core.planning.navdp.trt.ddim_scheduler import NumpyDDIMScheduler
 from sparx_agency.core.planning.navdp.trt.engine_runner import TRTEngineRunner
 from sparx_agency.core.planning.navdp.trt.errors import NavDPError
 from sparx_agency.core.planning.navdp.trt.point_encoder import NavDPPointEncoder
@@ -66,11 +67,14 @@ class NavDPTRTPolicy:
     """
 
     def __init__(self, engine_dir, head_params_npz, sample_num=16,
-                 predict_size=24, device_id=0):
+                 predict_size=24, device_id=0, sampler="ddpm",
+                 num_inference_steps=None):
         self.engine_dir = Path(engine_dir)
         self.sample_num = int(sample_num)
         self.predict_size = int(predict_size)
         self.device_id = int(device_id)
+        self.sampler = str(sampler).lower()
+        self.num_inference_steps = num_inference_steps
 
         sel_path = self.engine_dir / "selected.json"
         if not sel_path.exists():
@@ -84,12 +88,24 @@ class NavDPTRTPolicy:
         self._cri = self._runner(engines, "critic")
 
         self._load_head_params(head_params_npz)
+        self._build_scheduler()
 
     def _runner(self, engines, key):
         """Build a :class:`TRTEngineRunner` for the named engine in selected.json."""
         if key not in engines:
             raise NavDPError("selected.json missing engine %r" % key)
         return TRTEngineRunner(self.engine_dir / engines[key], device_id=self.device_id)
+
+    @staticmethod
+    def _infer_out(runner, feeds, out_name):
+        """Run ``runner`` and return its ``out_name`` output, raising a clear
+        :class:`NavDPError` (not a bare ``KeyError``) if the engine was built with
+        a differently-named output than the runtime expects."""
+        out = runner.infer(feeds)
+        if out_name not in out:
+            raise NavDPError("engine %s produced no output %r; got %r"
+                             % (runner.engine_path.name, out_name, list(out)))
+        return out[out_name]
 
     def _load_head_params(self, npz_path):
         """Load point-encoder weights, the time table, and alphas_cumprod."""
@@ -104,7 +120,36 @@ class NavDPTRTPolicy:
         self.point_encoder = NavDPPointEncoder(p["point_encoder_weight"],
                                                p["point_encoder_bias"])
         self.time_table = np.asarray(p["time_table"], dtype=np.float32)  # (T, 384)
-        self.scheduler = NumpyDDPMScheduler(p["alphas_cumprod"])
+        self._alphas_cumprod = np.asarray(p["alphas_cumprod"], dtype=np.float32)
+
+    def _build_scheduler(self):
+        """Construct the diffusion sampler from ``self.sampler`` + steps.
+
+        ``ddpm`` is the bit-faithful trained default and MUST run the full trained
+        step count. ``ddim`` runs a deterministic reduced-step schedule (the
+        Tier-1 speed lever) over the SAME engines -- no re-export, no retrain.
+        """
+        n_train = len(self._alphas_cumprod)
+        if self.sampler == "ddpm":
+            if self.num_inference_steps not in (None, n_train):
+                raise NavDPError(
+                    "sampler='ddpm' runs the full %d trained steps; use "
+                    "sampler='ddim' for num_inference_steps=%s"
+                    % (n_train, self.num_inference_steps))
+            self.scheduler = NumpyDDPMScheduler(self._alphas_cumprod)
+        elif self.sampler == "ddim":
+            steps = int(self.num_inference_steps or n_train)
+            self.scheduler = NumpyDDIMScheduler(self._alphas_cumprod, steps)
+        else:
+            raise NavDPError("unknown sampler %r (use 'ddpm' or 'ddim')" % self.sampler)
+
+    def configure_sampler(self, sampler, num_inference_steps=None):
+        """Swap the diffusion sampler at runtime. Engines are unchanged, so this
+        needs NO re-export/rebuild -- used by the step validator and the server."""
+        self.sampler = str(sampler).lower()
+        self.num_inference_steps = num_inference_steps
+        self._build_scheduler()
+        return self
 
     # ------------------------------------------------------------------
     # Inference
@@ -140,7 +185,7 @@ class NavDPTRTPolicy:
         goal_n = np.repeat(goal_embed[:, None, :], self.sample_num, axis=0)  # (N,1,384)
 
         naction = self._denoise_loop(rgbd_n, goal_n, init_noise, variance_noises)
-        critic = self._cri.infer({CRI_IN_TRAJ: naction, CRI_IN_RGBD: rgbd_n})[CRI_OUT]
+        critic = self._infer_out(self._cri, {CRI_IN_TRAJ: naction, CRI_IN_RGBD: rgbd_n}, CRI_OUT)
         return finalize_trajectories(naction, critic.reshape(-1), 1, self.sample_num)
 
     def _encode(self, input_images, input_depths):
@@ -149,7 +194,7 @@ class NavDPTRTPolicy:
             np.transpose(input_images, (0, 1, 4, 2, 3)), dtype=np.float32)  # (1,8,3,224,224)
         depth = np.ascontiguousarray(
             np.transpose(input_depths, (0, 3, 1, 2)), dtype=np.float32)     # (1,1,224,224)
-        return self._enc.infer({ENC_IN_IMAGES: images, ENC_IN_DEPTH: depth})[ENC_OUT]
+        return self._infer_out(self._enc, {ENC_IN_IMAGES: images, ENC_IN_DEPTH: depth}, ENC_OUT)
 
     def _denoise_loop(self, rgbd_n, goal_n, init_noise, variance_noises):
         """Run the 10-step DDPM loop; conditioning is uploaded once and resident."""
@@ -160,8 +205,8 @@ class NavDPTRTPolicy:
         self._den.upload({DEN_IN_RGBD: rgbd_n, DEN_IN_GOAL: goal_n})
         for step, k in enumerate(self.scheduler.timesteps):
             k = int(k)
-            noise_pred = self._den.infer(
-                {DEN_IN_ACTIONS: naction, DEN_IN_TIME: self._time_token(k)})[DEN_OUT]
+            noise_pred = self._infer_out(
+                self._den, {DEN_IN_ACTIONS: naction, DEN_IN_TIME: self._time_token(k)}, DEN_OUT)
             vn = None if variance_noises is None else variance_noises[step]
             naction = self.scheduler.step(noise_pred, k, naction, variance_noise=vn)
         return naction

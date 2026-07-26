@@ -145,7 +145,7 @@ RTSP:
 Robot UID:
 
 ```bash
---robot-uid drnb177ede2
+--robot-uid drndfb3eeb1
 ```
 
 Capture/data root:
@@ -188,7 +188,7 @@ cd /home/user1/GIT/TheAgency
 source /home/user1/GIT/TheAgency/sparx_agency/theagency_venv/bin/activate
 export PYTHONPATH=/home/user1/GIT/TheAgency:$PYTHONPATH
 
-python3 sparx_agency/tasks/mapping/take_xtend_da3_frames.py   --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv   --xtend-host 192.0.0.15   --xtend-port 8000   --robot-uid drnb177ede2   --engine-path /home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine   --config-yaml /home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_example.yaml   --output-dir /home/user1/Documents/xtend_da3_takes   --capture-hz 5   --duration-sec 30   --max-depth-m 7.0
+python3 sparx_agency/tasks/mapping/take_xtend_da3_frames.py   --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv   --xtend-host 192.0.0.15   --xtend-port 8000   --robot-uid drndfb3eeb1   --engine-path /home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine   --config-yaml /home/user1/depth_anything_ws/src/ros2-depth-anything-v3-trt/camera_info_example.yaml   --output-dir /home/user1/Documents/xtend_da3_takes   --capture-hz 5   --duration-sec 30   --max-depth-m 7.0
 ```
 
 Useful options:
@@ -263,7 +263,7 @@ Default values currently hardcoded in the script:
 host=192.0.0.15
 port=8000
 frequency=30.0
-robot_uid=drnb177ede2
+robot_uid=drndfb3eeb1
 rtsp_uri=rtsp://192.0.0.15:8510/active_drone_fpv
 out_dir=./captures
 drone_id=42B
@@ -283,13 +283,13 @@ cd /home/user1/GIT/TheAgency
 source theagency_venv/bin/activate
 export PYTHONPATH=/home/user1/GIT/TheAgency:$PYTHONPATH
 
-python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --drone-id 42B   --out-dir /home/user/jetson-containers/data   --capture-hz 1   --yaw-bucket-deg 0
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drndfb3eeb1   --drone-id 42B   --out-dir /home/user/jetson-containers/data   --capture-hz 1   --yaw-bucket-deg 0
 ```
 
 Recommended after movement is stable:
 
 ```bash
-python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --drone-id R1   --out-dir /home/user/jetson-containers/data   --capture-every-ms 500   --yaw-bucket-deg 0
+python3 sparx_agency/demos/Demo_No4_XTEND_MapRoom/xtend_dome_main.py   --host 192.0.0.15   --port 8000   --robot-uid drndfb3eeb1   --drone-id R1   --out-dir /home/user/jetson-containers/data   --capture-every-ms 500   --yaw-bucket-deg 0
 ```
 
 Expected output:
@@ -321,13 +321,13 @@ cd /home/user1/GIT/TheAgency
 source theagency_venv/bin/activate
 export PYTHONPATH=/home/user1/GIT/TheAgency:$PYTHONPATH
 
-python3 sparx_agency/robots/XTEND/get_xtend_probe.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv   --mode both   --frequency-hz 10   --raw-dump-seconds 5   --robot-status-only
+python3 sparx_agency/robots/XTEND/get_xtend_probe.py   --host 192.0.0.15   --port 8000   --robot-uid drndfb3eeb1   --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv   --mode both   --frequency-hz 10   --raw-dump-seconds 5   --robot-status-only
 ```
 
 Show video:
 
 ```bash
-python3 sparx_agency/robots/XTEND/get_xtend_probe.py   --host 192.0.0.15   --port 8000   --robot-uid drnb177ede2   --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv   --show-video
+python3 sparx_agency/robots/XTEND/get_xtend_probe.py   --host 192.0.0.15   --port 8000   --robot-uid drndfb3eeb1   --rtsp-uri rtsp://192.0.0.15:8510/active_drone_fpv   --show-video
 ```
 
 Useful options:

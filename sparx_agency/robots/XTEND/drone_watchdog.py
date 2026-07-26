@@ -7,7 +7,7 @@ from sparx_agency.robots.XTEND.automation import ControllerAutomation
 # Match these to your actual drone/network setup
 DRONE_HOST = "192.0.0.15"
 DRONE_PORT = 8000
-ROBOT_UID = "drnb177ede2"
+ROBOT_UID = "drndfb3eeb1"
 TARGET_SCRIPT = "xtend_dome_main.py"
 
 

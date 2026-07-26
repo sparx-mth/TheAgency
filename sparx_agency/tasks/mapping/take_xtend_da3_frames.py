@@ -241,7 +241,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--robot-uid",
-        default="drnb177ede2",
+        default="drndfb3eeb1",
         help="XTEND robot UID used to select telemetry.",
     )
     p.add_argument(

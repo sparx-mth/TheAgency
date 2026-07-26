@@ -1,13 +1,15 @@
 """
 Small pure-numpy spatial operators used by the BEV projector: 3D neighbour
-counting, 2D border-clamped shift, directional/count wall completion, and a
-dependency-free 4-connected dilation.
+counting, 2D border-clamped shift, directional/count wall completion, a
+dependency-free 4-connected dilation, and small-component (speck) removal.
 
 Kept numpy-only (no scipy) so the whole `bev` package imports cleanly inside
 FALCON's container. core/mapping/costmap/inflation.py is the richer,
 scipy-based inflation used elsewhere in the stack.
 """
 from __future__ import annotations
+
+from typing import Tuple
 
 import numpy as np
 
@@ -96,3 +98,107 @@ def bridge_fill(occ: np.ndarray, blocked: np.ndarray, *, mode: str,
         n_filled += int(cand.sum())
         occ |= cand
     return occ, n_filled
+
+
+def _label_components(mask: np.ndarray, connectivity: int) -> np.ndarray:
+    """Label 4/8-connected occupied components (pure numpy, no scipy).
+
+    Iterative max-propagation: every occupied cell repeatedly takes the largest
+    label in its neighbourhood until stable, so each component collapses to a
+    single id. connectivity 8 treats diagonal neighbours as connected (an
+    L-corner stays ONE component); 4 uses only the orthogonal neighbours.
+    Returns an int64 (H, W) label map, 0 on background.
+    """
+    H, W = mask.shape
+    ids = np.arange(1, H * W + 1, dtype=np.int64).reshape(H, W)
+    lab = np.where(mask, ids, 0)
+    while True:
+        nb = lab.copy()
+        nb[1:, :] = np.maximum(nb[1:, :], lab[:-1, :])
+        nb[:-1, :] = np.maximum(nb[:-1, :], lab[1:, :])
+        nb[:, 1:] = np.maximum(nb[:, 1:], lab[:, :-1])
+        nb[:, :-1] = np.maximum(nb[:, :-1], lab[:, 1:])
+        if connectivity == 8:
+            nb[1:, 1:] = np.maximum(nb[1:, 1:], lab[:-1, :-1])
+            nb[:-1, :-1] = np.maximum(nb[:-1, :-1], lab[1:, 1:])
+            nb[1:, :-1] = np.maximum(nb[1:, :-1], lab[:-1, 1:])
+            nb[:-1, 1:] = np.maximum(nb[:-1, 1:], lab[1:, :-1])
+        nb[~mask] = 0
+        if np.array_equal(nb, lab):
+            return lab
+        lab = nb
+
+
+def remove_small_components(mask: np.ndarray, min_size: int,
+                           connectivity: int = 8) -> Tuple[np.ndarray, int]:
+    """Drop occupied connected components smaller than ``min_size`` CELLS (area).
+
+    A raw-area gate: a component survives on total cell count alone. Kept as a
+    general tool, but note it treats a compact 2x2 clump (4 cells) as an obstacle
+    while dropping a straight 3-cell wall segment -- for "is it a wall?" prefer
+    ``remove_non_wall_components`` (a linear-run test). <=1 is a no-op.
+
+    Args:
+        mask: (H, W) bool occupied mask. Not mutated.
+        min_size: Minimum cells for a component to survive.
+        connectivity: 4 or 8.
+    Returns:
+        (filtered_mask, n_removed_cells).
+    """
+    if min_size <= 1 or not mask.any():
+        return mask, 0
+    if connectivity not in (4, 8):
+        raise ValueError("connectivity must be 4 or 8, got %r" % connectivity)
+    lab = _label_components(mask, connectivity)
+    uniq, counts = np.unique(lab[mask], return_counts=True)
+    small = uniq[counts < min_size]
+    if small.size == 0:
+        return mask, 0
+    remove = np.isin(lab, small) & mask
+    return (mask & ~remove), int(remove.sum())
+
+
+def remove_non_wall_components(mask: np.ndarray, min_run: int,
+                              connectivity: int = 8) -> Tuple[np.ndarray, int]:
+    """Drop components with no straight run of ``min_run`` consecutive cells.
+
+    A real wall in a BEV is a LINE: ``min_run`` cells in a row along one of the
+    four directions (horizontal, vertical, or either diagonal). A noise clump --
+    even a compact 2x2 (4 cells) or an L-tromino (3 cells) -- has no such run and
+    is culled, while a 3-in-a-row segment or a long diagonal survives. This is a
+    shape-aware "is it wall-like?" test, stricter than raw area: it keeps thin
+    linear walls and drops blobby specks of equal or greater cell count. It is
+    purely spatial, so a stuck phantom the drone can never re-observe free is
+    removed regardless.
+
+    ``connectivity`` only groups cells into components (8 keeps an L-corner
+    whole so its two arms are judged together); the run test always allows all
+    four line directions. A run is detected by ANDing ``min_run`` shifted copies
+    of the mask, so a cell survives iff it starts (with its neighbours) a full
+    straight segment. <=1 is a no-op.
+
+    Args:
+        mask: (H, W) bool occupied mask. Not mutated.
+        min_run: Minimum consecutive collinear cells for a component to survive.
+        connectivity: 4 or 8.
+    Returns:
+        (filtered_mask, n_removed_cells).
+    """
+    if min_run <= 1 or not mask.any():
+        return mask, 0
+    if connectivity not in (4, 8):
+        raise ValueError("connectivity must be 4 or 8, got %r" % connectivity)
+    # Cells that START a straight run of length min_run in some direction:
+    # AND the mask with itself shifted 1..min_run-1 steps along that direction.
+    run_start = np.zeros_like(mask)
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        acc = mask.copy()
+        for k in range(1, min_run):
+            acc &= shift2(mask, -k * dy, -k * dx)
+        run_start |= acc
+    if not run_start.any():
+        return (mask & False), int(mask.sum())
+    lab = _label_components(mask, connectivity)
+    keep = np.unique(lab[run_start])
+    remove = mask & ~np.isin(lab, keep)
+    return (mask & ~remove), int(remove.sum())

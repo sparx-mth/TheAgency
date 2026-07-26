@@ -23,8 +23,15 @@ from sparx_agency.core.common.types import Pose2D
 ClearFn = Callable[[Pose2D, Pose2D], bool]
 
 
-def _turn_angle(prev: Pose2D, v: Pose2D, nxt: Pose2D) -> float:
-    """Heading deviation at vertex ``v`` on ``prev -> v -> nxt`` (rad, 0=straight)."""
+def turn_angle_2d(prev: Pose2D, v: Pose2D, nxt: Pose2D) -> float:
+    """Heading deviation at vertex ``v`` on ``prev -> v -> nxt`` (rad, 0=straight).
+
+    The absolute exterior angle between the incoming leg ``prev -> v`` and the
+    outgoing leg ``v -> nxt``. Zero-length legs (a repeated vertex) contribute no
+    turn. Shared by corner rounding here and route-difficulty analysis
+    (:mod:`sparx_agency.core.planning.replanning.route_difficulty`) -- one home so
+    both agree on how a "turn" is measured.
+    """
     ux, uy = v.x - prev.x, v.y - prev.y
     wx, wy = nxt.x - v.x, nxt.y - v.y
     lu, lw = hypot(ux, uy), hypot(wx, wy)
@@ -53,7 +60,7 @@ def merge_collinear_2d(
         return list(points)
     out = [points[0]]
     for i in range(1, len(points) - 1):
-        if _turn_angle(out[-1], points[i], points[i + 1]) >= angle_thresh:
+        if turn_angle_2d(out[-1], points[i], points[i + 1]) >= angle_thresh:
             out.append(points[i])
     out.append(points[-1])
     return out
@@ -81,7 +88,7 @@ def chamfer_corners_2d(
     out = [points[0]]
     for i in range(1, len(points) - 1):
         prev, v, nxt = points[i - 1], points[i], points[i + 1]
-        turn = _turn_angle(prev, v, nxt)
+        turn = turn_angle_2d(prev, v, nxt)
         leg = min(hypot(v.x - prev.x, v.y - prev.y),
                   hypot(nxt.x - v.x, nxt.y - v.y))
         if not (max_turn < turn <= chamfer_max) or leg < min_runup:

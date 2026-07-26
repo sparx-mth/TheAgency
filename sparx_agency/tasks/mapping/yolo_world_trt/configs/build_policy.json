@@ -1,0 +1,40 @@
+{
+  "_comment": "Knobs for the OPEN-SET YOLO-World TensorRT build. The model is split into a static text-free BACKBONE engine and a dynamic text-fused HEAD engine (GPU); the text embeddings are a runtime input, never baked, so it stays open-vocabulary. The backbone defaults to the GPU: on-target Orin 15W benchmarks showed the GPU beats the DLA at every size (s 40 vs 29 FPS, x 19 vs 6 FPS), because the DLA is throughput-bound on these backbones and ~28% of layers fall back to the GPU anyway. Set dla.enable=true (or build_engine --dla) to build the DLA backbone for re-measurement. imgsz is HEIGHTxWIDTH and MUST be stride-32 multiples. Default 288x512 matches the 504x294 XTEND resize with minimal letterbox padding; use 640x640 for max accuracy.",
+
+  "variants": {
+    "s": "yolov8s-worldv2.pt",
+    "m": "yolov8m-worldv2.pt",
+    "l": "yolov8l-worldv2.pt",
+    "x": "yolov8x-worldv2.pt"
+  },
+
+  "imgsz": "288x512",
+  "opset": 17,
+
+  "precision": "fp16",
+
+  "head_prompt_profile": {
+    "_comment": "Dynamic-N optimization profile for the head engine: N is the prompt count. n_max is the hard ceiling on simultaneous classes without a rebuild (generous; re-prompt with <= n_max needs no rebuild). n_opt is the size TensorRT tunes for.",
+    "n_min": 1,
+    "n_opt": 8,
+    "n_max": 256
+  },
+
+  "dla": {
+    "enable": false,
+    "core": 0,
+    "gpu_fallback": true,
+    "managed_sram_bytes": 1048576,
+    "local_dram_bytes": 1073741824,
+    "global_dram_bytes": 536870912
+  },
+
+  "builder_optimization_level": {
+    "default": 5,
+    "orin_15w": 5
+  },
+
+  "conf_thresh": 0.25,
+  "iou_thresh": 0.5,
+  "max_det": 100
+}

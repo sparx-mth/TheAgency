@@ -33,12 +33,36 @@ plus a status bar.
   ENTER / SPACE                -> send (RGB, depth, goal) to NavDP, anchor the
                                   returned trajectory at the current pose, publish
                                   the world path, and freeze it on the 3rd panel
-  r                            -> clear the click + snapshot
+  r                            -> clear the click + snapshot (and hand the node
+                                  back to the world goal, if one is set)
   q / ESC                      -> quit
 
-No new inference runs until the next ENTER, so the follower keeps flying the last
-published path until then -- exactly the "click once, follow until I click again"
-behaviour.
+TWO GOAL SOURCES, and the difference between them is why there are two:
+
+  CLICK (a pixel).   A goal in the IMAGE. It is only meaningful for the frame it
+      was clicked on -- fly a metre and the same pixel is a different place -- so
+      it cannot be re-used, and no new inference runs until the next ENTER. The
+      follower keeps flying the last published path until then: "click once,
+      follow until I click again".
+  WORLD GOAL (metres).  ``~goal_x/~goal_y``, or the latched ``~goal_topic``
+      (``geometry_msgs/Point``) the BEV click and the mission director publish on.
+      A world point does NOT move as the drone does, so the node can re-aim it
+      itself: every ``~auto_period_s`` it re-projects the goal into the body frame
+      against the CURRENT pose and re-infers. NavDP only ever accepts a body-frame
+      (forward, left) point-goal, so that re-projection is the entire navigation
+      loop -- as the drone advances, the same world point becomes a nearer,
+      differently-bearing point-goal. Nobody has to press anything.
+
+SWITCHING BETWEEN THEM is symmetric, and neither needs a restart or a param:
+
+  camera click  -> click mode. Takes over a hands-off run instantly; the standing
+                   world goal is remembered, not lost.
+  BEV click     -> hands-off mode. Publishing a world goal drops any pending camera
+                   click, so the drone starts flying the new point immediately.
+  r             -> drop the camera click; the world goal (if any) resumes.
+
+Both end in the same place: one body-frame point-goal handed to NavDP, whose
+trajectory is anchored at the pose snapshotted with the frame it saw.
 
 RGB and depth arrive as frame-path messages (``std_msgs/String`` of the form
 "<path> <sec> <nsec>"): this node loads the ``.jpg`` and ``.npy`` from disk rather
@@ -71,7 +95,7 @@ import cv2
 import numpy as np
 
 import rospy
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped
 from nav_msgs.msg import Path
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
@@ -84,7 +108,9 @@ from sparx_agency.core.planning.navdp import (
     NavDPPointgoalClient,
     anchor_trajectory_to_world,
     pixel_to_pointgoal,
+    point_to_pointgoal,
     project_trajectory_to_pixels,
+    world_to_body_2d,
 )
 
 WINDOW = "NavDP click"
@@ -143,6 +169,38 @@ class NavDPClickNode:
         self.execute_fraction = float(G("~execute_fraction", 1.0))
         self.full_path_topic = G("~full_path_topic", "/path/waypoints_navdp_full")
         self.frame_id = G("~frame_id", "world")
+
+        # ── The second goal source: a WORLD point, re-aimed every inference ──
+        # A click is a point in the IMAGE, so it is only meaningful for the frame
+        # it was clicked on: fly a metre and the same pixel is a different place.
+        # A world goal is the opposite -- it stays put while the drone moves, so
+        # it is the one that can be flown without an operator. NavDP itself only
+        # ever accepts a BODY-frame (forward, left) point-goal, so the world goal
+        # is re-projected into the body frame at EVERY inference, against the pose
+        # snapshotted with that frame. That re-projection IS the navigation: as the
+        # drone advances, the same world point becomes a nearer, differently-bearing
+        # body goal, and NavDP re-plans toward it.
+        #
+        # Two ways in, both world/map metres, the click always winning:
+        #   ~goal_x/~goal_y  a fixed goal from the config file ('' = unset)
+        #   ~goal_topic      geometry_msgs/Point, latched -- the BEV click and the
+        #                    mission director both publish here; a new one retargets
+        #                    mid-flight and re-arms an arrived goal.
+        self.goal_topic = G("~goal_topic", "/waypoint_nav/goal")
+        gx0, gy0 = G("~goal_x", ""), G("~goal_y", "")
+        self.world_goal = None
+        if str(gx0) != "" and str(gy0) != "":
+            self.world_goal = (float(gx0), float(gy0))
+        # Auto-inference: with a world goal there is nobody to press ENTER, so the
+        # node re-infers on its own. Every tick re-projects the goal and publishes a
+        # fresh route; without it the drone would fly one prefix and hold forever.
+        self.auto_infer = bool(G("~auto_infer", True))
+        self.auto_period_s = float(G("~auto_period_s", 2.0))
+        # Stop re-inferring once the goal is this close: NavDP would otherwise keep
+        # being asked to reach a point under the drone and jitter around it.
+        self.goal_arrive_radius_m = float(G("~goal_arrive_radius_m", 0.5))
+        self._next_auto_t = 0.0
+        self._goal_arrived = False
 
         # Window layout. "full" = RGB + colorized depth + snapshot/overlay panels
         # (the legacy 3-up view). "rgb_only" = just the live RGB panel to click on,
@@ -213,6 +271,8 @@ class NavDPClickNode:
         if self.camera_info_topic:
             rospy.Subscriber(self.camera_info_topic, CameraInfo,
                              self._cam_info_cb, queue_size=1)
+        if self.goal_topic:
+            rospy.Subscriber(self.goal_topic, Point, self._goal_cb, queue_size=1)
 
         self.pub_path = rospy.Publisher(self.path_topic, Path,
                                         queue_size=1, latch=True)
@@ -306,6 +366,26 @@ class NavDPClickNode:
                                cx=float(cx), cy=float(cy))
         self._got_cam_info = True
 
+    def _goal_cb(self, msg):
+        """Latched world-frame goal (BEV click / mission director) -- retarget.
+
+        A BEV click is also the MODE SWITCH: it drops any pending camera click, so
+        the node leaves click-and-ENTER mode and starts flying the world goal
+        hands-off straight away. Without that, a BEV click would silently do
+        nothing until the operator pressed 'r' -- the click still won, and the new
+        goal only took effect at some later, unrelated keypress.
+        """
+        goal = (float(msg.x), float(msg.y))
+        if goal != self.world_goal:
+            rospy.loginfo("NavDP world goal := (%.2f, %.2f)", goal[0], goal[1])
+        self.world_goal = goal
+        self._goal_arrived = False   # a new goal always re-arms inference
+        self._next_auto_t = 0.0      # ...and acts on the next tick, not in 2 s
+        if self.click_px is not None:
+            rospy.loginfo("NavDP: world goal supersedes the camera click "
+                          "-- switching to hands-off mode")
+            self.click_px = None
+
     # ─── Inference + publish ─────────────────────────────────────
     def infer_and_publish(self, rgb, depth, pose_xyyaw, px, py):
         """Run one NavDP step for click ``(px, py)`` and publish the world path.
@@ -319,7 +399,38 @@ class NavDPClickNode:
         rospy.loginfo("NavDP goal: %.2fm fwd  %.2fm %s  (click depth=%.2fm, "
                       "dz=%+.2fm, alt=%.2fm)", gx, abs(gy), side, d, bz,
                       self.altitude)
+        return self._step(rgb, depth, pose_xyyaw, gx, gy, px, py)
 
+    def infer_world_goal(self, rgb, depth, pose_xyyaw):
+        """Run one NavDP step toward ``self.world_goal``, re-aimed from HERE.
+
+        The world goal is converted to the body frame against ``pose_xyyaw`` --
+        the pose snapshotted with this very RGB-D frame -- and range-limited to
+        NavDP's input box by :func:`point_to_pointgoal`, which scales forward and
+        lateral together so a goal beyond the box keeps its BEARING. So a distant
+        goal is flown as "head that way", one leg per inference, rather than being
+        clipped into a goal that points somewhere else.
+
+        Returns the body trajectory, or None (no goal, arrived, or NavDP failed).
+        """
+        if self.world_goal is None or self._goal_arrived:
+            return None
+        gwx, gwy = self.world_goal
+        ox, oy, _ = pose_xyyaw
+        if np.hypot(gwx - ox, gwy - oy) <= self.goal_arrive_radius_m:
+            rospy.loginfo("NavDP world goal (%.2f, %.2f) reached -- holding "
+                          "(publish a new goal to resume)", gwx, gwy)
+            self._goal_arrived = True
+            return None
+        fwd, left = world_to_body_2d(gwx, gwy, *pose_xyyaw)
+        gx, gy = point_to_pointgoal(fwd, left)
+        rospy.loginfo("NavDP world goal (%.2f, %.2f) -> body %.2fm fwd %.2fm "
+                      "left -> pointgoal (%.2f, %.2f)", gwx, gwy, fwd, left, gx, gy)
+        # -1: the server's overlay convention for "no click behind this goal".
+        return self._step(rgb, depth, pose_xyyaw, gx, gy, -1, -1)
+
+    def _step(self, rgb, depth, pose_xyyaw, gx, gy, px, py):
+        """One NavDP inference for a body-frame point-goal, then publish."""
         result = self.client.pointgoal_step(rgb, depth, gx, gy,
                                              click_px=px, click_py=py,
                                              altitude=self.altitude)
@@ -484,6 +595,18 @@ class NavDPClickNode:
                         (220, 220, 220), 1)
             cv2.imshow(WINDOW, np.vstack([top, bar]))
 
+            # Auto re-inference for the world goal. Runs HERE, on the main loop,
+            # rather than on a rospy.Timer: inference and the ENTER path would
+            # otherwise publish from two threads onto one latched topic. A pending
+            # click always wins -- the operator's pixel goal is never overridden
+            # by the standing world goal until 'r' clears it.
+            if (self.auto_infer and self.click_px is None
+                    and self.world_goal is not None and not self._goal_arrived
+                    and self.pose_xyyaw is not None
+                    and time.time() >= self._next_auto_t):
+                self._next_auto_t = time.time() + self.auto_period_s
+                self.infer_world_goal(rgb.copy(), depth.copy(), self.pose_xyyaw)
+
             key = cv2.waitKey(30) & 0xFF
             if key in (ord('q'), 27):
                 break
@@ -569,6 +692,16 @@ class NavDPClickNode:
             L("  execute   = first %.0f%% of the trajectory (hold at the prefix end "
               "until the next ENTER)", 100.0 * self.execute_fraction)
         L("  display   = %s", self.display_mode)
+        if self.world_goal is not None:
+            L("  world goal= (%.2f, %.2f)  (re-aimed every inference)",
+              *self.world_goal)
+        L("  goal  in  = %s  (world Point; a camera click overrides it)",
+          self.goal_topic or "(none)")
+        if self.auto_infer:
+            L("  auto      = re-infer every %.1fs toward the world goal, until "
+              "within %.2fm of it", self.auto_period_s, self.goal_arrive_radius_m)
+        else:
+            L("  auto      = OFF -- every inference needs an ENTER")
         L("  intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f  (%dx%d)",
           self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
           self.intr.width, self.intr.height)
@@ -611,6 +744,16 @@ if __name__ == "__main__":
 #       ~full_path_topic (/path/waypoints_navdp_full; the FULL trajectory, display
 #         only -- the BEV viewer draws it so you see the whole route while flying
 #         only the near prefix)
+#   world goal (the no-operator source; see the module docstring):
+#       ~goal_topic (/waypoint_nav/goal; geometry_msgs/Point, world metres, latched
+#         -- the BEV click and the mission director both publish here. A new goal
+#         retargets mid-flight and re-arms an arrived one.)
+#       ~goal_x ~goal_y ('' = unset; a fixed goal from the config file)
+#       ~auto_infer (true; re-infer toward the world goal with no ENTER. A pending
+#         camera click always wins -- press r to hand the node back.)
+#       ~auto_period_s (2.0; seconds between auto re-inferences. Pair with
+#         ~execute_fraction so a leg is roughly flown before the next one lands.)
+#       ~goal_arrive_radius_m (0.5; stop re-inferring within this of the goal)
 #   execution: ~execute_fraction (1.0; fly only the first fraction of the route,
 #       then hold at the prefix end until the next ENTER re-infers -- NavDP is
 #       accurate near the camera and drifts further out. 0.5 = first half.)

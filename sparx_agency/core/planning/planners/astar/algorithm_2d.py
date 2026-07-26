@@ -148,6 +148,19 @@ def astar_grid_2d(
     return AStarSearchResult2D(path=tuple(rev), expanded=expanded)
 
 
+def _backward_weight(a: Index2D, b: Index2D) -> float:
+    """How much move ``b`` reverses direction ``a``: 0 for forward/perpendicular
+    (angle <= 90 deg), rising to 1.0 for a full 180 deg reversal (``-cos`` of the
+    angle, clamped at 0). Lets a heading penalty leave forward and 90 deg turns
+    free while heavily penalising turning around."""
+    la = math.hypot(a[0], a[1])
+    lb = math.hypot(b[0], b[1])
+    if la < 1e-9 or lb < 1e-9:
+        return 0.0
+    cos = (a[0] * b[0] + a[1] * b[1]) / (la * lb)
+    return max(0.0, -cos)
+
+
 def astar_cost_grid_2d(
     cost: np.ndarray,
     start: Index2D,
@@ -156,6 +169,8 @@ def astar_cost_grid_2d(
     connectivity: int = 8,
     bbox: Optional[BBox] = None,
     turn_penalty: float = 0.0,
+    start_dir: Optional[Index2D] = None,
+    start_turn_penalty: float = 0.0,
     max_expansions: int | None = None,
 ) -> AStarSearchResult2D:
     """A* over a dense float cost grid (the fast, weighted kernel).
@@ -165,6 +180,14 @@ def astar_cost_grid_2d(
     non-finite cost (``inf``) is blocked. An optional ``turn_penalty`` is added
     whenever the travel direction changes, which suppresses staircasing before
     line-of-sight smoothing runs.
+
+    HEADING AWARENESS: pass ``start_dir`` (the drone's facing as a grid move
+    ``(dx, dy)``) to seed the start's incoming direction, so the FIRST move is a
+    "turn" like any other. With ``start_turn_penalty > 0`` the first move also
+    pays ``start_turn_penalty * how-backward-it-is`` (0 for flying forward or
+    turning 90 deg, up to the full penalty for a 180 deg reversal) -- so the route
+    flies the way the drone already looks and only turns around when it truly
+    must, instead of spinning in place because the shortest path runs backward.
 
     Args:
         cost: ``(H, W)`` float array. 1.0 = free, ``inf`` = blocked, finite
@@ -176,6 +199,10 @@ def astar_cost_grid_2d(
             grid indices. Cells outside are never expanded — the single largest
             speed win when start and goal are close on a large grid.
         turn_penalty: Extra cost added on a direction change (0 disables).
+        start_dir: Drone facing as a grid move ``(dx, dy)`` in ``{-1,0,1}`` (not
+            ``(0,0)``); ``None`` disables heading awareness (start move is free).
+        start_turn_penalty: Extra cost for the first move going against
+            ``start_dir``, scaled by :func:`_backward_weight` (0 disables).
         max_expansions: Safety cap on pops; ``None`` for unlimited.
 
     Returns:
@@ -220,8 +247,13 @@ def astar_cost_grid_2d(
             path.reverse()
             return AStarSearchResult2D(path=tuple(path), expanded=expanded)
 
-        prev = None
-        if turn_penalty > 0.0 and (x, y) in came:
+        # Incoming direction: the parent's move for an interior cell, else the
+        # drone's facing (start_dir) for the start cell -- so the first move is a
+        # turn like any other and the heading penalty can bias it forward.
+        at_start = (x, y) not in came
+        if at_start:
+            prev = start_dir
+        else:
             px, py = came[(x, y)]
             prev = (x - px, y - py)
 
@@ -234,7 +266,12 @@ def astar_cost_grid_2d(
             c = cost[ny, nx]
             if not math.isfinite(c):
                 continue
-            turn = turn_penalty if (prev is not None and prev != (dx, dy)) else 0.0
+            if prev is None or prev == (dx, dy):
+                turn = 0.0
+            elif at_start:
+                turn = turn_penalty + start_turn_penalty * _backward_weight(prev, (dx, dy))
+            else:
+                turn = turn_penalty
             ng = gc + step * c + turn
             if ng < g[ny, nx]:
                 g[ny, nx] = ng
