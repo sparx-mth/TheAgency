@@ -110,59 +110,98 @@ would need its own loader (its scenes aren't single-USD CDN references like
 ```
 robots/PEGASUS/
   config/camera_pegasus_iris_504x392.yaml   sim camera intrinsics (== XTEND's 392x504 depth-engine calibration)
-  adapters/scene.py                          load_indoor_scene() -- reference a stock CDN environment
+  adapters/scene.py                          load_indoor_scene() + SCENE_SURVEYS (surveyed spawn + route per scene)
   adapters/vehicle.py                        PegasusIrisVehicle -- spawn Iris (+ optional PX4 backend) + RGBD camera
-  setup/pegasus_isaac6_compat.patch          the compatibility + heartbeat-deadlock fixes, pinned to commit e13dc659
+  setup/pegasus_isaac6_compat.patch          the Isaac Sim 6.x compatibility fixes, pinned to commit e13dc659
   setup/install.sh                           clone+patch Pegasus, clone+build PX4 SITL
 ```
 
-The recording writer (`sim_extract.py`) and the driver/flight harnesses
-(`record_flight.py`, `fly_direct.py`, `fly_and_watch.py`) live outside this
-package since they're platform-agnostic / mission-level respectively — see
-below.
+The recording writer (`sim_extract.py`) and the flight harnesses live outside
+this package since they're platform-agnostic and mission-level respectively.
+**To actually fly something, see
+`tasks/planning/sim_flight_recording/README.md`** — that is the operating
+manual; this file covers the platform and the compatibility work underneath
+it.
+
+## The two dynamics bugs the port introduced (and fix)
+
+Getting the API port to *load* was not the same as getting it to *fly*. Two
+further problems only showed up once something tried to apply real thrust.
+Both are fixed in `setup/pegasus_isaac6_compat.patch`.
+
+**1. Rotor thrust must be applied to the body, not to the rotors.**
+`Multirotor.update()` applied each rotor's thrust to that rotor's own
+`/rotorN` prim. Those prims are articulation *links*, and in Isaac Sim 6.x a
+`RigidPrim` force on a link does not land at the link's centre of mass — it
+induces a large parasitic pitch torque. Measured directly, applying 1.5× hover
+thrust with no controller in the loop:
+
+| how the same total force was applied | result after 200 steps |
+|---|---|
+| split across the four `/rotorN` links | pitch −76°, tumbling, upside down by step 250 |
+| summed onto `/body` | clean climb, ±2° attitude, 3.3 m altitude |
+
+The patch aggregates the rotor thrusts into the equivalent body-frame wrench —
+total thrust along body +Z plus the torque those offset thrusts generate
+(`τ = Σ rᵢ × Fᵢ`), plus the rotors' rolling moment. Same rigid-body dynamics,
+one force application. The rotor offsets are measured from the stage once and
+cached (`Multirotor.rotor_body_positions()`), which also removes the
+duplicate copy of that computation in `force_and_torques_to_velocities`.
+
+**2. A deadlock in the PX4 backend's heartbeat gating.** PX4 is built with
+`ENABLE_LOCKSTEP_SCHEDULER`, so its entire internal clock — including
+heartbeat generation — only advances when it receives `HIL_SENSOR` data. But
+`PX4MavlinkBackend.update()` had a hard `if not self._received_first_hearbeat:
+return`, refusing to send any sensor data until it saw PX4's heartbeat first.
+Mutual wait, never resolves. The patch sends sensor data unconditionally and
+checks for the heartbeat opportunistically instead.
+
+## The Isaac Sim 6.0.1 physics-callback bug (no fix, but a reliable workaround)
+
+**Isaac Sim 6.0.1 stops dispatching `World.add_physics_callback()`-registered
+callbacks after ~2 calls following `world.reset()`.** Confirmed by wrapping a
+call-counter around `Multirotor.update()`: it printed `call #1`, `call #2`,
+then never again across 750+ further `world.step()` calls, with **zero
+exceptions raised anywhere**. Meanwhile the vehicle's live PhysX pose
+(`RigidPrim.get_world_poses()`, bypassing Pegasus's cached `self._state`)
+showed the rigid body integrating normally — PhysX itself is fine. Only the
+Python-level callbacks stopped.
+
+Pegasus registers four of them per vehicle, and all four die together: state
+refresh, sensor generation, backend state push, and force application (which
+is also what pushes `HIL_SENSOR` to PX4). That single bug is why earlier
+recordings were always frozen *and* why PX4 never booted far enough to emit a
+heartbeat.
+
+No fix for the dispatch itself was found — it would need to be traced through
+whatever changed in Kit/PhysX callback wiring in 6.0.1, or moved to
+`isaacsim.core.simulation_manager`, which the Kit logs reference throughout.
+**The workaround, which is what everything here uses:**
+`tasks/planning/sim_flight_recording/manual_physics_driver.py` calls those four
+methods by hand once per step from an ordinary Python loop, which does keep
+running. With it, PX4's first heartbeat arrives 1.4 s into simulated time.
 
 ## Running it
 
-Everything here must run inside a live Isaac Sim process (Isaac Sim's own
-Python, not the repo's `.venv` — it needs `omni`/`carb`/`pegasus.*`, which only
-exist inside a running Kit app).
+Everything must run inside a live Isaac Sim process (Isaac Sim's own Python,
+not the repo's `.venv` — it needs `omni`/`carb`/`pegasus.*`, which only exist
+inside a running Kit app).
 
 ```bash
-# One-time setup inside the isaac-sim container:
+# One-time setup, inside the isaac-sim container:
 sparx_agency/robots/PEGASUS/setup/install.sh /path/to/dev/root
-
-# Smoke-test the full chain (scene + vehicle + PX4 + camera + recorder):
-/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/record_flight.py \
-    --pegasus-root /path/to/dev/root/PegasusSimulator/extensions/pegasus.simulator \
-    --px4-dir /path/to/dev/root/PX4-Autopilot \
-    --scene simple_room --out-dir /path/to/recordings/simple_room_smoke
 ```
 
-`record_flight.py` is a **smoke test, not a piloted flight** — it spawns the
-vehicle and steps the sim so PX4 and the camera come up, but sends no
-arm/takeoff command. Scripted or policy-driven missions are future work.
+Then fly it **from the host** with the launcher, which handles syncing the
+repo into the container, clearing stale PX4 locks, and starting the run:
 
-**Verified end-to-end on 2026-07-26**: ran the full chain against `simple_room`
-— scene load, PX4 SITL connects to the Pegasus vehicle over MAVLink (TCP
-4560), the camera streams RGBD, and `sim_extract.py` writes a 30-frame
-recording. Loaded it back with `recording.load_recording()` (repo `.venv`,
-outside Isaac Sim): correct `(392, 504)` depth/RGB shapes, intrinsics matching
-this file, and real per-frame ground-truth poses (`poses.npy`) — flat/constant
-in this run since no arm/takeoff command was sent, as expected for a
-stationary smoke test. `future_path_body`/`goal_body` (the methods the ESDF
-label generator calls) also ran correctly against the output.
+```bash
+sparx_agency/tasks/planning/sim_flight_recording/run_flight.sh --scene office
+```
 
-One implementation bug found and fixed during this: `adapters/vehicle.py`'s
-`_IRIS_USD` was initially missing the `pegasus/simulator/` path segment (the
-asset actually lives at `.../pegasus.simulator/pegasus/simulator/assets/...`,
-not `.../pegasus.simulator/assets/...`), which silently spawned an empty
-placeholder prim instead of the Iris model.
-
-Operational note: `make px4_sitl_default none`'s auto-launched `px4` process
-tree can survive its parent Python process being killed (e.g. by a `timeout`
-wrapper) — if a run is interrupted, check for and kill orphaned
-`rcS`/`px4-param`/`build/px4_sitl_default/bin/px4` processes before the next
-run, or PX4's TCP port stays bound.
+See `tasks/planning/sim_flight_recording/README.md` for the flags, the flight
+modes, how the per-scene routes are surveyed, and why PX4 is given a vision
+pose instead of GPS.
 
 ## Watching it live: WebRTC streaming
 
@@ -179,126 +218,37 @@ extensions only ship a native shared library, no HTML/JS. You need NVIDIA's
 **Isaac Sim WebRTC Streaming Client** (a small desktop app for
 Linux/Windows/macOS, downloadable from the "Latest Release" section of
 `docs.isaacsim.omniverse.nvidia.com`'s download page). Point it at
-`localhost:49100` once the script prints `STREAMING_READY`.
+`localhost:49100` once the run prints `STREAMING_READY`.
 
-## Getting the drone to actually fly: three more bugs, one fundamental one
+Passing `--video` to `run_flight.sh` writes an MP4 instead/as well, which
+needs no extra software.
 
-Getting past "spawns and sits there" to "arms, takes off, flies a route" hit
-four real bugs, three fixable and one that isn't (for now):
+## Operational notes
 
-1. **A deadlock in our own script.** Any *blocking* pymavlink call
-   (`wait_heartbeat()`, `motors_armed_wait()`) stops `world.step()` from
-   running while it waits — which stops Pegasus from feeding PX4 sensor
-   ticks — which means PX4 can never finish booting and send the heartbeat
-   we're blocked waiting for. Fix: never block; poll MAVLink non-blockingly
-   from inside the stepping loop instead (see the (retired) `fly_and_watch.py`
-   for the pattern).
+- **Only one Isaac Sim process at a time.** A second one crashes the first
+  inside Kit (`libomni.anim.behavior.core.plugin.so`, `std::out_of_range: no
+  null terminator at count`) with a stack trace that points nowhere near the
+  real cause. Wait for `Simulation App Shutting Down` — teardown takes a while
+  after the Python process looks done.
+- **PX4 lock files.** `/tmp/px4_lock-0` and `/tmp/px4-sock-0` survive an
+  abruptly-killed PX4 and make the next instance exit immediately (`PX4
+  Exiting...`) with no explanation. `px4_launch.clear_stale_locks()` and
+  `run_flight.sh` both remove them; do it by hand if you launch PX4 yourself.
+- **Orphaned PX4 processes.** `make px4_sitl_default none`'s auto-launched
+  `px4` can outlive its parent Python process (e.g. under a `timeout`
+  wrapper). Check for stray `rcS`/`px4-param`/`build/px4_sitl_default/bin/px4`
+  before the next run, or PX4's TCP port stays bound.
+- **`make px4_sitl_default none` also launches PX4** after building, into an
+  interactive `pxh>` shell. With no TTY attached it spins printing the prompt
+  forever and produces a multi-GB log. Run it attached, or pipe through `head`.
 
-2. **Pegasus's own `PX4LaunchTool` launches PX4 from a broken working
-   directory.** It runs PX4 with `cwd=tempfile.TemporaryDirectory()` — a
-   fresh empty directory every time — but PX4 sources
-   `$PWD/etc/init.d/rc.vehicle_setup` at boot, which only exists under the
-   real build output, `px4_dir/build/px4_sitl_default`. Every run failed with
-   `rc.vehicle_setup: No such file` until PX4 was launched manually with the
-   correct `cwd` (`px4_autolaunch=False` on `PegasusIrisVehicle`, see the
-   retired `fly_and_watch.py._launch_px4`).
+## What's still open
 
-3. **Stale PX4 lock files.** `/tmp/px4_lock-0` / `/tmp/px4-sock-0` survive an
-   abruptly-killed PX4 process and make the next PX4 instance exit
-   immediately (`PX4 Exiting...`) with no explanation. Remove them before
-   every run if a prior run was interrupted.
-
-4. **A real deadlock inside Pegasus's own backend.** PX4 is built with
-   `ENABLE_LOCKSTEP_SCHEDULER` — its entire internal clock, including
-   heartbeat generation, is driven by receiving `HIL_SENSOR` data from the
-   simulator. But Pegasus's `PX4MavlinkBackend.update()` has a hard
-   `if not self._received_first_hearbeat: ...; return` — it refuses to send
-   *any* sensor data until it sees PX4's heartbeat first. Mutual wait, never
-   resolves. Fixed in `pegasus_isaac6_compat.patch`: send sensor data
-   unconditionally; check for the heartbeat opportunistically instead of
-   gating on it.
-
-5. **The fundamental one, found only by direct instrumentation: Isaac Sim
-   6.0.1 stops dispatching `World.add_physics_callback()`-registered
-   callbacks after ~2 calls following `world.reset()`.** Confirmed two ways:
-   a call-counter wrapped around `Multirotor.update()` (Pegasus's own
-   physics-callback method — this is what applies rotor thrust *and* what
-   feeds PX4 sensor data) printed `call #1`, `call #2`, then never again,
-   across 750+ further `world.step()` calls, with **zero exceptions** raised
-   anywhere. And reading the vehicle's *live* PhysX pose directly
-   (`RigidPrim.get_world_poses()`, bypassing Pegasus's own cached
-   `self._state`) showed the rigid body **free-falling normally** — PhysX
-   itself is fine; only the Python-level state cache and everything gated on
-   the physics-callback (sensor pushes to PX4, force application) had
-   silently stopped updating after the first couple of ticks. This explains
-   fix #4 not being sufficient on its own, and why the drone never moved in
-   earlier recordings even without any PX4 involvement at all.
-
-   No fix for the callback dispatch itself was found (would need
-   understanding what changed in Isaac Sim 6.0.1's Kit/PhysX callback wiring,
-   or whether `isaacsim.core.simulation_manager` — referenced throughout the
-   Kit logs — is the intended replacement API). **Workaround, and what
-   actually works today:** `tasks/planning/sim_flight_recording/fly_direct.py`
-   sidesteps the callback system entirely — it manually calls
-   `vehicle.update_state(dt)` and `vehicle.apply_force()`/`apply_torque()`
-   once per step from its own loop (which reliably keeps running), driven by
-   a simple world-frame PD controller (altitude + XY position hold, plus
-   attitude leveling). No PX4, no MAVLink. `fly_and_watch.py` (the PX4/MAVLink
-   path, fixes 1-4 above) is left in the tree as a documented, known-incomplete
-   path — it still relies on the same broken callback dispatch to feed PX4,
-   so getting it fully working would need the same manual-driving treatment
-   applied there too, feeding PX4 the state/sensor data by hand each step.
-
-## Running it
-
-Everything here must run inside a live Isaac Sim process (Isaac Sim's own
-Python, not the repo's `.venv` — it needs `omni`/`carb`/`pegasus.*`, which only
-exist inside a running Kit app).
-
-```bash
-# One-time setup inside the isaac-sim container:
-sparx_agency/robots/PEGASUS/setup/install.sh /path/to/dev/root
-
-# Fly it (direct Python control, no PX4) and watch it live:
-/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/fly_direct.py \
-    --pegasus-root /path/to/dev/root/PegasusSimulator/extensions/pegasus.simulator \
-    --scene simple_room --out-dir /path/to/recordings/simple_room_flight \
-    --altitude 2.0 --cruise-s 15
-# then connect the Isaac Sim WebRTC Streaming Client to localhost:49100
-# once the log prints STREAMING_READY. Pass --no-stream to skip streaming.
-```
-
-`fly_direct.py` climbs to `--altitude`, flies a slow 3 m forward/back sine-wave
-cruise for `--cruise-s` seconds, then descends — a real, verified flight
-(non-flat, non-frozen `poses.npy`; validated by loading the output through
-`recording.load_recording()`), not just a stationary smoke test.
-
-**Verified end-to-end on 2026-07-26**: `simple_room`, both with and without
-streaming enabled. 230 frames recorded over a 23 s mission; the loaded
-recording's `poses.npy` shows real X motion tracking the commanded sine-wave
-cruise (e.g. `x ≈ 0.63 → 1.03 → -2.70 → 0.30` across the captured frames) and
-near-zero yaw throughout (attitude leveling holding steady, no tumbling).
-
-`record_flight.py` still exists as the original stationary infra smoke test
-(scene + vehicle + camera + recorder, no flight control at all) — useful for
-quickly checking the base chain still works without needing a flight
-controller in the loop.
-
-One implementation bug found and fixed along the way: `adapters/vehicle.py`'s
-`_IRIS_USD` was initially missing the `pegasus/simulator/` path segment (the
-asset actually lives at `.../pegasus.simulator/pegasus/simulator/assets/...`,
-not `.../pegasus.simulator/assets/...`), which silently spawned an empty
-placeholder prim instead of the Iris model.
-
-## What's still open (not done in this pass)
-
-- The PX4/MAVLink path (`fly_and_watch.py`) is not fully working — see bug #5
-  above. `fly_direct.py` (no PX4) is the flight path that actually works.
+- The Pegasus and PX4-Autopilot checkouts and the built `px4` binary live
+  under the container's `/tmp` by default. **Move `DEV_ROOT` to a bind-mounted
+  host directory before the container is ever recreated, or this work vanishes
+  with it** — the container is currently the only copy.
+- No home or library scene is wired in (see "Confirmed indoor scenes").
 - No NavDP fine-tuning has been run against simulated data yet.
-- No home/library scene is wired in (see above).
-- The Pegasus/PX4-Autopilot checkouts and the built `px4` binary live under
-  the container's `/tmp` by default in `install.sh` — move `DEV_ROOT` to a
-  bind-mounted host directory before the container is ever recreated, or this
-  work vanishes with it.
 - `fly_direct.py`'s PD gains were tuned empirically for the Iris's ~1.6 kg
-  mass on this one scene; expect to retune for other scenes/missions.
+  mass on one scene; expect to retune for others.

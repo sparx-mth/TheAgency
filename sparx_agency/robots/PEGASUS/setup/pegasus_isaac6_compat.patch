@@ -37,7 +37,7 @@ index 0270a2a..41ae89b 100644
  
          # Check if we have already received IMU data. If not, start the lockstep and wait for more data
 diff --git a/extensions/pegasus.simulator/pegasus/simulator/logic/vehicles/multirotor.py b/extensions/pegasus.simulator/pegasus/simulator/logic/vehicles/multirotor.py
-index 8f65c87..ffe850b 100644
+index 8f65c87..aea88b4 100644
 --- a/extensions/pegasus.simulator/pegasus/simulator/logic/vehicles/multirotor.py
 +++ b/extensions/pegasus.simulator/pegasus/simulator/logic/vehicles/multirotor.py
 @@ -6,8 +6,9 @@
@@ -51,13 +51,18 @@ index 8f65c87..ffe850b 100644
  
  # The vehicle interface
  from pegasus.simulator.logic.vehicles.vehicle import Vehicle
-@@ -87,6 +88,17 @@ class Multirotor(Vehicle):
+@@ -87,6 +88,46 @@ class Multirotor(Vehicle):
          self._thrusters = config.thrust_curve
          self._drag = config.drag
  
 +        # isaacsim.core.prims.Articulation view for the rotor joints, created lazily on first use
 +        # (replaces the old omni.isaac.dynamic_control articulation handle)
 +        self._articulation = None
++
++        # Rotor offsets from the body origin, in the body frame. Constant (the rotors
++        # are rigidly attached apart from spinning about their own axis), so measured
++        # once on first use and cached.
++        self._rotor_body_positions = None
 +
 +    def get_articulation(self) -> Articulation:
 +        """Lazily create (and cache) the Articulation view for this vehicle's rotor joints."""
@@ -66,10 +71,34 @@ index 8f65c87..ffe850b 100644
 +
 +        return self._articulation
 +
++    def rotor_body_positions(self):
++        """The rotors' positions relative to the body origin, expressed in the body frame.
++
++        Measured from the live stage on first call and cached: the rotors only
++        rotate about their own axes, so their offsets never change.
++
++        Returns:
++            list: One ``numpy`` ``(x, y, z)`` offset per rotor, in metres.
++        """
++        if self._rotor_body_positions is None:
++            body_positions, body_orientations = self.get_rigid_prim("/body").get_world_poses()
++            body_pos = np.array(body_positions[0])
++            qw, qx, qy, qz = body_orientations[0]
++            body_rot_inv = Rotation.from_quat([qx, qy, qz, qw]).inv()
++
++            self._rotor_body_positions = []
++            for i in range(self._thrusters._num_rotors):
++                rotor_positions, _ = self.get_rigid_prim("/rotor" + str(i)).get_world_poses()
++                self._rotor_body_positions.append(
++                    body_rot_inv.apply(np.array(rotor_positions[0]) - body_pos)
++                )
++
++        return self._rotor_body_positions
++
      def start(self):
          """In this case we do not need to do anything extra when the simulation starts"""
          pass
-@@ -106,7 +118,7 @@ class Multirotor(Vehicle):
+@@ -106,7 +147,7 @@ class Multirotor(Vehicle):
          """
  
          # Get the articulation root of the vehicle
@@ -78,7 +107,47 @@ index 8f65c87..ffe850b 100644
  
          # Get the desired angular velocities for each rotor from the first backend (can be mavlink or other) expressed in rad/s
          if len(self._backends) != 0:
-@@ -152,17 +164,19 @@ class Multirotor(Vehicle):
+@@ -120,18 +161,30 @@ class Multirotor(Vehicle):
+         # Get the desired forces to apply to the vehicle
+         forces_z, _, rolling_moment = self._thrusters.update(self._state, dt)
+ 
+-        # Apply force to each rotor
++        # Isaac Sim 6.x compat fix: the original code applied each rotor's thrust to
++        # that rotor's own /rotorN prim. Those prims are articulation links, and a
++        # RigidPrim force on an articulation link does not land at the link's centre
++        # of mass -- the result is a large parasitic pitch torque that flips the
++        # vehicle onto its nose within ~2 s (measured: pitch -76 deg after 200 steps
++        # at 1.5x hover thrust, versus a clean climb when the same total force is
++        # applied to the body).
++        #
++        # Aggregate the rotor thrusts into the equivalent body-frame wrench instead.
++        # The rotors are rigidly attached, so this is the same rigid-body dynamics:
++        # a total thrust along body +Z, plus the roll/pitch torque those offset
++        # thrusts generate (tau = sum r_i x F_i), plus the rotors' rolling moment.
++        rotor_positions = self.rotor_body_positions()
++        total_thrust = float(np.sum(forces_z))
++        torque_x = float(np.sum([rotor_positions[i][1] * forces_z[i] for i in range(len(forces_z))]))
++        torque_y = float(-np.sum([rotor_positions[i][0] * forces_z[i] for i in range(len(forces_z))]))
++
++        self.apply_force([0.0, 0.0, total_thrust], body_part="/body")
++        self.apply_torque([torque_x, torque_y, rolling_moment], "/body")
++
++        # Generate the rotating propeller visual effect
+         for i in range(4):
+-
+-            # Apply the force in Z on the rotor frame
+-            self.apply_force([0.0, 0.0, forces_z[i]], body_part="/rotor" + str(i))
+-
+-            # Generate the rotating propeller visual effect
+             self.handle_propeller_visual(i, forces_z[i], articulation)
+ 
+-        # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
+-        self.apply_torque([0.0, 0.0, rolling_moment], "/body")
+-
+         # Compute the total linear drag force to apply to the vehicle's body frame
+         drag = self._drag.update(self._state, dt)
+         self.apply_force(drag, body_part="/body")
+@@ -152,17 +205,19 @@ class Multirotor(Vehicle):
          """
  
          # Rotate the joint to yield the visual of a rotor spinning (for animation purposes only)
@@ -102,7 +171,7 @@ index 8f65c87..ffe850b 100644
  
      def force_and_torques_to_velocities(self, force: float, torque: np.ndarray):
          """
-@@ -180,14 +194,17 @@ class Multirotor(Vehicle):
+@@ -180,14 +235,8 @@ class Multirotor(Vehicle):
              list: A list of angular velocities [rad/s] to apply in reach rotor to accomplish suchs forces and torques
          """
  
@@ -111,22 +180,15 @@ index 8f65c87..ffe850b 100644
 -
 -        # Get the rotors of the vehicle
 -        rotors = [self.get_dc_interface().get_rigid_body(self._stage_prefix + "/rotor" + str(i)) for i in range(self._thrusters._num_rotors)]
-+        # Get the body frame of the vehicle, and its world pose (scalar-first [w, x, y, z] orientation)
-+        body_positions, body_orientations = self.get_rigid_prim("/body").get_world_poses()
-+        body_pos = np.array(body_positions[0])
-+        qw, qx, qy, qz = body_orientations[0]
-+        body_rot_inv = Rotation.from_quat([qx, qy, qz, qw]).inv()
- 
-         # Get the relative position of the rotors with respect to the body frame of the vehicle (ignoring the orientation for now)
+-
+-        # Get the relative position of the rotors with respect to the body frame of the vehicle (ignoring the orientation for now)
 -        relative_poses = self.get_dc_interface().get_relative_body_poses(rb, rotors)
-+        relative_positions = []
-+        for i in range(self._thrusters._num_rotors):
-+            rotor_positions, _ = self.get_rigid_prim("/rotor" + str(i)).get_world_poses()
-+            relative_positions.append(body_rot_inv.apply(np.array(rotor_positions[0]) - body_pos))
++        # Get the relative position of the rotors with respect to the body frame of the vehicle
++        relative_positions = self.rotor_body_positions()
  
          # Define the alocation matrix
          aloc_matrix = np.zeros((4, self._thrusters._num_rotors))
-@@ -196,8 +213,8 @@ class Multirotor(Vehicle):
+@@ -196,8 +245,8 @@ class Multirotor(Vehicle):
          aloc_matrix[0, :] = np.array(self._thrusters._rotor_constant)                                           
  
          # Define the second and third lines of the matrix (\tau_x [Nm] and \tau_y [Nm])
