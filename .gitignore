@@ -242,3 +242,8 @@ sparx_agency/tasks/planning/vlas/*/trt/engines/
 
 # FALCON flight logs (thought journal); see tasks/planning/falcon/run_falcon.sh
 sparx_agency/tasks/planning/falcon/logs/
+
+# Simulated flight recordings (chase-camera video); see
+# tasks/planning/sim_flight_recording/run_flight.sh -- these are regenerated
+# per run and copied out of the container, never committed.
+*.mp4
