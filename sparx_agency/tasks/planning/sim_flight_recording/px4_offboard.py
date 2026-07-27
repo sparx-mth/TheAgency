@@ -16,39 +16,35 @@ from __future__ import annotations
 
 import math
 
-# PX4's custom-mode encoding for MAV_CMD_DO_SET_MODE (see PX4's commander/px4_custom_mode.h)
+# PX4's custom-mode encoding for MAV_CMD_DO_SET_MODE (see PX4's commander/px4_custom_mode.h).
+# HEARTBEAT.custom_mode packs the main mode into bits 16-23 and the sub mode into
+# 24-31, which is how a caller can tell whether a mode request was actually
+# honoured -- MAV_CMD_DO_SET_MODE is fire-and-forget and PX4 declines silently.
 _PX4_CUSTOM_MAIN_MODE_OFFBOARD = 6
 _MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
+_CUSTOM_MAIN_MODE_SHIFT = 16
+_CUSTOM_MAIN_MODE_MASK = 0xFF
 
 # SET_POSITION_TARGET_LOCAL_NED type_mask: use position + yaw, ignore velocity,
 # acceleration and yaw-rate (bits 3-8 and 11).
 _TYPE_MASK_POSITION_YAW = 0b100111111000
+# ... and its counterpart: use velocity + yaw, ignore position (bits 0-2),
+# acceleration (6-8) and yaw-rate (11).
+_TYPE_MASK_VELOCITY_YAW = 0b100111000111
 
 _MAV_FRAME_LOCAL_NED = 1
 
-# PX4 ships tuned for open sky: ~12 m/s cruise, 45 deg of tilt, aggressive
-# acceleration. In a furnished room that overshoots every waypoint into a wall
-# -- a simple_room run reached the far wall at 4.35 m and finished the flight
-# nose-down on the floor. These are the same limits an operator would set on a
-# real indoor drone: slow, gentle, shallow.
-INDOOR_LIMITS = {
-    "MPC_XY_VEL_MAX": 1.5,      # m/s, horizontal speed ceiling
-    "MPC_XY_CRUISE": 1.0,       # m/s, target speed between waypoints
-    "MPC_ACC_HOR_MAX": 1.5,     # m/s^2
-    "MPC_ACC_HOR": 1.0,         # m/s^2
-    "MPC_JERK_AUTO": 2.0,       # m/s^3, smooths the corners
-    "MPC_TILTMAX_AIR": 20.0,    # deg, shallow tilt keeps the camera useful
-    "MPC_Z_VEL_MAX_UP": 1.0,    # m/s
-    "MPC_Z_VEL_MAX_DN": 0.7,    # m/s
-    "MPC_YAWRAUTO_MAX": 45.0,   # deg/s, so the camera pans rather than whips
-    # Takeoff is the least stable moment: MPC_TILTMAX_AIR does not govern the
-    # takeoff ramp, and snapping to full climb thrust while still in ground
-    # contact has tipped the airframe over on its back (roll -150 deg two
-    # seconds after arming). Ramp the thrust in and climb slowly instead.
-    "MPC_TKO_RAMP_T": 3.0,      # s, thrust ramp-up time
-    "MPC_TKO_SPEED": 0.5,       # m/s, initial climb rate
-    "MPC_LAND_SPEED": 0.4,      # m/s, touchdown rate
-}
+# MAV_LANDED_STATE, from EXTENDED_SYS_STATE. PX4's land detector is the only
+# authority on whether the aircraft is actually down; inferring it from altitude
+# gets a touchdown on a desk wrong, and inferring it from disarm misses a
+# landing that PX4 chose not to disarm after.
+LANDED_STATE_ON_GROUND = 1
+LANDED_STATE_IN_AIR = 2
+
+
+def _normalize(angle: float) -> float:
+    """Wrap an angle into ``(-pi, pi]``."""
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 def enu_to_ned(x_east: float, y_north: float, z_up: float, yaw_enu: float):
@@ -71,23 +67,42 @@ class PX4Offboard:
     """A polled MAVLink client for arming and position-controlling PX4 SITL.
 
     Args:
-        port: UDP port PX4 SITL instance 0 opens for its companion-computer
-            link. See ``PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/
-            px4-rc.mavlink``.
+        instance: PX4 SITL instance id. Selects the companion-computer UDP port
+            (``14540 + instance``), which is what makes several aircraft
+            controllable from one machine. See :mod:`px4_launch` for the rest of
+            the per-instance identity.
     """
 
-    def __init__(self, port: int = 14540):
+    def __init__(self, instance: int = 0):
         from pymavlink import mavutil
 
+        from sparx_agency.tasks.planning.sim_flight_recording.px4_launch import offboard_port
+
         self._mavutil = mavutil
-        self._conn = mavutil.mavlink_connection(f"udpin:0.0.0.0:{port}")
+        self.instance = instance
+        self._conn = mavutil.mavlink_connection(f"udpin:0.0.0.0:{offboard_port(instance)}")
         self.heartbeat_seen = False
         self.armed = False
         self.mode = None
         self.local_ned = None
+        self.attitude_ned = None
+        self.landed_state = None
+        self.acknowledged_params = set()
+        self.status_texts = []
+        # World-frame -> PX4-local-frame transform. Latched, never live; see
+        # latch_frame for why that distinction is load-bearing.
+        self.frame_offset = (0.0, 0.0, 0.0)
+        self.heading_bias = 0.0
+        # The last setpoint actually put on the wire, in PX4's own NED frame.
+        # Nothing reads it in normal operation; it is here because when the
+        # aircraft does not go where it was sent, "what did we literally send,
+        # and where does PX4 think it is" is the question that settles it.
+        self.last_setpoint_ned = None
+        self._origin_world = (0.0, 0.0, 0.0)
+        self._origin_px4 = (0.0, 0.0, 0.0)
 
     def poll(self) -> None:
-        """Drain pending MAVLink messages and refresh heartbeat/arm/position state.
+        """Drain pending MAVLink messages and refresh the cached vehicle state.
 
         Call once per simulation step. Never blocks.
         """
@@ -102,9 +117,63 @@ class PX4Offboard:
                 self.mode = msg.custom_mode
             elif kind == "LOCAL_POSITION_NED":
                 self.local_ned = (msg.x, msg.y, msg.z)
+            elif kind == "ATTITUDE":
+                self.attitude_ned = (msg.roll, msg.pitch, msg.yaw)
+            elif kind == "EXTENDED_SYS_STATE":
+                self.landed_state = msg.landed_state
+            elif kind == "PARAM_VALUE":
+                # PX4 echoes every parameter it accepts. A parameter it rejected
+                # (a type mismatch, a name that does not exist) is never echoed,
+                # and the only other sign is a line in PX4's own console -- so
+                # this is how a caller can tell a setting actually applied.
+                self.acknowledged_params.add(
+                    msg.param_id.decode() if isinstance(msg.param_id, bytes) else msg.param_id
+                )
+            elif kind == "STATUSTEXT":
+                text = msg.text.decode() if isinstance(msg.text, bytes) else msg.text
+                self.status_texts.append(text)
 
-    def frame_offset(self, vehicle_enu):
-        """Offset between the simulator's world frame and PX4's local frame.
+    @property
+    def on_ground(self) -> bool:
+        """PX4's own land detector says the aircraft is down.
+
+        None until an ``EXTENDED_SYS_STATE`` has arrived, which reads as False.
+        """
+        return self.landed_state == LANDED_STATE_ON_GROUND
+
+    @property
+    def main_mode(self):
+        """PX4's current main flight mode, or None before the first heartbeat."""
+        if self.mode is None:
+            return None
+        return (int(self.mode) >> _CUSTOM_MAIN_MODE_SHIFT) & _CUSTOM_MAIN_MODE_MASK
+
+    @property
+    def in_offboard(self) -> bool:
+        """True while PX4 is actually flying the setpoints being streamed at it.
+
+        Worth checking every step, not just once. ``MAV_CMD_DO_SET_MODE`` is
+        fire-and-forget -- PX4 declines it silently if no setpoint stream is
+        flowing yet -- and PX4 also *leaves* offboard on its own whenever a
+        failsafe fires. An armed aircraft that is not in offboard ignores every
+        setpoint sent to it, which looks exactly like a drone that will not fly:
+        one campaign recorded 1210 frames of a stationary aircraft and called it
+        a successful flight because nothing was checking this.
+        """
+        return self.main_mode == _PX4_CUSTOM_MAIN_MODE_OFFBOARD
+
+    def drain_status_texts(self) -> list:
+        """Return and clear the ``STATUSTEXT`` messages seen since the last call.
+
+        This is where PX4 says *why* it refused to arm. Surfacing it turns a
+        campaign's "waypoint timed out" into "Preflight Fail: ..." without
+        having to go and read a separate console log.
+        """
+        texts, self.status_texts = self.status_texts, []
+        return texts
+
+    def measure_frame_offset(self, vehicle_enu):
+        """The offset between the simulator's world frame and PX4's local frame, right now.
 
         PX4's local NED frame is anchored where its estimator initialised --
         that is, wherever the vehicle happened to be sitting when PX4 booted --
@@ -114,15 +183,13 @@ class PX4Offboard:
         from a spawn at ``(-4.6, 4.4)``).
 
         Comparing PX4's own reported local position against the simulator's
-        ground truth recovers that offset continuously, so it also tracks any
-        later estimator drift.
+        ground truth recovers that offset.
 
         Args:
             vehicle_enu: The vehicle's true world-frame ``(x, y, z)``.
 
         Returns:
-            ``(dx, dy, dz)`` to subtract from a world-frame target before
-            sending it as a setpoint. Zero until PX4 reports a position.
+            ``(dx, dy, dz)``. Zero until PX4 reports a position.
         """
         if self.local_ned is None:
             return (0.0, 0.0, 0.0)
@@ -130,13 +197,164 @@ class PX4Offboard:
         estimated_enu = (east, north, -down)
         return tuple(vehicle_enu[i] - estimated_enu[i] for i in range(3))
 
-    def send_setpoint_world(self, x: float, y: float, z: float, yaw: float, vehicle_enu) -> None:
+    @property
+    def estimated_yaw_enu(self):
+        """PX4's estimated heading, in the simulator's ENU convention.
+
+        ``ATTITUDE`` reports yaw as radians CW from *its* north; this is the
+        same angle expressed as radians CCW from +X, so it can be compared with
+        the simulator's ground-truth heading directly. None before the first
+        ``ATTITUDE`` message.
+        """
+        if self.attitude_ned is None:
+            return None
+        return _normalize(math.pi / 2.0 - self.attitude_ned[2])
+
+    def latch_frame(self, vehicle_enu, vehicle_yaw_enu: float) -> None:
+        """Freeze the world-to-PX4 transform, and use it until re-latched.
+
+        **Two things have to be captured, and both have to be constants.**
+
+        *The translation* is where PX4 booted. *The rotation* is the angle
+        between PX4's idea of north and the simulator's +y, which is not zero:
+        PX4 takes its heading reference from a magnetometer, and there is no
+        reason for a simulated magnetic north to line up with a world grid.
+        Sending a world-frame displacement without rotating it into PX4's frame
+        commands the aircraft off by that angle -- which grows with distance and
+        put one 14 m flight 7 m from its goal.
+
+        And they must be *latched*, not measured live. Recomputing on every
+        setpoint closes a feedback loop: the commanded point becomes
+        ``target - truth + estimate(truth)``, so a position-dependent estimate
+        error moves the setpoint as the aircraft moves toward it. With a
+        rotational error that displacement is perpendicular to the motion, and
+        the aircraft flies a circle around its waypoint instead of arriving --
+        observed as a stable 1.1 m orbit held for 100 seconds through three
+        waypoint timeouts, with PX4 reporting a healthy offboard mode
+        throughout.
+
+        Latch while the aircraft is stationary on the ground, where a live
+        measurement is safe. :meth:`frame_drift` exists to notice the latched
+        value going stale.
+
+        Args:
+            vehicle_enu: The vehicle's true world-frame ``(x, y, z)``.
+            vehicle_yaw_enu: The vehicle's true heading, radians CCW from +X.
+        """
+        self._origin_world = tuple(float(v) for v in vehicle_enu[:3])
+        self._origin_px4 = self._estimated_enu() or self._origin_world
+        estimated_yaw = self.estimated_yaw_enu
+        if estimated_yaw is not None:
+            self.heading_bias = _normalize(float(vehicle_yaw_enu) - estimated_yaw)
+        self.frame_offset = tuple(
+            self._origin_world[i] - self._origin_px4[i] for i in range(3))
+
+    def _estimated_enu(self):
+        """PX4's reported position, converted from local NED to an ENU triple."""
+        if self.local_ned is None:
+            return None
+        north, east, down = self.local_ned
+        return (east, north, -down)
+
+    def frame_drift(self, vehicle_enu) -> float:
+        """How far PX4's estimate has moved relative to truth since latching, metres.
+
+        A healthy flight keeps this within a few tens of centimetres. A large
+        value means the latched transform is stale and the aircraft is being
+        commanded to the wrong place -- worth recording alongside a flight that
+        went wrong.
+        """
+        estimated = self._estimated_enu()
+        if estimated is None:
+            return 0.0
+        expected = self.world_to_px4(vehicle_enu[0], vehicle_enu[1], vehicle_enu[2])
+        return math.sqrt(sum((estimated[i] - expected[i]) ** 2 for i in range(3)))
+
+    def world_to_px4(self, x: float, y: float, z: float) -> tuple:
+        """Convert a world-frame (ENU) point into PX4's local frame.
+
+        Rotates the displacement from the latch point by the latched heading
+        bias, then re-anchors it on where PX4 thought it was at that moment.
+        """
+        rotated = self._rotate_into_px4(x - self._origin_world[0],
+                                        y - self._origin_world[1])
+        return (self._origin_px4[0] + rotated[0],
+                self._origin_px4[1] + rotated[1],
+                self._origin_px4[2] + (z - self._origin_world[2]))
+
+    def send_setpoint_world(self, x: float, y: float, z: float, yaw: float,
+                            vehicle_enu=None) -> None:
         """Stream a setpoint given in the *simulator's* world frame.
 
-        Converts through :meth:`frame_offset` into PX4's local frame first.
+        When the caller supplies ground truth, the setpoint is closed around it:
+        the *world-frame error* is rotated into PX4's frame and added to where
+        PX4 currently believes it is. That is a position servo on the true
+        position, and it is exact whatever PX4's estimate is doing -- a wrong
+        origin, a wrong heading reference and accumulated drift all cancel,
+        because only the *displacement* is ever taken from PX4.
+
+        It is also stable rather than the feedback trap a naive live correction
+        would be. While PX4's estimate and the truth differ by a fixed rotation
+        and translation, moving the aircraft by delta moves both terms by the
+        same amount, so the commanded point stays put; it moves only when that
+        relationship is violated, which is exactly when it should.
+
+        Without ground truth it falls back to the latched transform, which is
+        open-loop and only as good as the latch.
+
+        Args:
+            x, y, z: Target in the simulator's world (ENU) frame, metres.
+            yaw: Heading to hold, radians CCW from +X in the world frame.
+            vehicle_enu: The vehicle's true world-frame ``(x, y, z)``.
         """
-        dx, dy, dz = self.frame_offset(vehicle_enu)
-        self.send_setpoint(x - dx, y - dy, z - dz, yaw)
+        yaw_local = _normalize(yaw - self.heading_bias)
+        estimated = self._estimated_enu()
+        if vehicle_enu is None or estimated is None:
+            local = self.world_to_px4(x, y, z)
+            self.send_setpoint(local[0], local[1], local[2], yaw_local)
+            return
+
+        error = self._rotate_into_px4(x - vehicle_enu[0], y - vehicle_enu[1])
+        self.send_setpoint(estimated[0] + error[0], estimated[1] + error[1],
+                           estimated[2] + (z - vehicle_enu[2]), yaw_local)
+
+    def _rotate_into_px4(self, dx: float, dy: float) -> tuple:
+        """Rotate a world-frame horizontal displacement into PX4's local frame."""
+        cos_bias, sin_bias = math.cos(-self.heading_bias), math.sin(-self.heading_bias)
+        return (dx * cos_bias - dy * sin_bias, dx * sin_bias + dy * cos_bias)
+
+    def send_velocity_world(self, vx: float, vy: float, vz: float, yaw: float) -> None:
+        """Stream a **velocity** setpoint given in the simulator's world frame.
+
+        This is how the aircraft is actually flown, and position setpoints are
+        kept only for holding still before takeoff. PX4's offboard *position*
+        path did not work here: given a setpoint a metre away, in a healthy
+        offboard mode, with no failsafe and its own estimate tracking ground
+        truth to 30 cm, it closed the gap at one centimetre per second and the
+        flight timed out. Velocity setpoints go almost straight to the velocity
+        controller, so there is no trajectory smoother, no position-error
+        clamping and no local-frame *origin* to get wrong -- only the heading
+        bias, which is measured.
+
+        It also matches how everything else in this repo flies a drone: the
+        FALCON stack's followers all emit ``/cmd_vel``.
+
+        Args:
+            vx, vy: World-frame horizontal velocity, m/s (x = East, y = North).
+            vz: World-frame vertical velocity, m/s, positive up.
+            yaw: Heading to hold, radians CCW from +X in the world frame.
+        """
+        east, north = self._rotate_into_px4(vx, vy)
+        yaw_ned = math.pi / 2.0 - _normalize(yaw - self.heading_bias)
+        self.last_setpoint_ned = (north, east, -vz)
+        self._conn.mav.set_position_target_local_ned_send(
+            0, self._conn.target_system, self._conn.target_component,
+            _MAV_FRAME_LOCAL_NED, _TYPE_MASK_VELOCITY_YAW,
+            0.0, 0.0, 0.0,          # position (ignored by the type mask)
+            north, east, -vz,       # velocity, NED
+            0.0, 0.0, 0.0,          # acceleration (ignored)
+            yaw_ned, 0.0,           # yaw, yaw rate (rate ignored)
+        )
 
     def set_params(self, params: dict) -> None:
         """Push parameters to PX4.
@@ -162,13 +380,24 @@ class PX4Offboard:
                 name.encode(), float(value), param_type,
             )
 
-    def set_indoor_limits(self, limits: dict = None) -> None:
-        """Push the conservative indoor speed/tilt limits to PX4.
+    def request_data_streams(self, rate_hz: float = 5.0) -> None:
+        """Ask PX4 to stream the messages this class reads.
+
+        ``EXTENDED_SYS_STATE`` (the land detector) is not in PX4's default
+        onboard stream set, so without this :attr:`on_ground` never becomes
+        True and a mission waits out its landing timeout every time.
 
         Args:
-            limits: Parameter name to value. Defaults to :data:`INDOOR_LIMITS`.
+            rate_hz: Stream rate. A land detection does not need to be prompt.
         """
-        self.set_params(limits or INDOOR_LIMITS)
+        interval_us = int(1e6 / max(rate_hz, 0.1))
+        for message_id in (self._mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE,
+                           self._mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
+                           self._mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED):
+            self._command_long(
+                self._mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                float(message_id), float(interval_us),
+            )
 
     def _command_long(self, command: int, *params) -> None:
         args = list(params) + [0.0] * (7 - len(params))
@@ -184,6 +413,7 @@ class PX4Offboard:
         be called every step, both before and after :meth:`set_offboard_mode`.
         """
         north, east, down, yaw_ned = enu_to_ned(x_east, y_north, z_up, yaw_enu)
+        self.last_setpoint_ned = (north, east, down)
         self._conn.mav.set_position_target_local_ned_send(
             0, self._conn.target_system, self._conn.target_component,
             _MAV_FRAME_LOCAL_NED, _TYPE_MASK_POSITION_YAW,
@@ -223,6 +453,17 @@ class PX4Offboard:
     def arm(self) -> None:
         """Request arming. Idempotent -- PX4 ignores a redundant arm command."""
         self._command_long(self._mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1)
+
+    def disarm(self, force: bool = False) -> None:
+        """Request disarming.
+
+        Args:
+            force: Disarm even in flight. PX4 refuses a normal disarm request
+                while it believes it is airborne; the magic ``21196`` is its
+                documented override. Only for aborting a stuck episode.
+        """
+        self._command_long(self._mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                           0, 21196.0 if force else 0.0)
 
     def land(self) -> None:
         """Switch to PX4's autonomous land mode."""

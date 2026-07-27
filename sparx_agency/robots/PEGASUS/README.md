@@ -110,7 +110,11 @@ would need its own loader (its scenes aren't single-USD CDN references like
 ```
 robots/PEGASUS/
   config/camera_pegasus_iris_504x392.yaml   sim camera intrinsics (== XTEND's 392x504 depth-engine calibration)
-  adapters/scene.py                          load_indoor_scene() + SCENE_SURVEYS (surveyed spawn + route per scene)
+  maps/<scene>_alt<NNN>cm.npz               surveyed flyable space, one per scene AND altitude
+  adapters/scene.py                          load_indoor_scene() + a hand-measured spawn per scene
+  adapters/scene_map.py                      where a surveyed map lives and how to read it (no Isaac import)
+  adapters/occupancy_survey.py               sweep a loaded scene into that map (needs a live sim)
+  adapters/sensors.py                        the PX4 sensor suite with every noise term zeroed
   adapters/vehicle.py                        PegasusIrisVehicle -- spawn Iris (+ optional PX4 backend) + RGBD camera
   setup/pegasus_isaac6_compat.patch          the Isaac Sim 6.x compatibility fixes, pinned to commit e13dc659
   setup/install.sh                           clone+patch Pegasus, clone+build PX4 SITL
@@ -122,6 +126,63 @@ this package since they're platform-agnostic and mission-level respectively.
 `tasks/planning/sim_flight_recording/README.md`** — that is the operating
 manual; this file covers the platform and the compatibility work underneath
 it.
+
+## Simulated sensor noise, and why it is all switched off
+
+Pegasus models a real GPS receiver, IMU, magnetometer and barometer, noise and
+biases included. `adapters/sensors.py` zeroes every configurable noise term,
+which makes PX4's estimator input ground truth. That is the difference between
+a campaign that works and one that does not: on the stock sensors PX4's
+position hold wandered metres indoors — more than the gap between two office
+desks — and roughly half of `office` flights ended against furniture.
+
+Three things are worth knowing before changing it:
+
+- **The correlation times must stay non-zero.** They appear in divisors
+  (`imu.py:111`/`:131`, `magnetometer.py:118`, `gps.py:130`); zeroing one is a
+  `ZeroDivisionError`, not a quieter sensor.
+- **The barometer needs a subclass.** Alone among the four it has *no config
+  key* for its noise — `Barometer.update` unconditionally draws ~1 Pa of
+  Gaussian pressure error, which at sea-level density is 8.4 cm of altitude, on
+  every update. `NoiselessBarometer` overrides the method. (It is also dropped
+  from PX4's height fusion entirely — see `px4_params.py` — because PX4 was
+  observed switching to a second, stale `sensor_baro` instance mid-flight.)
+- **The GPS runs at 20 Hz, not Pegasus's 250 Hz default.** 250 Hz is one fix per
+  physics step, 50x what hardware produces and past the ~90 Hz PX4's observation
+  buffer accepts anyway.
+
+Exact sensors do **not** want a matching tightening of PX4's own process noise.
+That was tried and reverted: it makes the filter trust the accelerometer
+absolutely, so every transient disagreement with GPS lands in the accel-bias
+state instead, and the result was `Preflight Fail: High Accelerometer Bias`
+from the moment of takeoff.
+
+## Where a flight is safe to go: surveyed maps, not remembered routes
+
+`adapters/occupancy_survey.py` sweeps a loaded scene at flight altitude and asks
+PhysX two questions per grid cell — *is this inside the building?* (floor below,
+ceiling above; without the ceiling test a floor-only sweep accepts the
+kilometre-wide ground plane these assets stand on) and *is anything in the way?*
+(an `overlap_box_any` the size of the airframe). Cells that are not inside come
+back UNKNOWN rather than free, and the planner treats UNKNOWN as blocked, so a
+route can never leave through a wall the sweep never looked at.
+
+A second question is asked of the same downward ray: *how far is the floor?* A
+cell whose first hit below is much closer than the cruise altitude has furniture
+under it — flyable, but not somewhere the aircraft can be **put down**. That
+goes into the map as a `landable` layer, and it is not a nicety: a goal chosen
+over a desk lands the aircraft on the desk, where it tips, and every subsequent
+episode is refused with `Preflight Fail: Attitude failure (roll)`. One campaign
+lost four of six episodes that way.
+
+The result is a `core.planning.environment.OccupancyGrid2D` plus its layers,
+cached as a few-kB `.npz` under `maps/` and **committed**, so a campaign is
+reproducible and planning needs no simulator. `office` at 1.5 m is 320x320 cells
+at 25 cm: 867 m² of contiguous flyable space, of which 809 m² is landable.
+
+**A map is only valid at the altitude it was surveyed at** — clearance at head
+height and at desk height are different buildings — so the altitude is in the
+filename, and `load_scene_map` refuses to substitute a different one.
 
 ## The two dynamics bugs the port introduced (and fix)
 
@@ -179,7 +240,35 @@ whatever changed in Kit/PhysX callback wiring in 6.0.1, or moved to
 **The workaround, which is what everything here uses:**
 `tasks/planning/sim_flight_recording/manual_physics_driver.py` calls those four
 methods by hand once per step from an ordinary Python loop, which does keep
-running. With it, PX4's first heartbeat arrives 1.4 s into simulated time.
+running. With it, PX4's first heartbeat arrives 1.2 s into simulated time.
+
+## The timestep bug: `world.step()` did not advance a fixed amount of time
+
+Found last and mattering most. Pegasus's PX4 world defaults to `physics_dt =
+1/250` and `rendering_dt = 1/60`, which Isaac Sim turns into `substeps =
+int(rendering_dt / physics_dt) = 4`. So **`world.step()` advanced 4 ms without a
+render and 16 ms with one**, and a caller driving the vehicle by one fixed `dt`
+was wrong on every step, in one of two different directions.
+
+Everything downstream is derived from that `dt`:
+
+- PX4's lockstep clock is integrated from it (`_current_utime += dt * 1e6`), so
+  its clock ran about twice as fast as the world it was flying in.
+- Pegasus's simulated accelerometer is `(v − v_prev) / dt`, so specific force
+  alternated between 0.4x and 1.6x of truth at 25 Hz — a square wave straight
+  into the attitude estimator. This is the most likely identity of the
+  "compass/accelerometer-bias estimator divergence" earlier notes blamed for
+  the ~50% failure rate.
+- Every recorded timestamp was a frame index over a nominal rate the simulation
+  was not running at, so the poses in a recording were mis-stamped.
+
+**Fix:** `flight_session.build_world` calls
+`PegasusInterface.set_world_settings(physics_dt=PHYSICS_DT,
+rendering_dt=PHYSICS_DT)` before `initialize_world()`. Equal timesteps mean
+`substeps == 1`, so one `world.step()` is exactly one physics step whether or
+not it rendered. Rendering stays occasional — the caller chooses when — it just
+no longer changes how much time passes. Confirmed after the fix: a 45-second
+flight recorded 450 frames, i.e. exactly the requested 10 Hz.
 
 ## Running it
 
@@ -192,16 +281,22 @@ inside a running Kit app).
 sparx_agency/robots/PEGASUS/setup/install.sh /path/to/dev/root
 ```
 
-Then fly it **from the host** with the launcher, which handles syncing the
-repo into the container, clearing stale PX4 locks, and starting the run:
+Then survey a scene once (per altitude), and collect **from the host** with the
+launcher, which handles syncing the repo into the container, clearing stale PX4
+locks, and starting one worker per aircraft:
 
 ```bash
-sparx_agency/tasks/planning/sim_flight_recording/run_flight.sh --scene office
+docker exec isaac-sim bash -c "cd /tmp/dev/repo && /isaac-sim/python.sh \
+  sparx_agency/tasks/planning/sim_flight_recording/survey_scene.py \
+  --scene office --altitude 1.5 --preview"
+
+sparx_agency/tasks/planning/sim_flight_recording/run_collection.sh \
+  --scene office --episodes 20 --workers 4
 ```
 
-See `tasks/planning/sim_flight_recording/README.md` for the flags, the flight
-modes, how the per-scene routes are surveyed, and why PX4 is given a vision
-pose instead of GPS.
+See `tasks/planning/sim_flight_recording/README.md` for the flags, what one
+episode is, what comes out, and how several workers stay out of each other's
+way.
 
 ## Aerial Gym: deliberately not installed
 
@@ -328,21 +423,40 @@ needs no extra software.
   `docker exec -u root isaac-sim rm -rf /isaac-sim/extsDeprecated/omni.isaac.ml_archive/pip_prebundle/{torch,torchvision,torchaudio,nvidia,torch-*.dist-info,torchvision-*.dist-info,torchaudio-*.dist-info,nvidia_*.dist-info}`
   — confirmed this restores both scenes. Re-check for this after *any*
   `isaaclab.sh -i` run (including a reinstall after a container recreation).
-- **Only one Isaac Sim process at a time.** A second one crashes the first
-  inside Kit (`libomni.anim.behavior.core.plugin.so`, `std::out_of_range: no
-  null terminator at count`) with a stack trace that points nowhere near the
-  real cause. Wait for `Simulation App Shutting Down` — teardown takes a while
-  after the Python process looks done. The same GPU/Kit contention is also the
-  likely cause of a one-off `libnvidia-rtcore.so` / `libnvidia-gpucomp.so`
-  segfault (exit 139) seen when a flight was launched while a previous run's
-  PX4/Kit processes were still alive (orphaned, not killed) — it did not
-  recur once stray processes were cleaned up before relaunch, so treat any
+- **Starting a second Isaac Sim process while the first is still booting
+  crashes it.** The crash lands inside Kit
+  (`libomni.anim.behavior.core.plugin.so`, `std::out_of_range: no null
+  terminator at count`) with a stack trace that points nowhere near the real
+  cause. Wait for `Simulation App Shutting Down` — teardown takes a while after
+  the Python process looks done. The same GPU/Kit contention is also the likely
+  cause of a one-off `libnvidia-rtcore.so` / `libnvidia-gpucomp.so` segfault
+  (exit 139) seen when a flight was launched while a previous run's PX4/Kit
+  processes were still alive (orphaned, not killed) — it did not recur once
+  stray processes were cleaned up before relaunch, so treat any
   RTX-shader-compiler crash as a process-hygiene symptom first, not a Blackwell
   driver bug, before assuming the GPU itself is at fault.
-- **PX4 lock files.** `/tmp/px4_lock-0` and `/tmp/px4-sock-0` survive an
+  This is **not** a hard one-process-at-a-time limit — several concurrent
+  workers are supported and are the point of `run_collection.sh` — but it is
+  why that script staggers worker starts by 45 s. Kit's start-up is the
+  heaviest moment of a worker's life; overlapping two of them is what triggers
+  the shader-compiler crash. On this laptop's 8 GB GPU one worker is the
+  practical limit anyway; a 24 GB card fits several.
+- **PX4 lock files.** `/tmp/px4_lock-<N>` and `/tmp/px4-sock-<N>` survive an
   abruptly-killed PX4 and make the next instance exit immediately (`PX4
-  Exiting...`) with no explanation. `px4_launch.clear_stale_locks()` and
-  `run_flight.sh` both remove them; do it by hand if you launch PX4 yourself.
+  Exiting...`) with no explanation. `px4_launch.clear_stale_locks(instance)` and
+  `run_collection.sh` both remove them; do it by hand if you launch PX4 yourself.
+- **Every PX4 instance needs its own working directory.** `parameters.bson`,
+  `dataman` and `log/` are all relative to PX4's cwd, and `param_save_default`
+  writes the parameter file in place with `O_TRUNC` under a *process-local*
+  lock. Two instances sharing a directory silently corrupt each other's
+  configuration every time either receives a `PARAM_SET`, which is every
+  flight. `px4_launch.working_dir()` gives each one
+  `build/px4_sitl_default/instance_<N>`.
+- **PX4 persists every parameter it is sent**, so an experiment leaks into every
+  later run from the same directory. This has already caused one multi-day
+  false trail (a `--vision` run left `EKF2_GPS_CTRL=0` behind and every
+  subsequent flight failed pre-flight with `ekf2 missing data`). `collect.py`
+  deletes the parameter file at campaign start for exactly this reason.
 - **Orphaned PX4 processes.** `make px4_sitl_default none`'s auto-launched
   `px4` can outlive its parent Python process (e.g. under a `timeout`
   wrapper). Check for stray `rcS`/`px4-param`/`build/px4_sitl_default/bin/px4`
@@ -375,12 +489,25 @@ needs no extra software.
   the crash, but takes `pegasus.simulator` down with it (a hard dependency),
   so it's not usable. This is a genuine Kit/`omni.anim.behavior.core` bug,
   not something fixable from this repo — root cause unknown, no known
-  workaround. `run_flight.sh --scene hospital` will not fly until either this
-  upstream bug is fixed/patched or a different way to avoid it is found. A
-  hospital route survey (`probe_scene.py --scene hospital`) cannot even be
-  computed while this crash stands, since the survey step also enables
-  `pegasus.simulator`.
+  workaround. `--scene hospital` will not fly until either this upstream bug is
+  fixed/patched or a different way to avoid it is found. A hospital survey
+  (`survey_scene.py --scene hospital`) cannot even be computed while this crash
+  stands, since surveying also enables `pegasus.simulator`.
 - No home or library scene is wired in (see "Confirmed indoor scenes").
-- No NavDP fine-tuning has been run against simulated data yet.
+- Only `office` has been surveyed. `simple_room` should survey fine;
+  `warehouse` / `full_warehouse` are untried.
+- No VLA fine-tuning has been run against simulated data yet.
 - `fly_direct.py`'s PD gains were tuned empirically for the Iris's ~1.6 kg
   mass on one scene; expect to retune for others.
+- **The aircraft creeps a little on the floor between flights** — measured about
+  0.8 m over 15 s of sitting still after a landing. Harmless for the data (every
+  pose is ground truth either way) and no longer harmful to the estimator now
+  that PX4's own sensor auto-calibration is off, but the cause was never
+  established. Suspect PhysX resolving a small penetration between the Iris's
+  landing gear and the scene floor.
+- **Pegasus sends the aircraft's altitude in `HIL_SENSOR`'s temperature field.**
+  `send_sensor_msgs` passes `self._sensor_data.altitude` where the MAVLink
+  message expects `temperature`, which is why PX4's console reports absurd
+  sensor temperatures (`90061.0 degC`). Harmless with PX4's thermal
+  compensation off (the `TC_*_ENABLE` defaults), but it would silently corrupt
+  any run that turned it on.

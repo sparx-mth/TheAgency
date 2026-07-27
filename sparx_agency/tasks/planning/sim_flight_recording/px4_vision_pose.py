@@ -1,34 +1,61 @@
 """Feed PX4 a precise vision/mocap pose instead of simulated GPS.
 
-**INCOMPLETE — opt in with ``fly_px4.py --vision``, and expect it not to arm.**
-See "Current state" below before using it.
+**UNFINISHED, AND NOT WIRED INTO ANY ENTRY POINT.** Kept for its notes: the
+investigation below got most of the way, and the remaining suspects are now
+named. Nothing imports this module.
 
 *Why it exists.* Pegasus's PX4 backend simulates a GPS receiver, noise and all.
-Outdoors that is the right model; indoors it is fatal. Flying ``office`` on
-GPS, PX4's position hold wandered 2-5 m around each setpoint -- more than the
-clearance between the desks -- and the drone hit furniture on a leg the route
-planner had verified as clear. Real indoor drones do not use GPS for this; they
-fuse a visual-inertial or motion-capture pose. This module supplies the
-simulated equivalent, from the simulator's ground truth.
+Outdoors that is the right model; indoors it cost metres of position hold and
+about half of ``office`` flights ended against furniture. Real indoor drones do
+not use GPS for this; they fuse a visual-inertial or motion-capture pose. This
+module supplies the simulated equivalent, from the simulator's ground truth.
 
-*Current state.* With :data:`VISION_EKF_PARAMS` applied, PX4 accepts the
-parameters but then refuses to arm with ``Preflight Fail: ekf2 missing data``
--- the estimator has been told to depend on vision and is not receiving any.
-Two causes have been found and fixed and the symptom persists, so at least one
-more remains:
+*Why it is not the current answer.* That drift turned out to have two much
+cheaper causes, both since fixed: Pegasus's sensor noise (now zeroed --
+``robots/PEGASUS/adapters/sensors.py``) and a physics-timestep mismatch that fed
+the estimator a square-wave error on specific force (see
+``flight_session``'s docstring). Switching the estimator's aiding source is a
+far larger change than making the existing source accurate, so it was not
+needed. If exact indoor position ever *is* needed beyond what noiseless GPS
+gives, resume here.
 
-1. **Parameter type mismatch.** Four of these EKF2 parameters are INT32.
-   Sending them as REAL32 made PX4 reject them (``ERROR [mavlink] param types
-   mismatch``) and silently keep using GPS. Fixed -- see
+*Where it stalled.* With :data:`VISION_EKF_PARAMS` applied, PX4 accepted the
+parameters and then refused to arm with ``Preflight Fail: ekf2 missing data``.
+Four causes are now known; two were fixed before the work stopped.
+
+1. **Parameter type mismatch** (fixed). Four of these EKF2 parameters are
+   INT32. Sending them as REAL32 made PX4 reject them (``ERROR [mavlink] param
+   types mismatch``) and silently keep using GPS. See
    :meth:`px4_offboard.PX4Offboard.set_params`.
-2. **Wrong MAVLink link.** Pegasus's own ``send_vision_msgs`` writes to the HIL
-   connection, where PX4's ``simulator_mavlink`` ignores everything that is not
-   a ``HIL_*`` message. Fixed by sending over the companion link instead.
+2. **Wrong MAVLink link** (fixed). Pegasus's own ``send_vision_msgs`` writes to
+   the HIL connection, where PX4's ``simulator_mavlink`` ignores everything that
+   is not a ``HIL_*`` message. Fixed by sending over the companion link.
+3. **The message was probably never reaching PX4 at all.** PX4 *binds*
+   ``14580 + instance`` and *sends to* ``14540 + instance``
+   (``px4-rc.mavlink``). A ``udpin`` socket on 14540 does reply to PX4's source
+   port, so :class:`px4_offboard.PX4Offboard` is fine -- but any raw ``udpout``
+   to 14540 is silently dropped. Confirm with ``listener
+   vehicle_visual_odometry`` in PX4's console: nothing printed means the message
+   never arrived.
+4. **The error message does not mean what it looks like.** ``ekf2 missing
+   data`` comes from ``estimatorCheck.cpp`` and fires when the ``estimator_status``
+   uORB topic has *never been advertised* -- i.e. ekf2 has not completed a single
+   successful ``update()`` since boot. It is not an "EV data missing" message at
+   all. If it appears, the estimator is not running, and the vision path is a
+   red herring.
 
-Remaining suspects, untested: the ``time_usec`` stamp not lining up with PX4's
-lockstep clock closely enough for the EKF's acceptance window, and EKF2
-requiring a reboot rather than a runtime parameter change to switch aiding
-source.
+Two further constraints found in PX4 v1.14.3 that this code does not yet honour:
+
+* ``EKF2_EV_QMIN`` must stay 0. ``handle_message_vision_position_estimate``
+  never sets ``odom.quality``, so it is always 0 for a ``VISION_POSITION_ESTIMATE``
+  and any positive minimum blocks fusion forever.
+* Consecutive samples must be **less than 200 ms apart** (``EV_MAX_INTERVAL``)
+  or fusion never starts, and a 400 ms gap stops it. :data:`SEND_RATE_HZ` of 30
+  satisfies this in simulated time only if the caller really is calling
+  :meth:`VisionPoseSender.send` every step.
+* ``EKF2_EV_DELAY`` sizes the observation buffer and is read **once**, when
+  ekf2 first receives IMU data. Setting it at runtime changes the stored value
+  and nothing else; it needs ``ekf2 stop && ekf2 start``.
 
 Frames: the simulator is ENU with an FLU body; MAVLink's vision estimate is NED
 with an FRD body.

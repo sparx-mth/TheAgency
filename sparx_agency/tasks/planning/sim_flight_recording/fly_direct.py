@@ -7,13 +7,14 @@ example to check a scene loads, the camera streams, and the recorder writes),
 or when PX4 refuses to arm and you need to isolate whether the problem is the
 autopilot or the simulator.
 
-For real flights use :mod:`fly_px4`, which puts an actual PX4 autopilot in the
-loop and follows the scene's surveyed route.
+For real flights and for collecting data use :mod:`collect`, which puts an
+actual PX4 autopilot in the loop and plans a wall-avoiding route across a
+surveyed map.
 
-Because it commands forces directly, this script ignores the scene route and
+Because it commands forces directly, this script does no planning at all: it
 flies a fixed climb / forward-and-back cruise / descend pattern around the
-spawn point. It does no obstacle checking beyond starting from the surveyed
-spawn, so in a furnished scene it can and does fly into things.
+spawn point, with no obstacle checking whatsoever, so in a furnished scene it
+can and does fly into things.
 
 Must run under Isaac Sim's own Python::
 
@@ -26,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -36,9 +36,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from sparx_agency.tasks.planning.sim_flight_recording import flight_session
-from sparx_agency.tasks.planning.sim_flight_recording.manual_physics_driver import ManualPhysicsDriver
+from sparx_agency.tasks.planning.sim_flight_recording.sim_loop import SimLoop
 
-CAPTURE_EVERY_N_STEPS = 10
 G = 9.81
 CLIMB_S = 5.0
 DESCEND_S = 5.0
@@ -148,60 +147,43 @@ def main() -> None:
                 get_active_viewport().camera_path = "/World/ChaseCamera"
 
         world.reset()
-        driver = ManualPhysicsDriver(vehicle, state_only=True)
+        # state_only: this script applies its own forces, so it must not let the
+        # driver run Pegasus's rotor/backend update as well.
+        loop = SimLoop(world, vehicle, px4=None, rate_hz=args.rate_hz,
+                       realtime=not args.no_stream, state_only=True)
+        loop.start()
         mass = _total_mass(vehicle)
         print(f"vehicle mass: {mass:.3f} kg", flush=True)
 
-        flight_session.warmup_camera(world)
+        loop.warmup_camera()
         if not args.no_stream:
             print("STREAMING_READY -- connect the Isaac Sim WebRTC Streaming Client "
                   "to this machine, port 49100", flush=True)
 
         recorder = flight_session.FlightRecorder(
-            adapter, args.out_dir, rate_hz=args.rate_hz,
+            adapter, args.out_dir, rate_hz=args.rate_hz, camera_height_m=args.altitude,
             video_out=args.video_out, video_source=args.video_source,
             chase_camera=chase_camera,
         )
         try:
-            _fly(world, driver, vehicle, mass, recorder, args, spawn_xyz, chase_camera)
+            _fly(loop, vehicle, mass, recorder, args, spawn_xyz)
         finally:
-            recorder.finish()
+            recorder.finish({"scene": args.scene, "controller": "direct_pd"})
     finally:
         simulation_app.close()
 
 
-def _fly(world, driver, vehicle, mass, recorder, args, spawn_xyz, chase_camera) -> None:
+def _fly(loop, vehicle, mass, recorder, args, spawn_xyz) -> None:
     """Step the sim through the scripted mission, controlling and recording."""
-    from sparx_agency.tasks.planning.sim_flight_recording.chase_camera import aim_chase_camera
-
-    dt = flight_session.PHYSICS_DT
     mission_end_s = CLIMB_S + args.cruise_s + DESCEND_S + 3.0
-    sim_time = 0.0
-    step = 0
-    wall_start = time.monotonic()
+    start = loop.sim_time
 
-    while sim_time < mission_end_s:
-        world.step(render=True)
-        step += 1
-        sim_time += dt
-
-        # Pace to real time when someone might be watching: with warm GPU caches
-        # world.step() runs faster than the sim time it advances, so an unthrottled
-        # mission finishes before anyone can connect a viewer.
-        if not args.no_stream:
-            behind = wall_start + sim_time - time.monotonic()
-            if behind > 0:
-                time.sleep(behind)
-
-        driver.step(dt)  # refresh the state cache by hand -- see manual_physics_driver
-
-        if chase_camera is not None:
-            aim_chase_camera(chase_camera, vehicle.state.position)
+    while loop.sim_time - start < mission_end_s:
         _apply_control(vehicle, mass,
-                       _target_position(sim_time, spawn_xyz[:2], args.altitude, args.cruise_s))
-
-        if step % CAPTURE_EVERY_N_STEPS == 0:
-            recorder.capture()
+                       _target_position(loop.sim_time - start, spawn_xyz[:2],
+                                        args.altitude, args.cruise_s))
+        if loop.step():
+            recorder.capture(stamp_s=loop.sim_time - start)
 
 
 if __name__ == "__main__":

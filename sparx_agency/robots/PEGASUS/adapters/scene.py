@@ -1,20 +1,17 @@
-"""Load one of NVIDIA's stock Isaac Sim indoor environments, and fly it safely.
+"""Load one of NVIDIA's stock Isaac Sim indoor environments.
 
 Confirmed reachable (HTTP 200) from the ``isaac-sim`` container against the
 Isaac Sim 4.5 asset CDN on 2026-07-26; ``House`` and ``Library`` do not exist in
 this pack (404) -- there is no bundled home/library scene. See
 ``robots/PEGASUS/README.md`` for the full survey.
 
-Beyond loading the USD, this module records **where in each scene it is safe to
-fly**. These are furnished buildings with no machine-readable floor plan, so
-spawning at the origin and flying a fixed pattern does not work -- the first
-``office`` run wedged the drone against a wall 1.7 m behind its spawn point.
-:data:`SCENE_SURVEYS` holds the measured answer per scene, produced by
-``tasks/planning/sim_flight_recording/probe_scene.py``.
+**Where a flight is safe to go is not here.** That is a surveyed map, measured
+per scene by ``tasks/planning/sim_flight_recording/survey_scene.py`` and read
+back through :mod:`scene_map`. The hand-measured spawn points below predate that
+and survive only because the no-autopilot debugging script
+(``fly_direct.py``) needs somewhere to start and does no planning at all.
 """
 from __future__ import annotations
-
-import math
 
 _ASSET_BASE = (
     "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
@@ -24,7 +21,7 @@ _ASSET_BASE = (
 INDOOR_SCENES = {
     "simple_room": f"{_ASSET_BASE}/Simple_Room/simple_room.usd",
     # NOTE: hospital's USD loads fine on its own, but any run that also enables
-    # the pegasus.simulator extension (i.e. every real flight/survey) reliably
+    # the pegasus.simulator extension (i.e. every real flight or survey) reliably
     # crashes Kit ~2-3s in with a std::out_of_range in
     # libomni.anim.behavior.core.plugin.so -- before scene loading even starts.
     # Disabling that extension avoids the crash but takes pegasus.simulator
@@ -37,94 +34,42 @@ INDOOR_SCENES = {
     "full_warehouse": f"{_ASSET_BASE}/Simple_Warehouse/full_warehouse.usd",
 }
 
-# Free-space surveys, measured at 1.5 m altitude by
-# ``tasks/planning/sim_flight_recording/probe_scene.py`` on 2026-07-26.
-#
-#   spawn     -- the most open indoor cell found; ``clearance`` is how far the
-#                nearest obstacle is, in the *worst* of eight directions
-#   route     -- waypoints spread across the building, each leg raycast-verified
-#                clear of obstacles over a 1 m-wide corridor
-#
-# Re-run the probe after changing altitude: clearance at head height and
-# clearance at desk height are not the same thing.
-#
-# office's ~50% failure rate is NOT primarily route/clearance-related --
-# widening the corridor margin was tried (2026-07-27) and reverted after 3/3
-# test flights crashed anyway, from a compass/accelerometer-bias attitude-
-# estimator divergence at inconsistent times, unrelated to route width. See
-# probe_scene.py's LEG_MARGIN_M comment and px4_vision_pose.py.
-SCENE_SURVEYS = {
-    "simple_room": {
-        "spawn": (-0.5, 1.0),
-        "clearance": 3.85,
-        "route": [(-1.5, -1.0), (0.5, -0.5), (3.0, -0.5), (1.5, -2.0), (2.0, 0.5), (3.0, -2.0)],
-    },
-    "office": {
-        "spawn": (-4.0, 3.5),
-        "clearance": 8.62,
-        "route": [(4.0, -1.0), (-9.0, -10.5), (-12.5, -1.5), (4.5, -10.0)],
-    },
+# Hand-measured open spots, one per scene, from the raycast survey that preceded
+# the occupancy maps. Only ``fly_direct.py`` still uses these: it applies forces
+# from a scripted pattern and needs a start point but has no map to draw one
+# from. Anything that plans a route samples its start out of the surveyed map
+# instead, which is measured rather than remembered.
+SCENE_SPAWNS = {
+    "simple_room": (-0.5, 1.0),
+    "office": (-4.0, 3.5),
 }
 
 SPAWN_HEIGHT_M = 0.15  # just above the floor -- PX4 needs to detect it is landed at boot
 
 
-def _require_survey(name: str) -> dict:
-    if name not in INDOOR_SCENES:
-        raise KeyError(f"Unknown indoor scene {name!r}; choose from {sorted(INDOOR_SCENES)}")
-    if name not in SCENE_SURVEYS:
-        raise KeyError(
-            f"No free-space survey for scene {name!r}. Run "
-            f"tasks/planning/sim_flight_recording/probe_scene.py --scene {name} "
-            f"and add its SPAWN/ROUTE output to SCENE_SURVEYS."
-        )
-    return SCENE_SURVEYS[name]
-
-
 def scene_spawn(name: str, z: float = SPAWN_HEIGHT_M) -> tuple:
-    """The surveyed, verified-open spawn position for a scene.
+    """A known-open spot to drop the aircraft into a scene at.
 
     Args:
-        name: A key of :data:`SCENE_SURVEYS`.
+        name: A key of :data:`SCENE_SPAWNS`.
         z: Spawn height above the floor, metres.
 
     Returns:
         World-frame ``(x, y, z)``.
 
     Raises:
-        KeyError: If the scene is unknown or has not been surveyed.
+        KeyError: If the scene is unknown or has no recorded spawn.
     """
-    x, y = _require_survey(name)["spawn"]
+    if name not in INDOOR_SCENES:
+        raise KeyError(f"Unknown indoor scene {name!r}; choose from {sorted(INDOOR_SCENES)}")
+    if name not in SCENE_SPAWNS:
+        raise KeyError(
+            f"No recorded spawn point for scene {name!r}. Either add one to "
+            f"SCENE_SPAWNS, or use the surveyed map instead -- "
+            f"tasks/planning/sim_flight_recording/survey_scene.py --scene {name}"
+        )
+    x, y = SCENE_SPAWNS[name]
     return x, y, z
-
-
-def scene_route(name: str, altitude: float) -> list:
-    """The surveyed flight route for a scene, at ``altitude``.
-
-    Each waypoint's yaw points along the leg that reaches it, so the onboard
-    camera looks where the drone is going -- which is what makes the recording
-    useful as navigation training data rather than a sequence of sideways
-    drifts.
-
-    Args:
-        name: A key of :data:`SCENE_SURVEYS`.
-        altitude: Flight altitude, metres.
-
-    Returns:
-        A list of world-frame ``(x, y, z, yaw)`` waypoints, yaw in radians CCW
-        from +X (FLU, matching the repo-wide convention).
-
-    Raises:
-        KeyError: If the scene is unknown or has not been surveyed.
-    """
-    survey = _require_survey(name)
-    points = [survey["spawn"]] + [tuple(p) for p in survey["route"]]
-
-    waypoints = []
-    for previous, (x, y) in zip(points, points[1:]):
-        yaw = math.atan2(y - previous[1], x - previous[0])
-        waypoints.append((x, y, altitude, yaw))
-    return waypoints
 
 
 def load_indoor_scene(name: str, prim_path: str = "/World/Scene") -> str:

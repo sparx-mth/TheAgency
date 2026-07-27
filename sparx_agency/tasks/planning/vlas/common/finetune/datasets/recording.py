@@ -11,15 +11,29 @@ Layout::
       intrinsics.json     {"width","height","fx","fy","cx","cy"}
       meta.json           {"rate_hz","camera_height_m","pitch_deg", "frames": N}
       depth/000000.npy    (H, W) float32 meters, one per frame
+                          -- or .png, (H, W) uint16 millimetres
       rgb/000000.jpg      (H, W, 3) uint8, co-registered (optional for label-gen)
-      poses.npy           (N, 4) float32 rows [t, x, y, yaw]  world frame
+                          -- or .png
+      poses.npy           (N, >=4) float32, columns 0-3 = [t, x, y, yaw] world frame
+
+Two extractors write this layout and they do not agree on file *extensions*:
+``bag_extract`` (real rosbags) defaults to PNG for colour, ``sim_extract``
+(Isaac Sim) to JPEG for colour and PNG for depth. Rather than force one, the
+reader accepts either for both — a recording is defined by its arrays, not by
+which lossless container they arrived in.
+
+``poses.npy`` may carry **more** than four columns. Columns 0-3 are fixed and are
+all this module reads; a simulated flight appends full 6-DoF ground truth after
+them (altitude, attitude quaternion, velocities — see
+:data:`~...datasets.sim_extract.POSE_COLUMNS`), reachable through
+:meth:`FlightRecording.pose_full`. Older four-column recordings still load.
 
 The goal is supplied per-fine-tune (a body point for NavDP, an image for FlowNav);
 for auto-labels the goal defaults to the pose ``lookahead`` frames ahead.
 
-**No usable recording exists in the repo yet** (only a depth-only AprilTag test
-bag); :func:`synthesize_recording` builds a tiny synthetic one for tests and to
-document the schema.
+:func:`synthesize_recording` builds a tiny synthetic one for tests and to
+document the schema. Real recordings come from ``bag_extract`` (rosbags) or
+``sim_extract`` (``tasks/planning/sim_flight_recording/``).
 """
 from __future__ import annotations
 
@@ -33,34 +47,79 @@ import numpy as np
 from sparx_agency.core.common.types import Intrinsics
 
 
+DEPTH_EXTENSIONS = (".npy", ".png")
+RGB_EXTENSIONS = (".jpg", ".png", ".jpeg")
+
+
+def _frame_file(directory: Path, index: int, extensions) -> Optional[Path]:
+    """The first of ``extensions`` that exists for frame ``index``, or None."""
+    for extension in extensions:
+        candidate = directory / f"{index:06d}{extension}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class FlightRecording:
     """A loaded flight recording (lazy per-frame depth/rgb access)."""
 
     root: Path
     intrinsics: Intrinsics
-    poses: np.ndarray          # (N, 4) [t, x, y, yaw]
+    poses: np.ndarray          # (N, >=4), columns 0-3 = [t, x, y, yaw]
     rate_hz: float
     camera_height_m: float
     pitch_deg: float
+    depth_scale_m: float = 1.0  # metres per stored unit, for integer depth images
 
     @property
     def num_frames(self) -> int:
         return int(self.poses.shape[0])
 
     def depth(self, i: int) -> np.ndarray:
-        return np.load(self.root / "depth" / f"{i:06d}.npy").astype(np.float32)
+        """Frame ``i``'s depth in **metres**, whatever it was stored as.
+
+        Raises:
+            FileNotFoundError: If no depth frame exists at that index.
+        """
+        path = _frame_file(self.root / "depth", i, DEPTH_EXTENSIONS)
+        if path is None:
+            raise FileNotFoundError(
+                f"no depth frame {i:06d} in {self.root / 'depth'} "
+                f"(tried {', '.join(DEPTH_EXTENSIONS)})"
+            )
+        if path.suffix == ".npy":
+            return np.load(path).astype(np.float32)
+        import cv2
+        stored = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if stored is None:
+            raise FileNotFoundError(f"could not decode depth image {path}")
+        return stored.astype(np.float32) * self.depth_scale_m
 
     def rgb(self, i: int) -> Optional[np.ndarray]:
-        p = self.root / "rgb" / f"{i:06d}.jpg"
-        if not p.exists():
+        path = _frame_file(self.root / "rgb", i, RGB_EXTENSIONS)
+        if path is None:
             return None
         import cv2
-        bgr = cv2.imread(str(p))
+        bgr = cv2.imread(str(path))
         return None if bgr is None else bgr[:, :, ::-1].copy()
 
     def pose(self, i: int) -> np.ndarray:
         return self.poses[i, 1:4]  # (x, y, yaw)
+
+    def pose_full(self, i: int) -> np.ndarray:
+        """Every column stored for frame ``i``.
+
+        Four values for a legacy recording, fifteen for a simulated one (see
+        ``sim_extract.POSE_COLUMNS``). Callers that need altitude or attitude
+        must check the width rather than assume it.
+        """
+        return self.poses[i]
+
+    @property
+    def has_full_pose(self) -> bool:
+        """True if the recording carries more than ``[t, x, y, yaw]``."""
+        return self.poses.ndim == 2 and self.poses.shape[1] > 4
 
     def future_path_body(self, i: int, horizon: int, stride: int = 1) -> np.ndarray:
         """The flown-future world path expressed in frame ``i``'s body FLU frame.
@@ -101,6 +160,7 @@ def load_recording(root) -> FlightRecording:
         rate_hz=float(meta.get("rate_hz", 10.0)),
         camera_height_m=float(meta.get("camera_height_m", 1.0)),
         pitch_deg=float(meta.get("pitch_deg", 0.0)),
+        depth_scale_m=float(meta.get("depth_scale_m", 1.0)),
     )
 
 
