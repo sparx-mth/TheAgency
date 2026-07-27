@@ -13,28 +13,28 @@ worse than one that stops.
 
 Three behaviours are worth calling out because they shape the data:
 
-* **The aircraft is flown on velocity, not position.** :func:`guidance_velocity`
-  turns the world-frame error between the *simulator's exact position* and the
-  current waypoint into a clamped velocity command, and PX4 is left to be an
-  inner-loop velocity controller. PX4's offboard *position* path was tried first
-  and did not work here: given a setpoint one metre away, in a healthy offboard
-  mode, with no failsafe and its own estimate tracking truth to 30 cm, it closed
-  the gap at one centimetre per second until the flight timed out. Closing the
-  loop on ground truth also makes the aircraft's *true* path the thing that
-  converges, so PX4's estimator drift stops mattering -- and it is how every
-  other controller in this repo flies a drone.
-* **The aircraft looks along the leg it is flying**, using the heading the
-  planner attached to each waypoint. A live "point at the waypoint" heading was
-  tried first and is a trap: the commanded yaw depends on the position error,
-  the position response depends on the yaw, and the two close a loop. The
-  aircraft flew a stable 1.5 m circle around its waypoint for a hundred seconds
-  -- yaw rotating at a steady 19 deg/s, body-frame velocity pinned at 0.37 m/s
-  to the right, the commanded heading permanently 15 deg ahead of the actual
-  one, chasing its own tail. A per-leg constant has no such path, and points
-  the camera at the same thing anyway.
+* **The route is flown as one continuous curve**, not a list of stops. The
+  planner's corners are smoothed into a spline and chased with a moving carrot
+  (:mod:`path_follower`), so the aircraft holds cruise speed the whole way
+  instead of decelerating onto every waypoint. Flying the corners literally
+  produced stop-and-go motion and a camera that swung at each one.
+* **The aircraft is flown on velocity, not position.** The follower's output is
+  a world-frame velocity and PX4 is left to be an inner-loop velocity
+  controller. PX4's offboard *position* path was tried first and did not work
+  here: given a setpoint one metre away, in a healthy offboard mode, with no
+  failsafe and its own estimate tracking truth to 30 cm, it closed the gap at
+  one centimetre per second until the flight timed out. Closing the loop on
+  ground truth also makes the aircraft's *true* path the thing that converges,
+  so PX4's estimator drift stops mattering -- and it is how every other
+  controller in this repo flies a drone.
 * **Recording starts at arming and ends at touchdown**, so a recording opens
   with the climb and closes on the ground. The frames before arming are a
   stationary drone on the floor, which is not navigation data.
+
+The flight runs as three phases -- climb straight up, turn to face the route,
+then follow it -- because doing any two of them at once is how an aircraft
+clips what it took off next to, or pans the camera hard across the first few
+metres of every recording.
 """
 from __future__ import annotations
 
@@ -42,9 +42,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
-from sparx_agency.tasks.planning.sim_flight_recording.px4_params import INDOOR_LIMITS
-from sparx_agency.tasks.planning.sim_flight_recording.waypoint_mission import (
-    ARRIVAL_RADIUS_M, FINAL_RADIUS_M, WaypointMission,
+from sparx_agency.core.common.types import Pose3D, normalize_angle
+from sparx_agency.tasks.planning.sim_flight_recording.path_follower import (
+    FollowSpec, PathFollower, build_trajectory,
 )
 
 SETPOINT_PRIME_S = 2.0     # offboard needs a setpoint stream flowing before it engages
@@ -70,20 +70,18 @@ OFFBOARD_RETRY_S = 1.0
 # a slow one.
 SECONDS_PER_METRE = 4.0
 FIXED_OVERHEAD_S = 90.0
-# Guidance: a proportional law on the world-frame position error, clamped to the
-# same envelope PX4 is configured for. Kept slower than PX4's own inner loops so
-# the aircraft is never asked for a velocity step it cannot make smoothly.
-GUIDANCE_GAIN = 0.8         # 1/s
-# Never command a speed so small that the autopilot ignores it. A pure
-# proportional law tapers to nothing near the waypoint, and below roughly this
-# the aircraft simply does not respond -- it hovers a couple of centimetres per
-# second short of where it was sent. This is the same "minimum decisive
-# command" the FALCON followers use for the same reason.
-MIN_GUIDANCE_SPEED = 0.3    # m/s
+# Position hold, used only while climbing and turning. The route itself is flown
+# by path_follower, which is a different and much smoother thing.
+HOLD_GAIN = 0.8             # 1/s
+HOLD_DEADBAND_M = 0.15      # inside this, stop commanding and let it settle
 CLIMB_GAIN = 1.0            # 1/s
-MAX_CLIMB_RATE = 0.8        # m/s
 TAKEOFF_TOLERANCE_M = 0.15  # how close to cruise altitude counts as airborne
 TAKEOFF_TIMEOUT_S = 30.0
+TURN_TOLERANCE_RAD = math.radians(8.0)  # lined up enough to set off
+
+PHASE_CLIMB = "climb"
+PHASE_TURN = "turn"
+PHASE_FOLLOW = "follow"
 # How close to the goal counts as having got there. Wider than the mission's own
 # arrival radius because PX4's descent drifts.
 GOAL_TOLERANCE_M = 2.0
@@ -96,6 +94,7 @@ OUTCOME_STALLED = "stalled"
 OUTCOME_FLIGHT_TIMEOUT = "flight_timeout"
 OUTCOME_LAND_TIMEOUT = "land_timeout"
 OUTCOME_MISSED_GOAL = "missed_goal"
+OUTCOME_OFF_ROUTE = "off_route"
 GOOD_OUTCOMES = (OUTCOME_LANDED,)
 
 
@@ -108,11 +107,10 @@ class EpisodeResult:
             :data:`OUTCOME_LANDED` is a clean flight.
         frames: Frames recorded.
         duration_s: Simulated seconds from arming to the end of the recording.
-        waypoints_reached: How many of the plan's waypoints were actually
-            reached, excluding any that timed out.
-        waypoints_skipped: How many timed out. Non-zero means the aircraft cut
-            a corner somewhere, which is worth filtering on even when the
-            flight otherwise succeeded.
+        route_remaining_m: Along-path distance still unflown when the episode
+            ended. Near zero on a clean flight.
+        cross_track_error_m: How far off the planned route the aircraft was at
+            the end, metres.
         final_xy: Where the aircraft ended up.
         goal_error_m: Horizontal distance from the goal at the end.
         estimator_drift_m: How far PX4's position estimate moved relative to
@@ -126,8 +124,8 @@ class EpisodeResult:
     outcome: str
     frames: int = 0
     duration_s: float = 0.0
-    waypoints_reached: int = 0
-    waypoints_skipped: int = 0
+    route_remaining_m: float = 0.0
+    cross_track_error_m: float = 0.0
     final_xy: Tuple[float, float] = (0.0, 0.0)
     goal_error_m: float = 0.0
     estimator_drift_m: float = 0.0
@@ -154,36 +152,43 @@ def attitude_deg(vehicle) -> Tuple[float, float, float]:
     return float(roll), float(pitch), float(yaw)
 
 
-def guidance_velocity(position, target, cruise_speed: float,
-                      arrival_radius_m: float = 0.0) -> Tuple[float, float, float]:
-    """World-frame velocity that flies ``position`` toward ``target``.
+def hold_velocity(position, target, spec: FollowSpec) -> Tuple[float, float, float]:
+    """World-frame velocity that holds ``position`` at ``target``.
 
-    Proportional, clamped, and computed from the simulator's exact position --
-    so the aircraft's *true* path is what converges, whatever PX4's estimate is
-    doing. The horizontal and vertical axes are limited separately because the
-    airframe's climb authority and its cruise speed are different numbers.
+    Used only while climbing and turning, where the aircraft must stay put
+    rather than travel. Velocity control has no position feedback of its own, so
+    "hold still" has to be commanded as "fly to where you already are".
 
     Args:
         position: True world-frame ``(x, y, z)``.
-        target: World-frame ``(x, y, z)`` to fly to.
-        cruise_speed: Horizontal speed ceiling, m/s.
-        arrival_radius_m: Inside this the horizontal command is zero, so the
-            aircraft settles instead of hunting around the waypoint.
+        target: World-frame ``(x, y, z)`` to hold.
+        spec: Flight parameters, for the speed and climb-rate ceilings.
 
     Returns:
         ``(vx, vy, vz)`` in the world frame, m/s, ``vz`` positive up.
     """
     dx, dy = target[0] - position[0], target[1] - position[1]
     distance = math.hypot(dx, dy)
-    if distance > arrival_radius_m:
-        speed = min(max(GUIDANCE_GAIN * distance, MIN_GUIDANCE_SPEED), cruise_speed)
+    if distance > HOLD_DEADBAND_M:
+        speed = min(max(HOLD_GAIN * distance, spec.min_speed), spec.cruise_speed)
         vx, vy = dx / distance * speed, dy / distance * speed
     else:
-        # Inside the acceptance radius the job is done; commanding a residual
-        # speed here only pushes the aircraft past the waypoint and back.
         vx = vy = 0.0
     climb = CLIMB_GAIN * (target[2] - position[2])
-    return vx, vy, max(-MAX_CLIMB_RATE, min(MAX_CLIMB_RATE, climb))
+    return vx, vy, max(-spec.max_climb_rate, min(spec.max_climb_rate, climb))
+
+
+def slew_towards(current: float, target: float, max_rate: float, dt: float) -> float:
+    """Step ``current`` toward ``target`` by at most ``max_rate * dt`` radians.
+
+    The commanded heading is always slewed, never stepped: a stepped setpoint
+    hands the slew rate back to the autopilot's own limiter, and how fast the
+    world rotates in the recorded imagery stops being something this code
+    controls.
+    """
+    error = normalize_angle(target - current)
+    step = max_rate * dt
+    return normalize_angle(current + max(-step, min(step, error)))
 
 
 def _true_yaw(vehicle) -> float:
@@ -252,7 +257,8 @@ def arm_for_offboard(loop, px4, hold_xyz, yaw: float, cruise_altitude: float) ->
     return None
 
 
-def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> EpisodeResult:
+def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = None,
+                verbose: bool = True) -> EpisodeResult:
     """Arm, fly ``plan``, land at its goal, recording throughout.
 
     Args:
@@ -270,6 +276,7 @@ def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> Epi
     """
     vehicle = adapter.vehicle
     cruise_altitude = plan.waypoints[0][2]
+    follow_spec = follow_spec or FollowSpec()
 
     start_position = vehicle.state.position
     failure = arm_for_offboard(loop, px4, start_position, plan.start.yaw, cruise_altitude)
@@ -287,55 +294,95 @@ def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> Epi
               f"({offset[0]:.2f}, {offset[1]:.2f}, {offset[2]:.2f}) m, "
               f"heading bias {math.degrees(px4.heading_bias):+.1f} deg", flush=True)
 
-    mission = WaypointMission(plan.waypoints)
+    follower = PathFollower(
+        build_trajectory(Pose3D(float(start_position[0]), float(start_position[1]),
+                                cruise_altitude, plan.start.yaw),
+                         plan.waypoints, follow_spec),
+        follow_spec, initial_yaw=plan.start.yaw)
+    route_heading = follower.initial_heading()
+
     armed_at = loop.sim_time
     budget = flight_budget_s(plan.path_length_m)
-    cruise_speed = cruise_speed_hint()
     takeoff_xy = (float(start_position[0]), float(start_position[1]))
-    climbed = False
+    phase = PHASE_CLIMB
     yaw = plan.start.yaw
     tilted_since = None
     offboard_lost_since = None
     last_offboard_request = loop.sim_time
     landing_started = None
     last_status = loop.sim_time
-    progress_mark = (float(start_position[0]), float(start_position[1]),
-                     float(start_position[2]))
+    progress_mark = (takeoff_xy[0], takeoff_xy[1], float(start_position[2]))
     progress_at = loop.sim_time
+    follow = None
     outcome = None
     detail = ""
 
     while True:
         position = vehicle.state.position
-        target = mission.current()
 
         if landing_started is None:
-            reference = target if target is not None else (
-                plan.goal.x, plan.goal.y, cruise_altitude, yaw)
-            yaw = reference[3]
-            # Climb straight up before setting off. Translating while still near
-            # the floor is how an aircraft clips whatever it took off next to --
-            # so the climb target is the take-off point itself, which holds the
-            # horizontal position rather than merely not commanding one. Simply
-            # commanding zero horizontal velocity is not the same thing: velocity
-            # control has no position feedback, and the aircraft was measured
-            # drifting three metres sideways during a five-second climb.
-            if position[2] < cruise_altitude - TAKEOFF_TOLERANCE_M and not climbed:
-                velocity = guidance_velocity(
+            if phase == PHASE_CLIMB:
+                # Climb and turn at the same time. Both hold position, so doing
+                # them in series only adds dead time to the recording.
+                yaw = slew_towards(yaw, route_heading, follow_spec.turn_yaw_rate,
+                                   loop.dt)
+                # Climb straight up before setting off. Translating while still
+                # near the floor is how an aircraft clips whatever it took off
+                # next to -- so the climb target is the take-off point itself,
+                # which *holds* the horizontal position. Merely commanding zero
+                # horizontal velocity is not the same thing: velocity control
+                # has no position feedback, and the aircraft was measured
+                # drifting three metres sideways during a five-second climb.
+                velocity = hold_velocity(
                     position, (takeoff_xy[0], takeoff_xy[1], cruise_altitude),
-                    cruise_speed)
-                if loop.sim_time - armed_at > TAKEOFF_TIMEOUT_S:
+                    follow_spec)
+                at_altitude = position[2] >= cruise_altitude - TAKEOFF_TOLERANCE_M
+                lined_up = abs(normalize_angle(route_heading - yaw)) < TURN_TOLERANCE_RAD
+                if at_altitude and lined_up:
+                    phase = PHASE_FOLLOW
+                    follower.yaw = yaw
+                    if verbose:
+                        print(f"    at {position[2]:.1f} m on "
+                              f"{math.degrees(route_heading):.0f} deg -- "
+                              f"following the route", flush=True)
+                elif at_altitude:
+                    phase = PHASE_TURN
+                elif loop.sim_time - armed_at > TAKEOFF_TIMEOUT_S:
                     outcome = OUTCOME_FLIGHT_TIMEOUT
                     detail = (f"never reached its {cruise_altitude:.1f} m cruise altitude "
                               f"within {TAKEOFF_TIMEOUT_S:.0f} s (stuck at "
                               f"{position[2]:.2f} m)")
                     break
+            elif phase == PHASE_TURN:
+                # Line up with the route before moving off. Turning while under
+                # way would pan the camera hard across the first few metres of
+                # every flight, which is the opposite of what the recording is
+                # for.
+                velocity = hold_velocity(
+                    position, (takeoff_xy[0], takeoff_xy[1], cruise_altitude),
+                    follow_spec)
+                yaw = slew_towards(yaw, route_heading, follow_spec.turn_yaw_rate,
+                                   loop.dt)
+                if abs(normalize_angle(route_heading - yaw)) < TURN_TOLERANCE_RAD:
+                    phase = PHASE_FOLLOW
+                    follower.yaw = yaw
+                    if verbose:
+                        print(f"    lined up on {math.degrees(route_heading):.0f} deg "
+                              f"-- following the route", flush=True)
             else:
-                climbed = True
-                velocity = guidance_velocity(
-                    position, reference, cruise_speed,
-                    arrival_radius_m=(FINAL_RADIUS_M if mission.on_final
-                                      else ARRIVAL_RADIUS_M))
+                follow = follower.update(position, _true_yaw(vehicle),
+                                         vehicle.state.linear_velocity, loop.dt)
+                velocity, yaw = follow.velocity, follow.yaw
+                if follow.failed:
+                    outcome = OUTCOME_OFF_ROUTE
+                    detail = (f"{follow.cross_track_error:.1f} m off the planned route "
+                              f"at ({position[0]:.1f}, {position[1]:.1f})")
+                    break
+                if follow.done:
+                    px4.land()
+                    landing_started = loop.sim_time
+                    if verbose:
+                        print("    route complete -- landing", flush=True)
             px4.send_velocity_world(velocity[0], velocity[1], velocity[2], yaw)
 
         rendered = loop.step()
@@ -371,11 +418,8 @@ def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> Epi
                               f"{'; '.join(px4.drain_status_texts()[-4:]) or '(nothing)'}")
                     break
 
-            if not climbed:
-                progress_at = loop.sim_time
-            elif target is not None and math.dist(
-                    tuple(position[:3]), tuple(target[:3])) <= 2.0 * ARRIVAL_RADIUS_M:
-                progress_at = loop.sim_time   # settling onto a waypoint, not stalled
+            if phase != PHASE_FOLLOW:
+                progress_at = loop.sim_time   # climbing or turning, not travelling
             elif math.dist(tuple(position[:3]), progress_mark) >= STALL_DISTANCE_M:
                 progress_mark = (float(position[0]), float(position[1]), float(position[2]))
                 progress_at = loop.sim_time
@@ -386,18 +430,11 @@ def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> Epi
                           f"{position[1]:.1f}, {position[2]:.1f}) -- it is not flying")
                 break
 
-            if climbed and mission.update(position, loop.sim_time) and verbose:
-                print(f"    waypoint {mission.index}/{len(plan.waypoints)} at "
-                      f"({position[0]:.1f}, {position[1]:.1f})", flush=True)
-            if mission.finished:
-                px4.land()
-                landing_started = loop.sim_time
-                if verbose:
-                    print("    route complete -- landing", flush=True)
-            elif loop.sim_time - armed_at > budget:
+            if loop.sim_time - armed_at > budget:
                 outcome = OUTCOME_FLIGHT_TIMEOUT
+                remaining = f"{follow.distance_to_goal:.1f} m" if follow else "the whole route"
                 detail = (f"route not finished within its {budget:.0f} s budget "
-                          f"(reached {mission.index}/{len(plan.waypoints)} waypoints)")
+                          f"({remaining} still to fly)")
                 break
         else:
             if px4.on_ground and loop.sim_time - landing_started >= POST_LAND_S:
@@ -412,26 +449,20 @@ def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> Epi
 
         if verbose and loop.sim_time - last_status >= STATUS_EVERY_S:
             last_status = loop.sim_time
-            aim = target if target is not None else (plan.goal.x, plan.goal.y, 0.0, 0.0)
-            print(f"    t={loop.sim_time - armed_at:6.1f}s "
+            speed = math.hypot(vehicle.state.linear_velocity[0],
+                               vehicle.state.linear_velocity[1])
+            print(f"    t={loop.sim_time - armed_at:6.1f}s {phase:<6s} "
                   f"pos=({position[0]:6.2f},{position[1]:6.2f},{position[2]:5.2f}) "
-                  f"->({aim[0]:6.2f},{aim[1]:6.2f}) "
-                  f"v=({vehicle.state.linear_velocity[0]:5.2f},"
-                  f"{vehicle.state.linear_velocity[1]:5.2f}) "
-                  f"rpy=({roll:5.1f},{pitch:5.1f},{math.degrees(_true_yaw(vehicle)):6.1f}) "
-                  f"drift={px4.frame_drift(position):4.2f} "
-                  f"wp={mission.index}/{len(plan.waypoints)} mode={px4.main_mode} "
-                  f"frames={recorder.frames}", flush=True)
+                  f"speed={speed:4.2f} yaw={math.degrees(_true_yaw(vehicle)):6.1f} "
+                  f"left={follow.distance_to_goal if follow else 0.0:5.1f}m "
+                  f"xte={follow.cross_track_error if follow else 0.0:4.2f} "
+                  f"mode={px4.main_mode} frames={recorder.frames}", flush=True)
 
     position = vehicle.state.position
     goal_error = math.hypot(position[0] - plan.goal.x, position[1] - plan.goal.y)
-    # A mission "finishes" when its last waypoint is reached OR times out, and a
-    # landing on the spot the aircraft never left is still a landing. Neither is
-    # a flight to the goal. Judge the recording by where it actually ended up,
-    # not by the state machine having run to the end. Skipped waypoints are
-    # reported separately rather than failing the episode: a flight that took
-    # too long over one corner but still arrived is good data, while a flight
-    # that cut a corner is something the caller may want to filter on.
+    # A landing on the spot the aircraft never left is still a landing, and it
+    # is not a flight to the goal. Judge the recording by where it actually
+    # ended up, not by the state machine having run to the end.
     if outcome == OUTCOME_LANDED and goal_error > GOAL_TOLERANCE_M:
         outcome = OUTCOME_MISSED_GOAL
         detail = f"landed {goal_error:.1f} m from the goal"
@@ -440,8 +471,8 @@ def fly_episode(loop, px4, adapter, plan, recorder, verbose: bool = True) -> Epi
         outcome=outcome,
         frames=recorder.frames,
         duration_s=loop.sim_time - armed_at,
-        waypoints_reached=mission.index - mission.skipped,
-        waypoints_skipped=mission.skipped,
+        route_remaining_m=follow.distance_to_goal if follow else plan.path_length_m,
+        cross_track_error_m=follow.cross_track_error if follow else 0.0,
         final_xy=(float(position[0]), float(position[1])),
         goal_error_m=goal_error,
         estimator_drift_m=px4.frame_drift(position),
@@ -488,8 +519,3 @@ def settle_after_landing(loop, px4, descend_timeout_s: float = 40.0,
     if px4.armed:
         px4.disarm(force=True)
         loop.run_for(1.0)
-
-
-def cruise_speed_hint() -> float:
-    """The cruise speed PX4 is configured for, m/s. For time estimates."""
-    return float(INDOOR_LIMITS["MPC_XY_CRUISE"])

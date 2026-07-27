@@ -14,8 +14,10 @@ Sim 6.0.1 and PX4 compatibility work all of this rests on) lives in
 ## The pipeline
 
 ```
-survey_scene.py            once per scene+altitude: raycast + overlap sweep
-   │                       of the building  →  robots/PEGASUS/maps/<scene>_alt150cm.npz
+survey_scene.py            ONCE per scene: one C++ sweep of the whole building
+   │                       at 10 cm  →  <scene>_voxels.npz   (3D ground truth)
+   │                                    <scene>_voxels.ply   (open it in Open3D)
+   │                                    <scene>_alt150cm.npz (a slab of it, for planning)
    ▼
 run_collection.sh          host-side launcher: syncs the repo, starts N workers
    │
@@ -39,8 +41,7 @@ need Isaac Sim.
 
 From the **host**, with the `isaac-sim` container running.
 
-**1. Survey the scene** (once per scene *and per altitude* — clearance at head
-height and at desk height are different buildings):
+**1. Survey the scene** — once, in 3D. Every altitude is then a slice of it:
 
 ```bash
 docker exec isaac-sim bash -c "cd /tmp/dev/repo && /isaac-sim/python.sh \
@@ -50,7 +51,8 @@ docker exec isaac-sim bash -c "cd /tmp/dev/repo && /isaac-sim/python.sh \
 
 Look at the `.png` it writes next to the map before trusting a new scene. A
 survey that came out mostly empty is obvious in a picture and invisible in a
-cell count.
+cell count. See **The ground-truth 3D map** below for what else comes out and
+how to open it.
 
 **2. Collect:**
 
@@ -93,16 +95,18 @@ docker cp isaac-sim:/tmp/dev/recordings/office .
    clear all the way to the floor, not merely at cruise altitude. A goal over a
    desk is somewhere the aircraft can hover and cannot be put down: it lands on
    the desk, tips, and every later episode is refused with `Preflight Fail:
-   Attitude failure (roll)`. In `office`, 809 m² of the 867 m² flyable space is
+   Attitude failure (roll)`. In `office`, 731 m² of the 788 m² flyable space is
    landable; the missing 7% is furniture.
 2. **Plan a route to it.** `core/planning/planners/astar`'s
    `WeightedAStarPlanner2D` — the same planner the real drones fly. It inflates
    every obstacle by `--standoff`, then prefers the middle of a corridor to its
    edge, and emits corner-rounded waypoints every 2 m.
-3. **Fly it.** `episode.py` turns the world-frame error between the simulator's
-   exact position and the current waypoint into a clamped **velocity** command,
-   and PX4 SITL is the inner-loop velocity controller. The heading is the
-   planner's per-leg heading, so the camera looks along the leg being flown.
+3. **Fly it, continuously.** The planner's corners are smoothed into a spline
+   and chased with a moving carrot (`path_follower.py`), so the aircraft holds
+   cruise speed the whole way instead of decelerating onto every waypoint. The
+   output is a world-frame **velocity**; PX4 SITL is the inner-loop velocity
+   controller. Three phases: climb straight up, turn to face the route, then
+   follow it.
 4. **Land at the goal**, and start the next episode from there.
 
 The next episode starting where the last one landed is deliberate: it avoids
@@ -253,11 +257,92 @@ simulation was not running at. `flight_session.build_world` now sets
 `rendering_dt == physics_dt`, so one `world.step()` is exactly one physics step
 whether or not it rendered.
 
+## The ground-truth 3D map
+
+The scene is swept **once**, in 3D, at 10 cm, and everything else is derived
+from that. Isaac's own `isaacsim.asset.gen.omap` generator does the sweep in
+C++: one PhysX box-overlap per voxel, 27 seconds for 27 million voxels. Doing it
+per-voxel from Python is not an option at that scale.
+
+```
+robots/PEGASUS/maps/
+  office_voxels.npz      307x745x63 voxels @ 0.1 m = 30.7 x 74.5 x 6.3 m
+                         1.81 M occupied, 10.8 M free, 1.77 M unknown.
+                         183 kB compressed, and committed.
+  office_voxels.ply      the same occupied voxels as a point cloud, 27 MB.
+                         Regenerated, not committed.
+  office_alt0150cm.npz   the 2D map: a 0.6 m-thick slab of the above at 1.5 m,
+                         plus the `landable` layer.
+```
+
+`VoxelGrid3D` satisfies the existing `VoxelMap3D` protocol, so the 3D planners
+can use it directly. **A second altitude is free** — it is a slice, not another
+sweep — and the 2D and 3D maps cannot disagree because one is computed from the
+other.
+
+### Looking at it
+
+```python
+# On a machine with open3d installed (pip install open3d):
+import open3d as o3d
+pcd = o3d.io.read_point_cloud("office_voxels.ply")
+voxels = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, 0.1)
+o3d.visualization.draw_geometries([voxels])
+```
+
+The exporter has **no Open3D dependency** — it writes the minimal binary PLY
+(`float x/y/z` + `uchar red/green/blue`, 15 bytes a point) that Open3D reads,
+because Open3D is not installed on the machine that produces the file. Points
+are coloured by height.
+
+### Three things about that generator
+
+Each of them costs an afternoon:
+
+* **Importing the binding before enabling the extension kills the process.**
+  `from isaacsim.asset.gen.omap.bindings import _omap` on its own terminates Kit
+  with exit code 0, no traceback — indistinguishable from a clean shutdown.
+* **`set_transform`'s bounds are relative to the origin**, not absolute world
+  coordinates.
+* **`get_buffer()` is useless after `generate3d()`** — it returns a flattened
+  2D-sized buffer with no occupied cells in it. The 3D result comes out of
+  `get_occupied_positions()` / `get_free_positions()`.
+
+And one thing about the result: the generator floods outward from its origin and
+marks what it cannot reach as unknown, which sounds like it separates the
+building from the field it stands in. **It does not** — the free space above the
+roof connects to everything, so the flood escapes over the top. Measured on
+`office`, 867 m² of building came back as 4618 m² of building-plus-car-park with
+zero unknown voxels. A ceiling test (`restrict_to_indoor`) is what actually
+separates them, and with a voxel column in hand it is one array reduction.
+
 ## How the aircraft is actually flown
 
-**Velocity setpoints closed on ground truth, not position setpoints.** This is
-the single most important implementation decision here and it was arrived at the
-hard way.
+**A smoothed spline, a moving carrot, and velocity setpoints closed on ground
+truth.** Two decisions, both arrived at the hard way.
+
+### Continuous, not waypoint-by-waypoint
+
+The planner emits corner points. Flying them literally — aim at the next corner,
+decelerate onto it, accept it, aim at the next — gives stop-and-go motion: the
+aircraft pauses at every waypoint and the camera swings. `path_follower.py`
+composes two components the repo already had, both of which the real drones use:
+`HermiteSmoother3D` turns the corners into a G1-continuous spline, and
+`PurePursuitTracker3D` chases a carrot along it with a lookahead that shortens
+on tight curves.
+
+Measured against a perfect vehicle over a route with two right angles and a
+doubling-back: **mean speed 1.14 m/s against a 1.2 m/s cruise, standard
+deviation 0.055 m/s, and the slowest moment is 79% of cruise** — that dip is the
+deliberate corner easing, not a stop.
+
+One number in there can fly the aircraft into a wall. The spline cuts *outside*
+the planner's corner points, and the planner's obstacle standoff is the entire
+budget for that; measured, the worst-case bulge is about `1.8 x tangent_scale`
+metres. The default 0.2 spends 0.36 m of a 0.6 m standoff. Raising it makes
+prettier curves and less clearance.
+
+### Velocity, not position
 
 PX4's offboard *position* path does not work in this setup. Given a
 `SET_POSITION_TARGET_LOCAL_NED` one metre away — in a healthy offboard mode
@@ -398,46 +483,64 @@ whole pipeline rests on.
 
 ## Verified
 
-`office`, 2026-07-27, one worker, seven episodes back to back from a single Kit
-boot, chaining across the building. **Six of seven landed**; the seventh hit
-something and was recorded with `outcome: crashed`, which is what that outcome
-is for.
+`office`, 2026-07-27, one worker, six episodes back to back from a single Kit
+boot, chaining across the building. **Six of six landed.**
 
 ```
 recording        outcome    frames      s     Hz  flown m  plan m  goal m  yaw deg
-office_w0_e000   landed        654   65.3  10.00     27.3    21.8    1.37      155
-office_w0_e001   landed        300   29.9  10.00     10.8     5.8    1.35       47
-office_w0_e002   landed        488   48.7  10.00     19.8    14.9    1.36      224
-office_w0_e003   landed        436   43.5  10.00     18.1    13.9    1.38      219
-office_w0_e004   landed        642   64.1  10.00     16.7     8.6    1.44      219
-office_w0_e005   landed        482   48.1  10.00     21.1    18.0    1.33      175
-office_w0_e006   crashed       187   18.6  10.00     11.8    15.8   17.72      252
+office_w0_e000   landed        542   54.1  10.00     45.5    42.7    0.28      143
+office_w0_e001   landed        266   26.5  10.00     15.8    11.5    0.63       60
+office_w0_e002   landed        292   29.1  10.00     17.1    13.7    0.66      158
+office_w0_e003   landed        280   27.9  10.00     16.3    13.0    0.62      121
+office_w0_e004   landed        336   33.5  10.00     20.2    16.8    0.76      237
+office_w0_e005   landed        520   51.9  10.00     43.5    40.0    0.66       73
 ```
 
-3189 frames over 126 m of flight. Every recording is at **exactly 10.00 Hz** —
-the timestep fix, visible. Goal error clusters at 1.3–1.4 m, which is the drift
-during PX4's own descent, not a tracking error: the aircraft arrives within the
-0.8 m acceptance radius and then AUTO.LAND takes it down. Yaw coverage of
-47–252° per flight means the camera really does turn.
+Every recording is at **exactly 10.00 Hz** — the timestep fix, visible. Yaw
+coverage of 60–237° per flight means the camera really does turn.
+
+Measured over the transit phase (first movement to last), against the same
+scene flown waypoint-by-waypoint before the continuous follower existed:
+
+| | before | after |
+|---|---|---|
+| cruise speed | 0.42 m/s | **0.95 m/s** |
+| speed std dev | 0.187 | **0.276** |
+| stopped (<0.3 m/s) during transit | 30.0 % | **9.7 %** |
+| yaw rate, 95th percentile | 16.4 °/s | **14.1 °/s** |
+| a typical flight | 19 m in 50 s | **26 m in 37 s** |
+| landed, from the goal | 1.37 m | **0.60 m** |
+
+The residual 9.7 % is the acceleration out of the initial hover and the
+deceleration into the goal. Through the middle of a flight the speed does not
+drop at all: sampled in 5-second windows across a 46 m route, every window from
+t=15 s to t=50 s was **0.0 % stopped** at 1.02–1.19 m/s.
 
 The recordings load through `recording.load_recording()` with `(392, 504)` depth
 in metres, co-registered RGB, matching intrinsics, and 15-column ground-truth
 poses; `future_path_body()` and `goal_body()` — what the ESDF label generator
 calls — run against them.
 
+**One thing PX4 does that no parameter fixes:** it refuses to arm for the first
+~180 simulated seconds after boot, with no stated reason. `wait_until_armable`
+absorbs that before the first episode is planned, because otherwise those
+attempts are recorded as failed episodes — and three failures in a row is what
+stops a worker, so a campaign could be killed by its own warm-up.
+
 ## Known gaps
 
-* **Roughly one flight in seven still ends against something** (1 of 7 in the
-  run above). The route is verified clear in advance and the aircraft tracks it
-  to well within the planner's standoff, so the likely cause is the map being 2D
-  — a route clear at 1.5 m says nothing about what the airframe's rotor arms
-  meet at 1.3 m. `outcome: crashed` makes these cheap to filter out; making them
-  rarer means surveying a vertical band rather than a slice.
-* **The aircraft flies slowly** — 0.37 m/s average, 0.86 m/s peak, against the
-  1.0 m/s `MPC_XY_CRUISE` ceiling, because the guidance law decelerates into
-  every waypoint. Raising `MPC_XY_CRUISE` and `GUIDANCE_GAIN` together would
-  buy throughput at some risk to tracking; neither has been tuned past "it
-  works".
+* **Flights still occasionally end against something** — none in the six-episode
+  run above, one in seven and one in six on earlier runs. The route is verified
+  clear in advance and the aircraft tracks it to well within the planner's
+  standoff, so the remaining suspects are the smoothed spline cutting outside
+  the corner points (bounded, but it spends 0.36 m of a 0.6 m standoff) and the
+  2D slab hiding something the rotor arms meet outside it. The 3D map is now
+  there to check the second properly; nothing does yet.
+* **A crash ends the worker.** The aircraft lands on its side, PX4 refuses to
+  arm on attitude, and after three refused episodes the worker stops — correctly,
+  since nothing here can right it. Recovering would mean teleporting the airframe
+  and restarting PX4 under it, which is not implemented. A crash therefore costs
+  the rest of that worker's campaign, not just one episode.
 * **Only one worker has been run at a time**, on an 8 GB laptop GPU that cannot
   fit two Isaac Sim processes. The per-worker isolation (ports, lock files,
   working directories, seeds) is implemented and unit-tested, and

@@ -280,6 +280,57 @@ def settle_estimator(loop, px4, seconds: float) -> None:
           f"it is heading {heading}", flush=True)
 
 
+def wait_until_armable(loop, px4, timeout_s: float = 240.0, retry_s: float = 2.0,
+                       verbose: bool = True) -> bool:
+    """Arm once and disarm again, before any episode is planned.
+
+    PX4 will not arm for a while after boot, and how long is neither documented
+    nor constant -- measured here, two consecutive 60-second attempts were
+    refused with no stated reason and the third succeeded, so the aircraft
+    needed about 150 simulated seconds of sitting still. Nothing in the
+    parameter set shortens it.
+
+    Absorbing that here rather than inside the first episode matters for two
+    reasons: those attempts would otherwise be recorded as failed episodes, and
+    three failures in a row is what stops a worker -- so a campaign could be
+    killed by its own warm-up before it ever flew.
+
+    Args:
+        loop: The simulation loop to step.
+        px4: The autopilot link.
+        timeout_s: Simulated seconds to keep trying.
+        retry_s: How often to re-request arming.
+        verbose: Announce the outcome.
+
+    Returns:
+        True once PX4 has armed (and been disarmed again), False on timeout --
+        which the caller should treat as a broken worker, not a bad episode.
+    """
+    started = loop.sim_time
+    last_request = -retry_s
+    while not px4.armed:
+        if loop.sim_time - started > timeout_s:
+            if verbose:
+                print(f"WARNING: PX4 would not arm within {timeout_s:.0f} simulated "
+                      f"seconds of warm-up; PX4 said: "
+                      f"{'; '.join(px4.drain_status_texts()[-4:]) or '(nothing)'}",
+                      flush=True)
+            return False
+        px4.send_velocity_world(0.0, 0.0, 0.0, 0.0)
+        if loop.sim_time - last_request >= retry_s:
+            px4.set_offboard_mode()
+            px4.arm()
+            last_request = loop.sim_time
+        loop.step()
+
+    px4.disarm()
+    loop.run_for(3.0)
+    if verbose:
+        print(f"PX4 armed for the first time after {loop.sim_time - started:.0f} "
+              f"simulated seconds of warm-up; disarmed and ready to fly", flush=True)
+    return True
+
+
 def _aim_live_viewport(camera_path: str = "/World/ChaseCamera") -> None:
     """Point the streamed viewport at the chase camera.
 

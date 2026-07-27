@@ -110,10 +110,12 @@ would need its own loader (its scenes aren't single-USD CDN references like
 ```
 robots/PEGASUS/
   config/camera_pegasus_iris_504x392.yaml   sim camera intrinsics (== XTEND's 392x504 depth-engine calibration)
-  maps/<scene>_alt<NNN>cm.npz               surveyed flyable space, one per scene AND altitude
+  maps/<scene>_voxels.npz                    ground-truth 3D occupancy at 10 cm -- the source of everything else
+  maps/<scene>_voxels.ply                    the same, as a point cloud for Open3D (regenerated, not committed)
+  maps/<scene>_alt<NNN>cm.npz                a horizontal slab of it at one altitude, for 2D planning
   adapters/scene.py                          load_indoor_scene() + a hand-measured spawn per scene
-  adapters/scene_map.py                      where a surveyed map lives and how to read it (no Isaac import)
-  adapters/occupancy_survey.py               sweep a loaded scene into that map (needs a live sim)
+  adapters/scene_map.py                      where the maps live and how to read them (no Isaac import)
+  adapters/voxel_survey.py                   sweep a loaded scene into the 3D map (needs a live sim)
   adapters/sensors.py                        the PX4 sensor suite with every noise term zeroed
   adapters/vehicle.py                        PegasusIrisVehicle -- spawn Iris (+ optional PX4 backend) + RGBD camera
   setup/pegasus_isaac6_compat.patch          the Isaac Sim 6.x compatibility fixes, pinned to commit e13dc659
@@ -157,28 +159,41 @@ absolutely, so every transient disagreement with GPS lands in the accel-bias
 state instead, and the result was `Preflight Fail: High Accelerometer Bias`
 from the moment of takeoff.
 
-## Where a flight is safe to go: surveyed maps, not remembered routes
+## Where a flight is safe to go: one 3D sweep, sliced
 
-`adapters/occupancy_survey.py` sweeps a loaded scene at flight altitude and asks
-PhysX two questions per grid cell — *is this inside the building?* (floor below,
-ceiling above; without the ceiling test a floor-only sweep accepts the
-kilometre-wide ground plane these assets stand on) and *is anything in the way?*
-(an `overlap_box_any` the size of the airframe). Cells that are not inside come
-back UNKNOWN rather than free, and the planner treats UNKNOWN as blocked, so a
-route can never leave through a wall the sweep never looked at.
+`adapters/voxel_survey.py` sweeps the **whole building once** into a ground-truth
+occupancy voxel grid at 10 cm, using Isaac's own `isaacsim.asset.gen.omap`
+generator — one PhysX box-overlap per voxel, in C++. Measured on `office`: 27
+million voxels in 27 seconds. A per-voxel Python query at that scale would take
+hours, which is why this is the only viable route to a 10 cm 3D map.
 
-A second question is asked of the same downward ray: *how far is the floor?* A
-cell whose first hit below is much closer than the cruise altitude has furniture
-under it — flyable, but not somewhere the aircraft can be **put down**. That
-goes into the map as a `landable` layer, and it is not a nicety: a goal chosen
-over a desk lands the aircraft on the desk, where it tips, and every subsequent
-episode is refused with `Preflight Fail: Attitude failure (roll)`. One campaign
-lost four of six episodes that way.
+Everything else is derived from it, so a scene is surveyed once and any altitude
+is free:
 
-The result is a `core.planning.environment.OccupancyGrid2D` plus its layers,
-cached as a few-kB `.npz` under `maps/` and **committed**, so a campaign is
-reproducible and planning needs no simulator. `office` at 1.5 m is 320x320 cells
-at 25 cm: 867 m² of contiguous flyable space, of which 809 m² is landable.
+- **the 2D planning map** is a horizontal slab of the voxel grid
+  (`project_to_occupancy_2d`), which also means the 2D and 3D maps cannot
+  disagree;
+- **the `landable` layer** is whether the voxel column is clear from the floor
+  up to cruise height. Flyable and landable are different questions: a cell can
+  be wide open at 1.5 m with a desk at 0.7 m under it, and a goal chosen there
+  lands the aircraft on the desk, where it tips, and every subsequent episode is
+  refused with `Preflight Fail: Attitude failure (roll)`. One campaign lost four
+  of six episodes that way.
+
+`office` at 10 cm is 307x745x63 voxels covering 30.7 x 74.5 x 6.3 m — 1.81 M
+occupied, and **183 kB compressed**, so it is committed. Sliced at 1.5 m that is
+788 m² of contiguous flyable space, of which 731 m² is landable.
+
+The `.ply` beside it is the same occupied voxels as a point cloud, for opening
+in Open3D. The exporter has no Open3D dependency (it writes the minimal binary
+PLY by hand), because Open3D is not installed on the machine that produces it.
+
+**The flood fill does not separate indoors from outdoors, though it looks like
+it should.** The generator marks what it cannot reach from its origin as
+UNKNOWN, but the free space above the roof connects to everything, so it escapes
+over the top: `office` came back as 4618 m² of building-plus-car-park with zero
+unknown voxels. A ceiling test (`restrict_to_indoor`) is what actually separates
+them — one array reduction, once the voxel column exists.
 
 **A map is only valid at the altitude it was surveyed at** — clearance at head
 height and at desk height are different buildings — so the altitude is in the

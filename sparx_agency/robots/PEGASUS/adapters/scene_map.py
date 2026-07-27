@@ -9,7 +9,7 @@ writes it.
 Deliberately free of any Isaac Sim import, so a map can be loaded, inspected and
 planned against on a laptop with no simulator — which is what makes the whole
 episode planner unit-testable. The surveying itself, which does need a live
-simulation, is :mod:`occupancy_survey`.
+simulation, is :mod:`voxel_survey`.
 
 **A map is only valid at the altitude it was surveyed at.** Clearance at head
 height and clearance at desk height are different buildings, so the altitude is
@@ -53,6 +53,47 @@ lands on the desk, tips, and every later flight is refused with ``Preflight
 Fail: Attitude failure (roll)`` -- which is exactly how one campaign lost four
 of its six episodes.
 """
+
+
+def voxel_map_path(scene: str, map_dir: Path = None) -> Path:
+    """Canonical file for a scene's ground-truth 3D voxel map.
+
+    Unlike the 2D maps there is no altitude in the name: the voxel grid covers
+    the whole building, and every 2D map is a slice of it.
+
+    Args:
+        scene: Scene key.
+        map_dir: Override the directory. Defaults to ``robots/PEGASUS/maps``.
+
+    Returns:
+        The ``.npz`` path (which may not exist yet).
+    """
+    directory = Path(map_dir) if map_dir is not None else MAP_DIR
+    return directory / f"{scene}_voxels.npz"
+
+
+def load_voxel_map(scene: str, map_dir: Path = None):
+    """Read a scene's ground-truth 3D voxel map.
+
+    Args:
+        scene: Scene key.
+        map_dir: Override the directory.
+
+    Returns:
+        ``(VoxelGrid3D, metadata)``.
+
+    Raises:
+        FileNotFoundError: With the exact command to produce the missing map.
+    """
+    from sparx_agency.core.planning.environment.voxel_grid_3d import load_voxel_grid
+
+    path = voxel_map_path(scene, map_dir)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no 3D voxel map for scene {scene!r} ({path}). Produce it with:\n"
+            f"  tasks/planning/sim_flight_recording/survey_scene.py --scene {scene}"
+        )
+    return load_voxel_grid(path)
 
 
 def save_scene_map(

@@ -44,6 +44,7 @@ from sparx_agency.tasks.planning.sim_flight_recording import (
 from sparx_agency.tasks.planning.sim_flight_recording.episode_plan import (
     EpisodeSpec, sample_episode,
 )
+from sparx_agency.tasks.planning.sim_flight_recording.path_follower import FollowSpec
 
 HEARTBEAT_TIMEOUT_S = 120.0
 """Simulated seconds to wait for PX4's first heartbeat. It normally takes ~1.5."""
@@ -90,6 +91,12 @@ def _parse_args():
                     help="obstacle clearance required at the start and goal, metres")
     ap.add_argument("--standoff", type=float, default=AIRFRAME_RADIUS_M + 0.25,
                     help="obstacle standoff the route is planned at, metres")
+    ap.add_argument("--cruise-speed", type=float, default=None,
+                    help="speed held along the route, m/s (default 1.2). PX4's own "
+                         "ceiling is 2.0, so do not exceed that")
+    ap.add_argument("--max-yaw-rate", type=float, default=None,
+                    help="how fast the aircraft may rotate, deg/s (default 14). This "
+                         "is how fast the world spins in the recorded imagery")
     ap.add_argument("--max-consecutive-failures", type=int, default=3,
                     help="stop the worker after this many failed episodes in a row")
     ap.add_argument("--settle-s", type=float, default=30.0,
@@ -105,6 +112,16 @@ def _parse_args():
     ap.add_argument("--video", action="store_true",
                     help="write a chase-camera MP4 next to each recording")
     return ap.parse_args()
+
+
+def _follow_spec(args) -> FollowSpec:
+    """How the aircraft flies a route, from the command line."""
+    defaults = FollowSpec()
+    cruise = args.cruise_speed if args.cruise_speed is not None else defaults.cruise_speed
+    yaw_rate = (np.radians(args.max_yaw_rate) if args.max_yaw_rate is not None
+                else defaults.max_yaw_rate)
+    return FollowSpec(cruise_speed=cruise, max_speed=max(cruise * 1.25, cruise + 0.2),
+                      max_yaw_rate=yaw_rate)
 
 
 def _episode_spec(args) -> EpisodeSpec:
@@ -130,6 +147,7 @@ def main() -> int:
     seed = args.seed if args.seed is not None else args.worker
     rng = np.random.default_rng(seed)
     spec = _episode_spec(args)
+    follow_spec = _follow_spec(args)
 
     # Load and validate the map before paying for a Kit boot: a missing or
     # unusable map is the most common way a campaign is misconfigured, and it
@@ -155,8 +173,12 @@ def main() -> int:
         )
         campaign_setup.configure_px4(loop, px4, px4_params.all_params(), PARAM_SETTLE_S)
         campaign_setup.settle_estimator(loop, px4, args.settle_s)
-        records = run_campaign(args, spec, rng, world_map, loop, adapter, px4,
-                               chase_camera, resolution, seed)
+        if not campaign_setup.wait_until_armable(loop, px4):
+            print("ERROR: this worker never became armable; nothing to collect",
+                  flush=True)
+            return 1
+        records = run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter,
+                               px4, chase_camera, resolution, seed)
     except Exception:
         traceback.print_exc()
         return 1
@@ -171,8 +193,8 @@ def main() -> int:
     return 0 if landed else 1
 
 
-def run_campaign(args, spec, rng, world_map, loop, adapter, px4, chase_camera,
-                 resolution, seed) -> list:
+def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
+                 chase_camera, resolution, seed) -> list:
     """Fly ``args.episodes`` missions, recording each. Returns the manifest rows."""
     records = []
     consecutive_failures = 0
@@ -206,9 +228,9 @@ def run_campaign(args, spec, rng, world_map, loop, adapter, px4, chase_camera,
             video_out=(out_dir.with_suffix(".mp4") if args.video else None),
             video_source="chase", chase_camera=chase_camera,
         )
-        result = episode.fly_episode(loop, px4, adapter, plan, recorder)
+        result = episode.fly_episode(loop, px4, adapter, plan, recorder, follow_spec)
         stats = recorder.finish(_episode_meta(args, seed, index, name, plan, result,
-                                              resolution))
+                                              resolution, follow_spec))
         episode.settle_after_landing(loop, px4)
 
         records.append(_manifest_row(name, plan, result, stats))
@@ -231,7 +253,8 @@ def run_campaign(args, spec, rng, world_map, loop, adapter, px4, chase_camera,
     return records
 
 
-def _episode_meta(args, seed, index, name, plan, result, resolution) -> dict:
+def _episode_meta(args, seed, index, name, plan, result, resolution,
+                  follow_spec) -> dict:
     """Provenance written into each recording's ``meta.json``."""
     return {
         "recording": name,
@@ -252,9 +275,11 @@ def _episode_meta(args, seed, index, name, plan, result, resolution) -> dict:
         "outcome_ok": result.ok,
         "outcome_detail": result.detail,
         "goal_error_m": result.goal_error_m,
-        "waypoints_reached": result.waypoints_reached,
-        "waypoints_skipped": result.waypoints_skipped,
+        "route_remaining_m": result.route_remaining_m,
+        "cross_track_error_m": result.cross_track_error_m,
         "estimator_drift_m": result.estimator_drift_m,
+        "cruise_speed_mps": follow_spec.cruise_speed,
+        "max_yaw_rate_dps": float(np.degrees(follow_spec.max_yaw_rate)),
     }
 
 
@@ -271,7 +296,8 @@ def _manifest_row(name, plan, result, stats) -> dict:
         "start_xy": [plan.start.x, plan.start.y],
         "goal_xy": [plan.goal.x, plan.goal.y],
         "goal_error_m": result.goal_error_m,
-        "waypoints_skipped": result.waypoints_skipped,
+        "route_remaining_m": result.route_remaining_m,
+        "cross_track_error_m": result.cross_track_error_m,
         "estimator_drift_m": result.estimator_drift_m,
         "detail": result.detail,
     }

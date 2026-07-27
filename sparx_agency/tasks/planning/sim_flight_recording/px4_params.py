@@ -25,15 +25,23 @@ Two things about *how* they are applied matter as much as the values:
 from __future__ import annotations
 
 INDOOR_LIMITS = {
-    "MPC_XY_VEL_MAX": 1.5,      # m/s, horizontal speed ceiling
-    "MPC_XY_CRUISE": 1.0,       # m/s, target speed between waypoints
-    "MPC_ACC_HOR_MAX": 1.5,     # m/s^2
-    "MPC_ACC_HOR": 1.0,         # m/s^2
-    "MPC_JERK_AUTO": 2.0,       # m/s^3, smooths the corners
-    "MPC_TILTMAX_AIR": 20.0,    # deg, shallow tilt keeps the camera useful
+    # These are ceilings, not targets: the route is flown by the guidance law in
+    # path_follower, and PX4 only has to be able to deliver what it asks for.
+    # Each must sit comfortably ABOVE FollowSpec's corresponding limit -- if PX4
+    # is the binding constraint the aircraft silently falls behind its carrot
+    # instead of tracking the route.
+    "MPC_XY_VEL_MAX": 2.0,      # m/s, horizontal speed ceiling
+    "MPC_XY_CRUISE": 1.5,       # m/s
+    "MPC_ACC_HOR_MAX": 2.5,     # m/s^2, enough to hold speed through a curve
+    "MPC_ACC_HOR": 2.0,         # m/s^2
+    "MPC_JERK_AUTO": 4.0,       # m/s^3, smooths the corners
+    "MPC_TILTMAX_AIR": 25.0,    # deg, shallow tilt keeps the camera useful
     "MPC_Z_VEL_MAX_UP": 1.0,    # m/s
     "MPC_Z_VEL_MAX_DN": 0.7,    # m/s
-    "MPC_YAWRAUTO_MAX": 45.0,   # deg/s, so the camera pans rather than whips
+    # The follower slews the heading itself, so this only has to not be the
+    # binding limit. How fast the world actually rotates in the recorded
+    # imagery is FollowSpec.max_yaw_rate.
+    "MPC_YAWRAUTO_MAX": 25.0,   # deg/s
     # Takeoff is the least stable moment: MPC_TILTMAX_AIR does not govern the
     # takeoff ramp, and snapping to full climb thrust while still in ground
     # contact has tipped the airframe onto its back (roll -150 deg two seconds
