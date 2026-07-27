@@ -16,8 +16,8 @@ Sim 6.0.1 and PX4 compatibility work all of this rests on) lives in
 ```
 survey_scene.py            ONCE per scene: one C++ sweep of the whole building
    │                       at 10 cm  →  <scene>_voxels.npz   (3D ground truth)
-   │                                    <scene>_voxels.ply   (open it in Open3D)
-   │                                    <scene>_alt150cm.npz (a slab of it, for planning)
+   │                                    <scene>_alt0150cm.npz (a slab of it, for planning)
+   │                       view_voxel_map.py opens the result and lets you walk it
    ▼
 run_collection.sh          host-side launcher: syncs the repo, starts N workers
    │
@@ -280,7 +280,43 @@ can use it directly. **A second altitude is free** — it is a slice, not anothe
 sweep — and the 2D and 3D maps cannot disagree because one is computed from the
 other.
 
-### Looking at it
+### Walking around it
+
+**No container.** The map is a file; the viewer reads it directly:
+
+```bash
+.venv/bin/python sparx_agency/tasks/planning/sim_flight_recording/view_voxel_map.py \
+    --scene office --max-z 2.2 --recordings ~/sim_flight_recordings
+```
+
+Drag to orbit, scroll to zoom, and:
+
+| key | |
+|---|---|
+| `[` / `]` | lower / raise the ceiling cut, 0.2 m a press |
+| `C` | points ↔ cubes (points by default — 1.8 M cubes will not orbit) |
+| `P` | print the current cut, to reuse as `--max-z` |
+| `R` | reset the view |
+| `H` | Open3D's own help |
+
+`--recordings` overlays the flown routes: an amber track per flight, green at
+the start, red at the goal. That is the fastest way to see whether the planner
+is hugging walls or cutting corners it should not.
+
+**Use the cut.** The ceiling is the largest surface in the building and it sits
+between you and everything you wanted to see; without clipping you are looking
+at a photograph of a roof. Just under the real ceiling (2.2 m here) turns it
+into a floor plan with the furniture standing on it. `--min-z` drops the floor
+the same way. `--screenshot out.png` renders one frame and exits, which is how
+the viewer is checked over SSH.
+
+**On Wayland, Open3D cannot get a GL context** — it fails with `Failed to
+initialize GLEW` and a window that never appears. The script clears
+`WAYLAND_DISPLAY` before importing Open3D so GLFW takes the XWayland path
+instead; that is why it works here at all, and why it must run under a session
+that has an `DISPLAY` to fall back to.
+
+### Looking at it without Open3D
 
 Only the `.npz` is committed — the point cloud is 27 MB and regenerated. Rebuild
 it from the committed map, which needs **neither Isaac Sim nor Open3D**:
@@ -290,27 +326,11 @@ it from the committed map, which needs **neither Isaac Sim nor Open3D**:
     --scene office --preview --max-z 2.2
 ```
 
-That writes `office_voxels.ply` next to the map, prints the Open3D snippet for
-it, and — because of `--preview` — also renders a shaded isometric PNG using
-just numpy and cv2, so you can check the map on the machine that produced it
-without a 450 MB wheel to look at one file.
-
-**Pass `--max-z`.** The ceiling is the largest surface in the building and it
-sits between you and everything you wanted to see; without clipping you are
-looking at a photograph of a roof. Just under the real ceiling (2.2 m here)
-turns it into a floor plan with the furniture standing on it. `--min-z` drops
-the floor the same way.
-
-Then, wherever you have Open3D:
-
-```python
-import open3d as o3d
-pcd = o3d.io.read_point_cloud("office_voxels.ply")
-o3d.visualization.draw_geometries(
-    [o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, 0.1)])
-# or just the points, which spins around faster:
-# o3d.visualization.draw_geometries([pcd])
-```
+That writes `office_voxels.ply` next to the map — openable in MeshLab or
+CloudCompare as well as Open3D — and, because of `--preview`, also renders a
+shaded isometric PNG using just numpy and cv2. That path is what checks the map
+on the machine that *produced* it: Isaac's Python has no Open3D, and a 450 MB
+wheel to look at one file is a poor trade.
 
 The exporter writes the minimal binary PLY (`float x/y/z` + `uchar
 red/green/blue`, 15 bytes a point) by hand rather than taking an Open3D
@@ -429,14 +449,16 @@ known.
 |---|---|
 | `run_collection.sh` | **host-side launcher — the entry point.** Syncs, starts N workers |
 | `collect.py` | one worker: boot Kit once, fly N episodes, write a manifest |
-| `survey_scene.py` | one-off: sweep a scene into a reusable occupancy map |
+| `survey_scene.py` | one-off: sweep a scene into a reusable 3D voxel map + 2D slab |
+| `voxel_export.py` | turn a saved map into a `.ply` + an isometric PNG, without Open3D |
+| `view_voxel_map.py` | the interactive Open3D viewer — orbit the map, overlay flown routes |
 | `campaign_setup.py` | the order-sensitive bring-up: map → world → vehicle → PX4 → params |
 | `episode_plan.py` | sample a reachable goal, plan a wall-avoiding route to it |
 | `episode.py` | arm, take off, track the route, land — one flight, one outcome |
 | `sim_loop.py` | the hand-driven physics loop everything hangs off |
 | `manual_physics_driver.py` | **the fix that makes any of this work** — see bug 1 above |
 | `flight_session.py` | boot Kit, build the world, spawn the aircraft, stream frames out |
-| `waypoint_mission.py` | which setpoint to stream right now, and when to move on |
+| `path_follower.py` | the continuous follower: spline, carrot, velocity + yaw command |
 | `px4_launch.py` | start/stop PX4 instances with per-instance ports and directories |
 | `px4_offboard.py` | non-blocking MAVLink: parameters, arm, setpoints, land, land-detect |
 | `px4_params.py` | the parameter sets an indoor simulated drone needs |
