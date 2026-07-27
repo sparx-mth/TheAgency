@@ -239,9 +239,11 @@ sparx_agency/tasks/planning/navdp/engines/
 *.weights
 
 # Vendor ROBOTICAN/Sphera message sources, staged into the Docker build context
-# by docker/devcontainer/stage_vendor_msgs.sh. Delivered by the vendor outside
-# this repo (~/rqs_iai_ws/src/rooster_interfaces) -- never committed here.
+# by docker/devcontainer/stage_vendor_msgs.sh (old single-Dockerfile setup) or
+# docker/stage_vendor_msgs.sh (modular bake.hcl setup). Delivered by the vendor
+# outside this repo (~/rqs_iai_ws/src/rooster_interfaces) -- never committed here.
 docker/devcontainer/vendor/
+docker/vendor/
 /sparx_agency/theagency_venv/
 
 # FALCON flight logs (thought journal); see tasks/planning/falcon/run_falcon.sh

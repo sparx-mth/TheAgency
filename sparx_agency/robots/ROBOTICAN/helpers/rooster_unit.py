@@ -82,6 +82,10 @@ class RoosterUnit:
         land_step_interval_sec: float = 1.0,
         land_timeout_sec: float = 30.0,
         climb_duration_sec: float = 3.0,
+        altitude_hold_kp: float = 500.0,
+        altitude_hold_kd: float = 600.0,
+        altitude_hold_max_correction: float = 200.0,
+        altitude_hold_interval_sec: float = 1.0,
     ):
         self.id = rooster_id
         self.node = node
@@ -91,6 +95,10 @@ class RoosterUnit:
         self.land_step_interval_sec = float(land_step_interval_sec)
         self.land_timeout_sec = float(land_timeout_sec)
         self.climb_duration_sec = float(climb_duration_sec)
+        self.altitude_hold_kp = float(altitude_hold_kp)
+        self.altitude_hold_kd = float(altitude_hold_kd)
+        self.altitude_hold_max_correction = float(altitude_hold_max_correction)
+        self.altitude_hold_interval_sec = float(altitude_hold_interval_sec)
 
         self.axes = AxisModel()
 
@@ -101,6 +109,37 @@ class RoosterUnit:
         self.busy_action: Optional[str] = None  # "takeoff" | "land" | None
         self._cancel_event = threading.Event()
 
+        # hover_z is a single open-loop throttle constant (see _climb) with
+        # no feedback of its own -- even a near-perfect value drifts slowly,
+        # and a draining battery shifts the real thrust curve underneath it
+        # mid-flight (confirmed live: hover_z=560 held for ~1-2 min then
+        # drifted toward the ceiling). This nulls that drift by nudging z
+        # toward whatever ranger reading was captured the moment hover
+        # began, rather than holding a fixed throttle forever.
+        #
+        # PD, not P-only: throttle maps to vertical ACCELERATION here (a
+        # double integrator to position), so a proportional-only correction
+        # is slow to arrest velocity already built up during the climb phase
+        # -- confirmed live, error kept growing for ~25s despite z visibly
+        # dropping in response, before finally turning around. The kd term
+        # damps the climb/sink RATE directly instead of waiting for enough
+        # position error to accumulate.
+        #
+        # Tuning status (live-tested 2026-07-27, hover_z=560, kp=500/kd=600):
+        # converges from a ~0.09m error down to ~0.01-0.02m within about
+        # 6-8 ticks, but does NOT fully settle -- it drifts back out to
+        # ~0.06m and re-converges in a slow (~10-15s period) bounded
+        # oscillation rather than a flat hold. That's a large improvement
+        # over the old open-loop behavior (unbounded drift into the
+        # ceiling), but it is not a fully damped controller. If tighter
+        # hold is needed later: try raising kd relative to kp further, or
+        # low-pass filtering ranger before differentiating it (a single
+        # 1-sample finite difference at these gains is fairly noise-
+        # sensitive) -- don't assume the current gains are final.
+        self._holding_altitude = False
+        self._hold_ranger_target: Optional[float] = None
+        self._hold_prev_ranger: Optional[float] = None
+
         self.manual_pub = node.create_publisher(
             ManualControl, f"/{rooster_id}/manual_control", 10)
         self.keep_alive_pub = node.create_publisher(
@@ -109,6 +148,7 @@ class RoosterUnit:
             RoosterState, f"/{rooster_id}/state", self._state_cb, 10)
         self.force_arm_client = node.create_client(
             SetBool, f"/{rooster_id}/fcu/command/force_arm")
+        node.create_timer(float(altitude_hold_interval_sec), self._altitude_hold_tick)
 
         node.get_logger().info(f"RoosterUnit ready for {rooster_id}")
 
@@ -134,6 +174,42 @@ class RoosterUnit:
         msg.requested_flight_mode = FLIGHT_MODE_POSITION
         msg.command_reboot = False
         self.keep_alive_pub.publish(msg)
+
+    def _altitude_hold_tick(self):
+        """PD correction toward the ranger reading captured when hover
+        began. A no-op unless a takeoff has actually engaged hold (see
+        _enable_altitude_hold) -- land() disables it immediately so it
+        never fights a commanded descent."""
+        if not self._holding_altitude or self._hold_ranger_target is None:
+            return
+        if self.ranger == float("inf"):
+            return
+        error = self._hold_ranger_target - self.ranger  # +: sunk low, -: drifted high
+        velocity = 0.0
+        if self._hold_prev_ranger is not None:
+            velocity = (self.ranger - self._hold_prev_ranger) / self.altitude_hold_interval_sec
+        self._hold_prev_ranger = self.ranger
+        correction = clamp_symmetric(
+            self.altitude_hold_kp * error - self.altitude_hold_kd * velocity,
+            self.altitude_hold_max_correction)
+        new_z = self.hover_z + correction
+        self.axes.set(x=self.axes.x, y=self.axes.y, z=new_z, r=self.axes.r)
+        self.node.get_logger().info(
+            f"[{self.id}] altitude hold: ranger={self.ranger:.3f}m "
+            f"target={self._hold_ranger_target:.3f}m error={error:+.3f}m "
+            f"vel={velocity:+.4f}m/s z={new_z:.0f}")
+
+    def _enable_altitude_hold(self):
+        if self.ranger == float("inf"):
+            self.node.get_logger().warn(
+                f"[{self.id}] No ranger telemetry yet -- altitude hold not engaged, "
+                f"holding raw throttle only.")
+            return
+        self._hold_ranger_target = self.ranger
+        self._hold_prev_ranger = None
+        self._holding_altitude = True
+        self.node.get_logger().info(
+            f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m.")
 
     # ---- manual movement ----
 
@@ -179,6 +255,7 @@ class RoosterUnit:
             if on_confirmed:
                 on_confirmed()
             return
+        self._holding_altitude = False
         self.axes.reset()
         self.arm_pending = True
         threading.Thread(target=self._do_arm, args=(on_confirmed, on_failed), daemon=True).start()
@@ -236,6 +313,7 @@ class RoosterUnit:
             on_failed(msg)
 
     def disarm(self, on_done: Optional[Callable[[], None]] = None):
+        self._holding_altitude = False
         self.axes.reset()
         if not self.force_arm_client.service_is_ready():
             self.node.get_logger().warn(f"[{self.id}] force_arm service not ready for disarm.")
@@ -286,12 +364,14 @@ class RoosterUnit:
         while time.time() < deadline:
             if self._cancel_event.is_set():
                 self.busy_action = None
+                self._enable_altitude_hold()
                 self.node.get_logger().info(f"[{self.id}] Climb cancelled - holding z={self.axes.z:.0f}.")
                 if on_hover:
                     on_hover()
                 return
             time.sleep(0.1)
         self.axes.set(z=self.hover_z)
+        self._enable_altitude_hold()
         self.busy_action = None
         self.node.get_logger().info(f"[{self.id}] Climb done - hovering at z={self.hover_z}.")
         if on_hover:
@@ -309,12 +389,14 @@ class RoosterUnit:
         threading.Thread(target=self._do_land, args=(on_landed,), daemon=True).start()
 
     def _do_land(self, on_landed):
+        self._holding_altitude = False
         deadline = time.time() + self.land_timeout_sec
         min_throttle = self.hover_z * LAND_MIN_THROTTLE_FRACTION
         reason = "timeout"
         while time.time() < deadline:
             if self._cancel_event.is_set():
                 self.busy_action = None
+                self._enable_altitude_hold()
                 self.node.get_logger().info(f"[{self.id}] Land cancelled - holding z={self.axes.z:.0f}.")
                 if on_landed:
                     on_landed()

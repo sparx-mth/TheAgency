@@ -1,0 +1,60 @@
+{
+  "name": "TheAgency ROBOTICAN (modular: base_cuda -> ros2_humble -> perception -> robotican)",
+
+  // Runs on the HOST before the container is created: stages the vendor
+  // .msg sources, then builds the whole DAG in one command via buildx bake
+  // (see docker/bake.hcl). Rebuilds are incremental -- unchanged layers
+  // are cached.
+  "initializeCommand": "${localWorkspaceFolder}/docker/stage_vendor_msgs.sh && docker buildx bake -f ${localWorkspaceFolder}/docker/bake.hcl robotican",
+
+  // Pre-built by initializeCommand above, not built inline here -- a plain
+  // devcontainer "build" block doesn't understand bake's multi-target DAG
+  // (each Dockerfile's `FROM theagency:<parent>` needs bake's `contexts`
+  // resolution, not a registry pull).
+  "image": "theagency:robotican",
+
+  // Mounted at the SAME absolute path as the host, not the devcontainer
+  // default /workspaces/<name> -- the run_*.sh wrappers and
+  // tools/mission_control.py hardcode /home/$USER/GIT/TheAgency.
+  "workspaceMount": "source=${localEnv:HOME}/GIT/TheAgency,target=${localEnv:HOME}/GIT/TheAgency,type=bind",
+  "workspaceFolder": "${localEnv:HOME}/GIT/TheAgency",
+  "remoteUser": "user1",
+
+  // Host networking is not a convenience here: cyclonedds.xml pins a
+  // specific host NIC by IP, and the Rooster video path is a raw UDP
+  // stream to a host port -- neither works across a bridged container.
+  "runArgs": [
+    "--network=host",
+    "--ipc=host",
+    "--privileged",
+    "--gpus", "all",
+    "--shm-size=2g"
+  ],
+
+  "mounts": [
+    "source=${localEnv:HOME}/rqs_iai_ws,target=${localEnv:HOME}/rqs_iai_ws,type=bind,readonly",
+    "source=/tmp/rooster_frames,target=/tmp/rooster_frames,type=bind",
+    "source=/tmp/rooster_depth,target=/tmp/rooster_depth,type=bind",
+    "source=${localEnv:HOME}/.cache/sparx_agency,target=${localEnv:HOME}/.cache/sparx_agency,type=bind",
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+
+  "containerEnv": {
+    // Do NOT hardcode DISPLAY beyond passthrough -- it has been ":1" on
+    // this PC, not ":0"; overriding it fails silently.
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "QT_X11_NO_MITSHM": "1",
+    "PYTHONUNBUFFERED": "1",
+    // Sphera's domain. NOT 5 (XTEND/Jetson) or 2 (Rooster Jetson).
+    "ROS_DOMAIN_ID": "9",
+    "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
+    "CYCLONEDDS_URI": "file://${localEnv:HOME}/rqs_iai_ws/src/cyclonedds.xml"
+  },
+
+  "customizations": {
+    "vscode": {
+      "settings": { "terminal.integrated.defaultProfile.linux": "bash" }
+    }
+  }
+}

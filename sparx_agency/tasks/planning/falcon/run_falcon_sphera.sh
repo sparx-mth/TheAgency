@@ -194,6 +194,12 @@ fi
 # container restart to take effect (single-file bind-mount inode gotcha,
 # see project_falcon_robotican_bridging memory) -- only scripts/launch
 # got the directory-mount fix.
+#
+# PYTHONPATH also includes /catkin_ws/src/falcon_adapter/scripts: several
+# planner nodes do `from thinking import Thinker` -- roslaunch execs their
+# SOURCE file via the devel-space stub, so sys.path[0] is the stub's own
+# directory, not scripts/, and that sibling import fails with
+# ModuleNotFoundError without this on the path.
 docker run -it --rm \
     --name "${CONTAINER}" \
     ${GPU_ARGS} \
@@ -205,7 +211,7 @@ docker run -it --rm \
     --ulimit nofile=65536:65536 \
     --volume /tmp/.X11-unix:/tmp/.X11-unix:rw \
     --volume "${SPARX_PARENT}/sparx_agency:/opt/sparx_agency:ro" \
-    --env PYTHONPATH=/opt \
+    --env PYTHONPATH=/opt:/catkin_ws/src/falcon_adapter/scripts \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \

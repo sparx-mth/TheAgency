@@ -1469,28 +1469,6 @@ class WaypointFollowerNode:
             except Exception as e:
                 rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
 
-    def _publish_twist_multi(self, vx, vy, wz):
-        """Assemble a multi-axis Twist: linear.x=vx, linear.y=vy, angular.z=wz;
-        linear.z=0 hardwired (fixed altitude). No command-commitment gate -- the
-        multi-axis controller emits continuous, minimum-force-shaped commands, so
-        it never needs the lone-pulse protection the one-axis path uses."""
-        m = Twist()
-        m.linear.x = vx
-        m.linear.y = vy  # lateral (crab) -- enabled for the multi-axis controller
-        m.linear.z = 0.0  # HARDWIRED -- fixed altitude (platform holds it)
-        m.angular.z = wz
-        self.cmd_vel_pub.publish(m)
-        if self._log_file is not None:
-            try:
-                self._log_file.write(json.dumps({
-                    "t": rospy.Time.now().to_sec(),
-                    "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
-                    "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
-                }) + "\n")
-                self._log_file.flush()
-            except Exception as e:
-                rospy.logwarn_throttle(10.0, "waypoint_follower: log write failed: %s", e)
-
     def _open_log(self, path):
         if path and "{ts}" in path:
             path = path.replace("{ts}", datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))

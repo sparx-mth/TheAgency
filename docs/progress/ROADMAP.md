@@ -1,0 +1,20 @@
+# Roadmap
+
+High-level direction only — no implementation detail here. Each line becomes a progress
+entry under `entries/` when work actually starts on it.
+
+## Now
+- [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
+
+## Next
+- [ ] Track down the noisy/speckled occupancy map (vendor CDR corruption suspected, not confirmed as the full explanation)
+- [ ] Resolve which battery-capacity config file Sphera actually reads (`rqs7-private-parameters` vs `rooster-private-parameters`, currently `10000.0` vs `1000.0`)
+- [ ] Split today's Sphera/FALCON fixes off `create_devcontainer_daphna` onto their own `fix/` branch
+- [ ] XTEND sibling Docker layer (`Dockerfile.xtend`) reusing `base_cuda`/`ros2_humble`/`perception`
+
+## Later / ideas
+- Long-tail migration of remaining DA3-consumer scripts/launch files to the model registry (explicitly deprioritized for now)
+
+## Done
+- [x] GPU hardware-detection consolidation, model/engine registry, x86 dev container for Sphera/ROBOTICAN (commit `55f96e33`)
+- [x] Rooster/Sphera takeoff, video streaming, depth `.npy` output, closed-loop altitude hold

@@ -1,0 +1,57 @@
+# ============================================================
+# Run the ROBOTICAN/Sphera session using the image docker/bake.hcl builds
+# (theagency:robotican). Build first:
+#   ./docker/stage_vendor_msgs.sh
+#   docker buildx bake -f docker/bake.hcl robotican
+#
+# Then, with Sphera + its `it` container already running:
+#   docker compose -f docker-compose.robotican.yml run --rm robotican
+#
+# When the XTEND stack exists, it gets its own docker-compose.xtend.yml
+# pointed at theagency:xtend -- same anchors, same shape, different image.
+# ============================================================
+x-x11-volume: &x11-volume
+  /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+services:
+  robotican:
+    image: theagency:robotican
+    network_mode: host
+    ipc: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONUNBUFFERED=1
+      # Sphera's domain (see ~/rqs_iai_ws/src/docker-compose.yml). NOT 5
+      # (XTEND/Jetson) or 2 (Rooster Jetson) -- those are different stacks.
+      - ROS_DOMAIN_ID=9
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file://${HOME}/rqs_iai_ws/src/cyclonedds.xml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - *x11-volume
+      # Repo at the SAME absolute path as the host -- the run_*.sh wrappers
+      # and tools/mission_control.py hardcode /home/$USER/GIT/TheAgency.
+      - ${HOME}/GIT/TheAgency:${HOME}/GIT/TheAgency
+      # Sphera's cyclonedds config + vendor .msg sources (read-only -- the
+      # image already built its own copy of the interfaces).
+      - ${HOME}/rqs_iai_ws:${HOME}/rqs_iai_ws:ro
+      # Shared with the host and the FALCON container, not per-container /tmp.
+      - /tmp/rooster_frames:/tmp/rooster_frames
+      - /tmp/rooster_depth:/tmp/rooster_depth
+      # Model registry cache -- outside the repo, read-write.
+      - ${HOME}/.cache/sparx_agency:${HOME}/.cache/sparx_agency
+      # run_video_trigger.sh / run_ground_truth_localization.sh `docker exec`
+      # into Sphera's `it` container from inside this one.
+      - /var/run/docker.sock:/var/run/docker.sock

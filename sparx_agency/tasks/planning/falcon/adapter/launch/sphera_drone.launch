@@ -262,9 +262,12 @@
     <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
     <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
     <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
-         /xtend/demo_mode == turning, and drop the stale in-flight turn frame on
-         resume, all in the capture clock. -->
-    <param name="demo_mode_topic"      value="/xtend/demo_mode" />
+         /R1/demo_mode == turning, and drop the stale in-flight turn frame on
+         resume, all in the capture clock. Renamed off /xtend/... to match
+         this robot's topic convention; must stay equal to the
+         demo_mode_topic passed into nav_stack.launch below, or this freeze
+         gate and the follower's own handshake fall out of sync. -->
+    <param name="demo_mode_topic"      value="/R1/demo_mode" />
     <param name="turning_mode_name"    value="turning" />
     <param name="resume_settle_sec"    value="0.0" />
     <!-- Startup warm-up: force-fuse the first N voxel pairs ignoring demo_mode
@@ -310,6 +313,23 @@
     <arg name="bev_ymin"      value="$(arg bev_ymin)" />
     <arg name="bev_xmax"      value="$(arg bev_xmax)" />
     <arg name="bev_ymax"      value="$(arg bev_ymax)" />
+
+    <!-- Rooster is holonomic (independent x/y/yaw via manual axes, not a
+         differential-drive platform that must turn to face its travel
+         direction), so multi_axis is the correct controller; it's also the
+         only one whose demo-mode confirmation is best-effort by default
+         (~mx_require_mode:=false), unlike the default roll_assist/waypoint
+         one-axis handshake which hard-blocks forever if nothing publishes a
+         confirmation on demo_mode_topic. Confirmed live: with the default
+         controller, waypoint_follower deadlocked in YAW_ALIGN waiting on
+         'turning' confirmation that no Rooster-side demo-mode manager exists
+         to ever send (xtend_drone_demo_manager.py has no Rooster equivalent).
+         demo_mode_topic/_request_topic renamed off /xtend/... to match this
+         robot's own /R1/... topic convention; mapping_sync's freeze gate
+         below uses the same rename so the two stay coordinated. -->
+    <arg name="controller"              value="multi_axis" />
+    <arg name="demo_mode_topic"         value="/R1/demo_mode" />
+    <arg name="demo_mode_request_topic" value="/R1/demo_mode_request" />
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="nav_mode"                value="$(arg nav_mode)" />
