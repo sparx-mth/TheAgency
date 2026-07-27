@@ -203,6 +203,62 @@ See `tasks/planning/sim_flight_recording/README.md` for the flags, the flight
 modes, how the per-scene routes are surveyed, and why PX4 is given a vision
 pose instead of GPS.
 
+## Aerial Gym: deliberately not installed
+
+Aerial Gym Simulator (`ntnu-arl/aerial_gym_simulator`) is still built
+exclusively on NVIDIA's deprecated IsaacGym (Isaac Sim/Isaac Lab support has
+been "under development" upstream for a long time with no release). IsaacGym
+Preview 4's bundled `libPhysXGpu_64.so` has no compiled kernels for Blackwell
+(`sm_120`) and fails outright with `CUDA error: no kernel image available for
+execution` on RTX 50-series cards — this is a shipped-binary limitation with
+no driver/CUDA-toolkit workaround and no maintained fork. It will not run GPU
+physics on this machine's RTX 5070 Laptop GPU; skipped rather than installed
+for a known dead end.
+
+## Isaac Lab (installed for the future training phase, not used by PEGASUS)
+
+Isaac Lab 3.0 Beta2 (`v3.0.0-beta2`, tag pinned) is installed into the same
+`isaac-sim` container/Isaac Sim Python, at `$DEV_ROOT/IsaacLab`, layered on
+top of the existing Isaac Sim install via a `_isaac_sim` symlink
+(`ln -s /isaac-sim $DEV_ROOT/IsaacLab/_isaac_sim`) rather than a second
+container. Install with `./isaaclab.sh -i`, run as root inside the container
+(`docker exec -u root`) since the installer shells out to `sudo`, which this
+minimal image does not have. It is unrelated to how PEGASUS flies today
+(PX4 + Pegasus, not an Isaac Lab env) — it is prep for RL-based training,
+which is why `nav_mode`/flight scripts here don't reference it.
+
+Two things to know before using it:
+
+- **`isaaclab_newton` and `isaaclab_rl`'s wheel builds intermittently
+  segfault** (`exit code: -11`) during `pip`'s isolated build-dependency
+  install step, for no reproducible reason found so far (not memory
+  pressure — confirmed >20GB free RAM at the time). A bare retry of
+  `./isaaclab.sh -i` succeeded both times this was hit; treat it as a flake,
+  not a real blocker, but don't assume a failed install run is authoritative
+  without one retry.
+- **Environment construction is real but very slow on this GPU.** Verified
+  with `py-spy dump` against a running `zero_agent.py --task
+  Isaac-Cartpole-v0` process (needs `--cap-add=SYS_PTRACE` on the container):
+  the stack is genuinely inside `ManagerBasedRLEnv.step()` →
+  `Articulation._apply_actuator_model()` → real Warp kernel launches, not
+  hung or deadlocked. But a trivial 1-4 env, 100-step cartpole episode took
+  20-30+ minutes wall-clock in both `--device cpu` and the GPU default, far
+  beyond what such a small workload should cost. **First-time Warp/NVRTC JIT
+  compilation was the leading theory but is now ruled out**: `/isaac-sim/
+  .cache/warp` (not one of the persisted bind mounts, so this only holds
+  within one container's lifetime) was confirmed populated with real compiled
+  kernels — including `sm120.ptx`, the Blackwell target — left over from
+  earlier slow runs in the same container, yet a later run in that same
+  container with a warm cache was still just as slow. So the cost is not
+  (primarily) compilation. Root cause is still unknown; candidates worth
+  checking next are per-step Python/Kit overhead unrelated to Warp, or
+  something specific to this pre-release Isaac Lab beta's manager-based env
+  architecture being inefficient at small batch sizes. Budget real time for
+  this (or fix it) before relying on it for actual training throughput. A
+  GPU-mode run also segfaulted once inside `warp.so!wp_cuda_graph_end_capture`
+  (exit 132, `SIGILL`) at a smaller `--num_envs`; a later run with different
+  `--num_envs` did not reproduce it, so its determinism is also still unclear.
+
 ## Watching it live: WebRTC streaming
 
 Isaac Sim runs fully headless in this container (no X11/GUI), so "watching"
@@ -225,11 +281,64 @@ needs no extra software.
 
 ## Operational notes
 
+- **Only the `/tmp/dev` mount and the explicit cache mounts survive a
+  container recreation — nothing else does.** `DEV_ROOT` is bind-mounted to a
+  host directory (`/home/nadavc/isaac_dev_root` → container `/tmp/dev`), and
+  Isaac Sim's own caches are bind-mounted too (`/isaac-sim/kit/cache`,
+  `/root/.cache/ov`, `/root/.cache/pip`, GLCache, ComputeCache, logs, data,
+  Documents — see the `docker run` invocation this README's setup implies).
+  **Everything else inside `/isaac-sim` — apt packages (`git`, `cmake`,
+  `build-essential`, ...) and anything pip-installed into Isaac Sim's own
+  Python (e.g. Isaac Lab's submodules) — lives in the container's writable
+  layer and is gone the moment the container is recreated.** Recreating the
+  container (e.g. to add `--cap-add=SYS_PTRACE` for `py-spy`) silently loses
+  both; re-run the `apt-get install` and `isaaclab.sh -i` steps after any
+  recreation. The `extsUser/pegasus.simulator` symlink (`/isaac-sim/extsUser`)
+  is also container-local and must be recreated the same way.
+- **The bind-mounted cache directories must be owned by the container's
+  `isaac-sim` user (uid 1234), not whatever host user created them.** A
+  `mkdir` on the host followed by a straight bind mount leaves them
+  host-owned; Isaac Sim then silently fails to acquire its shader
+  `DerivedDataCache` lock (`Failed to acquire exclusive lock to data store`)
+  and the RTX renderer never actually runs — physics and PX4 still work, so
+  the flight *looks* successful but every recorded frame is empty/near-empty
+  (a ~250-byte MP4, an empty `rgb/` dir). Fix from **inside** the container as
+  root (`docker exec -u root isaac-sim chown -R isaac-sim:isaac-sim
+  /isaac-sim/kit/cache /root/.cache/ov ...`) — chowning from the host side
+  fails with `Operation not permitted` since the host user has no rights over
+  files the container's root wrote.
+- **Installing Isaac Lab into this same Isaac Sim breaks *every* scene, not
+  just one, until fixed.** `isaaclab.sh -i` pip-installs its own modern
+  `torch`/`nvidia-nccl-cu12` into Isaac Sim's main site-packages, and tries to
+  move Isaac Sim's own older bundled copies
+  (`/isaac-sim/extsDeprecated/omni.isaac.ml_archive/pip_prebundle/{torch,
+  torchvision,nvidia}`) out of the way so the two don't collide — but that
+  move is a `rename()`, which fails silently across the overlayfs copy-up
+  boundary (`Invalid cross-device link`, logged as a skippable `[WARNING]`
+  during install, easy to miss). The stale bundled `torch` is then left in
+  place, its `libtorch_cuda.so` has an `nvidia-nccl-cu12` version mismatch
+  (`undefined symbol: ncclDevCommCreate`), and loading it during Kit's core
+  extension bring-up (right after `isaacsim.core.prims`, before
+  `isaacsim.core.api`) silently terminates the whole process with **exit code
+  0, no traceback, no crash dump** — indistinguishable from a clean shutdown
+  unless you check whether extension loading actually finished. This broke
+  *both* `office` and `hospital` identically; it has nothing to do with which
+  scene is loaded. **Fix:** delete (don't rename) the stale bundled copies
+  after installing Isaac Lab:
+  `docker exec -u root isaac-sim rm -rf /isaac-sim/extsDeprecated/omni.isaac.ml_archive/pip_prebundle/{torch,torchvision,torchaudio,nvidia,torch-*.dist-info,torchvision-*.dist-info,torchaudio-*.dist-info,nvidia_*.dist-info}`
+  — confirmed this restores both scenes. Re-check for this after *any*
+  `isaaclab.sh -i` run (including a reinstall after a container recreation).
 - **Only one Isaac Sim process at a time.** A second one crashes the first
   inside Kit (`libomni.anim.behavior.core.plugin.so`, `std::out_of_range: no
   null terminator at count`) with a stack trace that points nowhere near the
   real cause. Wait for `Simulation App Shutting Down` — teardown takes a while
-  after the Python process looks done.
+  after the Python process looks done. The same GPU/Kit contention is also the
+  likely cause of a one-off `libnvidia-rtcore.so` / `libnvidia-gpucomp.so`
+  segfault (exit 139) seen when a flight was launched while a previous run's
+  PX4/Kit processes were still alive (orphaned, not killed) — it did not
+  recur once stray processes were cleaned up before relaunch, so treat any
+  RTX-shader-compiler crash as a process-hygiene symptom first, not a Blackwell
+  driver bug, before assuming the GPU itself is at fault.
 - **PX4 lock files.** `/tmp/px4_lock-0` and `/tmp/px4-sock-0` survive an
   abruptly-killed PX4 and make the next instance exit immediately (`PX4
   Exiting...`) with no explanation. `px4_launch.clear_stale_locks()` and
@@ -244,10 +353,33 @@ needs no extra software.
 
 ## What's still open
 
-- The Pegasus and PX4-Autopilot checkouts and the built `px4` binary live
-  under the container's `/tmp` by default. **Move `DEV_ROOT` to a bind-mounted
-  host directory before the container is ever recreated, or this work vanishes
-  with it** — the container is currently the only copy.
+- **The hospital scene has two, separate problems layered on top of each
+  other.** ~~It reproducibly fails to load~~ that part is **retracted** — the
+  original "crashes Kit" symptom was never scene-specific, it was the Isaac
+  Lab/stale-bundled-torch conflict described in the operational notes above,
+  which broke `office` identically. Confirmed: `load_indoor_scene("hospital")`
+  alone loads cleanly (`HOSPITAL_LOADED_OK` in ~25s) after deleting the stale
+  bundled torch. **But there is a second, real, unrelated crash underneath:**
+  any run that also enables the `pegasus.simulator` extension — i.e. every
+  actual flight or survey attempt, via `flight_session.boot_isaac()` — crashes
+  Kit reproducibly (confirmed twice) ~2-3 seconds in, **before scene loading
+  even starts**, with `std::out_of_range: no null terminator at count` inside
+  `libomni.anim.behavior.core.plugin.so`. This is the same signature the
+  original code comment described, just misattributed to hospital's USD
+  content — it is actually triggered by `pegasus.simulator` being enabled at
+  all, independent of which scene loads after it (a genuinely surprising
+  finding: `office` and `simple_room` flights enable the exact same extension
+  combination and never hit it, so whatever timing/state this race depends on
+  isn't scene-choice alone). Tried disabling `omni.anim.behavior.core` (and
+  the animation extensions that depend on it) as a workaround: it does avoid
+  the crash, but takes `pegasus.simulator` down with it (a hard dependency),
+  so it's not usable. This is a genuine Kit/`omni.anim.behavior.core` bug,
+  not something fixable from this repo — root cause unknown, no known
+  workaround. `run_flight.sh --scene hospital` will not fly until either this
+  upstream bug is fixed/patched or a different way to avoid it is found. A
+  hospital route survey (`probe_scene.py --scene hospital`) cannot even be
+  computed while this crash stands, since the survey step also enables
+  `pegasus.simulator`.
 - No home or library scene is wired in (see "Confirmed indoor scenes").
 - No NavDP fine-tuning has been run against simulated data yet.
 - `fly_direct.py`'s PD gains were tuned empirically for the Iris's ~1.6 kg

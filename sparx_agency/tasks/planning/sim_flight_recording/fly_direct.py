@@ -137,8 +137,15 @@ def main() -> None:
         vehicle = adapter.vehicle
 
         chase_camera = None
-        if args.video_out is not None and args.video_source == "chase":
+        want_chase_video = args.video_out is not None and args.video_source == "chase"
+        if want_chase_video or not args.no_stream:
             chase_camera = make_chase_camera()
+            if not args.no_stream:
+                # Point the interactive viewport -- what the WebRTC livestream
+                # actually shows -- at the chase camera. Otherwise a live
+                # viewer sees Kit's unaimed default camera, not the drone.
+                from omni.kit.viewport.utility import get_active_viewport
+                get_active_viewport().camera_path = "/World/ChaseCamera"
 
         world.reset()
         driver = ManualPhysicsDriver(vehicle, state_only=True)

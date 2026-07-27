@@ -42,6 +42,16 @@ MAX_RAY_M = 30.0
 MAX_FLOOR_DROP_M = 4.0    # no hit below this and the cell is not over walkable floor
 MAX_CEILING_M = 8.0       # no hit above this and the cell is outdoors, not in a room
 LEG_MARGIN_M = 0.5        # half-width of the corridor each route leg is checked through
+# Tried widening this to 2.0 (and min_clearance below to 3.5) on 2026-07-27 to
+# cover PX4's documented 2-5 m GPS-grade position drift (px4_vision_pose.py),
+# since routes "verified clear" at the old margin still ended against
+# furniture. Reverted: 3/3 flights on wider-margin routes crashed from a
+# compass/accelerometer-bias attitude-estimator divergence (not from hitting
+# anything) at inconsistent times (52s, 96s, 140s) regardless of route length
+# or width, so the change couldn't be shown to help and wasn't kept. Office's
+# unreliability looks like it's this estimator issue more than route
+# clearance -- see the incomplete vision-pose fusion work in
+# px4_vision_pose.py, which is the more promising angle to continue from.
 HORIZONTAL_DIRS = [
     (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
     (0.7071, 0.7071), (0.7071, -0.7071), (-0.7071, 0.7071), (-0.7071, -0.7071),

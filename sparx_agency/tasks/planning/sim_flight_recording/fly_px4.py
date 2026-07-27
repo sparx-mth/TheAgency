@@ -188,13 +188,32 @@ def main() -> None:
         vehicle = adapter.vehicle
 
         chase_camera = None
-        if args.video_out is not None and args.video_source == "chase":
+        want_chase_video = args.video_out is not None and args.video_source == "chase"
+        if want_chase_video or not args.no_stream:
             from sparx_agency.tasks.planning.sim_flight_recording.chase_camera import make_chase_camera
             chase_camera = make_chase_camera()
 
         world.reset()
         driver = ManualPhysicsDriver(vehicle)
         driver.ensure_started()
+
+        if chase_camera is not None and not args.no_stream:
+            # Point the streamed viewport -- what the WebRTC livestream
+            # actually shows -- at the chase camera. Otherwise a live viewer
+            # sees Kit's unaimed default camera, not the drone. Must happen
+            # *after* world.reset(), which otherwise resets the viewport back
+            # to its default camera. get_active_viewport() can return nothing
+            # useful in a --no-window headless app; look the primary viewport
+            # up by its known window name instead.
+            from omni.kit.viewport.utility import get_active_viewport, get_viewport_from_window_name
+
+            viewport = get_viewport_from_window_name("Viewport") or get_active_viewport()
+            if viewport is not None:
+                viewport.camera_path = "/World/ChaseCamera"
+                print(f"live viewport camera set to /World/ChaseCamera on {viewport}", flush=True)
+            else:
+                print("WARNING: no viewport found to point at the chase camera "
+                      "-- live stream will show the default unaimed camera", flush=True)
 
         px4 = PX4Offboard()
         dt = flight_session.PHYSICS_DT

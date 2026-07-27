@@ -23,9 +23,14 @@ _ASSET_BASE = (
 
 INDOOR_SCENES = {
     "simple_room": f"{_ASSET_BASE}/Simple_Room/simple_room.usd",
-    # NOTE: hospital crashes Kit ~25 s into loading in Isaac Sim 6.0.1
-    # (libomni.anim.behavior.core, std::out_of_range) and is currently unusable.
-    # See tasks/planning/sim_flight_recording/README.md.
+    # NOTE: hospital's USD loads fine on its own, but any run that also enables
+    # the pegasus.simulator extension (i.e. every real flight/survey) reliably
+    # crashes Kit ~2-3s in with a std::out_of_range in
+    # libomni.anim.behavior.core.plugin.so -- before scene loading even starts.
+    # Disabling that extension avoids the crash but takes pegasus.simulator
+    # down with it (a hard dependency), so it is not a usable workaround.
+    # Currently unusable for real flights. See
+    # tasks/planning/sim_flight_recording/README.md and robots/PEGASUS/README.md.
     "hospital": f"{_ASSET_BASE}/Hospital/hospital.usd",
     "office": f"{_ASSET_BASE}/Office/office.usd",
     "warehouse": f"{_ASSET_BASE}/Simple_Warehouse/warehouse.usd",
@@ -42,6 +47,12 @@ INDOOR_SCENES = {
 #
 # Re-run the probe after changing altitude: clearance at head height and
 # clearance at desk height are not the same thing.
+#
+# office's ~50% failure rate is NOT primarily route/clearance-related --
+# widening the corridor margin was tried (2026-07-27) and reverted after 3/3
+# test flights crashed anyway, from a compass/accelerometer-bias attitude-
+# estimator divergence at inconsistent times, unrelated to route width. See
+# probe_scene.py's LEG_MARGIN_M comment and px4_vision_pose.py.
 SCENE_SURVEYS = {
     "simple_room": {
         "spawn": (-0.5, 1.0),
