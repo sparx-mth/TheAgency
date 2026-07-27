@@ -282,18 +282,40 @@ other.
 
 ### Looking at it
 
-```python
-# On a machine with open3d installed (pip install open3d):
-import open3d as o3d
-pcd = o3d.io.read_point_cloud("office_voxels.ply")
-voxels = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, 0.1)
-o3d.visualization.draw_geometries([voxels])
+Only the `.npz` is committed — the point cloud is 27 MB and regenerated. Rebuild
+it from the committed map, which needs **neither Isaac Sim nor Open3D**:
+
+```bash
+.venv/bin/python sparx_agency/tasks/planning/sim_flight_recording/voxel_export.py \
+    --scene office --preview --max-z 2.2
 ```
 
-The exporter has **no Open3D dependency** — it writes the minimal binary PLY
-(`float x/y/z` + `uchar red/green/blue`, 15 bytes a point) that Open3D reads,
-because Open3D is not installed on the machine that produces the file. Points
-are coloured by height.
+That writes `office_voxels.ply` next to the map, prints the Open3D snippet for
+it, and — because of `--preview` — also renders a shaded isometric PNG using
+just numpy and cv2, so you can check the map on the machine that produced it
+without a 450 MB wheel to look at one file.
+
+**Pass `--max-z`.** The ceiling is the largest surface in the building and it
+sits between you and everything you wanted to see; without clipping you are
+looking at a photograph of a roof. Just under the real ceiling (2.2 m here)
+turns it into a floor plan with the furniture standing on it. `--min-z` drops
+the floor the same way.
+
+Then, wherever you have Open3D:
+
+```python
+import open3d as o3d
+pcd = o3d.io.read_point_cloud("office_voxels.ply")
+o3d.visualization.draw_geometries(
+    [o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, 0.1)])
+# or just the points, which spins around faster:
+# o3d.visualization.draw_geometries([pcd])
+```
+
+The exporter writes the minimal binary PLY (`float x/y/z` + `uchar
+red/green/blue`, 15 bytes a point) by hand rather than taking an Open3D
+dependency it cannot satisfy where the file is produced. Points are coloured by
+height, and the voxel size in the `.npz` reconstructs the cubes exactly.
 
 ### Three things about that generator
 
