@@ -214,6 +214,7 @@ tasks/planning/vlas/navdp/finetune/            # ← NavDP-specific
   verify/                    # click-a-pixel UI: see the training signal before training
   eval/                      # trained-vs-untrained comparison + report
   pixel_goal/                # the pose-free pixel-goal fine-tune variant
+  world_goal/                # the map-supervised pipeline — see below
 
 tasks/planning/vlas/flownav/finetune/          # ← FlowNav-specific
   loss.py  finetune_model.py  train.py
@@ -229,6 +230,31 @@ stay in the native model format so each policy's `trt/export/` consumes them unc
 
 The numpy half is validated end-to-end (`pytest tests/` → 25 passed); the torch half
 compiles and its unit tests run in the model conda env.
+
+---
+
+## When a surveyed map exists, use `navdp/finetune/world_goal/` instead
+
+Everything above builds its supervision from **one depth frame**: the occupancy
+is what that frame can see, the ESDF is derived from it, and the label is NavDP's
+own trajectory pushed off those walls. That is the right design when all you have
+is a monocular recording, and it is still the path for the real XTEND bags.
+
+For the PEGASUS simulator there is a **surveyed ground-truth map of the whole
+building**, and `navdp/finetune/world_goal/` uses it instead. Three consequences,
+each of which this package structurally cannot provide:
+
+* goals are drawn from the map's free/clear/landable cells rather than
+  back-projected from a pixel, so a goal can never land on an obstacle;
+* the label is an independent expert (global A* + medial-axis centring), not the
+  student's own output corrected — so it can teach turning toward a doorway
+  several metres before the camera can see it;
+* the clearance term and the evaluation both read the **global** ESDF, so a
+  trajectory heading into an unseen wall is penalised, and the ruler is not the
+  one the teacher optimised against.
+
+It shares this package's `label_format`, `esdf_penalty`, `l2sp`, `ema` and
+`recording` modules. See `navdp/finetune/world_goal/README.md`.
 
 ---
 

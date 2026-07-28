@@ -33,9 +33,15 @@ from sparx_agency.tasks.planning.vlas.navdp.trt.export.wrappers import (
 # Parameter-name prefixes that make up the trainable "policy head" (everything
 # except the frozen RGB DINOv2 trunk). Mirrors the export REQUIRED_PREFIXES minus
 # rgb_model.
+# ``decoder.layers`` and not ``decoder`` -- ``NavDP_Policy`` keeps the prototype
+# ``self.decoder_layer`` it handed to ``nn.TransformerDecoder``, which deep-copies
+# it. Those 2.4 M parameters are in the checkpoint and are never used in any
+# forward, so a bare "decoder" prefix put dead weight into the optimizer, the EMA
+# shadow, the L2-SP reference and every saved checkpoint. Excluding it changes no
+# result (a parameter with no gradient never moves) and costs less of all four.
 HEAD_PREFIXES = (
     "point_encoder",
-    "decoder",
+    "decoder.layers",
     "input_embed",
     "cond_pos_embed",
     "out_pos_embed",

@@ -1,0 +1,132 @@
+# FALCON exploration run 6 of 6 -- "whole_office"
+#
+# Starts at the centre with the longest budget: the full compound.
+#
+# Everything at once, in whatever order the coverage tour decides. The long run, and the one that shows the map of the whole building appearing.
+#
+# ALL SIX RUNS SHARE ONE EXPLORATION BOX: the whole building. They differ in
+# where the aircraft starts and how long it flies, which is what makes the six
+# recordings different -- six starting points across a 28 x 72 m compound
+# produce six different orders of discovery.
+#
+# They used to differ by carving the building into six sub-regions, and that was
+# wrong. An exploration box edge that falls in OPEN SPACE is a trap: FALCON finds
+# frontiers along the cut, samples viewpoints for them, and half of every
+# candidate ring lands outside the box and is discarded. The aircraft flies to
+# the boundary, the hierarchical grid stops being able to place it ("Current cell
+# id: -5"), and the FSM cycles PLAN_TRAJ -> PUB_TRAJ -> PLAN_TRAJ forever while
+# the aircraft holds station. A box edge on a WALL is fine, because nothing needs
+# to be observed from beyond it -- which is why this one is inset 1.2 m from the
+# building's outer walls and does not cut through it anywhere.
+#
+# ONE file describes the whole run, on purpose. FALCON reads the `map_config`
+# block off the parameter server; the Isaac Sim side reads the `run` block with
+# pyyaml. They therefore cannot disagree about where the aircraft starts -- and
+# they must not: FALCON's trajectory server parks its pre-trajectory command at
+# (init_x, init_y, init_z), so an init pose that is not where the aircraft
+# actually is makes the very first reference a step-jump the tracker will chase.
+
+run:
+  name: "whole_office"
+  scene: "office"
+  # Where the aircraft is spawned, and the heading it takes off on. Inside the
+  # connected, landable region with at least 1.1 m of clearance at cruise height.
+  #
+  # Deliberately NOT on round numbers and NOT axis-aligned. Measured, three times
+  # each: an Iris spawned at exactly (-9.00, 0.00) facing exactly 0 deg never
+  # becomes armable. PX4 sits in OFFBOARD with a valid position estimate, refuses
+  # to arm for 420 simulated seconds, says nothing at all, and its EKF never
+  # leaves `cs_fake_pos` for `cs_yaw_align`/`cs_gps`. The same aircraft, same
+  # camera, same parameters, nudged 7 cm and 7 degrees off the axis, armed in 4
+  # seconds. Whatever the mechanism inside EKF2's yaw alignment, an exactly
+  # axis-aligned heading is the trigger, and avoiding it costs nothing.
+  spawn_x: -8.93
+  spawn_y: 2.83
+  spawn_yaw_deg: 97.0
+  # Cruise height. In the middle of the exploration box's z band, clear of desk
+  # tops (~0.8 m) and well under the ceiling (~2.9 m).
+  cruise_altitude_m: 1.4
+  # The symmetric 90 x 74 deg pinhole -- see the config file for why not the
+  # XTEND-matched one.
+  camera: "camera_falcon_explorer_640x480.yaml"
+  # Depth frames per second sent to FALCON. Its own renderer runs at 15 Hz and its
+  # mapper drops frames while busy, so more than this buys nothing.
+  frame_rate_hz: 12.0
+  # Land after this much simulated flight regardless. A whole building is more
+  # than one flight's worth of exploring, so a run normally ends here rather than
+  # by FALCON declaring the frontier set empty -- and that is a success, not a
+  # failure. See `flight_timeout` in the README.
+  max_flight_s: 1200
+
+map_config:
+  # No prior map: FALCON builds its own from the depth stream. This key is only
+  # read by upstream's mesh renderer, which is not running here.
+  map_file: ""
+  # 2 = one hierarchical-grid layer over the z band below.
+  map_dimension: 2
+
+  # MUST equal the aircraft's real spawn pose (see the note at the top).
+  init_x: -8.93
+  init_y: 2.83
+  init_z: 1.4
+  init_yaw: 1.6929694
+
+  map_size:
+    # `map` is the allocated voxel grid, `box` is what FALCON explores and plans
+    # inside, `vbox` is what it draws. Required on every axis:
+    # map contains vbox contains-or-equals box, and every min < its max.
+    map_min_x: -25.0
+    map_min_y: -35.2
+    map_min_z: -0.2
+    map_max_x: 7.1
+    map_max_y: 40.7
+    map_max_z: 2.4
+
+    # The exploration box: the whole building, inset from its outer walls. Its
+    # VOLUME chooses the mapping resolution -- under 4000 m3 FALCON maps at 10 cm,
+    # above it at 20 cm. This one is 2424 m3.
+    #
+    # The z floor is 1.0 m, not the 0.6 m this started at. FALCON plans anywhere
+    # inside the box, and with the floor lower it flew the aircraft at 0.74 m,
+    # which is desk height in this building; it wedged itself against furniture
+    # twice. The band is the airspace above the clutter, not the whole room.
+    box_min_x: -23.0
+    box_min_y: -33.2
+    box_min_z: 1.0
+    box_max_x: 5.1
+    box_max_y: 38.7
+    box_max_z: 2.2
+
+    # The VISUALISATION box, which is what the map recorder draws and the only
+    # thing FALCON iterates to build its occupancy clouds. Deliberately a thin
+    # 20 cm slab at cruise height rather than the whole z range: the recorder
+    # wants one horizontal cut of the map, and every extra layer here is another
+    # full pass over the grid, at 2 Hz, inside the single-threaded node that also
+    # services the depth callbacks.
+    vbox_min_x: -23.5
+    vbox_min_y: -33.7
+    vbox_min_z: 1.3
+    vbox_max_x: 5.6
+    vbox_max_y: 39.2
+    vbox_max_z: 1.5
+
+  scale: 1.0
+
+  # Body (FLU) -> camera (RDF). A property of the airframe, identical in every
+  # run, and the same rotation as robots/PEGASUS/adapters/camera_pose.py's
+  # BODY_TO_OPTICAL. FALCON's planner never applies it -- the camera pose arrives
+  # already composed on the sensor-pose topic -- but its own simulator's renderer
+  # reads it, and keeping it correct keeps the two descriptions honest.
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+
+  # Mesh frame from world. Identity: Isaac's scene USD is referenced with no
+  # transform, so the simulator's world frame IS the map frame.
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]

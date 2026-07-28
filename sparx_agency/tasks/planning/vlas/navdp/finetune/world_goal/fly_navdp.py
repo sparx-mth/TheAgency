@@ -1,0 +1,320 @@
+"""Fly the policy. The same missions, once untrained and once fine-tuned.
+
+Runs **inside the isaac-sim container**::
+
+    docker exec isaac-sim /isaac-sim/python.sh \
+        /tmp/dev/repo/sparx_agency/tasks/planning/vlas/navdp/finetune/world_goal/fly_navdp.py \
+        --scene office --missions 6 --seed 4242 --arm trained \
+        --server http://127.0.0.1:8888 --out /tmp/dev/navdp_flights --video
+
+Everything offline is open-loop: one prediction, from one frame, scored on its
+own. That cannot see the failure that actually matters, which is a small bias
+compounding over a hundred inferences until the aircraft is against a wall. This
+can, because the policy's output becomes the aircraft's motion and the next
+observation.
+
+The policy runs on the **host**, not here. Isaac's Python has torch but not
+``diffusers``, and NavDP's scheduler needs it; rather than mutate the container,
+inference is served over the HTTP contract this repo already uses for NavDP
+(``serve/navdp_trt_server.py``) and reached with the client already in
+``core`` -- the same contract the FALCON nodes speak, so what flies here is
+exactly what would fly on the real aircraft.
+
+    # host, navdp env, one per arm (different ports):
+    python -m ...navdp.serve.navdp_trt_server --backend torch --port 8888 \
+        --ckpt ~/Downloads/navdp-cross-modal.ckpt            # baseline
+    python -m ...navdp.serve.navdp_trt_server --backend torch --port 8889 \
+        --ckpt ~/navdp_world_goal/navdp-world-goal.ckpt      # fine-tuned
+
+Both arms fly the **same missions from the same seed**, and every mission is
+scored against the surveyed map: how close the aircraft really came to
+geometry, whether it reached the goal, how far it flew to get there. That is a
+different and much harder question than "was the predicted trajectory clear",
+and it is the one that decides whether the fine-tune was worth it.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+CRUISE_SPEED_MPS = 1.0
+LOOKAHEAD_M = 1.2
+INFER_HZ = 3.0
+GOAL_TOLERANCE_M = 1.5
+MAX_YAW_RATE_DPS = 60.0
+STALL_DISTANCE_M = 0.6
+STALL_WINDOW_S = 20.0
+SECONDS_PER_METRE = 5.0
+FIXED_OVERHEAD_S = 60.0
+COLLISION_CLEARANCE_M = 0.05     # airframe centre this close to geometry = a hit
+
+
+def carrot(trajectory: np.ndarray, lookahead_m: float) -> Tuple[float, float]:
+    """The point ``lookahead_m`` along a body-frame trajectory.
+
+    NavDP returns 24 waypoints covering a few metres; chasing the last one cuts
+    every corner it just planned, and chasing the first one crawls. A carrot at
+    a fixed arc length is the standard middle, and it is what every other
+    follower in this repo does.
+    """
+    path = np.asarray(trajectory, dtype=np.float64)[:, :2]
+    steps = np.linalg.norm(np.diff(path, axis=0, prepend=np.zeros((1, 2))), axis=1)
+    along = np.cumsum(steps)
+    if along[-1] <= 1e-6:
+        return 0.0, 0.0
+    target = min(lookahead_m, float(along[-1]))
+    return (float(np.interp(target, along, path[:, 0])),
+            float(np.interp(target, along, path[:, 1])))
+
+
+def velocity_to(position, target_xy, altitude_m: float,
+                cruise_mps: float) -> Tuple[float, float, float]:
+    """World-frame velocity chasing a world point, speed capped at cruise."""
+    dx = float(target_xy[0]) - float(position[0])
+    dy = float(target_xy[1]) - float(position[1])
+    distance = math.hypot(dx, dy)
+    if distance < 1e-3:
+        return 0.0, 0.0, 0.8 * (altitude_m - float(position[2]))
+    speed = min(cruise_mps, 1.2 * distance)
+    return (speed * dx / distance, speed * dy / distance,
+            0.8 * (altitude_m - float(position[2])))
+
+
+def sample_missions(world_map, seed: int, count: int, spec) -> List:
+    """Draw ``count`` missions. Same seed, same missions, for every arm."""
+    from sparx_agency.core.planning.mission import sample_start_goal
+
+    rng = np.random.default_rng(seed)
+    missions = []
+    for _ in range(count):
+        missions.append(sample_start_goal(
+            world_map.grid, rng, clearance_m=spec.clearance_m,
+            min_separation_m=spec.min_separation_m,
+            max_separation_m=spec.max_separation_m,
+            start_yaw_jitter_rad=spec.start_yaw_jitter_rad,
+            region=world_map.landing_region))
+    return missions
+
+
+def fly_mission(loop, px4, adapter, client, scene, mission, args,
+                recorder=None) -> Dict:
+    """Fly one A-to-B mission with the policy closing the loop.
+
+    Returns:
+        A result dict: outcome, whether the goal was reached, the worst
+        clearance the aircraft actually achieved against the surveyed map,
+        collisions, path length and duration.
+    """
+    from sparx_agency.core.planning.vlas.navdp.geometry import (
+        point_to_pointgoal, world_to_body_2d,
+    )
+    from sparx_agency.tasks.planning.sim_flight_recording.episode import (
+        CRASH_HOLD_S, CRASH_TILT_DEG, arm_for_offboard, attitude_deg, slew_towards,
+    )
+
+    vehicle = adapter.vehicle
+    goal = (mission.goal.x, mission.goal.y)
+    altitude = args.altitude
+
+    start = vehicle.state.position
+    failure = arm_for_offboard(loop, px4, start, mission.start.yaw, altitude)
+    if failure is not None:
+        return {"outcome": "arm_timeout", "detail": failure, "reached": False}
+
+    intrinsics = adapter.intrinsics
+    client.reset([[intrinsics.fx, 0.0, intrinsics.cx],
+                  [0.0, intrinsics.fy, intrinsics.cy],
+                  [0.0, 0.0, 1.0]], stop_threshold=-999, batch_size=1)
+
+    budget = FIXED_OVERHEAD_S + SECONDS_PER_METRE * mission.separation_m
+    deadline = loop.sim_time + budget
+    infer_period = 1.0 / max(args.infer_hz, 0.1)
+    next_infer = 0.0
+    target_world = (float(start[0]), float(start[1]))
+    yaw_command = mission.start.yaw
+    track: List[Tuple[float, float]] = []
+    tilted_since: Optional[float] = None
+    stall_reference = (float(start[0]), float(start[1]), loop.sim_time)
+    inferences, transport_failures = 0, 0
+    outcome = "flight_timeout"
+
+    while loop.sim_time < deadline:
+        rendered = loop.step()
+        position = vehicle.state.position
+        pose = adapter.pose_flu()
+        track.append((float(position[0]), float(position[1])))
+
+        if rendered and recorder is not None:
+            recorder.capture(stamp_s=loop.sim_time)
+
+        if rendered and loop.sim_time >= next_infer:
+            next_infer = loop.sim_time + infer_period
+            frame = adapter.capture_frame(stamp_s=loop.sim_time)
+            forward, left = world_to_body_2d(goal[0], goal[1], pose[0], pose[1], pose[2])
+            gx, gy = point_to_pointgoal(forward, left)
+            result = client.pointgoal_step(
+                np.ascontiguousarray(frame.rgb[:, :, :3]), frame.depth, gx, gy,
+                altitude=altitude)
+            inferences += 1
+            if result is None:
+                transport_failures += 1
+            else:
+                trajectory = client.best_trajectory(result)
+                body = carrot(trajectory, args.lookahead)
+                cos, sin = math.cos(pose[2]), math.sin(pose[2])
+                target_world = (pose[0] + body[0] * cos - body[1] * sin,
+                                pose[1] + body[0] * sin + body[1] * cos)
+                if math.hypot(body[0], body[1]) > 0.15:
+                    yaw_command = math.atan2(target_world[1] - pose[1],
+                                             target_world[0] - pose[0])
+
+        vx, vy, vz = velocity_to(position, target_world, altitude, args.cruise)
+        yaw_command = slew_towards(pose[2], yaw_command,
+                                   math.radians(MAX_YAW_RATE_DPS), loop.dt)
+        px4.send_velocity_world(vx, vy, vz, yaw_command)
+
+        if math.hypot(position[0] - goal[0], position[1] - goal[1]) < args.goal_tolerance:
+            outcome = "reached"
+            break
+
+        roll, pitch, _ = attitude_deg(vehicle)
+        if max(abs(roll), abs(pitch)) > CRASH_TILT_DEG:
+            tilted_since = tilted_since or loop.sim_time
+            if loop.sim_time - tilted_since > CRASH_HOLD_S:
+                outcome = "crashed"
+                break
+        else:
+            tilted_since = None
+
+        moved = math.hypot(position[0] - stall_reference[0], position[1] - stall_reference[1])
+        if moved > STALL_DISTANCE_M:
+            stall_reference = (float(position[0]), float(position[1]), loop.sim_time)
+        elif loop.sim_time - stall_reference[2] > STALL_WINDOW_S:
+            outcome = "stalled"
+            break
+
+    flown = np.asarray(track, dtype=np.float64)
+    clearance = scene.clearance(flown[:, 0], flown[:, 1]) if flown.shape[0] else np.array([0.0])
+    steps = np.linalg.norm(np.diff(flown, axis=0), axis=1) if flown.shape[0] > 1 else np.array([0.0])
+    final = flown[-1] if flown.shape[0] else np.array(start[:2])
+    return {
+        "outcome": outcome,
+        "reached": outcome == "reached",
+        "start_xy": [float(mission.start.x), float(mission.start.y)],
+        "goal_xy": [float(goal[0]), float(goal[1])],
+        "separation_m": float(mission.separation_m),
+        "goal_error_m": float(math.hypot(final[0] - goal[0], final[1] - goal[1])),
+        "min_clear_m": float(clearance.min()),
+        "p5_clear_m": float(np.percentile(clearance, 5)),
+        "mean_clear_m": float(clearance.mean()),
+        "collided": bool(clearance.min() < COLLISION_CLEARANCE_M),
+        "path_len_m": float(steps.sum()),
+        "duration_s": float(len(track) * loop.dt),
+        "inferences": inferences,
+        "transport_failures": transport_failures,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--scene", default="office")
+    parser.add_argument("--altitude", type=float, default=1.5)
+    parser.add_argument("--missions", type=int, default=6)
+    parser.add_argument("--seed", type=int, default=4242)
+    parser.add_argument("--arm", required=True, help="label for this set of weights")
+    parser.add_argument("--server", default="http://127.0.0.1:8888")
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--dev-root", default="/tmp/dev")
+    parser.add_argument("--worker", type=int, default=0)
+    parser.add_argument("--cruise", type=float, default=CRUISE_SPEED_MPS)
+    parser.add_argument("--lookahead", type=float, default=LOOKAHEAD_M)
+    parser.add_argument("--infer-hz", type=float, default=INFER_HZ)
+    parser.add_argument("--goal-tolerance", type=float, default=GOAL_TOLERANCE_M)
+    parser.add_argument("--video", action="store_true")
+    args = parser.parse_args()
+
+    repo = Path(args.dev_root) / "repo"
+    if repo.exists() and str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+
+    from sparx_agency.core.planning.vlas.navdp.client import NavDPPointgoalClient
+    from sparx_agency.tasks.planning.sim_flight_recording import campaign_setup, px4_launch
+    from sparx_agency.tasks.planning.sim_flight_recording.episode_plan import EpisodeSpec
+    from sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal.scene import (
+        Scene, SceneConfig,
+    )
+
+    spec = EpisodeSpec(altitude_m=args.altitude)
+    world_map = campaign_setup.load_map(args.scene, args.altitude, spec)
+    scene = Scene.load(SceneConfig(scene=args.scene, altitude_m=args.altitude))
+    missions = sample_missions(world_map, args.seed, args.missions, spec)
+    print(f"[fly] arm={args.arm}  {len(missions)} missions from seed {args.seed}",
+          flush=True)
+    for index, mission in enumerate(missions):
+        print(f"[fly]   {index}: ({mission.start.x:.1f}, {mission.start.y:.1f}) -> "
+              f"({mission.goal.x:.1f}, {mission.goal.y:.1f})  "
+              f"{mission.separation_m:.1f} m", flush=True)
+
+    out = Path(args.out).expanduser() / args.arm
+    out.mkdir(parents=True, exist_ok=True)
+    client = NavDPPointgoalClient(args.server)
+
+    px4 = px4_launch.launch(args.worker) if hasattr(px4_launch, "launch") else None
+    simulation_app, loop, adapter, px4_link, chase = campaign_setup.bring_up(
+        None, args, missions[0].start, heartbeat_timeout_s=300.0)
+    campaign_setup.configure_px4(px4_link)
+    campaign_setup.settle_estimator(loop)
+    campaign_setup.wait_until_armable(loop, px4_link)
+
+    results = []
+    for index, mission in enumerate(missions):
+        recorder = None
+        if args.video:
+            from sparx_agency.tasks.planning.sim_flight_recording.flight_session import (
+                FlightRecorder,
+            )
+            recorder = FlightRecorder(
+                adapter, out / f"mission_{index:02d}", rate_hz=10.0,
+                camera_height_m=args.altitude,
+                video_out=out / f"mission_{index:02d}.mp4",
+                video_source="chase", chase_camera=chase)
+        started = time.time()
+        result = fly_mission(loop, px4_link, adapter, client, scene, mission, args,
+                             recorder)
+        result.update({"mission": index, "arm": args.arm,
+                       "wall_s": round(time.time() - started, 1)})
+        if recorder is not None:
+            recorder.finish({"scene": args.scene, "arm": args.arm, **result})
+        results.append(result)
+        print(f"[fly] mission {index}: {result['outcome']}  "
+              f"min_clear {result['min_clear_m']:.2f} m  "
+              f"goal_error {result['goal_error_m']:.2f} m", flush=True)
+        (out / "results.json").write_text(json.dumps(results, indent=2))
+
+    reached = sum(1 for r in results if r["reached"])
+    collided = sum(1 for r in results if r["collided"])
+    summary = {
+        "arm": args.arm, "missions": len(results), "reached": reached,
+        "collisions": collided,
+        "min_clear_m": float(np.mean([r["min_clear_m"] for r in results])),
+        "path_len_m": float(np.mean([r["path_len_m"] for r in results])),
+        "duration_s": float(np.mean([r["duration_s"] for r in results])),
+        "goal_error_m": float(np.mean([r["goal_error_m"] for r in results])),
+        "results": results,
+    }
+    (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(f"[fly] {args.arm}: reached {reached}/{len(results)}, "
+          f"{collided} collisions, mean min clearance "
+          f"{summary['min_clear_m']:.2f} m", flush=True)
+    simulation_app.close()
+
+
+if __name__ == "__main__":
+    main()
