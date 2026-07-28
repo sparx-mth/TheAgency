@@ -113,6 +113,157 @@ and you're about to test click-to-fly.
 flight test — it will silently sabotage takeoff/land and the failure looks like a
 throttle/timing bug in `rooster_command_unit.py`, not a second process fighting it.
 
+---
+
+## 2026-07-28 — camera rig/mount visible in its own FOV, fused as a permanent phantom wall
+
+**Symptom:** FALCON's A* planner reported "boxed in - no A* route" almost immediately
+after a BEV click, falling back to NavDP, which then searched/spun erratically — and
+the resulting map looked noisy/speckled (a "V"-shaped or cauliflower-like blob rather
+than clean walls).
+
+**Root cause:** The bottom ~25% of every single RGB frame showed a near-constant
+`~0.17-0.35m` depth reading, completely stable across consecutive frames regardless of
+drone motion — confirmed by sampling `/tmp/rooster_depth/*.npy` directly with numpy.
+That's the drone's own camera rig/mount, visible in its own field of view, not real
+environment. `cam_min_depth` was `0.1` — below that artifact's range — so it passed
+the near-depth filter and got fused into the map as a permanent phantom wall directly
+in front of the drone on every single frame, regardless of where the drone actually
+was or which way it was facing.
+
+**Fix / workaround:** Raised `cam_min_depth` from `0.1` to `0.45` (comfortably above
+the observed `~0.35m` ceiling of the artifact, similar order of margin to
+`astar_planner`'s own `inflate_radius_m=0.4m`). Confirmed occupied-cell counts dropped
+substantially in a comparable flight window after the fix (889 → 315).
+
+**Don't:** Don't assume a "boxed in" planner result or a noisy map is necessarily a
+planner/mapping-logic bug — check the raw depth data FIRST (a quick numpy stat check
+across a handful of `.npy` frames caught this in minutes) before chasing coordinate
+transforms or freeze-timing theories. The freeze-timing (turning) theory investigated
+first was real but secondary — this was the dominant cause.
+
+---
+
+## 2026-07-28 — vbox/box bounds set exactly equal to map bounds crashed exploration_node
+
+**Symptom:** Raised `box_max_z`/`vbox_max_z` from `1.8` to `4.0` (to stop RViz truncating
+the room below its real ceiling) and set `map_max_z` to the same `4.0` — `exploration_node`
+crashed within seconds of the next `falcon` restart: `voxel_mapping::ESDF::getDistance`
+→ glog FATAL "Address out of range", from `BsplineOptimizer::calcDistanceCost` during
+the exploration planner's own internal trajectory optimization.
+
+**Root cause:** ESDF distance/gradient queries read neighboring cells near a queried
+point. With `vbox_max_z` exactly equal to `map_max_z`, there's no room left inside the
+map's own allocated grid for those neighbor reads near the top boundary — an
+out-of-range access is inevitable, not just possible. The documented ordering rule
+(`map ⊇ vbox ⊇ box`) technically allows equality, but "supports the ordering" and
+"leaves a working margin" are not the same thing, and the code that enforces this
+never checks for the margin.
+
+**Fix / workaround:** Raised `map_max_z` to `5.0` instead of leaving it at `4.0`,
+restoring a real 1.0m margin between `vbox_max_z` (4.0) and `map_max_z` (5.0) — smaller
+than the original config's 2.2m gap, but comfortably more than the handful of 0.1m grid
+cells any real stencil actually reads.
+
+**Don't:** Don't set `vbox_max_z`/`box_max_z` equal to `map_max_z` (or `_min` bounds
+equal to each other) even though the ordering comment technically permits it — always
+leave real headroom. If this crash class recurs (`ESDF::getDistance`/`getDistanceAndGradient`
+→ glog FATAL "Address out of range"), check the map/vbox/box margins first, not just
+whether the ordering constraint holds.
+
+---
+
+## 2026-07-28 — RViz showed a completely empty scene after the Y-axis localization fix
+
+**Symptom:** After negating `position.y` in `rooster_ground_truth_localization.py`
+(see the handedness-fix lesson above), RViz's 3D view showed absolutely nothing — no
+error, no warning, just an empty gray scene. The 2D BEV (matplotlib) window meanwhile
+showed real, live, correctly-updating data (drone pose, A* planning), proving the
+underlying pipeline was fine.
+
+**Root cause:** `maps/sphera_jail.rviz`'s saved "Current View" camera had a hardcoded
+`Focal Point: X: -54.75, Y: 14.66` — captured in an earlier session, before the Y-axis
+sign fix. The drone's real, physical spawn point never moved, but the sign reported
+for it flipped (`+14.66` → `-14.66`), so the saved camera was now pointed at the
+mirror-image empty location where the room used to be under the old convention.
+
+**Fix / workaround:** Updated the saved Focal Point to `Y: -14.66` to match. RViz must
+be restarted (not just have the `.rviz` file edited) to pick up a changed saved view,
+since it only reads that file at startup.
+
+**Don't:** When fixing a world-frame axis sign, don't assume you've found every place
+it's baked in once the code and config bounds are fixed — RViz's own saved viewport
+state is invisible until you actually open it, and "no error" does not mean "nothing
+is wrong." Check any saved camera/view files for the same axis too.
+
+---
+
+## 2026-07-28 — mapping_sync's rotation freeze got permanently stuck once it started working
+
+**Symptom:** After adding `rooster_demo_mode_manager.py` (a Rooster-only demo-mode
+arbiter that didn't exist before), the map stopped updating entirely — even with the
+drone sitting disarmed on the floor. `mapping_sync`'s heartbeat showed `gate=FROZEN`
+with the `frozen` counter climbing every single cycle, never recovering. Restarting
+`mapping_sync` itself (re-arming its warm-up sequence, which force-fuses the first 2
+pairs and calls `reset_freeze()`) only unstuck it for a few frames before it froze
+again immediately.
+
+**Root cause:** `waypoint_follower_node.py`'s own rotation supervisor was found to be
+continuously, on every single tick, requesting `"turning"` mode — while in its normal
+`RUNNING` navigation state, targeting the default startup goal, with the drone either
+disarmed on the floor or being flown manually (bypassing FALCON's own `/cmd_vel`
+entirely). Its "turn complete" condition apparently never resolves without real flight
+dynamics to confirm against. Before `rooster_demo_mode_manager.py` existed, nothing
+ever echoed this request onto `/R1/demo_mode`, so the freeze silently never engaged —
+masking this bug entirely. Fixing the arbiter (correct behavior) exposed a real,
+pre-existing bug in the rotation supervisor (incorrect behavior) that had never
+mattered before.
+
+**Fix / workaround:** No real fix yet. Set `freeze_on_turning_mode:=false` on
+`mapping_sync` in `sphera_drone.launch`, reverting to the freeze-less behavior
+everything had already been verified against. This gives up the turning-smear
+protection the freeze exists for (confirmed real and needed — see the original
+ring-artifact map from 2026-07-27) until the supervisor bug itself is found and fixed.
+
+**Don't:** Don't assume "the demo mode value looks right when I check it manually" (it
+did — `rostopic pub` confirmed `/R1/demo_mode` genuinely read `"fly_straight"`) means
+the freeze will clear — the freeze-clearing logic in `depth_fusion_gate.py` re-evaluates
+on every NEW mode message, so if something else keeps re-requesting `"turning"` a moment
+later, a manual override is immediately overwritten. Check what's actually driving the
+requests (`rosnode info /waypoint_follower`, or grep its own status log for `mode=`)
+before assuming a one-off manual fix will stick.
+
+**Update 2026-07-28 (later same day):** the actual supervisor bug above was found and
+fixed (`MultiAxisCommand.yaw_engaged`, see `multi_axis_follower/types.py` +
+`waypoint_follower_node.py:_supervisor_cmd_wz()`), and `freeze_on_turning_mode` was
+re-enabled (`true`) in `sphera_drone.launch`. It recurred anyway during a pure manual
+flight test (drone driven directly via `/R1/cmd_nav`, `waypoint_follower_node.py` never
+consulted at all) — but this time the mechanism was different and worth telling apart:
+
+- `mapping_sync`'s heartbeat showed `gate=FROZEN` with `frozen` climbing, exactly like
+  before. But `sensor_gate`'s own heartbeat log showed `state=FUSING`,
+  `mode_turning=False` the entire time — a red herring. `sensor_gate_node.py` and
+  `mapping_sync_node_sphera.py` each hold their **own separate** `DepthFusionGate`
+  instance (per `sensor_gate_node.py`'s own docstring: sensor_gate's copy "does not
+  freeze" the authoritative one in mapping_sync). Checking sensor_gate's health proves
+  nothing about mapping_sync's gate — always check `mapping_sync`'s own heartbeat.
+- Publishing to `/sensor_gate/reset_mode_freeze` (the documented manual-recovery topic)
+  did nothing, because it only resets sensor_gate's copy, not mapping_sync's.
+- The real cause this time: `rooster_demo_mode_manager.py`'s mode publisher is
+  `latch=True` *and* re-published on a 1 s timer from its own `self.current_mode`
+  — so a single stale `"turning"` request from earlier (before the manual-flight test
+  even started) stayed latched indefinitely with nothing to overwrite it, once the node
+  that sent it was gone.
+
+**Actual fix:** publish a fresh non-turning string straight to the *source*,
+`/R1/demo_mode_request` (not `/R1/demo_mode` itself, and not
+`/sensor_gate/reset_mode_freeze`) — e.g. `rostopic pub -1 /R1/demo_mode_request
+std_msgs/String 'data: fly_straight'` (`fly_straight` is the manager's own
+`~initial_mode` default). This updates the manager's internal `current_mode`, so the
+1 s timer starts re-publishing the correct value instead of re-latching `"turning"`.
+Confirmed: `mapping_sync`'s `gate` flipped to `FUSING` and `emit` resumed climbing
+within one heartbeat cycle, `frozen` stopped growing.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

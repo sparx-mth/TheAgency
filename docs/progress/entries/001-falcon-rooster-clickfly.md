@@ -40,25 +40,90 @@ place regardless of where you clicked.
       (Eigen assertion in `ExplorationFSM::visualize()` indexing `averages_` — a
       much smaller "top viewpoints" vector — by `frontiers_.size()`) as a known,
       restart-to-recover issue, not something in our code.
-- [ ] **Open**: RViz's 3D voxel view still shows a noisy/speckled, non-room-like
-      blob rather than clean planar walls, even after both fixes above and a fully
-      clean `falcon`/`exploration_node` restart. Vendor CDR corruption
-      (`invalid data size` / `string data is not null-terminated` in
-      `rmw_cyclonedds_cpp`) was confirmed recurring on `R1`-side nodes
-      (`video_handler`, `fcu_driver`, `rooster_manager`,
-      `sphera_physical_rooster_backend_node`) during the flight window that produced
-      this map, and neither `mapping_sync` nor `exploration_node` do any content
-      sanity-checking on depth values — only pose/timing gating — so corrupted
-      frames pass straight into the map. A quick spot-check of the 30 most recent
-      `/tmp/rooster_depth/*.npy` frames showed no NaNs and sane min/max/mean values,
-      so the corruption (if it's the cause) isn't leaving an obvious NaN trail in
-      the saved depth arrays — needs more investigation before concluding it's
-      fully explained.
+- [x] Root-caused the noisy/speckled voxel map from 2026-07-27: the bottom ~25%
+      of every RGB frame showed a near-constant `~0.17-0.35m` depth, completely
+      stable regardless of drone motion — the camera rig/mount itself, visible
+      in its own FOV, not real environment. `cam_min_depth` was `0.1`, below
+      that artifact's range, so it passed straight through and got fused as a
+      permanent phantom wall directly ahead of the drone on every frame. Raised
+      to `0.45` (comfortably above the observed ceiling, similar margin to
+      `astar_planner`'s own `inflate_radius_m=0.4m`). This is very likely the
+      real cause of "boxed in, no A* route" seen the same day, not primarily
+      the turning-freeze timing issue first suspected.
+- [x] Added `rooster_demo_mode_manager.py` (new, ROS1, `falcon_adapter`
+      package): a minimal demo-mode arbiter for Rooster, since only XTEND had
+      one (`xtend_drone_demo_manager.py`). Without it `/R1/demo_mode` never
+      actually reported `"turning"`, so `mapping_sync`'s authoritative rotation
+      freeze never engaged at all. Deliberately not a copy of the XTEND
+      version (that one also auto-sends stop/land/disarm on FINISH, which
+      would make this arbiter autonomously land the drone — landing must stay
+      a deliberate pilot action for Rooster).
+- [x] **New bug found once the arbiter worked**: `waypoint_follower_node.py`'s
+      own rotation supervisor gets stuck permanently requesting `"turning"` —
+      confirmed live, continuously, tick after tick, while its `RUNNING`
+      navigation loop targets the default startup goal with no real flight
+      dynamics ever confirming a turn is complete (e.g. while the drone is
+      flown manually, bypassing FALCON's own `/cmd_vel`, or sitting disarmed
+      on the floor). This permanently froze `mapping_sync` — confirmed the
+      freeze does NOT clear on `reset_freeze()`/warm-up cycling, nor on
+      manually publishing `fly_straight` to the request topic. Pragmatic fix
+      for now: `freeze_on_turning_mode:=false` on `mapping_sync` (reverting to
+      the freeze-less baseline everything was verified against before the
+      arbiter existed). The supervisor's stuck-freeze bug itself is
+      unresolved — flagged, not guess-patched.
+- [x] Raised the artificial low "ceiling" (`box_max_z`/`vbox_max_z`: `1.8` →
+      `4.0`, above the real ~3.39m ceiling) so RViz shows real room geometry
+      instead of truncating early. This immediately crashed `exploration_node`
+      live (`voxel_mapping::ESDF::getDistance` → glog FATAL "Address out of
+      range") because `vbox_max_z` was left exactly equal to `map_max_z`,
+      removing the margin ESDF's neighbor-cell distance/gradient queries need
+      near a boundary. Fixed by raising `map_max_z` to `5.0`, restoring a 1.0m
+      margin (the original config had a 2.2m gap for the same reason).
+- [x] Fixed a stale saved RViz camera position in `sphera_jail.rviz` (`Focal
+      Point Y: 14.66`, from before the Y-axis fix) that pointed the camera at
+      empty space once Y flipped sign — RViz looked completely empty with no
+      error, not just missing voxels. Updated to `Y: -14.66`.
+- [x] Verified orientation conclusively with a clean, longer (15-18s) pure
+      `forward` command (bypassing the planner/twist-adapter entirely):
+      `dx≈-0.1 to -0.7, dy≈+3.5 to +3.8` each time — confidently and
+      repeatably forward in world `+Y`, matching the spawn heading (~94°)
+      almost exactly. Also confirmed the depth-filter fix's effect: occupied
+      cell counts dropped substantially (889 → 315 in one comparable window)
+      after raising `cam_min_depth`.
+- [ ] **Open**: left/right (lateral) axis reported mirrored during one BEV
+      flight test (drone next to the real left wall in Sphera; map showed it
+      next to the right wall) — a DIFFERENT bug from the Y/forward-back
+      handedness fix above, since forward/back and altitude are both
+      confirmed correct and the drone's own tracked position is accurate.
+      Most likely in how the camera's local lateral axis gets projected into
+      world-frame points (not the drone's own pose/localization). Added a
+      physical landmark (a person, then a wooden box) near one hallway wall
+      as an asymmetric visual reference to test this conclusively. Not yet
+      definitively confirmed either way as of end of session — last visual
+      check was reported as "looks good" but wasn't cross-checked
+      side-by-side against the landmark's known real-world side.
+- [ ] Confirmed unrelated to our own code: a genuine Sphera vendor rendering
+      bug — an actor (person) visible in Sphera's live scene view and its own
+      "Cameras View" preview was completely absent from the actual
+      saved/exported frame file at the same moment. Reproduced and documented
+      with a side-by-side frame comparison; drafted (not sent) a vendor bug
+      report. A later fresh capture of a different added object (a wooden
+      box) did NOT reproduce this, suggesting it may be a transient/timing
+      issue (e.g. only affecting the first captures right after an actor
+      spawns) rather than a permanent per-actor-type exclusion — not
+      conclusively isolated.
 
 ## Open questions
-- Is the noisy voxel map fully explained by the vendor CDR corruption, or is there
-  a second, still-unidentified issue (e.g. in how corrupted frames specifically
-  translate into bad 3D points, given the saved `.npy` depth values look sane)?
+- Is the left/right (lateral) mirroring real, or was the "looks good" check
+  at the end of the session actually conclusive? Needs a proper side-by-side
+  check against the landmark before considering this closed.
+- Is the `waypoint_follower` rotation-supervisor stuck-freeze bug going to
+  resurface once `freeze_on_turning_mode` is re-enabled (it must be
+  re-enabled eventually — the turning-smear protection it exists for is
+  real, confirmed by the original ring-artifact map from 2026-07-27)?
+- Is the vendor's missing-actor-in-saved-frame bug transient (spawn-timing)
+  or does it still need a vendor report? One counter-example (the box
+  rendering fine) isn't enough to rule it out completely.
 - Which of the two conflicting battery-capacity config files
   (`~/rqs7-private-parameters/developer.params.yaml` at `10000.0` vs.
   `~/rooster-private-parameters/developer.params.yaml` at `1000.0`) does Sphera's
@@ -78,11 +143,29 @@ place regardless of where you clicked.
   a full `falcon` container recreation whenever the map itself needs to be clean,
   not just a node restart). This sequence is now documented in the
   `fly-rooster-sphera` skill's "After a Sphera restart" section.
+- 2026-07-28: Most of today's testing deliberately bypassed FALCON's own
+  planner (direct `cmd_nav` "forward"/"stop" commands to `rooster_command_unit`,
+  twist-adapter killed) specifically to isolate whether bugs were in low-level
+  flight control/mapping versus the planner layer. That isolation is exactly
+  what surfaced the `waypoint_follower` rotation-supervisor stuck-freeze bug
+  (its own navigation loop runs independently of whatever the manual test is
+  doing) — a real, useful side effect of the test methodology, not a
+  distraction from it.
+- 2026-07-28: A real, one-time regression was introduced by today's own
+  Z-bound fix (`vbox_max_z` raised to equal `map_max_z` exactly) — caught
+  live via `exploration_node`'s crash, not by review. Worth remembering when
+  touching `map`/`box`/`vbox` bounds again: they need a real margin between
+  each other, not just the documented `map ⊇ vbox ⊇ box` ordering.
 
 ## Result
 Core click-to-fly motion path confirmed working (drone visibly moved toward a
 clicked goal, `cmd_vel_gate`'s passed-command counter climbed continuously instead
 of freezing). Y-axis handedness and map-bounds fixes verified with quantitative
-ground-truth tests. Map-quality issue (noisy voxels, likely vendor corruption)
-remains open for next session. See `CHANGELOG.md` and `LESSONS.md` for the
-individual fixes and debugging detail.
+ground-truth tests. As of 2026-07-28: the camera-rig phantom-obstacle bug (likely
+the real cause of the original noisy/speckled map) is fixed and verified reduced;
+RViz's blank-screen bug (stale saved camera position) is fixed; the ceiling-height
+and its follow-on `exploration_node` crash are both fixed. Two things remain open:
+a possible left/right (lateral) mirroring bug, not yet conclusively confirmed
+either way, and `waypoint_follower`'s rotation-supervisor stuck-freeze bug, worked
+around (freeze disabled) rather than fixed. See `CHANGELOG.md` and `LESSONS.md`
+for the individual fixes and debugging detail.

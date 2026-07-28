@@ -108,7 +108,16 @@
   <arg name="cam_cy"        default="90.03019076680604" />
   <arg name="cam_width"     default="504" />
   <arg name="cam_height"    default="294" />
-  <arg name="cam_min_depth" default="0.1" />
+  <!-- 0.1 was too low: confirmed live 2026-07-28 the bottom band of every
+       RGB frame shows a near-constant ~0.17-0.35m depth (camera rig/mount
+       visible in its own FOV, not real environment - stable across frames
+       regardless of drone motion). At 0.1 that artifact passes the filter
+       and gets fused as a permanent phantom wall directly ahead of the
+       drone on every frame; very likely the real cause of "boxed in, no
+       A* route" and much of the mapping noise seen while flying. Raised to
+       0.45 (comfortably above the observed 0.35m ceiling, same order of
+       margin as astar_planner's own inflate_radius_m=0.4m). -->
+  <arg name="cam_min_depth" default="0.45" />
   <arg name="cam_max_depth" default="10.0" />
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
@@ -270,11 +279,53 @@
     <param name="demo_mode_topic"      value="/R1/demo_mode" />
     <param name="turning_mode_name"    value="turning" />
     <param name="resume_settle_sec"    value="0.0" />
+    <!-- Was disabled 2026-07-28 (same day, earlier): waypoint_follower_node.py's
+         own rotation supervisor got stuck permanently requesting "turning"
+         while its RUNNING navigation loop targeted the default startup goal
+         with no real flight dynamics ever confirming the turn was done (e.g.
+         while the drone was flown manually, bypassing FALCON's /cmd_vel
+         entirely, or sitting disarmed on the floor); confirmed live:
+         /R1/demo_mode stuck at "turning" indefinitely, mapping_sync
+         gate=FROZEN forever.
+
+         Root cause found and fixed the same day: _supervisor_cmd_wz()'s own
+         docstring already documented that drift_pid needed a "trim vs. turn"
+         regime signal (its follower.state) so ordinary heading trim never
+         reads as a real turn to the supervisor; multi_axis had NO
+         equivalent signal, so any nonzero wz (including slew/minimum-force
+         residue with yaw actually released) passed straight through
+         unchanged. Added MultiAxisCommand.yaw_engaged (the follower's own
+         authoritative "past the engage/release hysteresis deadband" flag,
+         already tracked internally as self._yawing but never exposed) and
+         gated _supervisor_cmd_wz() on it for multi_axis, mirroring the
+         drift_pid pattern exactly. Re-enabled now that the actual bug is
+         fixed, not just worked around; see LESSONS.md for the full
+         debugging detail. If mapping freezes stuck again, check
+         self._last_yaw_engaged / MultiAxisCommand.yaw_engaged first, not
+         this switch. -->
+    <param name="freeze_on_turning_mode" value="true" />
     <!-- Startup warm-up: force-fuse the first N voxel pairs ignoring demo_mode
          (so a stale latched 'turning' can't freeze mapping at pickup), then reset
          to a forward-flight baseline. 0 disables the warm-up. -->
     <param name="warmup_emits"         value="2" />
   </node>
+
+  <!-- Demo-mode arbiter (Rooster-only). Confirmed missing 2026-07-28: with
+       no Rooster equivalent of xtend_drone_demo_manager.py, /R1/demo_mode
+       never actually reported "turning" during a real rotation, so
+       mapping_sync's rotation freeze above never engaged; depth frames
+       kept fusing through a real in-place turn, smearing obstacles into a
+       false ring around the drone (confirmed live: BEV showed "boxed in;
+       no A* route" from a full ring of occupied cells that wasn't real
+       geometry). This node only echoes ~request_topic back as ~mode_topic;
+       no side effects, no auto-land on FINISH (see the node's own
+       docstring for why it isn't just a copy of the XTEND manager). -->
+  <node pkg="falcon_adapter" type="rooster_demo_mode_manager.py"
+        name="rooster_demo_mode_manager" output="screen">
+    <param name="request_topic" value="/R1/demo_mode_request" />
+    <param name="mode_topic"    value="/R1/demo_mode" />
+  </node>
+
   <!-- ══════════════════════════════════════════════════════════════
        The actual nav stack — same launch as Gazebo, just with the
        real-drone depth topic and camera intrinsics passed in.

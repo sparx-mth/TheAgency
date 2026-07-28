@@ -52,23 +52,24 @@ class RoosterGroundTruthLocalization(Node):
 
     def _on_state(self, msg: SpheraPawnState):
         # Sphera/Unreal is left-handed (clockwise-positive yaw); ROS/FLU is
-        # right-handed (counter-clockwise-positive about +Z). Converting
-        # handedness needs BOTH the yaw negated AND one linear axis negated
-        # -- only yaw was flipped originally (confirmed live: without it,
-        # FALCON's voxel map was built BEHIND the drone instead of in front,
-        # i.e. the camera-forward direction derived from this pose was
-        # mirrored), leaving position.y inconsistent with the now-corrected
-        # rotation. Confirmed live 2026-07-27: commanding a pure forward
-        # move gave ground-truth (dx, dy) = (+0.353, -0.388) while the
-        # reported yaw (~44.7 deg) implies dy/dx should be positive
-        # (tan(yaw) ~= +0.99) -- flipping dy's sign alone matches. This is a
-        # different bug from the already-fixed turn_left/turn_right
-        # manual-control sign in rooster_command_unit.py (that's the FCU's
-        # ManualControl.r axis; this is telemetry->pose).
+        # right-handed (counter-clockwise-positive about +Z). Confirmed live
+        # 2026-07-28, with paired raw (/R1/sphera/state) vs. transformed
+        # (/R1/localization) readings around a single, isolated pure-right
+        # manual move (no yaw change), cross-checked against the user's own
+        # direct visual confirmation that the drone moved right in Sphera:
+        # raw yaw ~ -95deg, raw (dx, dy) ~= (-0.556, ~0) -- solving
+        # world_ros = R(-raw_yaw) . local_ros for the local "right" command
+        # shows BOTH raw_x and raw_y must be negated (not just raw_y) for
+        # the transformed pose to place "right" on the correct side once
+        # yaw is also negated. With only position.y negated (the prior
+        # fix), FALCON's map/BEV showed the drone moving left for a real
+        # right move -- this is what that looked like from the outside.
+        # See LESSONS.md for the full derivation and the two earlier,
+        # wrong "no bug exists" conclusions that preceded this fix.
         yaw = -float(msg.rotation.yaw)
         pose = PoseStamped()
         pose.header = msg.header
-        pose.pose.position.x = float(msg.location.x)
+        pose.pose.position.x = -float(msg.location.x)
         pose.pose.position.y = -float(msg.location.y)
         pose.pose.position.z = float(msg.location.z)
         pose.pose.orientation.z = math.sin(yaw / 2.0)

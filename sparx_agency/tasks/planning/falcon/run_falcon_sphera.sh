@@ -183,6 +183,18 @@ if [ "${ARCH}" != "aarch64" ] && [ -S /var/run/docker.sock ]; then
   DOCKER_SOCK_MOUNT=( --volume /var/run/docker.sock:/var/run/docker.sock )
 fi
 
+# nav_debug_recorder_node.py's pose/orientation telemetry (telemetry.jsonl,
+# per-run under nav_debug_<timestamp>/) previously lived only inside this
+# container's own /root/.ros/falcon -- every `docker rm -f falcon` silently
+# destroyed it (confirmed live 2026-07-28: the whole last flight's log was
+# gone after a routine restart, with no warning). Mount it to a host dir so
+# it survives container recreation; nav_debug_recorder_node.py's own
+# fallback path (no FALCON_RUN_DIR set) is exactly /root/.ros/falcon, so no
+# other env var needs setting for this to take effect.
+FALCON_LOG_HOST="${HOME}/.cache/sparx_agency/falcon_nav_logs/sphera"
+mkdir -p "${FALCON_LOG_HOST}"
+FALCON_LOG_MOUNT=( --volume "${FALCON_LOG_HOST}:/root/.ros/falcon" )
+
 # ── Run ───────────────────────────────────────────────────────
 # NOTE: the map YAML below is intentionally still a single-file mount, NOT
 # a directory mount like scripts/launch above -- FALCON's own
@@ -216,6 +228,7 @@ docker run -it --rm \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
+    "${FALCON_LOG_MOUNT[@]}" \
     --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     "${RVIZ_MOUNT[@]}" \
     --network host \

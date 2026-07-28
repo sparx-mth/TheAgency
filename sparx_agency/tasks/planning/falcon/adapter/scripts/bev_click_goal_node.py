@@ -302,12 +302,21 @@ class BevClickGoalNode:
         # estate on any fixed-height screen (the map shrinks by whatever the log
         # takes), and the operator can move, resize or close the log independently
         # of the map they are actually flying from.
-        self.fig, self.ax = plt.subplots(figsize=(9, 9))
+        # Noticeably bigger than the previous 9x9 so the occupancy grid reads
+        # comfortably on a desk monitor; extra width also leaves room for the
+        # legend once it moves outside the axes (see _add_legend).
+        self.fig, self.ax = plt.subplots(figsize=(14, 10))
         self.ax_log = self.fig_log = None      # stay None when the log is off
         if self.show_thinking:
             self._init_thinking_window()
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+        # Scroll-wheel zoom around the cursor: a quick fallback/complement to
+        # the backend's own navigation toolbar (pan/zoom/home), which is left
+        # enabled as-is -- this code never touches rcParams['toolbar'] or
+        # builds a custom canvas, so the default GUI backend's toolbar (e.g.
+        # TkAgg/Qt5Agg) is whatever it normally would be.
+        self.fig.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.fig.canvas.mpl_connect(
             "close_event",
             lambda _e: rospy.signal_shutdown("bev_click_goal window closed"))
@@ -556,6 +565,26 @@ class BevClickGoalNode:
         rospy.loginfo("bev_click_goal: [%s] %s -> %s", key, layer,
                       "on" if self._show[layer] else "off")
 
+    # -- scroll-wheel zoom ------------------------------------------------------
+    def _on_scroll(self, event):
+        """Zoom the map in/out around the cursor on mouse-wheel scroll.
+
+        A simple, always-available complement to the toolbar's own zoom mode:
+        rescales the current x/y limits about the data point under the cursor
+        rather than the axes centre, so the operator can zoom straight in on
+        whatever they are looking at. ``_render`` never resets the limits once
+        set (see ``_limits_set``), so this persists across frames.
+        """
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        scale = 0.85 if event.button == "up" else 1.0 / 0.85   # up = zoom in
+        cx, cy = event.xdata, event.ydata
+        xmin, xmax = self.ax.get_xlim()
+        ymin, ymax = self.ax.get_ylim()
+        self.ax.set_xlim(cx - (cx - xmin) * scale, cx + (xmax - cx) * scale)
+        self.ax.set_ylim(cy - (cy - ymin) * scale, cy + (ymax - cy) * scale)
+        self.fig.canvas.draw_idle()
+
     # -- legend ----------------------------------------------------------------
     def _add_legend(self):
         """A static colour key for every route/marker the viewer draws.
@@ -566,6 +595,12 @@ class BevClickGoalNode:
         cleaned/flown), the display-only routes, the repulsive-force overlays,
         and the drone/goal markers. Drawn once; it persists because ``_render``
         only updates artists in place and never clears the axes.
+
+        Placed OUTSIDE the axes (to the right, via ``bbox_to_anchor``) rather
+        than ``loc="upper right"`` inside it: an inside legend used to sit on
+        top of the occupancy grid in exactly the corner an operator most needs
+        to see. ``subplots_adjust`` narrows the axes so the outside legend has
+        room and is not clipped by the figure edge.
         """
         handles = [
             Line2D([0], [0], color="deepskyblue", marker="o", markersize=3,
@@ -596,8 +631,13 @@ class BevClickGoalNode:
             Line2D([0], [0], color="lime", marker="*", markeredgecolor="black",
                    markersize=12, linestyle="None", label="navigation goal"),
         ]
-        self.ax.legend(handles=handles, loc="upper right", fontsize=7,
-                       framealpha=0.85, ncol=1,
+        # Leave room on the right for the legend so it doesn't get clipped by
+        # the figure edge (or, worse, matplotlib silently shrinking the axes
+        # back under it on a later draw).
+        self.fig.subplots_adjust(right=0.76)
+        self.ax.legend(handles=handles, loc="upper left",
+                       bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+                       fontsize=7, framealpha=0.85, ncol=1,
                        title="routes & markers  (keys 1-9/a/c toggle, 0 = all)"
                        ).set_zorder(20)
 

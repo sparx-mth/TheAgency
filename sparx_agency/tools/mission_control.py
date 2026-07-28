@@ -508,7 +508,7 @@ ROBOTICAN_SERVICES: list[Service] = [
             "real_pose_topic:=/R1/localization "
             "real_depth_path_topic:=/R1/depth_frame_path "
             "real_rgb_path_topic:=/R1/rgb_frame_path "
-            "cam_fx:=125.903068 cam_fy:=180.0 cam_cx:=269.5 cam_cy:=179.5 "
+            "cam_fx:=111.837662 cam_fy:=180.0 cam_cx:=269.5 cam_cy:=179.5 "
             "cam_width:=540 cam_height:=360 "
             # Rooster's ground-truth pose is stamped independently from depth
             # (unlike XTEND, where both share one capture event) — the
@@ -522,22 +522,27 @@ ROBOTICAN_SERVICES: list[Service] = [
             # where the drone starts near the origin, but /gt_pose is a
             # direct passthrough of Rooster's raw Sphera-world pose
             # (confirmed live: no re-zeroing), which starts at roughly
-            # (-54.75, 14.66). The unmodified default goal sat ~57m away,
-            # entirely outside sphera_jail.yaml's own box bounds, so
-            # astar_planner could never find a reachable target. This is
-            # the same 3m-south-of-spawn offset the default intended,
-            # just expressed in Rooster's actual world coordinates.
-            "goal_x:=-54.75 goal_y:=11.66 "
+            # (54.75, -14.66) (sign convention as of the 2026-07-28
+            # localization fix -- see rooster_ground_truth_localization.py
+            # and the fly-rooster-sphera skill's "Every X/Y bound..."
+            # gotcha; this was stale at the OLD, pre-fix sign until now).
+            # The unmodified default goal sat ~57m away, entirely outside
+            # sphera_jail.yaml's own box bounds, so astar_planner could
+            # never find a reachable target. This is the same
+            # 3m-south-of-spawn offset the default intended, just expressed
+            # in Rooster's actual world coordinates.
+            "goal_x:=54.75 goal_y:=-11.66 "
             # bev_xmin/ymin/xmax/ymax default to a 12x12m box at world
             # origin (0,0) -- correct for XTEND's near-origin office/hospital
-            # maps, but Rooster's real spawn is ~55m away at (-54.75, 14.66),
-            # so the BEV click map (and every click on it) was pointed at an
-            # empty patch of world far from the drone. These match
-            # sphera_jail.yaml's doubled box bounds, centered on the real
-            # spawn -- this is why the adapter launches sphera_drone.launch
-            # (a Sphera-only fork of real_drone.launch) instead: only that
-            # file forwards bev_* to nav_stack.launch.
-            "bev_xmin:=-70.75 bev_ymin:=-1.34 bev_xmax:=-38.75 bev_ymax:=30.66'"
+            # maps, but Rooster's real spawn is ~55m away, so the BEV click
+            # map (and every click on it) was pointed at an empty patch of
+            # world far from the drone. These match sphera_jail.yaml's
+            # doubled box bounds, centered on the real spawn (same sign
+            # convention note as goal_x/goal_y above) -- this is why the
+            # adapter launches sphera_drone.launch (a Sphera-only fork of
+            # real_drone.launch) instead: only that file forwards bev_* to
+            # nav_stack.launch.
+            "bev_xmin:=38.75 bev_ymin:=-30.66 bev_xmax:=70.75 bev_ymax:=1.34'"
         ),
         env="none",
         machine="pc",

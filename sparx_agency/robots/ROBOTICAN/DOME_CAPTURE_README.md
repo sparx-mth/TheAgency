@@ -102,10 +102,16 @@ resolution:
 
 For the Sphera simulator specifically, a starting-point calibration already
 exists at `sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml`
-— an ideal-pinhole approximation for the wide FOV (130°x90°) already assumed
-elsewhere in this codebase (`rooster_video_adapter.py`'s `intrinsic_from_fov`),
-**not verified against Sphera's actual camera sensor definition**. Replace it
-if you know the real FOV/intrinsics Sphera uses for R1's camera.
+— an ideal-pinhole approximation for the wide FOV (135°x90°) already assumed
+elsewhere in this codebase (`rooster_video_adapter.py`'s `intrinsic_from_fov`).
+The 135° hfov is confirmed against Sphera's generated scenario config
+(`~/.sphera/tmp/SpheraConfig/rooster_backend_Rooster_*.gen.yaml`,
+`roosters.R1.main_camera.hfov`, port 5001). The 90° vfov is **still not
+verified** — Sphera's config only specifies hfov for the native 1280x720
+render, and how the video_handler crops/scales that down to the ICD "low"
+540x360 (3:2) streaming preset is closed-source, so the true delivered vfov
+can't be derived with confidence. Replace fy if you find an authoritative
+source for it.
 
 The frame publisher below does no crop/resize — it publishes frames at the
 drone's native resolution — so this calibration file is used as-is

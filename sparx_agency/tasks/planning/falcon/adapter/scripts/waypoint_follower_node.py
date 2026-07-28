@@ -318,6 +318,7 @@ class WaypointFollowerNode:
         self._last_pub_vx = 0.0      # cmd executed last tick -> estimator feed-forward
         self._last_pub_wz = 0.0
         self._last_pub_vy = 0.0      # lateral feed-forward (multi-axis only; 0 otherwise)
+        self._last_yaw_engaged = False   # multi_axis's regime signal, see _supervisor_cmd_wz
 
         # Takeoff / settle (platform bring-up).
         self.auto_takeoff = bool(G("~auto_takeoff", True))
@@ -940,6 +941,9 @@ class WaypointFollowerNode:
             self._publish_drift(cmd, pose2d)
         self._last_pub_vx, self._last_pub_wz = cmd.vx, cmd.wz   # for next tick's feed-forward
         self._last_pub_vy = (cmd.vy if self._lateral else 0.0)
+        # multi_axis's own regime signal (see _supervisor_cmd_wz); other trackers'
+        # command objects don't carry this attribute at all, hence getattr.
+        self._last_yaw_engaged = bool(getattr(cmd, "yaw_engaged", False))
         self._narrate_nav(cmd)
 
         if defer_stop_mode:
@@ -984,10 +988,24 @@ class WaypointFollowerNode:
         turning, so let it speak: only its TURN and ESCAPE regimes count as
         rotation worth the freeze + stop-and-re-observe discipline. TRACK and
         HOLD yaw is a trim -- the map stays live and the flight is never
-        interrupted for it. The other holonomic trackers have no regime signal,
-        so their commanded rate passes through unchanged."""
+        interrupted for it.
+
+        multi_axis has its own equivalent regime signal now (added 2026-07-28):
+        ``yaw_engaged`` -- whether it is actually past the engage/release
+        hysteresis deadband, versus a nonzero ``wz`` left over from slew/
+        minimum-force shaping with yaw released. Before this, "no regime
+        signal, commanded rate passes through unchanged" meant an ordinary
+        heading correction near the hysteresis boundary could read as a real
+        turn to the supervisor and get stuck there -- confirmed live 2026-07-28:
+        waypoint_follower stayed in its RUNNING state requesting demo_mode
+        'turning' on every single tick, even with the drone disarmed and not
+        physically rotating at all, permanently freezing mapping_sync (see
+        LESSONS.md). Any other tracker with no regime signal at all still
+        passes its commanded rate through unchanged, same as before."""
         if (self.controller_kind == "drift_pid"
                 and self.follower.state not in ("TURN", "ESCAPE")):
+            return 0.0
+        if self.controller_kind == "multi_axis" and not self._last_yaw_engaged:
             return 0.0
         return self._last_pub_wz
 
