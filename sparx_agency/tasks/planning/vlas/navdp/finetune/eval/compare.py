@@ -190,7 +190,7 @@ def _summarize(rows: List[dict], rec: str, trained: Path, d_safe: float,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "Downloads/flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--bag-root", type=Path, default=Path.home() / "Videos",
                     help="directory of source rosbags, for AprilTag poses")
     ap.add_argument("--rec", default="walk_into", help="a HELD-OUT recording")

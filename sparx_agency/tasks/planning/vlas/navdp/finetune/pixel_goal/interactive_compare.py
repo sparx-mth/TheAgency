@@ -230,7 +230,7 @@ class CompareApp:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--rec", default="walk_into")
     ap.add_argument("--trained", type=Path, required=True, help="fine-tuned ema_latest.pth")
     ap.add_argument("--ckpt", type=Path, default=_BASE_CKPT)

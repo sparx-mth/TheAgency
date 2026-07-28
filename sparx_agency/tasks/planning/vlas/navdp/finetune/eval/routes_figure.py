@@ -122,7 +122,7 @@ def render(dataset: Path, bag_root: Path, rec: str, base_ckpt: Path, repo: Path,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "Downloads/flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--bag-root", type=Path, default=Path.home() / "Videos")
     ap.add_argument("--rec", default="walk_into")
     ap.add_argument("--trained", type=Path, required=True)

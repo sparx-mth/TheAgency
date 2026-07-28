@@ -247,7 +247,7 @@ class VerifyApp:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--rec", default=None)
     ap.add_argument("--frame", type=int, default=None)
     ap.add_argument("--n-sample", type=int, default=25)

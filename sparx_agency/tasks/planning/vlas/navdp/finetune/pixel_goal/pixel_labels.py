@@ -102,7 +102,7 @@ def generate(dataset: Path, rec: str, out: Path, n_per_frame: int, frame_stride:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--recs", nargs="+", required=True,
                     help="one or more recording names; a labels file is written per recording")
     ap.add_argument("--out-name", default="labels.npz",

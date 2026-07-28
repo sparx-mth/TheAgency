@@ -61,7 +61,7 @@ def render(dataset: Path, rec: str, frame: int, n: int, out: Path,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--rec", required=True)
     ap.add_argument("--frame", type=int, required=True)
     ap.add_argument("--n", type=int, default=6)

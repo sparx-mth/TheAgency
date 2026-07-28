@@ -29,10 +29,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../../.." && pwd)"
 WG=sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal
 CONFIG_DIR="${REPO}/sparx_agency/tasks/planning/vlas/navdp/finetune/world_goal/configs"
 
-OUT="${NAVDP_WG_OUT:-$HOME/navdp_world_goal}"
+OUT="${NAVDP_WG_OUT:-$HOME/data/navdp/world_goal}"
 CKPT="${NAVDP_CKPT:-$HOME/Downloads/navdp-cross-modal.ckpt}"
 SCENE="${NAVDP_WG_SCENE:-office}"
-RECORDINGS="${NAVDP_WG_RECORDINGS:-$HOME/sim_flight_recordings $HOME/sim_flight_recordings_v2 $HOME/sim_flight_recordings_v3 $HOME/sim_flight_recordings_v4 $HOME/falcon_pegasus_recordings}"
+RECORDINGS="${NAVDP_WG_RECORDINGS:-$HOME/data/sim/office_v1 $HOME/data/sim/office_v2 $HOME/data/sim/office_v3 $HOME/data/sim/office_v4 $HOME/data/sim/falcon_pegasus}"
 WORKERS="${NAVDP_WG_WORKERS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
 
 # Full-run defaults. --preview overrides all five.

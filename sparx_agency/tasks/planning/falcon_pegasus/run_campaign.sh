@@ -21,7 +21,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER="${ISAAC_CONTAINER:-isaac-sim}"
 DEV_ROOT="${ISAAC_DEV_ROOT:-/tmp/dev}"
-OUT_ROOT="${FALCON_PEGASUS_OUT:-$HOME/falcon_pegasus_recordings}"
+OUT_ROOT="${FALCON_PEGASUS_OUT:-$HOME/data/sim/falcon_pegasus}"
 # How long to allow one run before giving up on it, wall-clock seconds. Kit's
 # boot and PX4's warm-up alone are about five minutes before the aircraft is
 # even armable.

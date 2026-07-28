@@ -139,7 +139,7 @@ def _render_panels(samples, out: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", type=Path, default=Path.home() / "flight_dataset")
+    ap.add_argument("--dataset", type=Path, default=Path.home() / "data" / "flight" / "xtend_bags")
     ap.add_argument("--rec", required=True)
     ap.add_argument("--finetuned", type=Path, required=True, help="ema_latest.pth")
     ap.add_argument("--ckpt", type=Path, default=Path.home() / "Downloads/navdp-cross-modal.ckpt")
