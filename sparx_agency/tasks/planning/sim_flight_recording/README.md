@@ -600,4 +600,11 @@ stops a worker, so a campaign could be killed by its own warm-up.
   demonstrations and would not be for flying a real aircraft.
 * Every episode flies at one fixed altitude. The map is 2D, so a route never
   goes over or under anything.
-* No VLA fine-tuning has been run against this data yet.
+* The consumer of this data is
+  `tasks/planning/vlas/navdp/finetune/world_goal/`, which labels every admitted
+  frame against the same surveyed map these flights were planned on. It reads
+  recordings straight out of the campaign directories — no export step — and
+  filters them itself (cruise altitude ±0.35 m, under 25° of tilt, inside the
+  map, not standing in geometry), so a crashed or stalled episode is still worth
+  keeping: the label taught at each frame is the route a planner *would* have
+  flown, not the one that ended in a wall.

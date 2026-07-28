@@ -28,6 +28,14 @@ to the engines' precision.
 - **`tasks/planning/vlas/navdp/`** — the builder + server (this directory). Imports
   torch / onnx / tensorrt / the external NavDP repo; **dev/host only**, never
   imported by `core`.
+- **`finetune/world_goal/`** — the end-to-end *training* pipeline: labels planned
+  on the surveyed PEGASUS map, goals drawn from that map rather than
+  back-projected from a pixel, a clearance term that reads the global ESDF, and
+  a spatial train/val/test split of the building. `export_checkpoint.py` merges a
+  fine-tune back into a full NavDP checkpoint, so the result serves over the same
+  HTTP contract and exports to the same three engines described above. See
+  `finetune/world_goal/README.md`. (`finetune/pixel_goal/` is the earlier
+  pose-free path, still used for the real XTEND bags.)
 
 ### Which checkout to run from (the workspace differs per machine)
 

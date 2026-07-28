@@ -20,7 +20,7 @@ What this module reports per metric:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 from scipy.stats import wilcoxon
@@ -84,18 +84,23 @@ def _rank_biserial(delta: np.ndarray) -> float:
     return float((pos - neg) / total) if total > 0 else 0.0
 
 
-def compare_metric(metric: str, ref: Sequence[float],
-                   arm: Sequence[float]) -> PairedResult:
+def compare_metric(metric: str, ref: Sequence[float], arm: Sequence[float],
+                   higher_is_better: Optional[Mapping[str, bool]] = None) -> PairedResult:
     """Compare one metric between a reference arm and a candidate arm.
 
     Args:
-        metric: metric name; must appear in :data:`metrics.HIGHER_IS_BETTER`.
+        metric: metric name; must appear in the orientation mapping.
         ref: reference values (typically the untrained baseline).
         arm: candidate values, index-aligned with ``ref``.
+        higher_is_better: Which direction counts as an improvement, per metric.
+            Defaults to :data:`metrics.HIGHER_IS_BETTER`. Pass your own when
+            scoring with a different metric set -- the map-based world-goal
+            evaluation does.
 
     Returns:
         The :class:`PairedResult`. Pairs where either side is NaN are dropped.
     """
+    orientation = HIGHER_IS_BETTER if higher_is_better is None else higher_is_better
     r = np.asarray(ref, dtype=float)
     a = np.asarray(arm, dtype=float)
     ok = np.isfinite(r) & np.isfinite(a)
@@ -103,7 +108,7 @@ def compare_metric(metric: str, ref: Sequence[float],
     if r.size == 0:
         raise ValueError(f"{metric}: no usable paired samples")
 
-    sign = 1.0 if HIGHER_IS_BETTER[metric] else -1.0
+    sign = 1.0 if orientation[metric] else -1.0
     delta = sign * (a - r)
 
     p = float("nan")
@@ -126,19 +131,23 @@ def compare_metric(metric: str, ref: Sequence[float],
 
 
 def compare_all(ref_rows: List[dict], arm_rows: List[dict],
-                metrics: Sequence[str]) -> Dict[str, PairedResult]:
+                metrics: Sequence[str],
+                higher_is_better: Optional[Mapping[str, bool]] = None
+                ) -> Dict[str, PairedResult]:
     """Run :func:`compare_metric` across several metrics.
 
     Args:
         ref_rows: per-sample metric dicts for the reference arm.
         arm_rows: per-sample metric dicts for the candidate arm, index-aligned.
         metrics: metric names to compare.
+        higher_is_better: See :func:`compare_metric`.
 
     Returns:
         Mapping of metric name to its :class:`PairedResult`.
     """
     return {m: compare_metric(m, [row[m] for row in ref_rows],
-                              [row[m] for row in arm_rows]) for m in metrics}
+                              [row[m] for row in arm_rows], higher_is_better)
+            for m in metrics}
 
 
 def collision_rate(rows: List[dict]) -> float:
