@@ -51,6 +51,17 @@ pre { background: #8881; padding: .7rem; border-radius: 6px; overflow-x: auto;
 .scroll { overflow-x: auto; }
 .note { border-left: 3px solid #2a78d6; padding: .5rem .9rem; background: #2a78d611;
         border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: .9rem; }
+.glossary { margin: 1.2rem 0; border: 1px solid #8883; border-radius: 8px;
+            padding: .7rem 1rem; }
+.glossary > summary { cursor: pointer; font-weight: 600; font-size: .92rem; }
+.glossary .sub { font-size: .84rem; margin: .6rem 0; }
+table.defs td, table.defs th { text-align: left; vertical-align: top; }
+table.defs td:nth-child(2), table.defs td:nth-child(3),
+table.defs th:nth-child(2), table.defs th:nth-child(3) { white-space: nowrap; }
+table.defs td:nth-child(4) { font-size: .84rem; }
+table.defs tr.group td { font-weight: 600; opacity: .75; padding-top: .9rem;
+                         border-bottom: none; }
+table.defs .dir { opacity: .7; font-style: italic; }
 """
 
 
@@ -86,6 +97,98 @@ def cards(items: List[tuple]) -> str:
 
 def verdict_class(verdict: str) -> str:
     return {"better": "good", "WORSE": "bad"}.get(verdict, "flat")
+
+
+# What every number in the table means, in the order the table lists them.
+# Grouped the way metrics.py groups them: is it safe, did it get there, was the
+# route any good. Each entry is (name, unit, which direction is better, meaning).
+METRIC_GLOSSARY = (
+    ("Safety &mdash; measured against the surveyed map, not the camera", (
+        ("min_clear_m", "m", "higher",
+         "The closest the trajectory ever comes to geometry. This is the number "
+         "that decides whether an aircraft hits something, and it is reported "
+         "instead of an average because one bad excursion cannot move an "
+         "average but can end a flight."),
+        ("p5_clear_m", "m", "higher",
+         "The 5th percentile of clearance along the trajectory. Says whether the "
+         "path is <i>persistently</i> tight or only briefly, which "
+         "<code>min_clear_m</code> alone cannot distinguish."),
+        ("mean_clear_m", "m", "higher",
+         "Average clearance over the whole trajectory &mdash; how much room it "
+         "keeps in general."),
+        ("frac_below_safe", "fraction", "lower",
+         "The share of the trajectory closer to geometry than the safety "
+         "distance (0.5 m). How much of the path sits in the danger band."),
+        ("collision rate", "%", "lower",
+         "The share of <i>trajectories</i> with at least one point actually "
+         "inside geometry (clearance below zero). Reported under the table."),
+    )),
+    ("Destination &mdash; did it actually go where it was sent", (
+        ("goal_progress_m", "m", "higher",
+         "How much closer to the true world goal the trajectory <i>ends</i> than "
+         "it started. A timid policy that barely moves is trivially safe and "
+         "scores badly here, which is the point of having this next to the "
+         "clearance metrics."),
+        ("goal_gap_m", "m", "lower",
+         "Distance still remaining to the goal at the end of the 4.8 m horizon "
+         "&mdash; the same information as <code>goal_progress_m</code> seen from "
+         "the other end."),
+    )),
+    ("Route quality &mdash; was it a good way to get there", (
+        ("centre_offset_m", "m", "lower",
+         "Distance from the corridor's medial axis, found by sampling clearance "
+         "along the path normal and locating the maximum. Zero is dead centre. "
+         "This is the direct measurement of &ldquo;does it fly down the "
+         "middle&rdquo;, and it is independent of the expert &mdash; a "
+         "trajectory can be perfectly centred while looking nothing like the "
+         "label."),
+        ("bending", "rad", "lower",
+         "Total absolute heading change along the trajectory. A safe path that "
+         "oscillates is not a good path, and this is what catches it."),
+        ("path_len_m", "m", "read with progress",
+         "Arc length of the predicted trajectory. Neither direction is good on "
+         "its own: short means timid, long means wandering, so read it next to "
+         "<code>goal_progress_m</code>."),
+    )),
+)
+
+COLUMN_NOTES = (
+    "<b>&Delta;</b> is the paired per-sample difference between the two arms, "
+    "sign-flipped so a positive value always means the fine-tune helped, "
+    "whichever way the underlying number points. "
+    "<b>win / loss</b> counts how many paired samples improved versus regressed "
+    "&mdash; a mean gain assembled from a few large wins alongside many small "
+    "regressions is not an improvement. "
+    "<b>p</b> is a Wilcoxon signed-rank two-sided test (paired, and it does not "
+    "assume the differences are normal, which clearance deltas are not). "
+    "<b>effect</b> is a rank-biserial correlation in [-1, 1]: with a few hundred "
+    "samples a trivial difference reaches significance easily, so size matters "
+    "as much as the p-value. "
+    "<b>expert</b> is the training label itself &mdash; not a competitor, but "
+    "the ceiling imitation can reach; the gap to it says whether the remaining "
+    "error belongs to the student or the teacher."
+)
+
+
+def glossary_block() -> str:
+    """The metric definitions, rendered under the results table."""
+    rows = []
+    for group, entries in METRIC_GLOSSARY:
+        rows.append(f"<tr class='group'><td colspan='4'>{group}</td></tr>")
+        for name, unit, better, meaning in entries:
+            rows.append(f"<tr><td><code>{name}</code></td><td>{unit}</td>"
+                        f"<td class='dir'>{better}</td><td>{meaning}</td></tr>")
+    head = ("<thead><tr><th>metric</th><th>unit</th><th>better</th>"
+            "<th>what it measures</th></tr></thead>")
+    return (
+        "<details open class='glossary'><summary>What each metric means</summary>"
+        f"<p class='sub'>{COLUMN_NOTES}</p>"
+        f"<div class='scroll'><table class='defs'>{head}"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+        "<p class='sub'>Every trajectory is resampled to 2 cm before clearance is "
+        "measured: NavDP's waypoints are ~20 cm apart and a 10 cm partition fits "
+        "comfortably between two of them, so a path scored at its own resolution "
+        "can pass clean through a wall.</p></details>")
 
 
 def paired_table(paired: Dict[str, Dict], ceiling: Optional[Dict[str, Dict]]) -> str:
@@ -251,6 +354,7 @@ def build(run: Path, dataset_dir: Optional[Path],
                      f"imitation can reach, not a competitor.</p>")
         parts.append(paired_table(evaluation["paired_vs_baseline"],
                                   evaluation.get("ceiling_vs_baseline")))
+        parts.append(glossary_block())
         parts.append("<h3>By how hard the route turns</h3>")
         parts.append("<p class='sub'>Corners are where a navigation policy fails; "
                      "an overall mean can hide getting worse at them.</p>")
