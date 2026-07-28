@@ -79,6 +79,9 @@ from thinking import Thinker
 # Global for the same reason /thinking/log_path is: only drift_pid narrates here
 # today, but a global name leaves room for another controller to log to it too.
 CERTAINTY_LOG_PATH_PARAM = "/certainty/log_path"
+# Nose lead at which the turn anticipation is worth telling the operator about
+# (deg). Below it the drone still looks like it is flying where it points.
+YAW_LEAD_NARRATE_DEG = 20.0
 # NOTE: the pure_pursuit imports (core HermiteSmoother / PurePursuitTracker and the
 # sibling pure_pursuit_follower.py) are deliberately deferred into
 # _build_pure_pursuit() so they are loaded ONLY when ~controller:=pure_pursuit.
@@ -246,6 +249,10 @@ class WaypointFollowerNode:
         self.drift_telemetry = None
         self.certainty_log = None
         self._last_quality = None
+        # Edge trigger for the turn-anticipation narration: leading the nose
+        # into a corner is a DECISION and is said once, not a distance counted
+        # down every tick.
+        self._yaw_lead_said = False
         # Altitude hold: defaults BEFORE the controller dispatch below, because
         # _build_drift_pid assigns the real AltitudeHold -- a default set after
         # it would silently overwrite the built hold back to None.
@@ -1007,6 +1014,7 @@ class WaypointFollowerNode:
             self.thinker.say(t.authority, category="sensor", level="warn",
                              repeat_after_s=5.0)
             return
+        self._narrate_yaw_lookahead(t)
         wp = self._waypoint_xy(cmd.wp_idx)
         if wp is None:
             return
@@ -1019,6 +1027,30 @@ class WaypointFollowerNode:
             "Flying to waypoint %d/%d (x=%.2f, y=%.2f), %.0f cm off the line%s"
             % (cmd.wp_idx + 1, cmd.num_waypoints, wp[0], wp[1],
                abs(t.cross_track_m) * 100.0, drift_note))
+
+    def _narrate_yaw_lookahead(self, telemetry):
+        """Say, once, that the drone has started leading its nose into a turn.
+
+        The manoeuvre looks alarming from the outside -- the drone flies down a
+        corridor pointing at the wall -- so an operator watching /nav/thinking
+        should be told it is deliberate, and told why the roll is on. Said on
+        the rising edge only: the lead itself is telemetry (it changes every
+        tick and rides on /falcon/drift), the decision to take it is not."""
+        lead_deg = math.degrees(telemetry.yaw_lead_rad)
+        if abs(lead_deg) < YAW_LEAD_NARRATE_DEG:
+            self._yaw_lead_said = False
+            return
+        if self._yaw_lead_said:
+            return
+        self._yaw_lead_said = True
+        left = lead_deg > 0.0
+        self.thinker.say(
+            "Easing the nose into the %s turn %.1f m ahead, holding %s roll to "
+            "keep the body on the leg -- so I fly out of it instead of stopping "
+            "to spin on it" % ("left" if left else "right",
+                               telemetry.corner_dist_m,
+                               "right" if left else "left"),
+            category="nav", key="yaw_lookahead")
 
     def _publish_drift(self, cmd, pose2d):
         """Expose what the drift-PID controller has learned, and where it stuck.
