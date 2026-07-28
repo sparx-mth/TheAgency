@@ -5,6 +5,10 @@ entry under `entries/` when work actually starts on it.
 
 ## Now
 - [ ] FALCON BEV click-to-fly for Rooster/Sphera, end-to-end and reliable → `entries/001-falcon-rooster-clickfly.md`
+- [ ] Move every Rooster node still running on the bare host into `robotican_dev`/`theagency:robotican` → `entries/002-rooster-full-containerize.md`
+- [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`
+- [ ] BEV click-to-fly: smooth, occupancy-aware navigation to the clicked point → `entries/004-occupancy-aware-navigation.md`
+- [ ] YOLO-detected object label + position ("barrel") as a FALCON navigation goal → `entries/005-yolo-object-navigation.md`
 
 ## Next
 - [ ] Track down the noisy/speckled occupancy map (vendor CDR corruption suspected, not confirmed as the full explanation)
