@@ -125,6 +125,22 @@ EXTRA_ARGS=""
 if (( WANT_RVIZ )); then EXTRA_ARGS="rviz:=true "; fi
 if [ $# -gt 0 ]; then EXTRA_ARGS="${EXTRA_ARGS}$(printf '%q ' "$@")"; fi
 
+# Make RViz's camera chase the aircraft. FALCON's saved views are
+# ThirdPersonFollower on `<Fixed Frame>`, which is `world` and does not move --
+# so the view sits still while the drone flies out of it, which is exactly the
+# "I could see the map but not where the drone was" problem. Retargeting them at
+# base_link, the frame the bridge broadcasts, keeps the aircraft centred and its
+# clearance from the voxels readable at a glance.
+#
+# Patched in the container rather than vendored: the config is a thousand lines
+# of upstream that we want to keep tracking, the container is --rm so the edit
+# lives exactly as long as the run, and one sed is easier to review than a copy.
+RVIZ_PREP="true"
+if (( WANT_RVIZ )); then
+    RVIZ_PREP="sed -i 's|Target Frame: <Fixed Frame>|Target Frame: base_link|' \
+                   \$(rospack find exploration_manager)/config/rviz.rviz"
+fi
+
 # Mount the scripts over BOTH the source tree and catkin's devel bin directory.
 # catkin_install_python copies them into devel/lib/<pkg> at build time, and which
 # of the two roslaunch resolves `type=` against is not worth depending on --
@@ -146,6 +162,7 @@ docker run "${TTY_ARGS[@]}" --rm \
     --env FALCON_RUN_NAME="${RUN_NAME}" \
     "${IMAGE}" \
     bash -lc "source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && \
+              ${RVIZ_PREP} && \
               roslaunch falcon_pegasus falcon_pegasus.launch run:=${RUN_NAME} ${EXTRA_ARGS}"
 
 echo "[INFO] finished. Output in ${RUN_DIR_HOST}"

@@ -145,6 +145,15 @@ will not work by itself. Three things have to be arranged around it, and
   `~publish_tf`, which broadcasts `world -> base_link` from the odometry and
   `world -> camera` from each depth frame, so a view can also be attached to the
   aircraft and follow it.
+- **A drone.** FALCON's RViz config already has the displays for
+  `/odom_visualization/{robot,pose,path}` — enabled, in its `Simulation` group —
+  and nothing was publishing them, which is exactly why the map appeared and the
+  aircraft did not. `--rviz` starts FALCON's own `odom_visualization` fed from
+  our odometry, so the drone mesh shows up at its real size and its footprint
+  against the voxels is answerable by looking. To make the view *follow* it, set
+  **Target Frame: `base_link`** on the Views panel's ThirdPersonFollower (the
+  saved views use `<Fixed Frame>`, which does not move); the bridge's TF makes
+  that frame exist.
 - **A visualisation box worth drawing.** `vbox` is normally a 20 cm slab at
   cruise height, because that is all the map recorder needs and every extra
   layer is another full pass over the voxel grid at 2 Hz inside the same thread
@@ -179,6 +188,62 @@ question is always *which* of the two was wrong. RViz separates them:
 The map video records a top-down version of the same thing with a line drawn
 between the plan and the aircraft, so a run that already happened can be
 reviewed without re-flying it.
+
+## Holding when FALCON condemns its own trajectory
+
+FALCON checks the trajectory it is currently executing against the map every
+cycle, and when it finds an obstacle on it, it says so — `[FSM] Collision
+detected on the trajectory!` — publishes `1` on `/planning/replan`, and re-plans.
+That is the correct response and it is also incomplete, for the same reason
+everything else here needed a control layer: upstream, re-planning was free.
+The geometry simulator's aircraft *was* its reference, so it stopped the instant
+the reference did and the hundred-odd milliseconds of planning cost nothing. An
+aircraft with mass spends those milliseconds flying into the thing FALCON just
+found.
+
+So the bridge forwards that `1` as a `trajectory_unsafe` event (edge-triggered —
+the FSM re-fires it on every planning attempt), and the mission withholds the
+reference from the tracker until a new trajectory arrives. Withholding rather
+than zeroing: the tracker's station hold latches a point and flies back to it, so
+the aircraft brakes to a stop instead of drifting, which is what a velocity-
+controlled multirotor does when it is sent zeros. The stall and planner-stopped
+watchdogs still run underneath, so a hold that never lifts ends the run rather
+than hanging it.
+
+## Telling FALCON how big the drone is
+
+FALCON reasons about the aircraft as a point in two of the three places that
+matter, and the three are worth keeping apart because they want different
+settings:
+
+| where | knob | set to | why |
+|---|---|---|---|
+| the trajectory | `bspline_opt/safe_distance` | 0.7 m (upstream) | the corridor it flies down — raising this closes doorways |
+| how hard it avoids | `bspline_opt/pos/distance` (`obstacle_weight:=`) | **100** (was 50) | the weight on that clearance, which is the dial that actually centres a route |
+| the viewpoint | `frontier_finder/min_candidate_clearance` | **0.45 m** (was 0.21) | where it *stops to look*, which costs nothing in doorways |
+| the route | A* | nothing | searches the raw occupancy grid, unaware of the airframe |
+
+The middle row was upstream's 0.21 m — smaller than this airframe's own 0.35 m
+radius — so FALCON was free to choose observation points the drone physically
+cannot occupy and then route to them perfectly correctly. That is the "it does
+not know how big the drone is" problem in its most concrete and most fixable
+form, and unlike the first row it constrains only where the aircraft stops, not
+what it can fly through.
+
+The second row is the one worth understanding, because the first row is the
+knob everyone reaches for and it is the wrong one. `safe_distance` is not a
+constraint — it is the knee of a soft penalty, `(dist - safe)²` while
+`dist < safe`, summed against smoothness, start and end terms. Raise the
+*distance* and the optimiser fights itself in every corridor narrower than twice
+it, which is how 0.9 m shut every doorway in the building. Raise the *weight* and
+it wins where there is room to win and loses where the endpoints demand a thread.
+That is the soft half of the Gazebo stack's wall handling (a hard dilation plus a
+wall-proximity cost that centred routes in corridors), and it is one parameter.
+
+The hard half — the third row — is still open. The Gazebo stack this was ported from dilated known
+walls by the drone radius before planning and added a soft wall-proximity cost so
+routes preferred corridor centres; FALCON's A* does neither, and doing it
+properly means dilating its occupancy grid in C++ rather than working around it.
 
 ## What a campaign actually produces today
 

@@ -68,10 +68,19 @@
        drawn box to the full flight band, without which the voxel view is one 20 cm
        slice. Costs a few percent of a CPU core in exploration_node, which shares a
        thread with the mapper, so it is off by default. -->
+  <!-- Minimum free radius around a frontier viewpoint, metres. Must exceed the
+       airframe radius (robots/PEGASUS AIRFRAME_RADIUS_M = 0.35). -->
+  <arg name="viewpoint_clearance" default="0.45"/>
+  <!-- Weight of the B-spline's obstacle term; see the param below. -->
+  <arg name="obstacle_weight" default="100.0"/>
+
   <arg name="rviz" default="false"/>
   <!-- The z band RViz draws. Defaults span the flight band the runs use. -->
   <arg name="viz_min_z" default="0.9"/>
   <arg name="viz_max_z" default="2.3"/>
+  <!-- Size of the drone mesh in RViz. 1.0 draws it at roughly the Iris's real
+       0.7 m rotor span, so its footprint against the voxels is honest. -->
+  <arg name="drone_scale" default="1.0"/>
 
   <!-- FALCON opens with CHECK(!use_sim_time), a glog fatal: a true value does
        not degrade this stack, it aborts the node that contains the mapper, the
@@ -120,6 +129,16 @@
        raycasting time. -->
   <param name="/voxel_mapping/tsdf/raycast_max" value="8.0"/>
 
+  <!-- How much room a frontier VIEWPOINT must have before FALCON will fly to it.
+       Upstream's 0.21 m is smaller than this airframe's own radius (0.35 m to
+       the rotor tips), so the planner was free to choose observation points the
+       drone physically cannot occupy, and then route to them correctly. That is
+       the "FALCON does not know how big the drone is" problem in its most
+       concrete form, and unlike the B-spline's clearance below it costs nothing
+       in doorways: it constrains where the aircraft STOPS to look, not the
+       corridor it flies down to get there. -->
+  <param name="/frontier_finder/min_candidate_clearance" value="$(arg viewpoint_clearance)"/>
+
   <!-- Upstream's obstacle clearance for the B-spline, restated because it is
        the wrong dial to reach for and this is where you would reach for it.
        Raising it to 0.9 m to stop the aircraft clipping a wall did stop that,
@@ -130,6 +149,23 @@
        cause (an exploration box edge lying ON the wall) and a different fix
        (inset the box; see any runs/*.yaml). -->
   <param name="/bspline_opt/safe_distance" value="0.7"/>
+
+  <!-- How hard the optimiser is allowed to pull away from walls, which turns out
+       to be the dial that `safe_distance` is mistaken for. That clearance is not
+       a constraint: it is the knee of a soft penalty, ``(dist - safe)^2`` when
+       ``dist < safe``, summed against smoothness (20), start (100) and end (50).
+       So raising the DISTANCE makes the optimiser fight itself everywhere and
+       shuts doorways; raising the WEIGHT makes it win where there is room to win
+       and lose where the endpoints demand a thread, which is the behaviour we
+       actually want out of a corridor.
+
+       This is the soft half of what the Gazebo stack did with a hard wall
+       dilation plus a wall-proximity cost that centred routes in corridors. The
+       hard half has no equivalent here — FALCON's A* searches the raw occupancy
+       grid, so dilating by the airframe radius means changing its C++ — but the
+       soft half is one parameter, and centring the trajectory is most of the
+       benefit when the tracker is following it to within tens of centimetres. -->
+  <param name="/bspline_opt/pos/distance" value="$(arg obstacle_weight)"/>
 
   <!-- Draw the occupancy slab at cruise height so the recorder gets a
        horizontal cut of the map rather than a projection of the whole slab. -->
@@ -206,6 +242,22 @@
   <!-- FALCON's own RViz config, unmodified: exploration_manager/config/rviz.rviz.
        Several of its displays point at topics from rigs that are not running here
        (VINS, AirSim, a motion-capture pose); they simply stay empty. -->
+  <!-- The aircraft itself, in RViz. FALCON's own rviz config already has the
+       displays for /odom_visualization/{pose,robot,path} and they sit empty
+       without this, which is why the map appears and the drone does not. Scaled
+       to the real airframe so "is it about to touch that wall" is answerable by
+       looking: the mesh is the size of the thing that would hit it. -->
+  <node if="$(arg rviz)" pkg="odom_visualization" name="odom_visualization"
+        type="odom_visualization" output="log">
+    <remap from="~odometry" to="/uav_simulator/odometry"/>
+    <param name="robot_scale" value="$(arg drone_scale)"/>
+    <param name="frame_id" value="world"/>
+    <param name="color/r" value="0.1"/>
+    <param name="color/g" value="1.0"/>
+    <param name="color/b" value="0.3"/>
+    <param name="color/a" value="1.0"/>
+  </node>
+
   <node if="$(arg rviz)" pkg="rviz" name="rviz" type="rviz" output="log"
         args="-d $(find exploration_manager)/config/rviz.rviz"/>
 

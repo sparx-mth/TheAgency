@@ -14,10 +14,11 @@ emits a world-frame velocity:
 
 .. code-block:: text
 
-    v_cmd = v_ref  +  a_ref * accel_lead_s  +  PID(p_ref - p_meas)
-            \\____/    \\___________________/    \\_________________/
-          the plan       the plan's own          what physics did
-                        curvature, led
+    v_cmd = v_ref + a_ref*lead  +  Kd*(v_ref - v_meas)  +  PI(clamp(p_ref - p_meas))
+            \\_______________/     \\_________________/     \\____________________/
+              the plan, led           what the inner            where it has
+                                      loop has not yet          ended up, bounded
+                                      delivered
 
 The first two terms are the planner's intent replayed verbatim -- they are why
 the aircraft flies the *shape* of the trajectory instead of chasing a point
@@ -69,8 +70,9 @@ class ReferenceTracker3D:
             AxisPid(self.params.horizontal_pid),
             AxisPid(self.params.vertical_pid),
         )
-        self._yaw_cmd = None      # type: Optional[float]
-        self._hold = None         # type: Optional[tuple]
+        self._yaw_cmd = None        # type: Optional[float]
+        self._hold = None           # type: Optional[tuple]
+        self._last_command = None   # type: Optional[tuple]
         self._last_reference_age = 0.0
 
     def reset(self, yaw=None, hold_position=None):
@@ -93,6 +95,7 @@ class ReferenceTracker3D:
             axis.reset()
         self._yaw_cmd = None if yaw is None else normalize_angle(float(yaw))
         self._hold = None if hold_position is None else tuple(float(v) for v in hold_position)
+        self._last_command = None
         self._last_reference_age = 0.0
 
     @property
@@ -101,9 +104,18 @@ class ReferenceTracker3D:
         """The heading last put on the wire, or None before the first update."""
         return self._yaw_cmd
 
-    def update(self, reference, position, yaw, dt, reference_age=0.0):
-        # type: (Optional[TrajectoryPoint], tuple, float, float, float) -> TrackedSetpoint
+    def update(self, reference, position, yaw, dt, velocity=None, reference_age=0.0):
+        # type: (Optional[TrajectoryPoint], tuple, float, float, Optional[tuple], float) -> TrackedSetpoint
         """Advance one control tick.
+
+        The law is
+
+        .. code-block:: text
+
+            v_cmd = v_ref + a_ref*lead + Kd*(v_ref - v_meas) + PI(clamp(p_ref - p_meas))
+
+        smoothed, then clamped. Each term is doing a different job and the
+        middle one is doing most of the work -- see :mod:`~.params`.
 
         Args:
             reference: The planner's state for *now*: position, velocity,
@@ -112,6 +124,10 @@ class ReferenceTracker3D:
             position: The aircraft's measured world ``(x, y, z)``, metres.
             yaw: The aircraft's measured heading, radians CCW from +x.
             dt: Seconds since the previous call. Must be > 0.
+            velocity: The aircraft's measured world ``(vx, vy, vz)``, m/s. Omit it
+                and the damping term is simply absent -- the controller still
+                works, less well. Pass it whenever it is measured rather than
+                differenced, which on a simulator it always is.
             reference_age: How long ago ``reference`` was produced, seconds. The
                 caller knows this and the tracker cannot: a reference arriving
                 over a link is already old when it lands.
@@ -140,10 +156,11 @@ class ReferenceTracker3D:
         target = (float(reference.x), float(reference.y), float(reference.z))
         feed_forward = self._feed_forward(reference)
         error = tuple(target[i] - measured[i] for i in range(3))
+        damping = self._damping(reference, velocity)
 
         correction = tuple(self._correct(i, error[i], dt) for i in range(3))
-        command = tuple(feed_forward[i] + correction[i] for i in range(3))
-        command = self._clamp_velocity(command)
+        command = tuple(feed_forward[i] + damping[i] + correction[i] for i in range(3))
+        command = self._smooth(self._clamp_velocity(command))
 
         reference_yaw = yaw if reference.yaw is None else float(reference.yaw)
         self._yaw_cmd = self._slew_yaw(reference_yaw, dt)
@@ -161,16 +178,56 @@ class ReferenceTracker3D:
 
     def _correct(self, axis, error, dt):
         # type: (int, float, float) -> float
-        """One axis of feedback, with the integrator gated by how far off we are.
+        """One axis of position feedback, on a clamped error.
 
-        Integral separation: outside ``integral_band_m`` the axis is not holding
-        a standing bias, it is *travelling*. Integrating a large error charges a
-        correction that only finishes arriving once the error is gone, and then
-        pushes the aircraft past the reference by roughly that much -- measured
-        as a 9 cm overshoot on a 1 m step, which fell to 1 cm with this gate.
+        The clamp is the collision-avoidance property (see
+        ``params.position_error_clamp_m``): it bounds how hard the loop pulls
+        toward a distant reference without changing which way it pulls, so a
+        lagging aircraft rounds an obstacle instead of cutting through it.
+
+        Integral separation on top of that: outside ``integral_band_m`` the axis
+        is not holding a standing bias, it is *travelling*. Integrating a large
+        error charges a correction that only finishes arriving once the error is
+        gone, and then pushes the aircraft past the reference by roughly that
+        much -- measured as a 9 cm overshoot on a 1 m step, 1 cm with this gate.
         """
         near = abs(error) <= self.params.integral_band_m
-        return self._pid[axis].update(error, dt, integrate=near)
+        clamp = self.params.position_error_clamp_m
+        clamped = max(-clamp, min(clamp, error))
+        return self._pid[axis].update(clamped, dt, integrate=near)
+
+    def _damping(self, reference, velocity):
+        # type: (TrajectoryPoint, Optional[tuple]) -> tuple
+        """Gain on the velocity error, which is what closes an inner loop's lag.
+
+        Deliberately NOT clamped, and deliberately not derived from the position
+        error. It is the term that does the tracking: the position loop is held
+        gentle precisely because this one is here, and clamping it would put the
+        lag back.
+        """
+        if velocity is None:
+            return (0.0, 0.0, 0.0)
+        gains = (self.params.velocity_damping_xy, self.params.velocity_damping_xy,
+                 self.params.velocity_damping_z)
+        planned = (float(reference.vx), float(reference.vy), float(reference.vz))
+        return tuple(gains[i] * (planned[i] - float(velocity[i])) for i in range(3))
+
+    def _smooth(self, command):
+        # type: (tuple) -> tuple
+        """Exponentially smooth the output, so the airframe is not stepped.
+
+        Applied after the clamp rather than before, so the smoothed command is
+        also inside the limits; a smoother that can overshoot its own ceiling is
+        not a limit.
+        """
+        alpha = self.params.command_smoothing_alpha
+        if alpha >= 1.0 or self._last_command is None:
+            self._last_command = command
+            return command
+        smoothed = tuple(alpha * command[i] + (1.0 - alpha) * self._last_command[i]
+                         for i in range(3))
+        self._last_command = smoothed
+        return smoothed
 
     def _feed_forward(self, reference):
         # type: (TrajectoryPoint) -> tuple
@@ -195,8 +252,8 @@ class ReferenceTracker3D:
         if self._hold is None:
             self._hold = measured
         error = tuple(self._hold[i] - measured[i] for i in range(3))
-        command = self._clamp_velocity(tuple(
-            self._correct(i, error[i], dt) for i in range(3)))
+        command = self._smooth(self._clamp_velocity(tuple(
+            self._correct(i, error[i], dt) for i in range(3))))
         distance = math.sqrt(sum(component * component for component in error))
         return TrackedSetpoint(
             vx=command[0], vy=command[1], vz=command[2],

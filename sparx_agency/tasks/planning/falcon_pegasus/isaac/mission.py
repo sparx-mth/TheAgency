@@ -226,6 +226,7 @@ class ExplorationMission:
         self._next_frame_at = 0.0
         self._finished = False
         self._planner_gone_at = None
+        self._unsafe_trajectory = None   # trajectory id FALCON condemned
 
     # ── phases ───────────────────────────────────────────────────────────
 
@@ -391,8 +392,17 @@ class ExplorationMission:
             # whatever the aircraft's heading happened to be.
             position = sensing.nav_position(self.adapter)
             now = time.time()
+            # A condemned trajectory is withheld rather than followed. Passing
+            # None puts the tracker on its station hold, which brakes the
+            # aircraft toward a latched point instead of carrying its momentum
+            # into the obstacle FALCON just found while FALCON re-plans.
+            reference = None if self._unsafe_trajectory is not None else self.link.reference
             command = self.tracker.update(
-                self.link.reference, position, self._true_yaw(), self.loop.dt,
+                reference, position, self._true_yaw(), self.loop.dt,
+                # PhysX hands over the true world-frame velocity, so the tracker's
+                # damping term acts on a measured signal rather than a difference
+                # of positions. That term is what closes PX4's velocity-loop lag.
+                velocity=tuple(float(v) for v in self.adapter.vehicle.state.linear_velocity),
                 reference_age=self.link.reference_age_s(now))
             self.px4.send_velocity_world(command.vx, command.vy, command.vz, command.yaw)
             if not command.holding:
@@ -435,6 +445,9 @@ class ExplorationMission:
             if self.link.trajectory_id != last_trajectory:
                 last_trajectory = self.link.trajectory_id
                 trajectory_at = self.loop.sim_time
+                if self._unsafe_trajectory is not None:
+                    self._unsafe_trajectory = None
+                    self._say("new trajectory #%d -- following again" % last_trajectory)
             elif self.loop.sim_time - trajectory_at >= PLANNER_STALL_S:
                 return OUTCOME_PLANNER_STOPPED, (
                     "FALCON published no new trajectory for %.0f s (still on #%d). "
@@ -546,6 +559,13 @@ class ExplorationMission:
         elif name == protocol.EVENT_PLANNER_GONE:
             self._planner_gone_at = self._planner_gone_at or self.loop.sim_time
             self._say("FALCON stopped commanding (%s) -- holding" % detail)
+        elif name == protocol.EVENT_TRAJECTORY_UNSAFE:
+            # Latched on the trajectory that was live when FALCON condemned it.
+            # Cleared in _explore() the moment a new one arrives, which is the
+            # only thing that makes the reference safe to follow again.
+            self._unsafe_trajectory = self.link.trajectory_id
+            self._say("FALCON found an obstacle on the live trajectory (%s) -- "
+                      "holding until it replans" % detail)
 
     def _true_yaw(self) -> float:
         qx, qy, qz, qw = self.adapter.vehicle.state.attitude

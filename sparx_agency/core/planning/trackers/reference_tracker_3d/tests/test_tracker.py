@@ -128,14 +128,26 @@ def test_tracks_a_moving_reference_within_a_handspan():
 
 
 def test_stale_reference_holds_station_rather_than_flying_on():
-    """Silence from the planner stops the aircraft where it is."""
+    """Silence from the planner brings the aircraft to a stop where it is.
+
+    To a stop, not to an instant zero: the output is smoothed, so a cruising
+    aircraft is ramped down over a few ticks rather than being handed a step it
+    would answer with a lurch. What matters is that the command decays and the
+    aircraft ends up holding, which is what this checks.
+    """
     tracker = ReferenceTracker3D()
     reference = _reference(1.0, speed=1.0)
     tracker.update(reference, (1.0, 0.0, 1.5), yaw=0.0, dt=DT)
-    out = tracker.update(reference, (1.0, 0.0, 1.5), yaw=0.0, dt=DT,
-                         reference_age=5.0)
+
+    speeds = []
+    for _ in range(40):
+        out = tracker.update(reference, (1.0, 0.0, 1.5), yaw=0.0, dt=DT,
+                             reference_age=5.0)
+        speeds.append(math.hypot(out.vx, out.vy))
     assert out.holding
-    assert out.velocity() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9)
+    assert speeds[0] < 1.0            # already decaying on the first held tick
+    assert speeds[-1] < 0.02          # and stopped by the end
+    assert speeds == sorted(speeds, reverse=True)
 
 
 def test_hold_point_is_latched_not_re_measured():

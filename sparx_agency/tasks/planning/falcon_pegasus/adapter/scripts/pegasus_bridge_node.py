@@ -62,6 +62,12 @@ BODY_FRAME = "base_link"
 # signal that the mission is over rather than merely quiet.
 REPLAN_EXPLORATION_FINISHED = 2
 
+# 1 means safetyCallback() found the EXECUTING trajectory in collision. FALCON
+# replans and says nothing else about it; the aircraft is flying that trajectory
+# in the meantime, so it is forwarded and the aircraft holds until a new one
+# lands.
+REPLAN_TRAJECTORY_UNSAFE = 1
+
 # How long the command stream may go quiet before the aircraft is told the
 # planner is gone. traj_server publishes at 100 Hz while a trajectory is live and
 # stops entirely once exploration finishes.
@@ -139,6 +145,7 @@ class PegasusBridge(object):
         self._odoms = 0
         self._commands = 0
         self._finished = False
+        self._unsafe = False
         self._last_command_at = None
         self._planner_gone_reported = False
 
@@ -173,6 +180,18 @@ class PegasusBridge(object):
         command stream stops for good. The aircraft has to be told, or it holds
         its last reference until a timeout it did not need to wait for.
         """
+        if msg.data == REPLAN_TRAJECTORY_UNSAFE:
+            # Edge-triggered: the FSM re-enters PLAN_TRAJ on every attempt and
+            # this fires each time, which would be a hundred identical events
+            # while the aircraft is already holding.
+            if not self._unsafe:
+                self._unsafe = True
+                rospy.logwarn("[bridge] FALCON: obstacle on the live trajectory "
+                              "-- telling the aircraft to hold")
+                self._send_down(protocol.event(protocol.EVENT_TRAJECTORY_UNSAFE,
+                                               "collision on the executing trajectory"))
+            return
+        self._unsafe = False
         if msg.data != REPLAN_EXPLORATION_FINISHED or self._finished:
             return
         self._finished = True

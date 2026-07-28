@@ -63,8 +63,17 @@ EVENT_PLANNER_GONE = "planner_gone"
 """The command stream stopped without a finish. Hold, then land."""
 EVENT_MISSION_OVER = "mission_over"
 """Isaac is done flying. The ROS1 side should close its recording."""
+EVENT_TRAJECTORY_UNSAFE = "trajectory_unsafe"
+"""FALCON found an obstacle ON the trajectory the aircraft is currently flying.
 
-EVENTS = (EVENT_EXPLORATION_FINISHED, EVENT_PLANNER_GONE, EVENT_MISSION_OVER)
+Its own answer is to replan, which is right and also incomplete: replanning takes
+a hundred milliseconds or more, and upstream that cost nothing because the
+geometry simulator's aircraft stopped the instant its reference did. An aircraft
+with mass carries its momentum into the obstacle while the planner thinks. So the
+aircraft is told, and holds station until a new trajectory arrives."""
+
+EVENTS = (EVENT_EXPLORATION_FINISHED, EVENT_PLANNER_GONE, EVENT_MISSION_OVER,
+          EVENT_TRAJECTORY_UNSAFE)
 
 DEPTH_DTYPE = "<u2"
 """Depth pixels on the wire: little-endian uint16 millimetres, 0 = no return.

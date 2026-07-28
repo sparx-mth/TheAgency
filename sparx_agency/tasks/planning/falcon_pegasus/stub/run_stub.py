@@ -318,7 +318,8 @@ class _Flight:
             # reference is expressed in. See LaggingAircraft.nav_position.
             command = self.tracker.update(
                 self.link.reference, self.aircraft.nav_position, self.aircraft.yaw,
-                DT, reference_age=self.link.reference_age_s(time.time()))
+                DT, velocity=tuple(self.aircraft.velocity),
+                reference_age=self.link.reference_age_s(time.time()))
             self.aircraft.step(command.velocity(), command.yaw, DT)
             if not command.holding:
                 self.errors.append(command.position_error_m)
