@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>falcon_pegasus</name>
+  <version>0.1.0</version>
+  <description>
+    Runs the FALCON exploration stack, unmodified, against the Isaac Sim +
+    Pegasus + PX4 simulator: a bridge that makes a physically simulated aircraft
+    look like FALCON's own geometry-only rig, and a recorder that writes the map
+    being built to an MP4 with no display attached.
+  </description>
+  <maintainer email="dev@example.com">developer</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>rospy</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>quadrotor_msgs</build_depend>
+  <build_depend>tf2_ros</build_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>quadrotor_msgs</exec_depend>
+  <!-- The bridge broadcasts TF only when RViz is running; FALCON needs none. -->
+  <exec_depend>tf2_ros</exec_depend>
+  <!-- Launched by falcon_pegasus.launch with rviz:=true. -->
+  <exec_depend>rviz</exec_depend>
+  <!-- The planner and its trajectory server are launched from this package. -->
+  <exec_depend>exploration_manager</exec_depend>
+  <exec_depend>fast_planner</exec_depend>
+  <exec_depend>voxel_mapping</exec_depend>
+</package>

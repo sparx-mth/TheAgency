@@ -63,6 +63,24 @@ class SimLoop:
         self.driver.ensure_started()
         self._wall_start = time.monotonic()
 
+    def set_realtime(self, enabled: bool) -> None:
+        """Turn wall-clock pacing on or off mid-run, from *now*.
+
+        Pacing is measured from a fixed origin, so simply flipping the flag on a
+        loop that has already run is inert: simulated time is by then far behind
+        ``_wall_start + sim_time``, and every subsequent step decides it is
+        already late. Re-baselining is what makes a late switch mean anything.
+
+        A run that must be paced usually should not pay for it during start-up --
+        PX4's several minutes of warm-up are simulated seconds nobody watches,
+        and there is no reason to spend real ones on them.
+
+        Args:
+            enabled: Whether following steps should be throttled to wall time.
+        """
+        self.realtime = bool(enabled)
+        self._wall_start = time.monotonic() - self.sim_time
+
     def step(self) -> bool:
         """Advance one physics step.
 

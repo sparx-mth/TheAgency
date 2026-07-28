@@ -1,0 +1,45 @@
+# Sim depth camera for FALCON autonomous exploration on the PEGASUS platform.
+#
+# Deliberately NOT the XTEND-matched calibration next to this file. That one is a
+# crop of a real camera, so its principal point sits far off centre
+# (cy = 128.6 in a 392-pixel-tall image) and its field of view is asymmetric
+# about the optical axis: ~15.5 deg up, ~29.7 deg down.
+#
+# FALCON's frontier-viewpoint model does not know that. PerceptionUtils models
+# the sensor as a SYMMETRIC cone about the body +x boresight, sized from
+# /uav_model/sensing_parameters/fov/{horizontal,vertical}
+# (falcon_planner/exploration_utils/src/perception_utils.cpp). Fed an asymmetric
+# camera it believes it can see frontiers above the aircraft that are in fact
+# outside the image, chooses viewpoints for them, flies there, observes nothing,
+# and picks the same frontier again.
+#
+# So the exploration runs use a symmetric pinhole instead, chosen to be exactly
+# FALCON's own reference sensor
+# (exploration_manager/config/robot/uav_model_simulator.yaml): 640x480 with
+# fx = fy = 320, principal point at the image centre.
+#
+#   horizontal FOV = 2*atan(320/320) = 90.00 deg = 1.5707963 rad
+#   vertical   FOV = 2*atan(240/320) = 73.74 deg = 1.2870022 rad
+#
+# Those are the numbers already in FALCON's YAML, so a run needs no intrinsics
+# override anywhere and the two configurations cannot drift apart.
+#
+# Use camera_pegasus_iris_504x392.yaml instead when the goal is training data
+# that must be geometrically interchangeable with real XTEND flights.
+
+image_width: 640
+image_height: 480
+
+fx: 320.0
+fy: 320.0
+cx: 320.0
+cy: 240.0
+
+# Rendered as an ideal pinhole by the Pegasus MonocularCamera; carried only for
+# parity with the real camera yamls.
+distortion_model: "plumb_bob"
+k1: 0.0
+k2: 0.0
+p1: 0.0
+p2: 0.0
+k3: 0.0

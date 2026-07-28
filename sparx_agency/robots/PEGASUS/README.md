@@ -110,6 +110,8 @@ would need its own loader (its scenes aren't single-USD CDN references like
 ```
 robots/PEGASUS/
   config/camera_pegasus_iris_504x392.yaml   sim camera intrinsics (== XTEND's 392x504 depth-engine calibration)
+  config/camera_falcon_explorer_640x480.yaml a symmetric 90x74 deg pinhole, for planners that model the sensor
+  adapters/camera_pose.py                    world pose of the camera OPTICAL frame (what a mapper needs)
   maps/<scene>_voxels.npz                    ground-truth 3D occupancy at 10 cm -- the source of everything else
   maps/<scene>_voxels.ply                    the same, as a point cloud for Open3D (regenerated, not committed)
   maps/<scene>_alt<NNN>cm.npz                a horizontal slab of it at one altitude, for 2D planning
@@ -312,6 +314,39 @@ sparx_agency/tasks/planning/sim_flight_recording/run_collection.sh \
 See `tasks/planning/sim_flight_recording/README.md` for the flags, what one
 episode is, what comes out, and how several workers stay out of each other's
 way.
+
+## Two cameras, and which to render with
+
+`camera_pegasus_iris_504x392.yaml` is a copy of the real XTEND's calibration, so
+simulated recordings are geometrically interchangeable with real flights. It is
+what a data-collection campaign should render.
+
+It is the wrong camera for a planner that *models* the sensor. Its principal
+point is 67 px above centre (a crop of a real camera), so its field of view is
+asymmetric about the optical axis: ~15.5 deg up, ~29.7 deg down. FALCON's
+frontier-visibility model assumes a symmetric cone about the body boresight, so
+fed this camera it believes it can see frontiers that are outside the image,
+flies to viewpoints for them, observes nothing, and picks them again.
+`camera_falcon_explorer_640x480.yaml` is a symmetric 90 x 74 deg pinhole for
+exactly that case — see `tasks/planning/falcon_pegasus/`.
+
+`flight_session.spawn_vehicle` takes an explicit `intrinsics=` for this;
+`resolution=` still rescales the platform calibration when that is what you want.
+
+## Where the camera actually is, and why it matters more than it sounds
+
+`adapters/camera_pose.py` gives the world pose of the camera's **optical** frame
+(x right, y down, z forward), which is what a depth mapper back-projects with.
+Handing a mapper the *body* pose instead produces a complete, self-consistent map
+of the building rotated ninety degrees, and raises nothing anywhere.
+
+The 20 cm forward mount has a second consequence that is easy to miss. The camera
+carves free space outward *from itself*, so the body origin sits in the one place
+it can never observe: 20 cm behind the lens, at every heading, for the whole
+flight. Any planner that treats unobserved space as impassable — FALCON's A* does
+— will refuse to expand a single node from the aircraft's own position. The fix
+is to report the aircraft's position **at the sensor**, which is also the
+assumption FALCON's own configs encode (their `T_b_c` has zero translation).
 
 ## Aerial Gym: deliberately not installed
 

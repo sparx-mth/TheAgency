@@ -159,7 +159,7 @@ def build_world(simulation_app, scene: str, ground_plane: bool = True):
 def spawn_vehicle(simulation_app, pegasus_root: Path, spawn_xyz, spawn_yaw: float = 0.0,
                   use_px4: bool = True, px4_dir=None, vehicle_id: int = 0,
                   resolution: Optional[Tuple[int, int]] = None,
-                  camera_rate_hz: float = 10.0):
+                  camera_rate_hz: float = 10.0, intrinsics=None):
     """Spawn the Iris into an already-built world.
 
     Args:
@@ -175,8 +175,15 @@ def spawn_vehicle(simulation_app, pegasus_root: Path, spawn_xyz, spawn_yaw: floa
         vehicle_id: PX4 instance this aircraft is bound to. Selects its HIL
             port; must match what PX4 was launched with.
         resolution: Camera ``(width, height)``. None uses the platform
-            calibration's own resolution.
+            calibration's own resolution. Ignored when ``intrinsics`` is given.
         camera_rate_hz: Camera capture rate.
+        intrinsics: An explicit
+            :class:`~sparx_agency.core.common.types.Intrinsics` to render with,
+            instead of the platform calibration rescaled to ``resolution``. A
+            recording campaign wants the calibration (so simulated frames are
+            geometrically interchangeable with real XTEND ones); a mission whose
+            *planner* models the sensor may need a different camera entirely --
+            see ``tasks/planning/falcon_pegasus`` for one that does.
 
     Returns:
         The :class:`PegasusIrisVehicle` adapter.
@@ -187,6 +194,7 @@ def spawn_vehicle(simulation_app, pegasus_root: Path, spawn_xyz, spawn_yaw: floa
         pegasus_extension_root=pegasus_root,
         init_pos=tuple(spawn_xyz),
         init_yaw=spawn_yaw,
+        intrinsics=intrinsics,
         resolution=resolution,
         camera_frequency=camera_rate_hz,
         use_px4=use_px4,
