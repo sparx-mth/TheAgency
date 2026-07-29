@@ -5,7 +5,24 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed
+- Broken `torch` import in the project venv (`venv/`): removed an orphaned cu12 NVIDIA package
+  cluster conflicting with `torch==2.11.0`'s actual cu13 requirement, and force-reinstalled two
+  cu13 packages (`nvidia-cudnn-cu13`, `nvidia-nvshmem-cu13`) whose library files were missing
+  despite being reported installed (corrupted/interrupted earlier install). See LESSONS.md.
+
 ### Added
+- Built the YOLO-World-`s` TensorRT engine (`yolo_world_trt/build_all.sh s`) end-to-end for
+  the first time on this PC (installed `ultralytics`, downloaded `yolov8s-worldv2.pt`) —
+  `./run_object_mission_sphera.sh --detector-only` now actually starts the detector sidecar.
+  `m`/`l`/`x` are not built yet.
+- Sphera/Rooster fork of the "pick an object, then fly to it and land" mission stack:
+  `adapter/launch/object_mission_sphera.launch`, `config/mission_sphera.yaml`,
+  `run_object_mission_sphera.sh`, and a placeholder `objects_sphera.json` (no real object
+  catalog exists for `sphera_jail` yet). Mirrors XTEND's existing `object_mission.launch` stack
+  the same way `sphera_drone.launch` mirrors `real_drone.launch` — additive, XTEND's originals
+  untouched. Dry-validated (`mission_config.py` + `--help`); not yet flown live. See
+  `docs/progress/entries/005-yolo-object-navigation.md`.
 - Two new `mission_control.py` services (`rooster_jetson` group): `Rooster Frame Relay ->
   Jetson (R1)` and `Rooster Jetson Frame Watcher (R1)`, wiring the existing
   `dir_push_relay.py`/`dir_watch_path_publisher.py` mechanism (previously XTEND-only, never

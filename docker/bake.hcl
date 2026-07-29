@@ -8,6 +8,7 @@
 // whole DAG builds in one command with correct ordering and shared cache:
 //
 //   base_cuda -> ros2_humble -> perception -> robotican
+//                                          \-> detector
 //                                          \-> xtend   (future sibling)
 //
 // Usage:
@@ -50,6 +51,20 @@ target "robotican" {
   context    = "docker"
   dockerfile = "Dockerfile.robotican"
   tags       = ["${REGISTRY}:robotican"]
+  contexts   = {
+    "theagency:perception" = "target:perception"
+  }
+  args = {
+    USERNAME = "user1"
+    USER_UID = "1000"
+    USER_GID = "1000"
+  }
+}
+
+target "detector" {
+  context    = "docker"
+  dockerfile = "Dockerfile.detector"
+  tags       = ["${REGISTRY}:detector"]
   contexts   = {
     "theagency:perception" = "target:perception"
   }

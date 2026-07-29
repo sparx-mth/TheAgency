@@ -1,0 +1,25 @@
+[
+  {
+    "label": "placeholder_object_1",
+    "_comment": "sphera_jail has no room-mapper catalog yet: no mapping sweep has been flown/processed for this map. These are fictional entries near the drone's spawn/goal/stage points, purely so the mission's selection/staging/aim plumbing can be exercised end-to-end. The detector will never actually confirm either of these (nothing real is there), so the mission will fall back to a sweep-then-give-up land. Replace with a real room_mapper output (see Demo_No4_XTEND_MapRoom/room_mapper) once one exists for sphera_jail.",
+    "position_m": {
+      "x": 54.75,
+      "y": -11.66,
+      "z": 0.5
+    },
+    "frame_idx": 0,
+    "tag_ids": [],
+    "tag_confidence": 0.0
+  },
+  {
+    "label": "placeholder_object_2",
+    "position_m": {
+      "x": 56.75,
+      "y": -10.66,
+      "z": 0.5
+    },
+    "frame_idx": 0,
+    "tag_ids": [],
+    "tag_confidence": 0.0
+  }
+]
