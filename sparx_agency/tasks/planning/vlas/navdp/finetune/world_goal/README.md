@@ -326,10 +326,38 @@ split, keep every band comfortably wider than `ExpertConfig.horizon_m`. Widening
 val here is not free: the frames simply are not evenly spread down the building,
 so a wider val band comes straight out of test.
 
-When a second building has been surveyed
-(`sim_flight_recording/survey_scene.py --scene warehouse`), name it as a whole
-split with `scene_split:` — an unseen *building* is a far stronger test than an
-unseen wing, and the config supports both at once.
+### Prefer a held-out building once you have more than one
+
+`configs/splits_multiscene.yaml` is the split to use when several buildings have
+been flown, and it is strictly better than the y-bands above:
+
+| | | |
+|---|---|---|
+| **test** | `warehouse_shelves`, entire building | 535 m² the policy never sees |
+| **val** | `full_warehouse`, southern fifth | ~310 m², picks the checkpoint |
+| **train** | `office` entire + the rest of `full_warehouse` | ~2050 m² |
+
+Two reasons, one of them not obvious:
+
+* **An unseen wing is a weak test.** It shares the building's architecture,
+  lighting, renderer and asset set; the corridors either side of the split line
+  are built from the same handful of models. A warehouse full of shelves shares
+  none of that with an office, so transferring to it is evidence about
+  navigation rather than about memorisation.
+* **A whole-scene split is also cheaper in samples.** `SplitPlan.route_inside`
+  returns `True` unconditionally for a scene assigned whole — there is no
+  internal boundary for a route to cross — whereas a band split discards every
+  label whose expert route leaves its band, which on the office y-bands was a
+  large fraction of them.
+
+Office stays in **train** deliberately: it is the only surveyed scene with
+corridors, doorways and desks, and the closest thing here to the building the
+real XTEND flies. Validation is a band rather than a fourth building because
+with three buildings, spending one on checkpoint selection would drop either the
+office or the shelved warehouse out of the experiment; `full_warehouse` is much
+the largest at 1570 m² reachable, so a fifth of it is the cheapest band
+available. Validation only picks a checkpoint — it never has to be unseen
+*architecture*.
 
 ---
 
@@ -441,9 +469,24 @@ conda run -n navdp python -m $WG.report --run $OUT/run1 --dataset $OUT/dataset \
     --flights $OUT/flights
 ```
 
-> **Status:** authored and wired against the existing PEGASUS harness, but its
-> first run needs a live Isaac Sim + PX4 session and has not been executed here.
-> The offline pipeline (stages 1–5) has been run end to end.
+> **Status:** the offline pipeline (stages 1–5) has been run end to end. The
+> closed-loop script had never been *executed*, only written, and a static audit
+> found nine independent first-run failures — all now fixed: it unpacked five
+> values from a four-value `bring_up`, never called `boot_isaac`, called a
+> `px4_launch.launch` that does not exist (so PX4 never started and the run died
+> 300 simulated seconds later in the heartbeat wait), got `configure_px4` and
+> `settle_estimator` arity wrong, was missing six arguments `bring_up` reads off
+> the namespace, handed `client.reset` a raw 3×3 list where an `Intrinsics` is
+> required, returned a three-key dict on `arm_timeout` that `KeyError`d the
+> caller and lost every mission already flown, and tore nothing down on failure
+> so the second arm inherited the first arm's ports and PX4 parameters.
+>
+> One of the nine was in the server, not the script: `--backend torch` passed
+> `render_cam_height` to upstream's `NavDP_Agent`, which does not accept it. The
+> agent is built lazily inside `/navigator_reset`, so the server started
+> cleanly and then returned 500 on the first reset and 409 on every step after
+> it — indistinguishable from a dead policy. **Anything serving a fine-tuned
+> checkpoint over the torch backend hit this**, not just closed-loop flights.
 
 ---
 

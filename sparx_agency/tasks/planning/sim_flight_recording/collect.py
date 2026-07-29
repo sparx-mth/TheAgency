@@ -14,8 +14,15 @@ per worker, that is where the variety in a campaign comes from.
 **Failures are expected and handled, not fatal.** An episode that hits something
 or refuses to arm is written out with its outcome recorded in ``meta.json``, the
 airframe is settled, and the next episode is planned from wherever it ended up.
-Only a run of consecutive failures stops the worker -- at that point the aircraft
-is genuinely wedged and more attempts would only produce more bad data.
+
+Two different runs of failures stop the worker, and the distinction is worth
+throughput. A run of outcomes the aircraft *could not fly*
+(:data:`UNFLYABLE_OUTCOMES`) means it is lying against something and no later
+episode can recover it, so three ends the worker. A run of *poor flights* --
+diverged from the route, missed the goal, ran out of budget -- happened to an
+aircraft that is still airborne and still recording, so it takes eight. Treating
+those alike cost a Kit boot, three and a half minutes, every time a worker had a
+bad patch it would have flown out of on its own.
 
 Run several of these at once for throughput; ``run_collection.sh`` does that,
 and :mod:`px4_launch` documents the per-instance ports and directories that make
@@ -42,9 +49,20 @@ from sparx_agency.tasks.planning.sim_flight_recording import (
     campaign_setup, episode, flight_session, px4_launch, px4_params,
 )
 from sparx_agency.tasks.planning.sim_flight_recording.episode_plan import (
-    EpisodeSpec, sample_episode,
+    EpisodeSpec, plan_between, sample_episode,
 )
 from sparx_agency.tasks.planning.sim_flight_recording.path_follower import FollowSpec
+
+UNFLYABLE_OUTCOMES = (episode.OUTCOME_CRASHED, episode.OUTCOME_ARM_TIMEOUT)
+"""Outcomes that say the aircraft cannot take off again without help.
+
+A crash leaves it lying against something, PX4 then refuses to arm on attitude,
+and nothing here can right it -- so a run of these is the wedge that must stop a
+worker. Every *other* failure happened to an aircraft that flew: a route
+diverged, a goal was missed, a flight ran out of budget. Those are bad flights,
+not a broken worker, and recycling on three of them costs a three-and-a-half
+minute Kit boot to fix a problem the next episode would have fixed for free.
+"""
 
 HEARTBEAT_TIMEOUT_S = 120.0
 """Simulated seconds to wait for PX4's first heartbeat. It normally takes ~1.5."""
@@ -97,6 +115,12 @@ def _parse_args():
     ap.add_argument("--max-yaw-rate", type=float, default=None,
                     help="how fast the aircraft may rotate, deg/s (default 14). This "
                          "is how fast the world spins in the recorded imagery")
+    ap.add_argument("--max-bad-flights", type=int, default=8,
+                    help="stop after this many poor flights in a row that the "
+                         "aircraft nonetheless survived (off_route, stalled, "
+                         "flight_timeout, ...). Higher than "
+                         "--max-consecutive-failures because none of them means "
+                         "the worker is broken")
     ap.add_argument("--max-consecutive-failures", type=int, default=3,
                     help="stop the worker after this many failed episodes in a row")
     ap.add_argument("--settle-s", type=float, default=30.0,
@@ -197,7 +221,8 @@ def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
                  chase_camera, resolution, seed) -> list:
     """Fly ``args.episodes`` missions, recording each. Returns the manifest rows."""
     records = []
-    consecutive_failures = 0
+    consecutive_unflyable = 0   # the aircraft is wedged and cannot take off
+    consecutive_failures = 0    # it flies, but nothing is coming out well
     start_from = None  # the first episode is planned from wherever the aircraft spawned
 
     for index in range(args.episodes):
@@ -211,7 +236,7 @@ def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
         except RuntimeError as error:
             print(f"episode {index}: could not plan -- {error}", flush=True)
             consecutive_failures += 1
-            if consecutive_failures >= args.max_consecutive_failures:
+            if consecutive_failures >= args.max_bad_flights:
                 break
             continue
 
@@ -228,29 +253,61 @@ def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
             video_out=(out_dir.with_suffix(".mp4") if args.video else None),
             video_source="chase", chase_camera=chase_camera,
         )
-        result = episode.fly_episode(loop, px4, adapter, plan, recorder, follow_spec)
-        stats = recorder.finish(_episode_meta(args, seed, index, name, plan, result,
+        result = episode.fly_episode(loop, px4, adapter, plan, recorder, follow_spec,
+                                     replan=_replanner(world_map, spec, plan.goal))
+        flown = result.flown_plan or plan
+        stats = recorder.finish(_episode_meta(args, seed, index, name, flown, result,
                                               resolution, follow_spec))
         episode.settle_after_landing(loop, px4)
 
-        records.append(_manifest_row(name, plan, result, stats))
+        records.append(_manifest_row(name, flown, result, stats))
         print(f"episode {index}: {result.outcome} -- {result.frames} frames, "
               f"{result.duration_s:.0f} s, {result.goal_error_m:.2f} m from the goal"
               + (f" [{result.detail}]" if result.detail else ""), flush=True)
 
         if result.ok:
             consecutive_failures = 0
+            consecutive_unflyable = 0
             start_from = plan.goal
         else:
             consecutive_failures += 1
             start_from = None  # re-derive from wherever it actually ended up
+            if result.outcome in UNFLYABLE_OUTCOMES:
+                consecutive_unflyable += 1
+            else:
+                # It flew, so whatever went wrong, it is not lying on its side.
+                consecutive_unflyable = 0
             for message in result.px4_messages[-4:]:
                 print(f"    PX4: {message}", flush=True)
-            if consecutive_failures >= args.max_consecutive_failures:
-                print(f"stopping: {consecutive_failures} failed episodes in a row -- "
-                      f"the aircraft is most likely wedged", flush=True)
+            if consecutive_unflyable >= args.max_consecutive_failures:
+                print(f"stopping: {consecutive_unflyable} episodes in a row the "
+                      f"aircraft could not fly -- it is most likely wedged", flush=True)
+                break
+            if consecutive_failures >= args.max_bad_flights:
+                print(f"stopping: {consecutive_failures} poor flights in a row -- "
+                      f"the aircraft flies but nothing usable is coming out", flush=True)
                 break
     return records
+
+
+def _replanner(world_map, spec, goal):
+    """A callable that plans a fresh route from a live pose to ``goal``.
+
+    Handed to :func:`episode.fly_episode`, which uses it twice: once when the
+    aircraft reaches cruise altitude -- so the route starts where the aircraft
+    actually is rather than where it stood before the climb moved it -- and
+    again whenever the follower reports it has diverged.
+
+    Returns ``None`` when no route exists from that pose, which the caller reads
+    as "keep flying what you have" on the first call and "give up on this
+    episode" on a later one.
+    """
+    def replan(x: float, y: float, yaw: float):
+        start = world_map.snap(float(x), float(y), yaw=float(yaw))
+        return plan_between(world_map.grid, start, goal, spec,
+                            planner=world_map.planner)
+
+    return replan
 
 
 def _episode_meta(args, seed, index, name, plan, result, resolution,
@@ -271,6 +328,10 @@ def _episode_meta(args, seed, index, name, plan, result, resolution,
         "planned_waypoints": [list(w) for w in plan.waypoints],
         "planner_standoff_m": plan.inflate_used_m,
         "detour_ratio": plan.detour_ratio,
+        # How many times the route was planned again mid-flight. The waypoints
+        # above are the LAST route flown, so a non-zero count means the earlier
+        # part of this recording was flown on a different one.
+        "replans": result.replans,
         "outcome": result.outcome,
         "outcome_ok": result.ok,
         "outcome_detail": result.detail,

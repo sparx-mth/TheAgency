@@ -173,10 +173,17 @@ def _torch_agent_builder(args):
     from policy_agent import NavDP_Agent
     if not args.ckpt:
         raise SystemExit("[fatal] --backend torch needs --ckpt")
+    # No render_cam_height here: upstream's NavDP_Agent.__init__ does not accept
+    # it (only our own TRT agent does), and passing it raises TypeError. The
+    # agent is built lazily inside /navigator_reset, so the server would start
+    # cleanly and then return HTTP 500 on the first reset and 409 on every step
+    # after it -- which reads as a dead policy, not a bad keyword argument. The
+    # /navigator_reset handler still assigns the attribute for the mask draw,
+    # which works on any object.
     return lambda intrinsic: NavDP_Agent(
         intrinsic, image_size=224, memory_size=8, predict_size=24,
         temporal_depth=16, heads=8, token_dim=384, navi_model=args.ckpt,
-        render_cam_height=args.render_cam_height, device="cuda:0")
+        device="cuda:0")
 
 
 def _select_builder(args):

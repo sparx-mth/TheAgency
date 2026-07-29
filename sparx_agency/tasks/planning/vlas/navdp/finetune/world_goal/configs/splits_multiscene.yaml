@@ -1,0 +1,64 @@
+# Train / validation / test across three surveyed buildings.
+#
+# Use this in preference to `splits_office.yaml` whenever more than one building
+# has been flown. **An unseen building is a far stronger generalisation test
+# than an unseen wing of a building the policy trained on** -- same architecture,
+# same lighting, same renderer, and in an office the corridors on either side of
+# a split line are built from the same handful of assets.
+#
+#   test   warehouse_shelves   535 m2   an entire building the policy never sees
+#   val    full_warehouse, the southern fifth   ~310 m2   picks the checkpoint
+#   train  office (all of it) + the rest of full_warehouse   ~2050 m2
+#
+# ## Why these three roles and not some other assignment
+#
+# **Office must be trained on, not held out.** It is the only scene with
+# corridors, doorways and desks, and it is the one that resembles what the real
+# XTEND flies. A policy that had never trained on an office would be worse at
+# the job this dataset exists for, whatever it scored.
+#
+# **The test building is a warehouse with shelves**, which is geometrically
+# unlike the office in every way that matters -- long straight aisles, repeated
+# structure, obstacles that are gaps between racks rather than doorways. If the
+# policy transfers to it, that is evidence about *navigation*, not about having
+# memorised one building. The bare `warehouse.usd` shell would have been useless
+# here: four walls and a floor is not an obstacle-avoidance test.
+#
+# **Validation is a band of full_warehouse rather than a whole scene**, because
+# with only three buildings, spending one on checkpoint selection would leave
+# either the office or the shelved warehouse out of the experiment entirely.
+# full_warehouse is much the largest at 1570 m2 reachable, so a fifth of it is
+# the cheapest 310 m2 available. Validation only picks a checkpoint; it never
+# has to be an unseen *building*.
+#
+# ## A whole-scene split keeps samples a band split throws away
+#
+# `SplitPlan.route_inside` returns True unconditionally for a scene assigned
+# whole (splits.py) -- there is no internal boundary for a route to cross. A
+# band split instead requires the entire expert route to stay inside its band,
+# which on the office y-bands rejected a large share of samples with
+# `label_leaves_split`. So the held-out building is *also* the more efficient
+# way to spend the flights.
+#
+# ## Measured extents, for anyone re-cutting this
+#
+#   office             1174 m2 reachable   x [-24.3, 6.3]   y [-34.5, 39.9]
+#   full_warehouse     1570 m2 reachable   x [-28.2, 8.2]   y [-40.0, 33.6]
+#   warehouse_shelves   535 m2 reachable   x [-12.2, 12.2]  y [-18.2, 21.0]
+#
+# The val band boundary is cumulative reachable area, not the map's extent:
+# 20% of full_warehouse's reachable space lies below y = -13.4. Keep any band
+# comfortably wider than `ExpertConfig.horizon_m` (4.8 m) -- this one is 26.6 m
+# tall, so a 4.8 m label never struggles to fit inside it.
+
+buffer_m: 1.5
+
+scene_split:
+  # Entire buildings. These need no zones and lose no samples to a boundary.
+  office: train
+  warehouse_shelves: test
+
+scenes:
+  full_warehouse:
+    train: [[-28.2, -13.4,   8.2,  33.6]]
+    val:   [[-28.2, -40.0,   8.2, -13.4]]

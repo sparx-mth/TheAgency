@@ -21,7 +21,7 @@ Output (the ``recording.py`` schema)::
       depth/000000.png       (H, W) uint16 millimetres  -- or .npy float32 metres
       intrinsics.json        {width,height,fx,fy,cx,cy}
       meta.json              {rate_hz, camera_height_m, pitch_deg, frames, ...}
-      poses.npy              (N, 15) float32, see POSE_COLUMNS
+      poses.npy              (N, 21) float32, see POSE_COLUMNS
 """
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ POSE_COLUMNS = (
     "qx", "qy", "qz", "qw",            # 5-8   body FLU -> world ENU rotation
     "vx", "vy", "vz",                  # 9-11  world-frame linear velocity, m/s
     "wx", "wy", "wz",                  # 12-14 body-frame angular velocity, rad/s
+    "ax", "ay", "az",                  # 15-17 world-frame linear acceleration, m/s^2
+    "ux", "uy", "uz",                  # 18-20 body-frame linear velocity, m/s
 )
 """Column layout of ``poses.npy``.
 
@@ -48,7 +50,16 @@ Columns 0-3 are the original ``[t, x, y, yaw]`` schema and are load-bearing:
 :class:`~...datasets.recording.FlightRecording` slices them positionally. The
 rest is the extra ground truth a simulator can supply and a real flight (so far)
 cannot. A reader that only knows the old schema is unaffected — it never looks
-past column 3.
+past column 3, and every consumer here slices positionally from the left, so
+appending a column is always safe and removing one never is.
+
+Columns 15-20 are recorded because they are free at capture time and expensive
+afterwards: Pegasus already has them on the vehicle state, whereas recovering
+acceleration from a recording means differentiating a velocity that was sampled
+at the render rate, which is noisy and loses the very transients an
+acceleration channel is wanted for. Body-frame velocity is kept alongside the
+world-frame one because a policy reasons in the body frame and rotating it back
+needs the quaternion applied correctly, which is a step worth not repeating.
 
 ``t`` is the **simulation clock**, not a frame index divided by a nominal rate,
 whenever the capturing code supplies one. A frame rendered a physics step late
@@ -87,6 +98,8 @@ class SimFrame:
         quaternion: ``(qx, qy, qz, qw)`` rotating body FLU into world ENU.
         linear_velocity: World-frame ``(vx, vy, vz)``, m/s.
         angular_velocity: Body-frame ``(wx, wy, wz)``, rad/s.
+        linear_acceleration: World-frame ``(ax, ay, az)``, m/s^2.
+        body_velocity: Body-frame ``(u, v, w)``, m/s.
     """
 
     depth: np.ndarray
@@ -97,6 +110,8 @@ class SimFrame:
     quaternion: Optional[Sequence[float]] = None
     linear_velocity: Optional[Sequence[float]] = None
     angular_velocity: Optional[Sequence[float]] = None
+    linear_acceleration: Optional[Sequence[float]] = None
+    body_velocity: Optional[Sequence[float]] = None
 
 
 MAX_DEPTH_M = 20.0
@@ -159,13 +174,18 @@ def _pose_row(frame: SimFrame, stamp_s: float) -> list:
     """One row of ``poses.npy`` in :data:`POSE_COLUMNS` order."""
     x, y, yaw = frame.pose
     quaternion = frame.quaternion if frame.quaternion is not None else (0.0, 0.0, 0.0, 1.0)
-    linear = frame.linear_velocity if frame.linear_velocity is not None else (0.0, 0.0, 0.0)
-    angular = frame.angular_velocity if frame.angular_velocity is not None else (0.0, 0.0, 0.0)
+    zeros = (0.0, 0.0, 0.0)
+    linear = frame.linear_velocity if frame.linear_velocity is not None else zeros
+    angular = frame.angular_velocity if frame.angular_velocity is not None else zeros
+    accel = frame.linear_acceleration if frame.linear_acceleration is not None else zeros
+    body = frame.body_velocity if frame.body_velocity is not None else zeros
     return ([stamp_s, float(x), float(y), float(yaw),
              float(frame.z) if frame.z is not None else 0.0]
             + [float(v) for v in quaternion]
             + [float(v) for v in linear]
-            + [float(v) for v in angular])
+            + [float(v) for v in angular]
+            + [float(v) for v in accel]
+            + [float(v) for v in body])
 
 
 class FlightWriter:

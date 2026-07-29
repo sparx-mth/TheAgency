@@ -123,7 +123,7 @@ variety comes from.
     depth/000000.png     (H, W) uint16 millimetres        <- --depth-format npy for float32 metres
     rgb/000000.jpg       (H, W, 3) uint8
     intrinsics.json      the camera at the resolution actually rendered
-    poses.npy            (N, 15) float32, see below
+    poses.npy            (N, 21) float32, see below
     meta.json            everything about how this flight was produced
   office_w0_e001/
   ...
@@ -141,6 +141,15 @@ variety comes from.
 | 5–8 | `qx, qy, qz, qw`, body FLU → world ENU |
 | 9–11 | `vx, vy, vz`, world-frame linear velocity |
 | 12–14 | `wx, wy, wz`, body-frame angular velocity |
+| 15–17 | `ax, ay, az`, world-frame linear acceleration |
+| 18–20 | `ux, uy, uz`, body-frame linear velocity |
+
+Columns 15–20 are kept because they are free at capture time and expensive
+afterwards: Pegasus already holds them on the vehicle state, whereas recovering
+acceleration from a finished recording means differentiating a velocity sampled
+at the render rate — noisy exactly where the transients are. Nothing in the NavDP
+pipeline reads them today; they are there so a later model that wants dynamics
+does not need the campaign re-flown.
 
 `t` is the **simulation clock**, not a frame index over a nominal rate, and the
 pose in each row was read from the physics state at the instant its images were
@@ -192,6 +201,62 @@ sheet (evenly spaced RGB frames over their depth maps — a black camera or a
 drone facing a wall the whole way is obvious at a glance) and a plan view (the
 flown path over the scene map, next to the route that was planned). Runs in the
 repo venv; no GPU, no Isaac Sim.
+
+## Running for hours: `campaign_supervisor.py`
+
+`run_collection.sh` starts N workers and waits for them. That is right for a
+campaign you are watching and wrong for one that runs overnight, because a
+worker is *designed* to give up: three failed episodes in a row means the
+aircraft is wedged against something it cannot right itself from, so it exits.
+A wedge at episode 20 of 400 costs the other 380.
+
+```bash
+python3 sparx_agency/tasks/planning/sim_flight_recording/campaign_supervisor.py \
+    --scene office --workers 4 --episodes 3000 --max-bytes 130e9 --hours 16 \
+    --host-dir ~/data/sim/office --container-dir /data/office \
+    --stop-file /tmp/stop-collection \
+    -- --min-distance 12.0
+```
+
+It relaunches any worker that exits, so a wedge costs one Kit boot (about three
+and a half minutes) rather than a worker's whole remaining share. It stops on
+whichever comes first: `--episodes`, `--max-bytes`, `--hours`, `--min-free-gb`,
+or `touch`ing `--stop-file` — which brings the campaign down at the next episode
+boundary, leaving every finished recording valid.
+
+Three things it does that are not obvious, and each of which cost a campaign
+before it did them:
+
+* **Every launch gets its own directory**, `w<worker>_c<launch>/`. `collect.py`
+  numbers recordings `<scene>_w<W>_e<NNN>` from zero each launch, so a
+  relaunched worker pointed at the directory it used before overwrites its own
+  earlier flights one at a time, silently, and the campaign never grows. On
+  restart the supervisor continues the launch numbering rather than restarting
+  it, so an interrupted campaign can simply be started again.
+* **It reaps orphaned PX4s.** A killed worker never reaches
+  `px4_launch.terminate_px4`, so its PX4 outlives it holding TCP 4560+N; the
+  next worker on that instance then fails to bind and PX4 says nothing useful
+  about why. Instances are told apart by working directory, so a sweep never
+  touches a live sibling.
+* **It writes `supervisor.json` and `supervisor.log`** into the campaign
+  directory — what was relaunched and why.
+
+Watch it with `tools/campaign_monitor`, which shows flights, outcome mix, disk
+against the cap and an ETA.
+
+### Do not run more workers than the machine's *memory* allows
+
+The limit is not VRAM. Measured on a 24-core / 62 GB / RTX 4090 machine, one
+worker costs **4.3 GB of VRAM and 7–8 GB of RSS**, so VRAM allows six and
+memory allows four. Five was tried and the machine swapped: the run queue sat
+at 25 on 24 cores, context switches hit 4.5 M/s, and the symptom in PX4 was
+`BARO #0 failed: STALE!`, `MAG #0 failed: STALE!` and `Preflight Fail: Battery
+unhealthy` — a starved worker misses its `HIL_SENSOR` deadline, and PX4 then
+refuses to arm for the rest of the campaign. Two workers of five produced
+nothing but `arm_timeout` and stopped within five minutes.
+
+**A campaign that will not arm is a memory-pressure symptom first.** Check
+`vmstat` for swap-in before believing anything about PX4 or the aircraft.
 
 ## Running many at once
 
@@ -448,6 +513,7 @@ known.
 | file | role |
 |---|---|
 | `run_collection.sh` | **host-side launcher — the entry point.** Syncs, starts N workers |
+| `campaign_supervisor.py` | the entry point for an *unattended* campaign: relaunches workers, caps disk |
 | `collect.py` | one worker: boot Kit once, fly N episodes, write a manifest |
 | `survey_scene.py` | one-off: sweep a scene into a reusable 3D voxel map + 2D slab |
 | `voxel_export.py` | turn a saved map into a `.ply` + an isometric PNG, without Open3D |
@@ -561,7 +627,7 @@ drop at all: sampled in 5-second windows across a 46 m route, every window from
 t=15 s to t=50 s was **0.0 % stopped** at 1.02–1.19 m/s.
 
 The recordings load through `recording.load_recording()` with `(392, 504)` depth
-in metres, co-registered RGB, matching intrinsics, and 15-column ground-truth
+in metres, co-registered RGB, matching intrinsics, and 21-column ground-truth
 poses; `future_path_body()` and `goal_body()` — what the ESDF label generator
 calls — run against them.
 

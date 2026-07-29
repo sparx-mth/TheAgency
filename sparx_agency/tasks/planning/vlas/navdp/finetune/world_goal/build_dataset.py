@@ -78,8 +78,21 @@ ARRAY_SPEC = (
 
 def label_recording(source: RecordingSource, scene: Scene, sampler: GoalSampler,
                     expert_config: ExpertConfig, plan: SplitPlan,
-                    seed: int) -> Tuple[Dict[str, List[dict]], Dict[str, int]]:
+                    seed: int, scene_index: int = 0
+                    ) -> Tuple[Dict[str, List[dict]], Dict[str, int]]:
     """Label every admissible frame of one recording.
+
+    Args:
+        source: The recording to label.
+        scene: The surveyed building **this recording was flown in**. Every
+            label, clearance and route comes from it, so handing a recording the
+            wrong scene silently supervises it against another building's walls.
+        sampler: Goal sampler bound to the same scene.
+        expert_config: Label geometry.
+        plan: The split plan.
+        seed: Campaign seed; combined with the recording and frame index.
+        scene_index: Row into ``index.json["scenes"]``, stamped on every sample
+            so training can look up the right ESDF (``SceneFields.sample``).
 
     Returns:
         ``(per_split_samples, rejection_counts)``. A candidate goal is discarded
@@ -119,7 +132,7 @@ def label_recording(source: RecordingSource, scene: Scene, sampler: GoalSampler,
                 note("label_leaves_split")
                 continue
             per_split[split].append({
-                "recording": source.index, "frame": frame, "scene": 0,
+                "recording": source.index, "frame": frame, "scene": scene_index,
                 "pose": np.asarray(pose, np.float32),
                 "goal_token": label.goal_token, "goal_world": label.goal_world,
                 "action": label.action,
@@ -134,11 +147,17 @@ def label_recording(source: RecordingSource, scene: Scene, sampler: GoalSampler,
 
 
 def _worker(index: int):
-    """Fork-inherited entry point: label one recording by index."""
+    """Fork-inherited entry point: label one recording by index.
+
+    Each source carries the index of the building it was flown in, so a
+    multi-building campaign labels every recording against its own map.
+    """
     state = _STATE
+    scene_index = state["scene_of_source"][index]
     return index, label_recording(
-        state["sources"][index], state["scene"], state["sampler"],
-        state["expert"], state["plan"], state["seed"])
+        state["sources"][index], state["scenes"][scene_index],
+        state["samplers"][scene_index], state["expert"], state["plan"],
+        state["seed"], scene_index)
 
 
 def stack(samples: List[dict]) -> Dict[str, np.ndarray]:
@@ -183,7 +202,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--recordings", nargs="+", required=True,
                         help="recording dirs, campaign dirs, or globs")
-    parser.add_argument("--scene", default="office")
+    parser.add_argument("--scene", default="office",
+                        help="single building; ignored when --scenes is given")
+    parser.add_argument("--scenes", nargs="+", default=None,
+                        help="several surveyed buildings. Each recording is "
+                             "labelled against the one it was flown in, which "
+                             "meta.json records, so the order here is only the "
+                             "order of index.json[\"scenes\"]")
     parser.add_argument("--altitude", type=float, default=1.5)
     parser.add_argument("--map-dir", default=None)
     parser.add_argument("--splits", required=True, help="split-plan YAML")
@@ -204,12 +229,18 @@ def main() -> None:
                         help="stop after N recordings (smoke test)")
     args = parser.parse_args()
 
-    scene_config = SceneConfig(scene=args.scene, altitude_m=args.altitude,
-                               map_dir=args.map_dir)
-    print(f"[scene] loading {args.scene} @ {args.altitude:.2f} m ...", flush=True)
-    scene = Scene.load(scene_config)
-    print(f"[scene] grid {scene.grid.height}x{scene.grid.width} @ {scene.resolution:.2f} m  "
-          f"goal cells {int(scene.goal_region.sum())}", flush=True)
+    scene_names = args.scenes or [args.scene]
+    scene_configs = [SceneConfig(scene=name, altitude_m=args.altitude,
+                                 map_dir=args.map_dir) for name in scene_names]
+    scenes: List[Scene] = []
+    for config in scene_configs:
+        print(f"[scene] loading {config.scene} @ {args.altitude:.2f} m ...", flush=True)
+        loaded = Scene.load(config)
+        print(f"[scene] {config.scene}: grid {loaded.grid.height}x{loaded.grid.width} @ "
+              f"{loaded.resolution:.2f} m  goal cells {int(loaded.goal_region.sum())}",
+              flush=True)
+        scenes.append(loaded)
+    scene_index_of = {scene.name: i for i, scene in enumerate(scenes)}
 
     plan = load_split_plan(args.splits)
     for line in plan.describe():
@@ -221,26 +252,42 @@ def main() -> None:
     expert_config = ExpertConfig(horizon_m=args.horizon_m, center=not args.no_center,
                                  min_label_clearance_m=args.min_label_clearance)
     sampler_config = GoalSamplerConfig(goals_per_frame=args.goals_per_frame)
-    sampler = GoalSampler(scene, sampler_config)
+    samplers = [GoalSampler(scene, sampler_config) for scene in scenes]
 
+    # A recording names its own building in meta.json, so each is offered to
+    # every loaded scene and kept by the one it was flown in. load_source is
+    # what rejects a mismatch, which is why it is the test rather than the
+    # directory name -- a campaign directory can be renamed, meta.json cannot.
     sources: List[RecordingSource] = []
+    scene_of_source: List[int] = []
     skipped: List[str] = []
     for path in discover(args.recordings):
-        source, reason = load_source(path, scene, source_config, index=len(sources))
-        if source is None:
-            skipped.append(f"{path}: {reason}")
-            continue
-        sources.append(source)
-        print(f"[source] {source.name:<28} {source.frames.size:5d} frames "
-              f"({source.meta.get('outcome', 'exploration')})", flush=True)
+        reasons = []
+        for scene_index, scene in enumerate(scenes):
+            source, reason = load_source(path, scene, source_config,
+                                         index=len(sources))
+            if source is not None:
+                sources.append(source)
+                scene_of_source.append(scene_index)
+                print(f"[source] {source.name:<28} {source.frames.size:5d} frames "
+                      f"in {scene.name} "
+                      f"({source.meta.get('outcome', 'exploration')})", flush=True)
+                break
+            reasons.append(reason)
+        else:
+            skipped.append(f"{path}: {'; '.join(dict.fromkeys(reasons))}")
         if args.limit_recordings and len(sources) >= args.limit_recordings:
             break
     for line in skipped:
         print(f"[skip] {line}", flush=True)
     if not sources:
         raise SystemExit("no usable recordings -- see the [skip] lines above")
+    per_scene = {scenes[i].name: scene_of_source.count(i) for i in range(len(scenes))}
+    print(f"[source] {len(sources)} recordings: "
+          + ", ".join(f"{k} {v}" for k, v in per_scene.items()), flush=True)
 
-    _STATE.update({"sources": sources, "scene": scene, "sampler": sampler,
+    _STATE.update({"sources": sources, "scenes": scenes, "samplers": samplers,
+                   "scene_of_source": scene_of_source,
                    "expert": expert_config, "plan": plan, "seed": args.seed})
 
     per_split: Dict[str, List[dict]] = {split: [] for split in SPLITS}
@@ -279,7 +326,8 @@ def main() -> None:
 
     index = {
         "version": SCHEMA_VERSION,
-        "scenes": [asdict(scene_config)],
+        "scenes": [asdict(config) for config in scene_configs],
+        "recordings_per_scene": per_scene,
         "expert": asdict(expert_config),
         "sampler": {**asdict(sampler_config)},
         "sources": asdict(source_config),

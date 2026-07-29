@@ -103,6 +103,36 @@ def sample_missions(world_map, seed: int, count: int, spec) -> List:
     return missions
 
 
+def _empty_result(mission, start, outcome: str, detail: str = "") -> Dict:
+    """A result for a mission that never flew, with every key the caller reads.
+
+    The summary averages ``min_clear_m``, ``path_len_m``, ``duration_s`` and
+    ``goal_error_m`` across missions and counts ``collided``. A short dict here
+    -- which is what an ``arm_timeout`` used to return, and a cold PX4 makes
+    that the common case -- raises ``KeyError`` in the per-mission print, and
+    since ``summary.json`` is only written after the loop, every mission already
+    flown is lost with it. NaN propagates through ``np.mean`` visibly; a missing
+    key does not.
+    """
+    return {
+        "outcome": outcome,
+        "detail": detail,
+        "reached": False,
+        "start_xy": [float(mission.start.x), float(mission.start.y)],
+        "goal_xy": [float(mission.goal.x), float(mission.goal.y)],
+        "separation_m": float(mission.separation_m),
+        "goal_error_m": float("nan"),
+        "min_clear_m": float("nan"),
+        "p5_clear_m": float("nan"),
+        "mean_clear_m": float("nan"),
+        "collided": False,
+        "path_len_m": 0.0,
+        "duration_s": 0.0,
+        "inferences": 0,
+        "transport_failures": 0,
+    }
+
+
 def fly_mission(loop, px4, adapter, client, scene, mission, args,
                 recorder=None) -> Dict:
     """Fly one A-to-B mission with the policy closing the loop.
@@ -126,12 +156,11 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     start = vehicle.state.position
     failure = arm_for_offboard(loop, px4, start, mission.start.yaw, altitude)
     if failure is not None:
-        return {"outcome": "arm_timeout", "detail": failure, "reached": False}
+        return _empty_result(mission, start, "arm_timeout", detail=failure)
 
-    intrinsics = adapter.intrinsics
-    client.reset([[intrinsics.fx, 0.0, intrinsics.cx],
-                  [0.0, intrinsics.fy, intrinsics.cy],
-                  [0.0, 0.0, 1.0]], stop_threshold=-999, batch_size=1)
+    # The client builds the K matrix itself from an Intrinsics; handing it the
+    # matrix instead fails inside reset with 'list' object has no attribute 'fx'.
+    client.reset(adapter.intrinsics, stop_threshold=-999, batch_size=1)
 
     budget = FIXED_OVERHEAD_S + SECONDS_PER_METRE * mission.separation_m
     deadline = loop.sim_time + budget
@@ -238,6 +267,24 @@ def main() -> None:
     parser.add_argument("--infer-hz", type=float, default=INFER_HZ)
     parser.add_argument("--goal-tolerance", type=float, default=GOAL_TOLERANCE_M)
     parser.add_argument("--video", action="store_true")
+    # campaign_setup.bring_up reads all of these off the namespace, so they have
+    # to exist here even where this script has no reason to vary them. Defaults
+    # mirror collect.py's.
+    parser.add_argument("--resolution", default=None,
+                        help="camera WxH; defaults to the platform's own 504x392")
+    parser.add_argument("--pegasus-root",
+                        default="/tmp/dev/PegasusSimulator/extensions/pegasus.simulator")
+    parser.add_argument("--px4-dir", type=Path, default=Path("/tmp/dev/PX4-Autopilot"))
+    parser.add_argument("--rate-hz", type=float, default=10.0)
+    parser.add_argument("--realtime", action="store_true",
+                        help="throttle the simulation to wall-clock time")
+    parser.add_argument("--stream", action="store_true",
+                        help="WebRTC livestream on :49100")
+    parser.add_argument("--settle-s", type=float, default=30.0,
+                        help="simulated seconds to let PX4's estimator converge "
+                             "before the first mission. Without it the first "
+                             "mission of each arm flies on a half-converged EKF2 "
+                             "and the two arms are not comparable")
     args = parser.parse_args()
 
     repo = Path(args.dev_root) / "repo"
@@ -245,7 +292,9 @@ def main() -> None:
         sys.path.insert(0, str(repo))
 
     from sparx_agency.core.planning.vlas.navdp.client import NavDPPointgoalClient
-    from sparx_agency.tasks.planning.sim_flight_recording import campaign_setup, px4_launch
+    from sparx_agency.tasks.planning.sim_flight_recording import (
+        campaign_setup, flight_session, px4_launch, px4_params,
+    )
     from sparx_agency.tasks.planning.sim_flight_recording.episode_plan import EpisodeSpec
     from sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal.scene import (
         Scene, SceneConfig,
@@ -266,54 +315,76 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     client = NavDPPointgoalClient(args.server)
 
-    px4 = px4_launch.launch(args.worker) if hasattr(px4_launch, "launch") else None
-    simulation_app, loop, adapter, px4_link, chase = campaign_setup.bring_up(
-        None, args, missions[0].start, heartbeat_timeout_s=300.0)
-    campaign_setup.configure_px4(px4_link)
-    campaign_setup.settle_estimator(loop)
-    campaign_setup.wait_until_armable(loop, px4_link)
+    # Order matters and is collect.py's: clear the persisted parameter store
+    # first (PX4 keeps every parameter it is ever sent, so one arm's settings
+    # would otherwise leak into the next), start PX4, then boot Kit.
+    px4_launch.clear_saved_parameters(args.px4_dir, args.worker)
+    px4_process = px4_launch.launch_px4(
+        args.px4_dir, instance=args.worker,
+        log_path=out / f"px4_worker{args.worker}.log")
+    simulation_app = flight_session.boot_isaac(stream=args.stream)
 
-    results = []
-    for index, mission in enumerate(missions):
-        recorder = None
-        if args.video:
-            from sparx_agency.tasks.planning.sim_flight_recording.flight_session import (
-                FlightRecorder,
-            )
-            recorder = FlightRecorder(
-                adapter, out / f"mission_{index:02d}", rate_hz=10.0,
-                camera_height_m=args.altitude,
-                video_out=out / f"mission_{index:02d}.mp4",
-                video_source="chase", chase_camera=chase)
-        started = time.time()
-        result = fly_mission(loop, px4_link, adapter, client, scene, mission, args,
-                             recorder)
-        result.update({"mission": index, "arm": args.arm,
-                       "wall_s": round(time.time() - started, 1)})
-        if recorder is not None:
-            recorder.finish({"scene": args.scene, "arm": args.arm, **result})
-        results.append(result)
-        print(f"[fly] mission {index}: {result['outcome']}  "
-              f"min_clear {result['min_clear_m']:.2f} m  "
-              f"goal_error {result['goal_error_m']:.2f} m", flush=True)
-        (out / "results.json").write_text(json.dumps(results, indent=2))
+    results: List[Dict] = []
+    try:
+        loop, adapter, px4_link, chase = campaign_setup.bring_up(
+            simulation_app, args, missions[0].start, heartbeat_timeout_s=300.0)
+        campaign_setup.configure_px4(loop, px4_link, px4_params.all_params(), 3.0)
+        campaign_setup.settle_estimator(loop, px4_link, args.settle_s)
+        if not campaign_setup.wait_until_armable(loop, px4_link):
+            print("[fly] PX4 never became armable; nothing to fly", flush=True)
+            return
 
+        for index, mission in enumerate(missions):
+            recorder = None
+            if args.video:
+                recorder = flight_session.FlightRecorder(
+                    adapter, out / f"mission_{index:02d}", rate_hz=args.rate_hz,
+                    camera_height_m=args.altitude,
+                    video_out=out / f"mission_{index:02d}.mp4",
+                    video_source="chase", chase_camera=chase)
+            started = time.time()
+            result = fly_mission(loop, px4_link, adapter, client, scene, mission,
+                                 args, recorder)
+            result.update({"mission": index, "arm": args.arm,
+                           "wall_s": round(time.time() - started, 1)})
+            if recorder is not None:
+                recorder.finish({"scene": args.scene, "arm": args.arm, **result})
+            results.append(result)
+            print(f"[fly] mission {index}: {result['outcome']}  "
+                  f"min_clear {result['min_clear_m']:.2f} m  "
+                  f"goal_error {result['goal_error_m']:.2f} m", flush=True)
+            # Written every mission, not at the end: a run that dies on mission
+            # five should not also lose the four that flew.
+            (out / "results.json").write_text(json.dumps(results, indent=2))
+    finally:
+        _write_summary(out, args.arm, results)
+        # Leaving either alive costs the *other* arm its ports and its GPU
+        # memory, and this comparison is two sequential runs.
+        simulation_app.close()
+        px4_launch.terminate_px4(px4_process, instance=args.worker)
+
+
+def _write_summary(out: Path, arm: str, results: List[Dict]) -> None:
+    """Aggregate whatever flew, even when the run ended early."""
+    if not results:
+        print(f"[fly] {arm}: no missions completed", flush=True)
+        return
     reached = sum(1 for r in results if r["reached"])
-    collided = sum(1 for r in results if r["collided"])
+    collided = sum(1 for r in results if r.get("collided"))
+    mean = lambda key: float(np.nanmean([r.get(key, float("nan")) for r in results]))
     summary = {
-        "arm": args.arm, "missions": len(results), "reached": reached,
+        "arm": arm, "missions": len(results), "reached": reached,
         "collisions": collided,
-        "min_clear_m": float(np.mean([r["min_clear_m"] for r in results])),
-        "path_len_m": float(np.mean([r["path_len_m"] for r in results])),
-        "duration_s": float(np.mean([r["duration_s"] for r in results])),
-        "goal_error_m": float(np.mean([r["goal_error_m"] for r in results])),
+        "min_clear_m": mean("min_clear_m"),
+        "path_len_m": mean("path_len_m"),
+        "duration_s": mean("duration_s"),
+        "goal_error_m": mean("goal_error_m"),
         "results": results,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"[fly] {args.arm}: reached {reached}/{len(results)}, "
+    print(f"[fly] {arm}: reached {reached}/{len(results)}, "
           f"{collided} collisions, mean min clearance "
           f"{summary['min_clear_m']:.2f} m", flush=True)
-    simulation_app.close()
 
 
 if __name__ == "__main__":
