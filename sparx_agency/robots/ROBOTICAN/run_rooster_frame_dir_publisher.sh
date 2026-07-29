@@ -1,18 +1,21 @@
 #!/bin/bash
-# Wrapper for running rooster_frame_dir_publisher.py from PyCharm (or any
-# launcher) without fighting its environment-variable UI - sources the real
-# ROS env in a real shell, then execs the venv's python with whatever args
-# were passed through. Same pattern as run_ui.sh/run_calibrate_camera.sh.
+# Runs rooster_frame_dir_publisher.py inside the `robotican_dev` container
+# (docker-compose.robotican.yml / theagency:robotican), not the host venv.
 #
-# Running this script directly from PyCharm's run config (instead of pointing
-# it at the .py file) is required, not optional: without ROS's environment
-# (GI_TYPELIB_PATH/GST_PLUGIN_PATH/LD_LIBRARY_PATH etc. set by setup.bash),
-# the gi/GStreamer bindings this script loads can be ABI-mismatched against
-# whatever's on the default system path, which crashes as a hard SIGSEGV
-# rather than a Python exception.
-source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=9
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml
-exec /home/$USER/GIT/TheAgency/venv/bin/python \
-  /home/$USER/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/rooster_frame_dir_publisher.py "$@"
+# 2026-07-29: moved off the bare host venv (see docs/progress/entries/
+# 002-rooster-full-containerize.md) -- the ABI-sensitive GStreamer/PyGObject
+# bindings this script needs (see the old comment history in git blame if
+# curious) are already built into theagency:robotican's Humble+GStreamer
+# base image, verified live: `import gi; Gst.init(None)` works cleanly
+# there, so the host-venv workaround is no longer needed. Requires
+# `robotican_dev` already running (see docker-compose.robotican.yml) --
+# same container `run_depth_processor.sh`/`run_twist_control_adapter.sh` use.
+docker exec \
+  -e ROS_DOMAIN_ID=9 \
+  -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+  -e CYCLONEDDS_URI="file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml" \
+  robotican_dev bash -lc "
+    source /opt/ros/humble/setup.bash
+    export PYTHONPATH=\$PYTHONPATH:/home/$USER/GIT/TheAgency
+    python3 /home/$USER/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/rooster_frame_dir_publisher.py $*
+  "

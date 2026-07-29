@@ -445,21 +445,57 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster Frame Capture (R1)",
         key="rooster_frame_capture_R1",
         group="rooster_vision",
-        description="Decodes R1's UDP/RTP-H264 stream, saves JPEGs to /tmp/rooster_frames, publishes /R1/rgb_frame_path.",
+        description=(
+            "Decodes R1's UDP/RTP-H264 stream, saves JPEGs to /tmp/rooster_frames, "
+            "publishes /R1/rgb_frame_path. Runs inside robotican_dev (moved off the "
+            "host venv 2026-07-29 — see docs/progress/entries/002-rooster-full-"
+            "containerize.md); requires robotican_dev already running "
+            "(docker-compose.robotican.yml)."
+        ),
         cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_rooster_frame_dir_publisher.sh",
         env="none",
         machine="pc",
+        proc_container="robotican_dev",
         proc_pattern="rooster_frame_dir_publisher",
     ),
     Service(
         name="Rooster Depth Processor (R1)",
         key="rooster_depth_R1",
         group="rooster_vision",
-        description="DA3-TRT depth from /R1/rgb_frame_path, publishes /R1/depth_frame_path. Requires Rooster Frame Capture (R1) running.",
+        description=(
+            "DA3-TRT depth from /R1/rgb_frame_path, publishes /R1/depth_frame_path. "
+            "Requires Rooster Frame Capture (R1) running. Runs inside robotican_dev "
+            "(moved off the host venv 2026-07-29 — see docs/progress/entries/"
+            "002-rooster-full-containerize.md); requires robotican_dev already running "
+            "(docker-compose.robotican.yml). Engine rebuilt 2026-07-29 to match "
+            "robotican_dev's TensorRT version (10.15.1.29) — TRT engines are "
+            "hardware/version-locked, don't copy the .engine file between environments."
+        ),
         cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_depth_processor.sh",
         env="none",
         machine="pc",
+        proc_container="robotican_dev",
         proc_pattern="rooster_depth_processor",
+    ),
+    Service(
+        name="Rooster Twist Control Adapter (R1)",
+        key="rooster_twist_control_R1",
+        group="rooster_vision",
+        description=(
+            "Bridges FALCON's /cmd_vel into cmd_nav 'move' commands for click-to-fly "
+            "(rooster_command_unit.py stays the sole /R1/manual_control owner). New "
+            "2026-07-29 — previously had no run_*.sh wrapper or mission_control entry "
+            "at all, launched ad hoc via the host venv. Runs inside robotican_dev; "
+            "requires robotican_dev + rooster_command_unit.py (inside it) already "
+            "running. Only needed for FALCON-driven flight, not manual cmd_nav testing "
+            "— see LESSONS.md's 'stop-watchdog cancels any in-progress takeoff/land' "
+            "entry before running this during a manual arm/takeoff/land test."
+        ),
+        cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/adapters/run_twist_control_adapter.sh --rooster-id R1",
+        env="none",
+        machine="pc",
+        proc_container="robotican_dev",
+        proc_pattern="rooster_twist_control_adapter",
     ),
     Service(
         name="Rooster Video Trigger (R1)",

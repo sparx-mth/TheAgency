@@ -17,7 +17,7 @@
 # If you don't need the sim ground-truth shortcut, prefer the already-working
 # AprilTag-based localization_node.py command in DOME_CAPTURE_README.md
 # Terminal 3 instead -- it runs on the host, no `it` dependency.
-docker exec -it it bash -c '
+docker exec it bash -c '
   source /opt/ros/foxy/setup.bash
   source /home/rooster/workspace/install/setup.bash
   export CYCLONEDDS_URI=file:///etc/cyclonedds.xml
