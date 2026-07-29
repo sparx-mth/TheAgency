@@ -9,6 +9,7 @@ localization confidence, with reflexes for walls the camera cannot see.
 See ``README.md`` for the design and the tuning order.
 """
 from .blockage import AXIS_FORWARD, AXIS_YAW, Blockage, BlockageMonitor, BlockageParams
+from .corners import Corner, find_corner
 from .confidence import (
     ConfidenceParams,
     ConfidenceScheduler,
@@ -21,6 +22,7 @@ from .follower import DriftPidFollower
 from .params import DriftPidParams
 from .pid import AxisPid, PidGains
 from .types import DriftPidCommand, DriftPidState, DriftTelemetry
+from .yaw_lookahead import YawLead, YawLookahead, YawLookaheadParams
 
 __all__ = [
     "AXIS_FORWARD",
@@ -32,6 +34,7 @@ __all__ = [
     "ConfidenceParams",
     "ConfidenceScheduler",
     "ControlAuthority",
+    "Corner",
     "DriftPidCommand",
     "DriftPidFollower",
     "DriftPidParams",
@@ -45,5 +48,9 @@ __all__ = [
     "ForceEnvelope",
     "LocalizationQuality",
     "PidGains",
+    "YawLead",
+    "YawLookahead",
+    "YawLookaheadParams",
     "counts_for",
+    "find_corner",
 ]

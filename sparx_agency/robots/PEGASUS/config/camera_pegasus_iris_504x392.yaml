@@ -1,0 +1,23 @@
+# Sim camera intrinsics for the PEGASUS platform.
+#
+# Deliberately identical to robots/XTEND/config/camera_xtend_ros_calib_504_392_crop_resize.yaml
+# (not a fresh synthetic FOV) so simulated recordings are geometrically consistent
+# with real XTEND flights and can be mixed into the same NavDP fine-tune run. See
+# the "XTEND depth engine" memory: the depth engine requires 392x504, not 294x504.
+
+image_width: 504
+image_height: 392
+
+fx: 460.9072976392783
+fy: 461.9847581630249
+cx: 345.80685226685307
+cy: 128.61455823829436
+
+# No lens distortion is modeled in sim (the Pegasus MonocularCamera renders an
+# ideal pinhole) -- these are carried only for parity with the real camera yamls.
+distortion_model: "plumb_bob"
+k1: 0.0
+k2: 0.0
+p1: 0.0
+p2: 0.0
+k3: 0.0

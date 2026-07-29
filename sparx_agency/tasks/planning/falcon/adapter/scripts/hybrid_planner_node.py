@@ -69,7 +69,7 @@ from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics, Pose2D
 from sparx_agency.core.planning.environment import (
     OccupancyGrid2D, OccupancyGrid2DParams, OccupancyValues)
-from sparx_agency.core.planning.navdp import (
+from sparx_agency.core.planning.vlas.navdp import (
     NAVDP_MAX_FWD_M,
     NAVDP_MAX_LAT_M,
     NavDPError,

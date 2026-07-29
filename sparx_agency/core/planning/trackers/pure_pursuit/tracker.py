@@ -84,7 +84,8 @@ class PurePursuitTracker:
             self._s.progress_idx = closest_idx
 
         if cte > p.path_tolerance:
-            return self._stop("path_diverged", failed=True)
+            return self._stop("path_diverged", failed=True, cross_track_error=cte,
+                              dist_to_goal=dist_goal)
 
         path_curvature = alg.get_curvature(pts[self._s.progress_idx])
 
@@ -145,11 +146,23 @@ class PurePursuitTracker:
         )
 
     def _stop(self, reason: str, done: bool = False, failed: bool = False,
-              ref: Optional[TrajectoryPoint] = None) -> TrackerResult:
+              ref: Optional[TrajectoryPoint] = None,
+              cross_track_error: float = 0.0,
+              dist_to_goal: float = 0.0) -> TrackerResult:
+        """Halt, saying why.
+
+        ``cross_track_error`` is carried through because ``path_diverged`` is
+        the one stop a caller has to explain afterwards, and it is the number
+        that explains it. Omitting it left every diverged flight reporting
+        "0.0 m off the planned route" — a caller reading the metadata cannot
+        tell a genuine divergence from an unpopulated field.
+        """
         return TrackerResult(
             command=ControlCommand.velocity(0, 0, 0, 0, tracker=self.name, reason=reason),
             reference=ref,
-            metadata={"done": done, "failed": failed, "reason": reason},
+            metadata={"done": done, "failed": failed, "reason": reason,
+                      "cross_track_error": float(cross_track_error),
+                      "dist_to_goal": float(dist_to_goal)},
         )
 
 
@@ -215,7 +228,8 @@ class PurePursuitTracker3D:
             self._s.progress_idx = closest_idx
 
         if cte > p.path_tolerance:
-            return self._stop("path_diverged", failed=True)
+            return self._stop("path_diverged", failed=True, cross_track_error=cte,
+                              dist_to_goal=dist_goal)
 
         # Use xy curvature for speed adaptation
         path_curvature = alg.get_curvature(pts[self._s.progress_idx])
@@ -273,9 +287,21 @@ class PurePursuitTracker3D:
         )
 
     def _stop(self, reason: str, done: bool = False, failed: bool = False,
-              ref: Optional[TrajectoryPoint] = None) -> TrackerResult:
+              ref: Optional[TrajectoryPoint] = None,
+              cross_track_error: float = 0.0,
+              dist_to_goal: float = 0.0) -> TrackerResult:
+        """Halt, saying why.
+
+        ``cross_track_error`` is carried through because ``path_diverged`` is
+        the one stop a caller has to explain afterwards, and it is the number
+        that explains it. Omitting it left every diverged flight reporting
+        "0.0 m off the planned route" — a caller reading the metadata cannot
+        tell a genuine divergence from an unpopulated field.
+        """
         return TrackerResult(
             command=ControlCommand.velocity(0, 0, 0, 0, tracker=self.name, reason=reason),
             reference=ref,
-            metadata={"done": done, "failed": failed, "reason": reason},
+            metadata={"done": done, "failed": failed, "reason": reason,
+                      "cross_track_error": float(cross_track_error),
+                      "dist_to_goal": float(dist_to_goal)},
         )

@@ -177,7 +177,7 @@ TS1 -->|"target world_x, world_y"| N4A
 %% ── N5: PLANNER ─────────────────────────────────────
 subgraph N5["⑥ Planner  (Falcon or InterNAV)"]
     N5F["Falcon\ntasks/planning/falcon/\n─────────────────\ndepth → voxel map\n→ /falcon/bev_2d  OccupancyGrid\nA* path plan\n→ /cmd_vel  Twist"]
-    N5I["InterNAV\nagents/internnav_ros2_bridge/\n─────────────────\nRGB + instruction → InternVLA-N1\n→ /internnav/action  discrete\n→ /internnav/waypoint  (x,y)"]
+    N5I["InternVLA-N1\ntasks/planning/vlas/internvla_n1/\n─────────────────\nRGB + instruction → InternVLA-N1\n→ &lt;ns&gt;/navigation/action  discrete\n→ &lt;ns&gt;/navigation/waypoint  (x,y)"]
 end
 
 N4A -->|"/local_nav_vector  /map_local"| N5F

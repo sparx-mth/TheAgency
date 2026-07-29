@@ -633,8 +633,8 @@ Every `nav_mode` except `astar` calls the NavDP point-goal policy, so start this
 cd /home/user/agency_ws
 export NAVDP_REPO=/home/user/GIT/NavDP/baselines/navdp
 PYTHONPATH=$PWD python3 \
-  -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server \
-  --port 8888 --engine-dir sparx_agency/tasks/planning/navdp/engines/orin_sm87
+  -m sparx_agency.tasks.planning.vlas.navdp.serve.navdp_trt_server \
+  --port 8888 --engine-dir sparx_agency/tasks/planning/vlas/navdp/trt/engines/orin_sm87
 ```
 
 It runs on the FALCON **host**, not in the container: the Noetic image ships no

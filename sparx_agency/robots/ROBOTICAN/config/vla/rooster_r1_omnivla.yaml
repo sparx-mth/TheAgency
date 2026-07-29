@@ -1,0 +1,116 @@
+# =============================================================================
+# OmniVLA Bridge — Rooster R1 / Sphera  (Ground Roll)
+# =============================================================================
+# ManualControl (ground-roll mode):
+#   x: forward / backward    (-1000 .. 1000)
+#   y: not used
+#   z: TILT                  (-1000 .. 1000)
+#   r: yaw rotation          (-1000 .. 1000)
+#
+# Camera at 12 Hz, inference at 3 Hz, ManualControl repeats at 80 Hz.
+# =============================================================================
+
+bridge:
+  inference_rate: 3.0
+
+# =============================================================================
+# MODEL
+# =============================================================================
+model:
+  vla_path: "./omnivla-original"       # or omnivla-finetuned-cast
+  resume_step: 120000
+  device: "cuda:0"
+  max_linear_vel: 0.3                  # m/s
+  max_angular_vel: 0.3                 # rad/s
+  waypoint_index: 4                    # 0=nearest … 7=farthest
+
+# =============================================================================
+# INPUTS — GOALS
+# =============================================================================
+# Set any combination of goals. Modality is auto-detected.
+#
+# Supported OmniVLA modalities (non-satellite):
+#   ID 4 — pose only
+#   ID 5 — pose + image
+#   ID 6 — image only
+#   ID 7 — language only
+#   ID 8 — language + pose
+#
+# Note: language + image (without pose) is NOT a trained modality.
+#       The bridge will warn and fall back to language-only.
+# =============================================================================
+
+inputs:
+  rgb:
+    topic: "/R1/camera/image_raw"
+    msg_type: "sensor_msgs/Image"
+
+  # Goal 1: Language instruction (String)
+  instruction:
+    topic: "/R1/navigation/instruction"
+
+  # Goal 2: Goal image (sensor_msgs/Image)
+  goal_image:
+    enabled: true
+    topic: "/R1/navigation/goal_image"
+    file_path: ""                       # or static file: /path/to/goal.jpg
+
+  # Goal 3: Goal pose (Float32MultiArray, 4 values)
+  # Values: [rel_y/spacing, -rel_x/spacing, cos(heading_diff), sin(heading_diff)]
+  goal_pose:
+    enabled: true
+    topic: "/R1/navigation/goal_pose"
+
+  # Control: stop / pause / resume / reset / clear_language / clear_image / clear_pose
+  nav_control:
+    enabled: true
+    topic: "/R1/navigation/control"
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+outputs:
+  twist:
+    enabled: true
+    topic: "/R1/cmd_vel"
+
+  manual_control:
+    enabled: true
+    topic: "/R1/manual_control"
+    publish_rate_hz: 80.0
+    linear_scale: 800.0
+    tilt_scale: 1300.0
+    max_tilt: 500.0
+    turn_tilt: 250.0
+    stop_tilt: -1000.0
+    angular_scale: 2000.0
+    duration_sec: 0.3
+
+  keep_alive:
+    enabled: true
+    topic: "/R1/keep_alive"
+    publish_rate_hz: 1.0
+    is_active: true
+    requested_flight_mode: 1
+
+  feedback:
+    enabled: true
+    topic: "/R1/navigation/feedback"
+
+  status:
+    enabled: true
+    topic: "/R1/navigation/status"
+
+# =============================================================================
+# VISUALIZATION — OmniVLA trajectory plot (from the paper)
+# =============================================================================
+# Shows current image, goal image, and all 8 predicted waypoints on a
+# bird's-eye trajectory plot. Published as a ROS2 Image topic so you can
+# view it live in rqt_image_view.
+# =============================================================================
+
+visualization:
+  enabled: true
+  topic: "/R1/navigation/trajectory_viz"    # view with: rqt_image_view
+  save_dir: ""                              # set to a path to also save frames as JPGs
+                                            # e.g. "/tmp/omnivla_viz"

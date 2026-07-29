@@ -18,6 +18,15 @@ the same drift in each:
     this airframe, a backward pitch under a turn degrades and then INVERTS the
     delivered yaw), so a correction that needs reverse waits its turn.
 
+Optionally on top of TRACK sits the **turn anticipation** (:mod:`.yaw_lookahead`,
+off by default): approaching a real corner the nose is eased round it early
+while the body keeps flying the current leg on ROLL, so the drone arrives at the
+corner already pointing down the next one and flies straight out of it — instead
+of arriving pointed the old way and rotating in place, which is the manoeuvre
+this airframe is worst at. It changes only where the *nose* points and how the
+progress vector is split between pitch and roll; the route, the line and every
+loop above are untouched.
+
 On top of that sit two things the platform forces on any honest controller here:
 localization that degrades gracefully rather than failing cleanly (see
 :mod:`.confidence`), and walls the camera cannot see (see :mod:`.blockage` and
@@ -55,6 +64,7 @@ from .escape import EscapeManeuver
 from .params import DriftPidParams
 from .pid import AxisPid
 from .types import DriftPidCommand, DriftPidState, DriftTelemetry
+from .yaw_lookahead import YawLead, YawLookahead, approach_limit
 
 XY = Tuple[float, float]
 
@@ -75,6 +85,7 @@ class DriftPidFollower:
         self._scheduler = ConfidenceScheduler(p.confidence)
         self._blockage = BlockageMonitor(p.blockage)
         self._escape = EscapeManeuver(p.escape)
+        self._lookahead = YawLookahead(p.yaw_lookahead)
         self.reset()
 
     # ─── Lifecycle ───────────────────────────────────────────────
@@ -93,11 +104,13 @@ class DriftPidFollower:
         self._reported = False
         self._prev_age = None      # type: Optional[float]
         self._yield_scale = 1.0
+        self._lead = YawLead()
         for pid in (self._lat, self._fwd, self._yaw):
             pid.reset()
         self._envelope.reset()
         self._blockage.reset()
         self._escape.reset()
+        self._lookahead.reset()
 
     @property
     def state(self):
@@ -116,6 +129,12 @@ class DriftPidFollower:
         # type: () -> List[XY]
         """The re-anchored waypoints currently being flown."""
         return list(self._path)
+
+    @property
+    def yaw_lead(self):
+        # type: () -> YawLead
+        """The turn anticipation in force this tick (see :mod:`.yaw_lookahead`)."""
+        return self._lead
 
     @property
     def settle_map_updates_required(self):
@@ -147,6 +166,7 @@ class DriftPidFollower:
         self._done = False
         self._turning = False
         self._anchor = None
+        self._lead = YawLead()
         for pid in (self._lat, self._fwd, self._yaw):
             pid.reset_derivative()
         if pose is not None and len(self._path) >= 2:
@@ -188,13 +208,35 @@ class DriftPidFollower:
         auth = self._scheduler.evaluate(self._quality)
         fresh = self._measurement_fresh()
         if len(self._path) < 2:
+            self._lead = YawLead()
             return self._emit(0.0, 0.0, 0.0, DriftPidState.IDLE, dt, auth)
 
         # The blockage detector sees the RAW pose, always. The latency-led pose
         # below is advanced by the drone's own commands — feed that to a stuck
         # detector and a pinned drone would appear to obey every command.
         last_vx, _, last_wz = self._last
-        blocked = self._blockage.update(pose, last_vx, last_wz, dt, self._quality)
+        # The YAW axis is not under fair test while the turn anticipation owns
+        # it. The monitor asks "a lot of yaw commanded, how much rotation came
+        # back?" and compares the summed magnitude against the NET turn — which
+        # is exactly the wrong question for a schedule that deliberately drives
+        # the nose one way into a corner and straight back the other way into
+        # the next one 60 cm later. Measured on a surveyed office route, that
+        # reads as a wedged drone and fires an escape reflex at a drone that is
+        # flying perfectly. So those ticks are handed to the monitor as "not
+        # pushing this axis", which is the branch it already has for exactly
+        # this ("nobody is driving into it, so it is not under test") — the same
+        # judgement, made by the one part of the controller that can see the
+        # plan. The coverage this costs is written down in the README.
+        #
+        # Gated on a MATERIAL lead, not on a corner merely being in range: for
+        # most of the approach the lead is still small, the drone is flying
+        # normally, and the axis is under perfectly fair test. Only once the
+        # schedule is holding the nose off the leg by more than the catch-up
+        # band does the question stop being a fair one.
+        owns_yaw = abs(self._lead.offset_rad) > self.params.yaw_lookahead.catchup_rad
+        probe_wz = 0.0 if owns_yaw else last_wz
+        blocked = self._blockage.update(pose, last_vx, probe_wz, dt,
+                                        self._quality)
         frozen = bool(hold) or not map_ready or auth.hold
 
         if not blocked.blocked and not self._escape.active:
@@ -276,6 +318,7 @@ class DriftPidFollower:
                 return None
             esc = self._escape.step(dt)
             if esc.active:
+                self._lead = YawLead()
                 self._anchor = (pose.x, pose.y)
                 self._anchor_yaw = pose.yaw
                 return self._emit(esc.vx, esc.vy, esc.wz, DriftPidState.ESCAPE,
@@ -297,6 +340,7 @@ class DriftPidFollower:
         correct — winding up on it would launch the drone the moment the hold
         lifts. The learned drift is kept, not cleared.
         """
+        self._lead = YawLead()
         self._latch_anchor(pose)
         self._lat.update(0.0, dt, integrate=False, gain_scale=0.0)
         self._fwd.update(0.0, dt, integrate=False, gain_scale=0.0)
@@ -317,6 +361,7 @@ class DriftPidFollower:
 
         if self._done:
             self._turning = False
+            self._lead = YawLead()
             self._latch_anchor(pose, at_goal=True)
             vx, vy, wz, e_fwd, e_lat, e_yaw = self._station_keep(
                 pose, dt, auth, fresh, self._anchor_yaw)
@@ -324,19 +369,40 @@ class DriftPidFollower:
                               report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
                               e_yaw=e_yaw)
 
+        # Two angles from here on, and the turn anticipation is the gap between
+        # them: ``travel`` is where the drone is trying to GO (the carrot, which
+        # pulls it back onto the line), ``e_yaw`` is what the NOSE still has to
+        # do. With the lookahead OFF they are the same number and the classic
+        # law runs unchanged. With it ON the nose answers to the ROUTE — the leg
+        # plus the lead into the next corner — and the body answers to the line,
+        # which is the split the whole manoeuvre is built on.
+        corner = self._lookahead.find(self._path, self._idx, pose.x, pose.y)
         carrot = geo.lookahead_point(self._path, self._idx, pose.x, pose.y,
-                                     p.lookahead_m)
-        e_yaw = geo.bearing_error(pose.x, pose.y, pose.yaw, carrot[0], carrot[1])
+                                     p.lookahead_m,
+                                     stop_index=-1 if corner is None
+                                     else corner.index)
+        travel = geo.bearing_error(pose.x, pose.y, pose.yaw, carrot[0], carrot[1])
+        e_yaw = travel
+        if self._lookahead.enabled:
+            leg = geo.leg_heading(self._path, self._idx)
+            lead = self._lookahead.update(corner, leg, pose.yaw, dt)
+            self._lead = lead
+            e_yaw = normalize_angle(leg - pose.yaw + lead.offset_rad)
+        else:
+            lead = self._lead = YawLead()
         self._turning = yaw_engaged(self._turning, e_yaw, p.yaw_engage_rad,
                                     p.yaw_release_rad)
         # Two yaw regimes, two caps: TURNING owns the rotation and gets the
         # strong approach rate; TRACKING only trims it -- there the cross-track
         # ROLL owns the line, and an unthrottled yaw would swing the nose off
-        # course on every pose wobble.
+        # course on every pose wobble. The anticipation's feed-forward rides on
+        # top of the loop: without it the heading PID would have to hold a
+        # standing error to produce the schedule's rotation rate, so the nose
+        # would sit permanently behind the plan.
         wz = saturate(self._yaw.update(e_yaw, dt, integrate=integrate,
                                        gain_scale=gain,
                                        deadband_extra=auth.yaw_deadband_extra_rad,
-                                       fresh=fresh),
+                                       fresh=fresh) + lead.rate_hint,
                       p.approach_yaw_rate if self._turning
                       else p.track_yaw_rate)
 
@@ -362,8 +428,6 @@ class DriftPidFollower:
         self._anchor = None
         e_fwd, e_lat, _ = geo.cross_track_error(self._path, self._idx,
                                                 pose.x, pose.y, pose.yaw)
-        vy = self._lat.update(e_lat, dt, integrate=integrate, gain_scale=gain,
-                              deadband_extra=auth.deadband_extra_m, fresh=fresh)
         # Straight-flight bonus: while the yaw correction is quiet the drone may
         # cruise harder; as |wz| grows toward the track cap the speed blends back
         # to the base cruise -- never sprint and swing the nose at once.
@@ -372,27 +436,132 @@ class DriftPidFollower:
             yaw_frac = min(1.0, abs(wz) / p.track_yaw_rate)
             cruise = (p.cruise_speed_straight
                       - (p.cruise_speed_straight - p.cruise_speed) * yaw_frac)
-        vx = approach_speed(self._distance_to_goal(pose), p.pos_radius,
-                            p.slow_radius, cruise, p.arrive_speed_min)
-        vx *= alignment_gate(e_yaw, p.travel_cone_rad, p.translate_suppress_rad,
-                             p.translate_suppress_floor)
+        speed = approach_speed(self._distance_to_goal(pose), p.pos_radius,
+                               p.slow_radius, cruise, p.arrive_speed_min)
+        # The travel cone is a PERCEPTION limit -- never fly fast into space the
+        # forward camera has not looked at -- so it is measured on the direction
+        # of TRAVEL, which is precisely what the anticipation moves away from the
+        # nose. A drone crabbing hard is throttled by it, and that is correct.
+        speed *= alignment_gate(travel, p.travel_cone_rad,
+                                p.translate_suppress_rad,
+                                p.translate_suppress_floor)
+        if self._lookahead.enabled:
+            vx, vy, e_fwd, e_lat = self._crab(speed, travel, e_fwd, e_lat, dt,
+                                              auth, fresh, lead)
+            # The sideslip cone is deliberately NOT the turn one WHILE a corner
+            # is being anticipated: it caps |vy| at tan(cone)*vx, which at a
+            # full lead (vx near 0) would cancel the very manoeuvre being flown.
+            # With no corner in sight there is no manoeuvre to protect and the
+            # ordinary cone applies, so enabling the feature does not quietly
+            # remove a limit from every straight leg. See YawLookaheadParams.
+            side_cone = (p.yaw_lookahead.side_cone_rad
+                         if lead.corner_index >= 0 else p.turn_side_cone_rad)
+        else:
+            vx, vy = self._track_body(speed, e_fwd, e_lat, dt, auth, fresh)
+            side_cone = p.turn_side_cone_rad
+        # Mid-leg yaw trims obey the same coupling as turns: while the trim is
+        # genuinely rotating the airframe, never let the translation point
+        # backward or sideways-first (floor 0: the cruise already owns forward).
+        vx, vy = turn_coordination(vx, vy, wz, self._yaw_active_rad(), 0.0,
+                                   side_cone)
+        return self._emit(vx, vy, wz, DriftPidState.TRACK, dt, auth, blocked,
+                          report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
+                          e_yaw=e_yaw)
+
+    # ─── Translation on a leg ────────────────────────────────────
+    def _track_body(self, speed, e_fwd, e_lat, dt, auth, fresh):
+        # type: (float, float, float, float, object, bool) -> Tuple[float, float]
+        """Classic allocation: cruise straight ahead, correct with ROLL.
+
+        Valid because the nose points where the drone is going, so "forward" is
+        along the leg and "left" is across it. This is the allocation the
+        controller has always flown and the one it flies whenever the turn
+        anticipation is off or idle.
+        """
+        p = self.params
+        vy = self._lat.update(e_lat, dt, integrate=auth.integrate,
+                              gain_scale=auth.gain_scale,
+                              deadband_extra=auth.deadband_extra_m, fresh=fresh)
+        vx = speed
         if p.forward_track_frac > 0.0:
             vx += p.forward_track_frac * self._fwd.update(
-                e_fwd, dt, integrate=integrate, gain_scale=gain,
+                e_fwd, dt, integrate=auth.integrate,
+                gain_scale=auth.gain_scale,
                 deadband_extra=auth.deadband_extra_m, fresh=fresh)
         else:
             # Keep the loop's memory current so switching regimes does not start
             # it from a stale error, but let it contribute nothing here.
             self._fwd.update(e_fwd, dt, integrate=False, gain_scale=0.0,
                              fresh=fresh)
-        # Mid-leg yaw trims obey the same coupling as turns: while the trim is
-        # genuinely rotating the airframe, never let the translation point
-        # backward or sideways-first (floor 0: the cruise already owns forward).
-        vx, vy = turn_coordination(vx, vy, wz, self._yaw_active_rad(), 0.0,
-                                   p.turn_side_cone_rad)
-        return self._emit(vx, vy, wz, DriftPidState.TRACK, dt, auth, blocked,
-                          report_blocked=report, e_fwd=e_fwd, e_lat=e_lat,
-                          e_yaw=e_yaw)
+        return vx, vy
+
+    def _crab(self, speed, travel, e_fwd, e_lat, dt, auth, fresh, lead):
+        # type: (float, float, float, float, float, object, bool, YawLead) -> Tuple[float, float, float, float]
+        """Decoupled allocation: fly the leg while the nose leads the corner.
+
+        Identical in spirit to :meth:`_track_body` — a cruise along the route
+        and the loops correcting across it — but expressed in the frame that is
+        actually meaningful once the nose no longer points along the route.
+        Both position loops see the error resolved along and across the
+        *direction of travel*, and their answer is rotated back into the body
+        frame the platform is commanded in. At a 90-degree lead that rotation
+        turns the whole cruise into ROLL, which is the crab that finishes the
+        manoeuvre; at 0 it is the identity and this reduces to the classic
+        allocation term for term.
+
+        Returns:
+            ``(vx, vy, along, across)`` — the body-frame command, and the offset
+            to the line resolved in the travel frame. The caller publishes those
+            last two as the along-track and cross-track telemetry: with the nose
+            led, the drone's own lateral axis is no longer across the line, and
+            reporting the body component would understate the real distance off
+            it by ``1 / cos(lead)``.
+        """
+        p = self.params
+        # Two speed limits, and both are the drone telling the plan what it can
+        # actually do. First: ease off into the turn, only as much as the nose
+        # still needs (see approach_limit).
+        speed = min(speed, approach_limit(lead, p.yaw_lookahead,
+                                          p.arrive_speed_min))
+        # Second: a crab flies only as fast as the ROLL axis allows, because at
+        # a 60-degree lead most of the progress vector is lateral and lateral is
+        # the weak axis. Limiting HERE, rather than letting the envelope clip
+        # |vy| afterwards, is what keeps the direction of travel exact -- a
+        # clipped vy riding an unclipped vx is a drone quietly flying at a
+        # different angle from the one the geometry asked for, which is to say
+        # cutting the corner it was trying to fly round.
+        lateral_frac = abs(sin(travel))
+        if lateral_frac > 1e-3:
+            speed = min(speed, p.envelope.max_vy / lateral_frac)
+        along, across = geo.travel_frame_offset(e_fwd, e_lat, travel)
+        correction = self._lat.update(across, dt, integrate=auth.integrate,
+                                      gain_scale=auth.gain_scale,
+                                      deadband_extra=auth.deadband_extra_m,
+                                      fresh=fresh)
+        if p.forward_track_frac > 0.0:
+            speed += p.forward_track_frac * self._fwd.update(
+                along, dt, integrate=auth.integrate,
+                gain_scale=auth.gain_scale,
+                deadband_extra=auth.deadband_extra_m, fresh=fresh)
+        else:
+            self._fwd.update(along, dt, integrate=False, gain_scale=0.0,
+                             fresh=fresh)
+        vx, vy = geo.travel_allocation(speed, correction, travel)
+        if vx < 0.0:
+            # The crab itself can never point backward (the lead is capped short
+            # of sideways), but the cross-track correction rides on top of it and
+            # at a 60-degree lead a full correction pulling the same way is
+            # enough to tip the total over: 0.17 m/s of travel minus 0.12 m/s of
+            # roll leaves -0.02 m/s of PITCH. Reverse on this airframe is flown
+            # blind and is only ever an escape move, so it is dropped here rather
+            # than commanded. The correction it was serving is deferred, not
+            # lost: the offset stays open and closes once the crab eases.
+            #
+            # turn_coordination downstream floors vx too, but only while the yaw
+            # axis is ACTIVE. The uncovered case is a steady lead with a quiet
+            # yaw — the middle of a long crab — and that is the one this is for.
+            vx = 0.0
+        return vx, vy, along, across
 
     # ─── Helpers ─────────────────────────────────────────────────
     def _station_keep(self, pose, dt, auth, fresh, hold_yaw):
@@ -495,7 +664,15 @@ class DriftPidFollower:
                 self._anchor = None
                 continue
             if not final:
-                bearing = geo.bearing_error(pose.x, pose.y, pose.yaw, wx, wy)
+                # "Is this waypoint behind me?" is a question about the
+                # direction of travel, and with the nose led round a corner the
+                # heading is not that direction: a waypoint dead ahead of a
+                # crabbing drone can sit 90 degrees off its nose. Asked of the
+                # LEG instead, the test means what it says in both cases.
+                heading = pose.yaw
+                if self._lookahead.enabled:
+                    heading = geo.leg_heading(self._path, self._idx)
+                bearing = geo.bearing_error(pose.x, pose.y, heading, wx, wy)
                 if abs(bearing) > p.passed_bearing_rad:
                     self._idx += 1
                     self._anchor = None
@@ -526,7 +703,9 @@ class DriftPidFollower:
             deadband_extra_m=auth.deadband_extra_m,
             authority=reason or auth.reason,
             blocked_axis=blocked.axis if blocked is not None else "",
-            escape_state=escape_state)
+            escape_state=escape_state,
+            yaw_lead_rad=self._lead.offset_rad,
+            corner_dist_m=self._lead.corner_distance_m)
         return DriftPidCommand(
             command=ControlCommand.velocity(vx, vy, 0.0, wz, tracker=self.name),
             state=state, required_axis=None, freeze=None, done=self._done,
