@@ -46,8 +46,24 @@ CAMERA_ORIENTATION_DEG = (0.0, 0.0, 180.0)
 # Half the rotor-tip span plus a little. What the planner must keep clear.
 AIRFRAME_RADIUS_M = 0.35
 
+DEFAULT_CAMERA_CONFIG = "camera_pegasus_iris_720x420.yaml"
+"""The calibration a data-collection campaign renders with: the camera's native size.
 
-def load_camera_intrinsics(name: str = "camera_pegasus_iris_504x392.yaml") -> Intrinsics:
+Recording native and downsampling at training time means a change of camera or
+of model input size never requires re-flying a campaign, which is the expensive
+half of this pipeline. It is free for NavDP, because 720x420 and the deployed
+504x294 share an aspect ratio and so arrive as the same 224x131 image inside
+NavDP's 224x224 input.
+
+Do **not** render with ``camera_pegasus_iris_504x392.yaml``. It descends from
+the same native calibration by a *crop* rather than a resize, so it discards 20
+degrees of horizontal field of view and leaves what remains lopsided about the
+optical axis (36.9 deg left, 18.9 deg right); a policy trained on it meets
+obstacles from the right 20 degrees later than obstacles from the left.
+"""
+
+
+def load_camera_intrinsics(name: str = DEFAULT_CAMERA_CONFIG) -> Intrinsics:
     """Load one of the ``robots/PEGASUS/config/*.yaml`` camera intrinsics files."""
     data = yaml.safe_load((_CONFIG_DIR / name).read_text())
     return Intrinsics(
@@ -57,7 +73,7 @@ def load_camera_intrinsics(name: str = "camera_pegasus_iris_504x392.yaml") -> In
 
 
 def camera_intrinsics(resolution: Optional[Tuple[int, int]] = None,
-                      name: str = "camera_pegasus_iris_504x392.yaml") -> Intrinsics:
+                      name: str = DEFAULT_CAMERA_CONFIG) -> Intrinsics:
     """The platform camera's calibration, optionally rendered at another size.
 
     Args:
@@ -229,6 +245,11 @@ class PegasusIrisVehicle:
             quaternion=tuple(float(v) for v in state.attitude),
             linear_velocity=tuple(float(v) for v in state.linear_velocity),
             angular_velocity=tuple(float(v) for v in state.angular_velocity),
+            # Free here and expensive later: recovering acceleration from a
+            # recording means differentiating a velocity sampled at the render
+            # rate, which is noisy exactly where the transients are.
+            linear_acceleration=tuple(float(v) for v in state.linear_acceleration),
+            body_velocity=tuple(float(v) for v in state.linear_body_velocity),
         )
 
 

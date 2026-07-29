@@ -30,7 +30,12 @@ INDOOR_SCENES = {
     # tasks/planning/sim_flight_recording/README.md and robots/PEGASUS/README.md.
     "hospital": f"{_ASSET_BASE}/Hospital/hospital.usd",
     "office": f"{_ASSET_BASE}/Office/office.usd",
+    # The bare shell. Almost nothing to avoid -- four walls and a floor -- so it
+    # is a poor source of obstacle-avoidance data even though it flies fine.
+    # Prefer the two furnished variants below.
     "warehouse": f"{_ASSET_BASE}/Simple_Warehouse/warehouse.usd",
+    "warehouse_shelves": f"{_ASSET_BASE}/Simple_Warehouse/warehouse_multiple_shelves.usd",
+    "warehouse_forklifts": f"{_ASSET_BASE}/Simple_Warehouse/warehouse_with_forklifts.usd",
     "full_warehouse": f"{_ASSET_BASE}/Simple_Warehouse/full_warehouse.usd",
 }
 
@@ -42,7 +47,29 @@ INDOOR_SCENES = {
 SCENE_SPAWNS = {
     "simple_room": (-0.5, 1.0),
     "office": (-4.0, 3.5),
+    # Both warehouse assets are centred on the origin with open floor there,
+    # confirmed by surveying from it: 535 m2 and 1446 m2 of contiguous flyable
+    # space came back, which a spawn inside a rack or outside the building
+    # could not produce.
+    "warehouse": (0.0, 0.0),
+    "warehouse_shelves": (0.0, 0.0),
+    "warehouse_forklifts": (0.0, 0.0),
+    "full_warehouse": (0.0, 0.0),
 }
+
+SCENE_SWEEP_CEILING_M = {
+    "warehouse": 14.0,
+    "warehouse_shelves": 14.0,
+    "warehouse_forklifts": 14.0,
+    "full_warehouse": 14.0,
+}
+"""How high to sweep, for scenes whose roof is above the 6 m default.
+
+``restrict_to_indoor`` calls a column with no ceiling above it outdoors, so a
+warehouse swept only to 6 m comes back as *no* indoor space at all -- the survey
+then dies in ``largest_region`` with "no cell in the map has 0.35 m of
+clearance", which reads like an empty scene rather than a too-short sweep.
+"""
 
 SPAWN_HEIGHT_M = 0.15  # just above the floor -- PX4 needs to detect it is landed at boot
 

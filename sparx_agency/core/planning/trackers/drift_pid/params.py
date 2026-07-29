@@ -24,13 +24,14 @@ module only composes them and adds the navigation-level dials.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import radians
+from math import degrees, radians
 
 from .blockage import BlockageParams
 from .confidence import ConfidenceParams
 from .envelope import EnvelopeParams
 from .escape import EscapeParams
 from .pid import PidGains
+from .yaw_lookahead import YawLookaheadParams
 
 
 def _default_lateral_pid():
@@ -156,6 +157,10 @@ class DriftPidParams:
         confidence: How localization quality maps onto control authority.
         blockage: How "commanded but not moving" is detected.
         escape: The reflexes run when it is.
+        yaw_lookahead: Turn anticipation — lead the nose into the next corner
+            and crab the body along the leg, instead of arriving at the corner
+            pointing the old way and rotating in place. Disabled by default;
+            see :mod:`.yaw_lookahead`.
     """
 
     # ── Feed-forward: how fast we fly ──
@@ -195,6 +200,8 @@ class DriftPidParams:
     confidence: ConfidenceParams = field(default_factory=ConfidenceParams)
     blockage: BlockageParams = field(default_factory=BlockageParams)
     escape: EscapeParams = field(default_factory=EscapeParams)
+    yaw_lookahead: YawLookaheadParams = field(
+        default_factory=YawLookaheadParams)
 
     def __post_init__(self):
         # type: () -> None
@@ -268,6 +275,24 @@ class DriftPidParams:
                 "approach_yaw_rate=%.2f] -- tracking trims the heading, turning "
                 "owns it; a track cap above the turn cap is a contradiction"
                 % (self.track_yaw_rate, self.approach_yaw_rate))
+        if (self.yaw_lookahead.enabled
+                and self.yaw_lookahead.rate > self.track_yaw_rate):
+            raise ValueError(
+                "DriftPidParams.yaw_lookahead.rate (%.2f rad/s) exceeds "
+                "track_yaw_rate (%.2f) -- the anticipation runs in TRACK, so a "
+                "schedule allowed to rotate faster than the controller may "
+                "command there would fall behind by construction, every corner"
+                % (self.yaw_lookahead.rate, self.track_yaw_rate))
+        if (self.yaw_lookahead.enabled
+                and self.yaw_lookahead.catchup_rad >= self.yaw_engage_rad):
+            raise ValueError(
+                "DriftPidParams.yaw_lookahead.catchup_rad (%.1f deg) must stay "
+                "below yaw_engage_rad (%.1f deg) -- the anticipation opens a "
+                "heading error on purpose, and one it is allowed to open past "
+                "the engage threshold would trip the stop-and-turn latch the "
+                "whole manoeuvre exists to avoid"
+                % (degrees(self.yaw_lookahead.catchup_rad),
+                   degrees(self.yaw_engage_rad)))
         if self.cruise_speed_straight != 0.0 and not (
                 self.cruise_speed <= self.cruise_speed_straight
                 <= self.envelope.max_vx):

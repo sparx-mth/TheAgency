@@ -74,6 +74,10 @@ def _parse_args():
                     help="airframe half-width, used only to report usable airspace")
     ap.add_argument("--map-dir", type=Path, default=None,
                     help="override where the maps are written")
+    ap.add_argument("--sweep-origin", type=float, nargs=2, default=None,
+                    metavar=("X", "Y"),
+                    help="world point inside the building to flood the sweep "
+                         "from, for a scene with no entry in SCENE_SPAWNS")
     ap.add_argument("--preview", action="store_true",
                     help="also write a PNG of the 2D map next to it")
     ap.add_argument("--no-ply", action="store_true",
@@ -108,13 +112,21 @@ def write_preview(grid, path: Path, landing_region=None) -> None:
     cv2.imwrite(str(path), np.flipud(colour))
 
 
-def _sweep_origin(scene: str, altitude_m: float):
+def _sweep_origin(scene: str, altitude_m: float, override=None):
     """A point inside the building for the sweep to flood outward from.
 
     The generator marks everything it cannot reach as UNKNOWN, so this choice is
     what separates the interior from the kilometre of open ground the asset sits
     on. The hand-measured spawn is a known-open spot by construction.
+
+    A scene with no recorded spawn is a chicken-and-egg problem -- the spawn is
+    measured off the map and the map needs the spawn -- so ``--sweep-origin``
+    breaks it: survey once from a guess, look at the preview, and record the
+    spot in ``SCENE_SPAWNS`` once it is known good.
     """
+    if override is not None:
+        return (float(override[0]), float(override[1]), altitude_m)
+
     from sparx_agency.robots.PEGASUS.adapters.scene import scene_spawn
 
     x, y, _z = scene_spawn(scene)
@@ -151,7 +163,7 @@ def main() -> None:
 
         print(f"surveying '{args.scene}' in 3D at {args.resolution:.2f} m...", flush=True)
         voxels, metadata = survey_voxels(
-            _sweep_origin(args.scene, args.altitude),
+            _sweep_origin(args.scene, args.altitude, args.sweep_origin),
             resolution_m=args.resolution, radius_m=args.radius,
             floor_m=args.floor, ceiling_m=args.ceiling,
         )
@@ -210,6 +222,13 @@ def main() -> None:
             preview = path.with_suffix(".png")
             write_preview(grid, preview, landing_region)
             print(f"wrote preview to {preview}", flush=True)
+    except Exception:
+        # Kit's fast shutdown in the finally below tears the process down
+        # without letting the traceback reach a terminal, so a survey that
+        # raised looks exactly like one that simply finished. Print it first.
+        import traceback
+        traceback.print_exc()
+        raise
     finally:
         simulation_app.close()
 

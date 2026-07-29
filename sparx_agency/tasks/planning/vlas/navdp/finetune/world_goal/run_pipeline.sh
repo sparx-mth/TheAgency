@@ -30,16 +30,22 @@ WG=sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal
 CONFIG_DIR="${REPO}/sparx_agency/tasks/planning/vlas/navdp/finetune/world_goal/configs"
 
 OUT="${NAVDP_WG_OUT:-$HOME/data/navdp/world_goal}"
-CKPT="${NAVDP_CKPT:-$HOME/Downloads/navdp-cross-modal.ckpt}"
+CKPT="${NAVDP_CKPT:-$HOME/GIT/NavDP/baselines/navdp/checkpoints/navdp-cross-modal.ckpt}"
 SCENE="${NAVDP_WG_SCENE:-office}"
 RECORDINGS="${NAVDP_WG_RECORDINGS:-$HOME/data/sim/office_v1 $HOME/data/sim/office_v2 $HOME/data/sim/office_v3 $HOME/data/sim/office_v4 $HOME/data/sim/falcon_pegasus}"
 WORKERS="${NAVDP_WG_WORKERS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
 
 # Full-run defaults. --preview overrides all five.
+#
+# DATASET is deliberately *not* resolved here. It defaults to a path under $OUT,
+# and --out can still change $OUT further down, so computing it now would leave
+# `--out elsewhere` writing its run into the new directory and its dataset into
+# the old one. It is resolved after the argument loop instead.
 RUN="${NAVDP_WG_RUN:-run1}"
-DATASET="${NAVDP_WG_DATASET:-$OUT/dataset}"
+DATASET="${NAVDP_WG_DATASET:-}"
 STRIDE="${NAVDP_WG_STRIDE:-2}"
 GOALS="${NAVDP_WG_GOALS:-12}"
+PREVIEW=0
 TRAIN_EXTRA=()
 EVAL_EXTRA=()
 
@@ -48,7 +54,7 @@ REDO=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --preview)
-      RUN="preview"; DATASET="$OUT/dataset_preview"; STRIDE=10; GOALS=8
+      RUN="preview"; PREVIEW=1; STRIDE=10; GOALS=8
       TRAIN_EXTRA=(--max-steps 1200 --val-every 100)
       EVAL_EXTRA=(--max-batches 25); shift ;;
     --only) ONLY="$2"; shift 2 ;;
@@ -61,16 +67,36 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# Now that --out and --preview have both been seen, $OUT is final.
+if [[ -z "$DATASET" ]]; then
+  DATASET="$OUT/dataset"
+  (( PREVIEW )) && DATASET="$OUT/dataset_preview"
+fi
 FEATURES="${DATASET}_features"
 
 cd "$REPO"
-export NAVDP_REPO="${NAVDP_REPO:-$HOME/PycharmProjects/NavDP/baselines/navdp}"
+export NAVDP_REPO="${NAVDP_REPO:-$HOME/GIT/NavDP/baselines/navdp}"
+NAVDP_REPO="${NAVDP_REPO/#\~/$HOME}"
 py() { conda run --no-capture-output -n navdp python "$@"; }
 want() { [[ -z "$ONLY" || "$ONLY" == "$1" ]]; }
 have() { [[ -e "$1" && "$REDO" != "$2" ]]; }
+# A run is "trained" only once RunLogger.finish has written its summary. Gating
+# on best.pth instead would treat a run killed at step 40k of 260k as complete,
+# and then evaluate, export and report a model that saw 15% of its schedule --
+# at a learning rate still near peak, with nothing anywhere saying so.
+trained() { [[ "$REDO" != train && -f "$1" ]] && grep -q '"summary"' "$1"; }
 say() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
 
+# Both preconditions are checked before the first stage, because the dataset
+# stage takes hours and does not need either -- so a wrong path here otherwise
+# surfaces as a failure late at night, after the expensive part.
 [[ -f "$CKPT" ]] || { echo "checkpoint not found: $CKPT (set NAVDP_CKPT)" >&2; exit 1; }
+[[ -f "$NAVDP_REPO/policy_network.py" ]] || {
+  echo "NavDP repo not found: $NAVDP_REPO" >&2
+  echo "  set NAVDP_REPO to the directory containing policy_network.py" >&2
+  exit 1
+}
 say "run=$RUN  dataset=$DATASET  stride=$STRIDE  goals/frame=$GOALS  workers=$WORKERS"
 
 if want dataset; then
@@ -97,9 +123,10 @@ FEATURE_ARG=()
 [[ -f "$FEATURES/meta.json" && -z "${SKIP_FEATURES:-}" ]] && FEATURE_ARG=(--features "$FEATURES")
 
 if want train; then
-  if have "$OUT/$RUN/best.pth" train; then
-    say "train: $OUT/$RUN/best.pth exists -- --redo train to retrain"
+  if trained "$OUT/$RUN/run.json"; then
+    say "train: $OUT/$RUN ran to completion -- --redo train to retrain"
   else
+    [[ -f "$OUT/$RUN/best.pth" ]] && say "train: $OUT/$RUN was interrupted -- training again from the start"
     say "train: fine-tuning (validation is a different wing of the building)"
     py -m $WG.train --dataset "$DATASET" "${FEATURE_ARG[@]}" \
         --out "$OUT/$RUN" --ckpt "$CKPT" "${TRAIN_EXTRA[@]}"

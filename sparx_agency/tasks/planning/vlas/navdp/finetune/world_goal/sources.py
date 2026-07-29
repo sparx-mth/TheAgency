@@ -30,6 +30,7 @@ Pure numpy. Loading a source neither reads an image nor touches torch.
 """
 from __future__ import annotations
 
+import glob
 import json
 from dataclasses import dataclass, field
 from math import acos, degrees
@@ -218,30 +219,62 @@ def load_source(path, scene: Scene, config: SourceConfig,
                            rejected=rejected), ""
 
 
+MAX_DISCOVERY_DEPTH = 4
+"""How far below a given root a recording directory may sit.
+
+Two is what an unattended campaign already needs: ``campaign_supervisor.py``
+gives every worker launch its own directory so a relaunched worker cannot
+overwrite its own earlier flights, which puts recordings at
+``<root>/w0_c001/office_w0_e000``. Four leaves room to point at a parent of
+several campaigns without having to name each one.
+"""
+
+
+def _walk(directory: Path, depth: int, found: List[Path]) -> None:
+    """Collect recording directories at or below ``directory``.
+
+    A directory holding ``poses.npy`` *is* the recording, so the walk stops
+    there rather than descending into its ``rgb/`` and ``depth/`` — which on a
+    large campaign is the difference between reading a few hundred directory
+    entries and a million.
+    """
+    if (directory / "poses.npy").exists():
+        found.append(directory)
+        return
+    if (directory / "recording" / "poses.npy").exists():
+        found.append(directory / "recording")
+        return
+    if depth <= 0:
+        return
+    try:
+        children = sorted(directory.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if child.is_dir():
+            _walk(child, depth - 1, found)
+
+
 def discover(roots: Sequence[str]) -> List[Path]:
     """Expand recording roots into concrete recording directories.
 
-    Accepts a recording directory, a campaign directory holding several, or a
-    glob. A directory is a recording if it has ``poses.npy``; a FALCON run keeps
-    its recording in a ``recording/`` subdirectory.
+    Accepts a recording directory, a campaign directory holding several, a
+    directory of campaign directories, or a glob. A directory is a recording if
+    it has ``poses.npy``; a FALCON run keeps its recording in a ``recording/``
+    subdirectory.
+
+    A pattern is expanded against the filesystem after ``~`` is resolved, not
+    against the process's working directory — an absolute pattern is the normal
+    case here and ``Path().glob`` rejects one outright.
     """
     found: List[Path] = []
     for root in roots:
-        for candidate in sorted(Path().glob(root) if any(c in root for c in "*?[")
-                                else [Path(root).expanduser()]):
-            candidate = candidate.expanduser()
-            if not candidate.is_dir():
-                continue
-            if (candidate / "poses.npy").exists():
-                found.append(candidate)
-                continue
-            for child in sorted(candidate.iterdir()):
-                if not child.is_dir():
-                    continue
-                if (child / "poses.npy").exists():
-                    found.append(child)
-                elif (child / "recording" / "poses.npy").exists():
-                    found.append(child / "recording")
+        pattern = str(Path(root).expanduser())
+        candidates = ([Path(match) for match in sorted(glob.glob(pattern))]
+                      if any(char in pattern for char in "*?[") else [Path(pattern)])
+        for candidate in candidates:
+            if candidate.is_dir():
+                _walk(candidate, MAX_DISCOVERY_DEPTH, found)
     seen, unique = set(), []
     for path in found:
         resolved = path.resolve()

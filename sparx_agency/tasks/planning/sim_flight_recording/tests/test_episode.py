@@ -101,3 +101,60 @@ def test_slewing_stops_on_arrival_rather_than_overshooting():
 
 def test_a_flight_that_leaves_its_route_is_a_named_failure():
     assert episode.OUTCOME_OFF_ROUTE not in episode.GOOD_OUTCOMES
+
+
+# --------------------------------------------------------------- replanning
+#
+# The loop itself needs a simulator, so what is checked here is the contract
+# around it: the bounds that stop a replan loop running away, and the fact that
+# a result always carries the route it actually flew.
+
+
+def test_replanning_is_bounded_both_ways():
+    """A cap alone is not enough, and neither is an interval alone.
+
+    The follower reports divergence on *every* step once it has diverged, so
+    without a minimum interval one bad moment burns the whole replan budget in
+    three consecutive iterations and none of them is given time to work. Without
+    a cap, an aircraft that simply cannot track its route replans until its
+    flight budget runs out.
+    """
+    assert episode.MAX_REPLANS >= 1
+    assert episode.REPLAN_MIN_INTERVAL_S > 0.0
+    # Long enough that a recovery has actually been attempted: at cruise speed
+    # the aircraft covers several times the follower's path tolerance.
+    assert (episode.REPLAN_MIN_INTERVAL_S * FollowSpec().cruise_speed
+            > FollowSpec().path_tolerance)
+
+
+def test_a_replan_cannot_outlast_the_flight_budget():
+    """Replanning must not become a way to fly forever.
+
+    Each replan extends the budget by what the new route costs, never resets it,
+    so the total is bounded by the original budget plus MAX_REPLANS routes.
+    """
+    original = episode.flight_budget_s(30.0)
+    worst = original + episode.MAX_REPLANS * episode.SECONDS_PER_METRE * 30.0
+    assert worst < 10 * original
+
+
+def test_a_result_always_carries_the_route_that_was_flown():
+    """``meta.json`` is written from this, so it may never be missing.
+
+    The route in a recording's metadata has to be the one its images were taken
+    on. Since the route is planned after the climb and replaced on every replan,
+    the pre-takeoff plan the caller passed in is *not* that route.
+    """
+    assert "flown_plan" in episode.EpisodeResult.__dataclass_fields__
+    assert "replans" in episode.EpisodeResult.__dataclass_fields__
+    assert episode.EpisodeResult(outcome=episode.OUTCOME_LANDED).replans == 0
+
+
+def test_replanning_does_not_invent_a_new_outcome():
+    """A flight that recovered is a clean flight, not a third category.
+
+    Recording a replan as its own outcome would take every recovered flight out
+    of the training set, which is the opposite of the point -- the recovery is
+    exactly the behaviour worth demonstrating.
+    """
+    assert episode.GOOD_OUTCOMES == (episode.OUTCOME_LANDED,)

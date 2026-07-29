@@ -161,3 +161,57 @@ def test_a_correction_larger_than_its_axis_is_rejected():
     _rospy.params["~dp_lat_max"] = 0.9
     with pytest.raises(ValueError):
         build_drift_pid_params(_rospy.get_param)
+
+
+# ── turn anticipation (yaw lookahead) ────────────────────────────
+def test_the_turn_anticipation_is_off_unless_asked_for():
+    """It changes how every corner is flown, so it may never default on."""
+    assert build_drift_pid_params(_rospy.get_param).yaw_lookahead.enabled is False
+
+
+def test_every_yaw_lookahead_dial_reaches_the_core():
+    _rospy.params.update({
+        "~dp_yaw_lookahead": "true",
+        "~dp_yaw_lookahead_start_m": 3.3,
+        "~dp_yaw_lookahead_align_m": 0.44,
+        "~dp_yaw_lookahead_corner_deg": 31.0,
+        "~dp_yaw_lookahead_confirm_m": 1.7,
+        "~dp_yaw_lookahead_max_deg": 60.0,
+        "~dp_yaw_lookahead_catchup_deg": 8.0,
+        "~dp_yaw_lookahead_rate": 0.22,
+        "~dp_yaw_lookahead_cone_deg": 70.0,
+        "~dp_yaw_lookahead_ff": 0.5,
+    })
+    yl = build_drift_pid_params(_rospy.get_param).yaw_lookahead
+    assert yl.enabled is True
+    assert yl.start_m == 3.3
+    assert yl.align_m == 0.44
+    assert abs(yl.corner_rad - 0.5411) < 1e-3
+    assert yl.confirm_m == 1.7
+    assert abs(yl.max_offset_rad - 1.0472) < 1e-3
+    assert abs(yl.catchup_rad - 0.1396) < 1e-3
+    assert yl.rate == 0.22
+    assert abs(yl.side_cone_rad - 1.2217) < 1e-3
+    assert yl.feedforward == 0.5
+
+
+def test_the_schedule_rate_follows_the_tracking_yaw_cap_by_default():
+    """The manoeuvre runs in TRACK, so it inherits that budget rather than
+    silently asking for a rotation the controller may not command there."""
+    _rospy.params.update({"~dp_yaw_lookahead": True,
+                          "~dp_track_yaw_rate": 0.21})
+    assert build_drift_pid_params(_rospy.get_param).yaw_lookahead.rate == 0.21
+
+
+def test_a_schedule_faster_than_the_tracking_cap_fails_loudly_at_startup():
+    _rospy.params.update({"~dp_yaw_lookahead": True,
+                          "~dp_track_yaw_rate": 0.20,
+                          "~dp_yaw_lookahead_rate": 0.40})
+    with pytest.raises(ValueError, match="track_yaw_rate"):
+        build_drift_pid_params(_rospy.get_param)
+
+
+def test_a_typo_in_the_master_switch_is_refused_not_flown():
+    _rospy.params["~dp_yaw_lookahead"] = "yes please"
+    with pytest.raises(ValueError, match="not a boolean"):
+        build_drift_pid_params(_rospy.get_param)
