@@ -22,3 +22,4 @@ entry under `entries/` when work actually starts on it.
 ## Done
 - [x] GPU hardware-detection consolidation, model/engine registry, x86 dev container for Sphera/ROBOTICAN (commit `55f96e33`)
 - [x] Rooster/Sphera takeoff, video streaming, depth `.npy` output, closed-loop altitude hold
+- [x] Rooster frame capture → direct relay to the Jetson, orchestrated via mission_control.py → `entries/006-rooster-frame-jetson-relay.md`

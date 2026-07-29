@@ -264,6 +264,53 @@ std_msgs/String 'data: fly_straight'` (`fly_straight` is the manager's own
 Confirmed: `mapping_sync`'s `gate` flipped to `FUSING` and `emit` resumed climbing
 within one heartbeat cycle, `frozen` stopped growing.
 
+## 2026-07-29 — Jetson's `agency_ws` isn't a git-tracked clone of this repo
+
+**Symptom:** Wired a new `mission_control.py` service to run
+`dir_watch_path_publisher.py` from `{JETSON_REPO}/sparx_agency/robots/common/` on the
+Jetson — the file is committed in this repo (`647701b9`) and clearly present locally,
+but `ls` on the Jetson showed the directory without it at all.
+
+**Root cause:** `{JETSON_REPO}` (`/home/user/agency_ws`) is not kept in sync via
+`git pull`. `git status`/`git log` there show an empty, commit-less `master` branch
+with unrelated home-directory dotfiles as untracked — its `sparx_agency/` tree was
+manually copied over at some point in the past and never touched since for files
+outside whatever was actively being used. Any file committed after that copy simply
+isn't there, regardless of how long ago it was committed here.
+
+**Fix / workaround:** `scp`'d the one needed file directly to the matching path on the
+Jetson. No general sync mechanism exists — don't assume one does.
+
+**Don't:** Don't assume `{JETSON_REPO}` matches this repo just because paths/service
+definitions reference it as if it does. Before wiring any new `mission_control.py`
+Jetson-side service, verify the specific file(s) it needs actually exist there first
+(`ssh ... ls <path>`), rather than debugging a confusing `FileNotFoundError` after the
+fact.
+
+---
+
+## 2026-07-29 — testing `mission_control.py`'s orchestration logic without driving the UI
+
+**Symptom:** Needed to verify `start_service`/`stop_service`/`get_all_states` actually
+work for two new services, but no browser-automation tool was available to click
+through the Streamlit UI, and the script has no `if __name__ == "__main__":` guard —
+it's UI calls top-to-bottom, seemingly not meant to be imported as a plain module.
+
+**Root cause / finding:** Streamlit tolerates being imported outside a real
+`streamlit run` session. Every `st.*` call just logs "missing ScriptRunContext! This
+warning can be ignored when running in bare mode." and no-ops, rather than raising —
+this is documented Streamlit behavior ("bare mode"), not a hack specific to this file.
+
+**Fix / workaround:** `import sparx_agency.tools.mission_control as mc` directly (via
+`importlib`, with the repo root on `sys.path`) and call `mc.start_service(svc)` /
+`mc.stop_service(svc)` / `mc.get_all_states()` against real `Service` objects pulled
+from `mc.ALL_SERVICES`. Output is drowned in bare-mode warnings — grep for your own
+`print()` markers rather than trying to read the raw output.
+
+**Don't:** Don't assume a Streamlit app needs a real browser session (or refactoring
+into a separate importable module) just to unit-test its orchestration logic — try a
+plain import first.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

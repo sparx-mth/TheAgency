@@ -6,6 +6,13 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Added
+- Two new `mission_control.py` services (`rooster_jetson` group): `Rooster Frame Relay ->
+  Jetson (R1)` and `Rooster Jetson Frame Watcher (R1)`, wiring the existing
+  `dir_push_relay.py`/`dir_watch_path_publisher.py` mechanism (previously XTEND-only, never
+  tested for Rooster) so captured frames can be forwarded to the Jetson over rsync/SSH,
+  additive to (doesn't change) the existing local Rooster/Falcon vision pipeline. Verified
+  end-to-end through the orchestrator's own start/stop/status code, not just ad-hoc commands —
+  see `docs/progress/entries/006-rooster-frame-jetson-relay.md`.
 - Closed-loop PD altitude hold for the ROBOTICAN Rooster (`rooster_unit.py`), replacing
   the previous open-loop throttle constant that reliably drifted to floor or ceiling.
 - `demo_mode_topic`/`demo_mode_request_topic` params on `nav_stack.launch`, letting

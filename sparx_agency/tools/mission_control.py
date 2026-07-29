@@ -481,6 +481,100 @@ ROBOTICAN_SERVICES: list[Service] = [
         proc_pattern="video_trigger.py",
         stop_extra="docker exec it bash -lc 'pkill -f video_trigger.py || true' 2>/dev/null || true",
     ),
+    # ── Frame relay to Jetson (optional; not required for Rooster/Falcon) ───
+    # Rooster's own vision stack (frame capture + DA3 depth) runs entirely on
+    # this PC (see the "Vision (host, domain 9)" comment above) — it does not
+    # need the Jetson. This pair is a separate, additive path: it forwards a
+    # copy of the same captured JPEGs to the Jetson over rsync/SSH, for
+    # whatever future Jetson-side consumer (e.g. a second DA3-TRT instance)
+    # wants them. dir_push_relay.py/dir_watch_path_publisher.py are generic
+    # (built for XTEND's host/Jetson split originally, see their docstrings)
+    # — confirmed working for Rooster live 2026-07-29 (synthetic file, then a
+    # real live Sphera flight, 10Hz measured end-to-end) : PC watch dir ->
+    # rsync/SSH -> Jetson watch dir -> published on the Jetson's OWN ROS2
+    # topic. That topic is on ROS_DOMAIN_ID=5 (the Jetson's domain, see
+    # _ROS_ENV) — a self-contained Jetson-local graph, NOT bridged back to
+    # Rooster's ROS_DOMAIN_ID=9. Jetson-side dir deliberately mirrors the PC
+    # path (/tmp/rooster_frames on both ends) rather than living under
+    # JETSON_DATA -- same relative path on both machines, no translation to
+    # remember. See docs/progress/entries/006-rooster-frame-jetson-relay.md
+    # for the full test record.
+    Service(
+        name="Rooster Frame Relay -> Jetson (R1)",
+        key="rooster_frame_relay_jetson_R1",
+        group="rooster_jetson",
+        description=(
+            "Watches /tmp/rooster_frames (same dir Rooster Frame Capture writes) and "
+            "rsync/SSH-pushes every new JPEG to /tmp/rooster_frames on the Jetson. "
+            "Additive -- does not affect the local Rooster/Falcon pipeline."
+        ),
+        cmd=(
+            "python3 /home/user1/GIT/TheAgency/sparx_agency/robots/common/dir_push_relay.py "
+            "--watch-dir /tmp/rooster_frames --pattern '*.jpg' "
+            f"--remote-host {JETSON_SSH} "
+            "--remote-dir /tmp/rooster_frames"
+        ),
+        env="none",
+        machine="pc",
+        # dir_push_relay.py is shared with the depth relay below -- proc_pattern
+        # must include the distinguishing arg (remote-dir) or pkill/status can't
+        # tell the two apart (pkill -f matches the whole command line as regex).
+        proc_pattern="dir_push_relay.py.*--remote-dir /tmp/rooster_frames",
+    ),
+    Service(
+        name="Rooster Jetson Frame Watcher (R1)",
+        key="rooster_jetson_frame_watch_R1",
+        group="rooster_jetson",
+        description=(
+            "Jetson-side: watches /tmp/rooster_frames for files the PC-side relay "
+            "pushes and republishes each path on /rooster/jetson_rgb_frame_path "
+            "(ROS_DOMAIN_ID=5, Jetson-local -- not bridged to Rooster's domain 9)."
+        ),
+        cmd=(
+            f"python3 {JETSON_REPO}/sparx_agency/robots/common/dir_watch_path_publisher.py "
+            "--watch-dir /tmp/rooster_frames --pattern '*.jpg' "
+            "--path-topic /rooster/jetson_rgb_frame_path"
+        ),
+        env="ros",
+        # Shared script with the depth watcher below -- same disambiguation need.
+        proc_pattern="dir_watch_path_publisher.*jetson_rgb_frame_path",
+    ),
+    Service(
+        name="Rooster Depth Relay -> Jetson (R1)",
+        key="rooster_depth_relay_jetson_R1",
+        group="rooster_jetson",
+        description=(
+            "Watches /tmp/rooster_depth (same dir Rooster Depth Processor writes .npy "
+            "to) and rsync/SSH-pushes every new file to /tmp/rooster_depth on the "
+            "Jetson. Additive -- does not affect the local Rooster/Falcon pipeline."
+        ),
+        cmd=(
+            "python3 /home/user1/GIT/TheAgency/sparx_agency/robots/common/dir_push_relay.py "
+            "--watch-dir /tmp/rooster_depth --pattern '*.npy' "
+            f"--remote-host {JETSON_SSH} "
+            "--remote-dir /tmp/rooster_depth"
+        ),
+        env="none",
+        machine="pc",
+        proc_pattern="dir_push_relay.py.*--remote-dir /tmp/rooster_depth",
+    ),
+    Service(
+        name="Rooster Jetson Depth Watcher (R1)",
+        key="rooster_jetson_depth_watch_R1",
+        group="rooster_jetson",
+        description=(
+            "Jetson-side: watches /tmp/rooster_depth for .npy files the PC-side relay "
+            "pushes and republishes each path on /rooster/jetson_depth_frame_path "
+            "(ROS_DOMAIN_ID=5, Jetson-local -- not bridged to Rooster's domain 9)."
+        ),
+        cmd=(
+            f"python3 {JETSON_REPO}/sparx_agency/robots/common/dir_watch_path_publisher.py "
+            "--watch-dir /tmp/rooster_depth --pattern '*.npy' "
+            "--path-topic /rooster/jetson_depth_frame_path"
+        ),
+        env="ros",
+        proc_pattern="dir_watch_path_publisher.*jetson_depth_frame_path",
+    ),
     # ── Planner (Falcon), host, domain 9 — mirrors XTEND's "planner" group ──
     Service(
         name="Rooster Falcon Container",
