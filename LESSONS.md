@@ -11,6 +11,37 @@ Format per entry:
 
 ---
 
+## 2026-07-29 — stale `ros2` CLI daemon kept showing zero R1 topics after switching networks/domains back and forth
+
+**Symptom:** After going real-drone (`ROS_DOMAIN_ID=1`, CycloneDDS pointed at the real
+network) and then switching back to Sphera (`ROS_DOMAIN_ID=9`, CycloneDDS reverted to
+`172.16.17.10`), `ros2 topic list`/`ros2 topic echo` inside `it` showed ZERO `/R1/...`
+topics, even though R1's own container logs showed a perfectly healthy boot (FCU
+connected, position valid, no CDR/NIC errors) and both `it`'s and R1's cyclonedds
+configs correctly agreed on domain 9 / `enp129s0`/`172.16.17.10`.
+
+**Root cause:** `ros2` (Foxy) CLI commands are served by a long-lived background
+`_ros2_daemon` process that caches graph/discovery state and does NOT restart or
+rebind when `CYCLONEDDS_URI`/`ROS_DOMAIN_ID` change in a later shell — it keeps
+running with whatever network state it had when it first started. A daemon that had
+been running since earlier in the session (started during the real-drone/domain-1
+work) kept serving stale results to every later `ros2 topic list` call, even ones that
+correctly exported `ROS_DOMAIN_ID=9` — the CLI just asks the existing daemon, it
+doesn't re-discover itself. `ros2 daemon stop` itself hung (never completed) rather
+than fixing it.
+
+**Fix / workaround:** `docker exec it kill -9 <daemon-pid>` (find via `ps aux | grep
+daemon` inside `it`) — a fresh daemon spins up automatically on the next `ros2` CLI
+call and immediately sees the correct, current graph.
+
+**Don't:** Don't assume "both configs agree and the container's own logs look healthy"
+rules out a networking/discovery problem — the `ros2` CLI's own daemon is a separate,
+stateful layer that can lag behind a config change made after it started. Any time
+`ROS_DOMAIN_ID`/`CYCLONEDDS_URI` changes mid-session (e.g. switching between Sphera and
+a real drone), kill and let the daemon restart before trusting a "no topics" result.
+
+---
+
 ## 2026-07-27 — duplicate method definition silently shadowed the real navigation output
 
 **Symptom:** FALCON's `waypoint_follower` logged `nav=RUN done=False` continuously and
@@ -310,6 +341,41 @@ from `mc.ALL_SERVICES`. Output is drowned in bare-mode warnings — grep for you
 **Don't:** Don't assume a Streamlit app needs a real browser session (or refactoring
 into a separate importable module) just to unit-test its orchestration logic — try a
 plain import first.
+
+## 2026-07-29 — broken torch import: orphaned cu12 packages + two corrupted cu13 installs
+
+**Symptom:** `import torch` failed with `undefined symbol: ncclCommWindowDeregister` in
+`libtorch_cuda.so`. After removing the conflicting packages (see Root cause), the same import
+then failed with `libcudnn.so.9: cannot open shared object file`, then after fixing that,
+`libnccl.so.2: cannot open shared object file` — three distinct failures in sequence, each
+looking like it could be "the" bug.
+
+**Root cause:** Two independent problems layered on top of each other in the project venv:
+1. Both cu12 and cu13 variants of nearly every NVIDIA package (`nvidia-cublas`,
+   `nvidia-cudnn`, `nvidia-nccl`, etc.) were installed side by side. `torch==2.11.0` declares
+   `nvidia-nccl-cu13` etc. as its actual dependency, but the orphaned cu12 cluster (verified via
+   `pip show <pkg>` — `Required-by:` was empty for every one of them) was shadowing/conflicting
+   at import time, producing symbol mismatches against the older cu12 library.
+2. Independently, `nvidia-cudnn-cu13` and `nvidia-nvshmem-cu13` had their `.dist-info` metadata
+   present (`pip list`/`pip show` reported them installed) but their actual `.so` library files
+   were missing from disk entirely — an interrupted or corrupted earlier install, unrelated to
+   the cu12/cu13 conflict. Fixing #1 alone still left torch broken because of #2.
+
+**Fix / workaround:** Diagnosed systematically rather than guessing package-by-package:
+`pip show -f <pkg>` lists every file a package installed; checked each installed nvidia-* cu13
+package's files against disk (`[[ -f "$location/$f" ]]`) to find exactly which ones were
+actually missing (`nccl`: 1/1 missing, `nvshmem`: 12/12 missing — everything else was fine).
+Uninstalled the entire orphaned cu12 cluster (`pip uninstall -y nvidia-*-cu12` for every one
+with an empty `Required-by`), then `pip install --force-reinstall --no-deps` the two genuinely
+broken cu13 packages specifically (not a blanket torch reinstall).
+
+**Don't:** Don't assume the first import error is the only problem — each fix can unmask a
+different, independent failure underneath. Don't `pip uninstall`/reinstall packages just
+because they look suspicious; check `Required-by` first so a shared venv (many things in this
+project depend on it) doesn't lose something another part of the codebase actually needs.
+Don't reinstall a big package (torch) wholesale to fix what's actually a missing-file problem
+in one of its dependencies — `pip show -f` + a file-existence check finds the precise culprit
+in seconds and avoids re-downloading everything.
 
 <!--
 Example, in the style already proven useful in project-specific skills:

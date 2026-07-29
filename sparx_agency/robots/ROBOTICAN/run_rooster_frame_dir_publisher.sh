@@ -11,7 +11,7 @@
 # `robotican_dev` already running (see docker-compose.robotican.yml) --
 # same container `run_depth_processor.sh`/`run_twist_control_adapter.sh` use.
 docker exec \
-  -e ROS_DOMAIN_ID=9 \
+  -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-9}" \
   -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI="file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml" \
   robotican_dev bash -lc "
