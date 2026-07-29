@@ -16,22 +16,29 @@
 #   ~/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_fp16_546x364.engine
 # Override via: --ros-args -p engine_path:=<path>
 # ============================================
-source /opt/ros/jazzy/setup.bash
-export ROS_DOMAIN_ID=9
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml
-export PYTHONPATH=$PYTHONPATH:/home/$USER/GIT/TheAgency
-
-exec /home/$USER/GIT/TheAgency/venv/bin/python \
-  /home/$USER/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/rooster_depth_processor.py \
-  --ros-args \
-  -p engine_path:="$HOME/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_fp16_546x364.engine" \
-  -p config_yaml:="$HOME/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml" \
-  -p frame_path_topic:=/R1/rgb_frame_path \
-  -p camera_info_topic:=/R1/camera_info \
-  -p camera_info_mode:=base \
-  -p depth_topic:=/R1/depth_m \
-  -p depth_path_topic:=/R1/depth_frame_path \
-  -p depth_dir:=/tmp/rooster_depth \
-  -p max_depth_kept:=500 \
-  "$@"
+# 2026-07-29: moved off the bare host venv into `robotican_dev`
+# (docker-compose.robotican.yml / theagency:robotican) -- see
+# docs/progress/entries/002-rooster-full-containerize.md. Requires
+# `robotican_dev` already running; the engine/config paths below are host
+# paths, but `robotican_dev` bind-mounts the repo and depth_anything_ws at
+# the SAME absolute path as the host, so they resolve identically inside.
+docker exec \
+  -e ROS_DOMAIN_ID=9 \
+  -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+  -e CYCLONEDDS_URI="file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml" \
+  robotican_dev bash -lc "
+    source /opt/ros/humble/setup.bash
+    export PYTHONPATH=\$PYTHONPATH:/home/$USER/GIT/TheAgency
+    python3 /home/$USER/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/rooster_depth_processor.py \
+      --ros-args \
+      -p engine_path:='$HOME/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_fp16_546x364.engine' \
+      -p config_yaml:='$HOME/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml' \
+      -p frame_path_topic:=/R1/rgb_frame_path \
+      -p camera_info_topic:=/R1/camera_info \
+      -p camera_info_mode:=base \
+      -p depth_topic:=/R1/depth_m \
+      -p depth_path_topic:=/R1/depth_frame_path \
+      -p depth_dir:=/tmp/rooster_depth \
+      -p max_depth_kept:=500 \
+      $*
+  "
