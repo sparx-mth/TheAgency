@@ -38,7 +38,24 @@ RUN pip3 install --no-cache-dir ultralytics==8.4.110
 # (git+https://github.com/ultralytics/CLIP.git) if missing -- baked in here
 # instead so the container needs no network/git access at runtime and the
 # detector sidecar starts immediately instead of pausing for an AutoUpdate.
+#
+# Needs a modern pip/setuptools to build correctly: this base image's stock
+# pip 22.0.2 / setuptools 59.6.0 (Ubuntu jammy defaults) mis-resolve the
+# CLIP repo's pyproject.toml metadata -- confirmed live, it silently built
+# and "successfully installed" a wheel named UNKNOWN-0.0.0 with no `clip`
+# module actually importable, no error at install time to catch it.
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip3 install --no-cache-dir "git+https://github.com/ultralytics/CLIP.git"
+
+# `ultralytics` pulls in numpy>=2 unconstrained (2.2.6 as of this writing),
+# silently upgrading Dockerfile.perception's deliberate numpy==1.26.4 pin.
+# Confirmed live: pycuda (compiled against numpy 1.x's C-API) then fails
+# `import pycuda.autoinit` with "AttributeError: _ARRAY_API not found" /
+# "SystemError: initialization of _driver raised unreported exception" --
+# a hard break, not a warning. Re-pin back down after ultralytics/CLIP so
+# both torch/ultralytics AND pycuda/tensorrt work in the same container;
+# confirmed ultralytics still imports and runs fine against 1.26.4.
+RUN pip3 install --no-cache-dir numpy==1.26.4
 
 # Container user matching the host's UID/GID (user1:1000:1000) -- same
 # rationale as Dockerfile.robotican (repo mounted at the SAME absolute path

@@ -11,6 +11,49 @@ Format per entry:
 
 ---
 
+## 2026-07-29 — new detector container: numpy/CLIP/TensorRT-version traps, in sequence
+
+**Symptom:** Building `docker/Dockerfile.detector` (torch + ultralytics on top of the
+`perception` layer, for the YOLO-World detector) hit three separate, unrelated failures, each
+only visible after fixing the one before it: (1) `pip install torch` timed out mid-download
+with a default 120s timeout, (2) after fixing that, `import pycuda.autoinit` failed with
+`AttributeError: _ARRAY_API not found`, (3) after fixing that, the detector node failed with
+`RuntimeError: Failed to deserialize one of the engines.`
+
+**Root cause:** Three independent issues, not one:
+1. torch's CUDA 13 wheels are large; pip's default read timeout can trip mid-stream well
+   before anything is actually wrong (same as `Dockerfile.perception`'s own tensorrt install
+   already documents) — needs a much longer `--timeout`, not just `--retries`.
+2. `ultralytics` declares `numpy` unconstrained, so pip resolved `numpy==2.2.6` — silently
+   overriding `perception`'s deliberate `numpy==1.26.4` pin (there specifically so `pycuda`,
+   compiled against numpy 1.x's C-API, works). numpy 2.x breaks pycuda outright, not just a
+   warning.
+3. `git+https://github.com/ultralytics/CLIP.git` "succeeded" but built a wheel named literally
+   `UNKNOWN-0.0.0` — the base image's stock pip 22.0.2/setuptools 59.6.0 mis-resolve that
+   repo's `pyproject.toml` metadata, so no `clip` module was actually importable despite a
+   clean-looking install log. Separately, once TensorRT engines finally loaded, they were
+   built on the HOST (TensorRT 10.16.1.11) and failed to deserialize in the container
+   (TensorRT 10.15.1.29) — `Dockerfile.perception` already documents that engines are locked
+   to the exact TRT build that produced them, not just a major-version match.
+
+**Fix / workaround:** In order: raised the pip timeout to 600s/8 retries for the torch
+install; added an explicit `pip3 install numpy==1.26.4` as the LAST install step (after
+ultralytics/CLIP, so nothing downstream re-upgrades it) — confirmed `cv2` (a *different*
+package, pip's own `opencv-python`, not `perception`'s apt `python3-opencv`) tolerates the
+downgrade fine despite pip flagging it as a dependency conflict; upgraded
+`pip`/`setuptools`/`wheel` before the CLIP install so it resolves the real package name; and
+rebuilt just the TensorRT engine (not the ONNX export — that's portable) inside the container
+that will actually run it.
+
+**Don't:** Don't trust a "Successfully installed X" pip log line as proof X actually works —
+check the real package name landed (not `UNKNOWN`) and that nothing else silently got
+up/downgraded as a side effect. Don't assume a TensorRT engine built on one machine/container
+works in another with a different TensorRT version, even the same GPU — rebuild the engine
+(cheap, seconds) inside wherever it will actually run, and check `Dockerfile.perception`'s own
+comments before re-debugging a version-mismatch class already documented there.
+
+---
+
 ## 2026-07-29 — stale `ros2` CLI daemon kept showing zero R1 topics after switching networks/domains back and forth
 
 **Symptom:** After going real-drone (`ROS_DOMAIN_ID=1`, CycloneDDS pointed at the real

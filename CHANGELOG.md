@@ -12,6 +12,14 @@ future-you, not for a commit log.
   despite being reported installed (corrupted/interrupted earlier install). See LESSONS.md.
 
 ### Added
+- New `detector` container (`docker/Dockerfile.detector`, `bake.hcl` sibling target off
+  `perception`, `docker-compose.detector.yml`, started persistently as `detector_dev`) running
+  the YOLO-World detector sidecar — torch/ultralytics/CLIP kept out of `perception`/`robotican`
+  since `yolo_world_trt` is shared task infra, not ROBOTICAN-specific. `run_object_mission_sphera.sh`
+  now launches the sidecar via `docker exec` into it instead of the bare host venv, and passes
+  `rgb_topic:=/R1/rgb_frame_path` explicitly (previously unset, silently defaulting to XTEND's
+  topic). See LESSONS.md for three build issues hit and fixed along the way (numpy pin conflict,
+  a mis-built CLIP wheel, TensorRT engine/version lock).
 - Built the YOLO-World-`s` TensorRT engine (`yolo_world_trt/build_all.sh s`) end-to-end for
   the first time on this PC (installed `ultralytics`, downloaded `yolov8s-worldv2.pt`) —
   `./run_object_mission_sphera.sh --detector-only` now actually starts the detector sidecar.

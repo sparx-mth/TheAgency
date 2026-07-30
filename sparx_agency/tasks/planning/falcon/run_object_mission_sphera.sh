@@ -202,10 +202,13 @@ fi
 # pattern is also matched by anything that merely mentions it -- an editor, a
 # `tail -f` on the log, or the very shell command you typed to check -- and a guard
 # satisfied by an open editor is worse than no guard.
+# Sphera-only difference: the sidecar runs inside detector_dev (see below),
+# not on the bare host -- so this check is a `docker exec` pgrep, not a
+# host-level one.
 DETECTOR_PATTERN="python.*yolo_detector_ros2_node\.py"
 if [[ $WANT_FALCON -eq 1 && $WANT_DETECTOR -eq 0 ]]; then
-  if ! pgrep -f "$DETECTOR_PATTERN" >/dev/null 2>&1; then
-    echo "[ERROR] --falcon-only: no detector sidecar is running." >&2
+  if ! docker exec detector_dev pgrep -f "$DETECTOR_PATTERN" >/dev/null 2>&1; then
+    echo "[ERROR] --falcon-only: no detector sidecar is running (in detector_dev)." >&2
     echo "        Nothing would ever publish a detection, so the mission could only" >&2
     echo "        ever land by A* alone -- while looking perfectly healthy." >&2
     echo "        Start one first, in another terminal:" >&2
@@ -213,7 +216,7 @@ if [[ $WANT_FALCON -eq 1 && $WANT_DETECTOR -eq 0 ]]; then
     echo "        or drop the flag to run the whole stack: $0" >&2
     exit 1
   fi
-  echo "[mission] reusing the detector sidecar already running (pid $(pgrep -f "$DETECTOR_PATTERN" | head -1))"
+  echo "[mission] reusing the detector sidecar already running (pid $(docker exec detector_dev pgrep -f "$DETECTOR_PATTERN" | head -1))"
 fi
 # Fail here rather than inside the container: a missing catalog is a stale/absent
 # room map, and the next-best candidate (the shipped objects.json) holds a DIFFERENT
@@ -302,11 +305,19 @@ echo
 # Under --falcon-only the sidecar belongs to another terminal: killing it on exit
 # would defeat the entire point of the flag (the next relaunch would reload the
 # engines), so the guards below are load-bearing, not defensive.
+DETECTOR_PROC_PATTERN="yolo_detector_ros2_node.py"
 cleanup() {
   echo
   echo "[mission] shutting down what this run started ..."
+  # docker exec pkill (not a bare `kill $SIDECAR_PID`): SIDECAR_PID is the
+  # LOCAL `docker exec` client process. Killing only that does not reliably
+  # stop the node actually running inside detector_dev (docker exec has no
+  # ptrace/process-group tie to the client by default) -- confirmed against
+  # the same pattern mission_control.py already uses for proc_container
+  # services.
   if [[ $WANT_DETECTOR -eq 1 && -n "${SIDECAR_PID:-}" ]]; then
     kill "$SIDECAR_PID" 2>/dev/null || true
+    docker exec detector_dev pkill -f "$DETECTOR_PROC_PATTERN" 2>/dev/null || true
   fi
   [[ $WANT_BRIDGE -eq 1 ]] && docker rm -f ros1_bridge 2>/dev/null || true
   [[ $WANT_FALCON -eq 1 ]] && docker rm -f falcon      2>/dev/null || true
@@ -321,24 +332,46 @@ trap cleanup EXIT INT TERM
 # ROS setup scripts reference unbound vars / return nonzero -- guard set -e/-u.
 set +u +e; source /opt/ros/humble/setup.bash; set -u -e   # shellcheck disable=SC1091
 
-# ── 1. Detector sidecar (host, ROS2, GPU) ────────────────────
+# ── 1. Detector sidecar (container `detector_dev`, GPU) ───────
+# Sphera-only difference from run_object_mission.sh: that one runs the
+# sidecar on the bare host venv (torch/ultralytics installed there); this
+# fork runs it inside the `detector` image instead (docker/Dockerfile.detector,
+# started persistently via docker-compose.detector.yml as `detector_dev` --
+# same long-running pattern as `robotican_dev`). --falcon-only's "is a
+# sidecar already running" check below still greps by process pattern, now
+# via `docker exec` instead of a bare host `pgrep`.
 if [[ $WANT_DETECTOR -eq 1 ]]; then
-  echo "[mission] starting the YOLO-World detector sidecar (host, GPU) ..."
-  # PREPEND, never assign: the setup.bash above puts ROS's site-packages (rclpy et al)
-  # on PYTHONPATH, and a bare PYTHONPATH="$REPO_ROOT" prefix would drop it -- the node
-  # then dies on `import rclpy` even though the venv is fine.
-  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" \
-    "$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py" \
-    --ros-args \
-      -p target_object:="$INIT_TARGET" \
-      -p conf_thresh:="$CONF_THRESH" \
-      -p backbone_engine:="$BACKBONE" \
-      -p head_engine:="$HEAD" \
-      -p text_weights:="$TEXT_WEIGHTS" \
-    >"$LOG_DIR/sidecar.log" 2>&1 &
+  if ! docker ps --format '{{.Names}}' | grep -qx detector_dev; then
+    echo "[ERROR] detector_dev container is not running." >&2
+    echo "        Start it first:" >&2
+    echo "          docker compose -f $REPO_ROOT/docker-compose.detector.yml run -d --rm --name detector_dev detector tail -f /dev/null" >&2
+    exit 1
+  fi
+  echo "[mission] starting the YOLO-World detector sidecar (detector_dev container, GPU) ..."
+  # NOT `docker exec -d` (detached): that returns immediately, so `$!` would
+  # be the already-exited detach client, not something `kill -0`/`wait` can
+  # track. Plain `docker exec` (no -d), backgrounded with shell `&` instead,
+  # stays attached and streaming for as long as the remote process runs --
+  # same shape the original host-PID tracking below expects. $LOG_DIR is
+  # bind-mounted into detector_dev at the same path (docker-compose.detector.yml)
+  # so this host-side script can still read/tail it directly.
+  docker exec detector_dev bash -lc "
+    source /opt/ros/humble/setup.bash
+    export ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export CYCLONEDDS_URI='file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml'
+    export PYTHONPATH=\"$REPO_ROOT\${PYTHONPATH:+:\$PYTHONPATH}\"
+    python3 '$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py' \
+      --ros-args \
+        -p target_object:='$INIT_TARGET' \
+        -p conf_thresh:='$CONF_THRESH' \
+        -p backbone_engine:='$BACKBONE' \
+        -p head_engine:='$HEAD' \
+        -p text_weights:='$TEXT_WEIGHTS' \
+        -p rgb_topic:=/R1/rgb_frame_path \
+  " >"$LOG_DIR/sidecar.log" 2>&1 &
   SIDECAR_PID=$!
   sleep 3
-  if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
+  if ! docker exec detector_dev pgrep -f "$DETECTOR_PROC_PATTERN" >/dev/null 2>&1; then
     echo "[ERROR] detector sidecar died on startup -- see $LOG_DIR/sidecar.log" >&2
     tail -n 20 "$LOG_DIR/sidecar.log" >&2 || true
     exit 1

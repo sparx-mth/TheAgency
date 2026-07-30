@@ -6,7 +6,7 @@
   "use_dla": false,
   "gpu_fallback": null,
   "dynamic_N": false,
-  "trt_version": "10.16.1.11",
+  "trt_version": "10.15.1.29",
   "sm": 89,
   "target_tag": "nvidiageforcertx_sm89",
   "gpu_name": "NVIDIA GeForce RTX 4090",

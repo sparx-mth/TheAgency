@@ -51,6 +51,40 @@ clicking a point, the system identifies *what* it's looking at and navigates to 
       (`s`, `/home/user1/Downloads` — the previous default was `/home/user`, wrong username for
       this PC). Only `s` is built; `m`/`l`/`x` are not (mission.yaml/XTEND's own default is
       still `x`, untouched).
+- [x] Move the detector off the bare host venv into its own container (user's explicit ask —
+      the overall migration is host-PC-in-a-container-based, not Jetson-based, for the Sphera
+      side). New sibling image off `perception` (not folded into `robotican` — `yolo_world_trt`
+      is shared task infra, not ROBOTICAN-specific, and keeps `robotican_dev` focused on ROS2/
+      Rooster concerns): `docker/Dockerfile.detector`, a `detector` target in `docker/bake.hcl`,
+      and `docker-compose.detector.yml` (started persistently as `detector_dev`, same pattern as
+      `robotican_dev`). Three real problems hit and fixed along the way, in order:
+  - `ultralytics` pulls in `numpy>=2` unconstrained, silently upgrading `perception`'s
+    deliberate `numpy==1.26.4` pin — broke `pycuda` (`_ARRAY_API not found`). Fixed by
+    re-pinning `numpy==1.26.4` as a final layer after `ultralytics`/CLIP install; confirmed
+    `cv2`(`opencv-python`, a *different* package from `perception`'s own apt `python3-opencv`)
+    tolerates the downgrade fine despite pip's own dependency-conflict warning.
+  - The CLIP git install silently built/installed a wheel literally named `UNKNOWN-0.0.0` (no
+    error, but no importable `clip` module either) — this base image's stock pip 22.0.2/
+    setuptools 59.6.0 mis-resolve the repo's `pyproject.toml` metadata. Fixed by upgrading
+    pip/setuptools/wheel before the CLIP install.
+  - TensorRT engines are locked to the *exact* TRT build that produced them (already documented
+    in `Dockerfile.perception`'s own comments) — the `s` engine built earlier on the host
+    (TRT 10.16.1.11) failed to deserialize against the container's TRT (10.15.1.29). Rebuilt
+    just the engine (not re-export — ONNX is portable) inside `detector_dev`.
+  - `run_object_mission_sphera.sh`'s detector-launch block rewired to `docker exec` into
+    `detector_dev` (a plain `docker exec ... &`, NOT `-d`/detached — detached returns
+    immediately, so `$!` would be an already-exited PID the existing `kill -0`/`wait` logic
+    can't track); the `--falcon-only` "is a sidecar running" pre-check now greps inside the
+    container too. Also fixed a real, separate bug found in the process: the detector was
+    never told Rooster's `rgb_topic` at all (defaulted to XTEND's `/xtend/rgb_frame_path`) —
+    added `-p rgb_topic:=/R1/rgb_frame_path` explicitly.
+  - Weights relocated from `/home/user1/Downloads` (not mounted into any container) to
+    `~/.cache/sparx_agency/yolo_world_weights/` (already mounted read-write, the actual
+    model-registry cache dir); `mission_sphera.yaml` updated to match.
+  - Re-verified end-to-end after all of the above: `./run_object_mission_sphera.sh
+    --detector-only` starts the sidecar inside `detector_dev`, confirmed via
+    `docker exec detector_dev pgrep`, with the log showing the correct engine paths, weights
+    path, AND `rgb in = /R1/rgb_frame_path`.
 - [ ] Get a 2D detection (label + bounding box) reliably for a test object — **open question
       answered: no labeled object is known to exist in `sphera_jail` yet** (no room-mapper
       catalog for this map — see `objects_sphera.json`, a placeholder catalog with 2 fictional
@@ -96,11 +130,12 @@ clicking a point, the system identifies *what* it's looking at and navigates to 
   script forks), not building detection logic from scratch.
 - 2026-07-29: Did **not** create/switch to the `feat/yolo-object-navigation` branch this entry
   names — another agent was concurrently active on the shared `create_devcontainer_daphna`
-  checkout, and switching branches on a shared working directory without coordinating already
-  caused that agent a real, confusing bug once this session (see
-  `feedback_no_branch_switch_shared_workdir` memory). All new files from today are additive
-  (new files only, zero edits to existing tracked files), so leaving them uncommitted on the
-  current branch carries no real risk — branching/committing is left for the user to decide.
+  checkout, and switching branches on a shared working directory without coordinating is risky
+  in general (see `feedback_no_branch_switch_shared_workdir` memory; a bug did occur around
+  this time but was unrelated/already fixed, confirmed by the user). All new files from today
+  are additive (new files only, zero edits to existing tracked files), so leaving them
+  uncommitted on the current branch carries no real risk — branching/committing is left for
+  the user to decide.
 - 2026-07-29: Confirmed via `mission_control.py`'s "Rooster Falcon Adapter" service (the most
   up-to-date source of Rooster's actual live parameters, per the `fly-rooster-sphera` skill's
   own advice to check there over the skill doc) exactly which values to port: `real_pose_topic`,
