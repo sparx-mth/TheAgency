@@ -195,6 +195,16 @@ FALCON_LOG_HOST="${HOME}/.cache/sparx_agency/falcon_nav_logs/sphera"
 mkdir -p "${FALCON_LOG_HOST}"
 FALCON_LOG_MOUNT=( --volume "${FALCON_LOG_HOST}:/root/.ros/falcon" )
 
+# thinking_log_path/certainty_log_path (mission.yaml/mission_sphera.yaml) name
+# /tmp/falcon on the HOST as their intended landing spot, but nothing actually
+# mounted that path -- FALCON_THOUGHT_LOG/FALCON_CERTAINTY_LOG were unset, so
+# nav_stack.launch's own fallback ('' -> ~/.ros/falcon/, i.e. FALCON_LOG_MOUNT
+# above) silently took over instead. Mount /tmp/falcon for real and point
+# both env vars at it explicitly so these logs land where the comments say.
+mkdir -p /tmp/falcon
+FALCON_THOUGHT_LOG_MOUNT=( --volume /tmp/falcon:/tmp/falcon )
+RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
+
 # ── Run ───────────────────────────────────────────────────────
 # NOTE: the map YAML below is intentionally still a single-file mount, NOT
 # a directory mount like scripts/launch above -- FALCON's own
@@ -224,11 +234,14 @@ docker run -it --rm \
     --volume /tmp/.X11-unix:/tmp/.X11-unix:rw \
     --volume "${SPARX_PARENT}/sparx_agency:/opt/sparx_agency:ro" \
     --env PYTHONPATH=/opt:/catkin_ws/src/falcon_adapter/scripts \
+    --env FALCON_THOUGHT_LOG="/tmp/falcon/thinking_${RUN_STAMP}.log" \
+    --env FALCON_CERTAINTY_LOG="/tmp/falcon/certainty_${RUN_STAMP}.csv" \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
     "${FALCON_LOG_MOUNT[@]}" \
+    "${FALCON_THOUGHT_LOG_MOUNT[@]}" \
     --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     "${RVIZ_MOUNT[@]}" \
     --network host \

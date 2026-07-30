@@ -6,6 +6,10 @@ future-you, not for a commit log.
 
 ## [Unreleased]
 ### Fixed
+- `rooster_twist_control_adapter.py`'s `max_yaw_rate` recalibrated from a never-validated
+  0.5 rad/s to 1.8 rad/s, derived from a logged manual flight's actual turn-rate behavior
+  (~4x too low previously — any planner-requested yaw rate was executed much faster than
+  intended). See LESSONS.md and `docs/progress/entries/007-rooster-velocity-controller.md`.
 - Broken `torch` import in the project venv (`venv/`): removed an orphaned cu12 NVIDIA package
   cluster conflicting with `torch==2.11.0`'s actual cu13 requirement, and force-reinstalled two
   cu13 packages (`nvidia-cudnn-cu13`, `nvidia-nvshmem-cu13`) whose library files were missing

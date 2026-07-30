@@ -187,6 +187,32 @@ and you're about to test click-to-fly.
 flight test — it will silently sabotage takeoff/land and the failure looks like a
 throttle/timing bug in `rooster_command_unit.py`, not a second process fighting it.
 
+**Update 2026-07-30 — same root cause, a much more misleading second symptom:** left the
+twist-control adapter running from an earlier FALCON click-to-fly test, then moved on to a
+manual-flight session via the Tkinter `ui.py`. The drone took off and immediately flew hard
+into a wall; it LOOKED exactly like a yaw/turn-direction bug (see the "BEV click turned the
+wrong way" investigation earlier the same day) — plausible enough that real time went into
+checking bearing math and body-frame conventions before the actual cause surfaced. A
+command+pose logger (subscribing to `/R1/cmd_nav` and `/R1/localization`, no
+publishing) showed the real story: continuous `{"action": "move", "axes": {"x": 599, "y":
+0, "r": 0}}` commands at ~50ms intervals, present in **6672 of 6765** logged commands
+(only 93 had `x==0`) — i.e. an almost-constant ~60%-forward push with zero steering,
+starting before `arm` and continuing straight through takeoff. `ui.py` itself only ever
+sends discrete named actions (`forward`/`turn_left`/etc., grepped — no `"move"` string
+anywhere in it), so this wasn't the UI's own doing at all: `{"action": "move", "axes":
+{...}}` is `rooster_twist_control_adapter.py`'s own publish format, and it was still alive
+from earlier, faithfully translating FALCON's `waypoint_follower` (still cruising toward
+its own leftover default goal) into a continuous forward push that fought every manual
+input the whole session.
+
+**Don't (extended):** A drone that "drifts/turns into a wall immediately on takeoff" is
+NOT proof of a yaw-sign or turn-direction bug — check `ps aux | grep
+rooster_twist_control_adapter` (or any other `/R1/cmd_nav` publisher) FIRST, before
+re-deriving bearing/handedness math again. A cheap command+pose logger (subscribe-only,
+never publish) that records every `cmd_nav` message alongside ground-truth pose settles
+this class of question in seconds instead of live-flight-testing guesswork — keep using
+one whenever "what actually got commanded" is in doubt.
+
 ---
 
 ## 2026-07-28 — camera rig/mount visible in its own FOV, fused as a permanent phantom wall
@@ -419,6 +445,113 @@ project depend on it) doesn't lose something another part of the codebase actual
 Don't reinstall a big package (torch) wholesale to fix what's actually a missing-file problem
 in one of its dependencies — `pip show -f` + a file-existence check finds the precise culprit
 in seconds and avoids re-downloading everything.
+
+## 2026-07-30 — Rooster twist-control adapter's max_yaw_rate was ~4x too low
+
+**Symptom:** No live crash or error — found via a logged manual flight, not a reported bug.
+`rooster_twist_control_adapter.py` scales an incoming Twist to a `/R1/cmd_nav` axis value as
+`axis = twist_component / max_component * 1000`, with `max_yaw_rate` defaulting to 0.5 rad/s
+(never live-validated — same "assumed from doc convention" class of issue already seen once
+with `turn_left`/`turn_right`'s r-axis sign, see the earlier stop-watchdog entry above).
+
+**Root cause:** A subscribe-only command+pose logger (`manual_flight_logger.py`, joins
+`/R1/cmd_nav` and `/R1/localization` by timestamp) captured a full manual flight and let the
+actual axis->rate relationship be measured directly instead of assumed. 8 isolated
+`turn_right` segments (axis r=500, each bounded by the next command so no averaging across
+unrelated motion) gave a consistent ~55 deg/s (~0.96 rad/s), extrapolating to axis 1000 (full
+deflection) -> ~1.9 rad/s. The configured 0.5 rad/s max meant any planner (FALCON's
+`waypoint_follower_node.py` via `rooster_twist_control_adapter.py`) requesting even a modest
+angular.z was actually commanding a turn ~4x faster than it thought it was asking for.
+3 `turn_left` segments gave a lower ~42 deg/s (~1.5 rad/s at full scale) — a real left/right
+asymmetry, or noise from the small sample, not yet resolved (see
+`docs/progress/entries/007-rooster-velocity-controller.md`).
+
+**Fix / workaround:** Recalibrated `max_yaw_rate`'s default from 0.5 to 1.8 rad/s (both the
+constructor default and the CLI `--max-yaw-rate` default) in `rooster_twist_control_adapter.py`,
+with the derivation documented inline. `max_linear_x`/`max_linear_y` were left unchanged —
+this same flight's forward/lateral segments were too short and interleaved with adjacent turns
+(leftover momentum contaminated each segment; several "forward" segments even showed net
+*negative* displacement) to derive a trustworthy number. A dedicated calibration flight
+(isolated single-axis moves, no interleaving) is the planned follow-up for those and to
+confirm whether the yaw asymmetry is real.
+
+**Don't:** Don't assume a `max_*` "rate at full deflection" constant is correct just because
+no one has complained — it can be silently wrong for a long time if nothing downstream
+saturates it in an obviously visible way. Don't try to calibrate axis->rate gains from a
+flight that wasn't designed for calibration (this one mixed forward/turn commands back to
+back) unless the segment is long/isolated enough that adjacent-command momentum can't
+contaminate it — turn-rate segments here were trustworthy because each was bounded cleanly by
+stops; translational segments were not, for the same reason.
+
+## 2026-07-30 — flew after an R1 crash without restarting falcon, map was poisoned
+
+**Symptom:** After `rooster_manager` crashed inside `R1` and Sphera was restarted, only
+`ros1_bridge` and `video_trigger.py` were restarted (the documented fix for those two going
+stale on R1 recreation) — `falcon` itself, running continuously since well before the crash,
+was left alone on the reasoning "the drone respawned at the same spawn point, so the map
+should still be valid." The next click-to-fly test got repeated `astar_planner` "boxed in" /
+"PLAN FAILED ... pinched at (x,y) — thinner than the airframe, so most likely a mis-detected
+voxel" warnings, the drone jumped several meters at a time while nominally stopped, and landed
+~11m from the intended goal.
+
+**Root cause:** `exploration_node`'s voxel map is long-lived state for the whole `falcon`
+container's lifetime, and FALCON's TSDF/ESDF mapping has no exposed decay/forgetting or
+hit/miss-probability knob at all (confirmed by reading the vendored source directly) — bad
+fused data isn't temporally erased, it just sits there until enough new correct observations
+outweigh it, if that happens at all before the bad region matters for planning. During the
+`rooster_manager` crash window, `video_trigger.py` kept running and (per the existing
+"does NOT reconnect after R1 respawn" gotcha above) very likely froze on its last decoded
+frame and kept feeding stale/close-up depth into the still-running map as if it were real
+geometry. "Same spawn point" says nothing about whether the map's accumulated voxels are
+still trustworthy — that reasoning was the actual mistake.
+
+**Fix / workaround:** Elevated to a first-rule item in the `fly-rooster-sphera` skill: any
+time `R1` crashes or gets recreated, fully restart `falcon` (not just `ros1_bridge`/
+`video_trigger.py`) before flying again. A full container restart costs under a minute and
+guarantees a clean map, which is far cheaper than diagnosing "is the occupancy map buggy" as
+if it were a deep, novel bug every time this happens.
+
+**Don't:** Don't reason about map validity from drone *position* alone — the map is a
+function of everything that got fused into it since the container started, not of where the
+drone currently is. Don't skip restarting `falcon` after an `R1`-side crash just because the
+immediately-obvious staleness fixes (bridge, video) are already in the routine — the map
+itself is the thing most silently damaged by exactly that kind of disruption.
+
+## 2026-07-30 — a directional cmd_nav action doesn't clear the other axes
+
+**Symptom:** Drone got pinned against a wall during an autonomous click-to-fly test. Killed
+`rooster_twist_control_adapter.py` (the competing publisher) and immediately sent a single
+`{"action": "backward", "value": 300}` to back it away. Instead of retreating cleanly, the
+drone's position and the altitude-hold ranger both went wild (ranger jumped 1.7m -> 3.1m ->
+4.06m within 2s, velocity swinging -1.84 -> +0.94 -> -0.17 m/s) and it ended up far from where
+a straight retreat should have put it.
+
+**Root cause:** `rooster_command_unit.py`'s `_MOVE_ACTIONS` handling (`_on_cmd_nav`) only
+overrides the ONE axis a named action maps to (`"backward": dict(x=-1)` only ever touches
+`x`) — `y` and `r` are explicitly preserved from `unit.axes`'s current value, by design, so
+that turning while flying doesn't zero the drone's throttle/altitude-hold `z` axis. But that
+same preservation applies to `y`/`r` too: whatever `rooster_twist_control_adapter.py` had
+last written (it had been actively commanding a nonzero yaw rate while fighting the stuck-
+against-wall situation, right up until the moment its process was killed) stayed latched in
+`RoosterUnit.axes` and got carried straight into the `backward` command. The drone was very
+likely retreating correctly relative to its own nose (confirmed via `rooster_unit.py:164-168`
+publish_manual - `x/y/r` pass straight into the vendor `ManualControl` message with no frame
+transform in our code, and FCU `ManualControl` axes are body-relative on essentially every
+FCU convention) while ALSO still spinning from the stale `r` - a body-relative retreat plus
+continuous yaw looks, from the world frame, exactly like "backward went somewhere wrong."
+
+**Fix / workaround:** Send `stop` first (a distinct action, not part of `_MOVE_ACTIONS` -
+zeroes x/y/r fully) to clear ALL latched axes, THEN send the desired directional action.
+Never assume killing a competing publisher process also clears the state it already wrote
+into `RoosterUnit` - the axes it set are still sitting there until something explicitly
+overrides or zeroes them.
+
+**Don't:** Don't reach for a single named directional cmd_nav action as an emergency override
+without a preceding `stop` when a different controller (autonomous or otherwise) was just
+active - it inherits whatever that controller left on every axis except the one you're
+setting. Don't assume "the drone moved in a weird direction" means the axis convention itself
+is wrong (body- vs world-frame) before checking what was actually latched on the OTHER axes
+first - the frame convention here was correct; the bug was leftover state.
 
 <!--
 Example, in the style already proven useful in project-specific skills:

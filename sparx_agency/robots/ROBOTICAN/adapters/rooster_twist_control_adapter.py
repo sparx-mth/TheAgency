@@ -20,6 +20,22 @@ Twist mapping:
   linear.y   lateral          -> axis y
   angular.z  yaw rate         -> axis r
   linear.z is ignored - altitude is rooster_command_unit.py's job alone.
+
+max_linear_x/max_linear_y/max_yaw_rate are "real-world rate produced at full
+axis deflection (1000)" - the scale factor a planner's Twist is normalized
+against before becoming an axis value. max_yaw_rate was recalibrated
+2026-07-30 from 0.5 to 1.8 rad/s: a logged manual flight (command+pose,
+see docs/progress/entries/007-rooster-velocity-controller.md) showed
+axis r=500 (turn_right) produced ~55 deg/s (~0.96 rad/s) over 8 isolated
+turn segments, i.e. axis 1000 -> ~1.9 rad/s - the old 0.5 rad/s default was
+never live-validated and was ~4x too low, meaning any planner asking for
+even a modest yaw rate was actually commanding a much faster real turn than
+intended. See LESSONS.md for the full derivation. max_linear_x/max_linear_y
+were left unchanged: the same flight's forward/lateral segments were too
+short and interleaved with turns (leftover momentum contaminates each
+segment) to extract a trustworthy number - a dedicated calibration flight
+(isolated single-axis moves, no interleaving) is needed before touching
+those with the same confidence.
 """
 
 from __future__ import annotations
@@ -43,7 +59,7 @@ class RoosterTwistControlNode(Node):
         cmd_vel_topic: str | None = None,
         max_linear_x: float = 0.25,
         max_linear_y: float = 0.25,
-        max_yaw_rate: float = 0.5,
+        max_yaw_rate: float = 1.8,
         command_hz: float = 20.0,
         cmd_timeout_sec: float = 0.4,
     ):
@@ -117,7 +133,7 @@ def main(args=None):
     parser.add_argument("--cmd-vel-topic", default=None)
     parser.add_argument("--max-linear-x", type=float, default=0.25)
     parser.add_argument("--max-linear-y", type=float, default=0.25)
-    parser.add_argument("--max-yaw-rate", type=float, default=0.5)
+    parser.add_argument("--max-yaw-rate", type=float, default=1.8)
     parser.add_argument("--command-hz", type=float, default=20.0)
     parser.add_argument("--cmd-timeout-sec", type=float, default=0.4)
     parsed, _ = parser.parse_known_args()

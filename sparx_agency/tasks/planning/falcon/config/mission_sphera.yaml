@@ -190,12 +190,15 @@ launch:
   #                   see. Its dials are the CONTROLLER 5 section below.
   # Each has its OWN speed dials below, so a value in the wrong block does nothing.
   # NOTE: sphera_drone.launch (which object_mission_sphera.launch includes)
-  # hardcodes controller:=multi_axis into its own nav_stack.launch include
-  # regardless of what's passed to it -- Rooster is holonomic and the
-  # one-axis/drift_pid followers below assume a real AprilTag pose stream
-  # this platform doesn't have. This key is effectively documentation only
-  # for the Sphera path; set to match reality rather than leave it misleading.
-  controller: multi_axis       # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
+  # hardcodes its own controller:= into its nav_stack.launch include
+  # regardless of what's passed to it. This key is effectively documentation
+  # only for the Sphera path; set to match reality rather than leave it
+  # misleading. 2026-07-30: sphera_drone.launch switched multi_axis ->
+  # waypoint now that rooster_demo_mode_manager.py exists to satisfy the
+  # one-axis handshake (see that launch file's own comment for the history).
+  # drift_pid still assumes a real AprilTag pose stream this platform
+  # doesn't have, so it stays off the table for Sphera regardless.
+  controller: waypoint         # waypoint | roll_assist | multi_axis | pure_pursuit | drift_pid
                               #   NOTE: real_drone.launch defaults to roll_assist, but the
                               #   object mission has always pinned waypoint. Set it here.
   cruise_z: 1.0               # m, flight altitude for every controller; the BEV weight

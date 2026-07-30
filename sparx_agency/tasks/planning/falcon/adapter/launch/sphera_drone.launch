@@ -122,6 +122,12 @@
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
   <arg name="vel_x"     default="0.3" />
+  <!-- multi_axis-only (sphera_drone.launch hardcodes controller:=multi_axis
+       below); nav_stack.launch's own defaults are mx_lateral_speed_max=0.25,
+       mx_yaw_rate=0.6; exposed here so a slower/faster first flight test
+       doesn't need editing the shared nav_stack.launch. -->
+  <arg name="mx_lateral_speed_max" default="0.25" />
+  <arg name="mx_yaw_rate"          default="0.6" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
@@ -355,6 +361,8 @@
     <arg name="cam_max_depth" value="$(arg cam_max_depth)" />
 
     <arg name="vel_x"         value="$(arg vel_x)" />
+    <arg name="mx_lateral_speed_max" value="$(arg mx_lateral_speed_max)" />
+    <arg name="mx_yaw_rate"          value="$(arg mx_yaw_rate)" />
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
@@ -367,18 +375,25 @@
 
     <!-- Rooster is holonomic (independent x/y/yaw via manual axes, not a
          differential-drive platform that must turn to face its travel
-         direction), so multi_axis is the correct controller; it's also the
-         only one whose demo-mode confirmation is best-effort by default
-         (~mx_require_mode:=false), unlike the default roll_assist/waypoint
-         one-axis handshake which hard-blocks forever if nothing publishes a
-         confirmation on demo_mode_topic. Confirmed live: with the default
-         controller, waypoint_follower deadlocked in YAW_ALIGN waiting on
-         'turning' confirmation that no Rooster-side demo-mode manager exists
-         to ever send (xtend_drone_demo_manager.py has no Rooster equivalent).
+         direction). multi_axis was originally chosen here because the
+         default roll_assist/waypoint one-axis handshake hard-blocks forever
+         waiting for a 'turning' confirmation on demo_mode_topic, and at the
+         time (pre-2026-07-28) no Rooster-side demo-mode manager existed to
+         ever send one (xtend_drone_demo_manager.py has no Rooster
+         equivalent); confirmed live as a deadlock in YAW_ALIGN.
+         2026-07-30: rooster_demo_mode_manager.py now exists (added 07-28 for
+         mapping_sync's rotation-freeze gate) and is launched below; it's a
+         generic request->echo arbiter, so it also satisfies the one-axis
+         handshake (waypoint_follower_node.py:869-872's
+         confirmed=(current_demo_mode==mode) resolves in one round-trip).
+         Switching to waypoint (the true single-axis controller: X-advance OR
+         yaw, never combined) to test live now that the manager is in place;
+         see docs/progress/entries/007-rooster-velocity-controller.md. Revert
+         to multi_axis if this still deadlocks or otherwise misbehaves.
          demo_mode_topic/_request_topic renamed off /xtend/... to match this
          robot's own /R1/... topic convention; mapping_sync's freeze gate
          below uses the same rename so the two stay coordinated. -->
-    <arg name="controller"              value="multi_axis" />
+    <arg name="controller"              value="waypoint" />
     <arg name="demo_mode_topic"         value="/R1/demo_mode" />
     <arg name="demo_mode_request_topic" value="/R1/demo_mode_request" />
 

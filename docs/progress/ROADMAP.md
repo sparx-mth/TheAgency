@@ -9,6 +9,7 @@ entry under `entries/` when work actually starts on it.
 - [ ] Incoming updated FALCON/planning drop from the user — integrate and re-verify → `entries/003-falcon-planning-update.md`
 - [ ] BEV click-to-fly: smooth, occupancy-aware navigation to the clicked point → `entries/004-occupancy-aware-navigation.md`
 - [ ] YOLO-detected object label + position ("barrel") as a FALCON navigation goal → `entries/005-yolo-object-navigation.md`
+- [ ] Calibrate/tune the FALCON->Rooster velocity controller against real drone behavior → `entries/007-rooster-velocity-controller.md`
 
 ## Next
 - [ ] Track down the noisy/speckled occupancy map (vendor CDR corruption suspected, not confirmed as the full explanation)
