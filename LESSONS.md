@@ -213,6 +213,29 @@ never publish) that records every `cmd_nav` message alongside ground-truth pose 
 this class of question in seconds instead of live-flight-testing guesswork — keep using
 one whenever "what actually got commanded" is in doubt.
 
+**Update 2026-08-02 — third occurrence, this time looked like a "turning left instead of
+right" planning/direction bug across THREE separate takeoffs.** After building a live
+telemetry dashboard for click-to-fly debugging, the twist-control adapter was left running
+(needed for that testing) and never stopped before the user switched to flying manually via
+`ui.py`. All three flights showed the drone hovering nearly in place with yaw oscillating
+50-100°+ repeatedly right after takeoff — this time the interference wasn't a constant
+forward push (2026-07-30's symptom) but an alignment fight, because FALCON's
+`waypoint_follower` always has a non-empty `self.goal` from the moment it launches
+(`~goal_x`/`~goal_y` args are read at init, before any click ever arrives — see
+`astar_planner_node.py`), so the adapter kept trying to turn the drone toward that static
+default goal while the user tried to fly a different direction by hand. The command log
+confirmed it instantly: 300 of 301 logged commands in each flight were `{"action": "move",
+...}` (the adapter's format), only 1 was the actual `takeoff` action — zero named actions
+(`forward`/`turn_left`/etc.) from the UI made it through uncontested.
+
+**Don't (extended further):** Having a live dashboard that shows this process's up/down
+status does NOT prevent this bug by itself — the status was accurate and visible the whole
+time, but nothing prompted anyone to actually stop the process when the testing mode
+switched from click-to-fly to manual flight. Whenever handing control back to a human pilot
+after any autonomous-navigation testing, explicitly kill every `/R1/cmd_nav` publisher that
+isn't the UI first — don't rely on remembering, and don't treat "the dashboard would show it
+as running" as equivalent to "someone will notice and stop it."
+
 ---
 
 ## 2026-07-28 — camera rig/mount visible in its own FOV, fused as a permanent phantom wall
@@ -552,6 +575,38 @@ active - it inherits whatever that controller left on every axis except the one 
 setting. Don't assume "the drone moved in a weird direction" means the axis convention itself
 is wrong (body- vs world-frame) before checking what was actually latched on the OTHER axes
 first - the frame convention here was correct; the bug was leftover state.
+
+---
+
+## 2026-08-02 — ros1_bridge crashed with std::bad_alloc after every Sphera restart, no voxels in RViz
+
+**Symptom:** After restarting Sphera/R1, `ros1_bridge` (launched via `run_bridge.sh` with only
+`ROS_DOMAIN_ID=9` set) crashed within ~1s of the first real messages flowing (`terminate called
+after throwing an instance of 'std::bad_alloc'`), right after logging "Passing message from ROS 2
+geometry_msgs/msg/PoseStamped..." or a plain `std_msgs/String`. `falcon`'s `mapping_sync` heartbeat
+stayed at `gate=WARMUP`, `last_pose` growing forever, so no voxels ever appeared in RViz. Recreating
+`R1`, restarting `it`, and retrying the bridge repeatedly all failed to fix it.
+
+**Root cause:** `run_bridge.sh`'s own header comment says Rooster/R1 requires
+`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` plus `CYCLONEDDS_URI=file:///home/$USER/rqs_iai_ws/src/cyclonedds.xml`
+(R1 is Jazzy/CycloneDDS; XTEND, the script's default, is Foxy/FastRTPS) - only `ROS_DOMAIN_ID=9` was
+being passed. The bridge ran on `rmw_fastrtps_cpp` trying to deserialize CDR from a CycloneDDS
+publisher; the cross-vendor CDR mismatch is what threw `bad_alloc`, not the previously-documented
+Sphera CycloneDDS interface corruption bug ([[project_sphera_cyclonedds_interface]] in memory) - that
+one only applies when both sides already agree on CycloneDDS.
+
+**Fix / workaround:** Always launch the bridge for Rooster/R1 with all three overrides together:
+`ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh`.
+`ROS_DOMAIN_ID` alone is not enough. Confirm by checking the bridge's own startup banner prints
+`RMW (ROS2): rmw_cyclonedds_cpp`, and confirm real flow with `rostopic hz /R1/localization` inside
+`falcon` (not by grepping the bridge log for "Passing message" - that line only ever prints once per
+topic type, so it can't tell you whether the stream later stalled).
+
+**Don't:** Don't assume a repeat `bad_alloc` after a Sphera restart is the known CycloneDDS-corruption
+bug and reach straight for "restart Sphera again" - check the bridge's actual RMW banner first. Don't
+trust `mapping_sync`'s heartbeat alone to mean "no bridge running" - `pose=2, buf=1` stuck and aging is
+what it looks like when the bridge greeted the topic once and then silently dropped it, distinct from
+`pose=0, last_pose=-1.0s` (never connected at all).
 
 <!--
 Example, in the style already proven useful in project-specific skills:

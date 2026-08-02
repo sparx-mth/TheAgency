@@ -128,6 +128,18 @@
        doesn't need editing the shared nav_stack.launch. -->
   <arg name="mx_lateral_speed_max" default="0.25" />
   <arg name="mx_yaw_rate"          default="0.6" />
+  <!-- "waypoint"-controller-only (the default one-axis follower, not
+       multi_axis). nav_stack.launch's own default is yaw_rate=0.7 rad/s;
+       the ASSUMED rotation speed the YAW_ALIGN burst sizing uses to decide
+       how many ticks to hold a turn command for. Investigated live
+       2026-08-02: real measured yaw rate for this drone is ~1.5-1.9 rad/s
+       (same finding that fixed mx_yaw_rate above, a separate copy of the
+       same class of miscalibration); with the 0.7 assumption, a burst
+       correctly aimed in the right direction physically rotates ~2.5x
+       further than the code intends, so it never converges cleanly and
+       keeps firing more same-direction bursts past the actual target. See
+       docs/progress/entries/007-rooster-velocity-controller.md. -->
+  <arg name="yaw_rate"             default="0.7" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
@@ -141,6 +153,18 @@
   <arg name="bev_ymin"  default="-6.0" />
   <arg name="bev_xmax"  default="6.0" />
   <arg name="bev_ymax"  default="6.0" />
+
+  <!-- BEV anti-noise filter forwarding (2026-08-02): nav_stack.launch's own
+       defaults (2.0/3.0/3) are exposed here so Sphera can tighten them
+       without touching the shared file. Investigated live: A*'s
+       "turns away from the goal" routes trace back to real occupied cells
+       on the direct line, not obvious single-cell speckle; but one
+       checked blocker was an unusually thick (1.7m vs ~0.4-0.6m for clean
+       wall segments in the same grid) 256-cell blob, ambiguous enough to
+       be worth tightening rather than ignoring. -->
+  <arg name="bev_t_on"          default="2.0" />
+  <arg name="bev_occ_conf_full" default="3.0" />
+  <arg name="bev_min_wall_run"  default="3" />
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
        use_navdp:=true swaps astar_planner for navdp_click. It consumes the
@@ -363,9 +387,15 @@
     <arg name="vel_x"         value="$(arg vel_x)" />
     <arg name="mx_lateral_speed_max" value="$(arg mx_lateral_speed_max)" />
     <arg name="mx_yaw_rate"          value="$(arg mx_yaw_rate)" />
+    <arg name="yaw_rate"             value="$(arg yaw_rate)" />
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
+
+    <!-- BEV anti-noise filter forwarding — see the arg comment above. -->
+    <arg name="bev_t_on"          value="$(arg bev_t_on)" />
+    <arg name="bev_occ_conf_full" value="$(arg bev_occ_conf_full)" />
+    <arg name="bev_min_wall_run"  value="$(arg bev_min_wall_run)" />
 
     <!-- BEV viewport bounds — see the arg comment above for why this file exists. -->
     <arg name="bev_xmin"      value="$(arg bev_xmin)" />
