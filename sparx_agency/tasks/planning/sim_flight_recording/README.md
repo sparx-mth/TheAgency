@@ -434,6 +434,43 @@ roof connects to everything, so the flood escapes over the top. Measured on
 zero unknown voxels. A ceiling test (`restrict_to_indoor`) is what actually
 separates them, and with a voxel column in hand it is one array reduction.
 
+## Denser obstacles: `augment_scene.py`
+
+The stock scenes are sparse for obstacle-avoidance training -- `warehouse`
+especially, see `scene.py`'s `INDOOR_SCENES` comment. Rather than importing
+foreign assets (a materials/scale/style mismatch), this duplicates obstacle-
+sized prims *already in the scene* to new positions chosen against its own
+surveyed map, so a duplicate looks like it belongs:
+
+```bash
+# The scene needs a surveyed map first (see above) -- it is both what a new
+# obstacle must avoid landing in and the source of the "landable" floor it may
+# be placed on.
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/augment_scene.py \
+    --scene office --count 25 --min-spacing 1.5
+```
+
+This writes a duplication *recipe*
+(`robots/PEGASUS/scenes/<scene>_augmented.json`: which source prim, where, what
+yaw) rather than a baked `.usd` file -- see `scene_augment.py`'s module
+docstring for why an earlier USD-export version silently broke the
+indoor/outdoor ceiling test. `scene.py` picks the recipe up automatically as an
+`AUGMENTED_SCENES` entry (inheriting the base scene's spawn point) the next
+time anything imports it, so `office_augmented` is then usable anywhere a scene
+name is: **re-survey it first** -- the old map describes the building before
+the obstacles were added -- then fly or collect against it exactly like any
+other scene:
+
+```bash
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/survey_scene.py \
+    --scene office_augmented --altitude 1.5 --preview
+```
+
+`--min-spacing` and the default 1.5 m spawn keepout are both in
+`obstacle_placement.py`, unit-tested without Isaac Sim. Recipes are per-device
+(they reference this device's own scene-graph paths) and gitignored, same as
+the `.ply` point clouds.
+
 ## How the aircraft is actually flown
 
 **A smoothed spline, a moving carrot, and velocity setpoints closed on ground

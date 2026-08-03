@@ -118,6 +118,9 @@ robots/PEGASUS/
   adapters/scene.py                          load_indoor_scene() + a hand-measured spawn per scene
   adapters/scene_map.py                      where the maps live and how to read them (no Isaac import)
   adapters/voxel_survey.py                   sweep a loaded scene into the 3D map (needs a live sim)
+  adapters/obstacle_placement.py             where to put a new obstacle in a scene's free space (no Isaac import)
+  adapters/scene_augment.py                  duplicate a scene's own obstacles there (needs a live sim)
+  scenes/<scene>_augmented.json              obstacle-duplication recipe from augment_scene.py, gitignored
   adapters/sensors.py                        the PX4 sensor suite with every noise term zeroed
   adapters/vehicle.py                        PegasusIrisVehicle -- spawn Iris (+ optional PX4 backend) + RGBD camera
   setup/pegasus_isaac6_compat.patch          the Isaac Sim 6.x compatibility fixes, pinned to commit e13dc659

@@ -252,3 +252,7 @@ sparx_agency/tasks/planning/falcon/logs/
 # map itself IS committed (a few kB, and it makes a campaign reproducible).
 sparx_agency/robots/PEGASUS/maps/*.png
 sparx_agency/robots/PEGASUS/maps/*.ply
+
+# Obstacle-duplication recipes from augment_scene.py -- regenerated per device
+# (they reference this device's own scene-graph paths), never committed.
+sparx_agency/robots/PEGASUS/scenes/
