@@ -36,7 +36,23 @@ scene has been loaded and the timeline reset -- see
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
+
+# How far a finished duplicate's centre may sit from its intended target
+# before it is treated as a failed placement and dropped rather than left in
+# the scene at an arbitrary position. Set well above ordinary placement
+# rounding noise (centimetres) and well below the tens-of-metres errors a real
+# failure produces. Used by both :func:`duplicate_prim_verified` call sites --
+# the interactive generation pass in ``augment_scene.py`` *and* every replay
+# of the recipe (``scene.load_augmented_scene``). The two are not
+# interchangeable: a placement verified once at generation time is not
+# guaranteed to reproduce identically on a fresh replay (confirmed on a
+# warehouse scene with heavily shared/referenced box and pallet geometry --
+# some placements that passed verification during generation still landed
+# tens of metres off on a later, separately-booted replay), so the check has
+# to run again every time the recipe is applied, not just once when it is
+# written.
+VERIFY_TOLERANCE_M = 2.0
 
 # Structural prims to never duplicate -- floor/walls/ceiling/lighting/sky make
 # a corrupted-looking scene rather than a denser one, and are usually a very
@@ -150,6 +166,8 @@ def duplicate_prim(
     source_path: str,
     delta_xyz: Tuple[float, float, float],
     rotation_z_deg: float = 0.0,
+    stretch_top_m: float = None,
+    floor_z_m: float = 0.0,
 ) -> str:
     """Copy a prim to a new stage path, offset by a world-frame delta.
 
@@ -179,6 +197,14 @@ def duplicate_prim(
             whatever height off the floor the original had.
         rotation_z_deg: Extra yaw about world Z applied on top of the source's
             own rotation, for visual variety between copies of the same asset.
+        stretch_top_m: If given, scale the copy along Z (anchored at its own
+            base, not at the world origin -- see below) so its top reaches at
+            least this height above ``floor_z_m``. A drone cruising through a
+            band it merely *pokes into* can still slip over or under it;
+            stretching guarantees the obstacle actually spans the band. Never
+            shrinks a copy that already reaches this height (scale factor is
+            clamped to >= 1).
+        floor_z_m: World z of the floor, for ``stretch_top_m``.
 
     Returns:
         ``dest_path``.
@@ -195,6 +221,22 @@ def duplicate_prim(
 
     source_prim = stage.GetPrimAtPath(source_path)
     source_world = UsdGeom.Xformable(source_prim).ComputeLocalToWorldTransform(time)
+
+    # Scale factor computed from the source's own bounding box, before the
+    # copy: assumes the object's local origin sits at its own floor contact
+    # point (true of the floor-standing props this is meant for -- columns,
+    # racks, boxes -- which is also why min_reach_height_m/EXCLUDE_KEYWORDS
+    # steer away from wall/ceiling-mounted fixtures). Scaling about that local
+    # origin, in the object's own local frame, stretches it upward from where
+    # it already touches the floor rather than growing it from the middle or
+    # dragging its base off the ground.
+    scale_z = 1.0
+    if stretch_top_m is not None:
+        cache = UsdGeom.BBoxCache(time, [UsdGeom.Tokens.default_])
+        source_top_m = float(cache.ComputeWorldBound(source_prim)
+                             .ComputeAlignedRange().GetMax()[2]) - floor_z_m
+        if source_top_m > 1e-6:
+            scale_z = max(1.0, stretch_top_m / source_top_m)
 
     success, _ = omni.kit.commands.execute(
         "CopyPrim", path_from=source_path, path_to=dest_path, exclusive_select=False,
@@ -213,18 +255,83 @@ def duplicate_prim(
     # for an object tens of metres from the origin threw it tens of metres
     # across the map (confirmed: every duplicate in an 80-object batch landed
     # 3-92 m from its intended target, each error roughly matching a circular
-    # displacement for that object's distance from the origin). ``yaw`` must
-    # compose on the *local* side (spins the object about its own pivot before
-    # ``source_world`` places it); ``translation`` still belongs on the world
-    # side (added to whatever the point already is, so it means the same
-    # world-frame delta regardless of the object's own rotation).
-    translation = Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(*delta_xyz))
+    # displacement for that object's distance from the origin). ``yaw`` and
+    # ``stretch`` must both compose on the *local* side (act on the object
+    # about its own pivot before ``source_world`` places it) for the same
+    # reason a world-side scale would grow the object away from the world
+    # origin instead of from its own base; ``translation`` still belongs on
+    # the world side (added to whatever the point already is, so it means the
+    # same world-frame delta regardless of the object's own rotation/scale).
+    stretch = Gf.Matrix4d(1.0).SetScale(Gf.Vec3d(1.0, 1.0, scale_z))
     yaw = Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), rotation_z_deg))
-    new_world = yaw * source_world * translation
+    translation = Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(*delta_xyz))
+    new_world = stretch * yaw * source_world * translation
     new_local = new_world * parent_world.GetInverse()
 
     xformable.ClearXformOpOrder()
     xformable.AddTransformOp().Set(new_local)
+    return dest_path
+
+
+def duplicate_prim_verified(
+    dest_path: str,
+    source_path: str,
+    target_xy: Tuple[float, float],
+    delta_xyz: Tuple[float, float, float],
+    rotation_z_deg: float = 0.0,
+    stretch_top_m: float = None,
+    floor_z_m: float = 0.0,
+    tolerance_m: float = VERIFY_TOLERANCE_M,
+) -> Optional[str]:
+    """:func:`duplicate_prim`, then confirm it landed near ``target_xy`` or undo it.
+
+    Trusting a single placement computation has twice been wrong on this
+    codebase already (see :func:`duplicate_prim`'s docstring, and
+    :func:`augment_with_duplicates`'s note on a reused ``BBoxCache`` corrupting
+    the delta before it was even stored) -- and a placement verified once is
+    not guaranteed to reproduce identically on a later, separately-booted
+    replay of the same recipe. So every call site checks, including replay
+    (:func:`~sparx_agency.robots.PEGASUS.adapters.scene.load_augmented_scene`),
+    not just the one-off generation pass.
+
+    Args:
+        dest_path: Stage path for the new copy.
+        source_path: Prim to copy.
+        target_xy: World-frame ``(x, y)`` the duplicate's centre was meant to
+            land at.
+        delta_xyz: As :func:`duplicate_prim`.
+        rotation_z_deg: As :func:`duplicate_prim`.
+        stretch_top_m: As :func:`duplicate_prim`.
+        floor_z_m: As :func:`duplicate_prim`.
+        tolerance_m: How far from ``target_xy`` is still considered a good
+            placement.
+
+    Returns:
+        ``dest_path`` if the duplicate landed within ``tolerance_m`` of
+        ``target_xy``; ``None`` if it did not (the failed copy is removed from
+        the stage before returning).
+    """
+    import omni.usd
+    from pxr import Usd, UsdGeom
+
+    duplicate_prim(dest_path, source_path, delta_xyz, rotation_z_deg,
+                   stretch_top_m=stretch_top_m, floor_z_m=floor_z_m)
+
+    stage = omni.usd.get_context().get_stage()
+    dest_prim = stage.GetPrimAtPath(dest_path)
+    # A fresh cache for every verification -- see augment_with_duplicates'
+    # note on why one reused across stage edits returned stale data.
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    dest_range = cache.ComputeWorldBound(dest_prim).ComputeAlignedRange()
+    if dest_range.IsEmpty():
+        stage.RemovePrim(dest_prim.GetPath())
+        return None
+
+    mid = dest_range.GetMidpoint()
+    error_m = ((mid[0] - target_xy[0]) ** 2 + (mid[1] - target_xy[1]) ** 2) ** 0.5
+    if error_m > tolerance_m:
+        stage.RemovePrim(dest_prim.GetPath())
+        return None
     return dest_path
 
 
@@ -233,6 +340,7 @@ def augment_with_duplicates(
     candidates: List[Dict],
     dest_root: str = "/World/AugmentedObstacles",
     rng=None,
+    stretch_top_m: float = None,
 ) -> List[Dict]:
     """Place one duplicated obstacle per placement, picked randomly from ``candidates``.
 
@@ -245,6 +353,9 @@ def augment_with_duplicates(
             missing.
         rng: Source of randomness for which candidate is copied to each
             placement. A fresh default generator if omitted.
+        stretch_top_m: Forwarded to :func:`duplicate_prim` -- stretch every
+            copy that doesn't already reach this height, so a flight band it
+            merely brushed becomes one it cannot slip over or under.
 
     Returns:
         One dict per placement actually created: ``source``, ``dest_path``,
@@ -267,22 +378,42 @@ def augment_with_duplicates(
         UsdGeom.Xform.Define(stage, dest_root)
 
     rng = rng if rng is not None else np.random.default_rng()
-    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
 
     placed = []
+    dropped = 0
     for i, placement in enumerate(placements):
         source = candidates[int(rng.integers(0, len(candidates)))]
         source_path = source["path"]
         source_prim = stage.GetPrimAtPath(source_path)
+        # A fresh cache every iteration, not one reused across the loop.
+        # UsdGeomBBoxCache is documented as unsafe to reuse across stage
+        # edits -- reusing one here (each iteration's duplicate_prim call
+        # mutates the stage) returned a stale extent for some sources on a
+        # warehouse scene heavy with shared/referenced box and pallet
+        # geometry, corrupting the delta computed below *before* it was even
+        # stored: a batch of 300 came back with 22 duplicates 10-126 m from
+        # where they were meant to be.
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
         origin = cache.ComputeWorldBound(source_prim).ComputeAlignedRange().GetMidpoint()
 
         dest_path = f"{dest_root}/dup_{i:03d}"
         delta = (placement.x - origin[0], placement.y - origin[1], 0.0)
-        duplicate_prim(dest_path, source_path, delta, placement.rotation_deg)
+        kept = duplicate_prim_verified(
+            dest_path, source_path, (placement.x, placement.y), delta,
+            placement.rotation_deg, stretch_top_m=stretch_top_m)
+        if kept is None:
+            dropped += 1
+            continue
+
         placed.append({
             "source": source_path, "dest_path": dest_path,
             "x": placement.x, "y": placement.y,
             "rotation_deg": placement.rotation_deg,
             "dx": delta[0], "dy": delta[1], "dz": delta[2],
         })
+
+    if dropped:
+        print(f"augment_with_duplicates: dropped {dropped}/{len(placements)} "
+              f"duplicates that landed >{VERIFY_TOLERANCE_M:.1f} m from target",
+              flush=True)
     return placed

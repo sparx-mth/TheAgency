@@ -246,12 +246,27 @@ def load_augmented_scene(name: str, prim_path: str = "/World/Scene") -> str:
 
     from sparx_agency.robots.PEGASUS.adapters import scene_augment
 
+    stretch_top_m = recipe.get("stretch_top_m")
+    dropped = 0
     for i, obstacle in enumerate(recipe["obstacles"]):
         source_path = f"{prim_path}{obstacle['source_rel']}"
         dest_path = f"{obstacles_root}/dup_{i:03d}"
-        scene_augment.duplicate_prim(
+        # Verified, not just replayed: a placement that passed verification
+        # when the recipe was written is not guaranteed to reproduce
+        # identically on this fresh boot -- see
+        # scene_augment.duplicate_prim_verified's docstring.
+        kept = scene_augment.duplicate_prim_verified(
             dest_path, source_path,
+            (obstacle["target_x"], obstacle["target_y"]),
             (obstacle["dx"], obstacle["dy"], obstacle["dz"]),
             obstacle["rotation_deg"],
+            stretch_top_m=stretch_top_m,
         )
+        if kept is None:
+            dropped += 1
+
+    if dropped:
+        print(f"load_augmented_scene({name!r}): dropped {dropped}/"
+              f"{len(recipe['obstacles'])} obstacles that failed to reproduce "
+              f"their recorded placement on this replay", flush=True)
     return usd_path
