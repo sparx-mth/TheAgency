@@ -78,6 +78,12 @@ def _parse_args():
                          "bottom of the flight band so the copy is guaranteed "
                          "to span the whole thing, e.g. --min-height 0.5 "
                          "--stretch-top 1.5 for a 0.5-1.5 m flight band")
+    ap.add_argument("--obstacle-radius", type=float, default=None,
+                    help="footprint radius used only to keep a placement from "
+                         "sealing a passage, metres -- defaults to half the "
+                         "longest axis of the largest candidate obstacle, so no "
+                         "placement is assumed safe for a bigger object than it "
+                         "was actually checked against")
     ap.add_argument("--output", type=Path, default=None,
                     help="destination .json recipe path (default: "
                          "robots/PEGASUS/scenes/<scene>_augmented.json)")
@@ -110,17 +116,6 @@ def main() -> None:
         grid, _metadata, layers = load_scene_map(args.scene, args.altitude, args.map_dir)
         spawn_x, spawn_y, _z = scene_spawn(args.scene)
 
-        placements = sample_placements(
-            grid, layers[LANDABLE_LAYER], count=args.count,
-            min_spacing_m=args.min_spacing,
-            keepout=[(spawn_x, spawn_y, args.spawn_keepout)],
-            rng=np.random.default_rng(),
-        )
-        if len(placements) < args.count:
-            print(f"WARNING: only {len(placements)}/{args.count} placements fit "
-                  f"at {args.min_spacing:.1f} m spacing -- the free landable area "
-                  f"is smaller than requested", flush=True)
-
         candidates = scene_augment.list_obstacle_prims(
             root=args.root, min_reach_height_m=args.min_height)
         if not candidates:
@@ -131,6 +126,31 @@ def main() -> None:
         print(f"found {len(candidates)} candidate obstacle prims under {args.root}"
               + (f" reaching >= {args.min_height:.2f} m" if args.min_height > 0 else ""),
               flush=True)
+
+        # A placement's passage-blocking check (see obstacle_placement.
+        # sample_placements) needs to know how big an obstacle it is actually
+        # checking against -- half the largest candidate's own extent, unless
+        # the caller wants a different value, so a spot that would be safe for
+        # a small object is never wrongly assumed safe for whichever candidate
+        # actually lands there.
+        obstacle_radius_m = args.obstacle_radius
+        if obstacle_radius_m is None:
+            obstacle_radius_m = max(c["extent_m"] for c in candidates) / 2.0
+        print(f"using {obstacle_radius_m:.2f} m obstacle footprint radius for "
+              f"the passage-blocking check", flush=True)
+
+        placements = sample_placements(
+            grid, layers[LANDABLE_LAYER], count=args.count,
+            min_spacing_m=args.min_spacing,
+            keepout=[(spawn_x, spawn_y, args.spawn_keepout)],
+            obstacle_radius_m=obstacle_radius_m,
+            rng=np.random.default_rng(),
+        )
+        if len(placements) < args.count:
+            print(f"WARNING: only {len(placements)}/{args.count} placements fit "
+                  f"at {args.min_spacing:.1f} m spacing without blocking a "
+                  f"passage -- the free landable area is smaller, or more "
+                  f"fragmented, than requested", flush=True)
 
         placed = scene_augment.augment_with_duplicates(
             placements, candidates, stretch_top_m=args.stretch_top)
