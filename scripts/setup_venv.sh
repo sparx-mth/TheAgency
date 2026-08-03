@@ -64,9 +64,25 @@ case "${DEVICE}" in
         ;;
 esac
 
+# PATH can carry more than one python${ROS_PYTHON_VER} (pyenv/pkgx shims, custom
+# static builds for other tools, ...) and the first match is not guaranteed to be a
+# complete, working interpreter. Pick the first candidate that can actually run venv.
+PY_BIN=""
+for candidate in $(type -a -p "python${ROS_PYTHON_VER}" 2>/dev/null); do
+    if "${candidate}" -c "import ensurepip, subprocess" >/dev/null 2>&1; then
+        PY_BIN="${candidate}"
+        break
+    fi
+done
+if [ -z "${PY_BIN}" ]; then
+    echo "[setup_venv] No working python${ROS_PYTHON_VER} found on PATH (required for ROS ${ROS_DISTRO})"
+    exit 1
+fi
+
 echo "[setup_venv] Device:   ${DEVICE}"
 echo "[setup_venv] Req file: ${DEVICE_FILE}"
 echo "[setup_venv] Venv:     ${VENV_DIR}"
+echo "[setup_venv] Python:   ${PY_BIN} ($(${PY_BIN} --version 2>&1))"
 echo ""
 
 # --- copy to active ---
@@ -78,7 +94,7 @@ if [ ! -f "${VENV_DIR}/bin/pip" ]; then
     [ -d "${VENV_DIR}" ] && echo "[setup_venv] Removing broken venv ..." && rm -rf "${VENV_DIR}"
     echo "[setup_venv] Creating venv ..."
     # shellcheck disable=SC2086
-    python3 -m venv ${VENV_OPTS} "${VENV_DIR}"
+    "${PY_BIN}" -m venv ${VENV_OPTS} "${VENV_DIR}"
 fi
 
 # --- install ---
@@ -100,7 +116,7 @@ export _SETUP_ROS_DISTRO="${ROS_DISTRO}"
 export _SETUP_ROS_PYTHON_VER="${ROS_PYTHON_VER}"
 export _SETUP_HAS_CUDA_LD="${HAS_CUDA_LD}"
 
-python3 - << 'PYEOF'
+"${PY_BIN}" - << 'PYEOF'
 import os, re, pathlib
 
 repo    = os.environ['_SETUP_REPO_DIR']
