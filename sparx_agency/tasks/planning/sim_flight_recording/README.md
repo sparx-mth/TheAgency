@@ -471,6 +471,24 @@ other scene:
 (they reference this device's own scene-graph paths) and gitignored, same as
 the `.ply` point clouds.
 
+**`--min-height`** biases which prims are eligible to duplicate from, toward
+ones relevant to a drone cruising at altitude rather than desk clutter. The
+default obstacle filter (`scene_augment.MIN_EXTENT_M`/`MAX_EXTENT_M`) only
+looks at a prim's *longest* bounding-box axis, which a flat-lying desk can
+satisfy without standing more than knee-high -- `--min-height` additionally
+requires the prim's bounding-box *top* to reach at least that far above the
+floor, so a flight at ~1-1.5 m only gets offered columns, partitions, racks
+and similar obstacles that actually intersect its altitude band:
+
+```bash
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/augment_scene.py \
+    --scene office --count 200 --min-spacing 1.3 --min-height 1.0
+```
+
+Wall-mounted/hinged fixtures that would look like a rendering glitch floating
+free in open floor (doors, clocks, lamps, sinks, toilets, elevator frames)
+stay excluded regardless -- see `scene_augment.EXCLUDE_KEYWORDS`.
+
 ## How the aircraft is actually flown
 
 **A smoothed spline, a moving carrot, and velocity setpoints closed on ground
