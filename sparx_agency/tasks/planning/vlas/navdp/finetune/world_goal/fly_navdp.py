@@ -75,17 +75,32 @@ def carrot(trajectory: np.ndarray, lookahead_m: float) -> Tuple[float, float]:
             float(np.interp(target, along, path[:, 1])))
 
 
-def velocity_to(position, target_xy, altitude_m: float,
+def velocity_to(position, target_xy, current_yaw: float, altitude_m: float,
                 cruise_mps: float) -> Tuple[float, float, float]:
-    """World-frame velocity chasing a world point, speed capped at cruise."""
+    """World-frame velocity along the current heading, speed capped at cruise.
+
+    Points the velocity vector at ``current_yaw``, not straight at
+    ``target_xy``: a holonomic quad that flies wherever the target is
+    regardless of where it's facing crabs sideways through every turn
+    instead of yawing to face it first. Scaling speed by how well
+    ``current_yaw`` already matches the bearing to the target (``cos`` of
+    the heading error, clamped so it can't run in reverse) slows a sharp
+    turn to a yaw-in-place and lets it pick speed back up smoothly once
+    aligned -- see the identical fix in
+    ``core/planning/trackers/pure_pursuit/algorithm.compute_velocity_3d``,
+    which this mirrors for the same reason.
+    """
+    from sparx_agency.core.common.types.geometry import normalize_angle
+
     dx = float(target_xy[0]) - float(position[0])
     dy = float(target_xy[1]) - float(position[1])
     distance = math.hypot(dx, dy)
+    vz = 0.8 * (altitude_m - float(position[2]))
     if distance < 1e-3:
-        return 0.0, 0.0, 0.8 * (altitude_m - float(position[2]))
-    speed = min(cruise_mps, 1.2 * distance)
-    return (speed * dx / distance, speed * dy / distance,
-            0.8 * (altitude_m - float(position[2])))
+        return 0.0, 0.0, vz
+    heading_error = normalize_angle(math.atan2(dy, dx) - current_yaw)
+    speed = min(cruise_mps, 1.2 * distance) * max(0.0, math.cos(heading_error))
+    return speed * math.cos(current_yaw), speed * math.sin(current_yaw), vz
 
 
 def sample_missions(world_map, seed: int, count: int, spec) -> List:
@@ -229,7 +244,7 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
             if track_log is not None:
                 track_log.add(loop.sim_time, pose, trajectory, target_world)
 
-        vx, vy, vz = velocity_to(position, target_world, altitude, args.cruise)
+        vx, vy, vz = velocity_to(position, target_world, pose[2], altitude, args.cruise)
         yaw_command = slew_towards(pose[2], yaw_command,
                                    math.radians(MAX_YAW_RATE_DPS), loop.dt)
         px4.send_velocity_world(vx, vy, vz, yaw_command)

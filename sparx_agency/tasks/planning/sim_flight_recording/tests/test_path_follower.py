@@ -68,14 +68,17 @@ def _cruising(speed, spec):
 def test_the_aircraft_never_stops_mid_route():
     """The whole reason this exists: no deceleration onto every waypoint.
 
-    The floor is 0.75x rather than 1.0x because the tracker deliberately eases
-    off through tight corners (``corner_speed_factor``) -- which is smoothing,
-    not stopping. Measured worst case on this route is 0.79x.
+    The floor is 0.55x rather than 1.0x because the tracker deliberately eases
+    off through tight corners (``corner_speed_factor``), and ``compute_velocity_3d``
+    additionally throttles forward speed by how well the aircraft's actual
+    heading matches the bearing to the lookahead point (yaw-then-fly, not
+    holonomic strafing) -- both are smoothing, not stopping. Measured worst
+    case on this route is 0.63x.
     """
     spec = FollowSpec()
     cruising = _cruising(_fly(spec)["speed"], spec)
-    assert cruising.min() > 0.75 * spec.cruise_speed, "it stopped somewhere mid-route"
-    assert cruising.mean() > 0.9 * spec.cruise_speed
+    assert cruising.min() > 0.55 * spec.cruise_speed, "it stopped somewhere mid-route"
+    assert cruising.mean() > 0.85 * spec.cruise_speed
 
 
 def test_speed_holds_near_cruise_rather_than_sawtoothing():

@@ -134,7 +134,10 @@ def _parse_args():
                     help="enable the WebRTC livestream on port 49100. Only one "
                          "process can bind it, so never with several workers")
     ap.add_argument("--video", action="store_true",
-                    help="write a chase-camera MP4 next to each recording")
+                    help="write an MP4 next to each recording")
+    ap.add_argument("--video-source", choices=("chase", "onboard"), default="chase",
+                    help="'chase': external chase-cam view (default); 'onboard': "
+                         "the drone's own forward-facing camera")
     return ap.parse_args()
 
 
@@ -251,7 +254,7 @@ def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
             adapter, out_dir, rate_hz=args.rate_hz, camera_height_m=args.altitude,
             depth_format=args.depth_format,
             video_out=(out_dir.with_suffix(".mp4") if args.video else None),
-            video_source="chase", chase_camera=chase_camera,
+            video_source=args.video_source, chase_camera=chase_camera,
         )
         result = episode.fly_episode(loop, px4, adapter, plan, recorder, follow_spec,
                                      replan=_replanner(world_map, spec, plan.goal))

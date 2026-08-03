@@ -239,45 +239,50 @@ def find_lookahead_point_3d(
 def compute_velocity_3d(
     pos: np.ndarray,
     target: np.ndarray,
+    current_yaw: float,
     speed: float,
     max_speed_z: float,
 ) -> Tuple[float, float, float, float]:
     """
     Compute 3D velocity vector toward lookahead point.
 
-    For holonomic robots (drones), velocity points directly at target.
-    Z velocity is clamped separately for safety.
+    Horizontal velocity points along ``current_yaw``, not straight at
+    ``target``: a holonomic drone that flies wherever the lookahead point
+    is regardless of where it is facing crabs sideways through every turn
+    instead of yawing to face the new heading first. Scaling the forward
+    speed by how well ``current_yaw`` already matches the bearing to
+    ``target`` (``cos`` of the heading error, clamped so it can't reverse
+    into flying backward) makes a sharp turn slow to a yaw-in-place and
+    pick speed back up smoothly once aligned, with no separate turn phase.
+    Z velocity is unaffected -- climbing/descending never needs to wait on
+    yaw -- and is clamped separately for safety.
 
     Args:
         pos: Current position (x, y, z).
         target: Lookahead point (x, y, z).
+        current_yaw: The vehicle's actual current heading, radians.
         speed: Desired total speed (m/s).
         max_speed_z: Maximum vertical speed (m/s).
 
     Returns:
-        (vx, vy, vz, yaw) - velocity components and heading
+        (vx, vy, vz, target_yaw) - velocity components and the bearing to
+        ``target``, which the caller yaws toward independently.
     """
     delta = target - pos
     dist = np.linalg.norm(delta)
 
     if dist < 1e-6:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, current_yaw
 
-    # Unit direction
-    direction = delta / dist
+    target_yaw = float(np.arctan2(delta[1], delta[0]))
+    heading_error = normalize_angle(target_yaw - current_yaw)
+    aligned_speed = speed * max(0.0, float(np.cos(heading_error)))
 
-    # Scale by speed
-    vx = direction[0] * speed
-    vy = direction[1] * speed
-    vz = direction[2] * speed
+    vx = aligned_speed * np.cos(current_yaw)
+    vy = aligned_speed * np.sin(current_yaw)
+    vz = float(np.clip(delta[2] / dist * speed, -max_speed_z, max_speed_z))
 
-    # Clamp vertical speed
-    vz = float(np.clip(vz, -max_speed_z, max_speed_z))
-
-    # Yaw from xy velocity
-    yaw = float(np.arctan2(vy, vx)) if abs(vx) + abs(vy) > 1e-6 else 0.0
-
-    return float(vx), float(vy), float(vz), yaw
+    return float(vx), float(vy), vz, target_yaw
 
 
 def compute_yaw_rate_3d(

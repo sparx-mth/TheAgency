@@ -262,7 +262,8 @@ class PurePursuitTracker3D:
 
         # Compute 3D velocity toward target
         max_speed_z = min(p.max_speed_z, lim.max_speed_z)
-        vx, vy, vz, target_yaw = alg.compute_velocity_3d(pos, target, self._s.speed_cmd, max_speed_z)
+        vx, vy, vz, target_yaw = alg.compute_velocity_3d(
+            pos, target, pose.yaw, self._s.speed_cmd, max_speed_z)
 
         # Compute yaw rate
         max_yaw_rate = min(p.max_yaw_rate, lim.max_yaw_rate)
