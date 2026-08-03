@@ -62,6 +62,57 @@ def test_never_picks_occupied_or_unlandable_cells():
         assert landable[gy, gx]
 
 
+def test_never_fully_blocks_the_only_passage():
+    """A duplicate landing in the one corridor between two rooms is exactly
+    the bug this guards against: nothing checked reachability, only spacing
+    between obstacles, and a "correctly" spaced obstacle sealed a hallway.
+    """
+    from scipy import ndimage
+
+    size = 24
+    resolution = 0.5
+    occupied = np.ones((size, size), dtype=bool)
+    occupied[2:10, 2:10] = False    # room A
+    occupied[2:10, 14:22] = False   # room B
+    occupied[5:7, 10:14] = False    # the only corridor between them, 1 m wide
+    landable = ~occupied
+    origin = -size * resolution / 2.0
+    grid = occupancy_from_mask(occupied, resolution, origin, origin, frame_id="world")
+
+    spawn_x, spawn_y = grid.grid_to_world(5, 5)  # inside room A
+
+    placements = obstacle_placement.sample_placements(
+        grid, landable, count=60, min_spacing_m=0.3,
+        keepout=[(spawn_x, spawn_y, 1.2)], obstacle_radius_m=0.4,
+        rng=np.random.default_rng(7))
+
+    assert len(placements) > 0
+
+    # Stamp each placement's footprint the same shape the implementation
+    # itself checks against (a disk, not a bounding square -- a square is
+    # stricter along the diagonals and flagged a false block here once).
+    free = grid.grid == grid.values.free
+    offsets = obstacle_placement._disk_offsets(round(0.4 / resolution))
+    for p in placements:
+        gx, gy = grid.world_to_grid(p.x, p.y)
+        fy, fx = gy + offsets[:, 0], gx + offsets[:, 1]
+        in_bounds = (fy >= 0) & (fy < free.shape[0]) & (fx >= 0) & (fx < free.shape[1])
+        free[fy[in_bounds], fx[in_bounds]] = False
+
+    labels, _ = ndimage.label(free, structure=np.ones((3, 3), dtype=bool))
+    spawn_gx, spawn_gy = grid.world_to_grid(spawn_x, spawn_y)
+    assert labels[spawn_gy, spawn_gx] != 0
+    # Room B occupies grid columns 14-21 -- checking whether *any* of them
+    # still shares spawn's label (rather than one fixed reference cell) means
+    # this does not spuriously fail just because a legitimate placement
+    # happened to land on whatever single coordinate was chosen to represent
+    # "room B".
+    room_b_still_reachable = np.any(labels[2:10, 14:22] == labels[spawn_gy, spawn_gx])
+    assert room_b_still_reachable, (
+        "room B is no longer reachable from room A -- a placement sealed the corridor"
+    )
+
+
 def test_raises_on_no_candidates():
     size = 10
     grid, _ = _open_grid(size=size)
