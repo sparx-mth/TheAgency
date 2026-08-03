@@ -153,7 +153,8 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
         point_to_pointgoal, world_to_body_2d,
     )
     from sparx_agency.tasks.planning.sim_flight_recording.episode import (
-        CRASH_HOLD_S, CRASH_TILT_DEG, arm_for_offboard, attitude_deg, slew_towards,
+        CRASH_HOLD_S, CRASH_TILT_DEG, TAKEOFF_TOLERANCE_M, arm_for_offboard,
+        attitude_deg, slew_towards,
     )
 
     vehicle = adapter.vehicle
@@ -180,6 +181,13 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     stall_reference = (float(start[0]), float(start[1]), loop.sim_time)
     inferences, transport_failures = 0, 0
     outcome = "flight_timeout"
+    # arm_for_offboard only arms and switches modes -- it does not climb, so the
+    # aircraft is still on the ground when this function's loop starts. Running
+    # NavDP inference immediately would have it steering while the airframe is
+    # still climbing through ground effect and out of takeoff attitude, so
+    # inference is held off until the aircraft is at cruise altitude; the climb
+    # itself already happens for free via velocity_to()'s vz term below.
+    climbed = False
 
     while loop.sim_time < deadline:
         rendered = loop.step()
@@ -187,10 +195,17 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
         pose = adapter.pose_flu()
         track.append((float(position[0]), float(position[1])))
 
+        if not climbed and position[2] >= altitude - TAKEOFF_TOLERANCE_M:
+            climbed = True
+            # Don't charge the climb time against the first inference's period,
+            # and don't let the stall check fire for time spent only climbing.
+            next_infer = loop.sim_time
+            stall_reference = (float(position[0]), float(position[1]), loop.sim_time)
+
         if rendered and recorder is not None:
             recorder.capture(stamp_s=loop.sim_time)
 
-        if rendered and loop.sim_time >= next_infer:
+        if climbed and rendered and loop.sim_time >= next_infer:
             next_infer = loop.sim_time + infer_period
             frame = adapter.capture_frame(stamp_s=loop.sim_time)
             forward, left = world_to_body_2d(goal[0], goal[1], pose[0], pose[1], pose[2])

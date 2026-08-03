@@ -4,10 +4,12 @@
         --out ~/navdp_world_goal/flights/comparison
 
 ``fly_navdp.py --video`` writes one MP4 per mission per arm from the chase
-camera. Those are the right recordings but the wrong shape for looking at: to
-see *why* one set of weights crashed where the other did not, the two have to be
-on screen together, starting at the same moment, from the same place, toward the
-same goal.
+camera, plus the recorded onboard ``rgb/`` frames it always keeps. Those
+chase-cam clips are the right recordings but the wrong shape for looking at:
+to see *why* one set of weights crashed where the other did not, the two have
+to be on screen together, starting at the same moment, from the same place,
+toward the same goal. ``--camera-source onboard`` swaps the chase view for the
+drone's own forward-facing camera -- the actual frame NavDP ran inference on.
 
 Each output pairs one mission: baseline left, fine-tuned right, a caption under
 each naming the arm and how that flight ended. The two clips rarely last the
@@ -177,30 +179,77 @@ def track_panel(arm_dir: Path, index: int, scene: Optional[str],
     return track_video.render(log, existing, scene, size_px=size)
 
 
+def onboard_video(arm_dir: Path, index: int) -> Optional[Path]:
+    """The onboard-camera MP4 for one mission, encoding it if it is not there yet.
+
+    ``fly_navdp.py``'s ``mission_NN.mp4`` is the external chase camera -- a
+    view for a human, not the sensor input. NavDP is an RGB-D policy fed one
+    onboard frame at a time (``core/planning/vlas/navdp/client.py``), and
+    those exact frames are already on disk as ``mission_NN/rgb/NNNNNN.<ext>``
+    (``FlightRecorder`` writes them regardless of which camera the MP4 uses).
+    This just re-encodes that sequence, so it is what NavDP actually saw.
+
+    Cached next to the flight, same reasoning as :func:`track_panel`.
+    """
+    existing = arm_dir / f"mission_{index:02d}_onboard.mp4"
+    if existing.is_file():
+        return existing
+    mission_dir = arm_dir / f"mission_{index:02d}"
+    rgb_dir = mission_dir / "rgb"
+    meta_path = mission_dir / "meta.json"
+    if not rgb_dir.is_dir() or not meta_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return None
+    rate_hz = meta.get("rate_hz", 10.0)
+    ext = meta.get("rgb_ext", "jpg")
+    command = ["ffmpeg", "-y", "-framerate", str(rate_hz), "-i",
+               str(rgb_dir / f"%06d.{ext}"), "-c:v", "libx264",
+               "-pix_fmt", "yuv420p", str(existing)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[compare] ffmpeg failed to encode onboard video for mission "
+              f"{index}:\n{result.stderr[-800:]}")
+        return None
+    return existing if existing.is_file() else None
+
+
 def pair_missions(flights_dir: Path, out_dir: Path, left_arm: str,
                   right_arm: str, missions: Optional[List[int]] = None,
                   layout: str = "quad", scene: Optional[str] = None,
-                  cell: int = 480) -> List[Path]:
+                  cell: int = 480, camera: str = "chase") -> List[Path]:
     """Compose one comparison video per mission both arms recorded.
 
     ``layout="quad"`` puts each arm's camera above its map panel; ``"side"``
     shows the cameras alone. Quad needs a ``*_track.json`` per flight, which
     only exists for flights flown with ``--video``.
+
+    ``camera="chase"`` uses ``fly_navdp.py``'s external chase-cam MP4;
+    ``"onboard"`` re-encodes the recorded onboard frames instead -- see
+    :func:`onboard_video`.
     """
     left_dir, right_dir = flights_dir / left_arm, flights_dir / right_arm
     left_results, right_results = outcomes(left_dir), outcomes(right_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    indices = sorted(set(left_results) & set(right_results))
     written = []
-    for left_video in sorted(left_dir.glob("mission_*.mp4")):
-        if left_video.stem.endswith("_track"):        # our own rendered panel
-            continue
-        index = int(left_video.stem.split("_")[1])
+    for index in indices:
         if missions is not None and index not in missions:
             continue
-        right_video = right_dir / left_video.name
-        if not right_video.is_file():
-            print(f"[compare] mission {index}: no {right_arm} video, skipped")
+        if camera == "onboard":
+            left_video = onboard_video(left_dir, index)
+            right_video = onboard_video(right_dir, index)
+        else:
+            left_video = left_dir / f"mission_{index:02d}.mp4"
+            left_video = left_video if left_video.is_file() else None
+            right_video = right_dir / f"mission_{index:02d}.mp4"
+            right_video = right_video if right_video.is_file() else None
+        if left_video is None or right_video is None:
+            print(f"[compare] mission {index}: no {camera} video for both arms, "
+                  f"skipped")
             continue
 
         left_label = caption(left_arm, left_results.get(index))
@@ -241,6 +290,11 @@ def main(argv=None) -> int:
     parser.add_argument("--cell", type=int, default=480, help="panel width, pixels")
     parser.add_argument("--missions", type=int, nargs="*", default=None,
                         help="only these mission indices (default: all paired)")
+    parser.add_argument("--camera-source", default="chase",
+                        choices=("chase", "onboard"),
+                        help="'chase': the external chase-cam MP4 (default); "
+                             "'onboard': re-encode the recorded onboard frames "
+                             "-- what NavDP actually saw")
     args = parser.parse_args(argv)
 
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -250,7 +304,8 @@ def main(argv=None) -> int:
     flights = Path(args.flights).expanduser()
     out_dir = Path(args.out).expanduser() if args.out else flights / "comparison"
     written = pair_missions(flights, out_dir, args.left, args.right, args.missions,
-                            layout=args.layout, scene=args.scene, cell=args.cell)
+                            layout=args.layout, scene=args.scene, cell=args.cell,
+                            camera=args.camera_source)
     if not written:
         print("[compare] nothing written -- were the flights flown with --video?")
         return 1
