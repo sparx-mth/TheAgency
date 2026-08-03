@@ -70,6 +70,14 @@ def _parse_args():
                          "set this near the flight altitude to bias toward "
                          "columns/partitions/racks a drone cruising there "
                          "would actually hit, over low desk clutter")
+    ap.add_argument("--stretch-top", type=float, default=None,
+                    help="stretch every duplicate that doesn't already reach "
+                         "this height above the floor, metres -- a drone flying "
+                         "*inside* a band it merely brushed can still slip over "
+                         "or under it; combine with --min-height set to the "
+                         "bottom of the flight band so the copy is guaranteed "
+                         "to span the whole thing, e.g. --min-height 0.5 "
+                         "--stretch-top 1.5 for a 0.5-1.5 m flight band")
     ap.add_argument("--output", type=Path, default=None,
                     help="destination .json recipe path (default: "
                          "robots/PEGASUS/scenes/<scene>_augmented.json)")
@@ -124,7 +132,8 @@ def main() -> None:
               + (f" reaching >= {args.min_height:.2f} m" if args.min_height > 0 else ""),
               flush=True)
 
-        placed = scene_augment.augment_with_duplicates(placements, candidates)
+        placed = scene_augment.augment_with_duplicates(
+            placements, candidates, stretch_top_m=args.stretch_top)
         print(f"AUGMENT {args.scene}: added {len(placed)} obstacles", flush=True)
         for p in placed:
             print(f"  {p['dest_path']} <- {p['source']} at "
@@ -134,11 +143,13 @@ def main() -> None:
         root_prefix = args.root
         recipe = {
             "base_scene": args.scene,
+            "stretch_top_m": args.stretch_top,
             "obstacles": [
                 {
                     "source_rel": p["source"][len(root_prefix):],
                     "dx": p["dx"], "dy": p["dy"], "dz": p["dz"],
                     "rotation_deg": p["rotation_deg"],
+                    "target_x": p["x"], "target_y": p["y"],
                 }
                 for p in placed
             ],
