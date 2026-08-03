@@ -14,12 +14,9 @@ subscribe to ROS itself, so it has zero risk of interfering with flight.
 Turn-direction check: takes the most recent A* path's first waypoint,
 computes the bearing from the pose at that path's timestamp, and compares
 the SIGN of the required turn against the actual sign of yaw change over the
-next ~2s of pose samples. Convention (confirmed live this session, see
-LESSONS.md "turn_right/turn_left was ~4x too low" entry and the
-rooster_command_unit.py ACTION_MAP comment): increasing yaw = physical RIGHT
-turn, decreasing yaw = LEFT, for this drone's /localization convention --
-this is the OPPOSITE of the textbook ROS CCW-positive-is-left assumption,
-verified against Sphera visually, not assumed.
+next ~2s of pose samples. Convention: /R1/localization publishes standard
+REP103 CCW-positive yaw (increasing = LEFT, decreasing = RIGHT) -- see
+rooster_ground_truth_localization.py and LESSONS.md.
 
 This page also makes sure both loggers are actually running (it copies them
 in from the repo and starts them if a check finds them missing), so opening
@@ -34,15 +31,28 @@ import subprocess
 import time
 
 import streamlit as st
+import yaml
 
 REPO = "/home/user1/GIT/TheAgency"
 MANUAL_FLIGHT_LOGGER_HOST = f"{REPO}/sparx_agency/robots/ROBOTICAN/debug/manual_flight_logger.py"
 PATH_LOGGER_HOST = f"{REPO}/sparx_agency/tasks/planning/falcon/debug/path_logger.py"
 EXPLORATION_WATCHDOG_HOST = f"{REPO}/sparx_agency/tasks/planning/falcon/debug/exploration_watchdog.sh"
+MISSION_SPHERA_YAML = f"{REPO}/sparx_agency/tasks/planning/falcon/config/mission_sphera.yaml"
 
 POSE_DIR = "/tmp/rooster_turn_debug"  # manual_flight_logger.py --out-dir, inside `it`
 PATH_DIR = "/tmp/path_logger_out"     # path_logger.py --out-dir, inside `falcon`
 REFRESH_SEC = 2
+
+
+def _load_sphera_goal():
+    """Read the default goal from mission_sphera.yaml instead of hardcoding
+    it here and in mission_control.py separately."""
+    with open(MISSION_SPHERA_YAML) as f:
+        launch = yaml.safe_load(f)["launch"]
+    return launch["goal_x"], launch["goal_y"]
+
+
+_SPHERA_GOAL_X, _SPHERA_GOAL_Y = _load_sphera_goal()
 
 FALCON_LAUNCH_CMD = (
     "roslaunch falcon_adapter sphera_drone.launch map_name:=sphera_jail "
@@ -51,7 +61,7 @@ FALCON_LAUNCH_CMD = (
     "cam_fx:=111.837662 cam_fy:=180.0 cam_cx:=269.5 cam_cy:=179.5 "
     "cam_width:=540 cam_height:=360 cam_min_depth:=0.45 "
     "sync_tolerance:=0.05 max_interp_gap:=0.12 "
-    "goal_x:=54.75 goal_y:=-11.66 "
+    f"goal_x:={_SPHERA_GOAL_X} goal_y:={_SPHERA_GOAL_Y} "
     "bev_xmin:=38.75 bev_ymin:=-30.66 bev_xmax:=70.75 bev_ymax:=1.34 "
     "apf_max_total_shift_m:=0.3 vel_x:=0.15 mx_lateral_speed_max:=0.15 mx_yaw_rate:=0.4 "
     "bev_t_on:=3.0 bev_occ_conf_full:=4.0 bev_min_wall_run:=4 yaw_rate:=1.8"
@@ -188,9 +198,12 @@ SERVICES = [
     ("robotican_dev", "container", None, "robotican_dev", None, None),
     ("falcon", "container", None, "falcon", None, None),
     ("ros1_bridge", "container", None, "ros1_bridge", None, None),
-    ("ground_truth_localization", "proc", "it", "rooster_ground_truth_localization", "host", "/tmp/rooster_gt_loc.log"),
+    # check pattern has no ".py" for anything launched via `python3 -m
+    # <module.path>` (no filename ever appears in that command line) --
+    # only script-path launches (`python3 /tmp/x.py`) get a ".py" pattern.
+    ("ground_truth_localization", "proc", "it", "rooster_ground_truth_localization", "it", "/tmp/gtl.log"),
     ("video_trigger.py", "proc", "it", "video_trigger.py", "it", "/tmp/video_trigger.log"),
-    ("rooster_command_unit.py", "proc", "it", "rooster_command_unit.py", "it", "/tmp/rooster_command_unit_R1.log"),
+    ("rooster_command_unit.py", "proc", "it", "rooster_command_unit", "it", "/tmp/rooster_command_unit_R1.log"),
     ("manual_flight_logger.py", "proc", "it", "manual_flight_logger.py", "it", "/tmp/manual_flight_logger.log"),
     ("rooster_frame_dir_publisher.py", "proc", "robotican_dev", "rooster_frame_dir_publisher.py", "host", "/tmp/rooster_frame_capture.log"),
     ("rooster_depth_processor.py", "proc", "robotican_dev", "rooster_depth_processor.py", "host", "/tmp/rooster_depth_processor.log"),
@@ -202,6 +215,43 @@ SERVICES = [
     ("exploration_watchdog.sh", "proc", "falcon", "exploration_watchdog.sh", "falcon", "/tmp/exploration_watchdog.log"),
     ("path_logger.py", "proc", "falcon", "path_logger.py", "falcon", "/tmp/path_logger.log"),
 ]
+
+# Start command for every "proc" service above with no other way to get
+# (re)launched. Containers, manual_flight_logger.py/path_logger.py (handled
+# by ensure_loggers_running()), and everything inside `falcon` (handled by
+# the Restart Falcon button) are deliberately absent here.
+_IT_ROS_ENV = "source /opt/ros/foxy/setup.bash && source /home/rooster/workspace/install/setup.bash"
+START_COMMANDS = {
+    "ground_truth_localization": (
+        f"docker exec -d it bash -lc '{_IT_ROS_ENV} && "
+        "PYTHONPATH=/home/rooster:$PYTHONPATH python3 -m "
+        "sparx_agency.robots.ROBOTICAN.rooster_ground_truth_localization "
+        "--ros-args -p rooster_id:=R1 > /tmp/gtl.log 2>&1'"
+    ),
+    "video_trigger.py": (
+        f"docker exec -d it bash -lc '{_IT_ROS_ENV} && "
+        "python3 /tmp/video_trigger.py --drone-id R1 --host-ip 127.0.0.1 "
+        "--port 5001 --width 540 --height 360 > /tmp/video_trigger.log 2>&1'"
+    ),
+    "rooster_command_unit.py": (
+        f"docker exec -d it bash -lc '{_IT_ROS_ENV} && "
+        "PYTHONPATH=/home/rooster:$PYTHONPATH python3 -m "
+        "sparx_agency.robots.ROBOTICAN.adapters.rooster_command_unit "
+        "--ros-args -p rooster_id:=R1 > /tmp/rooster_command_unit_R1.log 2>&1'"
+    ),
+    "rooster_frame_dir_publisher.py": (
+        f"bash {REPO}/sparx_agency/robots/ROBOTICAN/run_rooster_frame_dir_publisher.sh "
+        "--rooster-id R1 > /tmp/rooster_frame_capture.log 2>&1 &"
+    ),
+    "rooster_depth_processor.py": (
+        f"bash {REPO}/sparx_agency/robots/ROBOTICAN/run_depth_processor.sh "
+        "> /tmp/rooster_depth_processor.log 2>&1 &"
+    ),
+    "rooster_twist_control_adapter": (
+        f"bash {REPO}/sparx_agency/robots/ROBOTICAN/adapters/run_twist_control_adapter.sh "
+        "--rooster-id R1 > /tmp/rooster_twist_control.log 2>&1 &"
+    ),
+}
 
 
 def bearing_deg(from_xy, to_xy):
@@ -245,6 +295,16 @@ for name, kind, chk_loc, chk_pat, log_loc, log_path in SERVICES:
     up_count += int(is_up)
     icon = "🟢" if is_up else "🔴"
     with st.expander(f"{icon} {name}"):
+        start_cmd = START_COMMANDS.get(name)
+        if not is_up and start_cmd is not None:
+            if st.button(f"▶ Start {name}", key=f"start_{name}"):
+                res = run(start_cmd)
+                if res.returncode != 0:
+                    st.error(f"Launch command exited {res.returncode}: {res.stderr[:300]}")
+                else:
+                    st.success("Launch command sent -- refreshing...")
+                    time.sleep(2)
+                    st.rerun()
         log = tail_log(log_loc, log_path)
         if log is not None:
             st.code(log or "(empty)", language=None)
@@ -324,10 +384,10 @@ if paths and poses:
             bearing = bearing_deg((pose_before["x"], pose_before["y"]), target)
             yaw0 = math.degrees(pose_before["yaw"])
             diff = wrap180(bearing - yaw0)
-            needed = "RIGHT (yaw should increase)" if diff > 0 else "LEFT (yaw should decrease)"
+            needed = "LEFT (yaw should increase)" if diff > 0 else "RIGHT (yaw should decrease)"
             yaw_end = math.degrees(poses_after[-1]["yaw"])
             actual_delta = wrap180(yaw_end - yaw0)
-            actual = "RIGHT (increased)" if actual_delta > 0.5 else ("LEFT (decreased)" if actual_delta < -0.5 else "~flat")
+            actual = "LEFT (increased)" if actual_delta > 0.5 else ("RIGHT (decreased)" if actual_delta < -0.5 else "~flat")
             match = (diff > 0 and actual_delta > 0.5) or (diff < 0 and actual_delta < -0.5)
 
             m1, m2, m3 = st.columns(3)

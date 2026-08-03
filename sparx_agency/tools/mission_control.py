@@ -16,10 +16,26 @@ import time
 from dataclasses import dataclass, field
 
 import streamlit as st
+import yaml
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+MISSION_SPHERA_YAML = (
+    "/home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/config/mission_sphera.yaml"
+)
+
+
+def _load_sphera_goal():
+    """Read the default goal from mission_sphera.yaml instead of hardcoding
+    it here and in rooster_turn_debug.py separately."""
+    with open(MISSION_SPHERA_YAML) as f:
+        launch = yaml.safe_load(f)["launch"]
+    return launch["goal_x"], launch["goal_y"]
+
+
+_SPHERA_GOAL_X, _SPHERA_GOAL_Y = _load_sphera_goal()
+
 JETSON_SSH   = "user@192.0.0.89"
 JETSON_REPO  = "/home/user/agency_ws"
 NANOOWL_REPO = "/home/user/GIT/NanoLLM_VILA_and_OWL"
@@ -648,20 +664,10 @@ ROBOTICAN_SERVICES: list[Service] = [
             # arriving within ~0.5ms. These match mapping_sync_node.py's own
             # documented defaults for this exact case.
             "sync_tolerance:=0.05 max_interp_gap:=0.12 "
-            # goal_x/goal_y default to (0.0, -3.0) -- correct for XTEND,
-            # where the drone starts near the origin, but /gt_pose is a
-            # direct passthrough of Rooster's raw Sphera-world pose
-            # (confirmed live: no re-zeroing), which starts at roughly
-            # (54.75, -14.66) (sign convention as of the 2026-07-28
-            # localization fix -- see rooster_ground_truth_localization.py
-            # and the fly-rooster-sphera skill's "Every X/Y bound..."
-            # gotcha; this was stale at the OLD, pre-fix sign until now).
-            # The unmodified default goal sat ~57m away, entirely outside
-            # sphera_jail.yaml's own box bounds, so astar_planner could
-            # never find a reachable target. This is the same
-            # 3m-south-of-spawn offset the default intended, just expressed
-            # in Rooster's actual world coordinates.
-            "goal_x:=54.75 goal_y:=-11.66 "
+            # Launch file default (0.0, -3.0) is XTEND-only; Rooster spawns
+            # at ~(54.75, -14.66), so this must be overridden. See
+            # mission_sphera.yaml for the actual goal and why it was chosen.
+            f"goal_x:={_SPHERA_GOAL_X} goal_y:={_SPHERA_GOAL_Y} "
             # bev_xmin/ymin/xmax/ymax default to a 12x12m box at world
             # origin (0,0) -- correct for XTEND's near-origin office/hospital
             # maps, but Rooster's real spawn is ~55m away, so the BEV click

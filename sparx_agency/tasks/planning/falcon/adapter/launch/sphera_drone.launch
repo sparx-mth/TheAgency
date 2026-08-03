@@ -140,6 +140,11 @@
        keeps firing more same-direction bursts past the actual target. See
        docs/progress/entries/007-rooster-velocity-controller.md. -->
   <arg name="yaw_rate"             default="0.7" />
+  <!-- Which path tracker drives the drone; see waypoint_follower_node.py's
+       own KNOWN_CONTROLLERS set for the full list (waypoint | multi_axis |
+       pure_pursuit | roll_assist | drift_pid). Exposed here (was hardcoded
+       below) so switching controllers doesn't need editing this file. -->
+  <arg name="controller" default="waypoint" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
@@ -423,7 +428,7 @@
          demo_mode_topic/_request_topic renamed off /xtend/... to match this
          robot's own /R1/... topic convention; mapping_sync's freeze gate
          below uses the same rename so the two stay coordinated. -->
-    <arg name="controller"              value="waypoint" />
+    <arg name="controller"              value="$(arg controller)" />
     <arg name="demo_mode_topic"         value="/R1/demo_mode" />
     <arg name="demo_mode_request_topic" value="/R1/demo_mode_request" />
 

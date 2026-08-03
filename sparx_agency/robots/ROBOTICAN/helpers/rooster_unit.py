@@ -76,12 +76,20 @@ class RoosterUnit:
         self,
         node: Node,
         rooster_id: str,
-        climb_z: float = 600.0,
+        # 600 was too weak to escape PX4's landing-detector confirm window
+        # (LNDMC_TRIG_TIME) before it re-triggers "landed" and disarms; 1000
+        # is the value confirmed live to actually climb. See LESSONS.md.
+        climb_z: float = 1000.0,
         hover_z: float = 550.0,
         land_step: float = 75.0,
         land_step_interval_sec: float = 1.0,
         land_timeout_sec: float = 30.0,
-        climb_duration_sec: float = 3.0,
+        # Was 3.0s -- at climb_z=1000 that built up enough velocity to fly
+        # into the ceiling before altitude hold could arrest it. Shortened.
+        climb_duration_sec: float = 1.0,
+        # Coast at hover_z before _enable_altitude_hold() samples its target
+        # -- see _climb(). Long enough for climb momentum to mostly settle.
+        climb_settle_sec: float = 1.0,
         altitude_hold_kp: float = 500.0,
         altitude_hold_kd: float = 600.0,
         altitude_hold_max_correction: float = 200.0,
@@ -95,6 +103,7 @@ class RoosterUnit:
         self.land_step_interval_sec = float(land_step_interval_sec)
         self.land_timeout_sec = float(land_timeout_sec)
         self.climb_duration_sec = float(climb_duration_sec)
+        self.climb_settle_sec = float(climb_settle_sec)
         self.altitude_hold_kp = float(altitude_hold_kp)
         self.altitude_hold_kd = float(altitude_hold_kd)
         self.altitude_hold_max_correction = float(altitude_hold_max_correction)
@@ -371,6 +380,13 @@ class RoosterUnit:
                 return
             time.sleep(0.1)
         self.axes.set(z=self.hover_z)
+        # Coast before sampling the hold target: _enable_altitude_hold()
+        # locks onto whatever ranger reads the instant it's called, but the
+        # climb burst leaves real upward momentum that keeps carrying the
+        # drone past that reading. Without this it locked onto a too-low
+        # target mid-climb and sank back to the ground trying to return to
+        # it. See LESSONS.md.
+        time.sleep(self.climb_settle_sec)
         self._enable_altitude_hold()
         self.busy_action = None
         self.node.get_logger().info(f"[{self.id}] Climb done - hovering at z={self.hover_z}.")

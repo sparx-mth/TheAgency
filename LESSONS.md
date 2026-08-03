@@ -608,6 +608,88 @@ trust `mapping_sync`'s heartbeat alone to mean "no bridge running" - `pose=2, bu
 what it looks like when the bridge greeted the topic once and then silently dropped it, distinct from
 `pose=0, last_pose=-1.0s` (never connected at all).
 
+---
+
+## 2026-08-03 — Rooster's published yaw had TWO independent sign/reference bugs, not one
+
+**Symptom:** BEV map/mapped geometry appeared on the wrong side of the drone from the way it was
+actually facing in Sphera (e.g. drone visually facing +Y, mapped area showing up toward -Y). Separately,
+`turn_right`/`turn_left` from the manual UI always worked correctly, but a controller computing a
+specific relative turn (e.g. "turn +30deg") sometimes went the wrong way.
+
+**Root cause:** Two distinct, independent bugs in `rooster_ground_truth_localization.py`'s `_on_state`,
+both hiding behind similar-looking symptoms:
+1. **Rotational sense.** The code negated yaw (`-msg.rotation.yaw`) based on a comment claiming
+   Sphera/Unreal yaw is left-handed/clockwise-positive. Confirmed live via a real commanded `turn_right`
+   while airborne (compare raw `msg.rotation.yaw` against published `/R1/localization` yaw at the same
+   timestamps): raw yaw DECREASED during the real right/clockwise turn, i.e. it was already standard
+   REP103 CCW-positive. The negation was taking an already-correct value and flipping it.
+2. **Zero-reference axis offset (a completely separate degree of freedom from #1).** Confirmed on a
+   fresh, untouched spawn (no commands sent since the last Sphera restart): the drone visually faces
+   world +Y there, but its yaw read ~-94deg, not the +90deg that FALCON's own camera-to-world depth
+   integration assumes (yaw=0 means forward aligns with world's own +X, CCW-positive) for a drone facing
+   +Y. Off by ~180deg - independently explains the BEV map symptom, since FALCON would then integrate
+   depth data toward almost the exact opposite of where the drone was really looking.
+   `sphera_jail.yaml`'s `init_yaw: 0.0` for this same spawn point is consequently also wrong, but that's
+   a repo-wide placeholder default used identically on every map file, not something calibrated
+   per-map, so it was left alone (real localization data supersedes it within milliseconds anyway).
+
+**Fix / workaround:** `yaw = atan2(sin(raw_yaw + pi), cos(raw_yaw + pi))` - no negation (fixes #1), plus
+a `+pi` (180deg) offset before wrapping (fixes #2). Verified: the corrected value on that same fresh
+spawn came out to 85.6deg, matching the expected +90deg closely (small residual because the real spawn
+heading isn't perfectly axis-aligned - not a bug).
+
+**Don't:** Don't assume "yaw problem" is one bug just because both symptoms involve yaw and both got
+fixed by edits to the same function - these were two independently-derived, independently-confirmed
+fixes with completely different evidence (a live turn test vs. a static fresh-spawn quaternion reading).
+Fixing #1 alone did not fix #2, and there was no a-priori reason #2 had to exist at all once #1 was
+fixed. Also don't put a fix like this inside `core/planning/trackers/waypoint_follower` (tried and
+reverted mid-session) - that package is deliberately drone-agnostic and assumes standard REP103 yaw;
+the correct place is the Rooster-specific localization boundary that produces the yaw in the first
+place, so every consumer (core's own bearing math, FALCON's C++ mapping, the BEV click arrow) gets
+fixed at once without needing its own compensating hack.
+
+---
+
+## 2026-08-03 — computed turns went backwards while manual turn_left/turn_right always worked
+
+**Symptom:** The manual UI's `turn_right`/`turn_left` buttons always turned the drone the correct way.
+But any controller-computed turn (waypoint, drift_pid, ...) that needed a specific relative correction
+(e.g. "turn +30deg") sometimes executed in the opposite direction, and turns driven by `/cmd_vel` never
+settled - repeatedly overshooting past the target and correcting back the other way, forming a sustained
+pendulum that never completed.
+
+**Root cause:** Two separate, additive problems, both inside `rooster_twist_control_adapter.py` (the
+one, shared conversion point every controller's `/cmd_vel` funnels through before reaching the FCU -
+manual UI actions never go through this file at all, straight to `rooster_command_unit.py`'s named-
+action dict instead, which is exactly why manual always worked):
+1. **Sign mismatch.** Standard REP103 (which `waypoint_follower`/`drift_pid` correctly assume, since
+   `core/` is deliberately drone-agnostic) has positive `angular.z` = CCW = left. This drone's FCU axis
+   convention has positive `r` = right (confirmed live, same convention already baked into
+   `rooster_command_unit.py`'s `turn_left: r=-1` / `turn_right: r=+1`). The adapter was doing a direct,
+   unflipped `r = angular.z / max_yaw_rate * 1000` - so a controller correctly computing "turn left"
+   executed as "turn right", the opposite of intended, for every controller.
+2. **No damping on top of an undamped FCU loop.** PX4's own yaw-rate control loop has zero derivative
+   gain (`MC_YAWRATE_D=0.0`, confirmed via `/R1/fcu/param/get_float` - P/I only). The adapter was
+   forwarding whatever r-axis value a controller requested as an instantaneous step change every tick,
+   exactly the kind of abrupt input that excites a P/I-only loop into sustained oscillation. Per the
+   user's explicit preference, this was NOT fixed by touching the PX4 parameter itself.
+
+**Fix / workaround:** (1) Negate: `target_r = -angular.z / max_yaw_rate * 1000`. (2) Added a
+`slew()` rate-limiter (new helper in `robots/common/math_utils.py`) so the adapter ramps its own r-axis
+output toward the target by at most `max_yaw_axis_step_per_sec` (2500, a deliberately conservative
+first guess - live-test and retune) per second, instead of snapping to it - smoothing the input without
+touching PX4. `stop_motion()` resets the ramp state directly so a stop is still immediate.
+
+**Don't:** Don't assume a shared symptom across every controller means the bug is in one specific
+controller's tuning - check what code path is actually COMMON to all of them first (here, the single
+Twist->cmd_nav converter) before hunting through per-controller PID gains. Don't conflate "the turn
+never settles" (damping/oscillation) with "the turn goes the wrong way" (sign) - they were reported
+and diagnosed as one thing at first, but are two independent bugs with two independent fixes; a
+sign-flipped, undamped loop produces a much more violent, sustained oscillation than an undamped-but-
+correctly-signed one, so a report of severe swinging is a hint to check the sign FIRST, not just reach
+for damping.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

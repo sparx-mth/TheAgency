@@ -96,13 +96,13 @@ launch:
   # position, so standing off at the room centre and looking is the robust move.
   # Set BOTH stage_x/stage_y to '' to switch staging off (fly straight onto the object).
   # Rooster's real spawn (~54.75, -14.66) is nowhere near XTEND's near-origin
-  # assumption, and sphera_jail has no known room layout yet (unlike office),
-  # so these are a rough placeholder: the same "3m/4m from spawn, one further
-  # than the other" offset XTEND's own goal/stage pair uses, just expressed in
-  # Rooster's actual world coordinates and within sphera_jail's box bounds
-  # (x:[38.75,70.75] y:[-30.66,1.34]) -- not tuned against real room geometry.
-  goal_x: 54.75                # m -- pre-selection target: fly here and hold
-  goal_y: -11.66               # m
+  # assumption, and sphera_jail has no known room layout yet (unlike office).
+  # goal_x/goal_y is placed past the hallway (4.5m forward + 2.5m right of
+  # spawn; forward=+Y, right=+X) so the default no-click flight exercises the
+  # same route a click would. stage_x/stage_y is still the older, closer
+  # placeholder -- object-mission staging is a separate concern.
+  goal_x: 57.25                # m -- pre-selection target: fly here and hold
+  goal_y: -10.16               # m
   stage_x: 54.75               # m -- room centre: look for the object from here
   stage_y: -10.66              # m
 
