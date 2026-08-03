@@ -44,10 +44,13 @@ from typing import Dict, List, Sequence, Tuple
 EXCLUDE_KEYWORDS = (
     "floor", "wall", "ceiling", "roof", "ground", "sky", "dome", "backdrop",
     "light", "environment", "groundplane",
-    # Fixtures that are structurally installed (plumbed, bolted to a wall) --
-    # duplicating one loose into open floor reads as a rendering glitch rather
-    # than a denser room, which is the opposite of realistic training data.
-    "toilet", "urinal", "sink", "bathtub",
+    # Fixtures that are structurally installed (plumbed, hinged, bolted to a
+    # wall) -- duplicating one loose into open floor reads as a rendering
+    # glitch rather than a denser room, which is the opposite of realistic
+    # training data. Doors and clocks matter more once tall obstacles are
+    # selected for (see min_reach_height_m): a door slab floating mid-room
+    # with no frame is the single most obvious case of this.
+    "toilet", "urinal", "sink", "bathtub", "door", "clock", "lamp", "elevator",
 )
 # A candidate's world-space bounding box must fall in this range, metres, on
 # its longest axis. Filters out both small fixtures (a door handle, a few cm)
@@ -62,6 +65,8 @@ def list_obstacle_prims(
     min_extent_m: float = MIN_EXTENT_M,
     max_extent_m: float = MAX_EXTENT_M,
     exclude_keywords: Sequence[str] = EXCLUDE_KEYWORDS,
+    min_reach_height_m: float = 0.0,
+    floor_z_m: float = 0.0,
 ) -> List[Dict]:
     """Find prims under ``root`` that look like duplicatable obstacles.
 
@@ -78,9 +83,20 @@ def list_obstacle_prims(
         exclude_keywords: Case-insensitive substrings that disqualify a prim
             (and its whole subtree) by path -- structural elements, not
             obstacles.
+        min_reach_height_m: Keep only prims whose bounding box *top* reaches at
+            least this height above ``floor_z_m``. ``min_extent_m`` alone does
+            not do this: a desk lying flat can have a 1 m diagonal extent
+            without standing more than 75 cm off the floor. A drone cruising
+            at ~1-1.5 m only cares about obstacles that actually reach that
+            band -- columns, partitions, door frames, tall racks -- not desk
+            clutter that a scan at that altitude would never touch. 0
+            (default) disables the filter.
+        floor_z_m: World z of the floor, for ``min_reach_height_m``.
 
     Returns:
-        One dict per candidate: ``path``, ``extent_m`` (longest bbox axis).
+        One dict per candidate: ``path``, ``extent_m`` (longest bbox axis),
+        ``top_m`` (world z of the bounding box top, height above the floor
+        this object actually reaches).
 
     Raises:
         RuntimeError: If ``root`` does not exist on the current stage.
@@ -117,7 +133,13 @@ def list_obstacle_prims(
         if extent > max_extent_m:
             continue  # too big for one obstacle -- descend into its parts
 
-        candidates.append({"path": prim.GetPath().pathString, "extent_m": extent})
+        top_m = float(box_range.GetMax()[2]) - floor_z_m
+        if top_m < min_reach_height_m:
+            continue  # tall enough on its longest axis, but lying flat
+
+        candidates.append({
+            "path": prim.GetPath().pathString, "extent_m": extent, "top_m": top_m,
+        })
         prim_iter.PruneChildren()
 
     return candidates
@@ -136,6 +158,18 @@ def duplicate_prim(
     otherwise) and converts that back into the copy's local transform. Working
     in world space is what makes ``delta_xyz`` mean what it says regardless of
     whatever local rotation the source prim already carries.
+
+    **The source's world transform is read before the copy, not after.** The
+    copy is created at ``dest_path``, under a different parent than the
+    source's own (typically a flat ``AugmentedObstacles`` group) -- but it
+    keeps the source's raw local xform ops, which were authored relative to
+    the *source's* parent. Computing "world transform" from the already-
+    reparented copy silently reinterprets those ops under the wrong parent,
+    which is only ever invisible when that parent happens to be identity.
+    Object copies with a source in a translated/rotated parent group (a
+    furniture cluster, a rack row) instead came out at wildly wrong world
+    positions -- confirmed by a preview PNG showing stray obstacle marks
+    outside the building envelope after a large batch.
 
     Args:
         dest_path: Stage path for the new copy. Must not already exist.
@@ -156,23 +190,37 @@ def duplicate_prim(
     import omni.usd
     from pxr import Gf, Usd, UsdGeom
 
+    stage = omni.usd.get_context().get_stage()
+    time = Usd.TimeCode.Default()
+
+    source_prim = stage.GetPrimAtPath(source_path)
+    source_world = UsdGeom.Xformable(source_prim).ComputeLocalToWorldTransform(time)
+
     success, _ = omni.kit.commands.execute(
         "CopyPrim", path_from=source_path, path_to=dest_path, exclusive_select=False,
     )
     if not success:
         raise RuntimeError(f"CopyPrim {source_path!r} -> {dest_path!r} failed")
 
-    stage = omni.usd.get_context().get_stage()
     dest_prim = stage.GetPrimAtPath(dest_path)
     xformable = UsdGeom.Xformable(dest_prim)
-    time = Usd.TimeCode.Default()
-
-    world = xformable.ComputeLocalToWorldTransform(time)
     parent_world = UsdGeom.Xformable(dest_prim.GetParent()).ComputeLocalToWorldTransform(time)
 
+    # Order matters and got this wrong once already: Gf.Matrix4d is a row-vector
+    # (p' = p * M) convention, so a matrix placed to the RIGHT of source_world
+    # acts on an already-world-space point -- a "yaw" there rotates the
+    # object's *position* around the world origin, not its own facing, which
+    # for an object tens of metres from the origin threw it tens of metres
+    # across the map (confirmed: every duplicate in an 80-object batch landed
+    # 3-92 m from its intended target, each error roughly matching a circular
+    # displacement for that object's distance from the origin). ``yaw`` must
+    # compose on the *local* side (spins the object about its own pivot before
+    # ``source_world`` places it); ``translation`` still belongs on the world
+    # side (added to whatever the point already is, so it means the same
+    # world-frame delta regardless of the object's own rotation).
     translation = Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(*delta_xyz))
     yaw = Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), rotation_z_deg))
-    new_world = world * yaw * translation
+    new_world = yaw * source_world * translation
     new_local = new_world * parent_world.GetInverse()
 
     xformable.ClearXformOpOrder()

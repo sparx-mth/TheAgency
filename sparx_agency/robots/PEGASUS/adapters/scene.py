@@ -116,6 +116,11 @@ _register_local_scenes()
 
 SPAWN_HEIGHT_M = 0.15  # just above the floor -- PX4 needs to detect it is landed at boot
 
+# App ticks between referencing a scene and duplicating one of its children --
+# see load_augmented_scene. Matches flight_session.STAGE_SETTLE_STEPS, which
+# exists for the same reason (async reference composition).
+_AUGMENT_SETTLE_STEPS = 20
+
 
 def scene_spawn(name: str, z: float = SPAWN_HEIGHT_M) -> tuple:
     """A known-open spot to drop the aircraft into a scene at.
@@ -209,11 +214,41 @@ def load_augmented_scene(name: str, prim_path: str = "/World/Scene") -> str:
     recipe = json.loads(AUGMENTED_SCENES[name].read_text())
     usd_path = load_indoor_scene(recipe["base_scene"], prim_path)
 
+    # The CDN reference just added composes asynchronously; ticking the app
+    # gives it time to finish before anything below reads the source prims.
+    import omni.kit.app
+
+    kit_app = omni.kit.app.get_app()
+    for _ in range(_AUGMENT_SETTLE_STEPS):
+        kit_app.update()
+
+    import omni.usd
+    from pxr import UsdGeom
+
+    # Duplicating straight into "<prim_path>/AugmentedObstacles/dup_000" with
+    # no prim ever explicitly Defined at the parent path lets CopyPrim
+    # auto-vivify it as a typeless Sdf "over" (Usd's implicit behaviour for an
+    # unauthored ancestor). An "over" is not IsDefined(), and neither is
+    # anything under it, in the *whole* subtree -- not just at that one prim.
+    # The duplicates exist on the stage (GetPrimAtPath finds them, CopyPrim
+    # reports success) but read as though they do not: GetChildren()'s default
+    # predicate excludes them, and so, critically, does the PhysX/omap sweep
+    # that surveys occupancy -- an augmented scene surveyed this way came back
+    # with an occupied-voxel count byte-identical to the unaugmented one, as
+    # if none of the duplicates were ever placed. Defining the group explicitly
+    # first is what the interactive augment_scene.py run already did
+    # (`augment_with_duplicates`'s ``UsdGeom.Xform.Define``) -- this mirrors it
+    # for the replay path.
+    obstacles_root = f"{prim_path}/AugmentedObstacles"
+    stage = omni.usd.get_context().get_stage()
+    if not stage.GetPrimAtPath(obstacles_root).IsValid():
+        UsdGeom.Xform.Define(stage, obstacles_root)
+
     from sparx_agency.robots.PEGASUS.adapters import scene_augment
 
     for i, obstacle in enumerate(recipe["obstacles"]):
         source_path = f"{prim_path}{obstacle['source_rel']}"
-        dest_path = f"{prim_path}/AugmentedObstacles/dup_{i:03d}"
+        dest_path = f"{obstacles_root}/dup_{i:03d}"
         scene_augment.duplicate_prim(
             dest_path, source_path,
             (obstacle["dx"], obstacle["dy"], obstacle["dz"]),
