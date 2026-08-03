@@ -63,6 +63,13 @@ def _parse_args():
                     help="radius around the scene's spawn point that stays clear, metres")
     ap.add_argument("--root", default="/World/Scene",
                     help="stage path the scene was referenced at")
+    ap.add_argument("--min-height", type=float, default=0.0,
+                    help="keep only obstacles whose top reaches at least this "
+                         "high above the floor, metres -- 0 (default) keeps "
+                         "everything obstacle-sized regardless of orientation; "
+                         "set this near the flight altitude to bias toward "
+                         "columns/partitions/racks a drone cruising there "
+                         "would actually hit, over low desk clutter")
     ap.add_argument("--output", type=Path, default=None,
                     help="destination .json recipe path (default: "
                          "robots/PEGASUS/scenes/<scene>_augmented.json)")
@@ -106,13 +113,15 @@ def main() -> None:
                   f"at {args.min_spacing:.1f} m spacing -- the free landable area "
                   f"is smaller than requested", flush=True)
 
-        candidates = scene_augment.list_obstacle_prims(root=args.root)
+        candidates = scene_augment.list_obstacle_prims(
+            root=args.root, min_reach_height_m=args.min_height)
         if not candidates:
             raise RuntimeError(
                 f"no duplicatable obstacle prims found under {args.root!r} in "
-                f"scene {args.scene!r}"
+                f"scene {args.scene!r} reaching at least {args.min_height:.2f} m"
             )
-        print(f"found {len(candidates)} candidate obstacle prims under {args.root}",
+        print(f"found {len(candidates)} candidate obstacle prims under {args.root}"
+              + (f" reaching >= {args.min_height:.2f} m" if args.min_height > 0 else ""),
               flush=True)
 
         placed = scene_augment.augment_with_duplicates(placements, candidates)
