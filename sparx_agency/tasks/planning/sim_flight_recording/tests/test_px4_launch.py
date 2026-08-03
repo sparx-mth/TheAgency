@@ -6,6 +6,9 @@ derivations, not the launching.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 from sparx_agency.tasks.planning.sim_flight_recording import px4_launch
@@ -66,3 +69,59 @@ def test_launching_without_a_build_says_how_to_build_it(tmp_path):
 
 def test_terminating_nothing_is_a_no_op():
     px4_launch.terminate_px4(None, instance=0)
+
+
+def _sleeper_in(directory, tag="px4"):
+    """A live process whose cwd is ``directory`` and whose argv mentions PX4.
+
+    Both are what kill_stale_px4 matches on, so this stands in for a real
+    daemon without needing a PX4 build.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    script = f"import time,sys; sys.argv[0]={tag!r}; time.sleep(30)"
+    return subprocess.Popen([sys.executable, "-c", script], cwd=str(directory))
+
+
+def test_a_stale_daemon_is_killed_so_the_next_run_can_bind(tmp_path):
+    """The bug this exists for: PX4 runs with -d, so terminating the launcher
+    leaves the real daemon holding TCP 4560+N, and the next run starves with
+    'sensors STALE' and never says why."""
+    victim = _sleeper_in(px4_launch.working_dir(tmp_path, 0))
+    try:
+        px4_launch.kill_stale_px4(tmp_path, 0)
+        assert victim.wait(timeout=10) is not None
+    finally:
+        victim.kill()
+        victim.wait(timeout=10)
+
+
+def test_a_live_sibling_instance_is_never_killed(tmp_path):
+    """Matching on '-i N' in a command line would kill another worker's
+    aircraft; matching on the working directory cannot."""
+    sibling = _sleeper_in(px4_launch.working_dir(tmp_path, 1))
+    try:
+        px4_launch.kill_stale_px4(tmp_path, 0)
+        with pytest.raises(subprocess.TimeoutExpired):
+            sibling.wait(timeout=2)
+        assert sibling.poll() is None
+    finally:
+        sibling.kill()
+        sibling.wait(timeout=10)
+
+
+def test_a_process_in_the_directory_that_is_not_px4_is_left_alone(tmp_path):
+    """The directory is how instances are told apart, but 'px4' in the argv is
+    what says this is PX4 and not, say, a shell someone opened there."""
+    bystander = _sleeper_in(px4_launch.working_dir(tmp_path, 0), tag="editor")
+    try:
+        px4_launch.kill_stale_px4(tmp_path, 0)
+        with pytest.raises(subprocess.TimeoutExpired):
+            bystander.wait(timeout=2)
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)
+
+
+def test_killing_stale_px4_when_there_is_none_is_a_no_op(tmp_path):
+    px4_launch.kill_stale_px4(tmp_path, 5)  # must not raise

@@ -35,6 +35,7 @@ hard ceiling** on concurrent instances without patching PX4 itself.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -89,6 +90,47 @@ def clear_stale_locks(instance: int = 0) -> None:
         try:
             os.remove(path)
         except FileNotFoundError:
+            pass
+
+
+def kill_stale_px4(px4_dir: Path, instance: int = 0) -> None:
+    """Kill a PX4 daemon left behind by an earlier run of the same instance.
+
+    :func:`launch_px4` starts PX4 with ``-d``, which daemonises it: the process
+    :class:`subprocess.Popen` holds is the launcher, while the ``bin/px4`` that
+    actually binds TCP ``4560 + N`` detaches and outlives it. Terminating the
+    launcher therefore leaves the real PX4 running, and the *next* run on that
+    instance boots into a port clash which PX4 reports only as its sensors going
+    ``STALE!`` and never sending a heartbeat -- an hour of flights lost to a
+    message that names neither the port nor the cause.
+
+    Instances are told apart by **working directory**, which :func:`working_dir`
+    guarantees is unique. Matching on ``-i N`` in a command line instead would
+    also match a live sibling instance and kill another worker's aircraft.
+
+    Args:
+        px4_dir: A built ``PX4-Autopilot`` checkout.
+        instance: PX4 instance id.
+    """
+    target = working_dir(px4_dir, instance)
+    try:
+        target = target.resolve()
+    except OSError:
+        return
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.joinpath("cwd").resolve() != target:
+                continue
+            command = entry.joinpath("cmdline").read_bytes()
+        except OSError:          # the process exited, or is not ours to read
+            continue
+        if b"px4" not in command:
+            continue
+        try:
+            os.kill(int(entry.name), signal.SIGKILL)
+        except OSError:
             pass
 
 
@@ -148,6 +190,9 @@ def launch_px4(px4_dir: Path, instance: int = 0,
             f"'make px4_sitl_default none' (see robots/PEGASUS/setup/install.sh)"
         )
 
+    # Before the locks, because a *live* orphan from the last run will simply
+    # recreate them -- and it, not the lock file, is what holds the HIL port.
+    kill_stale_px4(px4_dir, instance)
     clear_stale_locks(instance)
     cwd = working_dir(px4_dir, instance)
     cwd.mkdir(parents=True, exist_ok=True)
@@ -158,7 +203,9 @@ def launch_px4(px4_dir: Path, instance: int = 0,
                "-i", str(instance), "-d"]
 
     if log_path is None:
-        return subprocess.Popen(command, cwd=str(cwd), env=env)
+        process = subprocess.Popen(command, cwd=str(cwd), env=env)
+        process._px4_dir = px4_dir  # so terminate_px4 can reap the daemon
+        return process
 
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +213,7 @@ def launch_px4(px4_dir: Path, instance: int = 0,
     process = subprocess.Popen(command, cwd=str(cwd), env=env,
                                stdout=handle, stderr=subprocess.STDOUT)
     process._px4_log_handle = handle  # keep it open as long as the process lives
+    process._px4_dir = px4_dir
     return process
 
 
@@ -186,6 +234,11 @@ def terminate_px4(process: subprocess.Popen, instance: int = 0,
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=timeout)
+    # PX4 runs with -d, so the process above was only the launcher; the daemon
+    # holding TCP 4560+N is still alive and would poison the next run.
+    px4_dir = getattr(process, "_px4_dir", None)
+    if px4_dir is not None:
+        kill_stale_px4(px4_dir, instance)
     handle = getattr(process, "_px4_log_handle", None)
     if handle is not None:
         handle.close()

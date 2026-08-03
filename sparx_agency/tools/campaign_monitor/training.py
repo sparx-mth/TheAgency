@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 
 _STEPS_PER_EPOCH = re.compile(r"(\d[\d,]*)\s+steps?\s+per\s+epoch", re.IGNORECASE)
 _TOTAL_STEPS = re.compile(r"(\d[\d,]*)\s+(?:optimiser|optimizer|total)\s+steps", re.IGNORECASE)
+_RESUMED_AT = re.compile(r"resumed\s+from\s+\S+\s+at\s+step\s+(\d[\d,]*)", re.IGNORECASE)
 
 
 @dataclass
@@ -39,6 +40,12 @@ class TrainingProgress:
     min_clear_m: Optional[float] = None
     collide_pct: Optional[float] = None
     wall_s: float = 0.0
+    window_steps: int = 0
+    """Steps between the oldest and newest record read — the ETA's numerator."""
+    window_s: float = 0.0
+    """Wall-clock seconds those steps took."""
+    resumed_from_step: int = 0
+    """Step a resume picked up at, so the elapsed time can be read honestly."""
     started: Optional[str] = None
     finished: Optional[str] = None
     notes: List[str] = field(default_factory=list)
@@ -53,7 +60,17 @@ class TrainingProgress:
 
     @property
     def steps_per_second(self) -> Optional[float]:
-        """Average optimiser steps per wall-clock second so far."""
+        """Optimiser steps per wall-clock second, over the trailing window.
+
+        Measured between the oldest and newest record still in the tail rather
+        than as ``step / wall_s``. That whole-run average is wrong after a
+        resume — the step counter carries on from the checkpoint while the wall
+        clock restarts at zero, so it reports a rate several times the real one
+        and an ETA to match. A window is also the better reading of a rate that
+        changes, which is why it is not merely a special case for resumes.
+        """
+        if self.window_steps > 0 and self.window_s > 0:
+            return self.window_steps / self.window_s
         if self.wall_s <= 0 or self.step <= 0:
             return None
         return self.step / self.wall_s
@@ -142,7 +159,18 @@ def read(run_dir: Path) -> TrainingProgress:
         if (run_dir / name).is_file():
             progress.checkpoints.append(name)
 
-    for entry in _tail_records(run_dir / "metrics.jsonl"):
+    records = _tail_records(run_dir / "metrics.jsonl")
+    timed = [entry for entry in records
+             if entry.get("step") is not None and entry.get("wall_s") is not None]
+    if len(timed) >= 2:
+        progress.window_steps = int(timed[-1]["step"]) - int(timed[0]["step"])
+        progress.window_s = float(timed[-1]["wall_s"]) - float(timed[0]["wall_s"])
+
+    resumed = _RESUMED_AT.search(" ".join(progress.notes))
+    if resumed:
+        progress.resumed_from_step = int(resumed.group(1).replace(",", ""))
+
+    for entry in records:
         progress.step = max(progress.step, int(entry.get("step", 0)))
         progress.epoch = max(progress.epoch, float(entry.get("epoch", 0.0)))
         progress.wall_s = max(progress.wall_s, float(entry.get("wall_s", 0.0)))

@@ -39,6 +39,7 @@ import json
 import math
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -134,8 +135,14 @@ def _empty_result(mission, start, outcome: str, detail: str = "") -> Dict:
 
 
 def fly_mission(loop, px4, adapter, client, scene, mission, args,
-                recorder=None) -> Dict:
+                recorder=None, track_log=None) -> Dict:
     """Fly one A-to-B mission with the policy closing the loop.
+
+    Args:
+        track_log: Optional :class:`~.track_log.TrackLog`. Given one, every
+            inference's proposed trajectory is recorded in world coordinates,
+            which is what a map panel is drawn from afterwards. The flight is
+            identical either way -- this only observes.
 
     Returns:
         A result dict: outcome, whether the goal was reached, the worst
@@ -192,6 +199,7 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
                 np.ascontiguousarray(frame.rgb[:, :, :3]), frame.depth, gx, gy,
                 altitude=altitude)
             inferences += 1
+            trajectory = None
             if result is None:
                 transport_failures += 1
             else:
@@ -203,6 +211,8 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
                 if math.hypot(body[0], body[1]) > 0.15:
                     yaw_command = math.atan2(target_world[1] - pose[1],
                                              target_world[0] - pose[0])
+            if track_log is not None:
+                track_log.add(loop.sim_time, pose, trajectory, target_world)
 
         vx, vy, vz = velocity_to(position, target_world, altitude, args.cruise)
         yaw_command = slew_towards(pose[2], yaw_command,
@@ -233,6 +243,8 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     clearance = scene.clearance(flown[:, 0], flown[:, 1]) if flown.shape[0] else np.array([0.0])
     steps = np.linalg.norm(np.diff(flown, axis=0), axis=1) if flown.shape[0] > 1 else np.array([0.0])
     final = flown[-1] if flown.shape[0] else np.array(start[:2])
+    if track_log is not None:
+        track_log.set_flown(track)
     return {
         "outcome": outcome,
         "reached": outcome == "reached",
@@ -255,7 +267,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--scene", default="office")
     parser.add_argument("--altitude", type=float, default=1.5)
-    parser.add_argument("--missions", type=int, default=6)
+    parser.add_argument("--missions", type=int, default=6,
+                        help="size of the mission set the seed draws; with "
+                             "--mission-index only one of them is flown")
+    parser.add_argument("--mission-index", type=int, default=-1,
+                        help="fly only this mission of the set, in a session of "
+                             "its own. This is the correct way to fly more than "
+                             "one: the aircraft cannot be repositioned between "
+                             "missions, so a single session can only fly the "
+                             "first honestly. -1 flies them all in one session.")
     parser.add_argument("--seed", type=int, default=4242)
     parser.add_argument("--arm", required=True, help="label for this set of weights")
     parser.add_argument("--server", default="http://127.0.0.1:8888")
@@ -272,8 +292,11 @@ def main() -> None:
     # mirror collect.py's.
     parser.add_argument("--resolution", default=None,
                         help="camera WxH; defaults to the platform's own 504x392")
-    parser.add_argument("--pegasus-root",
-                        default="/tmp/dev/PegasusSimulator/extensions/pegasus.simulator")
+    # type=Path, as collect.py has it: spawn_vehicle does path arithmetic on
+    # this straight away, so a bare string dies with "unsupported operand
+    # type(s) for /: 'str' and 'str'" only once Kit has finished booting.
+    parser.add_argument("--pegasus-root", type=Path,
+                        default=Path("/tmp/dev/PegasusSimulator/extensions/pegasus.simulator"))
     parser.add_argument("--px4-dir", type=Path, default=Path("/tmp/dev/PX4-Autopilot"))
     parser.add_argument("--rate-hz", type=float, default=10.0)
     parser.add_argument("--realtime", action="store_true",
@@ -299,6 +322,9 @@ def main() -> None:
     from sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal.scene import (
         Scene, SceneConfig,
     )
+    from sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal.track_log import (
+        TrackLog,
+    )
 
     spec = EpisodeSpec(altitude_m=args.altitude)
     world_map = campaign_setup.load_map(args.scene, args.altitude, spec)
@@ -310,6 +336,23 @@ def main() -> None:
         print(f"[fly]   {index}: ({mission.start.x:.1f}, {mission.start.y:.1f}) -> "
               f"({mission.goal.x:.1f}, {mission.goal.y:.1f})  "
               f"{mission.separation_m:.1f} m", flush=True)
+
+    # One mission per process is the only sound shape here. A mission begins
+    # wherever the aircraft already is -- there is no teleport in the vehicle
+    # adapter and none in flight_session, because collect.py spawns a fresh
+    # Isaac and PX4 for every episode and never needed one. Flying several in
+    # one session therefore starts mission N+1 from wherever mission N ended,
+    # and once one crashes the aircraft is on the ground for good: every later
+    # mission returns in three seconds having flown 0.1 m. Sampling still uses
+    # the full list so the seed picks the same missions for every arm.
+    selected = args.mission_index
+    if selected >= 0:
+        if selected >= len(missions):
+            raise ValueError(
+                f"--mission-index {selected} is past the {len(missions)} "
+                f"missions seed {args.seed} produces")
+        missions = [missions[selected]]
+        print(f"[fly] flying mission {selected} only", flush=True)
 
     out = Path(args.out).expanduser() / args.arm
     out.mkdir(parents=True, exist_ok=True)
@@ -335,27 +378,51 @@ def main() -> None:
             return
 
         for index, mission in enumerate(missions):
+            # The true index in the seed's mission set, not the position in this
+            # session's list. Everything named after a mission uses this -- the
+            # recording, the MP4 and the stored result -- so that ten one-mission
+            # sessions in the same directory do not all call themselves "00".
+            mission_id = selected if selected >= 0 else index
             recorder = None
             if args.video:
                 recorder = flight_session.FlightRecorder(
-                    adapter, out / f"mission_{index:02d}", rate_hz=args.rate_hz,
+                    adapter, out / f"mission_{mission_id:02d}", rate_hz=args.rate_hz,
                     camera_height_m=args.altitude,
-                    video_out=out / f"mission_{index:02d}.mp4",
+                    video_out=out / f"mission_{mission_id:02d}.mp4",
                     video_source="chase", chase_camera=chase)
+            # Logged whenever video is, because the map panel is drawn from it
+            # and a video without the panel is half the comparison.
+            log = TrackLog((mission.goal.x, mission.goal.y),
+                           (mission.start.x, mission.start.y)) if args.video else None
             started = time.time()
             result = fly_mission(loop, px4_link, adapter, client, scene, mission,
-                                 args, recorder)
-            result.update({"mission": index, "arm": args.arm,
+                                 args, recorder, track_log=log)
+            result.update({"mission": mission_id, "arm": args.arm,
                            "wall_s": round(time.time() - started, 1)})
+            if log is not None:
+                log.write(out / f"mission_{mission_id:02d}_track.json",
+                          extra={"scene": args.scene, "arm": args.arm,
+                                 "infer_hz": args.infer_hz, **result})
             if recorder is not None:
                 recorder.finish({"scene": args.scene, "arm": args.arm, **result})
             results.append(result)
-            print(f"[fly] mission {index}: {result['outcome']}  "
+            print(f"[fly] mission {result['mission']}: {result['outcome']}  "
                   f"min_clear {result['min_clear_m']:.2f} m  "
                   f"goal_error {result['goal_error_m']:.2f} m", flush=True)
             # Written every mission, not at the end: a run that dies on mission
-            # five should not also lose the four that flew.
-            (out / "results.json").write_text(json.dumps(results, indent=2))
+            # five should not also lose the four that flew. One-mission runs get
+            # their own file so that twenty sessions in the same directory
+            # accumulate instead of overwriting each other.
+            name = "results.json" if selected < 0 else f"results_{selected:02d}.json"
+            (out / name).write_text(json.dumps(results, indent=2))
+    except Exception:
+        # Kit runs with --/app/fastShutdown=True, so ``simulation_app.close()``
+        # in the finally below tears the process down before the interpreter
+        # gets to print the traceback. Without this the run looks like a clean
+        # "no missions completed" and the real error is never seen.
+        traceback.print_exc()
+        sys.stdout.flush()
+        raise
     finally:
         _write_summary(out, args.arm, results)
         # Leaving either alive costs the *other* arm its ports and its GPU

@@ -140,10 +140,83 @@ def lr_schedule(step: int, warmup: int, total: int, final_fraction: float) -> fl
 
 def save_checkpoint(path: Path, model: WorldGoalNavDP, ema: ModelEma, step: int,
                     epoch: float, val: Optional[Dict], config: Dict) -> None:
-    """Write trainable weights (raw and EMA) plus enough context to explain them."""
+    """Write trainable weights (raw and EMA) plus enough context to explain them.
+
+    Deliberately *without* optimiser state: these are the checkpoints that get
+    shipped and compared, and doubling 356 MB five times over to carry Adam
+    moments nobody will ever use is not a good trade. Crash recovery is
+    :func:`save_resume` instead.
+    """
     torch.save({"model": model.trainable_state_dict(), "ema": ema.state_dict(),
                 "step": step, "epoch": epoch, "val": val, "config": config,
                 "param_counts": model.param_counts()}, path)
+
+
+def save_resume(path: Path, model: WorldGoalNavDP, ema: ModelEma,
+                optimizer, scheduler, state: Dict, config: Dict) -> None:
+    """Write everything needed to carry on exactly where the run left off.
+
+    Written at every validation and overwritten in place, so a run killed by a
+    power cut, an OOM or a reboot costs at most ``val_every`` steps instead of
+    everything. That is not hypothetical: this run lost three and a half hours
+    at 57 % to a power outage, and the shipped checkpoints could not resume it
+    because they carry no optimiser state.
+
+    Written to a temporary file and renamed, because the process dying *during*
+    the write is exactly the case this exists for and a half-written resume file
+    is worse than none.
+    """
+    payload = {
+        "model": model.trainable_state_dict(), "ema": ema.state_dict(),
+        "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+        "state": dict(state), "config": config,
+    }
+    temporary = path.with_suffix(".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
+
+
+def load_resume(path: Path, model: WorldGoalNavDP, ema: ModelEma, optimizer,
+                scheduler, state: Dict, logger) -> bool:
+    """Restore a run from ``path``. Returns whether anything was restored.
+
+    Accepts a full resume file *or* one of the shipped checkpoints. The shipped
+    ones carry no optimiser state, so restarting from one rebuilds Adam's
+    moments from scratch -- a transient of a few hundred steps -- but it still
+    recovers the weights and, importantly, the position in the cosine schedule,
+    which is the part that cannot be guessed.
+    """
+    if not path.is_file():
+        return False
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_trainable(blob["model"])
+    ema.load_state_dict(blob["ema"])
+    restored = dict(blob.get("state") or {})
+    if not restored:                       # a shipped checkpoint, not a resume file
+        # Carry the validation loss forward as the bar to beat. Starting from
+        # infinity would make the very first validation "the best" and overwrite
+        # best.pth -- and after a resume from a shipped checkpoint the optimiser
+        # restarts, so that first score is usually a transient *worse* than the
+        # weights being resumed from. The run would quietly replace a good
+        # checkpoint with a worse one on its first validation.
+        previous = (blob.get("val") or {}).get("total")
+        restored = {"step": int(blob.get("step", 0)), "stale": 0,
+                    "best": float(previous) if previous is not None else float("inf")}
+    state.update(restored)
+    if "optimizer" in blob:
+        optimizer.load_state_dict(blob["optimizer"])
+        scheduler.load_state_dict(blob["scheduler"])
+        logger.note(f"resumed from {path.name} at step {state['step']} "
+                    f"with optimiser state")
+    else:
+        # Fast-forward the schedule by hand so the learning rate carries on
+        # decaying from where it was rather than restarting at the peak.
+        for _ in range(int(state["step"])):
+            scheduler.step()
+        logger.note(f"resumed from {path.name} at step {state['step']}; it carries "
+                    f"no optimiser state, so Adam's moments restart and the "
+                    f"learning-rate schedule was fast-forwarded instead")
+    return True
 
 
 def main() -> None:
@@ -166,6 +239,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tensorboard", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument("--resume", nargs="?", const="auto", default=None,
+                        help="carry on from a previous run. Bare --resume takes "
+                             "<out>/resume.pth; give a path to start from a "
+                             "specific checkpoint (a shipped best.pth works, but "
+                             "carries no optimiser state)")
     args = parser.parse_args()
 
     config = yaml.safe_load(Path(args.config).read_text())
@@ -236,8 +314,15 @@ def main() -> None:
     milestones = {int(fraction * total_steps): f"milestone_{int(fraction * 100)}"
                   for fraction in config["eval"]["milestones"]}
     state = {"best": float("inf"), "stale": 0, "step": 0}
+    if args.resume:
+        resume_path = (out / "resume.pth" if args.resume == "auto"
+                       else Path(args.resume).expanduser())
+        if not load_resume(resume_path, model, ema, optimizer, scheduler, state, logger):
+            logger.note(f"--resume given but {resume_path} does not exist; "
+                        f"starting from the pretrained checkpoint")
     running: Dict[str, float] = {}
     started, seen, stop = time.time(), 0, False
+    resumed_at = int(state["step"])
 
     for epoch in range(10_000):
         model.train()
@@ -279,12 +364,16 @@ def main() -> None:
             logger.log("train", step, epoch_f, {
                 **{f"train/{k}": v for k, v in running.items()},
                 "lr_head": optimizer.param_groups[0]["lr"],
-                "grad_norm": float(grad_norm), "samples_per_s": seen / (time.time() - started),
+                "grad_norm": float(grad_norm), "samples_per_s": seen / max(time.time() - started, 1e-6),
                 "gpu_mem_gb": (torch.cuda.max_memory_allocated() / 1e9
                                if torch.cuda.is_available() else 0.0)})
             logger.log("val", step, epoch_f, val)
             logger.row(step, epoch_f, optimizer.param_groups[0]["lr"],
                        running.get("total", float("nan")), val, note)
+            # Overwritten every validation, so an outage costs val_every steps
+            # rather than the whole run.
+            save_resume(out / "resume.pth", model, ema, optimizer, scheduler,
+                        state, config)
 
             for milestone_step, name in milestones.items():
                 if abs(step - milestone_step) < int(config["eval"]["val_every"]) / 2:
@@ -299,6 +388,7 @@ def main() -> None:
     save_checkpoint(out / "last.pth", model, ema, state["step"],
                     state["step"] / steps_per_epoch, None, config)
     summary = {"steps": state["step"], "best_val_total": state["best"],
+               "resumed_from_step": resumed_at or None,
                "checkpoints": sorted(p.name for p in out.glob("*.pth")),
                "samples_per_s": seen / max(time.time() - started, 1e-6)}
     logger.finish(summary)

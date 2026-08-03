@@ -238,6 +238,17 @@ before it did them:
   next worker on that instance then fails to bind and PX4 says nothing useful
   about why. Instances are told apart by working directory, so a sweep never
   touches a live sibling.
+
+  This is now belt *and* braces: `px4_launch.kill_stale_px4` does the same sweep
+  from inside the container, and `launch_px4`/`terminate_px4` both call it. PX4
+  runs with `-d`, so it **daemonises** — the process `Popen` holds is only the
+  launcher, and the `bin/px4` that binds the HIL port detaches and survives
+  terminating it. Every run therefore leaked one, and the supervisor was
+  covering for it; a caller that runs two flights back to back in one process
+  (`world_goal/fly_navdp.py`) had nothing covering for it and lost an arm to
+  `no PX4 heartbeat after 300 simulated seconds`. If you see PX4 report sensors
+  `STALE!` and never send a heartbeat, look for a second `bin/px4` on that
+  instance before looking anywhere else.
 * **It writes `supervisor.json` and `supervisor.log`** into the campaign
   directory — what was relaunched and why.
 

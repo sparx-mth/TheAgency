@@ -141,7 +141,13 @@ def render_stages(stages: List[training.StageProgress]) -> List[str]:
 def render_training(progress: training.TrainingProgress, running: bool) -> List[str]:
     """The training panel: steps, losses, and the two navigation metrics."""
     if not progress.exists:
-        return [f"  {bars.DIM}not started{bars.RESET}"]
+        # A mistyped --run and a run that has genuinely not begun are the same
+        # empty reading, and the first is far more common. Say which.
+        if not progress.run_dir.is_dir():
+            return [f"  {bars.YELLOW}no such directory{bars.RESET} {progress.run_dir}",
+                    f"  {bars.DIM}check --run; nothing below it can be read{bars.RESET}"]
+        return [f"  {bars.DIM}not started{bars.RESET} {bars.DIM}({progress.run_dir}"
+                f" has no run.json){bars.RESET}"]
 
     total = f" / {progress.total_steps:,}" if progress.total_steps else ""
     lines = [bars.line("steps", progress.fraction, f"{progress.step:,}{total}",
@@ -170,7 +176,13 @@ def render_training(progress: training.TrainingProgress, running: bool) -> List[
     rate = progress.steps_per_second
     if rate:
         state.append(f"{rate:.2f} steps/s")
-    state.append(f"elapsed {bars.duration(progress.wall_s)}")
+    if progress.resumed_from_step:
+        # Otherwise "elapsed 1h 36m" next to step 66,000 reads as a machine
+        # three times faster than it is.
+        state.append(f"elapsed {bars.duration(progress.wall_s)} "
+                     f"since resuming at {progress.resumed_from_step:,}")
+    else:
+        state.append(f"elapsed {bars.duration(progress.wall_s)}")
     if progress.checkpoints:
         state.append(f"saved {', '.join(progress.checkpoints)}")
     if not running and progress.finished:

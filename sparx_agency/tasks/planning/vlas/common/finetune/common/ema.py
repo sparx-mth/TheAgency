@@ -74,3 +74,37 @@ class ModelEma:
         shared GPU).
         """
         return {k: v.detach().to("cpu") for k, v in self._shadow.items()}
+
+    def load_state_dict(self, state: Dict[str, torch.Tensor]) -> int:
+        """Restore a saved shadow, for resuming an interrupted run.
+
+        Copies **in place** into the existing shadow tensors so the EMA keeps
+        the device and dtype it was built with -- a saved state dict is always
+        on CPU, and assigning it wholesale would silently move the shadow off
+        the GPU and make every later update a host round-trip.
+
+        Args:
+            state: A dict from :meth:`state_dict`.
+
+        Returns:
+            How many shadow tensors were restored.
+
+        Raises:
+            KeyError: If the saved state shares no keys with this shadow, which
+                means it belongs to a different model or a different freeze
+                policy. Silently continuing there would resume a run with an
+                EMA that never saw any training.
+        """
+        restored = 0
+        for key, value in state.items():
+            shadow = self._shadow.get(key)
+            if shadow is None:
+                continue
+            shadow.copy_(value.to(shadow.device, shadow.dtype))
+            restored += 1
+        if not restored:
+            raise KeyError(
+                f"none of the {len(state)} saved EMA tensors match this shadow's "
+                f"{len(self._shadow)} keys -- the checkpoint is for a different "
+                f"model or a different set of trainable parameters")
+        return restored

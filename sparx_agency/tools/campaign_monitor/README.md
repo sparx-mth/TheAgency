@@ -69,9 +69,17 @@ instead of being dragged down by the three and a half minutes each worker spends
 booting Kit. Expect it to be pessimistic for the first few minutes of a campaign
 and steady after that.
 
-Training ETA is the plain average of steps per wall-clock second since the run
-started. It is honest for a run at constant batch size and wrong across a
-validation pass, which is why the step counter is shown next to it.
+Training throughput is measured **between the oldest and newest record still in
+the tail**, not as `step / wall_s` over the whole run. The whole-run average
+breaks on a resumed run: the step counter carries on from the checkpoint while
+`wall_s` restarts at zero, so a run resumed at step 45,000 reported 11.4 steps/s
+for a machine doing 3.6, and an ETA a third of the truth. A resumed run says so
+on the elapsed line — `elapsed 1h 36m since resuming at 45,000` — because the
+step count and the clock otherwise look inconsistent with each other.
+
+A **wrong `--run` path is called out rather than shown as "not started"**. The
+two produce the same empty reading and the first is much the more common, so a
+run directory that does not exist prints `no such directory` and the path.
 
 The training total is not written anywhere by the trainer, so `training.py`
 reconstructs it: `--max-steps` when it was given, otherwise a `... optimiser
