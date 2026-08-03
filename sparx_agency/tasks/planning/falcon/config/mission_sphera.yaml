@@ -49,7 +49,7 @@ detector:
   weights_dir: /home/user1/.cache/sparx_agency/yolo_world_weights
   conf_thresh: 0.1            # detections below this are ignored, so the object is
                               #   never confirmed and the mission lands by A* alone
-  init_target: gun            # placeholder target before you select one. Sets BOTH the
+  init_target: barrel         # placeholder target before you select one. Sets BOTH the
                               #   YOLO prompt and the label object_approach filters on,
                               #   which must never diverge. Overwritten on selection.
   # engines_dir: /path/to/engines               # default: yolo_world_trt/engines/<target_tag>

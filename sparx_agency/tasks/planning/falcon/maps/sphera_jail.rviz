@@ -545,6 +545,30 @@ Visualization Manager:
       Name: Voxel Mapping
     - Class: rviz/Group
       Displays:
+        - Alpha: 0.699999988079071
+          Class: rviz/Map
+          Color Scheme: costmap
+          Draw Behind: false
+          Enabled: true
+          Name: BEV 2D Costmap
+          Topic: /falcon/bev_2d
+          Unreliable: false
+          Use Timestamp: false
+          Value: true
+        - Alpha: 0.5
+          Class: rviz/Map
+          Color Scheme: map
+          Draw Behind: false
+          Enabled: false
+          Name: BEV 2D Confidence
+          Topic: /falcon/bev_2d_conf
+          Unreliable: false
+          Use Timestamp: false
+          Value: false
+      Enabled: true
+      Name: BEV 2D
+    - Class: rviz/Group
+      Displays:
         - Class: rviz/Marker
           Enabled: true
           Marker Topic: /odom_visualization/robot

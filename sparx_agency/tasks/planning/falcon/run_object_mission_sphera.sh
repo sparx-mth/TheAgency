@@ -363,6 +363,7 @@ if [[ $WANT_DETECTOR -eq 1 ]]; then
     python3 '$REPO_ROOT/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py' \
       --ros-args \
         -p target_object:='$INIT_TARGET' \
+        -p extra_prompts:='[drum]' \
         -p conf_thresh:='$CONF_THRESH' \
         -p backbone_engine:='$BACKBONE' \
         -p head_engine:='$HEAD' \
@@ -398,7 +399,14 @@ fi
 # starts inside the FALCON container, so that master -- and every topic registration
 # the bridge made against it -- dies when the container does.
 echo "[mission] starting the ros1<->ros2 bridge ..."
-"$HERE/bridge/run_bridge.sh" >"$LOG_DIR/bridge.log" 2>&1 &
+# Rooster is Jazzy/CycloneDDS; run_bridge.sh's own default profile
+# (domain 5, rmw_fastrtps_cpp) is XTEND/Foxy's. Without this override the
+# bridge comes up on the wrong domain/RMW and silently sees nothing -- no
+# crash, just zero pose/depth forever. See run_bridge.sh's own header
+# comment and LESSONS.md for the fuller derivation.
+ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+  CYCLONEDDS_URI="file://$HOME/rqs_iai_ws/src/cyclonedds.xml" \
+  "$HERE/bridge/run_bridge.sh" >"$LOG_DIR/bridge.log" 2>&1 &
 sleep 3
 
 # ── 3. FALCON nav + A*/NavDP + object-approach + director (container, foreground) ─
