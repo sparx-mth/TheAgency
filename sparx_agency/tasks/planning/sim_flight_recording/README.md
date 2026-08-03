@@ -489,6 +489,21 @@ Wall-mounted/hinged fixtures that would look like a rendering glitch floating
 free in open floor (doors, clocks, lamps, sinks, toilets, elevator frames)
 stay excluded regardless -- see `scene_augment.EXCLUDE_KEYWORDS`.
 
+**A placement is never allowed to seal off a passage.** `--min-spacing` alone
+only keeps obstacles apart from each other -- it does not stop one from sitting
+in the one corridor cell that is the only way to a side room, which is exactly
+what happened once: a scene that surveyed as "correct" (no stray obstacles, no
+overlaps) still turned out to have a fully-blocked hallway, because nothing had
+ever checked reachability, only spacing. `obstacle_placement.sample_placements`
+now stamps a candidate's own footprint onto a working copy of the free-space
+mask and rejects it if that shrinks the area still reachable from spawn by more
+than `max_reachable_loss_fraction` (2% by default) beyond what the footprint's
+own cells account for. The footprint radius defaults to half the longest axis
+of the *largest* candidate obstacle in play -- not a fixed guess -- so a spot
+is never assumed safe for a bigger object than it was actually checked against;
+override with `--obstacle-radius` if that default is too conservative for a
+scene with a few oversized outliers.
+
 ## How the aircraft is actually flown
 
 **A smoothed spline, a moving carrot, and velocity setpoints closed on ground
