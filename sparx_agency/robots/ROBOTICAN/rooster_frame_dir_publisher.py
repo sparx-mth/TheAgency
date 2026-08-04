@@ -12,9 +12,15 @@ publish-only. This is required for both the 360-degree sweep capture and any
 future FALCON bridging, where RGB/depth cross the ROS1/ROS2 bridge as
 file-path strings rather than raw sensor_msgs/Image.
 
-Single responsibility: video decode -> frame file -> path topic. It does not
-touch FCU commands, SetVideoMode, AprilTag, or TF — those stay owned by
-RoosterCommandUnitNode / localization_node.py respectively.
+Cage removal (BarInpainter) runs here, once, before the frame is saved: every
+downstream consumer reads this same saved JPEG (depth_processor_node.py via
+frame_path, the YOLO detector via rgb_topic), so cleaning at the source means
+neither has to duplicate the logic or risk drifting out of sync with it — see
+bar_inpainter.py for the two cage artifacts it handles and why.
+
+Single responsibility: video decode -> cage removal -> frame file -> path
+topic. It does not touch FCU commands, SetVideoMode, AprilTag, or TF — those
+stay owned by RoosterCommandUnitNode / localization_node.py respectively.
 
 Frames are published at the drone's native resolution (540x360) with no
 crop/resize — the DA3 model and its camera calibration are sized to match
@@ -38,8 +44,11 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 from sparx_agency.robots.common.image_utils import BadFrameGuard
+from sparx_agency.robots.ROBOTICAN.bar_inpainter import BarInpainter
 
 Gst.init(None)
+
+_DEFAULT_CAGE_MASK = Path(__file__).resolve().parent / "config" / "cage_static_mask.npy"
 
 
 class UdpH264FrameGrabber:
@@ -138,6 +147,7 @@ class RoosterFrameDirPublisher(Node):
             log_every=args.bad_frame_log_every,
             prefix="rooster_dir_pub",
         )
+        self.bar_inpainter = None if args.no_cage_clean else BarInpainter(args.cage_mask_path)
 
         self._frame_seq = 0
         self.path_pub = self.create_publisher(String, self.path_topic, 10)
@@ -172,6 +182,9 @@ class RoosterFrameDirPublisher(Node):
 
         if self.drop_bad_frames and not self.frame_guard.should_pass(frame):
             return
+
+        if self.bar_inpainter is not None:
+            frame = self.bar_inpainter.process(frame)
 
         self._frame_seq += 1
         final_path = self.out_dir / f"frame_{self._frame_seq:08d}.jpg"
@@ -225,6 +238,11 @@ def parse_args():
     p.add_argument("--bad-frame-std-min", type=float, default=1.0)
     p.add_argument("--bad-frame-sample-step", type=int, default=16)
     p.add_argument("--bad-frame-log-every", type=int, default=30)
+
+    p.add_argument("--cage-mask-path", default=str(_DEFAULT_CAGE_MASK),
+                    help="Static cage-arc mask (BarInpainter); the moving crossbar is detected fresh per frame regardless.")
+    p.add_argument("--no-cage-clean", action="store_true",
+                    help="Skip cage removal entirely (debugging only — every consumer reads the raw frame).")
     return p.parse_args()
 
 
