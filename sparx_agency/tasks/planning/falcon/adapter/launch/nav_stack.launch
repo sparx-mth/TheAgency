@@ -596,38 +596,6 @@
   <arg name="est_max_coast_s"       default="1.0" /><!-- cap on the dead-reckon horizon (s); beyond it the pose is HELD and the follower is told to wait -->
   <arg name="est_fresh_tau_s"       default="0.3" /><!-- confidence freshness decay constant -->
 
-  <!-- ══════════════════════════════════════════════════════════════
-       GRADED-PULSE YAW + MID-BURST FEEDBACK + ANTI-DEADLOCK (real-drone yaw).
-       Needs ctrl_rate_hz:=10 for the 4deg/tick -> 8deg-min / 24deg-cap numbers.
-       All default to the legacy behaviour at the core; enabled here. -->
-  <arg name="yaw_graded_pulses"     default="true" /><!-- size each burst by tick count {2,4,6} (strong/med/weak), hard 6-tick cap, vary DURATION not magnitude -->
-  <arg name="yaw_burst_grade_max_ticks" default="6" /><!-- max consecutive yaw ticks in one burst (6 ticks = 24deg @10Hz) -->
-  <arg name="yaw_settle_dwell_per_tick" default="0.1" /><!-- extra settle (s) per burst tick: more continuous rotation -> more inertia -> longer stop before re-measuring -->
-  <arg name="yaw_burst_live_feedback" default="true" /><!-- use the (estimator-denoised) live heading mid-burst to CUT a burst short on confirmed overshoot (one-way; never reverses in flight) -->
-  <arg name="yaw_fb_reach_deg"      default="2.0" /><!-- remaining-in-burst-direction (deg) at/below which the live heading counts as having reached the target -->
-  <arg name="yaw_fb_confirm_ticks"  default="2" /><!-- consecutive 'reached' ticks before cutting (rejects a single jumpy localization frame) -->
-  <arg name="yaw_max_reversals"     default="3" /><!-- anti-deadlock: after this many burst-direction flips, FORCE advance (never ping-pong 10R/10L/10R); 0 = off -->
-  <arg name="yaw_accept_growth_deg" default="4.0" /><!-- widen the accept band (deg) per reversal so an oscillating residual is swallowed -->
-  <arg name="yaw_burst_max_ticks"   default="30" /><!-- legacy runaway guard on a burst (now also a rosparam) -->
-
-  <!-- ══════════════════════════════════════════════════════════════
-       POSE ESTIMATOR — fuses the ~10Hz noisy /gt_pose with the command being
-       executed so the follower sees a DENOISED pose + yaw-rate: averages out
-       hover drift when stopped, recovers the true rate while turning. Decoupled
-       from the control loop (ingests every /gt_pose). use_pose_estimator:=false
-       feeds the raw pose. -->
-  <arg name="use_pose_estimator"    default="true" />
-  <arg name="est_window_s"          default="0.6" /><!-- least-squares fit window (s); ~6 samples @10Hz -->
-  <arg name="est_min_samples"       default="2" />
-  <arg name="est_max_buffer_s"      default="1.5" />
-  <arg name="est_wz_cmd_eps"        default="0.05" /><!-- |wz_cmd| (rad/s) above which the regime is TURNING -->
-  <arg name="est_vx_cmd_eps"        default="0.03" /><!-- |vx_cmd| (m/s) above which the regime is FORWARD -->
-  <arg name="est_ff_blend_min"      default="0.15" /><!-- feed-forward fraction when the axis is idle (trust the measured fit) -->
-  <arg name="est_ff_blend_max"      default="0.6" /><!-- feed-forward fraction at full command (lean on the command in the noisy rotating regime) -->
-  <arg name="est_dropout_s"         default="0.25" /><!-- measurement age (s) after which the estimate dead-reckons from the command -->
-  <arg name="est_max_coast_s"       default="1.0" /><!-- cap on the dead-reckon horizon (s); beyond it the pose is HELD and the follower is told to wait -->
-  <arg name="est_fresh_tau_s"       default="0.3" /><!-- confidence freshness decay constant -->
-
   <!-- Trajectory prediction (rollout of the follower) -> /path/predicted + score -->
   <arg name="predict_hz"          default="2.0" />
   <arg name="predict_horizon_s"   default="30.0" />
