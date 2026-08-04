@@ -1,0 +1,49 @@
+{
+  "role": "backbone",
+  "variant": "x",
+  "precision": "fp16",
+  "device": "gpu",
+  "use_dla": false,
+  "gpu_fallback": null,
+  "dynamic_N": false,
+  "trt_version": "10.15.1.29",
+  "sm": 89,
+  "target_tag": "nvidiageforcertx_sm89",
+  "gpu_name": "NVIDIA GeForce RTX 4090",
+  "power_budget_w": null,
+  "imgsz_hw": [
+    288,
+    512
+  ],
+  "embed_dim": 512,
+  "onnx_sha256": "55a1cce7a35eddc8977005a8803fa8346ce28a89ee3ea436bc8745b73dafe04c",
+  "total_layers": 433,
+  "dla_eligible_layers": 0,
+  "workspace_bytes": 4294967296,
+  "builder_optimization_level": 5,
+  "feat_names": [
+    "feat0",
+    "feat1",
+    "feat2"
+  ],
+  "feat_shapes": [
+    [
+      1,
+      320,
+      36,
+      64
+    ],
+    [
+      1,
+      640,
+      9,
+      16
+    ],
+    [
+      1,
+      1280,
+      18,
+      32
+    ]
+  ]
+}

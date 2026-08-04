@@ -1,0 +1,65 @@
+{
+  "variant": "x",
+  "weights": "/home/user1/.cache/sparx_agency/yolo_world_weights/yolov8x-worldv2.pt",
+  "weights_sha256": "41e771bfbbb8894dd857f3fef7cac3b3578dffd49fd3547101efa6a606a02a0e",
+  "imgsz_hw": [
+    288,
+    512
+  ],
+  "opset": 17,
+  "embed_dim": 512,
+  "txt_n_axis": 1,
+  "txt_example_shape": [
+    1,
+    7,
+    512
+  ],
+  "cut_index": 12,
+  "backbone": {
+    "input": "image",
+    "feat_names": [
+      "feat0",
+      "feat1",
+      "feat2"
+    ],
+    "feat_shapes": [
+      [
+        1,
+        320,
+        36,
+        64
+      ],
+      [
+        1,
+        640,
+        9,
+        16
+      ],
+      [
+        1,
+        1280,
+        18,
+        32
+      ]
+    ],
+    "onnx_sha256": "55a1cce7a35eddc8977005a8803fa8346ce28a89ee3ea436bc8745b73dafe04c"
+  },
+  "head": {
+    "feat_inputs": [
+      "feat0",
+      "feat1",
+      "feat2"
+    ],
+    "txt_input": "txt_feats",
+    "output": "output",
+    "output_example_shape": [
+      1,
+      11,
+      3024
+    ],
+    "n_min": 1,
+    "n_opt": 8,
+    "n_max": 256,
+    "onnx_sha256": "4ed1c722ab8f04eee7e8e08e796e372a58ac5cabd9947906e444570931e9a3a6"
+  }
+}

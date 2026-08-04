@@ -116,53 +116,124 @@ def container_up(name):
     return res.stdout.strip() == name
 
 
+def wait_until(check_fn, timeout=15, interval=0.3):
+    """Poll check_fn every `interval`s, up to `timeout`s. Replaces fixed
+    `sleep N` guesses -- returns as soon as the condition is true instead of
+    always waiting the worst-case time."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if check_fn():
+            return True
+        time.sleep(interval)
+    return check_fn()
+
+
 def restart_falcon(status):
-    # run_falcon_sphera.sh does `docker run -it` (needed for the container's
-    # own interactive tooling) -- it FAILS SILENTLY ("cannot attach stdin to
-    # a TTY-enabled container") without a real pseudo-terminal, and a plain
-    # backgrounded `nohup ... &` from subprocess.run gives it none. `script -qc`
-    # fakes one, exactly like every manual bring-up this session used.
-    steps = [
-        ("Removing falcon + ros1_bridge", "docker rm -f falcon ros1_bridge", None),
-        ("Starting falcon container",
-         "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon && "
-         "script -qc './run_falcon_sphera.sh sphera_jail' /dev/null > /tmp/falcon.log 2>&1 & sleep 8",
-         lambda: container_up("falcon")),
-        ("Installing python3-requests/pil (stopgap)",
-         "docker exec falcon bash -c 'apt-get update -qq && apt-get install -y python3-requests python3-pil'",
-         None),
-        ("Launching falcon_adapter",
-         f"docker exec -d falcon bash -lc \"source /opt/ros/noetic/setup.bash && "
-         f"source /catkin_ws/devel/setup.bash && {FALCON_LAUNCH_CMD} > /tmp/falcon_roslaunch.log 2>&1\" && sleep 6",
-         None),
-        ("Restarting ros1_bridge",
-         "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/bridge && "
-         "script -qc 'ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
-         "CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh' "
-         "/dev/null > /tmp/bridge.log 2>&1 & sleep 10",
-         lambda: container_up("ros1_bridge")),
-        ("Launching RViz",
-         "docker exec -d falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
-         "source /catkin_ws/devel/setup.bash && roslaunch exploration_manager rviz.launch "
-         "> /tmp/rviz.log 2>&1'",
-         None),
-        ("Launching BEV click node",
-         "docker exec -d falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
-         "source /catkin_ws/devel/setup.bash && rosrun falcon_adapter bev_click_goal_node.py "
-         "> /tmp/bev_click.log 2>&1'",
-         None),
-        ("Redeploying path_logger.py",
-         f"docker cp {PATH_LOGGER_HOST} falcon:/tmp/path_logger.py && "
-         "docker exec -d falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
-         "source /catkin_ws/devel/setup.bash && python3 /tmp/path_logger.py "
-         f"--out-dir {PATH_DIR} > /tmp/path_logger.log 2>&1'",
-         None),
-        ("Redeploying exploration_watchdog.sh",
-         f"docker cp {EXPLORATION_WATCHDOG_HOST} falcon:/tmp/exploration_watchdog.sh && "
-         "docker exec falcon chmod +x /tmp/exploration_watchdog.sh && "
-         "docker exec -d falcon /tmp/exploration_watchdog.sh",
-         None),
-    ]
+    """Restart the falcon_adapter roslaunch (and, if needed, the falcon/
+    ros1_bridge containers themselves).
+
+    If `falcon` is already up, we restart the roslaunch process IN PLACE
+    (SIGINT, wait for it to exit, relaunch via the same still-running
+    container) instead of `docker rm -f`-ing it. That's what was making
+    every restart slow: destroying the container also kills RViz, the BEV
+    click node, path_logger.py and exploration_watchdog.sh (they're all
+    `docker exec`'d children of it), so all four had to be redeployed on
+    every single restart even though only falcon_adapter itself changed. A
+    fresh container is still used the first time (or after a manual
+    `docker rm`), so cold start behaves exactly as before.
+    """
+    falcon_already_up = container_up("falcon")
+    bridge_already_up = container_up("ros1_bridge")
+    steps = []
+
+    if falcon_already_up:
+        status.write("ℹ️ falcon container already running — restarting falcon_adapter in place")
+        if proc_running("falcon", "roslaunch falcon_adapter"):
+            steps.append((
+                "Stopping falcon_adapter",
+                "docker exec falcon pkill -SIGINT -f 'roslaunch falcon_adapter'",
+                None,
+            ))
+            steps.append((
+                "Waiting for falcon_adapter to exit",
+                "true",
+                lambda: wait_until(lambda: not proc_running("falcon", "roslaunch falcon_adapter"), timeout=10),
+            ))
+    else:
+        # run_falcon_sphera.sh does `docker run -it` (needed for the container's
+        # own interactive tooling) -- it FAILS SILENTLY ("cannot attach stdin to
+        # a TTY-enabled container") without a real pseudo-terminal, and a plain
+        # backgrounded `nohup ... &` from subprocess.run gives it none. `script -qc`
+        # fakes one, exactly like every manual bring-up this session used.
+        steps.append(("Removing stale falcon container", "docker rm -f falcon", None))
+        steps.append((
+            "Starting falcon container",
+            "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon && "
+            "script -qc './run_falcon_sphera.sh sphera_jail' /dev/null > /tmp/falcon.log 2>&1 &",
+            lambda: wait_until(lambda: container_up("falcon"), timeout=20),
+        ))
+        # Stopgap: the built falcon-ros:noetic image predates the Dockerfile
+        # declaring these apt packages (see its own comment at the top),
+        # so a freshly-created container is missing them until the image
+        # is rebuilt. Only needed here, on a genuinely fresh container --
+        # an in-place restart reuses a container that already has them.
+        steps.append((
+            "Installing python3-requests/pil (stopgap)",
+            "docker exec falcon bash -c 'apt-get update -qq && apt-get install -y python3-requests python3-pil'",
+            None,
+        ))
+
+    steps.append((
+        "Launching falcon_adapter",
+        f"docker exec -d falcon bash -lc \"source /opt/ros/noetic/setup.bash && "
+        f"source /catkin_ws/devel/setup.bash && {FALCON_LAUNCH_CMD} > /tmp/falcon_roslaunch.log 2>&1\"",
+        lambda: wait_until(lambda: proc_running("falcon", "roslaunch falcon_adapter"), timeout=10),
+    ))
+
+    if bridge_already_up:
+        steps.append(("Removing stale ros1_bridge (no in-place restart yet)", "docker rm -f ros1_bridge", None))
+    steps.append((
+        "Restarting ros1_bridge",
+        "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/bridge && "
+        "script -qc 'ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+        "CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml ./run_bridge.sh' "
+        "/dev/null > /tmp/bridge.log 2>&1 &",
+        lambda: wait_until(lambda: container_up("ros1_bridge"), timeout=20),
+    ))
+
+    if not falcon_already_up:
+        # Only needed on a genuinely fresh container -- if falcon was reused,
+        # these four are still running from before and were never touched.
+        steps.append((
+            "Launching RViz",
+            "docker exec -d falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && roslaunch exploration_manager rviz.launch "
+            "> /tmp/rviz.log 2>&1'",
+            None,
+        ))
+        steps.append((
+            "Launching BEV click node",
+            "docker exec -d falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && rosrun falcon_adapter bev_click_goal_node.py "
+            "> /tmp/bev_click.log 2>&1'",
+            None,
+        ))
+        steps.append((
+            "Redeploying path_logger.py",
+            f"docker cp {PATH_LOGGER_HOST} falcon:/tmp/path_logger.py && "
+            "docker exec -d falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && python3 /tmp/path_logger.py "
+            f"--out-dir {PATH_DIR} > /tmp/path_logger.log 2>&1'",
+            None,
+        ))
+        steps.append((
+            "Redeploying exploration_watchdog.sh",
+            f"docker cp {EXPLORATION_WATCHDOG_HOST} falcon:/tmp/exploration_watchdog.sh && "
+            "docker exec falcon chmod +x /tmp/exploration_watchdog.sh && "
+            "docker exec -d falcon /tmp/exploration_watchdog.sh",
+            None,
+        ))
+
     for label, cmd, verify in steps:
         status.write(f"⏳ {label}...")
         res = run(cmd, timeout=40)
@@ -172,7 +243,7 @@ def restart_falcon(status):
         else:
             status.write(f"⚠️ {label} — exit {res.returncode}: {res.stderr[:300]}")
             if verify is not None:
-                status.write("   (container never came up -- stopping here, later steps would just fail too)")
+                status.write("   (never came up -- stopping here, later steps would just fail too)")
                 return
     status.write("**Done. Verify `controller=waypoint` and mapping_sync health before flying.**")
 

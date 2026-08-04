@@ -1,0 +1,47 @@
+{
+  "role": "head",
+  "variant": "x",
+  "precision": "fp16",
+  "device": "gpu",
+  "use_dla": false,
+  "gpu_fallback": null,
+  "dynamic_N": true,
+  "trt_version": "10.15.1.29",
+  "sm": 89,
+  "target_tag": "nvidiageforcertx_sm89",
+  "gpu_name": "NVIDIA GeForce RTX 4090",
+  "power_budget_w": null,
+  "imgsz_hw": [
+    288,
+    512
+  ],
+  "embed_dim": 512,
+  "onnx_sha256": "4ed1c722ab8f04eee7e8e08e796e372a58ac5cabd9947906e444570931e9a3a6",
+  "total_layers": 901,
+  "dla_eligible_layers": 0,
+  "workspace_bytes": 4294967296,
+  "builder_optimization_level": 5,
+  "head": {
+    "feat_inputs": [
+      "feat0",
+      "feat1",
+      "feat2"
+    ],
+    "txt_input": "txt_feats",
+    "output": "output",
+    "output_example_shape": [
+      1,
+      11,
+      3024
+    ],
+    "n_min": 1,
+    "n_opt": 8,
+    "n_max": 256
+  },
+  "txt_n_axis": 1,
+  "txt_example_shape": [
+    1,
+    7,
+    512
+  ]
+}

@@ -39,15 +39,14 @@ mission:
 # YOLO-WORLD DETECTOR  --  the host sidecar that finds the object
 # ====================================================================================================
 detector:
-  # Only the "s" (small) engine is actually built on this PC so far (this
-  # session, 2026-07-29 -- see docs/progress/entries/005-yolo-object-navigation.md).
-  # Build m/l/x too (yolo_world_trt/build_all.sh) before raising this.
-  model: s                     # s | m | l | x -- picks yolo_world_<model>.*.engine
+  # "x" (largest) engine built 2026-08-04 -- the "s" engine confused a barrel
+  # with a large rock (couldn't decide which to approach); x tells them apart.
+  model: x                     # s | m | l | x -- picks yolo_world_<model>.*.engine
   # Moved off /home/user1/Downloads (not mounted into any container) into the
   # model-registry cache dir, already mounted read-write into both robotican_dev
   # and the new detector container at this same absolute path.
   weights_dir: /home/user1/.cache/sparx_agency/yolo_world_weights
-  conf_thresh: 0.1            # detections below this are ignored, so the object is
+  conf_thresh: 0.3            # detections below this are ignored, so the object is
                               #   never confirmed and the mission lands by A* alone
   init_target: barrel         # placeholder target before you select one. Sets BOTH the
                               #   YOLO prompt and the label object_approach filters on,
