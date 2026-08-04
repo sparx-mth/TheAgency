@@ -82,6 +82,28 @@ if [[ ! -f "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml" ]]; then
 fi
 echo "[INFO] FALCON env: ${ENV_NAME}  (config: ${SCRIPT_DIR}/maps/${ENV_NAME}.yaml)"
 
+# ── Exploration area: derived and costed before anything starts ───
+# Same as run_falcon.sh -- the map file gives the area in a handful of numbers
+# under `map_config.area` and FALCON wants the eighteen of `map_config.map_size`.
+# Deriving them on the host fails a bad area in a tenth of a second with a
+# sentence instead of inside roslaunch with a glog CHECK, and prints what the
+# voxel grid will cost while there is still time to change it. The expanded copy
+# is what gets mounted, so the planner always reads what you edited.
+MAPSIZE_ROOT="${SPARX_PARENT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
+MAP_EXPANDED_DIR="$(mktemp -d)"
+trap 'rm -rf "${MAP_EXPANDED_DIR}"' EXIT
+MAP_EXPANDED="${MAP_EXPANDED_DIR}/${ENV_NAME}.yaml"
+PYTHON="${PYTHON:-${MAPSIZE_ROOT}/.venv/bin/python}"
+[[ -x "${PYTHON}" ]] || PYTHON="python3"
+if ! PYTHONPATH="${MAPSIZE_ROOT}" "${PYTHON}" \
+        -m sparx_agency.tasks.planning.falcon_pegasus.mapsize \
+        "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml" --out "${MAP_EXPANDED}"; then
+  echo "[ERROR] this environment's exploration area is unusable. Fix" >&2
+  echo "        map_config.area in maps/${ENV_NAME}.yaml -- see" >&2
+  echo "        ../falcon_pegasus/mapsize/README.md." >&2
+  exit 2
+fi
+
 # Optional per-env RViz view, e.g. maps/sphera_jail.rviz. FALCON's vendored
 # rviz.rviz ships one shared "Current View" camera centered near the office
 # map's origin -- for an env whose real world position is far from (0,0,0)
@@ -210,7 +232,7 @@ docker run -it --rm \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
-    --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
+    --volume "${MAP_EXPANDED}:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     "${RVIZ_MOUNT[@]}" \
     --network host \
     "${IMAGE}" \

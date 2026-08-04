@@ -76,6 +76,34 @@ if [[ ! -f "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml" ]]; then
 fi
 echo "[INFO] FALCON env: ${ENV_NAME}  (config: ${SCRIPT_DIR}/maps/${ENV_NAME}.yaml)"
 
+# ── Exploration area: derived and costed before anything starts ───
+# The map file gives the area in a handful of numbers under `map_config.area`;
+# FALCON wants the eighteen of `map_config.map_size`. Deriving them here rather
+# than in the container means a bad area fails in a tenth of a second with a
+# sentence instead of inside roslaunch with a glog CHECK and a stack trace, and
+# the size of the voxel grid gets printed while there is still time to change
+# it -- it is allocated in full on the first tick and never grows.
+#
+# The expanded copy is what gets mounted, so the file the planner reads always
+# matches the file you edited.
+#
+# SPARX_PARENT is not resolved until further down, so work it out here the same
+# way that line does; exporting it still wins.
+MAPSIZE_ROOT="${SPARX_PARENT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
+MAP_EXPANDED_DIR="$(mktemp -d)"
+trap 'rm -rf "${MAP_EXPANDED_DIR}"' EXIT
+MAP_EXPANDED="${MAP_EXPANDED_DIR}/${ENV_NAME}.yaml"
+PYTHON="${PYTHON:-${MAPSIZE_ROOT}/.venv/bin/python}"
+[[ -x "${PYTHON}" ]] || PYTHON="python3"
+if ! PYTHONPATH="${MAPSIZE_ROOT}" "${PYTHON}" \
+        -m sparx_agency.tasks.planning.falcon_pegasus.mapsize \
+        "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml" --out "${MAP_EXPANDED}"; then
+  echo "[ERROR] this environment's exploration area is unusable. Fix" >&2
+  echo "        map_config.area in maps/${ENV_NAME}.yaml -- see" >&2
+  echo "        ../falcon_pegasus/mapsize/README.md." >&2
+  exit 2
+fi
+
 # Auto-chmod +x on host so we don't lose 10 min wondering why nodes
 # aren't found. Harmless if they were already executable.
 chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
@@ -224,7 +252,7 @@ docker run -it --rm \
     "${FRAME_MOUNTS[@]}" \
     "${OBJECTS_MOUNT[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
-    --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
+    --volume "${MAP_EXPANDED}:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     --network host \
     "${IMAGE}" \
     "${@:-bash}"
