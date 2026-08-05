@@ -252,3 +252,9 @@ sparx_agency/tasks/planning/falcon/logs/
 # map itself IS committed (a few kB, and it makes a campaign reproducible).
 sparx_agency/robots/PEGASUS/maps/*.png
 sparx_agency/robots/PEGASUS/maps/*.ply
+
+# Augmented scene layouts: per-run clutter placements (randomised obstacle poses)
+# generated against a base Isaac scene. They are regenerated per campaign and are
+# large, so they stay local; a hand-authored scene definition in this directory is
+# still tracked.
+sparx_agency/robots/PEGASUS/scenes/*_augmented.json
