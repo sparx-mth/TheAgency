@@ -422,7 +422,11 @@ class VideoStreamManager(Node):
         # self.azimuth_pub.publish(azimuth_msg)
 
         # CameraInfo creation:
-    def intrinsic_from_fov(self,  hfov_deg=130, vfov_deg=90, half_pixel=True):
+    def intrinsic_from_fov(self,  hfov_deg=135, vfov_deg=90, half_pixel=True):
+        # hfov=135deg confirmed against Sphera's generated scenario config
+        # (~/.sphera/tmp/SpheraConfig/rooster_backend_Rooster_1.gen.yaml,
+        # roosters.R1.main_camera.hfov, port 5001). vfov=90deg is still an
+        # unverified placeholder - see camera_rooster_calib_540_360.yaml.
         theta_x = np.deg2rad(hfov_deg)
         theta_y = np.deg2rad(vfov_deg)
 

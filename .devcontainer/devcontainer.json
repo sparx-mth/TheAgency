@@ -1,0 +1,69 @@
+{
+  "name": "TheAgency (x86, ROS2 Humble, Sphera/ROBOTICAN)",
+  "build": {
+    "dockerfile": "../docker/devcontainer/Dockerfile",
+    "context": "../docker/devcontainer",
+    "args": {
+      "BASE_IMAGE": "nvidia/cuda:13.0.0-cudnn-devel-ubuntu22.04",
+      "ROS_DISTRO": "humble",
+      "USERNAME": "user1",
+      "USER_UID": "1000",
+      "USER_GID": "1000"
+    }
+  },
+
+  // Mounted at the SAME absolute path as the host, not the devcontainer
+  // default /workspaces/<name> -- the run_*.sh wrappers and tools/mission_control.py
+  // hardcode /home/$USER/GIT/TheAgency, so $HOME must resolve identically
+  // inside and outside the container. See docker/devcontainer/README.md if
+  // you're setting this up for a different user/home directory.
+  "workspaceMount": "source=${localEnv:HOME}/GIT/TheAgency,target=${localEnv:HOME}/GIT/TheAgency,type=bind",
+  "workspaceFolder": "${localEnv:HOME}/GIT/TheAgency",
+  "remoteUser": "user1",
+
+  // Host networking is not a convenience here: cyclonedds.xml pins a
+  // specific host NIC by IP, and the Rooster video path is a raw UDP stream
+  // to a host port -- neither works across a bridged container network.
+  "runArgs": [
+    "--network=host",
+    "--ipc=host",
+    "--privileged",
+    "--gpus", "all",
+    "--shm-size=2g"
+  ],
+
+  "mounts": [
+    // Sphera's cyclonedds config + vendor .msg sources (read-only: the
+    // container builds its own copy of the interfaces, see stage_vendor_msgs.sh).
+    "source=${localEnv:HOME}/rqs_iai_ws,target=${localEnv:HOME}/rqs_iai_ws,type=bind,readonly",
+    // Shared with the host and the FALCON container -- not per-container /tmp.
+    "source=/tmp/rooster_frames,target=/tmp/rooster_frames,type=bind",
+    "source=/tmp/rooster_depth,target=/tmp/rooster_depth,type=bind",
+    // Model registry cache -- outside the repo, read-write.
+    "source=${localEnv:HOME}/.cache/sparx_agency,target=${localEnv:HOME}/.cache/sparx_agency,type=bind",
+    // X11 for RViz / ui.py's embedded GStreamer video widget.
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    // run_video_trigger.sh and run_ground_truth_localization.sh `docker exec`
+    // into Sphera's `it` container from inside this one.
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+
+  "containerEnv": {
+    // Do NOT hardcode DISPLAY here beyond passthrough -- it has been ":1" on
+    // this PC, not ":0"; overriding it fails silently (see README).
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "QT_X11_NO_MITSHM": "1",
+    "PYTHONUNBUFFERED": "1",
+    // Sphera's domain (see ~/rqs_iai_ws/src/docker-compose.yml). NOT 5
+    // (XTEND/Jetson) or 2 (Rooster Jetson) -- those are different stacks.
+    "ROS_DOMAIN_ID": "9",
+    "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
+    "CYCLONEDDS_URI": "file://${localEnv:HOME}/rqs_iai_ws/src/cyclonedds.xml"
+  },
+
+  "customizations": {
+    "vscode": {
+      "settings": { "terminal.integrated.defaultProfile.linux": "bash" }
+    }
+  }
+}

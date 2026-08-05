@@ -1,0 +1,48 @@
+# ============================================================
+# Run the YOLO-World detector sidecar using the image docker/bake.hcl builds
+# (theagency:detector). Build first:
+#   docker buildx bake -f docker/bake.hcl detector
+#
+# Then (needs the SAME ROS_DOMAIN_ID/DDS config as robotican_dev/it, since
+# it subscribes to Rooster's frame-path topic and publishes detections back
+# onto the same DDS graph -- see docker-compose.robotican.yml, same anchors,
+# same shape, different image):
+#   docker compose -f docker-compose.detector.yml run --rm --name detector_dev detector
+#
+# Not ROBOTICAN-specific -- yolo_world_trt is shared task-level infra any
+# robot's camera feed can use (see Dockerfile.detector's own header).
+# ============================================================
+services:
+  detector:
+    image: theagency:detector
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Same Sphera/ROBOTICAN domain as robotican_dev/it -- NOT 5 (XTEND/
+      # Jetson) or 2 (Rooster Jetson).
+      - ROS_DOMAIN_ID=9
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file://${HOME}/rqs_iai_ws/src/cyclonedds.xml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # Repo at the SAME absolute path as the host -- run_object_mission_sphera.sh
+      # and yolo_world_trt/build_all.sh hardcode paths under it.
+      - ${HOME}/GIT/TheAgency:${HOME}/GIT/TheAgency
+      # cyclonedds config referenced by CYCLONEDDS_URI above (read-only, same
+      # as robotican_dev's own mount of this path).
+      - ${HOME}/rqs_iai_ws:${HOME}/rqs_iai_ws:ro
+      # Reads RGB frame-path files Rooster Frame Capture writes (shared with
+      # the host and robotican_dev, not per-container /tmp).
+      - /tmp/rooster_frames:/tmp/rooster_frames:ro
+      # Model registry cache -- outside the repo, read-write. Holds the
+      # yolo_world_weights/ dir (see config/mission_sphera.yaml's weights_dir).
+      - ${HOME}/.cache/sparx_agency:${HOME}/.cache/sparx_agency

@@ -1,0 +1,26 @@
+# ============================================================
+# Layer 1/4: base_cuda -- NVIDIA CUDA/cuDNN + bare Ubuntu tooling.
+#
+# No ROS, no perception libs, no project-specific anything. Every derived
+# image (ros2_humble, and any future non-ROS CUDA image) builds on this one
+# layer, so it stays deliberately thin -- add project deps in a later layer,
+# not here.
+#
+# Default matches this machine's validated stack: driver reports CUDA 13.0
+# (`nvidia-smi`), and requirements/devices/office_pc.txt (synced via
+# `pip freeze` from this machine's actual working venv) shows tensorrt was
+# installed as a cu13 wheel. Override BASE_IMAGE to match a different
+# machine's driver -- engines built downstream are locked to whatever
+# CUDA/TensorRT this resolves to (see tasks/common/model_registry/).
+# ============================================================
+ARG BASE_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl gnupg2 lsb-release software-properties-common ca-certificates \
+      git python3-pip python3-tk tmux less unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["bash"]

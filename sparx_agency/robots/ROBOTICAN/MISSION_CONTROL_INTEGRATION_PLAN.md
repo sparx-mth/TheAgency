@@ -90,8 +90,8 @@ don't assume**). Install the exact matching version into
 `~/GIT/TheAgency/venv`: `venv/bin/pip install "tensorrt==<exact version>"`.
 
 **Camera calibration**: `sparx_agency/robots/ROBOTICAN/config/camera_rooster_calib_540_360.yaml`
-— an *approximation* (assumed 130x90 FOV, not verified against Sphera's
-real camera definition), native 540x360 resolution. `camera_info_mode:=base`.
+— an *approximation* (hfov=135 confirmed against Sphera's scenario config,
+vfov=90 still unverified), native 540x360 resolution. `camera_info_mode:=base`.
 
 **Cage-mask inpainting is currently disabled** (all-zero mask at
 `config/cage_static_mask.npy`, correct 540x360 shape but no actual masking)

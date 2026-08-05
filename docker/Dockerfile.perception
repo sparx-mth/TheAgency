@@ -1,0 +1,96 @@
+# ============================================================
+# Layer 3/4: perception -- the stack every robot's perception pipeline
+# needs: TensorRT (DA3 depth), GStreamer (video ingestion), AprilTag
+# (localization), OpenCV/numpy. Shared by every robot-specific image --
+# ROBOTICAN now, XTEND later -- so a robot's own vendor deps belong in ITS
+# Dockerfile, not here.
+# ============================================================
+FROM theagency:ros2_humble
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# GStreamer + PyGObject -- mandatory for any robot's video path (Rooster's
+# rooster_frame_dir_publisher.py, ui.py; XTEND's online_nav_bridge later), not
+# optional: a version mismatch here is a hard SIGSEGV, not a Python
+# exception. Notably absent from every requirements/*.txt today -- this
+# image is what actually documents the dependency.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prefer apt over pip wherever a real package exists: one package manager
+# instead of two fighting over the same library, and security updates
+# through the normal apt channel instead of a frozen pip pin. Versions are
+# older than a pip pin would give (opencv 4.5.4, onnx 1.7.0 on jammy) --
+# acceptable here because nothing in THIS container's dependency set (no
+# torch, no depth-anything-v2) needs the newer versions; those pins existed
+# on the host venv for unrelated reasons (see requirements/devices/office_pc.txt).
+# NOTE: apt's python3-opencv pulls in apt's python3-numpy (1.21.5) as its
+# own dependency regardless -- pip's numpy below (1.26.4) shadows it in
+# /usr/local, which is fine (numpy's C-ABI is stable across this range) and
+# unavoidable if opencv stays on apt while pycuda needs a newer numpy (below).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-opencv \
+      python3-onnx \
+      python3-yaml \
+      python3-requests \
+      python3-pil \
+      python3-websockets \
+    && rm -rf /var/lib/apt/lists/*
+
+# Stay on pip -- either no real apt equivalent, a DIFFERENT library with a
+# different API, or (verified by actually running the apt install / actually
+# running the code, not just guessing) apt's version is a functional hazard,
+# not just an older number:
+#   - numpy: apt's jammy python3-numpy is 1.21.5. pycuda's own
+#     `compyte/dtypes.py` uses a subscripted `np.dtype[...]` type hint that
+#     needs numpy>=1.22 -- confirmed live: `import pycuda.autoinit` raised
+#     `TypeError: 'numpy._DTypeMeta' object is not subscriptable` under
+#     1.21.5. This is pycuda's own requirement, unrelated to torch/
+#     depth-anything-v2.
+#   - pupil-apriltags: no Debian/Ubuntu package. (`python3-apriltag` exists
+#     but is a different project with a different API -- our code imports
+#     `pupil_apriltags.Detector` specifically, see
+#     core/localization/providers/apriltag_provider.py. Swapping the
+#     library is a code change, not a packaging preference.)
+#   - pycuda: `apt-get install python3-pycuda` pulls Ubuntu's OWN
+#     `nvidia-cuda-toolkit` (CUDA 11.5: libcublas11, libcudart11.0, etc. --
+#     1.4 GB, +4 GB on disk) as a transitive dependency. That's a second,
+#     older, unrelated CUDA runtime installed alongside this image's real
+#     CUDA 13.0 base -- pycuda could end up linking against the wrong one
+#     while TensorRT uses the right one. Confirmed live during a build
+#     attempt, not a theoretical concern.
+#   - tensorrt: apt's TensorRT packages in the CUDA network repo are
+#     version-suffixed per CUDA release (e.g. "+cuda12.9") and have had
+#     unresolved dependency conflicts on fresh CUDA 13 base images
+#     (NVIDIA/TensorRT#4545); the pip wheel via pypi.nvidia.com is the
+#     approach already validated working on this exact host.
+# tensorrt is deliberately left UNPINNED, not pinned to the host venv's
+# 10.16.1.11. TensorRT engines are locked to the exact TRT build that
+# produced them (not just a major-version match -- confirmed live:
+# deserializing an existing engine failed with "expecting library version
+# 10.15.1.29 got ..., please rebuild" once this image had a different TRT
+# than the engine's). The instinct is to pin the container to match --
+# but nvidia's sdist for 10.16.1.11 has a packaging bug (its PEP 517
+# metadata reports project name "unknown", so pip's resolver rejects it
+# outright for an EXACT version pin with no fallback -- confirmed live,
+# `pip install tensorrt==10.16.1.11` fails even though that exact version
+# exists and installs fine unpinned). Leaving it unpinned lets pip's
+# resolver land wherever it actually can (10.15.1.29 as of this writing);
+# the model registry's *build* path (not download) is what reconciles a
+# legacy hand-built engine against whatever TRT this container ends up
+# with -- see tasks/common/model_registry/build/trt_build.py. Don't try to
+# force an exact version here again without re-testing that pip can
+# actually install it standalone.
+# --timeout/--retries: the tensorrt_cu13_libs wheel alone is ~3.7 GB: pip's
+# default read timeout (15s) can trip mid-download on an ordinary connection
+# well before anything is actually wrong -- seen live during this build.
+RUN pip3 install --no-cache-dir numpy==1.26.4 \
+    && pip3 install --no-cache-dir --no-deps pupil-apriltags==1.0.4.post11 \
+    && pip3 install --no-cache-dir pycuda==2026.1 \
+    && pip3 install --no-cache-dir --timeout 120 --retries 5 \
+         tensorrt --extra-index-url https://pypi.nvidia.com
+
+CMD ["bash"]

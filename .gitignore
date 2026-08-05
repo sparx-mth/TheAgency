@@ -226,11 +226,13 @@ CLAUDE.md
 # tracked (only the engines/ output tree and these extensions are ignored).
 # One rule per VLA -- glob the whole layer so a new VLA is covered on day one.
 sparx_agency/tasks/planning/vlas/*/trt/engines/
+sparx_agency/tasks/planning/navdp/engines/
 *.onnx
 *.engine
 *.plan
 *.ckpt
 *.calib
+*.cache
 
 # Model weights are downloaded/built on the target, never committed: the YOLO(-World)
 # and other checkpoints (e.g. yolov8s-worldv2.pt, auto-downloaded by ultralytics into
@@ -238,6 +240,13 @@ sparx_agency/tasks/planning/vlas/*/trt/engines/
 *.pt
 *.pth
 *.weights
+
+# Vendor ROBOTICAN/Sphera message sources, staged into the Docker build context
+# by docker/devcontainer/stage_vendor_msgs.sh (old single-Dockerfile setup) or
+# docker/stage_vendor_msgs.sh (modular bake.hcl setup). Delivered by the vendor
+# outside this repo (~/rqs_iai_ws/src/rooster_interfaces) -- never committed here.
+docker/devcontainer/vendor/
+docker/vendor/
 /sparx_agency/theagency_venv/
 
 # FALCON flight logs (thought journal); see tasks/planning/falcon/run_falcon.sh

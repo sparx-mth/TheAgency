@@ -243,4 +243,5 @@ class MultiAxisFollower:
             done=self._state == MultiAxisState.HOLD,
             wp_idx=self._wp_idx,
             num_waypoints=len(self._path),
+            yaw_engaged=self._yawing,
         )

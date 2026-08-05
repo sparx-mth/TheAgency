@@ -16,10 +16,70 @@ import time
 from dataclasses import dataclass, field
 
 import streamlit as st
+import yaml
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+MISSION_SPHERA_YAML = (
+    "/home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/config/mission_sphera.yaml"
+)
+
+
+def _load_sphera_goal():
+    """Read the default goal from mission_sphera.yaml instead of hardcoding
+    it here and in rooster_turn_debug.py separately."""
+    with open(MISSION_SPHERA_YAML) as f:
+        launch = yaml.safe_load(f)["launch"]
+    return launch["goal_x"], launch["goal_y"]
+
+
+_SPHERA_GOAL_X, _SPHERA_GOAL_Y = _load_sphera_goal()
+
+
+def _load_sphera_detector_config():
+    """Read the detector section from mission_sphera.yaml (model, weights_dir,
+    conf_thresh, init_target) and resolve engine/weights paths the same way
+    run_object_mission_sphera.sh does, so this UI and that script can never
+    diverge on which model/threshold/target actually gets launched.
+    """
+    with open(MISSION_SPHERA_YAML) as f:
+        cfg = yaml.safe_load(f)
+    det = cfg.get("detector", {})
+    model = det.get("model", "x")
+    weights_dir = det.get("weights_dir", "/home/user1/.cache/sparx_agency/yolo_world_weights")
+    conf_thresh = det.get("conf_thresh", 0.1)
+    init_target = det.get("init_target", "refrigerator")
+
+    try:
+        r = subprocess.run(
+            ["python3", "-c",
+             "from sparx_agency.tasks.mapping.yolo_world_trt.hardware import detect; "
+             "print(detect().target_tag)"],
+            capture_output=True, text=True, timeout=10, check=False,
+            cwd="/home/user1/GIT/TheAgency",
+            env={**os.environ, "PYTHONPATH": "/home/user1/GIT/TheAgency"},
+        )
+        target_tag = r.stdout.strip() or "nvidiageforcertx_sm89"
+    except Exception:
+        target_tag = "nvidiageforcertx_sm89"
+
+    engines_dir = det.get(
+        "engines_dir",
+        f"/home/user1/GIT/TheAgency/sparx_agency/tasks/mapping/yolo_world_trt/engines/{target_tag}",
+    )
+    return {
+        "model": model,
+        "conf_thresh": conf_thresh,
+        "init_target": init_target,
+        "backbone_engine": f"{engines_dir}/yolo_world_{model}.backbone.fp16.gpu.engine",
+        "head_engine": f"{engines_dir}/yolo_world_{model}.head.fp16.gpu.engine",
+        "text_weights": det.get("text_weights", f"{weights_dir}/yolov8{model}-worldv2.pt"),
+    }
+
+
+_SPHERA_DETECTOR = _load_sphera_detector_config()
+
 JETSON_SSH   = "user@192.0.0.89"
 JETSON_REPO  = "/home/user/agency_ws"
 NANOOWL_REPO = "/home/user/GIT/NanoLLM_VILA_and_OWL"
@@ -393,6 +453,31 @@ ROBOTICAN_SERVICES: list[Service] = [
         is_interactive=True,
         proc_pattern="position_fly_controller",
     ),
+    # ── Ground-truth localization ────────────────────────────────────────────
+    # Publishes /R1/localization (the pose everything else -- mapping_sync,
+    # object_approach's arrival detection, the twist adapter -- reads). Must
+    # be running (and RELAUNCHED whenever R1/Sphera itself restarts, since it
+    # holds no reconnect logic of its own) before anything downstream.
+    Service(
+        name="Rooster Ground Truth Localization (R1)",
+        key="rooster_gtl_R1",
+        group="rooster_core",
+        description=(
+            "Publishes /R1/localization from Sphera's raw /R1/sphera/state, applying "
+            "this stack's world-frame handedness + yaw-reference fix. Everything else "
+            "(mapping, object_approach arrival detection, twist control) reads this -- "
+            "must be running FIRST, and relaunched fresh whenever R1/Sphera restarts."
+        ),
+        cmd=(
+            "PYTHONPATH=/home/rooster:$PYTHONPATH python3 -m "
+            "sparx_agency.robots.ROBOTICAN.rooster_ground_truth_localization "
+            "--ros-args -p rooster_id:=R1"
+        ),
+        env="container",
+        machine="container",
+        container_name=ROOSTER_CONTAINER,
+        proc_pattern="rooster_ground_truth_localization",
+    ),
     # ── Command unit + UI ────────────────────────────────────────────────────
     # RoosterCommandUnit is the single gateway that talks to the FCU for one
     # drone: it owns arm/disarm/takeoff/land/manual-move and listens on
@@ -445,21 +530,57 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster Frame Capture (R1)",
         key="rooster_frame_capture_R1",
         group="rooster_vision",
-        description="Decodes R1's UDP/RTP-H264 stream, saves JPEGs to /tmp/rooster_frames, publishes /R1/rgb_frame_path.",
+        description=(
+            "Decodes R1's UDP/RTP-H264 stream, saves JPEGs to /tmp/rooster_frames, "
+            "publishes /R1/rgb_frame_path. Runs inside robotican_dev (moved off the "
+            "host venv 2026-07-29 — see docs/progress/entries/002-rooster-full-"
+            "containerize.md); requires robotican_dev already running "
+            "(docker-compose.robotican.yml)."
+        ),
         cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_rooster_frame_dir_publisher.sh",
         env="none",
         machine="pc",
+        proc_container="robotican_dev",
         proc_pattern="rooster_frame_dir_publisher",
     ),
     Service(
         name="Rooster Depth Processor (R1)",
         key="rooster_depth_R1",
         group="rooster_vision",
-        description="DA3-TRT depth from /R1/rgb_frame_path, publishes /R1/depth_frame_path. Requires Rooster Frame Capture (R1) running.",
+        description=(
+            "DA3-TRT depth from /R1/rgb_frame_path, publishes /R1/depth_frame_path. "
+            "Requires Rooster Frame Capture (R1) running. Runs inside robotican_dev "
+            "(moved off the host venv 2026-07-29 — see docs/progress/entries/"
+            "002-rooster-full-containerize.md); requires robotican_dev already running "
+            "(docker-compose.robotican.yml). Engine rebuilt 2026-07-29 to match "
+            "robotican_dev's TensorRT version (10.15.1.29) — TRT engines are "
+            "hardware/version-locked, don't copy the .engine file between environments."
+        ),
         cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/run_depth_processor.sh",
         env="none",
         machine="pc",
+        proc_container="robotican_dev",
         proc_pattern="rooster_depth_processor",
+    ),
+    Service(
+        name="Rooster Twist Control Adapter (R1)",
+        key="rooster_twist_control_R1",
+        group="rooster_vision",
+        description=(
+            "Bridges FALCON's /cmd_vel into cmd_nav 'move' commands for click-to-fly "
+            "(rooster_command_unit.py stays the sole /R1/manual_control owner). New "
+            "2026-07-29 — previously had no run_*.sh wrapper or mission_control entry "
+            "at all, launched ad hoc via the host venv. Runs inside robotican_dev; "
+            "requires robotican_dev + rooster_command_unit.py (inside it) already "
+            "running. Only needed for FALCON-driven flight, not manual cmd_nav testing "
+            "— see LESSONS.md's 'stop-watchdog cancels any in-progress takeoff/land' "
+            "entry before running this during a manual arm/takeoff/land test."
+        ),
+        cmd="bash /home/user1/GIT/TheAgency/sparx_agency/robots/ROBOTICAN/adapters/run_twist_control_adapter.sh --rooster-id R1",
+        env="none",
+        machine="pc",
+        proc_container="robotican_dev",
+        proc_pattern="rooster_twist_control_adapter",
     ),
     Service(
         name="Rooster Video Trigger (R1)",
@@ -481,6 +602,100 @@ ROBOTICAN_SERVICES: list[Service] = [
         proc_pattern="video_trigger.py",
         stop_extra="docker exec it bash -lc 'pkill -f video_trigger.py || true' 2>/dev/null || true",
     ),
+    # ── Frame relay to Jetson (optional; not required for Rooster/Falcon) ───
+    # Rooster's own vision stack (frame capture + DA3 depth) runs entirely on
+    # this PC (see the "Vision (host, domain 9)" comment above) — it does not
+    # need the Jetson. This pair is a separate, additive path: it forwards a
+    # copy of the same captured JPEGs to the Jetson over rsync/SSH, for
+    # whatever future Jetson-side consumer (e.g. a second DA3-TRT instance)
+    # wants them. dir_push_relay.py/dir_watch_path_publisher.py are generic
+    # (built for XTEND's host/Jetson split originally, see their docstrings)
+    # — confirmed working for Rooster live 2026-07-29 (synthetic file, then a
+    # real live Sphera flight, 10Hz measured end-to-end) : PC watch dir ->
+    # rsync/SSH -> Jetson watch dir -> published on the Jetson's OWN ROS2
+    # topic. That topic is on ROS_DOMAIN_ID=5 (the Jetson's domain, see
+    # _ROS_ENV) — a self-contained Jetson-local graph, NOT bridged back to
+    # Rooster's ROS_DOMAIN_ID=9. Jetson-side dir deliberately mirrors the PC
+    # path (/tmp/rooster_frames on both ends) rather than living under
+    # JETSON_DATA -- same relative path on both machines, no translation to
+    # remember. See docs/progress/entries/006-rooster-frame-jetson-relay.md
+    # for the full test record.
+    Service(
+        name="Rooster Frame Relay -> Jetson (R1)",
+        key="rooster_frame_relay_jetson_R1",
+        group="rooster_jetson",
+        description=(
+            "Watches /tmp/rooster_frames (same dir Rooster Frame Capture writes) and "
+            "rsync/SSH-pushes every new JPEG to /tmp/rooster_frames on the Jetson. "
+            "Additive -- does not affect the local Rooster/Falcon pipeline."
+        ),
+        cmd=(
+            "python3 /home/user1/GIT/TheAgency/sparx_agency/robots/common/dir_push_relay.py "
+            "--watch-dir /tmp/rooster_frames --pattern '*.jpg' "
+            f"--remote-host {JETSON_SSH} "
+            "--remote-dir /tmp/rooster_frames"
+        ),
+        env="none",
+        machine="pc",
+        # dir_push_relay.py is shared with the depth relay below -- proc_pattern
+        # must include the distinguishing arg (remote-dir) or pkill/status can't
+        # tell the two apart (pkill -f matches the whole command line as regex).
+        proc_pattern="dir_push_relay.py.*--remote-dir /tmp/rooster_frames",
+    ),
+    Service(
+        name="Rooster Jetson Frame Watcher (R1)",
+        key="rooster_jetson_frame_watch_R1",
+        group="rooster_jetson",
+        description=(
+            "Jetson-side: watches /tmp/rooster_frames for files the PC-side relay "
+            "pushes and republishes each path on /rooster/jetson_rgb_frame_path "
+            "(ROS_DOMAIN_ID=5, Jetson-local -- not bridged to Rooster's domain 9)."
+        ),
+        cmd=(
+            f"python3 {JETSON_REPO}/sparx_agency/robots/common/dir_watch_path_publisher.py "
+            "--watch-dir /tmp/rooster_frames --pattern '*.jpg' "
+            "--path-topic /rooster/jetson_rgb_frame_path"
+        ),
+        env="ros",
+        # Shared script with the depth watcher below -- same disambiguation need.
+        proc_pattern="dir_watch_path_publisher.*jetson_rgb_frame_path",
+    ),
+    Service(
+        name="Rooster Depth Relay -> Jetson (R1)",
+        key="rooster_depth_relay_jetson_R1",
+        group="rooster_jetson",
+        description=(
+            "Watches /tmp/rooster_depth (same dir Rooster Depth Processor writes .npy "
+            "to) and rsync/SSH-pushes every new file to /tmp/rooster_depth on the "
+            "Jetson. Additive -- does not affect the local Rooster/Falcon pipeline."
+        ),
+        cmd=(
+            "python3 /home/user1/GIT/TheAgency/sparx_agency/robots/common/dir_push_relay.py "
+            "--watch-dir /tmp/rooster_depth --pattern '*.npy' "
+            f"--remote-host {JETSON_SSH} "
+            "--remote-dir /tmp/rooster_depth"
+        ),
+        env="none",
+        machine="pc",
+        proc_pattern="dir_push_relay.py.*--remote-dir /tmp/rooster_depth",
+    ),
+    Service(
+        name="Rooster Jetson Depth Watcher (R1)",
+        key="rooster_jetson_depth_watch_R1",
+        group="rooster_jetson",
+        description=(
+            "Jetson-side: watches /tmp/rooster_depth for .npy files the PC-side relay "
+            "pushes and republishes each path on /rooster/jetson_depth_frame_path "
+            "(ROS_DOMAIN_ID=5, Jetson-local -- not bridged to Rooster's domain 9)."
+        ),
+        cmd=(
+            f"python3 {JETSON_REPO}/sparx_agency/robots/common/dir_watch_path_publisher.py "
+            "--watch-dir /tmp/rooster_depth --pattern '*.npy' "
+            "--path-topic /rooster/jetson_depth_frame_path"
+        ),
+        env="ros",
+        proc_pattern="dir_watch_path_publisher.*jetson_depth_frame_path",
+    ),
     # ── Planner (Falcon), host, domain 9 — mirrors XTEND's "planner" group ──
     Service(
         name="Rooster Falcon Container",
@@ -500,16 +715,31 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster Falcon Adapter",
         key="rooster_planner_adapter",
         group="rooster_planner",
-        description="ROS1 Falcon planner inside the falcon container, wired to R1's topics/camera intrinsics (requires falcon container + Rooster ROS1<->ROS2 Bridge running).",
+        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running).",
+        # Kept identical to rooster_turn_debug.py's FALCON_LAUNCH_CMD (the
+        # command actually tested live) so the two never drift apart again —
+        # this exact arg list is what fixed the 2026-08-03 yaw/turn-direction
+        # bugs (yaw_rate) and the BEV-filter false positives (bev_t_on,
+        # bev_occ_conf_full, bev_min_wall_run). See LESSONS.md.
+        #
+        # nav_mode:=astar (default is "combination" in sphera_drone.launch,
+        # which routes path_corrector through combination_planner_node --
+        # that node lazily imports `requests`/PIL and crashes at startup on a
+        # falcon-ros:noetic image built before the Dockerfile declared those
+        # packages (see the apt-get stopgap in "Rooster Falcon Container"'s
+        # Launch-All step). With it dead, path_corrector never gets a path
+        # and waypoint_follower sits in WAIT_PATH forever -- confirmed live
+        # 2026-08-04. astar sidesteps that whole dependency; switch back to
+        # combination only once the image itself is rebuilt.
         cmd=(
             "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
             "source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter sphera_drone.launch "
-            "map_name:=sphera_jail "
+            "map_name:=sphera_jail nav_mode:=astar "
             "real_pose_topic:=/R1/localization "
             "real_depth_path_topic:=/R1/depth_frame_path "
             "real_rgb_path_topic:=/R1/rgb_frame_path "
-            "cam_fx:=125.903068 cam_fy:=180.0 cam_cx:=269.5 cam_cy:=179.5 "
-            "cam_width:=540 cam_height:=360 "
+            "cam_fx:=111.837662 cam_fy:=180.0 cam_cx:=269.5 cam_cy:=179.5 "
+            "cam_width:=540 cam_height:=360 cam_min_depth:=0.45 "
             # Rooster's ground-truth pose is stamped independently from depth
             # (unlike XTEND, where both share one capture event) — the
             # launch default is 0.0/0.0 (exact-timestamp-only, correct for
@@ -518,38 +748,71 @@ ROBOTICAN_SERVICES: list[Service] = [
             # arriving within ~0.5ms. These match mapping_sync_node.py's own
             # documented defaults for this exact case.
             "sync_tolerance:=0.05 max_interp_gap:=0.12 "
-            # goal_x/goal_y default to (0.0, -3.0) -- correct for XTEND,
-            # where the drone starts near the origin, but /gt_pose is a
-            # direct passthrough of Rooster's raw Sphera-world pose
-            # (confirmed live: no re-zeroing), which starts at roughly
-            # (-54.75, 14.66). The unmodified default goal sat ~57m away,
-            # entirely outside sphera_jail.yaml's own box bounds, so
-            # astar_planner could never find a reachable target. This is
-            # the same 3m-south-of-spawn offset the default intended,
-            # just expressed in Rooster's actual world coordinates.
-            "goal_x:=-54.75 goal_y:=11.66 "
+            # Launch file default (0.0, -3.0) is XTEND-only; Rooster spawns
+            # at ~(54.75, -14.66), so this must be overridden. See
+            # mission_sphera.yaml for the actual goal and why it was chosen.
+            f"goal_x:={_SPHERA_GOAL_X} goal_y:={_SPHERA_GOAL_Y} "
             # bev_xmin/ymin/xmax/ymax default to a 12x12m box at world
             # origin (0,0) -- correct for XTEND's near-origin office/hospital
-            # maps, but Rooster's real spawn is ~55m away at (-54.75, 14.66),
-            # so the BEV click map (and every click on it) was pointed at an
-            # empty patch of world far from the drone. These match
-            # sphera_jail.yaml's doubled box bounds, centered on the real
-            # spawn -- this is why the adapter launches sphera_drone.launch
-            # (a Sphera-only fork of real_drone.launch) instead: only that
-            # file forwards bev_* to nav_stack.launch.
-            "bev_xmin:=-70.75 bev_ymin:=-1.34 bev_xmax:=-38.75 bev_ymax:=30.66'"
+            # maps, but Rooster's real spawn is ~55m away, so the BEV click
+            # map (and every click on it) was pointed at an empty patch of
+            # world far from the drone. These match sphera_jail.yaml's
+            # doubled box bounds, centered on the real spawn (same sign
+            # convention note as goal_x/goal_y above) -- this is why the
+            # adapter launches sphera_drone.launch (a Sphera-only fork of
+            # real_drone.launch) instead: only that file forwards bev_* to
+            # nav_stack.launch.
+            "bev_xmin:=38.75 bev_ymin:=-30.66 bev_xmax:=70.75 bev_ymax:=1.34 "
+            "apf_max_total_shift_m:=0.3 vel_x:=0.15 mx_lateral_speed_max:=0.15 "
+            "mx_yaw_rate:=0.4 bev_t_on:=3.0 bev_occ_conf_full:=4.0 "
+            "bev_min_wall_run:=4 yaw_rate:=1.8'"
         ),
         env="none",
         machine="pc",
         proc_container="falcon",
-        proc_pattern="real_drone.launch",
-        stop_extra="docker exec falcon bash -lc 'pkill -f real_drone.launch || true; pkill -f roslaunch || true' 2>/dev/null || true",
+        # Was "real_drone.launch" (copy-pasted from XTEND's entry) even
+        # though the cmd above already launches sphera_drone.launch -- the
+        # dashboard could never detect this as running or stop it correctly.
+        proc_pattern="sphera_drone.launch",
+        stop_extra="docker exec falcon bash -lc 'pkill -SIGINT -f \"roslaunch falcon_adapter sphera_drone.launch\" || true' 2>/dev/null || true",
+    ),
+    Service(
+        name="Rooster Object Approach",
+        key="rooster_planner_object_approach",
+        group="rooster_planner",
+        description=(
+            "Visual-approach state machine inside the falcon container: while the "
+            "target is unconfirmed the drone flies its normal A* route (BEV-click or "
+            "any goal); once Rooster YOLO Detector confirms the target for a few "
+            "consecutive frames, this takes over /cmd_vel and flies to it, dropping "
+            "the path plan. Needs no mission_director/catalog -- reads/writes the same "
+            "/waypoint_nav/goal topic BEV-click uses. Requires Rooster Falcon Adapter "
+            "+ Rooster ROS1<->ROS2 Bridge + Rooster YOLO Detector running."
+        ),
+        cmd=(
+            "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
+            "source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter object_approach.launch "
+            "cmd_vel_topic:=/cmd_vel_raw pose_topic:=/R1/localization pose_type:=pose_stamped "
+            "image_transport:=frame_path rgb_topic:=/R1/rgb_frame_path "
+            "depth_topic:=/R1/depth_frame_path "
+            "fx:=111.837662 fy:=180.0 cx:=269.5 cy:=179.5 img_width:=540 img_height:=360 "
+            f"target_object:={_SPHERA_DETECTOR['init_target']} start_enabled:=true "
+            "lock_mode:=detector_tracker closure_mode:=multi_axis force_mode:=fixed "
+            "fixed_vx:=0.4 vx_max:=0.4 land_range_m:=1.0 land_confirm_ticks:=3 "
+            f"n_confirm:=3 min_score:=0.15 target_range_m:=0.8 "
+            "viewer:=true publish_overlay:=true'"
+        ),
+        env="none",
+        machine="pc",
+        proc_container="falcon",
+        proc_pattern="object_approach.launch",
+        stop_extra="docker exec falcon bash -lc 'pkill -SIGINT -f \"roslaunch falcon_adapter object_approach.launch\" || true' 2>/dev/null || true",
     ),
     Service(
         name="Rooster ROS1<->ROS2 Bridge",
         key="rooster_planner_bridge",
         group="rooster_planner",
-        description="ROS1<->ROS2 bridge container for R1 — CycloneDDS/domain 9 (Rooster is Jazzy, not XTEND's Foxy/FastRTPS). Forwards /R1/localization, /R1/rgb_frame_path, /R1/depth_frame_path, cmd_vel.",
+        description="ROS1<->ROS2 bridge container for R1 — CycloneDDS/domain 9 (Rooster is Jazzy, not XTEND's Foxy/FastRTPS). Forwards /R1/localization, /R1/rgb_frame_path, /R1/depth_frame_path, cmd_vel, /object_approach/detections+goal.",
         cmd=(
             "cd /home/user1/GIT/TheAgency/sparx_agency/tasks/planning/falcon/bridge && "
             "ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
@@ -559,6 +822,39 @@ ROBOTICAN_SERVICES: list[Service] = [
         machine="pc",
         docker_container="ros1_bridge",
         stop_extra="docker rm -f ros1_bridge 2>/dev/null || true",
+    ),
+    Service(
+        name="Rooster YOLO Detector",
+        key="rooster_planner_detector",
+        group="rooster_planner",
+        description=(
+            f"YOLO-World TensorRT sidecar in detector_dev, model={_SPHERA_DETECTOR['model']} "
+            f"conf_thresh={_SPHERA_DETECTOR['conf_thresh']}, watching /R1/rgb_frame_path for "
+            f"'{_SPHERA_DETECTOR['init_target']}', publishing /object_approach/detections. "
+            "Model/threshold/target come from mission_sphera.yaml's detector: section -- "
+            "edit that file, not this command, to change them. Requires Rooster Frame "
+            "Capture (R1) + Rooster ROS1<->ROS2 Bridge running."
+        ),
+        cmd=(
+            "docker exec detector_dev bash -lc \"source /opt/ros/humble/setup.bash && "
+            "export ROS_DOMAIN_ID=9 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && "
+            "export CYCLONEDDS_URI=file:///home/user1/rqs_iai_ws/src/cyclonedds.xml && "
+            "export PYTHONPATH=/home/user1/GIT/TheAgency:\\$PYTHONPATH && "
+            "python3 /home/user1/GIT/TheAgency/sparx_agency/tasks/mapping/ros2/yolo_detector_ros2_node.py "
+            "--ros-args "
+            f"-p target_object:={_SPHERA_DETECTOR['init_target']} "
+            "-p extra_prompts:='[drum]' "
+            f"-p conf_thresh:={_SPHERA_DETECTOR['conf_thresh']} "
+            f"-p backbone_engine:={_SPHERA_DETECTOR['backbone_engine']} "
+            f"-p head_engine:={_SPHERA_DETECTOR['head_engine']} "
+            f"-p text_weights:={_SPHERA_DETECTOR['text_weights']} "
+            "-p rgb_topic:=/R1/rgb_frame_path\""
+        ),
+        env="none",
+        machine="pc",
+        proc_container="detector_dev",
+        proc_pattern="yolo_detector_ros2_node.py",
+        stop_extra="docker exec detector_dev pkill -f yolo_detector_ros2_node.py 2>/dev/null || true",
     ),
     # RViz/BEV-click below mirror the XTEND "planner" group's identically
     # named services, but XTEND's are Jetson-hosted (machine defaults to
@@ -811,6 +1107,76 @@ def _spawn_terminal_window(cmd: str, title: str) -> None:
     raise RuntimeError(f"No supported terminal emulator found. Last error: {last_exc}")
 
 
+def _is_running(svc: Service) -> bool:
+    """Single-service state check, for polling during an ordered launch --
+    get_all_states() checks every service at once (SSH + several docker
+    calls), too slow to call in a tight wait loop for just one service."""
+    try:
+        if svc.machine == "container":
+            if not svc.proc_pattern:
+                return False
+            r = subprocess.run(
+                ["docker", "exec", svc.container_name, "pgrep", "-f", svc.proc_pattern],
+                capture_output=True, check=False, timeout=3,
+            )
+            return r.returncode == 0
+        if svc.machine == "pc":
+            if svc.proc_container and svc.proc_pattern:
+                r = subprocess.run(
+                    ["docker", "exec", svc.proc_container, "pgrep", "-f", svc.proc_pattern],
+                    capture_output=True, check=False, timeout=3,
+                )
+                return r.returncode == 0
+            if svc.env == "docker":
+                r = subprocess.run(
+                    ["docker", "ps", "--filter", f"name=^{svc.docker_container}$", "--format", "{{.Names}}"],
+                    capture_output=True, text=True, check=False, timeout=3,
+                )
+                return r.stdout.strip() == svc.docker_container
+            if svc.proc_pattern:
+                r = subprocess.run(
+                    ["pgrep", "-f", svc.proc_pattern],
+                    capture_output=True, check=False, timeout=3,
+                )
+                return r.returncode == 0
+        return False
+    except Exception:
+        return False
+
+
+def _wait_until(svc: Service, timeout: float = 15, interval: float = 0.5) -> bool:
+    """Poll _is_running(svc) instead of a blind sleep -- returns as soon as
+    the service is up, only waiting the full timeout in the worst case."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _is_running(svc):
+            return True
+        time.sleep(interval)
+    return _is_running(svc)
+
+
+# Explicit dependency order for "Launch All" (ROBOTICAN/Rooster tab) --
+# group membership alone isn't a strict order (e.g. video trigger must start
+# before frame capture, both in "rooster_vision"). Each entry is
+# (service_key, wait_timeout_s); the launcher waits for one to come up
+# before starting the next, instead of a fixed sleep between every step.
+ROOSTER_LAUNCH_ORDER: list[tuple[str, float]] = [
+    ("rooster_planner_falcon", 20),      # falcon container must exist first
+    ("rooster_gtl_R1", 8),
+    ("rooster_video_trigger_R1", 8),
+    ("rooster_command_unit_R1", 8),
+    ("rooster_frame_capture_R1", 10),    # needs video trigger
+    ("rooster_depth_R1", 10),            # needs frame capture
+    ("rooster_planner_adapter", 15),     # roslaunch sphera_drone.launch
+    ("rooster_planner_bridge", 15),
+    ("rooster_planner_detector", 20),    # TRT engine load is the slow step
+    ("rooster_twist_control_R1", 8),     # needs command unit + adapter's /cmd_vel
+    ("rooster_planner_object_approach", 10),
+    ("rooster_planner_rviz", 8),
+    ("rooster_planner_bev_goal", 8),
+]
+
+
 def start_service(svc: Service) -> str | None:
     """Start service. Returns error string or None on success."""
     if svc.machine == "pc":
@@ -994,6 +1360,17 @@ def publish_demo_mode(mode: str) -> str | None:
 # ---------------------------------------------------------------------------
 # UI helpers
 # ---------------------------------------------------------------------------
+def _resolved_cmd(svc: Service) -> str:
+    """The exact command text start_service() would run, for display/copy --
+    doesn't include the pkill/tee/script/tmux wrapping, just the env + cmd."""
+    if svc.machine == "container":
+        env_block = _ENVS.get(svc.env, _CONTAINER_ENV)
+    else:
+        env_block = _ENVS.get(svc.env, "")
+    env_block = env_block.strip()
+    return f"{env_block}\n\n{svc.cmd}" if env_block else svc.cmd
+
+
 def _service_cards(services: list[Service], states: dict[str, bool]):
     cols = st.columns(3)
     for i, svc in enumerate(services):
@@ -1023,6 +1400,10 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
                         st.session_state.log_key = svc.key
                         st.session_state.log_text = get_logs(svc)
                         st.rerun()
+                # Collapsed by default -- st.code has its own copy-to-clipboard
+                # icon, so this is the "enable copying the command" affordance.
+                with st.expander("📄 Command"):
+                    st.code(_resolved_cmd(svc), language="bash")
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1558,75 @@ with tab_rooster:
             f"Container `{ROOSTER_CONTAINER}` is **not running**. "
             f"Start it with:  `cd {ROOSTER_DOCKER_COMPOSE} && docker compose up -d it`"
         )
+
+    # ── Guided bring-up: what should run, in what order, one button ─────────
+    with st.expander("🧭  Bring-up order (what should run, and why)", expanded=False):
+        st.markdown(
+            "\n".join(
+                f"{n}. **{s.name}**" + (f" — _{s.description.splitlines()[0]}_" if s.description else "")
+                for n, (key, _) in enumerate(ROOSTER_LAUNCH_ORDER, start=1)
+                for s in ROBOTICAN_SERVICES if s.key == key
+            )
+        )
+        st.caption(
+            "Whenever R1/Sphera itself restarts, re-run from **Ground Truth "
+            "Localization** onward — nothing upstream of it needs to change, "
+            "but everything downstream loses its connection to the old pose "
+            "feed. Rooster Falcon Adapter / Object Approach can also be "
+            "restarted in place (SIGINT + relaunch) without recreating the "
+            "falcon container — but if you do that, also restart Rooster "
+            "Falcon RViz / BEV Click Goal, since a fresh roslaunch spins a "
+            "brand-new ROS master and those two don't reconnect on their own."
+        )
+
+    launch_all_col, stop_all_col, _ = st.columns([1, 1, 2])
+    with launch_all_col:
+        if st.button("▶▶ Launch All (ordered)", use_container_width=True, type="primary"):
+            svc_map_all = {s.key: s for s in ROBOTICAN_SERVICES}
+            progress = st.empty()
+            for key, timeout in ROOSTER_LAUNCH_ORDER:
+                svc = svc_map_all[key]
+                already_up = _is_running(svc)
+                if already_up:
+                    progress.write(f"✅ {svc.name} — already running")
+                else:
+                    progress.write(f"⏳ {svc.name}…")
+                    err = start_service(svc)
+                    if err:
+                        progress.write(f"⚠️ {svc.name} — start error: {err}")
+                        continue
+                    ok = _wait_until(svc, timeout=timeout)
+                    progress.write(f"{'✅' if ok else '⚠️ (timed out, continuing)'} {svc.name}")
+                # Stopgap: falcon-ros:noetic was built before the Dockerfile
+                # declared python3-requests/python3-pil (combination_planner_
+                # node's NavDP client needs them) -- only matters on a
+                # genuinely fresh container, confirmed live 2026-08-04 that
+                # skipping this left combination_planner crashed at startup.
+                # Harmless/fast no-op if already installed.
+                if key == "rooster_planner_falcon" and not already_up:
+                    progress.write("⏳ Installing python3-requests/pil (stopgap)…")
+                    subprocess.run(
+                        ["docker", "exec", "falcon", "bash", "-c",
+                         "apt-get update -qq && apt-get install -y python3-requests python3-pil"],
+                        capture_output=True, check=False, timeout=60,
+                    )
+            st.rerun()
+    with stop_all_col:
+        if st.button("■■ Stop All (Rooster)", use_container_width=True):
+            if not st.session_state.get("rooster_stop_all_confirm", False):
+                st.session_state.rooster_stop_all_confirm = True
+                st.warning("Click **Stop All (Rooster)** again to confirm.")
+                st.stop()
+            st.session_state.rooster_stop_all_confirm = False
+            svc_map_all = {s.key: s for s in ROBOTICAN_SERVICES}
+            # Reverse order: stop things that depend on others before the
+            # things they depend on (mirrors the manual cleanup this session
+            # settled on -- e.g. kill falcon/bridge before the it-chain).
+            for key, _t in reversed(ROOSTER_LAUNCH_ORDER):
+                stop_service(svc_map_all[key])
+            st.rerun()
+
+    st.divider()
 
     # ARM / DISARM quick actions
     st.markdown("#### Drone Quick Actions")

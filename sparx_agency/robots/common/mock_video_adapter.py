@@ -243,7 +243,10 @@ class MockVideoStreamManager(Node):
         msg_used.header.frame_id = f"{self.dir_name}_____{last_yaw_rad:.5f}"
         self.image_used_pub.publish(msg_used)
 
-    def intrinsic_from_fov(self, hfov_deg=130, vfov_deg=90, half_pixel=True):
+    def intrinsic_from_fov(self, hfov_deg=135, vfov_deg=90, half_pixel=True):
+        # Kept in sync with rooster_video_adapter.py:VideoStreamManager -
+        # hfov=135deg is confirmed against Sphera's scenario config
+        # (roosters.R1.main_camera.hfov); vfov=90deg is still unverified.
         theta_x = np.deg2rad(hfov_deg)
         theta_y = np.deg2rad(vfov_deg)
 

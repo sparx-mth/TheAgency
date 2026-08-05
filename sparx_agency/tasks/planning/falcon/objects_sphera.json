@@ -1,0 +1,11 @@
+[
+  {
+    "label": "barrel",
+    "_comment": "Real object placed in the sphera_jail scene (frame_id Oil_Drum_1 in Sphera, also 'oil drum'/'drum'). Position converted from Sphera's raw location (x=-58.0105, y=14.9110, z=-0.0409) via this stack's world-frame handedness fix (world_x=-raw_x, world_y=-raw_y, z unchanged) -- see rooster_ground_truth_localization.py.",
+    "position_m": {
+      "x": 58.0105,
+      "y": -14.911,
+      "z": -0.0409
+    }
+  }
+]

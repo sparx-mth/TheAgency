@@ -19,6 +19,8 @@ from sparx_agency.robots.common.helpers import (
     load_camera_info_from_yaml, padded_camera_info, crop_resize_camera_info,
     sanitize_depth,
 )
+from sparx_agency.tasks.common.model_registry.errors import ModelRegistryError
+from sparx_agency.tasks.common.model_registry.resolver import resolve as resolve_model
 
 
 class DepthProcessorNode(Node):
@@ -42,10 +44,15 @@ class DepthProcessorNode(Node):
         self.bridge = CvBridge()
         self.camera_info_msg: CameraInfo | None = None
 
-        self.declare_parameter(
-            "engine_path",
-            str(Path.home() / "depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_v1.engine"),
-        )
+        # Empty (the default) means: resolve via the model registry using the
+        # engine_model/engine_role/engine_precision/engine_resolution params
+        # below. A non-empty engine_path always wins verbatim -- every
+        # existing launcher/script that passes one keeps working unchanged.
+        self.declare_parameter("engine_path", "")
+        self.declare_parameter("engine_model", "da3_metric_large")
+        self.declare_parameter("engine_role", "depth_only")
+        self.declare_parameter("engine_precision", "fp16")
+        self.declare_parameter("engine_resolution", "546x364")
         self.declare_parameter(
             "config_yaml",
             str(Path.home() / "GIT/TheAgency/sparx_agency/robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml"),
@@ -78,7 +85,24 @@ class DepthProcessorNode(Node):
         self.declare_parameter("metric_scale_divisor", 300.0)
         self.declare_parameter("metric_output_scale", 1.0)  # e.g. 0.88 for DA2-metric-indoor-small
 
-        self.engine_path = self.get_parameter("engine_path").value
+        self.engine_path = str(self.get_parameter("engine_path").value).strip()
+        if not self.engine_path:
+            engine_model = str(self.get_parameter("engine_model").value)
+            engine_role = str(self.get_parameter("engine_role").value).strip() or None
+            engine_precision = str(self.get_parameter("engine_precision").value)
+            engine_resolution = str(self.get_parameter("engine_resolution").value).strip() or None
+            try:
+                artifact = resolve_model(engine_model, role=engine_role,
+                                         precision=engine_precision,
+                                         resolution=engine_resolution)
+            except ModelRegistryError as e:
+                raise RuntimeError(
+                    f"no engine_path given and the model registry could not resolve "
+                    f"{engine_model!r}: {e}") from e
+            self.engine_path = str(artifact.path)
+            self.get_logger().info(
+                f"engine_path resolved via model registry: {self.engine_path} "
+                f"(origin={artifact.origin})")
         self.config_yaml = self.get_parameter("config_yaml").value
         self.camera_info_mode = self.get_parameter("camera_info_mode").value
         self.image_topic = self.get_parameter("image_topic").value

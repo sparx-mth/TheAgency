@@ -46,6 +46,15 @@ class MultiAxisCommand:
         done: True once the final goal has been reached (state is HOLD).
         wp_idx: Index of the waypoint currently being pursued.
         num_waypoints: Length of the active (re-anchored) path.
+        yaw_engaged: Whether yaw is actively past the engage/release hysteresis
+            deadband this tick (the follower's own authoritative "really turning,
+            not just trimming" signal) -- this is the regime signal
+            ``waypoint_follower_node.py``'s ``_supervisor_cmd_wz()`` was missing
+            for this tracker (it already has one for ``drift_pid`` via
+            ``follower.state``). ``wz`` can be nonzero from slew/shape-axis
+            residue even with yaw released, so callers that need to distinguish
+            "genuinely turning" from "an ordinary command in flight" should key
+            on this, not on ``wz != 0``.
     """
 
     command: ControlCommand
@@ -55,6 +64,7 @@ class MultiAxisCommand:
     done: bool
     wp_idx: int
     num_waypoints: int
+    yaw_engaged: bool = False
 
     @property
     def vx(self) -> float:

@@ -6,19 +6,37 @@ map_config:
   map_file: ""
   map_dimension: 2
 
-  # Drone's actual ground-truth spawn position in Sphera's world frame
-  # (confirmed via /R1/localization: pose stayed at (-54.75, 14.66, 0.12)
-  # throughout an idle session). NOT the origin -- office.yaml's
-  # "drone starts at the origin" assumption does NOT hold for this map;
-  # Sphera's world frame places R1 far from (0,0). Getting this wrong
-  # crashes exploration_node: FALCON's voxel grid is sized/indexed from
-  # map_size below, so a real position outside those bounds computes a
-  # wildly out-of-range array index --
+  # Drone's actual ground-truth spawn position in Sphera's world frame.
+  # NOT the origin -- office.yaml's "drone starts at the origin" assumption
+  # does NOT hold for this map; Sphera's world frame places R1 far from
+  # (0,0). Getting this wrong crashes exploration_node: FALCON's voxel grid
+  # is sized/indexed from map_size below, so a real position outside those
+  # bounds computes a wildly out-of-range array index --
   #   F... map_base_inl.h:173] Check failed: addr < map_data_->data.size()
   #   (-3062602 vs. 1480000) Address out of range: -3062602
   # (glog FATAL abort in voxel_mapping::OccupancyGrid::updateOccupancyVoxel).
-  init_x: -54.75
-  init_y: 14.66
+  #
+  # init_y (and every other _y bound below) flipped sign 2026-07-27:
+  # rooster_ground_truth_localization.py now negates position.y to
+  # complete the Sphera/Unreal (left-handed) -> ROS (right-handed)
+  # handedness conversion that was previously only half-applied (yaw was
+  # already negated, position.y was not).
+  #
+  # init_x (and every other _x bound below) ALSO flipped sign 2026-07-28:
+  # the y-only fix above was incomplete -- confirmed live via a pure lateral
+  # "right" move (no yaw change), cross-checked against direct visual
+  # confirmation in Sphera, that FALCON's map/BEV showed the drone moving
+  # LEFT for a real RIGHT move. Solving the rotation equations against
+  # paired raw (/R1/sphera/state) vs. transformed (/R1/localization) data
+  # showed position.x must be negated too, not just position.y, once yaw
+  # is negated (see rooster_ground_truth_localization.py and LESSONS.md for
+  # the derivation). The drone's real spawn point didn't move -- what
+  # changed is which sign /R1/localization reports for it (was -54.75, is
+  # now +54.75) -- so every X bound tuned against the old convention has to
+  # flip (and min/max swap, since negating a range reverses which end is
+  # which) or the drone spawns outside its own map.
+  init_x: 54.75
+  init_y: -14.66
   init_z: 0.12
   init_yaw: 0.0
 
@@ -44,28 +62,60 @@ map_config:
   # same out-of-bounds-index crash class as the X/Y note above, just on Z).
   # The crash then left RViz/bev_publisher showing stale state from
   # whatever was mid-flight, which looked like mirrored geometry/no drone
-  # marker. 4.0/3.5 gives >0.6m headroom above the confirmed ceiling.
+  # marker. map_max_z stays at 4.0 (>0.6m headroom above the confirmed
+  # ceiling) so that crash class can't recur.
+  #
+  # box_max_z/vbox_max_z are a different knob from map_max_z: raycast
+  # integration and the ESDF/collision-safety checks (tsdf.cpp, esdf.cpp,
+  # bspline_optimizer.cpp::calcDistanceCost, planner_manager.cpp::
+  # checkTrajCollision) are bounded only by map_min_z/map_max_z, so the
+  # ceiling stays a real, avoided obstacle regardless of box/vbox. box/vbox
+  # only gate exploration frontier targets, the global A* exploration
+  # search space, and what publishOccupancyGrid/TSDF/ESDF send to RViz.
+  #
+  # Capped at 1.8 (not just below the real ~3.39m ceiling): publishOccupancyGrid/
+  # TSDF/ESDF iterate up to vbox_max_idx_, and FALCON's raycast integration
+  # clamps/mismarks the LAST in-bounds voxel along a ray that would otherwise
+  # exit vbox -- confirmed live, a sharp pile-up of occupied points right at
+  # whatever vbox_max_z was set to (a boundary artifact, not real geometry),
+  # so any cutoff shows a false "ceiling" at its own height. Tried raising
+  # this to 4.0 on 2026-07-28 to see the real ceiling in RViz -- reverted the
+  # same day: the actual want was "no ceiling-like geometry at all blocking
+  # the view", real or artifact, not specifically the true ceiling height.
+  # Capping at 1.8 (below any real indoor ceiling) is the simpler way to get
+  # that: nothing gets mapped/explored/displayed up there at all, so there is
+  # nothing resembling a ceiling to see.
+  #
+  # map_max_z stays at 4.0 (not the 5.0 tried alongside the vbox=4.0
+  # experiment): that 5.0 was ONLY needed because vbox_max_z was set exactly
+  # equal to map_max_z, which crashed exploration_node live --
+  # voxel_mapping::ESDF::getDistance -> glog FATAL "Address out of range" --
+  # ESDF's neighbor-cell queries need real margin near a boundary, not just
+  # map_size >= vbox_size. With vbox_max_z back at 1.8, the original 2.2m
+  # margin below map_max_z=4.0 is restored, so 4.0 is safe again. If
+  # box_max_z/vbox_max_z are ever raised again, re-raise map_max_z to keep a
+  # real (>=1.0m) margin between them -- see LESSONS.md for the crash detail.
   map_size:
-    map_min_x: -74.75
-    map_min_y:  -5.34
+    map_min_x:  34.75
+    map_min_y: -34.66
     map_min_z:  -2.0
-    map_max_x:  -34.75
-    map_max_y:  34.66
+    map_max_x:  74.75
+    map_max_y:   5.34
     map_max_z:   4.0
 
-    box_min_x: -70.75
-    box_min_y:  -1.34
+    box_min_x:  38.75
+    box_min_y: -30.66
     box_min_z:  -1.0
-    box_max_x:  -38.75
-    box_max_y:  30.66
-    box_max_z:   3.5
+    box_max_x:  70.75
+    box_max_y:   1.34
+    box_max_z:   1.8
 
-    vbox_min_x: -74.75
-    vbox_min_y:  -5.34
+    vbox_min_x:  34.75
+    vbox_min_y: -34.66
     vbox_min_z:  -2.0
-    vbox_max_x:  -34.75
-    vbox_max_y:  34.66
-    vbox_max_z:   4.0
+    vbox_max_x:  74.75
+    vbox_max_y:   5.34
+    vbox_max_z:   1.8
 
   scale: 1.0
 
