@@ -65,26 +65,28 @@ def _cruising(speed, spec):
     return speed[ramp:-approach]
 
 
-def test_the_aircraft_never_stops_mid_route():
-    """The whole reason this exists: no deceleration onto every waypoint.
+def test_the_aircraft_does_not_decelerate_onto_every_waypoint():
+    """Still the reason this exists -- but no longer at any price.
 
-    The floor is 0.55x rather than 1.0x because the tracker deliberately eases
-    off through tight corners (``corner_speed_factor``), and ``compute_velocity_3d``
-    additionally throttles forward speed by how well the aircraft's actual
-    heading matches the bearing to the lookahead point (yaw-then-fly, not
-    holonomic strafing) -- both are smoothing, not stopping. Measured worst
-    case on this route is 0.63x.
+    This used to assert that the commanded speed never dropped below 0.55x cruise
+    *anywhere*. That property was given up deliberately: holding speed through a
+    corner is what took the corner wide, and wide enough to miss a doorway is
+    worse than a flight with a pause in it. What remains is the original point --
+    the aircraft is not stopping at each waypoint -- expressed as an average over
+    the route rather than a floor at every instant. See
+    ``FollowSpec.stop_turn_rad``.
     """
     spec = FollowSpec()
     cruising = _cruising(_fly(spec)["speed"], spec)
-    assert cruising.min() > 0.55 * spec.cruise_speed, "it stopped somewhere mid-route"
-    assert cruising.mean() > 0.85 * spec.cruise_speed
+    assert cruising.mean() > 0.8 * spec.cruise_speed
 
 
-def test_speed_holds_near_cruise_rather_than_sawtoothing():
+def test_speed_varies_only_where_the_route_bends():
+    """A flat profile was the old requirement; easing through curves is the new
+    one, so this pins the variation down to being modest rather than absent."""
     spec = FollowSpec()
     cruising = _cruising(_fly(spec)["speed"], spec)
-    assert cruising.std() < 0.1 * spec.cruise_speed
+    assert cruising.std() < 0.25 * spec.cruise_speed
 
 
 def test_a_faster_cruise_speed_actually_flies_faster():
@@ -185,5 +187,7 @@ def test_the_on_the_spot_turn_is_brisker_than_the_cruise_rotation():
 
 
 def test_the_cruise_yaw_rate_is_gentle_enough_for_usable_footage():
-    """Measured: 45 deg/s whipped the camera; this is the calm end of the range."""
-    assert math.degrees(FollowSpec().max_yaw_rate) <= 20.0
+    """Measured: 45 deg/s whipped the camera. 20 deg/s was too calm to be flown --
+    a 90-degree corner took 6.4 s of yawing and the aircraft arced through all of
+    it -- so the usable band is between the two."""
+    assert 25.0 <= math.degrees(FollowSpec().max_yaw_rate) <= 40.0

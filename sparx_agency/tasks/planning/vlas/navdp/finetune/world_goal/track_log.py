@@ -24,12 +24,25 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 
+SCHEMA_VERSION = 2
+"""Bumped when :meth:`TrackLog.set_flown` began recording the flown path's own
+clock. Version 1 logs carry positions with no way to say *when* -- see
+``track_video`` for what that cost."""
+
+
 class TrackLog:
     """Accumulates one entry per inference, then writes it as JSON."""
 
     def __init__(self, goal_xy: Sequence[float], start_xy: Sequence[float]) -> None:
+        """
+        Args:
+            goal_xy: The mission goal, world frame.
+            start_xy: Where the mission was planned to start from.
+        """
         self.goal_xy = [float(goal_xy[0]), float(goal_xy[1])]
         self.start_xy = [float(start_xy[0]), float(start_xy[1])]
+        self.started_s = 0.0
+        self.flown_dt = 0.0
         self.entries: List[Dict] = []
 
     def add(self, sim_time: float, pose: Sequence[float],
@@ -70,16 +83,40 @@ class TrackLog:
             float(pose[1]) + path[:, 0] * sin + path[:, 1] * cos,
         ], axis=-1)
 
-    def set_flown(self, track: Sequence[Sequence[float]], stride: int = 10) -> None:
-        """The path the aircraft actually took.
+    def set_flown(self, track: Sequence[Sequence[float]], started_s: float,
+                  dt: float, stride: int = 10) -> None:
+        """The path the aircraft actually took, and when each sample was taken.
 
         Sampled every ``stride``-th point: the control loop appends at the
         physics rate (250 Hz), so a minute of flight is 15,000 positions about
         2 mm apart — far finer than anything a map panel can draw, and enough
         JSON to matter next to the imagery.
+
+        **The timing is not optional.** Without it the only way to place a stored
+        position in time is to assume the flight's inferences and its positions
+        cover the same span. They do not: the aircraft is recorded from the
+        moment it leaves the ground, while inference is held off until it reaches
+        cruise altitude, so the inferences start about ten seconds in. Drawing
+        the two as if they were coextensive put the flown trail metres away from
+        the aircraft marker for most of a comparison video and made a correctly
+        located aircraft look badly mislocalised.
+
+        Args:
+            track: One position per control step, in order.
+            started_s: The simulation clock at ``track[0]`` — the same instant the
+                onboard recording and the chase camera start, to within one
+                render period.
+            dt: The control step, seconds.
+            stride: Keep every ``stride``-th sample.
         """
         self.flown = [[round(float(x), 3), round(float(y), 3)]
                       for x, y in list(track)[::max(1, stride)]]
+        self.started_s = float(started_s)
+        self.flown_dt = float(dt) * max(1, stride)
+
+    def flown_time(self, index: int) -> float:
+        """The simulation clock at flown sample ``index``."""
+        return self.started_s + index * self.flown_dt
 
     def write(self, path: Path, extra: Optional[Dict] = None) -> None:
         """Write the log, with whatever the caller knows about the flight.
@@ -90,7 +127,9 @@ class TrackLog:
         copy of what the policy proposed. Structure beats annotation.
         """
         payload = dict(extra or {})
-        payload.update({"goal_xy": self.goal_xy, "start_xy": self.start_xy,
+        payload.update({"schema": SCHEMA_VERSION,
+                        "goal_xy": self.goal_xy, "start_xy": self.start_xy,
+                        "started_s": self.started_s, "flown_dt": self.flown_dt,
                         "flown": getattr(self, "flown", []),
                         "inference_count": len(self.entries),
                         "inferences": self.entries})

@@ -169,8 +169,9 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     )
     from sparx_agency.tasks.planning.sim_flight_recording.episode import (
         CRASH_HOLD_S, CRASH_TILT_DEG, TAKEOFF_TOLERANCE_M, arm_for_offboard,
-        attitude_deg, slew_towards,
+        attitude_deg, hold_velocity, slew_towards,
     )
+    from sparx_agency.tasks.planning.sim_flight_recording.path_follower import FollowSpec
 
     vehicle = adapter.vehicle
     goal = (mission.goal.x, mission.goal.y)
@@ -203,6 +204,15 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     # inference is held off until the aircraft is at cruise altitude; the climb
     # itself already happens for free via velocity_to()'s vz term below.
     climbed = False
+    # Where to hold while climbing: where the aircraft actually is, not the
+    # mission's nominal start, so the hold cannot fight a spawn offset.
+    takeoff_xy = (float(start[0]), float(start[1]))
+    hold_spec = FollowSpec(cruise_speed=args.cruise,
+                           max_speed=max(args.cruise * 1.25, args.cruise + 0.2))
+    # The clock the recording, the chase camera and the flown track all start on.
+    # Read before the first step so it is the instant of track[0], which is what
+    # a map panel needs to line itself up against the video.
+    flight_started = loop.sim_time
 
     while loop.sim_time < deadline:
         rendered = loop.step()
@@ -244,7 +254,22 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
             if track_log is not None:
                 track_log.add(loop.sim_time, pose, trajectory, target_world)
 
-        vx, vy, vz = velocity_to(position, target_world, pose[2], altitude, args.cruise)
+        if climbed:
+            vx, vy, vz = velocity_to(position, target_world, pose[2], altitude,
+                                     args.cruise)
+        else:
+            # Station-keep over the take-off point until the aircraft is at cruise
+            # altitude. velocity_to is a *travel* law: it points the velocity along
+            # the current heading and scales it by the cosine of the heading error,
+            # so drift into the rear hemisphere is corrected at exactly zero speed.
+            # As a position hold that is one-sided, and it let the aircraft wander
+            # 3.5 m off the take-off point during the climb -- before a single
+            # inference, so NavDP's first observation came from somewhere the
+            # mission never chose. hold_velocity flies at the point regardless of
+            # heading, which is what "stay put" needs; it is the same law
+            # episode.py has always used for its own climb.
+            vx, vy, vz = hold_velocity(position, (takeoff_xy[0], takeoff_xy[1],
+                                                  altitude), hold_spec)
         yaw_command = slew_towards(pose[2], yaw_command,
                                    math.radians(MAX_YAW_RATE_DPS), loop.dt)
         px4.send_velocity_world(vx, vy, vz, yaw_command)
@@ -274,7 +299,7 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     steps = np.linalg.norm(np.diff(flown, axis=0), axis=1) if flown.shape[0] > 1 else np.array([0.0])
     final = flown[-1] if flown.shape[0] else np.array(start[:2])
     if track_log is not None:
-        track_log.set_flown(track)
+        track_log.set_flown(track, started_s=flight_started, dt=loop.dt)
     return {
         "outcome": outcome,
         "reached": outcome == "reached",
@@ -338,6 +363,11 @@ def main() -> None:
                              "before the first mission. Without it the first "
                              "mission of each arm flies on a half-converged EKF2 "
                              "and the two arms are not comparable")
+    parser.add_argument("--no-vision", dest="vision", action="store_false",
+                        help="fly on PX4's simulated GNSS and magnetometer rather "
+                             "than the simulator's true pose. Both arms must agree, "
+                             "or the comparison measures the estimator")
+    parser.set_defaults(vision=True)
     args = parser.parse_args()
 
     repo = Path(args.dev_root) / "repo"
@@ -394,14 +424,15 @@ def main() -> None:
     px4_launch.clear_saved_parameters(args.px4_dir, args.worker)
     px4_process = px4_launch.launch_px4(
         args.px4_dir, instance=args.worker,
-        log_path=out / f"px4_worker{args.worker}.log")
+        log_path=out / f"px4_worker{args.worker}.log",
+        boot_params=px4_params.boot_params(args.vision))
     simulation_app = flight_session.boot_isaac(stream=args.stream)
 
     results: List[Dict] = []
     try:
         loop, adapter, px4_link, chase = campaign_setup.bring_up(
             simulation_app, args, missions[0].start, heartbeat_timeout_s=300.0)
-        campaign_setup.configure_px4(loop, px4_link, px4_params.all_params(), 3.0)
+        campaign_setup.configure_px4(loop, px4_link, px4_params.all_params(args.vision), 3.0)
         campaign_setup.settle_estimator(loop, px4_link, args.settle_s)
         if not campaign_setup.wait_until_armable(loop, px4_link):
             print("[fly] PX4 never became armable; nothing to fly", flush=True)

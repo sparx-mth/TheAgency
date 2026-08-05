@@ -188,8 +188,14 @@ def bring_up(simulation_app, args, spawn: Pose2D, heartbeat_timeout_s: float) ->
         _aim_live_viewport()
 
     px4 = PX4Offboard(instance=args.worker)
+    vision = None
+    if args.vision:
+        from sparx_agency.tasks.planning.sim_flight_recording.px4_vision_pose import (
+            VisionPoseSender,
+        )
+        vision = VisionPoseSender(px4, adapter.vehicle)
     loop = SimLoop(world, adapter.vehicle, px4, rate_hz=args.rate_hz,
-                   realtime=args.realtime)
+                   realtime=args.realtime, vision=vision)
     loop.start()
 
     _wait_for_heartbeat(loop, px4, heartbeat_timeout_s)
@@ -251,6 +257,21 @@ def configure_px4(loop, px4, params: dict, settle_s: float) -> None:
               f"not applied. Check the PX4 log for 'param types mismatch'.", flush=True)
 
 
+VISION_AGREEMENT_M = 0.5
+"""How far PX4's estimate may sit from truth once vision fusion has settled.
+
+The pose being fused *is* ground truth, so the steady-state error is the
+estimator's own transient and nothing else -- in practice centimetres. Half a
+metre is a wide gate around that, chosen to catch the failure that matters
+(fusion never started, so the estimate is on dead reckoning or on a frame anchored
+somewhere else) rather than to police the last few centimetres.
+"""
+
+VISION_AGREEMENT_YAW_DEG = 5.0
+"""Same gate for heading. Yaw is fused from the same pose, so a large error here
+means ``EKF2_EV_CTRL``'s yaw bit did not take."""
+
+
 def settle_estimator(loop, px4, seconds: float) -> None:
     """Sit still until PX4's estimator has converged, before flying anything.
 
@@ -260,10 +281,25 @@ def settle_estimator(loop, px4, seconds: float) -> None:
     100 seconds failing to reach three waypoints while every later one took 20;
     the difference was entirely how long the estimator had been running.
 
+    **With vision aiding this is also the checkpoint that the aiding is real.**
+    Every way of getting the vision path wrong ends the same way -- PX4 accepts
+    the parameters, never fuses the pose, and flies on whatever it has left, with
+    no message saying so. The only reliable test is whether its estimate now
+    tracks the truth it is being handed, and here is the one moment the aircraft
+    is guaranteed stationary and the answer is unambiguous.
+
     Args:
-        loop: The simulation loop to step.
+        loop: The simulation loop to step. Its ``vision`` attribute decides
+            whether the agreement check applies.
         px4: The autopilot link, polled for the drift readout.
         seconds: Simulated seconds to wait.
+
+    Raises:
+        RuntimeError: If vision aiding was requested and PX4's settled estimate
+            does not agree with ground truth to :data:`VISION_AGREEMENT_M` /
+            :data:`VISION_AGREEMENT_YAW_DEG`. A campaign flown on an estimator
+            that is not being corrected produces poisoned recordings that look
+            fine, so this stops the worker instead.
     """
     if seconds <= 0.0:
         return
@@ -278,6 +314,69 @@ def settle_estimator(loop, px4, seconds: float) -> None:
     print(f"estimator settled; PX4's frame is offset from the world by "
           f"({offset[0]:.2f}, {offset[1]:.2f}, {offset[2]:.2f}) m and it believes "
           f"it is heading {heading}", flush=True)
+
+    vision = getattr(loop, "vision", None)
+    if vision is None:
+        return
+    _check_vision_fusion(loop, px4, vision, offset, estimated_yaw)
+
+
+def _check_vision_fusion(loop, px4, vision, offset, estimated_yaw) -> None:
+    """Confirm PX4 is actually fusing the ground-truth pose it is being sent.
+
+    Args:
+        loop: The simulation loop, for the vehicle's true heading.
+        px4: The autopilot link.
+        vision: The :class:`~px4_vision_pose.VisionPoseSender` in use.
+        offset: ``measure_frame_offset``'s reading, metres.
+        estimated_yaw: PX4's heading in ENU, or None if it has not reported one.
+
+    Raises:
+        RuntimeError: If the estimate does not track truth. The message names the
+            two things worth checking first, because the cause is always one of
+            them and neither is visible from here.
+    """
+    from sparx_agency.tasks.planning.sim_flight_recording.px4_vision_pose import (
+        find_px4_backend,
+    )
+
+    distance = math.sqrt(sum(component ** 2 for component in offset))
+    true_yaw = _true_yaw_enu(loop.vehicle)
+    yaw_error_deg = (float("nan") if estimated_yaw is None
+                     else abs(math.degrees(_wrap(true_yaw - estimated_yaw))))
+    print(f"vision aiding: {vision.sent} poses sent, PX4's estimate is "
+          f"{distance:.2f} m and {yaw_error_deg:.1f} deg from ground truth",
+          flush=True)
+
+    if distance <= VISION_AGREEMENT_M and yaw_error_deg <= VISION_AGREEMENT_YAW_DEG:
+        return
+    backend = find_px4_backend(loop.vehicle)
+    said = "; ".join(px4.drain_status_texts()[-4:]) or "(nothing)"
+    raise RuntimeError(
+        f"PX4 is not fusing the vision pose: after settling its estimate is "
+        f"{distance:.2f} m / {yaw_error_deg:.1f} deg from the ground truth it was "
+        f"sent ({vision.sent} poses, last stamped "
+        f"{getattr(backend, '_current_utime', 0) / 1e6:.1f} s). PX4 said: {said}. "
+        f"Three things to check, in order of how often they are the cause: "
+        f"(1) the pose arrives but is *rejected* -- read "
+        f"estimator_aid_src_ev_pos.test_ratio in PX4's ULog; a ratio above 1 with "
+        f"fused=false means EKF2_EVP_NOISE/EKF2_EVP_GATE are too tight, not that "
+        f"the pose is wrong; (2) it never arrives -- 'listener "
+        f"vehicle_visual_odometry' in PX4's console prints nothing; (3) a "
+        f"parameter did not apply -- 'param types mismatch' in PX4's console. See "
+        f"px4_vision_pose's docstring."
+    )
+
+
+def _true_yaw_enu(vehicle) -> float:
+    """The vehicle's true heading, radians CCW from +X."""
+    qx, qy, qz, qw = vehicle.state.attitude
+    return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+
+
+def _wrap(angle: float) -> float:
+    """Wrap an angle into ``(-pi, pi]``."""
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 def wait_until_armable(loop, px4, timeout_s: float = 240.0, retry_s: float = 2.0,

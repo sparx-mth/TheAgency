@@ -40,11 +40,20 @@ EXPLORATION_OVERRIDES = {
 def all_params() -> dict:
     """Every PX4 parameter an exploration run should fly with.
 
+    ``vision=False``: this stack still flies on PX4's simulated GNSS and
+    magnetometer. The collection stack moved off them because a stale compass had
+    PX4 raising a failsafe and force-landing mid-route (see
+    ``sim_flight_recording/px4_params.GPS_ESTIMATOR``), and the same fix would
+    help here -- but it needs a ``VisionPoseSender`` in this package's own loop
+    (``isaac/setup.py``), not just a parameter set, and sending the parameters
+    without the pose would leave EKF2 waiting for data that never arrives.
+    Changing that is its own piece of work.
+
     Returns:
         Name to value, the collection set with :data:`EXPLORATION_OVERRIDES`
         applied. The value's **Python type selects the MAVLink parameter type**
         (see ``PX4Offboard.set_params``), so the int/float split matters.
     """
-    merged = px4_params.all_params()
+    merged = px4_params.all_params(vision=False)
     merged.update(EXPLORATION_OVERRIDES)
     return merged

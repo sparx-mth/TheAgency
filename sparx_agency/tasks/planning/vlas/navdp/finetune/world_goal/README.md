@@ -488,6 +488,31 @@ conda run -n navdp python -m $WG.report --run $OUT/run1 --dataset $OUT/dataset \
 > it — indistinguishable from a dead policy. **Anything serving a fine-tuned
 > checkpoint over the torch backend hit this**, not just closed-loop flights.
 
+### The comparison video lied twice, and it is worth knowing how
+
+The first comparison videos looked like the aircraft was badly mislocalised — the
+position marker displaced from the takeoff point before the drone left the ground,
+and the flown trail detached from it for most of the clip. Neither was real. Both
+were composition faults, and between them they nearly cost a dataset:
+
+* **`track_video.py` drew the flown path by *fraction of the flight*.** Inference
+  is held off until cruise altitude, so the inferences cover the last ~26 s of a
+  36 s flight; spreading the flown path evenly across them put the trail up to ten
+  seconds behind the aircraft. It now renders on the flight's own clock, from
+  `started_s` and `flown_dt` in the track log (schema 2), and the marker is the
+  aircraft's position at that instant rather than the pose of the last inference.
+* **`compare_videos.py` stacked clips of different lengths and played both from
+  zero.** A 26 s panel over a 36 s camera means the map runs a third faster than
+  the view. The panel is now rendered at the camera's own capture rate over the
+  whole flight, and `check_alignment` warns if a pair still disagrees.
+
+A track log written before this has no clock; it still renders, one frame per
+inference, with a warning. **The takeoff drift in those videos was partly real,
+though** — see `--no-vision` in
+`tasks/planning/sim_flight_recording/README.md`, and the station-keeping fix in
+`fly_navdp.fly_mission`, which used a heading-locked travel law as a position hold
+and so corrected drift into the rear hemisphere at exactly zero speed.
+
 ---
 
 ## 10. Reading the results

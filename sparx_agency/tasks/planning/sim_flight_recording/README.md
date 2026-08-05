@@ -185,9 +185,20 @@ fields are worth filtering on even when the outcome is `landed`:
   the mission can carry on. Non-zero means the aircraft cut a corner somewhere,
   which is fine for most purposes and not if you are training on the geometry.
 * **`estimator_drift_m`** — how far PX4's position estimate wandered relative to
-  ground truth over the flight. Tens of centimetres is healthy. Metres means the
-  aircraft was being commanded to the wrong place and the recording's *images*
-  do not show what its *plan* says they should.
+  ground truth over the flight. **Around 0.1 m is what vision aiding gives**; tens
+  of centimetres is healthy; metres means the aircraft was being commanded to the
+  wrong place and the recording's *images* do not show what its *plan* says they
+  should. It is also the fastest way to tell whether a campaign was flown before
+  or after the switch off GNSS.
+
+Two `meta.json` fields describe *different* things and are easy to conflate:
+**`start_xy` is where the recording begins** (comparable with `poses.npy`'s first
+row, up to the grid snap), while **`route_start_xy` and `planned_waypoints`
+describe the last route flown**, which for a replanned episode picks up tens of
+metres into the flight. `start_xy` used to be taken from the latter; that made 20%
+of one campaign's recordings appear to start more than 3 m from their own first
+pose, and one by 44 m, which reads exactly like an aircraft that is not where it
+thinks it is. It was a mislabelled field.
 
 ### Looking at them
 
@@ -563,31 +574,118 @@ Two consequences worth knowing:
   +y is simply "north" by convention. `PX4Offboard.latch_frame` measures it
   while the aircraft is stationary and every command is rotated by it.
 
-## Position accuracy: exact sensors, not external vision
+## Position accuracy: PX4 is fed the simulator's own pose
 
-Pegasus simulates a GPS receiver, an IMU, a magnetometer and a barometer, noise
-and biases included. Outdoors that is the right model; indoors it cost metres of
-position hold — comparable to the gap between two office desks — and about half
-of `office` flights ended against furniture.
+**This section describes a change of direction. If you are reading recordings
+made before it, read the last part of this section too.**
 
-The fix is `robots/PEGASUS/adapters/sensors.py`: **every configurable noise term
-is zeroed**, which makes PX4's estimator input ground truth. The barometer needs
-a subclass because, alone among the four, it has no config key for its noise —
-it unconditionally injects ~1 Pa, which is 8.4 cm of altitude. `px4_params.py`
-then tells the estimator to believe the now-exact GPS (`EKF2_GPS_P_NOISE` 0.5 →
-0.05) and stops it gating a perfect fix on invented quality metrics
-(`EKF2_GPS_CHECK`).
+The accurate position was never the hard part. The simulator knows it exactly,
+and every follower here reads it straight off `vehicle.state.position`. The
+problem was that **PX4** had no access to it, and PX4 holds the veto — it can
+override offboard mode and land the aircraft whenever its own estimator decides
+something is wrong.
 
-The magnetometer is kept rather than disabled: noiseless, it is what makes yaw
-observable while the aircraft sits still on the ground, which GNSS-velocity yaw
-is not.
+For a long time PX4 ran its EKF2 on Pegasus's simulated GPS receiver and
+magnetometer with **every configurable noise term zeroed**
+(`robots/PEGASUS/adapters/sensors.py`; the barometer needs a subclass because,
+alone among the four, it has no config key for its noise and unconditionally
+injects ~1 Pa, which is 8.4 cm of altitude). Exact sensors, so an exact estimate —
+except for one thing. Yaw was observable *only* through the magnetometer, and
+Pegasus publishes one magnetometer where PX4's own SITL airframe declares two.
+Measured across the 139 worker runs of one 700-episode campaign:
 
-**External vision (`px4_vision_pose.py`) is the road not taken.** It is a larger
-change — switching the estimator's aiding source — for a problem that turned out
-to be sensor noise plus the timestep bug. It stays in the tree, unwired, with
-its investigation and the reasons it stalled documented in the module. Read it
-before starting that work again; two of its three remaining suspects are now
-known.
+| PX4 said | in |
+|---|---|
+| `MAG #0 failed: STALE` | 128 / 139 workers |
+| `Compass needs calibration - Land now!` | 79 / 139 |
+| `Failsafe activated` | 108 / 139 |
+| `Landing at current position` | **120 / 139** (3694 events) |
+
+That last row is the campaign. PX4 was seizing the aircraft mid-route and
+force-landing it while `path_follower` carried on steering, so a large share of
+the recordings are not a route being flown at all. `estimator_drift_m` came out at
+0.56 m median on the episodes that survived and **8.4 m on the ones that
+crashed**; 20% of episodes started more than 3 m from the route their metadata
+claimed, up to 43 m.
+
+**The fix is to give PX4 the pose the rest of the stack already uses.**
+`px4_vision_pose.VisionPoseSender` sends the simulator's ground truth as a
+`VISION_POSITION_ESTIMATE` over the companion link, and
+`px4_params.VISION_ESTIMATOR` switches EKF2 onto it: position and yaw from vision,
+GNSS off, barometer off, and the magnetometer removed at both levels
+(`EKF2_MAG_TYPE=5`, `SYS_HAS_MAG=0`) so it cannot refuse an arming for a sensor
+nothing is using. PX4's estimate then *is* the number the followers use and cannot
+drift away from it. On by default; `--no-vision` restores the old configuration
+for comparison.
+
+**Measured after the switch**, same scene, same spawn: PX4's settled estimate is
+**0.00 m and 0.0°** from ground truth (it was 6.8 m / 33° on the first attempt —
+see the four parameter traps below), `estimator_drift_m` is 0.11–0.14 m across a
+flight, cross-track error 0.00 m, and the episodes land 0.57–0.59 m from their
+goal on routes 1.05–1.12× the straight-line distance. No compass failsafe, no
+`Landing at current position`.
+
+Getting there took four parameter fixes, and **every one of them looked like the
+pose being wrong rather than the estimator refusing it**. In order:
+
+1. **Noise too tight.** `EKF2_EVP_NOISE` at 0.02 m made the innovation gate
+   narrower than the filter's own prediction error: EV position fused *once*, then
+   every sample was rejected at test ratios of 20–780 while the aircraft sat still.
+   0.1 m, the same value `GPS_ESTIMATOR` uses on the equally-exact simulated GNSS.
+2. **Position gate too narrow.** `EKF2_EVP_GATE` 5 → 30 SD. 6.8 m → 0.72 m.
+3. **Heading gate too narrow, and misleadingly named.** `EKF2_HDG_GATE` says
+   "magnetic heading", but `fuseYaw()` lives in `mag_fusion.cpp` and EV yaw goes
+   through it too. With no magnetometer the filter aligns yaw to zero and declares
+   itself aligned, so the first vision yaw arrives as a 180° innovation. 2.6 → 30 SD.
+4. **A fictitious gyro bias, which was the real one.** `EKF2_IMU_CTRL` kept the
+   gyro-bias state, and with no magnetometer nothing contradicted it during the
+   seconds before EV fusion starts — which are exactly the seconds the airframe
+   spends dropping onto the floor. It absorbed 0.54 rad/s of PhysX contact
+   rotation as a bias, saturated `EKF2_GYR_B_LIM` at 0.150 rad/s on all three
+   axes, and stayed there: PX4's yaw then **rotated at 8.6°/s** for the whole run,
+   sweeping past the correct heading every ~35 s, while a perfect vision yaw
+   arrived 50 times a second with too little authority to stop it. `EKF2_IMU_CTRL`
+   0 under vision. This is the same argument the accelerometer bias already had.
+
+The tool that found each of these is the ULog, not the console: read
+`estimator_aid_src_ev_pos` / `_ev_hgt` / `_ev_yaw` and look at `observation`,
+`test_ratio`, `fusion_enabled` and `fused`. A correct `observation` with a
+`test_ratio` above 1 and `fused` false means the *parameters* are wrong, and that
+is invisible from anywhere else — PX4 says only `Preflight Fail: position
+estimate error`. pyulog is not installed on this machine; the format is simple
+enough to read directly (drop the trailing `_padding0` field, which the logger
+does not write).
+
+Three things make this reliable rather than another silent failure:
+
+* **A pre-boot parameter channel.** `EKF2_HGT_REF`, `EKF2_MAG_TYPE`,
+  `EKF2_EV_DELAY` and `SYS_HAS_*` are read once, when `ekf2` starts. PX4 accepts
+  them over MAVLink afterwards, acknowledges them, saves them and ignores them.
+  `px4_launch.write_boot_parameters` writes them into PX4's own `px4-rc.params`
+  hook, which `rcS` sources after the airframe file and *before* `ekf2` starts;
+  `px4_params.all_params` now raises if a reboot-only parameter is handed to the
+  MAVLink push. See `px4_params`'s two-channel note.
+* **The send is in the loop, not in the flight script.** `SimLoop.step` sends the
+  pose. A gap over 200 ms of simulated time stops EKF2 fusing vision and nothing
+  reports it, so "every step" had to be true by construction.
+* **Bring-up fails loudly if fusion did not start.** `campaign_setup.settle_estimator`
+  compares PX4's settled estimate against the truth it was just sent and raises if
+  they disagree by more than 0.5 m or 5°. Every way of getting the vision path
+  wrong ends with PX4 flying on something else without saying so; this is the one
+  moment the aircraft is definitely stationary and the answer is unambiguous.
+
+`px4_vision_pose`'s docstring lists the four ways this failed before it worked —
+parameter type mismatch, the HIL link instead of the companion link, the UDP
+socket direction, and `ekf2 missing data` not meaning what it looks like — plus
+the two undocumented v1.14.3 constraints (`EV_MAX_INTERVAL`, `EKF2_EV_QMIN`).
+
+**Recordings made before this change.** `px4_params.GPS_ESTIMATOR` is still there
+and still reachable with `--no-vision`, so the two are comparable. But treat any
+campaign flown that way as suspect rather than merely noisy: check its
+`px4_worker*.log` for `Landing at current position`, and its `meta.json` for
+`estimator_drift_m` and for `start_xy` far from the recording's first pose. The
+`campaign_augmented` / `world_goal_augmented` datasets were deleted for exactly
+this.
 
 ## Files
 
@@ -608,7 +706,7 @@ known.
 | `path_follower.py` | the continuous follower: spline, carrot, velocity + yaw command |
 | `px4_launch.py` | start/stop PX4 instances with per-instance ports and directories |
 | `px4_offboard.py` | non-blocking MAVLink: parameters, arm, setpoints, land, land-detect |
-| `px4_params.py` | the parameter sets an indoor simulated drone needs |
+| `px4_params.py` | the parameter sets an indoor simulated drone needs, on two channels |
 | `chase_camera.py` | external camera that follows the drone, for video and streaming |
 | `inspect_recording.py` | review what came out — contact sheets and plan views, no GPU |
 | `fly_direct.py` | no autopilot: forces from a Python PD controller. Debugging only |

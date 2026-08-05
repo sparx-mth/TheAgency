@@ -127,6 +127,19 @@ def _parse_args():
                     help="simulated seconds to sit still before the first flight, so "
                          "PX4's estimator converges. Cheap, and the first episode is "
                          "materially worse without it")
+    ap.add_argument("--allow-overwrite", action="store_true",
+                    help="write into a directory that already holds recordings "
+                         "from this worker, replacing them. Off by default: "
+                         "recordings are named <scene>_w<worker>_e<index>, so a "
+                         "second run of the same worker in the same directory "
+                         "silently overwrites the first one's flights")
+    ap.add_argument("--no-vision", dest="vision", action="store_false",
+                    help="fly on PX4's simulated GNSS and magnetometer instead of "
+                         "feeding it the simulator's true pose. This is how the "
+                         "corrupted campaign was flown -- PX4's compass went stale, "
+                         "it raised a failsafe and force-landed mid-route in most "
+                         "workers. Only for reproducing that; see px4_params")
+    ap.set_defaults(vision=True)
 
     ap.add_argument("--realtime", action="store_true",
                     help="throttle to wall-clock time so a live viewer can follow")
@@ -149,6 +162,27 @@ def _follow_spec(args) -> FollowSpec:
                 else defaults.max_yaw_rate)
     return FollowSpec(cruise_speed=cruise, max_speed=max(cruise * 1.25, cruise + 0.2),
                       max_yaw_rate=yaw_rate)
+
+
+def existing_recordings(out_dir: Path, scene: str, worker: int) -> list:
+    """Recordings already in ``out_dir`` that this run would write over.
+
+    A recording is named ``<scene>_w<worker>_e<index>`` and the index restarts at
+    zero every run, so the collision is exact and silent: a second campaign
+    replaces the first one's flights one at a time as it goes, and the only sign
+    is the frame count changing under you. Checked before the Kit boot so it costs
+    a second rather than three minutes.
+
+    Args:
+        out_dir: Where recordings would be written.
+        scene: Scene key.
+        worker: Worker index.
+
+    Returns:
+        The clashing directories, sorted. Empty if there are none.
+    """
+    return sorted(path for path in Path(out_dir).glob(f"{scene}_w{worker}_e*")
+                  if path.is_dir())
 
 
 def _episode_spec(args) -> EpisodeSpec:
@@ -183,10 +217,22 @@ def main() -> int:
     print(f"map: {world_map.summary}", flush=True)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    clash = existing_recordings(args.out_dir, args.scene, args.worker)
+    if clash and not args.allow_overwrite:
+        print(f"ERROR: {args.out_dir} already holds {len(clash)} recording(s) from "
+              f"worker {args.worker} of {args.scene} ({clash[0].name} ... "
+              f"{clash[-1].name}). Episode numbering restarts at 000 every run, so "
+              f"continuing would overwrite them one by one. Use a fresh --out-dir, "
+              f"a different --worker, or --allow-overwrite if that is what you want.",
+              flush=True)
+        return 1
     px4_launch.clear_saved_parameters(args.px4_dir, args.worker)
+    print(f"estimator aiding: {'the simulator pose (vision)' if args.vision else 'GNSS + magnetometer'}",
+          flush=True)
     px4_process = px4_launch.launch_px4(
         args.px4_dir, instance=args.worker,
         log_path=args.out_dir / f"px4_worker{args.worker}.log",
+        boot_params=px4_params.boot_params(args.vision),
     )
     simulation_app = flight_session.boot_isaac(stream=args.stream)
     records = []
@@ -198,7 +244,8 @@ def main() -> int:
         loop, adapter, px4, chase_camera = campaign_setup.bring_up(
             simulation_app, args, spawn, heartbeat_timeout_s=HEARTBEAT_TIMEOUT_S,
         )
-        campaign_setup.configure_px4(loop, px4, px4_params.all_params(), PARAM_SETTLE_S)
+        campaign_setup.configure_px4(loop, px4, px4_params.all_params(args.vision),
+                                     PARAM_SETTLE_S)
         campaign_setup.settle_estimator(loop, px4, args.settle_s)
         if not campaign_setup.wait_until_armable(loop, px4):
             print("ERROR: this worker never became armable; nothing to collect",
@@ -259,11 +306,11 @@ def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
         result = episode.fly_episode(loop, px4, adapter, plan, recorder, follow_spec,
                                      replan=_replanner(world_map, spec, plan.goal))
         flown = result.flown_plan or plan
-        stats = recorder.finish(_episode_meta(args, seed, index, name, flown, result,
-                                              resolution, follow_spec))
+        stats = recorder.finish(_episode_meta(args, seed, index, name, plan, flown,
+                                              result, resolution, follow_spec))
         episode.settle_after_landing(loop, px4)
 
-        records.append(_manifest_row(name, flown, result, stats))
+        records.append(_manifest_row(name, plan, flown, result, stats))
         print(f"episode {index}: {result.outcome} -- {result.frames} frames, "
               f"{result.duration_s:.0f} s, {result.goal_error_m:.2f} m from the goal"
               + (f" [{result.detail}]" if result.detail else ""), flush=True)
@@ -313,9 +360,19 @@ def _replanner(world_map, spec, goal):
     return replan
 
 
-def _episode_meta(args, seed, index, name, plan, result, resolution,
+def _episode_meta(args, seed, index, name, plan, flown, result, resolution,
                   follow_spec) -> dict:
-    """Provenance written into each recording's ``meta.json``."""
+    """Provenance written into each recording's ``meta.json``.
+
+    Args:
+        plan: The route this episode was *planned* as, whose start is where the
+            recording begins.
+        flown: The last route actually flown, which differs from ``plan`` when
+            the aircraft replanned mid-flight.
+
+    Returns:
+        The metadata dict.
+    """
     return {
         "recording": name,
         "scene": args.scene,
@@ -324,16 +381,25 @@ def _episode_meta(args, seed, index, name, plan, result, resolution,
         "episode": index,
         "altitude_m": args.altitude,
         "camera_resolution": list(resolution) if resolution else None,
+        # Where this *recording* starts, to within the grid snap -- so it can be
+        # compared against poses.npy's first row, which is how you notice an
+        # aircraft that is not where its episode thinks it is. It used to be
+        # taken from `flown`, i.e. from the last mid-flight replan, which for a
+        # replanned episode is a point tens of metres into the flight: 20% of one
+        # campaign's recordings appeared to start more than 3 m from their own
+        # first pose, and one by 44 m. That was this field being mislabelled, not
+        # the aircraft being mislocalised -- but it read like the latter.
         "start_xy": [plan.start.x, plan.start.y],
         "start_yaw": plan.start.yaw,
-        "goal_xy": [plan.goal.x, plan.goal.y],
-        "planned_path_length_m": plan.path_length_m,
-        "planned_waypoints": [list(w) for w in plan.waypoints],
-        "planner_standoff_m": plan.inflate_used_m,
-        "detour_ratio": plan.detour_ratio,
-        # How many times the route was planned again mid-flight. The waypoints
-        # above are the LAST route flown, so a non-zero count means the earlier
-        # part of this recording was flown on a different one.
+        "goal_xy": [flown.goal.x, flown.goal.y],
+        # The route below is the LAST one flown. With replans > 0 the earlier part
+        # of the recording was flown on a different one, and `route_start_xy` is
+        # where this one picked up -- not where the recording starts.
+        "route_start_xy": [flown.start.x, flown.start.y],
+        "planned_path_length_m": flown.path_length_m,
+        "planned_waypoints": [list(w) for w in flown.waypoints],
+        "planner_standoff_m": flown.inflate_used_m,
+        "detour_ratio": flown.detour_ratio,
         "replans": result.replans,
         "outcome": result.outcome,
         "outcome_ok": result.ok,
@@ -347,8 +413,17 @@ def _episode_meta(args, seed, index, name, plan, result, resolution,
     }
 
 
-def _manifest_row(name, plan, result, stats) -> dict:
-    """One line of the campaign manifest."""
+def _manifest_row(name, plan, flown, result, stats) -> dict:
+    """One line of the campaign manifest.
+
+    Args:
+        plan: The route the episode was planned as; its start is where the
+            recording begins. See :func:`_episode_meta` for why the distinction
+            from ``flown`` is worth keeping.
+        flown: The last route actually flown.
+        result: The episode outcome.
+        stats: What the recorder wrote.
+    """
     return {
         "recording": name,
         "outcome": result.outcome,
@@ -356,9 +431,9 @@ def _manifest_row(name, plan, result, stats) -> dict:
         "frames": stats["frames"],
         "duration_s": stats["duration_s"],
         "flown_path_length_m": stats["path_length_m"],
-        "planned_path_length_m": plan.path_length_m,
+        "planned_path_length_m": flown.path_length_m,
         "start_xy": [plan.start.x, plan.start.y],
-        "goal_xy": [plan.goal.x, plan.goal.y],
+        "goal_xy": [flown.goal.x, flown.goal.y],
         "goal_error_m": result.goal_error_m,
         "route_remaining_m": result.route_remaining_m,
         "cross_track_error_m": result.cross_track_error_m,

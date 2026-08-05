@@ -110,10 +110,16 @@ def compose_quad(left_camera: Path, left_track: Path,
 
     Every input is padded by cloning its last frame, so the four stay aligned to
     a common start even though a crash clip is short and a timeout clip is long.
+    That padding aligns the *starts* and nothing else: a camera and a map panel
+    covering different spans of the same flight will run at different speeds all
+    the way through, and the result looks exactly like a mislocalised aircraft.
+    :func:`check_alignment` is there because that already happened once.
     """
     pad = "tpad=stop_mode=clone:stop_duration=600"
     longest = max(_seconds(left_camera), _seconds(right_camera),
                   _seconds(left_track), _seconds(right_track))
+    check_alignment(left_camera, left_track)
+    check_alignment(right_camera, right_track)
 
     def column(camera_index: int, track_index: int, label: str, colour: str) -> str:
         """Camera over map, captioned, with the arm's colour as a top border."""
@@ -145,6 +151,43 @@ def compose_quad(left_camera: Path, left_track: Path,
     return out_path.is_file()
 
 
+ALIGNMENT_TOLERANCE_S = 1.0
+"""How far a camera clip and its map panel may differ in length.
+
+They describe the same flight, so any real difference means one of them does not
+cover all of it. A second of slack absorbs rounding in the frame counts and the
+last partial capture; the mismatch this exists to catch was ten seconds.
+"""
+
+
+def check_alignment(camera: Path, track: Path) -> bool:
+    """Warn if a camera clip and its map panel do not cover the same span.
+
+    Stacking two clips of different lengths and playing both from zero silently
+    reinterprets one of them: at 26 seconds of panel against 36 of camera, the map
+    ran a third faster than the view, showed the aircraft several metres from where
+    the camera showed it, and was read as a localisation failure. Nothing in the
+    output says so, so it has to be said here.
+
+    Args:
+        camera: The camera clip.
+        track: The map-panel clip.
+
+    Returns:
+        True if the two agree to :data:`ALIGNMENT_TOLERANCE_S`.
+    """
+    camera_s, track_s = _seconds(camera), _seconds(track)
+    if abs(camera_s - track_s) <= ALIGNMENT_TOLERANCE_S:
+        return True
+    print(f"[compare] WARNING: {camera.name} is {camera_s:.1f} s but "
+          f"{track.name} is {track_s:.1f} s. Stacked and played together the map "
+          f"panel will run at a different speed from the view, and the aircraft "
+          f"will appear to be somewhere it never was. Delete "
+          f"{track.name} and re-render it -- an old track log (schema < 2) has no "
+          f"clock and can only be drawn one frame per inference.")
+    return False
+
+
 def _seconds(path: Path) -> float:
     """Duration of a clip, or 0 when ffprobe cannot read it."""
     result = subprocess.run(
@@ -161,9 +204,40 @@ def _duration(seconds: float) -> str:
     return f"{max(seconds, 0.1):.2f}"
 
 
+def capture_rate(arm_dir: Path, index: int, fallback: float = 10.0) -> float:
+    """The rate the mission's camera frames were captured at, from its ``meta.json``.
+
+    The chase-cam MP4 is encoded one frame per capture, so this is also that
+    clip's frame rate -- and rendering the map panel at the same rate is what
+    makes the two clips the same length for a given flight, which is what
+    :func:`compose_quad` needs to stack them honestly.
+
+    Args:
+        arm_dir: One arm's flight directory.
+        index: Mission index.
+        fallback: Used when the recording has no meta (``FlightRecorder``'s own
+            default rate).
+
+    Returns:
+        Frames per second.
+    """
+    meta_path = arm_dir / f"mission_{index:02d}" / "meta.json"
+    try:
+        return float(json.loads(meta_path.read_text()).get("rate_hz", fallback))
+    except (OSError, ValueError, TypeError):
+        return fallback
+
+
 def track_panel(arm_dir: Path, index: int, scene: Optional[str],
                 size: int) -> Optional[Path]:
     """The map-panel video for one mission, rendering it if it is not there yet.
+
+    Rendered at the camera's own capture rate so the panel and the camera clip
+    cover the same span at the same speed. They used to not: the panel began at
+    the flight's *first inference*, some ten seconds after the camera started
+    rolling, and both were played from zero -- so the map showed the aircraft
+    already under way while the camera still showed it on the ground. That read as
+    a localisation fault and was a composition fault.
 
     Cached next to the flight, because rendering a few hundred matplotlib frames
     is the slowest step here and re-cutting a comparison should not repeat it.
@@ -176,7 +250,8 @@ def track_panel(arm_dir: Path, index: int, scene: Optional[str],
     log = arm_dir / f"mission_{index:02d}_track.json"
     if not log.is_file():
         return None
-    return track_video.render(log, existing, scene, size_px=size)
+    return track_video.render(log, existing, scene, size_px=size,
+                              fps=capture_rate(arm_dir, index))
 
 
 def onboard_video(arm_dir: Path, index: int) -> Optional[Path]:

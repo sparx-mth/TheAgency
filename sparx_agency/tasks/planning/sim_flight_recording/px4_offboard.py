@@ -434,6 +434,17 @@ class PX4Offboard:
         once told to depend on vision, then refuses to arm with "Preflight
         Fail: ekf2 missing data".
 
+        **No ``reset_counter``, and that is a constraint rather than a choice.**
+        PX4 reads that field and treats a change in it as "reset your state to
+        this sample instead of fusing it", which is the natural way to close a
+        gap too large for the innovation gate. The pymavlink in the isaac-sim
+        container predates the extension field -- its
+        ``vision_position_estimate_send`` takes no such argument and raises
+        ``TypeError`` if given one -- so PX4 always sees 0 and never resets. The
+        innovation gates in :data:`px4_params.VISION_ESTIMATOR` are widened to
+        do that job instead. If pymavlink is ever upgraded, the reset path is the
+        better mechanism and worth revisiting.
+
         Args:
             north, east, down: Position in PX4's local NED frame, metres.
             roll, pitch, yaw: Attitude in NED/FRD, radians.

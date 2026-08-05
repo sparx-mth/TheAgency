@@ -14,8 +14,30 @@ That is the distinction the whole comparison rests on: a policy that flies into
 geometry because it planned to is a different failure from one that planned well
 and was carried in by momentum.
 
-Frames are rendered at the inference rate and encoded with ffmpeg. matplotlib
-and numpy only — no torch, no simulator, so this runs on a laptop from the JSON.
+## The panel runs on the flight's clock, and that is the whole point
+
+Every frame is placed at a real simulation time, taken from the log, and shows
+what was true then: the flown path up to that moment and the most recent
+proposal. It used to be one frame per *inference*, with the flown path indexed by
+**fraction of the flight** — and those are not the same timeline. The aircraft is
+recorded from the moment it leaves the ground while inference is held off until it
+reaches cruise altitude, so the first inference happens some ten seconds in. The
+panel therefore drew the trail metres behind the aircraft marker for most of the
+video, and the video itself started with the marker already displaced from the
+takeoff point. Both were artefacts. The reading they invited — that the aircraft
+was mislocalised, and had drifted before it left the ground — was wrong, and it
+cost a campaign's worth of data being thrown away before it was checked.
+
+A log written before that was understood has no clock (``flown_dt`` absent, or
+``schema`` below 2). Those still render, the old way, with a warning: the shape is
+right and the timing is not.
+
+Rendering at the camera's frame rate rather than the inference rate also makes the
+panel the same length as the chase-cam clip, so ``compare_videos`` can stack the
+two without one running ahead of the other.
+
+matplotlib and numpy only — no torch, no simulator, so this runs on a laptop from
+the JSON.
 """
 from __future__ import annotations
 
@@ -23,7 +45,7 @@ import argparse
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple, Sequence
 
 import numpy as np
 
@@ -35,6 +57,60 @@ GOAL = "#d81b60"
 MARGIN_M = 4.0
 """Padding around the flight's extent, metres. Enough that the proposed
 trajectory stays on screen when it heads away from the goal."""
+
+PANEL_FPS = 10.0
+"""Default panel frame rate.
+
+Matches ``FlightRecorder``'s default capture rate, which is what the chase-cam
+clip is encoded at -- so the panel and the camera come out the same length and
+stack without drifting apart.
+"""
+
+
+def timeline(log: Dict, fps: float) -> List[float]:
+    """The simulation times to draw a frame at, one per output frame.
+
+    Spans the whole flight, from the first flown sample to the last, so the panel
+    covers exactly what the camera recorded.
+
+    Args:
+        log: A track log with timing (``flown_dt`` present and non-zero).
+        fps: Output frame rate.
+
+    Returns:
+        Simulation times, ascending. Empty if the log has no flown path.
+    """
+    flown = log.get("flown") or []
+    if not flown:
+        return []
+    start = float(log.get("started_s", 0.0))
+    end = start + (len(flown) - 1) * float(log["flown_dt"])
+    count = max(1, int(round((end - start) * fps)) + 1)
+    return [start + index / fps for index in range(count)]
+
+
+def has_timing(log: Dict) -> bool:
+    """Whether this log can place its flown positions in time."""
+    return bool(log.get("flown_dt")) and bool(log.get("flown"))
+
+
+def latest_inference(entries: Sequence[Dict], when: float) -> Optional[Dict]:
+    """The most recent inference at or before ``when``, or None before the first.
+
+    Args:
+        entries: The log's inferences, in time order.
+        when: Simulation time.
+
+    Returns:
+        The entry, or None -- which is the correct answer for the climb, when the
+        policy has not been asked anything yet.
+    """
+    found = None
+    for entry in entries:
+        if entry["t"] > when:
+            break
+        found = entry
+    return found
 
 
 def load_map(scene: str, altitude_m: float = 1.5, map_dir: Optional[Path] = None):
@@ -64,9 +140,43 @@ def _bounds(log: Dict, pad: float = MARGIN_M):
             centre[1] - span / 2, centre[1] + span / 2)
 
 
+def _frame_plan(log: Dict, fps: float) -> List[Tuple[float, int, Optional[Dict]]]:
+    """What each output frame shows: ``(time, flown samples so far, inference)``.
+
+    On a log with timing this is the flight's own clock. On one without it falls
+    back to the old one-frame-per-inference behaviour, where the flown prefix can
+    only be guessed at from the fraction of the way through -- see this module's
+    docstring for what that misrepresents.
+
+    Args:
+        log: A track log.
+        fps: Output frame rate, used only when the log has timing.
+
+    Returns:
+        One tuple per output frame, in order.
+    """
+    entries = log["inferences"]
+    total = len(log.get("flown") or [])
+
+    if has_timing(log):
+        plan = []
+        for when in timeline(log, fps):
+            elapsed = when - float(log.get("started_s", 0.0))
+            upto = min(total, int(elapsed / float(log["flown_dt"])) + 1)
+            plan.append((when, upto, latest_inference(entries, when)))
+        return plan
+
+    print("[track] this log predates flown-path timing (schema < 2), so the "
+          "flown trail can only be spaced evenly across the inferences -- it will "
+          "not line up with the aircraft. Re-fly to get an aligned panel.")
+    return [(entry["t"], int(round((index + 1) / len(entries) * total)), entry)
+            for index, entry in enumerate(entries)]
+
+
 def render_frames(log: Dict, scene: str, out_dir: Path, altitude_m: float = 1.5,
-                  size_px: int = 540, dpi: int = 100) -> int:
-    """One PNG per inference. Returns how many were written."""
+                  size_px: int = 540, dpi: int = 100,
+                  fps: float = PANEL_FPS) -> int:
+    """One PNG per output frame. Returns how many were written."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -78,35 +188,46 @@ def render_frames(log: Dict, scene: str, out_dir: Path, altitude_m: float = 1.5,
     x0, x1, y0, y1 = _bounds(log)
 
     flown = np.asarray(log.get("flown") or [], dtype=float).reshape(-1, 2)
-    # The flown path is sampled at the physics rate and the inferences at ~4 Hz,
-    # so this maps one to the other by fraction of the flight rather than by
-    # time -- the log does not promise the two clocks share a zero.
-    entries = log["inferences"]
+    plan = _frame_plan(log, fps)
     inches = size_px / dpi
 
-    for index, entry in enumerate(entries):
+    for index, (when, upto, entry) in enumerate(plan):
         figure, axis = plt.subplots(figsize=(inches, inches), dpi=dpi)
         axis.imshow(grid > 0, cmap="Greys", origin="lower", extent=extent,
                     interpolation="nearest", vmin=0, vmax=1.6)
 
-        upto = int(round((index + 1) / len(entries) * flown.shape[0])) if flown.size else 0
         if upto > 1:
             axis.plot(flown[:upto, 0], flown[:upto, 1], color=FLOWN,
                       linewidth=2.0, label="flown", zorder=3)
-        if "traj" in entry:
+        if entry is not None and "traj" in entry:
             proposed = np.asarray(entry["traj"], dtype=float)
             axis.plot(proposed[:, 0], proposed[:, 1], color=PROPOSED,
                       linewidth=2.2, label="NavDP plan", zorder=4)
             axis.plot(proposed[-1, 0], proposed[-1, 1], "o", color=PROPOSED,
                       markersize=4, zorder=4)
-        else:
+        elif entry is not None:
             axis.text(0.5, 0.94, "inference dropped", transform=axis.transAxes,
                       ha="center", color=PROPOSED, fontsize=9)
+        else:
+            # Before the first inference the aircraft is still climbing and the
+            # policy has not been asked anything. Saying so beats an empty panel
+            # that reads as a dropped request.
+            axis.text(0.5, 0.94, "climbing to cruise altitude",
+                      transform=axis.transAxes, ha="center", color="0.35", fontsize=9)
 
-        pose = entry["pose"]
-        axis.plot([pose[0]], [pose[1]], "o", color="black", markersize=7, zorder=5)
-        axis.arrow(pose[0], pose[1], 1.2 * np.cos(pose[2]), 1.2 * np.sin(pose[2]),
-                   head_width=0.45, color="black", zorder=5, length_includes_head=True)
+        # The marker is the aircraft's own position at this instant, from the
+        # flown path -- not the pose the last inference was made at, which by now
+        # is up to an inference period stale and was the other half of why the
+        # marker and the trail disagreed. The heading arrow still comes from the
+        # inference, since that is the only place a yaw is recorded.
+        here = flown[upto - 1] if upto > 0 else None
+        if here is not None:
+            axis.plot([here[0]], [here[1]], "o", color="black", markersize=7, zorder=5)
+            if entry is not None:
+                yaw = entry["pose"][2]
+                axis.arrow(here[0], here[1], 1.2 * np.cos(yaw), 1.2 * np.sin(yaw),
+                           head_width=0.45, color="black", zorder=5,
+                           length_includes_head=True)
         axis.plot([log["goal_xy"][0]], [log["goal_xy"][1]], "*", color=GOAL,
                   markersize=15, zorder=6, label="goal")
 
@@ -116,11 +237,11 @@ def render_frames(log: Dict, scene: str, out_dir: Path, altitude_m: float = 1.5,
         axis.set_xticks([])
         axis.set_yticks([])
         axis.legend(loc="lower right", fontsize=7, framealpha=0.85)
-        axis.set_title(f"t = {entry['t']:.1f} s", fontsize=9)
+        axis.set_title(f"t = {when:.1f} s", fontsize=9)
         figure.tight_layout(pad=0.2)
         figure.savefig(out_dir / f"frame_{index:05d}.png")
         plt.close(figure)
-    return len(entries)
+    return len(plan)
 
 
 def encode(frame_dir: Path, out_path: Path, fps: float) -> bool:
@@ -137,8 +258,22 @@ def encode(frame_dir: Path, out_path: Path, fps: float) -> bool:
 
 
 def render(track_path: Path, out_path: Path, scene: Optional[str] = None,
-           altitude_m: float = 1.5, size_px: int = 540) -> Optional[Path]:
-    """Render one flight's map panel to an MP4."""
+           altitude_m: float = 1.5, size_px: int = 540,
+           fps: float = PANEL_FPS) -> Optional[Path]:
+    """Render one flight's map panel to an MP4.
+
+    Args:
+        track_path: A mission's ``*_track.json``.
+        out_path: Where to write the MP4.
+        scene: Scene key; defaults to the one named in the log.
+        altitude_m: Which surveyed map to draw.
+        size_px: Panel side, pixels.
+        fps: Output frame rate. Leave at :data:`PANEL_FPS` to match the chase-cam
+            clip, which is what makes the two stackable.
+
+    Returns:
+        The written path, or None if there was nothing to draw.
+    """
     log = TrackLog.read(Path(track_path))
     if not log.get("inferences"):
         print(f"[track] {track_path.name} has no inferences")
@@ -147,10 +282,13 @@ def render(track_path: Path, out_path: Path, scene: Optional[str] = None,
     if not scene:
         raise ValueError(f"{track_path} does not name a scene; pass --scene")
 
-    duration = max(1e-3, log["inferences"][-1]["t"] - log["inferences"][0]["t"])
-    fps = max(1.0, len(log["inferences"]) / duration)
+    if not has_timing(log):
+        # An old log has no clock, so the only rate that means anything is the one
+        # it was drawn at: one frame per inference.
+        duration = max(1e-3, log["inferences"][-1]["t"] - log["inferences"][0]["t"])
+        fps = max(1.0, len(log["inferences"]) / duration)
     with tempfile.TemporaryDirectory() as work:
-        count = render_frames(log, scene, Path(work), altitude_m, size_px)
+        count = render_frames(log, scene, Path(work), altitude_m, size_px, fps=fps)
         print(f"[track] {track_path.name}: {count} frames at {fps:.1f} fps")
         if not encode(Path(work), Path(out_path), fps):
             return None
@@ -165,10 +303,14 @@ def main(argv=None) -> int:
                         help="defaults to the scene named in the log")
     parser.add_argument("--altitude", type=float, default=1.5)
     parser.add_argument("--size", type=int, default=540, help="panel side, pixels")
+    parser.add_argument("--fps", type=float, default=PANEL_FPS,
+                        help="panel frame rate. The default matches the chase-cam "
+                             "clip's, which is what lets compare_videos stack the "
+                             "two without one running ahead")
     args = parser.parse_args(argv)
 
     result = render(Path(args.track).expanduser(), Path(args.out).expanduser(),
-                    args.scene, args.altitude, args.size)
+                    args.scene, args.altitude, args.size, args.fps)
     return 0 if result else 1
 
 

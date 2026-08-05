@@ -3,6 +3,7 @@ import json
 import math
 
 import numpy as np
+import pytest
 
 from sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal.track_log import TrackLog
 
@@ -35,7 +36,8 @@ def test_the_flown_path_is_subsampled():
     two millimetres apart, which no panel can draw and no one should store."""
     log = TrackLog(goal_xy=(0.0, 0.0), start_xy=(0.0, 0.0))
 
-    log.set_flown([(float(i), 0.0) for i in range(100)], stride=10)
+    log.set_flown([(float(i), 0.0) for i in range(100)], started_s=0.0,
+                  dt=0.004, stride=10)
 
     assert len(log.flown) == 10
     assert log.flown[1] == [10.0, 0.0]
@@ -44,7 +46,7 @@ def test_the_flown_path_is_subsampled():
 def test_round_trip_through_disk(tmp_path):
     log = TrackLog(goal_xy=(3.0, 4.0), start_xy=(0.0, 0.0))
     log.add(0.5, (0.0, 0.0, 0.0), np.array([[1.0, 0.0]]), (1.0, 0.0))
-    log.set_flown([(0.0, 0.0), (1.0, 0.0)], stride=1)
+    log.set_flown([(0.0, 0.0), (1.0, 0.0)], started_s=12.0, dt=0.004, stride=1)
     path = tmp_path / "mission_00_track.json"
 
     log.write(path, extra={"scene": "warehouse_shelves", "arm": "trained"})
@@ -77,6 +79,34 @@ def test_flight_metadata_cannot_overwrite_the_trajectories(tmp_path):
     assert restored["goal_xy"] == [1.0, 1.0]      # the log's own, not the result's
     assert restored["arm"] == "trained"           # non-colliding keys still land
     assert restored["inference_count"] == 1
+
+
+def test_the_flown_path_carries_its_own_clock():
+    """Without it a stored position cannot be placed in time, and a panel can
+    only guess -- which is what put the trail metres from the aircraft."""
+    log = TrackLog(goal_xy=(0.0, 0.0), start_xy=(0.0, 0.0))
+
+    log.set_flown([(float(i), 0.0) for i in range(100)], started_s=51.2,
+                  dt=0.004, stride=10)
+
+    assert log.started_s == 51.2
+    assert log.flown_dt == pytest.approx(0.04)     # 10 steps of 4 ms
+    assert log.flown_time(0) == pytest.approx(51.2)
+    assert log.flown_time(5) == pytest.approx(51.4)
+
+
+def test_the_clock_reaches_disk(tmp_path):
+    log = TrackLog(goal_xy=(0.0, 0.0), start_xy=(0.0, 0.0))
+    log.add(60.8, (0.0, 0.0, 0.0), None, (0.0, 0.0))
+    log.set_flown([(0.0, 0.0)] * 10, started_s=51.0, dt=0.004, stride=10)
+    path = tmp_path / "track.json"
+
+    log.write(path)
+    restored = TrackLog.read(path)
+
+    assert restored["started_s"] == 51.0
+    assert restored["flown_dt"] == pytest.approx(0.04)
+    assert restored["schema"] >= 2
 
 
 def test_the_log_stays_small(tmp_path):

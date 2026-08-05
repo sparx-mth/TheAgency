@@ -242,47 +242,112 @@ def compute_velocity_3d(
     current_yaw: float,
     speed: float,
     max_speed_z: float,
+    hold_for_turn: bool = False,
 ) -> Tuple[float, float, float, float]:
     """
     Compute 3D velocity vector toward lookahead point.
 
-    Horizontal velocity points along ``current_yaw``, not straight at
-    ``target``: a holonomic drone that flies wherever the lookahead point
-    is regardless of where it is facing crabs sideways through every turn
-    instead of yawing to face the new heading first. Scaling the forward
-    speed by how well ``current_yaw`` already matches the bearing to
-    ``target`` (``cos`` of the heading error, clamped so it can't reverse
-    into flying backward) makes a sharp turn slow to a yaw-in-place and
-    pick speed back up smoothly once aligned, with no separate turn phase.
-    Z velocity is unaffected -- climbing/descending never needs to wait on
-    yaw -- and is clamped separately for safety.
+    Horizontal velocity points **straight at** ``target``, which is what pure
+    pursuit means for a holonomic vehicle: a multirotor can translate in any
+    direction regardless of where its camera faces, and the two are separate
+    commands to the autopilot.
+
+    This used to point the velocity along ``current_yaw`` instead, scaled by
+    ``cos`` of the heading error, so that the vehicle could only fly where it was
+    already facing. That coupling was the single cause of four distinct observed
+    failures, because a rate-limited yaw then gates all motion:
+
+    * **Corners were taken far too wide.** At 0.25 rad/s a 90-degree corner needs
+      6.4 s of yawing, and the vehicle kept flying forward for all of it. Wide
+      enough to miss a doorway.
+    * **The last metre to a goal could not be closed.** Arriving with a heading
+      error near 90 degrees left ``cos`` near zero, so the commanded speed
+      collapsed while the vehicle waited on a slow yaw; past 90 degrees it
+      clamped to zero and the vehicle simply stopped short.
+    * **The path wove from side to side**, because the yaw chased the carrot's
+      bearing and the velocity followed the yaw, so every carrot advance steered
+      the vehicle.
+    * **Reversals were impossible**, since flying backward was clamped out.
+
+    Yaw is now purely a camera-pointing command the caller slews independently,
+    and where the *motion* has to wait for the heading -- a real corner, or a
+    reversal -- the caller says so with ``hold_for_turn`` instead of it emerging
+    from a cosine.
 
     Args:
         pos: Current position (x, y, z).
         target: Lookahead point (x, y, z).
-        current_yaw: The vehicle's actual current heading, radians.
+        current_yaw: The vehicle's actual current heading, radians. Only used as
+            the fallback bearing when ``target`` coincides with ``pos``.
         speed: Desired total speed (m/s).
         max_speed_z: Maximum vertical speed (m/s).
+        hold_for_turn: Hold horizontal position and let the vehicle rotate. The
+            climb rate is deliberately unaffected: waiting to turn is no reason
+            to stop holding altitude.
 
     Returns:
         (vx, vy, vz, target_yaw) - velocity components and the bearing to
-        ``target``, which the caller yaws toward independently.
+        ``target``.
     """
     delta = target - pos
-    dist = np.linalg.norm(delta)
+    dist = float(np.linalg.norm(delta))
 
     if dist < 1e-6:
         return 0.0, 0.0, 0.0, current_yaw
 
-    target_yaw = float(np.arctan2(delta[1], delta[0]))
-    heading_error = normalize_angle(target_yaw - current_yaw)
-    aligned_speed = speed * max(0.0, float(np.cos(heading_error)))
+    horizontal = float(np.hypot(delta[0], delta[1]))
+    target_yaw = (float(np.arctan2(delta[1], delta[0])) if horizontal > 1e-6
+                  else current_yaw)
 
-    vx = aligned_speed * np.cos(current_yaw)
-    vy = aligned_speed * np.sin(current_yaw)
     vz = float(np.clip(delta[2] / dist * speed, -max_speed_z, max_speed_z))
+    if hold_for_turn or horizontal <= 1e-6:
+        return 0.0, 0.0, vz, target_yaw
 
+    vx = speed * delta[0] / horizontal
+    vy = speed * delta[1] / horizontal
     return float(vx), float(vy), vz, target_yaw
+
+
+def route_heading_3d(
+    xyz: np.ndarray,
+    pos: np.ndarray,
+    from_idx: int,
+    distance: float,
+) -> Optional[float]:
+    """Bearing to a point ``distance`` further along the path, for pointing yaw.
+
+    Yaw aimed at the carrot chases it: the carrot sits a metre or two ahead, so
+    every advance swings the heading, and on a route with corners the vehicle
+    arrives at each one still turning into the last. Aiming further ahead -- past
+    the corner rather than at it -- makes the heading *anticipate* the route, so
+    the vehicle is already straight for the next leg by the time it reaches the
+    current point.
+
+    Args:
+        xyz: ``(N, 3)`` path points.
+        pos: Current position.
+        from_idx: Index to start measuring the arc length from, normally the
+            closest point on the path.
+        distance: Arc length ahead to aim at, metres. Should exceed the tracker's
+            lookahead or this reduces to aiming at the carrot.
+
+    Returns:
+        The bearing in radians, or None when the remaining path is too short to
+        give a meaningful direction -- at which point the caller should keep the
+        heading it has rather than snap to a noisy one.
+    """
+    n = len(xyz)
+    start = int(max(0, min(from_idx, n - 1)))
+    travelled = 0.0
+    index = start
+    while index < n - 1 and travelled < distance:
+        travelled += float(np.linalg.norm(xyz[index + 1] - xyz[index]))
+        index += 1
+
+    delta = xyz[index] - pos
+    if float(np.hypot(delta[0], delta[1])) < 0.2:
+        return None
+    return float(np.arctan2(delta[1], delta[0]))
 
 
 def compute_yaw_rate_3d(
