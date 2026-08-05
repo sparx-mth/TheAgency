@@ -192,7 +192,7 @@
   <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
-       and start the FlowNav TRT server (tasks/planning/flownav/server/...). -->
+       and start the FlowNav TRT server (tasks/planning/vlas/flownav/serve/...). -->
   <arg name="vla"                      default="navdp" />
   <arg name="flownav_goal_image"       default="" />
   <arg name="flownav_goal_image_topic" default="" />

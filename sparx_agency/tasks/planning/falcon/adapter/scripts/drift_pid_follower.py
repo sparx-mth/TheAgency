@@ -33,6 +33,7 @@ from sparx_agency.core.planning.trackers.drift_pid import (
     EnvelopeParams,
     EscapeParams,
     PidGains,
+    YawLookaheadParams,
 )
 
 
@@ -144,6 +145,27 @@ def build_drift_pid_params(G):
         use_effectiveness=param_bool("~dp_block_use_effectiveness", True),
         eff_floor=float(G("~dp_eff_floor", 0.15)),
     )
+    # Turn anticipation. OFF by default: it changes how the drone flies every
+    # corner, so it is opt-in until it has been flown. ~dp_yaw_lookahead_rate
+    # defaults to the tracking yaw cap because the manoeuvre runs in TRACK --
+    # the core rejects a schedule allowed to rotate faster than that.
+    track_yaw_rate = float(G("~dp_track_yaw_rate",
+                             float(G("~dp_approach_yaw_rate", 0.35))))
+    yaw_lookahead = YawLookaheadParams(
+        enabled=param_bool("~dp_yaw_lookahead", False),
+        start_m=float(G("~dp_yaw_lookahead_start_m", 2.5)),
+        align_m=float(G("~dp_yaw_lookahead_align_m", 0.35)),
+        corner_rad=math.radians(float(G("~dp_yaw_lookahead_corner_deg", 25.0))),
+        confirm_m=float(G("~dp_yaw_lookahead_confirm_m", 1.0)),
+        max_offset_rad=math.radians(
+            float(G("~dp_yaw_lookahead_max_deg", 70.0))),
+        catchup_rad=math.radians(
+            float(G("~dp_yaw_lookahead_catchup_deg", 12.0))),
+        rate=float(G("~dp_yaw_lookahead_rate", track_yaw_rate)),
+        side_cone_rad=math.radians(
+            float(G("~dp_yaw_lookahead_cone_deg", 0.0))),
+        feedforward=float(G("~dp_yaw_lookahead_ff", 1.0)),
+    )
     escape = EscapeParams(
         brake_s=float(G("~dp_escape_brake_s", 0.4)),
         back_s=float(G("~dp_escape_back_s", 0.7)),
@@ -159,8 +181,7 @@ def build_drift_pid_params(G):
         cruise_speed=float(G("~dp_cruise_speed", 0.18)),
         cruise_speed_straight=float(G("~dp_cruise_straight", 0.0)),
         approach_yaw_rate=float(G("~dp_approach_yaw_rate", 0.35)),
-        track_yaw_rate=float(G("~dp_track_yaw_rate",
-                               float(G("~dp_approach_yaw_rate", 0.35)))),
+        track_yaw_rate=track_yaw_rate,
         pos_radius=float(G("~dp_pos_radius",
                            float(G("~pos_acquisition_radius", 0.30)))),
         slow_radius=float(G("~dp_slow_radius", 0.80)),
@@ -186,6 +207,7 @@ def build_drift_pid_params(G):
         confidence=confidence,
         blockage=blockage,
         escape=escape,
+        yaw_lookahead=yaw_lookahead,
     )
 
 
@@ -239,6 +261,8 @@ class DriftTelemetryPublisher(object):
             "authority": telemetry.authority,
             "blocked_axis": telemetry.blocked_axis,
             "escape_state": telemetry.escape_state,
+            "yaw_lead_deg": round(math.degrees(telemetry.yaw_lead_rad), 1),
+            "corner_dist_m": round(telemetry.corner_dist_m, 2),
         })))
 
     def publish_blockage(self, pose, frame_id, axis):

@@ -64,6 +64,13 @@ class DriftTelemetry:
         authority: Why the controller has the authority it has (human-readable).
         blocked_axis: ``""``, ``"forward"`` or ``"yaw"``.
         escape_state: Phase of the escape reflex, or ``"IDLE"``.
+        yaw_lead_rad: How far the nose is currently led ahead of the direction
+            of travel by the turn anticipation (rad, + = nose to the left of
+            travel). 0 whenever the manoeuvre is off or idle. Its magnitude is
+            also the crab angle: this is the number that says "the drone is
+            flying sideways on purpose right now".
+        corner_dist_m: Arc distance to the corner being anticipated (m), or -1
+            when there is none.
     """
 
     drift_vy: float = 0.0
@@ -79,6 +86,8 @@ class DriftTelemetry:
     authority: str = ""
     blocked_axis: str = ""
     escape_state: str = "IDLE"
+    yaw_lead_rad: float = 0.0
+    corner_dist_m: float = -1.0
 
 
 @dataclass(frozen=True)

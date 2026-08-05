@@ -85,6 +85,81 @@ release point), every regime shapes its translation into a forward cone
   limit, so it only bites when the drone is slow and yawing hard — exactly
   where the coupling lives.
 
+## Turn anticipation: lead the nose, crab the body (opt-in)
+
+`yaw_lookahead.py` + `corners.py`, off unless `dp_yaw_lookahead:=true`.
+
+The table above says the drone can barely rotate without translating under it,
+and the section below that says standing still is where it drifts. Put those
+together and the ordinary way to take a corner — arrive pointing the old way,
+stop, rotate, fly on — is the worst manoeuvre this airframe has. Anticipation
+deletes it. Approaching a real corner the nose is eased round it **early**,
+while the body keeps flying the current leg on ROLL; at the corner the nose is
+already down the next corridor, so the drone flies straight out of the turn.
+
+What that costs, and what it buys, measured — 6 hand-built corners plus 5
+weighted-A* routes across the committed office survey, flown against the
+measured yaw coupling by `tasks/planning/turn_anticipation_rig`:
+
+| | classic | anticipating |
+|---|---|---|
+| flight time | 345.7 s | 351.7 s (+1.7%) |
+| in TURN (stopped to rotate) | 83.1 s | 14.7 s |
+| escape reflexes fired | 0 s | 0 s |
+
+The +1.7% is real and structural: a crab is capped by `max_vy`, the weak axis,
+so the last stretch into a corner is slower than a cruise. Run the *same routes*
+against the idealised airframe — every commanded yaw delivered in full,
+`--no-yaw-bite` — and the classic controller spins freely (300.0 s, only 28.9 s
+in TURN) while the anticipation costs **+13.5%**. **The feature is worth having
+exactly to the extent that the coupling in the table above is real**, which is
+why both numbers are quoted, and why they are quoted over one route set rather
+than whichever pairing flatters it.
+
+Four mechanisms keep the schedule honest, and each exists because the naive
+version broke:
+
+* **The lead is a function of distance to the corner, not time**, so being held,
+  flying slower or dropping a pose frame cannot corrupt it.
+* **The state is an absolute heading, re-read against the leg every tick.** A
+  republished route (the planner sends several a second) therefore changes
+  nothing, and the tick a corner retires — the leg heading jumps by the whole
+  turn, the schedule's answer drops by the same amount — moves the nose's actual
+  setpoint not at all.
+* **The lead may never sit more than `catchup_rad` ahead of the nose**, enforced
+  absolutely rather than incrementally. That is what makes the anticipation
+  unable to trip the controller's own stop-and-turn latch, even when the leg
+  heading jumps under it. A drone that cannot follow the schedule degrades into
+  the old behaviour, never into a stall.
+* **`approach_limit` eases off into the turn** by exactly what the nose still
+  has to do over the distance that is left — the only feedback loop between the
+  two, and what stops a fast approach arriving mis-pointed.
+
+Two consequences worth knowing before you fly it:
+
+1. **`max_offset_rad` is an airframe limit, not a geometric one.** 90 degrees is
+   flying exactly sideways — and a crab with no forward speed left is a crab
+   this drone can no longer yaw out of. The default (70) keeps real forward
+   speed under the rotation; the rest of the turn is finished at the corner
+   *while moving onto the new leg*, which is the strong regime.
+2. **Blockage detection thins out at the deepest part of the crab.** The forward
+   axis falls below `min_cmd_vx` because most of the progress vector is lateral,
+   and the yaw axis is deliberately withheld from the monitor once the schedule
+   is holding a material lead (it compares summed commanded yaw against *net*
+   rotation, and a schedule that turns into one corner and back out of the next
+   60 cm later reads as a wedged drone — measured on a survey route, it fired a
+   full escape reflex at a drone flying perfectly). So while the lead is beyond
+   `catchup_rad`, nothing is watching for "commanded but not moving". The
+   lateral axis was never watched at all, before or after this feature.
+
+3. **The travel cone does not throttle the crab at the shipped tuning, and is
+   not what makes it safe.** `dp_travel_cone_deg` is 85 in `mission.yaml` and
+   the lead is capped at 70, so `alignment_gate` never bites during an ordinary
+   corner — it only catches a drone whose *travel* has ended up further off its
+   nose than the schedule ever asks for. What actually bounds sideways flight is
+   `max_offset_rad`, and what bounds its speed is `max_vy`. If you want the cone
+   to bite on the crab, set it below the lead cap deliberately.
+
 ## The climb yield lives inside the control law
 
 When the adapter's altitude hold runs a climb pulse it passes
@@ -150,7 +225,9 @@ virtual obstacle and replans.
 | `confidence.py` | Localization quality → speed scale, gain scale, learn-or-freeze, hold. |
 | `blockage.py` | "Commanded but not moving", per axis, debounced. |
 | `escape.py` | The scripted reflexes. |
-| `geometry.py` | Line projection, the lookahead carrot, heading error. |
+| `geometry.py` | Line projection, the lookahead carrot, heading error, travel-frame maths. |
+| `corners.py` | Where the route next changes direction, how sharp, and which way it leaves. |
+| `yaw_lookahead.py` | The heading schedule that leads the nose into that corner. |
 | `follower.py` | The state machine that composes all of it. |
 | `params.py` | Navigation dials + composition of the above. |
 
@@ -188,6 +265,16 @@ Start slow and raise, one dial at a time:
    signature usually means the assumed transport delay is wrong, not the gains.
 5. `deadband` last — it is the tracking floor on a crisp pose, and shrinking it
    is what makes the drone chase noise.
+
+Turn anticipation is tuned separately and only after the above is settled,
+because it inherits those numbers: `yaw_lookahead.rate` may not exceed
+`track_yaw_rate` (the node refuses to start otherwise), `align_m` wants to sit
+just above `pos_radius` or the corner retires before the nose is round, and
+`catchup_rad` must stay below `yaw_engage_rad`. Its own two dials are
+`start_m` (earlier = gentler but more of the leg flown crabbed) and
+`max_offset_rad` (see above). Sweep them with the rig rather than guessing —
+`tasks/planning/turn_anticipation_rig` flies both configurations over a set of
+corners in about a second.
 
 Everything is exposed in `mission.yaml` under the `CONTROLLER 5` section. Keep
 `use_pose_estimator: false` with this controller: it does its own latency lead,

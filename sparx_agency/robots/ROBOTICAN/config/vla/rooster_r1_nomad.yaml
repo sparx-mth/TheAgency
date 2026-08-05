@@ -1,0 +1,58 @@
+# =============================================================================
+# NoMaD Bridge — Rooster R1 / Sphera  (Ground Roll)
+# =============================================================================
+# ManualControl (ground-roll mode):
+#   x: forward / backward    (-1000 .. 1000)
+#   y: not used
+#   z: thrust / power         (-1000 .. 1000)
+#   r: yaw rotation           (-1000 .. 1000)
+#
+# NoMaD publishes /waypoint at camera rate (~12 Hz).
+# ManualControl repeats at 80 Hz.
+# =============================================================================
+
+bridge:
+  kp_linear: 1.0                       # P-gain on forward distance
+  kp_angular: 2.0                      # P-gain on heading error
+  max_linear_vel: 0.3                  # m/s  clamp
+  max_angular_vel: 0.5                 # rad/s clamp
+  waypoint_reached_m: 0.08            # stop threshold
+  turn_in_place_rad: 1.0              # ~57°, above this → turn only
+
+# =============================================================================
+# INPUTS
+# =============================================================================
+inputs:
+  robot_id: "R1"
+
+  waypoint:
+    topic: "/waypoint"                 # Float32MultiArray [dx, dy] from NoMaD
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+outputs:
+  twist:
+    enabled: true
+    topic: "/R1/cmd_vel"
+
+  manual_control:
+    enabled: true
+    topic: "/R1/manual_control"
+    publish_rate_hz: 80.0
+    linear_scale: 800.0                # x = lin × linear_scale
+    angular_scale: 2000.0              # r = ang × angular_scale
+    cruise_thrust: 400.0               # z when moving forward (constant)
+    turn_thrust: 300.0                 # z when turning in place (constant)
+    duration_sec: 0.3                  # hold command this long before idle
+
+  keep_alive:
+    enabled: true
+    topic: "/R1/keep_alive"
+    publish_rate_hz: 1.0
+    is_active: true
+    requested_flight_mode: 1           # GROUND_ROLL
+
+  feedback:
+    enabled: true
+    topic: "/R1/navigation/feedback"

@@ -38,7 +38,7 @@ _FALCON = "sparx_agency/tasks/planning/falcon"
 MISSION_YAML = _FALCON + "/config/mission.yaml"
 MISSION_SCHEMA = _FALCON + "/config/mission_config.py"
 MISSION_LAUNCH = _FALCON + "/adapter/launch/object_mission.launch"
-NAVDP_SERVER = "sparx_agency/tasks/planning/navdp/server/navdp_trt_server.py"
+NAVDP_SERVER = "sparx_agency/tasks/planning/vlas/navdp/serve/navdp_trt_server.py"
 
 #: The launch arguments run_object_mission.sh fills in ITSELF, from its
 #: environment variables and positionals -- see its LAUNCH_ARGS block. They must
@@ -111,7 +111,7 @@ FALCON_ITEMS: list[LaunchItem] = [
             "cd {workspace}\n"
             "export NAVDP_REPO={navdp_repo}\n"
             "PYTHONPATH=$PWD {python} \\\n"
-            "  -m sparx_agency.tasks.planning.navdp.server.navdp_trt_server {params}"
+            "  -m sparx_agency.tasks.planning.vlas.navdp.serve.navdp_trt_server {params}"
         ),
         template=True,
         enabled_by_default=False,
@@ -129,8 +129,8 @@ FALCON_ITEMS: list[LaunchItem] = [
                       syntax=SLOT, section="Where it runs",
                       doc="Dir containing policy_network.py. Required even on the trt "
                           "backend: image preprocessing is imported from it."),
-            ParamSpec(name="engine-dir", default="sparx_agency/tasks/planning/navdp/"
-                                                 "engines/orin_sm87",
+            ParamSpec(name="engine-dir", default="sparx_agency/tasks/planning/vlas/navdp/"
+                                                 "trt/engines/orin_sm87",
                       syntax=CLI, pinned=True, section="Engines",
                       doc="Per-device engine dir; the name is the hardware tag. "
                           "Engines do not transfer between machines."),

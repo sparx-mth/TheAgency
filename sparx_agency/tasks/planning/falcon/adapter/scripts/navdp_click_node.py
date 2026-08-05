@@ -17,7 +17,7 @@ point ``~path_topic`` here straight at ``/path/waypoints``. Everything downstrea
 (``waypoint_follower_node`` flying ``/path/waypoints``, ``bev_click_goal_node``
 drawing it) is unchanged.
 
-All the maths is ROS-free and unit-tested in ``core.planning.navdp``:
+All the maths is ROS-free and unit-tested in ``core.planning.vlas.navdp``:
   * pixel + depth -> body-frame point-goal      (geometry.pixel_to_pointgoal)
   * NavDP HTTP request/response                  (client.NavDPPointgoalClient)
   * body trajectory -> world path                (geometry.anchor_trajectory_to_world)
@@ -103,7 +103,7 @@ from std_msgs.msg import String
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics
-from sparx_agency.core.planning.navdp import (
+from sparx_agency.core.planning.vlas.navdp import (
     NavDPError,
     NavDPPointgoalClient,
     anchor_trajectory_to_world,
@@ -725,7 +725,7 @@ if __name__ == "__main__":
 
 # ============================================================================
 # ROSPARAMS (all private ~; defaults in parentheses). The geometry + HTTP
-# contract live in core.planning.navdp; this node owns ROS I/O, the OpenCV
+# contract live in core.planning.vlas.navdp; this node owns ROS I/O, the OpenCV
 # window, click handling and publishing the world path.
 #
 #   IO: ~image_transport (frame_path | topic) selects RGB/depth transport:

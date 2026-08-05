@@ -1,0 +1,49 @@
+# Sim camera intrinsics for the PEGASUS platform, at the real camera's NATIVE
+# resolution. **This is what a data-collection campaign renders with.**
+#
+# Identical to robots/XTEND/config/camera_xtend_ros_calib_720_420.yaml, so
+# simulated recordings are geometrically interchangeable with real XTEND
+# flights.
+#
+# ## Record native, downsample at training time
+#
+# The deployed aircraft runs its depth engine at 504x294 (a uniform 0.7x of
+# this), and an earlier campaign rendered at that size directly. Recording
+# native instead costs disk and nothing else, and it means a change of camera or
+# of model input size never requires re-flying the campaign -- which is the
+# expensive half of this pipeline, measured in hours.
+#
+# It is free for NavDP specifically, because 720x420 and 504x294 have the *same*
+# aspect ratio (1.7143). NavDP's preprocessing does a keep-aspect resize to a
+# 224 long side and centre-pads to a square, so both arrive as an identical
+# 224x131 image inside a 224x224 input. The only difference is that downsampling
+# from native aliases less.
+#
+#   720x420  H 76.0 deg (L 36.9 / R 39.1)   V 47.8 deg (U 15.6 / D 32.2)
+#   504x294  the same view, 0.7x            -- exact: 460.907*0.7 = 322.635
+#   504x392  H 55.8 deg (L 36.9 / R 18.9)   -- a CROP; do not render with it
+#
+# The 504x392 file is a crop rather than a resize: it keeps the native focal
+# length and discards pixels, losing 20 degrees of horizontal field of view and
+# leaving what remains lopsided about the optical axis. A policy trained on it
+# meets obstacles from the right 20 degrees later than obstacles from the left.
+#
+# The vertical asymmetry (15.6 deg up against 32.2 deg down) is genuine in all
+# three -- the real camera looks down. Do not "fix" it.
+
+image_width: 720
+image_height: 420
+
+fx: 460.9072976392783
+fy: 461.9847581630249
+cx: 345.80685226685307
+cy: 128.61455823829436
+
+# No lens distortion is modeled in sim (the Pegasus MonocularCamera renders an
+# ideal pinhole) -- these are carried only for parity with the real camera yamls.
+distortion_model: "plumb_bob"
+k1: 0.0
+k2: 0.0
+p1: 0.0
+p2: 0.0
+k3: 0.0

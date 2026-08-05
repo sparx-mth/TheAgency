@@ -1,0 +1,65 @@
+# Train / validation / test as three disjoint parts of the office building.
+#
+# The surveyed office spans x [-24.3, 6.4], y [-34.5, 40.0] (see
+# robots/PEGASUS/maps/office_voxels.npz). It is long in y, so the split is a set
+# of y-bands: the aircraft never trains on a wall it is later tested against.
+#
+# The bands are cut on **reachable** area, not on the map's extent, and that
+# distinction is the whole reason these numbers changed. Of the office's 1817 m2
+# of free space at 1.5 m, only 1174 m2 sits in the largest connected component --
+# and `core/planning/mission/free_space_sampler` draws goals from that component
+# alone, precisely so an unreachable goal is structurally impossible rather than
+# something the planner discovers and the caller retries around. Free space that
+# is not in it is free space no flight will ever visit.
+#
+# Measured on the component, the bands below hold:
+#
+#   train  y >= 3.5     779 m2, 66.3%  the north hall, the east spine, the open
+#                       plan, and every long north-south transit
+#   val    y in [-8, 3.5)  248 m2, 21.1%  the central band; used only to pick the
+#                       checkpoint, never trained on
+#   test   y <  -8.0    147 m2, 12.5%  the south wing. The only number that means
+#                       anything.
+#
+# ## Why not the earlier cut at -8 / -15
+#
+# The previous bands (train y >= -8, val [-15,-8), test y < -15) were chosen
+# against the 27 recordings that existed then. Against simulator campaigns they
+# produce an **empty test split**, and `evaluate.py` then correctly refuses to
+# run -- so the whole pipeline dies after training, at the last stage that costs
+# hours.
+#
+# The cause is geometry, not sampling, so no amount of extra flying fixes it:
+# y < -15 holds 21% of the building's *free* space but only **39 m2** of its
+# *reachable* space, because the deep south wing is almost entirely cut off from
+# the main component. Measured over 39 simulator flights, the aircraft never went
+# below y = -17.3 and 1.1% of frames landed in that band; a sample additionally
+# needs its whole expert route to stay inside the band, and a 4.8 m route does
+# not fit in a 39 m2 sliver. Moving the test boundary to -8.0 gives the region
+# 147 m2 with real corridor structure, and restores the 66/21/13 shares this
+# split was always meant to have.
+#
+# Every band is far wider than `ExpertConfig.horizon_m` (4.8 m) -- val is the
+# narrow one at 11.5 m. Keep it that way if you re-cut: a band shorter than the
+# label horizon throws away every sample that does not point along it.
+#
+# `buffer_m` is a strip either side of every boundary in which no sample anchor
+# may sit, so a metre of pose noise cannot move a sample across the line. A
+# sample additionally requires its whole expert route to stay inside its own
+# region; only the *goal* may point out of it (a goal is two numbers, it leaks
+# no imagery).
+#
+# When a second building has been surveyed
+# (`survey_scene.py --scene warehouse`), prefer `scene_split:` below -- an
+# unseen *building* is a far stronger generalisation test than an unseen wing.
+
+buffer_m: 1.5
+
+scenes:
+  office:
+    train: [[-24.3,   3.5,   6.4,  40.0]]
+    val:   [[-24.3,  -8.0,   6.4,   3.5]]
+    test:  [[-24.3, -34.5,   6.4,  -8.0]]
+
+# scene_split:
+#   warehouse: test

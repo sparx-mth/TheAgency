@@ -140,6 +140,23 @@
   <arg name="dp_suppress_deg"            default="110.0" /><!-- deg error at which translation drops to suppress_floor (turn first, then fly) -->
   <arg name="dp_suppress_floor"          default="0.15" /><!-- fraction of speed kept beyond suppress_deg. >0 so it keeps creeping -->
   <arg name="dp_passed_bearing_deg"      default="110.0" /><!-- deg a non-final waypoint this far behind counts as passed, not turned back for -->
+  <!-- TURN ANTICIPATION (yaw lookahead)  -  lead the nose into the next corner
+       while the body keeps flying the leg on ROLL, so the drone arrives at the
+       corner already pointing down the next one and flies straight out of it,
+       instead of arriving pointed the old way and rotating in place (the
+       manoeuvre this airframe is worst at: ~11% yaw delivery standing still,
+       and standing still is where it drifts most). OFF by default - it changes
+       how every corner is flown. See core/.../trackers/drift_pid/README.md. -->
+  <arg name="dp_yaw_lookahead"           default="false" /><!-- the master switch. true = anticipate corners, false = the classic stop-and-turn -->
+  <arg name="dp_yaw_lookahead_start_m"   default="2.5" /><!-- m before the corner the nose starts easing round. THE dial: bigger anticipates earlier and more gently but flies more of the leg crabbed (a crab is capped by the weak ROLL axis, so it is slower than a cruise); smaller demands a brisker rotation at the end. Scaled down for gentler corners -->
+  <arg name="dp_yaw_lookahead_align_m"   default="0.35" /><!-- m before the corner the nose is fully round; the last stretch is flown on pure roll. Keep at or just above dp_pos_radius, or the corner retires before it is reached -->
+  <arg name="dp_yaw_lookahead_corner_deg" default="25.0" /><!-- deg smallest route direction change that counts as a turn. Must sit clear of the ~10 deg weave a grid A* route leaves on a straight corridor -->
+  <arg name="dp_yaw_lookahead_confirm_m" default="1.0" /><!-- m of path past the corner used to read its outgoing heading. The run stops at the NEXT direction change, so turn-then-turn is anticipated one turn at a time -->
+  <arg name="dp_yaw_lookahead_max_deg"   default="70.0" /><!-- deg hard cap on how far the nose may lead the direction of travel. NOT a geometry limit: 90 would be exactly sideways, and a crab with no forward speed left is one this airframe can no longer yaw out of (~11% delivery standing still vs 30-68% translating). ~60 keeps half the progress vector forward, which is what holds the yaw authority; whatever is left of the turn is finished at the corner while moving onto the new leg -->
+  <arg name="dp_yaw_lookahead_catchup_deg" default="12.0" /><!-- deg the lead only advances while the heading error is inside this. Keeps the schedule from walking away from a drone that cannot follow it, and MUST stay below dp_yaw_engage_deg or the anticipation would trip the very stop-and-turn it exists to avoid -->
+  <arg name="dp_yaw_lookahead_rate"      default="0.25" /><!-- rad/s fastest the schedule may rotate the heading target, and the rate it budgets the approach against. MUST NOT exceed dp_track_yaw_rate (the manoeuvre runs in TRACK, so that is the whole budget it has); the node refuses to start otherwise, rather than fly a schedule that falls behind every corner. Kept a literal rather than an $(arg) reference so every layer of the launch chain declares the same default; the node falls back to dp_track_yaw_rate only when the param is not set at all -->
+  <arg name="dp_yaw_lookahead_cone_deg"  default="0.0" /><!-- deg sideslip cone while crabbing; 0 = none. Deliberately replaces dp_turn_side_cone_deg here, which caps |vy| at tan(cone)*vx and would cancel the manoeuvre outright at a full lead (vx = 0). Backward travel stays forbidden either way -->
+  <arg name="dp_yaw_lookahead_ff"        default="1.0" /><!-- 0..1 how much of the schedule's own rotation rate is fed straight to the yaw axis. 0 leaves the loop purely feedback, and the nose then sits a few degrees behind the plan -->
   <!-- STATION KEEPING  -  holding still, which is where fore/aft drift shows up -->
   <arg name="dp_alt_hold"                default="false" /><!-- altitude hold on the solved pose z: keep the drone at the tag-plane height (target follows cruise_z) -->
   <arg name="dp_alt_climb_max"           default="0.06" /><!-- m/s cap on UP; the guarded direction, keep tiny (vertical axis climbs far harder than nominal) -->
@@ -717,6 +734,16 @@
     <arg name="dp_suppress_deg"            value="$(arg dp_suppress_deg)" />
     <arg name="dp_suppress_floor"          value="$(arg dp_suppress_floor)" />
     <arg name="dp_passed_bearing_deg"      value="$(arg dp_passed_bearing_deg)" />
+    <arg name="dp_yaw_lookahead"           value="$(arg dp_yaw_lookahead)" />
+    <arg name="dp_yaw_lookahead_start_m"   value="$(arg dp_yaw_lookahead_start_m)" />
+    <arg name="dp_yaw_lookahead_align_m"   value="$(arg dp_yaw_lookahead_align_m)" />
+    <arg name="dp_yaw_lookahead_corner_deg" value="$(arg dp_yaw_lookahead_corner_deg)" />
+    <arg name="dp_yaw_lookahead_confirm_m" value="$(arg dp_yaw_lookahead_confirm_m)" />
+    <arg name="dp_yaw_lookahead_max_deg"   value="$(arg dp_yaw_lookahead_max_deg)" />
+    <arg name="dp_yaw_lookahead_catchup_deg" value="$(arg dp_yaw_lookahead_catchup_deg)" />
+    <arg name="dp_yaw_lookahead_rate"      value="$(arg dp_yaw_lookahead_rate)" />
+    <arg name="dp_yaw_lookahead_cone_deg"  value="$(arg dp_yaw_lookahead_cone_deg)" />
+    <arg name="dp_yaw_lookahead_ff"        value="$(arg dp_yaw_lookahead_ff)" />
     <arg name="dp_alt_hold"                value="$(arg dp_alt_hold)" />
     <arg name="dp_alt_climb_max"           value="$(arg dp_alt_climb_max)" />
     <arg name="dp_alt_kp" value="$(arg dp_alt_kp)" />

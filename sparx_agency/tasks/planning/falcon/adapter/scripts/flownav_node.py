@@ -13,7 +13,7 @@ RAW path on ``~path_topic`` (``/path/waypoints_flownav``); the corrector recentr
 it and republishes ``/path/waypoints``.
 
 The heavy TensorRT inference runs in a HOST process
-(``tasks/planning/flownav/server/flownav_trt_server.py``) reached over loopback
+(``tasks/planning/vlas/flownav/serve/flownav_trt_server.py``) reached over loopback
 HTTP, because the FALCON Noetic container has no TensorRT -- exactly like NavDP.
 
 Goal image (pick one; or none -> the server's ``--goal-image`` is used):
@@ -40,10 +40,10 @@ from std_msgs.msg import String
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics
-from sparx_agency.core.planning.flownav.client import (
+from sparx_agency.core.planning.vlas.flownav.client import (
     FlowNavClientError, FlowNavImageGoalClient,
 )
-from sparx_agency.core.planning.navdp import (
+from sparx_agency.core.planning.vlas.navdp import (
     anchor_trajectory_to_world, project_trajectory_to_pixels,
 )
 

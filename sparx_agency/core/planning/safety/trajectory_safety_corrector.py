@@ -49,7 +49,7 @@ Frame contract
 Waypoints and the field's ``origin``/``resolution`` must be in the *same* metric
 frame; see :class:`PotentialFieldSampler` for the exact BEV convention. A NavDP
 body-frame trajectory should first be anchored to that frame with
-:func:`sparx_agency.core.planning.navdp.geometry.anchor_trajectory_to_world`.
+:func:`sparx_agency.core.planning.vlas.navdp.geometry.anchor_trajectory_to_world`.
 
 Python 3.8 compatible (the FALCON Noetic adapter imports ``core`` under 3.8):
 no PEP 604 unions, no ``match``/``case``; numpy-only at import time.

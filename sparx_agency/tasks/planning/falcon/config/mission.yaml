@@ -300,6 +300,17 @@ launch:
   dp_slow_radius: 0.80        # m start slowing this far from the FINAL goal
   dp_arrive_speed_min: 0.08   # m/s floor outside pos_radius, so it never crawls to a noisy stop
   dp_lookahead_m: 0.60        # m how far ahead the heading aims. Bigger = smoother but cuts corners
+  # -- TURN ANTICIPATION (yaw lookahead) -- lead the nose into the next corner while the body keeps flying the leg on ROLL, so the drone flies OUT of the corner instead of stopping to spin on it. OFF until it has been flown: it changes every corner. Full design + tuning order in core/planning/trackers/drift_pid/README.md
+  dp_yaw_lookahead: false     # the master switch. true = anticipate corners, false = the classic arrive-then-rotate
+  dp_yaw_lookahead_start_m: 2.5   # m before the corner the nose starts easing round. THE dial. At dp_cruise_speed 0.38 and dp_track_yaw_rate 0.25 a 90-deg turn needs ~2.4 m to be flown at full speed; below that the drone eases off into the turn instead, which is the trade
+  dp_yaw_lookahead_align_m: 0.35  # m before the corner the nose is fully round; the last stretch is pure roll. Just above dp_pos_radius (0.30), or the corner retires before it is reached
+  dp_yaw_lookahead_corner_deg: 25.0  # deg smallest route direction change that counts as a turn. Clear of the ~10 deg weave a grid A* route leaves on a straight corridor
+  dp_yaw_lookahead_confirm_m: 1.0    # m of path past the corner used to read its outgoing heading; the run stops at the NEXT direction change, so turn-then-turn is taken one turn at a time
+  dp_yaw_lookahead_max_deg: 70.0     # deg hard cap on the nose lead. NOT a geometry limit -- 90 would be flying exactly sideways, and a crab with no forward speed left is a crab this airframe can no longer yaw out of (~11% delivery standing still). ~60 keeps half the progress vector forward, which is what holds the yaw authority; the rest of the turn is finished at the corner while moving onto the new leg
+  dp_yaw_lookahead_catchup_deg: 12.0 # deg the lead only advances while the heading error is inside this. MUST stay below dp_yaw_engage_deg (30) or the anticipation would trip the stop-and-turn it exists to avoid
+  dp_yaw_lookahead_rate: 0.25        # rad/s fastest the schedule may rotate the nose, and the rate it budgets the approach against. Must not exceed dp_track_yaw_rate (0.25)
+  dp_yaw_lookahead_cone_deg: 0.0     # deg sideslip cone while crabbing; 0 = none. Replaces dp_turn_side_cone_deg here, which would cancel the manoeuvre outright at a full lead
+  dp_yaw_lookahead_ff: 1.0           # 0..1 how much of the schedule's own rotation rate is fed straight to the yaw axis. 0 leaves the nose a few degrees behind the plan
   dp_yaw_engage_deg: 30.0     # deg heading error above which it turns; below it corrects with ROLL only. Widened from 22: with yaw under-delivering the drone lived in TURN (110 ticks turning vs 32 flying) -- prefer flying slightly off-axis over turning in place forever
   dp_yaw_release_deg: 12.0    # deg error at which turning stops. MUST be < engage: the anti-chatter gap. Widened from 9: exit the (weak) in-place turn earlier and finish aligning in the far stronger while-flying regime
   dp_travel_cone_deg: 85.0    # deg widest angle off straight-ahead it will fly -- never fast where the camera cannot see. Widened from 70 for the same reason as engage: a drone that cannot finish its turn must still make progress

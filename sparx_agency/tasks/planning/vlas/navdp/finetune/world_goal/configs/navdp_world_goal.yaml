@@ -1,0 +1,52 @@
+# NavDP world-goal fine-tune. Every value the run depends on lives here; the CLI
+# only overrides paths and a handful of knobs. The resolved result is copied into
+# run.json next to the checkpoints, so a training curve can always be explained.
+
+model:
+  # The RGB DINOv2 trunk is never trained -- it is the generalisation anchor.
+  train_depth_encoder: false     # stage 2 only; also invalidates the feature cache
+  train_decoder_last_n: null     # null = all 16 decoder layers; try 8 if overfitting
+  lr_head: 1.0e-4                # Q-Former + decoder + heads (~44.5 M parameters)
+  lr_backbone: 1.0e-5            # depth trunk, when unfrozen
+
+data:
+  memory_size: 8                 # NavDP's queue; baked into the Q-Former, do not change
+  memory_stride: 1               # consecutive frames = 0.8 s of history at 10 Hz
+  color_order: bgr               # what the deployed server feeds; see preprocess.py
+
+loss:
+  # Reach the destination (waypoint + goal) and stay safe (clearance), with
+  # behaviour cloning carrying the bulk. See loss.py for what each term is for.
+  w_act: 1.0                     # diffusion epsilon-MSE, NavDP's native objective
+  w_waypoint: 1.0                # metric imitation -- this is where centring is taught
+  w_clearance: 2.0               # hinge on the GLOBAL signed ESDF -- the safety floor
+  w_goal: 0.1                    # match the expert's remaining distance to the goal
+  w_critic: 0.1                  # so the critic can rank 16 samples meaningfully
+  clearance_margin_m: 0.55       # 0.35 m airframe radius + margin
+  clearance_worst_weight: 3.0    # the WORST waypoint, not just the mean (see loss.py)
+  clearance_clamp_m: 2.0
+  waypoint_beta_m: 0.10
+  goal_beta_m: 0.50
+  critic_negatives: 3
+  critic_d_safe_m: 0.5
+  critic_progress_alpha: 0.1
+  snr_weighting: true            # geometric terms weighted by alpha_bar_k
+
+optim:
+  epochs: 8
+  batch_size: 24                 # fits 8 GB with the feature cache; drop to 4 without
+  accum_steps: 1                 # effective batch = batch_size * accum_steps
+  warmup_steps: 500              # a cold Q-Former with no warmup wrecks the prior
+  lr_final_fraction: 0.05        # cosine floor, as a fraction of the peak
+  weight_decay: 0.01
+  grad_clip: 1.0
+  ema_decay: 0.999               # evaluate and ship the EMA weights
+  l2sp_weight: 1.0e-3            # anti-forgetting pull toward the pretrained weights
+  amp: bf16                      # bf16 | fp32
+  num_workers: 6
+
+eval:
+  val_every: 500                 # steps between validation passes
+  val_batches: 40                # batches per validation pass (fixed noise seed)
+  patience: 12                   # validations without improvement before stopping
+  milestones: [0.25, 0.5, 0.75]  # extra checkpoints, as a fraction of the run
