@@ -246,11 +246,17 @@ def load_augmented_scene(name: str, prim_path: str = "/World/Scene") -> str:
 
     from sparx_agency.robots.PEGASUS.adapters import scene_augment
 
-    stretch_top_m = recipe.get("stretch_top_m")
+    # The vertical treatment is per obstacle, because one scene mixes batches:
+    # floor-standing clutter stretched through the flight band, and obstacles
+    # hung *in* it that a route has to go around. The recipe-level value is the
+    # fallback that keeps recipes written before that distinction replaying
+    # exactly as they did.
+    default_stretch_top_m = recipe.get("stretch_top_m")
     dropped = 0
     for i, obstacle in enumerate(recipe["obstacles"]):
         source_path = f"{prim_path}{obstacle['source_rel']}"
         dest_path = f"{obstacles_root}/dup_{i:03d}"
+        stretch_top_m = obstacle.get("stretch_top_m", default_stretch_top_m)
         # Verified, not just replayed: a placement that passed verification
         # when the recipe was written is not guaranteed to reproduce
         # identically on this fresh boot -- see
@@ -261,6 +267,8 @@ def load_augmented_scene(name: str, prim_path: str = "/World/Scene") -> str:
             (obstacle["dx"], obstacle["dy"], obstacle["dz"]),
             obstacle["rotation_deg"],
             stretch_top_m=stretch_top_m,
+            float_span_m=obstacle.get("float_span_m"),
+            float_centre_m=obstacle.get("float_centre_m"),
         )
         if kept is None:
             dropped += 1

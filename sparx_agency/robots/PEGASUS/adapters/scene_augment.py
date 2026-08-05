@@ -161,6 +161,63 @@ def list_obstacle_prims(
     return candidates
 
 
+def vertical_placement(
+    source_base_m: float,
+    source_top_m: float,
+    floor_z_m: float = 0.0,
+    stretch_top_m: float = None,
+    span_m: float = None,
+    centre_m: float = None,
+) -> Tuple[float, float]:
+    """How to scale and lift a copy so it occupies the height you meant.
+
+    Pure arithmetic, deliberately separated from the USD work so the one part
+    of a placement that is easy to get silently wrong can be tested without a
+    simulator. Both scaling modes anchor at the object's own base, matching
+    :func:`duplicate_prim`'s local-space stretch.
+
+    Two modes, and the difference is what a drone can do about the result:
+
+    * ``stretch_top_m`` grows a floor-standing prop until its top reaches that
+      height. Set it *past* the cruise altitude, not to it. Set to exactly the
+      altitude the obstacle merely reaches the aircraft's own plane, which is
+      the case the aircraft slips over -- measured on the first augmented
+      office and warehouse, where added occupancy peaked well below 1.5 m and
+      fell away immediately above it.
+    * ``span_m`` + ``centre_m`` make an obstacle at least that tall and hang it
+      centred on that height, clear of the floor. This is the case a route has
+      to go *around*: there is nothing under it to land the aircraft on and
+      nothing over it within the flight band, so no altitude change helps.
+
+    Args:
+        source_base_m: World z of the source prim's lowest point.
+        source_top_m: World z of its highest point.
+        floor_z_m: World z of the floor, which ``stretch_top_m`` measures from.
+        stretch_top_m: Grow the copy until its top is this high above the
+            floor. Never shrinks (scale is clamped to >= 1).
+        span_m: Make the copy at least this tall. Never shrinks.
+        centre_m: Put the copy's vertical midpoint here, lifting it off the
+            floor. None leaves the copy at the source's own height.
+
+    Returns:
+        ``(scale_z, extra_dz)`` -- the local Z scale and the world-frame z
+        offset to add to the placement delta, in that order of application.
+    """
+    height = max(source_top_m - source_base_m, 1e-6)
+    scale_z = 1.0
+    if stretch_top_m is not None and source_top_m - floor_z_m > 1e-6:
+        scale_z = max(scale_z, stretch_top_m / (source_top_m - floor_z_m))
+    if span_m is not None:
+        scale_z = max(scale_z, span_m / height)
+
+    extra_dz = 0.0
+    if centre_m is not None:
+        # Scaling is anchored at the base, so after it the copy spans
+        # [base, base + scale*height] and its midpoint has moved.
+        extra_dz = centre_m - (source_base_m + scale_z * height / 2.0)
+    return scale_z, extra_dz
+
+
 def duplicate_prim(
     dest_path: str,
     source_path: str,
@@ -168,6 +225,8 @@ def duplicate_prim(
     rotation_z_deg: float = 0.0,
     stretch_top_m: float = None,
     floor_z_m: float = 0.0,
+    float_span_m: float = None,
+    float_centre_m: float = None,
 ) -> str:
     """Copy a prim to a new stage path, offset by a world-frame delta.
 
@@ -203,8 +262,14 @@ def duplicate_prim(
             band it merely *pokes into* can still slip over or under it;
             stretching guarantees the obstacle actually spans the band. Never
             shrinks a copy that already reaches this height (scale factor is
-            clamped to >= 1).
+            clamped to >= 1). See :func:`vertical_placement` for why this
+            wants to be set past the cruise altitude rather than to it.
         floor_z_m: World z of the floor, for ``stretch_top_m``.
+        float_span_m: Make the copy at least this tall, as
+            :func:`vertical_placement`.
+        float_centre_m: Hang the copy with its vertical midpoint at this
+            height, clear of the floor -- an obstacle a route has to go around
+            rather than over or under.
 
     Returns:
         ``dest_path``.
@@ -230,13 +295,15 @@ def duplicate_prim(
     # origin, in the object's own local frame, stretches it upward from where
     # it already touches the floor rather than growing it from the middle or
     # dragging its base off the ground.
-    scale_z = 1.0
-    if stretch_top_m is not None:
+    scale_z, extra_dz = 1.0, 0.0
+    if stretch_top_m is not None or float_span_m is not None or float_centre_m is not None:
         cache = UsdGeom.BBoxCache(time, [UsdGeom.Tokens.default_])
-        source_top_m = float(cache.ComputeWorldBound(source_prim)
-                             .ComputeAlignedRange().GetMax()[2]) - floor_z_m
-        if source_top_m > 1e-6:
-            scale_z = max(1.0, stretch_top_m / source_top_m)
+        source_range = cache.ComputeWorldBound(source_prim).ComputeAlignedRange()
+        scale_z, extra_dz = vertical_placement(
+            float(source_range.GetMin()[2]), float(source_range.GetMax()[2]),
+            floor_z_m=floor_z_m, stretch_top_m=stretch_top_m,
+            span_m=float_span_m, centre_m=float_centre_m)
+    delta_xyz = (delta_xyz[0], delta_xyz[1], delta_xyz[2] + extra_dz)
 
     success, _ = omni.kit.commands.execute(
         "CopyPrim", path_from=source_path, path_to=dest_path, exclusive_select=False,
@@ -281,6 +348,8 @@ def duplicate_prim_verified(
     rotation_z_deg: float = 0.0,
     stretch_top_m: float = None,
     floor_z_m: float = 0.0,
+    float_span_m: float = None,
+    float_centre_m: float = None,
     tolerance_m: float = VERIFY_TOLERANCE_M,
 ) -> Optional[str]:
     """:func:`duplicate_prim`, then confirm it landed near ``target_xy`` or undo it.
@@ -303,6 +372,8 @@ def duplicate_prim_verified(
         rotation_z_deg: As :func:`duplicate_prim`.
         stretch_top_m: As :func:`duplicate_prim`.
         floor_z_m: As :func:`duplicate_prim`.
+        float_span_m: As :func:`duplicate_prim`.
+        float_centre_m: As :func:`duplicate_prim`.
         tolerance_m: How far from ``target_xy`` is still considered a good
             placement.
 
@@ -315,7 +386,8 @@ def duplicate_prim_verified(
     from pxr import Usd, UsdGeom
 
     duplicate_prim(dest_path, source_path, delta_xyz, rotation_z_deg,
-                   stretch_top_m=stretch_top_m, floor_z_m=floor_z_m)
+                   stretch_top_m=stretch_top_m, floor_z_m=floor_z_m,
+                   float_span_m=float_span_m, float_centre_m=float_centre_m)
 
     stage = omni.usd.get_context().get_stage()
     dest_prim = stage.GetPrimAtPath(dest_path)
@@ -341,6 +413,9 @@ def augment_with_duplicates(
     dest_root: str = "/World/AugmentedObstacles",
     rng=None,
     stretch_top_m: float = None,
+    float_span_m: float = None,
+    float_centre_m: float = None,
+    start_index: int = 0,
 ) -> List[Dict]:
     """Place one duplicated obstacle per placement, picked randomly from ``candidates``.
 
@@ -356,12 +431,22 @@ def augment_with_duplicates(
         stretch_top_m: Forwarded to :func:`duplicate_prim` -- stretch every
             copy that doesn't already reach this height, so a flight band it
             merely brushed becomes one it cannot slip over or under.
+        float_span_m: Forwarded to :func:`duplicate_prim`.
+        float_centre_m: Forwarded to :func:`duplicate_prim` -- hang this whole
+            batch at that height instead of standing it on the floor.
+        start_index: First number for the ``dup_NNN`` destination paths. A
+            scene is built from more than one batch (floor-standing clutter and
+            obstacles hung in the flight band are separate calls), and they
+            share one destination group, so a second batch starting at zero
+            would collide with the first batch's paths.
 
     Returns:
         One dict per placement actually created: ``source``, ``dest_path``,
-        ``x``, ``y``, ``rotation_deg``, and the ``(dx, dy, dz)`` delta applied
-        -- the last is what a caller needs to replay this same placement later
-        (see ``scene.load_augmented_scene``).
+        ``x``, ``y``, ``rotation_deg``, the ``(dx, dy, dz)`` delta applied, and
+        the vertical treatment (``stretch_top_m``, ``float_span_m``,
+        ``float_centre_m``) it was placed with -- together, everything a caller
+        needs to replay this same placement later, batch by batch (see
+        ``scene.load_augmented_scene``).
 
     Raises:
         ValueError: If ``candidates`` is empty.
@@ -396,11 +481,12 @@ def augment_with_duplicates(
         cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
         origin = cache.ComputeWorldBound(source_prim).ComputeAlignedRange().GetMidpoint()
 
-        dest_path = f"{dest_root}/dup_{i:03d}"
+        dest_path = f"{dest_root}/dup_{start_index + i:03d}"
         delta = (placement.x - origin[0], placement.y - origin[1], 0.0)
         kept = duplicate_prim_verified(
             dest_path, source_path, (placement.x, placement.y), delta,
-            placement.rotation_deg, stretch_top_m=stretch_top_m)
+            placement.rotation_deg, stretch_top_m=stretch_top_m,
+            float_span_m=float_span_m, float_centre_m=float_centre_m)
         if kept is None:
             dropped += 1
             continue
@@ -410,6 +496,8 @@ def augment_with_duplicates(
             "x": placement.x, "y": placement.y,
             "rotation_deg": placement.rotation_deg,
             "dx": delta[0], "dy": delta[1], "dz": delta[2],
+            "stretch_top_m": stretch_top_m,
+            "float_span_m": float_span_m, "float_centre_m": float_centre_m,
         })
 
     if dropped:

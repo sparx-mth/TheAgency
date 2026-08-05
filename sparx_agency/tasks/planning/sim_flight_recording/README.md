@@ -518,6 +518,61 @@ Wall-mounted/hinged fixtures that would look like a rendering glitch floating
 free in open floor (doors, clocks, lamps, sinks, toilets, elevator frames)
 stay excluded regardless -- see `scene_augment.EXCLUDE_KEYWORDS`.
 
+**Clutter is only an obstacle where the aircraft actually flies, and the first
+pass at these scenes got that wrong.** They were built with `--stretch-top 1.5`
+against a 1.5 m cruise, which grows each copy until its top reaches *exactly*
+the flight plane -- so the obstacle ends where the aircraft begins and it flies
+straight over. It is visible in the surveyed voxels: added occupancy peaked at
+0.8-0.9 m in `office` and 1.3-1.4 m in `warehouse_shelves`, then fell away
+immediately above the cruise height (warehouse dropped from +949 occupied cells
+at 1.50 m to +269 at 1.60 m), with a further slab of added material up at
+2.7-2.9 m that nothing at cruise altitude will ever meet. A scene can look
+heavily cluttered in a preview and still leave the one plane that matters open.
+
+So a scene is now built from two batches, and the flags say which is which:
+
+- **`--stretch-top`** grows floor-standing props. Set it *past* the cruise
+  altitude, never to it -- `--stretch-top 2.4` for a 1.5 m cruise.
+- **`--float-count` / `--float-centre` / `--float-span`** hang obstacles *in*
+  the flight band instead of standing them on the floor. These are the ones a
+  route has to go around: there is nothing under them to descend to and nothing
+  over them within the band, so no altitude change helps. `--float-centre`
+  defaults to `--altitude`, and `--float-span` (default 1.2 m) is stretched to
+  if the source prim is shorter, so the blocked band is wider than the airframe.
+
+```bash
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/augment_scene.py \
+    --scene office --altitude 1.5 --count 200 --min-spacing 1.5 \
+    --min-height 0.5 --stretch-top 2.4 \
+    --float-count 70 --float-centre 1.5 --float-span 1.2
+```
+
+The vertical treatment is recorded **per obstacle** in the recipe, because one
+scene mixes both batches; `scene.load_augmented_scene` falls back to the
+file-level `stretch_top_m` so recipes written before the split replay
+unchanged. The arithmetic itself is `scene_augment.vertical_placement`, kept
+free of any USD import and tested in `robots/PEGASUS/tests/
+test_vertical_placement.py` -- including the case above, where stretching to
+the cruise altitude leaves clear air directly over the obstacle.
+
+**`chown` the repo copy after syncing it, or the recipe is never written.**
+`augment_scene.py` and `survey_scene.py` are the only things here that write
+*back into* the repo rather than into `/data`, and the container runs as
+`isaac-sim` (uid 1234) while `docker cp` preserves the **host** uid — so the
+sync that `run_collection.sh` and every hand-rolled driver performs leaves
+`robots/PEGASUS/{scenes,maps}` owned by the host user and unwritable. Nothing
+complains until the final `write_text`, by which point the whole scene has been
+built and every placement logged, so it reads as a successful run that quietly
+left the old recipe in place. Copying it back to the host then "succeeds" on
+the unchanged file. After any `docker cp` of the repo:
+
+```bash
+docker exec -u 0 isaac-sim chown -R 1234:1234 /tmp/dev/repo/sparx_agency/robots/PEGASUS
+```
+
+Collection never hit this because `collect.py` only writes to the `/data` bind
+mount, which is world-writable.
+
 **A placement is never allowed to seal off a passage.** `--min-spacing` alone
 only keeps obstacles apart from each other -- it does not stop one from sitting
 in the one corridor cell that is the only way to a side room, which is exactly

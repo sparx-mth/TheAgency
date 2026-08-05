@@ -71,13 +71,26 @@ def _parse_args():
                          "columns/partitions/racks a drone cruising there "
                          "would actually hit, over low desk clutter")
     ap.add_argument("--stretch-top", type=float, default=None,
-                    help="stretch every duplicate that doesn't already reach "
-                         "this height above the floor, metres -- a drone flying "
-                         "*inside* a band it merely brushed can still slip over "
-                         "or under it; combine with --min-height set to the "
-                         "bottom of the flight band so the copy is guaranteed "
-                         "to span the whole thing, e.g. --min-height 0.5 "
-                         "--stretch-top 1.5 for a 0.5-1.5 m flight band")
+                    help="stretch every floor-standing duplicate that doesn't "
+                         "already reach this height above the floor, metres -- "
+                         "a drone flying *inside* a band it merely brushed can "
+                         "still slip over or under it. Set it PAST the cruise "
+                         "altitude, not to it: stretching to exactly the "
+                         "altitude tops the obstacle out in the aircraft's own "
+                         "plane, which is the case it skims over. For a 1.5 m "
+                         "cruise, --min-height 0.5 --stretch-top 2.4")
+    ap.add_argument("--float-count", type=int, default=0,
+                    help="how many additional obstacles to hang IN the flight "
+                         "band rather than stand on the floor -- the ones a "
+                         "route has to go around, because there is no altitude "
+                         "within the band that clears them")
+    ap.add_argument("--float-centre", type=float, default=None,
+                    help="height the floating batch is centred on, metres "
+                         "(default: --altitude, i.e. the cruise height)")
+    ap.add_argument("--float-span", type=float, default=1.2,
+                    help="minimum height of each floating obstacle, metres -- "
+                         "it is stretched to this if it is shorter, so the band "
+                         "it blocks is wider than the aircraft is tall")
     ap.add_argument("--obstacle-radius", type=float, default=None,
                     help="footprint radius used only to keep a placement from "
                          "sealing a passage, metres -- defaults to half the "
@@ -139,28 +152,54 @@ def main() -> None:
         print(f"using {obstacle_radius_m:.2f} m obstacle footprint radius for "
               f"the passage-blocking check", flush=True)
 
-        placements = sample_placements(
-            grid, layers[LANDABLE_LAYER], count=args.count,
-            min_spacing_m=args.min_spacing,
-            keepout=[(spawn_x, spawn_y, args.spawn_keepout)],
-            obstacle_radius_m=obstacle_radius_m,
-            rng=np.random.default_rng(),
-        )
-        if len(placements) < args.count:
-            print(f"WARNING: only {len(placements)}/{args.count} placements fit "
-                  f"at {args.min_spacing:.1f} m spacing without blocking a "
-                  f"passage -- the free landable area is smaller, or more "
-                  f"fragmented, than requested", flush=True)
+        rng = np.random.default_rng()
 
+        def place(count, **vertical):
+            """Draw ``count`` non-blocking spots and duplicate an obstacle onto each."""
+            if count <= 0:
+                return []
+            spots = sample_placements(
+                grid, layers[LANDABLE_LAYER], count=count,
+                min_spacing_m=args.min_spacing,
+                keepout=[(spawn_x, spawn_y, args.spawn_keepout)],
+                obstacle_radius_m=obstacle_radius_m,
+                rng=rng,
+            )
+            if len(spots) < count:
+                print(f"WARNING: only {len(spots)}/{count} placements fit at "
+                      f"{args.min_spacing:.1f} m spacing without blocking a "
+                      f"passage -- the free landable area is smaller, or more "
+                      f"fragmented, than requested", flush=True)
+            return spots
+
+        # Two batches, because they are two different problems for the aircraft.
+        # Floor-standing clutter stretched past the cruise height is something to
+        # fly around at ground level; obstacles hung in the band are something it
+        # cannot solve by changing altitude at all.
+        floor_spots = place(args.count)
         placed = scene_augment.augment_with_duplicates(
-            placements, candidates, stretch_top_m=args.stretch_top)
-        print(f"AUGMENT {args.scene}: added {len(placed)} obstacles", flush=True)
+            floor_spots, candidates, rng=rng, stretch_top_m=args.stretch_top)
+
+        float_centre = (args.float_centre if args.float_centre is not None
+                        else args.altitude)
+        float_spots = place(args.float_count)
+        floating = scene_augment.augment_with_duplicates(
+            float_spots, candidates, rng=rng, float_span_m=args.float_span,
+            float_centre_m=float_centre, start_index=len(placed))
+        placed = placed + floating
+        print(f"AUGMENT {args.scene}: added {len(placed)} obstacles "
+              f"({len(placed) - len(floating)} standing on the floor, "
+              f"{len(floating)} hung at {float_centre:.2f} m spanning "
+              f"{args.float_span:.2f} m)", flush=True)
         for p in placed:
             print(f"  {p['dest_path']} <- {p['source']} at "
                   f"({p['x']:.2f}, {p['y']:.2f}), yaw {p['rotation_deg']:.0f} deg",
                   flush=True)
 
         root_prefix = args.root
+        # The vertical treatment is recorded per obstacle, not once for the file:
+        # a scene now mixes floor-standing and hung batches, and the replay in
+        # scene.load_augmented_scene has to reproduce each one as it was placed.
         recipe = {
             "base_scene": args.scene,
             "stretch_top_m": args.stretch_top,
@@ -170,6 +209,9 @@ def main() -> None:
                     "dx": p["dx"], "dy": p["dy"], "dz": p["dz"],
                     "rotation_deg": p["rotation_deg"],
                     "target_x": p["x"], "target_y": p["y"],
+                    "stretch_top_m": p["stretch_top_m"],
+                    "float_span_m": p["float_span_m"],
+                    "float_centre_m": p["float_centre_m"],
                 }
                 for p in placed
             ],
