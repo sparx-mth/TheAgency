@@ -97,10 +97,28 @@ docker cp isaac-sim:/tmp/dev/recordings/office .
    the desk, tips, and every later episode is refused with `Preflight Fail:
    Attitude failure (roll)`. In `office`, 731 m² of the 788 m² flyable space is
    landable; the missing 7% is furniture.
-2. **Plan a route to it.** `core/planning/planners/astar`'s
-   `WeightedAStarPlanner2D` — the same planner the real drones fly. It inflates
-   every obstacle by `--standoff`, then prefers the middle of a corridor to its
-   edge, and emits corner-rounded waypoints every 2 m.
+2. **Plan a route to it, from where the aircraft is *and is pointing*.**
+   `core/planning/planners/astar`'s `WeightedAStarPlanner2D` — the same planner
+   the real drones fly. It inflates every obstacle by `--standoff`, then prefers
+   the middle of a corridor to its edge, and emits corner-rounded waypoints
+   every 2 m. It also knows that turning costs time: `start_turn_cost_m_per_rad`
+   charges a radian of rotating on the spot as `--cruise-speed` over the
+   follower's stationary yaw rate (1.7 m for the defaults), so between two
+   comparable routes the search takes the one the aircraft can already fly. An
+   episode is still free to start pointing anywhere and to turn right around
+   when the mission needs it — this is a tie-break, not a constraint.
+
+   The reach of that cost is the part worth knowing: it is charged **once**,
+   against the bearing on which the route leaves a 3 m disc around the start.
+   Charged on the first cell step instead — which is what `heading_penalty_m`
+   has always done and why it is left at 0 here — a heading cost only picks
+   between eight neighbours of one cell, and a single 10 cm step cannot steer a
+   30 m route. Measured over 120 office and 120 warehouse routes, the first-move
+   version moved the mean opening turn by under 4° and flight time by 0.2 s,
+   while the 3 m run-up cut flight time, the opening turn *and* the number of
+   stop-and-turns together. Charging much more than 1.7 m/rad reverses that: the
+   search buys a smaller opening turn with a detour that costs more than the
+   rotation it avoided.
 3. **Fly it, continuously.** The planner's corners are smoothed into a spline
    and chased with a moving carrot (`path_follower.py`), so the aircraft holds
    cruise speed the whole way instead of decelerating onto every waypoint. The

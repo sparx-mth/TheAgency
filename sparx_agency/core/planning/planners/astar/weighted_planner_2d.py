@@ -318,14 +318,19 @@ class WeightedAStarPlanner2D:
             self._clear_start_footprint(cost, lethal, world, sx, sy, inflate_m)
 
         # Heading awareness: seed the search with the drone's facing (quantised to
-        # a grid move) so the FIRST step is a turn like any other, and charge a
-        # backward-scaled penalty (in cells) for turning around. Off when
-        # heading_penalty_m == 0 (the search then treats the start move as free).
+        # a grid move) so the FIRST step is a turn like any other, and charge for
+        # turning off it -- as a reversal penalty, as a per-radian rotation cost,
+        # or both. Costs are converted to cells, the unit the search works in.
+        # Off when both are 0 (the search then treats the start move as free).
         start_dir = None
         start_turn_penalty = 0.0
-        if p.heading_penalty_m > 0.0:
+        start_turn_cost_rad = 0.0
+        start_turn_radius = 0.0
+        if p.heading_penalty_m > 0.0 or p.start_turn_cost_m_per_rad > 0.0:
             start_dir = _yaw_to_move(request.start.yaw)
             start_turn_penalty = p.heading_penalty_m / res
+            start_turn_cost_rad = p.start_turn_cost_m_per_rad / res
+            start_turn_radius = p.start_turn_radius_m / res
 
         bbox = self._bbox(sx, sy, gx, gy, w, h, res)
         search = astar_cost_grid_2d(
@@ -337,6 +342,8 @@ class WeightedAStarPlanner2D:
             turn_penalty=p.turn_penalty,
             start_dir=start_dir,
             start_turn_penalty=start_turn_penalty,
+            start_turn_cost_rad=start_turn_cost_rad,
+            start_turn_radius=start_turn_radius,
             max_expansions=p.max_expansions,
         )
         if not search.ok:

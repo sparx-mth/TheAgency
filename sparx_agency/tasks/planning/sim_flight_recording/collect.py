@@ -45,6 +45,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import numpy as np
 
+from sparx_agency.core.common.types import Pose2D
 from sparx_agency.tasks.planning.sim_flight_recording import (
     campaign_setup, episode, flight_session, px4_launch, px4_params,
 )
@@ -185,9 +186,17 @@ def existing_recordings(out_dir: Path, scene: str, worker: int) -> list:
                   if path.is_dir())
 
 
-def _episode_spec(args) -> EpisodeSpec:
+def _episode_spec(args, follow_spec: FollowSpec) -> EpisodeSpec:
+    """What episodes to draw, taking the follower's own trade between flying and
+    turning so the planner and the aircraft agree on what a corner costs.
+
+    ``--cruise-speed`` and ``--max-yaw-rate`` therefore reshape the *routes* as
+    well as the flying: a slower, faster-turning aircraft is right to accept
+    more corners than a quick one that must stop dead to rotate.
+    """
     from sparx_agency.robots.PEGASUS.adapters.vehicle import AIRFRAME_RADIUS_M
 
+    defaults = EpisodeSpec()
     return EpisodeSpec(
         altitude_m=args.altitude,
         clearance_m=args.clearance,
@@ -195,6 +204,9 @@ def _episode_spec(args) -> EpisodeSpec:
         inflate_floor_m=AIRFRAME_RADIUS_M,
         min_separation_m=args.min_distance,
         max_separation_m=args.max_distance,
+        start_turn_cost_m_per_rad=(follow_spec.cruise_speed
+                                   / max(follow_spec.turn_yaw_rate, 1e-3)),
+        start_turn_radius_m=defaults.start_turn_radius_m,
     )
 
 
@@ -207,8 +219,8 @@ def main() -> int:
     resolution = parse_resolution(args.resolution) if args.resolution else None
     seed = args.seed if args.seed is not None else args.worker
     rng = np.random.default_rng(seed)
-    spec = _episode_spec(args)
     follow_spec = _follow_spec(args)
+    spec = _episode_spec(args, follow_spec)
 
     # Load and validate the map before paying for a Kit boot: a missing or
     # unusable map is the most common way a campaign is misconfigured, and it
@@ -318,7 +330,17 @@ def run_campaign(args, spec, follow_spec, rng, world_map, loop, adapter, px4,
         if result.ok:
             consecutive_failures = 0
             consecutive_unflyable = 0
-            start_from = plan.goal
+            # Chain from the planned goal, but carry the heading the aircraft
+            # actually landed on. ``plan.goal``'s own yaw is a placeholder zero,
+            # and rightly so -- an arrival has no meaningful heading, the flight
+            # ends on a radius (see plan_between). Reused as the *next* start it
+            # silently claims the aircraft is facing +x, which was true of no
+            # episode after the first: every chained route in a campaign was
+            # planned for a heading the aircraft did not have, and the climb then
+            # turned it to match that fiction before the route was replanned from
+            # the air. The planner charges for turning off the start heading, so
+            # it needs the real one to charge against.
+            start_from = Pose2D(plan.goal.x, plan.goal.y, adapter.yaw())
         else:
             consecutive_failures += 1
             start_from = None  # re-derive from wherever it actually ended up

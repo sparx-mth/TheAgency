@@ -335,7 +335,14 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
     follow_spec = follow_spec or FollowSpec()
 
     start_position = vehicle.state.position
-    failure = arm_for_offboard(loop, px4, start_position, plan.start.yaw, cruise_altitude)
+    # Where the aircraft *is*, not where the route says it should be. The two
+    # agree when the plan was made from a live pose, and the yaw setpoint is the
+    # one place a disagreement is expensive: it is a position command, so opening
+    # a flight with the plan's heading asks PX4 to rotate to it as fast as it
+    # can, unbounded by the follower's yaw rate. The position half of this has
+    # always come from the vehicle; the heading half now does too.
+    start_yaw = adapter.yaw()
+    failure = arm_for_offboard(loop, px4, start_position, start_yaw, cruise_altitude)
     if failure is not None:
         return EpisodeResult(
             outcome=OUTCOME_ARM_TIMEOUT, detail=failure,
@@ -362,7 +369,7 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
     flown_plan = plan
     replans = 0
     last_replan_at = -REPLAN_MIN_INTERVAL_S
-    follower = build_follower(start_position[0], start_position[1], plan.start.yaw,
+    follower = build_follower(start_position[0], start_position[1], start_yaw,
                               plan.waypoints)
     # Only a placeholder until the post-climb plan exists: during the climb the
     # aircraft turns toward the goal's straight-line bearing, which is close
@@ -379,7 +386,7 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
     # has been planned from there.
     hold_xy = takeoff_xy
     phase = PHASE_CLIMB
-    yaw = plan.start.yaw
+    yaw = start_yaw
     tilted_since = None
     offboard_lost_since = None
     last_offboard_request = loop.sim_time
