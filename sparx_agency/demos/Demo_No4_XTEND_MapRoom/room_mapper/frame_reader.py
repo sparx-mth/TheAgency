@@ -71,6 +71,11 @@ def iter_frames(
     depth_index = {p.stem: p for p in depth_dir.glob("*.npy")}
 
     rgb_paths = sorted(rgb_dir.glob("*.jpg"), key=lambda p: p.stem)
+    n_matched = sum(1 for p in rgb_paths if p.stem in depth_index)
+    if n_matched < len(rgb_paths):
+        print(f"[frame_reader] {len(rgb_paths)} RGB frames found, "
+              f"{n_matched} have a matching depth .npy — "
+              f"{len(rgb_paths) - n_matched} skipped (no depth pair)")
 
     n = 0
     for i, rgb_path in enumerate(rgb_paths):

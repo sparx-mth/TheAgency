@@ -62,20 +62,24 @@ def load_labels_from_session(
     """
     Extract NanoOWL detections directly from JSON sidecar files in a flat session dir.
 
-    Iterates sorted JPGs that have a matching .npy (mirroring iter_frames with stride=1),
-    so frame_idx values align with those assigned by run_room_mapper.
+    frame_idx must match what frame_reader.iter_frames assigns: the enumerate index
+    over ALL sorted JPGs in the directory (not just the ones with a matching .npy).
+    iter_frames skips depth-less frames but never renumbers, so a frame's index is
+    its position in the full alphabetical listing. Enumerating only the depth-matched
+    subset here (as a prior version did) desyncs the two numbering schemes as soon as
+    any frame lacks depth, causing every detection to silently miss its frame_poses
+    entry in place_objects().
     """
     from pathlib import Path as _Path
 
     session_dir = _Path(session_dir)
     depth_stems = {p.stem for p in session_dir.glob("*.npy")}
-    jpgs = sorted(
-        [p for p in session_dir.glob("*.jpg") if p.stem in depth_stems],
-        key=lambda p: p.stem,
-    )
+    all_jpgs = sorted(session_dir.glob("*.jpg"), key=lambda p: p.stem)
 
     labels = []
-    for frame_idx, jpg in enumerate(jpgs):
+    for frame_idx, jpg in enumerate(all_jpgs):
+        if jpg.stem not in depth_stems:
+            continue
         json_path = jpg.with_suffix(".json")
         if not json_path.exists():
             continue
