@@ -46,6 +46,7 @@ from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
 from sensor_msgs.msg import Image
 from std_msgs.msg import Int32, String
+from trajectory.msg import Bspline
 
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
 from sparx_agency.tasks.planning.falcon_pegasus.link.socket_link import (
@@ -144,6 +145,7 @@ class PegasusBridge(object):
         self._frames = 0
         self._odoms = 0
         self._commands = 0
+        self._trajectories = 0
         self._finished = False
         self._unsafe = False
         self._last_command_at = None
@@ -151,6 +153,11 @@ class PegasusBridge(object):
 
         rospy.Subscriber("/planning/pos_cmd", PositionCommand, self._on_position_command,
                          queue_size=10)
+        # The trajectory itself, alongside the 100 Hz samples of it. Which one
+        # the aircraft acts on is the aircraft's choice; forwarding both costs
+        # a couple of kilobytes a second and means one FALCON-side run can serve
+        # either control path.
+        rospy.Subscriber("/planning/bspline", Bspline, self._on_bspline, queue_size=4)
         rospy.Subscriber("/planning/replan", Int32, self._on_replan, queue_size=10)
 
     # ── the FALCON -> Isaac direction ────────────────────────────────────
@@ -171,6 +178,28 @@ class PegasusBridge(object):
             (msg.velocity.x, msg.velocity.y, msg.velocity.z),
             (msg.acceleration.x, msg.acceleration.y, msg.acceleration.z),
             msg.yaw, msg.yaw_dot))
+
+    def _on_bspline(self, msg):
+        """Forward one whole trajectory to whatever is flying the aircraft.
+
+        Sent verbatim. The aircraft rebuilds the curve with the same
+        construction rules ``traj_server`` uses, so both sides evaluate the same
+        polynomial -- which is the point, since a disagreement between them
+        would show up as a tracking error with no visible cause.
+
+        This also arms the watchdog, and it is the *better* signal for it: a
+        trajectory id that stops advancing is how a dead planner is detected,
+        and unlike the command stream it cannot be faked by ``traj_server``
+        happily re-publishing the final point of a trajectory whose planner
+        segfaulted minutes ago.
+        """
+        self._trajectories += 1
+        self._last_command_at = rospy.Time.now()
+        self._send_down(protocol.bspline(
+            msg.start_time.to_sec(), msg.traj_id, msg.order,
+            list(msg.knots),
+            [(point.x, point.y, point.z) for point in msg.pos_pts],
+            list(msg.yaw_pts), msg.yaw_dt))
 
     def _on_replan(self, msg):
         """Watch for the FSM declaring the space explored.
@@ -377,8 +406,10 @@ class PegasusBridge(object):
             now = rospy.Time.now()
             if (now - report_at).to_sec() >= 10.0:
                 report_at = now
-                rospy.loginfo("[bridge] %d depth frames, %d odom, %d commands forwarded",
-                              self._frames, self._odoms, self._commands)
+                rospy.loginfo(
+                    "[bridge] %d depth frames, %d odom, %d commands, %d trajectories "
+                    "forwarded", self._frames, self._odoms, self._commands,
+                    self._trajectories)
 
         uplink.close()
         downlink.close()

@@ -33,11 +33,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from sparx_agency.core.common.types import KinematicLimits
+from sparx_agency.core.control.trajectory_tracking import TrajectoryTrackerParams
 from sparx_agency.core.planning.trackers.reference_tracker_3d import ReferenceTrackerParams
 from sparx_agency.tasks.planning.falcon_pegasus.isaac import setup
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.falcon_client import FalconLink
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.mission import (
-    ExplorationMission, MissionSpec,
+    CONTROL_ATTITUDE, CONTROL_MODES, ExplorationMission, MissionSpec,
 )
 from sparx_agency.tasks.planning.falcon_pegasus.link.socket_link import (
     DOWNLINK_PORT, UPLINK_PORT,
@@ -85,6 +86,13 @@ def _parse_args():
                         help="tracker horizontal speed ceiling, m/s. Must exceed "
                              "FALCON's own max_linear_velocity and stay under PX4's "
                              "MPC_XY_VEL_MAX")
+    parser.add_argument("--control", choices=CONTROL_MODES, default=CONTROL_ATTITUDE,
+                        help="where to cut into PX4. 'attitude' rebuilds FALCON's "
+                             "B-spline here and commands attitude + throttle, leaving "
+                             "PX4 only its attitude and rate loops. 'velocity' is the "
+                             "older path -- follow the 100 Hz sampled command and send "
+                             "world velocities, keeping PX4's velocity controller in "
+                             "the chain. Use it to reproduce the baseline numbers")
     parser.add_argument("--uplink-port", type=int, default=UPLINK_PORT)
     parser.add_argument("--downlink-port", type=int, default=DOWNLINK_PORT)
     parser.add_argument("--connect-timeout-s", type=float, default=300.0,
@@ -128,7 +136,9 @@ def _mission_spec(config: dict, args) -> MissionSpec:
                            else run["frame_rate_hz"]),
         max_flight_s=float(args.max_flight_s if args.max_flight_s is not None
                            else run["max_flight_s"]),
+        control_mode=args.control,
         tracker=ReferenceTrackerParams(limits=limits, max_position_error_m=3.0),
+        tracking=TrajectoryTrackerParams(max_position_error_m=3.0),
     )
 
 
@@ -167,7 +177,7 @@ def main() -> int:
             camera_config=str(args.camera or config["run"]["camera"]),
             rate_hz=spec.frame_rate_hz,
             worker=args.worker, want_chase_camera=args.video and not args.onboard_video,
-            settle_s=args.settle_s)
+            settle_s=args.settle_s, control_mode=spec.control_mode)
 
         # Before a single frame is sent: does the pose we will label the depth
         # with actually describe the camera that took it? Nothing downstream can

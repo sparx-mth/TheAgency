@@ -33,6 +33,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from sparx_agency.core.common.types import normalize_angle
+from sparx_agency.core.control.airframe import AirframeController
+from sparx_agency.core.control.flatness import matrix_from_quaternion
+from sparx_agency.core.control.thrust_model import ThrustModelParams
+from sparx_agency.core.control.trajectory_tracking import TrajectoryTrackerParams
 from sparx_agency.core.planning.trackers.reference_tracker_3d import (
     ReferenceTracker3D, ReferenceTrackerParams,
 )
@@ -43,6 +47,25 @@ from sparx_agency.tasks.planning.sim_flight_recording.episode import (
     slew_towards,
 )
 from sparx_agency.tasks.planning.sim_flight_recording.path_follower import FollowSpec
+
+CONTROL_ATTITUDE = "attitude"
+"""Rebuild FALCON's trajectory here and command PX4 an attitude and a throttle."""
+CONTROL_VELOCITY = "velocity"
+"""Follow FALCON's 100 Hz sampled command and send PX4 world velocities."""
+CONTROL_MODES = (CONTROL_ATTITUDE, CONTROL_VELOCITY)
+
+
+def _default_thrust_model():
+    # type: () -> ThrustModelParams
+    """Thrust-model seed for the Pegasus Iris on PX4 SITL.
+
+    0.62 rather than PX4's own 0.5 default, because that is roughly where this
+    airframe actually hovers. The estimator finds the truth within a second or
+    two whatever the seed, but those are the seconds immediately after handover,
+    when the aircraft is at cruise height over furniture.
+    """
+    return ThrustModelParams(hover_throttle=0.62)
+
 
 ODOMETRY_EVERY_N_STEPS = 5      # 50 Hz at the 250 Hz physics rate
 CLIMB_TOLERANCE_M = 0.15
@@ -173,7 +196,26 @@ class MissionSpec:
         cruise_altitude_m: Altitude to climb to before handing over to FALCON.
         frame_rate_hz: Depth frames per second sent to FALCON.
         max_flight_s: Simulated seconds of exploration before landing regardless.
-        tracker: Gains and limits for the outer loop.
+        control_mode: Which cut into PX4 to fly, ``"attitude"`` or
+            ``"velocity"``.
+
+            ``attitude`` is the default and the deeper cut: the trajectory is
+            rebuilt on this side, the outer loop emits an acceleration, and PX4
+            is left with the attitude loop, the rate loop and the mixer. It
+            removes PX4's own velocity controller from the chain -- a loop that
+            runs at tens of Hz off the same position estimate the outer loop
+            already has, and so contributes lag without contributing anything.
+
+            ``velocity`` is the older path, following the 100 Hz sampled
+            command and sending world velocities. Kept because it is the
+            baseline the campaign's numbers were measured against, and a
+            comparison against a baseline you can no longer run is not one.
+        tracker: Gains and limits for the velocity-cut outer loop.
+        tracking: Gains and limits for the attitude-cut outer loop.
+        thrust: Bounds and learning rate for the thrust model. Its
+            ``hover_throttle`` seed should be near the airframe's real one; the
+            estimator converges away from a bad seed in a second or two, but
+            those are the seconds just after handover.
     """
 
     name: str
@@ -183,7 +225,17 @@ class MissionSpec:
     cruise_altitude_m: float
     frame_rate_hz: float
     max_flight_s: float
+    control_mode: str = CONTROL_ATTITUDE
     tracker: ReferenceTrackerParams = field(default_factory=ReferenceTrackerParams)
+    tracking: TrajectoryTrackerParams = field(default_factory=TrajectoryTrackerParams)
+    thrust: ThrustModelParams = field(default_factory=_default_thrust_model)
+
+    def __post_init__(self):
+        # type: () -> None
+        """Reject an unknown control mode here rather than mid-flight."""
+        if self.control_mode not in CONTROL_MODES:
+            raise ValueError("control_mode must be one of %r, got %r"
+                             % (CONTROL_MODES, self.control_mode))
 
 
 class ExplorationMission:
@@ -208,7 +260,12 @@ class ExplorationMission:
         self.spec = spec
         self.recorder = recorder
         self.verbose = verbose
+        # Both controllers exist whichever mode is flown. They are cheap, and
+        # having both constructed means the climb and the hold phases -- which
+        # are velocity-commanded regardless -- do not have to care which cut the
+        # exploration phase will use.
         self.tracker = ReferenceTracker3D(spec.tracker)
+        self.controller = AirframeController(tracker=spec.tracking, thrust=spec.thrust)
         # hold_velocity/slew_towards want a FollowSpec for their ceilings; the
         # climb is the only phase that uses them, and it wants the same limits
         # the tracker flies with so the aircraft does not change character at
@@ -221,6 +278,7 @@ class ExplorationMission:
         self._errors = []
         self._distance = 0.0
         self._last_position = None
+        self._last_velocity = None
         self._streaming_depth = False
         self._streaming_odometry = False
         self._next_frame_at = 0.0
@@ -349,9 +407,14 @@ class ExplorationMission:
         already given it.
         """
         self._streaming_odometry = True
-        self.tracker.reset(yaw=self._true_yaw(),
-                           hold_position=sensing.nav_position(self.adapter))
-        self._say("odometry is flowing -- FALCON has control")
+        here = sensing.nav_position(self.adapter)
+        self.tracker.reset(yaw=self._true_yaw(), hold_position=here)
+        # The integrators are cleared, because they hold a bias learned during a
+        # climb; the thrust scale is not, because the airframe's mass and its
+        # battery did not change when the mission phase did.
+        self.controller.reset(yaw=self._true_yaw(), hold_position=here)
+        self._say("odometry is flowing -- FALCON has control (%s cut, hover throttle %.2f)"
+                  % (self.spec.control_mode, self.controller.hover_throttle))
         target = tuple(self.adapter.vehicle.state.position)
         started = self.loop.sim_time
         while not self.link.has_trajectory:
@@ -370,6 +433,78 @@ class ExplorationMission:
                     "unknown space." % FIRST_COMMAND_TIMEOUT_S)
         self._say("first trajectory received -- exploring")
         return None, ""
+
+    def _control(self, position, now):
+        """Fly one tick, by whichever cut into PX4 the run selected.
+
+        Both paths take the same measured state and both honour the same
+        condemned-trajectory hold; what differs is how deep into PX4 they reach.
+
+        The tracker closes on the **sensor's** position, because that is the
+        frame FALCON's plan is expressed in. Comparing a reference meant for the
+        camera against the body origin would bias every command by the camera's
+        20 cm mount offset, rotated by whatever heading the aircraft happened to
+        have.
+
+        A condemned trajectory is withheld rather than followed: the controller
+        brakes toward a latched point instead of carrying its momentum into the
+        obstacle FALCON has just found while FALCON re-plans.
+
+        Args:
+            position: The sensor's world position this tick.
+            now: Wall-clock seconds, the clock FALCON stamps trajectories on.
+
+        Returns:
+            An object exposing ``holding`` and ``position_error_m`` -- the two
+            things the watchdogs above need, and all they need.
+        """
+        velocity = tuple(float(v) for v in self.adapter.vehicle.state.linear_velocity)
+        follow = self._unsafe_trajectory is None
+        if self.spec.control_mode == CONTROL_VELOCITY:
+            reference = self.link.reference if follow else None
+            command = self.tracker.update(
+                reference, position, self._true_yaw(), self.loop.dt,
+                # PhysX hands over the true world-frame velocity, so the
+                # damping term acts on a measured signal rather than a
+                # difference of positions.
+                velocity=velocity,
+                reference_age=self.link.reference_age_s(now))
+            self.px4.send_velocity_world(command.vx, command.vy, command.vz, command.yaw)
+            return command
+
+        if self.link.trajectory is not None:
+            # Idempotent: the controller rejects anything not newer than what it
+            # already holds, so re-offering the same curve every tick is free.
+            self.controller.set_trajectory(self.link.trajectory)
+        command = self.controller.update(position, velocity, self._true_yaw(),
+                                         self.loop.dt, now, follow=follow)
+        self.px4.send_attitude_target(command.attitude.quaternion_wxyz(),
+                                      command.throttle,
+                                      yaw_rate=command.attitude.yaw_rate)
+        self._learn_thrust(command.throttle, velocity)
+        return command
+
+    def _learn_thrust(self, throttle, velocity):
+        """Feed the thrust model what the throttle just bought.
+
+        The acceleration is differenced from PhysX's own velocity rather than
+        read from an accelerometer, because there is no accelerometer on this
+        path and the simulator's velocity is exact. On a real aircraft this is
+        the IMU, and the estimator's outlier rejection is written for that noise
+        rather than for this.
+
+        The thrust axis is the aircraft's **measured** one, not the commanded
+        one: using the command would make the estimate agree with itself and
+        learn nothing.
+        """
+        if self._last_velocity is not None:
+            measured = tuple((velocity[i] - self._last_velocity[i]) / self.loop.dt
+                             for i in range(3))
+            attitude = self.adapter.vehicle.state.attitude
+            body_z = matrix_from_quaternion(
+                (attitude[3], attitude[0], attitude[1], attitude[2]))[:, 2]
+            self.controller.observe_thrust(throttle, measured, body_z, self.loop.dt)
+        self._last_velocity = velocity
 
     def _explore(self):
         """Track FALCON's reference until the space is explored or time runs out."""
@@ -392,19 +527,7 @@ class ExplorationMission:
             # whatever the aircraft's heading happened to be.
             position = sensing.nav_position(self.adapter)
             now = time.time()
-            # A condemned trajectory is withheld rather than followed. Passing
-            # None puts the tracker on its station hold, which brakes the
-            # aircraft toward a latched point instead of carrying its momentum
-            # into the obstacle FALCON just found while FALCON re-plans.
-            reference = None if self._unsafe_trajectory is not None else self.link.reference
-            command = self.tracker.update(
-                reference, position, self._true_yaw(), self.loop.dt,
-                # PhysX hands over the true world-frame velocity, so the tracker's
-                # damping term acts on a measured signal rather than a difference
-                # of positions. That term is what closes PX4's velocity-loop lag.
-                velocity=tuple(float(v) for v in self.adapter.vehicle.state.linear_velocity),
-                reference_age=self.link.reference_age_s(now))
-            self.px4.send_velocity_world(command.vx, command.vy, command.vz, command.yaw)
+            command = self._control(position, now)
             if not command.holding:
                 self._errors.append(command.position_error_m)
             self._tick()
@@ -487,11 +610,29 @@ class ExplorationMission:
 
             if self.verbose and self.loop.sim_time - last_status >= STATUS_EVERY_S:
                 last_status = self.loop.sim_time
-                self._say("t=%5.1fs pos=(%6.2f,%6.2f,%5.2f) err=%4.2fm xte=%4.2fm "
-                          "traj#%d frames=%d/%d"
+                # The gap is printed split, because the halves mean opposite
+                # things: `lag` is how far behind schedule the aircraft is, which
+                # is benign, and `xte` is how far off the path it is, which is
+                # what hits walls. A run that is 1.5 m behind but on the line is
+                # healthy; one that is 1.5 m sideways is about to end.
+                # The command is printed alongside the error, because the two
+                # together are what separate "the controller is not asking" from
+                # "the controller is asking and the aircraft is not going". A
+                # metre of error with a degree of tilt is the first; a metre of
+                # error with ten degrees of tilt is the second, and they want
+                # completely different fixes.
+                tilt_deg = math.degrees(command.attitude.tilt_rad) \
+                    if self.spec.control_mode == CONTROL_ATTITUDE else float("nan")
+                throttle = command.throttle \
+                    if self.spec.control_mode == CONTROL_ATTITUDE else float("nan")
+                self._say("t=%5.1fs pos=(%6.2f,%6.2f,%5.2f) err=%4.2fm lag=%5.2fm "
+                          "xte=%4.2fm tilt=%4.1fdeg thr=%.2f%s traj#%d frames=%d/%d"
                           % (self.loop.sim_time - started, position[0], position[1],
                              position[2], command.position_error_m,
-                             command.cross_track_error_m, self.link.trajectory_id,
+                             command.along_track_lag_m, command.cross_track_error_m,
+                             tilt_deg, throttle,
+                             " HOLD" if command.holding else "",
+                             self.link.trajectory_id,
                              self.link.frames_sent, self.link.frames_dropped))
 
     def _land(self) -> None:

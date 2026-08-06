@@ -215,6 +215,32 @@
   <param name="/astar/profile/coarse2/max_search_time" value="0.005"/>
   <param name="/astar/profile/medium/max_search_time" value="0.050"/>
 
+  <!-- How big the drone is, as far as the route planner is concerned.
+       Upstream A* tests a single voxel per node and has no notion of a radius,
+       so it will route a 0.7 m aircraft through a 0.3 m gap; the B-spline
+       optimiser then cannot thread that route and the FSM loops on
+       "Collision detected on the trajectory before publishing" until the
+       aircraft's stall watchdog ends the run. Added by
+       patches/inflate_astar_by_airframe.sh, which defaults both to 0 so an
+       unpatched or baseline image behaves exactly as upstream.
+
+       Inflation is XY only; the rotor disc is horizontal, and inflating z
+       would eat most of the 1.2 m exploration band for an airframe 0.15 m tall.
+
+       AIRFRAME_RADIUS_M, so the planner can never route somewhere the aircraft
+       physically does not fit. Note what this costs: the room warren's doors are
+       0.8-0.9 m, which leaves one to two free voxels through them at 0.1 m
+       resolution. If `2_room_warren` stops finding routes into the rooms, this
+       is the number to lower, and lowering it needs no rebuild. -->
+  <arg name="astar_inflate" default="0.35"/>
+  <param name="/astar/inflate_radius" value="$(arg astar_inflate)"/>
+  <!-- Inflation is suppressed within this of the search start. An aircraft that
+       has drifted against a wall is inside its own skirt, and without this
+       exemption it has no valid start node and can never plan away from it,
+       so the dilation meant to stop it wedging would itself become the wedge.
+       Wider than the inflation, by about one coarse A* step. -->
+  <param name="/astar/start_clearance" value="0.50"/>
+
   <!-- traj_server's open-loop take-off ramp, disabled. Upstream uses it to walk
        the position setpoint 1 m up and 1 m forward before any trajectory
        exists; here the aircraft has already climbed to cruise altitude under

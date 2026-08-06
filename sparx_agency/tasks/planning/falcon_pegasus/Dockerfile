@@ -33,6 +33,33 @@ RUN chmod +x /tmp/log_plan_failure.sh && /tmp/log_plan_failure.sh
 COPY patches/fix_falcon_viewpoint_index.sh /tmp/fix_falcon_viewpoint_index.sh
 RUN chmod +x /tmp/fix_falcon_viewpoint_index.sh && /tmp/fix_falcon_viewpoint_index.sh
 
+# Stop exploration_node segfaulting when the aircraft leaves the exploration
+# box -- which is routine here, because the box is inset from the building and
+# its floor sits above the ground. Unchecked index into a std::vector; same
+# shape as the viewpoint fix above, and the reason two real flights ended early.
+COPY patches/fix_falcon_grid_cell_index.sh /tmp/fix_falcon_grid_cell_index.sh
+RUN chmod +x /tmp/fix_falcon_grid_cell_index.sh && /tmp/fix_falcon_grid_cell_index.sh
+
+# Tell A* how big the drone is. Upstream routes a 0.7 m aircraft through a 0.3 m
+# gap because it tests one voxel per node, and the B-spline optimiser then
+# cannot thread the route it was handed. Inert unless the launch file sets
+# /astar/inflate_radius, so this image still reproduces a baseline run.
+# Stop the mapper aborting on a depth ray that steps one voxel off the edge of
+# the map. glog's CHECK is abort(), so this killed a flight outright.
+COPY patches/fix_falcon_raycast_out_of_map.sh /tmp/fix_falcon_raycast_out_of_map.sh
+RUN chmod +x /tmp/fix_falcon_raycast_out_of_map.sh && /tmp/fix_falcon_raycast_out_of_map.sh
+
+# Run the vendored LKH TSP solver in a forked child, with a greedy fallback.
+# It is one-shot C being called thousands of times in one process, its global
+# state does not survive that, and its segfault was the single biggest reason
+# no flight finished -- invisible from the aircraft, because traj_server
+# outlives the planner and keeps republishing the last trajectory.
+COPY patches/isolate_lkh_tsp_solver.sh /tmp/isolate_lkh_tsp_solver.sh
+RUN chmod +x /tmp/isolate_lkh_tsp_solver.sh && /tmp/isolate_lkh_tsp_solver.sh
+
+COPY patches/inflate_astar_by_airframe.sh /tmp/inflate_astar_by_airframe.sh
+RUN chmod +x /tmp/inflate_astar_by_airframe.sh && /tmp/inflate_astar_by_airframe.sh
+
 # The catkin package: two rospy nodes, a launch file, and the run configs.
 # runs/ lands INSIDE the package so `$(find falcon_pegasus)/runs/<run>.yaml`
 # resolves in the launch file. run_falcon_pegasus.sh bind-mounts the host copies

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import math
 
+from sparx_agency.core.control.flatness import world_attitude_to_ned_frd
+
 # PX4's custom-mode encoding for MAV_CMD_DO_SET_MODE (see PX4's commander/px4_custom_mode.h).
 # HEARTBEAT.custom_mode packs the main mode into bits 16-23 and the sub mode into
 # 24-31, which is how a caller can tell whether a mode request was actually
@@ -33,6 +35,12 @@ _TYPE_MASK_POSITION_YAW = 0b100111111000
 _TYPE_MASK_VELOCITY_YAW = 0b100111000111
 
 _MAV_FRAME_LOCAL_NED = 1
+
+# SET_ATTITUDE_TARGET type_mask: use the quaternion and the throttle, ignore the
+# three body-rate fields (bits 0-2). PX4 reads the yaw-rate field even so, as a
+# heading move rate, but discards roll and pitch rate in attitude mode -- see
+# `send_attitude_target`.
+_TYPE_MASK_ATTITUDE_THRUST = 0b00000111
 
 # MAV_LANDED_STATE, from EXTENDED_SYS_STATE. PX4's land detector is the only
 # authority on whether the aircraft is actually down; inferring it from altitude
@@ -355,6 +363,49 @@ class PX4Offboard:
             0.0, 0.0, 0.0,          # acceleration (ignored)
             yaw_ned, 0.0,           # yaw, yaw rate (rate ignored)
         )
+
+    def send_attitude_target(self, quaternion_wxyz, throttle: float,
+                             yaw_rate: float = 0.0) -> None:
+        """Stream an **attitude and throttle** setpoint, cutting below PX4's
+        velocity loop.
+
+        This is the deepest cut into PX4 that still leaves it the two loops
+        worth keeping. Above this message the caller owns the trajectory, the
+        position and velocity feedback, and the conversion of a wanted
+        acceleration into a tilt; below it PX4 keeps the attitude loop, the rate
+        loop on the gyro at a kilohertz, and the mixer -- the parts that need a
+        real-time clock and that nothing on the far side of a socket should try
+        to own.
+
+        What that buys over ``send_velocity_world`` is the removal of PX4's own
+        velocity controller from the chain. That loop runs at tens of Hz off the
+        same position estimate the outer loop already has, so it contributes lag
+        without contributing information, and the lag is the metre of tracking
+        error the campaign kept measuring at corners.
+
+        **The attitude is world-referenced, so the heading bias applies.** The
+        quaternion is rotated about the world z axis into PX4's local frame, the
+        same correction ``send_velocity_world`` makes to a velocity.
+
+        **PX4 ignores the roll and pitch rate feedforward in this mode.** Its
+        ``SET_ATTITUDE_TARGET`` handler takes either an attitude or a set of
+        body rates, not an attitude with rates fed forward; only the yaw rate
+        survives, as a heading move rate. The roll/pitch feedforward the
+        flatness stage computes is therefore carried but unused, and it is what
+        a body-rate cut would consume if this is ever taken one layer deeper.
+
+        Args:
+            quaternion_wxyz: Desired attitude in the simulator's world (ENU)
+                frame, ``(w, x, y, z)``, unit length.
+            throttle: Normalized collective thrust in [0, 1].
+            yaw_rate: Heading move rate, rad/s, world frame.
+        """
+        self._conn.mav.set_attitude_target_send(
+            0, self._conn.target_system, self._conn.target_component,
+            _TYPE_MASK_ATTITUDE_THRUST,
+            list(world_attitude_to_ned_frd(quaternion_wxyz, -self.heading_bias)),
+            0.0, 0.0, float(yaw_rate),
+            max(0.0, min(1.0, float(throttle))))
 
     def set_params(self, params: dict) -> None:
         """Push parameters to PX4.

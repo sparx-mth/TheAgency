@@ -8,11 +8,14 @@ the same bridge with the same wire protocol, on a laptop, in seconds:
 * depth comes from raycasting the surveyed ground-truth voxel map instead of
   rendering (:mod:`~.voxel_camera`) -- the same building, measured rather than
   drawn;
-* the airframe is a first-order velocity lag instead of PhysX and PX4. Not a toy
-  choice: a lag is what an inner-loop velocity controller looks like from
-  outside, so the outer-loop tracker has something real to close;
+* the airframe is a lag instead of PhysX and PX4 (:mod:`~.airframe`). Not a toy
+  choice: on the velocity cut a first-order velocity lag is exactly what PX4's
+  velocity controller looks like from outside, and on the attitude cut a
+  thrust-axis lag plus an unknown thrust curve is what its attitude and rate
+  loops look like -- so whichever control path is under test has something real
+  to close;
 * everything else -- the wire protocol, the timestamps, the handover order, the
-  tracker, the exit conditions -- is the code that flies the real aircraft.
+  control chain, the exit conditions -- is the code that flies the real aircraft.
 
 So a green stub run means FALCON's configuration, the exploration box, the
 camera contract, the bridge and the controller are all right, and the only thing
@@ -41,6 +44,9 @@ import numpy as np
 
 from sparx_agency.core.common.spatial_math import quat_to_rot
 from sparx_agency.core.common.types import KinematicLimits, normalize_angle
+from sparx_agency.core.control.airframe import AirframeController
+from sparx_agency.core.control.thrust_model import ThrustModelParams
+from sparx_agency.core.control.trajectory_tracking import TrajectoryTrackerParams
 from sparx_agency.core.planning.trackers.reference_tracker_3d import (
     ReferenceTracker3D, ReferenceTrackerParams,
 )
@@ -48,8 +54,14 @@ from sparx_agency.robots.PEGASUS.adapters.camera_pose import BODY_TO_OPTICAL, ca
 from sparx_agency.robots.PEGASUS.adapters.vehicle import CAMERA_OFFSET_FLU, camera_intrinsics
 from sparx_agency.tasks.planning.falcon_pegasus.isaac import setup
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.falcon_client import FalconLink
+from sparx_agency.tasks.planning.falcon_pegasus.isaac.mission import (
+    CONTROL_ATTITUDE, CONTROL_MODES, CONTROL_VELOCITY,
+)
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
 from sparx_agency.tasks.planning.falcon_pegasus.link.depth_codec import encode_depth
+from sparx_agency.tasks.planning.falcon_pegasus.stub.airframe import (
+    AttitudeAircraft, LaggingAircraft,
+)
 from sparx_agency.tasks.planning.falcon_pegasus.stub.voxel_camera import VoxelDepthCamera
 
 DT = 0.02                    # 50 Hz, the stub's control and physics rate
@@ -64,48 +76,6 @@ PLANNER_GONE_GRACE_S = 5.0
 # publishing the last trajectory's endpoint, so a frozen trajectory id is the
 # only sign that FALCON has stopped.
 PLANNER_STALL_S = 30.0
-
-
-class LaggingAircraft:
-    """A velocity-commanded rigid body with first-order lag and no attitude.
-
-    ``tau`` is how long the inner loop takes to reach a commanded velocity --
-    the one property of a real airframe the outer loop actually has to fight.
-    Everything else a multirotor does (tilt, rotor dynamics, ground effect) is
-    left to the simulator that has physics.
-    """
-
-    def __init__(self, position, yaw: float, tau: float = 0.35):
-        self.position = np.asarray(position, dtype=float)
-        self.velocity = np.zeros(3)
-        self.yaw = float(yaw)
-        self.tau = float(tau)
-
-    def step(self, velocity_command, yaw_command: float, dt: float) -> None:
-        alpha = dt / (self.tau + dt)
-        self.velocity += alpha * (np.asarray(velocity_command, dtype=float) - self.velocity)
-        self.position += self.velocity * dt
-        error = normalize_angle(yaw_command - self.yaw)
-        step = YAW_RATE * dt
-        self.yaw = normalize_angle(self.yaw + max(-step, min(step, error)))
-
-    @property
-    def quaternion_xyzw(self):
-        """Attitude as a yaw-only quaternion, scalar last."""
-        return (0.0, 0.0, math.sin(self.yaw / 2.0), math.cos(self.yaw / 2.0))
-
-    @property
-    def nav_position(self):
-        """Where FALCON is told the aircraft is: at the camera, not the body.
-
-        The same rule the real aircraft follows, and for the same reason -- see
-        ``isaac/sensing.py``'s ``nav_position``. The stub reproduces the mount
-        offset exactly so that a planning failure caused by it shows up here,
-        where a run costs a minute, rather than on Isaac Sim.
-        """
-        translation, _quaternion = camera_pose_world(
-            self.position, self.quaternion_xyzw, CAMERA_OFFSET_FLU)
-        return translation
 
 
 def _parse_args():
@@ -125,6 +95,16 @@ def _parse_args():
     parser.add_argument("--rays", default=None, metavar="WxH",
                         help="ray grid for the depth render (default: a quarter of "
                              "the image, matching FALCON's skip_pixel)")
+    parser.add_argument("--control", choices=CONTROL_MODES, default=CONTROL_ATTITUDE,
+                        help="which cut into PX4 to exercise. 'attitude' flies the "
+                             "rebuilt B-spline through the flatness chain against a "
+                             "body that only accepts a tilt and a throttle; 'velocity' "
+                             "follows the 100 Hz sampled command against a "
+                             "velocity-lagged body, which is the older baseline")
+    parser.add_argument("--hover-throttle", type=float, default=0.62,
+                        help="the STAND-IN AIRFRAME's true hover throttle, which the "
+                             "controller is not told. Set it away from the thrust "
+                             "model's seed to check the estimator actually acquires")
     parser.add_argument("--out", type=Path, default=None, help="write a result JSON here")
     return parser.parse_args()
 
@@ -168,17 +148,27 @@ def main() -> int:
           % (name, run["scene"], cruise, intrinsics.width, intrinsics.height,
              camera._ray_shape[0], camera._ray_shape[1]), flush=True)
 
-    aircraft = LaggingAircraft(spawn, spawn_yaw)
+    if args.control == CONTROL_ATTITUDE:
+        aircraft = AttitudeAircraft(spawn, spawn_yaw,
+                                    true_hover_throttle=args.hover_throttle)
+    else:
+        aircraft = LaggingAircraft(spawn, spawn_yaw)
     tracker = ReferenceTracker3D(ReferenceTrackerParams(limits=KinematicLimits(
         max_speed_xy=1.6, max_speed_z=0.8, max_yaw_rate=math.radians(60.0),
         max_accel_xy=2.0, max_accel_z=1.5)))
+    controller = AirframeController(
+        tracker=TrajectoryTrackerParams(max_position_error_m=3.0),
+        thrust=ThrustModelParams(hover_throttle=0.62))
+    print("stub: %s cut, airframe hovers at %.2f throttle" % (args.control,
+                                                              args.hover_throttle),
+          flush=True)
 
     link = FalconLink()
     link.connect(intrinsics, str(run["scene"]), name)
     print("connected to the FALCON bridge", flush=True)
 
     state = _Flight(link, aircraft, tracker, camera, intrinsics, cruise, spawn_yaw,
-                    frame_period, budget, realtime)
+                    frame_period, budget, realtime, args.control, controller)
     try:
         outcome, detail = state.run()
     finally:
@@ -190,6 +180,8 @@ def main() -> int:
         "flight_s": state.sim_time, "commands": link.commands_received,
         "frames": link.frames_sent, "dropped": link.frames_dropped,
         "trajectories": link.trajectory_id,
+        "control_mode": args.control,
+        "hover_throttle": state.hover_throttle,
         "mean_tracking_error_m": state.mean_error,
         "max_tracking_error_m": state.max_error,
         "distance_m": state.distance,
@@ -205,10 +197,13 @@ class _Flight:
     """The stub's own version of the mission: climb, hand over, track, stop."""
 
     def __init__(self, link, aircraft, tracker, camera, intrinsics, cruise, spawn_yaw,
-                 frame_period, budget, realtime):
+                 frame_period, budget, realtime, control_mode, controller):
         self.link = link
         self.aircraft = aircraft
         self.tracker = tracker
+        self.control_mode = control_mode
+        self.controller = controller
+        self._last_velocity = None
         self.camera = camera
         self.intrinsics = intrinsics
         self.cruise = cruise
@@ -260,10 +255,10 @@ class _Flight:
             step = SURVEY_TURN_RATE * DT
             yaw = normalize_angle(yaw + step)
             turned += step
-            self.aircraft.step((0.0, 0.0, 0.0), yaw, DT)
+            self.aircraft.step_velocity((0.0, 0.0, 0.0), yaw, DT)
             self._tick()
         while abs(normalize_angle(self.spawn_yaw - self.aircraft.yaw)) > 0.1:
-            self.aircraft.step((0.0, 0.0, 0.0), self.spawn_yaw, DT)
+            self.aircraft.step_velocity((0.0, 0.0, 0.0), self.spawn_yaw, DT)
             self._tick()
 
     def _climb(self):
@@ -272,12 +267,12 @@ class _Flight:
         while True:
             error = target - self.aircraft.position
             command = np.clip(error * 1.0, -CLIMB_RATE_MPS, CLIMB_RATE_MPS)
-            self.aircraft.step(command, self.spawn_yaw, DT)
+            self.aircraft.step_velocity(command, self.spawn_yaw, DT)
             self._tick()
             if (abs(self.aircraft.position[2] - self.cruise) < 0.1
                     and abs(normalize_angle(self.aircraft.yaw - self.spawn_yaw)) < 0.1):
                 for _ in range(int(SETTLE_S / DT)):
-                    self.aircraft.step((0.0, 0.0, 0.0), self.spawn_yaw, DT)
+                    self.aircraft.step_velocity((0.0, 0.0, 0.0), self.spawn_yaw, DT)
                     self._tick()
                 print("    at %.2f m -- handing over to FALCON" % self.aircraft.position[2],
                       flush=True)
@@ -291,11 +286,13 @@ class _Flight:
         self._streaming_odometry = True
         self.tracker.reset(yaw=self.aircraft.yaw,
                            hold_position=self.aircraft.nav_position)
+        self.controller.reset(yaw=self.aircraft.yaw,
+                              hold_position=self.aircraft.nav_position)
         started = self.sim_time
         # has_trajectory, not `reference is not None`: traj_server publishes a
         # parked command with trajectory_id 0 before it has planned anything.
         while not self.link.has_trajectory:
-            self.aircraft.step((0.0, 0.0, 0.0), self.aircraft.yaw, DT)
+            self.aircraft.step_velocity((0.0, 0.0, 0.0), self.aircraft.yaw, DT)
             self._tick()
             if not self.link.alive:
                 return "link_lost", "the bridge went away before FALCON planned"
@@ -308,19 +305,57 @@ class _Flight:
         print("    first trajectory received -- exploring", flush=True)
         return None, ""
 
+    @property
+    def hover_throttle(self) -> float:
+        """What the thrust model ended the flight believing a hover costs.
+
+        Worth reporting even on the velocity cut, where it is untouched and so
+        comes back as the seed: a summary that omits it cannot distinguish "the
+        estimator was wrong" from "the estimator was never used", and the first
+        stub run of the attitude cut looked convincing for exactly that reason
+        -- the stand-in airframe happened to hover at the seed value.
+        """
+        return self.controller.hover_throttle
+
+    def _control(self):
+        """Fly one exploration tick, by whichever cut the run selected.
+
+        The mirror of ``isaac/mission.py``'s ``_control``, and deliberately so:
+        the value of this rig is that the code deciding what to send is the same
+        code, and only the thing receiving it is a stand-in.
+
+        Closed on the SENSOR's position, matching the frame FALCON's plan is
+        expressed in -- see ``airframe._sensor_position``.
+        """
+        position = self.aircraft.nav_position
+        velocity = tuple(self.aircraft.velocity)
+        if self.control_mode == CONTROL_VELOCITY:
+            command = self.tracker.update(
+                self.link.reference, position, self.aircraft.yaw, DT,
+                velocity=velocity,
+                reference_age=self.link.reference_age_s(time.time()))
+            self.aircraft.step_velocity(command.velocity(), command.yaw, DT)
+            return command
+
+        if self.link.trajectory is not None:
+            self.controller.set_trajectory(self.link.trajectory)
+        command = self.controller.update(position, velocity, self.aircraft.yaw,
+                                         DT, time.time())
+        self.aircraft.step_attitude(command.attitude.quaternion_wxyz(),
+                                    command.throttle, command.tracking.yaw, DT)
+        # Fed the airframe's own acceleration and thrust axis, which is what an
+        # IMU and an attitude estimate would report on the real aircraft.
+        self.controller.observe_thrust(command.throttle, self.aircraft.acceleration,
+                                       self.aircraft.body_z, DT)
+        return command
+
     def _explore(self):
         started = self.sim_time
         last_report = self.sim_time
         last_trajectory = self.link.trajectory_id
         trajectory_at = self.sim_time
         while True:
-            # Closed on the SENSOR's position, matching the frame FALCON's
-            # reference is expressed in. See LaggingAircraft.nav_position.
-            command = self.tracker.update(
-                self.link.reference, self.aircraft.nav_position, self.aircraft.yaw,
-                DT, velocity=tuple(self.aircraft.velocity),
-                reference_age=self.link.reference_age_s(time.time()))
-            self.aircraft.step(command.velocity(), command.yaw, DT)
+            command = self._control()
             if not command.holding:
                 self.errors.append(command.position_error_m)
             self._tick()
