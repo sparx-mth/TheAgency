@@ -56,6 +56,14 @@
   <arg name="target_topic"      default="/object_approach/goal" />
   <arg name="enable_topic"      default="/object_approach/enable" />
 
+  <!-- Mode hand-off with the route follower (visual_servoing takeover) and the
+       platform's finish request (stop->land->disarm). Defaults match this node's
+       own XTEND-shaped fallback; a Rooster/Sphera include MUST override both to
+       /R1/demo_mode(_request) (rooster_demo_mode_manager.py's actual topics) or
+       the takeover and the terminal land silently never happen; see LESSONS.md. -->
+  <arg name="demo_mode_topic"         default="/xtend/demo_mode" />
+  <arg name="demo_mode_request_topic" default="/xtend/demo_mode_request" />
+
   <!-- ── Mission ────────────────────────────────────────────────────── -->
   <arg name="target_object"     default="refrigerator" />
   <arg name="start_enabled"     default="true" />
@@ -234,6 +242,8 @@
     <param name="detections_topic"  value="$(arg detections_topic)" />
     <param name="target_topic"      value="$(arg target_topic)" />
     <param name="enable_topic"      value="$(arg enable_topic)" />
+    <param name="demo_mode_topic"         value="$(arg demo_mode_topic)" />
+    <param name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
     <param name="target_object"     value="$(arg target_object)" />
     <param name="start_enabled"     value="$(arg start_enabled)" />
     <param name="n_confirm"         value="$(arg n_confirm)" />

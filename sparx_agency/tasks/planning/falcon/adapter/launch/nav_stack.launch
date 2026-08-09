@@ -1268,6 +1268,29 @@
     <remap from="/transformer/sensor_pose_topic" to="/map_ros/pose"/>
   </node>
 
+  <!-- ══ EXPLORATION MODE (nav_mode:=exploration) ══════════════════════════════
+       exploration_node above computes FALCON's own frontier-driven plan on every
+       mission regardless of nav_mode (auto_start:=true in exploration_manager.yaml);
+       it has just never had anything to fly it. traj_server turns its raw
+       trajectory (/planning/bspline) into a continuous dynamically-feasible
+       setpoint stream (/planning/pos_cmd); falcon_exploration_follower_node.py
+       tracks that setpoint (core.planning.trackers.reference_tracker_3d) and
+       drives cmd_vel_raw the same way every other mode's follower does. Gated to
+       this mode only: astar/combination/hybrid/navdp all have their own follower
+       (waypoint_follower_node.py, disabled above for this mode) driving from a
+       discrete path instead of a continuous reference. -->
+  <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"
+        if="$(eval arg('nav_mode') == 'exploration')" />
+
+  <node pkg="falcon_adapter" type="falcon_exploration_follower_node.py"
+        name="falcon_exploration_follower" output="screen"
+        if="$(eval arg('nav_mode') == 'exploration')">
+    <param name="drone_ns"        value="$(arg drone_ns)" />
+    <param name="cmd_vel_topic"   value="$(arg cmd_vel_raw_topic)" />
+    <param name="demo_mode_topic"         value="$(arg demo_mode_topic)" />
+    <param name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
+  </node>
+
   <node pkg="falcon_adapter" type="bev_publisher_node.py"
         name="bev_publisher" output="screen">
     <param name="frame_id"               value="world" />
@@ -1645,10 +1668,13 @@
   <!-- Path corrector (SAFETY): recentres whichever planner's raw path against the
        BEV and publishes the SAFE path on /path/waypoints_safe (+ /path/waypoints_raw
        echo and /path/forces arrows for the BEV viewer). The trajectory_simplifier
-       below cleans that into the flown /path/waypoints. Always launched; ~enabled
+       below cleans that into the flown /path/waypoints. Always launched (except
+       nav_mode:=exploration, which has no A*/NavDP path to correct; FALCON's own
+       exploration_node + traj_server drive the drone directly); ~enabled
        (=safety_correct) false makes it a verbatim passthrough. -->
   <node pkg="falcon_adapter" type="path_corrector_node.py"
-        name="path_corrector" output="screen">
+        name="path_corrector" output="screen"
+        if="$(eval arg('nav_mode') != 'exploration')">
     <param name="input_path_topic"      value="$(arg planner_path_topic)" />
     <param name="bev_topic"             value="/falcon/bev_2d" />
     <param name="path_topic"            value="/path/waypoints_safe" />
@@ -1689,7 +1715,8 @@
        re-introduces a collision the corrector avoided. ~enabled (=simplify) false
        passes the safe path straight through. -->
   <node pkg="falcon_adapter" type="trajectory_simplifier_node.py"
-        name="trajectory_simplifier" output="screen">
+        name="trajectory_simplifier" output="screen"
+        if="$(eval arg('nav_mode') != 'exploration')">
     <param name="input_path_topic"   value="/path/waypoints_safe" />
     <param name="bev_topic"          value="/falcon/bev_2d" />
     <param name="path_topic"         value="/path/waypoints" />
@@ -1713,7 +1740,8 @@
   </node>
 
   <node pkg="falcon_adapter" type="waypoint_follower_node.py"
-        name="waypoint_follower" output="screen">
+        name="waypoint_follower" output="screen"
+        if="$(eval arg('nav_mode') != 'exploration')">
     <param name="drone_ns"               value="$(arg drone_ns)" />
     <!-- Publish INTO the GO gate, never straight at the drone. -->
     <param name="cmd_vel_topic"          value="$(arg cmd_vel_raw_topic)" />

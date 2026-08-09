@@ -715,14 +715,18 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster Falcon Adapter",
         key="rooster_planner_adapter",
         group="rooster_planner",
-        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running).",
-        # Kept identical to rooster_turn_debug.py's FALCON_LAUNCH_CMD (the
-        # command actually tested live) so the two never drift apart again —
+        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running). Currently nav_mode:=exploration for testing FALCON's own exploration_node; switch back to nav_mode:=astar for normal A* missions.",
+        # Otherwise kept identical to rooster_turn_debug.py's FALCON_LAUNCH_CMD
+        # (the command actually tested live) so the two never drift apart again —
         # this exact arg list is what fixed the 2026-08-03 yaw/turn-direction
         # bugs (yaw_rate) and the BEV-filter false positives (bev_t_on,
         # bev_occ_conf_full, bev_min_wall_run). See LESSONS.md.
         #
-        # nav_mode:=astar (default is "combination" in sphera_drone.launch,
+        # nav_mode is the one deliberate divergence from FALCON_LAUNCH_CMD
+        # (which passes no nav_mode at all, i.e. sphera_drone.launch's own
+        # default) -- currently exploration (2026-08-09, testing FALCON's own exploration_node
+        # + traj_server + falcon_exploration_follower_node.py -- see LESSONS.md).
+        # Was nav_mode:=astar: default is "combination" in sphera_drone.launch,
         # which routes path_corrector through combination_planner_node --
         # that node lazily imports `requests`/PIL and crashes at startup on a
         # falcon-ros:noetic image built before the Dockerfile declared those
@@ -730,11 +734,12 @@ ROBOTICAN_SERVICES: list[Service] = [
         # Launch-All step). With it dead, path_corrector never gets a path
         # and waypoint_follower sits in WAIT_PATH forever -- confirmed live
         # 2026-08-04. astar sidesteps that whole dependency; switch back to
-        # combination only once the image itself is rebuilt.
+        # astar or combination once exploration mode is done being tested
+        # (combination only once the image itself is rebuilt).
         cmd=(
             "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
             "source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter sphera_drone.launch "
-            "map_name:=sphera_jail nav_mode:=astar "
+            "map_name:=sphera_jail nav_mode:=exploration "
             "real_pose_topic:=/R1/localization "
             "real_depth_path_topic:=/R1/depth_frame_path "
             "real_rgb_path_topic:=/R1/rgb_frame_path "
@@ -795,6 +800,10 @@ ROBOTICAN_SERVICES: list[Service] = [
             "cmd_vel_topic:=/cmd_vel_raw pose_topic:=/R1/localization pose_type:=pose_stamped "
             "image_transport:=frame_path rgb_topic:=/R1/rgb_frame_path "
             "depth_topic:=/R1/depth_frame_path "
+            # Without these two, mode requests (including the 'finish' one that
+            # triggers stop->land->disarm) go to object_approach_node.py's own
+            # /xtend/... defaults, which rooster_demo_mode_manager.py never sees.
+            "demo_mode_topic:=/R1/demo_mode demo_mode_request_topic:=/R1/demo_mode_request "
             "fx:=111.837662 fy:=180.0 cx:=269.5 cy:=179.5 img_width:=540 img_height:=360 "
             f"target_object:={_SPHERA_DETECTOR['init_target']} start_enabled:=true "
             "lock_mode:=detector_tracker closure_mode:=multi_axis force_mode:=fixed "
