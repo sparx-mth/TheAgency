@@ -120,3 +120,22 @@ def test_the_log_stays_small(tmp_path):
     log.write(path)
 
     assert path.stat().st_size < 1_000_000
+
+
+def test_an_inference_records_what_the_aircraft_committed_to(tmp_path):
+    """Which half of the plan was a promise, and what ended the last one."""
+    log = TrackLog(goal_xy=(5.0, 0.0), start_xy=(0.0, 0.0))
+    log.add(1.0, (0.0, 0.0, 0.0), np.zeros((24, 2)), (1.0, 0.0),
+            commit_index=12, reason="commitment flown")
+    entry = log.entries[0]
+
+    assert entry["commit"] == 12
+    assert entry["why"] == "commitment flown"
+
+
+def test_an_inference_without_a_commitment_says_nothing_about_one(tmp_path):
+    log = TrackLog(goal_xy=(5.0, 0.0), start_xy=(0.0, 0.0))
+    log.add(1.0, (0.0, 0.0, 0.0), np.zeros((24, 2)), (1.0, 0.0))
+
+    assert "commit" not in log.entries[0]
+    assert "why" not in log.entries[0]

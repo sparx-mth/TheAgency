@@ -17,11 +17,12 @@ point ``~path_topic`` here straight at ``/path/waypoints``. Everything downstrea
 (``waypoint_follower_node`` flying ``/path/waypoints``, ``bev_click_goal_node``
 drawing it) is unchanged.
 
-All the maths is ROS-free and unit-tested in ``core.planning.vlas.navdp``:
-  * pixel + depth -> body-frame point-goal      (geometry.pixel_to_pointgoal)
-  * NavDP HTTP request/response                  (client.NavDPPointgoalClient)
-  * body trajectory -> world path                (geometry.anchor_trajectory_to_world)
-  * body trajectory -> image overlay             (geometry.project_trajectory_to_pixels)
+All the maths is ROS-free and unit-tested under ``core.planning.vlas``:
+  * pixel + depth -> body-frame point-goal      (navdp.geometry.pixel_to_pointgoal)
+  * NavDP HTTP request/response                  (navdp.client.NavDPPointgoalClient)
+  * body trajectory -> world route, and how much of it the drone promised to
+    fly before asking again          (common.plan_commit.PlanCommitExecutor)
+  * body trajectory -> image overlay    (navdp.geometry.project_trajectory_to_pixels)
 This node owns ONLY ROS / UI concerns: subscriptions, the OpenCV window, the
 click handling, intrinsics resolution and publishing the path.
 
@@ -47,11 +48,31 @@ TWO GOAL SOURCES, and the difference between them is why there are two:
   WORLD GOAL (metres).  ``~goal_x/~goal_y``, or the latched ``~goal_topic``
       (``geometry_msgs/Point``) the BEV click and the mission director publish on.
       A world point does NOT move as the drone does, so the node can re-aim it
-      itself: every ``~auto_period_s`` it re-projects the goal into the body frame
-      against the CURRENT pose and re-infers. NavDP only ever accepts a body-frame
-      (forward, left) point-goal, so that re-projection is the entire navigation
-      loop -- as the drone advances, the same world point becomes a nearer,
-      differently-bearing point-goal. Nobody has to press anything.
+      itself: it re-projects the goal into the body frame against the CURRENT
+      pose and re-infers. NavDP only ever accepts a body-frame (forward, left)
+      point-goal, so that re-projection is the entire navigation loop -- as the
+      drone advances, the same world point becomes a nearer, differently-bearing
+      point-goal. Nobody has to press anything.
+
+      **When** it re-infers is a commitment, not a timer. The published prefix
+      is a promise to fly ``~execute_fraction`` of the route, and the next
+      inference waits until the drone has actually flown it -- see
+      :mod:`sparx_agency.core.planning.vlas.common.plan_commit`. A timer cannot
+      know that: at 2 s and a 2.4 m leg it replaces a route the drone is a third
+      of the way along, which resets the follower and means no leg is ever
+      completed. ``~auto_period_s`` survives as the rate *floor*.
+
+      KNOWN LIMITATION of that, and it is a safety one. ``path_corrector_node``
+      is path-triggered: it recentres a route against the BEV when a route
+      arrives, and never in between. Publishing less often therefore re-checks
+      the flown route against the map less often, and none of the commitment's
+      guards looks at the map at all -- they measure the drone against the
+      route, not the route against the world. So in ``nav_mode:=navdp`` an
+      obstacle that appears mid-leg is not noticed until the leg ends. The other
+      modes do not have this exposure (A* owns its own confirmed-collision
+      replan); if you need it here, the guard to add is a BEV-triggered abort
+      alongside ``max_commit_s``, not a shorter ``~auto_period_s`` -- shortening
+      the floor cannot end a commitment, it can only delay one.
 
 SWITCHING BETWEEN THEM is symmetric, and neither needs a restart or a param:
 
@@ -103,10 +124,13 @@ from std_msgs.msg import String
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
 from sparx_agency.core.common.math import se3
 from sparx_agency.core.common.types import Intrinsics
+from sparx_agency.core.planning.vlas.common.plan_commit import (
+    CommitSpec,
+    PlanCommitExecutor,
+)
 from sparx_agency.core.planning.vlas.navdp import (
     NavDPError,
     NavDPPointgoalClient,
-    anchor_trajectory_to_world,
     pixel_to_pointgoal,
     point_to_pointgoal,
     project_trajectory_to_pixels,
@@ -166,7 +190,12 @@ class NavDPClickNode:
         # the drone stops there until the next inference); the FULL trajectory is
         # published on full_path_topic for display only. 1.0 = execute the whole
         # trajectory (legacy behaviour).
-        self.execute_fraction = float(G("~execute_fraction", 1.0))
+        # 0.5, matching every launch file. This is now also the COMMITMENT (see
+        # below), and 1.0 would promise the whole ~4.8 m route including the far
+        # half the policy is least sure of -- which is the one thing the design
+        # says never to promise. 1.0 remains available and still means "publish
+        # and fly the whole route".
+        self.execute_fraction = float(G("~execute_fraction", 0.5))
         self.full_path_topic = G("~full_path_topic", "/path/waypoints_navdp_full")
         self.frame_id = G("~frame_id", "world")
 
@@ -199,8 +228,37 @@ class NavDPClickNode:
         # Stop re-inferring once the goal is this close: NavDP would otherwise keep
         # being asked to reach a point under the drone and jitter around it.
         self.goal_arrive_radius_m = float(G("~goal_arrive_radius_m", 0.5))
-        self._next_auto_t = 0.0
         self._goal_arrived = False
+
+        # ── When to re-infer: a commitment, not a timer ──────────────────
+        # The published prefix is a promise to fly ~execute_fraction of the
+        # route. A timer cannot know whether that promise was kept: at
+        # ~auto_period_s = 2 s and a 2.4 m leg the next route lands while the
+        # drone is a third of the way along the last one, the follower is handed
+        # a new path and resets its progress, and no leg is ever completed. This
+        # measures the drone against the route it published and only asks again
+        # once the near half is behind it. ~auto_period_s stays as the rate
+        # FLOOR, so the cadence is never faster than it used to be.
+        #
+        # max_deviation is generous because the raw NavDP route is not what the
+        # drone flies: path_corrector_node recentres it and the simplifier
+        # rewrites it, so a metre or two of honest disagreement is normal here
+        # and only a gross departure means the route is not being followed.
+        # 30 s, not the simulator's 8. This aircraft cruises at 0.18-0.25 m/s
+        # (nav_stack.launch: dp_cruise_speed 0.18, pp_cruise_speed 0.2,
+        # vel_x 0.25), so a half-route leg of ~2.4 m takes 10-13 s to fly. An
+        # 8 s timeout would therefore fire before FLOWN on EVERY commitment and
+        # quietly turn this back into a timer -- the exact behaviour the
+        # commitment replaces. The timeout is for an aircraft that is stuck, not
+        # one that is merely slow, so it belongs well beyond the honest flight
+        # time of a leg.
+        self.commit_timeout_s = float(G("~commit_timeout_s", 30.0))
+        self.commit_max_deviation_m = float(G("~commit_max_deviation_m", 2.5))
+        self.commit = PlanCommitExecutor(CommitSpec(
+            fraction=self.execute_fraction,
+            max_commit_s=self.commit_timeout_s,
+            max_deviation_m=self.commit_max_deviation_m,
+            min_period_s=self.auto_period_s))
 
         # Window layout. "full" = RGB + colorized depth + snapshot/overlay panels
         # (the legacy 3-up view). "rgb_only" = just the live RGB panel to click on,
@@ -376,11 +434,22 @@ class NavDPClickNode:
         goal only took effect at some later, unrelated keypress.
         """
         goal = (float(msg.x), float(msg.y))
-        if goal != self.world_goal:
-            rospy.loginfo("NavDP world goal := (%.2f, %.2f)", goal[0], goal[1])
+        # A commitment is a promise to fly toward the OLD goal, so a retarget
+        # ends it, and so does re-arming an arrived one. Reset also clears the
+        # rate floor, so the new goal is acted on at the next tick rather than
+        # up to ~auto_period_s later.
+        #
+        # Only on those two, though. This topic is LATCHED and the mission
+        # director republishes; resetting on every message -- including an
+        # identical goal arriving mid-leg -- would wipe the standing commitment
+        # and its progress each time, which is per-frame inference again by
+        # another route.
+        if goal != self.world_goal or self._goal_arrived:
+            if goal != self.world_goal:
+                rospy.loginfo("NavDP world goal := (%.2f, %.2f)", goal[0], goal[1])
+            self.commit.reset()
         self.world_goal = goal
         self._goal_arrived = False   # a new goal always re-arms inference
-        self._next_auto_t = 0.0      # ...and acts on the next tick, not in 2 s
         if self.click_px is not None:
             rospy.loginfo("NavDP: world goal supersedes the camera click "
                           "-- switching to hands-off mode")
@@ -444,21 +513,32 @@ class NavDPClickNode:
             return None
 
         ox, oy, oyaw = pose_xyyaw
-        full_world = anchor_trajectory_to_world(traj, ox, oy, oyaw)
+        # The commitment and the published prefix are the same thing, defined
+        # once: the executor anchors the body trajectory at the pose the frame
+        # was snapshotted with and marks where ~execute_fraction of it ends.
+        # world_xy[0] is that anchor -- the drone itself -- so the route to
+        # publish is everything after it.
+        plan = self.commit.commit(traj, pose_xyyaw, rospy.get_time())
+        full_world = plan.world_xy[1:]
         n = len(full_world)
         # Execute only the near prefix (NavDP drifts further out); display the rest.
-        # max(2, ...) keeps a flyable path; the follower holds at its last waypoint,
-        # so the drone stops at the prefix end until the next ENTER re-infers.
-        k = n if self.execute_fraction >= 1.0 else min(n, max(2, int(round(n * self.execute_fraction))))
+        # max(2, ...) keeps a flyable path -- one waypoint is a point, not a leg --
+        # and is the single case where the published prefix is longer than the
+        # commitment, by exactly one waypoint of a route so short that
+        # min_commit_m will end the commitment on the next tick anyway. The
+        # follower holds at its last waypoint, so the drone stops at the prefix
+        # end until the commitment is flown.
+        k = n if self.execute_fraction >= 1.0 else min(n, max(2, plan.commit_index))
         stamp = rospy.Time.now()
         self.pub_path.publish(self._make_path(full_world[:k], stamp))   # flown prefix
         self.pub_full.publish(self._make_path(full_world, stamp))       # display full
         self.n_published += 1
         end = traj[-1]
-        rospy.loginfo("NavDP PUBLISHED: execute %d/%d waypoints (full route on %s)  "
-                      "body_end=(%.2f, %.2f)  anchored@(%.2f, %.2f, %.0fdeg)",
-                      k, n, self.full_path_topic, float(end[0]), float(end[1]),
-                      ox, oy, np.degrees(oyaw))
+        rospy.loginfo("NavDP PUBLISHED: execute %d/%d waypoints (%.1fm to fly, "
+                      "full route on %s)  body_end=(%.2f, %.2f)  "
+                      "anchored@(%.2f, %.2f, %.0fdeg)",
+                      k, n, plan.commit_arc_m, self.full_path_topic,
+                      float(end[0]), float(end[1]), ox, oy, np.degrees(oyaw))
         return traj
 
     def _make_path(self, world_xy, stamp):
@@ -602,10 +682,17 @@ class NavDPClickNode:
             # by the standing world goal until 'r' clears it.
             if (self.auto_infer and self.click_px is None
                     and self.world_goal is not None and not self._goal_arrived
-                    and self.pose_xyyaw is not None
-                    and time.time() >= self._next_auto_t):
-                self._next_auto_t = time.time() + self.auto_period_s
-                self.infer_world_goal(rgb.copy(), depth.copy(), self.pose_xyyaw)
+                    and self.pose_xyyaw is not None):
+                now = rospy.get_time()
+                tick = self.commit.tick(self.pose_xyyaw[0], self.pose_xyyaw[1], now)
+                if tick.replan_reason is not None:
+                    # Marked before the blocking HTTP call, so a slow or dead
+                    # server costs one period rather than becoming the period.
+                    self.commit.mark_attempt(now)
+                    rospy.loginfo("NavDP re-infer: %s (%.1f of %.1fm flown, "
+                                  "%.1fm off route)", tick.replan_reason,
+                                  tick.arc_m, tick.commit_arc_m, tick.lateral_m)
+                    self.infer_world_goal(rgb.copy(), depth.copy(), self.pose_xyyaw)
 
             key = cv2.waitKey(30) & 0xFF
             if key in (ord('q'), 27):
@@ -613,6 +700,11 @@ class NavDPClickNode:
             if key == ord('r'):
                 self.click_px = None
                 snap_vis = None
+                # The other half of the mode switch _goal_cb handles: dropping
+                # the click hands the node back to the world goal, and the
+                # standing commitment was a promise toward the CLICK. Keeping it
+                # would have the world goal inherit a leg aimed somewhere else.
+                self.commit.reset()
             elif key in (13, 32):                       # ENTER / SPACE
                 # NB: never `x or snap_vis` -- _on_enter returns an ndarray on
                 # success, and bool(ndarray) raises. Keep the last snapshot on
@@ -690,7 +782,7 @@ class NavDPClickNode:
             L("  execute   = whole trajectory")
         else:
             L("  execute   = first %.0f%% of the trajectory (hold at the prefix end "
-              "until the next ENTER)", 100.0 * self.execute_fraction)
+              "until it has been flown)", 100.0 * self.execute_fraction)
         L("  display   = %s", self.display_mode)
         if self.world_goal is not None:
             L("  world goal= (%.2f, %.2f)  (re-aimed every inference)",
@@ -698,8 +790,11 @@ class NavDPClickNode:
         L("  goal  in  = %s  (world Point; a camera click overrides it)",
           self.goal_topic or "(none)")
         if self.auto_infer:
-            L("  auto      = re-infer every %.1fs toward the world goal, until "
-              "within %.2fm of it", self.auto_period_s, self.goal_arrive_radius_m)
+            L("  auto      = re-infer once the published leg has been flown, "
+              "never faster than %.1fs, until within %.2fm of the goal",
+              self.auto_period_s, self.goal_arrive_radius_m)
+            L("  commit    = give up on a leg after %.1fs or %.1fm off route",
+              self.commit_timeout_s, self.commit_max_deviation_m)
         else:
             L("  auto      = OFF -- every inference needs an ENTER")
         L("  intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f  (%dx%d)",
@@ -751,12 +846,19 @@ if __name__ == "__main__":
 #       ~goal_x ~goal_y ('' = unset; a fixed goal from the config file)
 #       ~auto_infer (true; re-infer toward the world goal with no ENTER. A pending
 #         camera click always wins -- press r to hand the node back.)
-#       ~auto_period_s (2.0; seconds between auto re-inferences. Pair with
-#         ~execute_fraction so a leg is roughly flown before the next one lands.)
+#       ~auto_period_s (2.0; the rate FLOOR, seconds. Re-inference is triggered by
+#         the published leg having been FLOWN, not by a timer; this only stops a
+#         fast server from being asked again immediately after a short leg.)
 #       ~goal_arrive_radius_m (0.5; stop re-inferring within this of the goal)
 #   execution: ~execute_fraction (1.0; fly only the first fraction of the route,
-#       then hold at the prefix end until the next ENTER re-infers -- NavDP is
-#       accurate near the camera and drifts further out. 0.5 = first half.)
+#       then hold at the prefix end until it has been flown -- NavDP is accurate
+#       near the camera and drifts further out. 0.5 = first half.)
+#   commitment (core/planning/vlas/common/plan_commit; the guards that stop a leg
+#       the drone cannot fly from stalling the mission):
+#       ~commit_timeout_s (8.0; abandon a leg that has taken this long)
+#       ~commit_max_deviation_m (2.5; abandon a leg the drone is this far off.
+#         Generous on purpose: the corrector and simplifier rewrite the route
+#         between here and the follower, so honest disagreement is metres.)
 #   camera (MUST match the live depth frames; the launch wires these to
 #       the shared cam_* args): ~fx ~fy ~cx ~cy ~img_width (504) ~img_height (294)
 #       [real-XTEND raw-K defaults; sim uses sim_adapter's P-target via cam_*]

@@ -12,7 +12,8 @@ Layout -- one directory per policy, all platform-agnostic::
       interfaces/   the NavigationPolicy contract + goal modality types
       registry.py   name -> policy factory (lazy; heavy deps never imported here)
       common/       shared, VLA-agnostic runtime: errors, image codec, HTTP base,
-                    and the single TensorRT engine runner
+                    the single TensorRT engine runner, and plan_commit -- fly
+                    one prediction as a route before asking for another
       navdp/        point-goal diffusion policy    (client + geometry + trt/)
       flownav/      image-goal flow-matching policy (client + preprocess + trt/)
       internvla_n1/ dual-system VLN policy          (client + types)

@@ -848,7 +848,7 @@
   <arg name="navdp_img_height"         default="$(arg cam_height)" />
   <arg name="navdp_render_cam_height"  default="0.5" /><!-- overlay-only ground-plane height (snapshot panel); 0.5m keeps the near waypoints in-frame at flight altitude. <=0 tracks live altitude; lower pulls in more near waypoints -->
   <arg name="navdp_depth_max_m"        default="5.0" /><!-- depth clip before uint16 encoding (server contract; do NOT exceed 6.55) -->
-  <arg name="navdp_execute_fraction"   default="0.5" /><!-- fly only the first fraction of the NavDP route, then hold at the prefix end until the next ENTER re-infers (NavDP is accurate near the camera, drifts further out). 1.0 = whole route -->
+  <arg name="navdp_execute_fraction"   default="0.5" /><!-- fly only the first fraction of the NavDP route, then hold at the prefix end until that leg has been FLOWN (NavDP is accurate near the camera, drifts further out). This prefix IS the commitment: nothing re-infers until the drone has flown it, or one of the navdp_commit_* guards gives up on it. 1.0 = whole route -->
   <arg name="navdp_full_path_topic"    default="/path/waypoints_navdp_full" /><!-- the FULL route, display-only (BEV viewer draws it blue-dashed while the near prefix flies) -->
   <arg name="navdp_display_mode"       default="full" /><!-- full = RGB + depth + snapshot panels | rgb_only = just the clickable RGB panel (lighter) -->
   <!-- nav_mode:=navdp, WORLD-GOAL mode. A camera click is a goal in the IMAGE, so it
@@ -861,7 +861,9 @@
        as the drone advances the same world point becomes a nearer, differently-bearing
        point-goal. Set navdp_auto_infer:=false for the old click-and-ENTER-only node. -->
   <arg name="navdp_auto_infer"           default="true" /><!-- re-infer toward the world goal without an operator ENTER -->
-  <arg name="navdp_auto_period_s"        default="2.0" /><!-- s between auto re-inferences; pair with navdp_execute_fraction so a leg is roughly flown before the next one lands -->
+  <arg name="navdp_auto_period_s"        default="2.0" /><!-- the rate FLOOR, seconds. Re-inference is triggered by the published leg having been FLOWN (core/planning/vlas/common/plan_commit), not by a timer; this only stops a fast server being asked again straight after a short leg -->
+  <arg name="navdp_commit_timeout_s"     default="30.0" /><!-- abandon a leg that has taken this long: yawing in place, blocked, or fighting wind. Sized against the airframe, NOT the simulator: at dp_cruise_speed 0.18 m/s a half-route leg of ~2.4m honestly takes 10-13 s, so anything near that fires before the leg is flown and turns the commitment back into a timer -->
+  <arg name="navdp_commit_max_deviation_m" default="2.5" /><!-- abandon a leg the drone is this far off. Generous on purpose: path_corrector and the simplifier rewrite the route between navdp_click and the follower, so metres of honest disagreement are normal -->
   <arg name="navdp_goal_arrive_radius_m" default="0.5" /><!-- stop re-inferring within this of the goal, else NavDP is asked to reach a point under the drone and jitters. -->
 
   <!-- ══════════════════════════════════════════════════════════════
@@ -1455,6 +1457,8 @@
     <param name="goal_y"            value="$(arg goal_y)" if="$(eval arg('goal_y') != '')" />
     <param name="auto_infer"           value="$(arg navdp_auto_infer)" />
     <param name="auto_period_s"        value="$(arg navdp_auto_period_s)" />
+    <param name="commit_timeout_s"     value="$(arg navdp_commit_timeout_s)" />
+    <param name="commit_max_deviation_m" value="$(arg navdp_commit_max_deviation_m)" />
     <param name="goal_arrive_radius_m" value="$(arg navdp_goal_arrive_radius_m)" />
   </node>
 

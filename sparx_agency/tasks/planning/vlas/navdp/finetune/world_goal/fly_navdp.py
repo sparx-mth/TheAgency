@@ -13,6 +13,31 @@ compounding over a hundred inferences until the aircraft is against a wall. This
 can, because the policy's output becomes the aircraft's motion and the next
 observation.
 
+**The aircraft commits to a plan before asking for another one.** Training and
+offline scoring are frame-by-frame, and flying that way -- re-inferring on a
+timer and steering at whatever the newest prediction says -- means the aircraft
+executes the first third of a metre of every plan and no more, so the route the
+policy actually predicted never gets flown. Instead one prediction is anchored
+where it was made and flown as a route until roughly half of it is behind the
+aircraft; only then is the policy asked again. ``--infer-hz`` is now a rate
+*ceiling* rather than a schedule. The rule, and the guards that keep a
+commitment from becoming a trap, live in
+:mod:`sparx_agency.core.planning.vlas.common.plan_commit`.
+
+**And it is flown by the expert's own follower.** The committed route goes
+straight into :class:`~sparx_agency.tasks.planning.sim_flight_recording.path_follower.PathFollower`
+with the ``FollowSpec`` the demonstrations were collected under -- Hermite
+smoothing, a speed- and curvature-scaled carrot, an integrated rate-limited
+heading aimed ``yaw_lookahead`` *beyond* that carrot, and a stop-and-pivot for
+corners too sharp to fly through. This loop used to hand-roll all of that and
+got two things wrong that the collection follower had already solved: it aimed
+the nose at the carrot, which ``FollowSpec.yaw_lookahead`` documents as the
+cause of the flown path weaving from side to side, and it slewed the yaw
+setpoint from the measured pose instead of the previous command, which held the
+achieved turn rate to 0.6 deg/s against the 40 deg/s asked for. Flying the
+policy's route the way the expert's route is flown is also the only way the
+comparison means anything.
+
 The policy runs on the **host**, not here. Isaac's Python has torch but not
 ``diffusers``, and NavDP's scheduler needs it; rather than mutate the container,
 inference is served over the HTTP contract this repo already uses for NavDP
@@ -49,58 +74,16 @@ CRUISE_SPEED_MPS = 1.0
 LOOKAHEAD_M = 1.2
 INFER_HZ = 3.0
 GOAL_TOLERANCE_M = 1.5
-MAX_YAW_RATE_DPS = 60.0
 STALL_DISTANCE_M = 0.6
 STALL_WINDOW_S = 20.0
 SECONDS_PER_METRE = 5.0
 FIXED_OVERHEAD_S = 60.0
 COLLISION_CLEARANCE_M = 0.05     # airframe centre this close to geometry = a hit
-
-
-def carrot(trajectory: np.ndarray, lookahead_m: float) -> Tuple[float, float]:
-    """The point ``lookahead_m`` along a body-frame trajectory.
-
-    NavDP returns 24 waypoints covering a few metres; chasing the last one cuts
-    every corner it just planned, and chasing the first one crawls. A carrot at
-    a fixed arc length is the standard middle, and it is what every other
-    follower in this repo does.
-    """
-    path = np.asarray(trajectory, dtype=np.float64)[:, :2]
-    steps = np.linalg.norm(np.diff(path, axis=0, prepend=np.zeros((1, 2))), axis=1)
-    along = np.cumsum(steps)
-    if along[-1] <= 1e-6:
-        return 0.0, 0.0
-    target = min(lookahead_m, float(along[-1]))
-    return (float(np.interp(target, along, path[:, 0])),
-            float(np.interp(target, along, path[:, 1])))
-
-
-def velocity_to(position, target_xy, current_yaw: float, altitude_m: float,
-                cruise_mps: float) -> Tuple[float, float, float]:
-    """World-frame velocity along the current heading, speed capped at cruise.
-
-    Points the velocity vector at ``current_yaw``, not straight at
-    ``target_xy``: a holonomic quad that flies wherever the target is
-    regardless of where it's facing crabs sideways through every turn
-    instead of yawing to face it first. Scaling speed by how well
-    ``current_yaw`` already matches the bearing to the target (``cos`` of
-    the heading error, clamped so it can't run in reverse) slows a sharp
-    turn to a yaw-in-place and lets it pick speed back up smoothly once
-    aligned -- see the identical fix in
-    ``core/planning/trackers/pure_pursuit/algorithm.compute_velocity_3d``,
-    which this mirrors for the same reason.
-    """
-    from sparx_agency.core.common.types.geometry import normalize_angle
-
-    dx = float(target_xy[0]) - float(position[0])
-    dy = float(target_xy[1]) - float(position[1])
-    distance = math.hypot(dx, dy)
-    vz = 0.8 * (altitude_m - float(position[2]))
-    if distance < 1e-3:
-        return 0.0, 0.0, vz
-    heading_error = normalize_angle(math.atan2(dy, dx) - current_yaw)
-    speed = min(cruise_mps, 1.2 * distance) * max(0.0, math.cos(heading_error))
-    return speed * math.cos(current_yaw), speed * math.sin(current_yaw), vz
+COMMIT_FRACTION = 0.5            # fly half a prediction before asking for another
+COMMIT_TIMEOUT_S = 8.0
+MIN_COMMIT_M = 0.4
+MAX_DEVIATION_M = 2.0
+SEARCH_DWELL_S = 2.0             # look this long before trying another heading
 
 
 def sample_missions(world_map, seed: int, count: int, spec) -> List:
@@ -145,6 +128,7 @@ def _empty_result(mission, start, outcome: str, detail: str = "") -> Dict:
         "path_len_m": 0.0,
         "duration_s": 0.0,
         "inferences": 0,
+        "commitments": 0,
         "transport_failures": 0,
     }
 
@@ -164,14 +148,23 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
         clearance the aircraft actually achieved against the surveyed map,
         collisions, path length and duration.
     """
+    from sparx_agency.core.planning.vlas.common.plan_commit import (
+        CommitSpec, PlanCommitExecutor,
+    )
+    from sparx_agency.core.planning.vlas.common.yaw_search import (
+        YawSearch, YawSearchSpec,
+    )
     from sparx_agency.core.planning.vlas.navdp.geometry import (
         point_to_pointgoal, world_to_body_2d,
     )
+    from sparx_agency.core.common.types import Pose3D
     from sparx_agency.tasks.planning.sim_flight_recording.episode import (
         CRASH_HOLD_S, CRASH_TILT_DEG, TAKEOFF_TOLERANCE_M, arm_for_offboard,
         attitude_deg, hold_velocity, slew_towards,
     )
-    from sparx_agency.tasks.planning.sim_flight_recording.path_follower import FollowSpec
+    from sparx_agency.tasks.planning.sim_flight_recording.path_follower import (
+        FollowSpec, PathFollower, build_trajectory,
+    )
 
     vehicle = adapter.vehicle
     goal = (mission.goal.x, mission.goal.y)
@@ -188,10 +181,29 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
 
     budget = FIXED_OVERHEAD_S + SECONDS_PER_METRE * mission.separation_m
     deadline = loop.sim_time + budget
-    infer_period = 1.0 / max(args.infer_hz, 0.1)
-    next_infer = 0.0
+    # One prediction at a time, flown as a route. --infer-hz becomes the ceiling
+    # this can ask at, not the rate it asks at.
+    executor = PlanCommitExecutor(CommitSpec(
+        fraction=args.commit_fraction,
+        lookahead_m=args.lookahead,
+        min_commit_m=args.min_commit,
+        max_commit_s=args.commit_timeout,
+        max_deviation_m=args.max_deviation,
+        min_period_s=1.0 / max(args.infer_hz, 0.1)))
     target_world = (float(start[0]), float(start[1]))
+    # Two headings, and the difference between them is the whole yaw law: the
+    # TARGET is where the route says to point, the COMMAND is the setpoint sent
+    # to PX4, which is only ever allowed to move turn_yaw_rate per step away
+    # from where it already was.
     yaw_command = mission.start.yaw
+    # Where to hold when there is no route to fly. Latched at the moment the
+    # aircraft runs out of plan, so a stopped policy parks it where it stopped
+    # rather than letting it slide; cleared as soon as there is a route again.
+    hold_xy = None                          # type: Optional[Tuple[float, float]]
+    # Dwell long enough on each heading to actually ask from it: inference is
+    # gated by the rate floor AND by the render tick, so a couple of seconds is
+    # a handful of questions rather than none.
+    searcher = YawSearch(YawSearchSpec(dwell_s=args.search_dwell))
     track: List[Tuple[float, float]] = []
     tilted_since: Optional[float] = None
     stall_reference = (float(start[0]), float(start[1]), loop.sim_time)
@@ -202,13 +214,34 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
     # NavDP inference immediately would have it steering while the airframe is
     # still climbing through ground effect and out of takeoff attitude, so
     # inference is held off until the aircraft is at cruise altitude; the climb
-    # itself already happens for free via velocity_to()'s vz term below.
+    # itself already happens for free: hold_velocity climbs to `altitude`.
     climbed = False
     # Where to hold while climbing: where the aircraft actually is, not the
     # mission's nominal start, so the hold cannot fight a spawn offset.
     takeoff_xy = (float(start[0]), float(start[1]))
-    hold_spec = FollowSpec(cruise_speed=args.cruise,
-                           max_speed=max(args.cruise * 1.25, args.cruise + 0.2))
+    # The SAME flight parameters the expert demonstrations were collected with,
+    # so a NavDP route is flown the way an expert route was. Everything except
+    # the speeds is left at the collection defaults on purpose -- each of them
+    # was tuned against recorded flights and is documented in FollowSpec.
+    follow_spec = FollowSpec(cruise_speed=args.cruise,
+                             max_speed=max(args.cruise * 1.25, args.cruise + 0.2))
+
+    def build_follower(plan, from_yaw):
+        """A follower for a freshly committed route, starting under the aircraft.
+
+        The WHOLE prediction is handed over, not just the committed half: the
+        carrot and, more importantly, ``yaw_lookahead`` need route ahead of the
+        commit point to aim at. The commitment governs when to ask the policy
+        again; it is not a fence the follower has to see.
+        """
+        waypoints = [(float(px), float(py), altitude, 0.0)
+                     for px, py in plan.world_xy[1:]]
+        return PathFollower(
+            build_trajectory(Pose3D(plan.anchor[0], plan.anchor[1], altitude,
+                                    float(from_yaw)), waypoints, follow_spec),
+            follow_spec, initial_yaw=float(from_yaw))
+
+    follower = None
     # The clock the recording, the chase camera and the flown track all start on.
     # Read before the first step so it is the instant of track[0], which is what
     # a map panel needs to line itself up against the video.
@@ -219,59 +252,147 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
         position = vehicle.state.position
         pose = adapter.pose_flu()
         track.append((float(position[0]), float(position[1])))
+        # Re-derived every step: a stale flag would keep the stall detector
+        # disarmed for the rest of the flight.
+        turning = looking = False
 
         if not climbed and position[2] >= altitude - TAKEOFF_TOLERANCE_M:
             climbed = True
-            # Don't charge the climb time against the first inference's period,
-            # and don't let the stall check fire for time spent only climbing.
-            next_infer = loop.sim_time
+            # Don't let the stall check fire for time spent only climbing.
             stall_reference = (float(position[0]), float(position[1]), loop.sim_time)
 
         if rendered and recorder is not None:
             recorder.capture(stamp_s=loop.sim_time)
 
-        if climbed and rendered and loop.sim_time >= next_infer:
-            next_infer = loop.sim_time + infer_period
-            frame = adapter.capture_frame(stamp_s=loop.sim_time)
-            forward, left = world_to_body_2d(goal[0], goal[1], pose[0], pose[1], pose[2])
-            gx, gy = point_to_pointgoal(forward, left)
-            result = client.pointgoal_step(
-                np.ascontiguousarray(frame.rgb[:, :, :3]), frame.depth, gx, gy,
-                altitude=altitude)
-            inferences += 1
-            trajectory = None
-            if result is None:
-                transport_failures += 1
-            else:
-                trajectory = client.best_trajectory(result)
-                body = carrot(trajectory, args.lookahead)
-                cos, sin = math.cos(pose[2]), math.sin(pose[2])
-                target_world = (pose[0] + body[0] * cos - body[1] * sin,
-                                pose[1] + body[0] * sin + body[1] * cos)
-                if math.hypot(body[0], body[1]) > 0.15:
-                    yaw_command = math.atan2(target_world[1] - pose[1],
-                                             target_world[0] - pose[0])
-            if track_log is not None:
-                track_log.add(loop.sim_time, pose, trajectory, target_world)
-
         if climbed:
-            vx, vy, vz = velocity_to(position, target_world, pose[2], altitude,
-                                     args.cruise)
+            # Progress along the standing commitment, and whether it is over.
+            # Evaluated every control step, not every render: the carrot has to
+            # advance with the aircraft or the route is not being followed, it
+            # is being aimed at.
+            tick = executor.tick(pose[0], pose[1], loop.sim_time)
+            if rendered and tick.replan_reason is not None:
+                # Why this inference happened, kept before the tick is refreshed
+                # below -- it is the one line that says whether the commitment
+                # was flown or abandoned.
+                reason = tick.replan_reason
+                # Marked before the request, so a dropped inference still costs
+                # a period and a dead server is not asked 250 times a second.
+                executor.mark_attempt(loop.sim_time)
+                frame = adapter.capture_frame(stamp_s=loop.sim_time)
+                forward, left = world_to_body_2d(goal[0], goal[1],
+                                                 pose[0], pose[1], pose[2])
+                gx, gy = point_to_pointgoal(forward, left)
+                result = client.pointgoal_step(
+                    np.ascontiguousarray(frame.rgb[:, :, :3]), frame.depth, gx, gy,
+                    altitude=altitude)
+                inferences += 1
+                trajectory = None
+                if result is None:
+                    transport_failures += 1
+                else:
+                    trajectory = client.best_trajectory(result)
+                    # Anchored at the pose the frame was captured from: `pose`
+                    # was read at the top of this step, and nothing has moved
+                    # the aircraft since, so it is the pose behind this image.
+                    # Anchoring anywhere later lays the route down ahead of
+                    # where the policy actually looked.
+                    plan = executor.commit(trajectory, pose, loop.sim_time)
+                    tick = executor.tick(pose[0], pose[1], loop.sim_time)
+                    # A prediction with no length is a route of identical
+                    # points, and build_trajectory rightly refuses to smooth
+                    # one -- so check before asking rather than losing a
+                    # four-minute flight to the policy saying "stop". No
+                    # follower means the hold below takes over, which is the
+                    # correct response to a policy that has stopped.
+                    follower = (build_follower(plan, pose[2])
+                                if plan.total_arc_m >= args.min_commit else None)
+                if track_log is not None:
+                    track_log.add(loop.sim_time, pose, trajectory,
+                                  tick.target or target_world,
+                                  commit_index=(executor.plan.commit_index
+                                                if trajectory is not None else None),
+                                  reason=reason)
+            if tick.target is not None:
+                target_world = tick.target
+
+            # Nothing worth flying is a POSITION HOLD, not a zero velocity. A
+            # policy that has stopped -- and the pretrained one stops on most
+            # frames -- leaves a route with no length, so the follower is handed
+            # a route it is already at the end of and commands nothing. PX4 is in
+            # velocity control: "command nothing" has no position feedback, so
+            # momentum and estimator bias are never corrected and the aircraft
+            # slides. Measured on a real flight: 5.3 m of net drift over 79 s
+            # while every one of 198 predictions said stop. That drift then
+            # moves the aircraft into geometry it never chose to approach and
+            # poisons every clearance number the mission reports.
+            #
+            # This is the same one-sidedness the climb below documents, in the
+            # same file, for the same reason -- it was simply never applied to
+            # the case where the *policy* has nothing to say.
+            flyable = follower is not None and tick.commit_arc_m >= args.min_commit
+            if flyable:
+                # The expert's own follower, on the policy's route: a Hermite
+                # spline through the prediction, a speed- and curvature-scaled
+                # carrot along it, the heading aimed yaw_lookahead AHEAD of that
+                # carrot, and a stop-and-pivot when the corner is too sharp to
+                # fly through. Aiming the nose at the carrot instead is what
+                # made the collected flights weave -- FollowSpec.yaw_lookahead
+                # documents that, and it is the same mistake this loop made.
+                follow = follower.update(position, pose[2],
+                                         vehicle.state.linear_velocity, loop.dt)
+                turning = follow.turning
+                if follow.done:
+                    flyable = False     # route flown out; hold rather than coast
+                else:
+                    hold_xy = None
+                    searcher.reset()    # a route means the looking worked
+                    vx, vy, vz = follow.velocity
+                    yaw_command = follow.yaw
+            if not flyable:
+                if hold_xy is None:
+                    hold_xy = (float(position[0]), float(position[1]))
+                vx, vy, vz = hold_velocity(
+                    position, (hold_xy[0], hold_xy[1], altitude), follow_spec)
+                # Hold the POSITION and SWEEP the heading until the policy can
+                # see somewhere to go. A forward-looking policy asked about a
+                # view with no route in it answers "stop", correctly; asking it
+                # the same question forever is the bug. Holding the heading as
+                # well as the position guarantees exactly that, and it
+                # deadlocked both arms for a whole flight budget on the mission
+                # that spawns with the goal 116 degrees off the nose.
+                #
+                # The sweep looks at the goal first and widens either side --
+                # see core/planning/vlas/common/yaw_search. Turning on the spot
+                # costs nothing and risks nothing, and unlike the drift this
+                # replaced it does not fake progress while doing it.
+                yaw_command = slew_towards(
+                    yaw_command,
+                    searcher.heading(
+                        math.atan2(goal[1] - pose[1], goal[0] - pose[0]),
+                        pose[2], loop.sim_time),
+                    follow_spec.turn_yaw_rate, loop.dt)
+                # A first look around is deliberate, and it takes longer than
+                # the stall window; only once every heading has been tried and
+                # none produced a route is a stationary aircraft really stuck.
+                looking = searcher.sweeps == 0
         else:
             # Station-keep over the take-off point until the aircraft is at cruise
-            # altitude. velocity_to is a *travel* law: it points the velocity along
-            # the current heading and scales it by the cosine of the heading error,
-            # so drift into the rear hemisphere is corrected at exactly zero speed.
-            # As a position hold that is one-sided, and it let the aircraft wander
-            # 3.5 m off the take-off point during the climb -- before a single
-            # inference, so NavDP's first observation came from somewhere the
-            # mission never chose. hold_velocity flies at the point regardless of
-            # heading, which is what "stay put" needs; it is the same law
-            # episode.py has always used for its own climb.
+            # altitude. hold_velocity flies AT the point regardless of heading,
+            # which is what "stay put" needs and what a travel law cannot do:
+            # anything that scales speed by the cosine of the heading error
+            # corrects drift into the rear hemisphere at exactly zero speed, and
+            # that one-sidedness let the aircraft wander 3.5 m off the take-off
+            # point during the climb -- before a single inference, so NavDP's
+            # first observation came from somewhere the mission never chose.
             vx, vy, vz = hold_velocity(position, (takeoff_xy[0], takeoff_xy[1],
-                                                  altitude), hold_spec)
-        yaw_command = slew_towards(pose[2], yaw_command,
-                                   math.radians(MAX_YAW_RATE_DPS), loop.dt)
+                                                  altitude), follow_spec)
+        # yaw_command comes from the follower, which INTEGRATES its own
+        # rate-limited yaw rate. Nothing here slews it: this loop used to, from
+        # the measured pose rather than the previous command, which capped the
+        # setpoint 0.24 deg ahead of the aircraft at a 250 Hz step and held the
+        # achieved turn rate to 0.6 deg/s against the 40 deg/s asked for. While
+        # holding position the command simply stands still, which is what a hold
+        # wants.
         px4.send_velocity_world(vx, vy, vz, yaw_command)
 
         if math.hypot(position[0] - goal[0], position[1] - goal[1]) < args.goal_tolerance:
@@ -288,7 +409,11 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
             tilted_since = None
 
         moved = math.hypot(position[0] - stall_reference[0], position[1] - stall_reference[1])
-        if moved > STALL_DISTANCE_M:
+        if moved > STALL_DISTANCE_M or turning or looking:
+            # `turning` is the follower deliberately holding position to pivot
+            # onto a corner too sharp to fly through. It is not a wedged
+            # aircraft, and FollowSpec says so in as many words -- treating it
+            # as one would call every hard turn a stall.
             stall_reference = (float(position[0]), float(position[1]), loop.sim_time)
         elif loop.sim_time - stall_reference[2] > STALL_WINDOW_S:
             outcome = "stalled"
@@ -314,6 +439,7 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
         "path_len_m": float(steps.sum()),
         "duration_s": float(len(track) * loop.dt),
         "inferences": inferences,
+        "commitments": executor.commitments,
         "transport_failures": transport_failures,
     }
 
@@ -339,7 +465,26 @@ def main() -> None:
     parser.add_argument("--worker", type=int, default=0)
     parser.add_argument("--cruise", type=float, default=CRUISE_SPEED_MPS)
     parser.add_argument("--lookahead", type=float, default=LOOKAHEAD_M)
-    parser.add_argument("--infer-hz", type=float, default=INFER_HZ)
+    parser.add_argument("--infer-hz", type=float, default=INFER_HZ,
+                        help="rate CEILING on the policy, not a schedule. The "
+                             "commitment decides when to ask again; this only "
+                             "stops 'when' from being 'every render'")
+    parser.add_argument("--commit-fraction", type=float, default=COMMIT_FRACTION,
+                        help="share of each prediction the aircraft flies before "
+                             "asking again. 0.5 of NavDP's 24 waypoints commits "
+                             "through waypoint 12, about 2.4 m")
+    parser.add_argument("--commit-timeout", type=float, default=COMMIT_TIMEOUT_S,
+                        help="abandon a commitment that has taken this long "
+                             "(seconds): yawing in place, blocked, or stuck")
+    parser.add_argument("--min-commit", type=float, default=MIN_COMMIT_M,
+                        help="a commitment shorter than this is a predicted stop, "
+                             "not a route; ask again instead of crawling")
+    parser.add_argument("--max-deviation", type=float, default=MAX_DEVIATION_M,
+                        help="abandon a commitment the aircraft is this far off")
+    parser.add_argument("--search-dwell", type=float, default=SEARCH_DWELL_S,
+                        help="when the policy will not move, how long to hold "
+                             "each heading of the look-around sweep before "
+                             "trying the next. Must cover several inferences")
     parser.add_argument("--goal-tolerance", type=float, default=GOAL_TOLERANCE_M)
     parser.add_argument("--video", action="store_true")
     # campaign_setup.bring_up reads all of these off the namespace, so they have
@@ -469,7 +614,9 @@ def main() -> None:
             results.append(result)
             print(f"[fly] mission {result['mission']}: {result['outcome']}  "
                   f"min_clear {result['min_clear_m']:.2f} m  "
-                  f"goal_error {result['goal_error_m']:.2f} m", flush=True)
+                  f"goal_error {result['goal_error_m']:.2f} m  "
+                  f"{result['commitments']} plans over "
+                  f"{result['path_len_m']:.1f} m", flush=True)
             # Written every mission, not at the end: a run that dies on mission
             # five should not also lose the four that flew. One-mission runs get
             # their own file so that twenty sessions in the same directory

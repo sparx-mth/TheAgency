@@ -44,6 +44,13 @@ vlas/
 Shared, because it was literally duplicated: the TensorRT engine runner, the PNG
 codec, the HTTP plumbing, the error base.
 
+Shared for the opposite reason — because it would otherwise be duplicated the
+moment a second policy flies: [`common/plan_commit/`](common/plan_commit/README.md),
+which commits to one prediction and flies it as a route before asking for
+another. Every policy here answers per frame and every aircraft flies a route;
+the piece between the two belongs to neither, so it lives here. Do not write a
+second one inside a policy directory.
+
 **Not** shared, because the policies genuinely differ: `trt/scheduler.py` (NavDP's
 numpy DDPM/DDIM with critic ranking vs FlowNav's deterministic flow-matching Euler
 loop), `trt/postprocess.py`, `trt/policy.py`. Merging those would produce a

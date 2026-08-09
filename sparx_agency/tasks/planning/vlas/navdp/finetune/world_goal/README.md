@@ -449,6 +449,53 @@ failure that matters most, which is a small bias compounding over a hundred
 inferences. `fly_navdp.py` closes the loop in PEGASUS: identical missions from
 one seed, flown once per arm, scored against the surveyed map, with video.
 
+**The aircraft commits to a plan before asking for another one**, and that is
+not a detail. Training and offline scoring are frame-by-frame, and the obvious
+way to deploy the result is to match them: re-infer on a timer, steer at
+whatever the newest prediction says. In the air that is a pathology. At 3 Hz and
+1 m/s the aircraft covers 0.33 m of a 4.8 m plan before that plan is thrown away
+— it executes the first 7 % of everything the policy predicts and none of the
+route shape, and the only thing that ever compounds is whatever bias lives in
+that first segment. So one prediction is anchored where it was made, flown as a
+route with pure pursuit until roughly half of it is behind the aircraft, and
+only then replaced. `--infer-hz` is now a rate *ceiling*, not a schedule;
+`--commit-fraction` (default `0.5`, so waypoint 12 of NavDP's 24) is the rule.
+The rule and its four escape hatches live in
+[`core/planning/vlas/common/plan_commit`](../../../../../../core/planning/vlas/common/plan_commit/README.md),
+so FALCON's `navdp_click_node` gets the same behaviour and the simulator is
+flying what the aircraft flies. In the map panel the committed part is solid
+green and the speculative tail dashed orange, because they are two different
+claims.
+
+**And the aircraft could not turn.** Worth its own paragraph, because it hid
+behind the first fault and looked exactly like a bad policy. The yaw setpoint
+was built as `slew_towards(pose[2], yaw_command, rate, dt)` — slewing from the
+*measured* heading rather than from the previous command. That caps the setpoint
+at `rate · dt` ahead of where the aircraft already is: 0.24° at the 250 Hz
+physics step, so PX4 was never handed a heading error worth turning for. A
+measured flight yawed at **0.6 °/s** against the 40 °/s asked for; the aircraft
+flew wherever it happened to be pointing, and on a mission whose goal was 22 m
+north of a start facing west it stalled 20 m short having never turned. With the
+command slewed instead — which is what `episode.py` and `falcon_pegasus`'s
+mission have always done — the same mission, same seed, same untrained weights,
+reaches the goal. Anything measured before this is measuring the harness.
+
+One command does all of it — both arms, one Isaac session per mission, the
+inference server swapped between arms, the flights copied out and the video cut:
+
+```bash
+bash sparx_agency/tasks/planning/vlas/navdp/finetune/world_goal/run_comparison.sh \
+    --missions-to-fly 0,1,2 --out ~/navdp_world_goal/flights
+```
+
+Read `run_comparison.sh --help` before doing it by hand: it encodes three things
+that are easy to get wrong — one mission per session (the aircraft cannot be
+repositioned, so a second mission in the same session starts wherever the first
+ended), one server at a time (two NavDP policies and Isaac Sim do not fit in
+8 GB, and the failure looks nothing like its cause), and `ffmpeg`/`ffprobe`
+coming from the `navdp` env rather than the bare host. The long way, for
+reference:
+
 ```bash
 # host, two servers (Isaac's Python has torch but not diffusers, so inference
 # stays on the host and reaches the container over the existing HTTP contract)
@@ -619,3 +666,7 @@ expert arm exist to make that visible rather than convenient.
 | `report.py` | one self-contained HTML page |
 | `export_checkpoint.py` | merge the fine-tune into a full NavDP checkpoint |
 | `fly_navdp.py` | closed-loop flights in PEGASUS, trained vs untrained |
+| `track_log.py` / `track_video.py` | what the policy proposed, in world coordinates, drawn on the surveyed map |
+| `aggregate_flights.py` | one-mission-per-session results → one `summary.json` per arm |
+| `compare_videos.py` | the two arms side by side, camera over map |
+| `run_comparison.sh` | the whole closed-loop campaign in one command: both arms, N missions, one Isaac session each, servers swapped between arms, video cut at the end |

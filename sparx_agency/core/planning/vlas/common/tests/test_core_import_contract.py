@@ -35,7 +35,12 @@ FALCON_NAVDP_SYMBOLS = (
     "NAVDP_MAX_FWD_M", "NAVDP_MAX_LAT_M",
 )
 
-HEAVY = ("torch", "tensorrt", "pycuda", "cv2", "requests", "PIL")
+HEAVY = ("torch", "tensorrt", "pycuda", "cv2", "requests", "PIL", "scipy")
+"""What the Noetic container does not have. ``scipy`` is the quiet one: it is
+installed on every developer machine, so a module-scope ``from scipy...``
+anywhere on a FALCON import path passes every local test and kills the node at
+start-up. Several packages under ``core/planning`` use scipy legitimately --
+only the ones reachable from here must not."""
 
 
 def _py_files():
@@ -51,6 +56,11 @@ def _py_files():
     "sparx_agency.core.planning.vlas.flownav.client",
     "sparx_agency.core.planning.vlas.flownav.trt",
     "sparx_agency.core.planning.vlas.common.trt",
+    # The only module under vlas/ that imports from another core/planning
+    # package (trackers, for the pure-pursuit lookahead), so it is the one whose
+    # import chain can grow a heavy dependency without anyone here touching a
+    # file. navdp_click_node imports it inside the Noetic container.
+    "sparx_agency.core.planning.vlas.common.plan_commit",
 ])
 def test_import_pulls_no_heavy_dependency(module):
     # Run in a FRESH interpreter: an in-process check passes trivially once any

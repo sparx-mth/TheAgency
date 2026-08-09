@@ -135,3 +135,53 @@ def test_a_log_without_timing_still_renders_one_frame_per_inference():
 def test_timing_is_detected_from_the_log():
     assert track_video.has_timing(_log())
     assert not track_video.has_timing(_log(timing=False))
+
+
+# --- the committed prefix ---------------------------------------------------
+
+def _proposal(points: int = 24, commit: int = 12) -> dict:
+    """One inference entry with a straight proposal and a commitment on it."""
+    entry = {"t": 0.0, "pose": [0.0, 0.0, 0.0],
+             "traj": [[step * 0.2, 0.0] for step in range(1, points + 1)]}
+    if commit is not None:
+        entry["commit"] = commit
+    return entry
+
+
+def test_the_committed_prefix_is_the_first_commit_waypoints():
+    """The anchor pose is not in traj, so commit=12 means traj[:12]."""
+    held = track_video.committed_prefix(_proposal(24, 12))
+    assert held.shape == (12, 2)
+    assert held[-1][0] == pytest.approx(2.4)
+
+
+def test_a_log_from_before_commitments_promises_nothing():
+    """Those flights really did treat every waypoint as provisional."""
+    assert track_video.committed_prefix(_proposal(24, commit=None)) is None
+
+
+def test_an_empty_commitment_draws_nothing():
+    assert track_video.committed_prefix(_proposal(24, commit=0)) is None
+
+
+def test_a_dropped_inference_has_no_committed_prefix():
+    assert track_video.committed_prefix({"t": 0.0, "commit": 12}) is None
+
+
+# --- "the policy declined to move" is a result, not a blank panel -----------
+
+def test_a_stacked_trajectory_is_recognised_as_a_stop():
+    """What the pretrained checkpoint emits on most frames: 24 waypoints, all
+    on the same point. Drawn as a route it is an invisible dot."""
+    entry = {"t": 0.0, "pose": [1.0, 2.0, 0.0],
+             "traj": [[1.0, 2.0]] * 24, "commit": 12}
+    assert track_video.is_stop(entry)
+
+
+def test_a_real_route_is_not_a_stop():
+    assert not track_video.is_stop(_proposal(24, 12))
+
+
+def test_a_dropped_inference_is_not_a_stop():
+    """No trajectory at all is a transport failure, which says something else."""
+    assert not track_video.is_stop({"t": 0.0, "pose": [0.0, 0.0, 0.0]})

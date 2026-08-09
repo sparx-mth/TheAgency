@@ -5,8 +5,17 @@
 
 The camera stream says what the policy saw. This says what it decided. Each
 frame draws the surveyed occupancy map, the goal, the path flown so far, and the
-24-waypoint trajectory NavDP proposed at that instant — the thing that is gone a
-quarter of a second later and that no camera can show.
+24-waypoint trajectory NavDP proposed at that instant — the thing no camera can
+show.
+
+Two claims, drawn differently. The aircraft **commits** to roughly the first
+half of each prediction and flies it as a route before asking again (see
+``core/planning/vlas/common/plan_commit``); the rest is the policy's guess about
+what comes after. Drawing both as one line says the aircraft promised the whole
+thing, which it did not — so the committed prefix is solid green and the
+speculative tail is a dashed orange. A plan that stands still on screen while
+the aircraft moves along it is the commitment working; a plan that is replaced
+every frame is the failure this drawing exists to make visible.
 
 The trajectory is drawn in world coordinates, so a plan that heads into a shelf
 is visibly a plan that heads into a shelf, whatever the aircraft did afterwards.
@@ -53,6 +62,7 @@ from sparx_agency.tasks.planning.vlas.navdp.finetune.world_goal.track_log import
 
 FLOWN = "#2a78d6"
 PROPOSED = "#eb6834"
+COMMITTED = "#1b7f3b"
 GOAL = "#d81b60"
 MARGIN_M = 4.0
 """Padding around the flight's extent, metres. Enough that the proposed
@@ -111,6 +121,47 @@ def latest_inference(entries: Sequence[Dict], when: float) -> Optional[Dict]:
             break
         found = entry
     return found
+
+
+STOP_ARC_M = 0.05
+"""A proposal shorter than this is the policy declining to move.
+
+Not a dropped request and not a drawing fault -- a real answer, with all its
+waypoints stacked on one point. It is most of what the pretrained checkpoint
+emits in these scenes, so a panel that renders it as a bare dot and says nothing
+is indistinguishable from a broken video. It gets said out loud instead."""
+
+
+def is_stop(entry: Dict) -> bool:
+    """Whether this inference returned a route with no length in it."""
+    path = entry.get("traj")
+    if not path:
+        return False
+    return float(np.linalg.norm(np.diff(np.asarray(path, dtype=float),
+                                        axis=0), axis=1).sum()) < STOP_ARC_M
+
+
+def committed_prefix(entry: Dict) -> Optional[np.ndarray]:
+    """The part of a proposal the aircraft promised to fly: ``(k, 2)`` or None.
+
+    ``entry["traj"]`` holds the predicted waypoints only — the anchor pose is not
+    one of them — so the first ``entry["commit"]`` of them are the commitment.
+
+    A log written before commitments existed (schema < 3) carries no ``commit``
+    and gets ``None``. That is deliberate: every waypoint really was equally
+    provisional on those flights, and drawing half of one as a promise would
+    describe a flight that never made one.
+
+    Args:
+        entry: One inference from a track log.
+
+    Returns:
+        The committed waypoints, or ``None`` when the entry claims none.
+    """
+    held = int(entry.get("commit", 0))
+    if held <= 0 or "traj" not in entry:
+        return None
+    return np.asarray(entry["traj"], dtype=float)[:held]
 
 
 def load_map(scene: str, altitude_m: float = 1.5, map_dir: Optional[Path] = None):
@@ -199,12 +250,28 @@ def render_frames(log: Dict, scene: str, out_dir: Path, altitude_m: float = 1.5,
         if upto > 1:
             axis.plot(flown[:upto, 0], flown[:upto, 1], color=FLOWN,
                       linewidth=2.0, label="flown", zorder=3)
-        if entry is not None and "traj" in entry:
+        if entry is not None and is_stop(entry):
+            here = np.asarray(entry["traj"], dtype=float)[0]
+            axis.plot(here[0], here[1], "x", color=PROPOSED, markersize=9,
+                      markeredgewidth=2, zorder=5)
+            axis.text(0.5, 0.94, "policy returned no route (stop)",
+                      transform=axis.transAxes, ha="center", color=PROPOSED,
+                      fontsize=9)
+        elif entry is not None and "traj" in entry:
             proposed = np.asarray(entry["traj"], dtype=float)
+            held = committed_prefix(entry)
             axis.plot(proposed[:, 0], proposed[:, 1], color=PROPOSED,
-                      linewidth=2.2, label="NavDP plan", zorder=4)
+                      linewidth=1.6, linestyle="--", label="NavDP plan", zorder=4)
             axis.plot(proposed[-1, 0], proposed[-1, 1], "o", color=PROPOSED,
                       markersize=4, zorder=4)
+            if held is not None:
+                axis.plot(held[:, 0], held[:, 1], color=COMMITTED,
+                          linewidth=2.8, label="committed", zorder=5)
+                axis.plot(held[-1, 0], held[-1, 1], "o", color=COMMITTED,
+                          markersize=6, zorder=5)
+            if entry.get("why"):
+                axis.text(0.02, 0.02, entry["why"], transform=axis.transAxes,
+                          fontsize=7, color="0.25")
         elif entry is not None:
             axis.text(0.5, 0.94, "inference dropped", transform=axis.transAxes,
                       ha="center", color=PROPOSED, fontsize=9)

@@ -24,10 +24,13 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 
-SCHEMA_VERSION = 2
-"""Bumped when :meth:`TrackLog.set_flown` began recording the flown path's own
-clock. Version 1 logs carry positions with no way to say *when* -- see
-``track_video`` for what that cost."""
+SCHEMA_VERSION = 3
+"""Version 2 added the flown path's own clock to :meth:`TrackLog.set_flown`;
+version 1 logs carry positions with no way to say *when* -- see ``track_video``
+for what that cost. Version 3 adds ``commit`` and ``why`` to each inference: the
+aircraft now flies half of a plan before asking for another, so *which* half it
+promised to fly, and what ended the promise, are part of the story. Both are
+optional and a reader must cope without them."""
 
 
 class TrackLog:
@@ -46,7 +49,9 @@ class TrackLog:
         self.entries: List[Dict] = []
 
     def add(self, sim_time: float, pose: Sequence[float],
-            trajectory: Optional[np.ndarray], target_world: Sequence[float]) -> None:
+            trajectory: Optional[np.ndarray], target_world: Sequence[float],
+            commit_index: Optional[int] = None,
+            reason: Optional[str] = None) -> None:
         """Record one inference.
 
         Args:
@@ -56,6 +61,14 @@ class TrackLog:
                 when the request failed — a dropped inference is part of the
                 story and is recorded as an entry with no trajectory.
             target_world: The carrot the follower is actually chasing.
+            commit_index: How many of the trajectory's waypoints the aircraft
+                committed to flying before it would ask again. Recorded because
+                the committed prefix and the speculative tail are two different
+                claims, and a panel that draws them identically says the policy
+                promised more than it did.
+            reason: What ended the previous commitment and caused this
+                inference — flown, expired, off route. One phrase; the panel
+                shows it so a flight that is thrashing is visible as thrashing.
         """
         entry = {
             "t": round(float(sim_time), 3),
@@ -67,6 +80,10 @@ class TrackLog:
         if trajectory is not None:
             entry["traj"] = [[round(float(x), 3), round(float(y), 3)]
                              for x, y in self.to_world(trajectory, pose)]
+        if commit_index is not None:
+            entry["commit"] = int(commit_index)
+        if reason is not None:
+            entry["why"] = str(reason)
         self.entries.append(entry)
 
     @staticmethod
