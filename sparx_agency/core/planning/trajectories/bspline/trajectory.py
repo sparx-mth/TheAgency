@@ -162,3 +162,24 @@ class BsplineTrajectory:
         # type: (float) -> np.ndarray
         """Just the position, for the projection search that calls it in a loop."""
         return self.position.evaluate_at_time(min(max(0.0, float(t)), self.duration))
+
+    def with_start_time(self, start_time_s):
+        # type: (float) -> BsplineTrajectory
+        """The same curves, timed from a different instant.
+
+        The curves are shared, not copied: only the instant they are counted
+        from changes. This exists because a trajectory's start time is stamped
+        on *the planner's* clock, and the aircraft flying it does not always
+        share that clock -- a simulator running at a fraction of real time is
+        handed a schedule it cannot keep, and lags the plan by a distance that
+        grows with how far behind real time it is. Re-basing the start time onto
+        the clock the aircraft actually experiences makes the schedule
+        achievable again without touching the geometry.
+
+        Args:
+            start_time_s: The instant the trajectory begins, on the caller's clock.
+
+        Returns:
+            A new trajectory over the same curves.
+        """
+        return BsplineTrajectory(self.position, self.yaw, start_time_s, self.traj_id)

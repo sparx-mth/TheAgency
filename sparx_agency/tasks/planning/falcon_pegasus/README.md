@@ -182,6 +182,34 @@ It is off by default because it is not free: the occupancy clouds are only
 computed when something subscribes, and the wider box costs `exploration_node`
 real time on the thread that also services the depth callbacks.
 
+### The post-mortem, before you read a single log
+
+```bash
+.venv/bin/python sparx_agency/tasks/planning/falcon_pegasus/postmortem.py \
+    ~/data/sim/falcon_pegasus/soak/1_20260808_133925
+```
+
+**Run this first.** The `outcome` field is a symptom, not a diagnosis: of the
+seven soak rounds analysed so far, five were something other than what they
+reported, and each cost an hour of log-reading to establish. The tool answers
+the four questions that separate those cases, from the recording alone:
+
+* **Did it touch something?** A horizontal velocity that reverses through more
+  than 120° inside 250 ms is not a control response — nothing on this aircraft
+  can turn 1.4 m/s around that fast — it is a contact. This matters more than
+  anything else in the output, because a contact makes every number after it
+  (tilt, tracking error, "stalled") a *consequence*.
+* **What is at that point**, checked against the surveyed voxel map rather than
+  FALCON's, so the answer does not depend on the mapper being right.
+* **Was it upset or was it parked?** Judged on *net displacement*, not speed: an
+  aircraft lying on its side against a wall still shows 0.18 m/s of scraping
+  while moving 24 cm in ten seconds.
+* **Was it looking where it flew?** Reported for context and almost never a
+  fault — see round 6 below for why that number is a trap.
+
+On round 7 it found, unprompted, that the aircraft had hit the *same pillar*
+twice ninety seconds apart.
+
 ### What to look at when the aircraft hits something
 
 The crashes are the aircraft arriving somewhere its plan did not go, so the
@@ -296,20 +324,279 @@ today is **the crashes are fixed and the aircraft is not**. Successive rounds:
 
 So the failure moved from the planner dying to the aircraft stopping — which is
 progress, and is also the harder half. In round 2 the aircraft halted at
-(−21.8, −5.2) and never moved again, and two things rule out the obvious
-explanations:
+(−21.8, −5.2, 1.45) and never moved again. Three measurements settle what
+happened, and the first two are worth keeping as method:
 
-- **It was not boxed in.** The surveyed map is clear for 1.4 m in every
-  direction at that point, at the height it was flying.
-- **It was not lagging.** The split reads `lag=0.00m xte=1.03m`, and a zero lag
-  with the whole gap as cross-track is the signature of a reference whose
-  *planned velocity is zero* — a trajectory endpoint, not a moving target.
+- **The controller was asking.** Reconstructing the exact reported state offline
+  — `err=1.03 lag=0.00 xte=1.03`, at rest — the chain commands **11.4° of tilt
+  and 1.98 m/s² forward**. So the outer loop is not at fault, and that took
+  seconds to establish rather than a 25-minute flight.
+- **The airframe was held.** In the recording the aircraft *is* tilting (mean
+  4.2°, peaks 14.4°) while x, y and z stay frozen to the centimetre for 25 s. A
+  free body at 11° accelerates at ~2 m/s²; frozen position under active tilt
+  means PhysX is holding it.
+- **It was inside an obstacle.** At its exact position the surveyed map is
+  occupied at z = 1.45, with clear air at 1.2 and 1.6 — it is embedded in the
+  cruise-height clutter this scene is deliberately augmented with.
 
-The aircraft therefore sat one metre from a stationary reference, in free space,
-with the yaw plan still being tracked, and produced no translation. That is
-either a controller not asking or an airframe not answering, and the two want
-opposite fixes — so the flight status line now prints the commanded **tilt and
-throttle** next to the error, which separates them at a glance.
+**A correction worth recording**, because it sent the first pass down a blind
+alley: an earlier version of this section claimed the aircraft was in free
+space. That came from indexing the voxel array as `(x, y, z)` when it is
+`(nz, ny, nx)` — `voxel_camera.py` says so explicitly — so the query read
+entirely the wrong cells. Always index those grids `v[k, j, i]`.
+
+### Why it flew into the clutter
+
+It was doing **1.6 m/s into a 0.6 m/s plan**, and across the flight 42% of the
+time was above 1.1 m/s, 29% above 1.5, peaking at 2.85.
+
+That is not a tuning detail. FALCON checks its trajectory against the map at the
+speed *it* planned, with `bspline_opt/safe_distance` of clearance around it. Fly
+the same curve three times faster and the margin goes on stopping distance — and
+the airframe is 0.7 m across.
+
+The position loop has no natural ceiling: a metre of error asks for
+`kp * clamp` of acceleration, which the damping term balances only once the
+aircraft is `kp * clamp / kd` — about 0.9 m/s — **faster than the plan**. So the
+tracker now has a speed governor, ceilinged at *planned speed + `max_overspeed`*
+so it moves with the plan and can never hold the aircraft behind a faster
+trajectory. It tapers in below the ceiling rather than switching on at it,
+because an airframe's acceleration decays over a time constant and a limiter
+that waits for the limit has already lost.
+
+### The soak rounds, and what each one actually was
+
+Every round so far has stopped at attempt 1, and no two for the same reason.
+The table is worth keeping because three of the five were **not** what the
+outcome field said:
+
+| round | reported | what it really was |
+|---|---|---|
+| 1 | `stalled` | the mapper's raycast `CHECK` aborting — patched |
+| 2 | `stalled` | flew into cruise-height clutter at 1.6 m/s — speed governor added |
+| 4 | `stalled` | **Isaac Sim ran out of VRAM 36 s into start-up**; the aircraft never existed |
+| 5 | `crashed` | outer loop limit-cycling into the 35° tilt cap, then over |
+| 6 | `crashed` | flew into a wall while 2.18 m off plan — see below |
+
+**Round 4 is the cautionary one.** `isaac-sim` had been up 34 hours across many
+Kit sessions and was holding 6134 MiB of an 8 GB card with nothing running; Kit
+died on `ERROR_OUT_OF_DEVICE_MEMORY` before the drone spawned. A `docker restart`
+returned it to 96 MiB. Worse, the attempt produced no output, so `docker cp`
+copied the **previous** attempt's `result.json` and the harness scored a flight
+that never happened — the verdict came back byte-identical to round 2, down to
+the distance flown. A stale *clean* result would have counted toward the streak.
+`soak.sh` now deletes the container's output directory before each attempt,
+restarts Kit between attempts and prints free VRAM, and reports `isaac_gpu_oom`
+as its own outcome rather than letting it masquerade as the aircraft stalling.
+
+### Two control defects the crash exposed
+
+Round 5 flew properly and then diverged in attitude — tilt oscillating
+1.8° → 20 → 5 → 28 → 38 → 1 → 35 → 54 → 89 while barely translating, at about
+**0.5 Hz**. That is far too slow for PX4's attitude loop; it is the outer loop
+limit-cycling into the 35° tilt ceiling. The map is clear at that point, so it
+was not a collision.
+
+**The position-error clamp was rotating the correction.** It clamped each axis
+independently, so an error of (5.0, 1.0) m — the magnitude in this crash, whose
+worst tracking error was 5.25 m — clamped to (1.0, 1.0) and pointed **33.7°
+away from the reference**, with 45° as the worst case. The docstring promised
+the exact opposite ("keeps the correction pointed the right way and bounds only
+how hard it pulls"), and `limit_acceleration` ten lines away already scales the
+horizontal pair together for precisely this reason. Now the horizontal pair is
+scaled together and only the vertical axis is clipped alone.
+
+**`reset(hold_position=...)` did not hold.** It cleared the integrators and the
+projector but left the loaded trajectory in place, so the next tick found a
+usable curve and carried on flying it. The one call a caller has to say "stop
+flying the plan" silently did nothing. It now drops the current and queued
+curves.
+
+The speed governor from round 2 did work: exploring speed fell from mean 0.97 /
+p90 1.76 to mean 0.73 / p90 1.25 against a 0.6 m/s plan, and altitude held at
+1.11–1.95 m around a 1.4 m cruise.
+
+### Round 6: the simulator's clock, and a fallback that aborted the node
+
+Round 6 was the best flight so far and still ended in a wall. It flew **129 m**
+and mapped 872 m³ — five times the distance of any earlier round — then at
+t=139.7 s reversed from +0.94 to −1.83 m/s in 0.2 s. Nothing in a control law
+does that; it is a contact. The surveyed map confirms it: a floor-to-ceiling
+wall 20 cm thick at x ≈ −1.1, and by t=144.6 the aircraft's own centre reads
+occupied. The attitude divergence that the `crashed` verdict fired on was the
+*consequence* of bouncing off it, not the cause.
+
+**A statistic that looks damning and is not.** 45.7% of the moving flight —
+36 of 89.7 m — was flown with the direction of travel outside the camera's 90°
+FOV, median 37.8° off axis and p75 at 99.6°, i.e. flying backwards relative to
+where it looked. That is *not* a fault. FALCON's yaw planner aims at frontiers,
+not along travel, because it plans against its accumulated map rather than the
+current image; the reconstruction matches `traj_server` exactly
+(`NonUniformBspline(yaw_pts, 3, yaw_dt)`, same `t_cur`, same clamp), and a stub
+flight shows the same 54% while covering 209 m without incident. Do not spend a
+day on this number again.
+
+**What was actually wrong is the clock.** Mean tracking error was 2.18 m against
+the stub's 0.26 m on identical control code. Isaac Sim runs at about **0.66×
+real time** here (665 s of wall clock for ~418 s of simulation), while FALCON
+plans in its container on the wall clock and stamps every trajectory with
+`ros::Time::now()`. The schedule therefore advances about 1.5 s for every 1 s of
+flight the aircraft is given, and the tracker chases a deadline that recedes as
+fast as it closes. Reproduced on the stub by slowing nothing but the aircraft:
+
+| stub configuration | mean err | mean lag | mean xte |
+|---|---|---|---|
+| real time | 0.26 m | −0.08 m | 0.11 m |
+| 0.66× real time | 0.92 m | **+0.69 m** | 0.31 m |
+| 0.66×, schedule re-based | 0.84 m | +0.53 m | 0.33 m |
+
+The lag flips from *ahead of the plan* to two thirds of a metre behind it.
+`link/sim_clock.py` re-bases each trajectory's start time onto the clock the
+aircraft actually experiences, which recovers about a fifth of the lag. The rest
+is structural: FALCON plans from a predicted future state on its own clock that
+a slow aircraft never reaches, and only ROS `use_sim_time` with Isaac publishing
+`/clock` fixes that at the source. That is the next real piece of work here.
+
+Two rig gaps were closed on the way, both of which had been hiding this. The
+stand-in airframe had **no drag**, so it tracked to centimetres no matter what;
+it now carries the drag fitted from a real flight (`0.176·v + 0.121` m/s², i.e.
+0.30 m/s² at 1 m/s, measured as the residual between specific force and thrust
+axis over 501 samples of steady cruise). And `run_stub.py` gained
+`--real-time-factor` and `--trace`, which is what made the clock visible at all.
+
+### The coverage bar was 150% of what can ever be covered
+
+Worth knowing before reading any of the reliability results below, because it
+invalidates the pass/fail on all of them. `MIN_COVERAGE_M3` was 2200, derived as
+~91% of the exploration box's 2424 m³. But a box volume is not a coverage
+target. FALCON's `Coverage` (`MapServer::publishMapCoverage`) counts voxels that
+are no longer `UNKNOWN`, and a voxel leaves `UNKNOWN` only when a camera ray
+reaches it — so the interior of every wall, and every cubic metre of outdoor
+space the box hangs over, is permanently uncountable.
+
+Flood-filling the surveyed voxel map from the spawn through free space, and
+adding the occupied shell that free space touches, gives what a camera inside
+this building can ever see:
+
+| | box volume | observable | 91% bar |
+|---|---|---|---|
+| before | 2424 m³ | **1465 m³ (60%)** | — |
+| now (south edge fixed) | 2222 m³ | **1465 m³ (66%)** | **1333 m³** |
+
+So the old bar was **150% of the maximum achievable** and no flight could ever
+have met it. The best run on record, 1396 m³, was **95% of achievable** — an
+essentially complete exploration of the office, scored as a failure. The soak
+counter reading 0/10 was measuring the bar, not the aircraft.
+
+Only the **south** edge moved, from y = −33.2 to −27.2. The building stops at
+−27.2, so six metres of outdoor nothing had been sitting inside the coverage
+denominator: ~200 m³ that can never be observed and never stops being `UNKNOWN`.
+Removing it opens no new floor to fly into, so it carries no risk.
+
+**Moving the other three edges onto the walls was tried, and reverted.** The
+reasoning looked sound — an inset edge is an open-space frontier cut, exactly
+what the run config warns against, and one flight had spent 527 of its 878
+seconds wedged in a single 2 × 2 m cell beside `box_min_x`. But flush edges hand
+the aircraft a metre of floor it had never been allowed into, and on the west
+wall that floor carries shelving with ~20 cm *vertical* gaps at cruise height —
+solid slabs at z = 1.4 and z = 1.7 with a slot between them. FALCON planned
+straight into it and the aircraft wedged between two shelves at (−23.4, 0.2, 1.45), frozen
+to the centimetre for twenty seconds while the reference oscillated 0.9 m either
+side of it. That flight ended after 84 s with 313 m³, against 878 s and 857 m³
+for the inset box the round before.
+
+Inset edges cost a frontier cut that makes FALCON cycle and loiter; flush edges
+cost a physical wedge that ends the flight. The cut is the cheaper failure, so
+the inset stays.
+
+**Obstacle inflation does not save you here, and it is worth knowing why.**
+`patches/inflate_astar_by_airframe.sh` *is* applied to this image and *is*
+active — `astar_inflate` defaults to 0.35 m, `start_clearance` to 0.50 m. But it
+is **XY only**, deliberately: the rotor disc is horizontal, and the patch's own
+header explains that inflating in z would eat most of the 1.2 m exploration
+band. A slot between two horizontal slabs is open in XY, so A* routes into it
+happily. Anyone moving these edges out again needs a *vertical* clearance rule,
+or a `box_min_z` above the shelf band — not more XY inflation.
+
+### Chasing a deadline that does not exist, into a wall
+
+The chain that ended rounds 6 and 7, and the most useful thing found this
+session. It starts with the clock and ends against a pillar:
+
+```
+Isaac runs at ~0.7x real time, FALCON plans on the wall clock
+  -> the aircraft is structurally behind a schedule it cannot meet
+  -> the catch-up term saturates at max_catchup_speed for most of the flight
+  -> it flies 1.1-1.3 m/s along a route FALCON cleared for 0.6
+  -> any tracking error at all now spends clearance it does not have
+  -> contact
+```
+
+Measured on the two crashed rounds, airborne samples only: **25% and 44% of the
+flight above the governor's own 1.1 m/s ceiling**, p90 1.24 and 1.34, peaks of
+2.1 and 2.2 m/s — against a **0.6 m/s** plan (`max_linear_velocity` in
+`adapter/launch/falcon_pegasus.launch`, which overrides the 2.0 in FALCON's
+`uav_model_simulator.yaml`; check the launch file, not the yaml). Round 7
+brushed its pillar at 1.97 m/s, survived, came back ninety seconds later and
+died on the same corner.
+
+**The governor was not broken.** Probed directly it does the right thing — at
+1.3 m/s on a 0.6 m/s plan it commands −1.98 m/s², at 2.0 m/s it commands −5.06.
+The aircraft was fast because the controller was *deliberately* driving it fast:
+the catch-up term adds up to `max_catchup_speed` to the target velocity, and it
+was pinned there by a lag that is mostly an artefact of the clock rather than a
+real schedule deficit. The one term whose job is to recover time was spending
+clearance to chase a deadline that cannot be met by construction.
+
+So `max_catchup_speed` went 0.5 → **0.15** and `max_overspeed` 0.5 → **0.25**.
+On the stub at Isaac's measured rate:
+
+| | before | after |
+|---|---|---|
+| actual speed, mean | 1.00 m/s | **0.67** (plan 0.57) |
+| above 1.1 m/s | 30–44% | **6.4%** |
+| along-track lag, mean | +0.53 m | **+0.41 m** |
+| cross-track, mean | 0.33 m | 0.37 m |
+
+The lag got *better*, not worse, because the aircraft stops overshooting and
+having to come back. That is the trade the tracker's own `_diagnose` argues for
+in as many words: *being late is benign, being sideways is what hits walls.*
+
+### The greedy TSP fallback was aborting the node it existed to save
+
+Found by an adversarial audit and then caught live. `writeGreedyTourImpl` wrote
+`COMMENT : Length = trunc(100 · Σcᵢ)`, summing raw doubles once at the end.
+Upstream's convention is the opposite — `solveTSP` writes the cost matrix as
+per-edge truncated integers, so LKH's reported cost is `Σ trunc(100·cᵢ)` — and
+`planExploreMotionHGrid` re-derives exactly that per edge and asserts agreement:
+
+```cpp
+CHECK_NEAR(cost, grid_tour2_cost_sum, 1e-4)   // exploration_manager.cpp:246
+```
+
+glog's `CHECK_NEAR` is fatal. The two conventions differ by up to a hundredth
+per edge — 0.04 on a ten-city tour, 400× the tolerance, and over tolerance on
+400 of 400 random ten-city instances. So the fallback added to keep
+`exploration_node` alive when LKH dies was killing it instead: **SIGABRT
+(exit −6) immediately after "the LKH solver died on 'coverage_path'"**, with
+`traj_server` still republishing the last endpoint so the aircraft looked
+healthy while the planner was gone. The accumulator now sums hundredths per
+edge. A stub flight that previously died at trajectory #180 after 94 m now runs
+the full budget: 638 trajectories, 242 m, **1396 m³ covered**, node deaths 0.
+
+Both patch scripts are now **re-runnable**, which they had to become to fix
+this: the image already carried the patch, so the only way to correct a bug in
+it was a rebuild from the base image — an hour, on a machine whose compiler
+segfaults at random. Re-running now corrects an already-patched source in place,
+and the header guard matters as much as the source one (re-declaring the helpers
+is a hard compile error, not a no-op).
+
+**And `soak.sh` could never have scored a clean streak.** It counted every
+`Stack trace` in FALCON's log as a planner crash, but a *recovered* LKH crash
+prints one from the forked child while the parent carries on — the isolation
+patch working exactly as designed would have marked the flight dirty. Crashes
+are now counted as `exploration_node … process has died`, with stack traces and
+LKH recoveries recorded alongside as information.
 
 ### First real flight on the attitude cut — one run, `3_open_plan`
 

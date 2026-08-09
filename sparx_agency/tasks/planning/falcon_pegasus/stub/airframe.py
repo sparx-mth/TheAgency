@@ -31,6 +31,14 @@ from sparx_agency.robots.PEGASUS.adapters.vehicle import CAMERA_OFFSET_FLU
 YAW_RATE = math.radians(60.0)
 """How fast either stand-in can turn. Matches ``MPC_YAWRAUTO_MAX``."""
 
+DRAG_PER_MPS = 0.176
+DRAG_OFFSET_MPS2 = 0.121
+"""Horizontal drag, fitted from a recorded Pegasus flight -- see ``_drag``.
+
+Together: 0.30 m/s^2 at 1 m/s. Small enough to look negligible and large
+enough to put the aircraft into a wall, because it is a *standing* force.
+"""
+
 CLIMB_TAU_S = 0.35
 """Velocity-command lag, used by both airframes before handover.
 
@@ -125,10 +133,13 @@ class AttitudeAircraft:
         tau: Time constant of the thrust-axis response, seconds.
         true_hover_throttle: The airframe's real thrust curve, expressed as the
             throttle that holds a hover. The controller does not get told.
+        drag_per_mps: Drag rising with speed, m/s^2 per m/s. See :meth:`_drag`.
+        drag_offset: The constant part of the drag fit, m/s^2.
     """
 
-    def __init__(self, position, yaw, tau=0.18, true_hover_throttle=0.62):
-        # type: (object, float, float, float) -> None
+    def __init__(self, position, yaw, tau=0.18, true_hover_throttle=0.62,
+                 drag_per_mps=DRAG_PER_MPS, drag_offset=DRAG_OFFSET_MPS2):
+        # type: (object, float, float, float, float, float) -> None
         self.position = np.asarray(position, dtype=float).copy()
         self.velocity = np.zeros(3)
         self.acceleration = np.zeros(3)
@@ -137,6 +148,8 @@ class AttitudeAircraft:
         self.tau = float(tau)
         self.climb_tau = CLIMB_TAU_S
         self.full_scale = GRAVITY_MPS2 / float(true_hover_throttle)
+        self.drag_per_mps = float(drag_per_mps)
+        self.drag_offset = float(drag_offset)
 
     def step_velocity(self, velocity_command, yaw_command, dt):
         # type: (object, float, float) -> None
@@ -174,7 +187,9 @@ class AttitudeAircraft:
         self.body_z = self.body_z / norm if norm > 0.0 else np.array([0.0, 0.0, 1.0])
 
         thrust = max(0.0, float(throttle)) * self.full_scale
-        self.acceleration = thrust * self.body_z - np.array([0.0, 0.0, GRAVITY_MPS2])
+        self.acceleration = (thrust * self.body_z
+                             - np.array([0.0, 0.0, GRAVITY_MPS2])
+                             - self._drag())
         self.velocity += self.acceleration * dt
         self.position += self.velocity * dt
         # The floor. Without it a badly seeded thrust model produces an aircraft
@@ -185,6 +200,32 @@ class AttitudeAircraft:
             self.velocity[2] = max(0.0, float(self.velocity[2]))
 
         self._slew_yaw(yaw_command, dt)
+
+    def _drag(self):
+        # type: () -> np.ndarray
+        """Aerodynamic drag, opposing the horizontal velocity.
+
+        The third property this rig models, and the one it went without for too
+        long. Drag is a **standing** force: holding a speed costs a permanent
+        tilt, so the outer loop carries a permanent error unless something
+        integrates it away. A drag-free stand-in tracks its plan to within
+        centimetres however the integrator is gated, which is exactly why this
+        rig reported 0.29 m of mean tracking error while Isaac Sim, flying the
+        identical control code, reported 2.18 m and hit a wall.
+
+        The coefficients are measured, not invented: fitting the residual
+        between specific force and thrust axis over 501 samples of steady
+        cruise from a recorded Pegasus flight gives ``0.176 * v + 0.121`` m/s^2,
+        i.e. 0.30 m/s^2 at 1 m/s. Vertical drag is not modelled -- the fit is
+        horizontal, and the climb is velocity-commanded anyway.
+        """
+        horizontal = self.velocity[:2]
+        speed = float(np.linalg.norm(horizontal))
+        if speed <= 1e-6 or self.drag_per_mps <= 0.0:
+            return np.zeros(3)
+        magnitude = self.drag_per_mps * speed + self.drag_offset
+        return np.array([horizontal[0] / speed * magnitude,
+                         horizontal[1] / speed * magnitude, 0.0])
 
     def _slew_yaw(self, yaw_command, dt):
         # type: (float, float) -> None

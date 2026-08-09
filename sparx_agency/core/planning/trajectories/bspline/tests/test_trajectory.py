@@ -117,3 +117,43 @@ def test_dimension_mistakes_are_refused():
         BsplineTrajectory(flat, yaw, 0.0, 1)
     with pytest.raises(ValueError, match="yaw curve must be 1D"):
         BsplineTrajectory(NonUniformBspline(np.zeros((6, 3)), 3), flat, 0.0, 1)
+
+
+def test_with_start_time_moves_the_schedule_and_nothing_else():
+    """Re-basing the clock must not touch the geometry.
+
+    The simulator runs slower than the clock FALCON stamps on, so the start
+    time is re-based on the way in -- see falcon_pegasus/link/sim_clock.py. The
+    curve the aircraft flies has to come through that untouched.
+    """
+    original = _straight_run()
+    rebased = original.with_start_time(12.5)
+
+    assert rebased.start_time_s == 12.5
+    assert rebased.traj_id == original.traj_id
+    assert rebased.duration == original.duration
+    for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+        t = fraction * original.duration
+        before, after = original.sample(t), rebased.sample(t)
+        assert (after.x, after.y, after.z) == (before.x, before.y, before.z)
+        assert (after.vx, after.vy, after.vz) == (before.vx, before.vy, before.vz)
+        assert after.yaw == before.yaw
+
+
+def test_with_start_time_makes_a_trajectory_stamped_now_start_now():
+    """The defect this exists for, stated as a test.
+
+    Handed FALCON's raw wall stamp while the aircraft counts from a simulator
+    clock that started at zero, `elapsed` is ~1.7 billion seconds and every
+    trajectory reads as long finished -- the aircraft would hold station for
+    the whole flight instead of flying.
+    """
+    trajectory = _straight_run().with_start_time(1_700_000_000.0)
+    sim_now = 12.0
+
+    assert trajectory.elapsed(sim_now) < -1e8
+    assert trajectory.sample_at(sim_now).vx == 0.0        # clamped, stopped
+
+    rebased = trajectory.with_start_time(sim_now)
+    assert rebased.elapsed(sim_now) == 0.0
+    assert rebased.is_active(sim_now + 0.5 * rebased.duration)

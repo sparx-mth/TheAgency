@@ -16,8 +16,33 @@
 # the boundary, the hierarchical grid stops being able to place it ("Current cell
 # id: -5"), and the FSM cycles PLAN_TRAJ -> PUB_TRAJ -> PLAN_TRAJ forever while
 # the aircraft holds station. A box edge on a WALL is fine, because nothing needs
-# to be observed from beyond it -- which is why this one is inset 1.2 m from the
-# building's outer walls and does not cut through it anywhere.
+# to be observed from beyond it.
+#
+# THE 1.2 m INSET ON THE WEST, EAST AND NORTH EDGES IS DELIBERATE, AND IT IS
+# NOT the "edge on a wall" case above -- it is the trap, knowingly accepted,
+# because the alternative measured worse. Moving those edges onto the walls was
+# tried: it removed the frontier cut, and it also handed the aircraft a metre of
+# floor it had never been allowed into, where the west wall carries shelving
+# with roughly 20 cm gaps at cruise height -- solid slabs at z=1.4 and z=1.7
+# with a slot between. A* routed into it (its inflation is XY only, so a
+# horizontal slot looks open) and the aircraft wedged between two shelves at
+# (-23.4, 0.2, 1.45), frozen to the centimetre for
+# twenty seconds while the reference oscillated 0.9 m either side of it. The
+# flight ended after 84 s with 313 m3 mapped, against 878 s and 857 m3 for the
+# inset box on the round before.
+#
+# So: inset edges cost a frontier cut that makes FALCON cycle and loiter; flush
+# edges cost a physical wedge that ends the flight. The cut is the cheaper
+# failure. NOTE that obstacle inflation is already applied and already active
+# (astar_inflate 0.35 m in the launch) and does NOT help: it is XY only by
+# design, and a slot between two horizontal slabs is open in XY. Moving these
+# edges out needs a vertical clearance rule or a box_min_z above the shelves.
+#
+# The south edge is different and IS fixed: it was at y=-33.2 while the
+# building's southernmost structure is at y=-27.2, so six metres of outdoor
+# nothing sat inside the box -- volume that can never be observed, inflating
+# the coverage denominator by ~200 m3 while staying permanently UNKNOWN. Moving
+# it opens no new floor to fly into, so it carries none of the risk above.
 #
 # ONE file describes the whole run, on purpose. FALCON reads the `map_config`
 # block off the parameter server; the Isaac Sim side reads the `run` block with
@@ -91,7 +116,7 @@ map_config:
     # which is desk height in this building; it wedged itself against furniture
     # twice. The band is the airspace above the clutter, not the whole room.
     box_min_x: -23.0
-    box_min_y: -33.2
+    box_min_y: -27.2
     box_min_z: 1.0
     box_max_x: 5.1
     box_max_y: 38.7
@@ -104,7 +129,7 @@ map_config:
     # full pass over the grid, at 2 Hz, inside the single-threaded node that also
     # services the depth callbacks.
     vbox_min_x: -23.5
-    vbox_min_y: -33.7
+    vbox_min_y: -27.5
     vbox_min_z: 1.3
     vbox_max_x: 5.6
     vbox_max_y: 39.2

@@ -170,3 +170,61 @@ def test_the_warm_up_restarts_after_a_reset():
     assert model.observations == 0
     _fly(model, true_hover_throttle=0.45, seconds=2.0)
     assert model.hover_throttle == pytest.approx(0.45, abs=0.01)
+
+
+# ── non-finite input ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_acceleration_is_rejected(bad):
+    """The guards are comparisons, and NaN is false against all of them.
+
+    Left unchecked a single NaN reaches `max(low, min(high, nan))`, where
+    Python's min returns `high` -- pinning the scale to its maximum -- and
+    every honest observation afterwards fails the ratio test against it.
+    """
+    model = ThrustModel(ThrustModelParams(hover_throttle=0.62))
+    before = model.full_scale_mps2
+    assert model.observe(0.62, (0.0, 0.0, bad), (0.0, 0.0, 1.0), 0.01) is False
+    assert model.full_scale_mps2 == before
+    assert model.observations == 0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_throttle_is_rejected(bad):
+    model = ThrustModel(ThrustModelParams(hover_throttle=0.62))
+    before = model.full_scale_mps2
+    assert model.observe(bad, (0.0, 0.0, 9.81), (0.0, 0.0, 1.0), 0.01) is False
+    assert model.full_scale_mps2 == before
+
+
+def test_a_non_finite_dt_raises():
+    model = ThrustModel(ThrustModelParams(hover_throttle=0.62))
+    with pytest.raises(ValueError, match="finite"):
+        model.observe(0.62, (0.0, 0.0, 9.81), (0.0, 0.0, 1.0), float("nan"))
+
+
+def test_one_nan_does_not_lock_the_estimator_out_of_the_rest_of_the_flight():
+    """The consequence, end to end: a NaN must cost nothing but its own sample."""
+    model = ThrustModel(ThrustModelParams(hover_throttle=0.62))
+    truth = 9.81 / 0.55                      # the airframe really hovers at 0.55
+
+    model.observe(0.62, (0.0, 0.0, 0.62 * truth - 9.81), (0.0, 0.0, 1.0), 0.01)
+    model.observe(0.62, (0.0, 0.0, float("nan")), (0.0, 0.0, 1.0), 0.01)
+    for _ in range(200):
+        model.observe(0.62, (0.0, 0.0, 0.62 * truth - 9.81), (0.0, 0.0, 1.0), 0.01)
+
+    assert model.full_scale_mps2 == pytest.approx(truth, rel=0.02)
+    assert model.hover_throttle == pytest.approx(0.55, abs=0.02)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_request_returns_hover_not_full_throttle(bad):
+    """The command path had the same NaN trap the learning path was hardened against.
+
+    `max(min_throttle, min(max_throttle, nan))` is `max_throttle`: a single
+    non-finite request would have commanded full collective, with the attitude
+    stage reporting tilt 0.0 deg because acos(clamp(nan)) is 0.
+    """
+    model = ThrustModel(ThrustModelParams(hover_throttle=0.62))
+    assert model.normalized(bad) == pytest.approx(model.hover_throttle)
+    assert model.normalized(bad) < model.params.max_throttle

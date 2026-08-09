@@ -64,6 +64,37 @@ replacement = """  // Call LKH TSP solver -- in a CHILD PROCESS, so that when it
   }
 """
 
+# RE-RUNNABLE. An image built by an earlier run of this script has no bare
+# solveTSPLKH call site left to replace, and refusing to run against it means
+# the only way to correct a bug in the code below is a rebuild from the base
+# image -- an hour, on a machine whose compiler segfaults at random. So a source
+# that is already patched is brought UP TO DATE in place instead.
+already = "runLKHIsolated(tsp_par, tsp_out)" in source
+if already:
+    # The greedy tour's length must be accumulated per edge in hundredths. See
+    # the long comment at the accumulator for why: getting this wrong aborts
+    # the node on a glog CHECK_NEAR, in the one path meant to keep it alive.
+    corrections = [
+        ("  double total = 0.0;\n", "  long long total_units = 0;\n"),
+        ("    total += best_cost;\n",
+         "    total_units += (long long)(best_cost * 100.0);\n"),
+        ("    total += cost_matrix(current, depot);\n",
+         "    total_units += (long long)(cost_matrix(current, depot) * 100.0);\n"),
+        ('fout << "COMMENT : Length = " << (long long)(total * 100.0) << "\\n";',
+         'fout << "COMMENT : Length = " << total_units << "\\n";'),
+    ]
+    applied = 0
+    for old, new in corrections:
+        if old in source:
+            source = source.replace(old, new)
+            applied += 1
+    if applied == 0:
+        print("patch: already applied and already correct, nothing to do")
+    else:
+        open(path, "w").write(source)
+        print("patch: corrected the greedy tour length convention (%d edits)" % applied)
+    raise SystemExit(0)
+
 if source.count(call) != 1:
     raise SystemExit("patch: expected exactly 1 solveTSPLKH call site, found %d"
                      % source.count(call))
@@ -132,7 +163,24 @@ void writeGreedyTourImpl(const Eigen::MatrixXd &cost_matrix, int dimension,
   if (skip_last && dimension > 1)
     visited[depot] = true;
 
-  double total = 0.0;
+  // Accumulated in HUNDREDTHS, per edge, and never as a sum of doubles.
+  //
+  // This is not a style choice, it is the file format. solveTSP writes the
+  // cost matrix to LKH as per-edge truncated integers, so the Cost LKH reports
+  // back is sum_i trunc(100 * c_i). The caller re-derives exactly that, edge by
+  // edge, and then asserts the two agree:
+  //
+  //     CHECK_NEAR(cost, grid_tour2_cost_sum, 1e-4)   exploration_manager.cpp:246
+  //
+  // glog's CHECK_NEAR is fatal. Summing raw doubles and truncating once gives
+  // trunc(100 * sum_i c_i) instead, which differs by up to a hundredth per edge
+  // -- measured at 0.04 on a ten-city tour, four hundred times the tolerance,
+  // and over the tolerance on 400 of 400 random ten-city instances. So the
+  // fallback added to keep exploration_node alive when LKH dies was aborting
+  // it instead: SIGABRT, immediately after "the LKH solver died on
+  // 'coverage_path'", with traj_server still republishing the last endpoint so
+  // the aircraft looked healthy while the planner was gone.
+  long long total_units = 0;
   for (int step = 1; step < dimension; ++step) {
     int best = -1;
     double best_cost = std::numeric_limits<double>::max();
@@ -149,16 +197,16 @@ void writeGreedyTourImpl(const Eigen::MatrixXd &cost_matrix, int dimension,
       break;
     visited[best] = true;
     tour.push_back(best);
-    total += best_cost;
+    total_units += (long long)(best_cost * 100.0);
     current = best;
   }
   if (skip_last && dimension > 1) {
-    total += cost_matrix(current, depot);
+    total_units += (long long)(cost_matrix(current, depot) * 100.0);
     tour.push_back(depot);
   }
 
   std::ofstream fout(out_file);
-  fout << "COMMENT : Length = " << (long long)(total * 100.0) << "\\n";
+  fout << "COMMENT : Length = " << total_units << "\\n";
   fout << "TOUR_SECTION\\n";
   for (size_t i = 0; i < tour.size(); ++i)
     fout << (tour[i] + 1) << "\\n";     // TSPLIB cities are 1-based
@@ -225,9 +273,16 @@ addition = anchor + """
                        bool skip_last, const std::string &out_file);
 """
 
-if header.count(anchor) != 1:
-    raise SystemExit("patch: expected exactly 1 dijkstra declaration, found %d"
-                     % header.count(anchor))
-open(path, "w").write(header.replace(anchor, addition))
-print("patched: exploration_manager.h declares the isolated solver")
+# Re-runnable, like the source patch above. Declaring the two helpers a second
+# time is not harmless -- C++ rejects the redeclaration outright ("cannot be
+# overloaded with" itself) and the build fails on a header that was already
+# correct.
+if "runLKHIsolated" in header:
+    print("patched: exploration_manager.h already declares the isolated solver")
+else:
+    if header.count(anchor) != 1:
+        raise SystemExit("patch: expected exactly 1 dijkstra declaration, found %d"
+                         % header.count(anchor))
+    open(path, "w").write(header.replace(anchor, addition))
+    print("patched: exploration_manager.h declares the isolated solver")
 PYEOF

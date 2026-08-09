@@ -15,11 +15,15 @@ Four terms, tuned separately because they answer different questions:
   position is mostly noise and the filtering it needs costs phase.
 * **Integral** -- learns the standing biases, and only near the curve.
 
-There is no speed limit here, and none is needed. The plan's own velocity sets
-the speed; the damping term opposes any excess over it, so the closed loop
-settles at the planned speed rather than at some ceiling. A tracker with a speed
-clamp *below* the planner's limit falls permanently behind, which is a failure
-mode this shape simply does not have.
+The speed limit here is **relative to the plan**, not absolute, and that
+distinction is the whole point. An absolute clamp below the planner's own limit
+leaves the aircraft permanently behind — a real failure mode, and the reason
+this shape avoided one at first. But "no ceiling at all" is also wrong: the
+damping term balances the position term only once the aircraft is
+``kp * clamp / kd`` faster than the plan, which measured out at 42% of a flight
+above 1.1 m/s on a 0.6 m/s plan, and FALCON's clearance is computed for the
+speed FALCON planned. So the ceiling is ``planned speed + max_overspeed``, which
+moves with the plan and can never hold the aircraft back.
 """
 from __future__ import annotations
 
@@ -105,6 +109,51 @@ class TrajectoryTrackerParams:
             cruise so a large lag -- which usually means something went wrong
             rather than that the aircraft is merely late -- cannot turn into a
             dash along the route.
+
+            **Small on purpose, and it was not always.** At 0.5 it saturated for
+            most of every simulated flight, because on Isaac Sim the lag is
+            largely not a schedule deficit at all: the simulator runs at about
+            0.7x real time while FALCON plans on the wall clock, so the aircraft
+            is structurally behind a deadline it cannot meet (see
+            ``falcon_pegasus/link/sim_clock.py``). Chasing that fictitious lag
+            drove the aircraft at 1.1-1.3 m/s along a route FALCON had cleared
+            for 0.6 -- measured, 44% of one flight above the governor's own
+            ceiling -- and it is how two soak rounds ended against a wall.
+
+            Being late is benign; being fast in a corridor sized for a slower
+            aircraft is not. The same reasoning as ``_diagnose``: along-track
+            error is the cheap one, cross-track is what hits things.
+
+            A further cut to 0.10 (with ``max_overspeed`` 0.12) was tried and
+            reverted. It did reduce the overspeed -- the aircraft had been
+            sitting AT its ceiling for 54% of the ticks where the plan had a
+            speed, running 0.74 m/s against a 0.52 m/s plan -- but it cost 24%
+            of the coverage RATE on the stub (1077 -> 822 m3 in 180 s), and the
+            bar has to be met inside a fixed flight budget. The stub cannot
+            price the other side of that trade because it has no collisions, so
+            there was no evidence the safety gain paid for the coverage loss.
+            Do not tune this pair again on stub numbers alone.
+        max_overspeed: How much faster than the plan the aircraft may be flown,
+            m/s. This is a **clearance** setting, not a comfort one.
+
+            FALCON's trajectory is checked against the map at the speed FALCON
+            planned, with `bspline_opt/safe_distance` of clearance around it.
+            Fly the same curve faster and that margin is spent on stopping
+            distance: the airframe is 0.7 m across, the clutter in this building
+            sits at cruise height, and the difference between rounding an
+            obstacle and hitting it is a few tenths of a metre.
+
+            It needs a ceiling because the position loop has no natural one. A
+            metre of error asks for ``kp * clamp`` of acceleration, which the
+            damping term balances only once the aircraft is
+            ``kp * clamp / kd`` **faster than the plan** -- about 0.9 m/s with
+            these gains. Measured on a 0.6 m/s plan before this existed: 42% of
+            the flight above 1.1 m/s, 29% above 1.5, peaking at 2.85, and the
+            flight ended embedded in a desk at cruise height.
+
+            The only sanctioned reason to exceed the plan's speed is recovering
+            schedule, so this must be at least ``max_catchup_speed`` or the two
+            fight each other.
         position_error_clamp_m: Position error is clamped to this, per axis,
             **before** the position loop sees it.
 
@@ -146,7 +195,8 @@ class TrajectoryTrackerParams:
     velocity_damping_xy: float = 2.2
     velocity_damping_z: float = 3.0
     schedule_gain_per_s: float = 0.6
-    max_catchup_speed: float = 0.5
+    max_catchup_speed: float = 0.15
+    max_overspeed: float = 0.25
     position_error_clamp_m: float = 1.0
     integral_band_m: float = 0.5
     max_position_error_m: float = 2.0
@@ -160,7 +210,12 @@ class TrajectoryTrackerParams:
         for name in ("velocity_damping_xy", "velocity_damping_z", "schedule_gain_per_s"):
             if getattr(self, name) < 0.0:
                 raise ValueError("%s must be >= 0, got %r" % (name, getattr(self, name)))
-        for name in ("max_catchup_speed", "position_error_clamp_m",
+        if self.max_overspeed < self.max_catchup_speed:
+            raise ValueError(
+                "max_overspeed (%r) must be at least max_catchup_speed (%r), or the "
+                "speed ceiling cancels the catch-up it is supposed to allow"
+                % (self.max_overspeed, self.max_catchup_speed))
+        for name in ("max_overspeed", "max_catchup_speed", "position_error_clamp_m",
                      "integral_band_m", "max_position_error_m",
                      "max_trajectory_age_s", "max_yaw_rate", "yaw_rate_margin"):
             if getattr(self, name) <= 0.0:

@@ -58,6 +58,7 @@ from sparx_agency.tasks.planning.falcon_pegasus.isaac.mission import (
     CONTROL_ATTITUDE, CONTROL_MODES, CONTROL_VELOCITY,
 )
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
+from sparx_agency.tasks.planning.falcon_pegasus.link.sim_clock import SimClock
 from sparx_agency.tasks.planning.falcon_pegasus.link.depth_codec import encode_depth
 from sparx_agency.tasks.planning.falcon_pegasus.stub.airframe import (
     AttitudeAircraft, LaggingAircraft,
@@ -105,8 +106,39 @@ def _parse_args():
                         help="the STAND-IN AIRFRAME's true hover throttle, which the "
                              "controller is not told. Set it away from the thrust "
                              "model's seed to check the estimator actually acquires")
+    parser.add_argument("--real-time-factor", type=float, default=1.0, metavar="RTF",
+                        help="seconds of flight per second of wall clock (default 1.0). "
+                             "Below 1.0 the aircraft runs SLOW while FALCON keeps "
+                             "planning on the wall clock, which is what Isaac Sim does "
+                             "here -- measured at 0.66 on this machine. FALCON's "
+                             "schedule then advances faster than the aircraft can fly "
+                             "it, and the tracker carries a standing lag it cannot "
+                             "close. This is the single largest difference between a "
+                             "stub flight and a real one")
+    parser.add_argument("--drag", type=float, default=None, metavar="PER_MPS",
+                        help="override the stand-in airframe's drag, m/s^2 per m/s "
+                             "(default: the value fitted from a real flight). Pass 0 "
+                             "for the drag-free body this rig used to model -- which "
+                             "tracks to within centimetres and hides any defect in "
+                             "how the outer loop removes a standing bias")
     parser.add_argument("--out", type=Path, default=None, help="write a result JSON here")
+    parser.add_argument("--trace", type=Path, default=None,
+                        help="write a per-tick .npy of what the plan asked for and "
+                             "what the aircraft did. The one question the summary "
+                             "cannot answer is whether the aircraft was LOOKING "
+                             "where it flew: FALCON aims the camera along the "
+                             "planned direction of travel, so a tick whose actual "
+                             "course is far off the commanded yaw is a tick flown "
+                             "into unseen space. Columns are named in TRACE_COLUMNS")
     return parser.parse_args()
+
+
+# Kept next to the writer so the two cannot drift apart.
+TRACE_COLUMNS = (
+    "t", "x", "y", "z", "yaw", "vx", "vy", "vz",
+    "ref_x", "ref_y", "ref_z", "ref_yaw", "ref_vx", "ref_vy", "ref_vz",
+    "cmd_yaw", "err_m", "lag_m", "xte_m", "traj_id",
+)
 
 
 def _load_voxels(scene: str, override):
@@ -149,8 +181,11 @@ def main() -> int:
              camera._ray_shape[0], camera._ray_shape[1]), flush=True)
 
     if args.control == CONTROL_ATTITUDE:
+        # `_drag` is off entirely at drag_per_mps <= 0, offset included, so
+        # `--drag 0` restores the old drag-free body without a second flag.
+        drag = {} if args.drag is None else {"drag_per_mps": args.drag}
         aircraft = AttitudeAircraft(spawn, spawn_yaw,
-                                    true_hover_throttle=args.hover_throttle)
+                                    true_hover_throttle=args.hover_throttle, **drag)
     else:
         aircraft = LaggingAircraft(spawn, spawn_yaw)
     tracker = ReferenceTracker3D(ReferenceTrackerParams(limits=KinematicLimits(
@@ -168,7 +203,8 @@ def main() -> int:
     print("connected to the FALCON bridge", flush=True)
 
     state = _Flight(link, aircraft, tracker, camera, intrinsics, cruise, spawn_yaw,
-                    frame_period, budget, realtime, args.control, controller)
+                    frame_period, budget, realtime, args.control, controller,
+                    args.real_time_factor)
     try:
         outcome, detail = state.run()
     finally:
@@ -187,6 +223,11 @@ def main() -> int:
         "distance_m": state.distance,
     }
     print(json.dumps(summary, indent=2), flush=True)
+    if args.trace and state.trace:
+        args.trace.parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.trace, np.asarray(state.trace, dtype=float))
+        print("trace: %d ticks -> %s (columns: %s)"
+              % (len(state.trace), args.trace, ", ".join(TRACE_COLUMNS)), flush=True)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(summary, indent=2))
@@ -197,7 +238,8 @@ class _Flight:
     """The stub's own version of the mission: climb, hand over, track, stop."""
 
     def __init__(self, link, aircraft, tracker, camera, intrinsics, cruise, spawn_yaw,
-                 frame_period, budget, realtime, control_mode, controller):
+                 frame_period, budget, realtime, control_mode, controller,
+                 real_time_factor=1.0):
         self.link = link
         self.aircraft = aircraft
         self.tracker = tracker
@@ -211,10 +253,18 @@ class _Flight:
         self.frame_period = frame_period
         self.budget = budget
         self.realtime = realtime
+        self.real_time_factor = float(real_time_factor)
+        self.clock = SimClock()
+        if self.real_time_factor <= 0.0:
+            raise ValueError("real_time_factor must be positive, got %r"
+                             % (real_time_factor,))
         self.sim_time = 0.0
         self.distance = 0.0
         self._previous_position = None
         self.errors = []
+        # Always collected, written only on --trace: a few thousand rows of
+        # floats costs nothing next to ray-casting a depth image every tick.
+        self.trace = []
         self._next_frame_at = 0.0
         self._steps = 0
         self._streaming_odometry = False
@@ -333,21 +383,51 @@ class _Flight:
             command = self.tracker.update(
                 self.link.reference, position, self.aircraft.yaw, DT,
                 velocity=velocity,
-                reference_age=self.link.reference_age_s(time.time()))
+                reference_age=self.link.reference_age_s(self.sim_time))
             self.aircraft.step_velocity(command.velocity(), command.yaw, DT)
             return command
 
         if self.link.trajectory is not None:
+            # Re-based onto the aircraft's clock, exactly as the mission does:
+            # FALCON stamps its schedule on the wall clock, and at any
+            # --real-time-factor below 1 that schedule is not flyable. See
+            # link/sim_clock.py.
+            # Already on this clock -- FALCON runs on /clock now. See
+            # patches/allow_sim_time.sh.
             self.controller.set_trajectory(self.link.trajectory)
         command = self.controller.update(position, velocity, self.aircraft.yaw,
-                                         DT, time.time())
+                                         DT, self.sim_time)
         self.aircraft.step_attitude(command.attitude.quaternion_wxyz(),
                                     command.throttle, command.tracking.yaw, DT)
         # Fed the airframe's own acceleration and thrust axis, which is what an
         # IMU and an attitude estimate would report on the real aircraft.
         self.controller.observe_thrust(command.throttle, self.aircraft.acceleration,
                                        self.aircraft.body_z, DT)
+        self._trace(position, velocity, command)
         return command
+
+    def _trace(self, position, velocity, command):
+        """Record what the plan asked for beside what the aircraft did.
+
+        The reference is re-sampled from the trajectory rather than read off the
+        command, because the command carries only scalar diagnostics -- and the
+        thing being diagnosed is a *direction*, the angle between the planned
+        course and the yaw the camera is being pointed along.
+        """
+        track = command.tracking
+        trajectory = self.link.trajectory
+        if trajectory is None:
+            return
+        reference = trajectory.sample(track.reference_time_s)
+        self.trace.append((
+            self.sim_time, position[0], position[1], position[2], self.aircraft.yaw,
+            velocity[0], velocity[1], velocity[2],
+            reference.x, reference.y, reference.z,
+            reference.yaw if reference.yaw is not None else float("nan"),
+            reference.vx, reference.vy, reference.vz,
+            track.yaw, track.position_error_m, track.along_track_lag_m,
+            track.cross_track_error_m, float(track.trajectory_id),
+        ))
 
     def _explore(self):
         started = self.sim_time
@@ -397,6 +477,9 @@ class _Flight:
 
         self.sim_time += DT
         self._steps += 1
+        # time.time(), not monotonic: this must share an epoch with the
+        # stamps FALCON puts on its trajectories.
+        self.clock.update(time.time(), self.sim_time)
         if self._previous_position is not None:
             self.distance += float(
                 np.linalg.norm(self.aircraft.position - self._previous_position))
@@ -404,7 +487,7 @@ class _Flight:
 
         if self._streaming_odometry and self._steps % ODOMETRY_EVERY_N_STEPS == 0:
             self.link.send_odometry(
-                time.time(), self.aircraft.nav_position,
+                self.sim_time, self.aircraft.nav_position,
                 self.aircraft.quaternion_xyzw, tuple(self.aircraft.velocity),
                 (0.0, 0.0, 0.0))
 
@@ -413,7 +496,12 @@ class _Flight:
             self._send_frame()
 
         if self.realtime:
-            behind = self._wall_start + self.sim_time - time.monotonic()
+            # Divided by the real-time factor, so a factor below 1 makes the
+            # AIRCRAFT run slow while FALCON keeps running on the wall clock --
+            # which is what Isaac Sim actually does on this machine. See
+            # --real-time-factor.
+            behind = (self._wall_start + self.sim_time / self.real_time_factor
+                      - time.monotonic())
             if behind > 0:
                 time.sleep(behind)
 
@@ -425,8 +513,10 @@ class _Flight:
         depth = self.camera.render(translation,
                                    np.asarray(rotation_world_body).dot(BODY_TO_OPTICAL))
         encoded = encode_depth(depth)
-        self.link.send_frame(time.time(), self.intrinsics.width, self.intrinsics.height,
-                             translation, quaternion, encoded.tobytes())
+        # The simulator's clock: the bridge turns these into ROS /clock.
+        self.link.send_frame(self.sim_time, self.intrinsics.width,
+                             self.intrinsics.height, translation, quaternion,
+                             encoded.tobytes())
 
 
 if __name__ == "__main__":

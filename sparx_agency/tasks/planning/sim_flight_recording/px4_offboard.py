@@ -36,10 +36,10 @@ _TYPE_MASK_VELOCITY_YAW = 0b100111000111
 
 _MAV_FRAME_LOCAL_NED = 1
 
-# SET_ATTITUDE_TARGET type_mask: use the quaternion and the throttle, ignore the
-# three body-rate fields (bits 0-2). PX4 reads the yaw-rate field even so, as a
-# heading move rate, but discards roll and pitch rate in attitude mode -- see
-# `send_attitude_target`.
+# SET_ATTITUDE_TARGET type_mask: use the quaternion and the throttle, ignore all
+# three body-rate fields (bits 0-2) -- yaw rate included. See
+# `send_attitude_target` for why the yaw feedforward is masked off today and
+# what enabling it would take.
 _TYPE_MASK_ATTITUDE_THRUST = 0b00000111
 
 # MAV_LANDED_STATE, from EXTENDED_SYS_STATE. PX4's land detector is the only
@@ -387,18 +387,29 @@ class PX4Offboard:
         quaternion is rotated about the world z axis into PX4's local frame, the
         same correction ``send_velocity_world`` makes to a velocity.
 
-        **PX4 ignores the roll and pitch rate feedforward in this mode.** Its
-        ``SET_ATTITUDE_TARGET`` handler takes either an attitude or a set of
-        body rates, not an attitude with rates fed forward; only the yaw rate
-        survives, as a heading move rate. The roll/pitch feedforward the
-        flatness stage computes is therefore carried but unused, and it is what
-        a body-rate cut would consume if this is ever taken one layer deeper.
+        **No rate feedforward reaches PX4 in this mode, the yaw rate included.**
+        ``_TYPE_MASK_ATTITUDE_THRUST`` is ``0b111``, which sets the ignore bit
+        for body roll rate, body pitch rate *and* body yaw rate, so the
+        ``yaw_rate`` argument is placed in the message and then discarded by the
+        receiver. An earlier version of this docstring claimed the yaw rate
+        survived as a heading move rate; it does not, and the mask is what
+        decides.
+
+        Clearing bit 2 would pass it through -- PX4's handler copies
+        ``body_yaw_rate`` into the attitude setpoint's yaw move rate when that
+        bit is clear -- and it is probably worth doing, because the yaw
+        feedforward the tracker computes off FALCON's yaw curve is exactly what
+        would help the camera lead a turn. It is deliberately NOT done here:
+        it changes how the aircraft yaws, the stub slews yaw at a fixed rate and
+        cannot show the difference, and it wants its own before/after flight
+        rather than being folded into a reliability run.
 
         Args:
             quaternion_wxyz: Desired attitude in the simulator's world (ENU)
                 frame, ``(w, x, y, z)``, unit length.
             throttle: Normalized collective thrust in [0, 1].
-            yaw_rate: Heading move rate, rad/s, world frame.
+            yaw_rate: Heading move rate, rad/s, world frame. Carried in the
+                message but currently masked off -- see above.
         """
         self._conn.mav.set_attitude_target_send(
             0, self._conn.target_system, self._conn.target_component,

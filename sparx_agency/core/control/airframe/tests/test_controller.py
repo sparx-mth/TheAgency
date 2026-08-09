@@ -209,3 +209,71 @@ def test_it_reports_the_same_diagnostics_as_the_velocity_cut_controller():
     command = controller.update([0.0, 0.0, 1.4], [0.0, 0.0, 0.0], 0.0, DT, 0.0)
     missing = sorted(name for name in shared if not hasattr(command, name))
     assert not missing, "AirframeCommand is missing diagnostics: %s" % (missing,)
+
+
+# ── the deliverable thrust ceiling ────────────────────────────────────────
+
+def test_the_thrust_ceiling_is_cut_to_what_the_throttle_can_buy():
+    """max_specific_thrust is about the airframe; max_throttle is what reaches it."""
+    controller = AirframeController(thrust=ThrustModelParams(hover_throttle=0.62))
+    scale = controller.thrust_model.full_scale_mps2
+    deliverable = controller.thrust_model.params.max_throttle * scale
+
+    assert deliverable < controller.limits.max_specific_thrust      # they disagree
+    assert controller.deliverable_limits().max_specific_thrust == pytest.approx(deliverable)
+
+
+def test_a_strong_airframe_keeps_the_configured_ceiling():
+    """Nothing is taken away when the throttle can already buy the whole envelope."""
+    controller = AirframeController(thrust=ThrustModelParams(hover_throttle=0.3))
+    assert controller.deliverable_limits() is controller.limits
+
+
+def test_the_ceiling_follows_the_scale_as_it_is_learned():
+    """A sagging battery lowers what the throttle can buy, and the envelope with it."""
+    controller = AirframeController(thrust=ThrustModelParams(hover_throttle=0.62))
+    before = controller.deliverable_limits().max_specific_thrust
+
+    truth = GRAVITY_MPS2 / 0.78                  # heavier than it thought
+    for _ in range(400):
+        controller.observe_thrust(0.78, (0.0, 0.0, 0.78 * truth - GRAVITY_MPS2),
+                                  (0.0, 0.0, 1.0), 0.01)
+
+    after = controller.deliverable_limits().max_specific_thrust
+    assert after < before
+    assert after == pytest.approx(
+        controller.thrust_model.params.max_throttle
+        * controller.thrust_model.full_scale_mps2, rel=1e-6)
+
+
+def test_the_ceiling_never_drops_below_the_floor():
+    """A degenerate airframe must not make the envelope unconstructible."""
+    controller = AirframeController(
+        thrust=ThrustModelParams(hover_throttle=0.8, min_throttle=0.06, max_throttle=0.1))
+    limits = controller.deliverable_limits()
+    assert limits.max_specific_thrust > limits.min_specific_thrust
+
+
+def test_both_stages_clamp_against_the_same_envelope():
+    """The tracker's saturation flag must describe the clamp that actually ran.
+
+    `saturated` is the only consumer of saturation anywhere: it freezes the
+    position integrators and it is what AirframeCommand re-exposes. When the
+    flatness stage alone knew about the reduced thrust ceiling, the tracker
+    reported False while its command was being trimmed downstream, and the
+    integrators kept charging against a correction the airframe never saw.
+    """
+    controller = AirframeController(thrust=ThrustModelParams(hover_throttle=0.62))
+    deliverable = controller.deliverable_limits()
+    assert deliverable.max_specific_thrust < controller.limits.max_specific_thrust
+
+    seen = {}
+    real_update = controller.tracker.update
+
+    def spy(*args, **kwargs):
+        seen["limits"] = kwargs.get("limits")
+        return real_update(*args, **kwargs)
+
+    controller.tracker.update = spy
+    controller.update([0.0, 0.0, 1.4], [0.0, 0.0, 0.0], 0.0, 0.01, 0.0)
+    assert seen["limits"] is deliverable

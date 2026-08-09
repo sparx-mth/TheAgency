@@ -38,7 +38,7 @@ from sparx_agency.core.planning.trackers.reference_tracker_3d import ReferenceTr
 from sparx_agency.tasks.planning.falcon_pegasus.isaac import setup
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.falcon_client import FalconLink
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.mission import (
-    CONTROL_ATTITUDE, CONTROL_MODES, ExplorationMission, MissionSpec,
+    CONTROL_ATTITUDE, CONTROL_MODES, ExplorationMission, MissionSpec, TRACE_COLUMNS,
 )
 from sparx_agency.tasks.planning.falcon_pegasus.link.socket_link import (
     DOWNLINK_PORT, UPLINK_PORT,
@@ -63,6 +63,14 @@ def _parse_args():
                         help="also write a chase-camera MP4 of the aircraft")
     parser.add_argument("--onboard-video", action="store_true",
                         help="record the drone's own camera instead of the chase view")
+    parser.add_argument("--collider-fusion", action="store_true",
+                        help="fuse the rendered depth with a raycast of the surveyed "
+                             "colliders, so glass reads solid. OFF by default: the "
+                             "idea is right (the renderer sees through glass, PhysX "
+                             "does not) but the first implementation had a double "
+                             "rotation that corrupted the map, and it also needs "
+                             "astar_inflate lowered or A* stops finding paths. "
+                             "Validate on the stub before trusting a flight to it")
     parser.add_argument("--stream", action="store_true",
                         help="WebRTC livestream on :49100 (one process only)")
     parser.add_argument("--settle-s", type=float, default=30.0,
@@ -167,6 +175,7 @@ def main() -> int:
     link = FalconLink(args.uplink_port, args.downlink_port, args.connect_timeout_s)
     result = None
     recorder = None
+    mission = None
     try:
         from sparx_agency.robots.PEGASUS.adapters.scene import SPAWN_HEIGHT_M
         from sparx_agency.tasks.planning.falcon_pegasus.isaac import sensing
@@ -202,6 +211,11 @@ def main() -> int:
         print("connected to FALCON", flush=True)
 
         mission = ExplorationMission(loop, px4, adapter, link, spec, recorder=recorder)
+        # Glass: the rendered depth sees through it, PhysX does not. Fuse the
+        # depth with a raycast of the surveyed colliders so FALCON stops
+        # planning routes through glass doors it cannot pass.
+        if args.collider_fusion:
+            mission.enable_collider_fusion(spec.scene, str(config["run"]["camera"]))
         result = mission.fly()
         print("MISSION %s: %s %s" % (spec.name, result.outcome, result.detail), flush=True)
 
@@ -219,6 +233,7 @@ def main() -> int:
         link.close()
         px4_launch.terminate_px4(px4_process, instance=args.worker)
         _write_result(out_dir, run_path, spec, result)
+        _write_trace(out_dir, mission)
         simulation_app.close()
 
     return 0 if result is not None and result.ok else 1
@@ -237,6 +252,22 @@ def _write_result(out_dir: Path, run_path: Path, spec: MissionSpec, result) -> N
     }
     (out_dir / "result.json").write_text(json.dumps(payload, indent=2))
     print("wrote %s" % (out_dir / "result.json"), flush=True)
+
+
+def _write_trace(out_dir: Path, mission) -> None:
+    """Save the per-tick record of plan versus aircraft, if there is one.
+
+    Written in the `finally` beside the result, so a flight that ended by
+    crashing -- the only kind worth this much detail -- still leaves it behind.
+    """
+    trace = None if mission is None else getattr(mission, "_trace", None)
+    if not trace:
+        return
+    import numpy as np
+
+    np.save(out_dir / "trace.npy", np.asarray(trace, dtype=float))
+    (out_dir / "trace_columns.json").write_text(json.dumps(list(TRACE_COLUMNS)))
+    print("wrote %s (%d ticks)" % (out_dir / "trace.npy", len(trace)), flush=True)
 
 
 if __name__ == "__main__":

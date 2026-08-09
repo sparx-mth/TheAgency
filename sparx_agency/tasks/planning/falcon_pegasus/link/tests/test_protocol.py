@@ -127,10 +127,33 @@ def test_negative_infinity_is_discarded():
     assert encoded[0, 0] == 0
 
 
-def test_readings_closer_than_the_minimum_range_are_discarded():
+def test_readings_closer_than_the_minimum_range_are_clamped_not_discarded():
+    """A very close return is a wall, not an absent measurement.
+
+    Discarding them cost a flight: pinned against a partition the lens sits
+    ~0.1 m off it and the WHOLE frame reads under NEAR_M, so FALCON received a
+    blank image, never mapped the wall it was touching, and kept re-planning
+    the same unreachable viewpoint. Zero on this wire means "no measurement" and
+    must be reserved for exactly that.
+    """
     encoded = encode_depth(np.array([[NEAR_M - 0.01, NEAR_M + 0.01]], dtype=np.float32))
-    assert encoded[0, 0] == 0
+    assert encoded[0, 0] == int(round(NEAR_M * 1000))
     assert encoded[0, 1] > 0
+
+
+def test_a_whole_frame_against_a_wall_still_reports_a_surface():
+    """The case that actually happened: min 0.08, median 0.09, max 0.13 m."""
+    frame = np.full((8, 8), 0.09, dtype=np.float32)
+    encoded = encode_depth(frame)
+    assert (encoded > 0).all(), "a frame full of wall must not encode as no-data"
+    assert encoded.min() == int(round(NEAR_M * 1000))
+
+
+def test_a_genuine_non_measurement_is_still_zero():
+    """NaN is "no reading" and must stay distinguishable from a close surface."""
+    encoded = encode_depth(np.array([[math.nan, 0.0]], dtype=np.float32))
+    assert encoded[0, 0] == 0
+    assert encoded[0, 1] == 0
 
 
 def test_far_readings_are_clamped_not_wrapped():

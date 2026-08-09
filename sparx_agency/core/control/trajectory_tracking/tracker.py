@@ -52,6 +52,14 @@ from sparx_agency.core.control.trajectory_tracking.types import AccelerationComm
 from sparx_agency.core.planning.trackers.drift_pid.pid import AxisPid
 from sparx_agency.core.planning.trajectories.bspline.projection import TrajectoryProjector
 
+_GOVERNOR_TAPER = 0.6
+"""Fraction of the overspeed allowance used to fade the governor in.
+
+Below 1.0 so the fade finishes before the ceiling rather than at it, which is
+what lets an airframe with a lagging acceleration actually stop at the limit
+instead of coasting through it.
+"""
+
 
 class TrajectoryTracker:
     """Turns a B-spline trajectory and a measured state into a wanted acceleration.
@@ -79,6 +87,8 @@ class TrajectoryTracker:
         self._current = None        # type: Optional[object]
         self._pending = None        # type: Optional[object]
         self._yaw_cmd = None        # type: Optional[float]
+        # Overridden per tick by update(limits=...); see its docstring.
+        self._limits = self.params.limits
         self._hold = None           # type: Optional[np.ndarray]
         self._saturated = False
 
@@ -101,6 +111,14 @@ class TrajectoryTracker:
         for axis in self._pid:
             axis.reset()
         self._projector.reset()
+        # Drop the held and queued curves too. Without this, reset(hold_position=X)
+        # is silently ignored whenever a trajectory is still loaded -- update()
+        # finds it usable and follows it instead of holding, so the one call a
+        # caller makes to say "stop flying the plan" does not stop flying the
+        # plan. The mission resets at handover, where any curve still held
+        # belongs to a previous phase and must not be resumed.
+        self._current = None
+        self._pending = None
         self._yaw_cmd = None if yaw is None else normalize_angle(float(yaw))
         self._hold = None if hold_position is None else np.asarray(hold_position, dtype=float)
         self._saturated = False
@@ -141,7 +159,7 @@ class TrajectoryTracker:
         """The heading last put on the wire, or None before the first tick."""
         return self._yaw_cmd
 
-    def update(self, position, velocity, yaw, dt, now_s, follow=True):
+    def update(self, position, velocity, yaw, dt, now_s, follow=True, limits=None):
         # type: (object, object, float, float, float, bool) -> AccelerationCommand
         """Advance one control tick.
 
@@ -153,7 +171,15 @@ class TrajectoryTracker:
             dt: Seconds since the previous call. Must be > 0.
             now_s: Current time, on the clock the trajectories' start times are
                 stamped on.
-            follow: False holds station instead of tracking. This is how a
+            follow: False holds station instead of tracking.
+            limits: Acceleration envelope for this tick, overriding
+                ``params.limits``. The caller passes it when it knows something
+                the tracker cannot -- ``AirframeController`` cuts the thrust
+                ceiling to what the learned throttle can actually buy. It MUST
+                be the same envelope the stage below then applies, or
+                ``saturated`` reports on a clamp nobody performed and the
+                integrator keeps charging against a correction that is being
+                trimmed downstream. This is how a
                 caller acts on FALCON condemning its own live trajectory: the
                 aircraft brakes toward a latched point rather than carrying its
                 momentum into the obstacle that was just found.
@@ -165,6 +191,7 @@ class TrajectoryTracker:
         Raises:
             ValueError: If ``dt`` is not positive.
         """
+        self._limits = self.params.limits if limits is None else limits
         if dt <= 0.0:
             raise ValueError("TrajectoryTracker.update: dt must be > 0, got %r" % (dt,))
         measured = np.asarray(position, dtype=float).reshape(3)
@@ -204,9 +231,12 @@ class TrajectoryTracker:
         gap, schedule_lag_m, cross = self._diagnose(measured, planned_velocity, elapsed)
         catchup = self._catchup(planned_velocity, schedule_lag_m)
         damping = self._damping(planned_velocity + catchup, measured_velocity)
-        correction = np.array([self._correct(i, float(error[i]), dt) for i in range(3)])
-        command, self._saturated = limit_acceleration(
-            feed_forward + damping + correction, self.params.limits)
+        clamped = self._clamp_error(error)
+        correction = np.array([self._correct(i, float(error[i]), float(clamped[i]), dt)
+                               for i in range(3)])
+        wanted = self._limit_speed(feed_forward + damping + correction, measured_velocity,
+                                   float(np.linalg.norm(planned_velocity)))
+        command, self._saturated = limit_acceleration(wanted, self._limits)
 
         reference_yaw = yaw if reference.yaw is None else float(reference.yaw)
         self._yaw_cmd = self._slew_yaw(reference_yaw, dt)
@@ -307,6 +337,53 @@ class TrajectoryTracker:
         cross = float(np.linalg.norm(offset - along * direction))
         return gap, along, cross
 
+    def _limit_speed(self, wanted, measured_velocity, planned_speed):
+        # type: (np.ndarray, np.ndarray, float) -> np.ndarray
+        """Refuse to accelerate past the plan's speed plus a margin.
+
+        The position loop has no natural speed ceiling: a metre of error asks
+        for ``kp * clamp`` of acceleration, and the damping term only balances
+        it once the aircraft is ``kp * clamp / kd`` faster than the plan --
+        about 0.9 m/s with these gains. That is not a tuning nicety. FALCON
+        checks its trajectory against the map at the speed it planned, with a
+        fixed clearance around it, and flying the same curve faster spends that
+        clearance on stopping distance. Measured before this existed: 42% of a
+        flight above 1.1 m/s on a 0.6 m/s plan, and it ended inside a desk.
+
+        The governor **tapers in below the ceiling** rather than switching on at
+        it, and that is not refinement for its own sake. An airframe's
+        acceleration decays over a time constant, so a limiter that waits for
+        the ceiling has already lost: by the time the command reverses, the
+        aircraft has coasted past. Measured on a 1.00 m/s plan with a 1.50 m/s
+        ceiling, closing a 1.3 m lag: no ceiling 1.99, braking only once the
+        ceiling is passed 1.72, tapered 1.63.
+
+        So over the last stretch below the ceiling the accelerating component is
+        faded out, and above it the excess is actively braked off at the loop's
+        own damping gain. Only the *accelerating* component is ever removed and
+        braking is only ever added, so this can never stop the aircraft slowing
+        down and cannot deadlock a recovery.
+
+        It remains a **soft** ceiling -- nothing can stop an airframe instantly
+        -- and the ceiling moves with the plan, so unlike an absolute clamp it
+        can never hold the aircraft permanently behind a faster trajectory.
+        """
+        speed = float(np.linalg.norm(measured_velocity))
+        ceiling = planned_speed + self.params.max_overspeed
+        taper = max(self.params.max_overspeed * _GOVERNOR_TAPER, 1e-3)
+        if speed <= ceiling - taper or speed <= 1e-6:
+            return wanted
+
+        direction = measured_velocity / speed
+        along = float(np.dot(wanted, direction))
+        # Fade the accelerating component out across the taper band, so the
+        # command is already neutral by the time the ceiling arrives.
+        fade = max(0.0, min(1.0, (speed - (ceiling - taper)) / taper))
+        governed = wanted - fade * max(along, 0.0) * direction
+        if speed <= ceiling:
+            return governed
+        return governed - self.params.velocity_damping_xy * (speed - ceiling) * direction
+
     def _catchup(self, planned_velocity, lag_m):
         # type: (np.ndarray, float) -> np.ndarray
         """Extra target speed along the tangent, to recover schedule.
@@ -331,18 +408,46 @@ class TrajectoryTracker:
                       min(self.params.max_catchup_speed, wanted))
         return (planned_velocity / speed) * bounded
 
-    def _correct(self, axis, error, dt):
-        # type: (int, float, float) -> float
-        """One axis of position feedback, on a clamped error.
+    def _clamp_error(self, error):
+        # type: (np.ndarray) -> np.ndarray
+        """Bound how hard the position loop pulls, without changing where it pulls.
 
-        Integral separation on top of the clamp: outside ``integral_band_m`` the
-        axis is not holding a standing bias, it is *travelling*. The integrator
-        is also frozen while the command is saturated, because a correction that
+        The horizontal pair is scaled **together**; only the vertical axis is
+        clipped on its own. Clamping each axis independently -- which this did
+        at first -- silently rotates the correction: an error of (5.0, 1.0) m
+        clamps to (1.0, 1.0) and points 33.7 degrees away from the reference,
+        and the worst case is a full 45. That is the opposite of what the clamp
+        is for, and it is most wrong exactly when the aircraft is furthest off
+        the plan and the correction matters most.
+
+        Horizontal and vertical are separated rather than scaled as one 3-vector
+        because they are not interchangeable: they have their own gains, their
+        own limits, and losing altitude is not the same kind of mistake as
+        drifting sideways. ``limit_acceleration`` splits them for the same
+        reason.
+        """
+        clamp = self.params.position_error_clamp_m
+        clamped = np.array(error, dtype=float)
+        horizontal = float(np.hypot(clamped[0], clamped[1]))
+        if horizontal > clamp:
+            clamped[0] *= clamp / horizontal
+            clamped[1] *= clamp / horizontal
+        clamped[2] = max(-clamp, min(clamp, clamped[2]))
+        return clamped
+
+    def _correct(self, axis, error, clamped, dt):
+        # type: (int, float, float, float) -> float
+        """One axis of position feedback.
+
+        The PID sees the *clamped* error; the integral gate tests the *true*
+        one, because "am I near the curve" is a question about where the
+        aircraft actually is. Outside ``integral_band_m`` the axis is not
+        holding a standing bias, it is travelling, and integrating that charges
+        a correction which arrives after the error is gone. The integrator is
+        also frozen while the command is saturated, because a correction that
         cannot be applied should not keep accumulating.
         """
         near = abs(error) <= self.params.integral_band_m
-        clamp = self.params.position_error_clamp_m
-        clamped = max(-clamp, min(clamp, error))
         return self._pid[axis].update(clamped, dt, integrate=near and not self._saturated)
 
     def _damping(self, planned_velocity, measured_velocity):
@@ -371,8 +476,15 @@ class TrajectoryTracker:
             self._hold = measured.copy()
         error = self._hold - measured
         damping = self._damping(np.zeros(3), measured_velocity)
-        correction = np.array([self._correct(i, float(error[i]), dt) for i in range(3)])
-        command, self._saturated = limit_acceleration(damping + correction, self.params.limits)
+        clamped = self._clamp_error(error)
+        correction = np.array([self._correct(i, float(error[i]), float(clamped[i]), dt)
+                               for i in range(3)])
+        # A hold has no plan, so the ceiling is the margin alone. An aircraft
+        # returning to a latched point after being pushed off it has no business
+        # doing so at cruise speed, and this is the case where it is most likely
+        # to be near whatever pushed it.
+        wanted = self._limit_speed(damping + correction, measured_velocity, 0.0)
+        command, self._saturated = limit_acceleration(wanted, self._limits)
         return AccelerationCommand(
             ax=float(command[0]), ay=float(command[1]), az=float(command[2]),
             yaw=self._yaw_cmd if self._yaw_cmd is not None else 0.0,

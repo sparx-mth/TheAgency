@@ -22,6 +22,7 @@ scale stays honest.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 from sparx_agency.core.control.airframe.types import AirframeCommand
@@ -50,12 +51,51 @@ class AirframeController:
         # type: (Optional[TrajectoryTrackerParams], Optional[ThrustModelParams]) -> None
         self.tracker = TrajectoryTracker(tracker)
         self.thrust_model = ThrustModel(thrust)
+        self._deliverable = None      # type: Optional[AccelerationLimits]
 
     @property
     def limits(self):
         # type: () -> AccelerationLimits
         """The acceleration ceilings, owned by the tracker and shared downward."""
         return self.tracker.params.limits
+
+    def deliverable_limits(self):
+        # type: () -> AccelerationLimits
+        """The envelope with its thrust ceiling cut to what the airframe can buy.
+
+        ``AccelerationLimits.max_specific_thrust`` is a statement about the
+        airframe, but the throttle that actually reaches it is clamped at
+        ``max_throttle``, so the real ceiling is
+        ``max_throttle * full_scale`` -- and the two are not reconciled
+        anywhere. With this aircraft's learned scale they disagree by about
+        0.15 g: the limiter permits 15.70 m/s^2 while 0.9 throttle against a
+        15.82 m/s^2 scale can only produce 14.24, and the gap widens as the
+        learned hover throttle rises.
+
+        Left unreconciled the shortfall does not fall where the module's own
+        priority says it should. ``limit_acceleration`` gives horizontal away
+        first *precisely* so that altitude survives; but a thrust the throttle
+        cannot deliver still produces the commanded ATTITUDE, so the tilt is
+        honoured and the missing thrust comes off the vertical instead -- the
+        exact inversion, and only at the top of the envelope where it is least
+        affordable.
+
+        Recomputed as the scale is learned, and cached so the frozen dataclass
+        is not rebuilt at every tick of a 250 Hz loop.
+        """
+        base = self.limits
+        ceiling = (self.thrust_model.params.max_throttle
+                   * self.thrust_model.full_scale_mps2)
+        if ceiling >= base.max_specific_thrust:
+            return base
+        # An airframe that cannot deliver even the floor is a configuration
+        # error, not a flight condition; keep the dataclass constructible and
+        # let the saturation flag report it rather than raising mid-flight.
+        ceiling = max(ceiling, base.min_specific_thrust * 1.000001)
+        if (self._deliverable is None
+                or abs(self._deliverable.max_specific_thrust - ceiling) > 1e-3):
+            self._deliverable = replace(base, max_specific_thrust=ceiling)
+        return self._deliverable
 
     @property
     def trajectory_id(self):
@@ -106,10 +146,18 @@ class AirframeController:
         Returns:
             The attitude and throttle to command, with every stage's diagnostics.
         """
-        tracking = self.tracker.update(position, velocity, yaw, dt, now_s, follow=follow)
+        # ONE envelope, both stages. The thrust ceiling the throttle can
+        # actually buy is below the configured one from the 0.62 seed onward, so
+        # if only the flatness stage knew about it the tracker would report
+        # `saturated` False while its command was being trimmed -- and the
+        # integrator, which freezes on that flag, would keep charging against a
+        # correction that never reaches the airframe.
+        limits = self.deliverable_limits()
+        tracking = self.tracker.update(position, velocity, yaw, dt, now_s,
+                                       follow=follow, limits=limits)
         attitude = acceleration_to_attitude(
             tracking.acceleration(), tracking.yaw,
-            jerk=tracking.jerk(), yaw_rate=tracking.yaw_rate, limits=self.limits)
+            jerk=tracking.jerk(), yaw_rate=tracking.yaw_rate, limits=limits)
         return AirframeCommand(
             attitude=attitude,
             throttle=self.thrust_model.normalized(attitude.specific_thrust_mps2),

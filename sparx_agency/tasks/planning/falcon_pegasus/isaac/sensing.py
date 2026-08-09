@@ -31,6 +31,46 @@ POSE_AGREEMENT_M = 0.02
 POSE_AGREEMENT_RAD = math.radians(1.0)
 
 
+def fuse_with_colliders(depth, camera, translation, rotation_world_optical):
+    """Take the NEARER of the rendered depth and a raycast against the colliders.
+
+    GLASS IS THE REASON THIS EXISTS. The rendered depth comes from Isaac's
+    ``distance_to_image_plane`` annotator, which reports what the camera can
+    SEE -- and a camera sees straight through a glass door or partition to
+    whatever is behind it. PhysX does not: the collider is solid and stops the
+    aircraft dead.
+
+    So FALCON is told the glass is free space, plans a route through it, and the
+    aircraft is halted by a barrier its map says is not there. Because the map
+    never learns otherwise, every replan sends it back, which is precisely the
+    behaviour that dominated this campaign: the same wall struck again and
+    again, contacts at points FALCON's map reported clear.
+
+    The surveyed voxel map is the right corrective because it was built by
+    raycasting the PHYSICS COLLIDERS, so it contains exactly the geometry the
+    aircraft can hit, glass included. Taking the minimum keeps everything the
+    renderer sees that the survey missed (furniture moved since the survey, any
+    dynamic object) while never letting a transparent surface read as open.
+
+    Args:
+        depth: The rendered depth image, metres.
+        camera: A VoxelDepthCamera over the surveyed collider map.
+        translation: World position of the optical centre.
+        rotation_world_optical: ``(3, 3)`` world-from-optical rotation.
+
+    Returns:
+        The fused depth image, metres, same shape as ``depth``.
+    """
+    surveyed = camera.render(translation, rotation_world_optical)
+    if surveyed.shape != depth.shape:
+        # The raycaster runs at a coarser grid for speed; lift it to the image.
+        rows = np.linspace(0, surveyed.shape[0] - 1, depth.shape[0]).astype(int)
+        cols = np.linspace(0, surveyed.shape[1] - 1, depth.shape[1]).astype(int)
+        surveyed = surveyed[np.ix_(rows, cols)]
+    # inf means "nothing within range" in both, and min() handles it correctly.
+    return np.minimum(np.asarray(depth, dtype=np.float32), surveyed)
+
+
 def depth_bytes(adapter) -> Tuple[bytes, int, int]:
     """The current depth frame, ready for the wire.
 

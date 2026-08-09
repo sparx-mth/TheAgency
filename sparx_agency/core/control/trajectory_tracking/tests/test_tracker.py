@@ -131,6 +131,15 @@ def test_the_schedule_catch_up_settles_rather_than_biasing_the_speed():
     It has to converge: a term that keeps pushing once the schedule is recovered
     would fly the whole route fast and overrun the end of every trajectory,
     which is exactly what a lookahead does and why there is not one.
+
+    What is asserted is *convergence*, not a particular residual. The residual
+    is a deliberate trade and it moved once: ``max_catchup_speed`` went
+    0.5 -> 0.15 because on a slow simulator the lag is largely an
+    artefact of the clock rather than a real deficit, and chasing it flew the
+    aircraft half again as fast as the route was cleared for. A tenth of a metre
+    behind on a 1.0 m/s plan is a tenth of a second late, which is the benign
+    kind of wrong -- and it costs nothing laterally, because the reference is
+    the NEAREST point on the curve, not the one the schedule names.
     """
     trajectory = _line()
     start = _at_start(trajectory)
@@ -139,8 +148,15 @@ def test_the_schedule_catch_up_settles_rather_than_biasing_the_speed():
     tracker.reset(yaw=0.0)
     commands, _ = _fly(tracker, trajectory, airframe, trajectory.duration)
     tail = commands[-len(commands) // 4:]
-    assert max(abs(c.along_track_lag_m) for c in tail) < 0.06
-    assert max(c.position_error_m for c in tail) < 0.10
+    # Bounded, and no longer growing -- the second half of the tail is not worse
+    # than the first, which is what "settles" means and what a term that kept
+    # pushing would fail.
+    assert max(abs(c.along_track_lag_m) for c in tail) < 0.15
+    assert max(c.position_error_m for c in tail) < 0.20
+    half = len(tail) // 2
+    early = max(abs(c.along_track_lag_m) for c in tail[:half])
+    late = max(abs(c.along_track_lag_m) for c in tail[half:])
+    assert late <= early + 1e-3
 
 
 def test_the_feedforward_carries_the_command_not_the_feedback():
@@ -333,17 +349,76 @@ def test_divergence_is_reported_but_the_loop_keeps_trying():
 
 
 def test_the_position_error_clamp_bounds_the_pull_without_turning_it():
-    """Far from the plan, the correction is capped but still points at it."""
-    params = TrajectoryTrackerParams(position_error_clamp_m=0.5)
-    tracker = TrajectoryTracker(params)
+    """The clamp limits how hard the loop pulls, not which way it pulls.
+
+    Tested on the clamp itself rather than through a flight, because the
+    commanded acceleration also carries the feedforward and the damping term and
+    those would drown the property being checked.
+
+    Per-axis clamping breaks this contract: an error of (5.0, 1.0) clamps to
+    (1.0, 1.0), which points 33.7 degrees away from the reference, with 45 as
+    the worst case -- most wrong exactly when the aircraft is furthest off the
+    plan. The horizontal pair therefore has to be scaled together, the way
+    ``limit_acceleration`` already scales the horizontal command.
+    """
+    tracker = TrajectoryTracker(TrajectoryTrackerParams(position_error_clamp_m=1.0))
+
+    for error in ([5.0, 1.0, 0.0], [3.0, 0.5, 0.0], [-4.0, 2.0, 0.0], [0.2, 6.0, 0.0]):
+        clamped = tracker._clamp_error(np.array(error, dtype=float))
+        wanted = np.array(error[:2]) / np.linalg.norm(error[:2])
+        got = clamped[:2] / np.linalg.norm(clamped[:2])
+        angle = math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(wanted, got))))))
+        assert angle < 1e-6, "clamp rotated %s by %.1f deg" % (error, angle)
+        assert float(np.linalg.norm(clamped[:2])) == pytest.approx(1.0, abs=1e-9)
+
+    # Inside the clamp nothing is touched at all.
+    small = tracker._clamp_error(np.array([0.3, -0.4, 0.2]))
+    assert small == pytest.approx([0.3, -0.4, 0.2])
+
+    # Vertical is clipped on its own: altitude is not interchangeable with
+    # sideways drift, and the two axes have their own gains and limits.
+    tall = tracker._clamp_error(np.array([0.0, 0.0, 9.0]))
+    assert tall[2] == pytest.approx(1.0)
+
+
+def test_a_cross_track_offset_is_pushed_back_along_its_own_axis():
+    """The flight-level consequence: sideways error produces sideways correction."""
+    tracker = TrajectoryTracker(TrajectoryTrackerParams(use_projection=False))
     tracker.reset(yaw=0.0)
-    tracker.set_trajectory(_line())
-    near = tracker.update([0.0, 0.6, 1.4], [0.0, 0.0, 0.0], 0.0, DT, 1.0)
+    trajectory = _line()
+    tracker.set_trajectory(trajectory)
+    on_plan = trajectory.position_at(1.0)
+    reference = trajectory.sample(1.0)
+    command = tracker.update([on_plan[0], on_plan[1] + 3.0, on_plan[2]],
+                             [reference.vx, reference.vy, reference.vz], 0.0, DT, 1.0)
+    # Flying at the plan's speed with a pure +y offset: the correction is -y,
+    # and nothing significant is asked of x.
+    assert command.ay < -0.5
+    assert abs(command.ax) < 0.3
+
+
+def test_reset_stops_it_flying_the_plan():
+    """``reset(hold_position=...)`` must actually hold that position.
+
+    It did not: the corrections were cleared but the loaded trajectory was not,
+    so the very next tick found a usable curve and carried on following it. The
+    one call a caller has to say "stop flying the plan" quietly did nothing.
+    """
+    tracker = TrajectoryTracker()
     tracker.reset(yaw=0.0)
-    tracker.set_trajectory(_line())
-    far = tracker.update([0.0, 8.0, 1.4], [0.0, 0.0, 0.0], 0.0, DT, 1.0)
-    assert near.ay < 0.0 and far.ay < 0.0
-    assert far.ay == pytest.approx(near.ay, abs=1e-6)
+    trajectory = _line()
+    tracker.set_trajectory(trajectory)
+    flying = tracker.update(_at_start(trajectory), [0.0, 0.0, 0.0], 0.0, DT, 1.0)
+    assert not flying.holding
+    assert tracker.trajectory_id == 1
+
+    somewhere = [0.0, 0.0, 1.4]
+    tracker.reset(yaw=0.0, hold_position=somewhere)
+    held = tracker.update([0.3, 0.2, 1.4], [0.0, 0.0, 0.0], 0.0, DT, 1.2)
+    assert held.holding
+    assert tracker.trajectory_id == -1
+    # ... and it holds the point it was given, not wherever it happens to be.
+    assert held.position_error_m == pytest.approx(math.hypot(0.3, 0.2), abs=1e-6)
 
 
 def test_lag_reads_as_along_track_and_offset_reads_as_cross_track():
@@ -502,3 +577,160 @@ def test_the_catch_up_closes_a_deficit_that_falcon_keeps_re_creating():
 
     assert lags[0] > 1.0
     assert lags[-1] < 0.35, "the aircraft never caught up: %.2f m still behind" % lags[-1]
+
+
+def test_the_speed_ceiling_stops_the_position_loop_running_away():
+    """FALCON's clearance is computed for FALCON's speed; flying faster spends it.
+
+    The position loop has no natural ceiling -- a metre of error asks for
+    ``kp * clamp`` of acceleration and the damping term only balances it once
+    the aircraft is ``kp * clamp / kd`` faster than the plan. Measured in flight
+    before this existed: 42% of the time above 1.1 m/s on a 0.6 m/s plan,
+    peaking at 2.85, and the flight ended embedded in a desk at cruise height.
+
+    Measured across the catch-up itself, which is when the position term is
+    saturated and the overspeed actually happens; once the lag is closed both
+    settings simply cruise at the plan's speed and tell you nothing.
+    """
+    trajectory = _line(length=40)
+    start = trajectory.sample(0.0)
+    planned = math.hypot(start.vx, start.vy)
+
+    def peak_speed(max_overspeed):
+        tracker = TrajectoryTracker(TrajectoryTrackerParams(
+            max_overspeed=max_overspeed,
+            max_catchup_speed=min(0.5, max_overspeed)))
+        tracker.reset(yaw=0.0)
+        airframe = LaggingAirframe([start.x - 1.3, start.y, start.z],
+                                   velocity=[start.vx, start.vy, start.vz])
+        speeds = []
+        now = 0.0
+        tracker.set_trajectory(trajectory)
+        for _ in range(int(10.0 / DT)):
+            command = tracker.update(airframe.position, airframe.velocity, 0.0, DT, now)
+            airframe.step(command.acceleration(), DT)
+            speeds.append(float(np.linalg.norm(airframe.velocity)))
+            now += DT
+        return max(speeds)
+
+    tight = peak_speed(0.5)
+    loose = peak_speed(3.0)
+    # A soft ceiling: the governor brakes the excess off, but no controller can
+    # stop an airframe instantly, so a couple of tenths of transient survive.
+    assert tight <= planned + 0.5 + 0.2, "ceiling not respected: %.2f m/s" % tight
+    # And it is the ceiling doing the limiting, not the airframe: the same
+    # aircraft closing the same lag goes materially faster without it.
+    assert loose > tight + 0.15, "ceiling had no effect (%.2f vs %.2f)" % (loose, tight)
+
+
+def _ungoverned(catchup=0.1):
+    """A tracker whose speed ceiling can never engage, for differencing against.
+
+    The governor's contribution is only visible as a DIFFERENCE. Asserting that
+    a fast aircraft is braking proves nothing: at three times the plan speed the
+    damping term alone commands about -4.4 m/s^2, so the assertion passes with
+    the governor deleted outright -- which an earlier version of this test did.
+    """
+    return TrajectoryTracker(TrajectoryTrackerParams(max_overspeed=1000.0,
+                                                     max_catchup_speed=catchup))
+
+
+def _one_tick(tracker, trajectory, offset, velocity):
+    tracker.reset(yaw=0.0)
+    tracker.set_trajectory(trajectory)
+    on_plan = trajectory.position_at(1.0)
+    return tracker.update([on_plan[0] + offset, on_plan[1], on_plan[2]],
+                          velocity, 0.0, DT, 1.0)
+
+
+def test_the_ceiling_never_blocks_braking():
+    """It removes only the accelerating component, so it cannot deadlock a stop.
+
+    An aircraft already over the ceiling still needs to be able to slow down --
+    a limiter that zeroed the whole command would leave it coasting.
+    """
+    trajectory = _line()
+    governed = TrajectoryTracker(TrajectoryTrackerParams(max_overspeed=0.1,
+                                                         max_catchup_speed=0.1))
+    a = _one_tick(governed, trajectory, -0.5, [3.0, 0.0, 0.0])
+    b = _one_tick(_ungoverned(), trajectory, -0.5, [3.0, 0.0, 0.0])
+    assert a.ax < 0.0, "should be braking, got ax=%.2f" % a.ax
+    # and the governor must have made it MORE braking, not less
+    assert a.ax < b.ax
+
+
+def test_the_active_braking_branch_does_something():
+    """Above the ceiling the excess is braked off, not merely left alone.
+
+    Deleting that branch used to break no test at all. Differenced against a
+    tracker that cannot engage its ceiling, it has to show up.
+    """
+    trajectory = _line()
+    governed = TrajectoryTracker(TrajectoryTrackerParams(max_overspeed=0.1,
+                                                         max_catchup_speed=0.1))
+    over = _one_tick(governed, trajectory, 0.0, [2.0, 0.0, 0.0])
+    free = _one_tick(_ungoverned(), trajectory, 0.0, [2.0, 0.0, 0.0])
+    assert over.ax < free.ax - 0.5
+
+
+def test_the_governor_shapes_the_command_as_documented():
+    """The three branches of the speed governor, exercised directly.
+
+    Tested on ``_limit_speed`` rather than through a flight, deliberately. The
+    branches are only reachable when the command is ACCELERATING while the
+    aircraft is already near the ceiling, and on a straight plan that
+    combination does not occur -- projection puts the reference at the
+    aircraft's own along-track position, so a lagging aircraft has no position
+    error to accelerate towards and the damping term is already braking. A
+    closed-loop fixture therefore exercises none of this, which is exactly how
+    the taper and the active-braking branch came to have no coverage at all
+    while a test claimed to guard them.
+    """
+    tracker = TrajectoryTracker(TrajectoryTrackerParams(max_overspeed=0.5))
+    plan = 1.0
+    ceiling = plan + 0.5
+    taper = 0.5 * 0.6                       # _GOVERNOR_TAPER
+    accelerating = np.array([2.0, 0.0, 0.0])
+    braking = np.array([-2.0, 0.0, 0.0])
+
+    def limit(wanted, speed):
+        return tracker._limit_speed(wanted, np.array([speed, 0.0, 0.0]), plan)
+
+    # well below the ceiling: untouched
+    assert limit(accelerating, ceiling - taper - 0.2)[0] == pytest.approx(2.0)
+    # inside the taper band: the accelerating component is partly removed
+    faded = limit(accelerating, ceiling - taper / 2.0)[0]
+    assert 0.0 < faded < 2.0
+    # at the ceiling: fully removed
+    assert limit(accelerating, ceiling)[0] == pytest.approx(0.0, abs=1e-9)
+    # past it: actively braked, beyond merely removing the request
+    assert limit(accelerating, ceiling + 0.4)[0] < -0.5
+    # braking is never blocked, at any speed
+    for speed in (0.5, ceiling - taper / 2.0, ceiling, ceiling + 0.4):
+        assert limit(braking, speed)[0] <= -2.0 + 1e-9
+
+
+def test_the_ceiling_moves_with_the_plan_rather_than_capping_absolutely():
+    """An absolute clamp under the planner's limit would leave it permanently behind.
+
+    The ceiling is planned speed *plus* a margin, so a faster plan is simply
+    flown faster.
+    """
+    params = TrajectoryTrackerParams(max_overspeed=0.5)
+    tracker = TrajectoryTracker(params)
+    tracker.reset(yaw=0.0)
+    # 0.8 m spacing over a 0.4 s knot span is a 2 m/s plan -- far above any
+    # sane absolute clamp.
+    fast = _line(length=40, spacing=0.8)
+    start = fast.sample(0.0)
+    airframe = LaggingAirframe([start.x, start.y, start.z],
+                               velocity=[start.vx, start.vy, start.vz])
+    commands, _ = _fly(tracker, fast, airframe, 6.0)
+    assert float(np.linalg.norm(airframe.velocity)) > 1.8
+    assert max(c.position_error_m for c in commands[len(commands) // 2:]) < 0.2
+
+
+def test_bad_overspeed_settings_are_refused():
+    """A ceiling below the catch-up cancels the catch-up it exists to allow."""
+    with pytest.raises(ValueError, match="max_overspeed"):
+        TrajectoryTrackerParams(max_overspeed=0.2, max_catchup_speed=0.5)
