@@ -82,6 +82,7 @@ COLLISION_CLEARANCE_M = 0.05     # airframe centre this close to geometry = a hi
 COMMIT_FRACTION = 0.5            # fly half a prediction before asking for another
 COMMIT_TIMEOUT_S = 8.0
 MIN_COMMIT_M = 0.4
+ARRIVE_RADIUS_M = 0.30           # must stay below MIN_COMMIT_M; CommitSpec enforces it
 MAX_DEVIATION_M = 2.0
 SEARCH_DWELL_S = 2.0             # look this long before trying another heading
 
@@ -187,6 +188,7 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
         fraction=args.commit_fraction,
         lookahead_m=args.lookahead,
         min_commit_m=args.min_commit,
+        arrive_radius_m=args.arrive_radius,
         max_commit_s=args.commit_timeout,
         max_deviation_m=args.max_deviation,
         min_period_s=1.0 / max(args.infer_hz, 0.1)))
@@ -500,7 +502,12 @@ def main() -> None:
                              "(seconds): yawing in place, blocked, or stuck")
     parser.add_argument("--min-commit", type=float, default=MIN_COMMIT_M,
                         help="a commitment shorter than this is a predicted stop, "
-                             "not a route; ask again instead of crawling")
+                             "not a route; ask again instead of crawling. Must "
+                             "stay above --arrive-radius, or the shortest legal "
+                             "commitment is reached before it is flown")
+    parser.add_argument("--arrive-radius", type=float, default=ARRIVE_RADIUS_M,
+                        help="close enough to the end of a commitment to call it "
+                             "flown; lower it alongside --min-commit")
     parser.add_argument("--max-deviation", type=float, default=MAX_DEVIATION_M,
                         help="abandon a commitment the aircraft is this far off")
     parser.add_argument("--search-dwell", type=float, default=SEARCH_DWELL_S,
