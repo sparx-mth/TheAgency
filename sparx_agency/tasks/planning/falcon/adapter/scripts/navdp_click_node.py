@@ -518,7 +518,18 @@ class NavDPClickNode:
         # was snapshotted with and marks where ~execute_fraction of it ends.
         # world_xy[0] is that anchor -- the drone itself -- so the route to
         # publish is everything after it.
-        plan = self.commit.commit(traj, pose_xyyaw, rospy.get_time())
+        try:
+            plan = self.commit.commit(traj, pose_xyyaw, rospy.get_time())
+        except ValueError as e:
+            # A non-finite trajectory or pose. `core` is right to raise rather
+            # than let a NaN setpoint fly, but the flight response belongs to
+            # the node: hold the last path, exactly as a dropped inference does
+            # ten lines above. mark_attempt has already been charged, so a
+            # persistently corrupt source is re-asked at the rate floor and not
+            # hammered -- and the aircraft keeps flying a route it can trust
+            # instead of losing the navigation node mid-flight.
+            rospy.logwarn("NavDP: %s -- holding last path", e)
+            return None
         full_world = plan.world_xy[1:]
         n = len(full_world)
         # Execute only the near prefix (NavDP drifts further out); display the rest.
@@ -684,8 +695,17 @@ class NavDPClickNode:
                     and self.world_goal is not None and not self._goal_arrived
                     and self.pose_xyyaw is not None):
                 now = rospy.get_time()
-                tick = self.commit.tick(self.pose_xyyaw[0], self.pose_xyyaw[1], now)
-                if tick.replan_reason is not None:
+                try:
+                    tick = self.commit.tick(self.pose_xyyaw[0], self.pose_xyyaw[1], now)
+                except ValueError as e:
+                    # A non-finite pose off the localization topic -- a diverged
+                    # estimator, a bad TF, an uninitialised message. The executor
+                    # is right to refuse it, but the node must not die: it holds
+                    # the last path and tries again next frame, which is what it
+                    # already does for a dead policy server.
+                    rospy.logwarn_throttle(2.0, "NavDP: %s -- holding last path", e)
+                    tick = None
+                if tick is not None and tick.replan_reason is not None:
                     # Marked before the blocking HTTP call, so a slow or dead
                     # server costs one period rather than becoming the period.
                     self.commit.mark_attempt(now)

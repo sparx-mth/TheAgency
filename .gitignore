@@ -256,3 +256,11 @@ sparx_agency/robots/PEGASUS/maps/*.ply
 # Obstacle-duplication recipes from augment_scene.py -- regenerated per device
 # (they reference this device's own scene-graph paths), never committed.
 sparx_agency/robots/PEGASUS/scenes/
+
+# Adversarial QA working directory (the /verify skill). Copilot runs there
+# unattended with tools allowed, so it is deliberately outside the repo's tracked
+# surface: nothing it writes can be committed by accident, and a probe asserting
+# a bug we have since fixed cannot masquerade as a repo test. Tests that earn
+# their place are rewritten to repo convention and land in the `tests/` directory
+# beside the code they cover -- see the skill's promotion step.
+.verify_scratch/

@@ -29,7 +29,7 @@ ROS-free, numpy-only, Python 3.8 idioms -- the FALCON Noetic adapter imports it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import hypot
+from math import hypot, isfinite
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -57,6 +57,14 @@ class CommitSpec:
         arrive_radius_m: Close enough to the commit point to call it reached.
             Catches the corner-cutting case, where the aircraft passes inside
             the commit point and its projected arc never quite reaches it.
+            Proximity alone is not enough: arrival also requires the commitment
+            to be all but flown in arc terms, within this same distance. A long
+            route whose commit *point* merely happens to lie near the aircraft
+            -- a loop, or a corridor entered and reversed out of within the
+            committed half -- would otherwise be "arrived at" from a standing
+            start, which is the per-frame inference this package exists to stop.
+            This doubles as the arc-length slack, so it must stay larger than
+            the shortfall a genuine corner cut leaves behind.
         min_commit_m: A commitment shorter than this is not worth flying -- the
             policy has predicted a near-stop -- so ask again instead of crawling
             to a halt. Do not set it to zero: a degenerate prediction would then
@@ -99,6 +107,15 @@ class CommitSpec:
             if float(getattr(self, name)) < 0.0:
                 raise ValueError("%s cannot be negative; got %r"
                                  % (name, getattr(self, name)))
+        # An arrival radius at or above the shortest legal commitment means the
+        # shortest commitments are "arrived at" before they are flown, which is
+        # per-frame inference again -- the same class of misconfiguration that
+        # `fraction <= 0` is rejected for, and just as quiet in the air.
+        if float(self.arrive_radius_m) >= float(self.min_commit_m):
+            raise ValueError(
+                "arrive_radius_m (%r) must be smaller than min_commit_m (%r), or "
+                "the shortest legal commitment is reached before it is flown"
+                % (self.arrive_radius_m, self.min_commit_m))
 
 
 @dataclass
@@ -163,6 +180,8 @@ class PlanCommitExecutor(object):
         self._peak_arc_m = 0.0
         self._segment = 0
         self._held = None                   # type: Optional[str]
+        self._travelled_m = 0.0
+        self._last_xy = None                # type: Optional[Tuple[float, float]]
 
     # ── lifecycle ────────────────────────────────────────────────────
     def reset(self) -> None:
@@ -173,6 +192,8 @@ class PlanCommitExecutor(object):
         self._peak_arc_m = 0.0
         self._segment = 0
         self._held = None
+        self._travelled_m = 0.0
+        self._last_xy = None
 
     def mark_attempt(self, now_s: float) -> None:
         """Record that the policy was asked, successfully or not.
@@ -200,6 +221,11 @@ class PlanCommitExecutor(object):
         self._peak_arc_m = 0.0
         self._segment = 0
         self._held = None
+        # Distance is measured per commitment, not per mission: the new route is
+        # anchored where this prediction was made, so what the aircraft covered
+        # flying the previous one buys no credit against this one.
+        self._travelled_m = 0.0
+        self._last_xy = None
         self.commitments += 1
         return self.plan
 
@@ -213,13 +239,38 @@ class PlanCommitExecutor(object):
         otherwise read as finished from a standing start, and one the aircraft
         is blown backwards along would un-finish itself.
         """
+        # The plan is validated once per inference; the aircraft pose arrives on
+        # every control step and is the likelier source of a NaN -- a diverged
+        # estimator, a bad TF, an uninitialised Pose message. Unchecked, it
+        # projects to a nan arc, argmin picks index 0, and the carrot comes back
+        # (nan, nan) with replan_reason None: a non-finite setpoint the follower
+        # is told to keep flying. Refuse it here rather than downstream.
+        if not (isfinite(float(x)) and isfinite(float(y)) and isfinite(float(now_s))):
+            raise ValueError("aircraft pose and clock must be finite; got "
+                             "x=%r y=%r now_s=%r" % (x, y, now_s))
         if self.plan is None:
             return CommitTick(None, None, self._gate(NO_PLAN, now_s),
                               0.0, 0.0, 0.0, 0.0)
 
+        if self._last_xy is not None:
+            self._travelled_m += hypot(x - self._last_xy[0], y - self._last_xy[1])
+        self._last_xy = (float(x), float(y))
+
         arc, lateral, segment = self.plan.progress(x, y, self._segment)
         self._segment = max(self._segment, segment)
-        self._peak_arc_m = max(self._peak_arc_m, arc)
+        # Arc credit is capped by the distance actually covered. Projection is a
+        # nearest-point search over a window of CURSOR_WINDOW segments, so on a
+        # route that folds back within that window the aircraft can be credited
+        # with arc it never flew: with a small `fraction` the commit point lands
+        # inside the window, and a single projection from a few centimetres off
+        # the anchor jumps straight to it -- FLOWN after 4 cm of a 1.03 m
+        # commitment. Walking the cursor is only a defence when the commitment is
+        # longer than the window. Distance flown cannot be manufactured that way,
+        # and it bounds arc from above however the route is shaped. The arrival
+        # radius is the tolerance: a corner cut covers slightly less ground than
+        # the route it is tracking, and must still be able to complete.
+        credit = min(arc, self._travelled_m + self.spec.arrive_radius_m)
+        self._peak_arc_m = max(self._peak_arc_m, credit)
         commit_arc = self.plan.commit_arc_m
         cx, cy, heading = self.plan.carrot(x, y, self.spec.lookahead_m, self._segment)
         fraction = min(1.0, self._peak_arc_m / commit_arc) if commit_arc > 0 else 1.0
@@ -238,11 +289,29 @@ class PlanCommitExecutor(object):
         if self._peak_arc_m >= commit_arc:
             return FLOWN
         commit_x, commit_y = plan.commit_point
-        # Only where the radius is smaller than the leg. A commitment shorter
-        # than the arrival radius is "arrived at" from the anchor, before the
-        # aircraft has moved -- a route that curls back past its own start does
-        # exactly that -- and then the arc test never gets a say.
+        # Catches corner-cutting: the aircraft passes inside the commit point and
+        # its projected arc never quite reaches the end.
+        #
+        # Proximity to the commit point alone is not enough, and the arc-length
+        # bound below is what makes it safe. `commit_arc > arrive_radius_m` only
+        # rules out a commitment *shorter* than the radius; a long route whose
+        # commit **point** happens to sit near the anchor -- a loop, or a
+        # corridor entered and reversed out of within the committed half -- is
+        # within the radius from a standing start, and was declared flown having
+        # flown nothing. That is the original re-infer-every-frame bug wearing a
+        # different hat, so arrival also requires the commitment to be all but
+        # complete in arc terms, which corner-cutting is and a loop is not.
+        #
+        # The arc allowance is the smaller of the radius and a quarter of the
+        # commitment. A flat allowance is most of a short commitment: at the
+        # shipped defaults a legal 0.40 m commitment (min_commit_m) with a
+        # 0.30 m radius was declared FLOWN after 0.105 m -- 26 % of it -- because
+        # `commit_arc - arrive_radius_m` left only 0.10 m to cover. Scaling the
+        # allowance keeps corner-cutting working on the long commitments it was
+        # written for while refusing to hand back three quarters of a short one.
+        slack = min(self.spec.arrive_radius_m, 0.25 * commit_arc)
         if (commit_arc > self.spec.arrive_radius_m
+                and self._peak_arc_m >= commit_arc - slack
                 and hypot(x - commit_x, y - commit_y) <= self.spec.arrive_radius_m):
             return FLOWN
         if lateral > self.spec.max_deviation_m:

@@ -85,3 +85,43 @@ def test_a_cursor_past_the_end_clamps_to_the_last_segment():
     arc, _, segment = project(HAIRPIN, 0.0, 0.05, from_segment=99)
     assert segment == 2
     assert arc == pytest.approx(4.05)
+
+
+def test_the_cursor_advances_at_most_a_window_per_call():
+    """Progress is earned a window of segments at a time, wherever the query
+    point lies. Without the upper bound a single tick could hand back the far
+    end of a route the aircraft has not flown, and the commitment would be
+    retired on the spot."""
+    straight = np.stack([np.arange(40) * 0.2, np.zeros(40)], axis=1)
+    queries = ((7.0, 0.0),        # far down the route
+               (0.0, 0.0),        # behind the cursor
+               (39.0, -5.0))      # long past the end and well off to one side
+    for window in (1, 2, 4, 8):
+        for cursor in (0, 10, 25):
+            for x, y in queries:
+                _, _, segment = project(straight, x, y, cursor, window=window)
+                assert cursor <= segment <= cursor + window, (
+                    f"cursor {cursor} jumped to segment {segment} "
+                    f"with window {window}")
+
+
+def test_a_figure_eight_walked_with_the_cursor_never_reads_backwards():
+    """Arc never decreases on a route that crosses itself, as long as the
+    segment that comes back is fed in as the next cursor. The two branches of a
+    lemniscate meet at zero separation and cross at a right angle, so an
+    aircraft 3 cm off the branch it is flying sits almost exactly on the other
+    one; an unwindowed nearest-point search reads 2.9 m less arc there, and the
+    executor would set about flying the first loop a second time."""
+    t = np.linspace(0.0, 2.0 * np.pi, 60)
+    lemniscate = np.stack([np.sin(t), np.sin(t) * np.cos(t)], axis=1)
+    cursor, arcs = 0, []
+    for k in range(1, lemniscate.shape[0]):
+        step = lemniscate[k] - lemniscate[k - 1]
+        left = np.array([-step[1], step[0]]) / np.linalg.norm(step)
+        # Mid-segment, 3 cm to the left of it: where the aircraft really is.
+        query = 0.5 * (lemniscate[k - 1] + lemniscate[k]) + 0.03 * left
+        arc, _, cursor = project(lemniscate, query[0], query[1], cursor)
+        arcs.append(arc)
+    assert np.all(np.diff(arcs) >= 0.0), "arc went backwards at the crossing"
+    # And it walked the whole figure rather than stalling on one branch.
+    assert arcs[-1] > 0.95 * cumulative_arc(lemniscate)[-1]

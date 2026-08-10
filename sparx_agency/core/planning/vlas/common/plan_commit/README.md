@@ -68,6 +68,18 @@ a commitment last longer, never end it sooner. It is the backstop that stops a
 fast server reintroducing per-frame inference through one of the three above —
 so lowering it to unstick a stuck aircraft is exactly the wrong move.
 
+`arrive_radius_m` is the one knob that ends a commitment *successfully* rather
+than early. Arc length alone misses the corner-cutting case: the aircraft passes
+inside the commit point and its projected arc never quite reaches the end, so it
+would fly on past a commitment it has finished. Being near the commit point is
+half the test and **not sufficient on its own** — arrival also requires the
+commitment to be all but flown in arc terms. Otherwise a long route whose commit
+*point* happens to lie near the aircraft — a loop, or a corridor the policy
+enters and reverses out of inside the committed half — is "arrived at" from a
+standing start, having flown nothing, and every tick re-infers. That is the
+original bug wearing its third hat, and proximity plus progress is what closes
+it.
+
 Progress only ever moves forward, twice over. The projection is refused any
 segment behind a cursor the executor only advances, and the arc it returns is
 also kept as a high-water mark. Nearest-point projection is not monotonic where

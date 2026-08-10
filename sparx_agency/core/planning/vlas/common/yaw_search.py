@@ -19,8 +19,10 @@ something is proposed or the aircraft has looked everywhere. Rotating on the spo
 costs nothing, risks nothing, and is what a pilot does.
 
 This is policy-agnostic and ROS-free: it decides where to *look*, and the caller
-decides how to get there (rate-limited, in every stack here). Python 3.8 idioms
-and numpy-free -- the FALCON Noetic adapter can import it.
+decides how to get there (rate-limited, in every stack here). Python 3.8 idioms,
+and this module itself pulls in no numpy -- though importing it through the
+package does, since its siblings need it. The FALCON Noetic adapter can import
+it either way; numpy 1.17 is present in that container.
 """
 from __future__ import annotations
 

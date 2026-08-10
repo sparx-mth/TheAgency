@@ -126,6 +126,21 @@ def test_a_stopped_prediction_has_no_heading_to_offer():
     assert plan.segment_heading(0) is None
 
 
+def test_a_prediction_that_stalls_has_no_heading_on_its_dead_tail():
+    """A route that moves and then stops offers no heading past the point it
+    stopped at, and the carrot that reaches that tail says None too. Only the
+    tail is dead here, so a policy that pads an honest first leg with repeated
+    waypoints cannot swing the nose to world east the moment the aircraft
+    arrives at the end of it."""
+    body = np.concatenate([straight_ahead(2, step=1.0),
+                           np.tile([2.0, 0.0], (3, 1))], axis=0)
+    plan = anchor_plan(body, (0.0, 0.0, 0.0), 0.0, 0.5)
+    assert plan.segment_heading(0) == pytest.approx(0.0)
+    assert plan.segment_heading(2) is None
+    assert plan.segment_heading(3) is None
+    assert plan.carrot(0.0, 0.0, 3.5)[2] is None
+
+
 def test_a_turning_prediction_keeps_its_shape_in_the_world():
     """A right-hand arc anchored at yaw 0 must still curve right in the world."""
     angles = np.linspace(0.0, math.pi / 4, 12)

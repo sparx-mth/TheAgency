@@ -163,3 +163,59 @@ def test_no_dataclass_slots():
                 if isinstance(dec, ast.Call) and any(k.arg == "slots" for k in dec.keywords):
                     offenders.append("%s:%d" % (path.relative_to(VLAS_DIR), node.lineno))
     assert not offenders, "dataclass(slots=...) is 3.10+: %r" % offenders
+
+
+#: Builtins that grew ``__class_getitem__`` only in 3.9 (PEP 585).
+BUILTIN_GENERICS = ("list", "dict", "tuple", "set", "frozenset", "type")
+
+
+def _annotation_node_ids(tree):
+    """id() of every AST node that sits inside a type annotation.
+
+    Only meaningful for a module that defers its annotations: there the
+    expression is stored as a string and never evaluated, so a builtin generic
+    inside one costs nothing on 3.8. The same expression anywhere else -- and
+    every annotation in a module *without* the future import -- is executed.
+    """
+    ids = set()
+    for node in ast.walk(tree):
+        annotations = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            slots = (args.args + args.kwonlyargs + args.posonlyargs
+                     + [args.vararg, args.kwarg])
+            annotations = [a.annotation for a in slots if a is not None and a.annotation]
+            if node.returns:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign) and node.annotation:
+            annotations = [node.annotation]
+        for ann in annotations:
+            for sub in ast.walk(ann):
+                ids.add(id(sub))
+    return ids
+
+
+def test_no_runtime_builtin_generics():
+    """Builtin generics may only appear where the future import defers them.
+
+    ``list[int]`` / ``dict[str, Any]`` / ``tuple[float, float]`` are 3.9+ (PEP
+    585): on the container's 3.8 they raise ``TypeError`` the moment the
+    expression is evaluated. A module-scope type alias, a ``cast(list[int], x)``
+    or any signature in a module without ``from __future__ import annotations``
+    evaluates at *import*, so the node dies during roslaunch and the XTEND never
+    gets that planner -- while every test here on 3.12 stays green. The future
+    import defers annotations only; it does not rescue a runtime expression.
+    """
+    offenders = []
+    for path in _py_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        deferred = _annotation_node_ids(tree) if _has_future_annotations(tree) else set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                    and node.value.id in BUILTIN_GENERICS and id(node) not in deferred):
+                offenders.append("%s:%d %s[...]"
+                                 % (path.relative_to(VLAS_DIR), node.lineno, node.value.id))
+    assert not offenders, (
+        "builtin generic evaluated at runtime (TypeError on Python 3.8) -- use "
+        "typing.List/Dict/Tuple, or move it into an annotation in a module with "
+        "`from __future__ import annotations`: %r" % offenders)

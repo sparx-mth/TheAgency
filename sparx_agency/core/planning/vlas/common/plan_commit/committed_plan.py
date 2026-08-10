@@ -46,11 +46,36 @@ class CommittedPlan(object):
 
     def __init__(self, world_xy: np.ndarray, anchor: Sequence[float],
                  issued_s: float, commit_index: int) -> None:
-        self.world_xy = np.asarray(world_xy, dtype=np.float64).reshape(-1, 2)
+        # Copied, then frozen. `asarray` would alias the caller's array, so a
+        # later write to it -- or to `plan.world_xy` itself, which is public --
+        # would edit a plan that has already been validated and whose `arc` was
+        # computed from the old values. A NaN dropped in that way still reaches
+        # the follower as a target. An invariant that can be voided after
+        # construction is not an invariant; it is a comment.
+        self.world_xy = np.array(world_xy, dtype=np.float64).reshape(-1, 2)
         self.anchor = (float(anchor[0]), float(anchor[1]), float(anchor[2]))
         self.issued_s = float(issued_s)
         self.commit_index = int(commit_index)
         self.arc = cumulative_arc(self.world_xy)
+        # The invariant lives on the type, not only in `anchor_plan`, because
+        # this class is exported and can be constructed directly. Checking the
+        # derived `arc` as well as the input catches what an input check cannot:
+        # waypoints past sqrt(DBL_MAX) are individually finite but square to an
+        # infinite arc, and every downstream carrot is then (nan, nan). The
+        # clock is checked here too -- a non-finite `issued_s` makes
+        # `now - issued > max_commit_s` false forever, silently deleting the one
+        # escape hatch that ends a commitment nothing else can end.
+        if not (np.all(np.isfinite(self.world_xy)) and np.all(np.isfinite(self.arc))
+                and np.isfinite(self.issued_s)
+                and np.isfinite(self.anchor[0]) and np.isfinite(self.anchor[1])
+                and np.isfinite(self.anchor[2])):
+            raise ValueError(
+                "a committed plan must be finite: got %d vertices, arc end %r, "
+                "anchor %r, issued_s %r"
+                % (self.world_xy.shape[0], self.arc[-1] if self.arc.size else None,
+                   self.anchor, self.issued_s))
+        self.world_xy.setflags(write=False)
+        self.arc.setflags(write=False)
 
     # ── shape ────────────────────────────────────────────────────────
     @property
@@ -169,6 +194,14 @@ def commit_index_for(waypoints: int, fraction: float) -> int:
     waypoints is a plan that is finished before it starts and would re-infer on
     the very next tick, which is the failure this whole package exists to stop.
 
+    Rounding is :func:`round`'s, which is banker's -- an exact ``.5`` goes to
+    the even neighbour, so 5 waypoints at ``0.5`` commit through waypoint 2
+    rather than 3. That only bites on an odd waypoint count at exactly half, it
+    never yields zero because of the clamp, and the shapes that actually fly
+    here (16 and 24 waypoints) are exact. Documented rather than "fixed":
+    rounding half up would change the commitment length on some plan sizes for
+    no benefit anyone has asked for.
+
     Args:
         waypoints: How many waypoints the prediction holds.
         fraction: Share of the prediction to commit to, ``0..1``.
@@ -201,17 +234,37 @@ def anchor_plan(trajectory: np.ndarray, pose: Sequence[float], issued_s: float,
         The anchored plan.
 
     Raises:
-        ValueError: The trajectory holds no waypoints.
+        ValueError: The trajectory holds no waypoints, or either the trajectory
+            or the pose holds a non-finite value.
     """
-    body = np.atleast_2d(np.asarray(trajectory, dtype=np.float64))[:, :2]
-    if body.shape[0] < 1:
-        raise ValueError("a prediction with no waypoints cannot be committed to")
-    cos, sin = np.cos(float(pose[2])), np.sin(float(pose[2]))
+    # Shape first, and the column count with it: `atleast_2d` turns an empty
+    # (0,) array into (1, 0) and a bare (N,) into (1, N), so a row-count test
+    # alone passes them through to an IndexError three lines down -- a caller
+    # following the docstring and catching ValueError would not catch it.
+    body = np.atleast_2d(np.asarray(trajectory, dtype=np.float64))
+    if body.ndim != 2 or body.shape[0] < 1 or body.shape[1] < 2:
+        raise ValueError(
+            "a prediction needs at least one (forward, left) waypoint; got shape %r"
+            % (tuple(np.shape(trajectory)),))
+    body = body[:, :2]
+    # A NaN propagates through the rotation into every arc length and out of
+    # the carrot as a non-finite setpoint, which the follower would fly while
+    # the executor reported "keep going" -- a lost aircraft, silently. A policy
+    # whose head has diverged is exactly how that arrives, so it is checked
+    # here, once per inference, rather than trusted. `Pose2D` guards the same
+    # (x, y, yaw) this way; only the columns actually used are checked, so a
+    # NavDP yaw channel full of junk is still ignored rather than fatal.
+    if not np.all(np.isfinite(body)):
+        raise ValueError("trajectory holds non-finite waypoints")
+    at_x, at_y, at_yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    if not (np.isfinite(at_x) and np.isfinite(at_y) and np.isfinite(at_yaw)):
+        raise ValueError("anchor pose must be finite; got (%r, %r, %r)"
+                         % (at_x, at_y, at_yaw))
+    cos, sin = np.cos(at_yaw), np.sin(at_yaw)
     world = np.stack([
-        float(pose[0]) + body[:, 0] * cos - body[:, 1] * sin,
-        float(pose[1]) + body[:, 0] * sin + body[:, 1] * cos,
+        at_x + body[:, 0] * cos - body[:, 1] * sin,
+        at_y + body[:, 0] * sin + body[:, 1] * cos,
     ], axis=1)
-    anchored = np.concatenate(
-        [np.array([[float(pose[0]), float(pose[1])]]), world], axis=0)
+    anchored = np.concatenate([np.array([[at_x, at_y]]), world], axis=0)
     return CommittedPlan(anchored, pose, issued_s,
                          commit_index_for(body.shape[0], fraction))

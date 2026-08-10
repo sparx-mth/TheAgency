@@ -269,6 +269,15 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
             # Evaluated every control step, not every render: the carrot has to
             # advance with the aircraft or the route is not being followed, it
             # is being aimed at.
+            #
+            # Deliberately NOT guarded, unlike the commit below. A non-finite
+            # *prediction* is a policy hiccup and the flight can carry on without
+            # it; a non-finite *pose* means the simulator or its estimator has
+            # broken, and every number this episode goes on to record would be
+            # meaningless. This is an offline harness, so failing loudly and
+            # losing the run is better than writing a corrupt episode into the
+            # fine-tuning set. The FALCON node makes the opposite call, because
+            # there an aircraft is in the air.
             tick = executor.tick(pose[0], pose[1], loop.sim_time)
             if rendered and tick.replan_reason is not None:
                 # Why this inference happened, kept before the tick is refreshed
@@ -296,16 +305,29 @@ def fly_mission(loop, px4, adapter, client, scene, mission, args,
                     # the aircraft since, so it is the pose behind this image.
                     # Anchoring anywhere later lays the route down ahead of
                     # where the policy actually looked.
-                    plan = executor.commit(trajectory, pose, loop.sim_time)
-                    tick = executor.tick(pose[0], pose[1], loop.sim_time)
-                    # A prediction with no length is a route of identical
-                    # points, and build_trajectory rightly refuses to smooth
-                    # one -- so check before asking rather than losing a
-                    # four-minute flight to the policy saying "stop". No
-                    # follower means the hold below takes over, which is the
-                    # correct response to a policy that has stopped.
-                    follower = (build_follower(plan, pose[2])
-                                if plan.total_arc_m >= args.min_commit else None)
+                    try:
+                        plan = executor.commit(trajectory, pose, loop.sim_time)
+                    except ValueError as exc:
+                        # A non-finite prediction or pose. Counted as the
+                        # transport failure it resembles and dropped exactly
+                        # like `result is None` above: trajectory back to None,
+                        # no follower, so the position hold below takes over and
+                        # the next step asks again at the rate floor. Falling
+                        # through rather than skipping the step matters -- the
+                        # track log, the target and the physics all live below.
+                        print("[fly_navdp] rejected prediction: %s" % (exc,))
+                        transport_failures += 1
+                        trajectory = None
+                    else:
+                        tick = executor.tick(pose[0], pose[1], loop.sim_time)
+                        # A prediction with no length is a route of identical
+                        # points, and build_trajectory rightly refuses to smooth
+                        # one -- so check before asking rather than losing a
+                        # four-minute flight to the policy saying "stop". No
+                        # follower means the hold below takes over, which is the
+                        # correct response to a policy that has stopped.
+                        follower = (build_follower(plan, pose[2])
+                                    if plan.total_arc_m >= args.min_commit else None)
                 if track_log is not None:
                     track_log.add(loop.sim_time, pose, trajectory,
                                   tick.target or target_world,

@@ -67,20 +67,30 @@ def test_halfway_down_the_prediction_ends_the_commitment():
     engine = executor()
     engine.mark_attempt(0.0)
     engine.commit(straight_ahead(), (0.0, 0.0, 0.0), 0.0)
-    assert engine.tick(1.9, 0.0, 1.0).replan_reason is None
-    assert engine.tick(2.45, 0.0, 1.1).replan_reason == FLOWN
+    assert straight_walk(engine, 1.9, 1.0).replan_reason is None
+    assert straight_walk(engine, 2.45, 1.1).replan_reason == FLOWN
 
 
 def test_cutting_the_corner_still_counts_as_arriving():
     """The aircraft can pass inside the commit point without its projected arc
-    ever reaching it; the arrival radius is what catches that."""
+    ever reaching it; the arrival radius is what catches that.
+
+    It has to be flown there rather than teleported. Arrival also requires the
+    commitment to be all but complete in arc terms, so that a long route whose
+    commit *point* merely happens to lie near the aircraft -- a loop, or a
+    corridor entered and reversed out of -- cannot be declared flown from a
+    standing start.
+    """
     turning = np.stack([np.linspace(0.2, 3.2, 16),
                         -np.linspace(0.0, 2.0, 16) ** 2 / 4.0], axis=1)
     engine = executor(arrive_radius_m=0.3)
     engine.mark_attempt(0.0)
     plan = engine.commit(turning, (0.0, 0.0, 0.0), 0.0)
     commit_x, commit_y = plan.commit_point
-    assert engine.tick(commit_x - 0.2, commit_y + 0.1, 1.0).replan_reason == FLOWN
+    assert walk(engine, plan.world_xy[1:6], 1.0).replan_reason is None
+    tick = engine.tick(commit_x - 0.2, commit_y + 0.1, 1.0)
+    assert tick.arc_m < plan.commit_arc_m, "the arc test must not be what fires"
+    assert tick.replan_reason == FLOWN
 
 
 def test_progress_is_a_high_water_mark():
@@ -250,3 +260,102 @@ def test_the_carrot_follows_the_shape_of_the_plan_not_just_its_end():
     assert all(later >= earlier - 1e-9 for earlier, later in zip(arcs[:-1], arcs[1:]))
     assert arcs[-1] - arcs[0] > 1.0
     assert arcs[0] < plan.commit_arc_m < arcs[-1]
+
+
+# ── the legal extremes ───────────────────────────────────────────────
+def test_a_single_waypoint_prediction_is_committed_to_and_flown():
+    """The shortest legal prediction is a commitment like any other.
+
+    A one-waypoint answer -- a policy that has seen enough to offer one step and
+    no more -- must anchor a route the aircraft can be measured against. Clamped
+    to nothing, or dismissed as unflyable while it is a metre long, it would be
+    re-inferred on the very next tick, which is the per-frame inference this
+    package exists to stop.
+    """
+    engine = executor()
+    engine.mark_attempt(0.0)
+    plan = engine.commit(np.array([[1.0, 0.0]]), (0.0, 0.0, 0.0), 0.0)
+    assert plan.waypoints == 1
+    assert plan.commit_index == 1
+    assert plan.commit_arc_m == pytest.approx(1.0)          # well over min_commit_m
+    assert engine.tick(0.0, 0.0, 1.0).replan_reason is None
+    flown = straight_walk(engine, 1.0, 1.0)
+    assert flown.replan_reason == FLOWN
+    assert flown.fraction == pytest.approx(1.0)
+
+
+def test_committing_the_whole_prediction_ends_only_once_all_of_it_is_flown():
+    """``fraction=1.0`` commits every waypoint, so the commitment ends where the
+    prediction does rather than at the half the default flies.
+
+    The far end of a learned trajectory is the part the world has had the most
+    time to change under, which is why the default stops at half -- but the
+    extreme is legal, and it must lengthen the commitment rather than quietly
+    behave like the default.
+    """
+    engine = executor(fraction=1.0)
+    engine.mark_attempt(0.0)
+    plan = engine.commit(straight_ahead(), (0.0, 0.0, 0.0), 0.0)
+    assert plan.commit_index == 24
+    assert plan.commit_arc_m == pytest.approx(4.8)
+
+    # Nor does the whole-prediction case get an exemption from the travel cap:
+    # arc credit cannot exceed the ground actually covered, so a first tick two
+    # metres down a route it has not flown is credited the arrival slack alone.
+    early = engine.tick(2.0, 0.0, 1.0)
+    assert early.arc_m == pytest.approx(0.3)                # arrive_radius_m, no more
+    assert early.replan_reason is None
+
+    # What a default commitment would have finished at is not half of this one.
+    assert straight_walk(engine, 2.4, 1.0).replan_reason is None
+    assert straight_walk(engine, 4.8, 1.1).replan_reason == FLOWN
+
+
+# ── a route that folds back on itself ────────────────────────────────
+def fold_back(tail=19, spacing=0.1):
+    """Out half a metre and back to 3 cm from the anchor by waypoint 5.
+
+    The fold sits at the *start* of the route rather than at its middle, which
+    is what a policy answers with when it looks past an obstacle it has just
+    decided to go around. At a small ``fraction`` the commit point lands inside
+    the projection window, so the cursor -- which stops a hairpin being finished
+    from a standing start only because the cursor must walk every segment of the
+    way out first -- is no defence here.
+    """
+    fold = [(0.25, 0.0), (0.5, 0.0), (0.5, 0.06), (0.25, 0.06), (0.03, 0.06)]
+    return np.array(fold + [(0.03, 0.06 + spacing * k)
+                            for k in range(1, tail + 1)])
+
+
+def test_a_fold_is_not_finished_before_the_ground_has_been_covered():
+    """A commitment whose commit point falls inside the projection window is not
+    declared flown until the aircraft has actually covered the distance.
+
+    Flown by its own carrot from the anchor, this route projects straight onto
+    its commit point: on projected arc alone a 1.03 m commitment reads as
+    complete after four centimetres, and the aircraft infers every frame for the
+    rest of the flight. Arc credit is capped by distance travelled, so the
+    earliest FLOWN can arrive is ``commit_arc_m - arrive_radius_m`` of ground.
+    """
+    engine = executor(fraction=0.2)
+    engine.mark_attempt(0.0)
+    plan = engine.commit(fold_back(), (0.0, 0.0, 0.0), 0.0)
+    assert plan.commit_index == 5                   # inside the projection window
+    assert plan.commit_arc_m == pytest.approx(1.03)
+
+    x, y, travelled, flown_after = 0.0, 0.0, 0.0, None
+    for step_index in range(60):
+        tick = engine.tick(x, y, 1.0 + step_index * 0.05)
+        if tick.replan_reason == FLOWN:
+            flown_after = travelled
+            break
+        assert tick.replan_reason is None, tick.replan_reason
+        dx, dy = tick.target[0] - x, tick.target[1] - y
+        norm = math.hypot(dx, dy)
+        if norm > 1e-9:
+            step = min(0.02, norm)                  # 0.4 m/s at the 20 Hz tick
+            x += step * dx / norm
+            y += step * dy / norm
+            travelled += step
+    assert flown_after is not None, "the commitment was never finished"
+    assert flown_after >= plan.commit_arc_m - engine.spec.arrive_radius_m
