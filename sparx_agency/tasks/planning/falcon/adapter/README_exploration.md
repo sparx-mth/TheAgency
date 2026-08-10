@@ -16,29 +16,41 @@ looks alive (busy computing) but never moves.
 cd ~/rqs_iai_ws/src && docker compose up -d it
 ```
 
-**3. mission_control** (the dashboard everything else runs from):
+**3. `robotican_dev`** (runs Frame Capture / Depth Processor / Twist Control Adapter below —
+without this up first, those three fail with `container ... is not running` even though
+mission_control looks fine):
+```bash
+cd /home/user1/GIT/TheAgency && docker compose -f docker-compose.robotican.yml up -d
+```
+If `/tmp` was freshly cleared (e.g. a reboot today), also run this once — otherwise Frame
+Capture crashes on its first frame with `PermissionError` (see `LESSONS.md`):
+```bash
+sudo chmod 777 /tmp/rooster_frames /tmp/rooster_depth
+```
+
+**4. mission_control** (the dashboard everything else runs from):
 ```bash
 cd /home/user1/GIT/TheAgency && venv/bin/streamlit run sparx_agency/tools/mission_control.py
 ```
 Opens at `http://localhost:8501`.
 
-**4. In mission_control, start these services, in this exact order** (wait for each to show
+**5. In mission_control, start these services, in this exact order** (wait for each to show
 running before starting the next):
 
 1. Rooster Ground Truth Localization (R1)
 2. Rooster Video Trigger (R1)
 3. Rooster Command Unit (R1)
-4. Rooster Frame Capture (R1)
-5. Rooster Depth Processor (R1)
-6. Rooster Twist Control Adapter (R1)
+4. Rooster Frame Capture (R1) — needs `robotican_dev` (step 3) already up
+5. Rooster Depth Processor (R1) — needs `robotican_dev` (step 3) already up
+6. Rooster Twist Control Adapter (R1) — needs `robotican_dev` (step 3) already up
 7. Rooster Falcon Container
 8. Rooster ROS1<->ROS2 Bridge
 
-**5. Arm and take off.** Start **Rooster Manual UI (R1)** from mission_control and use it
+**6. Arm and take off.** Start **Rooster Manual UI (R1)** from mission_control and use it
 (or however you normally fly manually) to arm + take off. Confirm it's hovering before
 the next step.
 
-**6. Start exploration.** Start **Rooster Falcon Adapter** from mission_control — it's
+**7. Start exploration.** Start **Rooster Falcon Adapter** from mission_control — it's
 already configured with `nav_mode:=exploration`. This launches `exploration_node` →
 `traj_server` → `falcon_exploration_follower_node.py`, which takes over `/cmd_vel_raw` and
 flies the plan.
@@ -85,6 +97,8 @@ exploration_node (always on, every mode) -> /planning/bspline
 ```
 `waypoint_follower_node.py` and the A*/NavDP/combination planner nodes are all disabled
 in this mode — there's no discrete path, only a continuous trajectory.
+
+For a normal click-to-fly mission (or object approach) instead, see `README_click_to_fly.md`.
 
 See `LESSONS.md` (2026-08-10 entries) and the `fly-rooster-sphera` skill for the
 debugging history behind these.

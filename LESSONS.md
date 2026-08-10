@@ -746,6 +746,35 @@ reported real flight-time/path-length progress, and coverage climbed past 97%.
 placement, etc.) before confirming the aircraft is actually airborne — the log signature is identical
 either way, and chasing the map/planner side first wastes time on a non-issue.
 
+---
+
+## 2026-08-10 — Rooster Frame Capture: `PermissionError` writing into `/tmp/rooster_frames`
+
+**Symptom:** `rooster_frame_dir_publisher.py` (Rooster Frame Capture, runs inside
+`robotican_dev`) crashed on its very first frame with `PermissionError: [Errno 13]
+Permission denied: '/tmp/rooster_frames/frame_00000001.tmp'`.
+
+**Root cause:** `/tmp/rooster_frames` and `/tmp/rooster_depth` are shared host directories
+bind-mounted (at the same path) into `robotican_dev`, `falcon`, and `detector_dev`. Docker
+auto-creates a bind-mount's host-side directory as `root:root` mode `0755` if it doesn't
+already exist when a container starts — and since `/tmp` is typically cleared on reboot,
+whichever of those containers happened to start first ended up creating the directory as
+root. `robotican_dev` (the one that actually needs to WRITE the frame/depth files) runs as
+non-root `uid 1000`, so it couldn't write into a root-owned 0755 directory. `falcon` and
+`detector_dev` both mount these paths read-only, so neither could fix it from inside
+either — the fix had to come from the host.
+
+**Fix / workaround:**
+```bash
+sudo chmod 777 /tmp/rooster_frames /tmp/rooster_depth
+```
+Do this any time `/tmp` has been freshly cleared (reboot) before the first bring-up of the
+day.
+
+**Don't:** Don't assume a `PermissionError` here means something wrong with
+`rooster_frame_dir_publisher.py` itself — check `ls -ld` on the two shared dirs first;
+whichever container starts first on a clean `/tmp` decides the ownership for everyone else.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

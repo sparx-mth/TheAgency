@@ -499,7 +499,15 @@ ROBOTICAN_SERVICES: list[Service] = [
             "  -p rooster_id:=R1 \\\n"
             "  -p climb_z:=700.0 \\\n"
             "  -p hover_z:=700.0 \\\n"
-            "  -p climb_duration_sec:=5.0"
+            # climb_duration_sec dropped (2026-08-10) -- was 5.0 here, but
+            # rooster_unit.py's own RoosterUnit.__init__ comment documents that
+            # even 3.0s already built up enough climb momentum to fly into the
+            # ceiling before altitude hold could arrest it, and was shortened
+            # to 1.0s specifically to fix that. 5.0 silently overrode that fix
+            # and reintroduced the exact bug, worse -- confirmed live, drone
+            # immediately climbed to the ceiling and stuck there. Falls back
+            # to rooster_command_unit.py's own (correct) default of 1.0s.
+            "  -p max_ranger_m:=1.6"
         ),
         env="container",
         machine="container",
@@ -715,27 +723,29 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster Falcon Adapter",
         key="rooster_planner_adapter",
         group="rooster_planner",
-        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running). Currently nav_mode:=exploration for testing FALCON's own exploration_node; switch back to nav_mode:=astar for normal A* missions.",
-        # Otherwise kept identical to rooster_turn_debug.py's FALCON_LAUNCH_CMD
-        # (the command actually tested live) so the two never drift apart again —
+        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running). Currently nav_mode:=exploration, re-testing with the 2026-08-10 lowered max_vel/raised safe_distance defaults.",
+        # Kept identical to rooster_turn_debug.py's FALCON_LAUNCH_CMD (the
+        # command actually tested live) so the two never drift apart again —
         # this exact arg list is what fixed the 2026-08-03 yaw/turn-direction
         # bugs (yaw_rate) and the BEV-filter false positives (bev_t_on,
         # bev_occ_conf_full, bev_min_wall_run). See LESSONS.md.
         #
         # nav_mode is the one deliberate divergence from FALCON_LAUNCH_CMD
         # (which passes no nav_mode at all, i.e. sphera_drone.launch's own
-        # default) -- currently exploration (2026-08-09, testing FALCON's own exploration_node
-        # + traj_server + falcon_exploration_follower_node.py -- see LESSONS.md).
-        # Was nav_mode:=astar: default is "combination" in sphera_drone.launch,
-        # which routes path_corrector through combination_planner_node --
-        # that node lazily imports `requests`/PIL and crashes at startup on a
-        # falcon-ros:noetic image built before the Dockerfile declared those
-        # packages (see the apt-get stopgap in "Rooster Falcon Container"'s
-        # Launch-All step). With it dead, path_corrector never gets a path
-        # and waypoint_follower sits in WAIT_PATH forever -- confirmed live
-        # 2026-08-04. astar sidesteps that whole dependency; switch back to
-        # astar or combination once exploration mode is done being tested
-        # (combination only once the image itself is rebuilt).
+        # default "combination", which routes path_corrector through
+        # combination_planner_node -- that node lazily imports requests/PIL
+        # and crashes at startup on a falcon-ros:noetic image built before
+        # the Dockerfile declared those packages; see the apt-get stopgap in
+        # "Rooster Falcon Container"'s Launch-All step). astar sidesteps
+        # that whole dependency; switch back to combination only once the
+        # image itself is rebuilt.
+        #
+        # nav_mode:=exploration confirmed working live 2026-08-09/10 (see
+        # LESSONS.md). Was briefly reverted to astar for object_approach
+        # testing (needs waypoint_follower_node.py, disabled under
+        # exploration) -- back to exploration now to re-test with
+        # nav_stack.launch's lowered max_vel (0.15) / raised safe_distance
+        # and obstacles_inflation (1.0) defaults.
         cmd=(
             "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
             "source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter sphera_drone.launch "

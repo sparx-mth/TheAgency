@@ -35,6 +35,7 @@ falcon/
 │   ├── run_bridge.sh        #   build-if-missing + run
 │   └── verify_bridge.sh     #   topic-flow health check
 └── adapter/              # the falcon_adapter catkin package (the FALCON task's ROS1 nodes)
+    │                     #   nav_mode:=astar/object approach — see adapter/README_click_to_fly.md
     │                     #   nav_mode:=exploration — see adapter/README_exploration.md
     ├── scripts/          #   FALCON adapter nodes (rospy) — import the algorithms from core
     │   ├── falcon_adapter_node.py  # drone pose+depth -> FALCON topics + TF (core dead-reckoning + depth noise)
