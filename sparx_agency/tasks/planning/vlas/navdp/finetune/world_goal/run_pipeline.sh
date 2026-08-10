@@ -20,6 +20,19 @@
 # failure resumes rather than repeating half an hour of A*. Force a stage with
 # --redo <stage>, or run one stage on its own with --only <stage>.
 #
+# One building (the default) or several:
+#
+#   NAVDP_WG_SCENE=office                       # one, splits_office.yaml
+#   NAVDP_WG_SCENES="office warehouse_shelves"  # several
+#   NAVDP_WG_SPLITS=.../splits_multiscene.yaml  # required with SCENES, since
+#                                               # the filename can no longer be
+#                                               # derived from one scene name
+#
+# Check a multi-scene split plan puts samples in all three splits with a cheap
+# `build_dataset --frame-stride 10` before spending a training run on it: a
+# split band is a claim about *reachable* area, and an empty TEST split is only
+# discovered by evaluate, after training has already cost hours.
+#
 # Everything runs in the `navdp` conda env. Not `.venv`: its pip-installed ompl
 # bindings corrupt the heap at interpreter shutdown, so a run there prints
 # correct results and then aborts with exit 134.
@@ -32,6 +45,15 @@ CONFIG_DIR="${REPO}/sparx_agency/tasks/planning/vlas/navdp/finetune/world_goal/c
 OUT="${NAVDP_WG_OUT:-$HOME/data/navdp/world_goal}"
 CKPT="${NAVDP_CKPT:-$HOME/GIT/NavDP/baselines/navdp/checkpoints/navdp-cross-modal.ckpt}"
 SCENE="${NAVDP_WG_SCENE:-office}"
+# Several buildings, space separated. Each recording is labelled against the one
+# it was actually flown in (meta.json says which), so this is not a claim that
+# every recording belongs to every scene. An unseen *building* is a far stronger
+# generalisation test than an unseen wing of a building the policy trained on,
+# which is what splits_multiscene.yaml exists for -- but the split YAML could
+# not be reached from here before, because the filename was derived from the
+# single scene name.
+SCENES="${NAVDP_WG_SCENES:-}"
+SPLITS="${NAVDP_WG_SPLITS:-}"
 RECORDINGS="${NAVDP_WG_RECORDINGS:-$HOME/data/sim/office_v1 $HOME/data/sim/office_v2 $HOME/data/sim/office_v3 $HOME/data/sim/office_v4 $HOME/data/sim/falcon_pegasus}"
 WORKERS="${NAVDP_WG_WORKERS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
 
@@ -46,8 +68,14 @@ DATASET="${NAVDP_WG_DATASET:-}"
 STRIDE="${NAVDP_WG_STRIDE:-2}"
 GOALS="${NAVDP_WG_GOALS:-12}"
 PREVIEW=0
-TRAIN_EXTRA=()
-EVAL_EXTRA=()
+# Extra arguments for the two stages that have knobs worth reaching from here --
+# above all `--config`, since the training config is per machine (see
+# navdp_world_goal_4090.yaml, whose batch size and worker count are measured on
+# a 24 GB card and are not guesses). --preview adds its caps on top.
+# shellcheck disable=SC2206  # deliberate word split: these are argument lists
+TRAIN_EXTRA=(${NAVDP_WG_TRAIN_EXTRA:-})
+# shellcheck disable=SC2206
+EVAL_EXTRA=(${NAVDP_WG_EVAL_EXTRA:-})
 
 ONLY=""
 REDO=""
@@ -55,8 +83,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --preview)
       RUN="preview"; PREVIEW=1; STRIDE=10; GOALS=8
-      TRAIN_EXTRA=(--max-steps 1200 --val-every 100)
-      EVAL_EXTRA=(--max-batches 25); shift ;;
+      TRAIN_EXTRA+=(--max-steps 1200 --val-every 100)
+      EVAL_EXTRA+=(--max-batches 25); shift ;;
     --only) ONLY="$2"; shift 2 ;;
     --redo) REDO="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
@@ -97,15 +125,25 @@ say() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
   echo "  set NAVDP_REPO to the directory containing policy_network.py" >&2
   exit 1
 }
-say "run=$RUN  dataset=$DATASET  stride=$STRIDE  goals/frame=$GOALS  workers=$WORKERS"
+if [[ -n "$SCENES" ]]; then
+  # shellcheck disable=SC2206  # deliberate word split: several scene names
+  SCENE_ARG=(--scenes $SCENES)
+else
+  SCENE_ARG=(--scene "$SCENE")
+fi
+[[ -n "$SPLITS" ]] || SPLITS="$CONFIG_DIR/splits_${SCENE}.yaml"
+[[ -f "$SPLITS" ]] || { echo "split plan not found: $SPLITS (set NAVDP_WG_SPLITS)" >&2; exit 1; }
+
+say "run=$RUN  scenes=${SCENES:-$SCENE}  splits=$(basename "$SPLITS")"
+say "dataset=$DATASET  stride=$STRIDE  goals/frame=$GOALS  workers=$WORKERS"
 
 if want dataset; then
   if have "$DATASET/index.json" dataset; then
     say "dataset: already built ($DATASET) -- --redo dataset to rebuild"
   else
-    say "dataset: labelling against the surveyed $SCENE map"
-    py -m $WG.build_dataset --recordings $RECORDINGS --scene "$SCENE" \
-        --splits "$CONFIG_DIR/splits_${SCENE}.yaml" --out "$DATASET" \
+    say "dataset: labelling against the surveyed ${SCENES:-$SCENE} map(s)"
+    py -m $WG.build_dataset --recordings $RECORDINGS "${SCENE_ARG[@]}" \
+        --splits "$SPLITS" --out "$DATASET" \
         --frame-stride "$STRIDE" --goals-per-frame "$GOALS" --workers "$WORKERS"
   fi
 fi
