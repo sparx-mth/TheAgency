@@ -690,6 +690,62 @@ sign-flipped, undamped loop produces a much more violent, sustained oscillation 
 correctly-signed one, so a report of severe swinging is a hint to check the sign FIRST, not just reach
 for damping.
 
+---
+
+## 2026-08-10 — `robotican_dev` container: wrong name + missing engine mount broke three Rooster services
+
+**Symptom:** After the `robotican_dev` container exited (stale, 3 days old) and was brought back up with
+`docker compose -f docker-compose.robotican.yml up -d`, mission_control's Rooster Frame Capture, Depth
+Processor, and Twist Control Adapter all failed identically: `Error response from daemon: container
+<hex-id> is not running` — quoting the ID of the OLD, exited container, even though a freshly-started
+one was clearly running. Once that was fixed, Depth Processor then failed with `FileNotFoundError` for
+the DA3 TensorRT engine, despite the file existing fine on the host.
+
+**Root cause:** Two independent bugs in `docker-compose.robotican.yml`, both invisible until something
+tried to recreate the container from scratch: (1) no `container_name:` was set, so `docker compose up`
+named it `theagency-robotican-1` (the default `<project>-<service>-<index>` pattern) instead of the
+literal `robotican_dev` every `run_*.sh` wrapper and `mission_control.py`'s `proc_container` hardcode —
+the previous, long-lived container only had the right name because it predated this compose file /
+was started some other way, so the mismatch never surfaced until it needed recreating. (2)
+`~/depth_anything_ws` (where the DA3 engine + ONNX live) was never in the compose file's volume list at
+all, so the path doesn't exist inside the container regardless of naming.
+
+**Fix / workaround:** Added `container_name: robotican_dev` to the compose file's service block, and
+added a `${HOME}/depth_anything_ws:${HOME}/depth_anything_ws` volume (read-write, not `:ro` — a TRT
+version mismatch has needed rebuilding the engine from inside this exact container before, see the
+2026-07-29 entry above).
+
+**Don't:** Don't assume "container is not running" means the container just needs restarting — check
+`docker ps -a` for the EXACT name being `docker exec`'d into first. A compose-managed container can
+come up successfully under a completely different name than every script expects, and the error message
+alone won't tell you that.
+
+---
+
+## 2026-08-10 — FALCON `exploration_node` stuck in a "no path to next viewpoint" loop with the drone still on the ground
+
+**Symptom:** After wiring `nav_mode:=exploration` (`exploration_node` → `traj_server` →
+`falcon_exploration_follower_node.py`), the drone never moved. `exploration_node` was clearly alive and
+computing (HGrid/TSP/SOP all logging every ~30-50ms, correctly picking a next-viewpoint target), but
+every attempt ended in `[ExplorationManager] planTrajToView: No path to next viewpoint using default
+A*` / `... using coarse A*` / `[FSM] Plan fail`, repeating in a tight loop — with the map otherwise
+healthy (`mapping_sync` reporting `gate=FUSING`, pose and depth both flowing).
+
+**Root cause:** The drone was armed but had never taken off — sitting at ground level. Exploration's
+frontier viewpoints are chosen in free 3D space at flight altitude; A* has no reachable route from a
+ground-level start pose to one of those. `falcon_exploration_follower_node.py` correctly recognized it
+had no valid trajectory and held station the whole time (by design, via `ReferenceTracker3D`'s own
+stale-reference handling) rather than fabricating motion — so nothing in the follower's own logs pointed
+at "not flying yet" as the cause.
+
+**Fix / workaround:** Take off and get the drone hovering first, *then* switch to `nav_mode:=exploration`.
+Confirmed live: within seconds of takeoff, `exploration_node` started finding paths, `traj_server`
+reported real flight-time/path-length progress, and coverage climbed past 97%.
+
+**Don't:** Don't debug this as a planner/map bug (checking safety clearance, map connectivity, frontier
+placement, etc.) before confirming the aircraft is actually airborne — the log signature is identical
+either way, and chasing the map/planner side first wastes time on a non-issue.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

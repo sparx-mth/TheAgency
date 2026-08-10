@@ -35,6 +35,7 @@ falcon/
 │   ├── run_bridge.sh        #   build-if-missing + run
 │   └── verify_bridge.sh     #   topic-flow health check
 └── adapter/              # the falcon_adapter catkin package (the FALCON task's ROS1 nodes)
+    │                     #   nav_mode:=exploration — see adapter/README_exploration.md
     ├── scripts/          #   FALCON adapter nodes (rospy) — import the algorithms from core
     │   ├── falcon_adapter_node.py  # drone pose+depth -> FALCON topics + TF (core dead-reckoning + depth noise)
     │   ├── sensor_gate_node.py     # rotation-aware freezable pose+depth gate (core.mapping.depth_fusion_gate)
@@ -49,6 +50,7 @@ falcon/
     │   ├── pose_adapter_node.py    # real-drone localization (PoseStamped/Odometry) -> bare Pose
     │   ├── sim_adapter_node.py     # Gazebo sjtu_drone -> XTEND topic/camera emulation (core.common.intrinsic_remap + wall-clock restamp)
     │   ├── object_approach_node.py # detections -> track + visual servo + SEARCH/SCAN/APPROACH/HOVER_LOCK/RECOVER (core.planning.visual_servo)
+    │   ├── falcon_exploration_follower_node.py # nav_mode:=exploration — tracks traj_server's /planning/pos_cmd -> /cmd_vel_raw (core.planning.trackers.reference_tracker_3d)
     │   ├── target_lock_viewer_node.py # on-screen live target-lock HUD (subscribes the overlay Image)
     │   ├── cloud_utils.py          # PointCloud2 -> (N,3) helper (imported, not a node)
     │   └── thinking.py             # Thinker: narrate a node's decisions to /nav/thinking (imported, not a node)
