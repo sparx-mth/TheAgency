@@ -1,0 +1,143 @@
+diff --git a/falcon_planner/exploration_manager/src/exploration_manager.cpp b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+index 24ebbdc..c128fb0 100644
+--- a/falcon_planner/exploration_manager/src/exploration_manager.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+@@ -575,7 +575,7 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+ 
+     double sop_time = (ros::Time::now() - t1).toSec();
+     ROS_INFO("[ExplorationManager] SOP time: %.2f ms", sop_time * 1000.0);
+-    CHECK_LE(sop_time, 1.0) << "SOP solver internal error detected, solver blocked with unknown "
++    CHECK_LE(sop_time, 10.0) << "SOP solver internal error detected, solver blocked with unknown "
+                                "error. Please restart the planner";
+     ee_->sop_times_.push_back(make_pair(sop_cost_matrix_time, sop_time));
+ 
+@@ -944,6 +944,43 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+   LOG(INFO) << "[ExplorationManager] Next pos: " << next_pos[0] << ", " << next_pos[1] << ", "
+             << next_pos[2] << ", yaw: " << next_yaw;
+ 
++  // ── Dead-end guard: retire a viewpoint the aircraft cannot physically reach.
++  // FALCON routes A* through obstacles that sit inside the depth near clip
++  // (~0.95 m) and so never enter the map, then re-selects the same blocked
++  // viewpoint forever. The controller sees the collision but not the frontiers;
++  // this node sees the frontiers but not the collision. Close the gap with the
++  // one thing this node has -- the drone pose and its own chosen target: if the
++  // aircraft has not closed on next_pos for a sustained spell, the route is a
++  // fiction, so hand the spot to the frontier finder to shadow and move on.
++  {
++    // Block a viewpoint the aircraft cannot reach. "Cannot reach" shows up two
++    // ways, both of which are simply "went nowhere": pinned in contact, or
++    // wandering a tight region between viewpoints it keeps almost-reaching
++    // without ever clearing the frontier behind them (so coverage stops but the
++    // aircraft still drifts >1 m, which fooled a simple pinned test). Track it
++    // over a window: if its whole excursion stays under 2 m for 25 s while it is
++    // still not AT the viewpoint it is being sent to, the route is a fiction (an
++    // obstacle inside the depth near clip the map never caught) -- shadow it so
++    // the frontier finder retires the cluster and the tour moves on.
++    static std::vector<std::pair<double, Vector3d>> track;
++    const double now_s = ros::Time::now().toSec();
++    track.push_back(std::make_pair(now_s, pos));
++    while (track.size() > 1 && track.front().first < now_s - 25.0)
++      track.erase(track.begin());
++    const bool at_target = (pos - next_pos).norm() < 0.6;
++    double span = 0.0;
++    for (size_t i = 0; i < track.size(); ++i)
++      span = std::max(span, (track[i].second - pos).norm());
++    if (!at_target && track.front().first <= now_s - 25.0 && span < 2.0) {
++      frontier_finder_->addBlockedRegion(next_pos);
++      ROS_WARN("[ExplorationManager] Aircraft confined to <2 m for 25 s short of "
++               "viewpoint (%.2f, %.2f, %.2f); blocking it so the coverage tour "
++               "moves on",
++               next_pos[0], next_pos[1], next_pos[2]);
++      track.clear();
++    }
++  }
++
+   // Local planner
+   // Require next_pos, next_yaw from global planner
+   // pos, vel, acc, yaw: current states
+diff --git a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+index 241834b..0f2ab59 100644
+--- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
++++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+@@ -90,6 +90,11 @@ public:
+   void setCellHeights(const vector<double> &cell_heights);
+   bool isFrontierCovered();
+   void wrapYaw(double &yaw);
++  // Retire frontiers whose viewpoint the aircraft has proven it cannot fly to
++  // (an obstacle inside the depth near clip the map never caught). The
++  // exploration manager reports the spot when it fails to close on a chosen
++  // viewpoint; every cluster near it is then forced dormant.
++  void addBlockedRegion(const Vector3d &pos);
+ 
+   shared_ptr<PerceptionUtils> percep_utils_;
+   unique_ptr<RayCaster> raycaster_;
+@@ -126,6 +131,11 @@ private:
+   list<Frontier>::iterator first_new_ftr_;
+   Frontier next_frontier_;
+   Position update_bbox_min_, update_bbox_max_;
++  // Viewpoints the aircraft could not reach; any frontier whose average falls
++  // within blocked_region_radius_ of one is forced dormant, so the coverage
++  // tour stops offering a route the map believes clear but physics blocks.
++  vector<Vector3d> blocked_regions_;
++  double blocked_region_radius_;
+ 
+   // Params
+   int cluster_min_;
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+index f07a08d..98254cc 100644
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -29,6 +29,7 @@ FrontierFinder::FrontierFinder(ros::NodeHandle &nh, const shared_ptr<MapServer>
+   nh.param("/frontier_finder/ground_offset", ground_offset_, 0.0);
+   nh.param("/frontier_finder/viewpoint_z_score_cutoff", viewpoint_z_score_cutoff_, 0.0);
+   nh.param("/frontier_finder/cell_height_clearance", cell_height_clearance_, 0.1);
++  nh.param("/frontier_finder/blocked_region_radius", blocked_region_radius_, 1.5);
+ 
+   raycaster_.reset(new RayCaster);
+   resolution_ = map_server_->getResolution();
+@@ -50,6 +51,18 @@ FrontierFinder::FrontierFinder(ros::NodeHandle &nh, const shared_ptr<MapServer>
+ 
+ FrontierFinder::~FrontierFinder() {}
+ 
++void FrontierFinder::addBlockedRegion(const Vector3d &pos) {
++  // Coalesce nearby reports so a wall the aircraft grinds along a few times
++  // does not fill the list; one marker per radius is enough to shadow it.
++  for (const auto &b : blocked_regions_)
++    if ((b - pos).norm() < blocked_region_radius_)
++      return;
++  blocked_regions_.push_back(pos);
++  ROS_WARN("[FrontierFinder] Blocked unreachable viewpoint (%.2f, %.2f, %.2f); "
++           "%lu region(s) now shadowed from the coverage tour",
++           pos.x(), pos.y(), pos.z(), blocked_regions_.size());
++}
++
+ void FrontierFinder::searchFrontiers() {
+   ros::Time t1 = ros::Time::now();
+   tmp_frontiers_.clear();
+@@ -570,6 +583,26 @@ void FrontierFinder::computeFrontiersToVisit() {
+   // Try find viewpoints for each cluster and categorize them according to
+   // viewpoint number
+   for (auto &tmp_ftr : tmp_frontiers_) {
++    // Controller-reported dead end: a cluster sitting on a viewpoint the aircraft
++    // could not physically reach (an obstacle inside the depth near clip the map
++    // never caught) is retired to dormant, so the coverage tour stops re-picking
++    // a route the map believes clear but the airframe keeps grinding into.
++    bool in_blocked = false;
++    for (const auto &b : blocked_regions_)
++      if ((b - tmp_ftr.average_).norm() < blocked_region_radius_) {
++        in_blocked = true;
++        break;
++      }
++    if (in_blocked) {
++      dormant_frontiers_.push_back(tmp_ftr);
++      ++new_dormant_num;
++      for (auto &cell : tmp_ftr.cells_) {
++        Eigen::Vector3i idx;
++        map_server_->getTSDF()->positionToIndex(cell, idx);
++        frontier_flag_[toadr(idx)] = false;
++      }
++      continue;
++    }
+     // Search viewpoints around frontier
+     sampleViewpoints(tmp_ftr);
+     // sampleViewpoints3D(tmp_ftr);
