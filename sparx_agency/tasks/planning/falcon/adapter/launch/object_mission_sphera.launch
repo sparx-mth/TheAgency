@@ -87,6 +87,16 @@
   <arg name="real_pose_topic" default="/xtend/localization" />
   <arg name="real_pose_type"  default="pose_stamped" />     <!-- pose_stamped | pose -->
 
+  <!-- object_approach_node.py's own defaults are /xtend/demo_mode(_request); fine
+       for XTEND, but Rooster's arbiter (rooster_demo_mode_manager.py) hardcodes
+       /R1/demo_mode(_request), so without this override object_approach's mode
+       requests (including the 'finish' one that triggers stop->land->disarm) go to
+       a topic nobody listens to: waypoint_follower never sees visual_servoing and
+       never goes passive, and a confirmed approach never actually lands. Mirrors
+       what sphera_drone.launch already does for nav_stack.launch's own inclusion. -->
+  <arg name="demo_mode_topic"         default="/R1/demo_mode" />
+  <arg name="demo_mode_request_topic" default="/R1/demo_mode_request" />
+
   <!-- ── Sphera-only: forwarded straight into sphera_drone.launch's own args
        of the same name (see that file's header for the full rationale).
        This file already has its own bev_xmin/ymin/xmax/ymax further down
@@ -859,6 +869,10 @@
          stack, so forward the pose topic/type (e.g. /xtend/april_tag_pose). -->
     <arg name="pose_topic"      value="$(arg real_pose_topic)" />
     <arg name="pose_type"       value="$(arg real_pose_type)" />
+    <!-- Without this, mode requests (including 'finish' -> land) go to /xtend/...;
+         see the demo_mode_topic arg declaration above for the full story. -->
+    <arg name="demo_mode_topic"         value="$(arg demo_mode_topic)" />
+    <arg name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
     <!-- GATE: stays passive until the director publishes enable=True on selection. -->
     <arg name="start_enabled"   value="false" />
     <!-- Must match the detector's prompt; see the arg's docs above. -->

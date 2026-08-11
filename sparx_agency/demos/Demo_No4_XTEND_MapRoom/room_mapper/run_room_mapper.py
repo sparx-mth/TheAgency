@@ -238,6 +238,7 @@ def main() -> None:
     for i, rec in enumerate(frames):
         bgr     = rec.load_rgb()
         depth_m = rec.load_depth()
+        print("[mapper] processing frame {}".format(i))
 
         if args.sidecar_pose and rec.pose is not None:
             world_T_cam = _sidecar_pose_to_world_T_cam(rec.pose)

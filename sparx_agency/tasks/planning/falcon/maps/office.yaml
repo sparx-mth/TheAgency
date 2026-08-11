@@ -32,27 +32,33 @@ map_config:
   # mapped — it only cluttered the voxel view and made the room hard to
   # read. Walls up to flight height (~1 m) are kept; lower box_max_z
   # further if the ceiling is below 2 m and still shows.
-  map_size:
-    map_min_x: -10.0
-    map_min_y: -10.0
-    map_min_z: -2.0
-    map_max_x:  10.0
-    map_max_y:  10.0
-    map_max_z:  1.7
-
-    box_min_x: -6.0
-    box_min_y: -6.0
-    box_min_z: -1.0
-    box_max_x:  6.0
-    box_max_y:  6.0
-    box_max_z:  1.7
-
-    vbox_min_x: -8.0
-    vbox_min_y: -8.0
-    vbox_min_z: -2.0
-    vbox_max_x:  8.0
-    vbox_max_y:  8.0
-    vbox_max_z:  1.7
+  # WHERE TO EXPLORE, in a handful of numbers. FALCON's eighteen (`map_size`)
+  # are derived from these by run_falcon.sh before the container starts, and the
+  # derivation is pinned against the numbers this file used to carry by hand.
+  # To see the boxes and what the grid will cost:
+  #
+  #   python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize \
+  #       sparx_agency/tasks/planning/falcon/maps/office.yaml
+  #
+  #   box   what FALCON explores and plans inside -- edges should fall on walls
+  #   map   what actually gets ALLOCATED, in full, on the first tick
+  #   vbox  what gets drawn; defaults to the whole grid
+  area:
+    # The exploration footprint [x0, y0, x1, y1].
+    building: [-6, -6, 6, 6]
+    # The z band the planner may fly in.
+    flight_band: [-1, 1.7]
+    # The z range ALLOCATED -- wider, because the camera sees the floor.
+    vertical_extent: [-2, 1.7]
+    # Metres per voxel, CHOSEN rather than inherited. Upstream picks this from
+    # the exploration box's volume -- under 4000 m3 it maps at 10 cm, at or
+    # above it 20 cm -- so a change to the box used to silently change the grid.
+    # This value is what this environment has always mapped at.
+    resolution: 0.10
+    # How far the allocated grid reaches past the box, horizontally.
+    margin: 4
+    # This environment draws less than it allocates [x0, y0, z0, x1, y1, z1].
+    visualisation: [-8, -8, -2, 8, 8, 1.7]
 
   scale: 1.0
 

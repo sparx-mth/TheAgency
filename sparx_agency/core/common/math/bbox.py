@@ -65,6 +65,15 @@ def center_offset_norm(bbox: BBox, frame_w: int, frame_h: int) -> Tuple[float, f
     return _clamp(ox, -1.0, 1.0), _clamp(oy, -1.0, 1.0)
 
 
+def rescale_xyxy(bbox: BBox, src_w: int, src_h: int, dst_w: int, dst_h: int) -> BBox:
+    """Rescale a box from one frame size to another (same box, different pixel grid)."""
+    if (src_w, src_h) == (dst_w, dst_h):
+        return bbox
+    sx, sy = dst_w / src_w, dst_h / src_h
+    x1, y1, x2, y2 = bbox
+    return (x1 * sx, y1 * sy, x2 * sx, y2 * sy)
+
+
 def clip_xyxy(bbox: BBox, frame_w: int, frame_h: int) -> BBox:
     """Clip a box to the image bounds ``[0, frame_w] x [0, frame_h]``."""
     x1, y1, x2, y2 = bbox

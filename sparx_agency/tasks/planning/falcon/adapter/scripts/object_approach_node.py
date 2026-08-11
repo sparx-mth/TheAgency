@@ -82,6 +82,7 @@ See the file footer for the full rosparam list.
 import math
 import threading
 from collections import deque
+from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -93,11 +94,14 @@ from std_msgs.msg import Bool, String
 
 from sparx_agency.core.common.detection_message import parse_detections_message
 from sparx_agency.core.common.frame_path_message import parse_frame_path_message
+from sparx_agency.core.common.math.bbox import rescale_xyxy
 from sparx_agency.core.common.spatial_math import quat_to_yaw
 from sparx_agency.core.common.types import (
     ControlCommand, Intrinsics, KinematicLimits, normalize_angle,
 )
-from sparx_agency.core.mapping.depth.depth_bbox_fusion import bbox_to_xyz_cam_from_depth
+from sparx_agency.core.mapping.depth.depth_bbox_fusion import (
+    bbox_to_xyz_cam_from_depth, rescale_bbox_to_depth,
+)
 from sparx_agency.core.mapping.tracking import (
     make_lock_tracker, TargetTrackerConfig, DetectionOnlyConfig,
     DETECTOR_TRACKER, LOCK_MODES,
@@ -780,6 +784,14 @@ class ObjectApproachNode(object):
             rospy.logwarn_throttle(5.0, "object_approach: bad detections msg (%s)", e)
             return
         dets, stamp = parsed.detections, parsed.stamp
+        # The detector reports its OWN frame size per detection (det.frame_w/h,
+        # from its live RGB frame); rescale into our intrinsics' pixel space
+        # rather than assuming the two already match (see rescale_xyxy).
+        dets = [replace(d, bbox_xyxy=tuple(int(v) for v in rescale_xyxy(
+                            d.bbox_xyxy, d.frame_w, d.frame_h,
+                            self.intr.width, self.intr.height)),
+                        frame_w=self.intr.width, frame_h=self.intr.height)
+                for d in dets]
 
         with self._lock:
             state = self.gate.update(dets)
@@ -1041,17 +1053,11 @@ class ObjectApproachNode(object):
         """Metric range (m) to the tracked box from depth, or None."""
         if depth is None:
             return None
-        if depth.shape[:2] != (self.intr.height, self.intr.width):
-            # Depth not aligned to the RGB/intrinsics geometry we index it with;
-            # fall back to the area proxy rather than sample the wrong pixels.
-            rospy.logwarn_throttle(
-                10.0, "object_approach: depth %r != intrinsics %dx%d; using area proxy",
-                depth.shape[:2], self.intr.height, self.intr.width)
-            return None
-        x1, y1, x2, y2 = (int(v) for v in track.bbox_xyxy)
-        xyz = bbox_to_xyz_cam_from_depth(depth, (x1, y1, x2, y2),
-                                         self.intr.fx, self.intr.fy,
-                                         self.intr.cx, self.intr.cy)
+        dh, dw = depth.shape[:2]
+        bbox, fx, fy, cx, cy = rescale_bbox_to_depth(
+            track.bbox_xyxy, self.intr.fx, self.intr.fy, self.intr.cx, self.intr.cy,
+            self.intr.width, self.intr.height, dw, dh)
+        xyz = bbox_to_xyz_cam_from_depth(depth, bbox, fx, fy, cx, cy)
         return None if xyz is None else float(xyz[2])
 
     # ─── Demo-mode hand-off + cmd_vel ────────────────────────────────

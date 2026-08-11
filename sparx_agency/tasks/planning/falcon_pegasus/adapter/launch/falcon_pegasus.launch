@@ -30,6 +30,21 @@
        map_config and the aircraft's spawn pose, so they cannot disagree. -->
   <arg name="run" default="3_open_plan"/>
 
+  <!-- Where to read that file from. The run file describes its exploration area
+       in five numbers under `map_config.area`; FALCON wants the eighteen of
+       `map_config.map_size`. run_falcon_pegasus.sh derives them on the host
+       before the container starts and points this at the result, so a bad area
+       fails there with a sentence rather than here with a glog CHECK.
+
+       The default is the run file itself, which is what a direct
+       `roslaunch` inside the container gets, and a run file using the compact
+       `area` block will NOT work that way, because nothing has expanded it. Use
+       the script, or pass an already-expanded file.
+
+       (No double hyphens in this comment: XML forbids them, and roslaunch
+       reports it as "Invalid roslaunch XML syntax" against the whole file.) -->
+  <arg name="run_config" default="$(find falcon_pegasus)/runs/$(arg run).yaml"/>
+
   <!-- Video of the map being built. Set record:=false to fly without one. -->
   <arg name="record" default="true"/>
   <arg name="log_dir" default="/falcon_logs"/>
@@ -102,7 +117,7 @@
   <rosparam command="load" file="$(find exploration_manager)/config/exploration_manager.yaml"/>
 
   <!-- ── This run: FALCON's map_config plus the aircraft's spawn pose ─────── -->
-  <rosparam command="load" file="$(find falcon_pegasus)/runs/$(arg run).yaml"/>
+  <rosparam command="load" file="$(arg run_config)"/>
 
   <!-- ── Flight envelope ──────────────────────────────────────────────────── -->
   <param name="/uav_model/dynamics_parameters/max_linear_velocity" value="$(arg max_linear_velocity)"/>
