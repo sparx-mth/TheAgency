@@ -122,6 +122,13 @@ class BsplineFollowerNode(object):
         self._retreat_time_s = float(rospy.get_param("~retreat_time_s", 5.0))
         self._retreat_speed = float(rospy.get_param("~retreat_speed", 0.35))
         self._retreat_clear_m = float(rospy.get_param("~retreat_clear_m", 1.3))
+        # Attitude reflex: cut horizontal drive if roll or pitch crosses this, a
+        # margin below the plugin's ~35 deg clamp past which the model thrusts
+        # sideways and cannot recover. A near-clip contact can pitch the aircraft
+        # up as it drives into the unseen obstacle; stopping the drive lets it
+        # fall back level before it tips over.
+        self._tilt_limit_rad = math.radians(
+            float(rospy.get_param("~tilt_limit_deg", 22.0)))
         self._track = []                # type: list  # (t_s, x, y, z) history
         self._contact_seen_at = None    # type: object
         self._retreat_until = None      # type: object
@@ -271,21 +278,31 @@ class BsplineFollowerNode(object):
             self._climb(position)
             return
 
-        # A fresh 360 deg scan is the one thing that rebuilds FALCON's map and
-        # gets the frontier finder firing again -- needed after two dead ends:
-        #  * a respawn: its LKH solver crashed and it came back with an empty map
-        #    at wherever the aircraft now hovers, and a respawned FSM never
-        #    re-triggers on its own -- it would sit in WAIT_TRIGGER forever;
-        #  * a stall: it loops plan-failing on a frontier whose only viewpoint is
-        #    the current cell ("next_pos ... same as current pos and yaw"),
-        #    publishing nothing that moves the aircraft.
+        # Attitude reflex, ahead of everything below (even the retreat, which
+        # drives): a near-clip contact can tip the aircraft, and past the plugin's
+        # ~35 deg clamp it cannot recover. If roll or pitch crosses the margin,
+        # cut horizontal drive and hold so it settles back level rather than over.
+        roll, pitch = self._roll_pitch()
+        if abs(roll) > self._tilt_limit_rad or abs(pitch) > self._tilt_limit_rad:
+            self._cmd.publish(Twist())
+            self._servo.reset()
+            self._retreat_until = None
+            rospy.logwarn_throttle(
+                1.0, "[follower] tilt roll=%.0f pitch=%.0f deg; cutting drive to "
+                "level before it capsizes", math.degrees(roll), math.degrees(pitch))
+            return
+
+        # Re-survey only after a crash: a respawned exploration_node comes back
+        # with an EMPTY map and never re-triggers itself, and a fresh 360 deg
+        # scan is what gives its frontier finder something to fire on. Position
+        # stalls at an unreachable frontier are NOT handled here any more -- FALCON
+        # itself now shadows those viewpoints (the dead-end guard in
+        # exploration_manager), and yawing in place on every stall only thrashed
+        # against that 20 s block and re-scanned a view that never changes.
         silent_s = self._falcon_silent_s(now)
-        stalled = self._track_and_check_stall(now, position)
-        if self._survey_remaining_rad <= 0.0 and self._retreat_until is None:
-            if silent_s > self._resurvey_after_s:
-                self._begin_resurvey(now, "silent %.0fs (respawn?)" % silent_s)
-            elif stalled:
-                self._begin_resurvey(now, "stalled >%.0fs" % self._stall_window_s)
+        if (self._survey_remaining_rad <= 0.0 and self._retreat_until is None
+                and silent_s > self._resurvey_after_s):
+            self._begin_resurvey(now, "silent %.0fs (respawn?)" % silent_s)
 
         if self._survey_remaining_rad > 0.0:
             self._survey(yaw)
@@ -362,6 +379,17 @@ class BsplineFollowerNode(object):
         position = np.array([pose.position.x, pose.position.y, pose.position.z],
                             dtype=float)
         return position, world, yaw
+
+    def _roll_pitch(self):
+        # type: () -> tuple
+        """Roll and pitch, radians, from the latched odometry orientation."""
+        o = self._odom.pose.pose.orientation
+        sinr = 2.0 * (o.w * o.x + o.y * o.z)
+        cosr = 1.0 - 2.0 * (o.x * o.x + o.y * o.y)
+        roll = math.atan2(sinr, cosr)
+        sinp = max(-1.0, min(1.0, 2.0 * (o.w * o.y - o.z * o.x)))
+        pitch = math.asin(sinp)
+        return roll, pitch
 
     def _survey(self, yaw):
         # type: (float) -> None

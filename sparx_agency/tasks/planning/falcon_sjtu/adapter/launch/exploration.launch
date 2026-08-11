@@ -37,18 +37,24 @@
   <arg name="max_yaw_acc" default="0.5"/>
 
   <!-- ── Safety: HARD inflation in the map vs SOFT optimiser penalty. The rule
-       that must hold: safe_distance <= narrowest_half_width - inflation, or
-       the optimiser is asked for clearance the corridor cannot provide and
-       trades it away unpredictably. Drone radius ~0.25 m; house doors ~0.9 m:
-       0.45 - 0.30 leaves 0.15 of budget, 0.10 used. -->
-  <arg name="obstacles_inflation" default="0.30"/>
+       that must hold: safe_distance <= narrowest_half_width - inflation, or the
+       optimiser is asked for clearance the corridor cannot provide and trades it
+       away unpredictably. Lowered 0.30 to 0.25 (the drone radius, zero spare) to
+       open hospital doorways: a 0.9 m door widens the centre corridor from
+       0.30 m to 0.40 m, enough for the follower to hold the centre through it.
+       Grazes are survivable now (speed capped 0.6 m/s, contact reflex backs
+       out), so the old margin is spent reaching frontiers the 0.30 m map had
+       walled off rather than left on the table. -->
+  <arg name="obstacles_inflation" default="0.25"/>
   <arg name="safe_distance"       default="0.10"/>
 
-  <!-- ── Frontier viewpoints: rmin small enough to observe a room from OUTSIDE
-       its door (yaw-and-peek) instead of committing a spline into space that
-       is still half unknown. -->
-  <arg name="frontier_min_clearance"     default="0.35"/>
-  <arg name="frontier_min_occ_clearance" default="0.60"/>
+  <!-- ── Frontier viewpoints: clearances lowered (0.35 to 0.25, 0.60 to 0.40) so
+       FALCON places a viewpoint in a tighter space and observes a frontier
+       tucked behind a doorway, instead of declaring it un-viewable and leaving
+       that room unmapped. rmin stays 1.0 (above the 0.95 m near clip) so a
+       viewpoint can still actually see what it is placed to observe. -->
+  <arg name="frontier_min_clearance"     default="0.25"/>
+  <arg name="frontier_min_occ_clearance" default="0.40"/>
   <arg name="frontier_candidate_rmin"    default="1.0"/>
   <arg name="frontier_candidate_rmax"    default="2.5"/>
 
@@ -94,6 +100,14 @@
   <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)"/>
   <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)"/>
   <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)"/>
+
+  <!-- Dead-end guard (patched into exploration_manager + frontier_finder): when
+       the aircraft sits pinned short of a chosen viewpoint for 20 s, that
+       viewpoint is handed to the frontier finder, which retires every cluster
+       whose average is within this radius to dormant so the coverage tour stops
+       re-selecting a route the map thinks is clear but physics blocks. 2.5 m so
+       it reaches the frontier sitting up to candidate_rmax behind the viewpoint. -->
+  <param name="/frontier_finder/blocked_region_radius" value="2.5"/>
 
   <!-- traj_server parks its pre-plan command at the init pose, no ramp:
        the follower owns takeoff. -->
