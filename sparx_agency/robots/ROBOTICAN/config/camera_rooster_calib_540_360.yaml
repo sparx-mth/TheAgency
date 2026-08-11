@@ -1,23 +1,36 @@
 # ROBOTICAN/Rooster camera calibration - Sphera simulator, R1, 540x360.
 #
 # Simulated camera, so this is NOT from a chessboard calibration - it's the
-# ideal-pinhole approximation for the wide-angle/fisheye FOV already assumed
-# elsewhere in this codebase (hfov=130deg, vfov=90deg), computed the same way
+# ideal-pinhole approximation for the wide-angle FOV, computed the same way
 # as adapters/rooster_video_adapter.py:VideoStreamManager.intrinsic_from_fov().
 #
-# CAUTION: this has NOT been verified against Sphera's actual R1 camera
-# sensor definition - if Sphera's scenario config specifies a different FOV
-# (or real fisheye distortion) for R1's camera, replace fx/fy/cx/cy below to
-# match it. Distortion is zeroed (ideal pinhole) because nothing downstream
-# (DA3, AprilTag PnP via apriltag_cv_common.py) uses a proper fisheye
-# distortion model - accuracy will degrade toward the image edges for an
-# actual fisheye lens.
+# hfov=135deg CONFIRMED against Sphera's own generated scenario config
+# (~/.sphera/tmp/SpheraConfig/rooster_backend_Rooster_1.gen.yaml,
+# roosters.R1.main_camera: hfov=135.0, port=5001 - matches the port
+# video_trigger.py/rooster_payload.py stream from). Previously assumed
+# 130deg, which was never checked against Sphera's config; corrected here.
+#
+# vfov=90deg is STILL UNVERIFIED - Sphera's scenario config only specifies
+# hfov for main_camera (native render 1280x720 @ hfov=135deg), not vfov, and
+# the video_handler's exact crop/scale from that native 16:9 render down to
+# the ICD "low" 540x360 (3:2) streaming preset (Rooster_ICD.pdf sec 6.2.4) is
+# closed-source/opaque, so the true delivered vfov cannot be derived with
+# confidence (candidates range from ~90deg to ~107deg depending on whether
+# Sphera crops or re-renders at the new aspect). Do not change fy without a
+# confirmed source. Distortion is zeroed (ideal pinhole) because nothing
+# downstream (DA3, AprilTag PnP via apriltag_cv_common.py) uses a proper
+# fisheye distortion model - accuracy will degrade toward the image edges,
+# especially for this vfov, since 135deg is a very wide FOV where rectilinear
+# (tan-based) projection inherently stretches off-axis rectangular objects
+# near the edges - this can look like "twisted" doors/frames even with
+# perfectly correct intrinsics; it is an expected property of a wide-FOV
+# pinhole model, not necessarily a bug.
 
 image_width: 540
 image_height: 360
 
-# fx = W / (2*tan(hfov/2)), fy = H / (2*tan(vfov/2)), hfov=130deg, vfov=90deg
-fx: 125.903068
+# fx = W / (2*tan(hfov/2)), fy = H / (2*tan(vfov/2)), hfov=135deg, vfov=90deg
+fx: 111.837662
 fy: 180.000000
 cx: 269.500000
 cy: 179.500000
@@ -33,7 +46,7 @@ camera_matrix:
   rows: 3
   cols: 3
   data: [
-    125.903068, 0.0, 269.500000,
+    111.837662, 0.0, 269.500000,
     0.0, 180.000000, 179.500000,
     0.0, 0.0, 1.0
   ]
@@ -56,7 +69,7 @@ projection_matrix:
   rows: 3
   cols: 4
   data: [
-    125.903068, 0.0, 269.500000, 0.0,
+    111.837662, 0.0, 269.500000, 0.0,
     0.0, 180.000000, 179.500000, 0.0,
     0.0, 0.0, 1.0, 0.0
   ]

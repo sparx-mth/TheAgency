@@ -58,11 +58,19 @@ class RoosterCommandUnitNode(Node):
         super().__init__("rooster_command_unit")
 
         self.declare_parameter("rooster_id", "R1")
-        self.declare_parameter("climb_z", 600.0)
+        # See rooster_unit.py's RoosterUnit.__init__ for why these three
+        # takeoff params have the values they do.
+        self.declare_parameter("climb_z", 1000.0)
         self.declare_parameter("hover_z", 550.0)
         self.declare_parameter("land_step", 75.0)
         self.declare_parameter("land_step_interval_sec", 1.0)
         self.declare_parameter("land_timeout_sec", 30.0)
+        self.declare_parameter("climb_duration_sec", 1.0)
+        self.declare_parameter("climb_settle_sec", 1.0)
+        self.declare_parameter("altitude_hold_kp", 500.0)
+        self.declare_parameter("altitude_hold_kd", 600.0)
+        self.declare_parameter("altitude_hold_max_correction", 200.0)
+        self.declare_parameter("altitude_hold_interval_sec", 1.0)
         self.declare_parameter("publish_hz", 40.0)
         self.declare_parameter("video_host", "127.0.0.1")
         self.declare_parameter("video_port", 5001)
@@ -75,6 +83,12 @@ class RoosterCommandUnitNode(Node):
         land_step = float(self.get_parameter("land_step").value)
         land_step_interval_sec = float(self.get_parameter("land_step_interval_sec").value)
         land_timeout_sec = float(self.get_parameter("land_timeout_sec").value)
+        climb_duration_sec = float(self.get_parameter("climb_duration_sec").value)
+        climb_settle_sec = float(self.get_parameter("climb_settle_sec").value)
+        altitude_hold_kp = float(self.get_parameter("altitude_hold_kp").value)
+        altitude_hold_kd = float(self.get_parameter("altitude_hold_kd").value)
+        altitude_hold_max_correction = float(self.get_parameter("altitude_hold_max_correction").value)
+        altitude_hold_interval_sec = float(self.get_parameter("altitude_hold_interval_sec").value)
         publish_hz = float(self.get_parameter("publish_hz").value)
         video_host = self.get_parameter("video_host").value
         video_port = int(self.get_parameter("video_port").value)
@@ -88,6 +102,12 @@ class RoosterCommandUnitNode(Node):
             land_step=land_step,
             land_step_interval_sec=land_step_interval_sec,
             land_timeout_sec=land_timeout_sec,
+            climb_duration_sec=climb_duration_sec,
+            climb_settle_sec=climb_settle_sec,
+            altitude_hold_kp=altitude_hold_kp,
+            altitude_hold_kd=altitude_hold_kd,
+            altitude_hold_max_correction=altitude_hold_max_correction,
+            altitude_hold_interval_sec=altitude_hold_interval_sec,
         )
         self.payload = RoosterPayload(
             self, rooster_id,

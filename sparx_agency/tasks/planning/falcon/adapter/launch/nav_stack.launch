@@ -256,6 +256,16 @@
        back to the legacy controller with controller:=waypoint. -->
   <arg name="controller"            default="roll_assist" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist | drift_pid -->
 
+  <!-- DemoMode handshake topics (the one-axis/roll_assist/lateral trackers gate
+       yaw confirmation on demo_mode_topic; every controller best-effort requests
+       via demo_mode_request_topic). Defaults match XTEND's own demo-mode manager
+       (xtend_drone_demo_manager.py); override both from an including launch file
+       for any robot that publishes its own demo-mode confirmation elsewhere, or
+       that runs a holonomic controller (multi_axis/pure_pursuit/drift_pid) where
+       ~mx_require_mode:=false makes the confirmation best-effort only. -->
+  <arg name="demo_mode_topic"          default="/xtend/demo_mode" />
+  <arg name="demo_mode_request_topic"  default="/xtend/demo_mode_request" />
+
   <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
        ~mx_* so they never collide with the one-axis params; cruise speed and the
        capture radius are shared with vel_x / pos_acquisition_radius. -->
@@ -1774,6 +1784,8 @@
     <param name="cmd_log_path"           value="$(arg cmd_log_path)" />
     <!-- controller selection + multi-axis tuning (only used when controller:=multi_axis) -->
     <param name="controller"             value="$(arg controller)" />
+    <param name="demo_mode_topic"        value="$(arg demo_mode_topic)" />
+    <param name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
     <param name="mx_lateral_speed_max"   value="$(arg mx_lateral_speed_max)" />
     <param name="mx_yaw_rate"            value="$(arg mx_yaw_rate)" />
     <param name="mx_slow_radius"         value="$(arg mx_slow_radius)" />

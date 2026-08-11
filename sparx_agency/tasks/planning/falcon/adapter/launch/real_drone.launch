@@ -441,16 +441,12 @@
   <!-- ── Square (Manhattan) path shape ────────────────────────────
        Produce axis-aligned, right-angle routes instead of diagonal cuts.
        Three settings must agree: connectivity=4 drops A*'s diagonal moves;
-       los_smoothing=false keeps each L from being thinned toward a diagonal;
-       corner_round=false keeps 90 deg corners
+       los_smoothing=false keeps the line-of-sight string-puller from collapsing
+       each L into a single diagonal; corner_round=false keeps 90 deg corners
        sharp instead of chamfering them into 45 deg bevels. turn_penalty biases
        4-connected A* toward clean single-turn L-shapes (raise it to suppress
        staircases). For the legacy diagonal behaviour set connectivity:=8
-       los_smoothing:=true corner_round:=true.
-       NOTE: los_smoothing no longer string-pulls; it is now Douglas-Peucker
-       thinning, which only drops points near-collinear with their neighbours
-       and so preserves a clearance-centred route. It is safe to enable purely
-       to cut waypoint count; it is kept false here only for the square shape. -->
+       los_smoothing:=true corner_round:=true. -->
   <arg name="connectivity"   default="4" />
   <arg name="los_smoothing"  default="false" />
   <arg name="corner_round"   default="false" />

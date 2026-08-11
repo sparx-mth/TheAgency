@@ -205,6 +205,28 @@ if [ "${ARCH}" != "aarch64" ] && [ -S /var/run/docker.sock ]; then
   DOCKER_SOCK_MOUNT=( --volume /var/run/docker.sock:/var/run/docker.sock )
 fi
 
+# nav_debug_recorder_node.py's pose/orientation telemetry (telemetry.jsonl,
+# per-run under nav_debug_<timestamp>/) previously lived only inside this
+# container's own /root/.ros/falcon -- every `docker rm -f falcon` silently
+# destroyed it (confirmed live 2026-07-28: the whole last flight's log was
+# gone after a routine restart, with no warning). Mount it to a host dir so
+# it survives container recreation; nav_debug_recorder_node.py's own
+# fallback path (no FALCON_RUN_DIR set) is exactly /root/.ros/falcon, so no
+# other env var needs setting for this to take effect.
+FALCON_LOG_HOST="${HOME}/.cache/sparx_agency/falcon_nav_logs/sphera"
+mkdir -p "${FALCON_LOG_HOST}"
+FALCON_LOG_MOUNT=( --volume "${FALCON_LOG_HOST}:/root/.ros/falcon" )
+
+# thinking_log_path/certainty_log_path (mission.yaml/mission_sphera.yaml) name
+# /tmp/falcon on the HOST as their intended landing spot, but nothing actually
+# mounted that path -- FALCON_THOUGHT_LOG/FALCON_CERTAINTY_LOG were unset, so
+# nav_stack.launch's own fallback ('' -> ~/.ros/falcon/, i.e. FALCON_LOG_MOUNT
+# above) silently took over instead. Mount /tmp/falcon for real and point
+# both env vars at it explicitly so these logs land where the comments say.
+mkdir -p /tmp/falcon
+FALCON_THOUGHT_LOG_MOUNT=( --volume /tmp/falcon:/tmp/falcon )
+RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
+
 # ── Run ───────────────────────────────────────────────────────
 # NOTE: the map YAML below is intentionally still a single-file mount, NOT
 # a directory mount like scripts/launch above -- FALCON's own
@@ -216,6 +238,12 @@ fi
 # container restart to take effect (single-file bind-mount inode gotcha,
 # see project_falcon_robotican_bridging memory) -- only scripts/launch
 # got the directory-mount fix.
+#
+# PYTHONPATH also includes /catkin_ws/src/falcon_adapter/scripts: several
+# planner nodes do `from thinking import Thinker` -- roslaunch execs their
+# SOURCE file via the devel-space stub, so sys.path[0] is the stub's own
+# directory, not scripts/, and that sibling import fails with
+# ModuleNotFoundError without this on the path.
 docker run -it --rm \
     --name "${CONTAINER}" \
     ${GPU_ARGS} \
@@ -227,11 +255,16 @@ docker run -it --rm \
     --ulimit nofile=65536:65536 \
     --volume /tmp/.X11-unix:/tmp/.X11-unix:rw \
     --volume "${SPARX_PARENT}/sparx_agency:/opt/sparx_agency:ro" \
-    --env PYTHONPATH=/opt \
+    --env PYTHONPATH=/opt:/catkin_ws/src/falcon_adapter/scripts \
+    --env FALCON_THOUGHT_LOG="/tmp/falcon/thinking_${RUN_STAMP}.log" \
+    --env FALCON_CERTAINTY_LOG="/tmp/falcon/certainty_${RUN_STAMP}.csv" \
     "${SCRIPT_MOUNTS[@]}" \
     "${LAUNCH_MOUNTS[@]}" \
     "${FRAME_MOUNTS[@]}" \
     "${DOCKER_SOCK_MOUNT[@]}" \
+    "${FALCON_LOG_MOUNT[@]}" \
+    "${FALCON_THOUGHT_LOG_MOUNT[@]}" \
+    --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     --volume "${MAP_EXPANDED}:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     "${RVIZ_MOUNT[@]}" \
     --network host \

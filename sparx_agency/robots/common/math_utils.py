@@ -20,3 +20,13 @@ def clamp_symmetric(value: float, limit: float) -> float:
 def clamp_axis(value: float, limit: float = 1000.0) -> int:
     """Clamp to [-limit, limit] and cast to int (for drone controller axis values)."""
     return int(clamp_symmetric(value, limit))
+
+
+def slew(target: float, current: float, max_step: float) -> float:
+    """Move ``current`` toward ``target`` by at most ``max_step`` (rate limit)."""
+    delta = target - current
+    if delta > max_step:
+        return current + max_step
+    if delta < -max_step:
+        return current - max_step
+    return target

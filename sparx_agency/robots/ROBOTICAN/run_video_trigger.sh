@@ -7,7 +7,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 docker cp "${SCRIPT_DIR}/video_trigger.py" it:/tmp/video_trigger.py
-docker exec -it \
+docker exec \
   -e ROS_DOMAIN_ID=9 \
   -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml \

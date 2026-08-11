@@ -1,0 +1,65 @@
+{
+  "variant": "s",
+  "weights": "/home/user1/Downloads/yolov8s-worldv2.pt",
+  "weights_sha256": "9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792",
+  "imgsz_hw": [
+    288,
+    512
+  ],
+  "opset": 17,
+  "embed_dim": 512,
+  "txt_n_axis": 1,
+  "txt_example_shape": [
+    1,
+    7,
+    512
+  ],
+  "cut_index": 12,
+  "backbone": {
+    "input": "image",
+    "feat_names": [
+      "feat0",
+      "feat1",
+      "feat2"
+    ],
+    "feat_shapes": [
+      [
+        1,
+        128,
+        36,
+        64
+      ],
+      [
+        1,
+        512,
+        9,
+        16
+      ],
+      [
+        1,
+        768,
+        18,
+        32
+      ]
+    ],
+    "onnx_sha256": "1eb42460a0845c4103aae02d4037f14d86d68804d971db102d2bd06ae7df7c82"
+  },
+  "head": {
+    "feat_inputs": [
+      "feat0",
+      "feat1",
+      "feat2"
+    ],
+    "txt_input": "txt_feats",
+    "output": "output",
+    "output_example_shape": [
+      1,
+      11,
+      3024
+    ],
+    "n_min": 1,
+    "n_opt": 8,
+    "n_max": 256,
+    "onnx_sha256": "3c7ef16bd283b5c7563241afa95453626dd13b86083e95511e3dd40f803848e1"
+  }
+}

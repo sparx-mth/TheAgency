@@ -108,11 +108,43 @@
   <arg name="cam_cy"        default="90.03019076680604" />
   <arg name="cam_width"     default="504" />
   <arg name="cam_height"    default="294" />
-  <arg name="cam_min_depth" default="0.1" />
+  <!-- 0.1 was too low: confirmed live 2026-07-28 the bottom band of every
+       RGB frame shows a near-constant ~0.17-0.35m depth (camera rig/mount
+       visible in its own FOV, not real environment - stable across frames
+       regardless of drone motion). At 0.1 that artifact passes the filter
+       and gets fused as a permanent phantom wall directly ahead of the
+       drone on every frame; very likely the real cause of "boxed in, no
+       A* route" and much of the mapping noise seen while flying. Raised to
+       0.45 (comfortably above the observed 0.35m ceiling, same order of
+       margin as astar_planner's own inflate_radius_m=0.4m). -->
+  <arg name="cam_min_depth" default="0.45" />
   <arg name="cam_max_depth" default="10.0" />
 
   <!-- ── Optional flight-tuning overrides ────────────────────────-->
   <arg name="vel_x"     default="0.3" />
+  <!-- multi_axis-only (sphera_drone.launch hardcodes controller:=multi_axis
+       below); nav_stack.launch's own defaults are mx_lateral_speed_max=0.25,
+       mx_yaw_rate=0.6; exposed here so a slower/faster first flight test
+       doesn't need editing the shared nav_stack.launch. -->
+  <arg name="mx_lateral_speed_max" default="0.25" />
+  <arg name="mx_yaw_rate"          default="0.6" />
+  <!-- "waypoint"-controller-only (the default one-axis follower, not
+       multi_axis). nav_stack.launch's own default is yaw_rate=0.7 rad/s;
+       the ASSUMED rotation speed the YAW_ALIGN burst sizing uses to decide
+       how many ticks to hold a turn command for. Investigated live
+       2026-08-02: real measured yaw rate for this drone is ~1.5-1.9 rad/s
+       (same finding that fixed mx_yaw_rate above, a separate copy of the
+       same class of miscalibration); with the 0.7 assumption, a burst
+       correctly aimed in the right direction physically rotates ~2.5x
+       further than the code intends, so it never converges cleanly and
+       keeps firing more same-direction bursts past the actual target. See
+       docs/progress/entries/007-rooster-velocity-controller.md. -->
+  <arg name="yaw_rate"             default="0.7" />
+  <!-- Which path tracker drives the drone; see waypoint_follower_node.py's
+       own KNOWN_CONTROLLERS set for the full list (waypoint | multi_axis |
+       pure_pursuit | roll_assist | drift_pid). Exposed here (was hardcoded
+       below) so switching controllers doesn't need editing this file. -->
+  <arg name="controller" default="waypoint" />
   <arg name="cruise_z"  default="1.0" />
   <arg name="goal_x"    default="0.0" />
   <arg name="goal_y"    default="-3.0" />
@@ -126,6 +158,18 @@
   <arg name="bev_ymin"  default="-6.0" />
   <arg name="bev_xmax"  default="6.0" />
   <arg name="bev_ymax"  default="6.0" />
+
+  <!-- BEV anti-noise filter forwarding (2026-08-02): nav_stack.launch's own
+       defaults (2.0/3.0/3) are exposed here so Sphera can tighten them
+       without touching the shared file. Investigated live: A*'s
+       "turns away from the goal" routes trace back to real occupied cells
+       on the direct line, not obvious single-cell speckle; but one
+       checked blocker was an unusually thick (1.7m vs ~0.4-0.6m for clean
+       wall segments in the same grid) 256-cell blob, ambiguous enough to
+       be worth tightening rather than ignoring. -->
+  <arg name="bev_t_on"          default="2.0" />
+  <arg name="bev_occ_conf_full" default="3.0" />
+  <arg name="bev_min_wall_run"  default="3" />
 
   <!-- ── NavDP click-to-go (replaces A*; needs the NavDP server up) ──
        use_navdp:=true swaps astar_planner for navdp_click. It consumes the
@@ -262,16 +306,302 @@
     <param name="pose_is_camera_frame" value="false" /> <!-- mirror falcon_adapter for now -->
     <param name="cam_offset_x"         value="0.2" />   <!-- see frame note below -->
     <!-- Rotation freeze (authoritative): drop the (depth,pose) pair while
-         /xtend/demo_mode == turning, and drop the stale in-flight turn frame on
-         resume, all in the capture clock. -->
-    <param name="demo_mode_topic"      value="/xtend/demo_mode" />
+         /R1/demo_mode == turning, and drop the stale in-flight turn frame on
+         resume, all in the capture clock. Renamed off /xtend/... to match
+         this robot's topic convention; must stay equal to the
+         demo_mode_topic passed into nav_stack.launch below, or this freeze
+         gate and the follower's own handshake fall out of sync. -->
+    <param name="demo_mode_topic"      value="/R1/demo_mode" />
     <param name="turning_mode_name"    value="turning" />
     <param name="resume_settle_sec"    value="0.0" />
+    <!-- Was disabled 2026-07-28 (same day, earlier): waypoint_follower_node.py's
+         own rotation supervisor got stuck permanently requesting "turning"
+         while its RUNNING navigation loop targeted the default startup goal
+         with no real flight dynamics ever confirming the turn was done (e.g.
+         while the drone was flown manually, bypassing FALCON's /cmd_vel
+         entirely, or sitting disarmed on the floor); confirmed live:
+         /R1/demo_mode stuck at "turning" indefinitely, mapping_sync
+         gate=FROZEN forever.
+
+         Root cause found and fixed the same day: _supervisor_cmd_wz()'s own
+         docstring already documented that drift_pid needed a "trim vs. turn"
+         regime signal (its follower.state) so ordinary heading trim never
+         reads as a real turn to the supervisor; multi_axis had NO
+         equivalent signal, so any nonzero wz (including slew/minimum-force
+         residue with yaw actually released) passed straight through
+         unchanged. Added MultiAxisCommand.yaw_engaged (the follower's own
+         authoritative "past the engage/release hysteresis deadband" flag,
+         already tracked internally as self._yawing but never exposed) and
+         gated _supervisor_cmd_wz() on it for multi_axis, mirroring the
+         drift_pid pattern exactly. Re-enabled now that the actual bug is
+         fixed, not just worked around; see LESSONS.md for the full
+         debugging detail. If mapping freezes stuck again, check
+         self._last_yaw_engaged / MultiAxisCommand.yaw_engaged first, not
+         this switch. -->
+    <param name="freeze_on_turning_mode" value="true" />
     <!-- Startup warm-up: force-fuse the first N voxel pairs ignoring demo_mode
          (so a stale latched 'turning' can't freeze mapping at pickup), then reset
          to a forward-flight baseline. 0 disables the warm-up. -->
     <param name="warmup_emits"         value="2" />
   </node>
+
+  <!-- Demo-mode arbiter (Rooster-only). Confirmed missing 2026-07-28: with
+       no Rooster equivalent of xtend_drone_demo_manager.py, /R1/demo_mode
+       never actually reported "turning" during a real rotation, so
+       mapping_sync's rotation freeze above never engaged; depth frames
+       kept fusing through a real in-place turn, smearing obstacles into a
+       false ring around the drone (confirmed live: BEV showed "boxed in;
+       no A* route" from a full ring of occupied cells that wasn't real
+       geometry). This node only echoes ~request_topic back as ~mode_topic;
+       no side effects, no auto-land on FINISH (see the node's own
+       docstring for why it isn't just a copy of the XTEND manager). -->
+  <node pkg="falcon_adapter" type="rooster_demo_mode_manager.py"
+        name="rooster_demo_mode_manager" output="screen">
+    <param name="request_topic" value="/R1/demo_mode_request" />
+    <param name="mode_topic"    value="/R1/demo_mode" />
+  </node>
+
+  <!-- Pass-through args nav_stack.launch declares but this file didn't forward; needed for object_mission_sphera.launch's include of this file to work (roslaunch rejects any forwarded arg with no matching arg here). Defaults copied from nav_stack.launch itself. -->
+  <arg name="debug" default="false" />
+  <arg name="start_go" default="true" />
+  <!-- Not a nav_stack.launch arg at all (declared by object_mission_sphera.launch
+       itself, "interactive BEV window"); declared here only so the include
+       below doesn't reject it as unused. Not forwarded further. -->
+  <arg name="bev_viewer" default="true" />
+  <arg name="apf_collision_recheck" default="true" />
+  <arg name="apf_debug" default="$(arg debug)" />
+  <arg name="apf_treat_unknown_as_free" default="true" />
+  <arg name="apf_unknown_damping" default="true" />
+  <arg name="apf_unknown_radius_m" default="0.5" />
+  <arg name="bev_always_recompute" default="false" />
+  <arg name="bev_bbox_margin" default="1.0" />
+  <arg name="bev_component_connectivity" default="8" />
+  <arg name="bev_confirm_3d" default="true" />
+  <arg name="bev_door_band_m" default="0.80" />
+  <arg name="bev_door_free_voxels" default="2" />
+  <arg name="bev_door_occ_tol" default="0" />
+  <arg name="bev_min_component_cells" default="0" />
+  <arg name="bev_min_free_voxels" default="1" />
+  <arg name="bev_min_occ_neighbors_3d" default="1" />
+  <arg name="bev_min_occ_voxels" default="4" />
+  <arg name="bev_neighbors_3d" default="6" />
+  <arg name="bev_occ_dilate" default="0" />
+  <arg name="bev_occ_weight_thresh" default="2.0" />
+  <arg name="bev_protect_openings" default="true" />
+  <arg name="bev_publish_hz" default="10.0" />
+  <arg name="bev_resolution" default="0.10" />
+  <arg name="bev_skip_unchanged_publish" default="true" />
+  <arg name="bev_t_dec" default="1.0" />
+  <arg name="bev_temporal_filter" default="true" />
+  <arg name="bev_t_inc" default="1.0" />
+  <arg name="bev_t_max" default="5.0" />
+  <arg name="bev_t_off" default="0.5" />
+  <arg name="bev_voxel_size" default="$(arg bev_resolution)" />
+  <arg name="bev_wall_fill_iters" default="1" />
+  <arg name="bev_wall_fill_mode" default="directional" />
+  <arg name="bev_wall_fill_neighbors" default="5" />
+  <arg name="bev_weight_profile" default="triangular" />
+  <arg name="bev_weight_sigma" default="0.50" />
+  <arg name="bev_z_ceil" default="1.50" />
+  <arg name="bev_z_floor" default="0.70" />
+  <arg name="bev_z_peak" default="$(arg cruise_z)" />
+  <arg name="blockage_radius_m" default="0.35" />
+  <arg name="blockage_ttl_s" default="0.0" />
+  <arg name="certainty_log" default="true" />
+  <arg name="certainty_log_path" default="$(optenv FALCON_CERTAINTY_LOG)" />
+  <arg name="clearance_margin_m" default="0.8" />
+  <arg name="clearance_weight" default="3.0" />
+  <arg name="cmd_vel_raw_topic" default="$(arg drone_ns)/cmd_vel_raw" />
+  <arg name="cmd_vy_sign" default="1.0" />
+  <arg name="corner_chamfer_dist_m" default="0.5" />
+  <arg name="corner_chamfer_max_deg" default="28.0" />
+  <arg name="corner_max_turn_deg" default="14.0" />
+  <arg name="corner_merge_deg" default="8.0" />
+  <arg name="corner_min_runup_m" default="0.6" />
+  <arg name="dp_accel_wz" default="1.2" />
+  <arg name="dp_accel_xy" default="0.35" />
+  <arg name="dp_alt_ceiling_m" default="1.2" />
+  <arg name="dp_alt_climb_max" default="0.06" />
+  <arg name="dp_alt_conf_min" default="0.35" />
+  <arg name="dp_alt_hold" default="false" />
+  <arg name="dp_alt_kp" default="0.5" />
+  <arg name="dp_alt_pulse_trigger_m" default="0.20" />
+  <arg name="dp_alt_pulse_tscale" default="0.5" />
+  <arg name="dp_approach_yaw_rate" default="0.35" />
+  <arg name="dp_arrive_speed_min" default="0.08" />
+  <arg name="dp_block_clear_ticks" default="3" />
+  <arg name="dp_block_confirm_ticks" default="5" />
+  <arg name="dp_block_enabled" default="true" />
+  <arg name="dp_block_min_dist_m" default="0.06" />
+  <arg name="dp_block_min_vx" default="0.07" />
+  <arg name="dp_block_min_wz_deg" default="12.0" />
+  <arg name="dp_block_min_yaw_deg" default="7.0" />
+  <arg name="dp_block_progress_frac" default="0.30" />
+  <arg name="dp_block_use_effectiveness" default="true" />
+  <arg name="dp_block_window_s" default="1.2" />
+  <arg name="dp_coast_speed_scale" default="0.5" />
+  <arg name="dp_combined_effort" default="1.4" />
+  <arg name="dp_conf_full" default="0.35" />
+  <arg name="dp_conf_hold" default="0.05" />
+  <arg name="dp_conf_integrate" default="0.18" />
+  <arg name="dp_conf_min" default="0.10" />
+  <arg name="dp_cruise_speed" default="0.18" />
+  <arg name="dp_cruise_straight" default="0.0" />
+  <arg name="dp_deadband_extra_max_m" default="0.15" />
+  <arg name="dp_decel_wz" default="2.0" />
+  <arg name="dp_decel_xy" default="0.60" />
+  <arg name="dp_drift_leak_s" default="180.0" />
+  <arg name="dp_eff_floor" default="0.15" />
+  <arg name="dp_eff_full" default="0.60" />
+  <arg name="dp_eff_speed_floor" default="0.5" />
+  <arg name="dp_escape_back_s" default="0.7" />
+  <arg name="dp_escape_back_speed" default="0.10" />
+  <arg name="dp_escape_brake_s" default="0.4" />
+  <arg name="dp_escape_max_attempts" default="2" />
+  <arg name="dp_escape_probe_s" default="0.8" />
+  <arg name="dp_escape_probe_speed" default="0.10" />
+  <arg name="dp_escape_settle_s" default="0.5" />
+  <arg name="dp_escape_yaw_invert" default="false" />
+  <arg name="dp_escape_yaw_probe_s" default="1.0" />
+  <arg name="dp_forward_track_frac" default="0.0" />
+  <arg name="dp_fwd_deadband_m" default="0.05" />
+  <arg name="dp_fwd_d_tau_s" default="0.4" />
+  <arg name="dp_fwd_i_limit" default="0.05" />
+  <arg name="dp_fwd_kd" default="0.10" />
+  <arg name="dp_fwd_ki" default="0.05" />
+  <arg name="dp_fwd_kp" default="0.50" />
+  <arg name="dp_fwd_max" default="0.10" />
+  <arg name="dp_gain_floor" default="0.25" />
+  <arg name="dp_hold_deadband_m" default="0.06" />
+  <arg name="dp_lat_deadband_m" default="0.03" />
+  <arg name="dp_lat_d_tau_s" default="0.4" />
+  <arg name="dp_latency_s" default="0.12" />
+  <arg name="dp_lateral_turn_frac" default="0.40" />
+  <arg name="dp_lat_i_limit" default="0.05" />
+  <arg name="dp_lat_kd" default="0.12" />
+  <arg name="dp_lat_ki" default="0.06" />
+  <arg name="dp_lat_kp" default="0.55" />
+  <arg name="dp_lat_max" default="0.10" />
+  <arg name="dp_lookahead_m" default="0.60" />
+  <arg name="dp_max_age_s" default="0.6" />
+  <arg name="dp_max_translation" default="0.25" />
+  <arg name="dp_max_vx" default="0.25" />
+  <arg name="dp_max_vx_back" default="0.12" />
+  <arg name="dp_max_vy" default="0.12" />
+  <arg name="dp_max_wz" default="0.40" />
+  <arg name="dp_min_vx" default="0.06" />
+  <arg name="dp_min_vy" default="0.06" />
+  <arg name="dp_min_wz_deg" default="10.0" />
+  <arg name="dp_passed_bearing_deg" default="110.0" />
+  <arg name="dp_pos_radius" default="0.30" />
+  <arg name="dp_release_frac" default="0.5" />
+  <arg name="dp_require_quality" default="false" />
+  <arg name="dp_settle_map_updates" default="0" />
+  <arg name="dp_slow_radius" default="0.80" />
+  <arg name="dp_speed_floor" default="0.35" />
+  <arg name="dp_std_deadband_gain" default="0.6" />
+  <arg name="dp_std_ref_m" default="0.05" />
+  <arg name="dp_suppress_deg" default="110.0" />
+  <arg name="dp_suppress_floor" default="0.15" />
+  <arg name="dp_track_yaw_rate" default="0.35" />
+  <arg name="dp_travel_cone_deg" default="70.0" />
+  <arg name="dp_turn_pitch_bias" default="0.08" />
+  <arg name="dp_turn_side_cone_deg" default="35.0" />
+  <arg name="dp_yaw_deadband_deg" default="2.0" />
+  <arg name="dp_yaw_d_tau_s" default="0.35" />
+  <arg name="dp_yaw_engage_deg" default="22.0" />
+  <arg name="dp_yaw_i_limit" default="0.08" />
+  <arg name="dp_yaw_kd" default="0.15" />
+  <arg name="dp_yaw_ki" default="0.08" />
+  <arg name="dp_yaw_kp" default="0.90" />
+  <arg name="dp_yaw_max" default="0.35" />
+  <arg name="dp_yaw_release_deg" default="9.0" />
+  <arg name="dp_yaw_scale_floor" default="0.0" />
+  <arg name="esdf_iterations" default="12" />
+  <arg name="esdf_lateral_only" default="true" />
+  <arg name="esdf_max_step_m" default="0.2" />
+  <arg name="esdf_occ_thresh" default="0.65" />
+  <arg name="esdf_smooth_sigma_m" default="0.1" />
+  <arg name="force_arrow_scale" default="0.5" />
+  <arg name="force_field_stride" default="4" />
+  <arg name="goal_snap_radius_m" default="2.0" />
+  <arg name="go_topic" default="/mission/go" />
+  <arg name="heading_penalty_m" default="1.5" />
+  <arg name="inflate_floor_m" default="0.25" />
+  <arg name="inflate_radius_m" default="0.40" />
+  <arg name="lethal_confidence" default="0.5" />
+  <arg name="max_predicted_replans" default="3" />
+  <arg name="min_free_cells_to_plan" default="80" />
+  <arg name="nav_debug_record" default="true" />
+  <arg name="plan_period_s" default="10.0" />
+  <arg name="pp_cruise_speed" default="0.2" />
+  <arg name="pp_holonomic" default="false" />
+  <arg name="pp_max_yaw_rate" default="0.45" />
+  <arg name="pp_yaw_rate_smoothing" default="0.3" />
+  <arg name="probe_radius_m" default="0.10" />
+  <arg name="publish_force_field" default="true" />
+  <arg name="publish_forces" default="true" />
+  <arg name="recovery_back_duration_s" default="1.5" />
+  <arg name="recovery_back_speed" default="0.30" />
+  <arg name="recovery_climb_duration_s" default="0.4" />
+  <arg name="recovery_climb_enabled" default="true" />
+  <arg name="recovery_climb_speed" default="0.08" />
+  <arg name="recovery_enabled" default="true" />
+  <arg name="recovery_ladder_s" default="1.0" />
+  <arg name="recovery_persist_back_s" default="0.6" />
+  <arg name="recovery_persist_enabled" default="true" />
+  <arg name="recovery_persist_turn_s" default="0.6" />
+  <arg name="recovery_stale_s" default="0.3" />
+  <arg name="recovery_turn_dir" default="right" />
+  <arg name="recovery_turn_rate" default="0.5" />
+  <arg name="relax_step_m" default="0.05" />
+  <arg name="replan_collision_confirm" default="2" />
+  <arg name="replan_commit_min_s" default="4.0" />
+  <arg name="replan_corridor_radius_m" default="1.0" />
+  <arg name="replan_improve_frac" default="0.15" />
+  <arg name="replan_min_new_cells" default="60" />
+  <arg name="replan_min_new_cells_any" default="240" />
+  <arg name="replan_on_bev" default="false" />
+  <arg name="replan_on_collision" default="false" />
+  <arg name="replan_on_predicted_collision" default="false" />
+  <arg name="replan_periodic_always" default="false" />
+  <arg name="replan_period_s" default="7.0" />
+  <arg name="replan_relaxed_period_s" default="4.0" />
+  <arg name="replan_rotation_min_deg" default="30.0" />
+  <arg name="safety_correct" default="true" />
+  <arg name="search_margin_m" default="3.0" />
+  <arg name="simplify_collinear" default="true" />
+  <arg name="simplify_collinear_angle_deg" default="10.0" />
+  <arg name="simplify_debug" default="$(arg debug)" />
+  <arg name="simplify_max_segment_m" default="3.0" />
+  <arg name="simplify_merge" default="true" />
+  <arg name="simplify_merge_radius_m" default="0.20" />
+  <arg name="simplify_min_spacing" default="true" />
+  <arg name="simplify_min_spacing_m" default="1.0" />
+  <arg name="simplify_turn_keep_deg" default="25.0" />
+  <arg name="simplify_zigzag" default="true" />
+  <arg name="simplify_zigzag_angle_deg" default="60.0" />
+  <arg name="simplify_zigzag_passes" default="1" />
+  <arg name="simplify_zigzag_strength" default="0.5" />
+  <arg name="skip_yaw_thresh" default="0.25" />
+  <arg name="smart_replan" default="true" />
+  <arg name="soft_obstacle_cost" default="25.0" />
+  <arg name="start_skip_m" default="0.5" />
+  <arg name="stop_on_blocked_plan_fail" default="true" />
+  <arg name="thinking_log" default="false" />
+  <arg name="thinking_log_path" default="$(optenv FALCON_THOUGHT_LOG)" />
+  <arg name="thinking_window" default="false" />
+  <arg name="unknown_blocked" default="false" />
+  <arg name="unknown_cost" default="6.0" />
+  <arg name="use_blockage_memory" default="true" />
+  <arg name="use_pose_estimator" default="true" />
+  <arg name="waypoint_spacing_m" default="1.5" />
+  <arg name="yaw_acquire_max_deg" default="35.0" />
+  <arg name="yaw_acquisition_radius" default="0.2" />
+  <arg name="yaw_burst_grade_max_ticks" default="6" />
+  <arg name="yaw_pitch_bias" default="0.05" />
+  <arg name="zero_on_close" default="true" />
+
   <!-- ══════════════════════════════════════════════════════════════
        The actual nav stack — same launch as Gazebo, just with the
        real-drone depth topic and camera intrinsics passed in.
@@ -301,15 +631,47 @@
     <arg name="cam_max_depth" value="$(arg cam_max_depth)" />
 
     <arg name="vel_x"         value="$(arg vel_x)" />
+    <arg name="mx_lateral_speed_max" value="$(arg mx_lateral_speed_max)" />
+    <arg name="mx_yaw_rate"          value="$(arg mx_yaw_rate)" />
+    <arg name="yaw_rate"             value="$(arg yaw_rate)" />
     <arg name="cruise_z"      value="$(arg cruise_z)" />
     <arg name="goal_x"        value="$(arg goal_x)" />
     <arg name="goal_y"        value="$(arg goal_y)" />
+
+    <!-- BEV anti-noise filter forwarding — see the arg comment above. -->
+    <arg name="bev_t_on"          value="$(arg bev_t_on)" />
+    <arg name="bev_occ_conf_full" value="$(arg bev_occ_conf_full)" />
+    <arg name="bev_min_wall_run"  value="$(arg bev_min_wall_run)" />
 
     <!-- BEV viewport bounds — see the arg comment above for why this file exists. -->
     <arg name="bev_xmin"      value="$(arg bev_xmin)" />
     <arg name="bev_ymin"      value="$(arg bev_ymin)" />
     <arg name="bev_xmax"      value="$(arg bev_xmax)" />
     <arg name="bev_ymax"      value="$(arg bev_ymax)" />
+
+    <!-- Rooster is holonomic (independent x/y/yaw via manual axes, not a
+         differential-drive platform that must turn to face its travel
+         direction). multi_axis was originally chosen here because the
+         default roll_assist/waypoint one-axis handshake hard-blocks forever
+         waiting for a 'turning' confirmation on demo_mode_topic, and at the
+         time (pre-2026-07-28) no Rooster-side demo-mode manager existed to
+         ever send one (xtend_drone_demo_manager.py has no Rooster
+         equivalent); confirmed live as a deadlock in YAW_ALIGN.
+         2026-07-30: rooster_demo_mode_manager.py now exists (added 07-28 for
+         mapping_sync's rotation-freeze gate) and is launched below; it's a
+         generic request->echo arbiter, so it also satisfies the one-axis
+         handshake (waypoint_follower_node.py:869-872's
+         confirmed=(current_demo_mode==mode) resolves in one round-trip).
+         Switching to waypoint (the true single-axis controller: X-advance OR
+         yaw, never combined) to test live now that the manager is in place;
+         see docs/progress/entries/007-rooster-velocity-controller.md. Revert
+         to multi_axis if this still deadlocks or otherwise misbehaves.
+         demo_mode_topic/_request_topic renamed off /xtend/... to match this
+         robot's own /R1/... topic convention; mapping_sync's freeze gate
+         below uses the same rename so the two stay coordinated. -->
+    <arg name="controller"              value="$(arg controller)" />
+    <arg name="demo_mode_topic"         value="/R1/demo_mode" />
+    <arg name="demo_mode_request_topic" value="/R1/demo_mode_request" />
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="nav_mode"                value="$(arg nav_mode)" />
@@ -357,6 +719,242 @@
     <arg name="turn_penalty"            value="$(arg turn_penalty)" />
     <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
     <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
+    <!-- Forwards for the pass-through args declared above. -->
+    <arg name="apf_collision_recheck" value="$(arg apf_collision_recheck)" />
+    <arg name="apf_debug" value="$(arg apf_debug)" />
+    <arg name="apf_treat_unknown_as_free" value="$(arg apf_treat_unknown_as_free)" />
+    <arg name="apf_unknown_damping" value="$(arg apf_unknown_damping)" />
+    <arg name="apf_unknown_radius_m" value="$(arg apf_unknown_radius_m)" />
+    <arg name="bev_always_recompute" value="$(arg bev_always_recompute)" />
+    <arg name="bev_bbox_margin" value="$(arg bev_bbox_margin)" />
+    <arg name="bev_component_connectivity" value="$(arg bev_component_connectivity)" />
+    <arg name="bev_confirm_3d" value="$(arg bev_confirm_3d)" />
+    <arg name="bev_door_band_m" value="$(arg bev_door_band_m)" />
+    <arg name="bev_door_free_voxels" value="$(arg bev_door_free_voxels)" />
+    <arg name="bev_door_occ_tol" value="$(arg bev_door_occ_tol)" />
+    <arg name="bev_min_component_cells" value="$(arg bev_min_component_cells)" />
+    <arg name="bev_min_free_voxels" value="$(arg bev_min_free_voxels)" />
+    <arg name="bev_min_occ_neighbors_3d" value="$(arg bev_min_occ_neighbors_3d)" />
+    <arg name="bev_min_occ_voxels" value="$(arg bev_min_occ_voxels)" />
+    <arg name="bev_neighbors_3d" value="$(arg bev_neighbors_3d)" />
+    <arg name="bev_occ_dilate" value="$(arg bev_occ_dilate)" />
+    <arg name="bev_occ_weight_thresh" value="$(arg bev_occ_weight_thresh)" />
+    <arg name="bev_protect_openings" value="$(arg bev_protect_openings)" />
+    <arg name="bev_publish_hz" value="$(arg bev_publish_hz)" />
+    <arg name="bev_resolution" value="$(arg bev_resolution)" />
+    <arg name="bev_skip_unchanged_publish" value="$(arg bev_skip_unchanged_publish)" />
+    <arg name="bev_t_dec" value="$(arg bev_t_dec)" />
+    <arg name="bev_temporal_filter" value="$(arg bev_temporal_filter)" />
+    <arg name="bev_t_inc" value="$(arg bev_t_inc)" />
+    <arg name="bev_t_max" value="$(arg bev_t_max)" />
+    <arg name="bev_t_off" value="$(arg bev_t_off)" />
+    <arg name="bev_voxel_size" value="$(arg bev_voxel_size)" />
+    <arg name="bev_wall_fill_iters" value="$(arg bev_wall_fill_iters)" />
+    <arg name="bev_wall_fill_mode" value="$(arg bev_wall_fill_mode)" />
+    <arg name="bev_wall_fill_neighbors" value="$(arg bev_wall_fill_neighbors)" />
+    <arg name="bev_weight_profile" value="$(arg bev_weight_profile)" />
+    <arg name="bev_weight_sigma" value="$(arg bev_weight_sigma)" />
+    <arg name="bev_z_ceil" value="$(arg bev_z_ceil)" />
+    <arg name="bev_z_floor" value="$(arg bev_z_floor)" />
+    <arg name="bev_z_peak" value="$(arg bev_z_peak)" />
+    <arg name="blockage_radius_m" value="$(arg blockage_radius_m)" />
+    <arg name="blockage_ttl_s" value="$(arg blockage_ttl_s)" />
+    <arg name="certainty_log" value="$(arg certainty_log)" />
+    <arg name="certainty_log_path" value="$(arg certainty_log_path)" />
+    <arg name="clearance_margin_m" value="$(arg clearance_margin_m)" />
+    <arg name="clearance_weight" value="$(arg clearance_weight)" />
+    <arg name="cmd_vel_raw_topic" value="$(arg cmd_vel_raw_topic)" />
+    <arg name="cmd_vy_sign" value="$(arg cmd_vy_sign)" />
+    <arg name="corner_chamfer_dist_m" value="$(arg corner_chamfer_dist_m)" />
+    <arg name="corner_chamfer_max_deg" value="$(arg corner_chamfer_max_deg)" />
+    <arg name="corner_max_turn_deg" value="$(arg corner_max_turn_deg)" />
+    <arg name="corner_merge_deg" value="$(arg corner_merge_deg)" />
+    <arg name="corner_min_runup_m" value="$(arg corner_min_runup_m)" />
+    <arg name="debug" value="$(arg debug)" />
+    <arg name="dp_accel_wz" value="$(arg dp_accel_wz)" />
+    <arg name="dp_accel_xy" value="$(arg dp_accel_xy)" />
+    <arg name="dp_alt_ceiling_m" value="$(arg dp_alt_ceiling_m)" />
+    <arg name="dp_alt_climb_max" value="$(arg dp_alt_climb_max)" />
+    <arg name="dp_alt_conf_min" value="$(arg dp_alt_conf_min)" />
+    <arg name="dp_alt_hold" value="$(arg dp_alt_hold)" />
+    <arg name="dp_alt_kp" value="$(arg dp_alt_kp)" />
+    <arg name="dp_alt_pulse_trigger_m" value="$(arg dp_alt_pulse_trigger_m)" />
+    <arg name="dp_alt_pulse_tscale" value="$(arg dp_alt_pulse_tscale)" />
+    <arg name="dp_approach_yaw_rate" value="$(arg dp_approach_yaw_rate)" />
+    <arg name="dp_arrive_speed_min" value="$(arg dp_arrive_speed_min)" />
+    <arg name="dp_block_clear_ticks" value="$(arg dp_block_clear_ticks)" />
+    <arg name="dp_block_confirm_ticks" value="$(arg dp_block_confirm_ticks)" />
+    <arg name="dp_block_enabled" value="$(arg dp_block_enabled)" />
+    <arg name="dp_block_min_dist_m" value="$(arg dp_block_min_dist_m)" />
+    <arg name="dp_block_min_vx" value="$(arg dp_block_min_vx)" />
+    <arg name="dp_block_min_wz_deg" value="$(arg dp_block_min_wz_deg)" />
+    <arg name="dp_block_min_yaw_deg" value="$(arg dp_block_min_yaw_deg)" />
+    <arg name="dp_block_progress_frac" value="$(arg dp_block_progress_frac)" />
+    <arg name="dp_block_use_effectiveness" value="$(arg dp_block_use_effectiveness)" />
+    <arg name="dp_block_window_s" value="$(arg dp_block_window_s)" />
+    <arg name="dp_coast_speed_scale" value="$(arg dp_coast_speed_scale)" />
+    <arg name="dp_combined_effort" value="$(arg dp_combined_effort)" />
+    <arg name="dp_conf_full" value="$(arg dp_conf_full)" />
+    <arg name="dp_conf_hold" value="$(arg dp_conf_hold)" />
+    <arg name="dp_conf_integrate" value="$(arg dp_conf_integrate)" />
+    <arg name="dp_conf_min" value="$(arg dp_conf_min)" />
+    <arg name="dp_cruise_speed" value="$(arg dp_cruise_speed)" />
+    <arg name="dp_cruise_straight" value="$(arg dp_cruise_straight)" />
+    <arg name="dp_deadband_extra_max_m" value="$(arg dp_deadband_extra_max_m)" />
+    <arg name="dp_decel_wz" value="$(arg dp_decel_wz)" />
+    <arg name="dp_decel_xy" value="$(arg dp_decel_xy)" />
+    <arg name="dp_drift_leak_s" value="$(arg dp_drift_leak_s)" />
+    <arg name="dp_eff_floor" value="$(arg dp_eff_floor)" />
+    <arg name="dp_eff_full" value="$(arg dp_eff_full)" />
+    <arg name="dp_eff_speed_floor" value="$(arg dp_eff_speed_floor)" />
+    <arg name="dp_escape_back_s" value="$(arg dp_escape_back_s)" />
+    <arg name="dp_escape_back_speed" value="$(arg dp_escape_back_speed)" />
+    <arg name="dp_escape_brake_s" value="$(arg dp_escape_brake_s)" />
+    <arg name="dp_escape_max_attempts" value="$(arg dp_escape_max_attempts)" />
+    <arg name="dp_escape_probe_s" value="$(arg dp_escape_probe_s)" />
+    <arg name="dp_escape_probe_speed" value="$(arg dp_escape_probe_speed)" />
+    <arg name="dp_escape_settle_s" value="$(arg dp_escape_settle_s)" />
+    <arg name="dp_escape_yaw_invert" value="$(arg dp_escape_yaw_invert)" />
+    <arg name="dp_escape_yaw_probe_s" value="$(arg dp_escape_yaw_probe_s)" />
+    <arg name="dp_forward_track_frac" value="$(arg dp_forward_track_frac)" />
+    <arg name="dp_fwd_deadband_m" value="$(arg dp_fwd_deadband_m)" />
+    <arg name="dp_fwd_d_tau_s" value="$(arg dp_fwd_d_tau_s)" />
+    <arg name="dp_fwd_i_limit" value="$(arg dp_fwd_i_limit)" />
+    <arg name="dp_fwd_kd" value="$(arg dp_fwd_kd)" />
+    <arg name="dp_fwd_ki" value="$(arg dp_fwd_ki)" />
+    <arg name="dp_fwd_kp" value="$(arg dp_fwd_kp)" />
+    <arg name="dp_fwd_max" value="$(arg dp_fwd_max)" />
+    <arg name="dp_gain_floor" value="$(arg dp_gain_floor)" />
+    <arg name="dp_hold_deadband_m" value="$(arg dp_hold_deadband_m)" />
+    <arg name="dp_lat_deadband_m" value="$(arg dp_lat_deadband_m)" />
+    <arg name="dp_lat_d_tau_s" value="$(arg dp_lat_d_tau_s)" />
+    <arg name="dp_latency_s" value="$(arg dp_latency_s)" />
+    <arg name="dp_lateral_turn_frac" value="$(arg dp_lateral_turn_frac)" />
+    <arg name="dp_lat_i_limit" value="$(arg dp_lat_i_limit)" />
+    <arg name="dp_lat_kd" value="$(arg dp_lat_kd)" />
+    <arg name="dp_lat_ki" value="$(arg dp_lat_ki)" />
+    <arg name="dp_lat_kp" value="$(arg dp_lat_kp)" />
+    <arg name="dp_lat_max" value="$(arg dp_lat_max)" />
+    <arg name="dp_lookahead_m" value="$(arg dp_lookahead_m)" />
+    <arg name="dp_max_age_s" value="$(arg dp_max_age_s)" />
+    <arg name="dp_max_translation" value="$(arg dp_max_translation)" />
+    <arg name="dp_max_vx" value="$(arg dp_max_vx)" />
+    <arg name="dp_max_vx_back" value="$(arg dp_max_vx_back)" />
+    <arg name="dp_max_vy" value="$(arg dp_max_vy)" />
+    <arg name="dp_max_wz" value="$(arg dp_max_wz)" />
+    <arg name="dp_min_vx" value="$(arg dp_min_vx)" />
+    <arg name="dp_min_vy" value="$(arg dp_min_vy)" />
+    <arg name="dp_min_wz_deg" value="$(arg dp_min_wz_deg)" />
+    <arg name="dp_passed_bearing_deg" value="$(arg dp_passed_bearing_deg)" />
+    <arg name="dp_pos_radius" value="$(arg dp_pos_radius)" />
+    <arg name="dp_release_frac" value="$(arg dp_release_frac)" />
+    <arg name="dp_require_quality" value="$(arg dp_require_quality)" />
+    <arg name="dp_settle_map_updates" value="$(arg dp_settle_map_updates)" />
+    <arg name="dp_slow_radius" value="$(arg dp_slow_radius)" />
+    <arg name="dp_speed_floor" value="$(arg dp_speed_floor)" />
+    <arg name="dp_std_deadband_gain" value="$(arg dp_std_deadband_gain)" />
+    <arg name="dp_std_ref_m" value="$(arg dp_std_ref_m)" />
+    <arg name="dp_suppress_deg" value="$(arg dp_suppress_deg)" />
+    <arg name="dp_suppress_floor" value="$(arg dp_suppress_floor)" />
+    <arg name="dp_track_yaw_rate" value="$(arg dp_track_yaw_rate)" />
+    <arg name="dp_travel_cone_deg" value="$(arg dp_travel_cone_deg)" />
+    <arg name="dp_turn_pitch_bias" value="$(arg dp_turn_pitch_bias)" />
+    <arg name="dp_turn_side_cone_deg" value="$(arg dp_turn_side_cone_deg)" />
+    <arg name="dp_yaw_deadband_deg" value="$(arg dp_yaw_deadband_deg)" />
+    <arg name="dp_yaw_d_tau_s" value="$(arg dp_yaw_d_tau_s)" />
+    <arg name="dp_yaw_engage_deg" value="$(arg dp_yaw_engage_deg)" />
+    <arg name="dp_yaw_i_limit" value="$(arg dp_yaw_i_limit)" />
+    <arg name="dp_yaw_kd" value="$(arg dp_yaw_kd)" />
+    <arg name="dp_yaw_ki" value="$(arg dp_yaw_ki)" />
+    <arg name="dp_yaw_kp" value="$(arg dp_yaw_kp)" />
+    <arg name="dp_yaw_max" value="$(arg dp_yaw_max)" />
+    <arg name="dp_yaw_release_deg" value="$(arg dp_yaw_release_deg)" />
+    <arg name="dp_yaw_scale_floor" value="$(arg dp_yaw_scale_floor)" />
+    <arg name="esdf_iterations" value="$(arg esdf_iterations)" />
+    <arg name="esdf_lateral_only" value="$(arg esdf_lateral_only)" />
+    <arg name="esdf_max_step_m" value="$(arg esdf_max_step_m)" />
+    <arg name="esdf_occ_thresh" value="$(arg esdf_occ_thresh)" />
+    <arg name="esdf_smooth_sigma_m" value="$(arg esdf_smooth_sigma_m)" />
+    <arg name="force_arrow_scale" value="$(arg force_arrow_scale)" />
+    <arg name="force_field_stride" value="$(arg force_field_stride)" />
+    <arg name="goal_snap_radius_m" value="$(arg goal_snap_radius_m)" />
+    <arg name="go_topic" value="$(arg go_topic)" />
+    <arg name="start_go" value="$(arg start_go)" />
+    <arg name="heading_penalty_m" value="$(arg heading_penalty_m)" />
+    <arg name="inflate_floor_m" value="$(arg inflate_floor_m)" />
+    <arg name="inflate_radius_m" value="$(arg inflate_radius_m)" />
+    <arg name="lethal_confidence" value="$(arg lethal_confidence)" />
+    <arg name="max_predicted_replans" value="$(arg max_predicted_replans)" />
+    <arg name="min_free_cells_to_plan" value="$(arg min_free_cells_to_plan)" />
+    <arg name="nav_debug_record" value="$(arg nav_debug_record)" />
+    <arg name="plan_period_s" value="$(arg plan_period_s)" />
+    <arg name="pp_cruise_speed" value="$(arg pp_cruise_speed)" />
+    <arg name="pp_holonomic" value="$(arg pp_holonomic)" />
+    <arg name="pp_max_yaw_rate" value="$(arg pp_max_yaw_rate)" />
+    <arg name="pp_yaw_rate_smoothing" value="$(arg pp_yaw_rate_smoothing)" />
+    <arg name="probe_radius_m" value="$(arg probe_radius_m)" />
+    <arg name="publish_force_field" value="$(arg publish_force_field)" />
+    <arg name="publish_forces" value="$(arg publish_forces)" />
+    <arg name="recovery_back_duration_s" value="$(arg recovery_back_duration_s)" />
+    <arg name="recovery_back_speed" value="$(arg recovery_back_speed)" />
+    <arg name="recovery_climb_duration_s" value="$(arg recovery_climb_duration_s)" />
+    <arg name="recovery_climb_enabled" value="$(arg recovery_climb_enabled)" />
+    <arg name="recovery_climb_speed" value="$(arg recovery_climb_speed)" />
+    <arg name="recovery_enabled" value="$(arg recovery_enabled)" />
+    <arg name="recovery_ladder_s" value="$(arg recovery_ladder_s)" />
+    <arg name="recovery_persist_back_s" value="$(arg recovery_persist_back_s)" />
+    <arg name="recovery_persist_enabled" value="$(arg recovery_persist_enabled)" />
+    <arg name="recovery_persist_turn_s" value="$(arg recovery_persist_turn_s)" />
+    <arg name="recovery_stale_s" value="$(arg recovery_stale_s)" />
+    <arg name="recovery_turn_dir" value="$(arg recovery_turn_dir)" />
+    <arg name="recovery_turn_rate" value="$(arg recovery_turn_rate)" />
+    <arg name="relax_step_m" value="$(arg relax_step_m)" />
+    <arg name="replan_collision_confirm" value="$(arg replan_collision_confirm)" />
+    <arg name="replan_commit_min_s" value="$(arg replan_commit_min_s)" />
+    <arg name="replan_corridor_radius_m" value="$(arg replan_corridor_radius_m)" />
+    <arg name="replan_improve_frac" value="$(arg replan_improve_frac)" />
+    <arg name="replan_min_new_cells" value="$(arg replan_min_new_cells)" />
+    <arg name="replan_min_new_cells_any" value="$(arg replan_min_new_cells_any)" />
+    <arg name="replan_on_bev" value="$(arg replan_on_bev)" />
+    <arg name="replan_on_collision" value="$(arg replan_on_collision)" />
+    <arg name="replan_on_predicted_collision" value="$(arg replan_on_predicted_collision)" />
+    <arg name="replan_periodic_always" value="$(arg replan_periodic_always)" />
+    <arg name="replan_period_s" value="$(arg replan_period_s)" />
+    <arg name="replan_relaxed_period_s" value="$(arg replan_relaxed_period_s)" />
+    <arg name="replan_rotation_min_deg" value="$(arg replan_rotation_min_deg)" />
+    <arg name="safety_correct" value="$(arg safety_correct)" />
+    <arg name="search_margin_m" value="$(arg search_margin_m)" />
+    <arg name="simplify_collinear" value="$(arg simplify_collinear)" />
+    <arg name="simplify_collinear_angle_deg" value="$(arg simplify_collinear_angle_deg)" />
+    <arg name="simplify_debug" value="$(arg simplify_debug)" />
+    <arg name="simplify_max_segment_m" value="$(arg simplify_max_segment_m)" />
+    <arg name="simplify_merge" value="$(arg simplify_merge)" />
+    <arg name="simplify_merge_radius_m" value="$(arg simplify_merge_radius_m)" />
+    <arg name="simplify_min_spacing" value="$(arg simplify_min_spacing)" />
+    <arg name="simplify_min_spacing_m" value="$(arg simplify_min_spacing_m)" />
+    <arg name="simplify_turn_keep_deg" value="$(arg simplify_turn_keep_deg)" />
+    <arg name="simplify_zigzag" value="$(arg simplify_zigzag)" />
+    <arg name="simplify_zigzag_angle_deg" value="$(arg simplify_zigzag_angle_deg)" />
+    <arg name="simplify_zigzag_passes" value="$(arg simplify_zigzag_passes)" />
+    <arg name="simplify_zigzag_strength" value="$(arg simplify_zigzag_strength)" />
+    <arg name="skip_yaw_thresh" value="$(arg skip_yaw_thresh)" />
+    <arg name="smart_replan" value="$(arg smart_replan)" />
+    <arg name="soft_obstacle_cost" value="$(arg soft_obstacle_cost)" />
+    <arg name="start_skip_m" value="$(arg start_skip_m)" />
+    <arg name="stop_on_blocked_plan_fail" value="$(arg stop_on_blocked_plan_fail)" />
+    <arg name="thinking_log" value="$(arg thinking_log)" />
+    <arg name="thinking_log_path" value="$(arg thinking_log_path)" />
+    <arg name="thinking_window" value="$(arg thinking_window)" />
+    <arg name="unknown_blocked" value="$(arg unknown_blocked)" />
+    <arg name="unknown_cost" value="$(arg unknown_cost)" />
+    <arg name="use_blockage_memory" value="$(arg use_blockage_memory)" />
+    <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
+    <arg name="waypoint_spacing_m" value="$(arg waypoint_spacing_m)" />
+    <arg name="yaw_acquire_max_deg" value="$(arg yaw_acquire_max_deg)" />
+    <arg name="yaw_acquisition_radius" value="$(arg yaw_acquisition_radius)" />
+    <arg name="yaw_burst_grade_max_ticks" value="$(arg yaw_burst_grade_max_ticks)" />
+    <arg name="yaw_pitch_bias" value="$(arg yaw_pitch_bias)" />
+    <arg name="zero_on_close" value="$(arg zero_on_close)" />
   </include>
 
 </launch>

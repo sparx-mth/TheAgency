@@ -1,0 +1,54 @@
+{
+  "_comment": "Committed manifest for the model/engine registry. Lists where artifacts CAN be found; never commits the artifacts themselves (see .gitignore) and never any credentials -- only env-var names for wherever a store's bucket/region live.",
+  "schema_version": 1,
+  "defaults": {
+    "max_download_mb": 2048,
+    "stores": {
+      "primary": {
+        "backend": "s3",
+        "bucket_env": "SPARX_MODEL_BUCKET",
+        "region_env": "SPARX_MODEL_REGION",
+        "prefix": "models/v1"
+      }
+    }
+  },
+  "search_roots": [
+    "sparx_agency/tasks/mapping/yolo_world_trt/engines",
+    "sparx_agency/tasks/planning/flownav/engines",
+    "sparx_agency/tasks/planning/navdp/engines"
+  ],
+  "models": {
+    "da3_metric_large": {
+      "family": "depth_anything_v3",
+      "description": "DepthAnythingV3 metric-large: monocular metric depth in metres.",
+      "roles": ["depth_only"],
+      "resolution_multiple": 14,
+      "onnx": {
+        "export": {
+          "kind": "external_script",
+          "repo": "https://github.com/daphnaa/ros2-depth-anything-v3-trt",
+          "script": "onnx/generate_engine.py",
+          "argv": ["--onnx", "DA3METRIC-LARGE_{h}x{w}.onnx",
+                    "--output", "DA3METRIC-LARGE_fp16_{h}x{w}.engine", "--fp16"],
+          "hf_repo": "depth-anything/DA3METRIC-LARGE",
+          "note": "ONNX export at a new resolution needs the repo's onnx/README.md steps (torch + depth_anything_3 + the HF checkpoint); this repo's registry only builds the engine from an ONNX that already exists."
+        }
+      },
+      "variants": [
+        {
+          "precision": "fp16",
+          "height": 546,
+          "width": 364,
+          "role": "depth_only",
+          "engine_sources": [
+            "s3://{bucket}/{prefix}/engines/{target_tag}/{stem}.engine"
+          ],
+          "artifacts": {},
+          "legacy_paths": [
+            "~/depth_anything_ws/src/ros2-depth-anything-v3-trt/onnx/DA3METRIC-LARGE/DA3METRIC-LARGE_fp16_546x364.engine"
+          ]
+        }
+      ]
+    }
+  }
+}
