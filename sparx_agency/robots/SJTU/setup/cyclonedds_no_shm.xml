@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS profile for the SJTU simulator container, written for exactly one
+  job: being visible to the ROS 1 <-> ROS 2 bridge, which runs Foxy.
+
+  Why CycloneDDS at all. Humble ships Fast DDS 2.6 and Foxy ships Fast DDS 2.1.
+  The two are not wire-compatible, so a Humble publisher and a Foxy subscriber
+  on the same domain discover nothing and report nothing -- it looks exactly
+  like a dead node. CycloneDDS on both sides is the combination that works.
+
+  Why SharedMemory is off. Humble's CycloneDDS enables the iceoryx shared-memory
+  transport by default; Foxy's CycloneDDS predates it entirely. A sample handed
+  to iceoryx never reaches the network, so the bridge sees a discovered,
+  connected, permanently silent topic. This is the failure that presents as
+  "the bridge lists /simple_drone/odom but rostopic hz says no new messages".
+
+  Why AllowMulticast is spdp and not false. SPDP participant discovery needs
+  multicast; user data then goes unicast. Do NOT pin NetworkInterfaceAddress to
+  "lo" to keep traffic local -- loopback is not multicast-capable, so discovery
+  between containers stops dead. Every participant here runs with --net=host and
+  shares the host stack, so the default interface is already the right one.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <SharedMemory>
+      <Enable>false</Enable>
+    </SharedMemory>
+  </Domain>
+</CycloneDDS>

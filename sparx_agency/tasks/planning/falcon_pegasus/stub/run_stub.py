@@ -192,7 +192,13 @@ def main() -> int:
         max_speed_xy=1.6, max_speed_z=0.8, max_yaw_rate=math.radians(60.0),
         max_accel_xy=2.0, max_accel_z=1.5)))
     controller = AirframeController(
-        tracker=TrajectoryTrackerParams(max_position_error_m=3.0),
+        # The same measured drag and attitude lead the real mission flies with
+        # (see mission._default_tracking): the stand-in airframe models both
+        # effects, so leaving them out here would validate a different law.
+        tracker=TrajectoryTrackerParams(max_position_error_m=3.0,
+                                        drag_per_mps=0.176,
+                                        drag_offset_mps2=0.121,
+                                        attitude_lead_s=0.18),
         thrust=ThrustModelParams(hover_throttle=0.62))
     print("stub: %s cut, airframe hovers at %.2f throttle" % (args.control,
                                                               args.hover_throttle),

@@ -3,6 +3,41 @@
 Working note for the "ten clean full-office explorations in a row" task. Delete
 it when the streak is done and the README carries the conclusions.
 
+## Newest: measured feedforwards, validated deterministically
+
+Two terms added to the tracker (defaults off in core; the Pegasus mission and
+stub set the measured values via `_default_tracking`):
+
+* **Drag feedforward** -- `0.176*v + 0.121` m/s^2 along the planned velocity,
+  the airframe's measured curve. Removes the standing bias the damping term
+  could only shrink and the gated integrator could not touch.
+* **Attitude lead** -- the feedforward acceleration and jerk are sampled
+  0.18 s ahead of the reference (PX4's attitude-response constant), so the
+  aircraft is commanded the attitude the plan wants when it will actually
+  have it. Feedback stays at the reference.
+
+Validated A/B on the stub's AttitudeAircraft over a fixed corner route --
+deterministic, unlike a live stub run, whose FALCON variance (0.18-2.61 m on
+identical code) swamps the effect:
+
+| configuration | mean err | max err |
+|---|---|---|
+| plain | 0.189 m | 0.343 m |
+| drag only | 0.041 m | 0.143 m |
+| lead only | 0.198 m | 0.272 m |
+| **drag + lead (ships)** | **0.020 m** | **0.055 m** |
+
+The lead ALONE slightly worsens the mean -- on a lagging aircraft the led
+sample does not match where it is -- and pays off only once drag is cancelled.
+`test_feedforward_flight.py` pins the division of labour as measured.
+
+Also corrected: the bspline docstring claimed FALCON reparameterises its knots
+for velocity feasibility; `reallocateTime` is never called in this build, the
+knots are uniform in practice, and feasibility is only a soft optimiser cost.
+
+Not yet flown on Isaac -- the container was replaced by SJTU work when this
+landed. The first soak after it returns is the flight validation.
+
 ## Read this first: the streak could never have completed
 
 `MIN_COVERAGE_M3` was **2200**, and the most any flight can ever reach in that

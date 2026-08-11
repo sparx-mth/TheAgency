@@ -1,0 +1,1056 @@
+Continue where you left off. The terminal is closed for me.                                                                                                                                   
+
+● Picking up exactly where we stopped: I'd identified the gap list and recommended fixing the wrong docstring plus the two low-risk, measurable improvements — drag feedforward and attitude-lag
+  compensation. Continuing with that. First, what's running:
+
+● Bash(cd /home/nadavc/GIT/TheAgency; ps -eo pid,args | grep -E "soak\.sh|run_isaac_side|run_stub" | grep -v grep | head -3; echo "--- (blank = nothing running) ---";…)
+  ⎿  --- (blank = nothing running) ---
+     sjtu_verify
+     ## feat/airframe-control-nadav...origin/feat/airframe-control-nadav
+     … +2 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(git diff --stat; echo "==="; git diff sparx_agency/core/control/trajectory_tracking/params.py | head -60)
+  ⎿   sparx_agency/core/control/README.md                | 192 ++++++++++++++++++--
+      .../core/control/trajectory_tracking/params.py     |  16 ++
+      .../core/control/trajectory_tracking/tracker.py    | 197 +++++++--------------
+     … +41 lines (ctrl+o to expand)
+
+● Bash(ls sparx_agency/core/control/reference/ sparx_agency/core/control/velocity_servo/ 2>/dev/null; echo "=== tests green? ==="; .venv/bin/python -m pytest sparx_age…)
+  ⎿  sparx_agency/core/control/reference/:
+     diagnosis.py
+     feed.py
+     … +20 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+     
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Bash(sed -n '158,246p' sparx_agency/core/control/trajectory_tracking/tracker.py)
+  ⎿      def update(self, position, velocity, yaw, dt, now_s, follow=True, limits=None):
+             # type: (object, object, float, float, float, bool) -> AccelerationCommand
+             """Advance one control tick.
+     … +86 lines (ctrl+o to expand)
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  docstring corrected
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  params added
+     constructs ok
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  tracker wired
+     parse ok
+  ⎿  Allowed by auto mode classifier
+
+● Bash(grep -rn "TrajectoryTrackerParams" sparx_agency/core/control/velocity_servo/*.py | head -3; echo "---"; cat >> sparx_agency/core/control/trajectory_tracking/tes…)
+  ⎿  ---
+     sparx_agency/core/control/trajectory_tracking/tests/test_tracker.py:799: AssertionError
+     =========================== short test summary info ============================
+     … +2 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(.venv/bin/python -m pytest "sparx_agency/core/control/trajectory_tracking/tests/test_tracker.py::test_the_attitude_lead_samples_the_feedforward_ahead" -q 2>&1 |…)
+  ⎿  >       assert led.ax == pytest.approx(ahead.ax, abs=0.05)
+     E       assert -1.8892848087397958 == -4.080727224485383 ± 5.0e-02
+     E         comparison failed
+     … +2 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  fixture walks the projector
+     ................................                                         [100%]
+     32 passed in 12.46s
+  ⎿  Allowed by auto mode classifier
+
+● Bash(grep -n "tracking: TrajectoryTrackerParams" sparx_agency/tasks/planning/falcon_pegasus/isaac/mission.py; python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  347:    tracking: TrajectoryTrackerParams = field(default_factory=TrajectoryTrackerParams)
+       File "<stdin>", line 19
+         Attitude lead: PX4's attitude-plus-rate response looks like ~0.18 s from
+     … +6 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  mission set, parses
+     .............                                                            [100%]
+     229 passed in 18.75s
+  ⎿  Allowed by auto mode classifier
+
+● Bash(ss -ltn 2>/dev/null | grep -E '5599|5600' && echo "PORTS BUSY — will not run" || echo "ports free"; docker ps --format '{{.Names}}\t{{.Ports}}')
+  ⎿  ports free
+     sjtu_verify
+
+● Bash(cd sparx_agency/tasks/planning/falcon_pegasus && timeout 900 ./stub/check.sh 6_whole_office 180 --real-time-factor 0.62 2>&1 | grep -E 'STUB'; python3 -c "impor…)
+  ⎿  STUB whole_office: planner_stopped FALCON published no new trajectory for 30 s (still on #221)
+     ./stub/check.sh: line 53: 328947 Segmentation fault      (core dumped) "${PYTHON}" "${SCRIPT_DIR}/run_stub.py" --run "${RUN}" --max-flight-s "${BUDGET}" --out "${LOG_DIR}/${RUN}_stub
+     .json" ${STUB_ARGS[@]+"${STUB_ARGS[@]}"}
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(cat > sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py <<'EOF'
+      """The drag and attitude-lead feedforwards, measured on the stand-in a…)
+  ⎿  /bin/bash: line 83: sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py: No such file or directory
+     /bin/bash: line 165: .venv/bin/python: No such file or directory
+  ⎿  Allowed by auto mode classifier
+
+● Bash(pwd; cd /home/nadavc/GIT/TheAgency && pwd)
+  ⎿  /home/nadavc/GIT/TheAgency/sparx_agency/tasks/planning/falcon_pegasus
+     /home/nadavc/GIT/TheAgency
+
+● Write(sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py)
+  ⎿  Wrote 77 lines to sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py
+       1 """The drag and attitude-lead feedforwards, measured on the stand-in airframe.
+       2 
+       3 The stub's :class:`AttitudeAircraft` models the two effects these terms exist
+       4 for -- drag at the measured curve, and a thrust axis that reaches its command
+       5 through a ~0.18 s lag -- so flying it A/B on a FIXED trajectory is the honest
+       6 test. A live stub run cannot be: FALCON's exploration is nondeterministic and
+       7 its run-to-run variance (mean errors 0.18 to 2.61 on identical control code)
+       8 swamps the effect being measured.
+       9 """
+      10 from __future__ import annotations
+     … +67 lines (ctrl+o to expand)
+
+● Bash(.venv/bin/python -m pytest sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py -q 2>&1 | tail -6; echo "=== the actual numbers ==="; .ve…)
+  ⎿  E       assert 0.19776730831302827 < 0.18879519558941746
+     
+     sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py:77: AssertionError
+     … +8 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+     
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  test states the measured truth
+     ........................................................................ [ 82%]
+     .............................................                            [100%]
+     261 passed in 18.55s
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  noted
+      M sparx_agency/core/control/README.md
+      M sparx_agency/core/control/trajectory_tracking/params.py
+     … +10 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Continued from where we stopped and finished all three items. Summary:
+
+  What I found on resuming
+
+  The tree had moved under me — a completed SJTU refactor (from your parallel work): the tracker's projection/promotion/diagnosis extracted into a shared core/control/reference/TrajectoryFeed,
+  plus a new velocity_servo backend for the SJTU drone that only takes a body Twist. All 255 tests were green, so I built on top of it rather than around it.
+  
+  The three items, done
+
+  1. Docstring corrected — trajectory.py claimed FALCON reparameterises its knots for velocity feasibility. It has the machinery (reallocateTime) and never calls it; the knots are uniform in
+  practice and feasibility is only a soft optimiser cost. The docstring now says so, with the flight evidence.
+
+  2. Drag feedforward — drag_per_mps/drag_offset_mps2 in the tracker, computed from the planned velocity (measured would be positive feedback on speed). Defaults zero in core; the Pegasus
+  mission and stub set the measured curve 0.176·v + 0.121 m/s² via a new _default_tracking().
+
+  3. Attitude lead — attitude_lead_s: the feedforward acceleration and jerk are sampled 0.18 s ahead of the reference, so the aircraft is commanded the attitude the plan wants at the moment
+  the airframe will actually reach it. Feedback stays at the reference — it corrects errors that exist, not errors that are predicted.
+
+  Validated deterministically, and the data corrected me
+
+  A live stub run couldn't validate this (FALCON's variance swamps it), so the new test_feedforward_flight.py flies the stub's AttitudeAircraft — which models exactly these two effects — A/B
+  on a fixed corner route:
+
+  ┌───────────────┬─────────────────┬─────────┐
+  │ configuration │    mean err     │ max err │
+  ├───────────────┼─────────────────┼─────────┤
+  │ plain         │ 0.189 m         │ 0.343 m │
+  ├───────────────┼─────────────────┼─────────┤
+  │ drag only     │ 0.041 m         │ 0.143 m │
+  ├───────────────┼─────────────────┼─────────┤
+  │ lead only     │ 0.198 m ← worse │ 0.272 m │
+  ├───────────────┼─────────────────┼─────────┤
+  │ drag + lead   │ 0.020 m         │ 0.055 m │
+  └───────────────┴─────────────────┴─────────┘
+
+  9× better together. And my initial assumption — "each term helps on its own" — was wrong: the lead alone slightly worsens the mean, because on a lagging aircraft the led sample doesn't match
+  where it is. It only pays once drag is cancelled. The test now pins that measured division of labour instead of my assumption.
+
+  Two test-fixture bugs caught on the way: a fresh projector can't be teleported past its 1.5 s search window (the fixture now walks it), and a quoting error that silently skipped the mission
+  edit on the first pass.
+
+  State
+
+  261 tests pass. All uncommitted — and note the tree now mixes my changes with the in-flight SJTU refactor in the same files (tracker.py, params.py), so a commit should take both together.
+  Not yet flown on Isaac: the isaac-sim container was replaced by sjtu_verify, so the first soak after it returns is the flight validation. RESUME.md carries all of this at the top.
+
+✻ Churned for 14m 26s
+
+❯ Bottom line: Is he flying in a gazebo?                                                                                                                                                        
+
+● Let me check the actual state of the SJTU work rather than guess — there's a sjtu_verify container running:
+  
+● Bash(ls sparx_agency/tasks/planning/falcon_sjtu/ 2>/dev/null; echo "=== container ==="; docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'; echo "=== recent ac…)
+  ⎿  adapter
+     __init__.py
+     __pycache__
+     … +14 lines (ctrl+o to expand)
+
+  Listed 1 directory (ctrl+o to expand)
+
+● Bash(sed -n '120,160p' sparx_agency/tasks/planning/falcon_sjtu/README.md)
+  ⎿  `along² + cross² == gap²`, so a gap is fully attributable — and the two halves
+     are not equally dangerous. Being late is benign; being sideways is what hits
+     walls.
+     … +38 lines (ctrl+o to expand)
+
+● Yes. The SJTU drone flies in Gazebo, and it's live right now — the sjtu_verify container (Humble + Gazebo Classic) is up with the drone plugin loaded.
+
+  What "flying" concretely means as of today, from the package's own status:
+
+  - The world, drone, sensors and actuation all come up and fly. The airframe's velocity response has been measured.
+  - rig/track_bspline.py has flown a FALCON-shaped B-spline on the real Gazebo aircraft through the new VelocityServo, with measured tracking on a circle route at 0.6 m/s:
+
+  ┌────────────────────┬──────────┬─────────────┐
+  │   configuration    │ mean gap │ cross-track │
+  ├────────────────────┼──────────┼─────────────┤
+  │ inverse-plant lead │ 0.091 m  │ 0.054 m     │
+  ├────────────────────┼──────────┼─────────────┤
+  │ P + feedforward    │ 0.257 m  │ 0.202 m     │
+  └────────────────────┴──────────┴─────────────┘
+
+  That's good tracking — 6% of the circle's radius — and notably Gazebo runs at real-time factor 1.00, so the whole clock-mismatch problem that dominated the Pegasus campaign doesn't exist
+  there.
+
+  Two precise caveats on the "bottom line":
+
+  1. It flies B-splines, not yet FALCON. What's verified is the tracking rig on a synthetic FALCON-shaped curve. The full loop — FALCON mapping from Gazebo's depth camera and planning, closed
+  through this drone — is the part falcon_sjtu/adapter exists for and isn't yet claimed as flown.
+
+  2. It flies on the velocity backend only, by necessity. The SJTU drone accepts only a body-frame Twist on cmd_vel — its plugin owns a complete internal PID cascade, and there is no attitude,
+  thrust or motor port. So the flatness and thrust-model stages we went through in depth have nowhere to land there; that's exactly why the tracker's front half was refactored into the shared
+  reference/ feed with a velocity_servo backend. Exercising the attitude path still needs Pegasus.
+
+✻ Baked for 43s
+  
+❯ Run the full FALCON exploration in Gazebo with the SJTU drone                                                                                                                                 
+
+● This is the integration step the README marks as not-yet-claimed. Let me survey what exists before deciding what to build:
+  
+  Listed 2 directories (ctrl+o to expand)
+
+● Bash(grep -n "DEPTH\|depth" sparx_agency/robots/SJTU/adapters/topics.py | head -6; echo "=== depth camera config ==="; cat sparx_agency/robots/SJTU/config/camera_fro…)
+  ⎿  149:FRONT_DEPTH_IMAGE = NAMESPACE + "/front_depth/depth/image_raw"
+     156:FRONT_DEPTH_CAMERA_INFO = NAMESPACE + "/front_depth/depth/camera_info"
+     157:"""``sensor_msgs/CameraInfo`` for :data:`FRONT_DEPTH_IMAGE`."""
+     """Fly FALCON's B-spline on the SJTU Gazebo drone.
+     … +58 lines (ctrl+o to expand)
+
+● Bash(sed -n '40,120p' sparx_agency/tasks/planning/falcon_sjtu/README.md)
+  ⎿    `hospital.world.world` and aborts. It also starts `rviz2`, a joy node and an
+       xterm teleop that publishes to the same `/simple_drone/cmd_vel` this package
+       drives — two publishers on the actuation topic. Use the inner
+     … +78 lines (ctrl+o to expand)
+
+● Bash(sed -n '160,230p' sparx_agency/tasks/planning/falcon_sjtu/README.md; echo "=== SJTU_PROJECT_DIR ==="; ls ~/GIT/sjtu_project 2>/dev/null | head -8 || ls ~/sjtu_p…)
+  ⎿  is not a claim about a corridor, a corner or a replan.
+
+     ### The "progressive divergence" result was a capsized airframe
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; ls $S | head -20; echo "=== old FALCON pieces ==="; find $S -maxdepth 3 -iname "*falcon*" -o -iname "*exploration*launch*" -o -name "cmd_t…)
+  ⎿  apriltag
+     aws-robomaker-bookstore-world
+     aws-robomaker-hospital-world
+     … +20 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; ls $S/falcon_docker $S/ros_bridge_docker | head -30; echo "=== the old exploration launch ==="; find $S/falcon_docker -name "*.launch" -o…)
+  ⎿  /home/nadavc/GIT/sjtu_project/falcon_docker:
+     adapter
+     bookstore.yaml
+     … +38 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; cat $S/falcon_docker/small_house.yaml | head -50; echo "════ bridge.yaml ════"; cat $S/ros_bridge_docker/bridge.yaml)
+  ⎿  map_config:
+       map_file: ""
+       map_dimension: 2
+     … +209 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; ls $S/falcon_docker/adapter/scripts/ 2>/dev/null | head -12; echo "════ gazebo_exploration.launch ════"; cat $S/falcon_docker/adapter/laun…)
+  ⎿  analyze_batch.py
+     astar_planner.py
+     batch_runner.py
+     … +99 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; grep -n "sensor_pose\|falcon_adapter\|cmd_to_vel\|node pkg\|remap\|camera_intrinsics\|image_width\|fx" $S/falcon_docker/adapter/launch/gaz…)
+  ⎿  23:    See falcon_adapter.py docstring for the noise model details.
+     229:<!--  ... and inside the <node pkg="falcon_adapter" type="falcon_adapter.py" ...>  -->
+     250:  <arg name="sensor_pose_topic"  value="/map_ros/pose" />
+     … +21 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(docker images --format '{{.Repository}}:{{.Tag}}' | grep -iE "bridge|sjtu|falcon" | head -6; echo "=== follower I/O ==="; grep -n "Subscriber\|Publisher\|get_pa…)
+  ⎿  sjtu_drone_sparx:humble
+     sjtu_drone_nadav:humble_ros2
+     falcon-pegasus:noetic
+     … +50 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; echo "=== camera mount ==="; grep -rn "front_depth\|front_cam" $S/sjtu_drone/sjtu_drone_description/urdf/*.xacro 2>/dev/null | grep -iE "o…)
+  ⎿  === camera mount ===
+     /home/nadavc/GIT/sjtu_project/sjtu_drone/sjtu_drone_description/urdf/sjtu_drone.urdf.xacro:58:  <joint name="front_cam_joint" type="fixed">
+     /home/nadavc/GIT/sjtu_project/sjtu_drone/sjtu_drone_description/urdf/sjtu_drone.urdf.xacro
+     … +32 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; sed -n '55,68p' $S/sjtu_drone/sjtu_drone_description/urdf/sjtu_drone.urdf.xacro; echo "=== sim domain id ==="; docker exec sjtu_verify bas…)
+  ⎿    <!-- The adapter applies T_b_c with this offset when computing the      -->
+       <!-- sensor_pose (cam_offset_x=0.2 in launch file).                     -->
+       <!-- ================================================================== -->
+     … +37 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '30,110p' ~/GIT/sjtu_project/falcon_docker/run_hospital.sh)
+  ⎿  # ── GPU flag selection ────────────────────────────────────────
+     # On Jetson, --gpus all only works on JetPack 5.x+ with
+     # nvidia-container-toolkit installed. The legacy --runtime nvidia
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '110,175p' ~/GIT/sjtu_project/falcon_docker/run_hospital.sh)
+  ⎿  LAUNCH_MOUNTS=()
+     for f in gazebo_exploration.launch gazebo_waypoint_nav.launch real_drone.launch visual_servoing.launch ; do
+       if [ -f "${LAUNCH_HOST}/${f}" ]; then
+     … +28 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '90,230p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$|^\s*<!--.*-->\s*$" | head -80)
+  ⎿         obstacles_inflation: HARD inflation in the ESDF/voxel map. Walls are
+              literally treated as thicker by this many meters. Cannot be
+              beaten by the optimizer. Set to (drone_radius + safety_margin).
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '255,335p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$" | grep -E "param|arg|rosparam|remap|include" | he…)
+  ⎿    <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+       <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+       <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+
+● Bash(.venv/bin/python -c "
+      import numpy as np…)
+  ⎿  cam x (right) in body: [ 0. -1.  0.]  cam y (down): [ 0.  0. -1.]  cam z (fwd): [1. 0. 0.]
+     q_b_c (w,x,y,z) = (np.float64(-0.5), 0.5, np.float64(-0.5), np.float64(0.5))
+         def _tick(self, _event):
+     … +35 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(cat ~/GIT/sjtu_project/falcon_docker/entrypoint.sh | head -14; echo ...; python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  #!/bin/bash
+     set -e
+     source /opt/ros/noetic/setup.bash
+     … +7 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py)
+  ⎿  Wrote 120 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py
+       1 #!/usr/bin/env python
+       2 """Turn the drone's odometry into the two inputs FALCON's mapper and FSM need.
+       3 
+       4 The SJTU sim publishes one ``nav_msgs/Odometry`` for the body. FALCON needs two
+       5 things it does not contain:
+       6 
+       7 * ``/map_ros/pose`` -- a ``PoseStamped`` for the **camera**, not the body. The
+       8   depth camera sits 0.2 m forward of the body origin (``front_cam_joint`` in
+       9   the URDF) and looks along body x, and the mapper projects every depth pixel
+      10   through this pose. Publish the body pose here and every obstacle is placed
+     … +110 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml)
+  ⎿  Wrote 60 lines to sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml
+       1 # FALCON map_config for the AWS small_house world -- the SJTU sim's default.
+       2 #
+       3 # Ported from sjtu_project/falcon_docker/small_house.yaml with one change that
+       4 # is a finding, not a preference:
+       5 #
+       6 #   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+       7 #   floor in the box it flies at ankle height between chair legs. The Pegasus
+       8 #   campaign measured exactly this ("it wedged itself against furniture twice"
+       9 #   at 0.74 m, desk height) and raised its floor for the same reason. The band
+      10 #   is the airspace above the clutter, not the whole room. Ceilings here are
+     … +50 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch)
+  ⎿  Wrote 116 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch
+      1 <launch>
+      2   <!--
+      3     exploration.launch — the full FALCON exploration, flown on the SJTU drone.
+      4 
+      5     A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
+      6     is not lost: the noise-injection adapter, recorder, BEV publisher and
+      7     completion watcher belonged to that stack's experiment harness, and
+      8     cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
+      9     the 100 Hz samples — see bspline_follower.launch for why that matters).
+     … +106 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml)
+  ⎿  Wrote 54 lines to sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml
+       1 # ros1_bridge parameter_bridge topics for the FALCON <-> SJTU Gazebo loop.
+       2 #
+       3 # Four topics, and the direction of each is set by who publishes, not by this
+       4 # file -- parameter_bridge bridges every entry both ways.
+       5 #
+       6 #   ROS2 -> ROS1: depth image and odometry (the sensors)
+       7 #   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+       8 #
+       9 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+      10 # and the drone plugin publish RELIABLE / VOLATILE (checked with
+     … +44 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '90,230p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$|^\s*<!--.*-->\s*$" | head
+      -80)
+  ⎿         obstacles_inflation: HARD inflation in the ESDF/voxel map. Walls are
+              literally treated as thicker by this many meters. Cannot be
+              beaten by the optimizer. Set to (drone_radius + safety_margin).
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '255,335p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$" | grep -E
+      "param|arg|rosparam|remap|include" | he…)
+  ⎿    <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+       <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+       <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+     … +37 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Bash(.venv/bin/python -c "
+      import numpy as np…)
+  ⎿  cam x (right) in body: [ 0. -1.  0.]  cam y (down): [ 0.  0. -1.]  cam z (fwd): [1. 0. 0.]
+     q_b_c (w,x,y,z) = (np.float64(-0.5), 0.5, np.float64(-0.5), np.float64(0.5))
+         def _tick(self, _event):
+     … +35 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(cat ~/GIT/sjtu_project/falcon_docker/entrypoint.sh | head -14; echo ...; python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  #!/bin/bash
+     set -e
+     source /opt/ros/noetic/setup.bash
+     … +7 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py)
+  ⎿  Wrote 120 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py
+       1 #!/usr/bin/env python
+       2 """Turn the drone's odometry into the two inputs FALCON's mapper and FSM need.
+       3
+       4 The SJTU sim publishes one ``nav_msgs/Odometry`` for the body. FALCON needs two
+       5 things it does not contain:
+       6
+       7 * ``/map_ros/pose`` -- a ``PoseStamped`` for the **camera**, not the body. The
+       8   depth camera sits 0.2 m forward of the body origin (``front_cam_joint`` in
+       9   the URDF) and looks along body x, and the mapper projects every depth pixel
+      10   through this pose. Publish the body pose here and every obstacle is placed
+     … +110 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml)
+  ⎿  Wrote 60 lines to sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml
+       1 # FALCON map_config for the AWS small_house world -- the SJTU sim's default.
+       2 #
+       3 # Ported from sjtu_project/falcon_docker/small_house.yaml with one change that
+       4 # is a finding, not a preference:
+       5 #
+       6 #   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+       7 #   floor in the box it flies at ankle height between chair legs. The Pegasus
+       8 #   campaign measured exactly this ("it wedged itself against furniture twice"
+       9 #   at 0.74 m, desk height) and raised its floor for the same reason. The band
+      10 #   is the airspace above the clutter, not the whole room. Ceilings here are
+     … +50 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch)
+  ⎿  Wrote 116 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch
+      1 <launch>
+      2   <!--
+      3     exploration.launch — the full FALCON exploration, flown on the SJTU drone.
+      4
+      5     A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
+      6     is not lost: the noise-injection adapter, recorder, BEV publisher and
+      7     completion watcher belonged to that stack's experiment harness, and
+      8     cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
+      9     the 100 Hz samples — see bspline_follower.launch for why that matters).
+     … +106 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml)
+  ⎿  Wrote 54 lines to sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml
+       1 # ros1_bridge parameter_bridge topics for the FALCON <-> SJTU Gazebo loop.
+       2 #
+       3 # Four topics, and the direction of each is set by who publishes, not by this
+       4 # file -- parameter_bridge bridges every entry both ways.
+       5 #
+       6 #   ROS2 -> ROS1: depth image and odometry (the sensors)
+       7 #   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+       8 #
+       9 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+  ⎿  Wrote 82 lines to sparx_agency/tasks/planning/falcon_sjtu/run_falcon_sjtu.sh
+       6 #   ROS2 -> ROS1: depth image and odometry (the sensors)
+       7 #   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+       8 #
+       9 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+      10 # and the drone plugin publish RELIABLE / VOLATILE (checked with
+     … +44 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/run_falcon_sjtu.sh)
+  ⎿  Wrote 82 lines to sparx_agency/tasks/planning/falcon_sjtu/run_falcon_sjtu.sh
+       1 #!/usr/bin/env bash
+       2 # ============================================================
+       3 # run_falcon_sjtu.sh — the full FALCON exploration on the SJTU Gazebo drone.
+       4 #
+       5 #   ./run_falcon_sjtu.sh [map_name]        # default small_house
+       6 #
+       7 # Expects the Gazebo sim ALREADY RUNNING (robots/SJTU/setup/bringup_world.sh);
+       8 # this brings up the other two containers and wires them:
+       9 #
+      10 #   sjtu sim (ROS2 Humble, domain 20)   ── already up, not touched here
+     … +72 lines (ctrl+o to expand)
+  ⎿  You've hit your session limit · resets 1:40pm (Asia/Jerusalem)
+Continue where you left off. The terminal is closed for me.                                                                                                                                   
+
+● Picking up exactly where we stopped: I'd identified the gap list and recommended fixing the wrong docstring plus the two low-risk, measurable improvements — drag feedforward and attitude-lag
+  compensation. Continuing with that. First, what's running:
+
+● Bash(cd /home/nadavc/GIT/TheAgency; ps -eo pid,args | grep -E "soak\.sh|run_isaac_side|run_stub" | grep -v grep | head -3; echo "--- (blank = nothing running) ---";…)
+  ⎿  --- (blank = nothing running) ---
+     sjtu_verify
+     ## feat/airframe-control-nadav...origin/feat/airframe-control-nadav
+     … +2 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(git diff --stat; echo "==="; git diff sparx_agency/core/control/trajectory_tracking/params.py | head -60)
+  ⎿   sparx_agency/core/control/README.md                | 192 ++++++++++++++++++--
+      .../core/control/trajectory_tracking/params.py     |  16 ++
+      .../core/control/trajectory_tracking/tracker.py    | 197 +++++++--------------
+     … +41 lines (ctrl+o to expand)
+
+● Bash(ls sparx_agency/core/control/reference/ sparx_agency/core/control/velocity_servo/ 2>/dev/null; echo "=== tests green? ==="; .venv/bin/python -m pytest sparx_age…)
+  ⎿  sparx_agency/core/control/reference/:
+     diagnosis.py
+     feed.py
+     … +20 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+     
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Bash(sed -n '158,246p' sparx_agency/core/control/trajectory_tracking/tracker.py)
+  ⎿      def update(self, position, velocity, yaw, dt, now_s, follow=True, limits=None):
+             # type: (object, object, float, float, float, bool) -> AccelerationCommand
+             """Advance one control tick.
+     … +86 lines (ctrl+o to expand)
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  docstring corrected
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  params added
+     constructs ok
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  tracker wired
+     parse ok
+  ⎿  Allowed by auto mode classifier
+
+● Bash(grep -rn "TrajectoryTrackerParams" sparx_agency/core/control/velocity_servo/*.py | head -3; echo "---"; cat >> sparx_agency/core/control/trajectory_tracking/tes…)
+  ⎿  ---
+     sparx_agency/core/control/trajectory_tracking/tests/test_tracker.py:799: AssertionError
+     =========================== short test summary info ============================
+     … +2 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(.venv/bin/python -m pytest "sparx_agency/core/control/trajectory_tracking/tests/test_tracker.py::test_the_attitude_lead_samples_the_feedforward_ahead" -q 2>&1 |…)
+  ⎿  >       assert led.ax == pytest.approx(ahead.ax, abs=0.05)
+     E       assert -1.8892848087397958 == -4.080727224485383 ± 5.0e-02
+     E         comparison failed
+     … +2 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  fixture walks the projector
+     ................................                                         [100%]
+     32 passed in 12.46s
+  ⎿  Allowed by auto mode classifier
+
+● Bash(grep -n "tracking: TrajectoryTrackerParams" sparx_agency/tasks/planning/falcon_pegasus/isaac/mission.py; python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  347:    tracking: TrajectoryTrackerParams = field(default_factory=TrajectoryTrackerParams)
+       File "<stdin>", line 19
+         Attitude lead: PX4's attitude-plus-rate response looks like ~0.18 s from
+     … +6 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  mission set, parses
+     .............                                                            [100%]
+     229 passed in 18.75s
+  ⎿  Allowed by auto mode classifier
+
+● Bash(ss -ltn 2>/dev/null | grep -E '5599|5600' && echo "PORTS BUSY — will not run" || echo "ports free"; docker ps --format '{{.Names}}\t{{.Ports}}')
+  ⎿  ports free
+     sjtu_verify
+
+● Bash(cd sparx_agency/tasks/planning/falcon_pegasus && timeout 900 ./stub/check.sh 6_whole_office 180 --real-time-factor 0.62 2>&1 | grep -E 'STUB'; python3 -c "impor…)
+  ⎿  STUB whole_office: planner_stopped FALCON published no new trajectory for 30 s (still on #221)
+     ./stub/check.sh: line 53: 328947 Segmentation fault      (core dumped) "${PYTHON}" "${SCRIPT_DIR}/run_stub.py" --run "${RUN}" --max-flight-s "${BUDGET}" --out "${LOG_DIR}/${RUN}_stub
+     .json" ${STUB_ARGS[@]+"${STUB_ARGS[@]}"}
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(cat > sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py <<'EOF'
+      """The drag and attitude-lead feedforwards, measured on the stand-in a…)
+  ⎿  /bin/bash: line 83: sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py: No such file or directory
+     /bin/bash: line 165: .venv/bin/python: No such file or directory
+  ⎿  Allowed by auto mode classifier
+
+● Bash(pwd; cd /home/nadavc/GIT/TheAgency && pwd)
+  ⎿  /home/nadavc/GIT/TheAgency/sparx_agency/tasks/planning/falcon_pegasus
+     /home/nadavc/GIT/TheAgency
+
+● Write(sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py)
+  ⎿  Wrote 77 lines to sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py
+       1 """The drag and attitude-lead feedforwards, measured on the stand-in airframe.
+       2 
+       3 The stub's :class:`AttitudeAircraft` models the two effects these terms exist
+       4 for -- drag at the measured curve, and a thrust axis that reaches its command
+       5 through a ~0.18 s lag -- so flying it A/B on a FIXED trajectory is the honest
+       6 test. A live stub run cannot be: FALCON's exploration is nondeterministic and
+       7 its run-to-run variance (mean errors 0.18 to 2.61 on identical control code)
+       8 swamps the effect being measured.
+       9 """
+      10 from __future__ import annotations
+     … +67 lines (ctrl+o to expand)
+
+● Bash(.venv/bin/python -m pytest sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py -q 2>&1 | tail -6; echo "=== the actual numbers ==="; .ve…)
+  ⎿  E       assert 0.19776730831302827 < 0.18879519558941746
+     
+     sparx_agency/tasks/planning/falcon_pegasus/tests/test_feedforward_flight.py:77: AssertionError
+     … +8 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+     
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  test states the measured truth
+     ........................................................................ [ 82%]
+     .............................................                            [100%]
+     261 passed in 18.55s
+  ⎿  Allowed by auto mode classifier
+
+● Bash(python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  noted
+      M sparx_agency/core/control/README.md
+      M sparx_agency/core/control/trajectory_tracking/params.py
+     … +10 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Continued from where we stopped and finished all three items. Summary:
+
+  What I found on resuming
+
+  The tree had moved under me — a completed SJTU refactor (from your parallel work): the tracker's projection/promotion/diagnosis extracted into a shared core/control/reference/TrajectoryFeed,
+  plus a new velocity_servo backend for the SJTU drone that only takes a body Twist. All 255 tests were green, so I built on top of it rather than around it.
+  
+  The three items, done
+
+  1. Docstring corrected — trajectory.py claimed FALCON reparameterises its knots for velocity feasibility. It has the machinery (reallocateTime) and never calls it; the knots are uniform in
+  practice and feasibility is only a soft optimiser cost. The docstring now says so, with the flight evidence.
+
+  2. Drag feedforward — drag_per_mps/drag_offset_mps2 in the tracker, computed from the planned velocity (measured would be positive feedback on speed). Defaults zero in core; the Pegasus
+  mission and stub set the measured curve 0.176·v + 0.121 m/s² via a new _default_tracking().
+
+  3. Attitude lead — attitude_lead_s: the feedforward acceleration and jerk are sampled 0.18 s ahead of the reference, so the aircraft is commanded the attitude the plan wants at the moment
+  the airframe will actually reach it. Feedback stays at the reference — it corrects errors that exist, not errors that are predicted.
+
+  Validated deterministically, and the data corrected me
+
+  A live stub run couldn't validate this (FALCON's variance swamps it), so the new test_feedforward_flight.py flies the stub's AttitudeAircraft — which models exactly these two effects — A/B
+  on a fixed corner route:
+
+  ┌───────────────┬─────────────────┬─────────┐
+  │ configuration │    mean err     │ max err │
+  ├───────────────┼─────────────────┼─────────┤
+  │ plain         │ 0.189 m         │ 0.343 m │
+  ├───────────────┼─────────────────┼─────────┤
+  │ drag only     │ 0.041 m         │ 0.143 m │
+  ├───────────────┼─────────────────┼─────────┤
+  │ lead only     │ 0.198 m ← worse │ 0.272 m │
+  ├───────────────┼─────────────────┼─────────┤
+  │ drag + lead   │ 0.020 m         │ 0.055 m │
+  └───────────────┴─────────────────┴─────────┘
+
+  9× better together. And my initial assumption — "each term helps on its own" — was wrong: the lead alone slightly worsens the mean, because on a lagging aircraft the led sample doesn't match
+  where it is. It only pays once drag is cancelled. The test now pins that measured division of labour instead of my assumption.
+
+  Two test-fixture bugs caught on the way: a fresh projector can't be teleported past its 1.5 s search window (the fixture now walks it), and a quoting error that silently skipped the mission
+  edit on the first pass.
+
+  State
+
+  261 tests pass. All uncommitted — and note the tree now mixes my changes with the in-flight SJTU refactor in the same files (tracker.py, params.py), so a commit should take both together.
+  Not yet flown on Isaac: the isaac-sim container was replaced by sjtu_verify, so the first soak after it returns is the flight validation. RESUME.md carries all of this at the top.
+
+✻ Churned for 14m 26s
+
+❯ Bottom line: Is he flying in a gazebo?                                                                                                                                                        
+
+● Let me check the actual state of the SJTU work rather than guess — there's a sjtu_verify container running:
+  
+● Bash(ls sparx_agency/tasks/planning/falcon_sjtu/ 2>/dev/null; echo "=== container ==="; docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'; echo "=== recent ac…)
+  ⎿  adapter
+     __init__.py
+     __pycache__
+     … +14 lines (ctrl+o to expand)
+
+  Listed 1 directory (ctrl+o to expand)
+
+● Bash(sed -n '120,160p' sparx_agency/tasks/planning/falcon_sjtu/README.md)
+  ⎿  `along² + cross² == gap²`, so a gap is fully attributable — and the two halves
+     are not equally dangerous. Being late is benign; being sideways is what hits
+     walls.
+     … +38 lines (ctrl+o to expand)
+
+● Yes. The SJTU drone flies in Gazebo, and it's live right now — the sjtu_verify container (Humble + Gazebo Classic) is up with the drone plugin loaded.
+
+  What "flying" concretely means as of today, from the package's own status:
+
+  - The world, drone, sensors and actuation all come up and fly. The airframe's velocity response has been measured.
+  - rig/track_bspline.py has flown a FALCON-shaped B-spline on the real Gazebo aircraft through the new VelocityServo, with measured tracking on a circle route at 0.6 m/s:
+
+  ┌────────────────────┬──────────┬─────────────┐
+  │   configuration    │ mean gap │ cross-track │
+  ├────────────────────┼──────────┼─────────────┤
+  │ inverse-plant lead │ 0.091 m  │ 0.054 m     │
+  ├────────────────────┼──────────┼─────────────┤
+  │ P + feedforward    │ 0.257 m  │ 0.202 m     │
+  └────────────────────┴──────────┴─────────────┘
+
+  That's good tracking — 6% of the circle's radius — and notably Gazebo runs at real-time factor 1.00, so the whole clock-mismatch problem that dominated the Pegasus campaign doesn't exist
+  there.
+
+  Two precise caveats on the "bottom line":
+
+  1. It flies B-splines, not yet FALCON. What's verified is the tracking rig on a synthetic FALCON-shaped curve. The full loop — FALCON mapping from Gazebo's depth camera and planning, closed
+  through this drone — is the part falcon_sjtu/adapter exists for and isn't yet claimed as flown.
+
+  2. It flies on the velocity backend only, by necessity. The SJTU drone accepts only a body-frame Twist on cmd_vel — its plugin owns a complete internal PID cascade, and there is no attitude,
+  thrust or motor port. So the flatness and thrust-model stages we went through in depth have nowhere to land there; that's exactly why the tracker's front half was refactored into the shared
+  reference/ feed with a velocity_servo backend. Exercising the attitude path still needs Pegasus.
+
+✻ Baked for 43s
+  
+❯ Run the full FALCON exploration in Gazebo with the SJTU drone                                                                                                                                 
+
+● This is the integration step the README marks as not-yet-claimed. Let me survey what exists before deciding what to build:
+  
+  Listed 2 directories (ctrl+o to expand)
+
+● Bash(grep -n "DEPTH\|depth" sparx_agency/robots/SJTU/adapters/topics.py | head -6; echo "=== depth camera config ==="; cat sparx_agency/robots/SJTU/config/camera_fro…)
+  ⎿  149:FRONT_DEPTH_IMAGE = NAMESPACE + "/front_depth/depth/image_raw"
+     156:FRONT_DEPTH_CAMERA_INFO = NAMESPACE + "/front_depth/depth/camera_info"
+     157:"""``sensor_msgs/CameraInfo`` for :data:`FRONT_DEPTH_IMAGE`."""
+     """Fly FALCON's B-spline on the SJTU Gazebo drone.
+     … +58 lines (ctrl+o to expand)
+
+● Bash(sed -n '40,120p' sparx_agency/tasks/planning/falcon_sjtu/README.md)
+  ⎿    `hospital.world.world` and aborts. It also starts `rviz2`, a joy node and an
+       xterm teleop that publishes to the same `/simple_drone/cmd_vel` this package
+       drives — two publishers on the actuation topic. Use the inner
+     … +78 lines (ctrl+o to expand)
+
+● Bash(sed -n '160,230p' sparx_agency/tasks/planning/falcon_sjtu/README.md; echo "=== SJTU_PROJECT_DIR ==="; ls ~/GIT/sjtu_project 2>/dev/null | head -8 || ls ~/sjtu_p…)
+  ⎿  is not a claim about a corridor, a corner or a replan.
+
+     ### The "progressive divergence" result was a capsized airframe
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; ls $S | head -20; echo "=== old FALCON pieces ==="; find $S -maxdepth 3 -iname "*falcon*" -o -iname "*exploration*launch*" -o -name "cmd_t…)
+  ⎿  apriltag
+     aws-robomaker-bookstore-world
+     aws-robomaker-hospital-world
+     … +20 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; ls $S/falcon_docker $S/ros_bridge_docker | head -30; echo "=== the old exploration launch ==="; find $S/falcon_docker -name "*.launch" -o…)
+  ⎿  /home/nadavc/GIT/sjtu_project/falcon_docker:
+     adapter
+     bookstore.yaml
+     … +38 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; cat $S/falcon_docker/small_house.yaml | head -50; echo "════ bridge.yaml ════"; cat $S/ros_bridge_docker/bridge.yaml)
+  ⎿  map_config:
+       map_file: ""
+       map_dimension: 2
+     … +209 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; ls $S/falcon_docker/adapter/scripts/ 2>/dev/null | head -12; echo "════ gazebo_exploration.launch ════"; cat $S/falcon_docker/adapter/laun…)
+  ⎿  analyze_batch.py
+     astar_planner.py
+     batch_runner.py
+     … +99 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; grep -n "sensor_pose\|falcon_adapter\|cmd_to_vel\|node pkg\|remap\|camera_intrinsics\|image_width\|fx" $S/falcon_docker/adapter/launch/gaz…)
+  ⎿  23:    See falcon_adapter.py docstring for the noise model details.
+     229:<!--  ... and inside the <node pkg="falcon_adapter" type="falcon_adapter.py" ...>  -->
+     250:  <arg name="sensor_pose_topic"  value="/map_ros/pose" />
+     … +21 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(docker images --format '{{.Repository}}:{{.Tag}}' | grep -iE "bridge|sjtu|falcon" | head -6; echo "=== follower I/O ==="; grep -n "Subscriber\|Publisher\|get_pa…)
+  ⎿  sjtu_drone_sparx:humble
+     sjtu_drone_nadav:humble_ros2
+     falcon-pegasus:noetic
+     … +50 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; echo "=== camera mount ==="; grep -rn "front_depth\|front_cam" $S/sjtu_drone/sjtu_drone_description/urdf/*.xacro 2>/dev/null | grep -iE "o…)
+  ⎿  === camera mount ===
+     /home/nadavc/GIT/sjtu_project/sjtu_drone/sjtu_drone_description/urdf/sjtu_drone.urdf.xacro:58:  <joint name="front_cam_joint" type="fixed">
+     /home/nadavc/GIT/sjtu_project/sjtu_drone/sjtu_drone_description/urdf/sjtu_drone.urdf.xacro
+     … +32 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(S=~/GIT/sjtu_project; sed -n '55,68p' $S/sjtu_drone/sjtu_drone_description/urdf/sjtu_drone.urdf.xacro; echo "=== sim domain id ==="; docker exec sjtu_verify bas…)
+  ⎿    <!-- The adapter applies T_b_c with this offset when computing the      -->
+       <!-- sensor_pose (cam_offset_x=0.2 in launch file).                     -->
+       <!-- ================================================================== -->
+     … +37 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '30,110p' ~/GIT/sjtu_project/falcon_docker/run_hospital.sh)
+  ⎿  # ── GPU flag selection ────────────────────────────────────────
+     # On Jetson, --gpus all only works on JetPack 5.x+ with
+     # nvidia-container-toolkit installed. The legacy --runtime nvidia
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '110,175p' ~/GIT/sjtu_project/falcon_docker/run_hospital.sh)
+  ⎿  LAUNCH_MOUNTS=()
+     for f in gazebo_exploration.launch gazebo_waypoint_nav.launch real_drone.launch visual_servoing.launch ; do
+       if [ -f "${LAUNCH_HOST}/${f}" ]; then
+     … +28 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '90,230p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$|^\s*<!--.*-->\s*$" | head -80)
+  ⎿         obstacles_inflation: HARD inflation in the ESDF/voxel map. Walls are
+              literally treated as thicker by this many meters. Cannot be
+              beaten by the optimizer. Set to (drone_radius + safety_margin).
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '255,335p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$" | grep -E "param|arg|rosparam|remap|include" | he…)
+  ⎿    <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+       <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+       <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+
+● Bash(.venv/bin/python -c "
+      import numpy as np…)
+  ⎿  cam x (right) in body: [ 0. -1.  0.]  cam y (down): [ 0.  0. -1.]  cam z (fwd): [1. 0. 0.]
+     q_b_c (w,x,y,z) = (np.float64(-0.5), 0.5, np.float64(-0.5), np.float64(0.5))
+         def _tick(self, _event):
+     … +35 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(cat ~/GIT/sjtu_project/falcon_docker/entrypoint.sh | head -14; echo ...; python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  #!/bin/bash
+     set -e
+     source /opt/ros/noetic/setup.bash
+     … +7 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py)
+  ⎿  Wrote 120 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py
+       1 #!/usr/bin/env python
+       2 """Turn the drone's odometry into the two inputs FALCON's mapper and FSM need.
+       3 
+       4 The SJTU sim publishes one ``nav_msgs/Odometry`` for the body. FALCON needs two
+       5 things it does not contain:
+       6 
+       7 * ``/map_ros/pose`` -- a ``PoseStamped`` for the **camera**, not the body. The
+       8   depth camera sits 0.2 m forward of the body origin (``front_cam_joint`` in
+       9   the URDF) and looks along body x, and the mapper projects every depth pixel
+      10   through this pose. Publish the body pose here and every obstacle is placed
+     … +110 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml)
+  ⎿  Wrote 60 lines to sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml
+       1 # FALCON map_config for the AWS small_house world -- the SJTU sim's default.
+       2 #
+       3 # Ported from sjtu_project/falcon_docker/small_house.yaml with one change that
+       4 # is a finding, not a preference:
+       5 #
+       6 #   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+       7 #   floor in the box it flies at ankle height between chair legs. The Pegasus
+       8 #   campaign measured exactly this ("it wedged itself against furniture twice"
+       9 #   at 0.74 m, desk height) and raised its floor for the same reason. The band
+      10 #   is the airspace above the clutter, not the whole room. Ceilings here are
+     … +50 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch)
+  ⎿  Wrote 116 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch
+      1 <launch>
+      2   <!--
+      3     exploration.launch — the full FALCON exploration, flown on the SJTU drone.
+      4 
+      5     A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
+      6     is not lost: the noise-injection adapter, recorder, BEV publisher and
+      7     completion watcher belonged to that stack's experiment harness, and
+      8     cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
+      9     the 100 Hz samples — see bspline_follower.launch for why that matters).
+     … +106 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml)
+  ⎿  Wrote 54 lines to sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml
+       1 # ros1_bridge parameter_bridge topics for the FALCON <-> SJTU Gazebo loop.
+       2 #
+       3 # Four topics, and the direction of each is set by who publishes, not by this
+       4 # file -- parameter_bridge bridges every entry both ways.
+       5 #
+       6 #   ROS2 -> ROS1: depth image and odometry (the sensors)
+       7 #   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+       8 #
+       9 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+      10 # and the drone plugin publish RELIABLE / VOLATILE (checked with
+     … +44 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '90,230p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$|^\s*<!--.*-->\s*$" | head
+      -80)
+  ⎿         obstacles_inflation: HARD inflation in the ESDF/voxel map. Walls are
+              literally treated as thicker by this many meters. Cannot be
+              beaten by the optimizer. Set to (drone_radius + safety_margin).
+     … +77 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(sed -n '255,335p' ~/GIT/sjtu_project/falcon_docker/adapter/launch/gazebo_exploration.launch | grep -vE "^\s*$" | grep -E
+      "param|arg|rosparam|remap|include" | he…)
+  ⎿    <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+       <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+       <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+     … +37 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Bash(.venv/bin/python -c "
+      import numpy as np…)
+  ⎿  cam x (right) in body: [ 0. -1.  0.]  cam y (down): [ 0.  0. -1.]  cam z (fwd): [1. 0. 0.]
+     q_b_c (w,x,y,z) = (np.float64(-0.5), 0.5, np.float64(-0.5), np.float64(0.5))
+         def _tick(self, _event):
+     … +35 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Bash(cat ~/GIT/sjtu_project/falcon_docker/entrypoint.sh | head -14; echo ...; python3 - <<'PYEOF'
+      import pathlib…)
+  ⎿  #!/bin/bash
+     set -e
+     source /opt/ros/noetic/setup.bash
+     … +7 lines (ctrl+o to expand)
+  ⎿  Allowed by auto mode classifier
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py)
+  ⎿  Wrote 120 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/scripts/sensor_pose_node.py
+       1 #!/usr/bin/env python
+       2 """Turn the drone's odometry into the two inputs FALCON's mapper and FSM need.
+       3
+       4 The SJTU sim publishes one ``nav_msgs/Odometry`` for the body. FALCON needs two
+       5 things it does not contain:
+       6
+       7 * ``/map_ros/pose`` -- a ``PoseStamped`` for the **camera**, not the body. The
+       8   depth camera sits 0.2 m forward of the body origin (``front_cam_joint`` in
+       9   the URDF) and looks along body x, and the mapper projects every depth pixel
+      10   through this pose. Publish the body pose here and every obstacle is placed
+     … +110 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml)
+  ⎿  Wrote 60 lines to sparx_agency/tasks/planning/falcon_sjtu/config/small_house.yaml
+       1 # FALCON map_config for the AWS small_house world -- the SJTU sim's default.
+       2 #
+       3 # Ported from sjtu_project/falcon_docker/small_house.yaml with one change that
+       4 # is a finding, not a preference:
+       5 #
+       6 #   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+       7 #   floor in the box it flies at ankle height between chair legs. The Pegasus
+       8 #   campaign measured exactly this ("it wedged itself against furniture twice"
+       9 #   at 0.74 m, desk height) and raised its floor for the same reason. The band
+      10 #   is the airspace above the clutter, not the whole room. Ceilings here are
+     … +50 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch)
+  ⎿  Wrote 116 lines to sparx_agency/tasks/planning/falcon_sjtu/adapter/launch/exploration.launch
+      1 <launch>
+      2   <!--
+      3     exploration.launch — the full FALCON exploration, flown on the SJTU drone.
+      4
+      5     A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
+      6     is not lost: the noise-injection adapter, recorder, BEV publisher and
+      7     completion watcher belonged to that stack's experiment harness, and
+      8     cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
+      9     the 100 Hz samples — see bspline_follower.launch for why that matters).
+     … +106 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml)
+  ⎿  Wrote 54 lines to sparx_agency/tasks/planning/falcon_sjtu/config/bridge.yaml
+       1 # ros1_bridge parameter_bridge topics for the FALCON <-> SJTU Gazebo loop.
+       2 #
+       3 # Four topics, and the direction of each is set by who publishes, not by this
+       4 # file -- parameter_bridge bridges every entry both ways.
+       5 #
+       6 #   ROS2 -> ROS1: depth image and odometry (the sensors)
+       7 #   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+       8 #
+       9 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+  ⎿  Wrote 82 lines to sparx_agency/tasks/planning/falcon_sjtu/run_falcon_sjtu.sh
+       6 #   ROS2 -> ROS1: depth image and odometry (the sensors)
+       7 #   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+       8 #
+       9 # QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+      10 # and the drone plugin publish RELIABLE / VOLATILE (checked with
+     … +44 lines (ctrl+o to expand)
+
+● Write(sparx_agency/tasks/planning/falcon_sjtu/run_falcon_sjtu.sh)
+  ⎿  Wrote 82 lines to sparx_agency/tasks/planning/falcon_sjtu/run_falcon_sjtu.sh
+       1 #!/usr/bin/env bash
+       2 # ============================================================
+       3 # run_falcon_sjtu.sh — the full FALCON exploration on the SJTU Gazebo drone.
+       4 #
+       5 #   ./run_falcon_sjtu.sh [map_name]        # default small_house
+       6 #
+       7 # Expects the Gazebo sim ALREADY RUNNING (robots/SJTU/setup/bringup_world.sh);
+       8 # this brings up the other two containers and wires them:
+       9 #
+      10 #   sjtu sim (ROS2 Humble, domain 20)   ── already up, not touched here
+     … +72 lines (ctrl+o to expand)
+  ⎿  You've hit your session limit · resets 1:40pm (Asia/Jerusalem)

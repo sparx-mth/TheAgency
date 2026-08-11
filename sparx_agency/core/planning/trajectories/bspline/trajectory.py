@@ -65,11 +65,16 @@ class BsplineTrajectory:
         """Rebuild the trajectory from the fields of a ``trajectory/Bspline`` message.
 
         The construction rules are FALCON's, and the asymmetry between the two
-        curves is real rather than an oversight on either side: the position
-        curve carries an **explicit knot vector** (the optimiser reparameterises
-        it to respect the aircraft's velocity limit, so its knots are not evenly
-        spaced), while the yaw curve carries only a **knot interval**, because
-        nothing reparameterises it.
+        curves is in the wire format: the position curve carries an **explicit
+        knot vector**, the yaw curve only a **knot interval**. Read nothing more
+        into that. FALCON has the machinery to reparameterise the position knots
+        for velocity feasibility (``NonUniformBspline::reallocateTime``), which
+        would make them non-uniform -- but nothing in the build this flies
+        against ever calls it, so in practice the transmitted knots are evenly
+        spaced and the explicit vector is generality, not information. An
+        earlier version of this docstring claimed the optimiser reparameterises;
+        it does not, and the flight data shows the consequence -- planned speeds
+        exceed the configured limit, since feasibility is only a soft cost.
 
         Args:
             order: Spline degree of the position curve, 3 in practice.

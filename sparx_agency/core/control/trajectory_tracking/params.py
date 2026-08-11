@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from math import radians
 
 from sparx_agency.core.control.flatness.limits import AccelerationLimits
+from sparx_agency.core.control.reference.params import ReferenceParams
 from sparx_agency.core.planning.trackers.drift_pid.pid import PidGains
 from sparx_agency.core.planning.trajectories.bspline.projection import ProjectionParams
 
@@ -204,10 +205,59 @@ class TrajectoryTrackerParams:
     max_yaw_rate: float = radians(90.0)
     yaw_rate_margin: float = 1.5
 
+    # ── standing-force feedforward ───────────────────────────────────────
+    # Drag opposes velocity, so holding a cruise speed costs a permanent
+    # acceleration nothing else in this law supplies. The damping term can only
+    # shrink the resulting velocity deficit (deficit = drag / kd, about
+    # 0.14 m/s at 1 m/s on the measured airframe), and the integrator that
+    # could remove it is gated off outside integral_band_m -- precisely when
+    # the aircraft is furthest from the plan. Feeding the measured drag curve
+    # forward removes the bias structurally instead of asking feedback to
+    # fight a force we can predict.
+    #
+    # Computed from the PLANNED velocity, deliberately: basing it on measured
+    # velocity would make it positive feedback on speed. Zero by default
+    # because the numbers are a property of one airframe -- the Pegasus Iris
+    # measures 0.176*v + 0.121 m/s^2 (fitted from the residual between
+    # specific force and thrust axis over 501 samples of steady cruise) -- and
+    # core/ carries no platform's constants.
+    drag_per_mps: float = 0.0
+    drag_offset_mps2: float = 0.0
+
+    # ── attitude-lag lead ────────────────────────────────────────────────
+    # The chain commands an attitude and the airframe reaches it a time
+    # constant later (PX4's attitude+rate response, ~0.18 s here). That is
+    # transport delay: at 1 m/s it is ~18 cm of tracking error no gain can
+    # remove, because reacting faster to the past does not shorten the future.
+    # Sampling the FEEDFORWARD acceleration and jerk this far ahead of the
+    # reference commands, now, the attitude the plan wants when the airframe
+    # will actually have it. Only the feedforward leads -- position and
+    # velocity feedback stay at the reference, correcting errors that exist
+    # rather than errors that are predicted.
+    attitude_lead_s: float = 0.0
+
+    def reference_params(self):
+        # type: () -> ReferenceParams
+        """The subset of this tuning that describes the *plan* rather than the airframe.
+
+        Kept as three flat fields here rather than as a nested dataclass so the
+        parameter surface every caller already constructs does not change; this
+        method is the seam that hands them to the shared
+        :class:`~sparx_agency.core.control.reference.feed.TrajectoryFeed`, which
+        the velocity backend uses too. The two backends disagree about what to
+        command and must never disagree about what the plan says.
+        """
+        return ReferenceParams(projection=self.projection,
+                               use_projection=self.use_projection,
+                               max_trajectory_age_s=self.max_trajectory_age_s)
+
     def __post_init__(self):
         # type: () -> None
         """Validate the invariants the control law relies on."""
         for name in ("velocity_damping_xy", "velocity_damping_z", "schedule_gain_per_s"):
+            if getattr(self, name) < 0.0:
+                raise ValueError("%s must be >= 0, got %r" % (name, getattr(self, name)))
+        for name in ("drag_per_mps", "drag_offset_mps2", "attitude_lead_s"):
             if getattr(self, name) < 0.0:
                 raise ValueError("%s must be >= 0, got %r" % (name, getattr(self, name)))
         if self.max_overspeed < self.max_catchup_speed:

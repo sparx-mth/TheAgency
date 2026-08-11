@@ -69,6 +69,26 @@ def _default_thrust_model():
     return ThrustModelParams(hover_throttle=0.62)
 
 
+def _default_tracking():
+    # type: () -> TrajectoryTrackerParams
+    '''Tracker tuning for the Pegasus Iris, where the numbers are measured.
+
+    Drag: 0.176*v + 0.121 m/s^2, fitted from the residual between specific
+    force and thrust axis over 501 samples of steady cruise on a recorded
+    flight. Without the feedforward this is a standing bias the damping term
+    can only shrink (a ~0.14 m/s deficit at 1 m/s), and the integrator is
+    gated off exactly when the aircraft is far enough from the plan to need it.
+
+    Attitude lead: PX4 reaches a commanded attitude through its attitude and
+    rate loops, which from outside look like a ~0.18 s time constant -- the
+    same number the stub airframe models. Leading the feedforward by it
+    commands the attitude the plan wants at the moment the airframe will
+    actually have it, removing a transport delay no feedback gain can.
+    '''
+    return TrajectoryTrackerParams(drag_per_mps=0.176, drag_offset_mps2=0.121,
+                                   attitude_lead_s=0.18)
+
+
 ODOMETRY_EVERY_N_STEPS = 5      # 50 Hz at the 250 Hz physics rate
 CLIMB_TOLERANCE_M = 0.15
 CLIMB_TIMEOUT_S = 45.0
@@ -344,7 +364,7 @@ class MissionSpec:
     max_flight_s: float
     control_mode: str = CONTROL_ATTITUDE
     tracker: ReferenceTrackerParams = field(default_factory=ReferenceTrackerParams)
-    tracking: TrajectoryTrackerParams = field(default_factory=TrajectoryTrackerParams)
+    tracking: TrajectoryTrackerParams = field(default_factory=_default_tracking)
     thrust: ThrustModelParams = field(default_factory=_default_thrust_model)
 
     def __post_init__(self):

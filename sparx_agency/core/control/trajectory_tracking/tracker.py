@@ -47,10 +47,10 @@ import numpy as np
 
 from sparx_agency.core.common.types import normalize_angle
 from sparx_agency.core.control.flatness.limits import limit_acceleration
+from sparx_agency.core.control.reference.feed import TrajectoryFeed
 from sparx_agency.core.control.trajectory_tracking.params import TrajectoryTrackerParams
 from sparx_agency.core.control.trajectory_tracking.types import AccelerationCommand
 from sparx_agency.core.planning.trackers.drift_pid.pid import AxisPid
-from sparx_agency.core.planning.trajectories.bspline.projection import TrajectoryProjector
 
 _GOVERNOR_TAPER = 0.6
 """Fraction of the overspeed allowance used to fade the governor in.
@@ -83,14 +83,16 @@ class TrajectoryTracker:
             AxisPid(self.params.horizontal_pid),
             AxisPid(self.params.vertical_pid),
         )
-        self._projector = TrajectoryProjector(self.params.projection)
-        self._current = None        # type: Optional[object]
-        self._pending = None        # type: Optional[object]
+        self._feed = TrajectoryFeed(self.params.reference_params())
         self._yaw_cmd = None        # type: Optional[float]
         # Overridden per tick by update(limits=...); see its docstring.
         self._limits = self.params.limits
         self._hold = None           # type: Optional[np.ndarray]
-        self._saturated = False
+        # Per axis, not one flag for the whole command. `limit_acceleration`
+        # gives horizontal away first precisely so altitude survives, so a
+        # horizontal clamp must not be what stops the vertical integrator
+        # learning the standing thrust bias it exists to hold.
+        self._saturated = [False, False, False]
 
     def reset(self, yaw=None, hold_position=None):
         # type: (Optional[float], Optional[object]) -> None
@@ -110,18 +112,16 @@ class TrajectoryTracker:
         """
         for axis in self._pid:
             axis.reset()
-        self._projector.reset()
-        # Drop the held and queued curves too. Without this, reset(hold_position=X)
+        # Drops the held and queued curves too. Without that, reset(hold_position=X)
         # is silently ignored whenever a trajectory is still loaded -- update()
         # finds it usable and follows it instead of holding, so the one call a
         # caller makes to say "stop flying the plan" does not stop flying the
         # plan. The mission resets at handover, where any curve still held
         # belongs to a previous phase and must not be resumed.
-        self._current = None
-        self._pending = None
+        self._feed.reset()
         self._yaw_cmd = None if yaw is None else normalize_angle(float(yaw))
         self._hold = None if hold_position is None else np.asarray(hold_position, dtype=float)
-        self._saturated = False
+        self._saturated = [False, False, False]
 
     def set_trajectory(self, trajectory):
         # type: (object) -> bool
@@ -141,17 +141,13 @@ class TrajectoryTracker:
             newer than what is already held -- a re-send or a misordered
             message, either of which would restart a curve mid-flight.
         """
-        newest = self._pending or self._current
-        if newest is not None and trajectory.traj_id <= newest.traj_id:
-            return False
-        self._pending = trajectory
-        return True
+        return self._feed.set_trajectory(trajectory)
 
     @property
     def trajectory_id(self):
         # type: () -> int
         """Id of the trajectory being flown, or -1 when none is."""
-        return -1 if self._current is None else int(self._current.traj_id)
+        return self._feed.trajectory_id
 
     @property
     def commanded_yaw(self):
@@ -200,142 +196,87 @@ class TrajectoryTracker:
         if self._yaw_cmd is None:
             self._yaw_cmd = yaw
 
-        self._promote(now_s)
-        if not follow or not self._usable(now_s):
+        if self._feed.promote(now_s):
+            # The new curve is a different parameterisation, so the derivative
+            # memory built on the old one means nothing on it. The learned bias
+            # is kept: the wind did not change because the plan did.
+            for axis in self._pid:
+                axis.reset_derivative()
+
+        sample = None
+        if follow:
+            sample = self._feed.resolve(measured, now_s,
+                                        lookahead_s=self.params.projection.lookahead_s)
+        if sample is None:
             return self._hold_station(measured, measured_velocity, dt)
 
         self._hold = None
-        elapsed = self._current.elapsed(now_s)
-        projected_time = self._project(measured, elapsed)
-        # Once the schedule has run out the reference is pinned to the stopped
-        # endpoint, whatever the projection says. This is not a tidying detail:
-        # the search returns a time marginally *inside* the curve, and sampling
-        # there hands back the plan's full cruise velocity as a feedforward. An
-        # aircraft given that keeps flying at cruise past the end of a
-        # trajectory -- measured, a metre and a half into space FALCON never
-        # checked -- while the position term alone gently disagrees.
-        past_end = elapsed >= self._current.duration
-        reference_time = (self._current.duration if past_end
-                          else min(projected_time + self.params.projection.lookahead_s,
-                                   self._current.duration))
-        reference = self._current.sample(reference_time)
-        target = np.array([reference.x, reference.y, reference.z], dtype=float)
-        planned_velocity = np.array([reference.vx, reference.vy, reference.vz], dtype=float)
+        reference = sample.point
+        target = np.array(sample.position, dtype=float)
+        planned_velocity = np.array(sample.velocity, dtype=float)
         error = target - measured
+        feed_forward = np.array(sample.acceleration, dtype=float)
+        jerk = (reference.jx, reference.jy, reference.jz)
 
-        feed_forward = np.array([reference.ax, reference.ay, reference.az], dtype=float)
-        # The schedule deficit is measured in SPACE, against where the plan says
-        # the aircraft should be *now*, and not as a difference of times on this
-        # curve. See _schedule_deficit: the obvious time-based version reads zero
-        # in precisely the case that matters.
-        gap, schedule_lag_m, cross = self._diagnose(measured, planned_velocity, elapsed)
-        catchup = self._catchup(planned_velocity, schedule_lag_m)
+        # Attitude-lag lead: the airframe reaches a commanded attitude a time
+        # constant late, so the FEEDFORWARD -- the part of this command that IS
+        # the attitude -- is sampled that far ahead of the reference. Feedback
+        # stays at the reference; it corrects errors that exist, not errors
+        # that are predicted. Past the end there is nothing ahead to lead into.
+        if self.params.attitude_lead_s > 0.0 and not sample.past_end:
+            trajectory = self._feed.trajectory
+            led = trajectory.sample(min(sample.reference_time_s
+                                        + self.params.attitude_lead_s,
+                                        trajectory.duration))
+            feed_forward = np.array([led.ax, led.ay, led.az], dtype=float)
+            jerk = (led.jx, led.jy, led.jz)
+
+        # Standing-force feedforward: the acceleration spent overcoming drag at
+        # the PLANNED velocity. See the params for why planned, not measured.
+        feed_forward += self._drag(planned_velocity)
+
+        catchup = self._catchup(planned_velocity, sample.along_track_lag_m)
         damping = self._damping(planned_velocity + catchup, measured_velocity)
         clamped = self._clamp_error(error)
         correction = np.array([self._correct(i, float(error[i]), float(clamped[i]), dt)
                                for i in range(3)])
         wanted = self._limit_speed(feed_forward + damping + correction, measured_velocity,
                                    float(np.linalg.norm(planned_velocity)))
-        command, self._saturated = limit_acceleration(wanted, self._limits)
+        command, saturated = limit_acceleration(wanted, self._limits)
+        self._note_saturation(wanted, command)
 
         reference_yaw = yaw if reference.yaw is None else float(reference.yaw)
         self._yaw_cmd = self._slew_yaw(reference_yaw, dt)
 
-        along = schedule_lag_m
         return AccelerationCommand(
             ax=float(command[0]), ay=float(command[1]), az=float(command[2]),
             yaw=self._yaw_cmd,
             yaw_rate=float(reference.yaw_rate or 0.0),
-            jx=reference.jx, jy=reference.jy, jz=reference.jz,
-            position_error_m=gap,
-            along_track_lag_m=along,
-            cross_track_error_m=cross,
+            jx=float(jerk[0]), jy=float(jerk[1]), jz=float(jerk[2]),
+            position_error_m=sample.gap_m,
+            along_track_lag_m=sample.along_track_lag_m,
+            cross_track_error_m=sample.cross_track_error_m,
             yaw_error_rad=normalize_angle(reference_yaw - yaw),
-            reference_time_s=reference_time,
-            trajectory_id=int(self._current.traj_id),
-            diverged=gap > self.params.max_position_error_m,
-            past_end=past_end,
-            saturated=self._saturated)
+            reference_time_s=sample.reference_time_s,
+            trajectory_id=sample.trajectory_id,
+            diverged=sample.gap_m > self.params.max_position_error_m,
+            past_end=sample.past_end,
+            saturated=saturated)
 
-    def _promote(self, now_s):
-        # type: (float) -> None
-        """Swap in the queued trajectory once its own start time has arrived."""
-        if self._pending is None:
-            return
-        if self._current is None or self._pending.start_time_s <= float(now_s):
-            self._current = self._pending
-            self._pending = None
-            # The new curve is a different parameterisation, so last tick's
-            # position along the old one means nothing on it.
-            self._projector.reset()
-            for axis in self._pid:
-                axis.reset_derivative()
+    def _note_saturation(self, wanted, delivered, tolerance=1e-9):
+        # type: (np.ndarray, np.ndarray, float) -> None
+        """Record, per axis, whether the command asked for survived the clamp.
 
-    def _usable(self, now_s):
-        # type: (float) -> bool
-        """Whether the held trajectory is worth following at ``now_s``."""
-        if self._current is None:
-            return False
-        elapsed = self._current.elapsed(now_s)
-        if elapsed < 0.0:
-            return False
-        return elapsed < self._current.duration + self.params.max_trajectory_age_s
-
-    def _project(self, measured, elapsed):
-        # type: (np.ndarray, float) -> float
-        """Where on the curve the aircraft currently is, in seconds from its start."""
-        if not self.params.use_projection:
-            return min(max(0.0, elapsed), self._current.duration)
-        return self._projector.project(self._current, measured)
-
-    def _diagnose(self, measured, planned_velocity, elapsed):
-        # type: (np.ndarray, np.ndarray, float) -> tuple
-        """Split the gap from the plan into "late" and "sideways".
-
-        One displacement, decomposed once: from the aircraft to where the plan
-        says it should be **at this instant**, resolved along and across the
-        direction of travel. So ``along**2 + cross**2 == gap**2`` always, and
-        "1.3 m of gap" is always answerable as how much of it is each. The two
-        halves are not equally dangerous -- being late is benign, being sideways
-        is what hits walls -- and the control law treats them differently, so
-        they must not be conflated.
-
-        **Measured in space, deliberately.** The obvious way to find the lag is
-        ``elapsed - projected_time``, a difference of two times on the current
-        curve, and it is wrong in exactly the case the catch-up term exists for.
-        FALCON does not plan the next curve from the aircraft; it plans it from
-        its **own previous curve**, at ``now + replan_duration``. So a lagging
-        aircraft is behind the new curve's *start*, a curve has no negative
-        time, the projection clamps at zero, and the deficit disappears.
-        Measured on a real flight: a true 1.30 m of lag read as 0.03 m, and the
-        catch-up contributed 0.03 m/s instead of its 0.5 m/s ceiling. FALCON
-        replans about four times a second, so no lag ever survived on one curve
-        long enough to be seen.
-
-        The distance to the *nearest* point on the curve is the other tempting
-        definition of cross-track, and it fails the same way: with the aircraft
-        directly behind the start of a straight curve it reports the full 1.3 m
-        as cross-track, because the nearest point really is 1.3 m away. Honest
-        about the curve, useless as a measure of being off the path.
-
-        Returns:
-            ``(gap_m, along_track_lag_m, cross_track_error_m)``. Positive
-            ``along`` means late.
+        Per axis rather than one flag for the whole command, because the
+        integrator gate reads it. ``limit_acceleration`` deliberately gives the
+        horizontal axes away first so that altitude survives -- so a hard
+        corner saturates horizontally on almost every tick, and a single shared
+        flag would freeze the *vertical* integrator throughout, costing it the
+        standing thrust bias it exists to hold. The two axes saturate for
+        different reasons and must be gated separately.
         """
-        on_schedule = self._current.position_at(
-            min(max(0.0, elapsed), self._current.duration))
-        offset = on_schedule - measured
-        gap = float(np.linalg.norm(offset))
-        speed = float(np.linalg.norm(planned_velocity))
-        if speed <= 1e-6:
-            # A stationary reference has no direction of travel, so none of the
-            # gap can be called lateness. Reporting it all as cross-track is the
-            # safe reading: an offset from a hover point is not being late.
-            return gap, 0.0, gap
-        direction = planned_velocity / speed
-        along = float(np.dot(offset, direction))
-        cross = float(np.linalg.norm(offset - along * direction))
-        return gap, along, cross
+        self._saturated = [bool(abs(float(delivered[i]) - float(wanted[i])) > tolerance)
+                           for i in range(3)]
 
     def _limit_speed(self, wanted, measured_velocity, planned_speed):
         # type: (np.ndarray, np.ndarray, float) -> np.ndarray
@@ -444,11 +385,29 @@ class TrajectoryTracker:
         aircraft actually is. Outside ``integral_band_m`` the axis is not
         holding a standing bias, it is travelling, and integrating that charges
         a correction which arrives after the error is gone. The integrator is
-        also frozen while the command is saturated, because a correction that
-        cannot be applied should not keep accumulating.
+        also frozen while **this axis** is saturated -- not while any axis is,
+        which would let a hard turn cost the altitude loop its trim.
         """
         near = abs(error) <= self.params.integral_band_m
-        return self._pid[axis].update(clamped, dt, integrate=near and not self._saturated)
+        return self._pid[axis].update(clamped, dt,
+                                      integrate=near and not self._saturated[axis])
+
+    def _drag(self, planned_velocity):
+        # type: (np.ndarray) -> np.ndarray
+        """Acceleration spent overcoming drag at the planned velocity.
+
+        The measured curve is linear-plus-offset (0.176*v + 0.121 m/s^2 at
+        1 m/s on the Pegasus Iris); the offset acts along the direction of
+        travel and vanishes with it, so a hover feeds nothing forward.
+        """
+        if self.params.drag_per_mps <= 0.0 and self.params.drag_offset_mps2 <= 0.0:
+            return np.zeros(3)
+        speed = float(np.linalg.norm(planned_velocity))
+        if speed <= 1e-6:
+            return np.zeros(3)
+        direction = planned_velocity / speed
+        magnitude = self.params.drag_per_mps * speed + self.params.drag_offset_mps2
+        return direction * magnitude
 
     def _damping(self, planned_velocity, measured_velocity):
         # type: (np.ndarray, np.ndarray) -> np.ndarray
@@ -484,14 +443,15 @@ class TrajectoryTracker:
         # doing so at cruise speed, and this is the case where it is most likely
         # to be near whatever pushed it.
         wanted = self._limit_speed(damping + correction, measured_velocity, 0.0)
-        command, self._saturated = limit_acceleration(wanted, self._limits)
+        command, saturated = limit_acceleration(wanted, self._limits)
+        self._note_saturation(wanted, command)
         return AccelerationCommand(
             ax=float(command[0]), ay=float(command[1]), az=float(command[2]),
             yaw=self._yaw_cmd if self._yaw_cmd is not None else 0.0,
             position_error_m=float(np.linalg.norm(error)),
-            reference_time_s=self._projector.last_t,
+            reference_time_s=self._feed.last_reference_time,
             trajectory_id=self.trajectory_id,
-            holding=True, saturated=self._saturated)
+            holding=True, saturated=saturated)
 
     def _slew_yaw(self, reference_yaw, dt):
         # type: (float, float) -> float

@@ -1,0 +1,116 @@
+<launch>
+  <!--
+    exploration.launch — the full FALCON exploration, flown on the SJTU drone.
+
+    A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
+    is not lost: the noise-injection adapter, recorder, BEV publisher and
+    completion watcher belonged to that stack's experiment harness, and
+    cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
+    the 100 Hz samples — see bspline_follower.launch for why that matters).
+
+    Topology, three nodes plus FALCON's two:
+
+      /simple_drone/odom  (bridged from ROS2, body-frame twist)
+              │
+        sensor_pose_node ──► /map_ros/pose   (camera pose, mapper pairs by stamp)
+              │        └───► /odom_world     (twist rotated to WORLD — FALCON
+              │                               reads it unrotated into the next
+              │                               plan's initial velocity)
+      /simple_drone/front_depth/depth/image_raw (bridged, 32FC1 metres)
+              │
+        exploration_node  (mapper + frontiers + planner + FSM, unmodified)
+              │
+        traj_server ──► /planning/pos_cmd    (unused by us, kept for FALCON)
+              └───────► /planning/bspline ──► bspline_follower ──► cmd_vel
+  -->
+
+  <arg name="map_name" default="small_house"/>
+  <arg name="drone_ns" default="/simple_drone"/>
+
+  <!-- ── Speeds: the old stack's indoor tuning, kept. At 0.25 m/s a 4 m leg is
+       a ~16 s spline, comfortably inside FALCON's well-behaved regime; yaw
+       faster than translation so the camera can align at a door before the
+       aircraft is committed through it. -->
+  <arg name="max_vel"     default="0.25"/>
+  <arg name="max_acc"     default="0.25"/>
+  <arg name="max_yaw_vel" default="0.6"/>
+  <arg name="max_yaw_acc" default="0.5"/>
+
+  <!-- ── Safety: HARD inflation in the map vs SOFT optimiser penalty. The rule
+       that must hold: safe_distance <= narrowest_half_width - inflation, or
+       the optimiser is asked for clearance the corridor cannot provide and
+       trades it away unpredictably. Drone radius ~0.25 m; house doors ~0.9 m:
+       0.45 - 0.30 leaves 0.15 of budget, 0.10 used. -->
+  <arg name="obstacles_inflation" default="0.30"/>
+  <arg name="safe_distance"       default="0.10"/>
+
+  <!-- ── Frontier viewpoints: rmin small enough to observe a room from OUTSIDE
+       its door (yaw-and-peek) instead of committing a spline into space that
+       is still half unknown. -->
+  <arg name="frontier_min_clearance"     default="0.35"/>
+  <arg name="frontier_min_occ_clearance" default="0.60"/>
+  <arg name="frontier_candidate_rmin"    default="1.0"/>
+  <arg name="frontier_candidate_rmax"    default="2.5"/>
+
+  <!-- ── FALCON's own configuration, exactly as its exploration.launch loads
+       it. The map yaml is OURS, mounted over the image's config/map/ dir by
+       run_falcon_sjtu.sh. -->
+  <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+  <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+  <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+  <rosparam command="load" file="$(find pathfinding)/config/astar.yaml"/>
+  <rosparam command="load" file="$(find fast_planner)/config/fast_planner.yaml"/>
+  <rosparam command="load" file="$(find exploration_preprocessing)/config/frontier_finder.yaml"/>
+  <rosparam command="load" file="$(find exploration_preprocessing)/config/hgrid.yaml"/>
+  <rosparam command="load" file="$(find exploration_utils)/config/perception_utils.yaml"/>
+  <rosparam command="load" file="$(find exploration_manager)/config/exploration_manager.yaml"/>
+
+  <!-- ── Overrides. NO sensing_parameters here: the corrected camera model
+       (600x600, fx=fy=390.64 — the previous stack's 640x480/320 corrupted the
+       map, see the package README) is owned by bspline_follower.launch, ONE
+       source of truth, included below. -->
+  <param name="/transformer/pose_topic_type"     value="pose"/>
+  <param name="/transformer/timestamp_tolerance" value="0.05"/>
+
+  <param name="/uav_model/dynamics_parameters/max_linear_velocity"     value="$(arg max_vel)"/>
+  <param name="/uav_model/dynamics_parameters/max_linear_acceleration" value="$(arg max_acc)"/>
+  <param name="/uav_model/dynamics_parameters/max_yaw_velocity"        value="$(arg max_yaw_vel)"/>
+  <param name="/uav_model/dynamics_parameters/max_yaw_acceleration"    value="$(arg max_yaw_acc)"/>
+
+  <param name="/voxel_mapping/obstacles_inflation" value="$(arg obstacles_inflation)"/>
+  <param name="/bspline_opt/safe_distance"         value="$(arg safe_distance)"/>
+
+  <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)"/>
+  <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)"/>
+  <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)"/>
+  <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)"/>
+
+  <!-- traj_server parks its pre-plan command at the init pose, no ramp:
+       the follower owns takeoff. -->
+  <param name="/traj_server/init_dx" value="0.0"/>
+  <param name="/traj_server/init_dy" value="0.0"/>
+  <param name="/traj_server/init_dz" value="0.0"/>
+
+  <!-- ── The adapter nodes ─────────────────────────────────────────────── -->
+  <node pkg="falcon_adapter" type="sensor_pose_node.py" name="sensor_pose_node"
+        output="screen">
+    <param name="odom_topic" value="$(arg drone_ns)/odom"/>
+  </node>
+
+  <!-- ── FALCON, unmodified ────────────────────────────────────────────── -->
+  <node pkg="exploration_manager" name="exploration_node" type="exploration_node"
+        output="screen" required="true">
+    <!-- /odom_world comes from sensor_pose_node (world-frame twist), NOT the
+         raw bridged odometry, whose twist is body-frame per REP-147 and would
+         start every replan with a velocity pointing along the nose. -->
+    <remap from="/voxel_mapping/depth_image"     to="$(arg drone_ns)/front_depth/depth/image_raw"/>
+    <remap from="/transformer/sensor_pose_topic" to="/map_ros/pose"/>
+  </node>
+
+  <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"/>
+
+  <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
+  <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
+    <arg name="drone_ns" value="$(arg drone_ns)"/>
+  </include>
+</launch>

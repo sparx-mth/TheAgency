@@ -734,3 +734,89 @@ def test_bad_overspeed_settings_are_refused():
     """A ceiling below the catch-up cancels the catch-up it exists to allow."""
     with pytest.raises(ValueError, match="max_overspeed"):
         TrajectoryTrackerParams(max_overspeed=0.2, max_catchup_speed=0.5)
+
+
+# ── the standing-force feedforward and the attitude lead ──────────────────
+
+def _on_plan_tick(params, trajectory, t=1.0):
+    """One tick with the aircraft exactly on the plan, at the plan's velocity.
+
+    Feedback terms all read ~zero there, so what comes back is the feedforward
+    path alone -- the clean way to observe it without disentangling the PID.
+
+    The projector is WALKED to ``t`` rather than teleported: its search window
+    is 1.5 s ahead of wherever it last was, so a fresh tracker asked to resolve
+    t=2.0 clamps to 1.5 and every feedback term reads the 0.7 m gap between
+    the two -- which is the projector doing its job, not a fixture to fight.
+    """
+    tracker = TrajectoryTracker(params)
+    tracker.reset(yaw=0.0)
+    tracker.set_trajectory(trajectory)
+    step = 0.5
+    when = step
+    while when < t - 1e-9:
+        ref = trajectory.sample(when)
+        tracker.update([ref.x, ref.y, ref.z], [ref.vx, ref.vy, ref.vz],
+                       0.0, DT, when)
+        when += step
+    ref = trajectory.sample(t)
+    return tracker.update([ref.x, ref.y, ref.z], [ref.vx, ref.vy, ref.vz],
+                          0.0, DT, t)
+
+
+def test_drag_feedforward_adds_the_measured_curve_along_travel():
+    trajectory = _line()          # straight +x at ~1 m/s
+    plain = _on_plan_tick(TrajectoryTrackerParams(), trajectory)
+    dragged = _on_plan_tick(TrajectoryTrackerParams(drag_per_mps=0.176,
+                                                    drag_offset_mps2=0.121),
+                            trajectory)
+    speed = np.hypot(trajectory.sample(1.0).vx, trajectory.sample(1.0).vy)
+    expected = 0.176 * speed + 0.121
+    assert dragged.ax - plain.ax == pytest.approx(expected, abs=1e-6)
+    assert dragged.ay - plain.ay == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_hover_feeds_no_drag_forward():
+    """The offset term acts along travel and must vanish with it.
+
+    A constant 0.121 m/s^2 with no direction to attach to would push a
+    hovering aircraft sideways forever.
+    """
+    trajectory = _line()
+    params = TrajectoryTrackerParams(drag_per_mps=0.176, drag_offset_mps2=0.121)
+    tracker = TrajectoryTracker(params)
+    tracker.reset(yaw=0.0)
+    tracker.set_trajectory(trajectory)
+    # Past the end the reference is the stopped endpoint: planned velocity zero.
+    end = trajectory.sample(trajectory.duration)
+    command = tracker.update([end.x, end.y, end.z], [0.0, 0.0, 0.0],
+                             0.0, DT, trajectory.duration + 0.5)
+    assert abs(command.ax) < 0.05 and abs(command.ay) < 0.05
+
+
+def test_the_attitude_lead_samples_the_feedforward_ahead():
+    """With lead, the commanded acceleration is the plan's at t + lead.
+
+    Verified on a corner, where acceleration actually changes -- on a straight
+    line the lead is invisible, which is exactly why it is safe there.
+    """
+    trajectory = _corner()
+    lead = 0.25
+    t = 2.0                       # mid-corner: acceleration varying
+    plain = _on_plan_tick(TrajectoryTrackerParams(), trajectory, t=t)
+    led = _on_plan_tick(TrajectoryTrackerParams(attitude_lead_s=lead),
+                        trajectory, t=t)
+    ahead = trajectory.sample(plain.reference_time_s + lead)
+    # The led feedforward should match the plan AHEAD, not the plan now.
+    assert led.ax == pytest.approx(ahead.ax, abs=0.05)
+    assert led.ay == pytest.approx(ahead.ay, abs=0.05)
+    assert (abs(led.ax - plain.ax) + abs(led.ay - plain.ay)) > 0.01
+    # And the jerk it carries forward is the led one too.
+    assert led.jx == pytest.approx(ahead.jx, abs=1e-9)
+
+
+def test_negative_drag_or_lead_is_rejected():
+    for bad in ({"drag_per_mps": -0.1}, {"drag_offset_mps2": -0.1},
+                {"attitude_lead_s": -0.05}):
+        with pytest.raises(ValueError):
+            TrajectoryTrackerParams(**bad)

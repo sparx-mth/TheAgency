@@ -1,0 +1,104 @@
+# The SJTU sim drone as a plant: what it weighs, what it refuses, and how it
+# actually answers a velocity setpoint.
+#
+# The last part is the reason this file exists. `libplugin_drone.so` is not a
+# free body -- it is a four-stage PID cascade that already owns attitude and
+# velocity, and the only input it accepts in flight is a body twist. Anything
+# built on top of it is therefore an *outer* loop closed around a controller
+# that takes a fifth of a second to notice a command and half a second to reach
+# it. Ignoring that is the single largest source of tracking error on this
+# platform, and it does not look like lag -- it looks like a loop that is
+# mysteriously always behind, which invites raising the position gain until it
+# rings.
+#
+# So the measured response lives with the platform, not as a constant inside the
+# control code: see adapters/plant_config.py, which turns the block below into a
+# core VelocityPlant / AxisPlant.
+
+# ---------------------------------------------------------------------------
+# Mass and thrust -- from sjtu_drone_description/urdf/sjtu_drone.urdf.xacro
+# (base_link <mass value="1.477"/>) and sjtu_drone_bringup/config/drone.yaml
+# (maxForce: 30).
+# ---------------------------------------------------------------------------
+mass_kg: 1.477
+max_thrust_n: 30.0
+# 30 / (1.477 * 9.80665) = 2.07. Comfortable but not aerobatic; a climb command
+# that assumes several g of headroom will simply saturate.
+thrust_to_weight: 2.07
+
+# ---------------------------------------------------------------------------
+# What the plugin will refuse. These are the plugin's own saturations (from its
+# startup log / drone.yaml), restated here so a command can be clamped *before*
+# it is sent rather than discovered to have been clipped afterwards.
+# ---------------------------------------------------------------------------
+limits:
+  # velocityXYLimit. The horizontal pair is clamped together, preserving
+  # direction -- clipping per axis turns a speed limit into a steering error.
+  max_speed_xy: 2.0
+  # The plugin's velocityZLimit is -1, i.e. *disabled*: its vertical PID will
+  # ask for whatever it likes and only max_thrust_n stops it. 2.0 is therefore
+  # our own ceiling, chosen to match the horizontal one, not something the
+  # simulator enforces. Raise it knowingly.
+  max_speed_z: 2.0
+  # yawLimit.
+  max_yaw_rate: 1.5
+  # rollpitchLimit. Not a command input -- the plugin's velocity loop produces
+  # tilt internally -- but it is what bounds the achievable horizontal
+  # acceleration, so a planner that wants to reason about it needs it here.
+  max_tilt_rad: 0.5
+
+# ---------------------------------------------------------------------------
+# Measured closed-loop velocity response: the plant an outer loop inverts.
+#
+# Each axis is a first-order lag behind a pure transport delay, which is the
+# model core/control/velocity_servo/plant.py's AxisPlant carries:
+#
+#     v_actual / v_command = dc_gain * exp(-delay_s * s) / (time_constant_s * s + 1)
+#
+# Measured by stepping /simple_drone/cmd_vel and fitting /simple_drone/odom's
+# twist (which is correctly expressed in the child frame -- gt_vel is not; see
+# the README).
+#
+# The three DC gains are all within 2.5% of unity, which says the cascade really
+# does close its own velocity loop and that a velocity feedforward alone flies
+# the aircraft in steady state. What it does *not* do is do so promptly: the
+# horizontal delay of 0.181 s caps a position loop closed around this at roughly
+# 1 / (3 * 0.181) = 1.8 rad/s before phase margin runs out.
+#
+# Vertical and yaw are three to five times quicker off the mark than horizontal,
+# because neither has to wait for the airframe to rotate first. A controller
+# that assumes one lag for all three axes will be sluggish in two of them and
+# aggressive in the third.
+# ---------------------------------------------------------------------------
+velocity_plant:
+  horizontal:
+    dc_gain: 0.998
+    delay_s: 0.181
+    time_constant_s: 0.510
+  vertical:
+    dc_gain: 1.024
+    delay_s: 0.033
+    time_constant_s: 0.409
+  yaw:
+    dc_gain: 0.999
+    delay_s: 0.055
+    time_constant_s: 0.477
+
+# ---------------------------------------------------------------------------
+# The cascade underneath, recorded for provenance only. Nothing in this package
+# reads it: these gains live in the plugin and are configured from
+# sjtu_drone_bringup/config/drone.yaml. They are here because the measured
+# response above is a *consequence* of them, and a run whose response does not
+# match the table above should be checked against these first -- a changed
+# drone.yaml is the cheapest explanation.
+#
+# Values as printed by the plugin at startup.
+# ---------------------------------------------------------------------------
+plugin_pid_cascade:
+  roll_pitch: {kp: 10.0, kd: 5.0, limit: 0.5}
+  yaw: {kp: 2.0, kd: 1.0, limit: 1.5}
+  velocity_xy: {kp: 5.0, kd: 2.3, limit: 2.0}
+  # limit -1 means "no limit" in the plugin's PID.
+  velocity_z: {kp: 5.0, kd: 1.0, limit: -1.0}
+  position_xy: {kp: 1.1, kd: 0.0, limit: 5.0}
+  position_z: {kp: 1.0, kd: 0.2, limit: -1.0}

@@ -1,0 +1,92 @@
+<launch>
+  <!--
+    bspline_follower.launch — fly FALCON's B-spline on the SJTU Gazebo drone.
+
+    This launches OUR follower and the camera parameters FALCON maps with. It
+    deliberately does not re-declare FALCON's own planner arguments: those live
+    in the exploration launch and are the planner's business, not the
+    controller's.
+
+    ════════════════════════════════════════════════════════════════════
+    THE CAMERA INTRINSICS BELOW ARE A CORRECTION, NOT A COPY.
+    ════════════════════════════════════════════════════════════════════
+    The previous stack told FALCON  fx=fy=320, cx=320, cy=240 at 640x480.
+    The sensor it was reading is     600x600 at horizontal_fov 1.3098 rad,
+    which is                         fx=fy=390.64, cx=cy=300.5
+    (verified live off /simple_drone/front_depth/depth/camera_info, and
+    derivable from sjtu_drone.urdf.xacro: fx = (width/2) / tan(hfov/2)).
+
+    Two independent errors followed from that, and both corrupt the MAP rather
+    than the flight:
+
+      * fx 18% low  ->  every depth ray back-projects about 22% too far out
+        laterally, so obstacles are mapped wider and further apart than they
+        are, and the free space between them is fiction.
+      * cy 60.5 px high in a frame FALCON also believed was 480 rows tall
+        ->  about 8.8 degrees of spurious downward tilt in all reconstructed
+        geometry, so the floor climbs and the ceiling descends with range.
+
+    A planner given that map routes through walls that are not where it thinks,
+    and no amount of controller tuning recovers it. Fix the map before drawing
+    any conclusion about tracking.
+  -->
+
+  <arg name="drone_ns"       default="/simple_drone" />
+  <arg name="ctrl_rate_hz"   default="50.0" />
+
+  <!-- Measured off the airframe, not assumed. See
+       robots/SJTU/config/airframe.yaml and the README for the step-response
+       method. Re-measure if the plugin's gains or the sim's real-time factor
+       change: a wrong time constant makes the lead term push the wrong amount
+       and reads exactly like a mistuned position gain. -->
+  <arg name="plant_xy_tau"   default="0.51" />
+  <arg name="plant_xy_delay" default="0.18" />
+  <arg name="plant_z_tau"    default="0.41" />
+  <arg name="plant_z_delay"  default="0.04" />
+  <arg name="plant_yaw_tau"  default="0.48" />
+  <arg name="plant_yaw_delay" default="0.06" />
+
+  <!-- Speed ceilings. `max_overspeed` is a CLEARANCE setting: FALCON checks its
+       route against the map at the speed it planned, so flying the same curve
+       faster spends that margin on stopping distance. -->
+  <arg name="max_speed_xy"     default="1.2" />
+  <arg name="max_overspeed"    default="0.25" />
+  <arg name="max_catchup_speed" default="0.15" />
+  <arg name="yaw_gain"         default="1.5" />
+
+  <!-- Off reproduces the previous stack's P + velocity-feedforward law, which
+       is what the improvement is measured against. Keep it as a comparison,
+       not as a fallback. -->
+  <arg name="use_feedforward_lead" default="true" />
+  <arg name="predict_reference"    default="true" />
+
+  <!-- ── camera model FALCON maps with (corrected; see the header) ── -->
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="390.6427" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fy" value="390.6427" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cx" value="300.5" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cy" value="300.5" />
+  <param name="/uav_model/sensing_parameters/image_width"  value="600" />
+  <param name="/uav_model/sensing_parameters/image_height" value="600" />
+
+  <node pkg="falcon_adapter" type="bspline_follower_node.py"
+        name="bspline_follower" output="screen">
+    <param name="cmd_topic"        value="$(arg drone_ns)/cmd_vel" />
+    <param name="odom_topic"       value="$(arg drone_ns)/odom" />
+    <param name="ctrl_rate_hz"     value="$(arg ctrl_rate_hz)" />
+
+    <param name="plant_xy_tau"     value="$(arg plant_xy_tau)" />
+    <param name="plant_xy_delay"   value="$(arg plant_xy_delay)" />
+    <param name="plant_z_tau"      value="$(arg plant_z_tau)" />
+    <param name="plant_z_delay"    value="$(arg plant_z_delay)" />
+    <param name="plant_yaw_tau"    value="$(arg plant_yaw_tau)" />
+    <param name="plant_yaw_delay"  value="$(arg plant_yaw_delay)" />
+
+    <param name="max_speed_xy"     value="$(arg max_speed_xy)" />
+    <param name="max_overspeed"    value="$(arg max_overspeed)" />
+    <param name="max_catchup_speed" value="$(arg max_catchup_speed)" />
+    <param name="yaw_gain"         value="$(arg yaw_gain)" />
+
+    <param name="use_feedforward_lead" value="$(arg use_feedforward_lead)" />
+    <param name="predict_reference"    value="$(arg predict_reference)" />
+  </node>
+</launch>

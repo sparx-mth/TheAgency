@@ -1,0 +1,53 @@
+# SJTU sim front RGB camera -- /simple_drone/front/image_raw + /simple_drone/front/camera_info.
+#
+# Provenance: derived from the sensor definition itself, not from a calibration
+# run. Gazebo renders an ideal pinhole from <horizontal_fov> and <image>, so the
+# SDF *is* the ground truth:
+#
+#   sjtu_drone_description/urdf/sjtu_drone.urdf.xacro, sensor "front_camera"
+#     <horizontal_fov>1.3098</horizontal_fov>
+#     <image><width>600</width><height>600</height></image>
+#     <clip><near>0.1</near><far>100.0</far></clip>
+#     <update_rate>60</update_rate>
+#
+#   fx = fy = (width / 2) / tan(hfov / 2) = 300 / tan(0.6549) = 390.642735
+#   cx = cy = width / 2 = 300
+#
+# The image is square and the SDF gives only a horizontal FOV, so the vertical
+# FOV is the same 75.05 deg -- an unusually tall field for a forward camera, and
+# worth remembering before assuming this matches an XTEND-shaped frame.
+#
+# /simple_drone/front/camera_info is the runtime authority and should agree with
+# this to within the half-pixel that Gazebo's (width + 1) / 2 principal-point
+# convention can introduce. If it disagrees by more than that, the model was
+# edited and this file is stale.
+
+image_width: 600
+image_height: 600
+
+fx: 390.642735
+fy: 390.642735
+cx: 300.0
+cy: 300.0
+
+# Field of view implied by the above, degrees. Carried for readability only --
+# nothing reads these back.
+hfov_deg: 75.046
+vfov_deg: 75.046
+
+# Frame rate the sensor renders at, Hz. The RGB and depth cameras of this drone
+# run at *different* rates (60 vs 15), so an RGBD consumer must pair them by
+# timestamp rather than by arrival order.
+rate_hz: 60.0
+
+# Gazebo renders an ideal pinhole; there is no lens to distort. Carried only for
+# parity with the real-camera yamls under robots/XTEND/config/.
+distortion_model: "plumb_bob"
+k1: 0.0
+k2: 0.0
+p1: 0.0
+p2: 0.0
+k3: 0.0
+
+# Additive image noise the SDF asks Gazebo for (gaussian, zero-mean).
+noise_stddev: 0.01

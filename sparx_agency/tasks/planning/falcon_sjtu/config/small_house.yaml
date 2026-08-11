@@ -1,0 +1,60 @@
+# FALCON map_config for the AWS small_house world -- the SJTU sim's default.
+#
+# Ported from sjtu_project/falcon_docker/small_house.yaml with one change that
+# is a finding, not a preference:
+#
+#   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+#   floor in the box it flies at ankle height between chair legs. The Pegasus
+#   campaign measured exactly this ("it wedged itself against furniture twice"
+#   at 0.74 m, desk height) and raised its floor for the same reason. The band
+#   is the airspace above the clutter, not the whole room. Ceilings here are
+#   ~2.5 m, so 0.6-2.2 leaves 1.6 m of usable band.
+#
+# The house is roughly 15 x 15 m. The exploration box is inset to the interior;
+# its z ceiling (2.2) sits under the real ceilings so the top face of the box
+# is closed by structure, not by open air.
+#
+# init_* MUST match the drone's spawn pose in the world file. The sim spawns at
+# the origin on the floor; traj_server parks its pre-trajectory command here,
+# and an init pose that is not where the aircraft is makes the first reference
+# a step-jump (see the falcon_pegasus runs/ header for the measured cost).
+
+map_config:
+  map_file: ""
+  map_dimension: 2
+  init_x: 0.0
+  init_y: 0.0
+  init_z: 0.0
+  init_yaw: 0.0
+  map_size:
+    map_min_x: -10.5
+    map_min_y: -10.5
+    map_min_z: -1.0
+    map_max_x:  10.0
+    map_max_y:  10.0
+    map_max_z:  3.5
+    box_min_x:  -8.0
+    box_min_y:  -8.0
+    box_min_z:   0.6
+    box_max_x:   8.0
+    box_max_y:   8.0
+    box_max_z:   2.2
+    vbox_min_x: -10.0
+    vbox_min_y: -10.0
+    vbox_min_z:  -1.0
+    vbox_max_x:  10.0
+    vbox_max_y:  10.0
+    vbox_max_z:   2.5
+  scale: 1.0
+  # Body (FLU) -> camera optical (RDF). A property of the drone, not the world;
+  # the same rotation sensor_pose_node.py composes into /map_ros/pose.
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]

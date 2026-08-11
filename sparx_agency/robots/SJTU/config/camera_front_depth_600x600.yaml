@@ -1,0 +1,61 @@
+# SJTU sim front DEPTH camera -- /simple_drone/front_depth/depth/image_raw
+# + /simple_drone/front_depth/depth/camera_info + /simple_drone/front_depth/points.
+#
+# Provenance: same derivation as the RGB pair, from the sensor definition rather
+# than a calibration run:
+#
+#   sjtu_drone_description/urdf/sjtu_drone.urdf.xacro, sensor "front_depth_camera"
+#     <horizontal_fov>1.3098</horizontal_fov>
+#     <image><width>600</width><height>600</height></image>
+#     <clip><near>0.1</near><far>10.0</far></clip>
+#     <update_rate>15</update_rate>
+#
+#   fx = fy = (width / 2) / tan(hfov / 2) = 300 / tan(0.6549) = 390.642735
+#   cx = cy = width / 2 = 300
+#
+# Geometrically identical to camera_front_600x600.yaml, and deliberately kept as
+# its own file rather than aliased: the two sensors are separate Gazebo sensors
+# on the same link, they can be re-tuned independently in the xacro, and a
+# consumer that silently shared one calibration would not notice when they
+# diverged.
+#
+# The two differences that matter are here, not in the intrinsics:
+#   * the far clip is 10 m, not 100 m. Beyond it the depth image is invalid, so
+#     a mapper must range-gate at 10 m or it will fuse whatever Gazebo puts in
+#     the out-of-range pixels as if it were geometry;
+#   * it renders at 15 Hz against the RGB camera's 60 Hz, so an RGBD consumer
+#     pairs by timestamp, never by arrival order.
+#
+# The comment block above this sensor in the xacro claims the parameters were
+# "matched to FALCON simulator exactly" at 640x480 / 90 deg / 5 m. They were
+# not -- the values actually in the file are 600x600 / 75 deg / 10 m. Trust the
+# tags, not the prose.
+
+image_width: 600
+image_height: 600
+
+fx: 390.642735
+fy: 390.642735
+cx: 300.0
+cy: 300.0
+
+hfov_deg: 75.046
+vfov_deg: 75.046
+
+rate_hz: 15.0
+
+# Valid depth range, metres. Outside it the pixel carries no measurement.
+range_min_m: 0.1
+range_max_m: 10.0
+
+# Published as 32FC1 float metres by gazebo_ros_camera's depth path -- not the
+# 16UC1 millimetres a real RGBD sensor emits. A conversion written against a
+# real bag will be off by 1000x here.
+depth_encoding: "32FC1"
+
+distortion_model: "plumb_bob"
+k1: 0.0
+k2: 0.0
+p1: 0.0
+p2: 0.0
+k3: 0.0

@@ -1,0 +1,54 @@
+# ros1_bridge parameter_bridge topics for the FALCON <-> SJTU Gazebo loop.
+#
+# Four topics, and the direction of each is set by who publishes, not by this
+# file -- parameter_bridge bridges every entry both ways.
+#
+#   ROS2 -> ROS1: depth image and odometry (the sensors)
+#   ROS1 -> ROS2: cmd_vel and takeoff (the actuation)
+#
+# QoS is the trap here, verified live rather than assumed: gazebo_ros_camera
+# and the drone plugin publish RELIABLE / VOLATILE (checked with
+# `ros2 topic info -v` on the running sim -- the old stack's comments warn the
+# same publishers are sometimes best_effort in other builds, and a mismatch is
+# not an error, it is silently zero data).
+#
+# camera_info is deliberately NOT bridged: FALCON reads intrinsics from
+# rosparam (/uav_model/sensing_parameters/*), which bspline_follower.launch
+# sets to the corrected 600x600 / fx 390.64 model.
+
+topics:
+  - topic: /simple_drone/front_depth/depth/image_raw
+    type: sensor_msgs/msg/Image
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: reliable
+      durability: volatile
+
+  - topic: /simple_drone/odom
+    type: nav_msgs/msg/Odometry
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: reliable
+      durability: volatile
+
+  - topic: /simple_drone/cmd_vel
+    type: geometry_msgs/msg/Twist
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: reliable
+      durability: volatile
+
+  - topic: /simple_drone/takeoff
+    type: std_msgs/msg/Empty
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: reliable
+      durability: volatile
