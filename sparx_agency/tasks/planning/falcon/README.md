@@ -22,7 +22,7 @@ falcon/
 ├── maps/                 # map configs, selected by name at run time
 │   ├── office.yaml       #   real-drone environment
 │   ├── hospital.yaml     #   baked into the image (the build needs one map present)
-│   └── bookstore.yaml, playground.yaml, small_house.yaml, small_warehouse.yaml
+│   └── bookstore.yaml, playground.yaml, small_house.yaml, sphera_jail.yaml
 ├── patches/              # post-clone fixes applied to FALCON during the build
 │   ├── fix_falcon_system_info.sh   # nvidia-smi parse crash on Jetson
 │   ├── fix_falcon_cost_check.sh    # glog FATAL on tiny A* cost

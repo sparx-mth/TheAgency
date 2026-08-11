@@ -71,44 +71,43 @@ map_config:
   init_z: 1.4
   init_yaw: 0.1221730
 
-  map_size:
-    # `map` is the allocated voxel grid, `box` is what FALCON explores and plans
-    # inside, `vbox` is what it draws. Required on every axis:
-    # map contains vbox contains-or-equals box, and every min < its max.
-    map_min_x: -25.0
-    map_min_y: -35.2
-    map_min_z: -0.2
-    map_max_x: 7.1
-    map_max_y: 40.7
-    map_max_z: 2.4
-
-    # The exploration box: the whole building, inset from its outer walls. Its
-    # VOLUME chooses the mapping resolution -- under 4000 m3 FALCON maps at 10 cm,
-    # above it at 20 cm. This one is 2424 m3.
+  # WHERE TO EXPLORE, in five numbers. The eighteen `map_size` numbers this file
+  # used to carry by hand are derived from these before the container starts, and
+  # the derivation is pinned against the old values in
+  # mapsize/tests/test_area.py. To see the boxes and what the grid will cost:
+  #
+  #   python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize runs/<run>.yaml
+  #
+  # run_falcon_pegasus.sh prints the same report on its way past.
+  area:
+    # The exploration box footprint, inset 1.2 m from the building's outer walls.
+    # Its EDGES MUST FALL ON WALLS. An edge in open space is a trap: FALCON finds
+    # frontiers along the cut, samples viewpoints for them, and half of every
+    # candidate ring lands outside the box and is discarded. The aircraft flies to
+    # the boundary, the hierarchical grid stops being able to place it ("Current
+    # cell id: -5"), and the FSM cycles PLAN_TRAJ -> PUB_TRAJ -> PLAN_TRAJ forever
+    # while the aircraft holds station.
     #
-    # The z floor is 1.0 m, not the 0.6 m this started at. FALCON plans anywhere
-    # inside the box, and with the floor lower it flew the aircraft at 0.74 m,
-    # which is desk height in this building; it wedged itself against furniture
-    # twice. The band is the airspace above the clutter, not the whole room.
-    box_min_x: -23.0
-    box_min_y: -33.2
-    box_min_z: 1.0
-    box_max_x: 5.1
-    box_max_y: 38.7
-    box_max_z: 2.2
-
-    # The VISUALISATION box, which is what the map recorder draws and the only
-    # thing FALCON iterates to build its occupancy clouds. Deliberately a thin
-    # 20 cm slab at cruise height rather than the whole z range: the recorder
-    # wants one horizontal cut of the map, and every extra layer here is another
-    # full pass over the grid, at 2 Hz, inside the single-threaded node that also
-    # services the depth callbacks.
-    vbox_min_x: -23.5
-    vbox_min_y: -33.7
-    vbox_min_z: 1.3
-    vbox_max_x: 5.6
-    vbox_max_y: 39.2
-    vbox_max_z: 1.5
+    # ALL SIX RUNS SHARE THIS BOX. They differ in where the aircraft starts and
+    # how long it flies. They used to differ by carving the building into six
+    # sub-regions, and that was wrong, for the reason above.
+    building: [-23.0, -33.2, 5.1, 38.7]
+    # The z band the planner may fly in: the airspace ABOVE the clutter, not the
+    # whole room. This started at 0.6 m, which let FALCON fly the aircraft at
+    # 0.74 m -- desk height in this building -- and it wedged itself twice.
+    flight_band: [1.0, 2.2]
+    # The z range ALLOCATED. Wider than the flight band, because the camera sees
+    # the floor and the mapper needs somewhere to put it.
+    vertical_extent: [-0.2, 2.4]
+    # Metres per voxel, chosen rather than inherited. Upstream picks this from the
+    # exploration box's VOLUME -- under 4000 m3 it maps at 10 cm, at or above it
+    # 20 cm -- and this box is 2424 m3, just inside the threshold. So the eight-fold
+    # difference in memory currently hangs on a boundary nobody set deliberately.
+    # 0.10 is what these runs have always flown; 0.20 costs an eighth of the
+    # memory (267 MB -> 33 MB) whenever the detail is worth trading.
+    resolution: 0.10
+    # How far the allocated grid reaches past the exploration box, horizontally.
+    margin: 2.0
 
   scale: 1.0
 

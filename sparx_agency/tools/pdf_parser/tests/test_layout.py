@@ -65,6 +65,18 @@ def test_malformed_xml_raises():
         layout.parse_layout_xml("this is not xml")
 
 
+def test_control_characters_from_a_symbol_font_do_not_kill_the_page():
+    """One unmapped maths glyph used to cost the whole document its exhibits."""
+    page = layout.parse_layout_xml(XML.replace("Second", "\x14\x15"))[0]
+    assert len(page.blocks) == 2
+    assert page.blocks[1].lines[0].text == "��"
+
+
+def test_sanitising_keeps_tabs_newlines_and_ordinary_text():
+    text = "a\tb\nc\r\nd é ∑"
+    assert layout.sanitise_control_characters(text) == text
+
+
 def _line(x: float, y: float, text: str = "cell", width: float = 40.0) -> Line:
     """One line at a position, as a single word."""
     box = BBox(x, y, x + width, y + 10.0)
