@@ -29,6 +29,11 @@ from sparx_agency.tools.pdf_parser.geometry import BBox, union_all
 
 _TAG_NAMESPACE = re.compile(r"^\{[^}]*\}")
 
+# Everything XML 1.0 forbids that can survive a UTF-8 decode: the C0 controls
+# other than tab, newline and carriage return, plus the two non-characters.
+_ILLEGAL_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+_GLYPH_PLACEHOLDER = "�"
+
 
 @dataclass(frozen=True)
 class Word:
@@ -243,11 +248,36 @@ def _parse_page(element: ElementTree.Element, number: int) -> PageLayout:
     )
 
 
+def sanitise_control_characters(xml_text: str) -> str:
+    """Replace the characters poppler emits that XML does not allow.
+
+    A symbol font whose glyphs carry no Unicode mapping — the mathematics in
+    almost any paper — makes ``pdftotext`` write the raw glyph code inside a
+    ``<word>`` element. Codes below ``0x20`` are legal in a PDF and illegal in
+    XML, so a single equation is enough to make the parser reject the whole
+    document, and the extraction then comes back with no figures, no tables and
+    no algorithms while the text and the page renders look fine.
+
+    The character is replaced rather than deleted so the word survives with its
+    rectangle. The glyph really is on the page, and removing it would leave an
+    empty word behind to distort the word-spacing heuristics that tell prose
+    from a table row.
+
+    Args:
+        xml_text: Standard output from ``pdftotext -bbox-layout``.
+
+    Returns:
+        The same text with every character XML 1.0 forbids replaced by U+FFFD.
+    """
+    return _ILLEGAL_XML_CHARS.sub(_GLYPH_PLACEHOLDER, xml_text)
+
+
 def parse_layout_xml(xml_text: str) -> List[PageLayout]:
     """Parse the XHTML from ``pdftotext -bbox-layout`` into pages.
 
     Args:
-        xml_text: The complete document poppler wrote to stdout.
+        xml_text: The complete document poppler wrote to stdout. Characters XML
+            forbids are repaired first by :func:`sanitise_control_characters`.
 
     Returns:
         One :class:`PageLayout` per page, in document order.
@@ -256,7 +286,7 @@ def parse_layout_xml(xml_text: str) -> List[PageLayout]:
         ValueError: If the text is not parseable XML.
     """
     try:
-        root = ElementTree.fromstring(xml_text)
+        root = ElementTree.fromstring(sanitise_control_characters(xml_text))
     except ElementTree.ParseError as exc:
         raise ValueError("pdftotext -bbox-layout did not emit valid XML: {}".format(exc))
 

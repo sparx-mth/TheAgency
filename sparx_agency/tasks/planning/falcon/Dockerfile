@@ -214,6 +214,17 @@ RUN chmod +x /tmp/fix_falcon_cost_check.sh && /tmp/fix_falcon_cost_check.sh
 COPY patches/fix_falcon_depth_overflow.sh /tmp/fix_falcon_depth_overflow.sh
 RUN chmod +x /tmp/fix_falcon_depth_overflow.sh && /tmp/fix_falcon_depth_overflow.sh
 
+# ── 6a-quater-bis. Make the map resolution settable, and visible ─
+# Three bugs in the same twenty lines of map_server.cpp: the fine
+# resolution is read from a misspelled key and so cannot be set at
+# all; the resolution is chosen from the exploration box's VOLUME,
+# so shrinking the box can multiply memory by eight; and the grid's
+# size is only logged behind `verbose`, which ships false. The voxel
+# grid is allocated in full on the first tick, so this is the number
+# that decides whether a large area starts at all.
+COPY patches/fix_falcon_map_resolution.sh /tmp/fix_falcon_map_resolution.sh
+RUN chmod +x /tmp/fix_falcon_map_resolution.sh && /tmp/fix_falcon_map_resolution.sh
+
 # ── 6a-quinquies. Silence per-callback FSM glog spam ──────────
 # exploration_fsm.cpp logs two LOG(INFO) lines on EVERY callback
 # (~90-130 Hz). With GLOG_logtostderr=1 (set above) they bury every

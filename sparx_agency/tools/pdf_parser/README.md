@@ -89,7 +89,13 @@ All of that is inferred here, so it is worth knowing how.
 
 **Positions come from `pdftotext -bbox-layout`**, which reports a rectangle for
 every word, line and block. That is the foundation; without coordinates none of
-the rest is possible.
+the rest is possible. Poppler's XML is repaired before it is parsed: a symbol
+font whose glyphs have no Unicode mapping makes it write the raw glyph code into
+a `<word>`, and codes below `0x20` are legal in a PDF but illegal in XML, so one
+equation would otherwise cost the document every figure, table and algorithm
+while the text and page renders still looked fine. Those characters are replaced
+by `U+FFFD`, keeping the word and its rectangle
+(`layout.py:sanitise_control_characters`).
 
 **Captions are the index.** A paper lays its figures out however it likes but
 always labels them. Every crop, table and listing starts from a caption. Two
