@@ -139,6 +139,19 @@
 
   <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"/>
 
+  <!-- Drone marker for RViz. FALCON's rviz.rviz displays the robot from
+       /odom_visualization/robot, but the node that publishes it belongs to
+       FALCON's own uav_simulator bringup, which this stack replaces with the
+       real Gazebo aircraft -- without this, RViz shows the map growing with no
+       drone in it. The node reads ~odometry, remapped to the world-frame odom. -->
+  <node pkg="odom_visualization" name="odom_visualization" type="odom_visualization">
+    <remap from="~odometry" to="/odom_world"/>
+    <param name="robot_scale" value="2.0"/>
+    <param name="color/r" value="1.0"/>
+    <param name="color/g" value="0.3"/>
+    <param name="color/b" value="0.0"/>
+  </node>
+
   <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
   <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
     <arg name="drone_ns" value="$(arg drone_ns)"/>

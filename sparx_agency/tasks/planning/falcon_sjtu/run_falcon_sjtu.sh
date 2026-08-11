@@ -34,6 +34,15 @@ mkdir -p "${LOG_DIR}"
 # containers up for a monitor/soak to watch -- which is how the iterate loop
 # drives it.
 FOLLOW="${FOLLOW:-1}"
+# RVIZ=1 (default when there is a display) opens FALCON's own RViz view (map,
+# frontiers, trajectories, the drone) in a sibling container on the same
+# roscore. It is started BEFORE the bridge, so the view is up before the first
+# depth frame is mapped. RVIZ=0 for headless/soak runs.
+if [[ -n "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
+    RVIZ="${RVIZ:-1}"
+else
+    RVIZ="${RVIZ:-0}"
+fi
 
 if [[ ! -f "${SCRIPT_DIR}/config/${MAP_NAME}.yaml" ]]; then
     echo "[ERROR] no map config: ${SCRIPT_DIR}/config/${MAP_NAME}.yaml" >&2
@@ -43,7 +52,7 @@ fi
 chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
 
 cleanup() {
-    docker rm -f falcon-sjtu sjtu-ros1-bridge > /dev/null 2>&1 || true
+    docker rm -f falcon-sjtu sjtu-ros1-bridge falcon-rviz > /dev/null 2>&1 || true
 }
 # Only tear down on an explicit interrupt, not on normal completion: FOLLOW=0
 # returns with the stack still up on purpose.
@@ -72,6 +81,28 @@ for _ in $(seq 1 30); do
     echo -n "."; sleep 2
 done
 echo " -- up"
+
+# ── RViz: FALCON's own exploration view, on the same roscore ───────────────
+# A sibling container from the FALCON image (the config and the rviz binary are
+# both in there), sharing the host X socket. Software GL: the image has mesa but
+# no GPU bindings, and rviz's displays are cheap enough without one. The drone
+# model itself comes from the odom_visualization node that exploration.launch
+# starts, fed by /odom_world.
+if [[ "${RVIZ}" == "1" ]]; then
+    command -v xhost > /dev/null && xhost +local: > /dev/null 2>&1 || true
+    docker run -d --name falcon-rviz \
+        --network host \
+        --env DISPLAY="${DISPLAY}" \
+        --env QT_X11_NO_MITSHM=1 \
+        --env LIBGL_ALWAYS_SOFTWARE=1 \
+        --env ROS_MASTER_URI="http://localhost:11311" \
+        --env ROS_HOSTNAME="localhost" \
+        --volume /tmp/.X11-unix:/tmp/.X11-unix:rw \
+        "${FALCON_IMAGE}" \
+        roslaunch exploration_manager rviz.launch \
+        > /dev/null
+    echo "[falcon_sjtu] rviz up (RVIZ=0 to disable)"
+fi
 
 # ── the bridge: ROS1 <-> ROS2 ──────────────────────────────────────────────
 # The image bakes an entrypoint that defaults to dynamic_bridge (bridges every
@@ -119,7 +150,7 @@ echo "[falcon_sjtu] up (map=${MAP_NAME})."
 if [[ "${FOLLOW}" == "0" ]]; then
     echo "[falcon_sjtu] detached; containers left running. Follow with:"
     echo "    docker logs -f falcon-sjtu   |   docker logs -f sjtu-ros1-bridge"
-    echo "    tear down: docker rm -f falcon-sjtu sjtu-ros1-bridge"
+    echo "    tear down: docker rm -f falcon-sjtu sjtu-ros1-bridge falcon-rviz"
     exit 0
 fi
 echo "[falcon_sjtu] following falcon-sjtu; Ctrl-C tears both containers down."

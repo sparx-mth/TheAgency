@@ -121,6 +121,27 @@ container to record it. `along` and `cross` always satisfy
 are not equally dangerous. Being late is benign; being sideways is what hits
 walls.
 
+## Running it, with the map on screen
+
+```bash
+# 1. the world (external repo; drone spawns at (1,1,0) in hospital)
+export SJTU_PROJECT_DIR=~/GIT/sjtu_project
+bash sparx_agency/robots/SJTU/setup/bringup_world.sh --skip-build hospital
+
+# 2. FALCON + bridge + RViz (in another terminal)
+./run_falcon_sjtu.sh hospital
+```
+
+`run_falcon_sjtu.sh` opens FALCON's own RViz view automatically whenever a
+display is present (`RVIZ=0` to suppress, e.g. for soaks): the voxel map,
+frontiers, hgrid, the planned and travelled trajectories, and the drone itself.
+RViz is started before the bridge, so the view is up before the first depth
+frame is mapped — a fresh run shows the map growing from the very first voxel.
+The drone model is published by FALCON's `odom_visualization`, which
+`exploration.launch` runs fed from `/odom_world` (FALCON's rviz config expects
+it, and nothing else in this stack would publish it — without it the map grows
+with no aircraft in view).
+
 ## Status
 
 Verified: the Gazebo world, drone, all sensors and the actuation path come up
