@@ -1107,6 +1107,55 @@
   <arg name="max_yaw_vel" default="0.6" />
   <arg name="max_yaw_acc" default="0.5" />
 
+  <!-- 2026-08-11: lowering max_vel above did NOT actually slow the drone down
+       during exploration; confirmed live that falcon_exploration_follower_
+       node.py's own PulseShaper was pegging every cmd_vel_raw command to a
+       FIXED magnitude (0.3 m/s / ~40deg/s) regardless of what FALCON's
+       trajectory asked for, same pattern object_approach_node.py uses for
+       Rooster's FCU deadband. That fixed stage is the actual speed
+       bottleneck for this mode, not max_vel above.
+
+       vy dropped much further than vx (0.05 vs 0.1), deliberately
+       asymmetric: confirmed live that equal-magnitude vx/vy produced
+       simultaneous roll+pitch+yaw ("flying diagonally", bumping walls/
+       ceiling); FALCON's position spline and its yaw are independently
+       planned (separate bspline_opt cost terms), so the two frequently
+       disagree, and rotating a holonomic world-frame velocity into body
+       frame at equal magnitude on both axes asks the FCU for a hard
+       simultaneous tilt. Deliberately NOT fixed by forcing yaw to face the
+       direction of travel (would defeat exploration's whole point of
+       looking around while moving) or by zeroing vy outright (would flatten
+       the spline's real, holonomically-planned shape into a cruder
+       forward-only approximation). Cutting vy's magnitude instead keeps
+       both: yaw stays independent, and there's still enough lateral
+       authority to track the spline's actual curve, just far too little to
+       produce meaningful roll.
+
+       UNTESTED at these magnitudes. If the drone stops moving smoothly
+       (jerky/no motion) rather than just moving slower/straighter, these
+       are too low to overcome Rooster's real deadband and need raising.
+       object_approach_node.py's own fixed_vx:=0.4 is the highest
+       confirmed-working value in this codebase; nothing this low has been
+       live-tested before.
+
+       2026-08-11, later same day: 0.1/0.05 confirmed live too weak to move
+       the drone properly in either axis (below Rooster's real deadband, not
+       just slow). Raised both, keeping the same ~2:1 vx:vy ratio so the
+       lateral-tilt cut from the note above is preserved. Still below
+       object_approach's proven 0.4; if THIS is still too weak, that 0.4 is
+       the next data point to try before assuming force_mode=fixed itself is
+       wrong for this mode. -->
+  <arg name="explore_fixed_vx"     default="0.2" />
+  <arg name="explore_fixed_vy"     default="0.1" />
+  <arg name="explore_fixed_wz_deg" default="20.0" />
+
+  <!-- Backstop against Rooster's own FCU velocity loop overshooting a fixed-
+       magnitude pulse; see falcon_exploration_follower_node.py's
+       max_measured_speed_xy for the full rationale. 0.4 = 2x explore_fixed_vx,
+       enough headroom for normal combined vx+vy motion without catching
+       intended cruising speed as "too fast". <=0.0 disables. -->
+  <arg name="explore_max_measured_speed_xy" default="0.4" />
+
   <arg name="obstacles_inflation"        default="1.0" />
   <arg name="safe_distance"              default="1.0" />
   <arg name="frontier_min_clearance"     default="0.50" />
@@ -1296,6 +1345,12 @@
     <param name="cmd_vel_topic"   value="$(arg cmd_vel_raw_topic)" />
     <param name="demo_mode_topic"         value="$(arg demo_mode_topic)" />
     <param name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
+    <!-- The actual speed bottleneck for this mode; see the
+         explore_fixed_* arg declarations above. -->
+    <param name="fixed_vx"     value="$(arg explore_fixed_vx)" />
+    <param name="fixed_vy"     value="$(arg explore_fixed_vy)" />
+    <param name="fixed_wz_deg" value="$(arg explore_fixed_wz_deg)" />
+    <param name="max_measured_speed_xy" value="$(arg explore_max_measured_speed_xy)" />
   </node>
 
   <node pkg="falcon_adapter" type="bev_publisher_node.py"

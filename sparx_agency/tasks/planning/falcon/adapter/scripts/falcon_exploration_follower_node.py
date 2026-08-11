@@ -95,6 +95,19 @@ class FalconExplorationFollowerNode:
         ))
         self.yaw_kp = float(G("~yaw_kp", 1.0))
 
+        # <=0.0 disables. This checks MEASURED speed (from odometry), not the
+        # commanded reference -- max_speed_xy above only clamps what the
+        # tracker asks for, it says nothing about what the aircraft is
+        # actually doing. Rooster's own velocity response to a fixed-
+        # magnitude Twist pulse is a closed FCU control loop we don't own
+        # and can overshoot; this is a backstop against that, independent of
+        # whatever FALCON/the tracker computed. When measured horizontal
+        # speed is already at/above this, translation is withheld for that
+        # tick (let it coast down) rather than adding another pulse on top
+        # of a already-fast platform. Yaw is unaffected -- it isn't
+        # "thrust" in the same sense and turning doesn't add speed.
+        self.max_measured_speed_xy = float(G("~max_measured_speed_xy", 0.0))
+
         # ── Rooster force shaping: fixed-magnitude pulses, no docking gait ──
         # See the module docstring for why ClosureGait is deliberately not used
         # here even though object_approach_node.py uses it alongside PulseShaper.
@@ -241,6 +254,16 @@ class FalconExplorationFollowerNode:
         cos_y, sin_y = math.cos(self._yaw), math.sin(self._yaw)
         body_vx = setpoint.vx * cos_y + setpoint.vy * sin_y
         body_vy = -setpoint.vx * sin_y + setpoint.vy * cos_y
+
+        if self.max_measured_speed_xy > 0.0 and self._velocity is not None:
+            measured_speed = math.hypot(self._velocity[0], self._velocity[1])
+            if measured_speed >= self.max_measured_speed_xy:
+                rospy.logwarn_throttle(
+                    2.0, "falcon_exploration_follower: measured speed %.2fm/s >= "
+                    "%.2fm/s cap, withholding translation this tick",
+                    measured_speed, self.max_measured_speed_xy)
+                body_vx = 0.0
+                body_vy = 0.0
 
         # The tracker gives an absolute heading; a yaw RATE command is what
         # cmd_vel needs. Proportional on the same signed error the tracker

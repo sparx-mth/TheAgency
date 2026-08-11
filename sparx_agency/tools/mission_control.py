@@ -507,7 +507,13 @@ ROBOTICAN_SERVICES: list[Service] = [
             # and reintroduced the exact bug, worse -- confirmed live, drone
             # immediately climbed to the ceiling and stuck there. Falls back
             # to rooster_command_unit.py's own (correct) default of 1.0s.
-            "  -p max_ranger_m:=1.6"
+            "  -p max_ranger_m:=1.6 \\\n"
+            # 2026-08-11: fly at a chosen height instead of wherever the
+            # open-loop climb happens to land -- see RoosterUnit's
+            # target_ranger_m. Set equal to max_ranger_m above (not lower):
+            # the ceiling then only backstops overshoot past the intended
+            # target, it isn't fighting a separate lower target.
+            "  -p target_ranger_m:=1.6"
         ),
         env="container",
         machine="container",

@@ -102,6 +102,12 @@ class RoosterUnit:
         # immediate cause; this is the durable safety net so a future bad
         # config/drift can't do the same thing silently.
         max_ranger_m: float = 0.0,
+        # <=0.0 disables -- altitude hold then keeps its original behavior of
+        # locking onto whatever ranger the open-loop climb happened to reach
+        # (see _enable_altitude_hold). Set this to actually choose a flight
+        # height instead of however climb_z/climb_duration_sec/hover_z's
+        # open-loop throttle burst happens to land. Added 2026-08-11.
+        target_ranger_m: float = 0.0,
     ):
         self.id = rooster_id
         self.node = node
@@ -117,6 +123,7 @@ class RoosterUnit:
         self.altitude_hold_max_correction = float(altitude_hold_max_correction)
         self.altitude_hold_interval_sec = float(altitude_hold_interval_sec)
         self.max_ranger_m = float(max_ranger_m)
+        self.target_ranger_m = float(target_ranger_m)
 
         self.axes = AxisModel()
 
@@ -233,11 +240,16 @@ class RoosterUnit:
                 f"[{self.id}] No ranger telemetry yet -- altitude hold not engaged, "
                 f"holding raw throttle only.")
             return
-        self._hold_ranger_target = self.ranger
+        # A configured target overrides the default "hold wherever the climb
+        # happened to leave you" behavior -- the PD loop then climbs/descends
+        # toward it like any other altitude error, no different code path.
+        self._hold_ranger_target = (
+            self.target_ranger_m if self.target_ranger_m > 0.0 else self.ranger)
         self._hold_prev_ranger = None
         self._holding_altitude = True
         self.node.get_logger().info(
-            f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m.")
+            f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m, "
+            f"target={self._hold_ranger_target:.3f}m.")
 
     # ---- manual movement ----
 

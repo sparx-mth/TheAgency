@@ -73,6 +73,8 @@ class RoosterCommandUnitNode(Node):
         self.declare_parameter("altitude_hold_interval_sec", 1.0)
         # <=0.0 disables -- see RoosterUnit.__init__ for why this exists.
         self.declare_parameter("max_ranger_m", 0.0)
+        # <=0.0 disables -- see RoosterUnit.__init__ for why this exists.
+        self.declare_parameter("target_ranger_m", 0.0)
         self.declare_parameter("publish_hz", 40.0)
         self.declare_parameter("video_host", "127.0.0.1")
         self.declare_parameter("video_port", 5001)
@@ -92,6 +94,7 @@ class RoosterCommandUnitNode(Node):
         altitude_hold_max_correction = float(self.get_parameter("altitude_hold_max_correction").value)
         altitude_hold_interval_sec = float(self.get_parameter("altitude_hold_interval_sec").value)
         max_ranger_m = float(self.get_parameter("max_ranger_m").value)
+        target_ranger_m = float(self.get_parameter("target_ranger_m").value)
         publish_hz = float(self.get_parameter("publish_hz").value)
         video_host = self.get_parameter("video_host").value
         video_port = int(self.get_parameter("video_port").value)
@@ -112,6 +115,7 @@ class RoosterCommandUnitNode(Node):
             altitude_hold_max_correction=altitude_hold_max_correction,
             altitude_hold_interval_sec=altitude_hold_interval_sec,
             max_ranger_m=max_ranger_m,
+            target_ranger_m=target_ranger_m,
         )
         self.payload = RoosterPayload(
             self, rooster_id,
