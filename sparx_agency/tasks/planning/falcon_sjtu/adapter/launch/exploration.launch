@@ -80,6 +80,16 @@
   <param name="/voxel_mapping/obstacles_inflation" value="$(arg obstacles_inflation)"/>
   <param name="/bspline_opt/safe_distance"         value="$(arg safe_distance)"/>
 
+  <!-- ── Coverage-tour TSP size vs LKH stability. FALCON's coverage tour is a
+       TSP over hgrid cell centres, solved in-process by LKH, which segfaults
+       intermittently and more often as the tour grows (FindTour -> Best5OptMove
+       -> Flip_SL). Coarser cells mean far fewer of them — a 40x40 m box drops
+       from ~64 five-metre cells to ~16 ten-metre ones — which shrinks the TSP
+       and the crash rate while keeping the whole hospital in scope. The tour is
+       slightly less optimal; that is the trade for surviving. -->
+  <arg name="hgrid_cell_size_max" default="10.0"/>
+  <param name="/hgrid/cell_size_max" value="$(arg hgrid_cell_size_max)"/>
+
   <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)"/>
   <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)"/>
   <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)"/>
@@ -98,8 +108,14 @@
   </node>
 
   <!-- ── FALCON, unmodified ────────────────────────────────────────────── -->
+  <!-- respawn rather than required: FALCON's in-process LKH TSP solver
+       segfaults intermittently (FindTour -> Best5OptMove -> Flip_SL, an upstream
+       heuristic bug), and a `required` node takes the whole mission down with
+       it. Respawning restarts the planner in place; the map is rebuilt from the
+       depth stream that keeps flowing. A tight crash loop is still visible in
+       the log (respawn_delay spaces them), which is the signal to stop. -->
   <node pkg="exploration_manager" name="exploration_node" type="exploration_node"
-        output="screen" required="true">
+        output="screen" respawn="true" respawn_delay="3">
     <!-- /odom_world comes from sensor_pose_node (world-frame twist), NOT the
          raw bridged odometry, whose twist is body-frame per REP-147 and would
          start every replan with a velocity pointing along the nose. -->

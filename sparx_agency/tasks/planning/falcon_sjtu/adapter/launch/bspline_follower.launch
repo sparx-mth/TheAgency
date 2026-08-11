@@ -48,8 +48,13 @@
 
   <!-- Speed ceilings. `max_overspeed` is a CLEARANCE setting: FALCON checks its
        route against the map at the speed it planned, so flying the same curve
-       faster spends that margin on stopping distance. -->
-  <arg name="max_speed_xy"     default="1.2" />
+       faster spends that margin on stopping distance. max_speed_xy is the hard
+       cap: lowered from 1.2 to 0.6 after a capsize post-mortem — the aircraft
+       struck warehouse clutter at ~1 m/s (inside the depth near clip, so FALCON
+       never mapped it), pitched up while pinned and tipped past the plugin's
+       ~35 deg clamp, which thrust-along-body-z cannot recover from. Halving the
+       impact speed keeps a near-clip contact a graze the retreat reflex clears. -->
+  <arg name="max_speed_xy"     default="0.6" />
   <arg name="max_overspeed"    default="0.25" />
   <arg name="max_catchup_speed" default="0.15" />
   <arg name="yaw_gain"         default="1.5" />
@@ -59,6 +64,32 @@
        not as a fallback. -->
   <arg name="use_feedforward_lead" default="true" />
   <arg name="predict_reference"    default="true" />
+
+  <!-- Wedge/contact reflex: a velocity-commanded aircraft pinned against a wall
+       is told to keep driving into it and never moves. It backs out on a real
+       Gazebo contact (bumper_states, bridged) or an inferred wedge (commanding
+       motion, net-zero travel), and retreats far enough to bring the wall back
+       outside the ~0.95 m depth near clip so FALCON re-maps it. -->
+  <arg name="wedge_window_s"  default="3.0" />
+  <arg name="wedge_move_m"    default="0.2" />
+  <arg name="wedge_cmd_speed" default="0.08" />
+  <arg name="contact_hold_s"  default="0.4" />
+  <arg name="retreat_time_s"  default="5.0" />
+  <arg name="retreat_speed"   default="0.35" />
+  <arg name="retreat_clear_m" default="1.3" />
+
+  <!-- Crash-recovery reflex. FALCON's in-process LKH solver corrupts the heap on
+       degenerate tours and the node respawns with an EMPTY map at wherever the
+       aircraft now hovers; a respawned FSM never re-triggers itself. It also
+       dead-ends without crashing, looping plan-fails on a frontier whose only
+       viewpoint is the current cell. When no plan has arrived for resurvey_after_s,
+       or the aircraft has not moved stall_move_m in stall_window_s, the follower
+       turns a fresh 360 deg scan so the frontier finder fires again; below the
+       silence window but past hold_silent_s it holds rather than flying blind. -->
+  <arg name="resurvey_after_s" default="12.0" />
+  <arg name="hold_silent_s"    default="6.0" />
+  <arg name="stall_window_s"   default="15.0" />
+  <arg name="stall_move_m"     default="1.5" />
 
   <!-- ── camera model FALCON maps with (corrected; see the header) ── -->
   <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="390.6427" />
@@ -88,5 +119,18 @@
 
     <param name="use_feedforward_lead" value="$(arg use_feedforward_lead)" />
     <param name="predict_reference"    value="$(arg predict_reference)" />
+
+    <param name="wedge_window_s"   value="$(arg wedge_window_s)" />
+    <param name="wedge_move_m"     value="$(arg wedge_move_m)" />
+    <param name="wedge_cmd_speed"  value="$(arg wedge_cmd_speed)" />
+    <param name="contact_hold_s"   value="$(arg contact_hold_s)" />
+    <param name="retreat_time_s"   value="$(arg retreat_time_s)" />
+    <param name="retreat_speed"    value="$(arg retreat_speed)" />
+    <param name="retreat_clear_m"  value="$(arg retreat_clear_m)" />
+
+    <param name="resurvey_after_s" value="$(arg resurvey_after_s)" />
+    <param name="hold_silent_s"    value="$(arg hold_silent_s)" />
+    <param name="stall_window_s"   value="$(arg stall_window_s)" />
+    <param name="stall_move_m"     value="$(arg stall_move_m)" />
   </node>
 </launch>

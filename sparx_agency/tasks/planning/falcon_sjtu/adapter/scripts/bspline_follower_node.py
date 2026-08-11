@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Fly FALCON's B-spline on the SJTU Gazebo drone.
 
 The one node between the planner and the aircraft. It replaces
@@ -36,6 +36,7 @@ import math
 import numpy as np
 import rospy
 from geometry_msgs.msg import Twist
+from gazebo_msgs.msg import ContactsState
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Empty, Float32MultiArray, Int32
 from trajectory.msg import Bspline
@@ -73,11 +74,60 @@ class BsplineFollowerNode(object):
         self._odom_timeout_s = float(rospy.get_param("~odom_timeout_s", 0.5))
         self._takeoff_altitude_m = float(rospy.get_param("~takeoff_altitude_m", 1.0))
         # 1.25 turns; 0 disables. See _survey for why this must exist.
-        self._survey_remaining_rad = (2.0 * math.pi
-                                      * float(rospy.get_param("~survey_revs", 1.25)))
+        self._survey_revs = float(rospy.get_param("~survey_revs", 1.25))
+        self._survey_remaining_rad = 2.0 * math.pi * self._survey_revs
         self._survey_yaw_rate = float(rospy.get_param("~survey_yaw_rate", 0.5))
         self._survey_last_yaw = None
+        # Re-survey when FALCON falls silent for this long after it has been
+        # planning -- the signature of an exploration_node respawn (its LKH
+        # solver segfaults, roslaunch restarts it, and it comes back with an
+        # empty map at wherever the aircraft now is). A fresh 360 deg scan is
+        # what lets it find frontiers again instead of sitting in "No path".
+        self._resurvey_after_s = float(rospy.get_param("~resurvey_after_s", 12.0))
+        # Below the re-survey window but above a normal replan gap: hold instead
+        # of carrying the last curve on into an obstacle while FALCON is down (its
+        # in-process LKH solver corrupts the heap and roslaunch is mid-respawn).
+        # A velocity-commanded aircraft flown a stale plan blind is exactly what
+        # tips into the one wall the depth camera never saw. 6 s clears FALCON's
+        # ~3 s replan cadence so a normal gap is not mistaken for a crash.
+        self._hold_silent_s = float(rospy.get_param("~hold_silent_s", 6.0))
+        # Exploration stall: airborne and not moving while FALCON churns
+        # plan-fails on a frontier whose only viewpoint is the current cell -- it
+        # selects "here", cannot plan a zero-length trajectory to it, and loops
+        # ("next_pos ... same as current pos and yaw") forever. A crash used to
+        # break this by chance (the respawn wipes the map); a fresh 360 deg scan
+        # does it deliberately, clearing or re-routing the stuck frontier.
+        self._stall_window_s = float(rospy.get_param("~stall_window_s", 15.0))
+        # Net displacement, not path length: a stuck aircraft still jitters ~0.5 m
+        # as FALCON's degenerate plans nudge it, so the bar is a real leg, not a
+        # twitch. 1.5 m in 15 s is well below any genuine exploration move.
+        self._stall_move_m = float(rospy.get_param("~stall_move_m", 1.5))
+        self._stall_track = []          # type: list  # (t_s, x, y, z)
+        self._resurveys = 0
+        self._last_bspline_at = None    # type: object
         self._servo = VelocityServo(self._params())
+
+        # ── wedge/contact reflex ─────────────────────────────────────────
+        # A velocity-commanded aircraft pinned against a wall keeps being told
+        # to drive into it and never moves -- the map may not carry the wall
+        # (the depth camera goes blind inside its ~0.95 m near clip), so nothing
+        # in the plan chain notices. Two triggers: ground-truth contact from the
+        # Gazebo bumper, and an inferred wedge (commanding motion, net-zero
+        # travel). Recovery backs out far enough to bring the wall back inside
+        # the near clip, so FALCON re-maps it and plans around it next.
+        self._wedge_window_s = float(rospy.get_param("~wedge_window_s", 3.0))
+        self._wedge_move_m = float(rospy.get_param("~wedge_move_m", 0.2))
+        self._wedge_cmd_speed = float(rospy.get_param("~wedge_cmd_speed", 0.08))
+        self._contact_hold_s = float(rospy.get_param("~contact_hold_s", 0.4))
+        self._retreat_time_s = float(rospy.get_param("~retreat_time_s", 5.0))
+        self._retreat_speed = float(rospy.get_param("~retreat_speed", 0.35))
+        self._retreat_clear_m = float(rospy.get_param("~retreat_clear_m", 1.3))
+        self._track = []                # type: list  # (t_s, x, y, z) history
+        self._contact_seen_at = None    # type: object
+        self._retreat_until = None      # type: object
+        self._retreat_from = None       # type: object  # world pos at retreat start
+        self._retreat_dir_world = None  # type: object
+        self._retreats = 0
 
         self._odom = None               # type: object
         self._odom_at = None            # type: object
@@ -95,6 +145,8 @@ class BsplineFollowerNode(object):
                          Odometry, self._on_odom, queue_size=4)
         rospy.Subscriber("/planning/bspline", Bspline, self._on_bspline, queue_size=4)
         rospy.Subscriber("/planning/replan", Int32, self._on_replan, queue_size=10)
+        rospy.Subscriber(rospy.get_param("~contact_topic", "/simple_drone/bumper_states"),
+                         ContactsState, self._on_bumper, queue_size=4)
 
         self._last_tick = None          # type: object
         rospy.Timer(rospy.Duration(1.0 / self._rate_hz), self._tick)
@@ -162,6 +214,7 @@ class BsplineFollowerNode(object):
         while the real degree comes from a parameter, so a mismatch is a silent
         wrong-curve failure and this repo raises rather than guessing.
         """
+        self._last_bspline_at = rospy.Time.now()
         if msg.order != 3:
             raise ValueError(
                 "FALCON published a degree-%d position spline; this follower "
@@ -217,13 +270,53 @@ class BsplineFollowerNode(object):
         if not self._airborne:
             self._climb(position)
             return
+
+        # A fresh 360 deg scan is the one thing that rebuilds FALCON's map and
+        # gets the frontier finder firing again -- needed after two dead ends:
+        #  * a respawn: its LKH solver crashed and it came back with an empty map
+        #    at wherever the aircraft now hovers, and a respawned FSM never
+        #    re-triggers on its own -- it would sit in WAIT_TRIGGER forever;
+        #  * a stall: it loops plan-failing on a frontier whose only viewpoint is
+        #    the current cell ("next_pos ... same as current pos and yaw"),
+        #    publishing nothing that moves the aircraft.
+        silent_s = self._falcon_silent_s(now)
+        stalled = self._track_and_check_stall(now, position)
+        if self._survey_remaining_rad <= 0.0 and self._retreat_until is None:
+            if silent_s > self._resurvey_after_s:
+                self._begin_resurvey(now, "silent %.0fs (respawn?)" % silent_s)
+            elif stalled:
+                self._begin_resurvey(now, "stalled >%.0fs" % self._stall_window_s)
+
         if self._survey_remaining_rad > 0.0:
             self._survey(yaw)
+            return
+
+        # Contact recovery owns the aircraft while it is backing out of a wall:
+        # the plan that put it there has been dropped, so nothing else may drive.
+        if self._retreat_until is not None:
+            self._retreat(now, position, yaw)
+            return
+
+        # FALCON briefly silent (crashed mid-plan, before the re-survey window):
+        # hold station rather than carry the stale curve on blind into the wall
+        # it could not see. Retreat above takes priority -- backing out of a real
+        # contact must not be interrupted by a hold.
+        if silent_s > self._hold_silent_s:
+            self._cmd.publish(Twist())
+            self._servo.reset()
             return
 
         follow = not (self._stopped or self._finished)
         command = self._servo.update(position, velocity, yaw, dt, now.to_sec(),
                                      follow=follow)
+
+        # Back out on a real contact or an inferred wedge. A wall inside the
+        # depth near clip (~0.95 m) is invisible to FALCON, which then plans
+        # straight through it, so the follower is the only thing that can notice.
+        if follow and not command.holding and self._should_retreat(now, position, command):
+            self._begin_retreat(position, command)
+            return
+
         self._publish(command)
 
     def _elapsed(self, now):
@@ -295,11 +388,64 @@ class BsplineFollowerNode(object):
         command = Twist()
         if self._survey_remaining_rad <= 0.0:
             self._cmd.publish(command)          # stop the turn cleanly
+            # Start the stall clock fresh: the scan just built new map, so give
+            # FALCON a full window to act on it before calling it stuck again --
+            # otherwise the in-place turn itself reads as a stall and loops.
+            self._stall_track = []
             rospy.loginfo("[bspline_follower] survey turn complete -- "
                           "following FALCON")
             return
         command.angular.z = self._survey_yaw_rate
         self._cmd.publish(command)
+
+    def _falcon_silent_s(self, now):
+        # type: (object) -> float
+        """Seconds since FALCON last published a plan; 0 before the first one.
+
+        Zero until the first curve arrives so the startup climb and survey own
+        that phase -- there is no plan to be stale yet, and a large value there
+        would trigger a hold or a re-survey before exploration has even begun.
+        """
+        if self._last_bspline_at is None:
+            return 0.0
+        return (now - self._last_bspline_at).to_sec()
+
+    def _track_and_check_stall(self, now, position):
+        # type: (object, np.ndarray) -> bool
+        """Whether the aircraft has gone nowhere for the whole stall window.
+
+        Net displacement start-to-now, so a drone yawing on the spot at a
+        viewpoint it cannot leave reads as stalled while one genuinely creeping
+        along a corridor does not. Returns False until the window is full.
+        """
+        now_s = now.to_sec()
+        self._stall_track.append((now_s, float(position[0]), float(position[1]),
+                                  float(position[2])))
+        cutoff = now_s - self._stall_window_s
+        while len(self._stall_track) > 1 and self._stall_track[0][0] < cutoff:
+            self._stall_track.pop(0)
+        if self._stall_track[0][0] > cutoff:
+            return False
+        t0, x0, y0, z0 = self._stall_track[0]
+        moved = math.sqrt((position[0] - x0) ** 2 + (position[1] - y0) ** 2
+                          + (position[2] - z0) ** 2)
+        return moved < self._stall_move_m
+
+    def _begin_resurvey(self, now, reason):
+        # type: (object, str) -> None
+        """Restart the survey turn to rebuild the map and break a dead end.
+
+        ``_last_bspline_at`` is pushed to ``now`` and the stall history cleared
+        so the turn is armed once per dead end rather than every tick; the next
+        real plan and the motion it produces reset both when exploration resumes.
+        """
+        self._survey_remaining_rad = 2.0 * math.pi * self._survey_revs
+        self._survey_last_yaw = None
+        self._last_bspline_at = now
+        self._stall_track = []
+        self._resurveys += 1
+        rospy.logwarn("[follower] FALCON %s (recovery #%d); re-surveying to "
+                      "rebuild its map", reason, self._resurveys)
 
     def _climb(self, position):
         # type: (np.ndarray) -> None
@@ -317,6 +463,101 @@ class BsplineFollowerNode(object):
                           position[2])
             return
         self._takeoff.publish(Empty())
+
+    def _on_bumper(self, msg):
+        # type: (ContactsState) -> None
+        """Latch the time of the most recent ground-truth collision."""
+        if len(msg.states) > 0:
+            self._contact_seen_at = rospy.Time.now()
+
+    def _should_retreat(self, now, position, command):
+        # type: (object, np.ndarray, object) -> bool
+        """Whether to back out: a fresh contact, or an inferred wedge."""
+        return self._contact_recent(now) or self._is_wedged(now, position, command)
+
+    def _contact_recent(self, now):
+        # type: (object) -> bool
+        """Whether the bumper reported a contact within the hold window."""
+        if self._contact_seen_at is None:
+            return False
+        return (now - self._contact_seen_at).to_sec() <= self._contact_hold_s
+
+    def _is_wedged(self, now, position, command):
+        # type: (object, np.ndarray, object) -> bool
+        """Whether the aircraft is pinned: commanded to move, going nowhere.
+
+        Net travel over the window -- start point to now -- not the maximum
+        excursion within it, because an aircraft grinding on a wall jitters back
+        and forth by more than the threshold while making no actual progress, and
+        a max-excursion test reads that jitter as movement and never fires.
+        """
+        wanted = math.hypot(command.world_vx, command.world_vy)
+        now_s = now.to_sec()
+        self._track.append((now_s, float(position[0]), float(position[1]),
+                            float(position[2])))
+        cutoff = now_s - self._wedge_window_s
+        while len(self._track) > 1 and self._track[0][0] < cutoff:
+            self._track.pop(0)
+        if wanted < self._wedge_cmd_speed:
+            return False
+        if self._track[0][0] > cutoff:
+            return False                # window not yet full
+        t0, x0, y0, z0 = self._track[0]
+        net = math.sqrt((position[0] - x0) ** 2 + (position[1] - y0) ** 2
+                        + (position[2] - z0) ** 2)
+        return net < self._wedge_move_m
+
+    def _begin_retreat(self, position, command):
+        # type: (np.ndarray, object) -> None
+        """Start backing out of a wall, opposite the direction it drove in.
+
+        The condemned curve is dropped (``reset``) so following resumes only when
+        FALCON publishes a fresh plan. The retreat runs until the aircraft has
+        cleared ``retreat_clear_m`` -- enough to bring the wall back outside the
+        depth near clip, so FALCON re-maps it and plans around it rather than
+        straight back into it.
+        """
+        self._retreats += 1
+        speed = math.hypot(command.world_vx, command.world_vy)
+        if speed > 1e-3:
+            self._retreat_dir_world = (-command.world_vx / speed,
+                                       -command.world_vy / speed)
+        else:
+            self._retreat_dir_world = None      # fall back to -body-x
+        self._retreat_from = np.array(position, dtype=float)
+        self._retreat_until = rospy.Time.now() + rospy.Duration(self._retreat_time_s)
+        self._contact_seen_at = None
+        self._servo.reset()
+        self._track = []
+        self._cmd.publish(Twist())
+        rospy.logwarn("[follower] contact/wedge (retreat #%d); backing out %.1f m",
+                      self._retreats, self._retreat_clear_m)
+
+    def _retreat(self, now, position, yaw):
+        # type: (object, np.ndarray, float) -> None
+        """Fly back out of the wall until clear of it, then hold for a fresh plan.
+
+        Ends on distance (cleared the near clip) or a time cap, whichever first --
+        the cap guards against a retreat that is itself blocked, e.g. a corner.
+        """
+        cleared = float(np.linalg.norm(position - self._retreat_from)) >= self._retreat_clear_m
+        if cleared or now >= self._retreat_until:
+            self._retreat_until = None
+            self._retreat_dir_world = None
+            self._retreat_from = None
+            self._cmd.publish(Twist())
+            rospy.loginfo("[follower] retreat done (%s); holding for a fresh plan",
+                          "cleared" if cleared else "timed out")
+            return
+        twist = Twist()
+        if self._retreat_dir_world is None:
+            twist.linear.x = -self._retreat_speed         # straight back
+        else:
+            cos, sin = math.cos(yaw), math.sin(yaw)
+            wx, wy = self._retreat_dir_world
+            twist.linear.x = self._retreat_speed * (cos * wx + sin * wy)
+            twist.linear.y = self._retreat_speed * (-sin * wx + cos * wy)
+        self._cmd.publish(twist)
 
     def _publish(self, command):
         # type: (object) -> None

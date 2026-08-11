@@ -1,0 +1,63 @@
+# FALCON map_config for the AWS RoboMaker hospital world.
+#
+# Ported from sjtu_project/falcon_docker/hospital.yaml, with the same box_min_z
+# lift the small_house config carries and for the same measured reason:
+#
+#   box_min_z: 0.0 -> 0.6.  FALCON plans anywhere inside the box, and with the
+#   floor in the box it flies at ankle height among the hospital's floor
+#   clutter -- beds, wheelchairs, reception desks, gurneys. The Pegasus campaign
+#   measured this exact failure ("it wedged itself against furniture twice" at
+#   desk height) and raised its floor. The band is the airspace above the
+#   clutter, not the whole room; hospital ceilings are ~2.9 m, so 0.6-2.0 leaves
+#   1.4 m of usable band with the top face closed by structure, not open air.
+#
+# init_* MUST match the drone's spawn pose. Verified live off /simple_drone/odom
+# on the running hospital sim: the model spawns at (1.0, 1.0, 2.0) and settles
+# to rest at (1.0, 1.0, 0.0) on the floor, so the ground-level init below is
+# (1, 1, 0). traj_server parks its pre-trajectory command at init_*, and an init
+# pose that is not where the aircraft rests makes the first reference a step
+# jump.
+
+map_config:
+  map_file: ""
+  map_dimension: 2
+  init_x: 1.0
+  init_y: 1.0
+  init_z: 0.0
+  init_yaw: 0.0
+  map_size:
+    map_min_x: -25.0
+    map_min_y: -25.0
+    map_min_z: -1.0
+    map_max_x:  25.0
+    map_max_y:  25.0
+    map_max_z:   2.2
+    box_min_x: -20.0
+    box_min_y: -20.0
+    box_min_z:   0.6
+    box_max_x:  20.0
+    box_max_y:  20.0
+    box_max_z:   2.0
+    vbox_min_x: -25.0
+    vbox_min_y: -25.0
+    vbox_min_z:  -1.0
+    vbox_max_x:  25.0
+    vbox_max_y:  25.0
+    vbox_max_z:   2.2
+  scale: 1.0
+  # Body (FLU) -> camera optical (RDF). A property of the drone, not the world;
+  # the same rotation sensor_pose_node.py composes into /map_ros/pose.
+  #   cam_x (right)   = -body_y  ->  [ 0, -1,  0]
+  #   cam_y (down)    = -body_z  ->  [ 0,  0, -1]
+  #   cam_z (forward) =  body_x  ->  [ 1,  0,  0]
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+

@@ -15,8 +15,24 @@
 # camera_info is deliberately NOT bridged: FALCON reads intrinsics from
 # rosparam (/uav_model/sensing_parameters/*), which bspline_follower.launch
 # sets to the corrected 600x600 / fx 390.64 model.
+#
+# /clock is bridged ROS2 -> ROS1 so the ROS1 side CAN run on sim time when
+# use_sim_time is set (the hospital world runs below real-time, ~0.88x idle and
+# lower under FALCON's depth+plan load; a wall-clock schedule then runs ahead of
+# the physics -- the dominant failure the Pegasus campaign fixed with the clock).
+# Its publisher is BEST_EFFORT (verified live), so this subscriber MUST be
+# best_effort too -- a reliable reader of a best_effort writer receives nothing.
 
 topics:
+  - topic: /clock
+    type: rosgraph_msgs/msg/Clock
+    queue_size: 10
+    qos:
+      history: keep_last
+      depth: 10
+      reliability: best_effort
+      durability: volatile
+
   - topic: /simple_drone/front_depth/depth/image_raw
     type: sensor_msgs/msg/Image
     queue_size: 1
@@ -52,3 +68,18 @@ topics:
       depth: 1
       reliability: reliable
       durability: volatile
+
+  # Ground-truth contact from the Gazebo collision plugin (gazebo_msgs is
+  # available on both ROS 1 and ROS 2 here). The follower reads this to back out
+  # of a wall the instant it touches -- far more reliable than inferring a wedge
+  # from a stalled pose, because a velocity-commanded aircraft grinding on a wall
+  # still jitters enough to look like it is moving. Publisher is RELIABLE.
+  - topic: /simple_drone/bumper_states
+    type: gazebo_msgs/msg/ContactsState
+    queue_size: 1
+    qos:
+      history: keep_last
+      depth: 1
+      reliability: reliable
+      durability: volatile
+

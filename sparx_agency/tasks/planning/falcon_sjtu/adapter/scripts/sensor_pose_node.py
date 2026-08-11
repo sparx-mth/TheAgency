@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Turn the drone's odometry into the two inputs FALCON's mapper and FSM need.
 
 The SJTU sim publishes one ``nav_msgs/Odometry`` for the body. FALCON needs two
