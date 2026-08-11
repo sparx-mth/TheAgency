@@ -33,6 +33,14 @@ RUN chmod +x /tmp/log_plan_failure.sh && /tmp/log_plan_failure.sh
 COPY patches/fix_falcon_viewpoint_index.sh /tmp/fix_falcon_viewpoint_index.sh
 RUN chmod +x /tmp/fix_falcon_viewpoint_index.sh && /tmp/fix_falcon_viewpoint_index.sh
 
+# Let a run choose its own mapping resolution instead of inheriting one from the
+# exploration box's volume, fix the typo that makes the fine resolution
+# unsettable, and print the size of the voxel grid at startup. The grid is
+# allocated in full on the first tick, so its cost is knowable before the flight
+# and is otherwise invisible. See the script.
+COPY patches/fix_falcon_map_resolution.sh /tmp/fix_falcon_map_resolution.sh
+RUN chmod +x /tmp/fix_falcon_map_resolution.sh && /tmp/fix_falcon_map_resolution.sh
+
 # The catkin package: two rospy nodes, a launch file, and the run configs.
 # runs/ lands INSIDE the package so `$(find falcon_pegasus)/runs/<run>.yaml`
 # resolves in the launch file. run_falcon_pegasus.sh bind-mounts the host copies

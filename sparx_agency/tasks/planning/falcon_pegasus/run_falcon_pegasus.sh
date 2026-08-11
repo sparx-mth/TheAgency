@@ -108,6 +108,25 @@ echo "[INFO] run:        ${RUN_NAME}"
 echo "[INFO] image:      ${IMAGE}"
 echo "[INFO] output dir: ${RUN_DIR_HOST}"
 
+# ── The exploration area: derived and costed before anything starts ───
+# The run file gives five numbers under `map_config.area`; FALCON wants the
+# eighteen of `map_config.map_size`. Deriving them here rather than in the
+# container buys two things. A bad area fails in a tenth of a second with a
+# sentence, instead of inside roslaunch with a glog CHECK and a stack trace. And
+# the size of the voxel grid gets printed while there is still time to change it
+# -- it is allocated in full on the first tick and never grows, so that one
+# number decides whether a large area starts at all.
+PYTHON="${PYTHON:-${REPO_PARENT}/.venv/bin/python}"
+[[ -x "${PYTHON}" ]] || PYTHON="python3"
+RUN_CONFIG_HOST="${RUN_DIR_HOST}/map_config.yaml"
+if ! PYTHONPATH="${REPO_PARENT}" "${PYTHON}" \
+        -m sparx_agency.tasks.planning.falcon_pegasus.mapsize \
+        "${SCRIPT_DIR}/runs/${RUN_NAME}.yaml" --out "${RUN_CONFIG_HOST}"; then
+    echo "[ERROR] this run's exploration area is unusable. Fix map_config.area" >&2
+    echo "        in runs/${RUN_NAME}.yaml -- see mapsize/README.md." >&2
+    exit 2
+fi
+
 docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
 
 chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
@@ -163,6 +182,7 @@ docker run "${TTY_ARGS[@]}" --rm \
     "${IMAGE}" \
     bash -lc "source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && \
               ${RVIZ_PREP} && \
-              roslaunch falcon_pegasus falcon_pegasus.launch run:=${RUN_NAME} ${EXTRA_ARGS}"
+              roslaunch falcon_pegasus falcon_pegasus.launch run:=${RUN_NAME} \
+                        run_config:=/falcon_logs/map_config.yaml ${EXTRA_ARGS}"
 
 echo "[INFO] finished. Output in ${RUN_DIR_HOST}"
