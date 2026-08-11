@@ -1095,15 +1095,20 @@
   <arg name="bev_skip_unchanged_publish" default="true" />
 
   <!-- FALCON speed / safety / frontier -->
-  <!-- 2026-08-10: lowered max_vel/max_acc further (was 0.25/0.25) and raised
-       obstacles_inflation/safe_distance (was 0.85/0.85) for extra collision
-       margin during exploration-mode testing. max_vel=0.15 matches the
-       vel_x:=0.15 already used for astar mode's waypoint_follower (see
-       "Rooster Falcon Adapter" in mission_control.py); same conservative
-       speed across modes rather than a new arbitrary number. Retune if this
-       turns out too slow/too cautious for the actual map's corridor widths. -->
-  <arg name="max_vel"     default="0.15" />
-  <arg name="max_acc"     default="0.15" />
+  <!-- 2026-08-11: reverted to the values exploration was actually confirmed
+       working under (97% coverage, zero crashes, 2026-08-09/10); was
+       lowered to 0.15/0.15 (max_vel/max_acc) on 2026-08-10 for slower flight,
+       and obstacles_inflation/safe_distance raised to 1.0/1.0 for extra
+       margin, but exploration_node has since crashed three separate times
+       (std::bad_alloc, a null-pointer segfault, and now a B-spline assertion
+       failure), always inside the same trajectory-optimization code path,
+       always after this tuning was in place. Reverting to isolate whether
+       this tuning is what's pushing the optimizer into a degenerate case;
+       if crashes stop, that confirms it; if they continue, it's a FALCON bug
+       independent of our tuning. Do NOT re-lower these without also
+       retesting stability; see LESSONS.md for the crash history. -->
+  <arg name="max_vel"     default="0.25" />
+  <arg name="max_acc"     default="0.25" />
   <arg name="max_yaw_vel" default="0.6" />
   <arg name="max_yaw_acc" default="0.5" />
 
@@ -1156,8 +1161,10 @@
        intended cruising speed as "too fast". <=0.0 disables. -->
   <arg name="explore_max_measured_speed_xy" default="0.4" />
 
-  <arg name="obstacles_inflation"        default="1.0" />
-  <arg name="safe_distance"              default="1.0" />
+  <!-- Reverted to 0.85/0.85 alongside max_vel/max_acc above; see that
+       comment for why. -->
+  <arg name="obstacles_inflation"        default="0.85" />
+  <arg name="safe_distance"              default="0.85" />
   <arg name="frontier_min_clearance"     default="0.50" />
   <arg name="frontier_min_occ_clearance" default="0.75" />
   <arg name="frontier_candidate_rmin"    default="1.0" />

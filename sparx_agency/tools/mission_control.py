@@ -1396,7 +1396,19 @@ def _resolved_cmd(svc: Service) -> str:
     return f"{env_block}\n\n{svc.cmd}" if env_block else svc.cmd
 
 
+def _short_caption(description: str, limit: int = 90) -> str:
+    """First line of a service description, capped at `limit` chars -- the
+    full text was cluttering every card by default; still available in full
+    inside the expander below."""
+    text = description.strip().split("\n", 1)[0]
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "…"
+
+
 def _service_cards(services: list[Service], states: dict[str, bool]):
+    st.session_state.setdefault("auto_restart", set())
+    st.session_state.setdefault("user_stopped", set())
     cols = st.columns(3)
     for i, svc in enumerate(services):
         running = states.get(svc.key, False)
@@ -1404,10 +1416,11 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
             with st.container(border=True):
                 dot = "🟢" if running else "🔴"
                 st.markdown(f"**{dot} {svc.name}**")
-                st.caption(svc.description)
+                st.caption(_short_caption(svc.description))
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     if st.button("▶ Start", key=f"s_{svc.key}", disabled=running, use_container_width=True):
+                        st.session_state.user_stopped.discard(svc.key)
                         with st.spinner("Starting…"):
                             err = start_service(svc)
                         if err:
@@ -1417,6 +1430,7 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
                             st.rerun()
                 with b2:
                     if st.button("■ Stop", key=f"x_{svc.key}", disabled=not running, use_container_width=True):
+                        st.session_state.user_stopped.add(svc.key)
                         stop_service(svc)
                         time.sleep(0.5)
                         st.rerun()
@@ -1425,10 +1439,46 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
                         st.session_state.log_key = svc.key
                         st.session_state.log_text = get_logs(svc)
                         st.rerun()
-                # Collapsed by default -- st.code has its own copy-to-clipboard
-                # icon, so this is the "enable copying the command" affordance.
-                with st.expander("📄 Command"):
-                    st.code(_resolved_cmd(svc), language="bash")
+                # Requires "Auto-refresh" in the sidebar -- that's what
+                # actually re-runs this script periodically to notice the
+                # process died and needs restarting; there is no separate
+                # background watcher.
+                auto_restart = st.checkbox(
+                    "🔁 Auto-restart if it dies", key=f"ar_{svc.key}",
+                    value=svc.key in st.session_state.auto_restart)
+                if auto_restart:
+                    st.session_state.auto_restart.add(svc.key)
+                else:
+                    st.session_state.auto_restart.discard(svc.key)
+                # Collapsed by default. text_area (not st.code) so copying
+                # always works by manual select-all + Ctrl/Cmd+C, regardless
+                # of the browser's clipboard-icon JS -- that needs a secure
+                # context (https, or exactly "localhost"), which silently
+                # fails when this is reached over plain http by IP (see the
+                # page title) even though the icon still renders.
+                with st.expander("📄 Command + full description"):
+                    st.caption(svc.description)
+                    st.text_area(
+                        "Command (select all + copy)", value=_resolved_cmd(svc),
+                        height=120, key=f"cmd_{svc.key}", disabled=True,
+                        label_visibility="collapsed")
+
+
+def _supervise_auto_restart(services: list[Service], states: dict[str, bool]):
+    """Restart any service the user asked to auto-restart, iff it is not
+    running AND the user didn't just click Stop on it themselves -- an
+    explicit stop always wins over auto-restart."""
+    auto_restart = st.session_state.get("auto_restart", set())
+    user_stopped = st.session_state.get("user_stopped", set())
+    if not auto_restart:
+        return
+    by_key = {s.key: s for s in services}
+    for key in auto_restart:
+        svc = by_key.get(key)
+        if svc is None or states.get(key, False) or key in user_stopped:
+            continue
+        st.toast(f"🔁 Restarting {svc.name} (auto-restart)")
+        start_service(svc)
 
 
 # ---------------------------------------------------------------------------
@@ -1451,6 +1501,10 @@ with st.sidebar:
 # Status summary
 with st.spinner("Checking service states…"):
     states = get_all_states()
+
+# Once, globally, against every service -- not per-tab, so a service auto-
+# restarts even while a different tab is the one currently visible.
+_supervise_auto_restart(ALL_SERVICES, states)
 
 running_count = sum(states.values())
 m1, m2, m3, m4 = st.columns(4)
