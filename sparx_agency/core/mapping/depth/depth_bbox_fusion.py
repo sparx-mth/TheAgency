@@ -3,6 +3,8 @@ from __future__ import annotations  # PEP 563: stringize the tuple[...] annotati
 import numpy as np
 from typing import Optional
 
+from sparx_agency.core.common.math.bbox import rescale_xyxy
+
 
 def valid_depth_mask(depth: np.ndarray, min_depth: float = 0.01,
                      max_depth: float = float("inf")) -> np.ndarray:
@@ -59,6 +61,24 @@ def bbox_to_xyz_cam_from_depth(
     X = (u - cx) * Z / fx
     Y = (v - cy) * Z / fy
     return (float(X), float(Y), float(Z))
+
+
+def rescale_bbox_to_depth(
+    bbox_xyxy: tuple[float, float, float, float],
+    fx: float, fy: float, cx: float, cy: float,
+    intr_w: int, intr_h: int, depth_w: int, depth_h: int,
+) -> tuple[tuple[int, int, int, int], float, float, float, float]:
+    """Rescale a bbox + intrinsics from RGB/tracker space to depth-array space.
+
+    Use when a depth source's native resolution differs from the bbox's own
+    intrinsics (e.g. a fixed-resolution TensorRT engine) instead of requiring
+    an exact shape match before sampling.
+    """
+    if (depth_h, depth_w) == (intr_h, intr_w):
+        return tuple(int(v) for v in bbox_xyxy), fx, fy, cx, cy
+    x1, y1, x2, y2 = rescale_xyxy(bbox_xyxy, intr_w, intr_h, depth_w, depth_h)
+    sx, sy = depth_w / intr_w, depth_h / intr_h
+    return (int(x1), int(y1), int(x2), int(y2)), fx * sx, fy * sy, cx * sx, cy * sy
 
 
 def transform_point(T_world_cam: np.ndarray, xyz_cam: tuple[float, float, float]) -> tuple[float, float, float]:

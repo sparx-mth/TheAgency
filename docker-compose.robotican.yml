@@ -16,6 +16,7 @@ x-x11-volume: &x11-volume
 services:
   robotican:
     image: theagency:robotican
+    container_name: robotican_dev
     network_mode: host
     ipc: host
     privileged: true
@@ -52,6 +53,14 @@ services:
       - /tmp/rooster_depth:/tmp/rooster_depth
       # Model registry cache -- outside the repo, read-write.
       - ${HOME}/.cache/sparx_agency:${HOME}/.cache/sparx_agency
+      # DA3 TensorRT engine + ONNX (rooster_depth_processor.py's hardcoded
+      # engine_path lives under here) -- read-write, not :ro, because a TRT
+      # version mismatch has needed rebuilding the engine from ONNX from
+      # inside this exact container before (see docs/progress/entries/
+      # 002-rooster-full-containerize.md). Missing entirely until
+      # 2026-08-10 -- confirmed live as a FileNotFoundError inside the
+      # container even though the file exists fine on the host.
+      - ${HOME}/depth_anything_ws:${HOME}/depth_anything_ws
       # run_video_trigger.sh / run_ground_truth_localization.sh `docker exec`
       # into Sphera's `it` container from inside this one.
       - /var/run/docker.sock:/var/run/docker.sock
