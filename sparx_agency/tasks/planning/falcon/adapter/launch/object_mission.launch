@@ -237,6 +237,9 @@
   <arg name="blockage_ttl_s"             default="0.0" /><!-- s a blockage is remembered. 0 = forever, right for a static building -->
   <!-- drift_pid controller - generated block END -->
   <arg name="controller"      default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist | drift_pid -->
+  <!-- Stuck detection + recovery master switch (every controller except drift_pid);
+       full tuning + docs live in nav_stack.launch. recovery:=false disables it. -->
+  <arg name="recovery"        default="true" />
   <!-- Follower-side pose denoising. false = fly the localization stream as
        published, so its own jitter and lag are visible rather than filtered. -->
   <arg name="cmd_vy_sign" default="1.0" /><!-- lateral (linear.y) sign at publish: -1 corrects the inversion measured on this airframe; must be exactly 1 or -1 -->
@@ -818,6 +821,7 @@
     <arg name="blockage_ttl_s"             value="$(arg blockage_ttl_s)" />
     <!-- drift_pid controller - generated block END forwarding -->
     <arg name="controller"      value="$(arg controller)" />
+    <arg name="recovery"        value="$(arg recovery)" />
     <arg name="cmd_vy_sign" value="$(arg cmd_vy_sign)" />
     <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
     <arg name="vel_x"           value="$(arg vel_x)" />

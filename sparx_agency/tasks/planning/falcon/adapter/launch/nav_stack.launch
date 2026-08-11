@@ -256,6 +256,25 @@
        back to the legacy controller with controller:=waypoint. -->
   <arg name="controller"            default="roll_assist" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist | drift_pid -->
 
+  <!-- STUCK DETECTION + RECOVERY (every controller EXCEPT drift_pid, which carries
+       its own blockage reflex). When a command produces no real progress for a
+       while the drone is stuck (usually a doorway edge the map cannot see): the
+       follower takes over, backs it out, and reports the spot on /falcon/blockage
+       so the planner marks it and REPLANS FROM THE REAL POSE. recovery:=false turns
+       the whole thing off. Escape phases are body-frame seconds; the lateral probe
+       is skipped automatically for the one-axis 'waypoint' controller. -->
+  <arg name="recovery"                 default="true" /><!-- master on/off for stuck detection + recovery (ignored by drift_pid) -->
+  <arg name="recovery_window_s"        default="1.2" /><!-- trailing window progress is measured over (s) -->
+  <arg name="recovery_progress_frac"   default="0.30" /><!-- achieved/commanded ratio below which an axis counts as "not moving" -->
+  <arg name="recovery_confirm_ticks"   default="5" /><!-- consecutive bad control ticks needed to declare a blockage -->
+  <arg name="recovery_brake_s"         default="0.4" /><!-- escape: hold still first (s) -->
+  <arg name="recovery_back_s"          default="0.7" /><!-- escape: reverse to break contact (s) -->
+  <arg name="recovery_back_speed"      default="0.10" /><!-- escape: reverse speed (m/s) -->
+  <arg name="recovery_probe_s"         default="0.8" /><!-- escape: sideways probe (s); holonomic/lateral controllers only -->
+  <arg name="recovery_settle_s"        default="0.5" /><!-- escape: hold still after (s), for a clean re-observe -->
+  <arg name="recovery_max_attempts"    default="1" /><!-- back-outs per episode before escalating to a replan -->
+  <arg name="recovery_pose_max_age_s"  default="0.5" /><!-- a pose older than this is not stuck evidence (a stale stream would look "stuck") -->
+
   <!-- Multi-axis controller tuning (only used when controller:=multi_axis). All
        ~mx_* so they never collide with the one-axis params; cruise speed and the
        capture radius are shared with vel_x / pos_acquisition_radius. -->
@@ -1806,6 +1825,18 @@
     <param name="cmd_log_path"           value="$(arg cmd_log_path)" />
     <!-- controller selection + multi-axis tuning (only used when controller:=multi_axis) -->
     <param name="controller"             value="$(arg controller)" />
+    <!-- stuck detection + recovery (every controller except drift_pid) -->
+    <param name="recovery_enabled"        value="$(arg recovery)" />
+    <param name="recovery_window_s"       value="$(arg recovery_window_s)" />
+    <param name="recovery_progress_frac"  value="$(arg recovery_progress_frac)" />
+    <param name="recovery_confirm_ticks"  value="$(arg recovery_confirm_ticks)" />
+    <param name="recovery_brake_s"        value="$(arg recovery_brake_s)" />
+    <param name="recovery_back_s"         value="$(arg recovery_back_s)" />
+    <param name="recovery_back_speed"     value="$(arg recovery_back_speed)" />
+    <param name="recovery_probe_s"        value="$(arg recovery_probe_s)" />
+    <param name="recovery_settle_s"       value="$(arg recovery_settle_s)" />
+    <param name="recovery_max_attempts"   value="$(arg recovery_max_attempts)" />
+    <param name="recovery_pose_max_age_s" value="$(arg recovery_pose_max_age_s)" />
     <param name="mx_lateral_speed_max"   value="$(arg mx_lateral_speed_max)" />
     <param name="mx_yaw_rate"            value="$(arg mx_yaw_rate)" />
     <param name="mx_slow_radius"         value="$(arg mx_slow_radius)" />
