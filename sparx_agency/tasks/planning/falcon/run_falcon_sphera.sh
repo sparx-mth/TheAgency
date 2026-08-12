@@ -264,7 +264,6 @@ docker run -it --rm \
     "${DOCKER_SOCK_MOUNT[@]}" \
     "${FALCON_LOG_MOUNT[@]}" \
     "${FALCON_THOUGHT_LOG_MOUNT[@]}" \
-    --volume "${SCRIPT_DIR}/maps/${ENV_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     --volume "${MAP_EXPANDED}:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${ENV_NAME}.yaml" \
     "${RVIZ_MOUNT[@]}" \
     --network host \

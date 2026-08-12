@@ -94,6 +94,20 @@ class RoosterUnit:
         altitude_hold_kd: float = 600.0,
         altitude_hold_max_correction: float = 200.0,
         altitude_hold_interval_sec: float = 1.0,
+        # <=0.0 disables this entirely -- no ceiling behavior change for any
+        # existing caller. Added 2026-08-10 after climb_duration_sec:=5.0
+        # (a mission_control.py misconfiguration, since fixed) reintroduced
+        # the exact "climbs into the ceiling" failure this file already
+        # documents at climb_duration_sec=3.0 above. That fix removes the
+        # immediate cause; this is the durable safety net so a future bad
+        # config/drift can't do the same thing silently.
+        max_ranger_m: float = 0.0,
+        # <=0.0 disables -- altitude hold then keeps its original behavior of
+        # locking onto whatever ranger the open-loop climb happened to reach
+        # (see _enable_altitude_hold). Set this to actually choose a flight
+        # height instead of however climb_z/climb_duration_sec/hover_z's
+        # open-loop throttle burst happens to land. Added 2026-08-11.
+        target_ranger_m: float = 0.0,
     ):
         self.id = rooster_id
         self.node = node
@@ -108,6 +122,8 @@ class RoosterUnit:
         self.altitude_hold_kd = float(altitude_hold_kd)
         self.altitude_hold_max_correction = float(altitude_hold_max_correction)
         self.altitude_hold_interval_sec = float(altitude_hold_interval_sec)
+        self.max_ranger_m = float(max_ranger_m)
+        self.target_ranger_m = float(target_ranger_m)
 
         self.axes = AxisModel()
 
@@ -201,12 +217,22 @@ class RoosterUnit:
         correction = clamp_symmetric(
             self.altitude_hold_kp * error - self.altitude_hold_kd * velocity,
             self.altitude_hold_max_correction)
+        at_ceiling = self.max_ranger_m > 0.0 and self.ranger >= self.max_ranger_m
+        if at_ceiling:
+            # Never push higher once at/above the ceiling -- correction can
+            # still go negative (descend back under it), just not positive.
+            # altitude_hold_max_correction alone can't do this: it only
+            # bounds the correction's MAGNITUDE per tick, not the resulting
+            # absolute altitude, so a sustained drift (see the hover_z drift
+            # entry in LESSONS.md) could climb past any per-tick bound.
+            correction = min(correction, 0.0)
         new_z = self.hover_z + correction
         self.axes.set(x=self.axes.x, y=self.axes.y, z=new_z, r=self.axes.r)
         self.node.get_logger().info(
             f"[{self.id}] altitude hold: ranger={self.ranger:.3f}m "
             f"target={self._hold_ranger_target:.3f}m error={error:+.3f}m "
-            f"vel={velocity:+.4f}m/s z={new_z:.0f}")
+            f"vel={velocity:+.4f}m/s z={new_z:.0f}"
+            + (" [AT CEILING]" if at_ceiling else ""))
 
     def _enable_altitude_hold(self):
         if self.ranger == float("inf"):
@@ -214,11 +240,16 @@ class RoosterUnit:
                 f"[{self.id}] No ranger telemetry yet -- altitude hold not engaged, "
                 f"holding raw throttle only.")
             return
-        self._hold_ranger_target = self.ranger
+        # A configured target overrides the default "hold wherever the climb
+        # happened to leave you" behavior -- the PD loop then climbs/descends
+        # toward it like any other altitude error, no different code path.
+        self._hold_ranger_target = (
+            self.target_ranger_m if self.target_ranger_m > 0.0 else self.ranger)
         self._hold_prev_ranger = None
         self._holding_altitude = True
         self.node.get_logger().info(
-            f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m.")
+            f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m, "
+            f"target={self._hold_ranger_target:.3f}m.")
 
     # ---- manual movement ----
 
@@ -375,6 +406,20 @@ class RoosterUnit:
                 self.busy_action = None
                 self._enable_altitude_hold()
                 self.node.get_logger().info(f"[{self.id}] Climb cancelled - holding z={self.axes.z:.0f}.")
+                if on_hover:
+                    on_hover()
+                return
+            # Climb is open-loop (fixed throttle, no ranger feedback) -- see
+            # the climb_duration_sec comment above for why that alone already
+            # overshot into the ceiling once. This is the same early-exit as
+            # a cancel, just triggered by the ranger instead of the user.
+            if (self.max_ranger_m > 0.0 and self.ranger != float("inf")
+                    and self.ranger >= self.max_ranger_m):
+                self.busy_action = None
+                self._enable_altitude_hold()
+                self.node.get_logger().warn(
+                    f"[{self.id}] Climb hit ceiling (ranger={self.ranger:.3f}m >= "
+                    f"max_ranger_m={self.max_ranger_m:.2f}m) - holding early.")
                 if on_hover:
                     on_hover()
                 return

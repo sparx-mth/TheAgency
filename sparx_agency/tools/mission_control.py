@@ -499,7 +499,21 @@ ROBOTICAN_SERVICES: list[Service] = [
             "  -p rooster_id:=R1 \\\n"
             "  -p climb_z:=700.0 \\\n"
             "  -p hover_z:=700.0 \\\n"
-            "  -p climb_duration_sec:=5.0"
+            # climb_duration_sec dropped (2026-08-10) -- was 5.0 here, but
+            # rooster_unit.py's own RoosterUnit.__init__ comment documents that
+            # even 3.0s already built up enough climb momentum to fly into the
+            # ceiling before altitude hold could arrest it, and was shortened
+            # to 1.0s specifically to fix that. 5.0 silently overrode that fix
+            # and reintroduced the exact bug, worse -- confirmed live, drone
+            # immediately climbed to the ceiling and stuck there. Falls back
+            # to rooster_command_unit.py's own (correct) default of 1.0s.
+            "  -p max_ranger_m:=1.6 \\\n"
+            # 2026-08-11: fly at a chosen height instead of wherever the
+            # open-loop climb happens to land -- see RoosterUnit's
+            # target_ranger_m. Set equal to max_ranger_m above (not lower):
+            # the ceiling then only backstops overshoot past the intended
+            # target, it isn't fighting a separate lower target.
+            "  -p target_ranger_m:=1.6"
         ),
         env="container",
         machine="container",
@@ -715,26 +729,33 @@ ROBOTICAN_SERVICES: list[Service] = [
         name="Rooster Falcon Adapter",
         key="rooster_planner_adapter",
         group="rooster_planner",
-        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running).",
+        description="ROS1 Falcon planner (sphera_drone.launch) inside the falcon container, wired to R1's topics/camera intrinsics + tuned yaw/BEV params (requires Rooster Falcon Container + Rooster ROS1<->ROS2 Bridge running). Currently nav_mode:=exploration, re-testing with the 2026-08-10 lowered max_vel/raised safe_distance defaults.",
         # Kept identical to rooster_turn_debug.py's FALCON_LAUNCH_CMD (the
         # command actually tested live) so the two never drift apart again —
         # this exact arg list is what fixed the 2026-08-03 yaw/turn-direction
         # bugs (yaw_rate) and the BEV-filter false positives (bev_t_on,
         # bev_occ_conf_full, bev_min_wall_run). See LESSONS.md.
         #
-        # nav_mode:=astar (default is "combination" in sphera_drone.launch,
-        # which routes path_corrector through combination_planner_node --
-        # that node lazily imports `requests`/PIL and crashes at startup on a
-        # falcon-ros:noetic image built before the Dockerfile declared those
-        # packages (see the apt-get stopgap in "Rooster Falcon Container"'s
-        # Launch-All step). With it dead, path_corrector never gets a path
-        # and waypoint_follower sits in WAIT_PATH forever -- confirmed live
-        # 2026-08-04. astar sidesteps that whole dependency; switch back to
-        # combination only once the image itself is rebuilt.
+        # nav_mode is the one deliberate divergence from FALCON_LAUNCH_CMD
+        # (which passes no nav_mode at all, i.e. sphera_drone.launch's own
+        # default "combination", which routes path_corrector through
+        # combination_planner_node -- that node lazily imports requests/PIL
+        # and crashes at startup on a falcon-ros:noetic image built before
+        # the Dockerfile declared those packages; see the apt-get stopgap in
+        # "Rooster Falcon Container"'s Launch-All step). astar sidesteps
+        # that whole dependency; switch back to combination only once the
+        # image itself is rebuilt.
+        #
+        # nav_mode:=exploration confirmed working live 2026-08-09/10 (see
+        # LESSONS.md). Was briefly reverted to astar for object_approach
+        # testing (needs waypoint_follower_node.py, disabled under
+        # exploration) -- back to exploration now to re-test with
+        # nav_stack.launch's lowered max_vel (0.15) / raised safe_distance
+        # and obstacles_inflation (1.0) defaults.
         cmd=(
             "docker exec falcon bash -lc 'source /opt/ros/noetic/setup.bash && "
             "source /catkin_ws/devel/setup.bash && roslaunch falcon_adapter sphera_drone.launch "
-            "map_name:=sphera_jail nav_mode:=astar "
+            "map_name:=sphera_jail nav_mode:=exploration "
             "real_pose_topic:=/R1/localization "
             "real_depth_path_topic:=/R1/depth_frame_path "
             "real_rgb_path_topic:=/R1/rgb_frame_path "
@@ -795,6 +816,10 @@ ROBOTICAN_SERVICES: list[Service] = [
             "cmd_vel_topic:=/cmd_vel_raw pose_topic:=/R1/localization pose_type:=pose_stamped "
             "image_transport:=frame_path rgb_topic:=/R1/rgb_frame_path "
             "depth_topic:=/R1/depth_frame_path "
+            # Without these two, mode requests (including the 'finish' one that
+            # triggers stop->land->disarm) go to object_approach_node.py's own
+            # /xtend/... defaults, which rooster_demo_mode_manager.py never sees.
+            "demo_mode_topic:=/R1/demo_mode demo_mode_request_topic:=/R1/demo_mode_request "
             "fx:=111.837662 fy:=180.0 cx:=269.5 cy:=179.5 img_width:=540 img_height:=360 "
             f"target_object:={_SPHERA_DETECTOR['init_target']} start_enabled:=true "
             "lock_mode:=detector_tracker closure_mode:=multi_axis force_mode:=fixed "
@@ -1371,7 +1396,19 @@ def _resolved_cmd(svc: Service) -> str:
     return f"{env_block}\n\n{svc.cmd}" if env_block else svc.cmd
 
 
+def _short_caption(description: str, limit: int = 90) -> str:
+    """First line of a service description, capped at `limit` chars -- the
+    full text was cluttering every card by default; still available in full
+    inside the expander below."""
+    text = description.strip().split("\n", 1)[0]
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "…"
+
+
 def _service_cards(services: list[Service], states: dict[str, bool]):
+    st.session_state.setdefault("auto_restart", set())
+    st.session_state.setdefault("user_stopped", set())
     cols = st.columns(3)
     for i, svc in enumerate(services):
         running = states.get(svc.key, False)
@@ -1379,10 +1416,11 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
             with st.container(border=True):
                 dot = "🟢" if running else "🔴"
                 st.markdown(f"**{dot} {svc.name}**")
-                st.caption(svc.description)
+                st.caption(_short_caption(svc.description))
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     if st.button("▶ Start", key=f"s_{svc.key}", disabled=running, use_container_width=True):
+                        st.session_state.user_stopped.discard(svc.key)
                         with st.spinner("Starting…"):
                             err = start_service(svc)
                         if err:
@@ -1392,6 +1430,7 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
                             st.rerun()
                 with b2:
                     if st.button("■ Stop", key=f"x_{svc.key}", disabled=not running, use_container_width=True):
+                        st.session_state.user_stopped.add(svc.key)
                         stop_service(svc)
                         time.sleep(0.5)
                         st.rerun()
@@ -1400,10 +1439,46 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
                         st.session_state.log_key = svc.key
                         st.session_state.log_text = get_logs(svc)
                         st.rerun()
-                # Collapsed by default -- st.code has its own copy-to-clipboard
-                # icon, so this is the "enable copying the command" affordance.
-                with st.expander("📄 Command"):
-                    st.code(_resolved_cmd(svc), language="bash")
+                # Requires "Auto-refresh" in the sidebar -- that's what
+                # actually re-runs this script periodically to notice the
+                # process died and needs restarting; there is no separate
+                # background watcher.
+                auto_restart = st.checkbox(
+                    "🔁 Auto-restart if it dies", key=f"ar_{svc.key}",
+                    value=svc.key in st.session_state.auto_restart)
+                if auto_restart:
+                    st.session_state.auto_restart.add(svc.key)
+                else:
+                    st.session_state.auto_restart.discard(svc.key)
+                # Collapsed by default. text_area (not st.code) so copying
+                # always works by manual select-all + Ctrl/Cmd+C, regardless
+                # of the browser's clipboard-icon JS -- that needs a secure
+                # context (https, or exactly "localhost"), which silently
+                # fails when this is reached over plain http by IP (see the
+                # page title) even though the icon still renders.
+                with st.expander("📄 Command + full description"):
+                    st.caption(svc.description)
+                    st.text_area(
+                        "Command (select all + copy)", value=_resolved_cmd(svc),
+                        height=120, key=f"cmd_{svc.key}", disabled=True,
+                        label_visibility="collapsed")
+
+
+def _supervise_auto_restart(services: list[Service], states: dict[str, bool]):
+    """Restart any service the user asked to auto-restart, iff it is not
+    running AND the user didn't just click Stop on it themselves -- an
+    explicit stop always wins over auto-restart."""
+    auto_restart = st.session_state.get("auto_restart", set())
+    user_stopped = st.session_state.get("user_stopped", set())
+    if not auto_restart:
+        return
+    by_key = {s.key: s for s in services}
+    for key in auto_restart:
+        svc = by_key.get(key)
+        if svc is None or states.get(key, False) or key in user_stopped:
+            continue
+        st.toast(f"🔁 Restarting {svc.name} (auto-restart)")
+        start_service(svc)
 
 
 # ---------------------------------------------------------------------------
@@ -1426,6 +1501,10 @@ with st.sidebar:
 # Status summary
 with st.spinner("Checking service states…"):
     states = get_all_states()
+
+# Once, globally, against every service -- not per-tab, so a service auto-
+# restarts even while a different tab is the one currently visible.
+_supervise_auto_restart(ALL_SERVICES, states)
 
 running_count = sum(states.values())
 m1, m2, m3, m4 = st.columns(4)
