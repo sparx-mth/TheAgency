@@ -35,6 +35,7 @@ hard ceiling** on concurrent instances without patching PX4 itself.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -42,6 +43,19 @@ from typing import Optional
 PX4_VEHICLE_MODEL = "gazebo-classic_iris"  # must match PegasusIrisVehicle's backend config
 MAX_INSTANCES = 10
 """PX4's own ceiling: ``px4-rc.mavlink`` sends instances >= 10 to port 14549."""
+
+BOOT_PARAM_SCRIPT = "px4-rc.params"
+"""PX4's own hook for pre-boot parameters, and the only way to set a
+``@reboot_required`` one.
+
+``rcS`` runs ``. px4-rc.params`` -- resolved through ``PATH`` -- after the
+airframe file has applied its defaults and *before* ``rc.vehicle_setup`` starts
+``ekf2``. Upstream's copy in ``ROMFS/px4fmu_common/init.d-posix/`` is entirely
+commented out and exists for exactly this purpose. ``rcS`` appends the ROMFS
+directory to ``PATH``, so a copy in a directory placed *earlier* on ``PATH``
+shadows it, which is how :func:`write_boot_parameters` keeps one per instance
+without touching the PX4 checkout.
+"""
 
 
 def _check_instance(instance: int) -> None:
@@ -92,6 +106,47 @@ def clear_stale_locks(instance: int = 0) -> None:
             pass
 
 
+def kill_stale_px4(px4_dir: Path, instance: int = 0) -> None:
+    """Kill a PX4 daemon left behind by an earlier run of the same instance.
+
+    :func:`launch_px4` starts PX4 with ``-d``, which daemonises it: the process
+    :class:`subprocess.Popen` holds is the launcher, while the ``bin/px4`` that
+    actually binds TCP ``4560 + N`` detaches and outlives it. Terminating the
+    launcher therefore leaves the real PX4 running, and the *next* run on that
+    instance boots into a port clash which PX4 reports only as its sensors going
+    ``STALE!`` and never sending a heartbeat -- an hour of flights lost to a
+    message that names neither the port nor the cause.
+
+    Instances are told apart by **working directory**, which :func:`working_dir`
+    guarantees is unique. Matching on ``-i N`` in a command line instead would
+    also match a live sibling instance and kill another worker's aircraft.
+
+    Args:
+        px4_dir: A built ``PX4-Autopilot`` checkout.
+        instance: PX4 instance id.
+    """
+    target = working_dir(px4_dir, instance)
+    try:
+        target = target.resolve()
+    except OSError:
+        return
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.joinpath("cwd").resolve() != target:
+                continue
+            command = entry.joinpath("cmdline").read_bytes()
+        except OSError:          # the process exited, or is not ours to read
+            continue
+        if b"px4" not in command:
+            continue
+        try:
+            os.kill(int(entry.name), signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def clear_saved_parameters(px4_dir: Path, instance: int = 0) -> None:
     """Delete one instance's persisted parameter store.
 
@@ -110,15 +165,97 @@ def clear_saved_parameters(px4_dir: Path, instance: int = 0) -> None:
         instance: PX4 instance id.
     """
     directory = working_dir(px4_dir, instance)
-    for name in ("parameters.bson", "parameters_backup.bson"):
+    for name in ("parameters.bson", "parameters_backup.bson", BOOT_PARAM_SCRIPT):
         try:
             (directory / name).unlink()
         except FileNotFoundError:
             pass
 
 
+def format_param_value(value) -> str:
+    """Render one parameter value for a ``param set`` line.
+
+    PX4's ``param set`` infers the type from how the value is written, exactly as
+    ``PARAM_SET`` over MAVLink infers it from the declared type -- so an INT32
+    parameter written ``1.0`` is refused, and a REAL32 one written ``0`` becomes
+    an integer PX4 then rejects against the parameter's declared type. The
+    int/float split in :mod:`px4_params` therefore has to survive being turned
+    into text.
+
+    Args:
+        value: An ``int`` for a PX4 INT32 parameter, a ``float`` for a REAL32
+            one. ``bool`` is refused: it is an ``int`` to Python but never what
+            a PX4 parameter is, and accepting it would write ``True``.
+
+    Returns:
+        The value as PX4's shell should see it.
+
+    Raises:
+        TypeError: If ``value`` is not an int or a float.
+    """
+    if isinstance(value, bool):
+        raise TypeError(
+            f"PX4 has no boolean parameter type; write {int(value)} (INT32) or "
+            f"{float(value)} (REAL32) so the intent is explicit"
+        )
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value) if value != int(value) else f"{value:.1f}"
+    raise TypeError(f"cannot write {value!r} ({type(value).__name__}) as a PX4 parameter")
+
+
+def write_boot_parameters(px4_dir: Path, instance: int, params: dict) -> Optional[Path]:
+    """Write one instance's pre-boot ``param set`` script.
+
+    This is the channel for every ``@reboot_required`` parameter -- see
+    :data:`BOOT_PARAM_SCRIPT` for why it lands in the right place, and
+    :data:`px4_params.REBOOT_REQUIRED` for which ones need it.
+
+    ``param set`` is used rather than ``param set-default`` deliberately: the
+    airframe file has already run by this point and set its own defaults, and a
+    default does not override a value that is already there.
+
+    Args:
+        px4_dir: A built ``PX4-Autopilot`` checkout.
+        instance: PX4 instance id. The script is private to it, like every other
+            file in its working directory.
+        params: Name to value. Empty removes any script left by an earlier run
+            rather than leaving it to apply silently -- the same trap as PX4's
+            persisted ``parameters.bson``.
+
+    Returns:
+        The script's path, or None if there was nothing to write.
+
+    Raises:
+        TypeError: If a value is not an int or a float.
+    """
+    directory = working_dir(px4_dir, instance)
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / BOOT_PARAM_SCRIPT
+    if not params:
+        try:
+            script.unlink()
+        except FileNotFoundError:
+            pass
+        return None
+
+    lines = [
+        "#!/bin/sh",
+        "# Generated by sim_flight_recording.px4_launch -- do not edit.",
+        "# Sourced by PX4's rcS before rc.vehicle_setup starts ekf2, which is the",
+        "# only point at which a @reboot_required parameter can be set.",
+    ]
+    lines += [f"param set {name} {format_param_value(value)}"
+              for name, value in sorted(params.items())]
+    script.write_text("\n".join(lines) + "\n")
+    script.chmod(0o755)
+    return script
+
+
 def launch_px4(px4_dir: Path, instance: int = 0,
-               log_path: Optional[Path] = None) -> subprocess.Popen:
+               log_path: Optional[Path] = None,
+               boot_params: Optional[dict] = None) -> subprocess.Popen:
     """Start one PX4 SITL instance in its own working directory.
 
     Args:
@@ -130,6 +267,13 @@ def launch_px4(px4_dir: Path, instance: int = 0,
             running several instances -- interleaved PX4 consoles are unreadable,
             and the pre-flight check that refused an arming is only ever visible
             in this output.
+        boot_params: Parameters to apply before ``ekf2`` starts, from
+            :func:`px4_params.boot_params`. Written to
+            :data:`BOOT_PARAM_SCRIPT` in the instance's working directory, which
+            is prepended to ``PATH`` so PX4's ``rcS`` finds it there instead of
+            the empty upstream copy. None or empty removes a stale script from a
+            previous run, so an instance is never configured by a flag that is
+            no longer set.
 
     Returns:
         The running process, to be passed to :func:`terminate_px4`.
@@ -137,6 +281,7 @@ def launch_px4(px4_dir: Path, instance: int = 0,
     Raises:
         FileNotFoundError: If the PX4 binary has not been built.
         ValueError: If ``instance`` is out of range.
+        TypeError: If a boot parameter's value is not an int or a float.
     """
     _check_instance(instance)
     px4_dir = Path(px4_dir)
@@ -148,17 +293,26 @@ def launch_px4(px4_dir: Path, instance: int = 0,
             f"'make px4_sitl_default none' (see robots/PEGASUS/setup/install.sh)"
         )
 
+    # Before the locks, because a *live* orphan from the last run will simply
+    # recreate them -- and it, not the lock file, is what holds the HIL port.
+    kill_stale_px4(px4_dir, instance)
     clear_stale_locks(instance)
     cwd = working_dir(px4_dir, instance)
     cwd.mkdir(parents=True, exist_ok=True)
+    write_boot_parameters(px4_dir, instance, boot_params or {})
 
-    env = dict(os.environ, PX4_SIM_MODEL=PX4_VEHICLE_MODEL)
+    # cwd first on PATH so `. px4-rc.params` in rcS resolves to the script above
+    # rather than the empty upstream one, which rcS appends to PATH.
+    env = dict(os.environ, PX4_SIM_MODEL=PX4_VEHICLE_MODEL,
+               PATH=f"{cwd}{os.pathsep}{os.environ.get('PATH', '')}")
     romfs = px4_dir / "ROMFS" / "px4fmu_common"
     command = [str(binary), str(romfs) + "/", "-s", str(romfs / "init.d-posix" / "rcS"),
                "-i", str(instance), "-d"]
 
     if log_path is None:
-        return subprocess.Popen(command, cwd=str(cwd), env=env)
+        process = subprocess.Popen(command, cwd=str(cwd), env=env)
+        process._px4_dir = px4_dir  # so terminate_px4 can reap the daemon
+        return process
 
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +320,7 @@ def launch_px4(px4_dir: Path, instance: int = 0,
     process = subprocess.Popen(command, cwd=str(cwd), env=env,
                                stdout=handle, stderr=subprocess.STDOUT)
     process._px4_log_handle = handle  # keep it open as long as the process lives
+    process._px4_dir = px4_dir
     return process
 
 
@@ -186,6 +341,11 @@ def terminate_px4(process: subprocess.Popen, instance: int = 0,
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=timeout)
+    # PX4 runs with -d, so the process above was only the launcher; the daemon
+    # holding TCP 4560+N is still alive and would poison the next run.
+    px4_dir = getattr(process, "_px4_dir", None)
+    if px4_dir is not None:
+        kill_stale_px4(px4_dir, instance)
     handle = getattr(process, "_px4_log_handle", None)
     if handle is not None:
         handle.close()

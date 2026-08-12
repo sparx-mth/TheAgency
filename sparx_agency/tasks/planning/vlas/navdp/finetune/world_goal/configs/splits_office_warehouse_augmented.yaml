@@ -1,0 +1,32 @@
+# Train / validation / test using only the two *augmented* buildings --
+# office_augmented and warehouse_shelves_augmented (the duplicated-obstacle
+# scenes from `sim_flight_recording/augment_scene.py`). No third, unrelated
+# recording source is mixed in.
+#
+# office_augmented reuses splits_office.yaml's bands verbatim rather than
+# re-deriving them. Duplicating obstacles does not move the building envelope
+# or its reachable-space geometry, and re-deriving from the raw map extent was
+# tried here first and rediscovered the exact trap splits_office.yaml already
+# documents: a test band cut at y < -15 measured EMPTY on this campaign's own
+# recordings (--frame-stride 10 preview), because the deep south wing is almost
+# entirely outside office's largest connected free-space component -- the same
+# geometry problem, unaffected by which flights happen to exist. y < -8 is the
+# measured-good cut (147 m2 / 12.5% of reachable space); use it.
+#
+# warehouse_shelves_augmented is assigned whole to train, following
+# splits_multiscene.yaml's precedent for full_warehouse's train portion --
+# SplitPlan.route_inside returns True unconditionally for a whole-scene
+# assignment, so no sample is lost to an internal boundary. It contributes
+# training variety without needing its own val/test cut; office_augmented's
+# already-validated bands supply both.
+
+buffer_m: 1.5
+
+scene_split:
+  warehouse_shelves_augmented: train
+
+scenes:
+  office_augmented:
+    train: [[-24.3,   3.5,   6.4,  40.0]]
+    val:   [[-24.3,  -8.0,   6.4,   3.5]]
+    test:  [[-24.3, -34.5,   6.4,  -8.0]]

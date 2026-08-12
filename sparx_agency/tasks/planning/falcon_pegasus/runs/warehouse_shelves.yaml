@@ -1,0 +1,74 @@
+# FALCON warehouse exploration -- "shelves, centre"
+#
+# Isaac Sim's Simple_Warehouse "warehouse_shelves" scene: a dense rack layout the drone
+# must zigzag between, moderate size (~24 x 39 m footprint) so the
+# whole thing can be mapped inside one short run -- deliberately not the hospital,
+# which is too large to finish. Surveyed voxel map:
+# robots/PEGASUS/maps/warehouse_shelves_voxels.npz (the stub raycasts it for depth).
+#
+# ONE file describes the whole run: the `run` block (read by the Isaac/stub side)
+# and the `map_config` block (read by FALCON off the param server) MUST agree
+# about where the aircraft starts, so init_x/y/z below equal spawn_x/y and the
+# cruise altitude. See runs/3_open_plan.yaml for the full rationale behind every
+# field; only the geometry and the start pose differ here.
+#
+# Spawn points were chosen from the surveyed map: interior, >=0.6 m of clearance
+# through the whole climb column, off-axis and off round numbers (an exactly
+# axis-aligned Iris will not arm -- see 3_open_plan.yaml). Varying the start
+# across runs surfaces which corners of the warehouse are hard to map.
+run:
+  name: "warehouse_shelves"
+  scene: "warehouse_shelves"
+  spawn_x: 2.77
+  spawn_y: 2.03
+  spawn_yaw_deg: 7.0
+  cruise_altitude_m: 1.4
+  camera: "camera_falcon_explorer_640x480.yaml"
+  frame_rate_hz: 12.0
+  # Simulated-second exploration budget. Kept short on purpose: a warehouse this
+  # size is mappable well inside it, so a run that hits this cap was not making
+  # progress and is worth stopping and analysing rather than waiting out.
+  max_flight_s: 300
+  # Hard real-time cap, seconds. Isaac runs below real time, so this bounds the
+  # WALL clock a single iteration can burn. Commented out by default so it does
+  # not cut an Isaac run short; the warehouse campaign passes --max-wall-s.
+  # max_wall_s: 420
+map_config:
+  map_file: ""
+  map_dimension: 2
+  init_x: 2.77
+  init_y: 2.03
+  init_z: 1.4
+  init_yaw: 0.1221730
+  # WHERE TO EXPLORE, in five numbers. The eighteen `map_size` numbers this file
+  # used to carry by hand are derived from these before the container starts. To
+  # see the boxes and what the grid will cost:
+  #
+  #   python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize runs/<run>.yaml
+  #
+  # See runs/3_open_plan.yaml for the full rationale behind every field; only the
+  # geometry differs here. The rack aisles run the length of the building, so the
+  # box edges sit on the outer walls with no inset -- there is no open floor
+  # beyond them to be let into.
+  area:
+    building: [-11.5, -17.5, 11.5, 20.3]
+    flight_band: [1.0, 2.2]
+    vertical_extent: [-0.3, 2.8]
+    resolution: 0.10
+    # Four numbers, not one: the allocated grid is the footprint of the surveyed
+    # voxel map the stub raycasts (robots/PEGASUS/maps/warehouse_shelves_voxels.npz,
+    # origin -12.2, -18.2, -0.3), and that survey is not a symmetric ring around
+    # the exploration box. Keeping the two aligned is what lets a stub flight and
+    # an Isaac flight see the same world.
+    margin: [0.7, 0.7, 0.8, 0.8]
+  scale: 1.0
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]

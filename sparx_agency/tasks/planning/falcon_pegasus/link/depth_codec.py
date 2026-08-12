@@ -35,7 +35,23 @@ import numpy as np
 from sparx_agency.tasks.planning.falcon_pegasus.link.protocol import DEPTH_DTYPE
 
 NEAR_M = 0.15
-"""Below this, a reading is noise or the airframe's own propellers. Zeroed."""
+"""Closest range reported. Nearer returns are CLAMPED to it, not discarded.
+
+They used to be zeroed, as "noise or the airframe's own propellers" -- which is
+the right rule for a physical sensor with a genuine blind zone, and the wrong
+one here. This camera is a ray-cast against the surveyed map: a 0.09 m reading
+is not noise, it is a wall.
+
+Zeroing them cost a whole flight. With the aircraft pinned against a partition
+the lens sits ~0.1 m off it, so the ENTIRE frame reads under NEAR_M -- measured
+min 0.08 / median 0.09 / max 0.13 m -- and every pixel was sent as 0, which on
+this wire means "no measurement". FALCON was handed a blank image while its nose
+was on the wall, so it never mapped that wall, the space beyond it stayed
+UNKNOWN, and it re-planned the same unreachable viewpoint indefinitely. The
+aircraft was backed off three times and returned within ten seconds each time.
+Clamping instead reports "a surface at least this close", which is true and is
+what lets the mapper finally lay the wall down.
+"""
 FAR_M = 20.0
 """Ceiling for a reported range, metres.
 
@@ -53,7 +69,9 @@ def encode_depth(depth_m, near_m=NEAR_M, far_m=FAR_M):
     Args:
         depth_m: ``(height, width)`` float array in metres. ``inf`` means "no
             surface within range"; ``NaN`` means "no measurement".
-        near_m: Readings below this are discarded (written as 0).
+        near_m: Closest reportable range; nearer returns clamp to it. See
+            :data:`NEAR_M` -- discarding them instead hides an obstacle the
+            aircraft is touching.
         far_m: Readings above this are clamped to it.
 
     Returns:
@@ -76,7 +94,10 @@ def encode_depth(depth_m, near_m=NEAR_M, far_m=FAR_M):
     # which is not. They must not collapse to the same number.
     finite = np.nan_to_num(values, nan=0.0, posinf=far_m, neginf=0.0)
     np.clip(finite, 0.0, far_m, out=finite)
-    finite[finite < near_m] = 0.0
+    # A real return closer than near_m clamps UP to it; only a genuine
+    # non-measurement (NaN, already 0 above) stays 0. See NEAR_M.
+    near = (finite > 0.0) & (finite < near_m)
+    finite[near] = near_m
     return np.rint(finite * 1000.0).astype(DEPTH_DTYPE, copy=False)
 
 

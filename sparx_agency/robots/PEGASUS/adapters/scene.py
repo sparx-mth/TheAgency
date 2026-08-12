@@ -13,6 +13,9 @@ and survive only because the no-autopilot debugging script
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 _ASSET_BASE = (
     "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
     "/Assets/Isaac/4.5/Isaac/Environments"
@@ -71,7 +74,52 @@ then dies in ``largest_region`` with "no cell in the map has 0.35 m of
 clearance", which reads like an empty scene rather than a too-short sweep.
 """
 
+LOCAL_SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
+"""Where ``augment_scene.py`` writes locally generated obstacle-duplication recipes.
+
+Never committed (see ``.gitignore``) -- regenerated per device, same as the
+``.ply`` point clouds under ``maps/``.
+"""
+
+AUGMENTED_SCENES: dict = {}
+"""Recipe-name -> ``.json`` path, populated by :func:`_register_local_scenes`.
+
+An augmented scene is not a second USD file on the CDN pattern of
+:data:`INDOOR_SCENES` -- see :func:`load_augmented_scene` for why -- so it
+gets its own registry rather than being folded into that one.
+"""
+
+
+def _register_local_scenes() -> None:
+    """Add any ``scenes/*.json`` recipe found on disk to :data:`AUGMENTED_SCENES`.
+
+    A recipe names the stock scene it was derived from (``base_scene``), so
+    the augmented variant can inherit that scene's :data:`SCENE_SPAWNS` /
+    :data:`SCENE_SWEEP_CEILING_M` entries rather than needing its own -- the
+    building layout, and therefore the known-open spawn point, did not change;
+    only the clutter did.
+    """
+    if not LOCAL_SCENES_DIR.is_dir():
+        return
+    for recipe_path in sorted(LOCAL_SCENES_DIR.glob("*.json")):
+        name = recipe_path.stem
+        AUGMENTED_SCENES[name] = recipe_path
+
+        base = json.loads(recipe_path.read_text()).get("base_scene")
+        if base in SCENE_SPAWNS:
+            SCENE_SPAWNS.setdefault(name, SCENE_SPAWNS[base])
+        if base in SCENE_SWEEP_CEILING_M:
+            SCENE_SWEEP_CEILING_M.setdefault(name, SCENE_SWEEP_CEILING_M[base])
+
+
+_register_local_scenes()
+
 SPAWN_HEIGHT_M = 0.15  # just above the floor -- PX4 needs to detect it is landed at boot
+
+# App ticks between referencing a scene and duplicating one of its children --
+# see load_augmented_scene. Matches flight_session.STAGE_SETTLE_STEPS, which
+# exists for the same reason (async reference composition).
+_AUGMENT_SETTLE_STEPS = 20
 
 
 def scene_spawn(name: str, z: float = SPAWN_HEIGHT_M) -> tuple:
@@ -87,8 +135,11 @@ def scene_spawn(name: str, z: float = SPAWN_HEIGHT_M) -> tuple:
     Raises:
         KeyError: If the scene is unknown or has no recorded spawn.
     """
-    if name not in INDOOR_SCENES:
-        raise KeyError(f"Unknown indoor scene {name!r}; choose from {sorted(INDOOR_SCENES)}")
+    if name not in INDOOR_SCENES and name not in AUGMENTED_SCENES:
+        raise KeyError(
+            f"Unknown indoor scene {name!r}; choose from "
+            f"{sorted(set(INDOOR_SCENES) | set(AUGMENTED_SCENES))}"
+        )
     if name not in SCENE_SPAWNS:
         raise KeyError(
             f"No recorded spawn point for scene {name!r}. Either add one to "
@@ -102,16 +153,23 @@ def scene_spawn(name: str, z: float = SPAWN_HEIGHT_M) -> tuple:
 def load_indoor_scene(name: str, prim_path: str = "/World/Scene") -> str:
     """Reference one of :data:`INDOOR_SCENES` onto the current stage.
 
+    An ``AUGMENTED_SCENES`` name is dispatched to :func:`load_augmented_scene`
+    instead -- it is a duplication recipe over a base scene, not a second CDN
+    reference.
+
     Args:
-        name: A key of :data:`INDOOR_SCENES`.
+        name: A key of :data:`INDOOR_SCENES` or :data:`AUGMENTED_SCENES`.
         prim_path: Stage path to spawn the environment reference at.
 
     Returns:
-        The USD path that was referenced.
+        The USD path that was referenced (the *base* scene's, for an
+        augmented one).
 
     Raises:
         KeyError: If ``name`` is not a known scene.
     """
+    if name in AUGMENTED_SCENES:
+        return load_augmented_scene(name, prim_path)
     if name not in INDOOR_SCENES:
         raise KeyError(f"Unknown indoor scene {name!r}; choose from {sorted(INDOOR_SCENES)}")
 
@@ -119,4 +177,104 @@ def load_indoor_scene(name: str, prim_path: str = "/World/Scene") -> str:
 
     usd_path = INDOOR_SCENES[name]
     add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
+    return usd_path
+
+
+def load_augmented_scene(name: str, prim_path: str = "/World/Scene") -> str:
+    """Load a base scene, then replay its recorded obstacle duplications onto it.
+
+    Deliberately not a second USD file referenced the normal way: an earlier
+    version exported the augmented stage to its own ``.usd`` and referenced
+    that through the same ``add_reference_to_stage`` path as a stock scene,
+    which double-nests the building (the exported layer's root layer already
+    contains a prim path named ``/World/Scene``, so referencing it again under
+    a target also named ``/World/Scene`` composes it one level deeper). PhysX
+    still swept the geometry fine -- world transforms are unaffected by extra
+    nesting -- but the indoor/outdoor ceiling test in
+    ``voxel_grid_3d.restrict_to_indoor`` assumes the ordinary single-nesting
+    layout and silently reclassified the whole building as outdoors. Loading
+    the base scene fresh and replaying the same duplications every time avoids
+    the composition entirely.
+
+    Args:
+        name: A key of :data:`AUGMENTED_SCENES`.
+        prim_path: Stage path the base scene is referenced at -- the
+            duplicated obstacles' source paths are recorded relative to this
+            and re-anchored here.
+
+    Returns:
+        The base scene's USD path (see :func:`load_indoor_scene`).
+
+    Raises:
+        KeyError: If ``name`` is not a known augmented scene.
+    """
+    if name not in AUGMENTED_SCENES:
+        raise KeyError(f"Unknown augmented scene {name!r}; choose from {sorted(AUGMENTED_SCENES)}")
+
+    recipe = json.loads(AUGMENTED_SCENES[name].read_text())
+    usd_path = load_indoor_scene(recipe["base_scene"], prim_path)
+
+    # The CDN reference just added composes asynchronously; ticking the app
+    # gives it time to finish before anything below reads the source prims.
+    import omni.kit.app
+
+    kit_app = omni.kit.app.get_app()
+    for _ in range(_AUGMENT_SETTLE_STEPS):
+        kit_app.update()
+
+    import omni.usd
+    from pxr import UsdGeom
+
+    # Duplicating straight into "<prim_path>/AugmentedObstacles/dup_000" with
+    # no prim ever explicitly Defined at the parent path lets CopyPrim
+    # auto-vivify it as a typeless Sdf "over" (Usd's implicit behaviour for an
+    # unauthored ancestor). An "over" is not IsDefined(), and neither is
+    # anything under it, in the *whole* subtree -- not just at that one prim.
+    # The duplicates exist on the stage (GetPrimAtPath finds them, CopyPrim
+    # reports success) but read as though they do not: GetChildren()'s default
+    # predicate excludes them, and so, critically, does the PhysX/omap sweep
+    # that surveys occupancy -- an augmented scene surveyed this way came back
+    # with an occupied-voxel count byte-identical to the unaugmented one, as
+    # if none of the duplicates were ever placed. Defining the group explicitly
+    # first is what the interactive augment_scene.py run already did
+    # (`augment_with_duplicates`'s ``UsdGeom.Xform.Define``) -- this mirrors it
+    # for the replay path.
+    obstacles_root = f"{prim_path}/AugmentedObstacles"
+    stage = omni.usd.get_context().get_stage()
+    if not stage.GetPrimAtPath(obstacles_root).IsValid():
+        UsdGeom.Xform.Define(stage, obstacles_root)
+
+    from sparx_agency.robots.PEGASUS.adapters import scene_augment
+
+    # The vertical treatment is per obstacle, because one scene mixes batches:
+    # floor-standing clutter stretched through the flight band, and obstacles
+    # hung *in* it that a route has to go around. The recipe-level value is the
+    # fallback that keeps recipes written before that distinction replaying
+    # exactly as they did.
+    default_stretch_top_m = recipe.get("stretch_top_m")
+    dropped = 0
+    for i, obstacle in enumerate(recipe["obstacles"]):
+        source_path = f"{prim_path}{obstacle['source_rel']}"
+        dest_path = f"{obstacles_root}/dup_{i:03d}"
+        stretch_top_m = obstacle.get("stretch_top_m", default_stretch_top_m)
+        # Verified, not just replayed: a placement that passed verification
+        # when the recipe was written is not guaranteed to reproduce
+        # identically on this fresh boot -- see
+        # scene_augment.duplicate_prim_verified's docstring.
+        kept = scene_augment.duplicate_prim_verified(
+            dest_path, source_path,
+            (obstacle["target_x"], obstacle["target_y"]),
+            (obstacle["dx"], obstacle["dy"], obstacle["dz"]),
+            obstacle["rotation_deg"],
+            stretch_top_m=stretch_top_m,
+            float_span_m=obstacle.get("float_span_m"),
+            float_centre_m=obstacle.get("float_centre_m"),
+        )
+        if kept is None:
+            dropped += 1
+
+    if dropped:
+        print(f"load_augmented_scene({name!r}): dropped {dropped}/"
+              f"{len(recipe['obstacles'])} obstacles that failed to reproduce "
+              f"their recorded placement on this replay", flush=True)
     return usd_path

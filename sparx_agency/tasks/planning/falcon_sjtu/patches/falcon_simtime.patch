@@ -1,0 +1,13 @@
+diff --git a/falcon_planner/exploration_manager/src/exploration_node.cpp b/falcon_planner/exploration_manager/src/exploration_node.cpp
+index 2ae28a0..a27eb5c 100644
+--- a/falcon_planner/exploration_manager/src/exploration_node.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_node.cpp
+@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
+   // Check if use_sim_time is false
+   bool use_sim_time;
+   nh.param("/use_sim_time", use_sim_time, false);
+-  CHECK(!use_sim_time) << "Please set use_sim_time to false";
++  LOG(INFO) << "use_sim_time=" << use_sim_time << " (sim-time permitted: all data stamps in this deployment are sim time)";
+ 
+   ExplorationFSM fsm;
+   fsm.init(nh);

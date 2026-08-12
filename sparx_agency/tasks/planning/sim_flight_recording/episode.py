@@ -79,13 +79,19 @@ HOLD_DEADBAND_M = 0.15      # inside this, stop commanding and let it settle
 CLIMB_GAIN = 1.0            # 1/s
 TAKEOFF_TOLERANCE_M = 0.15  # how close to cruise altitude counts as airborne
 
-MAX_REPLANS = 3
+MAX_REPLANS = 6
 """Replans allowed in one flight before it is given up on.
 
 Enough to recover from the two things that actually cause divergence -- a gust
 of PX4 overshoot on a tight corner, and a route the follower cuts wider than the
 planner intended -- without letting an aircraft that simply cannot track its
 route grind through its whole time budget re-deriving the same answer.
+
+Raised from 3: a flight that drifts off the route should be **replanned from
+where it is**, not abandoned, and three was low enough that a long route through
+several doorways could exhaust them and be recorded as ``off_route`` while still
+perfectly flyable. The interval floor below is what keeps this from becoming a
+loop.
 """
 
 REPLAN_MIN_INTERVAL_S = 5.0
@@ -329,7 +335,14 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
     follow_spec = follow_spec or FollowSpec()
 
     start_position = vehicle.state.position
-    failure = arm_for_offboard(loop, px4, start_position, plan.start.yaw, cruise_altitude)
+    # Where the aircraft *is*, not where the route says it should be. The two
+    # agree when the plan was made from a live pose, and the yaw setpoint is the
+    # one place a disagreement is expensive: it is a position command, so opening
+    # a flight with the plan's heading asks PX4 to rotate to it as fast as it
+    # can, unbounded by the follower's yaw rate. The position half of this has
+    # always come from the vehicle; the heading half now does too.
+    start_yaw = adapter.yaw()
+    failure = arm_for_offboard(loop, px4, start_position, start_yaw, cruise_altitude)
     if failure is not None:
         return EpisodeResult(
             outcome=OUTCOME_ARM_TIMEOUT, detail=failure,
@@ -356,7 +369,7 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
     flown_plan = plan
     replans = 0
     last_replan_at = -REPLAN_MIN_INTERVAL_S
-    follower = build_follower(start_position[0], start_position[1], plan.start.yaw,
+    follower = build_follower(start_position[0], start_position[1], start_yaw,
                               plan.waypoints)
     # Only a placeholder until the post-climb plan exists: during the climb the
     # aircraft turns toward the goal's straight-line bearing, which is close
@@ -373,7 +386,7 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
     # has been planned from there.
     hold_xy = takeoff_xy
     phase = PHASE_CLIMB
-    yaw = plan.start.yaw
+    yaw = start_yaw
     tilted_since = None
     offboard_lost_since = None
     last_offboard_request = loop.sim_time
@@ -424,9 +437,16 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
                                   f"it took off -- planned {fresh.path_length_m:.1f} m "
                                   f"from here over {len(fresh.waypoints)} waypoints",
                                   flush=True)
-                    elif replan is not None and verbose:
-                        print(f"    at {position[2]:.1f} m but no route from here -- "
-                              f"flying the pre-takeoff route", flush=True)
+                    elif replan is not None:
+                        # The pre-takeoff route was planned from a snapped ground
+                        # position and a heading the aircraft has since changed;
+                        # flying it because the real plan failed means flying a
+                        # route to somewhere the aircraft is not. Refuse instead.
+                        outcome = OUTCOME_OFF_ROUTE
+                        detail = (f"no route from ({position[0]:.1f}, "
+                                  f"{position[1]:.1f}) at cruise altitude -- the "
+                                  f"pre-takeoff route is not flyable from here")
+                        break
                     route_heading = follower.initial_heading()
                     hold_xy = (float(position[0]), float(position[1]))
                     phase = PHASE_TURN
@@ -553,8 +573,12 @@ def fly_episode(loop, px4, adapter, plan, recorder, follow_spec: FollowSpec = No
                               f"{'; '.join(px4.drain_status_texts()[-4:]) or '(nothing)'}")
                     break
 
-            if phase != PHASE_FOLLOW:
-                progress_at = loop.sim_time   # climbing or turning, not travelling
+            if phase != PHASE_FOLLOW or (follow is not None and follow.turning):
+                # Climbing, lining up, or deliberately stopped to rotate onto the
+                # next leg. All three are stationary on purpose, and a stall
+                # detector that cannot tell them from a wedged aircraft would end
+                # every flight that has a sharp corner in it.
+                progress_at = loop.sim_time
             elif math.dist(tuple(position[:3]), progress_mark) >= STALL_DISTANCE_M:
                 progress_mark = (float(position[0]), float(position[1]), float(position[2]))
                 progress_at = loop.sim_time

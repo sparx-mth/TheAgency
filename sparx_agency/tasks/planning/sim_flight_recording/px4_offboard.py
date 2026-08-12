@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import math
 
+from sparx_agency.core.control.flatness import world_attitude_to_ned_frd
+
 # PX4's custom-mode encoding for MAV_CMD_DO_SET_MODE (see PX4's commander/px4_custom_mode.h).
 # HEARTBEAT.custom_mode packs the main mode into bits 16-23 and the sub mode into
 # 24-31, which is how a caller can tell whether a mode request was actually
@@ -33,6 +35,12 @@ _TYPE_MASK_POSITION_YAW = 0b100111111000
 _TYPE_MASK_VELOCITY_YAW = 0b100111000111
 
 _MAV_FRAME_LOCAL_NED = 1
+
+# SET_ATTITUDE_TARGET type_mask: use the quaternion and the throttle, ignore all
+# three body-rate fields (bits 0-2) -- yaw rate included. See
+# `send_attitude_target` for why the yaw feedforward is masked off today and
+# what enabling it would take.
+_TYPE_MASK_ATTITUDE_THRUST = 0b00000111
 
 # MAV_LANDED_STATE, from EXTENDED_SYS_STATE. PX4's land detector is the only
 # authority on whether the aircraft is actually down; inferring it from altitude
@@ -356,6 +364,60 @@ class PX4Offboard:
             yaw_ned, 0.0,           # yaw, yaw rate (rate ignored)
         )
 
+    def send_attitude_target(self, quaternion_wxyz, throttle: float,
+                             yaw_rate: float = 0.0) -> None:
+        """Stream an **attitude and throttle** setpoint, cutting below PX4's
+        velocity loop.
+
+        This is the deepest cut into PX4 that still leaves it the two loops
+        worth keeping. Above this message the caller owns the trajectory, the
+        position and velocity feedback, and the conversion of a wanted
+        acceleration into a tilt; below it PX4 keeps the attitude loop, the rate
+        loop on the gyro at a kilohertz, and the mixer -- the parts that need a
+        real-time clock and that nothing on the far side of a socket should try
+        to own.
+
+        What that buys over ``send_velocity_world`` is the removal of PX4's own
+        velocity controller from the chain. That loop runs at tens of Hz off the
+        same position estimate the outer loop already has, so it contributes lag
+        without contributing information, and the lag is the metre of tracking
+        error the campaign kept measuring at corners.
+
+        **The attitude is world-referenced, so the heading bias applies.** The
+        quaternion is rotated about the world z axis into PX4's local frame, the
+        same correction ``send_velocity_world`` makes to a velocity.
+
+        **No rate feedforward reaches PX4 in this mode, the yaw rate included.**
+        ``_TYPE_MASK_ATTITUDE_THRUST`` is ``0b111``, which sets the ignore bit
+        for body roll rate, body pitch rate *and* body yaw rate, so the
+        ``yaw_rate`` argument is placed in the message and then discarded by the
+        receiver. An earlier version of this docstring claimed the yaw rate
+        survived as a heading move rate; it does not, and the mask is what
+        decides.
+
+        Clearing bit 2 would pass it through -- PX4's handler copies
+        ``body_yaw_rate`` into the attitude setpoint's yaw move rate when that
+        bit is clear -- and it is probably worth doing, because the yaw
+        feedforward the tracker computes off FALCON's yaw curve is exactly what
+        would help the camera lead a turn. It is deliberately NOT done here:
+        it changes how the aircraft yaws, the stub slews yaw at a fixed rate and
+        cannot show the difference, and it wants its own before/after flight
+        rather than being folded into a reliability run.
+
+        Args:
+            quaternion_wxyz: Desired attitude in the simulator's world (ENU)
+                frame, ``(w, x, y, z)``, unit length.
+            throttle: Normalized collective thrust in [0, 1].
+            yaw_rate: Heading move rate, rad/s, world frame. Carried in the
+                message but currently masked off -- see above.
+        """
+        self._conn.mav.set_attitude_target_send(
+            0, self._conn.target_system, self._conn.target_component,
+            _TYPE_MASK_ATTITUDE_THRUST,
+            list(world_attitude_to_ned_frd(quaternion_wxyz, -self.heading_bias)),
+            0.0, 0.0, float(yaw_rate),
+            max(0.0, min(1.0, float(throttle))))
+
     def set_params(self, params: dict) -> None:
         """Push parameters to PX4.
 
@@ -433,6 +495,17 @@ class PX4Offboard:
         there -- a vision pose sent down it is silently dropped, and the EKF,
         once told to depend on vision, then refuses to arm with "Preflight
         Fail: ekf2 missing data".
+
+        **No ``reset_counter``, and that is a constraint rather than a choice.**
+        PX4 reads that field and treats a change in it as "reset your state to
+        this sample instead of fusing it", which is the natural way to close a
+        gap too large for the innovation gate. The pymavlink in the isaac-sim
+        container predates the extension field -- its
+        ``vision_position_estimate_send`` takes no such argument and raises
+        ``TypeError`` if given one -- so PX4 always sees 0 and never resets. The
+        innovation gates in :data:`px4_params.VISION_ESTIMATOR` are widened to
+        do that job instead. If pymavlink is ever upgraded, the reset path is the
+        better mechanism and worth revisiting.
 
         Args:
             north, east, down: Position in PX4's local NED frame, metres.

@@ -17,12 +17,16 @@ from sparx_agency.tasks.planning.falcon_pegasus.mapsize import expand_run, load_
 PACKAGE = Path(__file__).resolve().parent.parent
 LAUNCH_FILES = sorted((PACKAGE / "adapter" / "launch").glob("*.launch"))
 RUN_FILES = sorted((PACKAGE / "runs").glob("*.yaml"))
+# The six numbered office runs, which share one exploration box. The warehouse
+# runs are a different building and are deliberately not in this list.
+OFFICE_RUN_FILES = sorted((PACKAGE / "runs").glob("[1-6]_*.yaml"))
 
 
 def test_there_are_launch_files_and_run_files_to_check():
     """A glob that silently matches nothing would make everything below pass."""
     assert LAUNCH_FILES
     assert RUN_FILES
+    assert len(OFFICE_RUN_FILES) == 6
 
 
 @pytest.mark.parametrize("path", LAUNCH_FILES, ids=lambda p: p.name)
@@ -65,7 +69,12 @@ def test_run_file_does_not_quietly_allocate_a_fortune(path):
 
 
 def test_the_six_office_runs_still_share_one_exploration_box():
-    """They differ only in where the aircraft starts and how long it flies."""
+    """They differ only in where the aircraft starts and how long it flies.
+
+    Scoped to the six numbered office runs on purpose: the warehouse runs are a
+    different building and must NOT share this box, so globbing every run file
+    here would turn a correct warehouse config into a failure.
+    """
     boxes = {
         tuple(
             expand_run(load_run(path)).config["map_config"]["map_size"][key]
@@ -73,6 +82,6 @@ def test_the_six_office_runs_still_share_one_exploration_box():
                 k for k in ("box_min_x", "box_min_y", "box_max_x", "box_max_y")
             )
         )
-        for path in RUN_FILES
+        for path in OFFICE_RUN_FILES
     }
     assert len(boxes) == 1

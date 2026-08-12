@@ -91,7 +91,35 @@ map_config:
     # ALL SIX RUNS SHARE THIS BOX. They differ in where the aircraft starts and
     # how long it flies. They used to differ by carving the building into six
     # sub-regions, and that was wrong, for the reason above.
-    building: [-23.0, -33.2, 5.1, 38.7]
+    #
+    # THE 1.2 m INSET ON THE WEST, EAST AND NORTH EDGES IS DELIBERATE, AND IT IS
+    # NOT the "edge on a wall" case above -- it is the trap, knowingly accepted,
+    # because the alternative measured worse. Moving those edges onto the walls
+    # was tried: it removed the frontier cut, and it also handed the aircraft a
+    # metre of floor it had never been allowed into, where the west wall carries
+    # shelving with roughly 20 cm gaps at cruise height -- solid slabs at z=1.4
+    # and z=1.7 with a slot between. A* routed into it (its inflation is XY only,
+    # so a horizontal slot looks open) and the aircraft wedged between two
+    # shelves at (-23.4, 0.2, 1.45), frozen to the centimetre for twenty seconds
+    # while the reference oscillated 0.9 m either side of it. That flight ended
+    # after 84 s with 313 m3 mapped, against 878 s and 857 m3 for the inset box
+    # on the round before. So: inset edges cost a frontier cut that makes FALCON
+    # cycle and loiter; flush edges cost a physical wedge that ends the flight.
+    # The cut is the cheaper failure. NOTE that obstacle inflation is already
+    # applied and already active (astar_inflate 0.35 m in the launch) and does
+    # NOT help: it is XY only by design, and a slot between two horizontal slabs
+    # is open in XY. Moving these edges out needs a vertical clearance rule or a
+    # box_min_z above the shelves.
+    #
+    # THE SOUTH EDGE IS DIFFERENT AND IS FIXED AT -27.2. It was at -33.2 while
+    # the building's southernmost structure is at -27.2, so six metres of
+    # outdoor nothing sat inside the box -- volume that can never be observed,
+    # inflating the coverage denominator by ~200 m3 while staying permanently
+    # UNKNOWN, and giving the planner frontiers it can never retire. Moving it
+    # opens no new floor to fly into, so it carries none of the risk above. The
+    # allocated grid still reaches -35.2 (see `margin`), so nothing the camera
+    # sees to the south is lost -- only the region FALCON is asked to explore.
+    building: [-23.0, -27.2, 5.1, 38.7]
     # The z band the planner may fly in: the airspace ABOVE the clutter, not the
     # whole room. This started at 0.6 m, which let FALCON fly the aircraft at
     # 0.74 m -- desk height in this building -- and it wedged itself twice.
@@ -101,13 +129,17 @@ map_config:
     vertical_extent: [-0.2, 2.4]
     # Metres per voxel, chosen rather than inherited. Upstream picks this from the
     # exploration box's VOLUME -- under 4000 m3 it maps at 10 cm, at or above it
-    # 20 cm -- and this box is 2424 m3, just inside the threshold. So the eight-fold
+    # 20 cm -- and this box is 2222 m3, just inside the threshold. So the eight-fold
     # difference in memory currently hangs on a boundary nobody set deliberately.
     # 0.10 is what these runs have always flown; 0.20 costs an eighth of the
     # memory (267 MB -> 33 MB) whenever the detail is worth trading.
     resolution: 0.10
-    # How far the allocated grid reaches past the exploration box, horizontally.
-    margin: 2.0
+    # How far the allocated grid reaches past the exploration box, horizontally:
+    # (low_x, low_y, high_x, high_y). Two metres everywhere except the south,
+    # where it is eight -- pulling the exploration box off the outdoor nothing
+    # (see `building`) deliberately did NOT shrink the allocated grid, so the
+    # mapper still has somewhere to put what the camera sees over the south wall.
+    margin: [2.0, 8.0, 2.0, 2.0]
 
   scale: 1.0
 

@@ -36,15 +36,61 @@ EXPLORATION_OVERRIDES = {
 }
 """What an exploration flight changes about the collection parameter set."""
 
+ATTITUDE_CUT_OVERRIDES = {
+    # Flying on SET_ATTITUDE_TARGET bypasses PX4's position and velocity
+    # controllers entirely, so every MPC_* gain above stops being reachable --
+    # including the tilt ceiling, which is now enforced on our side by
+    # `core.control.flatness.AccelerationLimits`. What is left underneath is the
+    # attitude loop and the rate loop, and those are what have to be right.
+    #
+    # The attitude loop is stiffened because it is now the *fastest* loop
+    # tracking the plan rather than the innermost of three: the position and
+    # velocity smoothing that used to sit above it, and hide a soft attitude
+    # response, is gone.
+    "MC_ROLL_P": 8.0,
+    "MC_PITCH_P": 8.0,
+    # Yaw stays where it is. FALCON's heading plan is already rate-limited and a
+    # stiff yaw loop on a camera boom buys nothing but a shaken image.
+    #
+    # Airmode off. It keeps attitude authority at zero throttle by allowing the
+    # mixer to raise collective, which is right for acrobatics and wrong here:
+    # this aircraft never commands zero throttle (the thrust model floors it),
+    # and the mixer stealing headroom would break the thrust calibration the
+    # whole vertical axis depends on.
+    "MC_AIRMODE": 0,
+}
+"""What the attitude cut changes on top of :data:`EXPLORATION_OVERRIDES`.
 
-def all_params() -> dict:
+Applied only when flying ``control_mode="attitude"``. On the velocity cut the
+``MPC_*`` set above is live and these do not apply -- which is the point of
+keeping the two selectable rather than replacing one with the other.
+"""
+
+
+def all_params(control_mode: str = "attitude") -> dict:
     """Every PX4 parameter an exploration run should fly with.
+
+    Args:
+        control_mode: ``"attitude"`` or ``"velocity"`` -- which cut into PX4 the
+            run will fly. It changes which of PX4's loops are in the chain, and
+            therefore which of its parameters mean anything.
+
+    ``vision=False``: this stack still flies on PX4's simulated GNSS and
+    magnetometer. The collection stack moved off them because a stale compass had
+    PX4 raising a failsafe and force-landing mid-route (see
+    ``sim_flight_recording/px4_params.GPS_ESTIMATOR``), and the same fix would
+    help here -- but it needs a ``VisionPoseSender`` in this package's own loop
+    (``isaac/setup.py``), not just a parameter set, and sending the parameters
+    without the pose would leave EKF2 waiting for data that never arrives.
+    Changing that is its own piece of work.
 
     Returns:
         Name to value, the collection set with :data:`EXPLORATION_OVERRIDES`
         applied. The value's **Python type selects the MAVLink parameter type**
         (see ``PX4Offboard.set_params``), so the int/float split matters.
     """
-    merged = px4_params.all_params()
+    merged = px4_params.all_params(vision=False)
     merged.update(EXPLORATION_OVERRIDES)
+    if control_mode == "attitude":
+        merged.update(ATTITUDE_CUT_OVERRIDES)
     return merged

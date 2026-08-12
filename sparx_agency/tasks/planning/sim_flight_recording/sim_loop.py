@@ -42,14 +42,22 @@ class SimLoop:
             than real time, and there is no reason to wait.
         state_only: Drive only the vehicle's state cache, leaving force
             application to the caller. What a direct force-control script wants.
+        vision: A :class:`~px4_vision_pose.VisionPoseSender`, or None to leave
+            PX4's estimator on its simulated GNSS and magnetometer. Sending the
+            pose is not something a flight script should have to remember: a
+            gap longer than 200 ms of simulated time stops EKF2 fusing vision
+            at all, and the failure is silent -- PX4 simply flies on a estimate
+            nothing is correcting. Putting it in the step is what makes "every
+            step" true by construction.
     """
 
     def __init__(self, world, vehicle, px4=None, rate_hz: float = 10.0,
                  dt: float = flight_session.PHYSICS_DT, realtime: bool = False,
-                 state_only: bool = False):
+                 state_only: bool = False, vision=None):
         self.world = world
         self.vehicle = vehicle
         self.px4 = px4
+        self.vision = vision
         self.dt = dt
         self.realtime = realtime
         self.render_every = flight_session.render_every_n_steps(rate_hz, 1.0 / dt)
@@ -91,10 +99,16 @@ class SimLoop:
         render = self.step_index % self.render_every == 0
         self.world.step(render=render)
         self.driver.step(self.dt)
-        if self.px4 is not None:
-            self.px4.poll()
         self.step_index += 1
         self.sim_time += self.dt
+        # After driver.step(), which is what ran the backend's update() and so
+        # advanced PX4's lockstep clock by dt -- a pose stamped ahead of that
+        # clock is dropped. And after sim_time, so the stamp and the rate limiter
+        # both describe the step that just happened.
+        if self.vision is not None:
+            self.vision.send(self.sim_time)
+        if self.px4 is not None:
+            self.px4.poll()
         if self.realtime:
             self._pace()
         return render

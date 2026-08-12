@@ -14,7 +14,7 @@ from sparx_agency.core.common.types import Pose2D
 from sparx_agency.core.planning.environment import occupancy_from_mask
 from sparx_agency.core.planning.mission import largest_region
 from sparx_agency.tasks.planning.sim_flight_recording.episode_plan import (
-    EpisodeSpec, plan_between, sample_episode, waypoints_with_heading,
+    EpisodeSpec, make_planner, plan_between, sample_episode, waypoints_with_heading,
 )
 
 RES = 0.25
@@ -149,6 +149,30 @@ def test_chained_episode_starts_where_the_last_one_landed():
                      (first.goal.x, first.goal.y)) <= RES * 2
 
 
+def test_a_chained_start_keeps_the_heading_it_was_given():
+    # The heading has to survive the snap-onto-the-region step, or the planner
+    # charges its turn cost against a direction the aircraft is not facing.
+    # A campaign chains from ``plan.goal``, whose own yaw is a meaningless zero
+    # (an arrival has no heading), so the caller must supply the real one --
+    # and this asserts the plumbing carries it when it does.
+    grid = _two_rooms_with_a_doorway()
+    spec = _spec()
+    region = largest_region(grid, spec.clearance_m)
+    for yaw in (0.0, math.pi / 2, -2.0):
+        plan = sample_episode(grid, np.random.default_rng(4), spec, region=region,
+                              start_from=Pose2D(5.0, 5.0, yaw))
+        assert plan.start.yaw == pytest.approx(yaw)
+
+
+def test_an_arrival_has_no_heading_of_its_own():
+    # Point 6: a flight ends on a radius, at whatever angle. plan.goal's yaw is
+    # therefore a placeholder, and this pins that so nobody starts trusting it.
+    grid = _two_rooms_with_a_doorway()
+    plan = plan_between(grid, Pose2D(5.0, 5.0, 1.0), Pose2D(15.0, 5.0, 2.5), _spec())
+    assert plan is not None
+    assert plan.goal.yaw == 0.0
+
+
 def test_impossible_spec_raises_instead_of_looping():
     grid = _two_rooms_with_a_doorway()
     with pytest.raises(RuntimeError, match="could not plan an episode"):
@@ -195,3 +219,25 @@ def test_a_chained_episode_may_start_outside_the_goal_region():
     gx, gy = grid.world_to_grid(plan.goal.x, plan.goal.y)
     assert landable[gy, gx]
     assert plan.start.x > 12.0, "the start should stay where the aircraft actually is"
+
+
+def test_the_spec_hands_its_turn_cost_to_the_planner():
+    # The wiring, not the search: a spec that says turning is expensive must
+    # produce a planner that charges for it, over metres rather than one cell.
+    spec = _spec(start_turn_cost_m_per_rad=2.5, start_turn_radius_m=4.0)
+    params = make_planner(spec).params
+    assert params.start_turn_cost_m_per_rad == 2.5
+    assert params.start_turn_radius_m == 4.0
+    assert params.heading_penalty_m == 0.0, "the reversal shape stays off here"
+
+
+def test_a_route_with_only_one_way_out_is_flown_however_the_aircraft_faces():
+    # The heading cost is a tie-break, never a veto: the doorway is the only way
+    # between the rooms, so it must be taken even facing hard away from it.
+    grid = _two_rooms_with_a_doorway()
+    spec = _spec(start_turn_cost_m_per_rad=8.0, start_turn_radius_m=3.0)
+    goal = Pose2D(15.0, 5.0, 0.0)
+    for yaw in (0.0, math.pi / 2, math.pi, -math.pi / 2):
+        plan = plan_between(grid, Pose2D(5.0, 5.0, yaw), goal, spec)
+        assert plan is not None, f"no route when facing {math.degrees(yaw):.0f} deg"
+        assert max(p[0] for p in plan.waypoints) > 12.0

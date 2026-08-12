@@ -304,6 +304,26 @@
   <!-- drift_pid controller - generated block END -->
   <arg name="controller" default="roll_assist" />
 
+  <!-- Stuck detection + recovery (every controller except drift_pid); the docs
+       for each knob live in nav_stack.launch. recovery:=false disables it.
+       Re-declared and forwarded here because a value set only in nav_stack is
+       not reachable from a mission: this layer re-declares what it passes down,
+       so an arg missing here is silently ignored when set on the command line.
+       DISTINCT from the lost-localization ladder further down, which also uses
+       recovery_* names; that one's reverse speed is recovery_back_speed, this
+       one's is recovery_escape_back_speed. -->
+  <arg name="recovery" default="true" />
+  <arg name="recovery_window_s"        default="1.2" />
+  <arg name="recovery_progress_frac"   default="0.30" />
+  <arg name="recovery_confirm_ticks"   default="5" />
+  <arg name="recovery_brake_s"         default="0.4" />
+  <arg name="recovery_back_s"          default="0.7" />
+  <arg name="recovery_escape_back_speed" default="0.10" />
+  <arg name="recovery_probe_s"         default="0.8" />
+  <arg name="recovery_settle_s"        default="0.5" />
+  <arg name="recovery_max_attempts"    default="1" />
+  <arg name="recovery_pose_max_age_s"  default="0.5" />
+
   <!-- Denoise the pose inside the follower (windowed least-squares fit blended
        with the command being executed) before it is used for control. Set false
        to fly on the localization stream exactly as published, which is what you
@@ -455,10 +475,16 @@
 
   <!-- ── NavDP execution / display ────────────────────────────────
        navdp_execute_fraction: fly only the first fraction of the route, hold at
-       the prefix end until the next ENTER (NavDP drifts further out). The full
-       route is still shown on the BEV viewer. navdp_display_mode: full = RGB +
-       depth + snapshot panels | rgb_only = just the clickable RGB panel. -->
+       the prefix end until that leg has been FLOWN (NavDP drifts further out).
+       The full route is still shown on the BEV viewer. navdp_auto_period_s is
+       the rate floor, not the period; what triggers the next inference is the
+       drone having flown the published leg. navdp_commit_* are the escape
+       hatches for a leg it cannot fly. navdp_display_mode: full = RGB + depth +
+       snapshot panels | rgb_only = just the clickable RGB panel. -->
   <arg name="navdp_execute_fraction"  default="0.5" />
+  <arg name="navdp_auto_period_s"     default="2.0" />
+  <arg name="navdp_commit_timeout_s"  default="30.0" />
+  <arg name="navdp_commit_max_deviation_m" default="2.5" />
   <arg name="navdp_display_mode"      default="full" />
 
   <arg name="publish_mapping_inputs" value="false" />
@@ -977,6 +1003,18 @@
     <arg name="blockage_ttl_s"             value="$(arg blockage_ttl_s)" />
     <!-- drift_pid controller - generated block END forwarding -->
     <arg name="controller"    value="$(arg controller)" />
+    <arg name="recovery"      value="$(arg recovery)" />
+    <!-- Stuck detection + escape tuning (see the declarations above) -->
+    <arg name="recovery_window_s"        value="$(arg recovery_window_s)" />
+    <arg name="recovery_progress_frac"   value="$(arg recovery_progress_frac)" />
+    <arg name="recovery_confirm_ticks"   value="$(arg recovery_confirm_ticks)" />
+    <arg name="recovery_brake_s"         value="$(arg recovery_brake_s)" />
+    <arg name="recovery_back_s"          value="$(arg recovery_back_s)" />
+    <arg name="recovery_escape_back_speed" value="$(arg recovery_escape_back_speed)" />
+    <arg name="recovery_probe_s"         value="$(arg recovery_probe_s)" />
+    <arg name="recovery_settle_s"        value="$(arg recovery_settle_s)" />
+    <arg name="recovery_max_attempts"    value="$(arg recovery_max_attempts)" />
+    <arg name="recovery_pose_max_age_s"  value="$(arg recovery_pose_max_age_s)" />
     <arg name="cmd_vy_sign" value="$(arg cmd_vy_sign)" />
     <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
     <arg name="pp_max_yaw_rate"       value="$(arg pp_max_yaw_rate)" />
@@ -1066,6 +1104,9 @@
     <arg name="turn_penalty"            value="$(arg turn_penalty)" />
     <arg name="heading_penalty_m"       value="$(arg heading_penalty_m)" />
     <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
+    <arg name="navdp_auto_period_s"     value="$(arg navdp_auto_period_s)" />
+    <arg name="navdp_commit_timeout_s"  value="$(arg navdp_commit_timeout_s)" />
+    <arg name="navdp_commit_max_deviation_m" value="$(arg navdp_commit_max_deviation_m)" />
     <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
   </include>
 

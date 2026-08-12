@@ -65,6 +65,16 @@ class EpisodeSpec:
             from its goal. Default is a full half-turn either way, i.e.
             uniformly random: a policy trained only on flights that begin
             already facing the target never learns to turn around.
+        start_turn_cost_m_per_rad: What a radian of turning on the spot is worth
+            in metres of flying, used to plan a route the aircraft can set off
+            on rather than one it must first spin to face. Set it to cruise
+            speed over the stationary yaw rate and the planner trades turning
+            against flying in real seconds -- for the default follower, 1.2 m/s
+            over 0.7 rad/s.
+        start_turn_radius_m: How far from the start that cost reaches. See
+            :class:`WeightedAStarParams`: the cost buys nothing at all charged
+            over a single 10 cm cell, and a few metres is the distance over
+            which the aircraft's heading is genuinely committed.
         max_attempts: How many samples to try before admitting the map cannot
             produce an episode to this spec.
     """
@@ -77,6 +87,8 @@ class EpisodeSpec:
     max_separation_m: Optional[float] = None
     waypoint_spacing_m: float = 2.0
     start_yaw_jitter_rad: float = math.pi
+    start_turn_cost_m_per_rad: float = 1.7
+    start_turn_radius_m: float = 3.0
     max_attempts: int = 20
 
 
@@ -113,10 +125,20 @@ class EpisodePlan:
 def make_planner(spec: EpisodeSpec) -> WeightedAStarPlanner2D:
     """Build the weighted A* planner an :class:`EpisodeSpec` describes.
 
-    ``heading_penalty_m`` is deliberately left at 0: an episode is free to start
-    with a turn (that is what ``start_yaw_jitter_rad`` is for), so a route
-    should not be biased toward whichever way the aircraft happens to be
-    pointing when it spawns.
+    The route is planned from where the aircraft *is and is pointing*, not from
+    a position alone. An episode still starts wherever it likes (that is what
+    ``start_yaw_jitter_rad`` is for) and the aircraft will happily turn around
+    when the mission needs it; the search simply knows that turning costs time,
+    so between two comparable routes it takes the one it can already fly.
+
+    ``heading_penalty_m`` -- the older "only punish reversals" shape -- is left
+    at 0 in favour of ``start_turn_cost_m_per_rad``, which charges by rotation
+    angle from zero. Both were measured over 120 office and 120 warehouse
+    routes: per-radian was the better of the two everywhere, and at the
+    physically-derived 1.7 m/rad over a 3 m run-up it is a strict improvement,
+    cutting flight time, the initial turn *and* the number of stop-and-turns at
+    once. Charging more than that buys a smaller opening turn by detouring, and
+    the detour costs more than the spin it saves.
     """
     return WeightedAStarPlanner2D(WeightedAStarParams(
         inflate_radius_m=spec.inflate_radius_m,
@@ -124,6 +146,8 @@ def make_planner(spec: EpisodeSpec) -> WeightedAStarPlanner2D:
         waypoint_spacing_m=spec.waypoint_spacing_m,
         unknown_blocked=True,   # unsurveyed space is not free space
         heading_penalty_m=0.0,
+        start_turn_cost_m_per_rad=spec.start_turn_cost_m_per_rad,
+        start_turn_radius_m=spec.start_turn_radius_m,
     ))
 
 

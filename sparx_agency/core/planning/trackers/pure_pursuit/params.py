@@ -91,6 +91,21 @@ class PurePursuitParams3D:
     # Yaw control
     yaw_mode: str = "velocity"  # "velocity" = face direction of motion, "path" = follow path yaw
 
+    # How far ahead along the path to point the heading, metres. Zero aims at the
+    # carrot, which makes the heading chase it and arrive at every corner still
+    # turning into the last one; a value comfortably past max_lookahead makes the
+    # heading anticipate the route instead. See ``algorithm.route_heading_3d``.
+    yaw_lookahead: float = 0.0
+
+    # Hold horizontal position and rotate when the heading is this far from where
+    # the route is going, resuming below ``resume_turn_rad``. Zero disables it and
+    # the vehicle turns while flying, which for a rate-limited yaw means taking
+    # every corner wide -- wide enough to miss a doorway. The pair is a hysteresis
+    # band: one threshold alone chatters between flying and turning on the
+    # boundary. resume must be < stop, or the stop is never released.
+    stop_turn_rad: float = 0.0
+    resume_turn_rad: float = 0.0
+
     # Smoothing
     speed_smoothing: float = 0.3
     yaw_rate_smoothing: float = 0.3

@@ -35,7 +35,7 @@ ARMABLE_TIMEOUT_S = 420.0
 def bring_up(simulation_app, scene: str, pegasus_root: Path, px4_dir: Path,
              spawn_xyz, spawn_yaw: float, camera_config: str, rate_hz: float,
              worker: int = 0, want_chase_camera: bool = False,
-             settle_s: float = 30.0):
+             settle_s: float = 30.0, control_mode: str = "attitude"):
     """Build the world, spawn the aircraft, and get PX4 to the point of arming.
 
     Args:
@@ -51,6 +51,9 @@ def bring_up(simulation_app, scene: str, pegasus_root: Path, px4_dir: Path,
         want_chase_camera: Create the external camera used for the flight video.
         settle_s: Simulated seconds to let PX4's estimator converge before the
             first arming attempt.
+        control_mode: Which cut into PX4 the flight will use. It selects the
+            parameter set, because it decides which of PX4's control loops are
+            in the chain at all.
 
     Returns:
         ``(loop, adapter, px4, chase_camera)``; ``chase_camera`` is None unless
@@ -97,7 +100,10 @@ def bring_up(simulation_app, scene: str, pegasus_root: Path, px4_dir: Path,
 
     _wait_for_heartbeat(loop, px4, HEARTBEAT_TIMEOUT_S)
     loop.warmup_camera()
-    campaign_setup.configure_px4(loop, px4, px4_exploration_params.all_params(),
+    # The parameter set depends on where the flight will cut into PX4: an
+    # attitude cut bypasses every MPC_* gain and leans on the MC_* ones instead.
+    campaign_setup.configure_px4(loop, px4,
+                                 px4_exploration_params.all_params(control_mode),
                                  PARAM_SETTLE_S)
     campaign_setup.settle_estimator(loop, px4, settle_s)
     # PX4 refuses to arm for a while after boot, and how long is neither

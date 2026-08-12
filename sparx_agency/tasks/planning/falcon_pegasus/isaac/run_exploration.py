@@ -33,11 +33,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from sparx_agency.core.common.types import KinematicLimits
+from sparx_agency.core.control.trajectory_tracking import TrajectoryTrackerParams
 from sparx_agency.core.planning.trackers.reference_tracker_3d import ReferenceTrackerParams
 from sparx_agency.tasks.planning.falcon_pegasus.isaac import setup
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.falcon_client import FalconLink
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.mission import (
-    ExplorationMission, MissionSpec,
+    CONTROL_ATTITUDE, CONTROL_MODES, ExplorationMission, MissionSpec, TRACE_COLUMNS,
 )
 from sparx_agency.tasks.planning.falcon_pegasus.link.socket_link import (
     DOWNLINK_PORT, UPLINK_PORT,
@@ -62,6 +63,14 @@ def _parse_args():
                         help="also write a chase-camera MP4 of the aircraft")
     parser.add_argument("--onboard-video", action="store_true",
                         help="record the drone's own camera instead of the chase view")
+    parser.add_argument("--collider-fusion", action="store_true",
+                        help="fuse the rendered depth with a raycast of the surveyed "
+                             "colliders, so glass reads solid. OFF by default: the "
+                             "idea is right (the renderer sees through glass, PhysX "
+                             "does not) but the first implementation had a double "
+                             "rotation that corrupted the map, and it also needs "
+                             "astar_inflate lowered or A* stops finding paths. "
+                             "Validate on the stub before trusting a flight to it")
     parser.add_argument("--stream", action="store_true",
                         help="WebRTC livestream on :49100 (one process only)")
     parser.add_argument("--settle-s", type=float, default=30.0,
@@ -81,10 +90,22 @@ def _parse_args():
                         help="override the run config's spawn heading, same caveat")
     parser.add_argument("--max-flight-s", type=float, default=None,
                         help="override the run config's flight budget")
+    parser.add_argument("--max-wall-s", type=float, default=None,
+                        help="hard real-time cap, seconds (overrides the run's "
+                             "max_wall_s). Ends the run once this much WALL clock has "
+                             "passed even if the simulated budget is not spent -- the "
+                             "'not more than N seconds' guarantee. Off if neither is set")
     parser.add_argument("--max-speed", type=float, default=1.6,
                         help="tracker horizontal speed ceiling, m/s. Must exceed "
                              "FALCON's own max_linear_velocity and stay under PX4's "
                              "MPC_XY_VEL_MAX")
+    parser.add_argument("--control", choices=CONTROL_MODES, default=CONTROL_ATTITUDE,
+                        help="where to cut into PX4. 'attitude' rebuilds FALCON's "
+                             "B-spline here and commands attitude + throttle, leaving "
+                             "PX4 only its attitude and rate loops. 'velocity' is the "
+                             "older path -- follow the 100 Hz sampled command and send "
+                             "world velocities, keeping PX4's velocity controller in "
+                             "the chain. Use it to reproduce the baseline numbers")
     parser.add_argument("--uplink-port", type=int, default=UPLINK_PORT)
     parser.add_argument("--downlink-port", type=int, default=DOWNLINK_PORT)
     parser.add_argument("--connect-timeout-s", type=float, default=300.0,
@@ -128,7 +149,12 @@ def _mission_spec(config: dict, args) -> MissionSpec:
                            else run["frame_rate_hz"]),
         max_flight_s=float(args.max_flight_s if args.max_flight_s is not None
                            else run["max_flight_s"]),
+        max_wall_s=(float(args.max_wall_s) if args.max_wall_s is not None
+                    else (float(run["max_wall_s"]) if run.get("max_wall_s") is not None
+                          else None)),
+        control_mode=args.control,
         tracker=ReferenceTrackerParams(limits=limits, max_position_error_m=3.0),
+        tracking=TrajectoryTrackerParams(max_position_error_m=3.0),
     )
 
 
@@ -157,6 +183,7 @@ def main() -> int:
     link = FalconLink(args.uplink_port, args.downlink_port, args.connect_timeout_s)
     result = None
     recorder = None
+    mission = None
     try:
         from sparx_agency.robots.PEGASUS.adapters.scene import SPAWN_HEIGHT_M
         from sparx_agency.tasks.planning.falcon_pegasus.isaac import sensing
@@ -167,7 +194,7 @@ def main() -> int:
             camera_config=str(args.camera or config["run"]["camera"]),
             rate_hz=spec.frame_rate_hz,
             worker=args.worker, want_chase_camera=args.video and not args.onboard_video,
-            settle_s=args.settle_s)
+            settle_s=args.settle_s, control_mode=spec.control_mode)
 
         # Before a single frame is sent: does the pose we will label the depth
         # with actually describe the camera that took it? Nothing downstream can
@@ -192,6 +219,11 @@ def main() -> int:
         print("connected to FALCON", flush=True)
 
         mission = ExplorationMission(loop, px4, adapter, link, spec, recorder=recorder)
+        # Glass: the rendered depth sees through it, PhysX does not. Fuse the
+        # depth with a raycast of the surveyed colliders so FALCON stops
+        # planning routes through glass doors it cannot pass.
+        if args.collider_fusion:
+            mission.enable_collider_fusion(spec.scene, str(config["run"]["camera"]))
         result = mission.fly()
         print("MISSION %s: %s %s" % (spec.name, result.outcome, result.detail), flush=True)
 
@@ -209,6 +241,7 @@ def main() -> int:
         link.close()
         px4_launch.terminate_px4(px4_process, instance=args.worker)
         _write_result(out_dir, run_path, spec, result)
+        _write_trace(out_dir, mission)
         simulation_app.close()
 
     return 0 if result is not None and result.ok else 1
@@ -227,6 +260,22 @@ def _write_result(out_dir: Path, run_path: Path, spec: MissionSpec, result) -> N
     }
     (out_dir / "result.json").write_text(json.dumps(payload, indent=2))
     print("wrote %s" % (out_dir / "result.json"), flush=True)
+
+
+def _write_trace(out_dir: Path, mission) -> None:
+    """Save the per-tick record of plan versus aircraft, if there is one.
+
+    Written in the `finally` beside the result, so a flight that ended by
+    crashing -- the only kind worth this much detail -- still leaves it behind.
+    """
+    trace = None if mission is None else getattr(mission, "_trace", None)
+    if not trace:
+        return
+    import numpy as np
+
+    np.save(out_dir / "trace.npy", np.asarray(trace, dtype=float))
+    (out_dir / "trace_columns.json").write_text(json.dumps(list(TRACE_COLUMNS)))
+    print("wrote %s (%d ticks)" % (out_dir / "trace.npy", len(trace)), flush=True)
 
 
 if __name__ == "__main__":

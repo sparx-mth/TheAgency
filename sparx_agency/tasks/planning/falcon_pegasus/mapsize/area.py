@@ -124,8 +124,12 @@ class ExplorationArea:
         resolution: Voxel edge in metres, chosen explicitly. See the README for
             why this is not left to FALCON's volume rule.
         margin: How far the allocated grid reaches past the exploration box
-            horizontally, in metres. A single number for a symmetric margin, or
-            ``(low_side, high_side)`` where it is not.
+            horizontally, in metres. A single number for a symmetric margin,
+            ``(low_side, high_side)`` where the two sides differ, or
+            ``(low_x, low_y, high_x, high_y)`` — same corner order as
+            ``building`` — where the two axes differ too. The warehouse runs
+            need the four-number form: their grids are the footprint of a
+            surveyed voxel map, which is not centred on the exploration box.
         visualisation: An explicit drawn box, ``(x0, y0, z0, x1, y1, z1)``.
         visualisation_slab_at: Height to centre a thin drawn slab on, for a
             recorder that wants one horizontal cut. Set by the caller from the
@@ -144,12 +148,15 @@ class ExplorationArea:
     visualisation_slab_at: Optional[float] = None
 
     @property
-    def margins(self) -> Tuple[float, float]:
-        """The horizontal margin as ``(low_side, high_side)``."""
+    def margins(self) -> Tuple[float, float, float, float]:
+        """The horizontal margin as ``(low_x, low_y, high_x, high_y)``."""
         if isinstance(self.margin, (int, float)):
-            return (float(self.margin), float(self.margin))
-        low, high = self.margin
-        return (float(low), float(high))
+            side = float(self.margin)
+            return (side, side, side, side)
+        if len(self.margin) == 2:
+            low, high = (float(value) for value in self.margin)
+            return (low, low, high, high)
+        return tuple(float(value) for value in self.margin)
 
     @property
     def box(self) -> Box:
@@ -161,13 +168,13 @@ class ExplorationArea:
     def map(self) -> Box:
         """The allocated voxel grid: the box plus margin, over the full height."""
         box = self.box
-        low, high = self.margins
+        low_x, low_y, high_x, high_y = self.margins
         return Box(
-            box.min_x - low,
-            box.min_y - low,
+            box.min_x - low_x,
+            box.min_y - low_y,
             self.vertical_extent[0],
-            box.max_x + high,
-            box.max_y + high,
+            box.max_x + high_x,
+            box.max_y + high_y,
             self.vertical_extent[1],
         )
 
@@ -241,12 +248,13 @@ class ExplorationArea:
 
         margin = spec.get("margin", 2.0)
         if isinstance(margin, (list, tuple)):
-            if len(margin) != 2:
+            if len(margin) not in (2, 4):
                 raise ValueError(
-                    "map_config.area.margin must be one number, or two for an "
-                    "asymmetric grid, got {}".format(len(margin))
+                    "map_config.area.margin must be one number, two for an "
+                    "asymmetric grid, or four (low_x, low_y, high_x, high_y) "
+                    "where the axes differ too, got {}".format(len(margin))
                 )
-            margin = (float(margin[0]), float(margin[1]))
+            margin = tuple(float(value) for value in margin)
         else:
             margin = float(margin)
 
