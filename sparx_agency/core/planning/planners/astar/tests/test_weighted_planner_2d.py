@@ -416,7 +416,9 @@ def test_split_preserves_endpoints_and_corner_vertices():
 # --------------------------------------------------------------------------
 # heading-aware A* (prefer flying the way the drone looks; avoid turning around)
 # --------------------------------------------------------------------------
-from sparx_agency.core.planning.planners.astar.algorithm_2d import _backward_weight
+from sparx_agency.core.planning.planners.astar.algorithm_2d import (
+    _backward_weight, _turn_angle,
+)
 
 
 def _plen(pts):
@@ -468,5 +470,77 @@ def test_planner_heading_picks_the_side_the_drone_faces():
     assert up.ok and down.ok
     # Facing up -> route goes OVER the top of the wall (reaches high y); facing down
     # -> UNDER the bottom (reaches low y). Wall top is y=3.0m, bottom y=1.0m.
+    assert max(p.y for p in up.path.points) > 3.0
+    assert min(p.y for p in down.path.points) < 1.0
+
+
+# --------------------------------------------------------------------------
+# run-up radius: the heading cost charged over metres rather than over one cell
+# --------------------------------------------------------------------------
+
+
+def test_turn_angle_is_linear_from_zero_unlike_backward_weight():
+    # The rotation-time shape charges a 90 deg turn half of a reversal, where the
+    # reversal shape charges it nothing -- which is the whole difference.
+    assert _turn_angle((1, 0), (1, 0)) == 0.0
+    assert abs(_turn_angle((1, 0), (0, 1)) - math.pi / 2) < 1e-9
+    assert abs(_turn_angle((1, 0), (-1, 0)) - math.pi) < 1e-9
+    assert _backward_weight((1, 0), (0, 1)) == 0.0
+
+
+def test_runup_radius_bends_a_route_a_first_move_cost_cannot():
+    # Goal straight down; the drone faces up (a 180 deg reversal). Charged over
+    # one cell, the route steps sideways once and then goes straight down anyway,
+    # arriving at the goal column almost immediately. Charged over a 3-cell run-up
+    # it has to leave the whole neighbourhood upward-ish, so it swings much wider.
+    cost = np.ones((21, 21))
+    start, goal = (10, 10), (10, 0)
+    kw = dict(connectivity=8, start_dir=(0, 1), start_turn_cost_rad=8.0)
+    one_cell = astar_cost_grid_2d(cost, start, goal, **kw)
+    run_up = astar_cost_grid_2d(cost, start, goal, start_turn_radius=3.0, **kw)
+    assert one_cell.ok and run_up.ok
+    # How far the route gets from the start column before it commits downward.
+    def swing(result):
+        return max(abs(x - 10) for x, _y in result.path)
+    assert swing(run_up) > swing(one_cell)
+    # And the run-up route genuinely leaves the disc going up, not down.
+    exit_cell = next(c for c in run_up.path if (c[0] - 10) ** 2 + (c[1] - 10) ** 2 > 9.0)
+    assert exit_cell[1] >= 10
+
+
+def test_runup_radius_zero_is_exactly_the_first_move_cost():
+    cost = np.ones((21, 21))
+    kw = dict(connectivity=8, start_dir=(0, 1), start_turn_cost_rad=8.0)
+    assert (astar_cost_grid_2d(cost, (10, 10), (10, 0), start_turn_radius=0.0, **kw).path
+            == astar_cost_grid_2d(cost, (10, 10), (10, 0), **kw).path)
+
+
+def test_runup_leaves_a_route_that_already_runs_forward_alone():
+    # Facing the goal: the heading cost is zero along the whole disc exit, so the
+    # route must be the plain shortest path however large the cost or the radius.
+    cost = np.ones((21, 21))
+    plain = astar_cost_grid_2d(cost, (10, 10), (10, 0), connectivity=8)
+    aligned = astar_cost_grid_2d(cost, (10, 10), (10, 0), connectivity=8,
+                                 start_dir=(0, -1), start_turn_cost_rad=20.0,
+                                 start_turn_radius=4.0)
+    assert aligned.path == plain.path
+
+
+def test_planner_per_radian_cost_prefers_the_side_it_faces():
+    # Same wall as the reversal test, but the drone faces along the wall rather
+    # than away from the goal -- a 90 deg turn either way, which the reversal
+    # shape charges nothing for and the per-radian shape charges for.
+    arr = _free(40, 40)
+    arr[10:31, 19:22] = 100
+    grid = _grid(arr)
+    params = WeightedAStarParams(start_turn_cost_m_per_rad=1.7,
+                                 start_turn_radius_m=1.0, los_smoothing=True,
+                                 waypoint_spacing_m=0.3, corner_round=False,
+                                 inflate_radius_m=0.0)
+    planner = WeightedAStarPlanner2D(params)
+    goal = Pose2D(3.0, 2.0)
+    up = planner.plan(PlanRequest(Pose2D(1.0, 2.0, math.pi / 2), goal), grid)
+    down = planner.plan(PlanRequest(Pose2D(1.0, 2.0, -math.pi / 2), goal), grid)
+    assert up.ok and down.ok
     assert max(p.y for p in up.path.points) > 3.0
     assert min(p.y for p in down.path.points) < 1.0

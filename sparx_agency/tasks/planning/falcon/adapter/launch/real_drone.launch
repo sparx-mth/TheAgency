@@ -455,10 +455,16 @@
 
   <!-- ── NavDP execution / display ────────────────────────────────
        navdp_execute_fraction: fly only the first fraction of the route, hold at
-       the prefix end until the next ENTER (NavDP drifts further out). The full
-       route is still shown on the BEV viewer. navdp_display_mode: full = RGB +
-       depth + snapshot panels | rgb_only = just the clickable RGB panel. -->
+       the prefix end until that leg has been FLOWN (NavDP drifts further out).
+       The full route is still shown on the BEV viewer. navdp_auto_period_s is
+       the rate floor, not the period; what triggers the next inference is the
+       drone having flown the published leg. navdp_commit_* are the escape
+       hatches for a leg it cannot fly. navdp_display_mode: full = RGB + depth +
+       snapshot panels | rgb_only = just the clickable RGB panel. -->
   <arg name="navdp_execute_fraction"  default="0.5" />
+  <arg name="navdp_auto_period_s"     default="2.0" />
+  <arg name="navdp_commit_timeout_s"  default="30.0" />
+  <arg name="navdp_commit_max_deviation_m" default="2.5" />
   <arg name="navdp_display_mode"      default="full" />
 
   <arg name="publish_mapping_inputs" value="false" />
@@ -1066,6 +1072,9 @@
     <arg name="turn_penalty"            value="$(arg turn_penalty)" />
     <arg name="heading_penalty_m"       value="$(arg heading_penalty_m)" />
     <arg name="navdp_execute_fraction"  value="$(arg navdp_execute_fraction)" />
+    <arg name="navdp_auto_period_s"     value="$(arg navdp_auto_period_s)" />
+    <arg name="navdp_commit_timeout_s"  value="$(arg navdp_commit_timeout_s)" />
+    <arg name="navdp_commit_max_deviation_m" value="$(arg navdp_commit_max_deviation_m)" />
     <arg name="navdp_display_mode"      value="$(arg navdp_display_mode)" />
   </include>
 

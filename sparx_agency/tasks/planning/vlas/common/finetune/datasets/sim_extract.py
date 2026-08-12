@@ -188,6 +188,42 @@ def _pose_row(frame: SimFrame, stamp_s: float) -> list:
             + [float(v) for v in body])
 
 
+def refuse_a_dirty_recording(out_dir: Path) -> None:
+    """Fail if ``out_dir`` already holds frames from an earlier flight.
+
+    Frames are written sequentially from ``000000``, and nothing here clears the
+    directory first. So a flight recorded into a directory a *longer* flight
+    used before it overwrites the first N frames and leaves the old tail in
+    place -- and every consumer reads a directory of numbered images as one
+    recording. ``ffmpeg -i %06d.jpg`` cannot tell, the dataset loader cannot
+    tell, and the poses row count no longer matches the imagery.
+
+    This is not hypothetical. A comparison recording of the cluttered office
+    ended with 201 frames of a different scene, spliced on from a run 26
+    minutes earlier; it was caught only because the video tooling separately
+    checks that the camera and the map panel cover the same span. Anything that
+    reached the training set this way would be silent.
+
+    Refusing is right rather than clearing: the frames may be the only copy of
+    an expensive flight, and deleting them to make room is a decision for
+    whoever knows that, not for the writer.
+
+    Args:
+        out_dir: The recording directory about to be written.
+
+    Raises:
+        FileExistsError: There are already frames there.
+    """
+    for name in ("rgb", "depth"):
+        existing = sorted((out_dir / name).glob("*")) if (out_dir / name).is_dir() else []
+        if existing:
+            raise FileExistsError(
+                "%s already holds %d %s frame(s) from an earlier flight; frames "
+                "are numbered from zero, so writing here would leave the tail of "
+                "that flight spliced onto this one. Move or delete %s first."
+                % (out_dir, len(existing), name, out_dir))
+
+
 class FlightWriter:
     """Write a recording one frame at a time, straight to disk.
 
@@ -214,6 +250,11 @@ class FlightWriter:
                  camera_height_m: float, pitch_deg: float,
                  max_depth_m: float = MAX_DEPTH_M,
                  depth_format: str = DEPTH_FORMAT_PNG, rgb_ext: str = "jpg"):
+        """
+        Raises:
+            FileExistsError: ``out_dir`` already holds frames from an earlier
+                flight. See :func:`refuse_a_dirty_recording`.
+        """
         self.out_dir = Path(out_dir)
         self.intrinsics = intrinsics
         self.rate_hz = rate_hz
@@ -225,6 +266,7 @@ class FlightWriter:
 
         self._depth_dir = self.out_dir / "depth"
         self._depth_dir.mkdir(parents=True, exist_ok=True)
+        refuse_a_dirty_recording(self.out_dir)
         self._poses = []
         self._have_rgb = False
 

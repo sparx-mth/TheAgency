@@ -170,6 +170,22 @@ class WeightedAStarParams:
     # rather than spinning in place because the shortest path runs backward. Needs
     # the start pose's ``yaw`` set (the planner reads ``request.start.yaw``). 0 = off.
     heading_penalty_m: float = 0.0
+    # The rotation-time counterpart: metres of extra path charged per RADIAN the
+    # route turns the drone away from its current heading at the start, linear
+    # from zero rather than free below 90 deg. Use this when the follower stops
+    # and yaws on the spot before a corner it cannot glide, so a 90 deg turn
+    # really does cost half of what a reversal costs; set it to cruise speed over
+    # yaw rate and the trade is in seconds. Adds to ``heading_penalty_m``, needs
+    # the same start ``yaw``. 0 = off.
+    start_turn_cost_m_per_rad: float = 0.0
+    # How far from the start, in metres, that cost is allowed to reach. It is
+    # charged once, against the bearing on which the route leaves a disc of this
+    # radius -- so set it to roughly the distance the aircraft covers while it
+    # turns, and the route has to commit to leaving the area the way the robot is
+    # pointing or pay for the rotation. 0 charges the first cell step instead,
+    # which is measurably almost no bias at all: see astar_cost_grid_2d, which
+    # also explains why a per-cell angular turn cost is a trap.
+    start_turn_radius_m: float = 0.0
     los_smoothing: bool = True
     waypoint_spacing_m: float = 3.0
     goal_snap_radius_m: float = 2.0

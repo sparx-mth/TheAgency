@@ -61,13 +61,17 @@ def _parse_args():
                     help="half-width of the swept area around the origin, metres")
     ap.add_argument("--floor", type=float, default=DEFAULT_FLOOR_M,
                     help="lowest world z to sweep, metres")
-    ap.add_argument("--ceiling", type=float, default=DEFAULT_CEILING_M,
-                    help="highest world z to sweep, metres")
+    ap.add_argument("--ceiling", type=float, default=None,
+                    help="highest world z to sweep, metres. Defaults to "
+                         "scene.SCENE_SWEEP_CEILING_M[--scene] if the scene has "
+                         f"an entry, else {DEFAULT_CEILING_M:.0f} m")
     ap.add_argument("--slab-half-height", type=float, default=DEFAULT_SLAB_HALF_HEIGHT_M,
                     help="half-thickness of the slab projected into the 2D map, metres")
-    ap.add_argument("--max-ceiling", type=float, default=8.0,
+    ap.add_argument("--max-ceiling", type=float, default=None,
                     help="how far above the flight altitude to look for a ceiling, "
-                         "metres. A column with none is outdoors")
+                         "metres. A column with none is outdoors. Defaults to "
+                         "match --ceiling if the scene has a "
+                         "SCENE_SWEEP_CEILING_M entry, else 8.0")
     ap.add_argument("--floor-z", type=float, default=0.0,
                     help="world z of the floor, metres, for the landability test")
     ap.add_argument("--robot-radius", type=float, default=AIRFRAME_RADIUS_M,
@@ -82,7 +86,26 @@ def _parse_args():
                     help="also write a PNG of the 2D map next to it")
     ap.add_argument("--no-ply", action="store_true",
                     help="skip the point cloud (it is the largest artefact)")
-    return ap.parse_args()
+    args = ap.parse_args()
+
+    # SCENE_SWEEP_CEILING_M exists specifically so a warehouse-class scene
+    # doesn't silently get surveyed with a roof-height default well below its
+    # actual roof -- but it was dead data until this resolved it here, and a
+    # bare --scene warehouse_shelves run paid for that twice: restrict_to_indoor
+    # finds no ceiling above most columns at the 6 m default and marks the
+    # whole building outdoors, which fails downstream not with "your ceiling
+    # is too low" but with largest_region's unrelated-sounding "no cell in the
+    # map has 0.35 m of clearance". Only fills in what the user did not
+    # explicitly pass; a bare `--ceiling`/`--max-ceiling` on the command line
+    # still wins.
+    from sparx_agency.robots.PEGASUS.adapters.scene import SCENE_SWEEP_CEILING_M
+
+    scene_ceiling = SCENE_SWEEP_CEILING_M.get(args.scene)
+    if args.ceiling is None:
+        args.ceiling = scene_ceiling if scene_ceiling is not None else DEFAULT_CEILING_M
+    if args.max_ceiling is None:
+        args.max_ceiling = scene_ceiling if scene_ceiling is not None else 8.0
+    return args
 
 
 def write_preview(grid, path: Path, landing_region=None) -> None:

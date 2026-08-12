@@ -176,6 +176,7 @@ class _State3D:
     progress_idx: int = 0
     speed_cmd: float = 0.0
     yaw_rate_cmd: float = 0.0
+    turning: bool = False       # latched by stop_turn_rad, released by resume_turn_rad
 
 
 class PurePursuitTracker3D:
@@ -260,13 +261,34 @@ class PurePursuitTracker3D:
         # Find lookahead point (3D)
         look_idx, target = alg.find_lookahead_point_3d(xyz, pos, self._s.progress_idx, lookahead_dist)
 
+        # Where to point the camera: along the route ahead when asked, so the
+        # heading anticipates the next leg instead of chasing the carrot.
+        route_yaw = None
+        if p.yaw_lookahead > 0.0:
+            route_yaw = alg.route_heading_3d(
+                xyz, pos, self._s.progress_idx, p.yaw_lookahead)
+
+        # Whether to hold still and rotate. Measured against the route heading,
+        # not the carrot's: the question is "am I pointing where the route goes",
+        # and the carrot's bearing swings too much to latch on.
+        max_yaw_rate = min(p.max_yaw_rate, lim.max_yaw_rate)
+        reference_yaw = route_yaw
+        if reference_yaw is None:
+            _, _, _, reference_yaw = alg.compute_velocity_3d(
+                pos, target, pose.yaw, 0.0, 0.0)
+        self._update_turning(
+            float(alg.normalize_angle(reference_yaw - pose.yaw)), p)
+
         # Compute 3D velocity toward target
         max_speed_z = min(p.max_speed_z, lim.max_speed_z)
-        vx, vy, vz, target_yaw = alg.compute_velocity_3d(pos, target, self._s.speed_cmd, max_speed_z)
+        vx, vy, vz, target_yaw = alg.compute_velocity_3d(
+            pos, target, pose.yaw, self._s.speed_cmd, max_speed_z,
+            hold_for_turn=self._s.turning)
 
         # Compute yaw rate
-        max_yaw_rate = min(p.max_yaw_rate, lim.max_yaw_rate)
-        yaw_rate = alg.compute_yaw_rate_3d(pose.yaw, target_yaw, max_yaw_rate, p.sample_dt)
+        yaw_rate = alg.compute_yaw_rate_3d(
+            pose.yaw, route_yaw if route_yaw is not None else target_yaw,
+            max_yaw_rate, p.sample_dt)
 
         self._s.yaw_rate_cmd += p.yaw_rate_smoothing * (yaw_rate - self._s.yaw_rate_cmd)
 
@@ -280,11 +302,39 @@ class PurePursuitTracker3D:
                 "dist_to_goal": dist_goal,
                 "lookahead_dist": lookahead_dist,
                 "target_yaw": target_yaw,
+                "route_yaw": route_yaw,
+                "turning": self._s.turning,
                 "speed_cmd": self._s.speed_cmd,
                 "yaw_rate_cmd": self._s.yaw_rate_cmd,
                 "vz": vz,
             },
         )
+
+    def _update_turning(self, heading_error: float, p) -> bool:
+        """Latch or release the stop-and-turn, with hysteresis.
+
+        Owns :attr:`_State3D.turning` rather than returning a value for the
+        caller to store: it is a latch, and a latch whose state lives somewhere
+        else is one call away from being read before it is written.
+
+        Args:
+            heading_error: Signed radians from the current heading to where the
+                route goes.
+            p: The tracker parameters.
+
+        Returns:
+            Whether horizontal motion should be held this step.
+        """
+        if p.stop_turn_rad <= 0.0:
+            self._s.turning = False
+            return False
+        error = abs(heading_error)
+        # Release on the *lower* threshold. Releasing on the same one leaves the
+        # vehicle oscillating between flying and turning on the boundary, which is
+        # worse than either.
+        threshold = max(p.resume_turn_rad, 0.0) if self._s.turning else p.stop_turn_rad
+        self._s.turning = error > threshold
+        return self._s.turning
 
     def _stop(self, reason: str, done: bool = False, failed: bool = False,
               ref: Optional[TrajectoryPoint] = None,

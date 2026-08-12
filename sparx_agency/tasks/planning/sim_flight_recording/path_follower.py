@@ -60,7 +60,9 @@ class FollowSpec:
         max_yaw_rate: How fast the aircraft may rotate *while flying the route*,
             rad/s. **This is the knob that sets how fast the world spins in the
             recorded imagery**, and the only one of the two that shapes the
-            data.
+            data. Raised from 0.25 to 0.6: at 0.25 a 90-degree corner needed 6.4
+            seconds of yawing, and the aircraft flew a wide arc through all of
+            it. Smooth footage is not worth missing a doorway.
         turn_yaw_rate: How fast it may rotate while stationary, lining up on the
             route before setting off, rad/s. Deliberately faster: the aircraft
             is holding position and going nowhere, so every second spent here is
@@ -68,7 +70,9 @@ class FollowSpec:
             rate a 180-degree line-up took thirteen seconds, which on a short
             flight was most of it.
         base_lookahead: Carrot distance at rest, m. Larger cuts corners and
-            flies smoother; smaller tracks the spline more tightly.
+            flies smoother; smaller tracks the spline more tightly. Shortened
+            from 1.2 to 0.8 (and the ceiling from 2.5 to 1.6) because cutting
+            corners is exactly what stops the aircraft getting through a door.
         max_lookahead: Ceiling on the speed-scaled carrot distance, m.
         slow_down_distance: Distance from the end over which the aircraft
             decelerates, m. The only place the speed profile is not flat.
@@ -85,22 +89,41 @@ class FollowSpec:
             worst-case bulge is close to ``1.8 * tangent_scale`` metres, so the
             default of 0.2 spends about 0.36 m of a 0.6 m standoff. Raising it
             makes for prettier curves and less clearance; do not raise it
-            without raising ``EpisodeSpec.inflate_radius_m`` too.
+            without raising ``EpisodeSpec.inflate_radius_m`` too. Lowered from
+            0.2 to 0.12 to tighten corners: the smoothed bulge was spending most
+            of the standoff, which is what put the aircraft on the wrong side of
+            a doorframe.
+        yaw_lookahead: How far along the route the heading aims, m. Must exceed
+            ``max_lookahead`` or the heading is just chasing the carrot again --
+            which is what made the flown path weave from side to side, since the
+            aircraft only ever pointed at the next point and ignored the rest of
+            the route.
+        stop_turn_rad: Heading error at which the aircraft stops translating and
+            rotates on the spot. This is the "sometimes you can stop, turn and
+            continue" behaviour: a continuous flight is better, but not at the
+            price of a corner taken so wide it misses the gap. 40 degrees leaves
+            ordinary curves entirely alone -- they never reach it -- and catches
+            real corners and reversals.
+        resume_turn_rad: Heading error at which it starts translating again.
+            Below ``stop_turn_rad`` on purpose: a single threshold chatters.
     """
 
     cruise_speed: float = 1.2
     max_speed: float = 1.5
     min_speed: float = 0.3
     max_climb_rate: float = 0.8
-    max_yaw_rate: float = 0.25
+    max_yaw_rate: float = 0.6
     turn_yaw_rate: float = 0.7
-    base_lookahead: float = 1.2
-    max_lookahead: float = 2.5
+    base_lookahead: float = 0.8
+    max_lookahead: float = 1.6
     slow_down_distance: float = 1.5
     goal_tolerance: float = 0.6
     path_tolerance: float = 2.5
-    corner_speed_factor: float = 0.3
-    tangent_scale: float = 0.2
+    corner_speed_factor: float = 0.8
+    tangent_scale: float = 0.12
+    yaw_lookahead: float = 3.5
+    stop_turn_rad: float = math.radians(40.0)
+    resume_turn_rad: float = math.radians(12.0)
 
 
 @dataclass
@@ -114,6 +137,10 @@ class FollowState:
         distance_to_goal: Along-path distance remaining, m.
         cross_track_error: How far off the spline the aircraft is, m.
         speed: Commanded speed, m/s.
+        turning: The follower is holding position and rotating, because the
+            heading is too far from where the route goes to fly it accurately.
+            Deliberate, and the reason a stall detector must not treat a
+            stationary aircraft as a wedged one.
         done: The end of the route has been reached.
         failed: The aircraft diverged from the route.
         reason: Why it stopped, empty while flying.
@@ -124,6 +151,7 @@ class FollowState:
     distance_to_goal: float
     cross_track_error: float
     speed: float
+    turning: bool = False
     done: bool = False
     failed: bool = False
     reason: str = ""
@@ -186,6 +214,9 @@ class PathFollower:
                 goal_tolerance=spec.goal_tolerance,
                 path_tolerance=spec.path_tolerance,
                 max_yaw_rate=spec.max_yaw_rate,
+                yaw_lookahead=spec.yaw_lookahead,
+                stop_turn_rad=spec.stop_turn_rad,
+                resume_turn_rad=spec.resume_turn_rad,
             ),
             default_limits=KinematicLimits(
                 max_speed_xy=spec.max_speed,
@@ -197,19 +228,32 @@ class PathFollower:
     def initial_heading(self) -> float:
         """The direction the route sets off in, for turning to face it first.
 
-        Turning on the spot before setting off, rather than while under way,
-        is what keeps the recorded imagery from panning hard across the first
-        few metres of every flight.
+        Turning on the spot before setting off, rather than while under way, is
+        what keeps the recorded imagery from panning hard across the first few
+        metres of every flight -- and what stops the first corner being taken
+        wide before the aircraft has even lined up.
+
+        Measured over :attr:`FollowSpec.yaw_lookahead` of route, not over the
+        first 30 cm of spline. The first 30 cm of a smoothed curve points wherever
+        the tangent happens to leave the aircraft, which on a route that turns
+        immediately is not the direction of travel at all: one flight lined itself
+        up to within 8 degrees of *that* and then still swung wide, because the
+        route it was actually about to fly went somewhere else.
         """
         points = self.trajectory.sample_by_time(0.1)
         if len(points) < 2:
             return self.yaw
         origin = points[0]
+        travelled, previous = 0.0, origin
         for point in points[1:]:
-            dx, dy = point.x - origin.x, point.y - origin.y
-            if math.hypot(dx, dy) > 0.3:
-                return math.atan2(dy, dx)
-        return self.yaw
+            travelled += math.hypot(point.x - previous.x, point.y - previous.y)
+            previous = point
+            if travelled >= self.spec.yaw_lookahead:
+                break
+        dx, dy = previous.x - origin.x, previous.y - origin.y
+        if math.hypot(dx, dy) < 0.3:
+            return self.yaw
+        return math.atan2(dy, dx)
 
     def update(self, position, yaw: float, velocity, dt: float) -> FollowState:
         """Advance the follower one step.
@@ -244,6 +288,7 @@ class PathFollower:
             distance_to_goal=float(meta.get("dist_to_goal", 0.0)),
             cross_track_error=float(meta.get("cross_track_error", 0.0)),
             speed=float(meta.get("speed_cmd", 0.0)),
+            turning=bool(meta.get("turning", False)),
             done=bool(meta.get("done", False)),
             failed=bool(meta.get("failed", False)),
             reason=str(meta.get("reason", "")),

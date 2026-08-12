@@ -97,10 +97,28 @@ docker cp isaac-sim:/tmp/dev/recordings/office .
    the desk, tips, and every later episode is refused with `Preflight Fail:
    Attitude failure (roll)`. In `office`, 731 m² of the 788 m² flyable space is
    landable; the missing 7% is furniture.
-2. **Plan a route to it.** `core/planning/planners/astar`'s
-   `WeightedAStarPlanner2D` — the same planner the real drones fly. It inflates
-   every obstacle by `--standoff`, then prefers the middle of a corridor to its
-   edge, and emits corner-rounded waypoints every 2 m.
+2. **Plan a route to it, from where the aircraft is *and is pointing*.**
+   `core/planning/planners/astar`'s `WeightedAStarPlanner2D` — the same planner
+   the real drones fly. It inflates every obstacle by `--standoff`, then prefers
+   the middle of a corridor to its edge, and emits corner-rounded waypoints
+   every 2 m. It also knows that turning costs time: `start_turn_cost_m_per_rad`
+   charges a radian of rotating on the spot as `--cruise-speed` over the
+   follower's stationary yaw rate (1.7 m for the defaults), so between two
+   comparable routes the search takes the one the aircraft can already fly. An
+   episode is still free to start pointing anywhere and to turn right around
+   when the mission needs it — this is a tie-break, not a constraint.
+
+   The reach of that cost is the part worth knowing: it is charged **once**,
+   against the bearing on which the route leaves a 3 m disc around the start.
+   Charged on the first cell step instead — which is what `heading_penalty_m`
+   has always done and why it is left at 0 here — a heading cost only picks
+   between eight neighbours of one cell, and a single 10 cm step cannot steer a
+   30 m route. Measured over 120 office and 120 warehouse routes, the first-move
+   version moved the mean opening turn by under 4° and flight time by 0.2 s,
+   while the 3 m run-up cut flight time, the opening turn *and* the number of
+   stop-and-turns together. Charging much more than 1.7 m/rad reverses that: the
+   search buys a smaller opening turn with a detour that costs more than the
+   rotation it avoided.
 3. **Fly it, continuously.** The planner's corners are smoothed into a spline
    and chased with a moving carrot (`path_follower.py`), so the aircraft holds
    cruise speed the whole way instead of decelerating onto every waypoint. The
@@ -185,9 +203,20 @@ fields are worth filtering on even when the outcome is `landed`:
   the mission can carry on. Non-zero means the aircraft cut a corner somewhere,
   which is fine for most purposes and not if you are training on the geometry.
 * **`estimator_drift_m`** — how far PX4's position estimate wandered relative to
-  ground truth over the flight. Tens of centimetres is healthy. Metres means the
-  aircraft was being commanded to the wrong place and the recording's *images*
-  do not show what its *plan* says they should.
+  ground truth over the flight. **Around 0.1 m is what vision aiding gives**; tens
+  of centimetres is healthy; metres means the aircraft was being commanded to the
+  wrong place and the recording's *images* do not show what its *plan* says they
+  should. It is also the fastest way to tell whether a campaign was flown before
+  or after the switch off GNSS.
+
+Two `meta.json` fields describe *different* things and are easy to conflate:
+**`start_xy` is where the recording begins** (comparable with `poses.npy`'s first
+row, up to the grid snap), while **`route_start_xy` and `planned_waypoints`
+describe the last route flown**, which for a replanned episode picks up tens of
+metres into the flight. `start_xy` used to be taken from the latter; that made 20%
+of one campaign's recordings appear to start more than 3 m from their own first
+pose, and one by 44 m, which reads exactly like an aircraft that is not where it
+thinks it is. It was a mislabelled field.
 
 ### Looking at them
 
@@ -238,6 +267,17 @@ before it did them:
   next worker on that instance then fails to bind and PX4 says nothing useful
   about why. Instances are told apart by working directory, so a sweep never
   touches a live sibling.
+
+  This is now belt *and* braces: `px4_launch.kill_stale_px4` does the same sweep
+  from inside the container, and `launch_px4`/`terminate_px4` both call it. PX4
+  runs with `-d`, so it **daemonises** — the process `Popen` holds is only the
+  launcher, and the `bin/px4` that binds the HIL port detaches and survives
+  terminating it. Every run therefore leaked one, and the supervisor was
+  covering for it; a caller that runs two flights back to back in one process
+  (`world_goal/fly_navdp.py`) had nothing covering for it and lost an arm to
+  `no PX4 heartbeat after 300 simulated seconds`. If you see PX4 report sensors
+  `STALE!` and never send a heartbeat, look for a second `bin/px4` on that
+  instance before looking anywhere else.
 * **It writes `supervisor.json` and `supervisor.log`** into the campaign
   directory — what was relaunched and why.
 
@@ -423,6 +463,131 @@ roof connects to everything, so the flood escapes over the top. Measured on
 zero unknown voxels. A ceiling test (`restrict_to_indoor`) is what actually
 separates them, and with a voxel column in hand it is one array reduction.
 
+## Denser obstacles: `augment_scene.py`
+
+The stock scenes are sparse for obstacle-avoidance training -- `warehouse`
+especially, see `scene.py`'s `INDOOR_SCENES` comment. Rather than importing
+foreign assets (a materials/scale/style mismatch), this duplicates obstacle-
+sized prims *already in the scene* to new positions chosen against its own
+surveyed map, so a duplicate looks like it belongs:
+
+```bash
+# The scene needs a surveyed map first (see above) -- it is both what a new
+# obstacle must avoid landing in and the source of the "landable" floor it may
+# be placed on.
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/augment_scene.py \
+    --scene office --count 25 --min-spacing 1.5
+```
+
+This writes a duplication *recipe*
+(`robots/PEGASUS/scenes/<scene>_augmented.json`: which source prim, where, what
+yaw) rather than a baked `.usd` file -- see `scene_augment.py`'s module
+docstring for why an earlier USD-export version silently broke the
+indoor/outdoor ceiling test. `scene.py` picks the recipe up automatically as an
+`AUGMENTED_SCENES` entry (inheriting the base scene's spawn point) the next
+time anything imports it, so `office_augmented` is then usable anywhere a scene
+name is: **re-survey it first** -- the old map describes the building before
+the obstacles were added -- then fly or collect against it exactly like any
+other scene:
+
+```bash
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/survey_scene.py \
+    --scene office_augmented --altitude 1.5 --preview
+```
+
+`--min-spacing` and the default 1.5 m spawn keepout are both in
+`obstacle_placement.py`, unit-tested without Isaac Sim. Recipes are per-device
+(they reference this device's own scene-graph paths) and gitignored, same as
+the `.ply` point clouds.
+
+**`--min-height`** biases which prims are eligible to duplicate from, toward
+ones relevant to a drone cruising at altitude rather than desk clutter. The
+default obstacle filter (`scene_augment.MIN_EXTENT_M`/`MAX_EXTENT_M`) only
+looks at a prim's *longest* bounding-box axis, which a flat-lying desk can
+satisfy without standing more than knee-high -- `--min-height` additionally
+requires the prim's bounding-box *top* to reach at least that far above the
+floor, so a flight at ~1-1.5 m only gets offered columns, partitions, racks
+and similar obstacles that actually intersect its altitude band:
+
+```bash
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/augment_scene.py \
+    --scene office --count 200 --min-spacing 1.3 --min-height 1.0
+```
+
+Wall-mounted/hinged fixtures that would look like a rendering glitch floating
+free in open floor (doors, clocks, lamps, sinks, toilets, elevator frames)
+stay excluded regardless -- see `scene_augment.EXCLUDE_KEYWORDS`.
+
+**Clutter is only an obstacle where the aircraft actually flies, and the first
+pass at these scenes got that wrong.** They were built with `--stretch-top 1.5`
+against a 1.5 m cruise, which grows each copy until its top reaches *exactly*
+the flight plane -- so the obstacle ends where the aircraft begins and it flies
+straight over. It is visible in the surveyed voxels: added occupancy peaked at
+0.8-0.9 m in `office` and 1.3-1.4 m in `warehouse_shelves`, then fell away
+immediately above the cruise height (warehouse dropped from +949 occupied cells
+at 1.50 m to +269 at 1.60 m), with a further slab of added material up at
+2.7-2.9 m that nothing at cruise altitude will ever meet. A scene can look
+heavily cluttered in a preview and still leave the one plane that matters open.
+
+So a scene is now built from two batches, and the flags say which is which:
+
+- **`--stretch-top`** grows floor-standing props. Set it *past* the cruise
+  altitude, never to it -- `--stretch-top 2.4` for a 1.5 m cruise.
+- **`--float-count` / `--float-centre` / `--float-span`** hang obstacles *in*
+  the flight band instead of standing them on the floor. These are the ones a
+  route has to go around: there is nothing under them to descend to and nothing
+  over them within the band, so no altitude change helps. `--float-centre`
+  defaults to `--altitude`, and `--float-span` (default 1.2 m) is stretched to
+  if the source prim is shorter, so the blocked band is wider than the airframe.
+
+```bash
+/isaac-sim/python.sh sparx_agency/tasks/planning/sim_flight_recording/augment_scene.py \
+    --scene office --altitude 1.5 --count 200 --min-spacing 1.5 \
+    --min-height 0.5 --stretch-top 2.4 \
+    --float-count 70 --float-centre 1.5 --float-span 1.2
+```
+
+The vertical treatment is recorded **per obstacle** in the recipe, because one
+scene mixes both batches; `scene.load_augmented_scene` falls back to the
+file-level `stretch_top_m` so recipes written before the split replay
+unchanged. The arithmetic itself is `scene_augment.vertical_placement`, kept
+free of any USD import and tested in `robots/PEGASUS/tests/
+test_vertical_placement.py` -- including the case above, where stretching to
+the cruise altitude leaves clear air directly over the obstacle.
+
+**`chown` the repo copy after syncing it, or the recipe is never written.**
+`augment_scene.py` and `survey_scene.py` are the only things here that write
+*back into* the repo rather than into `/data`, and the container runs as
+`isaac-sim` (uid 1234) while `docker cp` preserves the **host** uid — so the
+sync that `run_collection.sh` and every hand-rolled driver performs leaves
+`robots/PEGASUS/{scenes,maps}` owned by the host user and unwritable. Nothing
+complains until the final `write_text`, by which point the whole scene has been
+built and every placement logged, so it reads as a successful run that quietly
+left the old recipe in place. Copying it back to the host then "succeeds" on
+the unchanged file. After any `docker cp` of the repo:
+
+```bash
+docker exec -u 0 isaac-sim chown -R 1234:1234 /tmp/dev/repo/sparx_agency/robots/PEGASUS
+```
+
+Collection never hit this because `collect.py` only writes to the `/data` bind
+mount, which is world-writable.
+
+**A placement is never allowed to seal off a passage.** `--min-spacing` alone
+only keeps obstacles apart from each other -- it does not stop one from sitting
+in the one corridor cell that is the only way to a side room, which is exactly
+what happened once: a scene that surveyed as "correct" (no stray obstacles, no
+overlaps) still turned out to have a fully-blocked hallway, because nothing had
+ever checked reachability, only spacing. `obstacle_placement.sample_placements`
+now stamps a candidate's own footprint onto a working copy of the free-space
+mask and rejects it if that shrinks the area still reachable from spawn by more
+than `max_reachable_loss_fraction` (2% by default) beyond what the footprint's
+own cells account for. The footprint radius defaults to half the longest axis
+of the *largest* candidate obstacle in play -- not a fixed guess -- so a spot
+is never assumed safe for a bigger object than it was actually checked against;
+override with `--obstacle-radius` if that default is too conservative for a
+scene with a few oversized outliers.
+
 ## How the aircraft is actually flown
 
 **A smoothed spline, a moving carrot, and velocity setpoints closed on ground
@@ -482,31 +647,118 @@ Two consequences worth knowing:
   +y is simply "north" by convention. `PX4Offboard.latch_frame` measures it
   while the aircraft is stationary and every command is rotated by it.
 
-## Position accuracy: exact sensors, not external vision
+## Position accuracy: PX4 is fed the simulator's own pose
 
-Pegasus simulates a GPS receiver, an IMU, a magnetometer and a barometer, noise
-and biases included. Outdoors that is the right model; indoors it cost metres of
-position hold — comparable to the gap between two office desks — and about half
-of `office` flights ended against furniture.
+**This section describes a change of direction. If you are reading recordings
+made before it, read the last part of this section too.**
 
-The fix is `robots/PEGASUS/adapters/sensors.py`: **every configurable noise term
-is zeroed**, which makes PX4's estimator input ground truth. The barometer needs
-a subclass because, alone among the four, it has no config key for its noise —
-it unconditionally injects ~1 Pa, which is 8.4 cm of altitude. `px4_params.py`
-then tells the estimator to believe the now-exact GPS (`EKF2_GPS_P_NOISE` 0.5 →
-0.05) and stops it gating a perfect fix on invented quality metrics
-(`EKF2_GPS_CHECK`).
+The accurate position was never the hard part. The simulator knows it exactly,
+and every follower here reads it straight off `vehicle.state.position`. The
+problem was that **PX4** had no access to it, and PX4 holds the veto — it can
+override offboard mode and land the aircraft whenever its own estimator decides
+something is wrong.
 
-The magnetometer is kept rather than disabled: noiseless, it is what makes yaw
-observable while the aircraft sits still on the ground, which GNSS-velocity yaw
-is not.
+For a long time PX4 ran its EKF2 on Pegasus's simulated GPS receiver and
+magnetometer with **every configurable noise term zeroed**
+(`robots/PEGASUS/adapters/sensors.py`; the barometer needs a subclass because,
+alone among the four, it has no config key for its noise and unconditionally
+injects ~1 Pa, which is 8.4 cm of altitude). Exact sensors, so an exact estimate —
+except for one thing. Yaw was observable *only* through the magnetometer, and
+Pegasus publishes one magnetometer where PX4's own SITL airframe declares two.
+Measured across the 139 worker runs of one 700-episode campaign:
 
-**External vision (`px4_vision_pose.py`) is the road not taken.** It is a larger
-change — switching the estimator's aiding source — for a problem that turned out
-to be sensor noise plus the timestep bug. It stays in the tree, unwired, with
-its investigation and the reasons it stalled documented in the module. Read it
-before starting that work again; two of its three remaining suspects are now
-known.
+| PX4 said | in |
+|---|---|
+| `MAG #0 failed: STALE` | 128 / 139 workers |
+| `Compass needs calibration - Land now!` | 79 / 139 |
+| `Failsafe activated` | 108 / 139 |
+| `Landing at current position` | **120 / 139** (3694 events) |
+
+That last row is the campaign. PX4 was seizing the aircraft mid-route and
+force-landing it while `path_follower` carried on steering, so a large share of
+the recordings are not a route being flown at all. `estimator_drift_m` came out at
+0.56 m median on the episodes that survived and **8.4 m on the ones that
+crashed**; 20% of episodes started more than 3 m from the route their metadata
+claimed, up to 43 m.
+
+**The fix is to give PX4 the pose the rest of the stack already uses.**
+`px4_vision_pose.VisionPoseSender` sends the simulator's ground truth as a
+`VISION_POSITION_ESTIMATE` over the companion link, and
+`px4_params.VISION_ESTIMATOR` switches EKF2 onto it: position and yaw from vision,
+GNSS off, barometer off, and the magnetometer removed at both levels
+(`EKF2_MAG_TYPE=5`, `SYS_HAS_MAG=0`) so it cannot refuse an arming for a sensor
+nothing is using. PX4's estimate then *is* the number the followers use and cannot
+drift away from it. On by default; `--no-vision` restores the old configuration
+for comparison.
+
+**Measured after the switch**, same scene, same spawn: PX4's settled estimate is
+**0.00 m and 0.0°** from ground truth (it was 6.8 m / 33° on the first attempt —
+see the four parameter traps below), `estimator_drift_m` is 0.11–0.14 m across a
+flight, cross-track error 0.00 m, and the episodes land 0.57–0.59 m from their
+goal on routes 1.05–1.12× the straight-line distance. No compass failsafe, no
+`Landing at current position`.
+
+Getting there took four parameter fixes, and **every one of them looked like the
+pose being wrong rather than the estimator refusing it**. In order:
+
+1. **Noise too tight.** `EKF2_EVP_NOISE` at 0.02 m made the innovation gate
+   narrower than the filter's own prediction error: EV position fused *once*, then
+   every sample was rejected at test ratios of 20–780 while the aircraft sat still.
+   0.1 m, the same value `GPS_ESTIMATOR` uses on the equally-exact simulated GNSS.
+2. **Position gate too narrow.** `EKF2_EVP_GATE` 5 → 30 SD. 6.8 m → 0.72 m.
+3. **Heading gate too narrow, and misleadingly named.** `EKF2_HDG_GATE` says
+   "magnetic heading", but `fuseYaw()` lives in `mag_fusion.cpp` and EV yaw goes
+   through it too. With no magnetometer the filter aligns yaw to zero and declares
+   itself aligned, so the first vision yaw arrives as a 180° innovation. 2.6 → 30 SD.
+4. **A fictitious gyro bias, which was the real one.** `EKF2_IMU_CTRL` kept the
+   gyro-bias state, and with no magnetometer nothing contradicted it during the
+   seconds before EV fusion starts — which are exactly the seconds the airframe
+   spends dropping onto the floor. It absorbed 0.54 rad/s of PhysX contact
+   rotation as a bias, saturated `EKF2_GYR_B_LIM` at 0.150 rad/s on all three
+   axes, and stayed there: PX4's yaw then **rotated at 8.6°/s** for the whole run,
+   sweeping past the correct heading every ~35 s, while a perfect vision yaw
+   arrived 50 times a second with too little authority to stop it. `EKF2_IMU_CTRL`
+   0 under vision. This is the same argument the accelerometer bias already had.
+
+The tool that found each of these is the ULog, not the console: read
+`estimator_aid_src_ev_pos` / `_ev_hgt` / `_ev_yaw` and look at `observation`,
+`test_ratio`, `fusion_enabled` and `fused`. A correct `observation` with a
+`test_ratio` above 1 and `fused` false means the *parameters* are wrong, and that
+is invisible from anywhere else — PX4 says only `Preflight Fail: position
+estimate error`. pyulog is not installed on this machine; the format is simple
+enough to read directly (drop the trailing `_padding0` field, which the logger
+does not write).
+
+Three things make this reliable rather than another silent failure:
+
+* **A pre-boot parameter channel.** `EKF2_HGT_REF`, `EKF2_MAG_TYPE`,
+  `EKF2_EV_DELAY` and `SYS_HAS_*` are read once, when `ekf2` starts. PX4 accepts
+  them over MAVLink afterwards, acknowledges them, saves them and ignores them.
+  `px4_launch.write_boot_parameters` writes them into PX4's own `px4-rc.params`
+  hook, which `rcS` sources after the airframe file and *before* `ekf2` starts;
+  `px4_params.all_params` now raises if a reboot-only parameter is handed to the
+  MAVLink push. See `px4_params`'s two-channel note.
+* **The send is in the loop, not in the flight script.** `SimLoop.step` sends the
+  pose. A gap over 200 ms of simulated time stops EKF2 fusing vision and nothing
+  reports it, so "every step" had to be true by construction.
+* **Bring-up fails loudly if fusion did not start.** `campaign_setup.settle_estimator`
+  compares PX4's settled estimate against the truth it was just sent and raises if
+  they disagree by more than 0.5 m or 5°. Every way of getting the vision path
+  wrong ends with PX4 flying on something else without saying so; this is the one
+  moment the aircraft is definitely stationary and the answer is unambiguous.
+
+`px4_vision_pose`'s docstring lists the four ways this failed before it worked —
+parameter type mismatch, the HIL link instead of the companion link, the UDP
+socket direction, and `ekf2 missing data` not meaning what it looks like — plus
+the two undocumented v1.14.3 constraints (`EV_MAX_INTERVAL`, `EKF2_EV_QMIN`).
+
+**Recordings made before this change.** `px4_params.GPS_ESTIMATOR` is still there
+and still reachable with `--no-vision`, so the two are comparable. But treat any
+campaign flown that way as suspect rather than merely noisy: check its
+`px4_worker*.log` for `Landing at current position`, and its `meta.json` for
+`estimator_drift_m` and for `start_xy` far from the recording's first pose. The
+`campaign_augmented` / `world_goal_augmented` datasets were deleted for exactly
+this.
 
 ## Files
 
@@ -527,7 +779,7 @@ known.
 | `path_follower.py` | the continuous follower: spline, carrot, velocity + yaw command |
 | `px4_launch.py` | start/stop PX4 instances with per-instance ports and directories |
 | `px4_offboard.py` | non-blocking MAVLink: parameters, arm, setpoints, land, land-detect |
-| `px4_params.py` | the parameter sets an indoor simulated drone needs |
+| `px4_params.py` | the parameter sets an indoor simulated drone needs, on two channels |
 | `chase_camera.py` | external camera that follows the drone, for video and streaming |
 | `inspect_recording.py` | review what came out — contact sheets and plan views, no GPU |
 | `fly_direct.py` | no autopilot: forces from a Python PD controller. Debugging only |
