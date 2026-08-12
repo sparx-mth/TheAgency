@@ -54,22 +54,21 @@ map_config:
     # contacts were belly strikes on those tops). No doorway lintels exist in
     # this world, so the high band costs nothing -- the tall C-piles (1.78 m)
     # must be avoided laterally at ANY altitude below the shelf ceiling.
-    # 1.55: the bucket stacks are 1.41 m -- at floor 1.3 they pierced the
-    # band by 11 cm and run 030 logged 71 belly strikes on one stack. Above
-    # 1.55 the band clears EVERY freestanding pile except the 1.78 m C-piles
-    # (laterally avoided, well-mapped); shelf tops 1.96 still cap the box.
-    box_min_z:  1.55
+    # 0.6 floor / 1.8 ceiling: a REAL volume to explore. Progressively
+    # narrowing this band to dodge contact classes ended at a 0.25 m slab
+    # with so little explorable space that FALCON's frontier finder came up
+    # empty and declared the mission complete after a few metres of flight --
+    # five "clean" runs that mapped nothing. Obstacle heights (A-piles 1.10,
+    # buckets 1.41, C-piles 1.78) are the 3D brake gate's job, at the exact
+    # altitude layers they occupy; the ceiling stays below the 1.96 m shelf
+    # tops so coverage is flown in the aisles.
+    box_min_z:  0.6
     box_max_x:  3.9
     box_max_y:  7.2
     # 2.4 ceiling: the 1.55-1.8 band was 0.25 m tall and vertical inflation
     # (0.35) let ANY voxel mapped above 1.2 seal an aisle -- one depth speckle
     # walled off the maze and run soak-001 no-pathed for 30 minutes. No roof
     # in this world: give the planner headroom no pile can close.
-    # 1.8: strictly BELOW the 1.78 m C-pile tops. Every ceiling-2.0 failure
-    # was a pile-top interaction (capsize onto one, bubble-retreat loop in a
-    # 0.38 m inter-pile crack at z=1.89); the campaign's one perfect 224 s run
-    # flew this band. Its historical seal-stall risk is covered by inflation
-    # 0.30 and the position/coverage watchdogs.
     box_max_z:  1.8
     vbox_min_x: -8.0
     vbox_min_y: -12.0

@@ -84,7 +84,17 @@ class BsplineFollowerNode(object):
         # 1.25 turns; 0 disables. See _survey for why this must exist.
         self._survey_revs = float(rospy.get_param("~survey_revs", 1.25))
         self._survey_remaining_rad = 2.0 * math.pi * self._survey_revs
-        self._survey_yaw_rate = float(rospy.get_param("~survey_yaw_rate", 0.5))
+        self._survey_started_at = None  # type: object  # set on the first tick
+        # Fast, COMPLETE scan rather than a slow long one: the turn exists so
+        # FALCON can see the cells around the aircraft it would otherwise have
+        # to plan through blind, so cutting it off after a couple of seconds
+        # (the first plan can arrive that early) buys punctuality by planning
+        # through unobserved space -- measured as a pile strike 40 s later.
+        # One full revolution at nearly double the old rate covers everything
+        # in ~7 s, and the plan-arrived abort then prevents any over-turning.
+        self._survey_yaw_rate = float(rospy.get_param("~survey_yaw_rate", 0.9))
+        self._min_survey_rad = float(
+            rospy.get_param("~min_survey_rad", 2.0 * math.pi))
         self._survey_last_yaw = None
         # Re-survey when FALCON falls silent for this long after it has been
         # planning -- the signature of an exploration_node respawn (its LKH
@@ -159,6 +169,16 @@ class BsplineFollowerNode(object):
         self._gate_block_retreat_s = float(
             rospy.get_param("~gate_block_retreat_s", 4.0))
         self._gate_blocked_since = None     # type: object
+        # Creep-through escalation. A brake that only ever says NO deadlocks
+        # against a planner that keeps re-issuing the same legal route: the
+        # aircraft holds, FALCON replans identically, forever. After repeated
+        # blocks in the SAME place the follower concedes the planner has the
+        # better global picture and creeps through at a speed where a touch is
+        # a nudge, keeping the contact reflex as the true last resort.
+        self._creep_speed = float(rospy.get_param("~creep_speed", 0.12))
+        self._creep_time_s = float(rospy.get_param("~creep_time_s", 20.0))
+        self._creep_until = None            # type: object
+        self._block_episodes = []           # type: list  # (t_s, x, y)
 
         # ── depth visual bumper ──────────────────────────────────────────
         # The reflex under the map gate: the voxel map flaps thin obstacles
@@ -208,6 +228,8 @@ class BsplineFollowerNode(object):
         # default takeoff height, e.g. the hospital's counter-clearing 1.25).
         self._takeoff_altitude_m = max(self._takeoff_altitude_m,
                                        self._alt_min + 0.05)
+        self._takeoff_climb_speed = float(
+            rospy.get_param("~takeoff_climb_speed", 0.4))
         # Attitude reflex: cut horizontal drive if roll or pitch crosses this, a
         # margin below the plugin's ~35 deg clamp past which the model thrusts
         # sideways and cannot recover. A near-clip contact can pitch the aircraft
@@ -300,7 +322,7 @@ class BsplineFollowerNode(object):
             use_feedforward_lead=bool(rospy.get_param("~use_feedforward_lead", True)),
             predict_reference=bool(rospy.get_param("~predict_reference", True)),
             max_overspeed=float(rospy.get_param("~max_overspeed", 0.25)),
-            max_catchup_speed=float(rospy.get_param("~max_catchup_speed", 0.15)))
+            max_catchup_speed=float(rospy.get_param("~max_catchup_speed", 0.35)))
 
     # ── inputs ───────────────────────────────────────────────────────────
 
@@ -419,8 +441,27 @@ class BsplineFollowerNode(object):
             self._begin_resurvey(now, "silent %.0fs (respawn?)" % silent_s)
 
         if self._survey_remaining_rad > 0.0:
-            self._survey(yaw)
-            return
+            # The scan exists for ONE reason: FALCON cannot plan out of a cell
+            # it has never observed. The moment it publishes a plan, that
+            # reason is spent -- and turning on past it is actively harmful,
+            # because FALCON's clock starts with the plan while the aircraft
+            # is still spinning, so following begins seconds late against a
+            # schedule that has already run away (measured: the reference
+            # pinned to a curve's endpoint before the aircraft ever moved).
+            turned = 2.0 * math.pi * self._survey_revs - self._survey_remaining_rad
+            if (turned >= self._min_survey_rad
+                    and self._last_bspline_at is not None
+                    and self._survey_started_at is not None
+                    and self._last_bspline_at > self._survey_started_at):
+                self._survey_remaining_rad = 0.0
+                self._survey_last_yaw = None
+                self._send(Twist())
+                self._servo.reset()
+                rospy.loginfo("[follower] plan arrived mid-scan; cutting the "
+                              "turn short and following it now")
+            else:
+                self._survey(yaw)
+                return
 
         # Contact recovery owns the aircraft while it is backing out of a wall:
         # the plan that put it there has been dropped, so nothing else may drive.
@@ -459,7 +500,8 @@ class BsplineFollowerNode(object):
             # Personal-space bubble: closure from ANY bearing, not just the
             # motion direction -- wall-sliding grinds are invisible to both
             # directional brakes. A breach is a near-contact: retreat now.
-            if (self._gate_enabled and self._gate.bubble_blocked(
+            creeping = (self._creep_until is not None and now < self._creep_until)
+            if (not creeping and self._gate_enabled and self._gate.bubble_blocked(
                     (float(position[0]), float(position[1]), float(position[2])),
                     float(rospy.get_param("~bubble_clearance_m", 0.28)))):
                 rospy.logwarn("[follower] bubble breach: occupied voxel inside "
@@ -520,9 +562,20 @@ class BsplineFollowerNode(object):
                             world_vx=command.world_vx * f,
                             world_vy=command.world_vy * f)
 
+            if hard_blocked and creeping:
+                speed = math.hypot(command.vx, command.vy)
+                if speed > self._creep_speed:
+                    f = self._creep_speed / speed
+                    command = dataclasses.replace(
+                        command, vx=command.vx * f, vy=command.vy * f,
+                        world_vx=command.world_vx * f,
+                        world_vy=command.world_vy * f)
+                hard_blocked = False
+
             if hard_blocked:
                 if self._gate_blocked_since is None:
                     self._gate_blocked_since = now
+                    self._note_block_episode(now, position)
                     rospy.logwarn("[follower] brake: %s; holding", block_why)
                 elif (now - self._gate_blocked_since).to_sec() > self._gate_block_retreat_s:
                     self._gate_blocked_since = None
@@ -632,6 +685,29 @@ class BsplineFollowerNode(object):
         command.angular.z = self._survey_yaw_rate
         self._send(command)
 
+    def _note_block_episode(self, now, position):
+        # type: (object, np.ndarray) -> None
+        """Record a block; concede to the planner if this spot keeps repeating.
+
+        Two blocks within 1.5 m inside 90 s means the disagreement is
+        structural -- our clearance model versus the planner's -- not a
+        transient. FALCON sees the whole map and keeps choosing this route, so
+        the follower crosses it slowly instead of holding until the mission
+        cap (the observed plan-hold-replan livelock).
+        """
+        now_s = now.to_sec()
+        x, y = float(position[0]), float(position[1])
+        self._block_episodes = [e for e in self._block_episodes
+                                if now_s - e[0] < 90.0]
+        repeats = sum(1 for e in self._block_episodes
+                      if math.hypot(x - e[1], y - e[2]) < 1.5)
+        self._block_episodes.append((now_s, x, y))
+        if repeats >= 1:
+            self._creep_until = now + rospy.Duration(self._creep_time_s)
+            rospy.logwarn("[follower] blocked repeatedly at (%.1f, %.1f); "
+                          "conceding to the planner, creeping at %.2f m/s "
+                          "for %.0fs", x, y, self._creep_speed, self._creep_time_s)
+
     def _falcon_silent_s(self, now):
         # type: (object) -> float
         """Seconds since FALCON last published a plan; 0 before the first one.
@@ -675,6 +751,7 @@ class BsplineFollowerNode(object):
         """
         self._survey_remaining_rad = 2.0 * math.pi * self._survey_revs
         self._survey_last_yaw = None
+        self._survey_started_at = now
         self._last_bspline_at = now
         self._stall_track = []
         self._hold_point = None        # the next hold latches where IT begins
@@ -692,12 +769,21 @@ class BsplineFollowerNode(object):
         """
         if position[2] >= self._takeoff_altitude_m:
             self._airborne = True
+            self._survey_started_at = rospy.Time.now()
             self._servo.reset()
             self._flying.publish(Bool(data=True))
             rospy.loginfo("[follower] airborne at %.2f m; following the plan",
                           position[2])
             return
+        # The trigger only switches the plugin into flying mode; its own climb
+        # levels off around 1 m and holds. Any map whose flight band starts
+        # higher (the warehouse floor is 1.55 m) would strand the aircraft
+        # below the handover altitude FOREVER -- the mission simply never
+        # starts. So fly the climb ourselves once the motors are running.
         self._takeoff.publish(Empty())
+        twist = Twist()
+        twist.linear.z = self._takeoff_climb_speed
+        self._send(twist)
 
     @staticmethod
     def _cloud_xyz(msg):

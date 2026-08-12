@@ -192,8 +192,21 @@ while true; do
         # NB grep -c PRINTS 0 and exits 1 on no match: `|| echo 0` would emit
         # "0\n0" and poison the -eq below (it cost run 031 its CLEAN verdict).
         C=$(grep -c '\[CONTACT\]' "${RUN_DIR}/monitor.log" 2>/dev/null); C=${C:-0}
-        if [[ "${C}" -eq 0 ]]; then finish CLEAN "finished untouched" 0
-        else finish FINISHED_DIRTY "finished with ${C} contact(s)" 1; fi
+        # A finish is only a MAPPING if the aircraft actually went somewhere.
+        # FALCON declares "exploration finished" whenever its frontier finder
+        # comes up empty -- including on a near-empty map -- and certifying
+        # that as CLEAN is how a campaign fools itself: runs 026/031 and three
+        # soak runs "finished untouched" having flown 0.0-10.8 m total.
+        PATH_M=$(docker cp "${SIM_CONTAINER}:/tmp/flight_trace.jsonl" - 2>/dev/null | tar -xO 2>/dev/null | awk -F'[,:]' '
+            /"x"/ { for (i=1;i<=NF;i++) { if ($i ~ /"x"/) x=$(i+1)+0; if ($i ~ /"y"/) y=$(i+1)+0 }
+                    if (seen) { d=sqrt((x-px)^2+(y-py)^2); s+=d } px=x; py=y; seen=1 }
+            END { printf "%.1f", s }')
+        PATH_M=${PATH_M:-0}
+        if awk -v p="${PATH_M}" -v m="${MIN_PATH_M:-40}" 'BEGIN{exit !(p < m)}'; then
+            finish TRIVIAL_FINISH "finished after only ${PATH_M} m of flight (< ${MIN_PATH_M:-40} m): empty-map false finish" 1
+        fi
+        if [[ "${C}" -eq 0 ]]; then finish CLEAN "finished untouched after ${PATH_M} m" 0
+        else finish FINISHED_DIRTY "finished with ${C} contact(s) after ${PATH_M} m" 1; fi
     fi
 
     # periodic real-time factor + per-container CPU/mem samples (cheap;
