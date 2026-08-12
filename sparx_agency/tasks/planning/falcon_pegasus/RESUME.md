@@ -3,6 +3,62 @@
 Working note for the "ten clean full-office explorations in a row" task. Delete
 it when the streak is done and the README carries the conclusions.
 
+## Newest: warehouse target, a deadlock watchdog, and re-anchor-on-stop
+
+A block of work aimed at the operator's four reported problems (tracking lag,
+unsafe-route deadlock, feasibility from the start, and replanning from the
+aircraft's current position when it cannot follow), plus a way to fly the
+**warehouse** without waiting out stuck runs. Validated on the stub against the
+real FALCON planner — no GPU, no rebuild — because the whole watchdog path is
+bind-mounted (bridge + protocol) or host-side (mission/stub).
+
+**Warehouse is now a first-class target.** `warehouse_shelves` (24 × 39 m, dense
+racks — a real zigzag test, small enough to map in one short run) and
+`full_warehouse` are surveyed already (`robots/PEGASUS/maps/*_voxels.npz`).
+Added `runs/warehouse_shelves.yaml` + three corner-start variants (`_2/_3/_4`)
+and `runs/full_warehouse.yaml`, geometry taken from the surveyed extents and
+spawns verified interior/off-axis/clear-through-the-climb-column. A stub flight
+of `warehouse_shelves` (120 s) came back clean: `flight_timeout`, 106.7 m flown,
+198 trajectories, mean err 0.38 m, **coverage 756 m³**, watchdog silent.
+
+**The deadlock watchdog** (`no_progress` outcome). FALCON's coverage — voxels
+that have left `UNKNOWN`, m³ — is the only measure the aircraft has of whether
+NEW space is still being found. `map_recorder` already subscribed
+`/voxel_mapping/map_coverage`; the bridge now does too and piggybacks it on each
+`POSCMD` (`cov`), so `FalconLink.coverage_m3` carries it. The mission and the
+stub end a run when, for `NO_PROGRESS_WINDOW_S` (30 s), the aircraft has neither
+discovered `NO_PROGRESS_COVERAGE_M3` (3 m³) nor moved `NO_PROGRESS_RADIUS_M`
+(1.5 m) — exactly the operator's "no new voxels AND roughly stationary". Plus a
+hard wall-clock cap (`max_wall_s` / `--max-wall-s`, `time_budget` outcome) on top
+of the sim-time `max_flight_s` (300 s on the warehouse runs), because Isaac runs
+below real time. Degrades safely if coverage never arrives (movement half alone).
+
+**Re-anchor on stop** (`patches/replan_from_measured_state.sh`, extended). The
+patch already replanned from odometry once the predicted start was
+`replan_start_tolerance` away. It now ALSO fires when the aircraft is essentially
+stopped (`measured_speed < replan_stopped_speed`, launch default 0.10 m/s) while
+the predicted start still carries velocity — the emergency-stop / unsafe-hold /
+wedged case, where the gap has not grown yet but planning from a future point a
+stopped aircraft will never reach is the exact deadlock to avoid. Inert by
+default (`-1`); set in `falcon_pegasus.launch`. **Needs an image rebuild to take
+effect** (the running image still has the old patch); the launch param is
+harmlessly ignored by the old patch until then.
+
+**Sphera / XTEND parity: already present, verified, not re-implemented.** That
+stack uses FALCON only as a mapper; our own `astar_planner_node` plans and always
+uses the live pose (`PlanRequest(start=self.pose)`, astar_planner_node.py:1076),
+`smart_replan` re-plans on collision/discovery/rotation, the follower's recovery
++ `blockage_memory` forces a replan-from-current when stuck, and `path_corrector`
+reverts to raw A* if a correction would collide. `sphera_drone.launch` →
+`nav_stack.launch` already defaults `smart_replan`, `use_blockage_memory`,
+`inflate_radius_m=0.40`, `recovery`, `apf_collision_recheck`,
+`stop_on_blocked_plan_fail` on. So each Pegasus fix has a live Sphera equivalent;
+nothing risky was changed in untested real-drone flight code.
+
+**Tracking lag deliberately not re-tuned.** The root cause is re-anchoring +
+`use_sim_time` (both done); this file's own history is a graveyard of reverted
+gain tweaks. Left the tracker alone on purpose.
+
 ## Newest: measured feedforwards, validated deterministically
 
 Two terms added to the tracker (defaults off in core; the Pegasus mission and

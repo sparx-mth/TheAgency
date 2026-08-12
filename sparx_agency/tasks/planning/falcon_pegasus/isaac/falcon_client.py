@@ -70,6 +70,12 @@ class FalconLink:
         self.commands_received = 0
         self.frames_sent = 0
         self.frames_dropped = 0
+        # FALCON's own explored-volume number (cubic metres), piggybacked on the
+        # command stream by the bridge. The only measure the aircraft has of
+        # whether NEW space is still being discovered -- the voxels themselves
+        # never leave the FALCON container. Starts at 0 and holds its last value
+        # if the stream ever omits it, which is what the deadlock watchdog wants.
+        self.coverage_m3 = 0.0
         self.events = []                                # type: List[Tuple[str, str]]
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -197,6 +203,8 @@ class FalconLink:
                 self.reference_stamp_s = float(header["t"])
                 self.trajectory_id = int(header["id"])
                 self.commands_received += 1
+                if "cov" in header:
+                    self.coverage_m3 = float(header["cov"])
             elif kind == protocol.KIND_BSPLINE:
                 self.trajectory = _to_trajectory(header)
                 self.trajectories_received += 1

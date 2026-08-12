@@ -254,6 +254,26 @@ PLANNER_NUDGE_UNTIL = 0.6
 # the only thing that stops moving.
 PLANNER_STALL_S = 30.0
 
+# THE DEADLOCK WATCHDOG the operator asked for. The stall and planner-stall
+# guards above each catch one specific failure -- a motionless aircraft, a
+# frozen trajectory id. This catches the general one: FALCON is alive and
+# replanning and the aircraft is even drifting a little, yet NO NEW SPACE is
+# being discovered, because the planner keeps drawing a route the aircraft
+# cannot follow and neither side gives up. Left alone it burns the whole budget
+# going nowhere -- and on a warehouse we would rather stop, look at why, and
+# fly again than wait it out.
+#
+# The signal is FALCON's own coverage: voxels that have left UNKNOWN, in cubic
+# metres, forwarded on the command stream (see link/protocol.py). The rule is
+# exactly the one asked for -- if for NO_PROGRESS_WINDOW_S the aircraft has
+# neither discovered NO_PROGRESS_COVERAGE_M3 of NEW volume NOR moved
+# NO_PROGRESS_RADIUS_M from where the window opened, it is deadlocked and the run
+# ends. It degrades safely when coverage never arrives (an old bridge, a silent
+# mapper): the movement half alone still bounds an aircraft that is merely stuck.
+NO_PROGRESS_COVERAGE_M3 = 3.0
+NO_PROGRESS_RADIUS_M = 1.5
+NO_PROGRESS_WINDOW_S = 30.0
+
 TRACE_COLUMNS = (
     "t", "x", "y", "z", "yaw", "vx", "vy", "vz",
     "ref_x", "ref_y", "ref_z", "ref_yaw", "ref_vx", "ref_vy", "ref_vz",
@@ -276,7 +296,14 @@ OUTCOME_CLIMB_FAILED = "climb_failed"
 OUTCOME_OFFBOARD_LOST = "offboard_lost"
 OUTCOME_STALLED = "stalled"
 OUTCOME_PLANNER_STOPPED = "planner_stopped"
-GOOD_OUTCOMES = (OUTCOME_EXPLORED, OUTCOME_TIMEOUT, OUTCOME_PLANNER_STOPPED)
+# Discovered no new voxels while barely moving -- a planner/tracker deadlock,
+# stopped on purpose so it can be analysed instead of waited out.
+OUTCOME_NO_PROGRESS = "no_progress"
+# Hit the hard wall-clock budget (the operator's "not more than 300 s"). Like
+# flight_timeout, everything flown up to it is a real exploration.
+OUTCOME_TIME_BUDGET = "time_budget"
+GOOD_OUTCOMES = (OUTCOME_EXPLORED, OUTCOME_TIMEOUT, OUTCOME_PLANNER_STOPPED,
+                 OUTCOME_TIME_BUDGET)
 
 
 @dataclass
@@ -363,6 +390,12 @@ class MissionSpec:
     frame_rate_hz: float
     max_flight_s: float
     control_mode: str = CONTROL_ATTITUDE
+    # A hard wall-clock cap, seconds, or None to disable. Separate from
+    # max_flight_s, which is SIMULATED time: Isaac Sim runs below real time here,
+    # so a sim-time budget alone can still cost far longer in wall time. This is
+    # the operator's "mapping the warehouse must not take more than N seconds" --
+    # a real-time guillotine so an iteration never runs away.
+    max_wall_s: Optional[float] = None
     tracker: ReferenceTrackerParams = field(default_factory=ReferenceTrackerParams)
     tracking: TrajectoryTrackerParams = field(default_factory=_default_tracking)
     thrust: ThrustModelParams = field(default_factory=_default_thrust_model)
@@ -704,6 +737,12 @@ class ExplorationMission:
         unwedge_attempts = 0
         reflexes = 0
         nudges = 0
+        # Deadlock watchdog anchors: the position and coverage the current
+        # no-progress window opened at, and the wall clock the flight began at.
+        wall_started = time.monotonic()
+        noprogress_pos = progress_mark
+        noprogress_cov = self.link.coverage_m3
+        noprogress_at = self.loop.sim_time
 
         while True:
             # The tracker closes on the SENSOR's position, because that is the
@@ -852,6 +891,25 @@ class ExplorationMission:
             else:
                 diverged_since = None
 
+            # Deadlock: no new coverage AND no real movement for a whole window.
+            # The window resets on EITHER discovering NO_PROGRESS_COVERAGE_M3 of
+            # new space or moving NO_PROGRESS_RADIUS_M, so it only fires when both
+            # have stopped -- exactly "wedged and mapping nothing new". Held
+            # trajectories are not exempted on purpose: a hold that discovers
+            # nothing for this long is itself a deadlock worth ending.
+            if (self.link.coverage_m3 - noprogress_cov >= NO_PROGRESS_COVERAGE_M3
+                    or math.dist(position, noprogress_pos) >= NO_PROGRESS_RADIUS_M):
+                noprogress_cov = self.link.coverage_m3
+                noprogress_pos = position
+                noprogress_at = self.loop.sim_time
+            elif self.loop.sim_time - noprogress_at >= NO_PROGRESS_WINDOW_S:
+                return OUTCOME_NO_PROGRESS, (
+                    "no new voxels and under %.1f m of movement in %.0f s at "
+                    "(%.1f, %.1f, %.1f) while FALCON kept replanning -- a "
+                    "planner/tracker deadlock, stopped to be analysed"
+                    % (NO_PROGRESS_RADIUS_M, NO_PROGRESS_WINDOW_S,
+                       position[0], position[1], position[2]))
+
             if self._planner_gone_at is not None:
                 if self.loop.sim_time - self._planner_gone_at >= PLANNER_GONE_GRACE_S:
                     return OUTCOME_NO_COMMANDS, (
@@ -862,6 +920,18 @@ class ExplorationMission:
                 return OUTCOME_TIMEOUT, (
                     "reached the %.0f s flight budget with exploration still running"
                     % self.spec.max_flight_s)
+
+            # The hard real-time cap. max_flight_s above is SIMULATED seconds;
+            # Isaac runs below real time, so a run can pass that check and still
+            # have taken far longer on the wall clock. This is the operator's
+            # "not more than N seconds" -- a real-time guillotine for fast
+            # iteration, off unless the run set it.
+            if self.spec.max_wall_s is not None and (
+                    time.monotonic() - wall_started > self.spec.max_wall_s):
+                return OUTCOME_TIME_BUDGET, (
+                    "reached the %.0f s wall-clock budget with exploration still "
+                    "running (%.0f s simulated)"
+                    % (self.spec.max_wall_s, self.loop.sim_time - started))
 
             if self.verbose and self.loop.sim_time - last_status >= STATUS_EVERY_S:
                 last_status = self.loop.sim_time

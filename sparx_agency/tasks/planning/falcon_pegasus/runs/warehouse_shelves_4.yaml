@@ -1,0 +1,72 @@
+# FALCON warehouse exploration -- "shelves, south-west"
+#
+# Isaac Sim's Simple_Warehouse "warehouse_shelves" scene: a dense rack layout the drone
+# must zigzag between, moderate size (~24 x 39 m footprint) so the
+# whole thing can be mapped inside one short run -- deliberately not the hospital,
+# which is too large to finish. Surveyed voxel map:
+# robots/PEGASUS/maps/warehouse_shelves_voxels.npz (the stub raycasts it for depth).
+#
+# ONE file describes the whole run: the `run` block (read by the Isaac/stub side)
+# and the `map_config` block (read by FALCON off the param server) MUST agree
+# about where the aircraft starts, so init_x/y/z below equal spawn_x/y and the
+# cruise altitude. See runs/3_open_plan.yaml for the full rationale behind every
+# field; only the geometry and the start pose differ here.
+#
+# Spawn points were chosen from the surveyed map: interior, >=0.6 m of clearance
+# through the whole climb column, off-axis and off round numbers (an exactly
+# axis-aligned Iris will not arm -- see 3_open_plan.yaml). Varying the start
+# across runs surfaces which corners of the warehouse are hard to map.
+run:
+  name: "warehouse_shelves_4"
+  scene: "warehouse_shelves"
+  spawn_x: -7.63
+  spawn_y: -9.37
+  spawn_yaw_deg: 7.0
+  cruise_altitude_m: 1.4
+  camera: "camera_falcon_explorer_640x480.yaml"
+  frame_rate_hz: 12.0
+  # Simulated-second exploration budget. Kept short on purpose: a warehouse this
+  # size is mappable well inside it, so a run that hits this cap was not making
+  # progress and is worth stopping and analysing rather than waiting out.
+  max_flight_s: 300
+  # Hard real-time cap, seconds. Isaac runs below real time, so this bounds the
+  # WALL clock a single iteration can burn. Commented out by default so it does
+  # not cut an Isaac run short; the warehouse campaign passes --max-wall-s.
+  # max_wall_s: 420
+map_config:
+  map_file: ""
+  map_dimension: 2
+  init_x: -7.63
+  init_y: -9.37
+  init_z: 1.4
+  init_yaw: 0.1221730
+  map_size:
+    map_min_x: -12.2
+    map_min_y: -18.2
+    map_min_z: -0.3
+    map_max_x: 12.3
+    map_max_y: 21.1
+    map_max_z: 2.8
+    box_min_x: -11.5
+    box_min_y: -17.5
+    box_min_z: 1.0
+    box_max_x: 11.5
+    box_max_y: 20.3
+    box_max_z: 2.2
+    vbox_min_x: -12.0
+    vbox_min_y: -18.0
+    vbox_min_z: 1.3
+    vbox_max_x: 12.0
+    vbox_max_y: 20.8
+    vbox_max_z: 1.5
+  scale: 1.0
+  T_b_c:
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [ 0.0,-1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]
+  T_m_w:
+  - [ 1.0, 0.0, 0.0, 0.0]
+  - [ 0.0, 1.0, 0.0, 0.0]
+  - [ 0.0, 0.0, 1.0, 0.0]
+  - [ 0.0, 0.0, 0.0, 1.0]

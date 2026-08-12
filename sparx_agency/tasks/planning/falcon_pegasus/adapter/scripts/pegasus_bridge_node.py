@@ -47,7 +47,7 @@ from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import Image
-from std_msgs.msg import Int32, String
+from std_msgs.msg import Float32, Int32, String
 from trajectory.msg import Bspline
 
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
@@ -233,6 +233,11 @@ class PegasusBridge(object):
         self._unsafe = False
         self._last_command_at = None
         self._planner_gone_reported = False
+        # FALCON's explored volume, m3, from its own map server. Forwarded to the
+        # aircraft on the command stream so its deadlock watchdog can tell "still
+        # discovering" from "wedged and mapping nothing new". Held between
+        # updates -- map_coverage publishes at ~2 Hz, pos_cmd at 100 Hz.
+        self._coverage_m3 = 0.0
 
         rospy.Subscriber("/planning/pos_cmd", PositionCommand, self._on_position_command,
                          queue_size=10)
@@ -242,6 +247,11 @@ class PegasusBridge(object):
         # either control path.
         rospy.Subscriber("/planning/bspline", Bspline, self._on_bspline, queue_size=4)
         rospy.Subscriber("/planning/replan", Int32, self._on_replan, queue_size=10)
+        # FALCON's own coverage number: voxels that have left UNKNOWN, in m3. The
+        # aircraft never sees the map, so this is its only measure of exploration
+        # progress -- see the deadlock watchdog in isaac/mission.py.
+        rospy.Subscriber("/voxel_mapping/map_coverage", Float32, self._on_coverage,
+                         queue_size=2)
 
     # ── the FALCON -> Isaac direction ────────────────────────────────────
 
@@ -260,7 +270,18 @@ class PegasusBridge(object):
             (msg.position.x, msg.position.y, msg.position.z),
             (msg.velocity.x, msg.velocity.y, msg.velocity.z),
             (msg.acceleration.x, msg.acceleration.y, msg.acceleration.z),
-            msg.yaw, msg.yaw_dot))
+            msg.yaw, msg.yaw_dot, coverage_m3=self._coverage_m3))
+
+    def _on_coverage(self, msg):
+        """Latch FALCON's explored volume, to piggyback on the command stream.
+
+        Published by the same map server the recorder reads
+        (``/voxel_mapping/map_coverage``), in cubic metres of no-longer-UNKNOWN
+        space. Just stored here; ``_on_position_command`` attaches it to every
+        forwarded reference so the aircraft's deadlock watchdog can see whether
+        new space is still being discovered.
+        """
+        self._coverage_m3 = float(msg.data)
 
     def _on_bspline(self, msg):
         """Forward one whole trajectory to whatever is flying the aircraft.

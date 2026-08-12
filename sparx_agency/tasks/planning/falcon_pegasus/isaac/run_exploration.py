@@ -90,6 +90,11 @@ def _parse_args():
                         help="override the run config's spawn heading, same caveat")
     parser.add_argument("--max-flight-s", type=float, default=None,
                         help="override the run config's flight budget")
+    parser.add_argument("--max-wall-s", type=float, default=None,
+                        help="hard real-time cap, seconds (overrides the run's "
+                             "max_wall_s). Ends the run once this much WALL clock has "
+                             "passed even if the simulated budget is not spent -- the "
+                             "'not more than N seconds' guarantee. Off if neither is set")
     parser.add_argument("--max-speed", type=float, default=1.6,
                         help="tracker horizontal speed ceiling, m/s. Must exceed "
                              "FALCON's own max_linear_velocity and stay under PX4's "
@@ -144,6 +149,9 @@ def _mission_spec(config: dict, args) -> MissionSpec:
                            else run["frame_rate_hz"]),
         max_flight_s=float(args.max_flight_s if args.max_flight_s is not None
                            else run["max_flight_s"]),
+        max_wall_s=(float(args.max_wall_s) if args.max_wall_s is not None
+                    else (float(run["max_wall_s"]) if run.get("max_wall_s") is not None
+                          else None)),
         control_mode=args.control,
         tracker=ReferenceTrackerParams(limits=limits, max_position_error_m=3.0),
         tracking=TrajectoryTrackerParams(max_position_error_m=3.0),

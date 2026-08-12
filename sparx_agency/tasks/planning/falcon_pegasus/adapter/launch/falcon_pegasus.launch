@@ -75,8 +75,31 @@
   <arg name="obstacle_weight" default="100.0"/>
 
   <arg name="rviz" default="false"/>
-  <!-- The z band RViz draws. Defaults span the flight band the runs use. -->
-  <arg name="viz_min_z" default="0.9"/>
+  <!-- The z band RViz draws, and the reason the FLOOR is invisible if you get
+       it wrong. Every publisher in map_server.cpp — occupancy grid, TSDF, ESDF
+       and all three slices — iterates `vbox_min_idx_` to `vbox_max_idx_`, so
+       vbox is a *view*, not a map bound: voxels outside it are fused, planned
+       against and counted as coverage, and simply never published. Fusion is
+       clipped by the MAP box only (tsdf.cpp clamps rays with
+       `closestPointInMap` and skips voxels failing `isInMap`), and every
+       runs/*.yaml puts map_min_z at -0.2 or -0.3, below the ground. So the
+       floor has always been in the map; a band starting at 0.9 just never drew
+       it, and "the drone is flying too high to see the floor" is the wrong
+       diagnosis to reach for.
+
+       Starts below the ground plane for that reason. -0.2 is the highest
+       map_min_z any run uses, and map_server CHECKs map_min <= vbox_min, so
+       this is the lowest value valid for every run. Costs about twice the
+       voxel-view work of the old 0.9 band (26 z-layers instead of 14, at 2 Hz,
+       in the thread that also services the depth callbacks) and it buys a
+       ground plane you can judge altitude against.
+
+       The floor is a solid sheet under everything, so a top-down RViz camera
+       now shows the floor and nothing else; orbit down to eye level, or raise
+       this back to 0.9, to read the map as a floor plan again. The recorded
+       map video is unaffected — it draws the 20 cm cruise slab from
+       runs/*.yaml, which is the cut that makes a top-down video legible. -->
+  <arg name="viz_min_z" default="-0.2"/>
   <arg name="viz_max_z" default="2.3"/>
   <!-- Size of the drone mesh in RViz. 1.0 draws it at roughly the Iris's real
        0.7 m rotor span, so its footprint against the voxels is honest. -->
@@ -119,6 +142,18 @@
   <arg name="replan_start_tolerance" default="1.0"/>
   <param name="/exploration_node/replan_start_tolerance"
          value="$(arg replan_start_tolerance)"/>
+
+  <!-- The second re-anchor trigger: the aircraft has STOPPED while the plan
+       still expects it moving. This is the emergency-stop / unsafe-hold / wedged
+       case — where the position gap has often not grown yet, so the tolerance
+       above would not fire, yet planning a fresh curve from a future point a
+       stopped aircraft will never reach is exactly the deadlock to avoid. When
+       measured speed is below this while the predicted start still carries
+       velocity, FALCON replans from where the aircraft actually is. Defaults to
+       -1 (inert) in the patch, so an unset value is upstream behaviour. -->
+  <arg name="replan_stopped_speed" default="0.10"/>
+  <param name="/exploration_node/replan_stopped_speed"
+         value="$(arg replan_stopped_speed)"/>
 
   <arg name="use_sim_time" default="true"/>
   <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -209,8 +244,10 @@
   <!-- The visualisation box is a 20 cm slab at cruise height (see any
        runs/*.yaml) because that is all the map recorder draws and every extra
        layer is another full pass over the voxel grid at 2 Hz. RViz wants the
-       whole flight band or the voxels look like a single contour line, so the
-       slab is widened back out when RViz is running and only then. -->
+       whole flight band or the voxels look like a single contour line — and it
+       wants the ground plane under that band, or there is no floor to see — so
+       the slab is widened back out when RViz is running and only then. Nothing
+       here changes what is mapped; see viz_min_z above. -->
   <group if="$(arg rviz)">
     <param name="/map_config/map_size/vbox_min_z" value="$(arg viz_min_z)"/>
     <param name="/map_config/map_size/vbox_max_z" value="$(arg viz_max_z)"/>

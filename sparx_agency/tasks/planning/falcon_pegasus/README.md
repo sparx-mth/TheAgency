@@ -46,9 +46,19 @@ cd sparx_agency/tasks/planning/falcon_pegasus && docker build -t falcon-pegasus:
 # the fast loop -- no Isaac Sim, no GPU, about four minutes
 ./stub/check.sh 3_open_plan
 
+# the warehouse -- a dense rack layout to test route-planning and tracking,
+# small enough to map in one short run. Same fast loop, no GPU:
+./stub/check.sh warehouse_shelves 300
+# vary the start location to find the corners that are hard to reach:
+./stub/check.sh warehouse_shelves_2 300      # and _3, _4
+
 # one real flight: FALCON side first, aircraft second
 ./run_falcon_pegasus.sh 3_open_plan          # terminal 1
 ./run_isaac_side.sh 3_open_plan --video      # terminal 2
+
+# the warehouse on Isaac, capped at 300 s of real time so an iteration is quick:
+./run_falcon_pegasus.sh warehouse_shelves                       # terminal 1
+./run_isaac_side.sh warehouse_shelves --video --max-wall-s 300  # terminal 2
 
 # all six runs, unattended
 ./run_campaign.sh
@@ -127,10 +137,45 @@ Three outcomes are successes and mean different things:
   happens and why it has to be detected rather than waited out.
 
 The failures are `stalled` (the aircraft stopped moving while FALCON kept
-replanning — it is wedged against something), `diverged` (more than 3 m behind
-the plan for 30 s), `offboard_lost`, `crashed`, `arm_failed` and `no_commands`.
-`result.json` says which, with the distance flown, the trajectory count and the
-mean and worst plan-to-aircraft gap.
+replanning — it is wedged against something), `no_progress` (FALCON is still
+replanning and the aircraft is even drifting a little, but *no new space is
+being discovered* — a planner/tracker deadlock, stopped on purpose rather than
+waited out), `diverged` (more than 3 m behind the plan for 30 s),
+`offboard_lost`, `crashed`, `arm_failed` and `no_commands`. `time_budget` is the
+hard real-time cap (`max_wall_s` / `--max-wall-s`) firing, and like
+`flight_timeout` it means everything flown up to it was real. `result.json` says
+which, with the distance flown, the trajectory count and the mean and worst
+plan-to-aircraft gap.
+
+## Stopping a run that is going nowhere — the deadlock watchdog
+
+An exploration that has quietly wedged is worse than one that stops: it burns
+the whole budget, and on a real flight it burns a battery. Three guards end a
+stuck run so it can be *analysed* instead of waited out, and they are worth
+keeping apart because they catch different shapes of stuck:
+
+- **`stalled`** — the aircraft has not moved `STALL_DISTANCE_M` in
+  `STALL_WINDOW_S`. Motionless against something.
+- **`planner_stopped`** — the trajectory id has not advanced in
+  `PLANNER_STALL_S`. FALCON itself has gone quiet (usually its LKH solver died).
+- **`no_progress`** — the general one, and the one the operator asked for. FALCON
+  is alive and replanning and the aircraft is even drifting, yet **no new voxels
+  are being discovered**. The signal is FALCON's own coverage — voxels that have
+  left `UNKNOWN`, in m³ — which the mapper computes in its container and the
+  bridge piggybacks onto the command stream (`/voxel_mapping/map_coverage` →
+  `cov` on each `POSCMD` → `FalconLink.coverage_m3`). The rule is exactly the
+  operator's: if for `NO_PROGRESS_WINDOW_S` (30 s) the aircraft has neither
+  discovered `NO_PROGRESS_COVERAGE_M3` (3 m³) of new space **nor** moved
+  `NO_PROGRESS_RADIUS_M` (1.5 m), it is deadlocked and the run ends. It degrades
+  safely if coverage never arrives — the movement half alone still bounds a
+  motionless aircraft.
+
+On top of those, two budgets bound how long a single iteration can run:
+`max_flight_s` is **simulated** seconds (300 on the warehouse runs), and
+`max_wall_s` (`--max-wall-s`, off unless set) is a hard **wall-clock** cap, since
+Isaac runs below real time and a sim-time budget alone can still cost far longer
+in real time. Both watchdogs run on the stub too, so the whole thing is provable
+without a GPU.
 
 ## Watching it live in FALCON's own RViz
 
@@ -176,7 +221,26 @@ will not work by itself. Three things have to be arranged around it, and
   cruise height, because that is all the map recorder needs and every extra
   layer is another full pass over the voxel grid at 2 Hz inside the same thread
   as the mapper. Drawn as-is the voxel view is a single contour line. `--rviz`
-  widens it to the flight band; `viz_min_z` / `viz_max_z` set the range.
+  widens it to the flight band plus the ground under it; `viz_min_z` /
+  `viz_max_z` set the range, and `viz_min_z` defaults to −0.2 for the reason
+  below.
+
+**`vbox` is a view, not a map bound — and it is why the floor looks missing.**
+Every publisher in `voxel_mapping/src/map_server.cpp` — occupancy grid, TSDF,
+ESDF and all three slices — loops `vbox_min_idx_` to `vbox_max_idx_`. Fusion
+does not: `tsdf.cpp` clamps each ray with `closestPointInMap` and skips voxels
+failing `isInMap`, so the bound on what gets *mapped* is `map_min_z` /
+`map_max_z`, and every `runs/*.yaml` puts `map_min_z` at −0.2 or −0.3, below the
+ground. The floor is therefore fused, planned against and counted as coverage
+whatever `vbox` says; a `viz_min_z` of 0.9 simply never drew it. If the depth
+image shows the floor and the voxel view does not, that is this — not the
+aircraft flying too high, and not a hole in the map. `viz_min_z` now starts
+below the ground plane (−0.2, the highest `map_min_z` any run uses, and
+`map_server` CHECKs `map_min <= vbox_min`). The floor then draws as a solid
+sheet under everything, so a top-down camera shows the floor and nothing else —
+orbit down to eye level, or pass `viz_min_z:=0.9`, to read the map as a floor
+plan again. The recorded map video is unaffected: it draws the cruise slab from
+`runs/*.yaml`, which is the cut that makes a top-down video legible.
 
 It is off by default because it is not free: the occupancy clouds are only
 computed when something subscribes, and the wider box costs `exploration_node`
@@ -1147,9 +1211,15 @@ on the wall) and a different fix (inset the box).
 
 ## Known limits
 
-- **Only the `office` scene.** It is the only surveyed one, and `hospital`
-  crashes Kit whenever `pegasus.simulator` is enabled (an upstream Kit bug — see
-  `robots/PEGASUS/README.md`). The six runs vary the region, not the building.
+- **Scenes: `office`, `warehouse_shelves`, `full_warehouse`.** All three are
+  surveyed (`robots/PEGASUS/maps/<scene>_voxels.npz`) so the stub can raycast
+  them; `hospital` still crashes Kit whenever `pegasus.simulator` is enabled (an
+  upstream Kit bug — see `robots/PEGASUS/README.md`). The warehouse is the better
+  route/tracking test: a dense rack layout the aircraft has to zigzag between,
+  and — unlike the hospital — small enough (24 × 39 m for `warehouse_shelves`) to
+  map inside one short run. Its run configs are `runs/warehouse_shelves*.yaml`
+  (a centre start plus three corner starts, so a campaign can vary the spawn and
+  see which corners are hard to reach) and `runs/full_warehouse.yaml`.
 - **One run at a time.** Not a port limit: Kit's start-up is the heaviest moment
   of a worker's life and this is an 8 GB laptop GPU.
 - **`pymavlink` lives in the container's writable layer** and is lost on a

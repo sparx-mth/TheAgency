@@ -270,13 +270,24 @@ def odometry(stamp_s, position, quaternion_xyzw, linear_velocity, angular_veloci
     })
 
 
-def position_command(stamp_s, traj_id, position, velocity, acceleration, yaw, yaw_dot):
-    # type: (float, int, tuple, tuple, tuple, float, float) -> bytes
+def position_command(stamp_s, traj_id, position, velocity, acceleration, yaw, yaw_dot,
+                     coverage_m3=None):
+    # type: (float, int, tuple, tuple, tuple, float, float, object) -> bytes
     """One reference state from FALCON's trajectory server.
 
     A transcription of ``quadrotor_msgs/PositionCommand``, minus the fields
     ``traj_server`` never fills (``jerk`` is always zero, ``trajectory_flag`` is
     set once at start-up and never updated).
+
+    ``coverage_m3`` piggybacks FALCON's own explored-volume number on the 100 Hz
+    command stream, because that is the only signal the aircraft has for whether
+    *new* space is still being discovered -- the mapper lives in the FALCON
+    container and the aircraft never sees the voxels themselves. It is optional
+    (``None`` omits the ``"cov"`` key entirely) so a bridge that predates this,
+    or one running without the ``/voxel_mapping/map_coverage`` topic, still
+    produces a valid message and the receiver simply keeps its last value. The
+    deadlock watchdog (see ``isaac/mission.py``) reads it to tell "wedged and
+    discovering nothing" from "flying and still mapping".
 
     Args:
         stamp_s: Wall-clock seconds the command was published at.
@@ -286,17 +297,22 @@ def position_command(stamp_s, traj_id, position, velocity, acceleration, yaw, ya
         acceleration: World ``(ax, ay, az)``, m/s^2.
         yaw: Reference heading, radians CCW from +x.
         yaw_dot: Reference yaw rate, rad/s.
+        coverage_m3: FALCON's explored volume in cubic metres, or ``None`` to
+            omit it.
 
     Returns:
         A framed ``POSCMD`` message.
     """
-    return encode(KIND_POSCMD, {
+    header = {
         "t": float(stamp_s), "id": int(traj_id),
         "p": [float(v) for v in position],
         "v": [float(v) for v in velocity],
         "a": [float(v) for v in acceleration],
         "yaw": float(yaw), "yaw_dot": float(yaw_dot),
-    })
+    }
+    if coverage_m3 is not None:
+        header["cov"] = float(coverage_m3)
+    return encode(KIND_POSCMD, header)
 
 
 def bspline(start_time_s, traj_id, order, knots, position_points, yaw_points, yaw_dt):

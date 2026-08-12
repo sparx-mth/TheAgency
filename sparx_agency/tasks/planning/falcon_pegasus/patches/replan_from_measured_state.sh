@@ -43,18 +43,30 @@
 # upstream predicts.
 #
 # So: predict while the prediction is TRUE, and fall back to measurement once it
-# demonstrably is not. If the predicted start is further than
-# `~replan_start_tolerance` from the aircraft, the prediction has stopped
-# describing reality and the smooth join is worth less than planning from a
-# place the aircraft actually is. Velocity comes from odometry in that case too,
-# and acceleration is zeroed -- the same treatment the hover branch already
-# gives, since a measured acceleration is not available and a predicted one
-# would belong to the trajectory being abandoned.
+# demonstrably is not. There are two ways it stops being true, and the second is
+# the one the operator kept hitting:
 #
-# The tolerance is a ROS parameter defaulting to 1e9, so an unpatched-looking
-# image behaves EXACTLY as upstream until `nav` sets it. That keeps a baseline
-# run available for comparison and means the threshold can be tuned from the
-# launch file without another rebuild.
+#   1. THE PLAN RAN AHEAD. The predicted start is further than
+#      `~replan_start_tolerance` from the aircraft -- it fell behind, the plan
+#      marched on, and the smooth join is now worth less than starting where the
+#      aircraft actually is.
+#   2. THE AIRCRAFT STOPPED. It is essentially motionless -- held after an
+#      unsafe trajectory, braked in an emergency, or wedged -- while the plan
+#      still expects it moving. Here the position gap may not have grown yet, but
+#      planning a fresh curve from a future point a stopped aircraft will never
+#      reach is precisely the deadlock to avoid. Detected as measured speed below
+#      `~replan_stopped_speed` while the predicted start still carries velocity,
+#      and answered the same way: re-anchor to where the aircraft is, now.
+#
+# In either case velocity comes from odometry and acceleration is zeroed -- the
+# same treatment the hover branch already gives, since a measured acceleration is
+# not available and a predicted one would belong to the trajectory being
+# abandoned.
+#
+# Both are ROS parameters defaulting to the inert value (1e9 and -1), so an
+# unpatched-looking image behaves EXACTLY as upstream until `nav` sets them. That
+# keeps a baseline run available for comparison and means the thresholds can be
+# tuned from the launch file without another rebuild.
 set -e
 
 FSM=/catkin_ws/src/FALCON/falcon_planner/exploration_manager/src/exploration_fsm.cpp
@@ -85,15 +97,31 @@ addition = anchor + """
       // describing the aircraft, and planning from the measured state is worth
       // more than a smooth join to a curve the aircraft was not flying.
       double replan_start_tolerance = 1e9;
+      double replan_stopped_speed = -1.0;
       ros::NodeHandle nh_tol;
       nh_tol.param("/exploration_node/replan_start_tolerance",
                    replan_start_tolerance, 1e9);
+      nh_tol.param("/exploration_node/replan_stopped_speed",
+                   replan_stopped_speed, -1.0);
       const double predicted_gap = (fd_->start_pos_ - fd_->odom_pos_).norm();
-      if (predicted_gap > replan_start_tolerance) {
+      const double measured_speed = fd_->odom_vel_.norm();
+      const double predicted_speed = fd_->start_vel_.norm();
+      // Two ways the prediction has stopped describing the aircraft: it ran
+      // ahead (gap too big), or the aircraft STOPPED -- held after an unsafe
+      // trajectory, braked, or wedged -- while the plan still expects motion.
+      // The second is the deadlock the operator kept hitting: a fresh curve from
+      // a future point a stopped aircraft will never reach. Re-anchor for either.
+      const bool prediction_far = predicted_gap > replan_start_tolerance;
+      const bool stopped_but_planned_moving =
+          replan_stopped_speed >= 0.0 &&
+          measured_speed < replan_stopped_speed &&
+          predicted_speed > 2.0 * replan_stopped_speed;
+      if (prediction_far || stopped_but_planned_moving) {
         ROS_WARN_THROTTLE(2.0,
-                          "[FSM] predicted start is %.2f m from the aircraft "
-                          "(tol %.2f) -- replanning from the measured state",
-                          predicted_gap, replan_start_tolerance);
+                          "[FSM] replanning from the measured state: gap %.2f m "
+                          "(tol %.2f), measured %.2f m/s, planned %.2f m/s",
+                          predicted_gap, replan_start_tolerance, measured_speed,
+                          predicted_speed);
         fd_->start_pos_ = fd_->odom_pos_;
         fd_->start_vel_ = fd_->odom_vel_;
         fd_->start_acc_.setZero();
@@ -111,5 +139,6 @@ if source.count(anchor) != 1:
                      % source.count(anchor))
 
 open(path, "w").write(source.replace(anchor, addition))
-print("patch: FALCON will replan from the measured state when the prediction is stale")
+print("patch: FALCON will replan from the measured state when it strays far OR "
+      "stops while the plan expects motion")
 PYEOF

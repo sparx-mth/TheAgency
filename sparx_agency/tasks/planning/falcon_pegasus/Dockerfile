@@ -65,6 +65,23 @@ RUN chmod +x /tmp/isolate_lkh_tsp_solver.sh && /tmp/isolate_lkh_tsp_solver.sh
 COPY patches/inflate_astar_by_airframe.sh /tmp/inflate_astar_by_airframe.sh
 RUN chmod +x /tmp/inflate_astar_by_airframe.sh && /tmp/inflate_astar_by_airframe.sh
 
+# Let FALCON run on the simulator's clock. Upstream opens exploration_node with
+# CHECK(!use_sim_time), a glog FATAL, because THEIR wall-clock simulator feeds
+# the position command back as the state. Isaac runs below real time, so
+# falcon_pegasus.launch sets /use_sim_time=true and the bridge publishes /clock;
+# without this patch that launch aborts the node at start-up. See RESUME.md.
+COPY patches/allow_sim_time.sh /tmp/allow_sim_time.sh
+RUN chmod +x /tmp/allow_sim_time.sh && /tmp/allow_sim_time.sh
+
+# Replan from where the aircraft IS, not from a stale/future point off the
+# previous curve, once the prediction stops describing it -- either it strayed
+# too far (/exploration_node/replan_start_tolerance) or it STOPPED while the plan
+# still expects motion (/exploration_node/replan_stopped_speed): the
+# emergency-stop / unsafe-hold / wedged deadlock. Both params default inert, so
+# an unset launch behaves as upstream. See RESUME.md.
+COPY patches/replan_from_measured_state.sh /tmp/replan_from_measured_state.sh
+RUN chmod +x /tmp/replan_from_measured_state.sh && /tmp/replan_from_measured_state.sh
+
 # The catkin package: two rospy nodes, a launch file, and the run configs.
 # runs/ lands INSIDE the package so `$(find falcon_pegasus)/runs/<run>.yaml`
 # resolves in the launch file. run_falcon_pegasus.sh bind-mounts the host copies

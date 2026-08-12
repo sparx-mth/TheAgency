@@ -56,6 +56,7 @@ from sparx_agency.tasks.planning.falcon_pegasus.isaac import setup
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.falcon_client import FalconLink
 from sparx_agency.tasks.planning.falcon_pegasus.isaac.mission import (
     CONTROL_ATTITUDE, CONTROL_MODES, CONTROL_VELOCITY,
+    NO_PROGRESS_COVERAGE_M3, NO_PROGRESS_RADIUS_M, NO_PROGRESS_WINDOW_S,
 )
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
 from sparx_agency.tasks.planning.falcon_pegasus.link.sim_clock import SimClock
@@ -86,6 +87,11 @@ def _parse_args():
                         help="voxel map npz (default: the run's scene map)")
     parser.add_argument("--max-flight-s", type=float, default=None,
                         help="override the run config's flight budget")
+    parser.add_argument("--max-wall-s", type=float, default=None,
+                        help="hard real-time cap, seconds. Stops the run once this "
+                             "much WALL clock has passed even if the simulated budget "
+                             "is not spent -- the operator's 'not more than N seconds'. "
+                             "Off by default")
     parser.add_argument("--realtime", action="store_true",
                         help="pace to wall clock. On by default and almost always "
                              "what you want: FALCON walks its trajectory on the wall "
@@ -210,7 +216,7 @@ def main() -> int:
 
     state = _Flight(link, aircraft, tracker, camera, intrinsics, cruise, spawn_yaw,
                     frame_period, budget, realtime, args.control, controller,
-                    args.real_time_factor)
+                    args.real_time_factor, max_wall_s=args.max_wall_s)
     try:
         outcome, detail = state.run()
     finally:
@@ -227,6 +233,7 @@ def main() -> int:
         "mean_tracking_error_m": state.mean_error,
         "max_tracking_error_m": state.max_error,
         "distance_m": state.distance,
+        "coverage_m3": link.coverage_m3,
     }
     print(json.dumps(summary, indent=2), flush=True)
     if args.trace and state.trace:
@@ -237,7 +244,8 @@ def main() -> int:
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(summary, indent=2))
-    return 0 if outcome in ("explored", "flight_timeout", "planner_stopped") else 1
+    return 0 if outcome in ("explored", "flight_timeout", "planner_stopped",
+                            "time_budget") else 1
 
 
 class _Flight:
@@ -245,7 +253,7 @@ class _Flight:
 
     def __init__(self, link, aircraft, tracker, camera, intrinsics, cruise, spawn_yaw,
                  frame_period, budget, realtime, control_mode, controller,
-                 real_time_factor=1.0):
+                 real_time_factor=1.0, max_wall_s=None):
         self.link = link
         self.aircraft = aircraft
         self.tracker = tracker
@@ -260,6 +268,7 @@ class _Flight:
         self.budget = budget
         self.realtime = realtime
         self.real_time_factor = float(real_time_factor)
+        self.max_wall_s = max_wall_s
         self.clock = SimClock()
         if self.real_time_factor <= 0.0:
             raise ValueError("real_time_factor must be positive, got %r"
@@ -440,6 +449,10 @@ class _Flight:
         last_report = self.sim_time
         last_trajectory = self.link.trajectory_id
         trajectory_at = self.sim_time
+        # Deadlock watchdog anchors -- see NO_PROGRESS_* in isaac/mission.py.
+        noprogress_pos = self.aircraft.nav_position
+        noprogress_cov = self.link.coverage_m3
+        noprogress_at = self.sim_time
         while True:
             command = self._control()
             if not command.holding:
@@ -454,6 +467,22 @@ class _Flight:
                     "FALCON published no new trajectory for %.0f s (still on #%d)"
                     % (PLANNER_STALL_S, last_trajectory))
 
+            # Deadlock: no new coverage AND no real movement for a whole window.
+            # Identical rule to the real mission's, on the same forwarded
+            # coverage number -- the stub is here to prove exactly this logic
+            # before a GPU-hour is spent on it.
+            position = self.aircraft.nav_position
+            if (self.link.coverage_m3 - noprogress_cov >= NO_PROGRESS_COVERAGE_M3
+                    or math.dist(position, noprogress_pos) >= NO_PROGRESS_RADIUS_M):
+                noprogress_cov = self.link.coverage_m3
+                noprogress_pos = position
+                noprogress_at = self.sim_time
+            elif self.sim_time - noprogress_at >= NO_PROGRESS_WINDOW_S:
+                return "no_progress", (
+                    "no new voxels and under %.1f m of movement in %.0f s while "
+                    "FALCON kept replanning -- a planner/tracker deadlock"
+                    % (NO_PROGRESS_RADIUS_M, NO_PROGRESS_WINDOW_S))
+
             if self._finished:
                 return "explored", ""
             if not self.link.alive:
@@ -464,6 +493,11 @@ class _Flight:
             if self.sim_time - started > self.budget:
                 return "flight_timeout", ("reached the %.0f s budget with exploration "
                                           "still running" % self.budget)
+            if self.max_wall_s is not None and (
+                    time.monotonic() - self._wall_start > self.max_wall_s):
+                return "time_budget", (
+                    "reached the %.0f s wall-clock budget (%.0f s simulated)"
+                    % (self.max_wall_s, self.sim_time - started))
             if self.sim_time - last_report >= 10.0:
                 last_report = self.sim_time
                 print("    t=%5.1fs pos=(%6.2f,%6.2f,%5.2f) err=%4.2fm traj#%d frames=%d"
