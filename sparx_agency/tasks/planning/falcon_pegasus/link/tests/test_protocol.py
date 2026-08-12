@@ -127,10 +127,33 @@ def test_negative_infinity_is_discarded():
     assert encoded[0, 0] == 0
 
 
-def test_readings_closer_than_the_minimum_range_are_discarded():
+def test_readings_closer_than_the_minimum_range_are_clamped_not_discarded():
+    """A very close return is a wall, not an absent measurement.
+
+    Discarding them cost a flight: pinned against a partition the lens sits
+    ~0.1 m off it and the WHOLE frame reads under NEAR_M, so FALCON received a
+    blank image, never mapped the wall it was touching, and kept re-planning
+    the same unreachable viewpoint. Zero on this wire means "no measurement" and
+    must be reserved for exactly that.
+    """
     encoded = encode_depth(np.array([[NEAR_M - 0.01, NEAR_M + 0.01]], dtype=np.float32))
-    assert encoded[0, 0] == 0
+    assert encoded[0, 0] == int(round(NEAR_M * 1000))
     assert encoded[0, 1] > 0
+
+
+def test_a_whole_frame_against_a_wall_still_reports_a_surface():
+    """The case that actually happened: min 0.08, median 0.09, max 0.13 m."""
+    frame = np.full((8, 8), 0.09, dtype=np.float32)
+    encoded = encode_depth(frame)
+    assert (encoded > 0).all(), "a frame full of wall must not encode as no-data"
+    assert encoded.min() == int(round(NEAR_M * 1000))
+
+
+def test_a_genuine_non_measurement_is_still_zero():
+    """NaN is "no reading" and must stay distinguishable from a close surface."""
+    encoded = encode_depth(np.array([[math.nan, 0.0]], dtype=np.float32))
+    assert encoded[0, 0] == 0
+    assert encoded[0, 1] == 0
 
 
 def test_far_readings_are_clamped_not_wrapped():
@@ -167,3 +190,52 @@ def test_encode_decode_round_trip_preserves_every_pixel():
     decoded = decode_depth(encoded.tobytes(), 504, 392)
     np.testing.assert_array_equal(decoded, encoded)
     assert np.max(np.abs(decoded.astype(float) / 1000.0 - metres)) < 1e-3
+
+
+def test_round_trips_a_whole_trajectory():
+    """The curve survives the wire, and rebuilds into the same polynomial.
+
+    Checked by evaluating the rebuilt curve rather than by comparing fields: the
+    thing that must hold is that both sides of the link agree on where the
+    aircraft should be, and a knot vector that round-trips but is applied
+    differently would pass a field comparison and fail in flight.
+    """
+    from sparx_agency.core.planning.trajectories.bspline import BsplineTrajectory
+
+    points = [[float(i) * 0.5, float(i % 3), 1.4] for i in range(9)]
+    knots = [(-3 + i) * 0.35 for i in range(len(points) + 4)]
+    yaws = [0.1, 0.4, 0.9, 1.3, 1.6, 1.9]
+    blob = protocol.bspline(1234.5, 7, 3, knots, points, yaws, 0.5)
+
+    (kind, header, payload), = protocol.Decoder().feed(blob)
+    assert kind == protocol.KIND_BSPLINE
+    assert payload == b""
+    assert header["id"] == 7
+    assert header["t"] == 1234.5
+
+    rebuilt = BsplineTrajectory.from_falcon(
+        header["order"], header["knots"], header["pos"], header["yaw"],
+        header["yaw_dt"], header["t"], header["id"])
+    original = BsplineTrajectory.from_falcon(3, knots, points, yaws, 0.5, 1234.5, 7)
+    assert rebuilt.duration == pytest.approx(original.duration)
+    for t in (0.0, 0.4, 1.1, rebuilt.duration):
+        here, there = rebuilt.sample(t), original.sample(t)
+        assert (here.x, here.y, here.z) == pytest.approx((there.x, there.y, there.z))
+        assert here.yaw == pytest.approx(there.yaw)
+
+
+def test_a_trajectory_message_survives_being_chopped_up():
+    """It is the largest header on the link, so it is the one TCP will split."""
+    points = [[float(i), 0.0, 1.0] for i in range(40)]
+    knots = [(-3 + i) * 0.2 for i in range(len(points) + 4)]
+    blob = protocol.bspline(0.0, 1, 3, knots, points, [0.0] * 6, 0.2)
+    assert len(blob) > 1024
+    messages = _drain(protocol.Decoder(), blob, chunk_size=97)
+    assert len(messages) == 1
+    assert messages[0][0] == protocol.KIND_BSPLINE
+    assert len(messages[0][1]["pos"]) == 40
+
+
+def test_the_bspline_kind_has_a_name():
+    """Unnamed kinds show up in logs as integers and waste an afternoon."""
+    assert protocol.KIND_NAMES[protocol.KIND_BSPLINE] == "bspline"

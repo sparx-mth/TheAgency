@@ -75,6 +75,11 @@ class TrajectoryPoint:
 
     Core fields (t, x, y, z) are required. Velocities, accelerations,
     and auxiliary fields (yaw, curvature, arc length) are optional.
+
+    Jerk is carried because a multirotor's *attitude* feedforward is the
+    derivative of its thrust direction, which is a function of jerk. A
+    controller that commands attitude therefore needs the third derivative of
+    position; one that commands velocity does not, and leaves these zero.
     """
     t: float
     x: float
@@ -86,6 +91,9 @@ class TrajectoryPoint:
     ax: float = 0.0
     ay: float = 0.0
     az: float = 0.0
+    jx: float = 0.0
+    jy: float = 0.0
+    jz: float = 0.0
     yaw: Optional[float] = None
     yaw_rate: Optional[float] = None
     s: Optional[float] = None

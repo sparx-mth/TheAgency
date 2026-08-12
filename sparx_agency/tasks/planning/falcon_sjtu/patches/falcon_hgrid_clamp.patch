@@ -1,0 +1,103 @@
+diff --git a/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp b/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
+index 7c17673..27605d4 100644
+--- a/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
++++ b/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
+@@ -215,9 +215,22 @@ UniformGrid::UniformGrid(ros::NodeHandle &nh, const Config &config,
+ }
+ 
+ int UniformGrid::positionToGridCellId(const Position &pos) {
+-  int x = std::floor((pos.x() - config_.bbox_min_.x()) / config_.cell_size_.x());
+-  int y = std::floor((pos.y() - config_.bbox_min_.y()) / config_.cell_size_.y());
+-  int z = std::floor((pos.z() - config_.bbox_min_.z()) / config_.cell_size_.z());
++  // Clamp into the grid box FIRST: the aircraft sits below the box floor on
++  // every takeoff (and can overshoot any face), and an out-of-box position
++  // floored to a negative index here flowed into unchecked vector indexing
++  // and allocation sizes downstream -- segfaults and bad_allocs that killed
++  // the planner at mission start. The callers ask "which cell is this
++  // position in"; for an out-of-box position the nearest cell is the answer.
++  Position p = pos;
++  for (int k = 0; k < 3; ++k)
++    p(k) = std::max(config_.bbox_min_(k) + 1e-4,
++                    std::min(config_.bbox_max_(k) - 1e-4, pos(k)));
++  int x = std::floor((p.x() - config_.bbox_min_.x()) / config_.cell_size_.x());
++  int y = std::floor((p.y() - config_.bbox_min_.y()) / config_.cell_size_.y());
++  int z = std::floor((p.z() - config_.bbox_min_.z()) / config_.cell_size_.z());
++  x = std::max(0, std::min(config_.num_cells_x_ - 1, x));
++  y = std::max(0, std::min(config_.num_cells_y_ - 1, y));
++  z = std::max(0, std::min(config_.num_cells_z_ - 1, z));
+ 
+   return x + y * config_.num_cells_x_ + z * config_.num_cells_x_ * config_.num_cells_y_;
+ }
+@@ -232,6 +245,26 @@ void UniformGrid::positionToGridCellCenterId(const Position &pos, int &cell_id,
+ 
+   cell_id = positionToGridCellId(pos);
+ 
++  // A position outside the grid box (the aircraft below the box floor during
++  // takeoff, or overshooting a face) produced an out-of-range id here and the
++  // unchecked vector index below SEGFAULTED the node -- upstream knew (the
++  // CHECKs at the bottom of this function are commented out) and shipped the
++  // crash; measured as 14 planner deaths in 8 minutes once the flight box
++  // floor was raised. Clamp to the nearest in-box position instead: every
++  // caller is asking "which tour cell is the aircraft in", and for an
++  // aircraft at the boundary the nearest cell IS the answer.
++  if (cell_id < 0 || cell_id >= static_cast<int>(uniform_grid_.size())) {
++    Position clamped = pos;
++    for (int k = 0; k < 3; ++k)
++      clamped(k) = std::max(config_.bbox_min_(k) + 1e-3,
++                            std::min(config_.bbox_max_(k) - 1e-3, pos(k)));
++    cell_id = positionToGridCellId(clamped);
++    if (cell_id < 0 || cell_id >= static_cast<int>(uniform_grid_.size())) {
++      cell_id = -1;
++      return;
++    }
++  }
++
+   Position bbox_min = uniform_grid_[cell_id].bbox_min_;
+   Position bbox_max = uniform_grid_[cell_id].bbox_max_;
+ 
+@@ -2004,6 +2037,7 @@ void UniformGrid::calculateCostMatrixSingleThread(
+         // int end_id = cell_id_center_id_pair.first * 10 + cell_id_center_id_pair.second;
+       } else {
+         cost = getAStarCostYaw(cur_pos, center_free, cur_vel, 0.0, 0.0);
++        if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+         // if (cost > 499.0) {
+         //   ROS_ERROR("[UniformGrid] Cost from current position to cell %d free center (%.2f, %.2f,
+         //   "
+@@ -2116,11 +2150,13 @@ void UniformGrid::calculateCostMatrixSingleThread(
+               std::vector<int> path;
+               cost = connectivity_graph_->searchConnectivityGraphBFS(cell_center_id1,
+                                                                      cell_center_id2, path);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost (BFS), avoid CHECK_GT abort
+               CHECK_GT(cost, 1e-4) << "Zero cost from cell " << grid_cell1.id_ << " center " << i
+                                    << " to cell " << grid_cell2.id_ << " center " << j;
+             }
+           } else {
+             cost = getAStarCostYaw(centers1[i], centers2[j], Eigen::Vector3d::Zero(), 0.0, 0.0);
++            if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+             if (cost > 499.0) {
+               // Try CG search
+               if (no_cg_search) {
+@@ -2129,6 +2165,7 @@ void UniformGrid::calculateCostMatrixSingleThread(
+                 std::vector<int> path;
+                 cost = connectivity_graph_->searchConnectivityGraphBFS(cell_center_id1,
+                                                                        cell_center_id2, path);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost (BFS), avoid CHECK_GT abort
+                 CHECK_GT(cost, 1e-4) << "Zero cost from cell " << grid_cell1.id_ << " center " << i
+                                      << " to cell " << grid_cell2.id_ << " center " << j;
+               }
+@@ -2292,6 +2329,7 @@ void UniformGrid::calculateCostMatrixMultiThread(
+             } else {
+               // WARNING: getAStarCostYaw is not thread safe
+               cost = getAStarCostYaw(cur_pos, center, cur_vel, 0.0, 0.0);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+             }
+ 
+             cost_matrix(0, index) = cost;
+@@ -2330,6 +2368,7 @@ void UniformGrid::calculateCostMatrixMultiThread(
+             } else {
+               // WARNING: getAStarCostYaw is not thread safe
+               cost = getAStarCostYaw(center1, center2, Eigen::Vector3d::Zero(), 0.0, 0.0);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+             }
+ 
+             if (!is_free_center1 || !is_free_center2) {

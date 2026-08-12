@@ -1,0 +1,170 @@
+<launch>
+  <!--
+    exploration.launch — the full FALCON exploration, flown on the SJTU drone.
+
+    A lean port of sjtu_project's gazebo_exploration.launch. What was dropped
+    is not lost: the noise-injection adapter, recorder, BEV publisher and
+    completion watcher belonged to that stack's experiment harness, and
+    cmd_to_vel is replaced by our bspline_follower (which reads the CURVE, not
+    the 100 Hz samples — see bspline_follower.launch for why that matters).
+
+    Topology, three nodes plus FALCON's two:
+
+      /simple_drone/odom  (bridged from ROS2, body-frame twist)
+              │
+        sensor_pose_node ──► /map_ros/pose   (camera pose, mapper pairs by stamp)
+              │        └───► /odom_world     (twist rotated to WORLD — FALCON
+              │                               reads it unrotated into the next
+              │                               plan's initial velocity)
+      /simple_drone/front_depth/depth/image_raw (bridged, 32FC1 metres)
+              │
+        exploration_node  (mapper + frontiers + planner + FSM, unmodified)
+              │
+        traj_server ──► /planning/pos_cmd    (unused by us, kept for FALCON)
+              └───────► /planning/bspline ──► bspline_follower ──► cmd_vel
+  -->
+
+  <arg name="map_name" default="small_house"/>
+  <arg name="drone_ns" default="/simple_drone"/>
+
+  <!-- ONE clock owns everything. Every data stamp in this graph is already
+       Gazebo sim time (the bridged depth, odom and therefore /map_ros/pose),
+       but without this flag ros::Time::now() was WALL time: FALCON stamped
+       B-splines on a clock ~12% faster than the physics (hospital rtf ~0.88),
+       so the reference ran ahead of the aircraft and the follower burned its
+       catch-up margin closing a gap that was pure clock skew. /clock is
+       bridged ROS2->ROS1 in config/bridge.yaml (best_effort, matching its
+       publisher); nodes idle until the bridge comes up, which the run script
+       tolerates. -->
+  <param name="/use_sim_time" value="true"/>
+
+  <!-- ── Speeds: the old stack's indoor tuning, kept. At 0.25 m/s a 4 m leg is
+       a ~16 s spline, comfortably inside FALCON's well-behaved regime; yaw
+       faster than translation so the camera can align at a door before the
+       aircraft is committed through it. -->
+  <arg name="max_vel"     default="0.25"/>
+  <arg name="max_acc"     default="0.25"/>
+  <arg name="max_yaw_vel" default="0.6"/>
+  <arg name="max_yaw_acc" default="0.5"/>
+
+  <!-- ── Safety: HARD inflation in the map vs SOFT optimiser penalty. The rule
+       that must hold: safe_distance <= narrowest_half_width - inflation, or the
+       optimiser is asked for clearance the corridor cannot provide and trades it
+       away unpredictably. Lowered 0.30 to 0.25 (the drone radius, zero spare) to
+       open hospital doorways: a 0.9 m door widens the centre corridor from
+       0.30 m to 0.40 m, enough for the follower to hold the centre through it.
+       Grazes are survivable now (speed capped 0.6 m/s, contact reflex backs
+       out), so the old margin is spent reaching frontiers the 0.30 m map had
+       walled off rather than left on the table. -->
+  <arg name="obstacles_inflation" default="0.25"/>
+  <arg name="safe_distance"       default="0.15"/>
+
+  <!-- ── Frontier viewpoints: clearances lowered (0.35 to 0.25, 0.60 to 0.40) so
+       FALCON places a viewpoint in a tighter space and observes a frontier
+       tucked behind a doorway, instead of declaring it un-viewable and leaving
+       that room unmapped. rmin stays 1.0 (above the 0.95 m near clip) so a
+       viewpoint can still actually see what it is placed to observe. -->
+  <arg name="frontier_min_clearance"     default="0.25"/>
+  <arg name="frontier_min_occ_clearance" default="0.40"/>
+  <arg name="frontier_candidate_rmin"    default="1.0"/>
+  <arg name="frontier_candidate_rmax"    default="2.5"/>
+
+  <!-- ── FALCON's own configuration, exactly as its exploration.launch loads
+       it. The map yaml is OURS, mounted over the image's config/map/ dir by
+       run_falcon_sjtu.sh. -->
+  <rosparam command="load" file="$(find exploration_manager)/config/robot/uav_model_simulator.yaml"/>
+  <rosparam command="load" file="$(find exploration_manager)/config/map/$(arg map_name).yaml"/>
+  <rosparam command="load" file="$(find voxel_mapping)/config/voxel_mapping.yaml"/>
+  <rosparam command="load" file="$(find pathfinding)/config/astar.yaml"/>
+  <rosparam command="load" file="$(find fast_planner)/config/fast_planner.yaml"/>
+  <rosparam command="load" file="$(find exploration_preprocessing)/config/frontier_finder.yaml"/>
+  <rosparam command="load" file="$(find exploration_preprocessing)/config/hgrid.yaml"/>
+  <rosparam command="load" file="$(find exploration_utils)/config/perception_utils.yaml"/>
+  <rosparam command="load" file="$(find exploration_manager)/config/exploration_manager.yaml"/>
+
+  <!-- ── Overrides. NO sensing_parameters here: the corrected camera model
+       (600x600, fx=fy=390.64 — the previous stack's 640x480/320 corrupted the
+       map, see the package README) is owned by bspline_follower.launch, ONE
+       source of truth, included below. -->
+  <param name="/transformer/pose_topic_type"     value="pose"/>
+  <param name="/transformer/timestamp_tolerance" value="0.05"/>
+
+  <param name="/uav_model/dynamics_parameters/max_linear_velocity"     value="$(arg max_vel)"/>
+  <param name="/uav_model/dynamics_parameters/max_linear_acceleration" value="$(arg max_acc)"/>
+  <param name="/uav_model/dynamics_parameters/max_yaw_velocity"        value="$(arg max_yaw_vel)"/>
+  <param name="/uav_model/dynamics_parameters/max_yaw_acceleration"    value="$(arg max_yaw_acc)"/>
+
+  <param name="/voxel_mapping/obstacles_inflation" value="$(arg obstacles_inflation)"/>
+  <param name="/bspline_opt/safe_distance"         value="$(arg safe_distance)"/>
+
+  <!-- ── Coverage-tour TSP size vs LKH stability. FALCON's coverage tour is a
+       TSP over hgrid cell centres, solved in-process by LKH, which segfaults
+       intermittently and more often as the tour grows (FindTour -> Best5OptMove
+       -> Flip_SL). Coarser cells mean far fewer of them — a 40x40 m box drops
+       from ~64 five-metre cells to ~16 ten-metre ones — which shrinks the TSP
+       and the crash rate while keeping the whole hospital in scope. The tour is
+       slightly less optimal; that is the trade for surviving. -->
+  <arg name="hgrid_cell_size_max" default="10.0"/>
+  <param name="/hgrid/cell_size_max" value="$(arg hgrid_cell_size_max)"/>
+
+  <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)"/>
+  <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)"/>
+  <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)"/>
+  <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)"/>
+
+  <!-- Dead-end guard (patched into exploration_manager + frontier_finder): when
+       the aircraft sits pinned short of a chosen viewpoint for 20 s, that
+       viewpoint is handed to the frontier finder, which retires every cluster
+       whose average is within this radius to dormant so the coverage tour stops
+       re-selecting a route the map thinks is clear but physics blocks. 2.5 m so
+       it reaches the frontier sitting up to candidate_rmax behind the viewpoint. -->
+  <param name="/frontier_finder/blocked_region_radius" value="2.5"/>
+
+  <!-- traj_server parks its pre-plan command at the init pose, no ramp:
+       the follower owns takeoff. -->
+  <param name="/traj_server/init_dx" value="0.0"/>
+  <param name="/traj_server/init_dy" value="0.0"/>
+  <param name="/traj_server/init_dz" value="0.0"/>
+
+  <!-- ── The adapter nodes ─────────────────────────────────────────────── -->
+  <node pkg="falcon_adapter" type="sensor_pose_node.py" name="sensor_pose_node"
+        output="screen">
+    <param name="odom_topic" value="$(arg drone_ns)/odom"/>
+  </node>
+
+  <!-- ── FALCON, unmodified ────────────────────────────────────────────── -->
+  <!-- respawn rather than required: FALCON's in-process LKH TSP solver
+       segfaults intermittently (FindTour -> Best5OptMove -> Flip_SL, an upstream
+       heuristic bug), and a `required` node takes the whole mission down with
+       it. Respawning restarts the planner in place; the map is rebuilt from the
+       depth stream that keeps flowing. A tight crash loop is still visible in
+       the log (respawn_delay spaces them), which is the signal to stop. -->
+  <node pkg="exploration_manager" name="exploration_node" type="exploration_node"
+        output="screen" respawn="true" respawn_delay="3">
+    <!-- /odom_world comes from sensor_pose_node (world-frame twist), NOT the
+         raw bridged odometry, whose twist is body-frame per REP-147 and would
+         start every replan with a velocity pointing along the nose. -->
+    <remap from="/voxel_mapping/depth_image"     to="$(arg drone_ns)/front_depth/depth/image_raw"/>
+    <remap from="/transformer/sensor_pose_topic" to="/map_ros/pose"/>
+  </node>
+
+  <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"/>
+
+  <!-- Drone marker for RViz. FALCON's rviz.rviz displays the robot from
+       /odom_visualization/robot, but the node that publishes it belongs to
+       FALCON's own uav_simulator bringup, which this stack replaces with the
+       real Gazebo aircraft; without this, RViz shows the map growing with no
+       drone in it. The node reads ~odometry, remapped to the world-frame odom. -->
+  <node pkg="odom_visualization" name="odom_visualization" type="odom_visualization">
+    <remap from="~odometry" to="/odom_world"/>
+    <param name="robot_scale" value="2.0"/>
+    <param name="color/r" value="1.0"/>
+    <param name="color/g" value="0.3"/>
+    <param name="color/b" value="0.0"/>
+  </node>
+
+  <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
+  <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
+    <arg name="drone_ns" value="$(arg drone_ns)"/>
+  </include>
+</launch>

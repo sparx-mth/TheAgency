@@ -2,13 +2,19 @@
 # Run one stub flight end to end: bring the FALCON side up, fly the stand-in
 # aircraft against it, tear it down, and report what happened.
 #
-#   stub/check.sh [run] [max_flight_s]
+#   stub/check.sh [run] [max_flight_s] [extra run_stub.py args...]
 #
 # This is the fast loop. It exercises the bridge, FALCON's configuration, the
-# exploration box, the camera contract and the outer-loop tracker against the
+# exploration box, the camera contract and the whole control chain against the
 # real surveyed building, without Isaac Sim, a GPU, or PX4's three-minute
 # warm-up. Use it after changing a run config or anything in adapter/, and only
 # then spend a real flight on it.
+#
+# Anything after the budget goes straight to run_stub.py, which is how the two
+# cuts into PX4 are compared without rebuilding anything:
+#
+#   stub/check.sh 3_open_plan 150 --control attitude --hover-throttle 0.72
+#   stub/check.sh 3_open_plan 150 --control velocity
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +24,8 @@ PYTHON="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 
 RUN="${1:-3_open_plan}"
 BUDGET="${2:-240}"
+shift $(( $# < 2 ? $# : 2 ))
+STUB_ARGS=("$@")
 LOG_DIR="${STUB_LOG_DIR:-/tmp/falcon_pegasus_stub}"
 mkdir -p "${LOG_DIR}"
 FALCON_LOG="${LOG_DIR}/${RUN}_falcon.log"
@@ -42,7 +50,7 @@ for _ in $(seq 1 120); do
 done
 
 "${PYTHON}" "${SCRIPT_DIR}/run_stub.py" --run "${RUN}" --max-flight-s "${BUDGET}" \
-    --out "${LOG_DIR}/${RUN}_stub.json"
+    --out "${LOG_DIR}/${RUN}_stub.json" ${STUB_ARGS[@]+"${STUB_ARGS[@]}"}
 status=$?
 
 echo

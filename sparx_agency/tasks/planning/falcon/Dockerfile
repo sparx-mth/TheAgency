@@ -210,6 +210,11 @@ RUN chmod +x /tmp/fix_falcon_system_info.sh && /tmp/fix_falcon_system_info.sh
 COPY patches/fix_falcon_cost_check.sh /tmp/fix_falcon_cost_check.sh
 RUN chmod +x /tmp/fix_falcon_cost_check.sh && /tmp/fix_falcon_cost_check.sh
 
+# Occupancy-grid publish cadence vs map growth: free/unknown clouds grow with
+# explored volume and scale publish+parse cost with mapping progress.
+COPY patches/fix_falcon_visgrid_cadence.sh /tmp/fix_falcon_visgrid_cadence.sh
+RUN chmod +x /tmp/fix_falcon_visgrid_cadence.sh && /tmp/fix_falcon_visgrid_cadence.sh
+
 # ── 6a-quater. Patch FALCON depthToPointcloud buffer overflow ─
 COPY patches/fix_falcon_depth_overflow.sh /tmp/fix_falcon_depth_overflow.sh
 RUN chmod +x /tmp/fix_falcon_depth_overflow.sh && /tmp/fix_falcon_depth_overflow.sh

@@ -51,10 +51,16 @@ KIND_POSCMD = 3
 """FALCON -> Isaac, 100 Hz. One ``quadrotor_msgs/PositionCommand``."""
 KIND_EVENT = 4
 """Either direction. A named, structured thing happened -- see :data:`EVENTS`."""
+KIND_BSPLINE = 5
+"""FALCON -> Isaac, on every replan. The trajectory itself, not a sample of it.
+
+Carried *alongside* :data:`KIND_POSCMD` rather than instead of it, so both
+control paths stay flyable from one run of the FALCON side and can be compared
+without rebuilding anything."""
 
 KIND_NAMES = {
     KIND_HELLO: "hello", KIND_FRAME: "frame", KIND_ODOM: "odom",
-    KIND_POSCMD: "poscmd", KIND_EVENT: "event",
+    KIND_POSCMD: "poscmd", KIND_EVENT: "event", KIND_BSPLINE: "bspline",
 }
 
 EVENT_EXPLORATION_FINISHED = "exploration_finished"
@@ -264,13 +270,24 @@ def odometry(stamp_s, position, quaternion_xyzw, linear_velocity, angular_veloci
     })
 
 
-def position_command(stamp_s, traj_id, position, velocity, acceleration, yaw, yaw_dot):
-    # type: (float, int, tuple, tuple, tuple, float, float) -> bytes
+def position_command(stamp_s, traj_id, position, velocity, acceleration, yaw, yaw_dot,
+                     coverage_m3=None):
+    # type: (float, int, tuple, tuple, tuple, float, float, object) -> bytes
     """One reference state from FALCON's trajectory server.
 
     A transcription of ``quadrotor_msgs/PositionCommand``, minus the fields
     ``traj_server`` never fills (``jerk`` is always zero, ``trajectory_flag`` is
     set once at start-up and never updated).
+
+    ``coverage_m3`` piggybacks FALCON's own explored-volume number on the 100 Hz
+    command stream, because that is the only signal the aircraft has for whether
+    *new* space is still being discovered -- the mapper lives in the FALCON
+    container and the aircraft never sees the voxels themselves. It is optional
+    (``None`` omits the ``"cov"`` key entirely) so a bridge that predates this,
+    or one running without the ``/voxel_mapping/map_coverage`` topic, still
+    produces a valid message and the receiver simply keeps its last value. The
+    deadlock watchdog (see ``isaac/mission.py``) reads it to tell "wedged and
+    discovering nothing" from "flying and still mapping".
 
     Args:
         stamp_s: Wall-clock seconds the command was published at.
@@ -280,16 +297,59 @@ def position_command(stamp_s, traj_id, position, velocity, acceleration, yaw, ya
         acceleration: World ``(ax, ay, az)``, m/s^2.
         yaw: Reference heading, radians CCW from +x.
         yaw_dot: Reference yaw rate, rad/s.
+        coverage_m3: FALCON's explored volume in cubic metres, or ``None`` to
+            omit it.
 
     Returns:
         A framed ``POSCMD`` message.
     """
-    return encode(KIND_POSCMD, {
+    header = {
         "t": float(stamp_s), "id": int(traj_id),
         "p": [float(v) for v in position],
         "v": [float(v) for v in velocity],
         "a": [float(v) for v in acceleration],
         "yaw": float(yaw), "yaw_dot": float(yaw_dot),
+    }
+    if coverage_m3 is not None:
+        header["cov"] = float(coverage_m3)
+    return encode(KIND_POSCMD, header)
+
+
+def bspline(start_time_s, traj_id, order, knots, position_points, yaw_points, yaw_dt):
+    # type: (float, int, int, object, object, object, float) -> bytes
+    """One whole trajectory, as FALCON's ``trajectory/Bspline`` message carries it.
+
+    Small enough for JSON: a minute-long exploration leg is a few dozen control
+    points, so this is a couple of kilobytes arriving a handful of times a
+    second -- against a depth frame every 80 ms on the same link.
+
+    The asymmetry between the two curves is FALCON's and is preserved exactly.
+    The **position** curve carries an explicit knot vector, because the
+    optimiser reparameterises it to respect the velocity limit and its knots are
+    genuinely unevenly spaced. The **yaw** curve carries only an interval,
+    because nothing reparameterises it. Sending the position curve's knots for
+    both would fly the right shape at the wrong speed.
+
+    Args:
+        start_time_s: Wall-clock instant the trajectory begins. Normally a
+            little in the *future*: FALCON starts each curve a planning-time
+            ahead so it joins the one still being flown.
+        traj_id: Monotonically increasing trajectory identifier.
+        order: Degree of the position curve; 3 in practice.
+        knots: The position curve's knot vector.
+        position_points: ``(N, 3)`` control points, metres.
+        yaw_points: ``(M,)`` yaw control points, radians.
+        yaw_dt: The yaw curve's uniform knot interval, seconds.
+
+    Returns:
+        A framed ``BSPLINE`` message.
+    """
+    return encode(KIND_BSPLINE, {
+        "t": float(start_time_s), "id": int(traj_id), "order": int(order),
+        "knots": [float(v) for v in knots],
+        "pos": [[float(c) for c in point] for point in position_points],
+        "yaw": [float(v) for v in yaw_points],
+        "yaw_dt": float(yaw_dt),
     })
 
 

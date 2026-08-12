@@ -38,14 +38,17 @@ Run: ``rosrun falcon_pegasus pegasus_bridge_node.py`` (normally from
 ``launch/falcon_pegasus.launch``).
 """
 import threading
+import time
 
 import rospy
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
+from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import Image
-from std_msgs.msg import Int32, String
+from std_msgs.msg import Float32, Int32, String
+from trajectory.msg import Bspline
 
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
 from sparx_agency.tasks.planning.falcon_pegasus.link.socket_link import (
@@ -83,6 +86,84 @@ HELLO_TIMEOUT_S = 5.0
 # reach the same numbers through a YAML load and a rosparam load, and a float
 # that survives both is not obliged to be bit-identical.
 INTRINSICS_TOLERANCE = 1e-3
+
+
+class SimClockPublisher:
+    """Republish the aircraft's clock as ROS ``/clock``, so FALCON runs on it.
+
+    THE PROBLEM THIS SOLVES. FALCON plans on whatever ``ros::Time::now()``
+    returns, and the aircraft it is flying lives in Isaac Sim, which manages
+    about 0.63 of real time on this machine. Left on the wall clock, FALCON
+    issues a schedule that advances roughly 1.6 s for every second of flight the
+    aircraft is actually given: it can never be met, the tracker carries a
+    standing lag, and every replan starts a little further ahead than the last.
+    Putting FALCON on the simulator's clock removes the mismatch at its source
+    rather than compensating for it downstream.
+
+    WHY IT LIVES HERE. Isaac Sim has no ROS at all -- the two halves talk over a
+    socket -- so nothing on that side can publish ``/clock``. The bridge is the
+    one process that sees the aircraft's timestamps and is inside ROS.
+
+    THE BOOTSTRAP IS THE DELICATE PART. With ``/use_sim_time`` set, every node
+    reads time 0 until the first ``/clock`` arrives, and the first one cannot
+    arrive until the aircraft connects. So this publishes nothing at all until
+    then, and the bridge's own pre-connection waits must use the wall clock --
+    see ``_await_hello``. Anything in this file that calls ``rospy.Time.now()``
+    before the aircraft is up will read zero and behave strangely.
+
+    Time is held between updates rather than interpolated, and never allowed to
+    go backwards: a clock that jumps back invalidates every timer and TF buffer
+    in the stack.
+    """
+
+    RATE_HZ = 100.0
+
+    def __init__(self):
+        self._pub = rospy.Publisher("/clock", Clock, queue_size=1)
+        self._lock = threading.Lock()
+        self._latest = None
+        self._thread = None
+        self._running = False
+
+    def offer(self, stamp_s):
+        """Take a timestamp from the aircraft. Monotonic; stale stamps ignored."""
+        with self._lock:
+            if self._latest is None or float(stamp_s) > self._latest:
+                self._latest = float(stamp_s)
+
+    @property
+    def started(self):
+        with self._lock:
+            return self._latest is not None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._pump, name="sim-clock")
+        self._thread.daemon = True
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    def _pump(self):
+        """Publish at a steady WALL rate, whatever the simulated clock says.
+
+        Paced on the wall clock deliberately: this is the thing that defines
+        simulated time, so it cannot wait on it. If the aircraft stops sending,
+        the published time simply stops advancing, and FALCON stalls with it --
+        which is the correct behaviour for a lockstep simulation and is what
+        makes a hung simulator look like a hung simulator rather than like an
+        aircraft that has flown off its plan.
+        """
+        period = 1.0 / self.RATE_HZ
+        while self._running and not rospy.is_shutdown():
+            with self._lock:
+                latest = self._latest
+            if latest is not None:
+                self._pub.publish(Clock(clock=rospy.Time.from_sec(latest)))
+            time.sleep(period)
 
 
 def _odometry_as_transform(odometry):
@@ -124,6 +205,9 @@ class PegasusBridge(object):
         self.pose_pub = rospy.Publisher("/uav_simulator/sensor_pose", TransformStamped,
                                         queue_size=100)
         self.odom_pub = rospy.Publisher("/uav_simulator/odometry", Odometry, queue_size=10)
+        # Started as soon as the aircraft sends its first stamp; see
+        # SimClockPublisher for why it cannot start before that.
+        self.clock = SimClockPublisher()
         self.status_pub = rospy.Publisher("/falcon_pegasus/status", String, queue_size=10,
                                           latch=True)
 
@@ -144,14 +228,30 @@ class PegasusBridge(object):
         self._frames = 0
         self._odoms = 0
         self._commands = 0
+        self._trajectories = 0
         self._finished = False
         self._unsafe = False
         self._last_command_at = None
         self._planner_gone_reported = False
+        # FALCON's explored volume, m3, from its own map server. Forwarded to the
+        # aircraft on the command stream so its deadlock watchdog can tell "still
+        # discovering" from "wedged and mapping nothing new". Held between
+        # updates -- map_coverage publishes at ~2 Hz, pos_cmd at 100 Hz.
+        self._coverage_m3 = 0.0
 
         rospy.Subscriber("/planning/pos_cmd", PositionCommand, self._on_position_command,
                          queue_size=10)
+        # The trajectory itself, alongside the 100 Hz samples of it. Which one
+        # the aircraft acts on is the aircraft's choice; forwarding both costs
+        # a couple of kilobytes a second and means one FALCON-side run can serve
+        # either control path.
+        rospy.Subscriber("/planning/bspline", Bspline, self._on_bspline, queue_size=4)
         rospy.Subscriber("/planning/replan", Int32, self._on_replan, queue_size=10)
+        # FALCON's own coverage number: voxels that have left UNKNOWN, in m3. The
+        # aircraft never sees the map, so this is its only measure of exploration
+        # progress -- see the deadlock watchdog in isaac/mission.py.
+        rospy.Subscriber("/voxel_mapping/map_coverage", Float32, self._on_coverage,
+                         queue_size=2)
 
     # ── the FALCON -> Isaac direction ────────────────────────────────────
 
@@ -170,7 +270,40 @@ class PegasusBridge(object):
             (msg.position.x, msg.position.y, msg.position.z),
             (msg.velocity.x, msg.velocity.y, msg.velocity.z),
             (msg.acceleration.x, msg.acceleration.y, msg.acceleration.z),
-            msg.yaw, msg.yaw_dot))
+            msg.yaw, msg.yaw_dot, coverage_m3=self._coverage_m3))
+
+    def _on_coverage(self, msg):
+        """Latch FALCON's explored volume, to piggyback on the command stream.
+
+        Published by the same map server the recorder reads
+        (``/voxel_mapping/map_coverage``), in cubic metres of no-longer-UNKNOWN
+        space. Just stored here; ``_on_position_command`` attaches it to every
+        forwarded reference so the aircraft's deadlock watchdog can see whether
+        new space is still being discovered.
+        """
+        self._coverage_m3 = float(msg.data)
+
+    def _on_bspline(self, msg):
+        """Forward one whole trajectory to whatever is flying the aircraft.
+
+        Sent verbatim. The aircraft rebuilds the curve with the same
+        construction rules ``traj_server`` uses, so both sides evaluate the same
+        polynomial -- which is the point, since a disagreement between them
+        would show up as a tracking error with no visible cause.
+
+        This also arms the watchdog, and it is the *better* signal for it: a
+        trajectory id that stops advancing is how a dead planner is detected,
+        and unlike the command stream it cannot be faked by ``traj_server``
+        happily re-publishing the final point of a trajectory whose planner
+        segfaulted minutes ago.
+        """
+        self._trajectories += 1
+        self._last_command_at = rospy.Time.now()
+        self._send_down(protocol.bspline(
+            msg.start_time.to_sec(), msg.traj_id, msg.order,
+            list(msg.knots),
+            [(point.x, point.y, point.z) for point in msg.pos_pts],
+            list(msg.yaw_pts), msg.yaw_dt))
 
     def _on_replan(self, msg):
         """Watch for the FSM declaring the space explored.
@@ -251,6 +384,10 @@ class PegasusBridge(object):
         publishing in this order means the matching entry is already in its queue
         by the time the image callback runs.
         """
+        # The clock first: everything below stamps messages with this instant,
+        # and a message stamped in the future of /clock is dropped by FALCON's
+        # message filters.
+        self.clock.offer(float(header["t"]))
         stamp = rospy.Time.from_sec(float(header["t"]))
         width, height = int(header["w"]), int(header["h"])
 
@@ -298,6 +435,7 @@ class PegasusBridge(object):
         thing from its end.
         """
         odometry = Odometry()
+        self.clock.offer(float(header["t"]))
         odometry.header.stamp = rospy.Time.from_sec(float(header["t"]))
         odometry.header.frame_id = WORLD_FRAME
         odometry.child_frame_id = BODY_FRAME
@@ -334,6 +472,10 @@ class PegasusBridge(object):
 
     def run(self):
         """Accept the aircraft's two connections and pump messages until shutdown."""
+        # Running before the first stamp arrives is harmless -- it publishes
+        # nothing until then -- and it must be up before the first frame is
+        # handled, because that frame is what starts simulated time.
+        self.clock.start()
         uplink_server = LinkServer(self.uplink_port, "uplink")
         downlink_server = LinkServer(self.downlink_port, "downlink")
         rospy.loginfo("[bridge] waiting for Isaac Sim on 127.0.0.1:%d (uplink) and :%d "
@@ -361,7 +503,7 @@ class PegasusBridge(object):
             protocol.KIND_ODOM: lambda header, _payload: self._on_odometry(header),
             protocol.KIND_EVENT: lambda header, _payload: self._on_event(header),
         }
-        report_at = rospy.Time.now()
+        report_at = time.monotonic()
         while not rospy.is_shutdown():
             for kind, header, payload in uplink.poll(timeout=0.05):
                 handler = handlers.get(kind)
@@ -374,11 +516,16 @@ class PegasusBridge(object):
                 self._publish_status("aircraft_gone")
                 break
             self._watch_command_stream()
-            now = rospy.Time.now()
-            if (now - report_at).to_sec() >= 10.0:
+            # Wall clock: this is a "how is it going" log line, and pacing it on
+            # simulated time would make it rarer exactly when the simulator is
+            # struggling and the operator most wants to see it.
+            now = time.monotonic()
+            if now - report_at >= 10.0:
                 report_at = now
-                rospy.loginfo("[bridge] %d depth frames, %d odom, %d commands forwarded",
-                              self._frames, self._odoms, self._commands)
+                rospy.loginfo(
+                    "[bridge] %d depth frames, %d odom, %d commands, %d trajectories "
+                    "forwarded", self._frames, self._odoms, self._commands,
+                    self._trajectories)
 
         uplink.close()
         downlink.close()
@@ -419,8 +566,12 @@ class PegasusBridge(object):
 
     def _await_hello(self, endpoint, timeout_s=HELLO_TIMEOUT_S):
         """The peer's ``HELLO`` header, or None if it never sent one."""
-        deadline = rospy.Time.now() + rospy.Duration(timeout_s)
-        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+        # WALL clock, deliberately. With /use_sim_time set, rospy.Time.now()
+        # returns 0 until the first /clock message, and /clock cannot be
+        # published until the aircraft this is waiting for has connected. Timing
+        # this wait on simulated time deadlocks the bridge at start-up.
+        deadline = time.monotonic() + float(timeout_s)
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
             for kind, header, _payload in endpoint.poll(timeout=0.2):
                 if kind == protocol.KIND_HELLO:
                     return header

@@ -74,6 +74,12 @@ from sparx_agency.core.planning.trackers.rotation_supervisor import (
     RotationReobserveSupervisor,
     RotationSupervisorParams,
 )
+from sparx_agency.core.planning.recovery import (
+    EscapeParams,
+    RecoveryParams,
+    RecoverySupervisor,
+    StuckParams,
+)
 from thinking import Thinker
 # Global (not ~) param naming the shared per-tick certainty CSV; '' disables it.
 # Global for the same reason /thinking/log_path is: only drift_pid narrates here
@@ -280,6 +286,21 @@ class WaypointFollowerNode:
         # the effectiveness estimate and the certainty log's mirror of what
         # actually flew.
         self._core_owns_pitch_bias = (self.controller_kind == "drift_pid")
+
+        # ── Stuck detection + recovery (controllers with no reflex of their own) ─
+        # drift_pid carries its own blockage detector + escape (it reports on
+        # /falcon/blockage itself); every other controller flies blind into a wall
+        # it cannot see. Wrap those in the controller-agnostic RecoverySupervisor:
+        # it notices the stuck (a command that produces no progress), backs the
+        # drone out, and once clear reports the spot at the REAL pose so the planner
+        # reroutes from where the drone actually is. Off for drift_pid (would double
+        # up), and switchable with ~recovery_enabled.
+        self.recovery = None
+        self.blockage_pub = None
+        self._pose_rx_t = None
+        self.recovery_pose_max_age_s = float(G("~recovery_pose_max_age_s", 0.5))
+        if self.controller_kind != "drift_pid":
+            self.recovery = self._build_recovery(G)
 
         # ── Rotation supervisor (holonomic controllers only) ─────────
         # The one-axis follower freezes + re-observes inside its own state machine.
@@ -668,6 +689,102 @@ class WaypointFollowerNode:
                              "flying without it", cert_path, e)
         return follower
 
+    def _build_recovery(self, G):
+        """Construct the RecoverySupervisor + blockage publisher from rosparams.
+
+        Returns None (recovery off) when ``~recovery_enabled`` is false. The
+        escape's lateral probe is enabled only for controllers that drive
+        ``linear.y`` (``self._lateral``); a one-axis follower backs straight out.
+        """
+        if not bool(G("~recovery_enabled", True)):
+            rospy.loginfo("waypoint_follower: recovery / stuck-detection is OFF "
+                          "(~recovery_enabled:=false)")
+            return None
+        self.blockage_topic = str(G("~blockage_topic", "/falcon/blockage"))
+        self.blockage_pub = rospy.Publisher(self.blockage_topic, PointStamped,
+                                            queue_size=5, latch=True)
+        params = RecoveryParams(
+            enabled=True,
+            stuck=StuckParams(
+                window_s=float(G("~recovery_window_s", 1.2)),
+                min_cmd_vx=float(G("~recovery_min_cmd_vx", 0.05)),
+                min_cmd_wz=float(G("~recovery_min_cmd_wz", 0.15)),
+                min_cmd_distance_m=float(G("~recovery_min_cmd_distance_m", 0.06)),
+                min_cmd_yaw_rad=float(G("~recovery_min_cmd_yaw_rad", 0.12)),
+                progress_frac=float(G("~recovery_progress_frac", 0.30)),
+                confirm_ticks=int(G("~recovery_confirm_ticks", 5)),
+                clear_ticks=int(G("~recovery_clear_ticks", 3)),
+                stale_clear_s=float(G("~recovery_stale_clear_s", 4.0)),
+            ),
+            escape=EscapeParams(
+                brake_s=float(G("~recovery_brake_s", 0.4)),
+                back_s=float(G("~recovery_back_s", 0.7)),
+                back_speed=float(G("~recovery_back_speed", 0.10)),
+                probe_s=float(G("~recovery_probe_s", 0.8)),
+                probe_speed=float(G("~recovery_probe_speed", 0.10)),
+                settle_s=float(G("~recovery_settle_s", 0.5)),
+                allow_lateral=self._lateral,
+                max_attempts=int(G("~recovery_max_attempts", 1)),
+            ),
+        )
+        rospy.loginfo(
+            "waypoint_follower: recovery ON (%s) -- stuck if < %.0f%% progress for "
+            "%d ticks over %.1fs; escape brake %.1fs, back %.1fs @ %.2fm/s%s -> "
+            "reports /falcon/blockage to replan from the real pose",
+            self.controller_kind, params.stuck.progress_frac * 100.0,
+            params.stuck.confirm_ticks, params.stuck.window_s,
+            params.escape.brake_s, params.escape.back_s, params.escape.back_speed,
+            (", probe %.1fs" % params.escape.probe_s) if self._lateral
+            else " (one-axis: no lateral probe)")
+        return RecoverySupervisor(params)
+
+    def _pose_trustworthy(self):
+        """True when the raw pose is fresh enough to be stuck-detection evidence.
+
+        A stale pose stream would otherwise read as "commanded but not moving" and
+        invent a blockage. No timestamp yet (first ticks) -> trust it.
+        """
+        if self._pose_rx_t is None:
+            return True
+        age = (rospy.Time.now() - self._pose_rx_t).to_sec()
+        return age <= self.recovery_pose_max_age_s
+
+    def _report_blockage(self, pose, axis):
+        """Publish an impassable spot to the planner at the drone's REAL pose.
+
+        Mirrors ``DriftTelemetryPublisher.publish_blockage``: a latched
+        PointStamped on ``/falcon/blockage`` that ``astar_planner`` turns into a
+        lethal cell plus a forced replan whose start IS the current odometry pose
+        -- so the route is replanned from where the drone actually is, not from the
+        point it should have reached on the trajectory.
+        """
+        if self.blockage_pub is None:
+            return
+        msg = PointStamped()
+        msg.header.stamp = rospy.Time.now()
+        msg.header.frame_id = self.frame_id
+        msg.point.x = float(pose.x)
+        msg.point.y = float(pose.y)
+        msg.point.z = 0.0
+        self.blockage_pub.publish(msg)
+        rospy.logwarn("waypoint_follower: stuck on the %s axis at (%.2f, %.2f) -- "
+                      "backed out and asking the planner to replan from here",
+                      axis or "?", pose.x, pose.y)
+
+    def _publish_escape(self, vx, vy, wz):
+        """Publish an escape velocity straight to /cmd_vel.
+
+        Bypasses the follower publish path on purpose: its one-axis
+        command-commitment gate and turn pitch bias would fight an open-loop
+        back-out. Applies only ``~cmd_vy_sign``, like the other lateral publishes.
+        """
+        t = Twist()
+        t.linear.x = float(vx)
+        t.linear.y = float(vy) * self.cmd_vy_sign
+        t.linear.z = 0.0
+        t.angular.z = float(wz)
+        self.cmd_vel_pub.publish(t)
+
     def _build_pure_pursuit(self, G):
         """Construct the spline-then-Pure-Pursuit follower from rosparams.
 
@@ -738,6 +855,7 @@ class WaypointFollowerNode:
             rospy.loginfo("waypoint_follower: first /gt_pose pose=(%.2f,%.2f,%.2f)",
                           msg.position.x, msg.position.y, msg.position.z)
         self.cur_pose = msg
+        self._pose_rx_t = rospy.Time.now()   # freshness witness for the stuck detector
         # Feed the estimator at the FULL /gt_pose rate (decoupled from the control
         # loop). /gt_pose is a bare Pose (no stamp), so use the receive time.
         q = msg.orientation
@@ -910,6 +1028,34 @@ class WaypointFollowerNode:
                 or not self._go_allowed                # GO gate says HELD -> freeze
                 or (rospy.Time.now() - self._node_start_t).to_sec() < self.startup_hold_sec
                 or (sup is not None and sup.hold))   # supervisor mid-turn stop
+
+        # ── Recovery: notice a stuck drone, back it out, replan from the real pose ─
+        # Runs for every controller that has no blockage reflex of its own. Fed the
+        # RAW pose (never the command-propagated estimate -- that would make a
+        # pinned drone look like it is moving) and the command PUBLISHED last tick.
+        # While the back-out owns the command the follower is frozen (we return);
+        # when a recovery concludes we report the blockage at the real pose so the
+        # planner reroutes from here. frozen=hold so a drone deliberately held (no
+        # GO, lost localization, mid-turn stop) never invents an obstacle.
+        if self.recovery is not None:
+            recov = self.recovery.update(
+                raw2d, self._last_pub_vx, self._last_pub_wz, self.dt,
+                pose_trustworthy=self._pose_trustworthy(), frozen=hold)
+            if recov.request_replan:
+                self._report_blockage(raw2d, recov.stuck_axis)
+                if recov.reason:
+                    self.thinker.say(recov.reason, category="plan", level="warn")
+            if recov.override:
+                self._last_pub_vx = recov.vx
+                self._last_pub_wz = recov.wz
+                self._last_pub_vy = recov.vy if self._lateral else 0.0
+                self._set_freeze(False)          # an escape never rotates -> map live
+                self._publish_escape(recov.vx, recov.vy, recov.wz)
+                if recov.reason:
+                    self.thinker.say(recov.reason, category="plan", level="warn",
+                                     repeat_after_s=2.0)
+                return
+
         if self.quality is not None:
             # drift_pid decides its own speed, gains and whether to learn drift
             # from how much the pose can be trusted THIS tick. Fed before step so

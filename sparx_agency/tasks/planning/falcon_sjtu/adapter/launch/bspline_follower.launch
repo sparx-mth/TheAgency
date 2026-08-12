@@ -1,0 +1,166 @@
+<launch>
+  <!--
+    bspline_follower.launch — fly FALCON's B-spline on the SJTU Gazebo drone.
+
+    This launches OUR follower and the camera parameters FALCON maps with. It
+    deliberately does not re-declare FALCON's own planner arguments: those live
+    in the exploration launch and are the planner's business, not the
+    controller's.
+
+    ════════════════════════════════════════════════════════════════════
+    THE CAMERA INTRINSICS BELOW ARE A CORRECTION, NOT A COPY.
+    ════════════════════════════════════════════════════════════════════
+    The previous stack told FALCON  fx=fy=320, cx=320, cy=240 at 640x480.
+    The sensor it was reading is     600x600 at horizontal_fov 1.3098 rad,
+    which is                         fx=fy=390.64, cx=cy=300.5
+    (verified live off /simple_drone/front_depth/depth/camera_info, and
+    derivable from sjtu_drone.urdf.xacro: fx = (width/2) / tan(hfov/2)).
+
+    Two independent errors followed from that, and both corrupt the MAP rather
+    than the flight:
+
+      * fx 18% low  ->  every depth ray back-projects about 22% too far out
+        laterally, so obstacles are mapped wider and further apart than they
+        are, and the free space between them is fiction.
+      * cy 60.5 px high in a frame FALCON also believed was 480 rows tall
+        ->  about 8.8 degrees of spurious downward tilt in all reconstructed
+        geometry, so the floor climbs and the ceiling descends with range.
+
+    A planner given that map routes through walls that are not where it thinks,
+    and no amount of controller tuning recovers it. Fix the map before drawing
+    any conclusion about tracking.
+  -->
+
+  <arg name="drone_ns"       default="/simple_drone" />
+  <arg name="ctrl_rate_hz"   default="50.0" />
+
+  <!-- Measured off the airframe, not assumed. See
+       robots/SJTU/config/airframe.yaml and the README for the step-response
+       method. Re-measure if the plugin's gains or the sim's real-time factor
+       change: a wrong time constant makes the lead term push the wrong amount
+       and reads exactly like a mistuned position gain. -->
+  <arg name="plant_xy_tau"   default="0.51" />
+  <arg name="plant_xy_delay" default="0.18" />
+  <arg name="plant_z_tau"    default="0.41" />
+  <arg name="plant_z_delay"  default="0.04" />
+  <arg name="plant_yaw_tau"  default="0.48" />
+  <arg name="plant_yaw_delay" default="0.06" />
+
+  <!-- Speed ceilings. `max_overspeed` is a CLEARANCE setting: FALCON checks its
+       route against the map at the speed it planned, so flying the same curve
+       faster spends that margin on stopping distance. max_speed_xy is the hard
+       cap: lowered from 1.2 to 0.6 after a capsize post-mortem — the aircraft
+       struck warehouse clutter at ~1 m/s (inside the depth near clip, so FALCON
+       never mapped it), pitched up while pinned and tipped past the plugin's
+       ~35 deg clamp, which thrust-along-body-z cannot recover from. Halving the
+       impact speed keeps a near-clip contact a graze the retreat reflex clears. -->
+  <arg name="max_speed_xy"     default="0.6" />
+  <arg name="max_overspeed"    default="0.25" />
+  <arg name="max_catchup_speed" default="0.15" />
+  <arg name="yaw_gain"         default="1.5" />
+
+  <!-- Off reproduces the previous stack's P + velocity-feedforward law, which
+       is what the improvement is measured against. Keep it as a comparison,
+       not as a fallback. -->
+  <arg name="use_feedforward_lead" default="true" />
+  <arg name="predict_reference"    default="true" />
+
+  <!-- Wedge/contact reflex: a velocity-commanded aircraft pinned against a wall
+       is told to keep driving into it and never moves. It backs out on a real
+       Gazebo contact (bumper_states, bridged) or an inferred wedge (commanding
+       motion, net-zero travel), and retreats far enough to bring the wall back
+       outside the ~0.95 m depth near clip so FALCON re-maps it. -->
+  <arg name="wedge_window_s"  default="3.0" />
+  <arg name="wedge_move_m"    default="0.2" />
+  <arg name="wedge_cmd_speed" default="0.08" />
+  <arg name="contact_hold_s"  default="0.4" />
+  <arg name="retreat_time_s"  default="5.0" />
+  <arg name="retreat_speed"   default="0.35" />
+  <arg name="retreat_clear_m" default="1.3" />
+  <!-- Turn-to-look after the back-out: face the struck point and stare so the
+       mapper fuses it; what turns a strike into map evidence instead of a
+       strike, replan, strike loop. -->
+  <arg name="face_time_s"     default="6.0" />
+  <arg name="look_dwell_s"    default="1.5" />
+
+  <!-- Map brake gate: the follower accumulates FALCON's occupied/free voxel
+       streams and refuses to fly the commanded velocity into occupied space;
+       a sustained dead stop is treated like a contact (retreat + look).
+       Exists because FALCON's own runtime safety check never signals this
+       follower (measured: 45 silent pre-publish detections, 0 executing-
+       trajectory detections, 336 contacts in one 40-minute run). -->
+  <arg name="map_gate"              default="true" />
+  <arg name="gate_drone_radius_m"   default="0.25" />
+  <arg name="gate_z_lo"             default="0.4" />
+  <arg name="gate_z_hi"             default="2.0" />
+  <arg name="gate_block_retreat_s"  default="4.0" />
+  <!-- Depth visual bumper: clamp forward speed by the closest raw depth
+       return in the flight corridor. Catches thin obstacles the voxel map
+       flaps (raycast clearing erodes one-voxel silhouettes). -->
+  <arg name="depth_brake"           default="true" />
+
+  <!-- Crash-recovery reflex. FALCON's in-process LKH solver corrupts the heap on
+       degenerate tours and the node respawns with an EMPTY map at wherever the
+       aircraft now hovers; a respawned FSM never re-triggers itself. It also
+       dead-ends without crashing, looping plan-fails on a frontier whose only
+       viewpoint is the current cell. When no plan has arrived for resurvey_after_s,
+       or the aircraft has not moved stall_move_m in stall_window_s, the follower
+       turns a fresh 360 deg scan so the frontier finder fires again; below the
+       silence window but past hold_silent_s it holds rather than flying blind. -->
+  <arg name="resurvey_after_s" default="12.0" />
+  <arg name="hold_silent_s"    default="6.0" />
+  <arg name="stall_window_s"   default="15.0" />
+  <arg name="stall_move_m"     default="1.5" />
+
+  <!-- ── camera model FALCON maps with (corrected; see the header) ── -->
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="390.6427" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/fy" value="390.6427" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cx" value="300.5" />
+  <param name="/uav_model/sensing_parameters/camera_intrinsics/cy" value="300.5" />
+  <param name="/uav_model/sensing_parameters/image_width"  value="600" />
+  <param name="/uav_model/sensing_parameters/image_height" value="600" />
+
+  <node pkg="falcon_adapter" type="bspline_follower_node.py"
+        name="bspline_follower" output="screen">
+    <param name="cmd_topic"        value="$(arg drone_ns)/cmd_vel" />
+    <param name="odom_topic"       value="$(arg drone_ns)/odom" />
+    <param name="ctrl_rate_hz"     value="$(arg ctrl_rate_hz)" />
+
+    <param name="plant_xy_tau"     value="$(arg plant_xy_tau)" />
+    <param name="plant_xy_delay"   value="$(arg plant_xy_delay)" />
+    <param name="plant_z_tau"      value="$(arg plant_z_tau)" />
+    <param name="plant_z_delay"    value="$(arg plant_z_delay)" />
+    <param name="plant_yaw_tau"    value="$(arg plant_yaw_tau)" />
+    <param name="plant_yaw_delay"  value="$(arg plant_yaw_delay)" />
+
+    <param name="max_speed_xy"     value="$(arg max_speed_xy)" />
+    <param name="max_overspeed"    value="$(arg max_overspeed)" />
+    <param name="max_catchup_speed" value="$(arg max_catchup_speed)" />
+    <param name="yaw_gain"         value="$(arg yaw_gain)" />
+
+    <param name="use_feedforward_lead" value="$(arg use_feedforward_lead)" />
+    <param name="predict_reference"    value="$(arg predict_reference)" />
+
+    <param name="wedge_window_s"   value="$(arg wedge_window_s)" />
+    <param name="wedge_move_m"     value="$(arg wedge_move_m)" />
+    <param name="wedge_cmd_speed"  value="$(arg wedge_cmd_speed)" />
+    <param name="contact_hold_s"   value="$(arg contact_hold_s)" />
+    <param name="retreat_time_s"   value="$(arg retreat_time_s)" />
+    <param name="retreat_speed"    value="$(arg retreat_speed)" />
+    <param name="retreat_clear_m"  value="$(arg retreat_clear_m)" />
+    <param name="face_time_s"      value="$(arg face_time_s)" />
+    <param name="look_dwell_s"     value="$(arg look_dwell_s)" />
+    <param name="map_gate"             value="$(arg map_gate)" />
+    <param name="gate_drone_radius_m"  value="$(arg gate_drone_radius_m)" />
+    <param name="gate_z_lo"            value="$(arg gate_z_lo)" />
+    <param name="gate_z_hi"            value="$(arg gate_z_hi)" />
+    <param name="gate_block_retreat_s" value="$(arg gate_block_retreat_s)" />
+    <param name="depth_brake"          value="$(arg depth_brake)" />
+    <param name="depth_topic"          value="$(arg drone_ns)/front_depth/depth/image_raw" />
+
+    <param name="resurvey_after_s" value="$(arg resurvey_after_s)" />
+    <param name="hold_silent_s"    value="$(arg hold_silent_s)" />
+    <param name="stall_window_s"   value="$(arg stall_window_s)" />
+    <param name="stall_move_m"     value="$(arg stall_move_m)" />
+  </node>
+</launch>

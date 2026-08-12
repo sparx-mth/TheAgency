@@ -26,6 +26,7 @@ from collections import deque
 from typing import List, Optional, Tuple
 
 from sparx_agency.core.common.types import TrajectoryPoint
+from sparx_agency.core.planning.trajectories.bspline import BsplineTrajectory
 from sparx_agency.tasks.planning.falcon_pegasus.link import protocol
 from sparx_agency.tasks.planning.falcon_pegasus.link.socket_link import (
     DOWNLINK_PORT, UPLINK_PORT, connect,
@@ -59,10 +60,22 @@ class FalconLink:
 
         self.reference = None                           # type: Optional[TrajectoryPoint]
         self.reference_stamp_s = None                   # type: Optional[float]
+        # The most recently planned curve, or None if the trajectory stream is
+        # not being used. Separate from `reference` on purpose: the two control
+        # paths consume different things from the same link, and a run can be
+        # flown either way without restarting the FALCON side.
+        self.trajectory = None                          # type: Optional[BsplineTrajectory]
+        self.trajectories_received = 0
         self.trajectory_id = 0
         self.commands_received = 0
         self.frames_sent = 0
         self.frames_dropped = 0
+        # FALCON's own explored-volume number (cubic metres), piggybacked on the
+        # command stream by the bridge. The only measure the aircraft has of
+        # whether NEW space is still being discovered -- the voxels themselves
+        # never leave the FALCON container. Starts at 0 and holds its last value
+        # if the stream ever omits it, which is what the deadlock watchdog wants.
+        self.coverage_m3 = 0.0
         self.events = []                                # type: List[Tuple[str, str]]
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -171,10 +184,12 @@ class FalconLink:
     # ── receiving ────────────────────────────────────────────────────────
 
     def poll(self) -> List[Tuple[str, str]]:
-        """Drain the downlink and update :attr:`reference`.
+        """Drain the downlink and update :attr:`reference` and :attr:`trajectory`.
 
-        Only the newest command is kept: the controller runs at the physics rate
-        and wants the freshest reference, not a backlog of the ones it missed.
+        Only the newest of each is kept: the controller runs at the physics rate
+        and wants the freshest state, not a backlog of the ones it missed. That
+        is safe for both -- a command is a snapshot, and a trajectory supersedes
+        its predecessor outright.
 
         Returns:
             The ``(name, detail)`` events that arrived in this call.
@@ -188,6 +203,14 @@ class FalconLink:
                 self.reference_stamp_s = float(header["t"])
                 self.trajectory_id = int(header["id"])
                 self.commands_received += 1
+                if "cov" in header:
+                    self.coverage_m3 = float(header["cov"])
+            elif kind == protocol.KIND_BSPLINE:
+                self.trajectory = _to_trajectory(header)
+                self.trajectories_received += 1
+                # Also advances the id, so `has_trajectory` and the mission's
+                # planner-stall watchdog work identically on either control path.
+                self.trajectory_id = max(self.trajectory_id, int(header["id"]))
             elif kind == protocol.KIND_EVENT:
                 events.append((header.get("name", ""), header.get("detail", "")))
         self.events.extend(events)
@@ -212,6 +235,22 @@ class FalconLink:
         if self.reference_stamp_s is None:
             return float("inf")
         return max(now_s - self.reference_stamp_s, 0.0)
+
+
+def _to_trajectory(header: dict) -> BsplineTrajectory:
+    """One ``BSPLINE`` header rebuilt into the curve FALCON planned.
+
+    Uses the same construction rules ``traj_server`` applies to the same
+    message, so both sides of the link evaluate the identical polynomial.
+    """
+    return BsplineTrajectory.from_falcon(
+        order=int(header["order"]),
+        knots=header["knots"],
+        position_points=header["pos"],
+        yaw_points=header["yaw"],
+        yaw_dt=float(header["yaw_dt"]),
+        start_time_s=float(header["t"]),
+        traj_id=int(header["id"]))
 
 
 def _to_trajectory_point(header: dict) -> TrajectoryPoint:
