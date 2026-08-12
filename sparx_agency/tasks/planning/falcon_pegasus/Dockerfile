@@ -40,6 +40,11 @@ RUN chmod +x /tmp/fix_falcon_viewpoint_index.sh && /tmp/fix_falcon_viewpoint_ind
 COPY patches/fix_falcon_grid_cell_index.sh /tmp/fix_falcon_grid_cell_index.sh
 RUN chmod +x /tmp/fix_falcon_grid_cell_index.sh && /tmp/fix_falcon_grid_cell_index.sh
 
+# Occupancy-grid publish cadence vs map growth (measured on SJTU 2026-08-12):
+# free/unknown clouds grow with explored volume; occupied stays 2 Hz.
+COPY patches/fix_falcon_visgrid_cadence.sh /tmp/fix_falcon_visgrid_cadence.sh
+RUN chmod +x /tmp/fix_falcon_visgrid_cadence.sh && /tmp/fix_falcon_visgrid_cadence.sh
+
 # Tell A* how big the drone is. Upstream routes a 0.7 m aircraft through a 0.3 m
 # gap because it tests one voxel per node, and the B-spline optimiser then
 # cannot thread the route it was handed. Inert unless the launch file sets

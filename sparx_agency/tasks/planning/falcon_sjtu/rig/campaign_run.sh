@@ -121,7 +121,9 @@ MON_PID=$!
 
 # ── 3. FALCON + bridge, headless ───────────────────────────────────────────
 T0=$(date +%s)
-RVIZ=0 FOLLOW=0 bash "${PKG_DIR}/run_falcon_sjtu.sh" "${MAP}" \
+# RVIZ=1 to WATCH a campaign run (map, frontiers, tour, drone) while it still
+# produces the full monitor/verdict artifacts; default off for soaks.
+RVIZ="${RVIZ:-0}" FOLLOW=0 bash "${PKG_DIR}/run_falcon_sjtu.sh" "${MAP}" \
     > "${RUN_DIR}/stack_up.log" 2>&1 \
     || finish INFRA "run_falcon_sjtu failed" 4
 # the follower's control-side view of the same flight

@@ -456,6 +456,17 @@ class BsplineFollowerNode(object):
         # A sustained dead stop from either is a physical fact the planner is
         # not resolving: treat it exactly like a contact -- back out and look.
         if follow and not command.holding:
+            # Personal-space bubble: closure from ANY bearing, not just the
+            # motion direction -- wall-sliding grinds are invisible to both
+            # directional brakes. A breach is a near-contact: retreat now.
+            if (self._gate_enabled and self._gate.bubble_blocked(
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    float(rospy.get_param("~bubble_clearance_m", 0.28)))):
+                rospy.logwarn("[follower] bubble breach: occupied voxel inside "
+                              "personal space; retreating")
+                self._begin_retreat(position, command)
+                return
+
             hard_blocked = False
             block_why = ""
 
@@ -490,6 +501,24 @@ class BsplineFollowerNode(object):
                         vx=command.vx * scale, vy=command.vy * scale,
                         world_vx=command.world_vx * scale,
                         world_vy=command.world_vy * scale)
+
+            # Proximity speed governor: room at ANY bearing bounds speed.
+            # Each directional brake has a blind arc (nose-only depth,
+            # commanded-direction corridor); a cruise-speed strike proved the
+            # arcs can lose a race. Near anything mapped, be slow near it.
+            if self._gate_enabled and not hard_blocked:
+                d_near = self._gate.nearest_occupied(
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    1.2)
+                if d_near is not None:
+                    cap = max(0.08, 0.7 * (d_near - 0.30))
+                    speed = math.hypot(command.vx, command.vy)
+                    if speed > cap:
+                        f = cap / speed
+                        command = dataclasses.replace(
+                            command, vx=command.vx * f, vy=command.vy * f,
+                            world_vx=command.world_vx * f,
+                            world_vy=command.world_vy * f)
 
             if hard_blocked:
                 if self._gate_blocked_since is None:

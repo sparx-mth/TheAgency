@@ -160,6 +160,53 @@ class VoxelBrakeGate(object):
         hi = min(31, int(math.floor((z + h) / lm)))
         return tuple(range(lo, hi + 1))
 
+    def nearest_occupied(self, pos_xyz, max_r):
+        # type: (tuple, float) -> object
+        """Distance to the nearest occupied voxel centre within ``max_r``.
+
+        Feeds the proximity speed governor: closing speed must be bounded by
+        room at EVERY bearing, because the directional brakes each have a
+        blind arc (nose-only depth, commanded-direction corridor) and a
+        cruise-speed strike proved a race between them is winnable. Returns
+        None when nothing occupied is within ``max_r``.
+        """
+        layers = self._layers_for_z(float(pos_xyz[2]) if len(pos_xyz) > 2 else 1.2)
+        v = self._cfg.voxel_m
+        n = int(math.ceil(max_r / v))
+        cx, cy = float(pos_xyz[0]), float(pos_xyz[1])
+        best = None
+        for ix in range(-n, n + 1):
+            for iy in range(-n, n + 1):
+                d = math.hypot(ix * v, iy * v)
+                if d > max_r or (best is not None and d >= best):
+                    continue
+                if self._blocked_at(cx + ix * v, cy + iy * v, layers):
+                    best = d
+        return best
+
+    def bubble_blocked(self, pos_xyz, clearance_m):
+        # type: (tuple, float) -> bool
+        """Whether any occupied voxel sits within ``clearance_m`` at any bearing.
+
+        The corridor test only guards the direction of MOTION: an aircraft
+        sliding parallel to a wall shows a clear corridor while lateral drift
+        closes the last centimetres unchecked (measured: a 2000-contact grind
+        along a pile face with every forward check passing). This is the
+        personal-space check that catches closure from ANY side.
+        """
+        layers = self._layers_for_z(float(pos_xyz[2]) if len(pos_xyz) > 2 else 1.2)
+        v = self._cfg.voxel_m
+        n = int(math.ceil(clearance_m / v))
+        cx, cy = float(pos_xyz[0]), float(pos_xyz[1])
+        for ix in range(-n, n + 1):
+            for iy in range(-n, n + 1):
+                x = cx + ix * v
+                y = cy + iy * v
+                if math.hypot(x - cx, y - cy) <= clearance_m + v * 0.5:
+                    if self._blocked_at(x, y, layers):
+                        return True
+        return False
+
     def blocked_distance(self, pos_xyz, dir_xy, max_dist):
         # type: (tuple, tuple, float) -> object
         """Distance to the first blocked sample along a swept corridor.

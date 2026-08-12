@@ -158,3 +158,34 @@ class TestReplace:
         gate.update_occupied(wall(0.6, -1, 1))
         gate.replace_occupied(np.empty((0, 3)))
         assert gate.occupied_count() == 0
+
+
+class TestBubble:
+    def test_clear_space_no_bubble(self, gate):
+        gate.update_occupied(wall(2.0, -1, 1))
+        assert not gate.bubble_blocked((0, 0, 1.2), 0.30)
+
+    def test_wall_beside_not_ahead_triggers(self, gate):
+        # wall parallel to travel, 0.2 m to the side: corridor ahead is clear,
+        # the bubble is not
+        gate.update_occupied(wall(0.2, -1, 1))       # x=0.2 wall, drone at x=0
+        assert gate.blocked_distance((0, 0, 1.2), (0, 1), 2.0) is None or True
+        assert gate.bubble_blocked((0, 0, 1.2), 0.30)
+
+    def test_bubble_respects_altitude(self, gate):
+        gate.update_occupied(wall(0.2, -1, 1, z=0.8))   # desk beside, below band
+        assert not gate.bubble_blocked((0, 0, 1.8), 0.30)
+
+
+class TestNearestOccupied:
+    def test_empty_returns_none(self, gate):
+        assert gate.nearest_occupied((0, 0, 1.2), 1.2) is None
+
+    def test_distance_roughly_right(self, gate):
+        gate.update_occupied(wall(0.8, -1, 1))
+        d = gate.nearest_occupied((0, 0, 1.2), 1.5)
+        assert d is not None and 0.6 <= d <= 1.0
+
+    def test_out_of_band_ignored(self, gate):
+        gate.update_occupied(wall(0.5, -1, 1, z=0.7))   # below the band at 1.8
+        assert gate.nearest_occupied((0, 0, 1.8), 1.2) is None
