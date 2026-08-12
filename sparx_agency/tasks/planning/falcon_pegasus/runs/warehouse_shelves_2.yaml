@@ -40,25 +40,15 @@ map_config:
   init_y: 15.33
   init_z: 1.4
   init_yaw: 0.1221730
-  map_size:
-    map_min_x: -12.2
-    map_min_y: -18.2
-    map_min_z: -0.3
-    map_max_x: 12.3
-    map_max_y: 21.1
-    map_max_z: 2.8
-    box_min_x: -11.5
-    box_min_y: -17.5
-    box_min_z: 1.0
-    box_max_x: 11.5
-    box_max_y: 20.3
-    box_max_z: 2.2
-    vbox_min_x: -12.0
-    vbox_min_y: -18.0
-    vbox_min_z: 1.3
-    vbox_max_x: 12.0
-    vbox_max_y: 20.8
-    vbox_max_z: 1.5
+  # The same box as runs/warehouse_shelves.yaml -- only the start pose differs.
+  # See that file for what the four-number margin is for, and 3_open_plan.yaml
+  # for the rationale behind every field.
+  area:
+    building: [-11.5, -17.5, 11.5, 20.3]
+    flight_band: [1.0, 2.2]
+    vertical_extent: [-0.3, 2.8]
+    resolution: 0.10
+    margin: [0.7, 0.7, 0.8, 0.8]
   scale: 1.0
   T_b_c:
   - [ 0.0, 0.0, 1.0, 0.0]

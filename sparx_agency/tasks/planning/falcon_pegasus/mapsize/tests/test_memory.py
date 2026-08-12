@@ -13,11 +13,11 @@ from sparx_agency.tasks.planning.falcon_pegasus.mapsize.memory import (
 # The whole-office area, as the six run files describe it today. Repeated rather
 # than imported from the sibling test: the tests directory is not a package.
 OFFICE = ExplorationArea(
-    building=(-23.0, -33.2, 5.1, 38.7),
+    building=(-23.0, -27.2, 5.1, 38.7),
     flight_band=(1.0, 2.2),
     vertical_extent=(-0.2, 2.4),
     resolution=0.10,
-    margin=2.0,
+    margin=(2.0, 8.0, 2.0, 2.0),
 )
 
 

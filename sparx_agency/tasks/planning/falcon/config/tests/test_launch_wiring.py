@@ -227,3 +227,27 @@ def test_launch_file_is_well_formed_xml(launch):
             "stack fails to start:\n  %s\n"
             "If this mentions an invalid token, check for '--' inside an XML "
             "comment (e.g. writing a --flag name in prose)." % (launch.name, e))
+
+
+# ── One declaration per arg ─────────────────────────────────────────
+# roslaunch does NOT take the first of two declarations, it refuses to load the
+# file: "Invalid <arg> tag: arg 'x' has already been declared." So a duplicate is
+# not a shadowing bug, it is the whole stack failing at startup, sphera included.
+#
+# This is the third time it has happened, and every time it arrived the same way:
+# a merge that put a block of args in twice, once from each branch, or two
+# unrelated features that chose the same name. Nothing else in this file catches
+# it, because everything else reads declarations into a dict.
+@pytest.mark.parametrize("launch", sorted(_LAUNCH_DIR.glob("*.launch")),
+                         ids=lambda p: p.name)
+def test_no_arg_is_declared_twice(launch):
+    import collections
+    import xml.etree.ElementTree as ET
+
+    names = [a.get("name") for a in ET.parse(str(launch)).getroot().findall("arg")]
+    dupes = sorted(n for n, c in collections.Counter(names).items() if c > 1)
+    assert not dupes, (
+        "%s declares %s more than once, so roslaunch refuses to load it and every "
+        "launch that includes it dies at startup. Either the block was merged in "
+        "twice, or two features picked the same name and one needs renaming."
+        % (launch.name, ", ".join(dupes)))

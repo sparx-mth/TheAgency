@@ -237,9 +237,23 @@
   <arg name="blockage_ttl_s"             default="0.0" /><!-- s a blockage is remembered. 0 = forever, right for a static building -->
   <!-- drift_pid controller - generated block END -->
   <arg name="controller"      default="waypoint" /><!-- waypoint | multi_axis | pure_pursuit | roll_assist | drift_pid -->
-  <!-- Stuck detection + recovery master switch (every controller except drift_pid);
-       full tuning + docs live in nav_stack.launch. recovery:=false disables it. -->
+  <!-- Stuck detection + recovery (every controller except drift_pid); the docs
+       for each knob live in nav_stack.launch. recovery:=false disables it. The
+       tuning is re-declared here as well as in real_drone because this layer
+       forwards what a mission sets, and an arg missing from it is dropped in
+       silence. Note recovery_escape_back_speed: the plain recovery_back_speed
+       belongs to the lost-localization ladder, a different feature. -->
   <arg name="recovery"        default="true" />
+  <arg name="recovery_window_s"        default="1.2" />
+  <arg name="recovery_progress_frac"   default="0.30" />
+  <arg name="recovery_confirm_ticks"   default="5" />
+  <arg name="recovery_brake_s"         default="0.4" />
+  <arg name="recovery_back_s"          default="0.7" />
+  <arg name="recovery_escape_back_speed" default="0.10" />
+  <arg name="recovery_probe_s"         default="0.8" />
+  <arg name="recovery_settle_s"        default="0.5" />
+  <arg name="recovery_max_attempts"    default="1" />
+  <arg name="recovery_pose_max_age_s"  default="0.5" />
   <!-- Follower-side pose denoising. false = fly the localization stream as
        published, so its own jitter and lag are visible rather than filtered. -->
   <arg name="cmd_vy_sign" default="1.0" /><!-- lateral (linear.y) sign at publish: -1 corrects the inversion measured on this airframe; must be exactly 1 or -1 -->
@@ -822,6 +836,17 @@
     <!-- drift_pid controller - generated block END forwarding -->
     <arg name="controller"      value="$(arg controller)" />
     <arg name="recovery"        value="$(arg recovery)" />
+    <!-- Stuck detection + escape tuning (see the declarations above) -->
+    <arg name="recovery_window_s"        value="$(arg recovery_window_s)" />
+    <arg name="recovery_progress_frac"   value="$(arg recovery_progress_frac)" />
+    <arg name="recovery_confirm_ticks"   value="$(arg recovery_confirm_ticks)" />
+    <arg name="recovery_brake_s"         value="$(arg recovery_brake_s)" />
+    <arg name="recovery_back_s"          value="$(arg recovery_back_s)" />
+    <arg name="recovery_escape_back_speed" value="$(arg recovery_escape_back_speed)" />
+    <arg name="recovery_probe_s"         value="$(arg recovery_probe_s)" />
+    <arg name="recovery_settle_s"        value="$(arg recovery_settle_s)" />
+    <arg name="recovery_max_attempts"    value="$(arg recovery_max_attempts)" />
+    <arg name="recovery_pose_max_age_s"  value="$(arg recovery_pose_max_age_s)" />
     <arg name="cmd_vy_sign" value="$(arg cmd_vy_sign)" />
     <arg name="use_pose_estimator" value="$(arg use_pose_estimator)" />
     <arg name="vel_x"           value="$(arg vel_x)" />

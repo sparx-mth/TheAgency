@@ -40,25 +40,27 @@ map_config:
   init_y: 2.03
   init_z: 1.4
   init_yaw: 0.1221730
-  map_size:
-    map_min_x: -12.2
-    map_min_y: -18.2
-    map_min_z: -0.3
-    map_max_x: 12.3
-    map_max_y: 21.1
-    map_max_z: 2.8
-    box_min_x: -11.5
-    box_min_y: -17.5
-    box_min_z: 1.0
-    box_max_x: 11.5
-    box_max_y: 20.3
-    box_max_z: 2.2
-    vbox_min_x: -12.0
-    vbox_min_y: -18.0
-    vbox_min_z: 1.3
-    vbox_max_x: 12.0
-    vbox_max_y: 20.8
-    vbox_max_z: 1.5
+  # WHERE TO EXPLORE, in five numbers. The eighteen `map_size` numbers this file
+  # used to carry by hand are derived from these before the container starts. To
+  # see the boxes and what the grid will cost:
+  #
+  #   python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize runs/<run>.yaml
+  #
+  # See runs/3_open_plan.yaml for the full rationale behind every field; only the
+  # geometry differs here. The rack aisles run the length of the building, so the
+  # box edges sit on the outer walls with no inset -- there is no open floor
+  # beyond them to be let into.
+  area:
+    building: [-11.5, -17.5, 11.5, 20.3]
+    flight_band: [1.0, 2.2]
+    vertical_extent: [-0.3, 2.8]
+    resolution: 0.10
+    # Four numbers, not one: the allocated grid is the footprint of the surveyed
+    # voxel map the stub raycasts (robots/PEGASUS/maps/warehouse_shelves_voxels.npz,
+    # origin -12.2, -18.2, -0.3), and that survey is not a symmetric ring around
+    # the exploration box. Keeping the two aligned is what lets a stub flight and
+    # an Isaac flight see the same world.
+    margin: [0.7, 0.7, 0.8, 0.8]
   scale: 1.0
   T_b_c:
   - [ 0.0, 0.0, 1.0, 0.0]

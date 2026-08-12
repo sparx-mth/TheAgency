@@ -23,11 +23,11 @@ RUN = {
         "map_dimension": 2,
         "init_x": -8.93,
         "area": {
-            "building": [-23.0, -33.2, 5.1, 38.7],
+            "building": [-23.0, -27.2, 5.1, 38.7],
             "flight_band": [1.0, 2.2],
             "vertical_extent": [-0.2, 2.4],
             "resolution": 0.10,
-            "margin": 2.0,
+            "margin": [2.0, 8.0, 2.0, 2.0],
         },
         "scale": 1.0,
     },
@@ -111,7 +111,7 @@ def test_a_useless_resolution_is_caught():
 
 
 def test_an_explicit_resolution_differing_from_the_volume_rule_is_flagged():
-    """The office box is 2424 m3, so FALCON's own rule would pick 10 cm."""
+    """The office box is 2222 m3, so FALCON's own rule would pick 10 cm."""
     expanded = expand_run(a_run(resolution=0.2))
     assert any("volume rule" in note for note in expanded.warnings)
     assert not expand_run(a_run(resolution=0.1)).warnings

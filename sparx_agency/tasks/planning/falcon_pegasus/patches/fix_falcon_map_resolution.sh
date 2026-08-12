@@ -16,7 +16,7 @@
 #      fine one, at or above it the coarse one. That couples two things that
 #      should not be coupled, in the surprising direction -- shrinking your
 #      exploration box can multiply memory by eight by dropping under the
-#      threshold. Our whole-office runs sit at 2424 m3, just inside it: 267 MB
+#      threshold. Our whole-office runs sit at 2222 m3, just inside it: 267 MB
 #      at 10 cm against 33 MB at 20 cm, for exactly the same flight.
 #
 #   3. Nothing ever says how big the grid is. map_server does log its resolution

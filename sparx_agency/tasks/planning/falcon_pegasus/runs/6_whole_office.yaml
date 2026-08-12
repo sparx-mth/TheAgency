@@ -91,7 +91,13 @@ map_config:
     # ALL SIX RUNS SHARE THIS BOX. They differ in where the aircraft starts and
     # how long it flies. They used to differ by carving the building into six
     # sub-regions, and that was wrong, for the reason above.
-    building: [-23.0, -33.2, 5.1, 38.7]
+    #
+    # The south edge is at -27.2, not the -33.2 it started at: the building's
+    # southernmost structure is at -27.2, so six metres of outdoor nothing sat
+    # inside the box, permanently UNKNOWN and inflating the coverage denominator
+    # by ~200 m3 -- which matters most here, the run that is supposed to finish
+    # the whole building. See runs/3_open_plan.yaml for the full reasoning.
+    building: [-23.0, -27.2, 5.1, 38.7]
     # The z band the planner may fly in: the airspace ABOVE the clutter, not the
     # whole room. This started at 0.6 m, which let FALCON fly the aircraft at
     # 0.74 m -- desk height in this building -- and it wedged itself twice.
@@ -101,13 +107,17 @@ map_config:
     vertical_extent: [-0.2, 2.4]
     # Metres per voxel, chosen rather than inherited. Upstream picks this from the
     # exploration box's VOLUME -- under 4000 m3 it maps at 10 cm, at or above it
-    # 20 cm -- and this box is 2424 m3, just inside the threshold. So the eight-fold
+    # 20 cm -- and this box is 2222 m3, just inside the threshold. So the eight-fold
     # difference in memory currently hangs on a boundary nobody set deliberately.
     # 0.10 is what these runs have always flown; 0.20 costs an eighth of the
     # memory (267 MB -> 33 MB) whenever the detail is worth trading.
     resolution: 0.10
-    # How far the allocated grid reaches past the exploration box, horizontally.
-    margin: 2.0
+    # How far the allocated grid reaches past the exploration box, horizontally:
+    # (low_x, low_y, high_x, high_y). Two metres everywhere except the south,
+    # where it is eight -- pulling the exploration box off the outdoor nothing
+    # deliberately did NOT shrink the allocated grid, so the mapper still has
+    # somewhere to put what the camera sees over the south wall.
+    margin: [2.0, 8.0, 2.0, 2.0]
 
   scale: 1.0
 

@@ -7,20 +7,22 @@ import pytest
 
 from sparx_agency.tasks.planning.falcon_pegasus.mapsize.area import Box, ExplorationArea
 
-# The whole-office area, as the six run files describe it today.
+# The whole-office area, as the six run files describe it today. The south edge
+# is at -27.2 (the building's southernmost structure) while the grid still
+# reaches -35.2, which is why the margin is four numbers and not one.
 OFFICE = ExplorationArea(
-    building=(-23.0, -33.2, 5.1, 38.7),
+    building=(-23.0, -27.2, 5.1, 38.7),
     flight_band=(1.0, 2.2),
     vertical_extent=(-0.2, 2.4),
     resolution=0.10,
-    margin=2.0,
+    margin=(2.0, 8.0, 2.0, 2.0),
 )
 OFFICE_CRUISE_M = 1.4
 
 
 def test_box_is_the_footprint_over_the_flight_band():
     box = OFFICE.box
-    assert (box.min_x, box.min_y, box.min_z) == pytest.approx((-23.0, -33.2, 1.0))
+    assert (box.min_x, box.min_y, box.min_z) == pytest.approx((-23.0, -27.2, 1.0))
     assert (box.max_x, box.max_y, box.max_z) == pytest.approx((5.1, 38.7, 2.2))
 
 
@@ -34,7 +36,7 @@ def test_map_matches_the_hand_written_run_files():
 def test_vbox_matches_the_hand_written_run_files():
     """With a slab height, the drawn box is a thin cut at cruise altitude."""
     vbox = replace(OFFICE, visualisation_slab_at=OFFICE_CRUISE_M).vbox
-    assert (vbox.min_x, vbox.min_y, vbox.min_z) == pytest.approx((-23.5, -33.7, 1.3))
+    assert (vbox.min_x, vbox.min_y, vbox.min_z) == pytest.approx((-23.5, -27.7, 1.3))
     assert (vbox.max_x, vbox.max_y, vbox.max_z) == pytest.approx((5.6, 39.2, 1.5))
 
 
@@ -58,15 +60,25 @@ def test_an_explicit_box_beats_a_slab_height():
 
 
 def test_a_scalar_margin_is_symmetric():
-    assert OFFICE.margins == (2.0, 2.0)
+    area = replace(OFFICE, margin=2.0)
+    assert area.margins == (2.0, 2.0, 2.0, 2.0)
 
 
 def test_an_asymmetric_margin_is_kept_per_side():
     """small_house.yaml really is -10.5..10.0 around a -8..8 box."""
     area = replace(OFFICE, building=(-8.0, -8.0, 8.0, 8.0), margin=(2.5, 2.0))
-    assert area.margins == (2.5, 2.0)
+    assert area.margins == (2.5, 2.5, 2.0, 2.0)
     assert area.map.min_x == pytest.approx(-10.5)
     assert area.map.max_x == pytest.approx(10.0)
+
+
+def test_a_four_sided_margin_is_kept_per_axis():
+    """The office grid reaches 8 m south of a box that stops at the wall."""
+    assert OFFICE.margins == (2.0, 8.0, 2.0, 2.0)
+    assert OFFICE.map.min_x == pytest.approx(-25.0)
+    assert OFFICE.map.min_y == pytest.approx(-35.2)
+    assert OFFICE.map.max_x == pytest.approx(7.1)
+    assert OFFICE.map.max_y == pytest.approx(40.7)
 
 
 def test_from_dict_reads_an_asymmetric_margin():
@@ -79,11 +91,27 @@ def test_from_dict_reads_an_asymmetric_margin():
             "margin": [2.5, 2.0],
         }
     )
-    assert area.margins == (2.5, 2.0)
+    assert area.margins == (2.5, 2.5, 2.0, 2.0)
+
+
+def test_from_dict_reads_a_four_sided_margin():
+    """The warehouse grids are a surveyed map's footprint, not a ring."""
+    area = ExplorationArea.from_dict(
+        {
+            "building": [-11.5, -17.5, 11.5, 20.3],
+            "flight_band": [1.0, 2.2],
+            "vertical_extent": [-0.3, 2.8],
+            "resolution": 0.1,
+            "margin": [0.7, 0.7, 0.8, 0.8],
+        }
+    )
+    assert area.margins == (0.7, 0.7, 0.8, 0.8)
+    assert (area.map.min_x, area.map.min_y) == pytest.approx((-12.2, -18.2))
+    assert (area.map.max_x, area.map.max_y) == pytest.approx((12.3, 21.1))
 
 
 def test_from_dict_rejects_a_three_sided_margin():
-    with pytest.raises(ValueError, match="one number, or two"):
+    with pytest.raises(ValueError, match="one number, two .* or four"):
         ExplorationArea.from_dict(
             {
                 "building": [0.0, 0.0, 10.0, 10.0],
@@ -96,8 +124,8 @@ def test_from_dict_rejects_a_three_sided_margin():
 
 
 def test_office_exploration_volume():
-    """2424 m3 — the number the run files' own comment quotes."""
-    assert OFFICE.box.volume == pytest.approx(2424.0, rel=1e-3)
+    """2222 m3 — the number the run files' own comment quotes."""
+    assert OFFICE.box.volume == pytest.approx(2222.0, rel=1e-3)
 
 
 def test_grid_shape_rounds_up_like_falcon():
@@ -128,11 +156,11 @@ def test_to_falcon_emits_the_keys_the_planner_reads():
 def test_from_dict_reads_an_area_block():
     area = ExplorationArea.from_dict(
         {
-            "building": [-23.0, -33.2, 5.1, 38.7],
+            "building": [-23.0, -27.2, 5.1, 38.7],
             "flight_band": [1.0, 2.2],
             "vertical_extent": [-0.2, 2.4],
             "resolution": 0.10,
-            "margin": 2.0,
+            "margin": [2.0, 8.0, 2.0, 2.0],
         }
     )
     assert area == OFFICE
