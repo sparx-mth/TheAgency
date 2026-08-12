@@ -31,6 +31,7 @@ Runs inside the ROS1 Noetic FALCON container, on **Python 3.8**.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -38,11 +39,18 @@ import rospy
 from geometry_msgs.msg import Twist
 from gazebo_msgs.msg import ContactsState
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Image, PointCloud2
 from std_msgs.msg import Bool, Empty, Float32MultiArray, Int32
 from trajectory.msg import Bspline
 
 from sparx_agency.core.control.velocity_servo import (
     AxisPlant, VelocityLimits, VelocityPlant, VelocityServo, VelocityServoParams,
+)
+from sparx_agency.core.planning.safety.depth_proximity_brake import (
+    DepthProximityBrake, DepthProximityBrakeConfig,
+)
+from sparx_agency.core.planning.safety.voxel_brake_gate import (
+    VoxelBrakeGate, VoxelBrakeGateConfig,
 )
 from sparx_agency.core.planning.trajectories.bspline import BsplineTrajectory
 
@@ -122,6 +130,84 @@ class BsplineFollowerNode(object):
         self._retreat_time_s = float(rospy.get_param("~retreat_time_s", 5.0))
         self._retreat_speed = float(rospy.get_param("~retreat_speed", 0.35))
         self._retreat_clear_m = float(rospy.get_param("~retreat_clear_m", 1.3))
+        # Turn-to-look: after backing out, face the struck point and stare so
+        # the mapper fuses it. Caps, not guarantees -- see _retreat.
+        self._face_time_s = float(rospy.get_param("~face_time_s", 6.0))
+        self._look_dwell_s = float(rospy.get_param("~look_dwell_s", 1.5))
+        self._contact_point = None      # type: object  # (x, y) world, strike spot
+        self._retreat_phase = None      # type: object  # back | face | dwell
+
+        # ── map brake gate ───────────────────────────────────────────────
+        # The last line of defence: refuse to fly the commanded velocity into
+        # voxels FALCON's own map says are occupied. Exists because FALCON's
+        # runtime safety check demonstrably does not signal this follower (its
+        # pre-publish check swaps in a fallback curve silently, and its
+        # executing-trajectory check fired 0 times across 336 contacts), so
+        # the map knowing an obstacle does not stop the aircraft -- this does.
+        self._gate_enabled = bool(rospy.get_param("~map_gate", True))
+        self._gate = VoxelBrakeGate(VoxelBrakeGateConfig(
+            drone_radius_m=float(rospy.get_param("~gate_drone_radius_m", 0.30)),
+            z_band=(float(rospy.get_param("~gate_z_lo", 0.4)),
+                    float(rospy.get_param("~gate_z_hi", 2.0))),
+        ))
+        # A hard stop held this long is a physical fact the planner is not
+        # resolving: treat it exactly like a contact and back out for a fresh
+        # look, which also un-sticks a start cell swallowed by inflation.
+        # 4 s: strictly more than FALCON's ~3 s replan cadence, so a block
+        # always gives the planner one full chance to reroute before the
+        # follower spends ~10 s on a physical back-out.
+        self._gate_block_retreat_s = float(
+            rospy.get_param("~gate_block_retreat_s", 4.0))
+        self._gate_blocked_since = None     # type: object
+
+        # ── depth visual bumper ──────────────────────────────────────────
+        # The reflex under the map gate: the voxel map flaps thin obstacles
+        # (raycast clearing erodes one-voxel silhouettes -- every remaining
+        # strike of run 009 was one person, visible in raw depth the whole
+        # time), so forward speed is ALSO clamped by the closest raw depth
+        # return inside the flight corridor. Intrinsics come from the same
+        # rosparams the launch feeds FALCON's mapper.
+        self._depth_brake_enabled = bool(rospy.get_param("~depth_brake", True))
+        self._depth_brake = DepthProximityBrake(DepthProximityBrakeConfig(
+            fx=float(rospy.get_param(
+                "/uav_model/sensing_parameters/camera_intrinsics/fx", 390.6427)),
+            fy=float(rospy.get_param(
+                "/uav_model/sensing_parameters/camera_intrinsics/fy", 390.6427)),
+            cx=float(rospy.get_param(
+                "/uav_model/sensing_parameters/camera_intrinsics/cx", 300.5)),
+            cy=float(rospy.get_param(
+                "/uav_model/sensing_parameters/camera_intrinsics/cy", 300.5)),
+        ))
+        self._depth_allow = None        # type: object  # (v_allow, d_min)
+        self._depth_allow_at = None     # type: object
+        self._depth_history = []        # type: list  # (t_s, v_allow) trailing window
+
+        # ── altitude guard band ──────────────────────────────────────────
+        # Derived from the MAP's own planning box: a start pose outside the
+        # box is a pose FALCON can never plan from, so the guard keeps the
+        # aircraft strictly inside it in every state (see _send). Slightly
+        # inside the faces so plans that ride the box limits do not fight it.
+        box_lo = float(rospy.get_param("/map_config/map_size/box_min_z", 0.6))
+        box_hi = float(rospy.get_param("/map_config/map_size/box_max_z", 2.0))
+        self._alt_min = box_lo + 0.10
+        self._alt_max = box_hi - 0.10
+        # Horizontal box for the same guard, with a small tolerance ring so
+        # normal wall-adjacent flight is untouched.
+        try:
+            self._box_xy = (
+                float(rospy.get_param("/map_config/map_size/box_min_x")) - 0.20,
+                float(rospy.get_param("/map_config/map_size/box_max_x")) + 0.20,
+                float(rospy.get_param("/map_config/map_size/box_min_y")) - 0.20,
+                float(rospy.get_param("/map_config/map_size/box_max_y")) + 0.20)
+        except KeyError:
+            self._box_xy = None
+        self._last_z = None             # type: object
+        self._hold_point = None         # type: object  # (x,y,z) station latch
+        # Takeoff must END inside the planning box or the first plan request
+        # starts from an illegal altitude (maps may raise the floor above the
+        # default takeoff height, e.g. the hospital's counter-clearing 1.25).
+        self._takeoff_altitude_m = max(self._takeoff_altitude_m,
+                                       self._alt_min + 0.05)
         # Attitude reflex: cut horizontal drive if roll or pitch crosses this, a
         # margin below the plugin's ~35 deg clamp past which the model thrusts
         # sideways and cannot recover. A near-clip contact can pitch the aircraft
@@ -154,6 +240,21 @@ class BsplineFollowerNode(object):
         rospy.Subscriber("/planning/replan", Int32, self._on_replan, queue_size=10)
         rospy.Subscriber(rospy.get_param("~contact_topic", "/simple_drone/bumper_states"),
                          ContactsState, self._on_bumper, queue_size=4)
+        if self._gate_enabled:
+            # At 0.1 m resolution FALCON's publisher emits complete occupied
+            # sweeps on this topic (its local-box variant only runs at
+            # coarser resolutions), so every message REPLACES the gate's
+            # world -- no free-cloud subscription, no ghost accumulation.
+            # buff_size must exceed the biggest sweep: rospy's 64 KiB default
+            # silently mangles multi-MB messages, which is how run 013's
+            # gate lost every free update and livelocked on phantoms.
+            rospy.Subscriber("/voxel_mapping/occupancy_grid_occupied",
+                             PointCloud2, self._on_occupied_cloud,
+                             queue_size=1, buff_size=2 ** 26)
+        if self._depth_brake_enabled:
+            rospy.Subscriber(rospy.get_param("~depth_topic",
+                                             "/simple_drone/front_depth/depth/image_raw"),
+                             Image, self._on_depth, queue_size=1, buff_size=2 ** 23)
 
         self._last_tick = None          # type: object
         rospy.Timer(rospy.Duration(1.0 / self._rate_hz), self._tick)
@@ -208,6 +309,7 @@ class BsplineFollowerNode(object):
         """Latch the state. This is the only feedback the loop has."""
         self._odom = msg
         self._odom_at = rospy.Time.now()
+        self._last_z = float(msg.pose.pose.position.z)
 
     def _on_bspline(self, msg):
         # type: (Bspline) -> None
@@ -269,7 +371,7 @@ class BsplineFollowerNode(object):
         if not self._state_is_fresh(now):
             # No state means no loop. Publishing the previous command would fly
             # the aircraft blind; publishing zero at least stops it.
-            self._cmd.publish(Twist())
+            self._send(Twist())
             self._servo.reset()
             return
 
@@ -284,9 +386,12 @@ class BsplineFollowerNode(object):
         # cut horizontal drive and hold so it settles back level rather than over.
         roll, pitch = self._roll_pitch()
         if abs(roll) > self._tilt_limit_rad or abs(pitch) > self._tilt_limit_rad:
-            self._cmd.publish(Twist())
+            self._send(Twist())
             self._servo.reset()
             self._retreat_until = None
+            self._retreat_phase = None
+            self._contact_point = None
+            self._gate_blocked_since = None
             rospy.logwarn_throttle(
                 1.0, "[follower] tilt roll=%.0f pitch=%.0f deg; cutting drive to "
                 "level before it capsizes", math.degrees(roll), math.degrees(pitch))
@@ -299,6 +404,15 @@ class BsplineFollowerNode(object):
         # itself now shadows those viewpoints (the dead-end guard in
         # exploration_manager), and yawing in place on every stall only thrashed
         # against that 20 s block and re-scanned a view that never changes.
+        # Mission over: hold POSITION, not zero velocity. FALCON is silent
+        # forever now, so without this the resurvey below would spin the
+        # aircraft every 12 s for the rest of time, and a zero-velocity hold
+        # open-loop drifts horizontally (the vertical twin of the drift the
+        # _send guard exists for).
+        if self._finished:
+            self._hold_station(position, yaw)
+            return
+
         silent_s = self._falcon_silent_s(now)
         if (self._survey_remaining_rad <= 0.0 and self._retreat_until is None
                 and silent_s > self._resurvey_after_s):
@@ -315,13 +429,14 @@ class BsplineFollowerNode(object):
             return
 
         # FALCON briefly silent (crashed mid-plan, before the re-survey window):
-        # hold station rather than carry the stale curve on blind into the wall
+        # hold STATION rather than carry the stale curve on blind into the wall
         # it could not see. Retreat above takes priority -- backing out of a real
         # contact must not be interrupted by a hold.
         if silent_s > self._hold_silent_s:
-            self._cmd.publish(Twist())
+            self._hold_station(position, yaw)
             self._servo.reset()
             return
+        self._hold_point = None            # any other state releases the latch
 
         follow = not (self._stopped or self._finished)
         command = self._servo.update(position, velocity, yaw, dt, now.to_sec(),
@@ -333,6 +448,63 @@ class BsplineFollowerNode(object):
         if follow and not command.holding and self._should_retreat(now, position, command):
             self._begin_retreat(position, command)
             return
+
+        # Two brakes between the servo and the wire, sharing one escalation
+        # timer: the DEPTH bumper clamps the forward axis on what the camera
+        # sees right now (thin obstacles the voxel map flaps), and the MAP
+        # gate vetoes any commanded direction into accumulated occupancy.
+        # A sustained dead stop from either is a physical fact the planner is
+        # not resolving: treat it exactly like a contact -- back out and look.
+        if follow and not command.holding:
+            hard_blocked = False
+            block_why = ""
+
+            if self._depth_brake_enabled and command.vx > 1e-3:
+                v_allow = self._depth_forward_limit(now)
+                if v_allow <= 0.05:
+                    hard_blocked = True
+                    d = self._depth_allow[1] if self._depth_allow else -1.0
+                    block_why = "depth %.2f m in corridor" % (d if d else -1.0)
+                elif command.vx > v_allow:
+                    # one factor on every component, body AND world: the gate
+                    # downstream sweeps its corridor from the world vector, so
+                    # a body/world mismatch mis-aims it and understates speed
+                    f = v_allow / command.vx
+                    command = dataclasses.replace(
+                        command, vx=command.vx * f, vy=command.vy * f,
+                        world_vx=command.world_vx * f,
+                        world_vy=command.world_vy * f)
+
+            if self._gate_enabled and not hard_blocked:
+                scale, blocked = self._gate.command_scale(
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    (command.world_vx, command.world_vy))
+                if scale <= 0.0:
+                    hard_blocked = True
+                    block_why = "map voxel %.2f m ahead" % (
+                        blocked if blocked is not None else -1.0)
+                elif scale < 1.0:
+                    # BodyTwistCommand is frozen: build the braked copy.
+                    command = dataclasses.replace(
+                        command,
+                        vx=command.vx * scale, vy=command.vy * scale,
+                        world_vx=command.world_vx * scale,
+                        world_vy=command.world_vy * scale)
+
+            if hard_blocked:
+                if self._gate_blocked_since is None:
+                    self._gate_blocked_since = now
+                    rospy.logwarn("[follower] brake: %s; holding", block_why)
+                elif (now - self._gate_blocked_since).to_sec() > self._gate_block_retreat_s:
+                    self._gate_blocked_since = None
+                    self._begin_retreat(position, command)
+                    return
+                stop = Twist()
+                stop.linear.z = command.vz          # altitude hold stays live
+                stop.angular.z = command.yaw_rate   # keep looking along the path
+                self._send(stop)
+                return
+            self._gate_blocked_since = None
 
         self._publish(command)
 
@@ -415,16 +587,21 @@ class BsplineFollowerNode(object):
         self._survey_last_yaw = yaw
         command = Twist()
         if self._survey_remaining_rad <= 0.0:
-            self._cmd.publish(command)          # stop the turn cleanly
+            self._send(command)          # stop the turn cleanly
             # Start the stall clock fresh: the scan just built new map, so give
             # FALCON a full window to act on it before calling it stuck again --
             # otherwise the in-place turn itself reads as a stall and loops.
             self._stall_track = []
+            # Restamp the silence clock at turn COMPLETION, not just at turn
+            # start: the 1.25-rev turn takes ~16 s, longer than the 12 s
+            # resurvey window, so stamping only at start meant FALCON got
+            # ZERO post-scan planning time and the node spun back-to-back.
+            self._last_bspline_at = rospy.Time.now()
             rospy.loginfo("[bspline_follower] survey turn complete -- "
                           "following FALCON")
             return
         command.angular.z = self._survey_yaw_rate
-        self._cmd.publish(command)
+        self._send(command)
 
     def _falcon_silent_s(self, now):
         # type: (object) -> float
@@ -471,6 +648,7 @@ class BsplineFollowerNode(object):
         self._survey_last_yaw = None
         self._last_bspline_at = now
         self._stall_track = []
+        self._hold_point = None        # the next hold latches where IT begins
         self._resurveys += 1
         rospy.logwarn("[follower] FALCON %s (recovery #%d); re-surveying to "
                       "rebuild its map", reason, self._resurveys)
@@ -491,6 +669,54 @@ class BsplineFollowerNode(object):
                           position[2])
             return
         self._takeoff.publish(Empty())
+
+    @staticmethod
+    def _cloud_xyz(msg):
+        # type: (PointCloud2) -> np.ndarray
+        """View a PointCloud2 with leading float32 x,y,z as an Nx3 array."""
+        n = msg.width * msg.height
+        if n == 0:
+            return np.empty((0, 3), dtype=np.float32)
+        return np.ndarray(shape=(n, 3), dtype="<f4", buffer=msg.data,
+                          strides=(msg.point_step, 4))
+
+    def _on_depth(self, msg):
+        # type: (Image) -> None
+        """Clamp forward speed by the closest return in the flight corridor."""
+        if msg.encoding not in ("32FC1",):
+            return                      # never guess a depth format
+        depth = np.frombuffer(msg.data, dtype=np.float32).reshape(
+            msg.height, msg.width)
+        self._depth_allow = self._depth_brake.allowed_forward_speed(depth)
+        self._depth_allow_at = rospy.Time.now()
+        self._depth_history.append((self._depth_allow_at.to_sec(),
+                                    self._depth_allow[0]))
+
+    def _depth_forward_limit(self, now):
+        # type: (object) -> float
+        """Current forward speed ceiling from the visual bumper, inf if none.
+
+        The TRAILING MINIMUM over a short window, not the latest frame: when
+        an obstacle penetrates the near clip its pixels go invalid and the
+        instantaneous corridor minimum jumps to the background -- the brake
+        would release at exactly the closest range. Holding the window's
+        minimum keeps the clamp on until the aircraft has actually backed off.
+        A wholly stale stream (camera or bridge hiccup) lifts the clamp
+        rather than grounding the mission -- the voxel gate stays underneath.
+        """
+        if (self._depth_allow is None or self._depth_allow_at is None
+                or (now - self._depth_allow_at).to_sec() > 1.0):
+            return float("inf")
+        now_s = now.to_sec()
+        while self._depth_history and self._depth_history[0][0] < now_s - 1.5:
+            self._depth_history.pop(0)
+        if not self._depth_history:
+            return self._depth_allow[0]
+        return min(v for _, v in self._depth_history)
+
+    def _on_occupied_cloud(self, msg):
+        # type: (PointCloud2) -> None
+        self._gate.replace_occupied(self._cloud_xyz(msg))
 
     def _on_bumper(self, msg):
         # type: (ContactsState) -> None
@@ -540,51 +766,179 @@ class BsplineFollowerNode(object):
         """Start backing out of a wall, opposite the direction it drove in.
 
         The condemned curve is dropped (``reset``) so following resumes only when
-        FALCON publishes a fresh plan. The retreat runs until the aircraft has
-        cleared ``retreat_clear_m`` -- enough to bring the wall back outside the
-        depth near clip, so FALCON re-maps it and plans around it rather than
-        straight back into it.
+        FALCON publishes a fresh plan. The retreat is three phases -- BACK out
+        past the depth near clip, turn to FACE the point that was struck, DWELL
+        looking at it -- because the baseline showed the two-phase version
+        failing fatally: the drone backed out with the obstacle outside the
+        camera's view, the map never gained it, and every replan drove straight
+        back in until the airframe wedged and capsized. Facing the contact point
+        while the mapper fuses a few frames is what turns a strike into map
+        evidence FALCON can plan around.
         """
         self._retreats += 1
         speed = math.hypot(command.world_vx, command.world_vy)
         if speed > 1e-3:
-            self._retreat_dir_world = (-command.world_vx / speed,
-                                       -command.world_vy / speed)
+            drive = (command.world_vx / speed, command.world_vy / speed)
+            self._retreat_dir_world = (-drive[0], -drive[1])
         else:
+            drive = None
             self._retreat_dir_world = None      # fall back to -body-x
+        # Where the obstacle is: just ahead of where the strike happened, along
+        # the direction the aircraft was driving. 0.5 m is "at or just past the
+        # airframe's nose"; precision is not needed, the camera FOV is wide.
+        if drive is not None:
+            self._contact_point = (float(position[0]) + 0.5 * drive[0],
+                                   float(position[1]) + 0.5 * drive[1])
+        else:
+            self._contact_point = None
         self._retreat_from = np.array(position, dtype=float)
+        self._retreat_phase = "back"
         self._retreat_until = rospy.Time.now() + rospy.Duration(self._retreat_time_s)
         self._contact_seen_at = None
+        self._gate_blocked_since = None     # a retreat consumes the block
         self._servo.reset()
         self._track = []
-        self._cmd.publish(Twist())
-        rospy.logwarn("[follower] contact/wedge (retreat #%d); backing out %.1f m",
-                      self._retreats, self._retreat_clear_m)
+        self._send(Twist())
+        rospy.logwarn("[follower] contact/wedge (retreat #%d); backing out %.1f m "
+                      "then turning to look", self._retreats, self._retreat_clear_m)
+
+    def _end_retreat(self, why):
+        # type: (str) -> None
+        """Leave the retreat state machine and hold for a fresh plan.
+
+        The servo is reset a SECOND time here: a curve FALCON queued mid-
+        retreat was planned from a mid-retreat pose before the dwell fused
+        the obstacle into the map, and promoting it would fly straight back
+        at the wall the whole maneuver existed to avoid. Following resumes
+        on the next post-dwell plan, which is at most one cadence away.
+        """
+        self._retreat_until = None
+        self._retreat_dir_world = None
+        self._retreat_from = None
+        self._contact_point = None
+        self._retreat_phase = None
+        self._gate_blocked_since = None
+        self._servo.reset()
+        self._send(Twist())
+        rospy.loginfo("[follower] retreat done (%s); holding for a fresh plan", why)
 
     def _retreat(self, now, position, yaw):
         # type: (object, np.ndarray, float) -> None
-        """Fly back out of the wall until clear of it, then hold for a fresh plan.
+        """BACK out of the wall, FACE what was struck, DWELL, then hold.
 
-        Ends on distance (cleared the near clip) or a time cap, whichever first --
-        the cap guards against a retreat that is itself blocked, e.g. a corner.
+        Every phase carries a time cap (the deadline in ``_retreat_until``) so a
+        blocked back-out or a fouled turn cannot deadlock the aircraft; the caps
+        degrade the maneuver, never the mission.
         """
-        cleared = float(np.linalg.norm(position - self._retreat_from)) >= self._retreat_clear_m
-        if cleared or now >= self._retreat_until:
-            self._retreat_until = None
-            self._retreat_dir_world = None
-            self._retreat_from = None
-            self._cmd.publish(Twist())
-            rospy.loginfo("[follower] retreat done (%s); holding for a fresh plan",
-                          "cleared" if cleared else "timed out")
+        if self._retreat_phase == "back":
+            cleared = (float(np.linalg.norm(position - self._retreat_from))
+                       >= self._retreat_clear_m)
+            # A corner: the way back out is itself walled. Stop backing early
+            # rather than grind the tail into the second wall (the run-3
+            # capsize was exactly this geometry).
+            back_blocked = False
+            if self._gate_enabled and self._retreat_dir_world is not None:
+                bd = self._gate.blocked_distance(
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    self._retreat_dir_world, 0.7)
+                back_blocked = bd is not None and bd < 0.45
+            if cleared or back_blocked or now >= self._retreat_until:
+                if self._contact_point is None:
+                    self._end_retreat("cleared" if cleared else "timed out")
+                    return
+                self._retreat_phase = "face"
+                self._retreat_until = now + rospy.Duration(self._face_time_s)
+                self._send(Twist())
+                return
+            twist = Twist()
+            if self._retreat_dir_world is None:
+                twist.linear.x = -self._retreat_speed     # straight back
+            else:
+                cos, sin = math.cos(yaw), math.sin(yaw)
+                wx, wy = self._retreat_dir_world
+                twist.linear.x = self._retreat_speed * (cos * wx + sin * wy)
+                twist.linear.y = self._retreat_speed * (-sin * wx + cos * wy)
+            self._send(twist)
             return
+
+        if self._retreat_phase == "face":
+            target = math.atan2(self._contact_point[1] - float(position[1]),
+                                self._contact_point[0] - float(position[0]))
+            err = (target - yaw + math.pi) % (2.0 * math.pi) - math.pi
+            if abs(err) < 0.15 or now >= self._retreat_until:
+                self._retreat_phase = "dwell"
+                self._retreat_until = now + rospy.Duration(self._look_dwell_s)
+                self._send(Twist())
+                rospy.loginfo("[follower] facing the obstacle (yaw err %.0f deg); "
+                              "letting the mapper see it", math.degrees(err))
+                return
+            twist = Twist()
+            twist.angular.z = max(-self._survey_yaw_rate,
+                                  min(self._survey_yaw_rate, 1.5 * err))
+            self._send(twist)
+            return
+
+        # dwell: stare at the strike point so a few depth frames fuse
+        if now >= self._retreat_until:
+            self._end_retreat("looked at the obstacle")
+            return
+        self._send(Twist())
+
+    def _hold_station(self, position, yaw):
+        # type: (np.ndarray, float) -> None
+        """Closed-loop position hold at the point where the hold began.
+
+        A velocity-commanded airframe parked on zero twists drifts (run 010:
+        ~1.8 mm/s up, plus horizontal wander); this latches the entry point
+        and P-controls back to it, capped gently so a hold can never become
+        an attack.
+        """
+        if self._hold_point is None:
+            self._hold_point = np.array(
+                [float(position[0]), float(position[1]), float(position[2])])
+        err = self._hold_point - position
+        wx = max(-0.2, min(0.2, 0.6 * float(err[0])))
+        wy = max(-0.2, min(0.2, 0.6 * float(err[1])))
+        cos, sin = math.cos(yaw), math.sin(yaw)
         twist = Twist()
-        if self._retreat_dir_world is None:
-            twist.linear.x = -self._retreat_speed         # straight back
-        else:
-            cos, sin = math.cos(yaw), math.sin(yaw)
-            wx, wy = self._retreat_dir_world
-            twist.linear.x = self._retreat_speed * (cos * wx + sin * wy)
-            twist.linear.y = self._retreat_speed * (-sin * wx + cos * wy)
+        twist.linear.x = cos * wx + sin * wy
+        twist.linear.y = -sin * wx + cos * wy
+        twist.linear.z = max(-0.2, min(0.2, 0.8 * float(err[2])))
+        self._send(twist)
+
+    def _send(self, twist):
+        # type: (Twist) -> None
+        """The one choke point to the actuator, with the altitude guard.
+
+        A velocity-commanded airframe parked on zero drifts: run 010 measured
+        ~1.8 mm/s of open-loop climb during long holds, which walked the
+        aircraft out through the planning box ceiling (z 1.8 -> 4.2) -- and a
+        planner whose start pose is outside the box can never plan again, so
+        the hold became permanent. Every publish, in every state, therefore
+        passes through this band clamp: above the ceiling forces descent,
+        below the floor forces climb, inside the band the command is its own.
+        """
+        z = self._last_z
+        if z is not None:
+            if z > self._alt_max and twist.linear.z > -0.15:
+                twist.linear.z = -0.15
+            elif z < self._alt_min and twist.linear.z < 0.15:
+                twist.linear.z = 0.15
+        # The horizontal twin: retreats and wedge back-outs are open loop and
+        # happily push the airframe through the planning box wall into the
+        # very shelving the box exists to exclude (run 027 reached x=-5.8
+        # against a box floor of -4.6 and ground on the west shelf). Outside
+        # the box plus margin, bias the WORLD velocity back toward it.
+        if self._odom is not None and self._box_xy is not None:
+            p = self._odom.pose.pose.position
+            yaw = _yaw_from_quaternion(self._odom.pose.pose.orientation)
+            (x_lo, x_hi, y_lo, y_hi) = self._box_xy
+            push_wx = (0.2 if p.x < x_lo else (-0.2 if p.x > x_hi else 0.0))
+            push_wy = (0.2 if p.y < y_lo else (-0.2 if p.y > y_hi else 0.0))
+            if push_wx != 0.0 or push_wy != 0.0:
+                cos, sin = math.cos(yaw), math.sin(yaw)
+                twist.linear.x += cos * push_wx + sin * push_wy
+                twist.linear.y += -sin * push_wx + cos * push_wy
         self._cmd.publish(twist)
 
     def _publish(self, command):
@@ -595,7 +949,7 @@ class BsplineFollowerNode(object):
         twist.linear.y = command.vy
         twist.linear.z = command.vz
         twist.angular.z = command.yaw_rate
-        self._cmd.publish(twist)
+        self._send(twist)
 
         # Flat array rather than a custom message so nothing has to be built
         # into the container to record it. Order is fixed and documented in the

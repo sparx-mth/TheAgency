@@ -1,0 +1,76 @@
+diff --git a/falcon_planner/voxel_mapping/src/map_server.cpp b/falcon_planner/voxel_mapping/src/map_server.cpp
+index 3fed3f2..0192697 100644
+--- a/falcon_planner/voxel_mapping/src/map_server.cpp
++++ b/falcon_planner/voxel_mapping/src/map_server.cpp
+@@ -576,6 +576,17 @@ void MapServer::publishOccupancyGrid() {
+       occupancy_grid_unknown_pub_.getNumSubscribers() == 0)
+     return;
+ 
++  // Cadence split: the OCCUPIED cloud is small (tens of thousands of points)
++  // and safety-critical downstream, so it goes out every cycle; the FREE and
++  // UNKNOWN clouds grow with the explored volume (hundreds of thousands to
++  // millions of points serialized at 2 Hz) and only support visualisation and
++  // slow ghost-clearing, so they go out every 10th cycle. Without this the
++  // publish cost -- and every subscriber's parse cost -- grows linearly with
++  // mapping progress, which is exactly the "the further the mission gets, the
++  // slower everything runs" failure.
++  static int slow_cycle_counter = 0;
++  const bool publish_bulk = (slow_cycle_counter++ % 10 == 0);
++
+   if (config_.verbose_)
+     ROS_INFO_THROTTLE(1.0, "[MapServer] Publishing occupancy grid...");
+ 
+@@ -615,19 +626,23 @@ void MapServer::publishOccupancyGrid() {
+   pcl::toROSMsg(pointcloud_occupied, pointcloud_msg);
+   occupancy_grid_occupied_pub_.publish(pointcloud_msg);
+ 
+-  pointcloud_free.width = pointcloud_free.points.size();
+-  pointcloud_free.height = 1;
+-  pointcloud_free.is_dense = true;
+-  pointcloud_free.header.frame_id = config_.world_frame_;
+-  pcl::toROSMsg(pointcloud_free, pointcloud_msg);
+-  occupancy_grid_free_pub_.publish(pointcloud_msg);
++  if (publish_bulk) {
++    pointcloud_free.width = pointcloud_free.points.size();
++    pointcloud_free.height = 1;
++    pointcloud_free.is_dense = true;
++    pointcloud_free.header.frame_id = config_.world_frame_;
++    pcl::toROSMsg(pointcloud_free, pointcloud_msg);
++    occupancy_grid_free_pub_.publish(pointcloud_msg);
++  }
+ 
+-  pointcloud_unknown.width = pointcloud_unknown.points.size();
+-  pointcloud_unknown.height = 1;
+-  pointcloud_unknown.is_dense = true;
+-  pointcloud_unknown.header.frame_id = config_.world_frame_;
+-  pcl::toROSMsg(pointcloud_unknown, pointcloud_msg);
+-  occupancy_grid_unknown_pub_.publish(pointcloud_msg);
++  if (publish_bulk) {
++    pointcloud_unknown.width = pointcloud_unknown.points.size();
++    pointcloud_unknown.height = 1;
++    pointcloud_unknown.is_dense = true;
++    pointcloud_unknown.header.frame_id = config_.world_frame_;
++    pcl::toROSMsg(pointcloud_unknown, pointcloud_msg);
++    occupancy_grid_unknown_pub_.publish(pointcloud_msg);
++  }
+ }
+ 
+ void MapServer::publishOccupancyGridHighResolution() {
+@@ -853,7 +868,7 @@ void MapServer::depthToPointcloud(const cv::Mat &depth_image, const Transformati
+   int rows = depth_image.rows;
+   int points_num = 0;
+ 
+-  pointcloud.points.resize(cols * rows / (config_.skip_pixel_ * config_.skip_pixel_));
++  pointcloud.points.resize((rows / config_.skip_pixel_ + 1) * (cols / config_.skip_pixel_ + 1)); // FALCON patch: depth cloud overflow
+   pointcloud.sensor_origin_.head<3>() = T_w_c.getPosition().cast<float>();
+   pointcloud.sensor_orientation_ = T_w_c.getRotationMatrix().cast<float>();
+ 
+@@ -913,7 +928,7 @@ void MapServer::depthToPointcloudDecimation(const cv::Mat &depth_image, const Tr
+   int points_num = 0;
+   int decimation_magnitude_ = 10;
+ 
+-  pointcloud.points.resize(cols * rows / (decimation_magnitude_ * decimation_magnitude_));
++  pointcloud.points.resize((rows / decimation_magnitude_ + 1) * (cols / decimation_magnitude_ + 1)); // FALCON patch: depth cloud overflow
+   pointcloud.sensor_origin_.head<3>() = T_w_c.getPosition().cast<float>();
+   pointcloud.sensor_orientation_ = T_w_c.getRotationMatrix().cast<float>();
+ 

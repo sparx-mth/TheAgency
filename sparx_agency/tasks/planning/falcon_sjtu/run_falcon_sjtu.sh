@@ -64,7 +64,9 @@ SCRIPTS_TARGET="/catkin_ws/src/falcon_adapter/scripts"
 LAUNCH_TARGET="/catkin_ws/src/falcon_adapter/launch"
 docker run -d --name falcon-sjtu \
     --network host \
+    --cap-add=SYS_PTRACE \
     --env PYTHONPATH="/opt/sparx_agency" \
+    --env PYTHONUNBUFFERED=1 \
     --volume "${REPO_ROOT}:/opt/sparx_agency:ro" \
     --volume "${SCRIPT_DIR}/adapter/scripts/bspline_follower_node.py:${SCRIPTS_TARGET}/bspline_follower_node.py" \
     --volume "${SCRIPT_DIR}/adapter/scripts/sensor_pose_node.py:${SCRIPTS_TARGET}/sensor_pose_node.py" \
@@ -72,7 +74,7 @@ docker run -d --name falcon-sjtu \
     --volume "${SCRIPT_DIR}/adapter/launch/bspline_follower.launch:${LAUNCH_TARGET}/bspline_follower.launch" \
     --volume "${SCRIPT_DIR}/config/${MAP_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${MAP_NAME}.yaml" \
     "${FALCON_IMAGE}" \
-    roslaunch falcon_adapter exploration.launch map_name:="${MAP_NAME}" \
+    roslaunch falcon_adapter exploration.launch map_name:="${MAP_NAME}" ${FALCON_LAUNCH_ARGS:-} \
     > /dev/null
 
 echo -n "[falcon_sjtu] waiting for roscore"

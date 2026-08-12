@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import time
 
 import rclpy
@@ -82,6 +83,7 @@ class FlightMonitor(Node):
         self._rpy = None             # (roll, pitch, yaw)
         self._speed = 0.0
         self._airborne_seen = False
+        self._above_since = None     # start of the current spell above airborne_m
         self._in_contact = False
         self._contact_names = []
         self._window = []            # (t, x, y, z) for the wedge test
@@ -98,16 +100,33 @@ class FlightMonitor(Node):
         self._rpy = _rpy_from_quaternion(o.x, o.y, o.z, o.w)
         v = msg.twist.twist.linear
         self._speed = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+        # Latch "airborne" only after a SUSTAINED spell above the bar. The drone
+        # spawns at z=2 and free-falls to the floor before anything commands it,
+        # and that ~0.5 s transit above the bar must not count as flight -- it
+        # made the monitor call the spawn drop a GROUNDED crash at t=0.4 s.
+        now = time.time()
         if p.z > self._args.airborne_m:
-            self._airborne_seen = True
+            if self._above_since is None:
+                self._above_since = now
+            elif now - self._above_since >= self._args.airborne_hold_s:
+                self._airborne_seen = True
+        else:
+            self._above_since = None
 
     def _on_bumper(self, msg):
         # type: (ContactsState) -> None
+        ignore = re.compile(self._args.ignore_contact_re)
         names = []
         for state in msg.states:
-            names.append(getattr(state, "collision2_name", "") or
-                         getattr(state, "collision1_name", ""))
-        now_contact = len(msg.states) > 0
+            name = (getattr(state, "collision2_name", "") or
+                    getattr(state, "collision1_name", ""))
+            if not ignore.search(name):
+                names.append(name)
+        # Floor/ground contact is not a wall strike: resting before takeoff and
+        # sitting after a landing both touch the floor continuously, and a real
+        # fall to the floor is already the GROUNDED verdict. Same for the
+        # pre-takeoff phase as a whole -- nothing has flown yet.
+        now_contact = len(names) > 0 and self._airborne_seen
         if now_contact and not self._in_contact:
             self._event("CONTACT", "began: %s" % (", ".join(sorted(set(names))) or "?",))
             if self._args.exit_on_contact:
@@ -205,6 +224,11 @@ def main():
     ap.add_argument("--trace", default="/tmp/flight_trace.jsonl")
     ap.add_argument("--capsize-deg", type=float, default=35.0)
     ap.add_argument("--airborne-m", type=float, default=0.8)
+    ap.add_argument("--airborne-hold-s", type=float, default=3.0,
+                    help="continuous seconds above airborne-m before 'airborne' "
+                         "latches; rejects the z=2 spawn free-fall")
+    ap.add_argument("--ignore-contact-re", default=r"floor|ground|Ground",
+                    help="collision names this regex matches are never CONTACT")
     ap.add_argument("--grounded-m", type=float, default=0.3)
     ap.add_argument("--wedge-window-s", type=float, default=25.0)
     ap.add_argument("--wedge-move-m", type=float, default=0.4)

@@ -34,6 +34,10 @@ map_config:
     map_max_z:   2.2
     box_min_x: -20.0
     box_min_y: -20.0
+    # 0.6: the 1.25 counter-clearing floor traded one failure for a worse one
+    # (2.0 m doorway lintels inflate down into the band; rooms seal shut and
+    # the tour no-paths from inside a pocket -- run 020). Counter lips are the
+    # brakes' problem; doors must stay open to the planner.
     box_min_z:   0.6
     box_max_x:  20.0
     box_max_y:  20.0

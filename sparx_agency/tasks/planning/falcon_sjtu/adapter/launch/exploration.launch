@@ -27,6 +27,17 @@
   <arg name="map_name" default="small_house"/>
   <arg name="drone_ns" default="/simple_drone"/>
 
+  <!-- ONE clock owns everything. Every data stamp in this graph is already
+       Gazebo sim time (the bridged depth, odom and therefore /map_ros/pose),
+       but without this flag ros::Time::now() was WALL time: FALCON stamped
+       B-splines on a clock ~12% faster than the physics (hospital rtf ~0.88),
+       so the reference ran ahead of the aircraft and the follower burned its
+       catch-up margin closing a gap that was pure clock skew. /clock is
+       bridged ROS2->ROS1 in config/bridge.yaml (best_effort, matching its
+       publisher); nodes idle until the bridge comes up, which the run script
+       tolerates. -->
+  <param name="/use_sim_time" value="true"/>
+
   <!-- ── Speeds: the old stack's indoor tuning, kept. At 0.25 m/s a 4 m leg is
        a ~16 s spline, comfortably inside FALCON's well-behaved regime; yaw
        faster than translation so the camera can align at a door before the
@@ -46,7 +57,7 @@
        out), so the old margin is spent reaching frontiers the 0.30 m map had
        walled off rather than left on the table. -->
   <arg name="obstacles_inflation" default="0.25"/>
-  <arg name="safe_distance"       default="0.10"/>
+  <arg name="safe_distance"       default="0.15"/>
 
   <!-- ── Frontier viewpoints: clearances lowered (0.35 to 0.25, 0.60 to 0.40) so
        FALCON places a viewpoint in a tighter space and observes a frontier
@@ -142,7 +153,7 @@
   <!-- Drone marker for RViz. FALCON's rviz.rviz displays the robot from
        /odom_visualization/robot, but the node that publishes it belongs to
        FALCON's own uav_simulator bringup, which this stack replaces with the
-       real Gazebo aircraft -- without this, RViz shows the map growing with no
+       real Gazebo aircraft; without this, RViz shows the map growing with no
        drone in it. The node reads ~odometry, remapped to the world-frame odom. -->
   <node pkg="odom_visualization" name="odom_visualization" type="odom_visualization">
     <remap from="~odometry" to="/odom_world"/>

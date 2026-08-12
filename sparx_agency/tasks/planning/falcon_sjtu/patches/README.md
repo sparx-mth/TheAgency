@@ -43,6 +43,15 @@ never when the viewpoint is merely unreachable. The result is a permanent stall
 - A no-progress guard in `planExploreMotionHGrid()`: if the aircraft's whole
   excursion stays under 2 m for 25 s while still not at the chosen viewpoint,
   that viewpoint is handed to `addBlockedRegion()` and the coverage tour moves on.
+- **(2026-08-12)** A degenerate-tour guard in `solveTSP()`: tours of ≤3 cities
+  are enumerated directly and never enter LKH, whose in-process solver corrupts
+  the heap on tiny tours — measured 15 respawns in one 45-minute mission, each
+  arriving in the respawn→tiny-map→tiny-tour→crash cascade this breaks
+  (sentinel: `never enter LKH`).
+- **(2026-08-12)** Blocked regions persist to the param server
+  (`/frontier_finder/blocked_regions_runtime`) and reload on construction, so a
+  respawned frontier finder keeps every physics-vetoed viewpoint shadowed
+  (sentinel: `blocked_regions_runtime`).
 
 ## Rebuilding vs. the running image
 
@@ -66,6 +75,44 @@ cp sparx_agency/tasks/planning/falcon_sjtu/patches/falcon_deadend_guard.patch \
 The fix script self-verifies with a **single-line** sentinel (`confined to <2 m`)
 because the guard's full log line is split across two C string literals — grep a
 whole-phrase sentinel and it will spuriously miss.
+
+## falcon_simtime.patch — let FALCON run under /use_sim_time
+
+Touches one upstream file no other fix script does:
+`exploration_manager/src/exploration_node.cpp`.
+
+**Why.** exploration_node aborts at startup (glog `CHECK(!use_sim_time)`) when
+the global `/use_sim_time` param is true. Here every data stamp in the graph is
+already Gazebo sim time (bridged depth, odometry, and the camera pose derived
+from it), and the hospital world runs below real time (~0.88x), so wall-clock
+`ros::Time::now()` stamps B-splines on a clock ~12% faster than the physics —
+the follower burns its catch-up margin closing pure clock skew. Sim time is the
+only consistent configuration; the upstream check merely predates running
+FALCON against a sub-realtime simulator.
+
+**What it does.** Replaces the CHECK with a `LOG(INFO)` recording the clock
+choice (sentinel: `sim-time permitted`). Wired in `falcon_docker` as step
+6a-sexies (`fix_falcon_simtime.sh`), and compiled into the running
+`falcon-ros-custom:v1` via `docker commit` on 2026-08-11.
+
+## falcon_visgrid_cadence.patch — stop publish cost scaling with map growth
+
+Touches one file no other fix script does:
+`voxel_mapping/src/map_server.cpp`.
+
+**Why.** `publishOccupancyGrid()` sweeps the entire voxel box every 0.5 s and
+serialises occupied, FREE and UNKNOWN clouds whenever anyone subscribes (the
+follower's brake gate does, and so does RViz). The free/unknown clouds grow
+with the explored volume — hundreds of thousands to millions of points — so
+publish and subscriber-parse cost grow linearly with mapping progress: the
+measured "the further the mission maps, the slower everything runs" failure.
+
+**What it does.** Occupied keeps its 2 Hz cadence (small, and the brake gate
+feeds on it); free/unknown publish every 10th cycle (sentinel:
+`publish_bulk`). Wired in `falcon_docker` as step 6a-septies
+(`fix_falcon_visgrid_cadence.sh`), compiled into the running image via
+`docker commit` on 2026-08-11. The follower additionally throttles its own
+free-cloud processing to one per 3 s, so unpatched images degrade gracefully.
 
 ## Not FALCON code (already reproducible, no patch needed)
 

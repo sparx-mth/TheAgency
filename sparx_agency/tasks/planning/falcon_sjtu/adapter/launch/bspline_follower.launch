@@ -77,6 +77,27 @@
   <arg name="retreat_time_s"  default="5.0" />
   <arg name="retreat_speed"   default="0.35" />
   <arg name="retreat_clear_m" default="1.3" />
+  <!-- Turn-to-look after the back-out: face the struck point and stare so the
+       mapper fuses it; what turns a strike into map evidence instead of a
+       strike, replan, strike loop. -->
+  <arg name="face_time_s"     default="6.0" />
+  <arg name="look_dwell_s"    default="1.5" />
+
+  <!-- Map brake gate: the follower accumulates FALCON's occupied/free voxel
+       streams and refuses to fly the commanded velocity into occupied space;
+       a sustained dead stop is treated like a contact (retreat + look).
+       Exists because FALCON's own runtime safety check never signals this
+       follower (measured: 45 silent pre-publish detections, 0 executing-
+       trajectory detections, 336 contacts in one 40-minute run). -->
+  <arg name="map_gate"              default="true" />
+  <arg name="gate_drone_radius_m"   default="0.25" />
+  <arg name="gate_z_lo"             default="0.4" />
+  <arg name="gate_z_hi"             default="2.0" />
+  <arg name="gate_block_retreat_s"  default="4.0" />
+  <!-- Depth visual bumper: clamp forward speed by the closest raw depth
+       return in the flight corridor. Catches thin obstacles the voxel map
+       flaps (raycast clearing erodes one-voxel silhouettes). -->
+  <arg name="depth_brake"           default="true" />
 
   <!-- Crash-recovery reflex. FALCON's in-process LKH solver corrupts the heap on
        degenerate tours and the node respawns with an EMPTY map at wherever the
@@ -127,6 +148,15 @@
     <param name="retreat_time_s"   value="$(arg retreat_time_s)" />
     <param name="retreat_speed"    value="$(arg retreat_speed)" />
     <param name="retreat_clear_m"  value="$(arg retreat_clear_m)" />
+    <param name="face_time_s"      value="$(arg face_time_s)" />
+    <param name="look_dwell_s"     value="$(arg look_dwell_s)" />
+    <param name="map_gate"             value="$(arg map_gate)" />
+    <param name="gate_drone_radius_m"  value="$(arg gate_drone_radius_m)" />
+    <param name="gate_z_lo"            value="$(arg gate_z_lo)" />
+    <param name="gate_z_hi"            value="$(arg gate_z_hi)" />
+    <param name="gate_block_retreat_s" value="$(arg gate_block_retreat_s)" />
+    <param name="depth_brake"          value="$(arg depth_brake)" />
+    <param name="depth_topic"          value="$(arg drone_ns)/front_depth/depth/image_raw" />
 
     <param name="resurvey_after_s" value="$(arg resurvey_after_s)" />
     <param name="hold_silent_s"    value="$(arg hold_silent_s)" />
