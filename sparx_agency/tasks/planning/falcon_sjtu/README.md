@@ -407,6 +407,31 @@ doorway rather than reverse out of one: a real bumper contact is still ungated,
 the map gate's own 4 s hard-block escalation still retreats, and the mission
 watchdog still ends a run that has stopped making map.
 
+### Three strikes: when holding still is the action
+
+A bumper contact retreats the aircraft, and nothing stops FALCON re-issuing the
+same route. An obstacle standing *in* a doorway — in the measured case a blood-
+pressure cart parked in a 0.93 m opening — therefore produces an unbounded
+strike-retreat-strike loop: **55 bumper reports on two objects at one hospital
+doorway**, the run ending on the confinement watchdog at 216 m³.
+
+Retreating is right the first time and the second. By the third it is evidence
+that this approach does not work, and the only actor who can do anything about
+that is FALCON. Its dead-end guard retires a viewpoint the aircraft stays within
+2 m of for 25 s without reaching — so **holding station is the action**, not a
+failure to act. It is exactly the condition the guard watches for, and it turns
+a grind into a retired viewpoint and a tour that moves on. Contacts are grouped
+by position rather than by object, because the aircraft cannot identify what it
+touched and the geometry is what repeats.
+
+**The ordering inside that rule is the whole of its correctness**, and getting
+it wrong is instructive. Holding the moment the third contact is detected parks
+the aircraft *against the thing it has just hit*: the bumper keeps reporting,
+the hold re-arms itself, and it never moves again — measured, 71 bumper reports
+and 46 give-ups in one run with the aircraft pinned. The hold is therefore armed
+on the third contact but **acts only after the retreat has backed the aircraft
+1.3 m clear**, which is also precisely where the guard wants it.
+
 ### Flying through the middle of an opening
 
 FALCON's distance cost is soft and evaluated only at control points ~0.5 m
@@ -501,10 +526,52 @@ cannot cover (it being disabled, failing to start, or its container dying).
 
 ### A planner respawn wipes the map, and every progress watchdog has to know
 
-FALCON's `exploration_node` aborts intermittently — its in-process LKH TSP solver
-corrupts the heap — and roslaunch respawns it with an **empty map** that then
-rebuilds from scratch. Coverage does not dip on that event; it falls off a
-cliff, measured 728 → 271 m³ in one acceptance run.
+FALCON's `exploration_node` aborts intermittently and roslaunch respawns it with
+an **empty map** that then rebuilds from scratch. Coverage does not dip on that
+event; it falls off a cliff, measured 728 → 271 m³ in one acceptance run.
+
+**It is not (only) the LKH solver, and this file said it was.** The measured
+stack trace, from a run that aborted at t = 481 s, is:
+
+```
+ExplorationFSM::visualize()
+  → PlanningVisualization::drawBspline(NonUniformBspline …)
+    → NonUniformBspline::evaluateDeBoorT(double const&)
+      → NonUniformBspline::evaluateDeBoor(double const&)
+        → __assert_fail   (/usr/include/eigen3/Eigen/src/Core/Block.h:120)
+```
+
+That is an Eigen block assertion inside the **RViz visualisation path**, firing
+when the B-spline is evaluated outside its own knot span. It is not a planning
+failure at all — the FSM calls `visualize()` every cycle, and drawing a
+degenerate curve kills the process. (The assert survives because the image is
+not built with `-DNDEBUG`; disabling it needs an image rebuild, which is why it
+is not fixed here.)
+
+**It cannot be tuned away from outside the image, and a plausible theory that it
+could was tested and refuted.** The theory was that a curve is evaluated outside
+its knot span when it is degenerate (near zero length), that FALCON emits those
+when it plans to a viewpoint the aircraft is effectively standing on, and that
+`min_candidate_dist` — upstream 0.5 m — was therefore the first link in the
+chain. It was raised to 1.2 m (verified live on the param server) and the abort
+recurred with a **byte-identical stack trace**. So the trigger is not curve
+degeneracy: it is an endpoint off-by-one in the visualiser's own sampling loop,
+where the last sample lands exactly on the final knot and the span index runs
+one past the control points. That is intermittent because it depends on where
+floating-point accumulation puts the last step, and it is in code this
+deployment cannot change without rebuilding `falcon-ros-custom`.
+
+`min_candidate_dist` 1.2 is kept anyway — refusing a viewpoint the aircraft is
+already standing on is right on its own terms, and it is well clear of the 0.6 m
+the dead-end guard calls "at target" — but **it is not the fix, and nothing here
+is.** The response is instead to make the *recovery* reliable, which is what the
+A\* node pool, the blacklist non-inheritance and the re-survey cap below are
+for. Treat the crash as weather.
+
+Stalls and crashes do still correlate — the run that mapped the whole hospital
+never stalled badly and never crashed, while every stalling run crashed — but on
+this evidence the arrow runs from crash to stall at least as much as the other
+way, and the LKH story this file used to tell is not the root either.
 
 Any watchdog keyed on "has the map grown since its high-water mark" then kills a
 perfectly healthy rebuild, because the mark belongs to the previous incarnation.
@@ -734,6 +801,30 @@ lattice a 0.93 m doorway is two cells, so one occupied cell closes it to the
 search. `exploration.launch` now overrides both (0.3 m, 0.05 s) after the yaml
 load. The coarse profiles are left alone: they build the tour's cost matrix over
 many pairs at once and are meant to degenerate to a straight-line estimate.
+
+**Refining the lattice without moving the node pool makes it worse, not
+better**, and doing exactly that cost a run. `allocate_num` is A\*'s pool and
+upstream pairs 100000 nodes with the 0.5 m grid:
+
+| lattice | cells over the hospital's 28 × 60 × 4 m map | pool |
+|---|---|---|
+| 0.5 m | 53,760 | 100,000 — comfortable |
+| 0.3 m | **248,889** | 100,000 — **2.5× short** |
+
+Every query then exhausted the pool and returned no-path: **2012** of them in
+one run against 58 in a healthy one. FALCON went silent, the follower's
+respawn-recovery survey fired seven times, and the aircraft spent **93% of its
+ticks turning on the spot** until the watchdog ended it for not moving.
+`astar_allocate_num` is now 500000, about 25 MB.
+
+That failure also exposed a missing bound in the follower. The recovery survey
+rebuilds the MAP; it does nothing for a planner that has the map and cannot
+ROUTE through it, and from inside the follower those two look identical — both
+are silence. `max_resurveys` (4) caps it, for the silence recovery and the
+watchdog nudge alike. Past the cap the follower holds, which is honest (it has
+nothing left to try), lets FALCON's dead-end guard see a stationary aircraft,
+and lets the watchdog reach a verdict on a mission that is genuinely stuck
+rather than on one that is busy spinning.
 
 ## Why it crawls near obstacles: ask the attribution log, do not guess
 

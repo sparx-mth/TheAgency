@@ -130,6 +130,17 @@ class BsplineFollowerNode(object):
         # empty map at wherever the aircraft now is). A fresh 360 deg scan is
         # what lets it find frontiers again instead of sitting in "No path".
         self._resurvey_after_s = float(rospy.get_param("~resurvey_after_s", 12.0))
+        # The scan rebuilds the MAP. It does nothing whatever for a planner that
+        # has the map and cannot ROUTE through it, and telling those two apart
+        # from here is impossible -- both look like silence. So the recovery is
+        # capped: measured, a run where A* was failing every query spent 93% of
+        # its ticks turning on the spot, seven consecutive recoveries deep,
+        # until the watchdog ended it for not moving. Past the cap the follower
+        # holds instead, which is honest (it has nothing left to try), lets
+        # FALCON's dead-end guard see a stationary aircraft, and lets the
+        # watchdog reach a verdict on a mission that is genuinely stuck rather
+        # than on one that is busy spinning.
+        self._max_resurveys = int(rospy.get_param("~max_resurveys", 4))
         # Below the re-survey window but above a normal replan gap: hold instead
         # of carrying the last curve on into an obstacle while FALCON is down (its
         # in-process LKH solver corrupts the heap and roslaunch is mid-respawn).
@@ -368,6 +379,12 @@ class BsplineFollowerNode(object):
         self._give_up_radius_m = float(rospy.get_param("~give_up_radius_m", 1.5))
         self._give_up_window_s = float(rospy.get_param("~give_up_window_s", 120.0))
         self._give_up_hold_s = float(rospy.get_param("~give_up_hold_s", 30.0))
+        # Capped below the watchdog's no-movement patience (180 s), because a
+        # hold is not a plan: if the planner has not moved on by then, the
+        # mission is stuck and the watchdog is entitled to say so.
+        self._give_up_hold_max_s = float(
+            rospy.get_param("~give_up_hold_max_s", 90.0))
+        self._give_ups = 0
         self._give_up_until = None          # type: object
 
         # ── depth visual bumper ──────────────────────────────────────────
@@ -679,6 +696,15 @@ class BsplineFollowerNode(object):
         """
         if self._finished or self._retreat_until is not None:
             return
+        if self._resurveys >= self._max_resurveys:
+            # Same cap as the silence recovery, and for the same reason: a scan
+            # that has not helped four times will not help a fifth, and turning
+            # on the spot is indistinguishable from progress to nothing except
+            # the coverage number the watchdog is already watching.
+            rospy.logwarn_throttle(
+                30.0, "[follower] watchdog nudge ignored: %d surveys have not "
+                "restored progress", self._resurveys)
+            return
         self._begin_resurvey(rospy.Time.now(), "watchdog nudge (%s)" % msg.data)
 
     def _on_abort(self, msg):
@@ -804,7 +830,8 @@ class BsplineFollowerNode(object):
 
         silent_s = self._falcon_silent_s(now)
         if (self._survey_remaining_rad <= 0.0 and self._retreat_until is None
-                and silent_s > self._resurvey_after_s):
+                and silent_s > self._resurvey_after_s
+                and self._resurveys < self._max_resurveys):
             self._begin_resurvey(now, "silent %.0fs (respawn?)" % silent_s)
 
         if self._survey_remaining_rad > 0.0:
@@ -923,23 +950,46 @@ class BsplineFollowerNode(object):
                 # Third strike in the same place: stop attempting it. See the
                 # note by _contact_spots -- holding is what lets FALCON's
                 # dead-end guard retire the viewpoint and re-route the tour.
-                self._give_up_until = now + rospy.Duration(self._give_up_hold_s)
+                #
+                # The hold is armed here but does NOT act here, and the ordering
+                # is the whole correctness of it: the aircraft is IN CONTACT at
+                # this instant, so holding station now parks it against whatever
+                # it just hit, the bumper keeps reporting, and the hold re-arms
+                # itself forever. Measured, when this returned early: 71 bumper
+                # reports and 46 give-ups in one run, the aircraft pinned. Fall
+                # through to the retreat, which backs it 1.3 m clear first; the
+                # hold below then applies from the next tick on which nothing
+                # fresh has been struck -- and 1.3 m clear of an unreached
+                # viewpoint is exactly where FALCON's guard wants it.
+                # The hold LENGTHENS each time the same place defeats it. A
+                # fixed 30 s hold ends, FALCON routes the aircraft straight
+                # back, and it touches the same thing again: measured, 76
+                # bumper reports on one hanging-scrubs prop across seven
+                # give-ups, coverage frozen. Each repeat is evidence the
+                # planner needs longer to conclude the viewpoint is
+                # unreachable, so give it longer -- bounded, because a hold is
+                # not a plan and the mission watchdog is entitled to a verdict.
+                self._give_ups += 1
+                hold_s = min(self._give_up_hold_s * self._give_ups,
+                             self._give_up_hold_max_s)
+                self._give_up_until = now + rospy.Duration(hold_s)
                 rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
-                              "%.1f m; this approach does not work -- holding "
-                              "%.0fs so the planner retires the viewpoint",
+                              "%.1f m; this approach does not work -- backing "
+                              "out and holding %.0fs (give-up #%d) so the "
+                              "planner retires the viewpoint",
                               self._give_up_repeats, float(position[0]),
                               float(position[1]), self._give_up_radius_m,
-                              self._give_up_hold_s)
-            if self._give_up_until is not None and now < self._give_up_until:
-                self._note_limiter("gave_up")
-                self._hold_station(position, yaw)
-                return
+                              hold_s, self._give_ups)
             if contact or wedged:
                 # Look only if the MAP does not already have whatever stopped
                 # it. The turn and dwell are 7.5 s of a 12 s manoeuvre and they
                 # buy nothing against an obstacle the mapper has already fused.
                 self._begin_retreat(position, command,
                                     look=not self._map_knows_ahead(position, command))
+                return
+            if self._give_up_until is not None and now < self._give_up_until:
+                self._note_limiter("gave_up")
+                self._hold_station(position, yaw)
                 return
 
         # Two brakes between the servo and the wire, sharing one escalation

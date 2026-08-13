@@ -138,21 +138,31 @@
        from ~64 five-metre cells to ~16 ten-metre ones — which shrinks the TSP
        and the crash rate while keeping the whole hospital in scope. The tour is
        slightly less optimal; that is the trade for surviving. -->
-  <!-- 14.0, raised from 10.0, for the reason the paragraph above gives: the
-       crash rate scales with the tour, and the tour scales with the cell count.
-       On the hospital's 24 x 55 m box that is 2 x 4 = 8 cells instead of
-       3 x 6 = 18, less than half the cities.
-
-       This matters more than it looks because of what a crash COSTS here. The
-       respawned node comes back with an empty map, so every crash does not
-       merely interrupt the mission, it resets its coverage to zero: measured,
-       one hospital run losing 728 m3 and another 577 m3, each then needing ten
-       minutes to re-earn ground it had already mapped. Two crashes in one run
-       is enough to put a complete map out of reach of any sane time cap. The
-       tour is less optimal at 14 m; that is a far smaller cost than starting
-       over. -->
-  <arg name="hgrid_cell_size_max" default="14.0"/>
+  <!-- 10.0, and it stays there. It was briefly raised to 14.0 on the theory
+       that the node's aborts were LKH crashes scaling with the tour size. That
+       theory is wrong: the measured stack trace is an Eigen assertion in the
+       RViz drawBspline path, nothing to do with the TSP (see the crash section
+       in the README), and 10.0 is what the one run that mapped the whole
+       hospital used. Coarser cells make the coverage tour worse for no gain. -->
+  <arg name="hgrid_cell_size_max" default="10.0"/>
   <param name="/hgrid/cell_size_max" value="$(arg hgrid_cell_size_max)"/>
+
+  <!-- ── Do not choose a viewpoint the aircraft is already standing on ────
+       getTopViewpointsInfo takes the first viewpoint at least this far from the
+       current pose. At 0.5 m FALCON regularly picks one essentially on top of
+       the aircraft, and the trajectory it then fits is a near-zero-length
+       curve. That is the direct precursor of the crash that dominates this
+       deployment: evaluating such a curve outside its own knot span trips an
+       Eigen assertion inside PlanningVisualization::drawBspline and aborts the
+       node, which wipes the map (see "A planner respawn wipes the map" in the
+       README for the measured stack trace and what it costs).
+
+       1.2 m is above the 0.6 m the dead-end guard already calls "at target",
+       so it does not shadow a viewpoint the aircraft could usefully fly to,
+       and it is below candidate_rmin 1.0 plus the 0.5 m grid the viewpoints
+       are sampled on, so it does not empty the candidate set. -->
+  <arg name="frontier_min_candidate_dist" default="1.2"/>
+  <param name="/frontier_finder/min_candidate_dist" value="$(arg frontier_min_candidate_dist)"/>
 
   <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)"/>
   <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)"/>
@@ -207,10 +217,32 @@
        it can see through a door the planner thinks is a wall. At 0.3 m it is
        three cells. The cost is ~4.6x the cells, which the time budget above
        now covers. -->
-  <arg name="astar_resolution"      default="0.3"/>
+  <!-- allocate_num is the A* NODE POOL, and it has to move with the
+       resolution or refining the lattice makes the search worse, not better.
+       Upstream pairs 100000 nodes with a 0.5 m grid. At 0.3 m the same volume
+       needs (0.5/0.3)^3 = 4.6x as many, the pool runs out mid-search, and every
+       query returns no-path: measured 2012 "No path to next viewpoint" lines
+       in one run against 58 in a healthy one, after which FALCON went silent,
+       the follower's respawn-recovery survey fired seven times, and the
+       aircraft spent 93% of its ticks turning on the spot until the watchdog
+       ended it for not moving. 500000 nodes is about 25 MB. -->
+  <!-- RESOLUTION IS BACK AT UPSTREAM'S 0.5, and the round trip is the lesson.
+       0.3 was chosen to give a 0.93 m doorway three cells instead of two, on
+       the theory that one occupied cell was closing doors to the search. That
+       theory was never confirmed and the change did measurable harm: it made
+       every query 4.6x more expensive, and after a planner respawn, when the
+       map is empty and A* must expand through unknown space with nothing to
+       guide it, searches stopped completing at all. 976 no-path lines in one
+       run, coverage frozen, against ZERO in the run that mapped the whole
+       building on upstream's 0.5 m.
+       The time budget stays raised, because one millisecond is indefensible on
+       any lattice, and the pool stays large because headroom is free. -->
+  <arg name="astar_resolution"      default="0.5"/>
   <arg name="astar_max_search_time" default="0.05"/>
+  <arg name="astar_allocate_num"    default="500000"/>
   <param name="/astar/profile/default/resolution"      value="$(arg astar_resolution)"/>
   <param name="/astar/profile/default/max_search_time" value="$(arg astar_max_search_time)"/>
+  <param name="/astar/allocate_num"                    value="$(arg astar_allocate_num)"/>
 
   <!-- ── How far FALCON may plan from a pose the aircraft is not at ───────
        falcon_replan_from_pose.patch corrects the replan origin to odometry
@@ -309,6 +341,12 @@
   <arg name="watchdog_confine_cap_s"     default="240.0"/>
   <arg name="watchdog_barren_cap_s"      default="300.0"/>
   <arg name="watchdog_grace_s"           default="90.0"/>
+  <!-- 180, from the node's own 120. The follower now deliberately HOLDS for up
+       to 90 s when a place has defeated it three times, so the aircraft can be
+       legitimately stationary far longer than it used to be and the watchdog
+       must not read that as pinned. It still ends a run that stays put through
+       two of the longest holds the follower is able to take. -->
+  <arg name="watchdog_no_move_cap_s"     default="180.0"/>
   <node if="$(arg watchdog)" pkg="falcon_adapter" type="mission_watchdog_node.py"
         name="mission_watchdog" output="screen">
     <param name="odom_topic"         value="$(arg drone_ns)/odom"/>
@@ -318,6 +356,7 @@
     <param name="growth_m3_per_min"  value="$(arg watchdog_growth_m3_per_min)"/>
     <param name="confine_cap_s"      value="$(arg watchdog_confine_cap_s)"/>
     <param name="barren_cap_s"       value="$(arg watchdog_barren_cap_s)"/>
+    <param name="no_move_cap_s"      value="$(arg watchdog_no_move_cap_s)"/>
   </node>
 
   <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
