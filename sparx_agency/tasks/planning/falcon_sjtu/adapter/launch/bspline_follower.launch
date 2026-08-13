@@ -289,6 +289,67 @@
   <arg name="stall_window_s"   default="15.0" />
   <arg name="stall_move_m"     default="1.5" />
 
+  <!-- ── unstick: the OTHER silence, and it needs the opposite answer ──────
+       A re-survey answers a planner that lost its map. It cannot answer a
+       planner that has the map and rejects every trajectory, which is what
+       happens when the aircraft is parked inside an inflated obstacle:
+       checkTrajCollision() tests each candidate from the aircraft's own
+       position, so every one of them collides at its first sample and FALCON
+       re-plans and re-rejects without ever publishing. Turning on the spot does
+       not move the start point out of that cell, so the re-survey spends its
+       four attempts and the follower then holds forever.
+
+       Measured, hospital, 2026-08-13: 1781 of 1808 publish attempts ended
+       "collision also detected on the initial trajectory"; the aircraft held
+       (-8.19, -1.09, 1.50) to the centimetre for 180 s until the watchdog cut
+       the run at 360.7 m3. z = 1.50 was alt_max, and the building's furniture
+       tops out at 1.74-1.83 m, which at obstacles_inflation 0.25 seals the map
+       from 1.49 m up: the aircraft had climbed into an obstacle.
+
+       So when the silence is long AND the aircraft has not moved, move it -
+       sideways on a bearing that rotates each attempt, and back toward the
+       middle of the altitude band, where the fewest inflated shells overlap.
+       unstick_after_s sits above resurvey_after_s so the cheap answer is always
+       tried first, and the manoeuvre itself moves the aircraft far enough to
+       reset the mission watchdog's own no-movement timer. -->
+  <arg name="unstick_after_s"     default="25.0" />
+  <arg name="unstick_time_s"      default="8.0" />
+  <arg name="unstick_speed"       default="0.35" />
+  <arg name="unstick_climb_speed" default="0.25" />
+  <arg name="unstick_move_m"      default="0.35" />
+  <arg name="max_unsticks"        default="20" />
+
+  <!-- ── the jam: following, unthrottled, bumper quiet, and going nowhere ──
+       Neither a contact nor a silence, so neither reflex caught it. The
+       aircraft is pressed against geometry inside the depth camera's 0.95 m
+       near clip, and the wedge reflex that would back it out is suppressed on
+       purpose inside a tight passage - retreating out of a doorway the aircraft
+       is halfway through is how it never gets through one. That suppression is
+       right; this is the net under it, because a passage the aircraft cannot
+       move in is not a passage it is passing through.
+
+       The test needs no speed threshold: integrate the speed actually put on
+       the wire over jam_window_s (demanded travel) and compare with net
+       displacement (achieved travel). A creep that achieves its creep passes; a
+       cruise that achieves nothing does not. Measured, hospital, 2026-08-14:
+       commanded speed p50 0.24 m/s with 67% of ticks saturated, and the
+       aircraft at (5.12, 16.21) to the centimetre for 181 s, zero bumper
+       contacts, 654 plans delivered. -->
+  <arg name="jam_window_s" default="10.0" />
+  <arg name="jam_demand_m" default="0.6" />
+  <arg name="jam_move_m"   default="0.15" />
+
+  <!-- How much of the box ceiling the vertical escape may not use. 0, and the
+       burden of proof is on any margin. A 0.20 m cap was tried on the theory
+       that obstacle inflation seals the top of the band; obstacles_inflation is
+       read by no node in FALCON (see exploration.launch), and binning coverage
+       growth by altitude across every hospital run says the top of the band is
+       where this aircraft maps FASTEST: 17.9 and 18.1 m3/min at z 1.4 and 1.5,
+       against 7.1 at 1.2, because from up there it sees over the furniture. The
+       cap only removed an escape, and the follower's own log said so:
+       "climbing would not clear it either at 1.25 m". -->
+  <arg name="escape_climb_ceiling_margin_m" default="0.0" />
+
   <!-- ── camera model FALCON maps with (corrected; see the header) ── -->
   <param name="/uav_model/sensing_parameters/camera_intrinsics/fx" value="390.6427" />
   <param name="/uav_model/sensing_parameters/camera_intrinsics/fy" value="390.6427" />
@@ -371,5 +432,17 @@
     <param name="hold_silent_s"    value="$(arg hold_silent_s)" />
     <param name="stall_window_s"   value="$(arg stall_window_s)" />
     <param name="stall_move_m"     value="$(arg stall_move_m)" />
+
+    <param name="unstick_after_s"     value="$(arg unstick_after_s)" />
+    <param name="unstick_time_s"      value="$(arg unstick_time_s)" />
+    <param name="unstick_speed"       value="$(arg unstick_speed)" />
+    <param name="unstick_climb_speed" value="$(arg unstick_climb_speed)" />
+    <param name="unstick_move_m"      value="$(arg unstick_move_m)" />
+    <param name="max_unsticks"        value="$(arg max_unsticks)" />
+    <param name="jam_window_s"        value="$(arg jam_window_s)" />
+    <param name="jam_demand_m"        value="$(arg jam_demand_m)" />
+    <param name="jam_move_m"          value="$(arg jam_move_m)" />
+    <param name="escape_climb_ceiling_margin_m"
+           value="$(arg escape_climb_ceiling_margin_m)" />
   </node>
 </launch>

@@ -542,36 +542,62 @@ ExplorationFSM::visualize()
 ```
 
 That is an Eigen block assertion inside the **RViz visualisation path**, firing
-when the B-spline is evaluated outside its own knot span. It is not a planning
-failure at all — the FSM calls `visualize()` every cycle, and drawing a
-degenerate curve kills the process. (The assert survives because the image is
-not built with `-DNDEBUG`; disabling it needs an image rebuild, which is why it
-is not fixed here.)
+when the B-spline's span index runs past its own control points. It is not a
+planning failure at all — the FSM calls `visualize()` every cycle, and drawing
+one malformed curve kills the process, and with it the map, because on this
+stack `exploration_node` owns the voxel grid too.
 
-**It cannot be tuned away from outside the image, and a plausible theory that it
-could was tested and refuted.** The theory was that a curve is evaluated outside
-its knot span when it is degenerate (near zero length), that FALCON emits those
-when it plans to a viewpoint the aircraft is effectively standing on, and that
-`min_candidate_dist` — upstream 0.5 m — was therefore the first link in the
-chain. It was raised to 1.2 m (verified live on the param server) and the abort
-recurred with a **byte-identical stack trace**. So the trigger is not curve
-degeneracy: it is an endpoint off-by-one in the visualiser's own sampling loop,
-where the last sample lands exactly on the final knot and the span index runs
-one past the control points. That is intermittent because it depends on where
-floating-point accumulation puts the last step, and it is in code this
-deployment cannot change without rebuilding `falcon-ros-custom`.
+**The cause is FALCON re-timing our trajectories onto a speed we do not fly, and
+it is fixed in `falcon_slow_traj_rescale.patch`.** The line above the assert in
+the log is the tell, and it was there all along:
 
-`min_candidate_dist` 1.2 is kept anyway — refusing a viewpoint the aircraft is
-already standing on is right on its own terms, and it is well clear of the 0.6 m
-the dead-end guard calls "at target" — but **it is not the fix, and nothing here
-is.** The response is instead to make the *recovery* reliable, which is what the
-A\* node pool, the blacklist non-inheritance and the re-survey cap below are
-for. Treat the crash as weather.
+```
+[FSM] Slow trajectory detected, duration: 25.16, length: 3.89
+[FSM] Avg position velocity: 0.15, avg yaw velocity: 0.00, lengthen ratio: 0.08
+```
 
-Stalls and crashes do still correlate — the run that mapped the whole hospital
-never stalled badly and never crashed, while every stalling run crashed — but on
-this evidence the arrow runs from crash to stall at least as much as the other
-way, and the LKH story this file used to tell is not the root either.
+After each plan the FSM rescales any trajectory averaging under 0.5 m/s so that
+it would average a hardcoded **2.0 m/s**, yaw against 1.57 rad/s, via
+`ratio = 1.0 / min(1.57/avg_yaw_vel, 2.0/avg_pos_vel)`. Two things follow. On an
+aircraft configured to cruise at 0.15 m/s that ratio is a **compression of every
+plan** — 324 rescales in one 16-minute mission, ratios clustered at 0.08–0.25,
+each one handing the follower a reference four to thirteen times faster than the
+limit the optimiser had just been given. And a trajectory that does not turn has
+`avg_yaw_vel == 0`, so `1.57 / 0` is an infinity that `std::min` does not
+propagate the way this code assumes; the non-finite ratio re-times the knot
+vector into the shape that trips the assert. Both defects live in the same four
+lines.
+
+The patch takes the targets from parameters, ships them set to the configured
+cruise (so a trajectory already flying at the requested speed is left alone),
+permits the rescale to stretch time but never to compress it, and refuses to
+divide by a stationary axis. It also bounds the span search in
+`NonUniformBspline::evaluateDeBoor` by both the knot count and the control-point
+count, so that no future malformed spline — whatever produces it — can abort the
+node again. See `patches/README.md`.
+
+**Two earlier diagnoses in this file were wrong; both are recorded because the
+evidence that refuted them is reusable.** The first blamed LKH. The second, after
+the stack trace ruled LKH out, blamed an endpoint off-by-one in the visualiser's
+sampling loop and declared the crash untunable from outside the image — wrong on
+both counts: the sampling loop is bounded, and the image has had a patch
+mechanism (`patches/`) the whole time. A third theory, that the curves were
+degenerate because FALCON plans to viewpoints the aircraft is already standing
+on, was tested by raising `min_candidate_dist` from 0.5 m to 1.2 m and refuted
+by a **byte-identical** recurrence. That setting is kept — refusing a viewpoint
+the aircraft is standing on is right on its own terms, and 1.2 m is well clear of
+the 0.6 m the dead-end guard calls "at target" — but it was never the fix.
+
+The recovery hardening those theories motivated is kept as well, since a crash
+from any other cause still wipes the map: the A\* node pool, the blacklist
+non-inheritance and the re-survey cap below. What changes is that the crash is no
+longer weather to be endured.
+
+Stalls and crashes correlate strongly — the run that mapped the whole hospital
+never stalled badly and never crashed, while every stalling run crashed — and
+the mechanism is now legible in both directions: the rescale that eventually
+aborts the node is also, every time it fires without aborting, a reference the
+follower cannot track.
 
 Any watchdog keyed on "has the map grown since its high-water mark" then kills a
 perfectly healthy rebuild, because the mark belongs to the previous incarnation.
@@ -1028,12 +1054,77 @@ Two things resolve it, in order:
    retreat was one axis of a three-axis escape and the only one being used.
    `escape_climb_s` (4 s), `escape_climb_speed` (0.4 m/s) and
    `escape_climb_max_z`; `escape_climb_s:=0` restores horizontal-only
-   behaviour. The climb ceiling is **0, meaning "the flight box ceiling"**,
-   and it must stay inside the box: a planner cannot plan from a pose outside
-   its own box, so an escape that climbs out strands the mission it was
-   rescuing. It used to be a hardcoded 1.65 m, chosen when the warehouse box
-   topped out at 1.8, which became simultaneously unsafe and wasteful the
-   moment either world's box moved — which both of them now have.
+   behaviour. The climb ceiling is **0, meaning "the flight box ceiling, less
+   `escape_climb_ceiling_margin_m`"**, and it must stay inside the box: a
+   planner cannot plan from a pose outside its own box, so an escape that
+   climbs out strands the mission it was rescuing. It used to be a hardcoded
+   1.65 m, chosen when the warehouse box topped out at 1.8, which became
+   simultaneously unsafe and wasteful the moment either world's box moved —
+   which both of them now have.
+
+   The 0.20 m margin is not decoration, and the reason is the third axis of the
+   same problem. See below.
+
+### The top of the flight box is the worst altitude in the building
+
+FALCON checks a candidate trajectory against a map where every obstacle has been
+grown by `obstacles_inflation` (0.25 m), so an item of height *h* seals the map
+up to *h* + 0.25. The hospital's tall furniture tops out at 1.74–1.83 m — storage
+racks, vending machines, the ClutteringC crate — which seals it **from 1.49 m
+up**. `box_max_z` is 1.6, and the follower's own altitude guard puts `alt_max` at
+1.50.
+
+So the vertical escape, whose whole purpose is to climb until nothing blocks the
+aircraft any more, climbed to exactly the one altitude at which *everything*
+does. And it is worse than a bad altitude, because of what the collision check
+is: `checkTrajCollision()` evaluates a candidate **from the aircraft's own
+position**. An aircraft inside an inflated shell makes every candidate collide at
+its first sample. FALCON replans, rejects, and never publishes — silently, since
+the rejection happens in `PUB_TRAJ` after the plan has already succeeded.
+
+Measured on the run of 2026-08-13 that this fixed: **1781 of 1808** publish
+attempts ended `[FSM] Replan: collision also detected on the initial
+trajectory`, and the aircraft held `(-8.19, -1.09, 1.50)` **to the centimetre for
+180 s** until the mission watchdog cut the run at 360.7 m³. The same signature
+appears three times in that one run, every time at z = 1.49–1.50; twice it
+escaped by luck.
+
+Two changes, and they are deliberately different in kind:
+
+- **`escape_climb_ceiling_margin_m` (0.20)** keeps the climb out of the top of
+  the band, so the recovery stops steering into the trap. Prevention.
+- **The unstick manoeuvre** gets the aircraft out when it is in one anyway.
+
+### The other silence, and why a re-survey cannot answer it
+
+From inside the follower, "FALCON has lost its map" and "FALCON has the map and
+rejects every trajectory" are the same observation: no message on
+`/planning/bspline`. They need opposite responses.
+
+The re-survey answers the first — a respawned node needs to be *shown* the room.
+It cannot answer the second, and this is the whole point: **turning on the spot
+does not move the start point out of the occupied cell**. So the four re-surveys
+are spent on a problem they cannot touch, and the follower then holds station
+forever. That is precisely the 180 s freeze above.
+
+The discriminator is movement. After a re-survey a healthy aircraft gets a plan
+and flies, so silence this long *combined with* the aircraft not having moved is
+the second case. The response (`unstick_after_s` 25 s, `unstick_move_m` 0.35 m
+over the 15 s stall window) is to **move**:
+
+- sideways on a bearing that **rotates each attempt** — back, left, right,
+  forward off the nose — so a direction that is itself walled is never retried
+  identically;
+- and vertically back toward `alt_mid`, the middle of the band, which is where
+  the fewest inflated shells overlap: floor clutter inflates upward, ceilings and
+  tall furniture inflate downward, and the middle is what is left.
+
+`unstick_after_s` sits above `resurvey_after_s` so the cheap answer is always
+tried first, and the manoeuvre moves the aircraft far enough (0.20 m/s for 6 s)
+to reset the mission watchdog's own no-movement timer — a deliberate escape must
+not read as a pinned airframe. `max_unsticks` (8) bounds it, because an aircraft
+that has tried four bearings twice and still cannot get a plan is a run worth
+ending rather than continuing.
 
    How much this buys depends entirely on `gate_body_halfheight_m` being
    right, because that is what decides which layers "the airframe can strike".
@@ -1069,6 +1160,40 @@ the aisles, so early mapping crawled and retreats went up. The flight box in
 region; the frontier clearances are not.
 
 ## Status
+
+**Both worlds map to completion on one configuration.** `rig/both_worlds.sh`,
+2026-08-14, one invocation, no per-world tuning of any kind:
+
+| leg | verdict | coverage | flown | wall clock | contacts | respawns |
+|---|---|---|---|---|---|---|
+| hospital | FINISHED | **709.6 m³** (bar 600) | 458.5 m | 1995 s | 24 on 2 objects | 0 |
+| warehouse | FINISHED | **201.28 m³** (bar 170) | 36.3 m | 153 s | 6 on 1 object | 0 |
+
+Both legs reached FINISH on FALCON's own reckoning — the frontier set emptied,
+rather than a watchdog or a time cap ending them. The hospital run covered
+x[-12.2, 11.1] y[-25.7, 20.0], which is the whole building, and the warehouse
+figure is 98.6% of its 204.1 m³ of explorable volume.
+
+Every contact in both legs was on the same model, `aws_robomaker_warehouse_
+ClutteringC_01`, on a first approach to geometry inside the 0.95 m depth near
+clip — the known limit described under the depth brake below, not a tracking
+failure. **Zero planner respawns and zero wedges in either world**, against a
+baseline where a single hospital run took 15 respawns.
+
+What it took is recorded in the sections below and in `patches/README.md`; the
+short version is that four defects had to be fixed together, and each was found
+by measurement after a theory about it turned out to be wrong:
+
+1. FALCON re-timed every plan onto a hardcoded 2.0 m/s, compressing this
+   aircraft's trajectories 4-13x and eventually aborting the node from inside
+   its own visualiser, which erased the map (`falcon_slow_traj_rescale.patch`).
+2. A jam with no bumper contact, invisible to both the contact reflex and the
+   silence reflex, caught now by comparing demanded travel with achieved travel.
+3. A viewpoint blacklist with no expiry, which retired the corridor to the south
+   wing at t = 53 s of one run and let FALCON declare success having mapped half
+   the building (`falcon_blocked_region_ttl.patch`).
+4. This follower's own give-up hold, which escalated to 90 s and parked the
+   aircraft in the exact spot that had defeated it for a continuous 300 s.
 
 Verified: the Gazebo world, drone, all sensors and the actuation path come up
 and fly; the airframe's velocity response has been measured (below); the control

@@ -1,0 +1,144 @@
+--- a/falcon_planner/exploration_manager/src/exploration_fsm.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_fsm.cpp
+@@ -6,6 +6,9 @@
+ #include "tic_toc.h"
+ #include "traj_utils/planning_visualization.h"
+ 
++#include <cmath>
++#include <limits>
++
+ using Eigen::Vector4d;
+ 
+ namespace fast_planner {
+@@ -453,22 +456,74 @@
+     double avg_yaw_vel = yaw_traj_length / yaw_traj_duration;
+     // ROS_WARN_COND(avg_vel < 0.1, "[FSM] Average velocity too low: %.2lf", avg_vel);
+ 
+-    // static bool traj_lengthened = false;
+-    // if (avg_pos_vel < 0.5 && avg_yaw_vel < 0.5 && !traj_lengthened) {
+-    if (avg_pos_vel < 0.5 && avg_yaw_vel < 0.5) {
++    // SPARX: re-time a sluggish trajectory onto the speed this aircraft is
++    // actually configured to fly, not onto a hardcoded 2.0 m/s.
++    //
++    // Upstream rescales any trajectory averaging under 0.5 m/s so that it would
++    // average 2.0 m/s, and does the same for yaw against 1.57 rad/s. On an
++    // aircraft whose planner cruise is 0.15 m/s that ratio is not a correction,
++    // it is a 4x-13x compression of every plan: measured 324 rescales in one
++    // 16-minute mission, ratios clustered at 0.08-0.25. The reference then runs
++    // away from an airframe that is not permitted to chase it, which is the
++    // tracking gap the replan-from-pose fallback keeps having to repair.
++    //
++    // Two further defects sit in the same four lines. A trajectory that does not
++    // turn gives avg_yaw_vel == 0, so 1.57 / 0 is an infinity; a trajectory of
++    // zero duration makes both averages NaN. std::min propagates neither the way
++    // this code assumes, and the resulting non-finite ratio re-times the knot
++    // vector into a shape that later aborts the process from inside
++    // visualize() -> drawBspline -> evaluateDeBoor, taking the voxel map with it.
++    //
++    // So: take the targets from parameters (set them to the configured cruise and
++    // the mission is left alone, ratio 1.0, because it is already flying at the
++    // speed it was asked for), require finite positive averages before dividing,
++    // and clamp the ratio to a band no single rescale may exceed.
++    static double slow_target_vel = -1.0;
++    static double slow_target_yaw = -1.0;
++    static double slow_trigger_vel = -1.0;
++    static double slow_ratio_min = -1.0;
++    static double slow_ratio_max = -1.0;
++    if (slow_target_vel < 0.0) {
++      ros::param::param("/fsm/slow_traj_target_vel", slow_target_vel, 2.0);
++      ros::param::param("/fsm/slow_traj_target_yaw", slow_target_yaw, 1.57);
++      ros::param::param("/fsm/slow_traj_trigger_vel", slow_trigger_vel, 0.5);
++      ros::param::param("/fsm/slow_traj_ratio_min", slow_ratio_min, 0.25);
++      ros::param::param("/fsm/slow_traj_ratio_max", slow_ratio_max, 4.0);
++    }
++
++    bool averages_usable = pos_traj_duration > 1e-6 && yaw_traj_duration > 1e-6 &&
++                           std::isfinite(avg_pos_vel) && std::isfinite(avg_yaw_vel);
++
++    if (averages_usable && avg_pos_vel < slow_trigger_vel && avg_yaw_vel < slow_trigger_vel) {
+       ROS_WARN("[FSM] Slow trajectory detected, duration: %.2lf, length: %.2lf", pos_traj_duration,
+                pos_traj_length);
+-      // traj_lengthened = true;
+-      double yaw_ratio = 1.57 / avg_yaw_vel;
+-      double pos_ratio = 2.0 / avg_pos_vel;
+-      double ratio = 1.0 / std::min(yaw_ratio, pos_ratio);
+-      planner_manager_->local_data_.position_traj_.lengthenTime(ratio);
+-      planner_manager_->local_data_.yaw_traj_.lengthenTime(ratio);
+-      ROS_WARN("[FSM] Avg position velocity: %.2lf, avg yaw velocity: %.2lf, lengthen ratio: %.2lf",
+-               avg_pos_vel, avg_yaw_vel, ratio);
+ 
+-      double init_traj_duration = planner_manager_->local_data_.init_traj_bspline_.getTimeSum();
+-      ROS_WARN("[FSM] Initial traj duration: %.2lf", init_traj_duration);
++      // An axis that is not moving cannot ask for a rescale; leave it to the other.
++      double yaw_ratio = avg_yaw_vel > 1e-3 ? slow_target_yaw / avg_yaw_vel
++                                            : std::numeric_limits<double>::infinity();
++      double pos_ratio = avg_pos_vel > 1e-3 ? slow_target_vel / avg_pos_vel
++                                            : std::numeric_limits<double>::infinity();
++      double demand = std::min(yaw_ratio, pos_ratio);
++      double ratio = 1.0 / demand;
++
++      if (!std::isfinite(ratio) || ratio <= 0.0) {
++        ROS_WARN("[FSM] Slow trajectory rescale skipped: neither axis is moving "
++                 "(pos %.3lf m/s, yaw %.3lf rad/s)",
++                 avg_pos_vel, avg_yaw_vel);
++      } else {
++        double clamped = std::max(slow_ratio_min, std::min(slow_ratio_max, ratio));
++        planner_manager_->local_data_.position_traj_.lengthenTime(clamped);
++        planner_manager_->local_data_.yaw_traj_.lengthenTime(clamped);
++        ROS_WARN(
++            "[FSM] Avg position velocity: %.2lf, avg yaw velocity: %.2lf, lengthen ratio: %.2lf",
++            avg_pos_vel, avg_yaw_vel, clamped);
++        ROS_WARN_COND(clamped != ratio,
++                      "[FSM] Rescale ratio %.3lf clamped to %.3lf by /fsm/slow_traj_ratio_*", ratio,
++                      clamped);
++
++        double init_traj_duration = planner_manager_->local_data_.init_traj_bspline_.getTimeSum();
++        ROS_WARN("[FSM] Initial traj duration: %.2lf", init_traj_duration);
++      }
+     }
+ 
+     trajectory::Bspline bspline;
+--- a/falcon_planner/trajectory/src/bspline/non_uniform_bspline.cpp
++++ b/falcon_planner/trajectory/src/bspline/non_uniform_bspline.cpp
+@@ -1,6 +1,8 @@
+ #include "bspline/non_uniform_bspline.h"
+ #include <ros/ros.h>
+ 
++#include <cmath>
++
+ namespace fast_planner {
+ NonUniformBspline::NonUniformBspline(const Eigen::MatrixXd &points, const int &order,
+                                      const double &interval) {
+@@ -41,11 +43,31 @@
+ Eigen::MatrixXd NonUniformBspline::getControlPoint() { return control_points_; }
+ 
+ Eigen::VectorXd NonUniformBspline::evaluateDeBoor(const double &u) {
++  // SPARX: never abort the process on a malformed spline.
++  //
++  // The span search below walks the knot vector with no upper bound and then
++  // indexes control_points_ with the result. It is safe only while the knots are
++  // finite and non-decreasing and there are at least p_+1 control points. When a
++  // re-timing produces anything else, k walks past the end of u_, reads whatever
++  // follows it, and control_points_.row() fires an Eigen assertion that kills
++  // exploration_node - which on this stack also owns the voxel map, so a
++  // visualization call ends the mission and erases everything mapped so far.
++  // A clamped evaluation of a degenerate curve is wrong in a way we can see and
++  // recover from; abort() is not.
++  const int rows = static_cast<int>(control_points_.rows());
++  if (rows <= 0)
++    return Eigen::VectorXd::Zero(3);
++  if (rows <= p_)
++    return control_points_.row(rows - 1);
++
+   double ub = min(max(u_(p_), u), u_(m_ - p_));
++  if (!std::isfinite(ub))
++    ub = u_(p_);
+ 
+   // Determine which [uk,uk+1] does u lay in
++  const int k_max = min(static_cast<int>(u_.rows()) - 2, rows - 1);
+   int k = p_;
+-  while (u_(k + 1) < ub)
++  while (k < k_max && u_(k + 1) < ub)
+     ++k;
+ 
+   /* deBoor's algorithm */

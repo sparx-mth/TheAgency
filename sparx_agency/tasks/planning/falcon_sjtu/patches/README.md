@@ -134,6 +134,142 @@ untouched.
 own, 15 retreats and **zero bumper contacts**. The same stack before this patch
 plateaued at 99 m³ and milled in one spot.
 
+## falcon_slow_traj_rescale.patch — re-time onto our speed, and never abort
+
+Touches two upstream files (sentinels: `re-time a sluggish trajectory` in the
+first, `never abort the process on a malformed spline` in the second):
+
+- `exploration_manager/src/exploration_fsm.cpp`
+- `trajectory/src/bspline/non_uniform_bspline.cpp`
+
+**Why.** After every plan the FSM measures the trajectory's average speed, and if
+it is under 0.5 m/s it rewrites the knot vector so the same curve would be flown
+at **2.0 m/s** (and yaw at 1.57 rad/s):
+
+```cpp
+double yaw_ratio = 1.57 / avg_yaw_vel;
+double pos_ratio = 2.0 / avg_pos_vel;
+double ratio = 1.0 / std::min(yaw_ratio, pos_ratio);
+```
+
+Upstream flies fast, so that is a correction. This aircraft is configured to
+cruise at 0.15 m/s, so it is a compression — measured **324 rescales in one
+16-minute hospital mission**, ratios clustered at **0.08–0.25**, i.e. every
+seventh plan handed the follower a reference four to thirteen times faster than
+the limit the B-spline optimiser had just been given. The follower is not
+permitted to chase it, so the reference walks away from the aircraft; that is the
+same gap `falcon_replan_from_pose.patch` above keeps having to repair, arriving
+from the other end.
+
+The same four lines also hold the crash this package spent a long time
+misattributing. A trajectory that does not turn has `avg_yaw_vel == 0`, so
+`1.57 / 0` is an infinity; a zero-duration trajectory makes both averages NaN.
+`std::min` propagates neither the way this code assumes, and the non-finite
+ratio that comes out re-times the knots into a shape that later aborts the
+process:
+
+```
+[FSM] Slow trajectory detected, duration: 25.16, length: 3.89
+[FSM] Avg position velocity: 0.15, avg yaw velocity: 0.00, lengthen ratio: 0.08
+exploration_node: Eigen/src/Core/Block.h:120: Assertion `(i>=0) && (... i<xpr.rows())' failed.
+  #7 ExplorationFSM::visualize()
+  #6 PlanningVisualization::drawBspline(...)
+  #5 NonUniformBspline::evaluateDeBoorT(double const&)
+  #4 NonUniformBspline::evaluateDeBoor(double const&)
+```
+
+That matters far more here than upstream, because on this stack the **voxel map
+lives in the same node**: one assertion inside a *visualisation* call ends the
+mission and erases everything mapped so far. Measured directly — a hospital run
+holding 320 m³ was back to 22 m³ one second later.
+
+**What it does.**
+
+- Takes the rescale's targets from parameters (`/fsm/slow_traj_target_vel`,
+  `_target_yaw`, `_trigger_vel`, `_ratio_min`, `_ratio_max`), declared in
+  `adapter/launch/exploration.launch`. With the target set to the configured
+  cruise, a trajectory already flying at the speed it was asked for yields ratio
+  1.0 and is left alone.
+- Clamps the ratio, and we ship `ratio_min: 1.0` — the rescale may **stretch**
+  time only. Stretching is a real safety valve (a too-tight time allocation gets
+  slowed to something flyable); compressing is precisely what breaks the velocity
+  feasibility the optimiser had already guaranteed. Nothing can now speed a
+  reference up.
+- Requires finite, positive averages before dividing, and skips the rescale
+  (with a log line) when neither axis is moving.
+- Guards `NonUniformBspline::evaluateDeBoor` so that no malformed spline can
+  abort the process again, whatever produces it. The span search there walks the
+  knot vector with no upper bound and then indexes `control_points_` with the
+  result; it is bounded now by both the knot count and the control-point count,
+  a spline with fewer than `p_+1` control points returns its last point, and a
+  non-finite parameter falls back to the curve's start. A clamped evaluation of a
+  degenerate curve is wrong in a way the mission can see and recover from.
+  `abort()` is not.
+
+## falcon_blocked_region_ttl.patch — a shadow is about the map, and the map changes
+
+Touches the two files `falcon_deadend_guard.patch` already owns, and must be
+applied after it (sentinels: `a shadow is a statement`, `has expired`):
+
+- `exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h`
+- `exploration_preprocessing/src/frontier_finder.cpp`
+
+**Why.** The dead-end guard hands the frontier finder a viewpoint the aircraft
+could not physically reach, and every frontier cluster within
+`blocked_region_radius` of it is retired to dormant. That shadow was
+**permanent** — it lasted the life of the node, and was persisted to the param
+server so it outlived the node too.
+
+A shadow is a statement about the map as it stood when it was cast, and the map
+changes. Cast in the first minute of a mission, when almost nothing has been
+observed, it is usually wrong. Measured on the hospital, 2026-08-14: the guard
+blocked `(5.11, -1.21)` at **t = 53 s**, eight seconds into the flight; at the
+3.5 m radius then in force that covered the corridor joining the north wing to
+the south. The aircraft mapped the north, exhausted its frontiers and declared
+**FINISH at 253.65 m³** with the entire southern half of the building never
+visited — a *successful* mission by FALCON's own reckoning.
+
+The severity depends entirely on what got shadowed, and nothing in the guard
+knew the difference: over a dead-end pocket the shadow is exactly right, over a
+transit corridor it is fatal. Permanence is what made the second case
+unrecoverable.
+
+**What it does.** Puts time into the trade rather than picking a side of it.
+
+- Every region carries the time it was cast and expires after
+  `/frontier_finder/blocked_region_ttl_s` (90 s; `<= 0` restores the old
+  permanent behaviour). `expireBlockedRegions()` runs at the top of
+  `computeFrontiersToVisit()`, so an expired region is reconsidered on that
+  tour rather than the next one.
+- **Each re-report doubles the next shadow**, capped at
+  `2^blocked_region_ttl_max_doubling` (3, so 8×). An early mistake in a corridor
+  is forgiven after 90 s; a pocket that genuinely cannot be observed — the
+  hospital's stairwell-filled corner rooms, its solid-slab elevators, its
+  floor-to-ceiling cubicle curtains — is re-reported and retires for 90, 180,
+  360, then 720 s, which is the rest of the mission. Termination survives;
+  completeness stops depending on the first minute of the flight.
+- **Strikes are counted on a coarser key than shadows, and on a history that
+  never expires** (`blocked_region_escalate_radius`, 4.0 m). This is not a
+  refinement; without it the escalation above does not work at all. An aircraft
+  defeated twice by the same obstacle does not fail at the same point twice —
+  measured 2.6 m apart in the hospital's north-west corner, outside the 2.0 m
+  coalesce radius — so both failures registered as new regions at strike 1, the
+  TTL never doubled, and the aircraft went back and ground on one clutter pile
+  for **297 s of a 485 s run, 78 bumper reports**. The history is consulted only
+  to seed a new shadow's strike count.
+- A repeat report inside the radius now **refreshes** the shadow instead of
+  being silently dropped, because the aircraft is telling us it is still stuck
+  there, and that is precisely the evidence that should extend it.
+- The persisted copy is rewritten on expiry, so a respawn cannot restore
+  shadows that have just been retired. Restored shadows are stamped with the
+  restore time and given one strike: the successor cannot know how much of
+  their life they had already spent, and one more TTL is the conservative
+  reading.
+
+With expiry doing the work, `blocked_region_radius` goes back **under**
+`candidate_rmax` (2.0 against 2.5) in `adapter/launch/exploration.launch`, so
+retiring one viewpoint no longer retires the whole frontier that produced it.
+
 ## Rebuilding vs. the running image
 
 An image that was `docker commit`ed live carries these already and needs no
@@ -142,6 +278,30 @@ rebuild. The patch mechanism above is what makes them survive an image
 — and it is the only thing that does, which matters on a machine that never had
 the committed image. `falcon-ros-custom:v1` was rebuilt from scratch this way on
 PCN87653 on 2026-08-13.
+
+## Iterating on a patch against an image that already has it
+
+The fix script is idempotent **by sentinel**, which is exactly right for a fresh
+clone and exactly wrong for iteration: once a patch is in the image its sentinel
+is present, so editing that patch and re-running the script logs
+"already applied, skipping" and changes nothing. A rebuild that reports success
+while silently shipping the old code is the failure mode this whole mechanism
+exists to prevent, so it is worth stating plainly.
+
+To iterate, copy the edited sources straight into a scratch container built from
+the current image, rebuild the affected packages, and `docker commit`. Keep the
+patch file in step as the authoritative artifact for the Dockerfile path, where
+FALCON is cloned fresh and every patch applies to a pristine tree.
+
+Two things to check when rebuilding by hand:
+
+- **Build every package the change touches.** `frontier_finder.cpp` lives in
+  `exploration_preprocessing`, not `exploration_manager`; a `catkin_make --pkg`
+  list that omits it builds cleanly and ships nothing.
+- **Verify the sentinel in the artifact it actually lands in.** These strings
+  compile into `libexploration_preprocessing.so`, not into the
+  `exploration_node` binary. Grepping the wrong file fails the verification
+  step and, with `set -e`, aborts before the commit.
 
 ## Regenerating the patch
 

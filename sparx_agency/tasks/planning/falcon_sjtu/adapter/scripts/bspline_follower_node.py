@@ -161,6 +161,12 @@ class BsplineFollowerNode(object):
         self._stall_move_m = float(rospy.get_param("~stall_move_m", 1.5))
         self._stall_track = []          # type: list  # (t_s, x, y, z)
         self._resurveys = 0
+        self._unsticks = 0
+        self._unstick_until = None      # type: object
+        self._unstick_heading = None    # type: object  # world-frame (dx, dy)
+        self._jam_track = []            # type: list  # (t_s, x, y, z, cmd_speed)
+        self._jam_demanded = 0.0
+        self._jam_moved = 0.0
         self._last_bspline_at = None    # type: object
         self._servo = VelocityServo(self._params())
 
@@ -194,6 +200,53 @@ class BsplineFollowerNode(object):
         # the climb would actually reach rather than about where it already is.
         self._escape_climb_lookahead_m = float(
             rospy.get_param("~escape_climb_lookahead_m", 0.25))
+        # How much of the box ceiling the climb may NOT use. DEFAULT 0: the
+        # climb gets the whole box, and the burden of proof is on any margin.
+        #
+        # It was briefly 0.20, on the theory that the top of the band is the
+        # worst altitude to be at because obstacle inflation seals it. That
+        # theory was wrong twice over. `obstacles_inflation` is read by no node
+        # in FALCON (see the note in exploration.launch), so there is no
+        # inflation to seal anything; and the measurement that would have
+        # supported it says the opposite. Binning every hospital run's coverage
+        # growth by altitude:
+        #
+        #     z 1.0 -> 13.7    z 1.2 -> 7.1    z 1.4 -> 17.9
+        #     z 1.1 ->  8.3    z 1.3 -> 9.2    z 1.5 -> 18.1   m3/min
+        #
+        # The top of the band is where this aircraft maps FASTEST, because from
+        # up there it sees over the furniture. Capping the climb took the escape
+        # its own logs then complained about: "climbing would not clear it
+        # either at 1.25 m".
+        self._escape_climb_ceiling_margin_m = float(
+            rospy.get_param("~escape_climb_ceiling_margin_m", 0.0))
+        # ── unstick: move when FALCON cannot plan from where the aircraft is ──
+        # checkTrajCollision() tests a candidate from the aircraft's OWN
+        # position, so an aircraft parked inside an inflated shell makes every
+        # candidate collide. FALCON then re-plans and re-rejects forever and
+        # never publishes; measured 1781 of 1808 publish attempts in one
+        # hospital run ending "collision also detected on the initial
+        # trajectory", with the aircraft holding one point to the centimetre
+        # until the mission watchdog cut the run 180 s later.
+        #
+        # From inside this node that is indistinguishable from silence -- and
+        # the standing answer to silence, the re-survey, cannot fix it, because
+        # turning on the spot does not move the start point out of the occupied
+        # cell. The only escape is to MOVE: sideways out of the shell, and
+        # vertically back toward the middle of the band, where the fewest
+        # inflated shells overlap.
+        self._unstick_after_s = float(rospy.get_param("~unstick_after_s", 25.0))
+        self._unstick_time_s = float(rospy.get_param("~unstick_time_s", 8.0))
+        self._unstick_speed = float(rospy.get_param("~unstick_speed", 0.35))
+        self._unstick_climb_speed = float(
+            rospy.get_param("~unstick_climb_speed", 0.25))
+        self._unstick_move_m = float(rospy.get_param("~unstick_move_m", 0.35))
+        self._max_unsticks = int(rospy.get_param("~max_unsticks", 20))
+        # The jam: following a live plan at full authority, bumper quiet, and
+        # not moving. Demanded travel vs achieved travel over the window.
+        self._jam_window_s = float(rospy.get_param("~jam_window_s", 10.0))
+        self._jam_demand_m = float(rospy.get_param("~jam_demand_m", 0.6))
+        self._jam_move_m = float(rospy.get_param("~jam_move_m", 0.15))
         # ── proximity speed governor ─────────────────────────────────────
         # cap = max(floor, slope * (d_near - stop)). It was hardcoded
         # max(0.08, 0.7 * (d_near - 0.30)), and measured attribution showed why
@@ -379,11 +432,24 @@ class BsplineFollowerNode(object):
         self._give_up_radius_m = float(rospy.get_param("~give_up_radius_m", 1.5))
         self._give_up_window_s = float(rospy.get_param("~give_up_window_s", 120.0))
         self._give_up_hold_s = float(rospy.get_param("~give_up_hold_s", 30.0))
-        # Capped below the watchdog's no-movement patience (180 s), because a
-        # hold is not a plan: if the planner has not moved on by then, the
-        # mission is stuck and the watchdog is entitled to say so.
+        # The hold does NOT escalate any more, and this is a division of labour
+        # rather than a relaxation. Lengthening it here was an attempt to make a
+        # place stay given-up on, and it put the escalation in the wrong process:
+        # the aircraft is the thing that has to keep flying, and every extra
+        # second of hold is a second of the mission's own no-growth budget spent
+        # sitting in the exact spot that defeated it. Measured on the hospital,
+        # 2026-08-14: six give-ups escalating to 90 s each held the aircraft at
+        # (-8.7, 11.7) with the limiter reading `gave_up 100%` for a continuous
+        # 300 s, which is precisely the barren window the mission watchdog then
+        # aborted on -- 211.3 m3, no contacts, nothing wrong but the waiting.
+        #
+        # Persistence belongs to FALCON, which is the only thing that can stop
+        # choosing the viewpoint. So hold once, for just longer than the 25 s
+        # its dead-end guard needs to observe, and let the escalating shadow in
+        # falcon_blocked_region_ttl.patch (90, 180, 360, 720 s) do the
+        # remembering.
         self._give_up_hold_max_s = float(
-            rospy.get_param("~give_up_hold_max_s", 90.0))
+            rospy.get_param("~give_up_hold_max_s", 30.0))
         self._give_ups = 0
         self._give_up_until = None          # type: object
 
@@ -450,11 +516,23 @@ class BsplineFollowerNode(object):
         # from outside its own box, so the escape strands the mission it was
         # meant to rescue), and it wastes most of the headroom of a box whose
         # ceiling is higher. The box already knows; ask it.
+        # The middle of the band, where the fewest inflated obstacle shells
+        # overlap: everything on the floor inflates upward and everything on the
+        # ceiling inflates downward, so the mid-band is the altitude a stuck
+        # aircraft should return to. The unstick manoeuvre aims here.
+        self._alt_mid = 0.5 * (self._alt_min + self._alt_max)
+        # ...and the climb stops short of the ceiling, for the reason given with
+        # escape_climb_ceiling_margin_m above: at the top of the band the
+        # aircraft sits inside the inflation shell of anything tall it is near,
+        # which makes every trajectory FALCON tries collide at its own start
+        # point, and leaves no headroom to climb further.
+        climb_ceiling = self._alt_max - self._escape_climb_ceiling_margin_m
+        climb_ceiling = max(climb_ceiling, self._alt_mid)
         if self._escape_climb_max_z <= 0.0:
-            self._escape_climb_max_z = self._alt_max
+            self._escape_climb_max_z = climb_ceiling
         else:
             self._escape_climb_max_z = min(self._escape_climb_max_z,
-                                           self._alt_max)
+                                           climb_ceiling)
         # Horizontal box for the same guard, with a small tolerance ring so
         # normal wall-adjacent flight is untouched.
         try:
@@ -829,6 +907,35 @@ class BsplineFollowerNode(object):
             return
 
         silent_s = self._falcon_silent_s(now)
+
+        # The unstick owns the aircraft while it runs: it exists precisely
+        # because nothing else was moving it.
+        if self._unstick_until is not None:
+            self._note_limiter("unstick")
+            self._unstick(now, position, yaw)
+            return
+
+        # Two different silences, and they need opposite answers. A respawned
+        # planner has an empty map and needs to be SHOWN the room, which is the
+        # re-survey below. A planner that has the map but rejects every
+        # trajectory because the aircraft is parked inside an inflated obstacle
+        # needs the aircraft MOVED, and turning on the spot will never do it.
+        # The discriminator is movement: after a re-survey the aircraft normally
+        # gets a plan and flies, so an aircraft that has been silent this long
+        # AND has not moved is in the second case.
+        if (self._survey_remaining_rad <= 0.0 and self._retreat_until is None
+                and silent_s > self._unstick_after_s
+                and self._unsticks < self._max_unsticks
+                and self._track_and_check_stall(now, position,
+                                                self._unstick_move_m)):
+            self._begin_unstick(
+                now, yaw,
+                "no plan for %.0fs and the aircraft has not moved; FALCON "
+                "cannot plan from here" % silent_s)
+            self._note_limiter("unstick")
+            self._unstick(now, position, yaw)
+            return
+
         if (self._survey_remaining_rad <= 0.0 and self._retreat_until is None
                 and silent_s > self._resurvey_after_s
                 and self._resurveys < self._max_resurveys):
@@ -863,6 +970,28 @@ class BsplineFollowerNode(object):
         if self._retreat_until is not None:
             self._note_limiter("retreat:%s" % (self._retreat_phase or "?"))
             self._retreat(now, position, yaw)
+            return
+
+        # A jam is neither a contact nor a silence, and until now nothing caught
+        # it. The aircraft is following a live plan at full authority, the bumper
+        # is quiet, and it is not moving -- pressed against geometry the depth
+        # camera cannot see inside its 0.95 m near clip. The wedge reflex that
+        # would normally back it out is deliberately suppressed inside a tight
+        # passage, because retreating out of a doorway the aircraft is halfway
+        # through is how it never gets through one. That suppression is right,
+        # and it needs this net under it: a passage the aircraft cannot move in
+        # is not a passage it is passing through.
+        #
+        # The test is demanded travel against achieved travel, which needs no
+        # threshold on speed and scales itself: integrate the speed actually put
+        # on the wire, compare with net displacement. Measured on the run this
+        # comes from -- commanded speed p50 0.24 m/s, 67% of ticks saturated,
+        # and the aircraft at (5.12, 16.21) to the centimetre for 181 s.
+        if self._jammed(now, position):
+            self._begin_unstick(now, yaw, "commanded %.1f m of travel and moved "
+                                "%.2f m" % (self._jam_demanded, self._jam_moved))
+            self._note_limiter("unstick")
+            self._unstick(now, position, yaw)
             return
 
         # FALCON briefly silent (crashed mid-plan, before the re-survey window):
@@ -961,17 +1090,22 @@ class BsplineFollowerNode(object):
                 # hold below then applies from the next tick on which nothing
                 # fresh has been struck -- and 1.3 m clear of an unreached
                 # viewpoint is exactly where FALCON's guard wants it.
-                # The hold LENGTHENS each time the same place defeats it. A
-                # fixed 30 s hold ends, FALCON routes the aircraft straight
-                # back, and it touches the same thing again: measured, 76
-                # bumper reports on one hanging-scrubs prop across seven
-                # give-ups, coverage frozen. Each repeat is evidence the
-                # planner needs longer to conclude the viewpoint is
-                # unreachable, so give it longer -- bounded, because a hold is
-                # not a plan and the mission watchdog is entitled to a verdict.
+                # The hold does NOT lengthen with repeats. It used to, on the
+                # reasoning that a fixed 30 s hold ends and FALCON routes the
+                # aircraft straight back into the same prop -- which is true,
+                # and still the wrong place to fix it. Holding longer buys
+                # persistence by spending the only resource the mission cannot
+                # spare, which is the aircraft's time in the air, and it spends
+                # it standing exactly where the trouble is: six escalating
+                # give-ups read `gave_up 100%` for 300 continuous seconds and
+                # ended the run at 211.3 m3 with nothing broken.
+                # Persistence is FALCON's job, because FALCON is the only thing
+                # that can stop choosing the viewpoint, and its shadow now
+                # escalates 90/180/360/720 s on its own. One hold, long enough
+                # for its dead-end guard to see 25 s of confinement, is all this
+                # side needs to contribute.
                 self._give_ups += 1
-                hold_s = min(self._give_up_hold_s * self._give_ups,
-                             self._give_up_hold_max_s)
+                hold_s = min(self._give_up_hold_s, self._give_up_hold_max_s)
                 self._give_up_until = now + rospy.Duration(hold_s)
                 rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
                               "%.1f m; this approach does not work -- backing "
@@ -1502,14 +1636,21 @@ class BsplineFollowerNode(object):
             return 0.0
         return (now - self._last_bspline_at).to_sec()
 
-    def _track_and_check_stall(self, now, position):
-        # type: (object, np.ndarray) -> bool
+    def _track_and_check_stall(self, now, position, move_m=None):
+        # type: (object, np.ndarray, object) -> bool
         """Whether the aircraft has gone nowhere for the whole stall window.
 
         Net displacement start-to-now, so a drone yawing on the spot at a
         viewpoint it cannot leave reads as stalled while one genuinely creeping
         along a corridor does not. Returns False until the window is full.
+
+        ``move_m`` overrides the displacement that still counts as stalled; the
+        unstick asks a much tighter question than the default (has it moved at
+        all) and must not be answered with a threshold sized for "is it making
+        useful progress".
         """
+        if move_m is None:
+            move_m = self._stall_move_m
         now_s = now.to_sec()
         self._stall_track.append((now_s, float(position[0]), float(position[1]),
                                   float(position[2])))
@@ -1521,7 +1662,7 @@ class BsplineFollowerNode(object):
         t0, x0, y0, z0 = self._stall_track[0]
         moved = math.sqrt((position[0] - x0) ** 2 + (position[1] - y0) ** 2
                           + (position[2] - z0) ** 2)
-        return moved < self._stall_move_m
+        return moved < move_m
 
     def _begin_resurvey(self, now, reason):
         # type: (object, str) -> None
@@ -1540,6 +1681,84 @@ class BsplineFollowerNode(object):
         self._resurveys += 1
         rospy.logwarn("[follower] FALCON %s (recovery #%d); re-surveying to "
                       "rebuild its map", reason, self._resurveys)
+
+    def _jammed(self, now, position):
+        # type: (object, np.ndarray) -> bool
+        """Whether the aircraft has been asked to travel and has not.
+
+        Integrates the speed actually put on the wire over ``jam_window_s`` and
+        compares it with net displacement over the same window. Needs no speed
+        threshold and scales itself: a creep that achieves its creep passes, a
+        cruise that achieves nothing does not. Returns False until the window is
+        full, and while any manoeuvre that deliberately does not travel (survey,
+        retreat, unstick, hold) owns the aircraft -- those are counted out by the
+        callers above, which all return before reaching here.
+        """
+        now_s = now.to_sec()
+        cmd = 0.0 if self._last_cmd_speed is None else float(self._last_cmd_speed)
+        self._jam_track.append((now_s, float(position[0]), float(position[1]),
+                                float(position[2]), cmd))
+        cutoff = now_s - self._jam_window_s
+        while len(self._jam_track) > 1 and self._jam_track[0][0] < cutoff:
+            self._jam_track.pop(0)
+        if self._jam_track[0][0] > cutoff or len(self._jam_track) < 2:
+            return False
+        demanded = 0.0
+        for i in range(1, len(self._jam_track)):
+            dt = self._jam_track[i][0] - self._jam_track[i - 1][0]
+            demanded += self._jam_track[i - 1][4] * dt
+        _, x0, y0, z0, _ = self._jam_track[0]
+        moved = math.sqrt((position[0] - x0) ** 2 + (position[1] - y0) ** 2
+                          + (position[2] - z0) ** 2)
+        self._jam_demanded = demanded
+        self._jam_moved = moved
+        return (demanded > self._jam_demand_m and moved < self._jam_move_m
+                and self._unsticks < self._max_unsticks)
+
+    def _begin_unstick(self, now, yaw, reason):
+        # type: (object, float, str) -> None
+        """Arm a deliberate move away from a place the aircraft cannot leave.
+
+        The bearing rotates with each attempt -- back, left, right, forward --
+        so a direction that is itself walled is never retried identically. The
+        silence clock is pushed to ``now`` so FALCON is given the full window
+        again once the aircraft has moved, rather than the manoeuvre re-arming
+        on the strength of silence it has not yet had a chance to end.
+        """
+        self._unsticks += 1
+        bearings = (math.pi, 0.5 * math.pi, -0.5 * math.pi, 0.0)
+        rel = bearings[(self._unsticks - 1) % len(bearings)]
+        heading = yaw + rel
+        self._unstick_heading = (math.cos(heading), math.sin(heading))
+        self._unstick_until = now + rospy.Duration(self._unstick_time_s)
+        self._last_bspline_at = now
+        self._stall_track = []
+        self._jam_track = []
+        self._hold_point = None
+        self._servo.reset()
+        rospy.logwarn(
+            "[follower] stuck (%s). Unstick #%d, %+.0f deg off the nose and back "
+            "toward mid-band z=%.2f", reason, self._unsticks,
+            math.degrees(rel), self._alt_mid)
+
+    def _unstick(self, now, position, yaw):
+        # type: (object, np.ndarray, float) -> None
+        """Drive the armed unstick: a fixed world bearing, plus mid-band."""
+        if self._unstick_until is None or now >= self._unstick_until:
+            self._unstick_until = None
+            self._unstick_heading = None
+            self._send(Twist())
+            self._servo.reset()
+            return
+        wx, wy = self._unstick_heading
+        cos, sin = math.cos(yaw), math.sin(yaw)
+        twist = Twist()
+        twist.linear.x = self._unstick_speed * (cos * wx + sin * wy)
+        twist.linear.y = self._unstick_speed * (-sin * wx + cos * wy)
+        dz = self._alt_mid - float(position[2])
+        twist.linear.z = max(-self._unstick_climb_speed,
+                             min(self._unstick_climb_speed, 0.8 * dz))
+        self._send(twist)
 
     def _climb(self, position):
         # type: (np.ndarray) -> None

@@ -175,20 +175,58 @@
        whose average is within this radius to dormant so the coverage tour stops
        re-selecting a route the map thinks is clear but physics blocks.
 
-       3.5, raised from 2.5. Parts of both worlds are genuinely unobservable and
-       the mission cannot FINISH until those frontiers retire: the hospital's
-       two north corner rooms are filled by staircases climbing z 0 to 3.0, both
-       its elevators are modelled as solid door slabs, and seven cubicle
-       curtains are solid from 0.095 to 2.483 m. At 2.5 the guard retired the
-       cluster it was handed and the coverage tour chose its neighbour a couple
-       of metres away, so run 002 made twenty-three attempts on one north-west
-       pocket. 3.5 exceeds candidate_rmax (2.5), so retiring a viewpoint also
-       retires the frontier that produced it.
+       This knob traded completeness against termination, and it was set at 3.5
+       for termination: parts of both worlds are genuinely unobservable and the
+       mission cannot FINISH until those frontiers retire (the hospital's two
+       north corner rooms are filled by staircases climbing z 0 to 3.0, both its
+       elevators are modelled as solid door slabs, seven cubicle curtains are
+       solid from 0.095 to 2.483 m). 3.5 exceeded candidate_rmax (2.5), so
+       retiring a viewpoint also retired the frontier that produced it, which
+       stopped run 002 making twenty-three attempts on one north-west pocket.
 
-       This is the knob that trades completeness against termination. Lower it
-       if a run ever finishes with a room genuinely missing rather than merely
-       unreachable. -->
-  <param name="/frontier_finder/blocked_region_radius" value="3.5"/>
+       That was the wrong half of the trade, and the note here used to say what
+       would prove it: lower this if a run ever finishes with a room genuinely
+       missing rather than merely unreachable. One did. On 2026-08-14 the guard
+       blocked (5.11, -1.21) at t = 53 s, eight seconds into the flight with
+       almost nothing observed yet, and at 3.5 m that shadow covered the
+       corridor joining the north wing to the south. The aircraft mapped the
+       north, ran out of frontiers and declared FINISH at 253.65 m3, with the
+       entire southern half of the building never visited. A shadow cast over a
+       TRANSIT route is not the same mistake as one cast over a dead-end pocket,
+       and permanence made the first one fatal.
+
+       The resolution is not to pick a side of the trade but to put time into
+       it, which falcon_blocked_region_ttl.patch does. A shadow now expires, and
+       each re-report of the same region DOUBLES the next one (capped at
+       2^ttl_max_doubling). An early mistake in a corridor is forgiven after
+       90 s; a pocket that really is unobservable is re-reported and retires for
+       90, 180, 360, then 720 s, which is the rest of the mission. Termination
+       survives, completeness stops depending on the first minute of the flight.
+
+       With expiry doing the work, the radius goes back under candidate_rmax so
+       one bad viewpoint no longer retires its whole frontier. -->
+  <param name="/frontier_finder/blocked_region_radius" value="2.0"/>
+  <param name="/frontier_finder/blocked_region_ttl_s" value="90.0"/>
+  <!-- 5, so the ladder is 90, 180, 360, 720, 1440, 2880 s. The cap is what
+       decides whether a mission can TERMINATE: at 3 (720 s) the hospital's last
+       unreachable frontier came back twice inside one run, and FALCON spent the
+       endgame re-attempting it, 1911 "No path to next viewpoint" lines, holding
+       at 736.3 m3 until the no-growth watchdog ended a mission that had already
+       mapped the building. A place that has independently defeated the aircraft
+       five times is not worth offering again, and at 1440 s it is retired for
+       the rest of any run this campaign flies, which lets the frontier set
+       actually empty and the FSM reach FINISH. -->
+  <param name="/frontier_finder/blocked_region_ttl_max_doubling" value="5"/>
+  <!-- Strikes are keyed more coarsely than shadows, and on a history that
+       never expires. An aircraft defeated twice by the same pile of clutter
+       does not fail at the same point twice: measured 2.6 m apart in the
+       hospital's north-west corner, which is outside the 2.0 m coalesce
+       radius, so both failures read as new, both shadows started at strike 1,
+       and the escalation above never engaged at all. The aircraft went back
+       into that corner and ground on it for 297 s of a 485 s run, 78 bumper
+       reports on one clutter pile. 4.0 m spans an obstacle and the pocket
+       around it without reaching the next room. -->
+  <param name="/frontier_finder/blocked_region_escalate_radius" value="4.0"/>
 
   <!-- ── A*: give it time to find the route, and cells to find it through ─
        These override two values loaded from pathfinding/config/astar.yaml, and
@@ -267,6 +305,40 @@
        and odometry wins. -->
   <arg name="replan_from_pose_drift" default="0.40"/>
   <param name="/fsm/replan_from_pose_drift" value="$(arg replan_from_pose_drift)"/>
+
+  <!-- ── Which speed a "slow" trajectory is re-timed onto ─────────────────
+       On seeing a trajectory averaging under trigger_vel, FALCON rewrites its
+       knot vector so it would average target_vel instead. Upstream's target is
+       2.0 m/s, which on this aircraft is not a correction but a compression:
+       measured 324 rescales in one 16-minute hospital mission, ratios clustered
+       at 0.08 to 0.25, i.e. every seventh plan handed the follower a reference
+       four to thirteen times faster than the 0.15 m/s the optimiser had just
+       been told was the limit. The follower cannot legally chase it, so the gap
+       it opens is the same gap replan_from_pose_drift above keeps repairing.
+
+       Two things are set here. The target becomes the configured cruise, so a
+       trajectory already flying at the speed it was asked for is left alone.
+       And ratio_min is 1.0, which permits the rescale to STRETCH time only.
+       That direction is a genuine safety valve - a trajectory whose time
+       allocation is too tight gets slowed to something flyable - while the
+       compressing direction is exactly what breaks a velocity feasibility the
+       B-spline optimiser had already guaranteed. Nothing here can now speed a
+       reference up.
+
+       This also removes the divide-by-zero behind the node's aborts: a
+       trajectory that does not turn has avg_yaw_vel 0, and 1.57/0 fed through
+       std::min produced a non-finite re-timing whose knot vector later killed
+       exploration_node from inside its own visualiser. -->
+  <arg name="slow_traj_target_vel"  default="0.15"/>
+  <arg name="slow_traj_target_yaw"  default="1.57"/>
+  <arg name="slow_traj_trigger_vel" default="0.5"/>
+  <arg name="slow_traj_ratio_min"   default="1.0"/>
+  <arg name="slow_traj_ratio_max"   default="2.0"/>
+  <param name="/fsm/slow_traj_target_vel"  value="$(arg slow_traj_target_vel)"/>
+  <param name="/fsm/slow_traj_target_yaw"  value="$(arg slow_traj_target_yaw)"/>
+  <param name="/fsm/slow_traj_trigger_vel" value="$(arg slow_traj_trigger_vel)"/>
+  <param name="/fsm/slow_traj_ratio_min"   value="$(arg slow_traj_ratio_min)"/>
+  <param name="/fsm/slow_traj_ratio_max"   value="$(arg slow_traj_ratio_max)"/>
 
   <!-- traj_server parks its pre-plan command at the init pose, no ramp:
        the follower owns takeoff. -->
