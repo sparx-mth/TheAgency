@@ -101,7 +101,15 @@ class RoosterUnit:
         # isn't enough push. Raised toward that demonstrated-working range;
         # re-verify against a live drift before trusting it further.
         altitude_hold_max_correction: float = 380.0,
-        altitude_hold_interval_sec: float = 1.0,
+        # Was 1.0s -- confirmed live (2026-08-13) that /R1/state (ranger's
+        # source) actually updates at ~10Hz, so a 1Hz loop was reacting to
+        # only 1 in 10 fresh readings and holding a stale throttle for up to
+        # a full second between corrections. Matches this doesn't fix the
+        # -380/380 correction bound above, but a loop this slow on a
+        # double-integrator plant (throttle -> accel -> velocity ->
+        # position) is a likely cause of the documented "10-15s oscillation,
+        # never fully settles" behavior on its own. Re-verify live.
+        altitude_hold_interval_sec: float = 0.1,
         # <=0.0 disables this entirely -- no ceiling behavior change for any
         # existing caller. Added 2026-08-10 after climb_duration_sec:=5.0
         # (a mission_control.py misconfiguration, since fixed) reintroduced
@@ -172,6 +180,7 @@ class RoosterUnit:
         self._holding_altitude = False
         self._hold_ranger_target: Optional[float] = None
         self._hold_prev_ranger: Optional[float] = None
+        self._hold_prev_ranger_time: Optional[float] = None
 
         self.manual_pub = node.create_publisher(
             ManualControl, f"/{rooster_id}/manual_control", 10)
@@ -217,11 +226,23 @@ class RoosterUnit:
             return
         if self.ranger == float("inf"):
             return
+        # Loop runs at ~10Hz, about the same as /R1/state's own update rate,
+        # so about half the ticks see no new ranger sample at all. Treating
+        # that as velocity=0 (as before) alternates full-PD and P-only
+        # correction every other tick -- confirmed live 2026-08-13, a real
+        # oscillation this caused. Skip entirely until a genuinely new
+        # sample arrives instead of guessing a false zero velocity.
+        if self._hold_prev_ranger is not None and self.ranger == self._hold_prev_ranger:
+            return
+        now = time.monotonic()
         error = self._hold_ranger_target - self.ranger  # +: sunk low, -: drifted high
         velocity = 0.0
-        if self._hold_prev_ranger is not None:
-            velocity = (self.ranger - self._hold_prev_ranger) / self.altitude_hold_interval_sec
+        if self._hold_prev_ranger is not None and self._hold_prev_ranger_time is not None:
+            dt = now - self._hold_prev_ranger_time
+            if dt > 0.0:
+                velocity = (self.ranger - self._hold_prev_ranger) / dt
         self._hold_prev_ranger = self.ranger
+        self._hold_prev_ranger_time = now
         correction = clamp_symmetric(
             self.altitude_hold_kp * error - self.altitude_hold_kd * velocity,
             self.altitude_hold_max_correction)
@@ -254,6 +275,7 @@ class RoosterUnit:
         self._hold_ranger_target = (
             self.target_ranger_m if self.target_ranger_m > 0.0 else self.ranger)
         self._hold_prev_ranger = None
+        self._hold_prev_ranger_time = None
         self._holding_altitude = True
         self.node.get_logger().info(
             f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m, "

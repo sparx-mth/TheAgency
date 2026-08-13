@@ -547,7 +547,11 @@ ROBOTICAN_SERVICES: list[Service] = [
             # descended cleanly from a similar height in the same flight, so
             # the vehicle responds fine to a stronger push. See
             # RoosterUnit.__init__ (rooster_unit.py) for the full analysis.
-            "  -p altitude_hold_max_correction:=380.0"
+            "  -p altitude_hold_max_correction:=380.0 \\\n"
+            # 2026-08-13: raised from 1.0 -- confirmed live that /R1/state's
+            # ranger updates at ~10Hz, so a 1Hz loop reacted to only 1 in 10
+            # fresh readings. See RoosterUnit.__init__ for the full analysis.
+            "  -p altitude_hold_interval_sec:=0.1"
         ),
         env="container",
         machine="container",

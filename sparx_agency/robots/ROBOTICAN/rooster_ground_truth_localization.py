@@ -23,6 +23,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from sphera_common_interfaces.msg import SpheraPawnState
@@ -41,8 +42,11 @@ class RoosterGroundTruthLocalization(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, 10)
         self.source_pub = self.create_publisher(String, source_topic, 10)
+        # Sphera publishes this at BEST_EFFORT; must match explicitly or we
+        # silently receive nothing (a plain int here defaults to RELIABLE).
         self.create_subscription(
-            SpheraPawnState, f"/{rooster_id}/sphera/state", self._on_state, 10)
+            SpheraPawnState, f"/{rooster_id}/sphera/state", self._on_state,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT))
 
         self.get_logger().info(
             f"rooster_ground_truth_localization ready for {rooster_id}\n"
