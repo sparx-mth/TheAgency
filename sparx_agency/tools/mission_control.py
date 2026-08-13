@@ -427,6 +427,32 @@ _ROOSTER_CTRL = (
 )
 
 ROBOTICAN_SERVICES: list[Service] = [
+    # ── Vendor backend (must exist before anything below) ────────────────────
+    # `it` is docker-compose's own service name for the ROBOTICAN/Sphera vendor
+    # backend (FCU driver, rooster_manager, video handler) -- everything else in
+    # this tab either docker-execs INTO it (container_name=ROOSTER_CONTAINER) or
+    # talks to a topic it publishes. Added 2026-08-13 so a fresh bring-up no
+    # longer needs a separate manual `docker compose up -d it` outside this UI
+    # (see the "Container commands" expander below for the equivalent by hand).
+    Service(
+        name="Rooster Sphera Interface Container (it)",
+        key="rooster_it_container",
+        group="rooster_core",
+        description=(
+            "Vendor ROBOTICAN/Sphera backend container (FCU driver, rooster_manager, "
+            "video handler). Must be running before every other Rooster service -- "
+            "they all docker-exec into this container or depend on a topic it "
+            "publishes. Does NOT need restarting when just Sphera itself restarts "
+            "(the container survives that) -- only Rooster Ground Truth "
+            "Localization needs relaunching then, since it holds no reconnect "
+            "logic of its own."
+        ),
+        cmd=f"cd {ROOSTER_DOCKER_COMPOSE} && docker compose up -d it",
+        env="docker",
+        machine="pc",
+        docker_container=ROOSTER_CONTAINER,
+        stop_extra=f"cd {ROOSTER_DOCKER_COMPOSE} && docker compose stop it 2>/dev/null || true",
+    ),
     # ── Core controller ───────────────────────────────────────────────────────
     Service(
         name="Position Fly Controller",
@@ -513,7 +539,15 @@ ROBOTICAN_SERVICES: list[Service] = [
             # target_ranger_m. Set equal to max_ranger_m above (not lower):
             # the ceiling then only backstops overshoot past the intended
             # target, it isn't fighting a separate lower target.
-            "  -p target_ranger_m:=1.6"
+            "  -p target_ranger_m:=1.6 \\\n"
+            # 2026-08-13: raised from the old default of 200. Confirmed live
+            # that -200 wasn't enough to recover once drifted above
+            # max_ranger_m (pinned there for 155/162s, net trend was still
+            # +0.18 m/min, i.e. climbing); land()'s throttle ramp (-490)
+            # descended cleanly from a similar height in the same flight, so
+            # the vehicle responds fine to a stronger push. See
+            # RoosterUnit.__init__ (rooster_unit.py) for the full analysis.
+            "  -p altitude_hold_max_correction:=380.0"
         ),
         env="container",
         machine="container",
@@ -1186,6 +1220,7 @@ def _wait_until(svc: Service, timeout: float = 15, interval: float = 0.5) -> boo
 # (service_key, wait_timeout_s); the launcher waits for one to come up
 # before starting the next, instead of a fixed sleep between every step.
 ROOSTER_LAUNCH_ORDER: list[tuple[str, float]] = [
+    ("rooster_it_container", 15),        # vendor backend -- everything else execs into it
     ("rooster_planner_falcon", 20),      # falcon container must exist first
     ("rooster_gtl_R1", 8),
     ("rooster_video_trigger_R1", 8),
@@ -1458,10 +1493,11 @@ def _service_cards(services: list[Service], states: dict[str, bool]):
                 # page title) even though the icon still renders.
                 with st.expander("📄 Command + full description"):
                     st.caption(svc.description)
-                    st.text_area(
-                        "Command (select all + copy)", value=_resolved_cmd(svc),
-                        height=120, key=f"cmd_{svc.key}", disabled=True,
-                        label_visibility="collapsed")
+                    st.code(_resolved_cmd(svc), language="bash")
+                    # st.text_area(
+                    #     "Command (select all + copy)", value=_resolved_cmd(svc),
+                    #     height=120, key=f"cmd_{svc.key}", disabled=True,
+                    #     label_visibility="collapsed")
 
 
 def _supervise_auto_restart(services: list[Service], states: dict[str, bool]):
@@ -1635,7 +1671,8 @@ with tab_rooster:
     else:
         st.error(
             f"Container `{ROOSTER_CONTAINER}` is **not running**. "
-            f"Start it with:  `cd {ROOSTER_DOCKER_COMPOSE} && docker compose up -d it`"
+            "Start it with the **Rooster Sphera Interface Container (it)** card "
+            "under Core below (or **▶▶ Launch All** — it now starts first)."
         )
 
     # ── Guided bring-up: what should run, in what order, one button ─────────
@@ -1744,7 +1781,12 @@ with tab_rooster:
     with st.expander("📊  Monitors", expanded=False):
         _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_monitor"], states)
 
-    with st.expander("ℹ️  Container commands", expanded=False):
+    with st.expander("ℹ️  Container commands (manual fallback)", expanded=False):
+        st.caption(
+            "Start/stop normally goes through the **Rooster Sphera Interface "
+            "Container (it)** card under Core above -- these are the equivalent "
+            "commands by hand, for when the UI itself isn't reachable."
+        )
         st.code(
             f"# Start container\ncd {ROOSTER_DOCKER_COMPOSE} && docker compose up -d it\n\n"
             f"# Attach interactive shell\ndocker exec -it {ROOSTER_CONTAINER} bash\n\n"

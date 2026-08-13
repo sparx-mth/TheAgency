@@ -92,7 +92,15 @@ class RoosterUnit:
         climb_settle_sec: float = 1.0,
         altitude_hold_kp: float = 500.0,
         altitude_hold_kd: float = 600.0,
-        altitude_hold_max_correction: float = 200.0,
+        # Was 200 -- confirmed live (2026-08-13) that's too weak to recover
+        # once drifted past max_ranger_m: pinned at hover_z-200 continuously
+        # for 155/162s produced a flat-to-slightly-climbing trend (+0.18
+        # m/min), not a descent. In the same flight, land()'s throttle ramp
+        # (down to hover_z-490) descended cleanly and monotonically from a
+        # similar height in ~11s -- so the vehicle *can* respond, -200 just
+        # isn't enough push. Raised toward that demonstrated-working range;
+        # re-verify against a live drift before trusting it further.
+        altitude_hold_max_correction: float = 380.0,
         altitude_hold_interval_sec: float = 1.0,
         # <=0.0 disables this entirely -- no ceiling behavior change for any
         # existing caller. Added 2026-08-10 after climb_duration_sec:=5.0
