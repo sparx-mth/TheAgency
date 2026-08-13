@@ -69,8 +69,12 @@ class RoosterCommandUnitNode(Node):
         self.declare_parameter("climb_settle_sec", 1.0)
         self.declare_parameter("altitude_hold_kp", 500.0)
         self.declare_parameter("altitude_hold_kd", 600.0)
-        self.declare_parameter("altitude_hold_max_correction", 200.0)
-        self.declare_parameter("altitude_hold_interval_sec", 1.0)
+        # See RoosterUnit.__init__ (rooster_unit.py) for why the default was
+        # raised from 200 to 380 -- 2026-08-13.
+        self.declare_parameter("altitude_hold_max_correction", 380.0)
+        # See RoosterUnit.__init__ for why this was raised from 1.0 to
+        # 0.1 -- 2026-08-13 (matches /R1/state's real ~10Hz ranger rate).
+        self.declare_parameter("altitude_hold_interval_sec", 0.1)
         # <=0.0 disables -- see RoosterUnit.__init__ for why this exists.
         self.declare_parameter("max_ranger_m", 0.0)
         # <=0.0 disables -- see RoosterUnit.__init__ for why this exists.
