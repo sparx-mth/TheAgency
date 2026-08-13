@@ -47,17 +47,33 @@
   <arg name="max_yaw_vel" default="0.6"/>
   <arg name="max_yaw_acc" default="0.5"/>
 
-  <!-- ── Safety: HARD inflation in the map vs SOFT optimiser penalty. The rule
-       that must hold: safe_distance <= narrowest_half_width - inflation, or the
-       optimiser is asked for clearance the corridor cannot provide and trades it
-       away unpredictably. Lowered 0.30 to 0.25 (the drone radius, zero spare) to
-       open hospital doorways: a 0.9 m door widens the centre corridor from
-       0.30 m to 0.40 m, enough for the follower to hold the centre through it.
-       Grazes are survivable now (speed capped 0.6 m/s, contact reflex backs
-       out), so the old margin is spent reaching frontiers the 0.30 m map had
-       walled off rather than left on the table. -->
+  <!-- ── Safety. READ THIS BEFORE TUNING EITHER NUMBER.
+       `obstacles_inflation` DOES NOTHING. The string "inflation" does not occur
+       anywhere in FALCON's source — `/voxel_mapping/obstacles_inflation` is
+       read by no node, so every value it has ever been given, and every
+       conclusion drawn from changing it (including the aisle-sealing notes in
+       config/warehouse.yaml), is about a parameter that was never consumed. It
+       is kept only so the old command lines do not break, and so the next
+       person finds this note instead of re-deriving it.
+
+       `safe_distance` is the ONLY clearance the planner respects. It is used
+       in BsplineOptimizer::calcDistanceCost against the 3D ESDF:
+
+           getDistanceAndGradient(q[i], dist, dist_grad);
+           if (dist < safe_distance_) cost += pow(dist - safe_distance_, 2);
+
+       Three consequences. It is ISOTROPIC — the same margin over and under an
+       obstacle as beside it, which is the only vertical clearance in the
+       stack. It is SOFT — a penalty weighed against smoothness and dynamic
+       feasibility, so the optimiser will spend it to keep a curve flyable. And
+       at the old 0.15 m it asked for less margin than the aircraft's own
+       0.25 m radius, while the follower's map gate vetoes anything inside
+       0.28 m — so the planner's best legal curve sat inside the gate's trip
+       line and the two fought each other.
+       0.35 m: above the gate's bubble, and a 1.4 m warehouse aisle still
+       leaves 0.35 m of slack on each side. -->
   <arg name="obstacles_inflation" default="0.25"/>
-  <arg name="safe_distance"       default="0.15"/>
+  <arg name="safe_distance"       default="0.55"/>
 
   <!-- ── Frontier viewpoints: clearances lowered (0.35 to 0.25, 0.60 to 0.40) so
        FALCON places a viewpoint in a tighter space and observes a frontier
@@ -164,7 +180,24 @@
   </node>
 
   <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
+  <!-- Tracking authority, forwarded so a run can be tuned without editing a
+       file. Defaults match bspline_follower.launch exactly, so forwarding
+       them changes nothing by itself.
+
+       max_overspeed is a CLEARANCE budget, not a comfort setting: FALCON
+       checks its curve against the map at the speed it planned, and flying the
+       same curve faster spends that margin on stopping distance. It is only
+       safe to raise it in step with safe_distance — which is why these two
+       knobs are named together here. max_overspeed >= max_catchup_speed is
+       enforced by VelocityServoParams and raises if violated. -->
+  <arg name="max_speed_xy"      default="0.6"/>
+  <arg name="max_overspeed"     default="0.35"/>
+  <arg name="max_catchup_speed" default="0.25"/>
+
   <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
-    <arg name="drone_ns" value="$(arg drone_ns)"/>
+    <arg name="drone_ns"          value="$(arg drone_ns)"/>
+    <arg name="max_speed_xy"      value="$(arg max_speed_xy)"/>
+    <arg name="max_overspeed"     value="$(arg max_overspeed)"/>
+    <arg name="max_catchup_speed" value="$(arg max_catchup_speed)"/>
   </include>
 </launch>

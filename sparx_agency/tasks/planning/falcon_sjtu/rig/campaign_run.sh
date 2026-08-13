@@ -35,6 +35,12 @@ export SJTU_PROJECT_DIR="${SJTU_PROJECT_DIR:-${HOME}/GIT/sjtu_project}"
 # no_roof_small_warehouse.
 WORLD="${WORLD:-${MAP}}"
 SIM_CONTAINER="sjtu_drone_${WORLD}"
+# The domain every `docker exec ... ros2` probe below must join. Same rule as
+# run_falcon_sjtu.sh: follow the shell's ROS_DOMAIN_ID (which is also what
+# bringup_world.sh -> env.sh gives the sim), then 20. Hardcoding 20 while the
+# sim followed the shell made every probe query an empty domain, which is
+# indistinguishable from a simulator that never started.
+SIM_DOMAIN_ID="${SIM_DOMAIN_ID:-${ROS_DOMAIN_ID:-20}}"
 POLL_S=10
 # Early-abort watchdogs: a run that stops DISCOVERING or stops MOVING is over,
 # whatever the planner believes -- waiting out the full cap on it is wasted
@@ -89,7 +95,7 @@ for _ in $(seq 1 40); do
             source /opt/ros/humble/setup.bash
             export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
             export CYCLONEDDS_URI=file:///etc/cyclonedds/no_shm.xml
-            export ROS_DOMAIN_ID='"${SIM_DOMAIN_ID:-20}"'
+            export ROS_DOMAIN_ID='"${SIM_DOMAIN_ID}"'
             ros2 topic list 2>/dev/null' 2>/dev/null | grep -q front_depth; then
         SIM_UP=1; break
     fi
@@ -114,7 +120,7 @@ docker exec "${SIM_CONTAINER}" bash -c '
     source /opt/ros/humble/setup.bash
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export CYCLONEDDS_URI=file:///etc/cyclonedds/no_shm.xml
-    export ROS_DOMAIN_ID='"${SIM_DOMAIN_ID:-20}"'
+    export ROS_DOMAIN_ID='"${SIM_DOMAIN_ID}"'
     exec python3 /tmp/flight_monitor.py --trace /tmp/flight_trace.jsonl' \
     > "${RUN_DIR}/monitor.log" 2>&1 &
 MON_PID=$!

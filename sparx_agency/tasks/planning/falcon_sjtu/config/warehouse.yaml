@@ -69,7 +69,20 @@ map_config:
     # (0.35) let ANY voxel mapped above 1.2 seal an aisle -- one depth speckle
     # walled off the maze and run soak-001 no-pathed for 30 minutes. No roof
     # in this world: give the planner headroom no pile can close.
-    box_max_z:  1.8
+    # 2.6, raised from 1.8. The ceiling is the ONLY vertical room the planner
+    # has, and at 1.8 no overflight in this world could satisfy safe_distance
+    # 0.85: a 1.10 m ClutteringA pile needs 1.95 m of altitude for full
+    # clearance, buckets (1.41) need 2.26, the tall C-piles (1.78) need 2.63.
+    # The optimiser could only trade the margin away and skim the tops, which
+    # is the "no space under the route" the belly strikes came from. 2.6 gives
+    # every pile inside the box real headroom.
+    #
+    # This does NOT re-open flight over the racking, which is why the old
+    # "stay below the 1.96 m shelf tops" argument no longer binds: the shelf
+    # rows sit at x 4.28..5.16 and x -6.89..-4.79, both OUTSIDE box_max_x 3.9
+    # and box_min_x -4.4, so the aircraft cannot reach them at any altitude.
+    # vbox_max_z is 3.0, so the map already covers this band.
+    box_max_z:  2.6
     vbox_min_x: -8.0
     vbox_min_y: -12.0
     vbox_min_z: -1.0

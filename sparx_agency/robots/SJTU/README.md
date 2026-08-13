@@ -146,9 +146,34 @@ Four things to carry away, all of them in `config/camera_front_600x600.yaml` and
   free space outward from *itself*, so the body origin is the one place it can
   never observe.
 
-The xacro's own comment block above the depth sensor claims the parameters were
-"matched to FALCON simulator exactly" at 640x480 / 90 deg / 5 m. They were not —
-the tags in the same file say 600x600 / 75 deg / 10 m. Trust the tags.
+The xacro's own comment block above the depth sensor used to claim the
+parameters were "matched to FALCON simulator exactly" at 640x480 / 90 deg / 5 m.
+They were not — the tags in the same file say 600x600 / 75 deg / 10 m. That
+comment has been replaced with the derivation above; trust the tags either way.
+
+**But the tags are only what runs after a workspace rebuild.** Gazebo loads the
+*installed* URDF under `$SJTU_PROJECT_DIR/install/`, so `--skip-build` flies
+whatever was installed last, and an edit to the source xacro is invisible with
+no warning anywhere. This is not hypothetical: an April 2026 build of
+`sjtu_drone_description` — **640x360 at `horizontal_fov` 2.09 rad, fx 185.69** —
+was still being flown against a stack configured for 600x600 / fx 390.64. The
+mismatch does not fail; it back-projects every ray with a focal length 2.1x too
+long and builds a map that is wrong in a way that looks plausible on screen:
+obstacles collapse toward the optical axis, occupied voxels land inside the
+aircraft's own footprint, and the follower retreats from walls the physics says
+it never touched (measured: 40 "bubble breach" retreats, zero bumper contacts,
+coverage frozen at 31 of 161 m³). Rebuilt, the same mission mapped 99 m³ in two
+minutes with zero breaches.
+
+**Verify against the sim, not the file**, whenever the map looks wrong:
+
+```bash
+ros2 topic echo --once /simple_drone/front_depth/depth/camera_info   # K, width, height
+ros2 topic hz /simple_drone/front_depth/depth/image_raw              # 15 Hz nominal
+```
+
+`k[0]` must equal the `fx` in `falcon_sjtu`'s `bspline_follower.launch`, and
+`width`/`height` must equal its `image_width`/`image_height`.
 
 ## Frames, and their three different conventions
 
@@ -248,12 +273,26 @@ Flags: `--gui` / `--headless` (default), `--domain <N>` (ROS_DOMAIN_ID, default
 that never started), `--name <NAME>`, `--skip-build`, `--help`. `--help` lists
 the worlds actually present in your checkout.
 
-Only two worlds are in the checkout today: **`hospital`** (from
-`aws-robomaker-hospital-world`, plus its `hospital_two_floors` /
-`hospital_three_floors` variants) and **`playground`** (sjtu's own).
-`small_house`, `bookstore` and `small_warehouse` are *not* — they are separate
-aws-robomaker repositories. Cloning one next to `sjtu_drone/` makes it appear
-with no change to the script.
+`--help` lists what is cloned, which is the only reliable inventory. Today that
+is **`hospital`** (from `aws-robomaker-hospital-world`, plus its
+`hospital_two_floors` / `hospital_three_floors` variants), **`playground`**
+(sjtu's own), **`small_house`**, **`bookstore`**, and the two warehouses,
+**`no_roof_small_warehouse`** and `small_warehouse`. Each aws-robomaker world is
+a separate repository; cloning one next to `sjtu_drone/` makes it appear with no
+change to the script.
+
+**The small-warehouse repository is archived and its default branch holds only a
+README.** The worlds and models are on the `ros1` branch — a plain
+`git clone` of it leaves you with a repo that contributes no world at all:
+
+```bash
+git clone --depth 1 https://github.com/aws-robotics/aws-robomaker-small-warehouse-world.git
+cd aws-robomaker-small-warehouse-world && git fetch --depth 1 origin ros1:ros1 && git checkout ros1
+```
+
+`no_roof_small_warehouse` is the one FALCON is flown in (`falcon_sjtu`'s map
+config for it is named `warehouse`); the roofed `small_warehouse` traps a depth
+camera under a ceiling the box was never sized for.
 
 **Why not the external repo's `run.sh`.** Three reasons, and the first is the
 one that matters:

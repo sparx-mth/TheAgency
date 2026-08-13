@@ -40,7 +40,7 @@ from geometry_msgs.msg import Twist
 from gazebo_msgs.msg import ContactsState
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, PointCloud2
-from std_msgs.msg import Bool, Empty, Float32MultiArray, Int32
+from std_msgs.msg import Bool, Empty, Float32MultiArray, Int32, String
 from trajectory.msg import Bspline
 
 from sparx_agency.core.control.velocity_servo import (
@@ -81,20 +81,40 @@ class BsplineFollowerNode(object):
         self._rate_hz = float(rospy.get_param("~ctrl_rate_hz", 50.0))
         self._odom_timeout_s = float(rospy.get_param("~odom_timeout_s", 0.5))
         self._takeoff_altitude_m = float(rospy.get_param("~takeoff_altitude_m", 1.0))
-        # 1.25 turns; 0 disables. See _survey for why this must exist.
+        # TWO scans, one knob each, because they answer different questions.
+        #
+        # survey_revs is the RECOVERY scan (_begin_resurvey): a respawned
+        # exploration_node comes back with an EMPTY map and never
+        # re-triggers itself, and a fresh turn is what gives its frontier
+        # finder something to fire on. That failure is real; keep it.
+        #
+        # takeoff_survey_revs is the scan at the START, and it is now 0
+        # because it was measured to buy nothing: FALCON published its
+        # first plan 1.9 s after takeoff WITH the turn and 1.8 s WITHOUT
+        # it -- the forward view alone is enough to seed the frontier
+        # finder. What the turn did cost was a first trajectory planned
+        # from a SPINNING aircraft: FALCON starts the curves clock at
+        # the plan while the yaw is still slewing, so the follower opens
+        # every mission unwinding a heading it never asked for.
         self._survey_revs = float(rospy.get_param("~survey_revs", 1.25))
-        self._survey_remaining_rad = 2.0 * math.pi * self._survey_revs
+        self._survey_remaining_rad = 2.0 * math.pi * float(
+            rospy.get_param("~takeoff_survey_revs", 0.0))
         self._survey_started_at = None  # type: object  # set on the first tick
-        # Fast, COMPLETE scan rather than a slow long one: the turn exists so
-        # FALCON can see the cells around the aircraft it would otherwise have
-        # to plan through blind, so cutting it off after a couple of seconds
-        # (the first plan can arrive that early) buys punctuality by planning
-        # through unobserved space -- measured as a pile strike 40 s later.
-        # One full revolution at nearly double the old rate covers everything
-        # in ~7 s, and the plan-arrived abort then prevents any over-turning.
+        # The scan is a fallback, not a ritual: it exists so FALCON has
+        # something to plan out of when the map is empty. A PLAN IS PROOF THAT
+        # IT DID -- so the turn is abandoned the moment one arrives, with no
+        # minimum. Turning on past that point costs punctuality for nothing:
+        # FALCON's clock starts with the plan while the aircraft is still
+        # spinning, so following begins seconds late against a schedule that
+        # has already run away.
+        #
+        # min_survey_rad is kept as a knob rather than deleted, because the
+        # opposite failure is real: cutting off a scan that has barely started
+        # leaves the cells beside the aircraft unobserved, and FALCON will
+        # happily route through them (measured once as a pile strike ~40 s
+        # later). Raise it to 2*pi to demand a full revolution again.
         self._survey_yaw_rate = float(rospy.get_param("~survey_yaw_rate", 0.9))
-        self._min_survey_rad = float(
-            rospy.get_param("~min_survey_rad", 2.0 * math.pi))
+        self._min_survey_rad = float(rospy.get_param("~min_survey_rad", 0.0))
         self._survey_last_yaw = None
         # Re-survey when FALCON falls silent for this long after it has been
         # planning -- the signature of an exploration_node respawn (its LKH
@@ -139,6 +159,36 @@ class BsplineFollowerNode(object):
         self._contact_hold_s = float(rospy.get_param("~contact_hold_s", 0.4))
         self._retreat_time_s = float(rospy.get_param("~retreat_time_s", 5.0))
         self._retreat_speed = float(rospy.get_param("~retreat_speed", 0.35))
+        # Vertical escape, used only when the horizontal back-out is itself
+        # walled. max_z must stay UNDER the flight box ceiling (warehouse
+        # box_max_z is 1.8) or the aircraft climbs out of the volume FALCON is
+        # allowed to plan in and no frontier is reachable from up there.
+        # 0 disables the climb and restores the horizontal-only behaviour.
+        self._escape_climb_s = float(rospy.get_param("~escape_climb_s", 4.0))
+        self._escape_climb_speed = float(
+            rospy.get_param("~escape_climb_speed", 0.4))
+        self._escape_climb_max_z = float(
+            rospy.get_param("~escape_climb_max_z", 1.65))
+        # ── proximity speed governor ─────────────────────────────────────
+        # cap = max(floor, slope * (d_near - stop)). It was hardcoded
+        # max(0.08, 0.7 * (d_near - 0.30)), and measured attribution showed why
+        # that matters: the governor bound 43-71% of ticks near obstacles at
+        # roughly HALF the planned speed. The reason is that its knee was set
+        # independently of the planner's own clearance. FALCON is asked for
+        # safe_distance (0.55 m) of margin; at exactly that distance the old
+        # curve allowed 0.7*(0.55-0.30) = 0.175 m/s against a 0.25 m/s plan, so
+        # the aircraft was throttled to 70% while flying EXACTLY where the
+        # planner intended. A governor must bite when the aircraft is closer
+        # than planned, not when it is where it was told to be.
+        #
+        # stop = the drone radius: the distance at which speed must be zero,
+        # which is a property of the airframe. slope 1.2 then clears a 0.25 m/s
+        # plan at 0.46 m and the 0.55 m planned clearance with margin, while
+        # still collapsing to the floor by 0.32 m. Tighten stop, not slope, if
+        # this ever needs to be more conservative.
+        self._prox_stop_m = float(rospy.get_param("~prox_stop_m", 0.25))
+        self._prox_slope = float(rospy.get_param("~prox_slope", 1.2))
+        self._prox_floor = float(rospy.get_param("~prox_floor", 0.08))
         self._retreat_clear_m = float(rospy.get_param("~retreat_clear_m", 1.3))
         # Turn-to-look: after backing out, face the struck point and stare so
         # the mapper fuses it. Caps, not guarantees -- see _retreat.
@@ -177,6 +227,11 @@ class BsplineFollowerNode(object):
         # a nudge, keeping the contact reflex as the true last resort.
         self._creep_speed = float(rospy.get_param("~creep_speed", 0.12))
         self._creep_time_s = float(rospy.get_param("~creep_time_s", 20.0))
+        # Distance from the contested spot at which the concession is over.
+        # 2.0 m is past the 1.5 m radius _note_block_episode groups episodes
+        # by, so leaving cancels the creep without immediately re-arming it.
+        self._creep_clear_m = float(rospy.get_param("~creep_clear_m", 2.0))
+        self._creep_from = None         # type: object
         self._creep_until = None            # type: object
         self._block_episodes = []           # type: list  # (t_s, x, y)
 
@@ -197,6 +252,18 @@ class BsplineFollowerNode(object):
                 "/uav_model/sensing_parameters/camera_intrinsics/cx", 300.5)),
             cy=float(rospy.get_param(
                 "/uav_model/sensing_parameters/camera_intrinsics/cy", 300.5)),
+            # These were core defaults sized for a stack that planned 0.15 m
+            # from obstacles. They are a VETO, not a brake: below
+            # hard_block_d_m the node zeroes horizontal drive outright, and
+            # because margin_m + nose_offset_m is the stopping distance, the
+            # allowed speed is already 0 below 0.80 m. At the old 1.05/0.70
+            # the aircraft was vetoed by anything within ~1 m of the nose
+            # while FALCON was deliberately routing it 0.55 m from obstacles
+            # -- the planner and the bumper asking for incompatible things.
+            # 0.55/0.30 keeps a real stopping margin at this airframe's
+            # 0.8 m/s^2 and 0.30 s latency without vetoing a planned pass.
+            hard_block_d_m=float(rospy.get_param("~depth_block_d_m", 0.55)),
+            margin_m=float(rospy.get_param("~depth_margin_m", 0.30)),
         ))
         self._depth_allow = None        # type: object  # (v_allow, d_min)
         self._depth_allow_at = None     # type: object
@@ -255,6 +322,14 @@ class BsplineFollowerNode(object):
         self._takeoff = rospy.Publisher("/simple_drone/takeoff", Empty, queue_size=1)
         self._diagnostics = rospy.Publisher("~tracking", Float32MultiArray, queue_size=10)
         self._flying = rospy.Publisher("~following", Bool, queue_size=1, latch=True)
+        # Live "who is limiting me right now", one word per tick.
+        self._limiter_pub = rospy.Publisher("~limiter", String, queue_size=1)
+        self._limiter_ticks = {}
+        self._limiter_ratio = {}
+        self._limiter_ratio_n = {}
+        self._limiter_last_report = None
+        self._limiter_report_s = float(
+            rospy.get_param("~limiter_report_s", 15.0))
 
         rospy.Subscriber(rospy.get_param("~odom_topic", "/simple_drone/odom"),
                          Odometry, self._on_odom, queue_size=4)
@@ -316,8 +391,22 @@ class BsplineFollowerNode(object):
             max_accel_z=float(rospy.get_param("~max_accel_z", 2.0)),
             max_yaw_rate=float(rospy.get_param("~max_yaw_rate", 1.4)),
             max_yaw_accel=float(rospy.get_param("~max_yaw_accel", 3.0)))
+        # Vertical position loop. core defaults it to kp 1.8, barely above
+        # the horizontal 1.2 -- but the two axes are not comparable. The
+        # bound each gain sits under is 1 / (3 * delay): horizontal delay
+        # 0.18 s gives 1.85, so 1.2 is close to its ceiling, while the
+        # vertical axis answers in 0.04 s (thrust changes without waiting
+        # for the airframe to rotate) and its bound is 8.3. At 1.8 the
+        # climb loop was running at a FIFTH of the stiffness its own rule
+        # allows, which is why altitude changes lag the reference while
+        # the horizontal axes hold it. 3.6 doubles the authority and is
+        # still less than half the delay bound.
+        vertical_pid = dataclasses.replace(
+            VelocityServoParams().vertical_pid,
+            kp=float(rospy.get_param("~vertical_kp", 3.6)),
+            ki=float(rospy.get_param("~vertical_ki", 0.4)))
         return VelocityServoParams(
-            plant=plant, limits=limits,
+            plant=plant, limits=limits, vertical_pid=vertical_pid,
             yaw_gain=float(rospy.get_param("~yaw_gain", 1.5)),
             use_feedforward_lead=bool(rospy.get_param("~use_feedforward_lead", True)),
             predict_reference=bool(rospy.get_param("~predict_reference", True)),
@@ -383,6 +472,56 @@ class BsplineFollowerNode(object):
 
     # ── the loop ─────────────────────────────────────────────────────────
 
+    def _note_limiter(self, name, ratio=None):
+        # type: (str, object) -> None
+        """Record which mechanism owned this tick, and what it cost.
+
+        Five limiters can each slow or stop this aircraft, they are checked in
+        sequence, and every one of them was added for a different incident.
+        With no attribution, "the drone barely moves near obstacles" is
+        unfalsifiable -- every mechanism looks equally guilty from the outside,
+        and the log only ever shows the loudest one (a retreat) rather than the
+        one that actually binds most of the time. This records exactly ONE
+        binding limiter per tick plus the fraction of the planned speed that
+        survived it, so a four-minute run yields a histogram that names the
+        offender instead of a hunch.
+        """
+        self._limiter_ticks[name] = self._limiter_ticks.get(name, 0) + 1
+        if ratio is not None:
+            self._limiter_ratio[name] = (self._limiter_ratio.get(name, 0.0)
+                                         + float(ratio))
+            self._limiter_ratio_n[name] = self._limiter_ratio_n.get(name, 0) + 1
+        if self._limiter_pub is not None:
+            self._limiter_pub.publish(String(data=name))
+
+        now_s = rospy.Time.now().to_sec()
+        if self._limiter_report_s <= 0.0:
+            return
+        if self._limiter_last_report is None:
+            self._limiter_last_report = now_s
+            return
+        if now_s - self._limiter_last_report < self._limiter_report_s:
+            return
+        self._limiter_last_report = now_s
+        total = sum(self._limiter_ticks.values()) or 1
+        parts = []
+        for key in sorted(self._limiter_ticks,
+                          key=lambda k: -self._limiter_ticks[k]):
+            share = 100.0 * self._limiter_ticks[key] / total
+            if share < 0.5:
+                continue
+            n = self._limiter_ratio_n.get(key, 0)
+            if n:
+                parts.append("%s %.0f%% (x%.2f)"
+                             % (key, share, self._limiter_ratio[key] / n))
+            else:
+                parts.append("%s %.0f%%" % (key, share))
+        rospy.loginfo("[follower] limiter share over %.0fs: %s",
+                      self._limiter_report_s, ", ".join(parts))
+        self._limiter_ticks = {}
+        self._limiter_ratio = {}
+        self._limiter_ratio_n = {}
+
     def _tick(self, _event):
         # type: (object) -> None
         """One control tick. Never raises into the timer thread."""
@@ -432,6 +571,7 @@ class BsplineFollowerNode(object):
         # open-loop drifts horizontally (the vertical twin of the drift the
         # _send guard exists for).
         if self._finished:
+            self._note_limiter("finished")
             self._hold_station(position, yaw)
             return
 
@@ -460,12 +600,14 @@ class BsplineFollowerNode(object):
                 rospy.loginfo("[follower] plan arrived mid-scan; cutting the "
                               "turn short and following it now")
             else:
+                self._note_limiter("survey")
                 self._survey(yaw)
                 return
 
         # Contact recovery owns the aircraft while it is backing out of a wall:
         # the plan that put it there has been dropped, so nothing else may drive.
         if self._retreat_until is not None:
+            self._note_limiter("retreat:%s" % (self._retreat_phase or "?"))
             self._retreat(now, position, yaw)
             return
 
@@ -474,11 +616,17 @@ class BsplineFollowerNode(object):
         # it could not see. Retreat above takes priority -- backing out of a real
         # contact must not be interrupted by a hold.
         if silent_s > self._hold_silent_s:
+            self._note_limiter("falcon_silent")
             self._hold_station(position, yaw)
             self._servo.reset()
             return
         self._hold_point = None            # any other state releases the latch
 
+        # Attribution for this tick: the planned speed before any limiter
+        # touches it, and the worst single factor applied to it.
+        binding = "following"
+        worst = 1.0
+        speed0 = None
         follow = not (self._stopped or self._finished)
         command = self._servo.update(position, velocity, yaw, dt, now.to_sec(),
                                      follow=follow)
@@ -501,9 +649,26 @@ class BsplineFollowerNode(object):
             # motion direction -- wall-sliding grinds are invisible to both
             # directional brakes. A breach is a near-contact: retreat now.
             creeping = (self._creep_until is not None and now < self._creep_until)
+            # Creep is a concession to ONE contested spot, not a cruise mode.
+            # It was released on a 20 s timer alone, so once triggered the
+            # aircraft crawled at creep_speed everywhere it flew next --
+            # measured at 48-100% of ticks at 0.22x the planned speed, the
+            # single largest cause of "it can barely move". Release it as soon
+            # as the aircraft has actually left the spot; the timer stays as
+            # the backstop for a concession that never gets anywhere.
+            if creeping and self._creep_from is not None:
+                gone = math.hypot(float(position[0]) - self._creep_from[0],
+                                  float(position[1]) - self._creep_from[1])
+                if gone > self._creep_clear_m:
+                    self._creep_until = None
+                    self._creep_from = None
+                    creeping = False
+                    rospy.loginfo("[follower] %.1f m clear of the contested "
+                                  "spot; back to plan speed", gone)
             if (not creeping and self._gate_enabled and self._gate.bubble_blocked(
                     (float(position[0]), float(position[1]), float(position[2])),
                     float(rospy.get_param("~bubble_clearance_m", 0.28)))):
+                self._note_limiter("bubble_breach")
                 rospy.logwarn("[follower] bubble breach: occupied voxel inside "
                               "personal space; retreating")
                 self._begin_retreat(position, command)
@@ -511,6 +676,7 @@ class BsplineFollowerNode(object):
 
             hard_blocked = False
             block_why = ""
+            speed0 = math.hypot(command.vx, command.vy)
 
             if self._depth_brake_enabled and command.vx > 1e-3:
                 v_allow = self._depth_forward_limit(now)
@@ -523,6 +689,8 @@ class BsplineFollowerNode(object):
                     # downstream sweeps its corridor from the world vector, so
                     # a body/world mismatch mis-aims it and understates speed
                     f = v_allow / command.vx
+                    if f < worst:
+                        worst, binding = f, "depth_brake"
                     command = dataclasses.replace(
                         command, vx=command.vx * f, vy=command.vy * f,
                         world_vx=command.world_vx * f,
@@ -537,6 +705,8 @@ class BsplineFollowerNode(object):
                     block_why = "map voxel %.2f m ahead" % (
                         blocked if blocked is not None else -1.0)
                 elif scale < 1.0:
+                    if scale < worst:
+                        worst, binding = scale, "map_gate"
                     # BodyTwistCommand is frozen: build the braked copy.
                     command = dataclasses.replace(
                         command,
@@ -553,10 +723,13 @@ class BsplineFollowerNode(object):
                     (float(position[0]), float(position[1]), float(position[2])),
                     1.2)
                 if d_near is not None:
-                    cap = max(0.08, 0.7 * (d_near - 0.30))
+                    cap = max(self._prox_floor,
+                              self._prox_slope * (d_near - self._prox_stop_m))
                     speed = math.hypot(command.vx, command.vy)
                     if speed > cap:
                         f = cap / speed
+                        if f < worst:
+                            worst, binding = f, "proximity_cap"
                         command = dataclasses.replace(
                             command, vx=command.vx * f, vy=command.vy * f,
                             world_vx=command.world_vx * f,
@@ -566,6 +739,10 @@ class BsplineFollowerNode(object):
                 speed = math.hypot(command.vx, command.vy)
                 if speed > self._creep_speed:
                     f = self._creep_speed / speed
+                    # Label it: creep silently produced ratios as low as
+                    # 0.39 that the histogram was crediting to "following".
+                    if f < worst:
+                        worst, binding = f, "creep"
                     command = dataclasses.replace(
                         command, vx=command.vx * f, vy=command.vy * f,
                         world_vx=command.world_vx * f,
@@ -581,6 +758,9 @@ class BsplineFollowerNode(object):
                     self._gate_blocked_since = None
                     self._begin_retreat(position, command)
                     return
+                self._note_limiter(
+                    "hard_block:%s" % ("depth" if block_why.startswith("depth")
+                                       else "map_gate"), 0.0)
                 stop = Twist()
                 stop.linear.z = command.vz          # altitude hold stays live
                 stop.angular.z = command.yaw_rate   # keep looking along the path
@@ -588,6 +768,15 @@ class BsplineFollowerNode(object):
                 return
             self._gate_blocked_since = None
 
+        if follow:
+            # speed0 is None on a tick that never entered the limiter chain
+            # (command.holding): nothing throttled it, so the ratio is 1.
+            if speed0 is None:
+                self._note_limiter("holding", 1.0)
+            else:
+                speed1 = math.hypot(command.vx, command.vy)
+                ratio = (speed1 / speed0) if speed0 > 1e-6 else 1.0
+                self._note_limiter(binding, ratio)
         self._publish(command)
 
     def _elapsed(self, now):
@@ -704,6 +893,7 @@ class BsplineFollowerNode(object):
         self._block_episodes.append((now_s, x, y))
         if repeats >= 1:
             self._creep_until = now + rospy.Duration(self._creep_time_s)
+            self._creep_from = (x, y)
             rospy.logwarn("[follower] blocked repeatedly at (%.1f, %.1f); "
                           "conceding to the planner, creeping at %.2f m/s "
                           "for %.0fs", x, y, self._creep_speed, self._creep_time_s)
@@ -958,6 +1148,41 @@ class BsplineFollowerNode(object):
                     self._retreat_dir_world, 0.7)
                 back_blocked = bd is not None and bd < 0.45
             if cleared or back_blocked or now >= self._retreat_until:
+                # A back-out that never moved is not a retreat, and reporting it
+                # as one is what produced the observed deadlock: the gate vetoes
+                # the way out on the first tick, the maneuver falls through to
+                # FACE and DWELL, "retreat done" is logged, the aircraft is
+                # still exactly where it was, and the breach re-fires forever
+                # (measured: 47 cycles at (-1.13, 4.84), zero bumper contacts,
+                # coverage frozen). Feed it to the SAME escalation the map gate
+                # uses -- an aircraft that cannot extract itself is the
+                # structural our-clearance-versus-the-planner's disagreement
+                # _note_block_episode exists to concede, and conceding means
+                # creeping across at creep_speed rather than holding until the
+                # mission cap.
+                moved = float(np.linalg.norm(position - self._retreat_from))
+                if moved < 0.05 and not cleared:
+                    rospy.logwarn("[follower] could not back out (%s); the way "
+                                  "out is walled too -- conceding to the planner",
+                                  "gate vetoed it" if back_blocked else "timed out")
+                    self._note_block_episode(now, position)
+                    # Pinned in the PLANE, but this aircraft is holonomic and
+                    # the gate is layered in z (_layers_for_z returns only the
+                    # layers the airframe can strike at its current altitude),
+                    # so gaining altitude genuinely changes what blocks it --
+                    # a 1.10 m clutter pile stops obstructing an aircraft at
+                    # 1.6 m. Horizontal retreat is one axis of a three-axis
+                    # escape and it was the only one being used, which is why
+                    # a wedge took minutes of creep to resolve instead of
+                    # seconds. Climb before conceding.
+                    if (self._escape_climb_s > 0.0
+                            and float(position[2]) < self._escape_climb_max_z):
+                        self._retreat_phase = "climb"
+                        self._retreat_until = now + rospy.Duration(
+                            self._escape_climb_s)
+                        rospy.logwarn("[follower] pinned at %.2f m; climbing to "
+                                      "clear the layer", float(position[2]))
+                        return
                 if self._contact_point is None:
                     self._end_retreat("cleared" if cleared else "timed out")
                     return
@@ -973,6 +1198,27 @@ class BsplineFollowerNode(object):
                 wx, wy = self._retreat_dir_world
                 twist.linear.x = self._retreat_speed * (cos * wx + sin * wy)
                 twist.linear.y = self._retreat_speed * (-sin * wx + cos * wy)
+            self._send(twist)
+            return
+
+        if self._retreat_phase == "climb":
+            # Straight up, no yaw and no translation: the point is to change
+            # which z layers the gate is testing, and translating while pinned
+            # is what put the aircraft here. Ends the moment the personal-space
+            # bubble is clear at the new altitude, or on the time cap.
+            clear = True
+            if self._gate_enabled:
+                clear = not self._gate.bubble_blocked(
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    float(rospy.get_param("~bubble_clearance_m", 0.28)))
+            if (clear or now >= self._retreat_until
+                    or float(position[2]) >= self._escape_climb_max_z):
+                self._send(Twist())
+                self._end_retreat("climbed clear at %.2f m" % float(position[2])
+                                  if clear else "climb capped")
+                return
+            twist = Twist()
+            twist.linear.z = self._escape_climb_speed
             self._send(twist)
             return
 

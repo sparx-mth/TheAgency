@@ -97,6 +97,52 @@
   <!-- Depth visual bumper: clamp forward speed by the closest raw depth
        return in the flight corridor. Catches thin obstacles the voxel map
        flaps (raycast clearing erodes one-voxel silhouettes). -->
+
+  <!-- Proximity speed governor: cap = max(floor, slope * (d_near - stop)).
+       stop is the airframe radius, where speed must genuinely be zero. Keep
+       the knee BELOW the planner's safe_distance or the governor throttles a
+       correctly flown path (it did: 43-71% of ticks at half speed). -->
+  <!-- Two scans, two knobs. survey_revs is the RECOVERY turn after a planner
+       respawn (empty map, never re-triggers itself) and stays at 1.25.
+       takeoff_survey_revs is the turn at the START and is 0: measured, FALCON
+       published its first plan 1.9 s after takeoff with it and 1.8 s without,
+       so it bought nothing — while costing a first trajectory planned from a
+       spinning aircraft. Raise it only if a world needs a seeded map. -->
+  <arg name="takeoff_survey_revs" default="1.25" />
+
+  <!-- Vertical position loop. Bounded by 1/(3*delay): the vertical axis
+       answers in 0.04 s (bound 8.3) against horizontal 0.18 s (bound 1.85),
+       so it carries a much stiffer gain than the horizontal 1.2. core's 1.8
+       left the climb lagging the reference; 3.6 is still under half the
+       bound. -->
+  <arg name="vertical_kp" default="3.6" />
+  <arg name="vertical_ki" default="0.4" />
+
+  <arg name="prox_stop_m"  default="0.25" />
+  <arg name="prox_slope"   default="1.2" />
+  <arg name="prox_floor"   default="0.08" />
+
+  <!-- Depth bumper geometry. hard_block_d_m is a VETO, not a brake, and
+       margin_m + nose_offset is the distance at which allowed speed hits zero.
+       Both must stay under safe_distance or the bumper refuses passes the
+       planner was asked to produce. -->
+  <arg name="depth_block_d_m" default="0.55" />
+  <arg name="depth_margin_m"  default="0.30" />
+
+  <!-- Creep releases on DISTANCE from the spot it conceded at, not just on the
+       timer; 2.0 m is past the 1.5 m radius block episodes are grouped by. -->
+  <arg name="creep_clear_m" default="2.0" />
+
+  <!-- Vertical escape when the horizontal back-out is itself walled. max_z
+       must stay UNDER the flight box ceiling (warehouse box_max_z 1.8).
+       escape_climb_s:=0 restores horizontal-only recovery. -->
+  <arg name="escape_climb_s"     default="4.0" />
+  <arg name="escape_climb_speed" default="0.4" />
+  <arg name="escape_climb_max_z" default="1.65" />
+
+  <!-- Seconds between binding-limiter histograms; 0 silences them. -->
+  <arg name="limiter_report_s" default="15.0" />
+
   <arg name="depth_brake"           default="true" />
 
   <!-- Crash-recovery reflex. FALCON's in-process LKH solver corrupts the heap on
@@ -155,6 +201,19 @@
     <param name="gate_z_lo"            value="$(arg gate_z_lo)" />
     <param name="gate_z_hi"            value="$(arg gate_z_hi)" />
     <param name="gate_block_retreat_s" value="$(arg gate_block_retreat_s)" />
+    <param name="takeoff_survey_revs"  value="$(arg takeoff_survey_revs)" />
+    <param name="vertical_kp"          value="$(arg vertical_kp)" />
+    <param name="vertical_ki"          value="$(arg vertical_ki)" />
+    <param name="prox_stop_m"          value="$(arg prox_stop_m)" />
+    <param name="prox_slope"           value="$(arg prox_slope)" />
+    <param name="prox_floor"           value="$(arg prox_floor)" />
+    <param name="depth_block_d_m"      value="$(arg depth_block_d_m)" />
+    <param name="depth_margin_m"       value="$(arg depth_margin_m)" />
+    <param name="creep_clear_m"        value="$(arg creep_clear_m)" />
+    <param name="escape_climb_s"       value="$(arg escape_climb_s)" />
+    <param name="escape_climb_speed"   value="$(arg escape_climb_speed)" />
+    <param name="escape_climb_max_z"   value="$(arg escape_climb_max_z)" />
+    <param name="limiter_report_s"     value="$(arg limiter_report_s)" />
     <param name="depth_brake"          value="$(arg depth_brake)" />
     <param name="depth_topic"          value="$(arg drone_ns)/front_depth/depth/image_raw" />
 

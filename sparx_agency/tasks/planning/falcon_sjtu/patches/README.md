@@ -9,15 +9,37 @@ silently drops it. Each such change is a patch here, applied by the image build.
 
 The image is built by **`sjtu_project/falcon_docker/Dockerfile`** (an external
 repo), which `git clone`s FALCON (`ros1-noetic`) and then runs a series of
-self-verifying `fix_falcon_*.sh` scripts before `catkin_make`. Our patch is wired
-in there the same way:
+self-verifying `fix_falcon_*.sh` scripts before `catkin_make`. All four patches
+here are wired in as one step:
 
-- `sjtu_project/falcon_docker/falcon_deadend_guard.patch` — the patch (authoritative copy).
-- `sjtu_project/falcon_docker/fix_falcon_deadend_guard.sh` — `git apply`s it and self-verifies.
-- `Dockerfile` step "6a-quinquies" — `COPY`s both in and runs the script.
+- `sjtu_project/falcon_docker/sparx_patches/*.patch` — a copy of this directory.
+- `sjtu_project/falcon_docker/fix_falcon_sparx_patches.sh` — `git apply`s each
+  one in turn and verifies its sentinel, failing the **image build** rather than
+  shipping a silently unpatched FALCON.
+- `Dockerfile` step "6a-ter" — `COPY`s both in and runs the script.
 
-The copy in this directory is a **mirror for visibility from TheAgency**; the
-build reads the one in `falcon_docker/`. Keep them in sync if you change it.
+The copies in this directory are the **authoritative source**; the build reads
+the mirror in `falcon_docker/sparx_patches/`. Keep them in sync.
+
+**Two older fix scripts are subsumed and must not run alongside these.** The
+patches were cut with `git diff` inside a container where the sed-based fixes had
+already been applied to the working tree, so they carry those exact edits as
+their own additions:
+
+| superseded script | now lives inside |
+|---|---|
+| `fix_falcon_cost_check.sh` (6 cost floors) | `falcon_hgrid_clamp.patch` |
+| `fix_falcon_depth_overflow.sh` (2 resizes) | `falcon_visgrid_cadence.patch` |
+| `fix_falcon_sop.sh` (1 s → 10 s) | `falcon_deadend_guard.patch` |
+
+Steps 6a-ter and 6a-quater were therefore removed from the Dockerfile. Running
+one of them *and* its patch leaves the tree unpatchable — the script inserts the
+lines, and `git apply` then fails on context it expected to add itself. The sop
+script is the exception that stays wired at step 8b: it checks for its own
+result first and self-skips, so the patch simply makes it a no-op.
+
+Verified against upstream `ros1-noetic` as of 2026-08-13: all four apply clean,
+no `--3way` fallback needed.
 
 ## falcon_deadend_guard.patch — escape unreachable dead ends
 
@@ -53,12 +75,73 @@ never when the viewpoint is merely unreachable. The result is a permanent stall
   respawned frontier finder keeps every physics-vetoed viewpoint shadowed
   (sentinel: `blocked_regions_runtime`).
 
+## falcon_hgrid_clamp.patch — never index outside the grid box
+
+Touches one upstream file: `exploration_preprocessing/src/hierarchical_grid.cpp`
+(sentinel: `Clamp into the grid box FIRST`).
+
+**Why.** `UniformGrid::positionToGridCellId()` floors a position into a cell
+index with no bound check, and `positionToGridCellCenterId()` then indexes
+`uniform_grid_` with the result. The aircraft is *below the box floor on every
+takeoff* (`box_min_z` 0.6 while it rests at z=0), so the index is negative
+before the mission even starts, and any overshoot of a face does the same thing
+later. Upstream knew — the CHECKs at the bottom of that function are commented
+out — and shipped the crash: measured as 14 planner deaths in 8 minutes once the
+flight box floor was raised.
+
+**What it does.** Clamps the position into the box before flooring, clamps the
+per-axis cell index into range, and re-clamps on the caller's side if the id is
+still out of range, returning −1 rather than indexing. Every caller is asking
+"which tour cell is the aircraft in"; for an aircraft outside the box the
+nearest cell *is* the answer. It also carries the six cost floors that
+`fix_falcon_cost_check.sh` used to insert.
+
+## falcon_replan_from_pose.patch — plan from the aircraft, not from its ghost
+
+Touches one upstream file: `exploration_manager/src/exploration_fsm.cpp`
+(sentinel: `replanning from the real pose`).
+
+**Why.** Once FALCON leaves `static_state_` it stops planning from odometry and
+starts every replan from the PREVIOUS trajectory, evaluated `replan_duration_`
+ahead and **clamped to that trajectory's end**:
+
+```cpp
+double t_r = (time_now - info->start_time_).toSec() + fp_->replan_duration_;
+if (t_r > info->duration_) t_r = info->duration_;
+fd_->start_pos_ = info->position_traj_.evaluateDeBoorT(t_r);
+```
+
+That is fine while the aircraft tracks the curve. Ours frequently does not —
+the depth brake, the map gate and the retreat all stop it on purpose — and
+`static_state_` is only restored on a planning failure or on FINISH, never on
+"the aircraft did not get there". So the start point runs to the end of a curve
+that was never flown, and every later plan compounds from that ghost. Measured
+on the warehouse: `position_error` 5.4 m, `along_track_lag` 4.5 m,
+`reference_time_s` pinned at 8e-05 s across **118 trajectories** — the follower
+crawling at `max_catchup_speed` toward a start point that moved again before it
+could ever be acquired. On screen it reads exactly as "the planned path starts
+several metres away from the drone and it will not follow it".
+
+**What it does.** After computing the ghost start, compare it with `odom_pos_`;
+past `/fsm/replan_from_pose_drift` (default 1.5 m) fall back to planning from
+the real pose, velocity and yaw — precisely what the `static_state_` branch
+above it already does. It is a fallback, not a replacement: while tracking is
+healthy the drift never reaches the threshold and upstream behaviour is
+untouched.
+
+**Result** (warehouse, `obstacles_inflation:=0.35`, 2026-08-13): coverage
+**153.9 m³ of the 161 m³ flight box (95.6%)**, mission reaching FINISH on its
+own, 15 retreats and **zero bumper contacts**. The same stack before this patch
+plateaued at 99 m³ and milled in one spot.
+
 ## Rebuilding vs. the running image
 
-The running `falcon-ros-custom:v1` also has this compiled in (it was
-`docker commit`ed live), so the current `run_falcon_sjtu.sh` workflow needs no
-rebuild. The patch mechanism above is what makes it survive an image **rebuild**
-(`docker build sjtu_project/falcon_docker`) or a fresh FALCON clone.
+An image that was `docker commit`ed live carries these already and needs no
+rebuild. The patch mechanism above is what makes them survive an image
+**rebuild** (`docker build sjtu_project/falcon_docker`) or a fresh FALCON clone
+— and it is the only thing that does, which matters on a machine that never had
+the committed image. `falcon-ros-custom:v1` was rebuilt from scratch this way on
+PCN87653 on 2026-08-13.
 
 ## Regenerating the patch
 
@@ -66,10 +149,10 @@ If you change FALCON's C++ again in the running container:
 
 ```bash
 docker exec falcon-sjtu bash -lc \
-  'cd /catkin_ws/src/FALCON && git --no-pager diff -- <changed files>' \
+  'cd /catkin_ws/src/FALCON && git --no-pager diff -- <the files of ONE patch>' \
   > sparx_agency/tasks/planning/falcon_sjtu/patches/falcon_deadend_guard.patch
 cp sparx_agency/tasks/planning/falcon_sjtu/patches/falcon_deadend_guard.patch \
-   ~/GIT/sjtu_project/falcon_docker/falcon_deadend_guard.patch
+   ~/GIT/sjtu_project/falcon_docker/sparx_patches/
 ```
 
 The fix script self-verifies with a **single-line** sentinel (`confined to <2 m`)

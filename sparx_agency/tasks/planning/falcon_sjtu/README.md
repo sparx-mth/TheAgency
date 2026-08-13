@@ -132,6 +132,62 @@ bash sparx_agency/robots/SJTU/setup/bringup_world.sh --skip-build hospital
 ./run_falcon_sjtu.sh hospital
 ```
 
+The warehouse is the same two commands with the **world and the map config
+named differently** — `no_roof_small_warehouse` is the Gazebo world,
+`warehouse` is the FALCON map config:
+
+```bash
+bash sparx_agency/robots/SJTU/setup/bringup_world.sh --skip-build no_roof_small_warehouse
+./run_falcon_sjtu.sh warehouse
+```
+
+`rig/campaign_run.sh` handles that split itself via `WORLD=`; see its header.
+
+**`--skip-build` reuses the installed simulator, including its URDF.** It is the
+fast path and the rig uses it, but after any edit to `sjtu_drone.urdf.xacro` it
+flies the *previous* aircraft — wrong camera intrinsics included, silently. See
+"Cameras" in `robots/SJTU/README.md` for what that does to the map, and check
+`camera_info` against `bspline_follower.launch` before trusting a run.
+
+> **Everything measured on the warehouse before 2026-08-13 was flown through a
+> stale 640x360 / fx 185.69 depth camera** while the stack was configured for
+> 600x600 / fx 390.64. That includes the runs behind `config/warehouse.yaml`'s
+> box limits and its notes on contacts and "pocket-land" — those conclusions
+> were drawn against a map whose obstacles were pulled 2.1x toward the optical
+> axis, so re-derive them before treating them as geometry.
+
+### On a machine that has never run this stack
+
+Three images and one world repo, none of which live in TheAgency. Bringing them
+up from nothing on PCN87653 on 2026-08-13 took four fixes, all of them in the
+external repos, and all of them the kind that only appear on a *fresh* build —
+an image that was `docker commit`ed live carries the workarounds invisibly:
+
+| what | why it does not just work |
+|---|---|
+| `aws-robomaker-small-warehouse-world` | archived repo: the default branch has **only a README**, the worlds are on `ros1` |
+| `sjtu_drone_sparx:humble` | `docker build -t sjtu_drone_sparx:humble sparx_agency/robots/SJTU/setup` (~10 s). Without it bring-up silently falls back to Fast DDS and the bridge sees nothing |
+| `ros1_bridge:noetic-foxy` | needs `ros-{noetic,foxy}-gazebo-msgs` at **build** time or `bumper_states` cannot bridge, and `cyclonedds_localhost.xml` baked in — `run_falcon_sjtu.sh` points `CYCLONEDDS_URI` at a path only `run_bridge.sh` mounts |
+| `falcon-ros-custom:v1` | `docker build sjtu_project/falcon_docker` — see `patches/README.md`, plus the three build breaks below |
+
+The three that stop `catkin_make` in a fresh `falcon_docker` build, in the order
+they fire:
+
+1. `falcon_adapter/CMakeLists.txt` lists `scripts/plot_trajectory_ros1.py`,
+   which has never been committed to `sjtu_project`. `catkin_install_python`
+   fails the *configure* step on any checkout that does not also carry that
+   untracked file.
+2. `uav_simulator/so3_disturbance_generator` `add_dependencies` on
+   `${PROJECT_NAME}_gencfg`, but no FALCON package calls
+   `generate_dynamic_reconfigure_options`, so the target cannot exist.
+3. `camera_sensing/mesh_render` needs Open3D's GUI/Filament API, and step 5
+   builds Open3D with `-DBUILD_GUI=OFF` deliberately — so it fails at *link*
+   time, after the whole workspace has compiled.
+
+2 and 3 are now seeded in `ignore_cuda_pkgs.sh` for every platform (they were
+previously only excluded on the `WITH_SIM=0` Jetson path). Neither package is
+launched by any of our three deployments.
+
 `run_falcon_sjtu.sh` opens FALCON's own RViz view automatically whenever a
 display is present (`RVIZ=0` to suppress, e.g. for soaks): the voxel map,
 frontiers, hgrid, the planned and travelled trajectories, and the drone itself.
@@ -141,6 +197,158 @@ The drone model is published by FALCON's `odom_visualization`, which
 `exploration.launch` runs fed from `/odom_world` (FALCON's rviz config expects
 it, and nothing else in this stack would publish it — without it the map grows
 with no aircraft in view).
+
+## Why it crawls near obstacles: ask the attribution log, do not guess
+
+Five mechanisms can slow or stop this aircraft — depth brake, map-gate scaling,
+proximity governor, personal-space retreat, creep — they are checked in
+sequence, and each was added for a different incident. From outside they are
+indistinguishable: the aircraft is simply slow, and the log only ever shows the
+loudest one (a retreat) rather than the one that actually binds. So the
+follower records exactly ONE binding limiter per tick, with the fraction of the
+planned speed that survived it, and prints a histogram every
+`limiter_report_s` (15 s):
+
+```
+[follower] limiter share over 15s: proximity_cap 71% (x0.49), following 29% (x1.00)
+```
+
+Read that as: for 71% of ticks the proximity governor was the binding
+constraint and it allowed 49% of the planned speed. `~limiter` publishes the
+same name live, one word per tick, for `rostopic echo`.
+
+**That log found two throttles that no amount of watching RViz would have.**
+
+*The proximity governor was fighting the planner.* It capped speed at
+`max(0.08, 0.7 * (d_near - 0.30))` — a curve set independently of the clearance
+FALCON is asked for. At `safe_distance` 0.55 m it allowed 0.175 m/s against a
+0.25 m/s plan: **the aircraft was throttled to 70% while flying exactly where
+the planner intended**, and to 32% whenever the soft ESDF penalty let the curve
+drift to 0.4 m. The knee is now the airframe radius, where speed genuinely must
+be zero (`prox_stop_m` 0.25, `prox_slope` 1.2, `prox_floor` 0.08), so a
+correctly flown path is not braked at all.
+
+*Creep never let go.* The concession to a contested spot released on a 20 s
+timer alone, so once triggered the aircraft crawled at 0.12 m/s everywhere it
+flew next — measured at 48-100% of ticks at 0.22x the plan, one window at
+100%. It now also releases spatially, as soon as the aircraft is
+`creep_clear_m` (2.0 m) from the spot it conceded at; the timer remains the
+backstop for a concession that never gets anywhere.
+
+Measured across the same world and start, fresh map each run:
+
+| configuration | FINISH | coverage | retreats | binding limiter |
+|---|---|---|---|---|
+| `safe_distance` 0.55 + vertical escape | 120 s | 154.2 m³ | 9 | `proximity_cap` 43-71% (x0.50) |
+| + governor knee at the airframe radius | ~150 s | 154.7 m³ | 6 | `creep` 48-100% (x0.22) |
+| + spatial creep release | **120 s** | **154.6 m³** | **5** | **`following` 83% (x1.00)** |
+
+Zero bumper contacts in every one of them.
+
+### Clearance is 3D, so the CEILING is a clearance parameter
+
+FALCON's ESDF is a genuine 3D Euclidean distance transform (three separable
+passes over z, y, x in `esdf.cpp`), swept over the map box and clamped by
+`boundIndex` to the **vbox**, not the flight box. The floor is in it — measured
+41,446 occupied voxels at z≈0, half the map — so `safe_distance` really is
+enforced downward as well as sideways.
+
+Which makes the flight box ceiling part of the clearance arithmetic, and it is
+easy to set it somewhere that quietly forbids every overflight:
+
+| obstacle | top | altitude needed at `safe_distance` 0.85 |
+|---|---|---|
+| ClutteringA piles | 1.10 m | 1.95 m |
+| buckets | 1.41 m | 2.26 m |
+| tall C-piles | 1.78 m | 2.63 m |
+
+At the old `box_max_z` 1.8 **none of those fit**. The optimiser cannot satisfy
+a constraint the box forbids, so it traded the margin away and skimmed the
+tops — which is where the belly strikes came from, and why the route looked
+like it had no room underneath it. `box_max_z` is now 2.6.
+
+The old argument for a low ceiling (stay under the 1.96 m shelf tops so
+coverage is flown in the aisles rather than over the racking) no longer binds:
+the shelf rows are at x 4.28..5.16 and x −6.89..−4.79, both outside
+`box_max_x` 3.9 and `box_min_x` −4.4, so the aircraft cannot reach them at any
+altitude. Raising the ceiling buys headroom over the clutter and nothing else.
+
+Measured, same world and start: coverage 95.5% of the box at 1.8 m against
+**97.1% at 2.6 m**, retreats 2 → **1**, and the aircraft using 1.24–2.48 m of
+altitude instead of 1.1–1.7. Compare percentages, not cubic metres — raising
+the ceiling changes the box volume from 161 m³ to 269 m³.
+
+### Known, characterised, NOT fixed: the depth brake over-cuts sideways
+
+`f = v_allow / command.vx` is derived from the FORWARD axis alone and then
+multiplies the whole 2D vector:
+
+```python
+f = v_allow / command.vx
+command = dataclasses.replace(command, vx=command.vx * f, vy=command.vy * f, ...)
+```
+
+The forward component lands exactly on `v_allow`, which is right. The lateral
+component is scaled by that same ratio, which is not: the depth corridor is a
+forward tube 0.70 m wide, so an obstacle inside it says nothing about moving
+sideways — and sidestepping is precisely how this aircraft passes a shelf end.
+The over-cut is 1/cos(beta) off the nose: 1.41x at 45 degrees, 2x at 60.
+
+It is left alone deliberately. The one-factor-on-every-component rule is load
+bearing for the stage below it — the map gate sweeps its corridor from the
+WORLD vector, so scaling body and world components differently mis-aims it
+(see the comment at that call site). Fixing this properly means limiting the
+forward axis only and recomputing the world vector from the corrected body
+command, then re-verifying the gate's corridor still points where the aircraft
+is actually going. Worth doing; not worth doing untested.
+
+The other four limiters enforce four different standoffs against the same wall
+— depth veto 0.55 m (was 1.05), map gate 0.35 m, bubble 0.28 m, governor knee
+0.25 m — and the binding envelope is the MAX of them, not any single design
+value. Keep them within sight of `safe_distance` (0.55 m) or the follower
+starts refusing curves the planner was asked to produce.
+
+## Getting unstuck: the escape is three-axis, not two
+
+A wedge in this world is almost never a contact — across every warehouse run on
+2026-08-13 the Gazebo bumper reported **zero** contacts while the follower
+retreated dozens of times. What fires is the map gate's personal-space bubble,
+and the aircraft was trying to resolve it by backing out *in the plane*. When
+the way back is walled too, that fails, and before the fixes below it failed
+silently: the maneuver fell through to FACE and DWELL, logged "retreat done",
+and the aircraft had not moved a centimetre.
+
+Two things resolve it, in order:
+
+1. **A back-out that never moved is recorded as a block** and feeds
+   `_note_block_episode` — the same escalation the map gate uses — so a second
+   one within 1.5 m concedes to the planner and creeps across at `creep_speed`
+   instead of looping forever.
+2. **A pinned aircraft climbs.** `voxel_brake_gate` keys occupancy into z
+   LAYERS and `_layers_for_z` only tests the layers the airframe can strike at
+   its current altitude, so gaining height genuinely changes what blocks it: a
+   1.10 m clutter pile stops obstructing an aircraft at 1.6 m. Horizontal
+   retreat was one axis of a three-axis escape and the only one being used.
+   `escape_climb_s` (4 s), `escape_climb_speed` (0.4 m/s) and
+   `escape_climb_max_z` (1.65 m, **under** the 1.8 m box ceiling — climb out of
+   the box and no frontier is reachable from up there); `escape_climb_s:=0`
+   restores horizontal-only behaviour.
+
+Measured on the warehouse, fresh map each time, same world and start:
+
+| configuration | time to FINISH | coverage | retreats | contacts |
+|---|---|---|---|---|
+| ghost-start fix only | ~420 s | 153.9 m³ | 15 | 0 |
+| + `safe_distance` 0.35 | ~250 s | 149.6 m³ | 9 | 0 |
+| + wider frontier clearances, `max_vel` 0.4 | ~470 s | 153.4 m³ | 22 | 0 |
+| **+ vertical escape** | **120 s** | 151.0 m³ | **8** | 0 |
+
+The third row is the negative result worth keeping: raising
+`frontier_min_occ_clearance` to 0.70 and `candidate_rmin` to 1.5 to stop FALCON
+choosing viewpoints in tight gaps made it *worse* — it refuses viewpoints in
+the aisles, so early mapping crawled and retreats went up. The flight box in
+`config/warehouse.yaml` remains the tool for keeping the aircraft out of a
+region; the frontier clearances are not.
 
 ## Status
 
