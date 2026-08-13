@@ -79,45 +79,41 @@ fi
 
 chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
 
-# ── per-world planner clearance ───────────────────────────────────────────
-# safe_distance is the ONLY clearance FALCON's optimiser respects, and the
-# right value is a property of the WORLD, not of this stack: the rule is
-# safe_distance <= narrowest_half_width, or the optimiser is asked for margin
-# the corridor cannot provide and trades it away unpredictably.
+# ── planner clearance: ONE value, both worlds ─────────────────────────────
+# This used to be set per world -- 0.85 in the warehouse, 0.45 in the hospital
+# -- on the belief that warehouse aisles are ~1.4 m and hospital doorways
+# 0.9 m. The measurement says otherwise. The warehouse's six shelf aisles are
+# 0.909, 0.916, 0.942, 1.035, 1.044 and 1.216 m (the "1.4 m" came from a shelf
+# mesh read without its 90 degree node transform, which also rotated the whole
+# rack; see config/warehouse.yaml), and its tightest clutter slots are 0.81 and
+# 0.95 m. The hospital's 18 small doorways are 0.930 m. The two buildings ask
+# for the SAME clearance, and the reason a single value looked impossible was a
+# geometry error, not a conflict between the worlds.
 #
-#   warehouse  aisles ~1.4 m wide  -> half-width 0.70. Flown at 0.15 / 0.55 /
-#              0.70 / 0.85: retreats 15 / 9 / 7 / 3 and bubble breaches
-#              many / - / 2 / 1, so more clearance keeps monotonically buying
-#              fewer conflicts with the follower's gates. 0.85 is chosen over
-#              upstream's 0.70 for that, and the cost is visible and bounded:
-#              it EXCEEDS the aisle half-width, so A* intermittently has no
-#              legal route and logs "No path to next viewpoint" (70 in one
-#              run, 0 at 0.70). FALCON replans through it and the mission
-#              still finished 154.2 m3 in 100 s. Drop to 0.70 if those
-#              failures ever stop being transient.
-#   hospital   doorways 0.9 m      -> half-width 0.45. 0.70 makes a doorway
-#              unplannable; keep it under 0.45.
+# 0.45 is the doorway HALF-WIDTH, and it is chosen at the half-width rather
+# than under it on purpose. The cost is
+#     if (dist < safe_distance) cost += pow(dist - safe_distance, 2)
+# which is strictly ONE-SIDED (verified in bspline_optimizer.cpp:271-289): at
+# 0.40 in a 0.90 m opening the penalty is exactly zero anywhere within +-0.05 m
+# of centre, so nothing pulls the curve to the middle and the follower starts
+# its pass having already spent that budget. At the half-width the cost becomes
+# delta^2 with its minimum on the centreline and a restoring gradient
+# everywhere off it -- the optimiser threads the exact middle of the opening,
+# which is what a 0.52 m airframe in a 0.90 m door needs.
+#
+# The old file also claimed 0.85 caused the warehouse's 70 "No path to next
+# viewpoint" lines. It cannot have: safe_distance is read by the B-spline
+# optimiser and by NOTHING ELSE in FALCON -- not astar.cpp, not
+# path_cost_evaluator.cpp, not frontier_finder.cpp. What it really did at 0.85
+# was leave a permanent non-zero distance residual (weight 50) fighting START
+# (100), END (50) and SMOOTHNESS (20) on every curve, so the optimiser bought
+# clearance by distorting routes it had no room to distort.
 #
 # An explicit safe_distance in FALCON_LAUNCH_ARGS always wins.
 if [[ "${FALCON_LAUNCH_ARGS:-}" != *safe_distance* ]]; then
-    case "${MAP_NAME}" in
-        warehouse)              MAP_SAFE_DISTANCE="0.85" ;;
-        # 0.45 = the doorway HALF-WIDTH, deliberately, so the distance
-        # cost has its minimum exactly on the centreline. At 0.40 the
-        # penalty pow(dist - safe_distance, 2) is exactly ZERO anywhere
-        # within +-0.05 m of centre, so nothing pulled the curve to the
-        # middle of a door and the follower spent its whole cross-track
-        # budget before it started. Setting it AT the half-width leaves
-        # a gradient everywhere off-centre: the optimiser threads the
-        # exact middle of the opening, which is where a 0.25 m airframe
-        # in a 0.90 m door has to be.
-        hospital|small_house)   MAP_SAFE_DISTANCE="0.45" ;;
-        *)                      MAP_SAFE_DISTANCE="" ;;
-    esac
-    if [[ -n "${MAP_SAFE_DISTANCE}" ]]; then
-        FALCON_LAUNCH_ARGS="safe_distance:=${MAP_SAFE_DISTANCE} ${FALCON_LAUNCH_ARGS:-}"
-        echo "[falcon_sjtu] ${MAP_NAME}: planner clearance safe_distance:=${MAP_SAFE_DISTANCE}"
-    fi
+    MAP_SAFE_DISTANCE="${SAFE_DISTANCE:-0.45}"
+    FALCON_LAUNCH_ARGS="safe_distance:=${MAP_SAFE_DISTANCE} ${FALCON_LAUNCH_ARGS:-}"
+    echo "[falcon_sjtu] ${MAP_NAME}: planner clearance safe_distance:=${MAP_SAFE_DISTANCE}"
 fi
 
 cleanup() {
@@ -139,6 +135,7 @@ docker run -d --name falcon-sjtu \
     --volume "${REPO_ROOT}:/opt/sparx_agency:ro" \
     --volume "${SCRIPT_DIR}/adapter/scripts/bspline_follower_node.py:${SCRIPTS_TARGET}/bspline_follower_node.py" \
     --volume "${SCRIPT_DIR}/adapter/scripts/sensor_pose_node.py:${SCRIPTS_TARGET}/sensor_pose_node.py" \
+    --volume "${SCRIPT_DIR}/adapter/scripts/mission_watchdog_node.py:${SCRIPTS_TARGET}/mission_watchdog_node.py" \
     --volume "${SCRIPT_DIR}/adapter/launch/exploration.launch:${LAUNCH_TARGET}/exploration.launch" \
     --volume "${SCRIPT_DIR}/adapter/launch/bspline_follower.launch:${LAUNCH_TARGET}/bspline_follower.launch" \
     --volume "${SCRIPT_DIR}/config/${MAP_NAME}.yaml:/catkin_ws/src/FALCON/falcon_planner/exploration_manager/config/map/${MAP_NAME}.yaml" \

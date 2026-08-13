@@ -121,6 +121,19 @@ def main():
         for w in worst:
             print("         worst gap %.2f m (along %+.2f, cross %+.2f) at ref_t %.1f traj %d"
                   % (w[2], w[3], w[4], w[11], int(w[10])))
+        # Commanded world speed, against the ceiling the clearance allows. The
+        # follower may not fly faster than it can stop inside the margin the
+        # planner reserved (safe_distance minus the airframe half width), and
+        # this is the column that says whether it did: every contact in one
+        # campaign happened between 0.48 and 0.59 m/s under a cap of 0.60 that
+        # had been chosen rather than derived.
+        speeds = [math.hypot(r[6], r[7]) for r in FOLLOW]
+        if speeds:
+            ps = _percentiles(speeds, (50, 90, 99))
+            stop = lambda v: 0.30 * v + v * v / 1.6   # noqa: E731 - local formula
+            print("         commanded speed p50/p90/p99 = %.2f/%.2f/%.2f m/s; "
+                  "stopping distance at p99 = %.2f m"
+                  % (ps[50], ps[90], ps[99], stop(ps[99])))
 
     # ── sim health ──────────────────────────────────────────────────────
     rtf_path = os.path.join(run_dir, "rtf.log")
@@ -139,6 +152,54 @@ def main():
         if factors:
             print("rtf:     mean %.2f  min %.2f  (%d samples)"
                   % (sum(factors) / len(factors), min(factors), len(factors)))
+
+    # ── mission progress: coverage, confinement, and the plan-origin gap ─
+    # The only artifact that says WHY a run went nowhere rather than merely
+    # that it did. Written at 1 Hz by mission_watchdog_node.
+    prog = []
+    ppath = os.path.join(run_dir, "progress.jsonl")
+    if os.path.exists(ppath):
+        with open(ppath) as f:
+            for line in f:
+                try:
+                    prog.append(json.loads(line))
+                except ValueError:
+                    continue
+    if prog:
+        last = prog[-1]
+        print("mission: coverage %.1f m3 over %.0fs; %d plans"
+              % (last.get("coverage_m3", 0.0), last.get("elapsed_s", 0.0),
+                 last.get("plans", 0)))
+        radii = [p["confinement_radius_m"] for p in prog
+                 if p.get("confinement_radius_m") is not None]
+        growth = [p["growth_m3_per_min"] for p in prog
+                  if p.get("growth_m3_per_min") is not None]
+        if radii:
+            pr, pg = _percentiles(radii, (10, 50)), _percentiles(growth, (10, 50))
+            print("         confinement radius p10/p50 = %.1f/%.1f m; "
+                  "growth p10/p50 = %.1f/%.1f m3/min"
+                  % (pr[10], pr[50], pg[10], pg[50]))
+        # Where FALCON believed the aircraft was, against where it was. The
+        # gap opens whenever this stack brakes or holds, because FALCON starts
+        # each replan from the previous curve rather than from odometry.
+        gaps = [p["plan_origin_gap_m"] for p in prog
+                if p.get("plan_origin_gap_m") is not None]
+        if gaps:
+            pgap = _percentiles(gaps, (50, 90, 99))
+            print("         plan-origin gap p50/p90/p99 = %.2f/%.2f/%.2f m, "
+                  "max %.2f m" % (pgap[50], pgap[90], pgap[99],
+                                  last.get("plan_origin_gap_max_m", 0.0)))
+        lags = [p["sensor_pose_lag_s"] for p in prog
+                if p.get("sensor_pose_lag_s") is not None]
+        if lags:
+            print("         mapper pose lag p50/p99 = %.3f/%.3f s (transformer "
+                  "tolerance 0.05)"
+                  % (_percentiles(lags, (50, 99))[50],
+                     _percentiles(lags, (50, 99))[99]))
+        for p in prog:
+            if p.get("state") not in (None, "running"):
+                print("         %-16s t=%6.0fs %s"
+                      % (p["state"], p.get("elapsed_s", 0.0), p.get("reason", "")))
 
     # ── planner side ────────────────────────────────────────────────────
     fl = os.path.join(run_dir, "falcon.log")

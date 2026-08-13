@@ -1,14 +1,36 @@
 # FALCON map_config for the AWS RoboMaker small warehouse (no-roof variant).
 #
-# Geometry measured from the world + collision meshes (rig note: the model SDFs
-# use COLLADA collision meshes, so these numbers come from parsing the mesh
-# vertex extents, not from <box> tags):
+# Geometry measured from the world + collision meshes. THE PREVIOUS NUMBERS IN
+# THIS FILE WERE WRONG, and wrong in a way worth recording because it is easy
+# to repeat: the ShelfD/ShelfE collision DAE carries a 90 degree <node><matrix>
+# that Gazebo applies and a naive vertex-extent parse does not. Reading the raw
+# vertices gave a north-south shelf row at x [4.28, 5.16], y [-9.95, 1.91],
+# "~2.0 m tall" -- the mesh's own half-length quoted as a height. Applying the
+# node transform (the only placement that rests the units on the floor rather
+# than burying them at z -1.959) turns them 90 degrees:
 #
-#   walls (inner shell)   x ~ [-6.8, 6.8]   y ~ [-10.2, 10.2]   9 m tall
-#   shelf row (E/D)       x [4.28, 5.16]    y [-9.95, 1.91]     ~2.0 m tall
-#   big shelf F           x [-6.89, -4.79]  y [-9.95, 8.10]     6.5 m tall
-#   clutter piles         ~1.8 m tall, scattered on the middle floor
-#   spawn                 (1, 1) -- open floor (nearest clutter edge > 1.2 m)
+#   walls (inner shell)   x [-6.861, 6.851]   y [-10.321, 10.321]   9.02 m, NO ROOF
+#   shelf units D/E       SIX of them, each x [2.772, 6.691] (3.918 m ALONG X),
+#                         0.880 m deep in y, decks solid z 0.735..2.643
+#   shelf aisles          EAST-WEST, between the units: 0.909, 0.916, 0.942,
+#                         1.035, 1.044 m, plus a 1.216 m slot at the south wall.
+#                         Every one is a 3.9 m DEAD END -- only 0.160 m separates
+#                         the shelf ends from the east wall.
+#   big shelf F           x [-6.839, -4.737]  y [-9.980, 8.067]  6.53 m tall,
+#                         solid only above 1.642; below that, four open bays
+#                         4.2-4.4 m wide behind 0.15 m fins.
+#   clutter piles         tops 1.00 / 1.10 / 1.41 / 1.50 / 1.79 m, middle floor
+#   spawn                 (1, 1) -- open floor, 1.68 m clear in every direction
+#
+# Two consequences the old numbers got backwards, and both bit:
+#   * "the shelf rows are OUTSIDE box_max_x 3.9, so the aircraft cannot reach
+#     them at any altitude" was false. All six units START at x 2.772, so
+#     1.128 m of every one of them was INSIDE the box -- and box_max_z 2.6 sat
+#     0.043 m BELOW their 2.643 m tops, so the aircraft was among the racking
+#     with no way to climb out of it. That is the "illogical route between
+#     crowded shelves" this config exists to forbid, written into the config.
+#   * "aisles are ~1.4 m wide" was wrong in both directions: the shelf aisles
+#     are 0.909-1.216 m and the north-strip gaps are 0.672-0.703 m.
 #
 # box_min_z 0.6 for the same reason as the hospital: the floor is in the box
 # otherwise and FALCON flies at ankle height among pallet jacks and buckets.
@@ -63,7 +85,17 @@ map_config:
     # altitude layers they occupy; the ceiling stays below the 1.96 m shelf
     # tops so coverage is flown in the aisles.
     box_min_z:  0.6
-    box_max_x:  3.9
+    # 2.6, lowered from 3.9. The six shelf units begin at x = 2.772 and their
+    # decks are solid to 2.643 m, above any ceiling this box can offer, so
+    # every centimetre of box east of 2.772 was solid racking or a dead-end
+    # aisle stub: 5.95 m2 of the box footprint was inside a shelf, and the six
+    # stubs (1.128 m deep, 0.909-1.216 m wide, eroding to a 0.41-0.72 m ribbon
+    # once the airframe is accounted for) contributed about 3 m2 of flyable
+    # floor while offering the frontier finder six pockets to keep proposing
+    # viewpoints in. Stopping 0.17 m short of the shelf faces removes all six
+    # without losing anything the aircraft could map from inside them -- the
+    # faces themselves map perfectly well from the open floor to the west.
+    box_max_x:  2.6
     box_max_y:  7.2
     # 2.4 ceiling: the 1.55-1.8 band was 0.25 m tall and vertical inflation
     # (0.35) let ANY voxel mapped above 1.2 seal an aisle -- one depth speckle
@@ -77,12 +109,14 @@ map_config:
     # is the "no space under the route" the belly strikes came from. 2.6 gives
     # every pile inside the box real headroom.
     #
-    # This does NOT re-open flight over the racking, which is why the old
-    # "stay below the 1.96 m shelf tops" argument no longer binds: the shelf
-    # rows sit at x 4.28..5.16 and x -6.89..-4.79, both OUTSIDE box_max_x 3.9
-    # and box_min_x -4.4, so the aircraft cannot reach them at any altitude.
-    # vbox_max_z is 3.0, so the map already covers this band.
-    box_max_z:  2.6
+    # 2.4, from 2.6. The tallest thing left inside the box once the racking is
+    # excluded is a 1.79 m ClutteringC pile, which needs 2.24 m of altitude to
+    # be overflown at safe_distance 0.45. 2.4 clears that with margin and does
+    # not spend the mission mapping 0.2 m of empty air over the whole floor.
+    # (The old 2.6 was sized for safe_distance 0.85, which this stack no longer
+    # asks for -- see the note on the unified clearance in run_falcon_sjtu.sh.)
+    # There is no roof in this world, so nothing above the box is structure.
+    box_max_z:  2.4
     vbox_min_x: -8.0
     vbox_min_y: -12.0
     vbox_min_z: -1.0

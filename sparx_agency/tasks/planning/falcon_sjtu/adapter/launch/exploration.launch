@@ -38,11 +38,29 @@
        tolerates. -->
   <param name="/use_sim_time" value="true"/>
 
-  <!-- ── Speeds: the old stack's indoor tuning, kept. At 0.25 m/s a 4 m leg is
-       a ~16 s spline, comfortably inside FALCON's well-behaved regime; yaw
-       faster than translation so the camera can align at a door before the
-       aircraft is committed through it. -->
-  <arg name="max_vel"     default="0.25"/>
+  <!-- ── Speeds. Yaw faster than translation so the camera can align at a door
+       before the aircraft is committed through it.
+
+       0.15, down from the old stack's 0.25, and the number comes out of the
+       doorway rather than out of comfort. What decides whether an aircraft can
+       thread a 0.93 m opening is not its speed but its CORRECTION PER METRE
+       TRAVELLED: how much cross-track it can take out before it arrives. The
+       follower's per-tick ceiling is `max_vel + max_overspeed`, so that ratio
+       is max_overspeed / max_vel, and the ceiling itself is bounded by
+       clearance (see the speed block below). With the ceiling pinned at
+       0.35 m/s the only way to buy correction is to lower the plan:
+
+         config                        plan  ceiling  corr  ratio  stopping
+         run 003 (finished the world)  0.25   0.60    0.35   1.40   0.41 m
+         ceiling capped, plan kept     0.25   0.35    0.10   0.40   0.18 m
+         ceiling capped, plan 0.20     0.20   0.35    0.15   0.75   0.18 m
+         this                          0.15   0.35    0.20   1.33   0.18 m
+
+       The middle two both stalled at hospital doorways with zero contacts, at
+       297 m3 and 211 m3, having simply run out of authority to centre. This
+       one restores run 003's ratio while keeping its stopping distance inside
+       the 0.19 m the planner reserves. The cost is wall-clock. -->
+  <arg name="max_vel"     default="0.15"/>
   <arg name="max_acc"     default="0.25"/>
   <arg name="max_yaw_vel" default="0.6"/>
   <arg name="max_yaw_acc" default="0.5"/>
@@ -120,7 +138,20 @@
        from ~64 five-metre cells to ~16 ten-metre ones — which shrinks the TSP
        and the crash rate while keeping the whole hospital in scope. The tour is
        slightly less optimal; that is the trade for surviving. -->
-  <arg name="hgrid_cell_size_max" default="10.0"/>
+  <!-- 14.0, raised from 10.0, for the reason the paragraph above gives: the
+       crash rate scales with the tour, and the tour scales with the cell count.
+       On the hospital's 24 x 55 m box that is 2 x 4 = 8 cells instead of
+       3 x 6 = 18, less than half the cities.
+
+       This matters more than it looks because of what a crash COSTS here. The
+       respawned node comes back with an empty map, so every crash does not
+       merely interrupt the mission, it resets its coverage to zero: measured,
+       one hospital run losing 728 m3 and another 577 m3, each then needing ten
+       minutes to re-earn ground it had already mapped. Two crashes in one run
+       is enough to put a complete map out of reach of any sane time cap. The
+       tour is less optimal at 14 m; that is a far smaller cost than starting
+       over. -->
+  <arg name="hgrid_cell_size_max" default="14.0"/>
   <param name="/hgrid/cell_size_max" value="$(arg hgrid_cell_size_max)"/>
 
   <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)"/>
@@ -132,9 +163,78 @@
        the aircraft sits pinned short of a chosen viewpoint for 20 s, that
        viewpoint is handed to the frontier finder, which retires every cluster
        whose average is within this radius to dormant so the coverage tour stops
-       re-selecting a route the map thinks is clear but physics blocks. 2.5 m so
-       it reaches the frontier sitting up to candidate_rmax behind the viewpoint. -->
-  <param name="/frontier_finder/blocked_region_radius" value="2.5"/>
+       re-selecting a route the map thinks is clear but physics blocks.
+
+       3.5, raised from 2.5. Parts of both worlds are genuinely unobservable and
+       the mission cannot FINISH until those frontiers retire: the hospital's
+       two north corner rooms are filled by staircases climbing z 0 to 3.0, both
+       its elevators are modelled as solid door slabs, and seven cubicle
+       curtains are solid from 0.095 to 2.483 m. At 2.5 the guard retired the
+       cluster it was handed and the coverage tour chose its neighbour a couple
+       of metres away, so run 002 made twenty-three attempts on one north-west
+       pocket. 3.5 exceeds candidate_rmax (2.5), so retiring a viewpoint also
+       retires the frontier that produced it.
+
+       This is the knob that trades completeness against termination. Lower it
+       if a run ever finishes with a room genuinely missing rather than merely
+       unreachable. -->
+  <param name="/frontier_finder/blocked_region_radius" value="3.5"/>
+
+  <!-- ── A*: give it time to find the route, and cells to find it through ─
+       These override two values loaded from pathfinding/config/astar.yaml, and
+       they are the difference between an exploration that reaches the far end
+       of a building and one that declares itself finished a third of the way
+       in.
+
+       The DEFAULT profile is the search `planTrajToView` runs to route the
+       aircraft to its chosen viewpoint, once per replan (~2.5 s). Upstream
+       gives it `max_search_time: 0.001`, ONE MILLISECOND, over a 0.5 m
+       lattice. Across a 24 x 56 m hospital that budget expires long before the
+       frontier is reached, and FALCON reports "No path to next viewpoint",
+       eventually retires the cluster as unreachable, and stops. Measured, two
+       runs of the same configuration: the one that mapped the whole building
+       logged 0 no-path lines, the one that finished at 260.8 m3 having never
+       gone south of y = -2.3 logged 58.
+
+       0.05 s is still 5% of one replan cycle and two orders of magnitude more
+       search. The COARSE profiles are deliberately left alone: they build the
+       tour's cost matrix over many pairs at once and are meant to degenerate
+       to a straight-line estimate.
+
+       Resolution 0.5 -> 0.3 for the same reason from the other direction: a
+       0.93 m doorway is TWO cells on a 0.5 m lattice, so a single occupied
+       cell closes it to the search, and the aircraft is asked to reach rooms
+       it can see through a door the planner thinks is a wall. At 0.3 m it is
+       three cells. The cost is ~4.6x the cells, which the time budget above
+       now covers. -->
+  <arg name="astar_resolution"      default="0.3"/>
+  <arg name="astar_max_search_time" default="0.05"/>
+  <param name="/astar/profile/default/resolution"      value="$(arg astar_resolution)"/>
+  <param name="/astar/profile/default/max_search_time" value="$(arg astar_max_search_time)"/>
+
+  <!-- ── How far FALCON may plan from a pose the aircraft is not at ───────
+       falcon_replan_from_pose.patch corrects the replan origin to odometry
+       once it has drifted past this. The origin drifts because FALCON derives
+       it by evaluating the PREVIOUS trajectory at the current instant rather
+       than by reading odometry, and t_r saturates at the curve's duration, so
+       every second this stack spends braked, held or retreating (which is most
+       of the seconds it spends near an obstacle) opens a gap.
+
+       1.5 was chosen to end a runaway where the gap reached 5.4 m, and it does.
+       But it also LICENSES a gap of up to 1.5 m as normal, and that is not a
+       constant cost across worlds: in a 1.4 m warehouse aisle the aircraft has
+       0.70 m of half width and a metre of origin error is absorbed by the
+       optimiser; in a 0.90 m hospital doorway it has 0.45 m, so a plan anchored
+       1.5 m away is a plan whose first metre lies in the wall. Measured: 82
+       corrections in one hospital run, every one of them 1.5 to 2.1 m, i.e. the
+       threshold sat permanently saturated.
+
+       0.40 is the follower's own acquisition tolerance. Under it the previous
+       curve's endpoint is the BETTER origin (it joins the trajectory being
+       flown smoothly, with no velocity step); over it the curve is a fiction
+       and odometry wins. -->
+  <arg name="replan_from_pose_drift" default="0.40"/>
+  <param name="/fsm/replan_from_pose_drift" value="$(arg replan_from_pose_drift)"/>
 
   <!-- traj_server parks its pre-plan command at the init pose, no ramp:
        the follower owns takeoff. -->
@@ -179,6 +279,47 @@
     <param name="color/b" value="0.0"/>
   </node>
 
+  <!-- ── Mission watchdog: end a run that has stopped earning its clock ──
+       An exploration fails in ways every node here reads as success. The FSM
+       is in EXEC_TRAJ, the follower is tracking, the aircraft is moving, and
+       the map has not gained a voxel in four minutes because the drone is
+       orbiting a room whose only exit is a doorway it cannot thread. The two
+       facts that settle it (where the aircraft has been, and how much map that
+       bought) are not in the same place anywhere else in this graph.
+
+       The judgement is in core/planning/exploration/progress_monitor.py and is
+       unit tested against both the stuck shapes and the healthy missions they
+       are confused with: a slow thorough sweep of one crowded room is confined
+       and must NOT be aborted; a long transit through mapped corridors is
+       barren and must not either. It takes both at once.
+
+       It publishes /mission/nudge (recoverable: the follower answers with a
+       fresh survey turn) and /mission/abort, and prints a greppable banner the
+       campaign harness ends the run on. It never kills anything itself, so an
+       interactive session is not torn down under its operator. -->
+  <arg name="watchdog"             default="true"/>
+  <arg name="watchdog_time_cap_s"  default="2400.0"/>
+  <!-- Radius and growth are a PAIR and only fire together. 3.0 m is above the
+       largest legitimate stationary maneuver (a survey turn is a point, a
+       retreat 1.3 m) and below the smallest useful exploration leg. 3.0 m3/min
+       is a third of the rate a healthy hospital run sustains (measured: 430 m3
+       in 11 min = 39 m3/min) and well above mapper dither. -->
+  <arg name="watchdog_confine_radius_m"  default="3.0"/>
+  <arg name="watchdog_growth_m3_per_min" default="3.0"/>
+  <arg name="watchdog_confine_cap_s"     default="240.0"/>
+  <arg name="watchdog_barren_cap_s"      default="300.0"/>
+  <arg name="watchdog_grace_s"           default="90.0"/>
+  <node if="$(arg watchdog)" pkg="falcon_adapter" type="mission_watchdog_node.py"
+        name="mission_watchdog" output="screen">
+    <param name="odom_topic"         value="$(arg drone_ns)/odom"/>
+    <param name="time_cap_s"         value="$(arg watchdog_time_cap_s)"/>
+    <param name="grace_s"            value="$(arg watchdog_grace_s)"/>
+    <param name="confine_radius_m"   value="$(arg watchdog_confine_radius_m)"/>
+    <param name="growth_m3_per_min"  value="$(arg watchdog_growth_m3_per_min)"/>
+    <param name="confine_cap_s"      value="$(arg watchdog_confine_cap_s)"/>
+    <param name="barren_cap_s"       value="$(arg watchdog_barren_cap_s)"/>
+  </node>
+
   <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
   <!-- Tracking authority, forwarded so a run can be tuned without editing a
        file. Defaults match bspline_follower.launch exactly, so forwarding
@@ -190,9 +331,50 @@
        safe to raise it in step with safe_distance — which is why these two
        knobs are named together here. max_overspeed >= max_catchup_speed is
        enforced by VelocityServoParams and raises if violated. -->
-  <arg name="max_speed_xy"      default="0.6"/>
-  <arg name="max_overspeed"     default="0.35"/>
-  <arg name="max_catchup_speed" default="0.25"/>
+  <!-- ── The speed ceiling is DERIVED from the clearance, not chosen ──────
+       The follower must never be allowed to fly at a speed whose stopping
+       distance exceeds the margin the planner reserved. That margin is
+           safe_distance (0.45) - airframe half width (0.26) = 0.19 m
+       and the stopping distance at speed v, with this airframe's measured
+       0.30 s of command latency and 0.8 m/s^2 of braking, is
+           d(v) = 0.30 v + v^2 / 1.6
+       d(0.25) = 0.11 m, inside the margin. d(0.35) = 0.18 m, AT it.
+       d(0.40) = 0.22 m, over it. d(0.60) = 0.41 m, more than twice it.
+
+       The servo's per-tick ceiling is exactly `planned_speed + max_overspeed`
+       (servo.py:320 passes it as max_speed_xy to limit_velocity, overriding the
+       limits' own), so max_overspeed is not a cruise setting. It is the
+       CORRECTION BUDGET: everything the position loop has above the
+       feedforward, which is what closes a cross-track error.
+
+       That distinction cost a run. Cutting max_overspeed from 0.35 to 0.10 to
+       bound the absolute speed also cut the authority to correct, and
+       cross-track errors that used to close in a second began to persist,
+       straight into the clearance-breach retreat. Measured: the aircraft
+       stalled at a 0.93 m doorway it had flown through in the previous
+       configuration, retreating on breaches of 0.27 to 0.51 m with 0.32 to
+       0.54 m of cross-track, coverage frozen at 670 m3.
+
+       The right lever is the PLAN, not the correction. max_vel 0.20 with
+       max_overspeed 0.15 puts the ceiling on the same 0.35 m/s while leaving
+       0.15 m/s of correction everywhere, and because the ceiling is relative,
+       leaving it in the slow sections too, which is where a corner and a
+       doorway both are.
+
+       The old 0.6 / 0.35 / 0.25 let the servo sprint to 0.60 m/s to close a
+       lag against a 0.25 m/s plan, i.e. fly at 2.4x the speed FALCON checked
+       its curve at, spending the whole clearance budget on stopping distance
+       before anything had gone wrong. Measured in the first acceptance
+       attempt: every contact was at 0.48-0.59 m/s, all of them the aircraft
+       accelerating into an obstacle the map did not yet have.
+
+       The cost is wall-clock and it is small: the aircraft spends most of a
+       mission at plan speed anyway, and the catch-up being given up was only
+       ever used after a hold or a retreat. Raise these ONLY together with
+       safe_distance. -->
+  <arg name="max_speed_xy"      default="0.35"/>
+  <arg name="max_overspeed"     default="0.20"/>
+  <arg name="max_catchup_speed" default="0.15"/>
 
   <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
     <arg name="drone_ns"          value="$(arg drone_ns)"/>

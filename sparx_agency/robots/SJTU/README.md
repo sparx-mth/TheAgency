@@ -213,6 +213,41 @@ startup):
 Airframe: 1.477 kg, `maxForce` 30 N — thrust-to-weight 2.07, comfortable but not
 aerobatic. Tilt limit 0.5 rad, yaw rate 1.5 rad/s, body velocity 2 m/s.
 
+### How big it actually is, and why that keeps being got wrong
+
+The collision geometry is a **mesh**, not a box —
+`sjtu_drone_description/models/sjtu_drone/quadrotor_4.stl`, offset `z + 0.04` in
+the URDF — so nothing in the SDF states a size and everyone who needs one
+invents it. Parsed off the 1,744 facets:
+
+| | measured |
+|---|---|
+| x extent | −0.260 .. 0.260 (**0.520 m** across) |
+| y extent | −0.260 .. 0.260 (**0.520 m** across) |
+| z extent | −0.040 .. 0.070 (**0.110 m** tall) |
+| max horizontal radius | **0.314 m** (the arm tips, at 45°) |
+
+Three numbers follow, and every one of them was wrong somewhere in this repo:
+
+* **On-axis half width 0.26 m.** This is the one a corridor or doorway test
+  wants — 0.25 is a fair rounding of it and is what `gate_drone_radius_m` uses.
+  Do **not** round it up to 0.30 "to be safe": the voxel gate sweeps a corridor
+  of that half width, and at 0.30 the cross-track budget through a 0.90 m
+  doorway falls to ±0.10 m in the worst grid phase, inside the follower's own
+  tracking noise.
+* **Circumscribed radius 0.314 m**, which is what matters when the aircraft is
+  yawed away from the axis of the opening it is passing. FALCON picks yaw to aim
+  the camera at the next frontier, not to align the airframe with a door, so
+  this is a live 0.05 m of budget that nothing currently manages.
+* **Half height 0.055 m.** The aircraft is a plate, not a cube. Two brakes in
+  `falcon_sjtu` defaulted to modelling it as 0.70 m tall
+  (`VoxelBrakeGateConfig.body_halfheight_m` and
+  `DepthProximityBrakeConfig.corridor_halfheight_m`, both 0.35), which makes it
+  clear every obstacle by 0.35 m instead of by its own body: it demanded 2.14 m
+  of altitude to overfly a 1.79 m pile under a 1.9 m ceiling, and vetoed a
+  1.14 m desk while cruising at 1.30 m. Both now carry 0.15 (measured plus one
+  0.1 m voxel).
+
 What actually matters to a controller is not those gains but the **closed-loop
 response they produce**, measured by stepping `cmd_vel` and fitting `odom`'s
 twist to a first-order lag behind a transport delay:

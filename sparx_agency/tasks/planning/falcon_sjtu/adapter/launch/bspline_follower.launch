@@ -48,14 +48,32 @@
 
   <!-- Speed ceilings. `max_overspeed` is a CLEARANCE setting: FALCON checks its
        route against the map at the speed it planned, so flying the same curve
-       faster spends that margin on stopping distance. max_speed_xy is the hard
-       cap: lowered from 1.2 to 0.6 after a capsize post-mortem — the aircraft
-       struck warehouse clutter at ~1 m/s (inside the depth near clip, so FALCON
-       never mapped it), pitched up while pinned and tipped past the plugin's
-       ~35 deg clamp, which thrust-along-body-z cannot recover from. Halving the
-       impact speed keeps a near-clip contact a graze the retreat reflex clears. -->
-  <arg name="max_speed_xy"     default="0.6" />
-  <arg name="max_overspeed"    default="0.25" />
+       faster spends that margin on stopping distance.
+
+       History, because the number has moved twice for two different reasons.
+       max_speed_xy was 1.2 and was lowered to 0.6 after a capsize post-mortem:
+       the aircraft struck warehouse clutter at ~1 m/s (inside the depth near
+       clip, so FALCON never mapped it), pitched up while pinned and tipped past
+       the plugin's ~35 deg clamp, which thrust-along-body-z cannot recover
+       from. That halved the impact speed, which was the right move and not
+       enough: 0.6 was still chosen rather than derived, and it is 2.4x the
+       0.25 m/s the planner checks its curves at.
+
+       These are DERIVED from the planner's clearance; see the block above the
+       same three args in exploration.launch, which is where they are actually
+       set for a mission. In short: stopping distance at this airframe's 0.30 s
+       of latency and 0.8 m/s^2 of braking must stay inside safe_distance minus
+       the airframe half width (0.45 - 0.26 = 0.19 m). d(0.35) = 0.18 m meets
+       that; d(0.40) = 0.22 m and d(0.60) = 0.41 m do not.
+       The servo's per-tick ceiling is EXACTLY planned_speed + max_overspeed
+       (servo.py:320), so max_overspeed is the correction budget, not a cruise
+       setting: bounding the ceiling by shrinking it also removes the authority
+       to close a cross-track error, which stalled a run at a doorway. The plan
+       speed carries the reduction instead (max_vel 0.20 in exploration.launch)
+       and 0.15 of correction is left everywhere. Raise only with
+       safe_distance. -->
+  <arg name="max_speed_xy"     default="0.35" />
+  <arg name="max_overspeed"    default="0.20" />
   <arg name="max_catchup_speed" default="0.15" />
   <arg name="yaw_gain"         default="1.5" />
 
@@ -90,7 +108,21 @@
        follower (measured: 45 silent pre-publish detections, 0 executing-
        trajectory detections, 336 contacts in one 40-minute run). -->
   <arg name="map_gate"              default="true" />
+  <!-- 0.25 is the airframe's on-axis half width: the collision mesh measures
+       0.52 m across the arms (0.63 m corner to corner, which only matters when
+       the aircraft is yawed 45 degrees to an opening). Do NOT round it up to
+       0.30 "to be safe": the gate sweeps a corridor of this half width, and at
+       0.30 the cross-track budget through a 0.90 m doorway falls to +-0.10 m in
+       the worst grid phase, which is inside the follower's own tracking noise. -->
   <arg name="gate_drone_radius_m"   default="0.25" />
+  <!-- The airframe's HALF-HEIGHT. The collision mesh is z -0.040..0.070, i.e.
+       0.11 m tall; core's 0.35 default modelled a 0.70 m body. The gate tests
+       only the z layers the airframe can strike at its altitude, so an inflated
+       half height makes the aircraft clear obstacles by that figure instead of
+       by its own body: it made a 1.79 m hospital clutter pile unflyable under a
+       1.9 m ceiling (it demanded 2.14 m) and forced 1.8 m of warehouse altitude
+       to overfly a 1.10 m pile. 0.15 = 0.055 measured, plus a 0.1 m voxel. -->
+  <arg name="gate_body_halfheight_m" default="0.15" />
   <arg name="gate_z_lo"             default="0.4" />
   <arg name="gate_z_hi"             default="2.0" />
   <arg name="gate_block_retreat_s"  default="4.0" />
@@ -98,10 +130,6 @@
        return in the flight corridor. Catches thin obstacles the voxel map
        flaps (raycast clearing erodes one-voxel silhouettes). -->
 
-  <!-- Proximity speed governor: cap = max(floor, slope * (d_near - stop)).
-       stop is the airframe radius, where speed must genuinely be zero. Keep
-       the knee BELOW the planner's safe_distance or the governor throttles a
-       correctly flown path (it did: 43-71% of ticks at half speed). -->
   <!-- Two scans, two knobs. survey_revs is the RECOVERY turn after a planner
        respawn (empty map, never re-triggers itself) and stays at 1.25.
        takeoff_survey_revs is the turn at the START and is 0: measured, FALCON
@@ -118,9 +146,71 @@
   <arg name="vertical_kp" default="3.6" />
   <arg name="vertical_ki" default="0.4" />
 
-  <arg name="prox_stop_m"  default="0.25" />
-  <arg name="prox_slope"   default="1.2" />
-  <arg name="prox_floor"   default="0.08" />
+  <!-- ── Clearance relative reflexes (replaced prox_stop_m/slope/floor) ──
+       The proximity governor used to be an absolute speed versus distance
+       curve, and an absolute curve cannot serve two worlds: with its knee at
+       the airframe radius it left a 1.4 m warehouse aisle alone and, in the
+       hospital, bound 71 to 77 percent of ticks at 0.36x the planned speed
+       because every corridor there puts a wall inside 0.6 m. It was throttling
+       an aircraft that was flying exactly where the planner had put it.
+
+       The reflexes now compare the aircraft's own clearance against the
+       clearance THE PLAN holds at the point being tracked, so the question is
+       "is the aircraft closer to something than its reference is", which means
+       the same thing in both buildings. See
+       core/planning/safety/clearance_envelope.py.
+
+       hard_floor 0.30: the airframe. The collision mesh measures 0.52 m across
+       the arms and 0.63 m corner to corner, so 0.26 m is the on axis half
+       width; against voxel CENTRES on a 0.1 m grid, 0.30 m is the distance at
+       which the next command is a contact. It is the one absolute here and is
+       never relaxed for any plan.
+       tolerance 0.10: tracking noise, not margin. A follower holding a curve
+       to centimetres crosses zero deficit constantly and a reflex chattering
+       on that boundary is worse than one that never fires.
+       span 0.25: the deficit at which speed reaches the creep floor.
+       breach 0.20: past this the aircraft is nearer than the plan ever was and
+       this is a near contact, not a tight intended pass. -->
+  <arg name="clearance_hard_floor_m" default="0.30" />
+  <arg name="clearance_tolerance_m"  default="0.10" />
+  <arg name="clearance_span_m"       default="0.25" />
+  <arg name="clearance_breach_m"     default="0.20" />
+  <arg name="clearance_open_m"       default="0.90" />
+  <!-- Must exceed clearance_open_m, or an open point reports the search limit
+       as its clearance and every deficit is measured against a ceiling. -->
+  <arg name="clearance_search_m"     default="1.00" />
+  <!-- Free width ACROSS travel below which the aircraft counts as inside a
+       passage, where the inferred-wedge reflex does not fire: the map has both
+       jambs, the aircraft is where it should be and merely slow, and backing
+       out 1.3 m only replays the approach. Measured in run 003, whose retreat
+       counter reached 35 while it cycled at one doorway with coverage frozen
+       at 1565.9 m3.
+       1.20 sits above every opening in either world (hospital doorways 0.930
+       and 1.500, warehouse aisles 0.909 to 1.216) and below any room.
+       It is measured by casting a ray to EACH side, not by reading clearance:
+       clearance is direction-agnostic, so beside a single wall both probes
+       return that same wall and the pair reads as a corridor that is not there.
+       Bounded by the paths that CAN resolve a doorway: a real bumper contact
+       is still ungated, the map gate's 4 s hard-block escalation still
+       retreats, and the mission watchdog still ends a run that stops mapping. -->
+  <arg name="passage_width_m"        default="1.20" />
+
+  <!-- ── Fly through the MIDDLE of an opening ─────────────────────────────
+       FALCON's distance cost is soft (pow(dist - safe_distance, 2), weighed
+       against smoothness and feasibility), so its curve is near the middle of
+       a doorway rather than on it, and the follower's tracking error lands on
+       top. In a 0.90 m door a 0.52 m airframe has about 0.19 m of budget, so
+       the two errors together are a jamb strike. This probes the free space
+       laterally and biases toward its peak: bounded, and zero above
+       engage_m so warehouse cruise is untouched.
+       The bias REDIRECTS at constant speed rather than adding to it, so it can
+       never spend the stopping distance budget the brakes are sized against. -->
+  <arg name="centering"            default="true" />
+  <arg name="centering_engage_m"   default="0.85" />
+  <arg name="centering_probe_m"    default="0.25" />
+  <arg name="centering_gain"       default="0.6" />
+  <arg name="centering_max_speed"  default="0.15" />
+  <arg name="centering_min_asym_m" default="0.05" />
 
   <!-- Depth bumper geometry. hard_block_d_m is a VETO, not a brake, and
        margin_m + nose_offset is the distance at which allowed speed hits zero.
@@ -128,17 +218,58 @@
        planner was asked to produce. -->
   <arg name="depth_block_d_m" default="0.55" />
   <arg name="depth_margin_m"  default="0.30" />
+  <!-- The cross-section the airframe sweeps, from its collision mesh
+       (0.52 x 0.52 x 0.11 m). core defaults both to 0.35, i.e. a body 0.70 m
+       wide and 0.70 m TALL, and the height is the expensive half: it vetoes on
+       anything within 0.35 m below the camera axis, so a cruise at 1.30 m
+       brakes for a 1.14 m reception desk it clears by 0.11 m, and the hospital
+       is full of 0.7 to 1.2 m furniture. Kept equal to
+       gate_body_halfheight_m so the two brakes agree about the aircraft. -->
+  <arg name="depth_corridor_halfwidth_m"  default="0.30" />
+  <arg name="depth_corridor_halfheight_m" default="0.15" />
 
-  <!-- Creep releases on DISTANCE from the spot it conceded at, not just on the
-       timer; 2.0 m is past the 1.5 m radius block episodes are grouped by. -->
+  <!-- Creep: the concession the follower makes to a spot it has blocked at
+       twice, pushing through slowly instead of holding. It releases on
+       DISTANCE from that spot, not just on the timer; 2.0 m is past the 1.5 m
+       radius block episodes are grouped by, so leaving cancels it without
+       immediately re-arming it.
+       The timer is 30 s (3.6 m of creep) and, critically, RESTARTS when a
+       retreat ends: a retreat is 5 to 12 s of manoeuvre and it used to run on
+       the concession's clock, so the aircraft emerged with under a metre of
+       creep left, ran out short of the opening and retreated again. Measured:
+       28 retreats cycling on one doorway approach, coverage frozen. -->
+  <!-- Giving up on an approach that keeps ending in contact. A bumper strike
+       retreats the aircraft and nothing stops FALCON re-issuing the same route,
+       so an obstacle standing IN a doorway (a parked BP cart, in the measured
+       case) produces an unbounded strike-retreat-strike loop: 55 bumper reports
+       on two objects at one hospital doorway, the run ending on the
+       confinement watchdog at 216 m3.
+       Retreating is right the first time and the second; by the third it is
+       evidence the approach does not work. HOLDING is then the action, not a
+       failure to act: staying within 2 m of an unreached viewpoint for 25 s is
+       exactly what FALCON's dead-end guard watches for, so the hold converts a
+       grind into a retired viewpoint and a tour that moves on. -->
+  <arg name="give_up_repeats"  default="3" />
+  <arg name="give_up_radius_m" default="1.5" />
+  <arg name="give_up_window_s" default="120.0" />
+  <arg name="give_up_hold_s"   default="30.0" />
+
+  <arg name="creep_speed"   default="0.12" />
+  <arg name="creep_time_s"  default="30.0" />
   <arg name="creep_clear_m" default="2.0" />
 
-  <!-- Vertical escape when the horizontal back-out is itself walled. max_z
-       must stay UNDER the flight box ceiling (warehouse box_max_z 1.8).
-       escape_climb_s:=0 restores horizontal-only recovery. -->
+  <!-- Vertical escape when the horizontal back-out is itself walled.
+       escape_climb_s:=0 restores horizontal-only recovery.
+       max_z 0 means "the flight box ceiling", which is what it should almost
+       always be: it MUST stay inside the box (a planner cannot plan from a
+       pose outside its own box, so an escape that climbs out strands the
+       mission it was rescuing), and any fixed number is wrong for some box.
+       The old 1.65 was chosen when the warehouse ceiling was 1.8 and became
+       both unsafe and wasteful the moment either world's box moved. A positive
+       value is honoured but still clamped to the box. -->
   <arg name="escape_climb_s"     default="4.0" />
   <arg name="escape_climb_speed" default="0.4" />
-  <arg name="escape_climb_max_z" default="1.65" />
+  <arg name="escape_climb_max_z" default="0.0" />
 
   <!-- Seconds between binding-limiter histograms; 0 silences them. -->
   <arg name="limiter_report_s" default="15.0" />
@@ -198,17 +329,36 @@
     <param name="look_dwell_s"     value="$(arg look_dwell_s)" />
     <param name="map_gate"             value="$(arg map_gate)" />
     <param name="gate_drone_radius_m"  value="$(arg gate_drone_radius_m)" />
+    <param name="gate_body_halfheight_m" value="$(arg gate_body_halfheight_m)" />
     <param name="gate_z_lo"            value="$(arg gate_z_lo)" />
     <param name="gate_z_hi"            value="$(arg gate_z_hi)" />
     <param name="gate_block_retreat_s" value="$(arg gate_block_retreat_s)" />
     <param name="takeoff_survey_revs"  value="$(arg takeoff_survey_revs)" />
     <param name="vertical_kp"          value="$(arg vertical_kp)" />
     <param name="vertical_ki"          value="$(arg vertical_ki)" />
-    <param name="prox_stop_m"          value="$(arg prox_stop_m)" />
-    <param name="prox_slope"           value="$(arg prox_slope)" />
-    <param name="prox_floor"           value="$(arg prox_floor)" />
+    <param name="clearance_hard_floor_m" value="$(arg clearance_hard_floor_m)" />
+    <param name="clearance_tolerance_m"  value="$(arg clearance_tolerance_m)" />
+    <param name="clearance_span_m"       value="$(arg clearance_span_m)" />
+    <param name="clearance_breach_m"     value="$(arg clearance_breach_m)" />
+    <param name="clearance_open_m"       value="$(arg clearance_open_m)" />
+    <param name="clearance_search_m"     value="$(arg clearance_search_m)" />
+    <param name="passage_width_m"        value="$(arg passage_width_m)" />
+    <param name="centering"              value="$(arg centering)" />
+    <param name="centering_engage_m"     value="$(arg centering_engage_m)" />
+    <param name="centering_probe_m"      value="$(arg centering_probe_m)" />
+    <param name="centering_gain"         value="$(arg centering_gain)" />
+    <param name="centering_max_speed"    value="$(arg centering_max_speed)" />
+    <param name="centering_min_asym_m"   value="$(arg centering_min_asym_m)" />
     <param name="depth_block_d_m"      value="$(arg depth_block_d_m)" />
     <param name="depth_margin_m"       value="$(arg depth_margin_m)" />
+    <param name="depth_corridor_halfwidth_m"  value="$(arg depth_corridor_halfwidth_m)" />
+    <param name="depth_corridor_halfheight_m" value="$(arg depth_corridor_halfheight_m)" />
+    <param name="give_up_repeats"      value="$(arg give_up_repeats)" />
+    <param name="give_up_radius_m"     value="$(arg give_up_radius_m)" />
+    <param name="give_up_window_s"     value="$(arg give_up_window_s)" />
+    <param name="give_up_hold_s"       value="$(arg give_up_hold_s)" />
+    <param name="creep_speed"          value="$(arg creep_speed)" />
+    <param name="creep_time_s"         value="$(arg creep_time_s)" />
     <param name="creep_clear_m"        value="$(arg creep_clear_m)" />
     <param name="escape_climb_s"       value="$(arg escape_climb_s)" />
     <param name="escape_climb_speed"   value="$(arg escape_climb_speed)" />

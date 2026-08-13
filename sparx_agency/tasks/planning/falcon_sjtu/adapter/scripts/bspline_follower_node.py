@@ -52,6 +52,12 @@ from sparx_agency.core.planning.safety.depth_proximity_brake import (
 from sparx_agency.core.planning.safety.voxel_brake_gate import (
     VoxelBrakeGate, VoxelBrakeGateConfig,
 )
+from sparx_agency.core.planning.safety.clearance_envelope import (
+    ClearanceEnvelope, ClearanceEnvelopeConfig,
+)
+from sparx_agency.core.planning.local_planners.corridor_centering import (
+    CorridorCentering, CorridorCenteringConfig,
+)
 from sparx_agency.core.control.reference.params import ReferenceParams
 from sparx_agency.core.planning.trajectories.bspline import BsplineTrajectory
 from sparx_agency.core.planning.trajectories.bspline.projection import ProjectionParams
@@ -169,8 +175,14 @@ class BsplineFollowerNode(object):
         self._escape_climb_s = float(rospy.get_param("~escape_climb_s", 4.0))
         self._escape_climb_speed = float(
             rospy.get_param("~escape_climb_speed", 0.4))
+        # Set later, from the map's own box: see the altitude guard below.
         self._escape_climb_max_z = float(
-            rospy.get_param("~escape_climb_max_z", 1.65))
+            rospy.get_param("~escape_climb_max_z", 0.0))
+        # How far above itself the climb looks before committing. One z layer
+        # of the gate (0.2 m) plus a little, so the test asks about occupancy
+        # the climb would actually reach rather than about where it already is.
+        self._escape_climb_lookahead_m = float(
+            rospy.get_param("~escape_climb_lookahead_m", 0.25))
         # ── proximity speed governor ─────────────────────────────────────
         # cap = max(floor, slope * (d_near - stop)). It was hardcoded
         # max(0.08, 0.7 * (d_near - 0.30)), and measured attribution showed why
@@ -217,9 +229,64 @@ class BsplineFollowerNode(object):
         # judgement, so a genuinely dead planner still re-arms everything.
         self._trust_plan_fresh_s = float(
             rospy.get_param("~trust_plan_fresh_s", 4.0))
-        self._prox_stop_m = float(rospy.get_param("~prox_stop_m", 0.25))
-        self._prox_slope = float(rospy.get_param("~prox_slope", 1.2))
-        self._prox_floor = float(rospy.get_param("~prox_floor", 0.08))
+        # ── clearance-relative reflexes ──────────────────────────────────
+        # These replace prox_stop_m / prox_slope / prox_floor, which were an
+        # absolute speed-versus-distance curve and are gone rather than left
+        # inert: a parameter that is still declared but no longer read is how
+        # obstacles_inflation wasted an afternoon in this same stack.
+        # Every threshold above is an absolute distance, and an absolute
+        # distance is the wrong shape: the room a correctly flown aircraft has
+        # is a property of the CORRIDOR. The same numbers leave a 1.4 m
+        # warehouse aisle (0.70 m of half width) untouched and make a 0.90 m
+        # hospital doorway (0.45 m) unflyable, which is why this stack has
+        # needed a different tuning per world and why fixing one broke the
+        # other. The envelope compares the aircraft's clearance against the
+        # PLAN's own clearance instead, so one configuration serves both.
+        # See core/planning/safety/clearance_envelope.py.
+        self._envelope = ClearanceEnvelope(ClearanceEnvelopeConfig(
+            hard_floor_m=float(rospy.get_param("~clearance_hard_floor_m", 0.30)),
+            tolerance_m=float(rospy.get_param("~clearance_tolerance_m", 0.10)),
+            deficit_span_m=float(rospy.get_param("~clearance_span_m", 0.25)),
+            breach_deficit_m=float(rospy.get_param("~clearance_breach_m", 0.20)),
+            floor_speed=float(rospy.get_param("~creep_speed", 0.12)),
+            open_clearance_m=float(rospy.get_param("~clearance_open_m", 0.90))))
+        # Radius the clearance queries search. Must exceed open_clearance_m or
+        # a genuinely open point reports the search limit as its clearance and
+        # every deficit is measured against a ceiling rather than the geometry.
+        self._clearance_r = float(rospy.get_param("~clearance_search_m", 1.0))
+        # Free width across travel below which the aircraft counts as inside a
+        # passage, where the wedge reflex must not fire: see the in_passage
+        # rule in _tick. 1.20 m sits above every opening in either world
+        # (hospital doorways 0.930 and 1.500, warehouse aisles 0.909-1.216) and
+        # below any room. Measured with rays to BOTH sides, not with clearance:
+        # clearance is direction-agnostic, so beside a single wall both probes
+        # return that same wall and the pair reads as a corridor that is not
+        # there.
+        self._passage_width_m = float(
+            rospy.get_param("~passage_width_m", 1.20))
+        self._plan_clearance = None     # type: object  # cached, see _clearances
+        self._plan_clearance_at = None  # type: object
+        # ── centre of the opening ────────────────────────────────────────
+        # The planner's distance cost is soft, so its curve is NEAR the middle
+        # of a doorway rather than ON it, and the follower's own tracking error
+        # lands on top of that. Neither is a fault; together they are a jamb
+        # strike. This probes the free space laterally and biases toward its
+        # peak, bounded and only where it is tight.
+        self._centering_enabled = bool(rospy.get_param("~centering", True))
+        self._centering = CorridorCentering(CorridorCenteringConfig(
+            engage_clearance_m=float(
+                rospy.get_param("~centering_engage_m", 0.85)),
+            probe_m=float(rospy.get_param("~centering_probe_m", 0.25)),
+            gain=float(rospy.get_param("~centering_gain", 0.6)),
+            max_speed=float(rospy.get_param("~centering_max_speed", 0.15)),
+            min_asymmetry_m=float(rospy.get_param("~centering_min_asym_m", 0.05))))
+        # Trajectories by id, so the reference POINT can be recovered for the
+        # clearance comparison: the servo reports where on the curve it is
+        # tracking (reference_time_s) but not the point itself, and the point
+        # is what carries the planner's clearance. Two are kept because a
+        # command can still name the previous curve on the tick a new one is
+        # promoted.
+        self._trajectories = {}         # type: dict
         self._retreat_clear_m = float(rospy.get_param("~retreat_clear_m", 1.3))
         # Turn-to-look: after backing out, face the struck point and stare so
         # the mapper fuses it. Caps, not guarantees -- see _retreat.
@@ -238,6 +305,18 @@ class BsplineFollowerNode(object):
         self._gate_enabled = bool(rospy.get_param("~map_gate", True))
         self._gate = VoxelBrakeGate(VoxelBrakeGateConfig(
             drone_radius_m=float(rospy.get_param("~gate_drone_radius_m", 0.30)),
+            # The airframe's HALF-HEIGHT, and it was 0.35 m by default against a
+            # collision mesh that measures z -0.040..0.070 -- 0.11 m tall in
+            # total. The gate tests only the z layers the airframe can strike at
+            # its current altitude, so a half-height six times too large means
+            # the aircraft must clear every obstacle by 0.35 m instead of by its
+            # own body. In the hospital that made a 1.79 m clutter pile
+            # unflyable at ANY altitude the 1.9 m box allows (it demanded
+            # 2.14 m), and run 002 ground against that one pile for 27 of its
+            # contacts before the watchdog ended it. In the warehouse it forced
+            # 1.8 m of altitude to overfly a 1.10 m pile that 1.5 m clears.
+            body_halfheight_m=float(
+                rospy.get_param("~gate_body_halfheight_m", 0.15)),
             z_band=(float(rospy.get_param("~gate_z_lo", 0.4)),
                     float(rospy.get_param("~gate_z_hi", 2.0))),
         ))
@@ -257,7 +336,12 @@ class BsplineFollowerNode(object):
         # better global picture and creeps through at a speed where a touch is
         # a nudge, keeping the contact reflex as the true last resort.
         self._creep_speed = float(rospy.get_param("~creep_speed", 0.12))
-        self._creep_time_s = float(rospy.get_param("~creep_time_s", 20.0))
+        # 30 s at creep_speed is 3.6 m: enough to cross an approach AND the
+        # opening at the end of it, which 20 s (2.4 m) was not. A longer window
+        # costs nothing when things go well, because creep_clear_m releases it
+        # spatially as soon as the aircraft is 2.0 m from the contested spot --
+        # the timer is only the backstop for a concession that gets nowhere.
+        self._creep_time_s = float(rospy.get_param("~creep_time_s", 30.0))
         # Distance from the contested spot at which the concession is over.
         # 2.0 m is past the 1.5 m radius _note_block_episode groups episodes
         # by, so leaving cancels the creep without immediately re-arming it.
@@ -265,6 +349,26 @@ class BsplineFollowerNode(object):
         self._creep_from = None         # type: object
         self._creep_until = None            # type: object
         self._block_episodes = []           # type: list  # (t_s, x, y)
+        # ── giving up on an approach that keeps ending in contact ─────────
+        # A bumper contact retreats the aircraft, and nothing stops FALCON
+        # re-issuing the same route, so an obstacle standing IN a doorway
+        # produces an unbounded strike-retreat-strike loop: measured, 55 bumper
+        # reports on two objects at one hospital doorway, the mission ending on
+        # the confinement watchdog at 216 m3.
+        #
+        # Retreating is right the first time and the second. By the third it is
+        # evidence that this approach does not work, and the only actor that can
+        # do anything about it is FALCON, whose dead-end guard retires a
+        # viewpoint the aircraft stays within 2 m of for 25 s without reaching.
+        # HOLDING STATION IS THEREFORE THE ACTION, not a failure to act: it is
+        # exactly the condition that guard watches for, so it converts a grind
+        # into a retired viewpoint and a coverage tour that moves on.
+        self._contact_spots = []            # type: list  # (t_s, x, y)
+        self._give_up_repeats = int(rospy.get_param("~give_up_repeats", 3))
+        self._give_up_radius_m = float(rospy.get_param("~give_up_radius_m", 1.5))
+        self._give_up_window_s = float(rospy.get_param("~give_up_window_s", 120.0))
+        self._give_up_hold_s = float(rospy.get_param("~give_up_hold_s", 30.0))
+        self._give_up_until = None          # type: object
 
         # ── depth visual bumper ──────────────────────────────────────────
         # The reflex under the map gate: the voxel map flaps thin obstacles
@@ -295,6 +399,19 @@ class BsplineFollowerNode(object):
             # 0.8 m/s^2 and 0.30 s latency without vetoing a planned pass.
             hard_block_d_m=float(rospy.get_param("~depth_block_d_m", 0.55)),
             margin_m=float(rospy.get_param("~depth_margin_m", 0.30)),
+            # The cross-section the airframe actually sweeps. core defaults
+            # both to 0.35, which describes a body 0.70 m wide and 0.70 m tall
+            # against a collision mesh that measures 0.52 x 0.52 x 0.11. The
+            # height is the expensive half: at 0.35 the brake vetoes on
+            # anything within 0.35 m below the camera axis, so cruising at
+            # 1.30 m it brakes for a 1.14 m reception desk it clears by
+            # 0.11 m -- and the hospital is full of 0.7-1.2 m furniture.
+            # Matched to the voxel gate's body_halfheight so the two brakes
+            # agree about the shape of the aircraft they are protecting.
+            corridor_halfwidth_m=float(
+                rospy.get_param("~depth_corridor_halfwidth_m", 0.30)),
+            corridor_halfheight_m=float(
+                rospy.get_param("~depth_corridor_halfheight_m", 0.15)),
         ))
         self._depth_allow = None        # type: object  # (v_allow, d_min)
         self._depth_allow_at = None     # type: object
@@ -309,6 +426,18 @@ class BsplineFollowerNode(object):
         box_hi = float(rospy.get_param("/map_config/map_size/box_max_z", 2.0))
         self._alt_min = box_lo + 0.10
         self._alt_max = box_hi - 0.10
+        # The vertical escape ceiling is the flight box's, not a number. It was
+        # 1.65 -- chosen when the warehouse box topped out at 1.8 and correct
+        # only for that box. A constant here is wrong in both directions: it
+        # climbs OUT of a box whose ceiling is lower (and a planner cannot plan
+        # from outside its own box, so the escape strands the mission it was
+        # meant to rescue), and it wastes most of the headroom of a box whose
+        # ceiling is higher. The box already knows; ask it.
+        if self._escape_climb_max_z <= 0.0:
+            self._escape_climb_max_z = self._alt_max
+        else:
+            self._escape_climb_max_z = min(self._escape_climb_max_z,
+                                           self._alt_max)
         # Horizontal box for the same guard, with a small tolerance ring so
         # normal wall-adjacent flight is untouched.
         try:
@@ -366,6 +495,15 @@ class BsplineFollowerNode(object):
                          Odometry, self._on_odom, queue_size=4)
         rospy.Subscriber("/planning/bspline", Bspline, self._on_bspline, queue_size=4)
         rospy.Subscriber("/planning/replan", Int32, self._on_replan, queue_size=10)
+        # The mission watchdog's two verdicts. A NUDGE is recoverable and the
+        # follower is the only node that can act on it: a fresh survey turn
+        # rebuilds the local map and re-arms FALCON's frontier finder on a
+        # region it has stopped seeing frontiers in. An ABORT is terminal --
+        # hold station so the aircraft is parked and level when the harness
+        # tears the stack down, rather than carrying a plan into a wall while
+        # the containers die around it.
+        rospy.Subscriber("/mission/nudge", String, self._on_nudge, queue_size=1)
+        rospy.Subscriber("/mission/abort", String, self._on_abort, queue_size=1)
         rospy.Subscriber(rospy.get_param("~contact_topic", "/simple_drone/bumper_states"),
                          ContactsState, self._on_bumper, queue_size=4)
         if self._gate_enabled:
@@ -503,6 +641,13 @@ class BsplineFollowerNode(object):
             # condemning what it was flying, so the arrival of a curve is its
             # statement that it has found a way out.
             self._stopped = False
+            # Keep the curve so the reference POINT can be recovered later:
+            # the clearance comparison needs where the plan is, and the servo
+            # reports only how far along it the reference sits.
+            self._trajectories[int(trajectory.traj_id)] = trajectory
+            if len(self._trajectories) > 2:
+                for stale in sorted(self._trajectories)[:-2]:
+                    del self._trajectories[stale]
 
     def _on_replan(self, msg):
         # type: (Int32) -> None
@@ -519,6 +664,38 @@ class BsplineFollowerNode(object):
         elif msg.data == REPLAN_EXPLORATION_FINISHED:
             self._finished = True
             rospy.loginfo("[follower] exploration finished; holding station")
+
+    def _on_nudge(self, msg):
+        # type: (String) -> None
+        """The watchdog says the mission is going nowhere; break the fixation.
+
+        A survey turn is the one intervention this node owns that changes what
+        the PLANNER sees rather than only what the aircraft does: it rebuilds
+        the local map from every bearing, which is what lets a frontier finder
+        that has stopped firing in this region fire again. Ignored while a
+        retreat owns the aircraft -- that maneuver is already an intervention,
+        and interrupting it mid-back-out leaves the drone against the wall it
+        was leaving.
+        """
+        if self._finished or self._retreat_until is not None:
+            return
+        self._begin_resurvey(rospy.Time.now(), "watchdog nudge (%s)" % msg.data)
+
+    def _on_abort(self, msg):
+        # type: (String) -> None
+        """The watchdog has ended the mission. Park the aircraft.
+
+        Deliberately the same latch the finish uses: hold POSITION, not zero
+        velocity. A velocity-commanded airframe parked on zero drifts, and the
+        harness may take a few seconds to tear the stack down.
+        """
+        if self._finished:
+            return
+        self._finished = True
+        self._servo.reset()
+        self._hold_point = None
+        rospy.logwarn("[follower] mission aborted by the watchdog (%s); "
+                      "holding station", msg.data)
 
     # ── the loop ─────────────────────────────────────────────────────────
 
@@ -684,9 +861,86 @@ class BsplineFollowerNode(object):
         # Back out on a real contact or an inferred wedge. A wall inside the
         # depth near clip (~0.95 m) is invisible to FALCON, which then plans
         # straight through it, so the follower is the only thing that can notice.
-        if follow and not command.holding and self._should_retreat(now, position, command):
-            self._begin_retreat(position, command)
-            return
+        #
+        # The INFERRED wedge is gated on clearance; the bumper is not. This was
+        # the dominant backwards path and it was the only one the trust rule did
+        # not cover -- it is evaluated here, several branches before `on_plan`
+        # is even computed, so an aircraft deliberately crawling through a
+        # doorway at a brake-limited speed reads as pinned and gets driven 1.3 m
+        # back out of it. "Going nowhere" and "going slowly on purpose" are the
+        # same measurement; only the clearance says which one it is. A real
+        # contact stays ungated, because a bumper report is not an inference.
+        if follow and not command.holding:
+            contact = self._contact_recent(now)
+            wedged = self._is_wedged(now, position, command)
+            if wedged and not contact:
+                plan_age = (now - self._last_bspline_at).to_sec() \
+                    if self._last_bspline_at is not None else 1e9
+                plan_clear, actual_clear = self._clearances(now, position, command)
+                on_clearance = (
+                    self._envelope.budget(plan_clear, actual_clear).deficit_m <= 0.0
+                    and plan_age < self._trust_plan_fresh_s)
+                # Three ways this is not a wedge, in the order they were found
+                # to be needed. The reflex exists for an obstacle the MAP DOES
+                # NOT HAVE -- something inside the depth near clip that FALCON
+                # planned straight through -- and backing out is right there,
+                # because the aircraft is somewhere nobody knew about. None of
+                # the three below is that.
+                #
+                # 1. ON CLEARANCE: the aircraft is no nearer anything than its
+                #    own reference. Necessary, and on its own not sufficient:
+                #    with the plan on the centre line of a 0.90 m opening a
+                #    0.15 m tracking error is already a deficit, so this rule
+                #    released exactly where it was needed most.
+                # 2. IN A PASSAGE: there is structure on BOTH sides across the
+                #    direction of travel. In a 0.93 m doorway the map has both
+                #    jambs, the aircraft is where it should be and merely slow,
+                #    and a 1.3 m back-out only replays the approach -- measured
+                #    in run 003, whose retreat counter reached 35 while it
+                #    cycled at one doorway with coverage frozen at 1565.9 m3,
+                #    each cycle costing about 12 s. See _in_passage for why
+                #    this is cast as rays rather than read off the plan.
+                # 3. CREEPING: the follower has already conceded this spot and
+                #    chosen to push through slowly. Reading the resulting lack
+                #    of progress as a wedge undoes the concession on the tick
+                #    after it is made -- concede, no progress for 3 s, retreat,
+                #    replan the identical curve, concede again.
+                #
+                # All three are bounded, and by mechanisms that can actually
+                # resolve a doorway rather than reverse out of one: a real
+                # bumper contact is still ungated, the map gate's own 4 s
+                # hard-block escalation still retreats, creep's 20 s timer
+                # re-arms the wedge, and the mission watchdog still ends a run
+                # that has stopped making map.
+                in_passage = (plan_age < self._trust_plan_fresh_s
+                              and self._in_passage(position, command))
+                if on_clearance or in_passage or (
+                        self._creep_until is not None
+                        and now < self._creep_until):
+                    wedged = False
+                    self._note_limiter("tight_pass")
+            if contact and self._note_contact_spot(now, position):
+                # Third strike in the same place: stop attempting it. See the
+                # note by _contact_spots -- holding is what lets FALCON's
+                # dead-end guard retire the viewpoint and re-route the tour.
+                self._give_up_until = now + rospy.Duration(self._give_up_hold_s)
+                rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
+                              "%.1f m; this approach does not work -- holding "
+                              "%.0fs so the planner retires the viewpoint",
+                              self._give_up_repeats, float(position[0]),
+                              float(position[1]), self._give_up_radius_m,
+                              self._give_up_hold_s)
+            if self._give_up_until is not None and now < self._give_up_until:
+                self._note_limiter("gave_up")
+                self._hold_station(position, yaw)
+                return
+            if contact or wedged:
+                # Look only if the MAP does not already have whatever stopped
+                # it. The turn and dwell are 7.5 s of a 12 s manoeuvre and they
+                # buy nothing against an obstacle the mapper has already fused.
+                self._begin_retreat(position, command,
+                                    look=not self._map_knows_ahead(position, command))
+                return
 
         # Two brakes between the servo and the wire, sharing one escalation
         # timer: the DEPTH bumper clamps the forward axis on what the camera
@@ -702,8 +956,16 @@ class BsplineFollowerNode(object):
             # Tracking a fresh plan closely: the planner's clearance stands.
             plan_age = (now - self._last_bspline_at).to_sec() \
                 if self._last_bspline_at is not None else 1e9
-            on_plan = (abs(command.cross_track_error_m)
-                       < self._trust_plan_xtrack_m
+            # How much of the plan's own margin the aircraft has spent. This
+            # replaces a cross-track test, and the difference is what lets one
+            # configuration fly both worlds: cross-track is a PROXY for having
+            # room, and it is a proxy with a different meaning in every
+            # corridor. 0.25 m off a curve down the middle of a 1.4 m aisle is
+            # 0.45 m of remaining clearance and perfectly safe; the same 0.25 m
+            # in a 0.90 m doorway is a strike. The deficit is the thing itself.
+            plan_clear, actual_clear = self._clearances(now, position, command)
+            budget = self._envelope.budget(plan_clear, actual_clear)
+            on_plan = (budget.deficit_m <= 0.0
                        and plan_age < self._trust_plan_fresh_s
                        and not command.holding)
             # Creep is a concession to ONE contested spot, not a cruise mode.
@@ -722,17 +984,34 @@ class BsplineFollowerNode(object):
                     creeping = False
                     rospy.loginfo("[follower] %.1f m clear of the contested "
                                   "spot; back to plan speed", gone)
-            if (not creeping and not on_plan
-                    and self._gate_enabled and self._gate.bubble_blocked(
-                    (float(position[0]), float(position[1]), float(position[2])),
-                    float(rospy.get_param("~bubble_clearance_m", 0.15)))):
+            # A breach is a near-contact: the aircraft is materially closer to
+            # something than the curve it is flying ever was, so the planner's
+            # clearance no longer covers it. A fixed personal-space bubble used
+            # to make this call, and a fixed bubble in a 0.90 m doorway fires on
+            # every pass -- the walls are 0.45 m away and there is nowhere in
+            # the opening that satisfies it. Judging the DEFICIT instead leaves
+            # an intended tight pass alone and still catches a drift into a
+            # jamb.
+            if not creeping and not on_plan and budget.breached:
                 self._note_limiter("bubble_breach")
-                rospy.logwarn("[follower] bubble breach: occupied voxel inside "
-                              "personal space; retreating (cross-track %.2f m, "
-                              "gap %.2f m)", command.cross_track_error_m,
-                              command.position_error_m)
-                self._begin_retreat(position, command)
+                rospy.logwarn("[follower] clearance breach: %.2f m of room "
+                              "against a plan that held %.2f m (deficit %.2f m); "
+                              "retreating (cross-track %.2f m)",
+                              -1.0 if budget.actual_clearance_m is None
+                              else budget.actual_clearance_m,
+                              budget.plan_clearance_m, budget.deficit_m,
+                              command.cross_track_error_m)
+                # No look: the clearance that objected was measured FROM the
+                # map, so the obstacle is already in it.
+                self._begin_retreat(position, command, look=False)
                 return
+
+            # Thread the middle of the opening. Applied BEFORE the brakes so
+            # they still guard the biased command, and only where it is tight
+            # (open space returns an idle bias), so warehouse cruise is
+            # untouched.
+            if self._centering_enabled and self._gate_enabled:
+                command = self._centre_in_opening(command, position, yaw)
 
             hard_blocked = False
             block_why = ""
@@ -778,15 +1057,27 @@ class BsplineFollowerNode(object):
             # Each directional brake has a blind arc (nose-only depth,
             # commanded-direction corridor); a cruise-speed strike proved the
             # arcs can lose a race. Near anything mapped, be slow near it.
+            #
+            # The cap is now relative to the plan rather than absolute, and the
+            # measured cost of the absolute version is why. Its knee sat at the
+            # airframe radius with a fixed slope, so in the hospital -- where
+            # every corridor puts a wall inside 0.6 m -- it was the binding
+            # limiter for 71-77% of ticks at 0.36x the planned speed, throttling
+            # an aircraft that was flying exactly where it had been told to.
+            # Below, an aircraft no closer than its own reference is not
+            # throttled at all, and one that has drifted closer is slowed in
+            # proportion to the margin it has spent. The absolute floor lives
+            # in the envelope's hard_floor_m and still stops it dead.
             if self._gate_enabled and not hard_blocked:
-                d_near = self._gate.nearest_occupied(
-                    (float(position[0]), float(position[1]), float(position[2])),
-                    1.2)
-                if d_near is not None:
-                    cap = max(self._prox_floor,
-                              self._prox_slope * (d_near - self._prox_stop_m))
+                if budget.hard_stop:
+                    hard_blocked = True
+                    block_why = "clearance %.2f m at the airframe floor" % (
+                        budget.actual_clearance_m
+                        if budget.actual_clearance_m is not None else -1.0)
+                elif budget.speed_scale < 1.0:
                     speed = math.hypot(command.vx, command.vy)
-                    if speed > cap:
+                    cap = self._envelope.speed_cap(budget, speed)
+                    if speed > cap > 0.0:
                         f = cap / speed
                         if f < worst:
                             worst, binding = f, "proximity_cap"
@@ -835,7 +1126,10 @@ class BsplineFollowerNode(object):
                                   command.position_error_m)
                 elif (now - self._gate_blocked_since).to_sec() > self._gate_block_retreat_s:
                     self._gate_blocked_since = None
-                    self._begin_retreat(position, command)
+                    # No look: whichever brake held this stop for 4 s was
+                    # reading an obstacle it can already see -- the voxel map
+                    # for the gate, the live depth frame for the bumper.
+                    self._begin_retreat(position, command, look=False)
                     return
                 self._note_limiter(
                     "hard_block:%s" % ("depth" if block_why.startswith("depth")
@@ -843,6 +1137,37 @@ class BsplineFollowerNode(object):
                 stop = Twist()
                 stop.linear.z = command.vz          # altitude hold stays live
                 stop.angular.z = command.yaw_rate   # keep looking along the path
+                # Centring survives the stop, and it is the only thing here
+                # that can END the stop. A dead halt in a doorway resolves in
+                # exactly one way -- the aircraft moves back toward the middle
+                # of the opening -- and zeroing every horizontal axis removes
+                # the one motion that would clear the block, leaving the 4 s
+                # escalation above to reverse the aircraft out of a door it was
+                # 0.1 m off centre in. Forward drive stays zero; only the
+                # across-track component is allowed through.
+                if self._centering_enabled and self._gate_enabled:
+                    bias = self._centering.bias(
+                        self._clearance_at,
+                        (float(position[0]), float(position[1]),
+                         float(position[2])),
+                        (command.world_vx, command.world_vy))
+                    if bias.engaged:
+                        cos, sin = math.cos(yaw), math.sin(yaw)
+                        stop.linear.x = cos * bias.world_vx + sin * bias.world_vy
+                        stop.linear.y = -sin * bias.world_vx + cos * bias.world_vy
+                # A DELIBERATE stop is not a wedge, and the wedge detector
+                # cannot tell the difference on its own: it compares the last
+                # commanded speed against the distance travelled, and the
+                # centring bias above puts 0.1-0.15 m/s on the wire while the
+                # aircraft is meant to be holding position and inching
+                # sideways. Three seconds of that reads as "commanding motion,
+                # going nowhere" and retreats the aircraft 1.3 m back out of
+                # the opening it is lining up on (measured at the hospital's
+                # NW doorway, retreats 7 and 8 of run 002). Clearing the track
+                # keeps the window from ever filling while the follower is the
+                # one holding the aircraft still; the block's own 4 s
+                # escalation above is what handles a stop that will not clear.
+                self._track = []
                 self._send(stop)
                 return
             self._gate_blocked_since = None
@@ -977,6 +1302,144 @@ class BsplineFollowerNode(object):
                           "conceding to the planner, creeping at %.2f m/s "
                           "for %.0fs", x, y, self._creep_speed, self._creep_time_s)
 
+    def _note_contact_spot(self, now, position):
+        # type: (object, np.ndarray) -> bool
+        """Record a contact; report whether this place has now failed enough.
+
+        Grouped by position rather than by object, because the aircraft cannot
+        identify what it touched -- and the geometry is what repeats. Returns
+        True on the ``give_up_repeats``-th contact within ``give_up_radius_m``
+        inside ``give_up_window_s``.
+        """
+        now_s = now.to_sec()
+        x, y = float(position[0]), float(position[1])
+        self._contact_spots = [s for s in self._contact_spots
+                               if now_s - s[0] < self._give_up_window_s]
+        self._contact_spots.append((now_s, x, y))
+        near = sum(1 for s in self._contact_spots
+                   if math.hypot(x - s[1], y - s[2]) < self._give_up_radius_m)
+        return near >= self._give_up_repeats
+
+    def _in_passage(self, position, command):
+        # type: (np.ndarray, object) -> bool
+        """Whether the aircraft is inside a passage rather than beside a wall.
+
+        Both look identical to a clearance reading and they want opposite
+        responses: in a doorway a 1.3 m back-out only replays the approach,
+        while beside a wall in a room it is exactly right. The separator is
+        whether there is structure on BOTH sides across the direction of
+        travel, which is what ``across_width`` casts rays to find out.
+        """
+        if not self._gate_enabled:
+            return False
+        speed = math.hypot(command.world_vx, command.world_vy)
+        if speed < 1e-3:
+            return False
+        width = self._centering.across_width(
+            self._gate.blocked_distance,
+            (float(position[0]), float(position[1]), float(position[2])),
+            (command.world_vx / speed, command.world_vy / speed),
+            self._passage_width_m)
+        return width is not None and width <= self._passage_width_m
+
+    def _map_knows_ahead(self, position, command):
+        # type: (np.ndarray, object) -> bool
+        """Whether the voxel map already carries whatever is stopping the aircraft.
+
+        Decides the turn-and-look phase of a retreat. That manoeuvre exists to
+        put an obstacle the mapper has NEVER SEEN in front of the camera -- the
+        near-clip case, where FALCON routes through a wall because no depth ray
+        ever reached it. Against an obstacle already in the map it buys nothing
+        and costs 7.5 s of a 12 s retreat plus a yaw slew off the route.
+        """
+        if not self._gate_enabled:
+            return False
+        speed = math.hypot(command.world_vx, command.world_vy)
+        if speed < 1e-3:
+            return False
+        blocked = self._gate.blocked_distance(
+            (float(position[0]), float(position[1]), float(position[2])),
+            (command.world_vx / speed, command.world_vy / speed),
+            self._retreat_clear_m)
+        return blocked is not None
+
+    def _clearance_at(self, x, y, z):
+        # type: (float, float, float) -> object
+        """Room at a world point, metres, or None when nothing is within reach.
+
+        The one measurement both the envelope and the centring probe are built
+        on. ``None`` genuinely means "more than the search radius", which both
+        callers read as open space -- so ``clearance_search_m`` must stay above
+        the envelope's ``open_clearance_m`` or every open point reports the
+        search limit and no deficit can ever be measured honestly.
+        """
+        if not self._gate_enabled:
+            return None
+        return self._gate.nearest_occupied((x, y, z), self._clearance_r)
+
+    def _clearances(self, now, position, command):
+        # type: (object, np.ndarray, object) -> tuple
+        """``(plan_clearance, actual_clearance)``, metres, either possibly None.
+
+        The plan's clearance is measured at the point on the curve the servo is
+        currently tracking, which is the planner's own statement of how much
+        room it believed this part of the route has. Recovering that point is
+        why the node keeps the trajectories: the command carries how far along
+        the curve the reference sits, not where that is.
+
+        It is cached for ``clearance_plan_period_s`` because the reference
+        travels at plan speed (0.25 m/s: 2.5 cm between recomputations) while
+        this runs at 50 Hz, so recomputing it every tick buys nothing and costs
+        a radial search inside the flight loop.
+        """
+        actual = self._clearance_at(float(position[0]), float(position[1]),
+                                    float(position[2]))
+        if (self._plan_clearance_at is not None
+                and (now - self._plan_clearance_at).to_sec() < 0.1):
+            return self._plan_clearance, actual
+        trajectory = self._trajectories.get(int(command.trajectory_id))
+        if trajectory is None:
+            self._plan_clearance = None
+            self._plan_clearance_at = now
+            return None, actual
+        reference = trajectory.position_at(command.reference_time_s)
+        self._plan_clearance = self._clearance_at(
+            float(reference[0]), float(reference[1]), float(reference[2]))
+        self._plan_clearance_at = now
+        return self._plan_clearance, actual
+
+    def _centre_in_opening(self, command, position, yaw):
+        # type: (object, np.ndarray, float) -> object
+        """Bias the command toward the middle of a tight opening.
+
+        The bias REDIRECTS rather than adds: the resulting speed is scaled back
+        to what it was, so threading a doorway costs forward progress instead of
+        buying sideways motion with extra energy. That keeps the whole thing
+        inside the stopping-distance budget the brakes downstream are sized
+        against, and means the centring can never make the aircraft faster than
+        the planner asked for.
+        """
+        speed = math.hypot(command.world_vx, command.world_vy)
+        if speed < 1e-3:
+            return command
+        bias = self._centering.bias(
+            self._clearance_at,
+            (float(position[0]), float(position[1]), float(position[2])),
+            (command.world_vx, command.world_vy))
+        if not bias.engaged:
+            return command
+        wx = command.world_vx + bias.world_vx
+        wy = command.world_vy + bias.world_vy
+        mixed = math.hypot(wx, wy)
+        if mixed < 1e-6:
+            return command
+        scale = speed / mixed
+        wx, wy = wx * scale, wy * scale
+        cos, sin = math.cos(yaw), math.sin(yaw)
+        return dataclasses.replace(
+            command, world_vx=wx, world_vy=wy,
+            vx=cos * wx + sin * wy, vy=-sin * wx + cos * wy)
+
     def _falcon_silent_s(self, now):
         # type: (object) -> float
         """Seconds since FALCON last published a plan; 0 before the first one.
@@ -1108,11 +1571,6 @@ class BsplineFollowerNode(object):
         if len(msg.states) > 0:
             self._contact_seen_at = rospy.Time.now()
 
-    def _should_retreat(self, now, position, command):
-        # type: (object, np.ndarray, object) -> bool
-        """Whether to back out: a fresh contact, or an inferred wedge."""
-        return self._contact_recent(now) or self._is_wedged(now, position, command)
-
     def _contact_recent(self, now):
         # type: (object) -> bool
         """Whether the bumper reported a contact within the hold window."""
@@ -1154,8 +1612,8 @@ class BsplineFollowerNode(object):
                         + (position[2] - z0) ** 2)
         return net < self._wedge_move_m
 
-    def _begin_retreat(self, position, command):
-        # type: (np.ndarray, object) -> None
+    def _begin_retreat(self, position, command, look=True):
+        # type: (np.ndarray, object, bool) -> None
         """Start backing out of a wall, opposite the direction it drove in.
 
         The condemned curve is dropped (``reset``) so following resumes only when
@@ -1187,7 +1645,16 @@ class BsplineFollowerNode(object):
         # Where the obstacle is: just ahead of where the strike happened, along
         # the direction the aircraft was driving. 0.5 m is "at or just past the
         # airframe's nose"; precision is not needed, the camera FOV is wide.
-        if drive is not None:
+        #
+        # ``look`` is False when the MAP is what stopped the aircraft. The turn
+        # and dwell exist to put an obstacle the mapper has never seen in front
+        # of the camera -- the near-clip case, where FALCON plans through a wall
+        # because no depth ray ever reached it. When the voxel gate or the
+        # clearance envelope is the thing objecting, the obstacle is already IN
+        # the map by definition, so the manoeuvre buys nothing and costs 7.5 s
+        # of the 13 s retreat plus a yaw slew away from the route. Run 002 spent
+        # 143 s of its first 330 in retreats at a single doorway.
+        if drive is not None and look:
             self._contact_point = (float(position[0]) + 0.5 * drive[0],
                                    float(position[1]) + 0.5 * drive[1])
         else:
@@ -1219,6 +1686,17 @@ class BsplineFollowerNode(object):
         self._contact_point = None
         self._retreat_phase = None
         self._gate_blocked_since = None
+        # A concession armed by THIS retreat has been running on the clock the
+        # whole time the retreat was flying, and a retreat is 5 to 12 s of a
+        # 20 s window. What survived was too short to be the concession it was
+        # meant to be: the aircraft came out of the manoeuvre with ~8 s of
+        # creep, which at creep_speed is under a metre, ran out short of the
+        # opening, re-armed the wedge and retreated again. Measured: 28 retreats
+        # cycling on one doorway approach with coverage frozen at 630 m3.
+        # Restarting it here spends the window on FLYING rather than on backing
+        # up, which is what conceding was for.
+        if self._creep_until is not None:
+            self._creep_until = rospy.Time.now() + rospy.Duration(self._creep_time_s)
         self._servo.reset()
         self._send(Twist())
         rospy.loginfo("[follower] retreat done (%s); holding for a fresh plan", why)
@@ -1303,10 +1781,33 @@ class BsplineFollowerNode(object):
             # is what put the aircraft here. Ends the moment the personal-space
             # bubble is clear at the new altitude, or on the time cap.
             clear = True
+            futile = False
             if self._gate_enabled:
-                clear = not self._gate.bubble_blocked(
-                    (float(position[0]), float(position[1]), float(position[2])),
-                    float(rospy.get_param("~bubble_clearance_m", 0.28)))
+                # The one absolute in the clearance model: the distance at
+                # which the airframe is about to touch something. A climb has
+                # bought its way out the moment nothing is inside it.
+                floor_m = self._envelope.config.hard_floor_m
+                here = (float(position[0]), float(position[1]),
+                        float(position[2]))
+                clear = not self._gate.bubble_blocked(here, floor_m)
+                # A climb that would not clear it either is not an escape, it
+                # is a slow grind up the face of the obstacle. Measured: the
+                # aircraft rose to 1.80 m -- the flight ceiling -- against a
+                # clutter pile whose top is 1.79 m, and scraped along it for
+                # 100 s, eight bumper contacts, coverage frozen. Looking one
+                # step ahead costs one query and turns that into a concession.
+                if not clear:
+                    ahead = min(self._escape_climb_max_z,
+                                float(position[2]) + self._escape_climb_lookahead_m)
+                    futile = (ahead <= float(position[2]) + 1e-3
+                              or self._gate.bubble_blocked(
+                                  (here[0], here[1], ahead), floor_m))
+            if futile:
+                self._note_block_episode(now, position)
+                self._send(Twist())
+                self._end_retreat("climbing would not clear it either at %.2f m"
+                                  % float(position[2]))
+                return
             if (clear or now >= self._retreat_until
                     or float(position[2]) >= self._escape_climb_max_z):
                 self._send(Twist())

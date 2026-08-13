@@ -75,13 +75,29 @@ measured against one means nothing.
 ## What this package adds
 
 ```
-adapter/scripts/bspline_follower_node.py   the only node: plan + state -> Twist
+adapter/scripts/bspline_follower_node.py   plan + state -> Twist
+adapter/scripts/sensor_pose_node.py        odom -> camera pose for the mapper
+adapter/scripts/mission_watchdog_node.py   is this run still worth its clock?
 adapter/launch/bspline_follower.launch     the follower, and the corrected camera model
+adapter/launch/exploration.launch          FALCON, the adapters and the watchdog
 ```
 
-The node is thin on purpose: subscribe, convert, one `update()`, publish. The
-control law is in `core/control/velocity_servo/` and is unit-tested against a
-simulated airframe, so it never needs Gazebo to be exercised.
+The nodes are thin on purpose: subscribe, convert, one call, publish. Everything
+they decide with lives ROS-free in `core/` and is unit-tested without Gazebo:
+
+| node | the logic it wires | tests |
+|---|---|---|
+| `bspline_follower_node` | `core/control/velocity_servo/` | against a simulated airframe |
+| | `core/planning/safety/clearance_envelope.py` | a warehouse aisle and a hospital doorway, one config |
+| | `core/planning/safety/voxel_brake_gate.py` | synthesised occupancy |
+| | `core/planning/local_planners/corridor_centering.py` | analytic corridors |
+| `mission_watchdog_node` | `core/planning/exploration/progress_monitor.py` | every stuck shape, and the healthy mission it is confused with |
+
+**A new node is not free: add it to the per-file mount loop in
+`run_falcon_sjtu.sh`.** An unmounted file silently runs whatever is baked into
+the image, or nothing at all. `rospack find falcon_adapter` resolves to
+`/catkin_ws/src/falcon_adapter`, so a mounted, executable script is found
+without an image rebuild; `run_falcon_sjtu.sh` does the `chmod +x` itself.
 
 ### Why it reads `/planning/bspline` and not `/planning/pos_cmd`
 
@@ -143,6 +159,14 @@ bash sparx_agency/robots/SJTU/setup/bringup_world.sh --skip-build no_roof_small_
 
 `rig/campaign_run.sh` handles that split itself via `WORLD=`; see its header.
 
+**`rig/both_worlds.sh` is the acceptance test**, and it is the one to run rather
+than a single-world soak. It flies the hospital and the warehouse back to back
+in one session, with the same binary and the same parameters and no editing in
+between, so a change that fixes one world by breaking the other fails there. It
+takes no per-world arguments and passes none: the only thing that differs
+between its two runs is the map config naming the building's own geometry.
+`rig/soak.sh` remains for repeated runs of a single world.
+
 **`--skip-build` reuses the installed simulator, including its URDF.** It is the
 fast path and the rig uses it, but after any edit to `sjtu_drone.urdf.xacro` it
 flies the *previous* aircraft — wrong camera intrinsics included, silently. See
@@ -198,6 +222,519 @@ The drone model is published by FALCON's `odom_visualization`, which
 it, and nothing else in this stack would publish it — without it the map grows
 with no aircraft in view).
 
+## One configuration, two worlds
+
+The two Gazebo worlds looked like they wanted opposite tunings, and for a while
+this package shipped opposite tunings: `safe_distance` 0.85 in the warehouse
+against 0.45 in the hospital, on the belief that warehouse aisles are ~1.4 m
+wide and hospital doorways 0.9 m. Improving one world then regressed the other,
+which is the signature of a parameter standing in for something that was never
+measured.
+
+**Both beliefs were wrong, and in the same direction.** Measured off the
+collision meshes:
+
+| | measured | previously believed |
+|---|---|---|
+| hospital doorways | 18 at **0.930 m**, 8 at 1.500 m, every lintel at **2.350 m** | 0.9 m, lintels ~2.0 m |
+| warehouse shelf aisles | **0.909 / 0.916 / 0.942 / 1.035 / 1.044 / 1.216 m** | "~1.4 m" |
+| warehouse tightest clutter slots | **0.81 m** and 0.95 m | "1.4 m gaps" |
+| drone collision mesh | **0.52 m across the arms, 0.63 m corner to corner**, 0.11 m tall | "0.25 m radius" |
+
+The warehouse's aisles are the same width as the hospital's doorways. There was
+never a conflict between the worlds to trade off — there was a geometry error.
+`safe_distance` is now **0.45 in both**, and the reason it sits exactly at the
+doorway half-width rather than under it is in `run_falcon_sjtu.sh`.
+
+The warehouse numbers were wrong for a reason worth knowing: the ShelfD/ShelfE
+collision DAE carries a 90-degree `<node><matrix>` that Gazebo applies and a
+naive vertex-extent parse does not. Skipping it rotates the whole rack and
+quotes the mesh's half-length as a height. The units actually run **east-west**
+at x 2.772..6.691 with decks solid to **2.643 m** — so the old `box_max_x` 3.9
+put 1.128 m of every shelf *inside* the flight box, under a `box_max_z` of 2.6
+that was 4 cm below their tops. The aircraft was being invited in among the
+racking with no way to climb out: the "illogical route between crowded shelves"
+this config exists to forbid, written into the config.
+
+The hospital box had the opposite fault. It was x,y ±20 while the building runs
+x ±12.44 and **y −34.94 to 20.94**: it claimed 7.6 m of solid ground beyond each
+side wall and cut the south wing off entirely. About a quarter of the hospital
+was outside the volume FALCON is allowed to plan in, so its frontier finder
+could not see it and its coverage tour could never route there. The baseline run
+stalled at (−4.3, −18.0), two metres short of that face.
+
+## Reflexes are measured against the plan, not against a constant
+
+The follower carries protective reflexes the planner does not: a personal-space
+bubble, a speed governor keyed on the nearest obstacle, a depth veto. Every one
+of them used to be an absolute distance, and an absolute distance is the wrong
+shape for this problem, because **the room a correctly flown aircraft has is a
+property of the corridor.** The same constants leave a warehouse aisle alone and
+make a hospital doorway unflyable; tuning them down re-opens the warehouse
+contacts they were raised to stop.
+
+`core/planning/safety/clearance_envelope.py` replaces the constant with a
+comparison. The reference point on FALCON's curve is itself a clearance
+measurement — its distance to the nearest occupied voxel is the room the planner
+believed it had and chose to use — so the follower asks the only question that
+transfers between worlds:
+
+> **Is the aircraft closer to something than the plan is?**
+
+If it is not, no proximity reflex may fire, whatever the absolute distance. If it
+is, they fire in proportion to the **deficit**: how much of the plan's own margin
+has been spent, which is the same number in both buildings. Underneath sits one
+absolute, `hard_floor_m` 0.30 — the distance at which the airframe is about to
+touch something — and that is never relaxed for any plan.
+
+Two consequences are worth stating because they are what actually changed:
+
+* **A hard stop is not a breach.** In a 0.90 m opening the plan holds 0.45 m, so
+  the floor is reached after only 0.15 m of drift — routinely, on a pass the
+  aircraft is entitled to make. Reading that as a breach retreated the aircraft
+  1.3 m back out of the door, whereupon it replanned the identical curve and did
+  it again. Stopping is right; reversing out of the building is not. In a 1.4 m
+  aisle the same 0.30 m means 0.40 m of margin has been thrown away, and there
+  the breach still fires. Same code, same threshold, opposite verdict, because
+  the plan is different.
+* **The inferred wedge is gated; the bumper is not.** `_is_wedged` was the
+  dominant backwards path and the only one the trust rule did not cover — it is
+  evaluated several branches before `on_plan` is computed, so an aircraft
+  deliberately crawling through a doorway at a brake-limited speed read as
+  pinned and was driven 1.3 m back out of it. "Going nowhere" and "going slowly
+  on purpose" are the same measurement; only the geometry says which. A real
+  contact stays ungated, because a bumper report is not an inference.
+
+### The speed ceiling is derived from the clearance, not chosen
+
+The same principle, applied to speed, and it caught a defect that had nothing to
+do with either world's geometry: **the follower was allowed to fly at a speed
+whose stopping distance exceeded the margin the planner had reserved.**
+
+The margin is `safe_distance` (0.45) minus the airframe half width (0.26), i.e.
+0.19 m. The stopping distance at this airframe's measured 0.30 s of command
+latency and 0.8 m/s² of braking is `d(v) = 0.30·v + v²/1.6`:
+
+| v | d(v) | against a 0.19 m margin |
+|---|---|---|
+| 0.25 m/s (plan) | 0.11 m | inside |
+| **0.35 m/s** | **0.18 m** | **at it — this is the ceiling** |
+| 0.40 m/s | 0.22 m | over |
+| 0.60 m/s (old cap) | 0.41 m | more than twice it |
+
+The servo's per-tick ceiling is `planned_speed + max_overspeed`, capped by
+`max_speed_xy`, so at a 0.25 m/s plan the old `max_speed_xy` 0.6 with
+`max_overspeed` 0.35 let it sprint to 0.60 m/s to close a lag — flying at 2.4×
+the speed FALCON had checked the curve at, spending the whole clearance budget
+on stopping distance before anything had gone wrong. Every contact in the first
+acceptance attempt was at **0.48–0.59 m/s**, all of them the aircraft
+accelerating into an obstacle the map did not yet have.
+
+And this was not an edge case the aircraft touched occasionally. Run 003's
+commanded speed was **p50 0.45, p90 0.60, p99 0.60 m/s**, with the servo
+saturated on **62%** of its following ticks: the old cap was not a ceiling the
+aircraft approached, it was the speed it flew at. `analyze_run.py` now prints
+that percentile and the stopping distance it implies, so the invariant is
+checkable from any run rather than being an argument about defaults.
+
+**But bounding it the obvious way broke something else, three times, and that is
+the more transferable lesson.** `max_overspeed` is not a cruise setting —
+`servo.py:320` passes `planned_speed + max_overspeed` to `limit_velocity` *as*
+the horizontal cap — so it is the **correction budget**: everything the position
+loop has above the feedforward, which is what closes a cross-track error.
+Shrinking it to hold the ceiling down removes the authority to correct.
+
+What decides whether an aircraft can thread a 0.93 m opening is not its speed.
+It is **correction per metre travelled** — how much cross-track it can take out
+before it arrives — and that is `max_overspeed / max_vel`:
+
+| configuration | plan | ceiling | correction | **ratio** | stopping | outcome |
+|---|---|---|---|---|---|---|
+| run 003 | 0.25 | 0.60 | 0.35 | **1.40** | 0.41 m | finished the world; contacts at 0.48–0.59 m/s |
+| ceiling capped, plan kept | 0.25 | 0.35 | 0.10 | 0.40 | 0.18 m | stalled at a doorway, 670 m³ |
+| ceiling capped, plan 0.20 | 0.20 | 0.35 | 0.15 | 0.75 | 0.18 m | stalled at a doorway, 297 m³ |
+| ceiling capped, plan 0.20, floor lifted | 0.20 | 0.35 | 0.15 | 0.75 | 0.18 m | stalled at a doorway, 211 m³ |
+| **current** | **0.15** | **0.35** | **0.20** | **1.33** | **0.18 m** | **hospital CLEAN: finished, 0 contacts** |
+
+Three consecutive stalls, all at 0.93 m doorways, all with **zero contacts** —
+the aircraft never hit anything, it simply could not centre itself before it
+arrived. With the ceiling pinned by clearance, the only way to buy back the
+ratio is to **lower the plan**, which is what `max_vel` 0.15 does. It restores
+run 003's ratio while keeping run 003's stopping distance problem fixed.
+
+Note what the ceiling is *not*: not a comfort setting and not a reaction to a
+crash, but an arithmetic consequence of `safe_distance`. And note what the plan
+speed is not: not a throughput knob. Together they are one decision with two
+constraints — the ceiling bounds what an unmapped obstacle costs, the ratio
+bounds what a doorway costs — and moving either alone breaks the other.
+
+### Inside a passage, a wedge is not a wedge
+
+The wedge reflex exists for an obstacle **the map does not have** — something
+inside the depth near clip that FALCON planned straight through. Backing out is
+right there, because the aircraft is somewhere nobody knew about. In a 0.93 m
+doorway the map has both jambs, the aircraft is exactly where it should be and
+merely slow, and a 1.3 m back-out only replays the approach: measured in run
+003, whose retreat counter reached 35 while it cycled at one doorway with
+coverage frozen at 1565.9 m³.
+
+So the reflex is suppressed inside a passage — and getting that test right took
+three attempts, each of which is worth recording because each looked correct:
+
+1. **Zero clearance deficit.** With the plan on the centre line of a 0.90 m
+   opening, a 0.15 m tracking error is already a deficit. The rule released
+   exactly where it was needed.
+2. **The plan's clearance is tight.** The clearance at the *reference point* is
+   the planner's own statement about the corridor — but it is a statement about
+   where the reference is, and the case that matters is precisely the one where
+   the aircraft is not there. Measured: the aircraft wedged in a doorway while
+   its reference sat in the room beyond holding 0.90 m, so the test read "not a
+   passage" at the moment the aircraft was inside one.
+3. **Structure on both sides of the aircraft**, which is what it actually
+   means. `CorridorCentering.across_width` casts a ray to each side across the
+   direction of travel and returns their sum, or `None` when either side is
+   open. Under `passage_width_m` (1.20 m, above every opening in either world
+   and below any room) the aircraft is in a passage.
+
+It has to be a **ray**, not the clearance field the rest of that class uses.
+Clearance is direction-agnostic: probed 0.25 m either side of an aircraft
+standing 0.30 m from a *single* wall, both probes return distances to that same
+wall (0.05 m and 0.55 m) and their sum reads as a 1.10 m corridor that does not
+exist. Only a ray can answer "is there something on the OTHER side".
+
+The suppression is bounded by the mechanisms that can actually resolve a
+doorway rather than reverse out of one: a real bumper contact is still ungated,
+the map gate's own 4 s hard-block escalation still retreats, and the mission
+watchdog still ends a run that has stopped making map.
+
+### Flying through the middle of an opening
+
+FALCON's distance cost is soft and evaluated only at control points ~0.5 m
+apart, so its curve is *near* the middle of a doorway, not *on* it; the
+follower's tracking error lands on top of that. In a 0.90 m door a 0.52 m
+airframe has about 0.19 m of budget, so the two errors together are a jamb
+strike.
+
+`core/planning/local_planners/corridor_centering.py` probes the clearance field
+to either side of the direction of travel and biases toward its peak. Three
+properties make that safe to add to a tracked trajectory rather than a fight
+with it: it is exactly zero above `centering_engage_m` (so warehouse cruise is
+untouched), it is capped at 0.15 m/s, and it **redirects at constant speed**
+rather than adding to it — threading a door costs forward progress instead of
+buying sideways motion out of the stopping-distance budget the brakes are sized
+against.
+
+The estimator is half the difference of the two probes, which is *exact*: a
+clearance field is a distance field, so across a corridor it falls 1:1 with
+lateral offset and the half-difference IS the error. The obvious alternative — a
+parabolic sub-sample peak fit — is biased and biased dangerously, returning
+`-d·e/(d − e)`, which asks for 0.30 m of correction to fix a 0.10 m error at a
+0.15 m probe. Parabolic fitting assumes a smooth quadratic peak; a corridor's
+clearance field has a *corner* at its centre line.
+
+The centring also survives a hard block, and it is the only thing that can end
+one: a dead halt in a doorway resolves in exactly one way — the aircraft moves
+back toward the middle — and zeroing every horizontal axis removes the one
+motion that would clear it.
+
+## Where FALCON thinks it is, versus where the aircraft is
+
+FALCON does not replan from odometry. It derives each replan's start point by
+evaluating the *previous* trajectory at the current instant
+(`exploration_fsm.cpp`), and `t_r` saturates at the curve's duration — so every
+second this stack spends braked, held or retreating opens a gap between the
+planned world and the real one, and the next curve is then anchored in the
+planned one. `falcon_replan_from_pose.patch` corrects the origin to odometry
+once that gap passes `/fsm/replan_from_pose_drift`.
+
+That threshold was 1.5. It ends the runaway it was written for (gaps of 5.4 m),
+but it also *licenses* 1.5 m as normal, and 1.5 m is not a constant cost across
+worlds: in a 1.4 m aisle the optimiser absorbs it, and in a 0.90 m doorway it is
+three times the whole clearance budget, spent before the aircraft has moved. It
+was measured **permanently saturated** in the hospital — 82 corrections in one
+run, every one of them 1.5–2.1 m.
+
+It is now **0.40**, the follower's own acquisition tolerance: under it the
+previous curve's endpoint is the better origin (it joins the trajectory being
+flown with no velocity step), over it the curve is a fiction and odometry wins.
+`mission_watchdog_node.py` records the gap per plan in `progress.jsonl`, so it
+is a number in every run rather than something to be inferred.
+
+## The mission watchdog: never burn wall-clock on a doomed run
+
+An exploration fails in ways every individual node reads as success. The FSM is
+in `EXEC_TRAJ`; the follower is tracking; the aircraft is moving; and the map has
+not gained a voxel in four minutes because the drone is orbiting a room whose
+only exit is a doorway it cannot thread. The two facts that settle it — where the
+aircraft has been, and how much map that bought — were not in the same place
+anywhere in the graph.
+
+`adapter/scripts/mission_watchdog_node.py` puts them there, judging with
+`core/planning/exploration/progress_monitor.py`:
+
+| signal | what it catches | why not alone |
+|---|---|---|
+| **confinement radius** — smallest disc containing a 120 s window of positions | orbiting a mapped region; doorway loops | fires on a legitimately slow sweep of one crowded room |
+| **coverage growth** — m³/min over the same window | a mission that has stopped learning | fires during a long transit through mapped corridors |
+| both at once | the actual failure | — |
+| net displacement | pinned against a wall | a doorway loop has plenty of it |
+| wall clock | the mission is simply over | says nothing about why |
+
+Confinement is a **two-stage escalation**, and that is the point: a
+confined-and-barren window is first a `/mission/nudge`, which the follower
+answers with a fresh survey turn (rebuilding the local map and re-arming
+FALCON's frontier finder on a region it has stopped seeing frontiers in), and
+only becomes `/mission/abort` if the nudges do not restore growth. A watchdog
+that can only kill wastes every run it fires on.
+
+It earns that on real runs. Measured in an acceptance flight: coverage flat at
+229.6 m³ with growth at 0.09 m³/min in the operating wing, **three nudges**, and
+the mission came back — 320.2 m³ and 22 m³/min four minutes later, having moved
+from (2.2, −17.3) to (6.4, −23.5). An abort-only watchdog would have thrown that
+run away.
+
+The node **declares; it never kills.** `rig/campaign_run.sh` greps the
+`[watchdog] MISSION ABORT` banner and ends the run, so an operator running the
+stack interactively is not torn down under their own session. The harness keeps
+its own coarser watchdogs underneath, with longer caps, for the cases the node
+cannot cover (it being disabled, failing to start, or its container dying).
+
+### A planner respawn wipes the map, and every progress watchdog has to know
+
+FALCON's `exploration_node` aborts intermittently — its in-process LKH TSP solver
+corrupts the heap — and roslaunch respawns it with an **empty map** that then
+rebuilds from scratch. Coverage does not dip on that event; it falls off a
+cliff, measured 728 → 271 m³ in one acceptance run.
+
+Any watchdog keyed on "has the map grown since its high-water mark" then kills a
+perfectly healthy rebuild, because the mark belongs to the previous incarnation.
+That is exactly what happened: the harness's coarse discovery watchdog cut a run
+at 420 s of "no new voxels" while the mission's own coverage was climbing at
+60 m³/min, its mark stuck at 472,587 occupied voxels from before the crash.
+
+Both watchdogs now re-baseline on a collapse rather than treating it as a stall
+— `ExplorationProgressMonitor._track_coverage` restamps on a material drop, and
+`campaign_run.sh` does the same when the occupied count halves. The rest of the
+stack already survives the respawn: `falcon_deadend_guard.patch` persists its
+blocked regions through a rosparam and logs `Restored N blocked region(s) from a
+previous incarnation`, and the follower's re-survey turn gives the fresh frontier
+finder something to fire on.
+
+**Surviving the crash is not the same as affording it.** Because the map is
+wiped, a crash does not interrupt the mission, it *resets* it: measured, one
+hospital run losing 728 m³ and another 577 m³, each then needing about ten
+minutes to re-earn ground it had already mapped. Two crashes in one run put a
+complete map out of reach of any sane time cap — one such run ended at 116 m³
+having twice been near 600.
+
+So the crash RATE is a first-class parameter of this deployment, and the lever
+is the tour: LKH's failure is in `FindTour → Best5OptMove → Flip_SL` and scales
+with the number of cities. `hgrid_cell_size_max` is now **14.0** (from 10.0),
+which on the hospital's 24 × 55 m box is 2 × 4 = 8 cells rather than 3 × 6 = 18,
+less than half the cities. The tour is less optimal; that is a far smaller cost
+than starting over. `falcon_deadend_guard.patch` already removes the other
+crash source by enumerating tours of three or fewer cities directly instead of
+entering LKH at all.
+
+#### The blacklist must not outlive the map it describes
+
+This is the sharpest correlation in the whole campaign, and it explains why
+crashed runs did not merely lose time but **finished early on a partial map**:
+
+| run | planner crashes | outcome |
+|---|---|---|
+| the one that mapped the building | **0** | finished, 760 m³, 0 contacts |
+| every other finishing run | ≥1 | finished at 355.9, 260.8, 116.1 m³ |
+
+`falcon_deadend_guard.patch` persists physics-vetoed viewpoints in the rosparam
+`/frontier_finder/blocked_regions_runtime` so they survive a respawn, and its
+constructor logs `Restored N blocked region(s) from a previous incarnation`.
+Within one incarnation that list is exactly right — the aircraft proved it
+cannot reach those places, and the map has not changed. **Across a respawn it is
+not**, because the respawn also wipes the map: the rebuilt world arrives with
+regions already shadowed in places the aircraft has not re-explored, the
+frontier finder runs out early, and FALCON declares a third of a building
+complete.
+
+`mission_watchdog_node` therefore deletes that param on every tick
+(`clear_blocked_regions_on_respawn`, default true). The in-memory blacklist is a
+C++ member, not the param, so blocking works exactly as designed for as long as
+the node lives; only the *inheritance* is cut. At most one second of blocks can
+survive a crash, which is the width of the watchdog loop.
+
+It also writes `progress.jsonl` at 1 Hz — coverage, confinement radius, growth
+rate, plan-origin gap, sensor-pose lag — which is the only artifact that says
+*why* a run went nowhere rather than merely that it did. `verdict.json` now
+carries `coverage_m3`, `retreats` and `plan_origin_corrections`.
+
+## What it bought, measured
+
+Hospital, same world, same spawn, fresh map each run, one configuration.
+
+**Read the run numbers as a sequence, not as the shipped configuration.** Each
+column is the stack as it stood when that run flew, and three changes landed
+*after* run 003 — the derived speed ceiling, the ray-based passage test, and the
+look-ahead on the vertical escape — each of which was found by reading run 003
+or the acceptance attempts that followed it. `rig/both_worlds.sh` is what
+measures the configuration as shipped.
+
+| | baseline | box + clearance envelope | + retreat fixes |
+|---|---|---|---|
+| run | 001 | 002 | 003 |
+| verdict | `STALLED_POSITION` | `ABORT_NO_MOVEMENT` | **`FINISHED`** (dirty) |
+| coverage | 598 m³ | 476 m³ | **1567.2 m³** (explorable 1583.3) |
+| time | 1592 s (cap) | 480 s (killed) | 1646 s, 517 m flown |
+| retreats | 60 | 25 | 36 |
+| bumper reports / distinct objects touched | 4 / – | 27 / 1 | 15 / **3** |
+| plan-origin corrections | 82, all 1.5–2.1 m | 108, capped at 0.43 m | 362, capped at 0.46 m |
+| binding limiter, open corridor | `proximity_cap` 77% (×0.36) | `following` 100% (×1.00) | `following` 95–100% |
+| furthest south reached | y = −18 (box edge) | y = 1.0 | **y = −33.3** |
+
+**Run 003 is the first time FALCON has ever declared the hospital finished**: its
+frontier finder ran out, having retired 107 clusters as unreachable.
+
+Read its 1567.2 m³ against the 1583.3 m³ of explorable volume carefully — they
+are close, but they are not quite the same quantity, and the ratio flatters. Of
+that explorable volume **80.6 m³ is sealed and can never leave UNKNOWN at any
+airframe size**, so the most free space any aircraft could ever report here is
+1502.7 m³; the remaining ~65 m³ of the run's figure is observed obstacle
+*surface*, which `map_coverage` also counts. The honest statement is not a
+percentage but this: **the run ended with one active frontier and 107 retired
+ones, having flown 517 m and reached every corner of a 24 × 56 m building** —
+x −11.0..12.1, y −33.9..18.8 against walls at x ±12.44, y −34.94..20.94.
+
+Count the contacts by OBJECT, not by bumper report. Gazebo's bumper emits a
+fresh `states` entry for every contact point in every physics step, so one
+five-second graze along a crate face reads as eight contacts and reads as a
+disaster. Run 003 touched **three** things — two AWS warehouse clutter crates
+that the hospital world reuses, and an X-ray machine — and all three were first
+approaches to geometry not yet in the map. That is the residual near-clip
+problem in "Still genuinely open" below, not a controller fault: the depth
+camera cannot see the last 0.95 m, and nothing in this stack slows the aircraft
+for flying into cells it has never observed.
+
+### What "fully mapped" is, as a number
+
+Computed from the collision meshes rather than asserted — surface-sampled at
+0.025 m, shells closed by an inscribed-radius test so wall cavities and crate
+interiors count as solid, downsampled to FALCON's 0.10 m grid, then labelled
+with 3D 6-connectivity after eroding by the airframe's 0.26 m half width:
+
+| | hospital (z ≤ 1.9) | warehouse |
+|---|---|---|
+| box | 24.0 × 55.0 × 1.3 m | 7.0 × 16.2 × 1.8 m |
+| box volume | 1716.0 m³ | 204.1 m³ |
+| **explorable** (box minus solid) | **1583.3 m³** | **192.8 m³** |
+| reachable by the drone's centre | 1280.0 m³ | 185.4 m³ |
+| sealed, unobservable at any airframe size | 80.6 m³ in 21 pockets | none |
+
+> **The hospital column is for `box_max_z` 1.9 and the ceiling has since moved
+> to 1.6** (see "Clearance is 3D" for why: 1.9 sat inside the furniture height
+> cluster and guaranteed skimming). The box is now 24.0 × 55.0 × **1.0** m =
+> 1320 m³, so every hospital figure above needs recomputing before it is
+> compared against a run flown under the current config. The scripts that
+> produced them are described in the method notes of that analysis: surface-
+> sample the collision meshes at 0.025 m, close the shells with an
+> inscribed-radius test, downsample to 0.10 m with `any`, then label with 3D
+> 6-connectivity after a 0.26 m horizontal erosion. The warehouse column is
+> current.
+
+`explorable` is the comparator for `/voxel_mapping/map_coverage`, which counts
+voxels inside the box that have left UNKNOWN — so it counts observed obstacle
+*surfaces* as well as free space flown through, and is therefore closer to
+explorable than to reachable.
+
+The hospital's 80.6 m³ of sealed volume is the honest ceiling on what any
+aircraft could ever map there, and it is worth knowing what it is before reading
+a run as incomplete: both north stairwells (raked soffits that step west as they
+rise, solid in every 0.10 m layer of the band), seven closed cubicle bays
+(curtains solid 0.095–2.483 m), and both elevator shafts behind closed door
+slabs. **The 26 doorways are all passable** — the reachable set is a single
+component spanning x −11.95..11.95 and y −34.45..20.45 with no gap, so a stalled
+hospital run is never a disconnected box.
+
+The warehouse box has **no unreachable pockets at all** after being narrowed off
+the shelf block, which is the property that matters most about that change: the
+six dead-end aisle stubs it removed were the frontier finder's favourite place
+to put viewpoints, and nothing west of x = 2.6 depended on them.
+
+Three things in that table are worth separating, because they are three
+different fixes and only one of them is a controller change.
+
+**The baseline was not slow, it was throttled.** `proximity_cap` binding 77% of
+ticks at 0.36× the planned speed is an aircraft being held back by its own
+reflexes while flying exactly where the planner put it. Replacing the absolute
+governor with the clearance comparison is what turns that into `following`
+100% (×1.00), and it is the single largest change in how the aircraft moves.
+
+**Run 002 covering *less* than the baseline is not a regression.** It is the
+box: run 001 had a box that stopped at y = −20 and spent its whole mission in
+the north, so its 598 m³ was 598 m³ of a quarter of the building it was allowed
+to see. Run 002 opened the south wing and then lost its time to the retreat loop
+at one north-west pocket. Coverage between runs with different boxes is not
+comparable, which is why the row below it — how far south the aircraft actually
+got — is the one that shows what the box fix did.
+
+**The retreat fixes are what let it finish the sweep.** Run 003 differs from 002
+only in the three ways a doorway is treated: creep suppresses the inferred
+wedge, a map-caused retreat skips its turn-and-look, and a deliberate stop
+clears the wedge window. Retreats fall 25 → 9 and contact episodes 27 → 2, and
+the aircraft gets from y = 1.0 to y = −33.3, i.e. the whole 56 m of the
+building.
+
+Warehouse ground truth, computed from the collision meshes for the box as it now
+stands (x −4.4..2.6, y −9.0..7.2, z 0.6..2.4): box 204.1 m³, **explorable
+192.8 m³**, reachable-from-spawn 185.4 m³ after eroding by the airframe radius,
+and **no unreachable pockets** — the narrowed box is a single connected
+component.
+
+### Distance flown is not the test — and it failed a complete map
+
+`campaign_run.sh` guards against FALCON's "exploration finished" firing on a
+near-empty map, because that has happened: runs 026/031 and three soak runs
+"finished untouched" having flown 0.0–10.8 m. The guard it used was **distance
+flown**, with a 40 m bar.
+
+That is a proxy, and it was only ever chosen because the mapper's own coverage
+figure was not available at the verdict. **An exploration's job is to observe the
+volume, not to visit it.** The depth camera reaches 5 m, so in an open world the
+aircraft legitimately finishes having flown a fraction of the floor it mapped:
+measured, a warehouse run covering **201.9 m³ of a 204.1 m³ box — 98.9%, a
+complete map, zero contacts** — was failed by this guard for flying 30.1 m.
+
+The guard now needs **both** signals to agree before calling a finish trivial: a
+short flight AND a nearly empty map (`MIN_PATH_M` 40 and `MIN_COVERAGE_M3` 50).
+Either alone is a proxy; coverage is the thing itself.
+
+### A finish that maps a third of the building is a failure, and it was passing
+
+The opposite error, and the more dangerous one. FALCON declares "exploration
+finished" the moment its frontier finder comes up empty, and that can happen with
+most of a world unvisited. Measured: a hospital run that **FINISHED** having
+covered 260.8 m³ and never gone south of y = −2.3 — the north third of a 56 m
+building — while the same configuration had reached y = −33.6 and 760 m³ an hour
+earlier. The trivial-finish guard passed it, correctly: 260.8 m³ is not an empty
+map. It is simply not the world.
+
+`both_worlds.sh` now sets a per-world **`FINISH_MIN_COVERAGE_M3`** and
+`campaign_run.sh` returns `PARTIAL_FINISH` below it. The floor belongs to the
+caller because only the caller knows what the world affords: warehouse 170
+(explorable 192.8, complete runs land at 201.5), hospital 600 (box 924, best
+complete run 760, worst partial 260.8).
+
+**The cause was not the follower and not frontier retirement.** Comparing the two
+runs: the complete one logged **0** `No path to next viewpoint` lines and retired
+94 frontier clusters; the partial one logged **58** and retired only 49. It
+retired *fewer* frontiers — A\* simply could not route to them, and FALCON then
+gave up on regions it could see but not reach.
+
+Upstream's A\* default profile is `resolution: 0.5, max_search_time: 0.001` —
+**one millisecond** for a route across a 24 × 56 m building — and on a 0.5 m
+lattice a 0.93 m doorway is two cells, so one occupied cell closes it to the
+search. `exploration.launch` now overrides both (0.3 m, 0.05 s) after the yaml
+load. The coarse profiles are left alone: they build the tour's cost matrix over
+many pairs at once and are meant to degenerate to a straight-line estimate.
+
 ## Why it crawls near obstacles: ask the attribution log, do not guess
 
 Five mechanisms can slow or stop this aircraft — depth brake, map-gate scaling,
@@ -224,9 +761,13 @@ same name live, one word per tick, for `rostopic echo`.
 FALCON is asked for. At `safe_distance` 0.55 m it allowed 0.175 m/s against a
 0.25 m/s plan: **the aircraft was throttled to 70% while flying exactly where
 the planner intended**, and to 32% whenever the soft ESDF penalty let the curve
-drift to 0.4 m. The knee is now the airframe radius, where speed genuinely must
-be zero (`prox_stop_m` 0.25, `prox_slope` 1.2, `prox_floor` 0.08), so a
-correctly flown path is not braked at all.
+drift to 0.4 m. Moving the knee to the airframe radius fixed the warehouse and
+did nothing for the hospital, where every corridor puts a wall inside 0.6 m: the
+governor still bound **71–77% of ticks at 0.36× the planned speed**. That is the
+measurement that killed the absolute curve altogether — `prox_stop_m`,
+`prox_slope` and `prox_floor` are gone, replaced by the clearance envelope
+above, and the first hospital run flown on it reported `following 100% (x1.00)`
+in open corridors instead.
 
 *Creep never let go.* The concession to a contested spot released on a 20 s
 timer alone, so once triggered the aircraft crawled at 0.12 m/s everywhere it
@@ -256,27 +797,86 @@ enforced downward as well as sideways.
 Which makes the flight box ceiling part of the clearance arithmetic, and it is
 easy to set it somewhere that quietly forbids every overflight:
 
-| obstacle | top | altitude needed at `safe_distance` 0.85 |
+| warehouse obstacle | top | altitude needed at `safe_distance` 0.45 |
 |---|---|---|
-| ClutteringA piles | 1.10 m | 1.95 m |
-| buckets | 1.41 m | 2.26 m |
-| tall C-piles | 1.78 m | 2.63 m |
+| ClutteringA piles | 1.10 m | 1.55 m |
+| buckets | 1.41 m | 1.86 m |
+| tall C-piles | 1.79 m | 2.24 m |
 
-At the old `box_max_z` 1.8 **none of those fit**. The optimiser cannot satisfy
-a constraint the box forbids, so it traded the margin away and skimmed the
-tops — which is where the belly strikes came from, and why the route looked
-like it had no room underneath it. `box_max_z` is now 2.6.
+At the old `box_max_z` 1.8 (and the old `safe_distance` 0.85, which demanded
+1.95/2.26/2.63) **none of those fit**. The optimiser cannot satisfy a constraint
+the box forbids, so it traded the margin away and skimmed the tops — which is
+where the belly strikes came from. `box_max_z` is 2.4: enough for every pile in
+the box at the unified 0.45 clearance, and no more, because ceiling the aircraft
+never needs is box volume the mission still has to explore before it can finish.
 
-The old argument for a low ceiling (stay under the 1.96 m shelf tops so
-coverage is flown in the aisles rather than over the racking) no longer binds:
-the shelf rows are at x 4.28..5.16 and x −6.89..−4.79, both outside
-`box_max_x` 3.9 and `box_min_x` −4.4, so the aircraft cannot reach them at any
-altitude. Raising the ceiling buys headroom over the clutter and nothing else.
+**The same arithmetic runs the other way in the hospital**, where the doorway
+lintels are all at z 2.350 and `safe_distance` is isotropic, so above 1.90 m no
+route through any door can satisfy the clearance it is asked for. The baseline
+run was flying at 1.899 when it stalled, pinned against its own ceiling clamp.
 
-Measured, same world and start: coverage 95.5% of the box at 1.8 m against
-**97.1% at 2.6 m**, retreats 2 → **1**, and the aircraft using 1.24–2.48 m of
-altitude instead of 1.1–1.7. Compare percentages, not cubic metres — raising
-the ceiling changes the box volume from 161 m³ to 269 m³.
+**But the doorway is not the binding constraint there — the furniture is, and
+that is the general rule this section was missing.** A flight band whose ceiling
+falls *inside* the height range of the world's tall obstacles guarantees
+skimming: the optimiser is asked for clearance no altitude in the box can give
+(a 1.79 m crate needs 2.24 m at `safe_distance` 0.45), so it spends the margin
+and routes over the top with centimetres to spare. The hospital's tall items
+cluster tightly at **1.74–1.83 m** — storage racks 1.740 and 1.799, vending
+machines 1.830, an AWS crate 1.790 — and a 1.90 ceiling sits right in the
+middle of that cluster. Measured: the aircraft grinding along at z 1.78–1.81
+over a 1.79 m crate, **25 bumper reports in one corner** with coverage frozen.
+
+`box_max_z` is now **1.60**, cleanly below the cluster, and the rule it buys is
+one the aircraft can always satisfy: **overfly anything under about 1.35 m, go
+around anything taller.** Neither the planner nor the vertical escape can reach
+the tops at all, because `alt_max` is 1.50.
+
+> Read a ceiling as three constraints at once, in this order: what the
+> structure above allows (lintels, roof), what the *obstacles* allow (never end
+> the band inside their height cluster), and what the volume costs in mission
+> time. The warehouse note below derives its ceiling from the first and third;
+> the hospital needed the second, and it is the one that bites hardest because
+> it fails as contacts rather than as a no-path.
+
+### Lowering a ceiling is half a decision — the floor has to follow it
+
+Dropping the hospital ceiling to 1.60 stopped the skimming and immediately
+produced a *different* failure, because it left `box_min_z` at 0.60. The usable
+band became 0.70–1.50 m and the aircraft flew most of it at **0.87–1.05 m**,
+which is inside the hospital's floor-clutter layer — beds, gurneys,
+wheelchairs, toilets, sinks and carts all live between 0.5 and 1.2 m. It could
+thread between them and then not manoeuvre, and it ended up boxed into a 2 m
+bathroom stub with FALCON offering a viewpoint 1.6 m away that it could not
+reach: 23 retreats, coverage frozen at 297.7 m³, watchdog abort with **zero
+contacts** — it never hit anything, it simply had nowhere to go.
+
+`box_min_z` is now **0.90**, so the usable band is 1.00–1.50 m. Because the
+voxel gate tests only the z layers the airframe can strike, at 1.50 m anything
+topping out under 1.2 m stops being an obstacle at all, and most of that clutter
+disappears from the aircraft's world. Items over 1.2 m still have to be flown
+around, which is correct and which a room has the space for.
+
+**There is a hard ceiling on how high that floor may go, and it is not
+obvious.** FALCON's coverage tour reduces each hgrid cell by connected-component
+labelling on ONE horizontal slice at a **hardcoded z = 1.0 m** —
+`map_dimension: 2` selects `getCCLCenters2D` (`hierarchical_grid.cpp:1571-1575`).
+A box whose floor sits above 1.0 m puts that slice outside the box entirely and
+the tour's entire model of the world goes blank. So the floor is bounded above
+by 1.0 regardless of what the clutter would prefer, and `box_min_z` 0.90 is the
+highest value that keeps the slice inside with margin. Anyone raising it further
+must first move `map_dimension` to 3 and confirm `getCCLCenters3D` behaves.
+
+There is a second, cheaper version of the same mistake in the FOLLOWER, and it
+cost more than the box did. `VoxelBrakeGate` tests only the z layers the
+airframe can strike, and its `body_halfheight_m` defaulted to 0.35 m against a
+collision mesh that is **0.11 m tall** (z −0.040..0.070). A half-height six times
+too large means the aircraft must clear every obstacle by 0.35 m instead of by
+its own body: it forced 1.8 m of warehouse altitude to overfly a 1.10 m pile
+that 1.5 m clears, and in the hospital it made a 1.79 m clutter pile unflyable
+at *any* altitude a 1.9 m ceiling allows — it demanded 2.14 m — which is where
+27 of run 002's contacts came from. It is now 0.15 (0.055 measured plus one
+voxel), and `DepthProximityBrake`'s corridor half-height, which had the same
+0.35 default and vetoed on a 1.14 m desk while cruising at 1.30 m, with it.
 
 ### Known, characterised, NOT fixed: the depth brake over-cuts sideways
 
@@ -302,11 +902,17 @@ forward axis only and recomputing the world vector from the corrected body
 command, then re-verifying the gate's corridor still points where the aircraft
 is actually going. Worth doing; not worth doing untested.
 
-The other four limiters enforce four different standoffs against the same wall
-— depth veto 0.55 m (was 1.05), map gate 0.35 m, bubble 0.28 m, governor knee
-0.25 m — and the binding envelope is the MAX of them, not any single design
-value. Keep them within sight of `safe_distance` (0.55 m) or the follower
-starts refusing curves the planner was asked to produce.
+This used to be the place that warned about four limiters enforcing four
+different absolute standoffs against the same wall — depth veto 0.55 m, map gate
+0.35 m, bubble 0.28 m, governor knee 0.25 m — with the binding envelope being
+the MAX of them rather than any single design value, and an instruction to keep
+them all "within sight of `safe_distance`". **That instruction is the thing the
+clearance envelope removes.** Three of those four numbers are gone: the governor
+knee and the bubble are now the deficit against the plan's own clearance, and
+what is left absolute is `clearance_hard_floor_m` (0.30, the airframe) and the
+depth veto (0.55, which is a stopping distance and genuinely does not scale with
+the corridor). Two numbers instead of four, one of them physics and one of them
+kinematics, and neither needs retuning when the building changes.
 
 ## Getting unstuck: the escape is three-axis, not two
 
@@ -330,9 +936,30 @@ Two things resolve it, in order:
    1.10 m clutter pile stops obstructing an aircraft at 1.6 m. Horizontal
    retreat was one axis of a three-axis escape and the only one being used.
    `escape_climb_s` (4 s), `escape_climb_speed` (0.4 m/s) and
-   `escape_climb_max_z` (1.65 m, **under** the 1.8 m box ceiling — climb out of
-   the box and no frontier is reachable from up there); `escape_climb_s:=0`
-   restores horizontal-only behaviour.
+   `escape_climb_max_z`; `escape_climb_s:=0` restores horizontal-only
+   behaviour. The climb ceiling is **0, meaning "the flight box ceiling"**,
+   and it must stay inside the box: a planner cannot plan from a pose outside
+   its own box, so an escape that climbs out strands the mission it was
+   rescuing. It used to be a hardcoded 1.65 m, chosen when the warehouse box
+   topped out at 1.8, which became simultaneously unsafe and wasteful the
+   moment either world's box moved — which both of them now have.
+
+   How much this buys depends entirely on `gate_body_halfheight_m` being
+   right, because that is what decides which layers "the airframe can strike".
+   At the old 0.35 the climb had to gain 0.35 m of clear air above an obstacle
+   before the gate would release; at the measured 0.15 it needs the aircraft's
+   actual body.
+
+   **And it must look before it climbs.** A climb that would not clear the
+   obstacle either is not an escape, it is a slow grind up its face — measured
+   in an acceptance run, where the aircraft rose to 1.80 m (the flight ceiling)
+   beside a clutter pile whose top is 1.79 m and scraped along it for 100 s,
+   eight bumper contacts, coverage frozen. This is the failure mode a *fixed*
+   climb ceiling used to hide by accident: at the old hardcoded 1.65 the
+   aircraft stopped below that pile rather than at it, which looked like the
+   number being right and was luck. The climb now tests occupancy one gate
+   layer above itself and concedes to the planner when climbing would change
+   nothing, which is correct at any ceiling.
 
 Measured on the warehouse, fresh map each time, same world and start:
 
@@ -437,12 +1064,24 @@ Check these before touching a gain.
 * **Sim time** — the wall clock outruns the physics. A control loop timed off
   the wall clock under a real-time factor below 1 advances the plan faster than
   the aircraft can be simulated, and the resulting lag is a pure artifact of the
-  clock. The **hospital world runs at roughly half real time** (depth measured
-  at 7.5 Hz against a 15 Hz nominal), so a plan there advances twice as fast as
-  the aircraft. Benchmark in the playground, watch the reported real-time
-  factor, and drive the loop off the ROS clock.
+  clock. This used to say the hospital runs at roughly half real time (depth
+  measured at 7.5 Hz against a 15 Hz nominal); **on this machine it does not** —
+  `gz stats` reports a factor of 1.00 across full hospital explorations, and sim
+  elapsed tracks wall elapsed to within a few seconds over ten minutes. Do not
+  assume either way: the factor is a property of the machine and the world
+  together, it is sampled into `rtf.log` every 60 s by `campaign_run.sh`, and
+  `analyze_run.py` prints its mean and minimum. The mitigation is the same
+  whatever it reads — `use_sim_time` is true and every loop here is driven off
+  the ROS clock.
 
 ### Not yet done
+
+> The paragraph below is **superseded** and kept only because the numbers above
+> it in this section were measured under it. FALCON now flies both worlds end to
+> end: the bridge, the roscore and the planner launch are all in place, the
+> corrected intrinsics are exercised by the real mapper, and `rig/both_worlds.sh`
+> is the acceptance test. What is genuinely still not done is at the end of this
+> section.
 
 **FALCON has never been flown in this simulator.** Everything above is our
 follower carrying a FALCON-*shaped* B-spline that the rig authored; no frontier
@@ -460,6 +1099,64 @@ them and the ones this file used to quote have been removed rather than
 softened. The circle is the primary benchmark anyway: it is the only route that
 asks the airframe for nothing infeasible, so what is left over is the
 controller.
+
+**Still genuinely open**, in rough order of how much they cost:
+
+* **The ESDF ratchets and never recovers.** `ESDFVoxel::value` starts at
+  `double` max and `updateLocalESDF` writes only if SMALLER (`esdf.cpp:38-41`).
+  Occupancy can flip OCCUPIED back to FREE, but the distance field cannot: one
+  frame of depth noise plants a permanent low-ESDF scar that the optimiser's
+  distance cost honours for the rest of the mission. Every long run is therefore
+  flying a world that looks slowly tighter than it is, and no amount of tuning
+  on our side reaches it. Fixing it means a FALCON patch that re-seeds the ESDF
+  over the update box rather than min-ing into it.
+* **The coverage tour's model of the world is one horizontal slice.**
+  `map_dimension: 2` selects `getCCLCenters2D`, which labels connectivity at a
+  **hardcoded z = 1.0 m** (`hierarchical_grid.cpp:1571-1575`). That is below the
+  altitude the aircraft actually flies and it is where the hospital's desks,
+  racks and vending machines are, so the hgrid can believe two regions are
+  disconnected that the drone can fly between at 1.5 m. Worth testing
+  `map_dimension: 3` against a run that is otherwise clean.
+* **`isNearUnknown` does not scale in z.** `min_candidate_clearance` sets the
+  x,y half-extent in voxels but the z extent is hardcoded to +-1 voxel
+  (`frontier_finder.cpp:1140-1151`), so the parameter means something different
+  vertically than horizontally.
+* **The depth brake still over-cuts sideways** (see above), and the yaw a
+  doorway is entered at is unmanaged: FALCON chooses yaw to aim the camera at
+  the next frontier, which is not the same as aligning the 0.52 m airframe with
+  a 0.93 m opening. At 45 degrees of misalignment the swept width is 0.63 m and
+  the budget falls from 0.19 m to 0.14 m.
+* **FALCON plans through UNKNOWN, and some of this world's obstacles are hollow
+  shells.** `checkTrajCollision` rejects a trajectory sample only if it is
+  literally OCCUPIED (`planner_manager.cpp:384-404`); unknown is fine, and the
+  A* underneath it is no stricter. Meanwhile several AWS props are modelled as
+  *hollow* collision meshes — the `ClutteringC` crate is a 1.77 × 2.06 m shell
+  whose 2.3 m³ interior is a cavity — so their insides are never observed, stay
+  UNKNOWN forever, and read to the planner as somewhere it may route. The
+  aircraft is then sent at a wall it cannot see through, and the follower's gate
+  stops it only once the near face has been mapped.
+
+  This is the single largest remaining source of contacts: one `ClutteringC`
+  crate in the hospital's north-west corner accounts for 14 of 16 bumper reports
+  in an acceptance run, and it recurred across three separate runs at the same
+  place. It is bounded rather than fixed — impact speed is now capped by the
+  derived ceiling, the retreat clears it, and FALCON's dead-end guard eventually
+  retires the viewpoint — and the mission finishes regardless. Fixing it
+  properly means either treating unknown as non-traversable in the follower's
+  gate (cheap, and it would stop the aircraft entering any unmapped volume,
+  which is a large behaviour change to validate) or closing the shells in the
+  map, which is the world's problem rather than the stack's.
+
+* **Nothing slows the aircraft for flying into UNKNOWN space**, and that is the
+  other half of the same story. Both episodes in run 003 were first approaches to
+  geometry that was not yet in the map: the depth camera's ~0.95 m near clip
+  makes the last metre blind, so an unobserved cell can be solid and the
+  follower has no way to know. The voxel gate accumulates OCCUPIED only, so
+  "unknown" and "free" are the same thing to it. Subscribing
+  `/voxel_mapping/occupancy_grid_free` as well would let the corridor sweep
+  distinguish them and cap speed on unobserved cells, which is the shape of the
+  fix; the cost is a second multi-megabyte cloud on the follower's callback
+  thread, so it wants measuring before it is built.
 
 ### Measured plant (`/simple_drone`, step response on the odometry)
 
