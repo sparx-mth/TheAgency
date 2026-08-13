@@ -102,7 +102,16 @@ chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
 if [[ "${FALCON_LAUNCH_ARGS:-}" != *safe_distance* ]]; then
     case "${MAP_NAME}" in
         warehouse)              MAP_SAFE_DISTANCE="0.85" ;;
-        hospital|small_house)   MAP_SAFE_DISTANCE="0.40" ;;
+        # 0.45 = the doorway HALF-WIDTH, deliberately, so the distance
+        # cost has its minimum exactly on the centreline. At 0.40 the
+        # penalty pow(dist - safe_distance, 2) is exactly ZERO anywhere
+        # within +-0.05 m of centre, so nothing pulled the curve to the
+        # middle of a door and the follower spent its whole cross-track
+        # budget before it started. Setting it AT the half-width leaves
+        # a gradient everywhere off-centre: the optimiser threads the
+        # exact middle of the opening, which is where a 0.25 m airframe
+        # in a 0.90 m door has to be.
+        hospital|small_house)   MAP_SAFE_DISTANCE="0.45" ;;
         *)                      MAP_SAFE_DISTANCE="" ;;
     esac
     if [[ -n "${MAP_SAFE_DISTANCE}" ]]; then

@@ -52,7 +52,9 @@ from sparx_agency.core.planning.safety.depth_proximity_brake import (
 from sparx_agency.core.planning.safety.voxel_brake_gate import (
     VoxelBrakeGate, VoxelBrakeGateConfig,
 )
+from sparx_agency.core.control.reference.params import ReferenceParams
 from sparx_agency.core.planning.trajectories.bspline import BsplineTrajectory
+from sparx_agency.core.planning.trajectories.bspline.projection import ProjectionParams
 
 REPLAN_TRAJECTORY_UNSAFE = 1
 """FALCON found the trajectory it is flying in collision. Hold, do not continue.
@@ -186,6 +188,35 @@ class BsplineFollowerNode(object):
         # plan at 0.46 m and the 0.55 m planned clearance with margin, while
         # still collapsing to the floor by 0.32 m. Tighten stop, not slope, if
         # this ever needs to be more conservative.
+        # ── trusting the plan ────────────────────────────────────────────
+        # The reflexes below exist for what the PLANNER CANNOT SEE: obstacles
+        # inside the depth near clip, and surprises the voxel map has not
+        # caught up with. When the aircraft is accurately tracking a FRESH
+        # plan it is, by definition, where a planner holding safe_distance
+        # clearance and the whole map intended it to be -- so a reflex firing
+        # there is overruling the planner with strictly less information.
+        #
+        # Measured in the hospital: "brake: depth 0.45 m in corridor; holding
+        # (cross-track 0.08 m)". The aircraft was 8 cm off a curve planned
+        # with 0.40 m of clearance and was stopped dead. At a 0.90 m doorway
+        # the frame is ALWAYS inside the bumper's 0.70 m corridor, so that
+        # veto fires on every doorway pass -- the aircraft cannot fly through
+        # a door it is perfectly lined up with.
+        #
+        # On plan, a brake may still SLOW the aircraft; it may not stop it and
+        # it may not send it backwards. Off plan, everything re-arms.
+        self._last_cmd_speed = None     # type: object
+        self._trust_plan_xtrack_m = float(
+            rospy.get_param("~trust_plan_xtrack_m", 0.25))
+        # Must EXCEED FALCON's replan cadence or the rule is dead most of
+        # every cycle: measured in the hospital at mean 2.52 s between
+        # plans, max 3.20 s. At the first attempt this was 1.5 s -- below
+        # the mean -- and the vetoes kept firing at cross-track 0.00 m.
+        # 4.0 s clears the observed maximum and still sits under
+        # hold_silent_s (6.0), which is the separate "the planner died"
+        # judgement, so a genuinely dead planner still re-arms everything.
+        self._trust_plan_fresh_s = float(
+            rospy.get_param("~trust_plan_fresh_s", 4.0))
         self._prox_stop_m = float(rospy.get_param("~prox_stop_m", 0.25))
         self._prox_slope = float(rospy.get_param("~prox_slope", 1.2))
         self._prox_floor = float(rospy.get_param("~prox_floor", 0.08))
@@ -405,8 +436,27 @@ class BsplineFollowerNode(object):
             VelocityServoParams().vertical_pid,
             kp=float(rospy.get_param("~vertical_kp", 3.6)),
             ki=float(rospy.get_param("~vertical_ki", 0.4)))
+        # How far the projector may advance the reference in ONE call.
+        # It defaults to 1.5 s of curve, but resolve() runs at 50 Hz
+        # while the aircraft covers ~0.02 s of curve per tick, so the
+        # window is three orders of magnitude wider than the motion it
+        # is tracking. At a corner tighter than search_ahead_s * speed
+        # (0.375 m at 0.25 m/s) the Euclidean-nearest point on the curve
+        # is on the OUTGOING leg, the projection snaps past the apex,
+        # and the correction then steers straight at it -- the aircraft
+        # cuts the turn and clips the inside corner. Hospital doorways
+        # and corridor junctions are exactly that geometry.
+        #
+        # 0.30 s is 7.5 cm of curve at cruise: too short to skip a
+        # corner, and still 15 s of curve per wall-clock second at
+        # 50 Hz, so recovering after a hold or a retreat is unaffected.
+        reference = ReferenceParams(
+            projection=ProjectionParams(
+                search_back_s=float(rospy.get_param("~proj_back_s", 0.5)),
+                search_ahead_s=float(rospy.get_param("~proj_ahead_s", 0.30))))
         return VelocityServoParams(
             plant=plant, limits=limits, vertical_pid=vertical_pid,
+            reference=reference,
             yaw_gain=float(rospy.get_param("~yaw_gain", 1.5)),
             use_feedforward_lead=bool(rospy.get_param("~use_feedforward_lead", True)),
             predict_reference=bool(rospy.get_param("~predict_reference", True)),
@@ -649,6 +699,13 @@ class BsplineFollowerNode(object):
             # motion direction -- wall-sliding grinds are invisible to both
             # directional brakes. A breach is a near-contact: retreat now.
             creeping = (self._creep_until is not None and now < self._creep_until)
+            # Tracking a fresh plan closely: the planner's clearance stands.
+            plan_age = (now - self._last_bspline_at).to_sec() \
+                if self._last_bspline_at is not None else 1e9
+            on_plan = (abs(command.cross_track_error_m)
+                       < self._trust_plan_xtrack_m
+                       and plan_age < self._trust_plan_fresh_s
+                       and not command.holding)
             # Creep is a concession to ONE contested spot, not a cruise mode.
             # It was released on a 20 s timer alone, so once triggered the
             # aircraft crawled at creep_speed everywhere it flew next --
@@ -665,12 +722,15 @@ class BsplineFollowerNode(object):
                     creeping = False
                     rospy.loginfo("[follower] %.1f m clear of the contested "
                                   "spot; back to plan speed", gone)
-            if (not creeping and self._gate_enabled and self._gate.bubble_blocked(
+            if (not creeping and not on_plan
+                    and self._gate_enabled and self._gate.bubble_blocked(
                     (float(position[0]), float(position[1]), float(position[2])),
-                    float(rospy.get_param("~bubble_clearance_m", 0.28)))):
+                    float(rospy.get_param("~bubble_clearance_m", 0.15)))):
                 self._note_limiter("bubble_breach")
                 rospy.logwarn("[follower] bubble breach: occupied voxel inside "
-                              "personal space; retreating")
+                              "personal space; retreating (cross-track %.2f m, "
+                              "gap %.2f m)", command.cross_track_error_m,
+                              command.position_error_m)
                 self._begin_retreat(position, command)
                 return
 
@@ -735,6 +795,22 @@ class BsplineFollowerNode(object):
                             world_vx=command.world_vx * f,
                             world_vy=command.world_vy * f)
 
+            if hard_blocked and on_plan:
+                # Slow to the creep speed and keep going THROUGH, rather than
+                # stopping in the doorway and handing the aircraft to a
+                # retreat that drives it back out the way it came.
+                speed = math.hypot(command.vx, command.vy)
+                if speed > self._creep_speed:
+                    f = self._creep_speed / speed
+                    if f < worst:
+                        worst, binding = f, "on_plan_crawl"
+                    command = dataclasses.replace(
+                        command, vx=command.vx * f, vy=command.vy * f,
+                        world_vx=command.world_vx * f,
+                        world_vy=command.world_vy * f)
+                hard_blocked = False
+                self._gate_blocked_since = None
+
             if hard_blocked and creeping:
                 speed = math.hypot(command.vx, command.vy)
                 if speed > self._creep_speed:
@@ -753,7 +829,10 @@ class BsplineFollowerNode(object):
                 if self._gate_blocked_since is None:
                     self._gate_blocked_since = now
                     self._note_block_episode(now, position)
-                    rospy.logwarn("[follower] brake: %s; holding", block_why)
+                    rospy.logwarn("[follower] brake: %s; holding (cross-track "
+                                  "%.2f m, gap %.2f m)", block_why,
+                                  command.cross_track_error_m,
+                                  command.position_error_m)
                 elif (now - self._gate_blocked_since).to_sec() > self._gate_block_retreat_s:
                     self._gate_blocked_since = None
                     self._begin_retreat(position, command)
@@ -1050,7 +1129,16 @@ class BsplineFollowerNode(object):
         and forth by more than the threshold while making no actual progress, and
         a max-excursion test reads that jitter as movement and never fires.
         """
-        wanted = math.hypot(command.world_vx, command.world_vy)
+        # Judge against what was ACTUALLY COMMANDED last tick, not against
+        # the raw plan. Every brake in this node scales the command down,
+        # and the deliberate slow modes (on_plan_crawl and creep, both
+        # ~0.12 m/s) then look identical to being pinned: at the plan's
+        # 0.25 m/s the test expects 0.75 m of travel in the 3 s window,
+        # while a legitimate crawl covers 0.36 m and is called wedged.
+        # That is what pulled the aircraft back OUT of doorways it was
+        # crawling through -- the retreat drives 1.3 m the way it came.
+        wanted = self._last_cmd_speed if self._last_cmd_speed is not None \
+            else math.hypot(command.world_vx, command.world_vy)
         now_s = now.to_sec()
         self._track.append((now_s, float(position[0]), float(position[1]),
                             float(position[2])))
@@ -1081,6 +1169,14 @@ class BsplineFollowerNode(object):
         evidence FALCON can plan around.
         """
         self._retreats += 1
+        # Arm the repeat-block concession on EVERY retreat, not only on one
+        # that failed to move. A retreat that backs out cleanly and then
+        # re-enters the same doorway on the same legal plan is the pure
+        # loop: breach at ~0.10 m of cross-track, back out 1.3 m, face,
+        # dwell, fly the identical curve back in, breach again -- forever,
+        # because nothing recorded that this SPOT is contested. Recording it
+        # lets the second attempt concede and creep through instead.
+        self._note_block_episode(rospy.Time.now(), position)
         speed = math.hypot(command.world_vx, command.world_vy)
         if speed > 1e-3:
             drive = (command.world_vx / speed, command.world_vy / speed)
@@ -1267,6 +1363,11 @@ class BsplineFollowerNode(object):
         twist.linear.z = max(-0.2, min(0.2, 0.8 * float(err[2])))
         self._send(twist)
 
+    def _note_cmd_speed(self, twist):
+        # type: (object) -> None
+        """Remember the horizontal speed actually put on the wire."""
+        self._last_cmd_speed = math.hypot(twist.linear.x, twist.linear.y)
+
     def _send(self, twist):
         # type: (Twist) -> None
         """The one choke point to the actuator, with the altitude guard.
@@ -1300,6 +1401,7 @@ class BsplineFollowerNode(object):
                 cos, sin = math.cos(yaw), math.sin(yaw)
                 twist.linear.x += cos * push_wx + sin * push_wy
                 twist.linear.y += -sin * push_wx + cos * push_wy
+        self._note_cmd_speed(twist)
         self._cmd.publish(twist)
 
     def _publish(self, command):
