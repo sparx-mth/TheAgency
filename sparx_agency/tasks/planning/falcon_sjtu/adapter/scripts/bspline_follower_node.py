@@ -244,6 +244,26 @@ class BsplineFollowerNode(object):
         self._max_unsticks = int(rospy.get_param("~max_unsticks", 20))
         # The jam: following a live plan at full authority, bumper quiet, and
         # not moving. Demanded travel vs achieved travel over the window.
+        # Minimum quiet time between unsticks, counted from the end of the last
+        # one. Three separate triggers can now call for an unstick -- a jam, a
+        # second give-up at one place, and a watchdog nudge once the surveys are
+        # spent -- and nothing coordinated them. Measured with all three live and
+        # unlimited: 20 unsticks in 574 s, one every 29 s, with the limiter
+        # reading `unstick 28-54%`. The aircraft spent half the mission
+        # performing 8 s escapes and the other half being interrupted before it
+        # could get anywhere, and covered 118 m3. The run that mapped the whole
+        # building did 13 in 1995 s, one per 153 s.
+        #
+        # An escape that runs half the time is not an escape, it is the flight
+        # plan. This bounds the duty cycle without taking any trigger away.
+        self._unstick_cooldown_s = float(
+            rospy.get_param("~unstick_cooldown_s", 60.0))
+        self._unstick_ready_at = None       # type: object
+        # The unstick asks the map which way is open before it moves.
+        self._unstick_probes = int(rospy.get_param("~unstick_probes", 12))
+        self._unstick_probe_m = float(rospy.get_param("~unstick_probe_m", 2.5))
+        self._unstick_min_clear_m = float(
+            rospy.get_param("~unstick_min_clear_m", 0.7))
         self._jam_window_s = float(rospy.get_param("~jam_window_s", 10.0))
         self._jam_demand_m = float(rospy.get_param("~jam_demand_m", 0.6))
         self._jam_move_m = float(rospy.get_param("~jam_move_m", 0.15))
@@ -452,6 +472,7 @@ class BsplineFollowerNode(object):
             rospy.get_param("~give_up_hold_max_s", 30.0))
         self._give_ups = 0
         self._give_up_until = None          # type: object
+        self._give_up_last_spot = None      # type: object  # (x, y)
 
         # ── depth visual bumper ──────────────────────────────────────────
         # The reflex under the map gate: the voxel map flaps thin obstacles
@@ -775,13 +796,27 @@ class BsplineFollowerNode(object):
         if self._finished or self._retreat_until is not None:
             return
         if self._resurveys >= self._max_resurveys:
-            # Same cap as the silence recovery, and for the same reason: a scan
-            # that has not helped four times will not help a fifth, and turning
-            # on the spot is indistinguishable from progress to nothing except
-            # the coverage number the watchdog is already watching.
-            rospy.logwarn_throttle(
-                30.0, "[follower] watchdog nudge ignored: %d surveys have not "
-                "restored progress", self._resurveys)
+            # A scan that has not helped four times will not help a fifth, and
+            # turning on the spot is indistinguishable from progress to anything
+            # except the coverage number the watchdog is already watching. But
+            # ignoring the nudge outright wasted the mission's clearest signal:
+            # the watchdog only sends this because the aircraft is confined and
+            # the map has stopped growing, which is exactly the condition the
+            # unstick exists for. Escalate to it rather than logging and
+            # returning, and let the bearing rotate on each repeat.
+            now = rospy.Time.now()
+            if (self._unstick_until is None and self._odom is not None
+                    and self._may_unstick(now)):
+                self._begin_unstick(
+                    now,
+                    _yaw_from_quaternion(self._odom.pose.pose.orientation),
+                    "watchdog nudge (%s) with %d surveys already spent"
+                    % (msg.data, self._resurveys))
+            else:
+                rospy.logwarn_throttle(
+                    30.0, "[follower] watchdog nudge noted: %d surveys and %d "
+                    "unsticks have not restored progress", self._resurveys,
+                    self._unsticks)
             return
         self._begin_resurvey(rospy.Time.now(), "watchdog nudge (%s)" % msg.data)
 
@@ -925,7 +960,7 @@ class BsplineFollowerNode(object):
         # AND has not moved is in the second case.
         if (self._survey_remaining_rad <= 0.0 and self._retreat_until is None
                 and silent_s > self._unstick_after_s
-                and self._unsticks < self._max_unsticks
+                and self._may_unstick(now)
                 and self._track_and_check_stall(now, position,
                                                 self._unstick_move_m)):
             self._begin_unstick(
@@ -1104,7 +1139,33 @@ class BsplineFollowerNode(object):
                 # escalates 90/180/360/720 s on its own. One hold, long enough
                 # for its dead-end guard to see 25 s of confinement, is all this
                 # side needs to contribute.
+                #
+                # And a hold is only ever the FIRST answer at a place. A second
+                # give-up within the same window means the hold did not work, and
+                # repeating it is the trap: while holding, this node commands no
+                # travel, so the jam detector's demanded-travel test cannot fire,
+                # so the unstick that would physically move the aircraft is
+                # structurally unreachable for as long as the hold keeps
+                # re-arming. Measured: the aircraft never left the starting room,
+                # 6 give-ups in 400 s on a 30 s cycle, 96.4 m3, and not one bumper
+                # contact in the whole run - nothing was wrong except that the
+                # only escape was switched off by the rule in front of it.
+                # So the second give-up at a place escalates to an unstick.
                 self._give_ups += 1
+                repeat_here = (self._give_up_last_spot is not None
+                               and math.hypot(
+                                   float(position[0]) - self._give_up_last_spot[0],
+                                   float(position[1]) - self._give_up_last_spot[1])
+                               < self._give_up_radius_m)
+                self._give_up_last_spot = (float(position[0]), float(position[1]))
+                if repeat_here and self._may_unstick(now):
+                    self._begin_unstick(
+                        now, yaw,
+                        "given up at (%.1f, %.1f) twice; holding again would only "
+                        "block the escape" % (float(position[0]), float(position[1])))
+                    self._note_limiter("unstick")
+                    self._unstick(now, position, yaw)
+                    return
                 hold_s = min(self._give_up_hold_s, self._give_up_hold_max_s)
                 self._give_up_until = now + rospy.Duration(hold_s)
                 rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
@@ -1713,7 +1774,50 @@ class BsplineFollowerNode(object):
         self._jam_demanded = demanded
         self._jam_moved = moved
         return (demanded > self._jam_demand_m and moved < self._jam_move_m
-                and self._unsticks < self._max_unsticks)
+                and self._may_unstick(now))
+
+    def _may_unstick(self, now):
+        # type: (object) -> bool
+        """Whether an unstick is allowed to start: budget left, and quiet since
+        the last one. Every trigger goes through here so they cannot add up."""
+        if self._unsticks >= self._max_unsticks:
+            return False
+        if self._unstick_ready_at is not None and now < self._unstick_ready_at:
+            return False
+        return True
+
+    def _clearest_bearing(self, yaw):
+        # type: (float) -> object
+        """The most open horizontal bearing according to the accumulated map.
+
+        Casts ``unstick_probes`` rays out to ``unstick_probe_m`` and returns
+        ``(heading, clear_m)`` for the furthest, or None when the map cannot
+        distinguish them -- no odometry, no cloud yet, or every direction
+        equally clear, in which case the caller's rotation is the better rule.
+        """
+        if self._odom is None:
+            return None
+        p = self._odom.pose.pose.position
+        origin = (p.x, p.y, p.z)
+        best = None
+        spread = 0.0
+        for i in range(self._unstick_probes):
+            heading = yaw + 2.0 * math.pi * i / float(self._unstick_probes)
+            d = self._gate.blocked_distance(
+                origin, (math.cos(heading), math.sin(heading)),
+                self._unstick_probe_m)
+            # None means nothing was struck within the probe: fully clear.
+            clear = self._unstick_probe_m if d is None else float(d)
+            spread = max(spread, clear)
+            if best is None or clear > best[1]:
+                best = (heading, clear)
+        if best is None or spread <= 0.0:
+            return None
+        # If nothing is meaningfully more open than the aircraft's own body
+        # width, the map is not telling us anything worth acting on.
+        if best[1] < self._unstick_min_clear_m:
+            return None
+        return best
 
     def _begin_unstick(self, now, yaw, reason):
         # type: (object, float, str) -> None
@@ -1726,9 +1830,27 @@ class BsplineFollowerNode(object):
         on the strength of silence it has not yet had a chance to end.
         """
         self._unsticks += 1
+        # Ask the map which way is actually open before committing, rather than
+        # rotating through four bearings blindly. The blind version escaped and
+        # was routed straight back in: 15 unsticks in one run against 823
+        # "collision also detected on the initial trajectory", because a bearing
+        # chosen without looking is as likely to end inside the occupancy that
+        # caused the deadlock as outside it. The follower already accumulates
+        # FALCON's occupied voxels for its brake gate, so the same ray cast that
+        # measures a corridor can pick the widest way out.
+        #
+        # The rotation is kept as the tie-break and the fallback: it is what
+        # makes two consecutive unsticks at one place differ when the map is
+        # uninformative (all bearings equally clear, or no cloud yet).
         bearings = (math.pi, 0.5 * math.pi, -0.5 * math.pi, 0.0)
         rel = bearings[(self._unsticks - 1) % len(bearings)]
         heading = yaw + rel
+        probe = self._clearest_bearing(yaw)
+        if probe is not None:
+            heading, clear_m = probe
+            rospy.loginfo("[follower] unstick bearing %+.0f deg off the nose has "
+                          "%.2f m of clear map, taking it",
+                          math.degrees(heading - yaw), clear_m)
         self._unstick_heading = (math.cos(heading), math.sin(heading))
         self._unstick_until = now + rospy.Duration(self._unstick_time_s)
         self._last_bspline_at = now
@@ -1747,6 +1869,8 @@ class BsplineFollowerNode(object):
         if self._unstick_until is None or now >= self._unstick_until:
             self._unstick_until = None
             self._unstick_heading = None
+            self._unstick_ready_at = now + rospy.Duration(
+                self._unstick_cooldown_s)
             self._send(Twist())
             self._servo.reset()
             return

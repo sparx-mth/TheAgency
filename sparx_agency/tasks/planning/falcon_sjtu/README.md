@@ -1195,6 +1195,60 @@ by measurement after a theory about it turned out to be wrong:
 4. This follower's own give-up hold, which escalated to 90 s and parked the
    aircraft in the exact spot that had defeated it for a continuous 300 s.
 
+### That result has not reproduced since, and the cause is not known
+
+Read the table above with this section next to it. The run it describes is real
+and its artifacts are on disk, but a campaign is one sample, and the samples
+after it do not agree with it.
+
+`rig/both_worlds.sh` now takes `KEEP_GOING=1`, which continues through a failed
+leg instead of stopping the campaign, because stopping at the first failure
+spends a whole campaign to learn a single bit. Measured with it, five rounds per
+campaign:
+
+| campaign | hospital | warehouse | notes |
+|---|---|---|---|
+| rate_A | 1/5 finished | **5/5** | warehouse 200.99–201.41 m³ |
+| rate_B | 1/5 finished | **5/5** | warehouse 201.19–201.67 m³ |
+| rate_C | 0/5 | 0/5 | warehouse 103–132 m³ |
+| rate_D | 0/3 | 0/3 | after reverting the suspected change |
+| rate_HEAD | 0/3 | 0/3 | **the committed configuration itself** |
+
+The warehouse succeeded ten times running, then failed twelve times running, and
+the break is sharp rather than a drift. What makes it worth writing down is that
+the second half includes the exact commit that produced the first half.
+
+**What has been eliminated, each by measurement rather than by argument:**
+
+- *The repository.* `rate_HEAD` is `git checkout`ed to the commit that passed.
+  Its FALCON startup parameters were diffed against a passing run's and are
+  identical apart from parameters that did not exist then.
+- *The FALCON image.* Docker kept every intermediate layer, so the exact image
+  the passing campaigns ran on was re-tagged and flown: 125.48 m³ with 79
+  contacts, the same degraded shape.
+- *The world and the aircraft's start.* `campaign_run.sh` verifies the world by
+  name in every run, and the spawn is logged at (1.0, 1.0, 2.0) in both.
+- *Simulation speed.* Real-time factor is 1.00 in both, from `rtf.log`.
+- *The machine.* Load average under 1.4, 374 GB free, 54 GB RAM available, GPU
+  idle at 33 °C with no throttling, no stray ROS participants on domain 20, and
+  per-container CPU and memory in `stats.log` that match a passing run within a
+  few percent.
+- *The assets.* Nothing under `sjtu_project/` or the map configs has a mtime
+  inside the window, and the drone container builds nothing (`SKIP_BUILD=true`).
+
+**What the failure looks like** is consistent and is the same in both worlds: the
+aircraft leaves its own flight box. A warehouse box of x[-4.4, 2.6] y[-9.0, 7.2]
+with the aircraft measured at (3.7, 7.4). FALCON cannot plan from outside its
+box, so coverage stops and a watchdog ends the run. Whatever changed acts on the
+aircraft's position, not on the planner's configuration.
+
+The honest reading is that this stack has a reproducibility problem that is not
+in its own source, and that the passing run should be treated as evidence that
+the configuration *can* map both worlds rather than as evidence that it reliably
+does. Anyone picking this up should start by re-running `rate_HEAD` on a freshly
+restarted Docker daemon, which is the one hypothesis left untested here because
+it changes machine-wide state on a shared machine.
+
 Verified: the Gazebo world, drone, all sensors and the actuation path come up
 and fly; the airframe's velocity response has been measured (below); the control
 law is unit-tested and runs unmodified on Python 3.8 / numpy 1.17 inside

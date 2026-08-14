@@ -82,6 +82,8 @@ export FALCON_LAUNCH_ARGS="${FALCON_LAUNCH_ARGS:-} watchdog_time_cap_s:=${WATCHD
 echo "[both] ${ROUNDS} round(s), ${CAP_S}s cap, watchdog cap ${WATCHDOG_CAP}s -> ${BASE}"
 failed=0
 dirty=0
+failed_legs=0
+KEEP_GOING="${KEEP_GOING:-0}"
 for round in $(seq 1 "${ROUNDS}"); do
     for entry in "${WORLDS[@]}"; do
         IFS=':' read -r map world floor <<< "${entry}"
@@ -104,10 +106,21 @@ for round in $(seq 1 "${ROUNDS}"); do
                 echo "[both]   FINISHED but touched ${objects} object(s) -- see ${dir}/monitor.log"
                 ;;
             *)
-                echo "[both] ${map} did NOT finish; stopping for diagnosis."
+                failed=1
+                failed_legs=$((failed_legs + 1))
+                echo "[both] ${map} did NOT finish."
                 echo "[both]   artifacts: ${dir}"
                 echo "[both]   start with: ${dir}/progress.jsonl (coverage, confinement, plan-origin gap)"
-                failed=1
+                if [[ "${KEEP_GOING}" == "1" ]]; then
+                    # Measuring, not gating: one round is one sample of a
+                    # process whose coverage has ranged 96 to 736 m3 on an
+                    # unchanged configuration, so stopping at the first failure
+                    # spends a whole campaign to learn a single bit. Carry on and
+                    # report a rate.
+                    echo "[both]   KEEP_GOING=1: continuing to the next leg."
+                    continue
+                fi
+                echo "[both] stopping for diagnosis (set KEEP_GOING=1 to measure a rate instead)."
                 break 2
                 ;;
         esac
@@ -132,5 +145,26 @@ if [[ ${failed} -eq 0 ]]; then
         echo "[both]      tracking failure."
     fi
     exit 0
+fi
+if [[ "${KEEP_GOING}" == "1" ]]; then
+    total=0
+    for d in "${BASE}"/r*_*/; do
+        [[ -f "${d}/verdict.json" ]] && total=$((total + 1))
+    done
+    echo "[both] MEASURED: ${failed_legs} of ${total} leg(s) did not finish."
+    echo "[both]   Per-world tally:"
+    for entry in "${WORLDS[@]}"; do
+        IFS=':' read -r map _ _ <<< "${entry}"
+        ok=0; bad=0
+        for d in "${BASE}"/r*_"${map}"/; do
+            [[ -f "${d}/verdict.json" ]] || continue
+            if grep -qE '"verdict": *"(CLEAN|FINISHED_DIRTY)"' "${d}/verdict.json"; then
+                ok=$((ok + 1))
+            else
+                bad=$((bad + 1))
+            fi
+        done
+        echo "[both]     ${map}: ${ok} finished, ${bad} did not"
+    done
 fi
 exit 1

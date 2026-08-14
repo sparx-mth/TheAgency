@@ -1,0 +1,83 @@
+--- a/falcon_planner/exploration_manager/src/exploration_fsm.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_fsm.cpp
+@@ -439,6 +439,80 @@
+       if (!safe_init_path) {
+         ROS_ERROR("[FSM] Replan: collision also detected on the initial trajectory");
+ 
++        // SPARX: give up on the DESTINATION, not just on the trajectory.
++        //
++        // Reaching here means both the optimised curve and the initial path
++        // sample an occupied voxel inside their first six metres, so nothing is
++        // published. The FSM then replans, the coverage tour offers the same
++        // viewpoint, the same geometry produces the same two curves, and the
++        // mission deadlocks in silence: measured 1781 of 1808 publish attempts
++        // in one hospital run, and 823 in another, with the aircraft holding
++        // station because from outside this node an unpublished plan and a dead
++        // planner look identical.
++        //
++        // checkTrajCollision() is a POINT test with no radius, and safe_distance
++        // is a soft cost the optimiser is free to trade away, so this is the
++        // ordinary failure of a curve fitted through a tight doorway: the spline
++        // cuts the corner its own waypoints went round. It is not a transient,
++        // and retrying it is what makes it permanent.
++        //
++        // The dead-end guard already knows how to retire a viewpoint, but it is
++        // keyed on the aircraft being confined near one for 25 s, which is a
++        // slow and indirect way to notice something this node has just proved
++        // directly. So count consecutive failures against the same destination
++        // and hand it to the same blacklist, which now expires and escalates on
++        // its own (falcon_blocked_region_ttl.patch).
++        // The streak must span real TIME, not just cycles. PUB_TRAJ is entered
++        // on every FSM tick, so a run of four failures is a third of a second,
++        // and a sustained deadlock turns into one blacklist per four ticks:
++        // measured 192 shadows in a 481 s run, each covering a 2 m radius, which
++        // sterilised the map far faster than the aircraft could explore it and
++        // left the mission confined to one corner at 146 m3. The rate limit is
++        // the fix, and the count alone was never the right test.
++        static int sparx_pub_fails = 0;
++        static Eigen::Vector3d sparx_pub_fail_at = Eigen::Vector3d::Zero();
++        static double sparx_streak_began = -1.0;
++        static double sparx_last_blacklist = -1e9;
++        static int sparx_pub_fail_limit = -1;
++        static double sparx_pub_fail_radius = -1.0;
++        static double sparx_pub_fail_span = -1.0;
++        static double sparx_pub_fail_cooldown = -1.0;
++        if (sparx_pub_fail_limit < 0) {
++          ros::param::param("/fsm/publish_fail_blacklist_after",
++                            sparx_pub_fail_limit, 4);
++          ros::param::param("/fsm/publish_fail_same_target_m",
++                            sparx_pub_fail_radius, 1.0);
++          ros::param::param("/fsm/publish_fail_min_span_s",
++                            sparx_pub_fail_span, 6.0);
++          ros::param::param("/fsm/publish_fail_cooldown_s",
++                            sparx_pub_fail_cooldown, 20.0);
++        }
++        const double sparx_now = ros::Time::now().toSec();
++        Eigen::Vector3d sparx_target = planner_manager_->local_data_.end_pos_;
++        if ((sparx_target - sparx_pub_fail_at).norm() > sparx_pub_fail_radius) {
++          sparx_pub_fail_at = sparx_target;
++          sparx_pub_fails = 0;
++          sparx_streak_began = sparx_now;
++        }
++        if (sparx_streak_began < 0.0)
++          sparx_streak_began = sparx_now;
++        ++sparx_pub_fails;
++        const double sparx_streak_s = sparx_now - sparx_streak_began;
++        if (sparx_pub_fail_limit > 0 && sparx_pub_fails >= sparx_pub_fail_limit &&
++            sparx_streak_s >= sparx_pub_fail_span &&
++            sparx_now - sparx_last_blacklist >= sparx_pub_fail_cooldown) {
++          ROS_WARN("[FSM] No publishable trajectory to (%.2f, %.2f, %.2f) after "
++                   "%d attempts over %.1f s; blacklisting the viewpoint so the "
++                   "tour moves on",
++                   sparx_target.x(), sparx_target.y(), sparx_target.z(),
++                   sparx_pub_fails, sparx_streak_s);
++          if (expl_manager_ && expl_manager_->frontier_finder_)
++            expl_manager_->frontier_finder_->addBlockedRegion(sparx_target);
++          sparx_pub_fails = 0;
++          sparx_streak_began = sparx_now;
++          sparx_last_blacklist = sparx_now;
++        }
++
+         fd_->static_state_ = true;
+         transitState(PLAN_TRAJ, "FSM");
+         break;

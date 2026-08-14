@@ -335,6 +335,27 @@
        commanded speed p50 0.24 m/s with 67% of ticks saturated, and the
        aircraft at (5.12, 16.21) to the centimetre for 181 s, zero bumper
        contacts, 654 plans delivered. -->
+  <!-- The unstick consults the accumulated occupancy before choosing a bearing.
+       Rotating blindly through back/left/right/forward escaped and was routed
+       straight back in: 15 unsticks in one hospital run against 823 "collision
+       also detected on the initial trajectory", because a direction chosen
+       without looking is as likely to end inside the occupancy that caused the
+       deadlock as outside it. 12 probes is every 30 degrees; 2.5 m is far
+       enough to tell a doorway from a wall and short enough to stay inside the
+       part of the map the aircraft has actually observed. Below
+       min_clear_m the map is not saying anything worth acting on and the
+       rotation takes over again. -->
+  <!-- Minimum quiet time between unsticks, from the end of the last one. Three
+       triggers can call for one (a jam, a second give-up at a place, a watchdog
+       nudge once the surveys are spent) and nothing coordinated them: measured
+       20 unsticks in 574 s, one every 29 s, limiter reading unstick 28-54%, and
+       118 m3 covered. The run that mapped the whole building did 13 in 1995 s.
+       An escape that runs half the time is the flight plan, not an escape. -->
+  <arg name="unstick_cooldown_s"   default="60.0" />
+  <arg name="unstick_probes"       default="12" />
+  <arg name="unstick_probe_m"      default="2.5" />
+  <arg name="unstick_min_clear_m"  default="0.7" />
+
   <arg name="jam_window_s" default="10.0" />
   <arg name="jam_demand_m" default="0.6" />
   <arg name="jam_move_m"   default="0.15" />
@@ -439,6 +460,10 @@
     <param name="unstick_climb_speed" value="$(arg unstick_climb_speed)" />
     <param name="unstick_move_m"      value="$(arg unstick_move_m)" />
     <param name="max_unsticks"        value="$(arg max_unsticks)" />
+    <param name="unstick_cooldown_s"  value="$(arg unstick_cooldown_s)" />
+    <param name="unstick_probes"      value="$(arg unstick_probes)" />
+    <param name="unstick_probe_m"     value="$(arg unstick_probe_m)" />
+    <param name="unstick_min_clear_m" value="$(arg unstick_min_clear_m)" />
     <param name="jam_window_s"        value="$(arg jam_window_s)" />
     <param name="jam_demand_m"        value="$(arg jam_demand_m)" />
     <param name="jam_move_m"          value="$(arg jam_move_m)" />

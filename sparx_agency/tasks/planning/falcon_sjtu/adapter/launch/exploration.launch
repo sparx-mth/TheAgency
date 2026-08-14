@@ -306,6 +306,44 @@
   <arg name="replan_from_pose_drift" default="0.40"/>
   <param name="/fsm/replan_from_pose_drift" value="$(arg replan_from_pose_drift)"/>
 
+  <!-- ── When an unpublishable destination is given up on ─────────────────
+       PUB_TRAJ rejects a plan when either the optimised curve or the initial
+       path samples one occupied voxel inside its first six metres, and
+       checkTrajCollision is a point test with no radius while safe_distance is
+       a soft cost the optimiser may trade away. A curve fitted through a tight
+       doorway therefore cuts the corner its own waypoints went round, fails the
+       check, and nothing is published. The FSM replans, the tour offers the same
+       viewpoint, and the identical pair of curves comes back: measured 1781 of
+       1808 publish attempts in one hospital run, 823 in another, with the
+       aircraft holding station because an unpublished plan is indistinguishable
+       from a dead planner from outside the node.
+
+       After this many consecutive failures against the same destination, hand
+       it to the frontier finder's blacklist, which expires and escalates on its
+       own. 4 is deliberately small: the evidence is direct and already proved,
+       unlike the dead-end guard's 25 s of confinement, which is a slow and
+       indirect way to notice the same thing.
+
+       The streak must span real TIME, and that is not a detail. PUB_TRAJ is
+       entered on every FSM tick, so four consecutive failures is a third of a
+       second and a sustained deadlock becomes one shadow every four ticks:
+       measured 192 of them in a 481 s run, each covering a 2 m radius, which
+       sterilised the map faster than the aircraft could explore it and left the
+       mission confined to one corner of the building at 146.0 m3. A count alone
+       was never the right test. -->
+  <arg name="publish_fail_blacklist_after" default="4"/>
+  <arg name="publish_fail_same_target_m"   default="1.0"/>
+  <arg name="publish_fail_min_span_s"      default="6.0"/>
+  <arg name="publish_fail_cooldown_s"      default="20.0"/>
+  <param name="/fsm/publish_fail_blacklist_after"
+         value="$(arg publish_fail_blacklist_after)"/>
+  <param name="/fsm/publish_fail_same_target_m"
+         value="$(arg publish_fail_same_target_m)"/>
+  <param name="/fsm/publish_fail_min_span_s"
+         value="$(arg publish_fail_min_span_s)"/>
+  <param name="/fsm/publish_fail_cooldown_s"
+         value="$(arg publish_fail_cooldown_s)"/>
+
   <!-- ── Which speed a "slow" trajectory is re-timed onto ─────────────────
        On seeing a trajectory averaging under trigger_vel, FALCON rewrites its
        knot vector so it would average target_vel instead. Upstream's target is
