@@ -279,51 +279,51 @@ rebuild. The patch mechanism above is what makes them survive an image
 the committed image. `falcon-ros-custom:v1` was rebuilt from scratch this way on
 PCN87653 on 2026-08-13.
 
-## NEVER rebuild `voxel_mapping`. Its binary is not reproducible from its source
+## Do not add a bounds guard to `MapServer::getOccupancy`. It was tried and it broke both worlds
 
-`falcon-ros-custom:v1` ships a `libvoxel_mapping.so` that **cannot be rebuilt
-from the source in the same image**. Running `catkin_make --pkg voxel_mapping`
-produces a library that compiles, links, loads and runs, and silently maps the
-world worse. Nothing warns you.
+`checkTrajCollision()` walks up to six metres along a trajectory asking
+`getOccupancy()` about every sample, and `getOccupancy()` indexes the grid
+behind a glog `CHECK` with no bounds test, so a sample that leaves the box kills
+the process and takes the voxel map with it. That crash is **real** and was
+measured twice in five hospital runs:
 
-Measured on 2026-08-14. The warehouse finishes in about two minutes at
-201–202 m³ and had done so on ten consecutive campaign legs. One
-`catkin_make --pkg voxel_mapping` later, the same commit, the same world and the
-same parameters gave 98–139 m³ on **twenty-two consecutive legs**, in both
-worlds, with the aircraft exploring away from the building and out through its
-own flight box. Re-tagging the pre-rebuild image and flying it unchanged
-restored 202.01 m³ in 123 s on the first attempt.
+```
+ExplorationFSM::safetyCallback() -> FastPlannerManager::checkTrajCollision()
+  -> MapServer::getOccupancy(Position) -> MapBase::getVoxel(int) -> CHECK -> abort
+```
 
-The cause is that some fix in `voxel_mapping` exists only in the shipped binary.
-The image has been `docker commit`ed live several times in its history (the
-header of `fix_falcon_sparx_patches.sh` records two such fixes being folded into
-patches later), and at least one edit was never captured as a patch or as source.
-Rebuilding the package discards it. The source tree looks complete — the depth
-overflow resizes and the `publish_bulk` cadence are both present — so inspection
-does not reveal what is missing.
+The obvious repair — `if (!isInBox(pos)) return OccupancyType::UNKNOWN;`, using
+the `isInBox()` defined on the line above — is **wrong, and catastrophically so**.
+Measured 2026-08-14: with it, twenty consecutive legs failed, the warehouse
+falling from 201–202 m³ (ten straight finishes) to 98–139 m³ and the hospital
+never reaching half the building, in both worlds, with the aircraft exploring
+away from the building and out through its own flight box.
 
-**Consequences for anyone changing FALCON here.**
+`getOccupancy()` is not only the collision check's accessor. Frontier detection
+and coverage read it too, and `isInBox()` delegates to the **TSDF's** box, which
+is not the occupancy grid's extent. Returning UNKNOWN outside it silently
+redefines what the planner considers unexplored, and exploration collapses. The
+crash is worth fixing, but the fix belongs in the *caller* clamping its samples,
+not in an accessor that changes meaning for everyone reading it.
 
-- Build only the packages you actually edited, and never name `voxel_mapping`.
-  `catkin_make --pkg trajectory exploration_preprocessing exploration_manager`
-  is safe: those report `Built target voxel_mapping` because it is *up to date*,
-  which is not the same as rebuilding it.
-- Before concluding that a code change caused a regression, check what the image
-  changed. Two hours went into eliminating the repository, the world, the spawn,
-  the real-time factor, the machine, the GPU, the Docker daemon and the Gazebo
-  model count, all correctly and all irrelevant, because an intermediate image
-  had been misidentified: the layer tested as "the last good image" carried a
-  timestamp four minutes *after* the last good run finished, and was in fact the
-  first bad one. **Check `docker images -a` timestamps against the run's own
-  artifacts before trusting a bisect.**
-- Docker keeps every intermediate layer, and that is what made the recovery
-  possible. Do not prune while an investigation is open.
+**Two process lessons from the same episode, both expensive.**
 
-The real repair is to find what the binary has and the source does not, and cut
-it as a patch so the image becomes reproducible. Until then a from-scratch
-`docker build` of `falcon_docker/` is **unverified**: it would rebuild
-`voxel_mapping` from source like any other package, and on this evidence would
-produce the degraded mapper.
+- *Check image timestamps against the runs' artifacts before trusting a bisect.*
+  The image was "eliminated" early by re-tagging an intermediate layer and flying
+  it, which is the right method — but the layer chosen was stamped four minutes
+  **after** the last good run finished, so it was the first bad image, not the
+  last good one. That single misreading sent hours into eliminating the
+  repository, the world, the spawn, the real-time factor, the machine, the GPU,
+  the Docker daemon and the Gazebo model count, all correctly and all
+  irrelevant, and produced a confident write-up here claiming
+  `libvoxel_mapping.so` could not be rebuilt from its own source. It can:
+  `catkin_make --pkg voxel_mapping` on unchanged source yields a **byte-identical**
+  library, same md5. That claim was published and is retracted.
+- *Do not delete intermediate images while an investigation is open.* Both
+  degraded layers were removed as tidy-up before the diff that would have
+  explained precisely why the revert of the guard did not restore behaviour, so
+  that question is now unanswerable. Recovery came from re-tagging the last
+  pre-guard image, `25923b082552`, which is what `falcon-ros-custom:v1` is today.
 
 ## Iterating on a patch against an image that already has it
 

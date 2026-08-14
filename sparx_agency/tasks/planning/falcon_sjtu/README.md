@@ -1221,13 +1221,13 @@ by measurement after a theory about it turned out to be wrong:
 
 **Resolved.** Between those runs and the campaigns after them, the warehouse fell
 from 201–202 m³ (ten consecutive finishes) to 98–139 m³ on twenty-two
-consecutive legs, in both worlds, on unchanged code. The cause was a single
-`catkin_make --pkg voxel_mapping` inside the FALCON image: its shipped
-`libvoxel_mapping.so` carries a fix that is **not in the source beside it**, so
-rebuilding that one package silently produces a worse mapper. Re-tagging the
-pre-rebuild layer and flying it unchanged restored 202.01 m³ in 123 s on the
-first attempt. Full account, and the rule that follows from it, in
-`patches/README.md` under "NEVER rebuild `voxel_mapping`".
+consecutive legs, in both worlds, on unchanged code. The cause was a change to
+the FALCON image: a bounds guard added to `MapServer::getOccupancy()` to stop a
+real crash, which instead redefined what the planner counts as unexplored and
+collapsed exploration in both worlds. Re-tagging the last pre-guard layer and
+flying it unchanged restored 202.01 m³ in 123 s on the first attempt. Full
+account in `patches/README.md`, including why that guard is the wrong repair for
+a crash that is nonetheless real.
 
 Two things in the investigation below are worth keeping even though the answer
 turned out to be elsewhere, because both are now permanent parts of the rig.
