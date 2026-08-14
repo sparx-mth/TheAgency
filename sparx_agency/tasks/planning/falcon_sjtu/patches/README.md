@@ -279,6 +279,52 @@ rebuild. The patch mechanism above is what makes them survive an image
 the committed image. `falcon-ros-custom:v1` was rebuilt from scratch this way on
 PCN87653 on 2026-08-13.
 
+## NEVER rebuild `voxel_mapping`. Its binary is not reproducible from its source
+
+`falcon-ros-custom:v1` ships a `libvoxel_mapping.so` that **cannot be rebuilt
+from the source in the same image**. Running `catkin_make --pkg voxel_mapping`
+produces a library that compiles, links, loads and runs, and silently maps the
+world worse. Nothing warns you.
+
+Measured on 2026-08-14. The warehouse finishes in about two minutes at
+201–202 m³ and had done so on ten consecutive campaign legs. One
+`catkin_make --pkg voxel_mapping` later, the same commit, the same world and the
+same parameters gave 98–139 m³ on **twenty-two consecutive legs**, in both
+worlds, with the aircraft exploring away from the building and out through its
+own flight box. Re-tagging the pre-rebuild image and flying it unchanged
+restored 202.01 m³ in 123 s on the first attempt.
+
+The cause is that some fix in `voxel_mapping` exists only in the shipped binary.
+The image has been `docker commit`ed live several times in its history (the
+header of `fix_falcon_sparx_patches.sh` records two such fixes being folded into
+patches later), and at least one edit was never captured as a patch or as source.
+Rebuilding the package discards it. The source tree looks complete — the depth
+overflow resizes and the `publish_bulk` cadence are both present — so inspection
+does not reveal what is missing.
+
+**Consequences for anyone changing FALCON here.**
+
+- Build only the packages you actually edited, and never name `voxel_mapping`.
+  `catkin_make --pkg trajectory exploration_preprocessing exploration_manager`
+  is safe: those report `Built target voxel_mapping` because it is *up to date*,
+  which is not the same as rebuilding it.
+- Before concluding that a code change caused a regression, check what the image
+  changed. Two hours went into eliminating the repository, the world, the spawn,
+  the real-time factor, the machine, the GPU, the Docker daemon and the Gazebo
+  model count, all correctly and all irrelevant, because an intermediate image
+  had been misidentified: the layer tested as "the last good image" carried a
+  timestamp four minutes *after* the last good run finished, and was in fact the
+  first bad one. **Check `docker images -a` timestamps against the run's own
+  artifacts before trusting a bisect.**
+- Docker keeps every intermediate layer, and that is what made the recovery
+  possible. Do not prune while an investigation is open.
+
+The real repair is to find what the binary has and the source does not, and cut
+it as a patch so the image becomes reproducible. Until then a from-scratch
+`docker build` of `falcon_docker/` is **unverified**: it would rebuild
+`voxel_mapping` from source like any other package, and on this evidence would
+produce the degraded mapper.
+
 ## Iterating on a patch against an image that already has it
 
 The fix script is idempotent **by sentinel**, which is exactly right for a fresh

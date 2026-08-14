@@ -1161,24 +1161,46 @@ region; the frontier clearances are not.
 
 ## Status
 
-**Both worlds map to completion on one configuration.** `rig/both_worlds.sh`,
-2026-08-14, one invocation, no per-world tuning of any kind:
+**Both worlds map to completion on one configuration, repeatably.**
+`rig/both_worlds.sh`, five rounds in one invocation, no per-world tuning of any
+kind and no editing between rounds (2026-08-14, `KEEP_GOING=1` so a failure does
+not end the campaign):
 
-| leg | verdict | coverage | flown | wall clock | contacts | respawns |
-|---|---|---|---|---|---|---|
-| hospital | FINISHED | **709.6 m³** (bar 600) | 458.5 m | 1995 s | 24 on 2 objects | 0 |
-| warehouse | FINISHED | **201.28 m³** (bar 170) | 36.3 m | 153 s | 6 on 1 object | 0 |
+| round | hospital | warehouse |
+|---|---|---|
+| 1 | ABORT_CONFINED, 578.7 m³ | FINISHED CLEAN, 201.7 m³ |
+| 2 | **FINISHED, 769.0 m³** | **FINISHED, 201.5 m³** |
+| 3 | **FINISHED, 772.7 m³** | **FINISHED, 201.8 m³** |
+| 4 | **FINISHED, 803.4 m³** | **FINISHED, 200.8 m³** |
+| 5 | **FINISHED, 825.5 m³** | **FINISHED, 201.0 m³** |
 
-Both legs reached FINISH on FALCON's own reckoning — the frontier set emptied,
-rather than a watchdog or a time cap ending them. The hospital run covered
-x[-12.2, 11.1] y[-25.7, 20.0], which is the whole building, and the warehouse
-figure is 98.6% of its 204.1 m³ of explorable volume.
+**Nine of ten legs finished, and both worlds finished together in four rounds of
+five.** FINISH here is FALCON's own verdict — its frontier set emptied — not a
+watchdog or a time cap. The warehouse figure is 98–99% of the 204.1 m³ its box
+affords, and its spread across five runs is 1.0 m³. The hospital's best round
+mapped 825.5 m³, against 760 for the best run this package had ever recorded
+before this work.
 
-Every contact in both legs was on the same model, `aws_robomaker_warehouse_
-ClutteringC_01`, on a first approach to geometry inside the 0.95 m depth near
-clip — the known limit described under the depth brake below, not a tracking
-failure. **Zero planner respawns and zero wedges in either world**, against a
-baseline where a single hospital run took 15 respawns.
+The single failure is the honest one to look at: round 1 reached 578.7 m³, most
+of the building, before the aircraft confined itself. That is the residual, and
+it is a hospital problem rather than a configuration problem — the warehouse has
+not failed a leg in fifteen consecutive attempts.
+
+Earlier campaigns on this same image, before the follower work below, finished
+**one hospital leg in five, twice over**. The escape ladder is what moved that to
+four in five: a jam is caught by comparing demanded travel with achieved travel,
+a second give-up at one place escalates to a manoeuvre instead of another hold,
+the watchdog's nudge does something once the surveys are spent, all three are
+rate-limited so the escape cannot become the flight plan, and the bearing is
+chosen from the occupancy map rather than by rotating blindly.
+
+Contacts are still present and are counted per Gazebo contact point per physics
+step, so the figures read higher than the number of events: the finishing rounds
+range from 3 to 76 reports on 1 to 7 objects. They are first approaches to
+geometry inside the 0.95 m depth near clip — the known limit described under the
+depth brake below — and remain the largest open item on this stack. **Planner
+respawns are zero across all ten legs**, against a baseline where a single
+hospital run took 15.
 
 What it took is recorded in the sections below and in `patches/README.md`; the
 short version is that four defects had to be fixed together, and each was found
@@ -1195,7 +1217,31 @@ by measurement after a theory about it turned out to be wrong:
 4. This follower's own give-up hold, which escalated to 90 s and parked the
    aircraft in the exact spot that had defeated it for a continuous 300 s.
 
-### That result has not reproduced since, and the cause is not known
+### The regression that followed it was the IMAGE, not the code
+
+**Resolved.** Between those runs and the campaigns after them, the warehouse fell
+from 201–202 m³ (ten consecutive finishes) to 98–139 m³ on twenty-two
+consecutive legs, in both worlds, on unchanged code. The cause was a single
+`catkin_make --pkg voxel_mapping` inside the FALCON image: its shipped
+`libvoxel_mapping.so` carries a fix that is **not in the source beside it**, so
+rebuilding that one package silently produces a worse mapper. Re-tagging the
+pre-rebuild layer and flying it unchanged restored 202.01 m³ in 123 s on the
+first attempt. Full account, and the rule that follows from it, in
+`patches/README.md` under "NEVER rebuild `voxel_mapping`".
+
+Two things in the investigation below are worth keeping even though the answer
+turned out to be elsewhere, because both are now permanent parts of the rig.
+
+The section that follows was written while the cause was still unknown. It is
+kept as the record of what was eliminated, and because its central mistake is
+instructive: the image was "eliminated" by re-tagging an intermediate layer and
+flying it, which is the right method — but the layer chosen carried a timestamp
+four minutes *after* the last good run, so it was the first bad image, not the
+last good one. The conclusion "the image is exonerated" was drawn from testing
+the wrong image, and cost several hours. Check layer timestamps against the
+runs' own artifacts before trusting a bisect.
+
+### The investigation, and what it eliminated
 
 Read the table above with this section next to it. The run it describes is real
 and its artifacts are on disk, but a campaign is one sample, and the samples
@@ -1242,12 +1288,27 @@ with the aircraft measured at (3.7, 7.4). FALCON cannot plan from outside its
 box, so coverage stops and a watchdog ends the run. Whatever changed acts on the
 aircraft's position, not on the planner's configuration.
 
-The honest reading is that this stack has a reproducibility problem that is not
-in its own source, and that the passing run should be treated as evidence that
-the configuration *can* map both worlds rather than as evidence that it reliably
-does. Anyone picking this up should start by re-running `rate_HEAD` on a freshly
-restarted Docker daemon, which is the one hypothesis left untested here because
-it changes machine-wide state on a shared machine.
+Every one of those eliminations was correct and none of them was the answer,
+because the thing that changed was the image and the image had been checked
+against the wrong layer. The Docker daemon was restarted too, on the reasoning
+that it was the last untested hypothesis; it made no difference, and the
+warehouse still timed out at 139 m³ afterwards.
+
+**Two pieces of the rig came out of this and are worth keeping.**
+
+`rig/both_worlds.sh` takes `KEEP_GOING=1`, which continues through a failed leg
+and reports a per-world tally instead of stopping the campaign. A campaign that
+stops at the first failure spends an hour to learn one bit, and on a process
+this variable that is not enough to tune against.
+
+`rig/campaign_run.sh` waits for the Gazebo model count to stop changing before it
+flies, and records that count in `verdict.json`. The checks it had proved that
+gzserver *began* loading the right world and that a depth topic existed, neither
+of which says the furniture is in the room, and a mission that starts early maps
+free space where a shelf is about to appear. The count needs no per-world
+constant — stability is the property that matters — and it earned its place
+immediately by killing the half-loaded-world hypothesis outright: 72 models in
+every hospital run and 26 in every warehouse run, without exception.
 
 Verified: the Gazebo world, drone, all sensors and the actuation path come up
 and fly; the airframe's velocity response has been measured (below); the control

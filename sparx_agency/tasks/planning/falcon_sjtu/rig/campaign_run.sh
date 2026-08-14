@@ -88,6 +88,7 @@ finish() {
  "elapsed_s": ${elapsed}, "contacts": ${contacts}, "wedges": ${wedges},
  "planner_respawns": ${respawns}, "coverage_m3": ${coverage},
  "retreats": ${retreats}, "plan_origin_corrections": ${drifts},
+ "world_models": ${SPARX_MODEL_COUNT:-0},
  "finish_line": "${finish_line//\"/\\\"}"}
 EOF
     say "VERDICT ${verdict} (${detail}) after ${elapsed}s: coverage=${coverage} m3 contacts=${contacts} retreats=${retreats} respawns=${respawns}"
@@ -130,6 +131,48 @@ if ! docker logs "${SIM_CONTAINER}" 2>&1 | grep "Loading world file" | grep -q "
     say "WRONG WORLD (gzserver did not load ${WORLD}.world)"; exit 4
 fi
 say "sim up (world verified: ${WORLD})"
+
+# ── 1b. wait for the world to finish LOADING, not just to start ────────────
+# The checks above prove gzserver began loading our world file and that a depth
+# topic exists. Neither proves the furniture is in it. An AWS world is a few
+# dozen separate model directories of meshes, and a mission that starts early
+# maps free space where a shelf is about to appear, plans through it, and spends
+# the run recovering from collisions with geometry its map says is not there.
+#
+# No per-world model count is needed, and none is wanted: the property that
+# matters is that the count has STOPPED changing. Poll until it is stable across
+# three consecutive reads, and record it either way, so a run flown into a
+# half-built world is visible in the verdict afterwards rather than silently
+# producing a bad sample.
+MODEL_COUNT=0
+model_count() {
+    docker exec "${SIM_CONTAINER}" bash -c '
+        source /opt/ros/humble/setup.bash
+        export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+        export CYCLONEDDS_URI=file:///etc/cyclonedds/no_shm.xml
+        export ROS_DOMAIN_ID='"${SIM_DOMAIN_ID}"'
+        timeout 10 ros2 service call /get_model_list gazebo_msgs/srv/GetModelList 2>/dev/null' 2>/dev/null \
+        | tr ',' '\n' | grep -c "aws_\|ground_plane\|simple_drone" || true
+}
+stable=0
+prev_count=-1
+for _ in $(seq 1 30); do
+    MODEL_COUNT="$(model_count)"
+    if [[ "${MODEL_COUNT}" -gt 0 && "${MODEL_COUNT}" == "${prev_count}" ]]; then
+        stable=$((stable + 1))
+        [[ ${stable} -ge 2 ]] && break
+    else
+        stable=0
+    fi
+    prev_count="${MODEL_COUNT}"
+    sleep 2
+done
+if [[ ${stable} -ge 2 ]]; then
+    say "world settled: ${MODEL_COUNT} models"
+else
+    say "WARNING: world model count never settled (last ${MODEL_COUNT}); flying anyway"
+fi
+export SPARX_MODEL_COUNT="${MODEL_COUNT}"
 
 # ── 2. the physics witness, before anything can move ───────────────────────
 docker cp "${SCRIPT_DIR}/flight_monitor.py" "${SIM_CONTAINER}:/tmp/flight_monitor.py"
