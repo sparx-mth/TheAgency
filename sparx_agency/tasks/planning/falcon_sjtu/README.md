@@ -1174,20 +1174,26 @@ configuration, no per-world tuning and no editing between rounds of a campaign
 | final (+ nudge bypass, hold budget) | 1 of 6 | 6 of 6 |
 | final2 (same code as `final`) | 4 of 6 | 6 of 6 |
 | unknown-brake ON (`unknown_brake:=true`) | 2 of 6 | 6 of 6 |
-| **total** | **11 of 29** | **29 of 29** |
+| baseline4 (default config) | 2 of 4 | 4 of 4 |
+| **total** | **13 of 33** | **33 of 33** |
 
-**Warehouse: twenty-nine consecutive finishes, 200.8–202.2 m³** — a spread of
+**Warehouse: thirty-three consecutive finishes, 200.8–202.2 m³** — a spread of
 1.4 m³, and 98–99% of the 204.1 m³ its box affords. It has not failed a leg since
 the image regression was undone.
 
-**Hospital: eleven finishes in twenty-nine, about two runs in five.** Its best
+One hospital leg finished **CLEAN — 768.5 m³ with zero bumper contacts** — which
+is the first time this package has mapped that building without touching it, and
+is the existence proof that the contact problem below is not inherent to the
+world.
+
+**Hospital: thirteen finishes in thirty-three, about two runs in five.** Its best
 round mapped **856.0 m³**, against 760 m³ for the best run this package had ever
 recorded before this work, and finishing rounds land at 769–856 m³. Failures
 range from 152 to 689 m³, so most of them map a substantial part of the building
 and then stop.
 
 Read the per-campaign column, and read it carefully, because it is the whole
-lesson: **4/5, 0/6, 1/6, 4/6, 2/6.** The third and fourth are the *same code*,
+lesson: **4/5, 0/6, 1/6, 4/6, 2/6, 2/4.** The third and fourth are the *same code*,
 and they differ by 1-in-6 against 4-in-6. The first campaign's 4-of-5 was
 reported here as a result before the second came back at 0-of-6, which is the
 mistake `KEEP_GOING` exists to prevent. Run-to-run variance dominates every
