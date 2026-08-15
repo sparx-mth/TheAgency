@@ -1173,25 +1173,28 @@ configuration, no per-world tuning and no editing between rounds of a campaign
 | confirm_final | **0 of 6** | 6 of 6 |
 | final (+ nudge bypass, hold budget) | 1 of 6 | 6 of 6 |
 | final2 (same code as `final`) | 4 of 6 | 6 of 6 |
-| **total** | **9 of 23** | **23 of 23** |
+| unknown-brake ON (`unknown_brake:=true`) | 2 of 6 | 6 of 6 |
+| **total** | **11 of 29** | **29 of 29** |
 
-**Warehouse: twenty-three consecutive finishes, 200.8–202.2 m³** — a spread of
+**Warehouse: twenty-nine consecutive finishes, 200.8–202.2 m³** — a spread of
 1.4 m³, and 98–99% of the 204.1 m³ its box affords. It has not failed a leg since
 the image regression was undone.
 
-**Hospital: nine finishes in twenty-three, about two runs in five.** Its best
+**Hospital: eleven finishes in twenty-nine, about two runs in five.** Its best
 round mapped **856.0 m³**, against 760 m³ for the best run this package had ever
 recorded before this work, and finishing rounds land at 769–856 m³. Failures
 range from 152 to 689 m³, so most of them map a substantial part of the building
 and then stop.
 
 Read the per-campaign column, and read it carefully, because it is the whole
-lesson: **4/5, 0/6, 1/6, 4/6.** The last two are the *same code*. The first
-campaign's 4-of-5 was reported here as a result before the second came back at
-0-of-6, which is the mistake `KEEP_GOING` exists to prevent. Run-to-run variance
-dominates every difference between the configurations tried in this effort, so
-no change below is claimed to have moved the hospital rate; a campaign of six
-rounds cannot separate 17% from 67% when one configuration produces both.
+lesson: **4/5, 0/6, 1/6, 4/6, 2/6.** The third and fourth are the *same code*,
+and they differ by 1-in-6 against 4-in-6. The first campaign's 4-of-5 was
+reported here as a result before the second came back at 0-of-6, which is the
+mistake `KEEP_GOING` exists to prevent. Run-to-run variance dominates every
+difference between the configurations tried in this effort, so **no change in
+this work is claimed to have moved the hospital rate** — a six-round campaign
+cannot separate 17% from 67% when one configuration produces both, and anything
+that wants to claim an effect here needs many more rounds than a day allows.
 
 FINISH throughout is FALCON's own verdict — its frontier set emptied — not a
 watchdog or a time cap. Planner respawns are zero in every leg of all three
@@ -1221,14 +1224,34 @@ campaigns, against a baseline where one hospital run took 15.
   catch it. The place to stop a capsize is before the contact.
 
 Both point the same way, and it is a perception problem before it is a control
-one: **nothing in this stack yet slows the aircraft for flying into cells it has
+one: **nothing in this stack slows the aircraft for flying into cells it has
 never observed.** The depth brake caps forward speed by the nearest return in the
 corridor, which handles what the camera can see; it says nothing about the
 0.95 m it cannot, nor about lateral and reverse motion during a retreat or an
-unstick. Closing that needs the free/unknown cloud the follower deliberately does
+unstick, and those manoeuvres do not pass through the servo at all.
+
+### `unknown_brake` — built, measured, and left OFF
+
+`core/planning/safety/observation_memory.py` bounds speed by how stale the
+evidence about the direction of travel is: each depth frame marks the wedge the
+aircraft is looking down, and the cap applies at the follower's send choke point,
+which is the only place the retreat, back-out and unstick can be reached. It is
+wired behind `unknown_brake` and **defaults to false**.
+
+It is off because it did not work. One campaign with it on finished **2 of 6**
+hospital legs, against 1 of 6 and 4 of 6 for the same stack with it off. That is
+no effect this rig can resolve, and it cost some speed everywhere to get it.
+Contacts on failing legs stayed high (169 and 109 reports). The campaign did see
+zero capsizes, but capsizes run at roughly one leg in ten, so zero in six is not
+evidence either.
+
+Keep the mechanism and its fifteen tests, because the diagnosis behind it still
+stands and the memory is the cheap half of the answer. What it lacks is a notion
+of what is *in* the unlooked-at direction: a bearing that is stale but open costs
+the aircraft speed for nothing, and only the free/unknown cloud the follower does
 not subscribe to today (`/voxel_mapping/occupancy_grid_free`, published every
-tenth cycle by `falcon_visgrid_cadence.patch`), so it is a real piece of work
-rather than a parameter, and it is the next thing worth doing.
+tenth cycle by `falcon_visgrid_cadence.patch`) can tell those apart. That is the
+next piece of work, and it is a real one rather than a parameter.
 
 Contacts are counted per Gazebo contact point per physics step, so the figures
 read higher than the number of events — count objects, not reports. They remain
