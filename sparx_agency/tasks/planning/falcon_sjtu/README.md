@@ -1172,24 +1172,26 @@ configuration, no per-world tuning and no editing between rounds of a campaign
 | recovered | 4 of 5 | 5 of 5 |
 | confirm_final | **0 of 6** | 6 of 6 |
 | final (+ nudge bypass, hold budget) | 1 of 6 | 6 of 6 |
-| **total** | **5 of 17** | **17 of 17** |
+| final2 (same code as `final`) | 4 of 6 | 6 of 6 |
+| **total** | **9 of 23** | **23 of 23** |
 
-**Warehouse: seventeen consecutive finishes, 200.8–201.8 m³** — a spread of
-1.0 m³, and 98–99% of the 204.1 m³ its box affords. It has not failed a leg since
+**Warehouse: twenty-three consecutive finishes, 200.8–202.2 m³** — a spread of
+1.4 m³, and 98–99% of the 204.1 m³ its box affords. It has not failed a leg since
 the image regression was undone.
 
-**Hospital: five finishes in seventeen.** Its best round mapped **825.5 m³**,
-against 760 m³ for the best run this package had ever recorded before this work,
-and finishing rounds land at 769–825 m³. Failures range from 152 to 689 m³, so
-most of them map a substantial part of the building and then stop.
+**Hospital: nine finishes in twenty-three, about two runs in five.** Its best
+round mapped **856.0 m³**, against 760 m³ for the best run this package had ever
+recorded before this work, and finishing rounds land at 769–856 m³. Failures
+range from 152 to 689 m³, so most of them map a substantial part of the building
+and then stop.
 
-Read the per-campaign column, not the total, and be careful with it: the first
-campaign's 4-of-5 is a lucky window, not a level. It was reported here as a
-result before the second campaign came back at 0-of-6, which was a mistake of
-exactly the kind `KEEP_GOING` exists to prevent. Three campaigns of the same
-stack gave 4/5, 0/6 and 1/6; the run-to-run variance dominates any difference
-between the configurations tried, and nothing below should be read as a measured
-improvement to the hospital rate unless it says so.
+Read the per-campaign column, and read it carefully, because it is the whole
+lesson: **4/5, 0/6, 1/6, 4/6.** The last two are the *same code*. The first
+campaign's 4-of-5 was reported here as a result before the second came back at
+0-of-6, which is the mistake `KEEP_GOING` exists to prevent. Run-to-run variance
+dominates every difference between the configurations tried in this effort, so
+no change below is claimed to have moved the hospital rate; a campaign of six
+rounds cannot separate 17% from 67% when one configuration produces both.
 
 FINISH throughout is FALCON's own verdict — its frontier set emptied — not a
 watchdog or a time cap. Planner respawns are zero in every leg of all three
@@ -1202,12 +1204,31 @@ campaigns, against a baseline where one hospital run took 15.
   measured holds capped at 4–5 per run and **zero** nudges refused, and still
   failed five legs of six.
 - Contacts are the unhealthy signal. Failing legs reach 152, 212 and 454 bumper
-  reports against 2–27 on finishing ones, all on geometry inside the 0.95 m depth
-  near clip, and one leg ended in a **CAPSIZE** at 487 m³ — the airframe tipped
-  past the plugin's ~35° clamp, the failure mode the speed ceiling below was
-  derived to prevent. That is the open thread worth pulling next, and it is a
-  perception problem before it is a control one: nothing in this stack yet slows
-  the aircraft for flying into cells it has never observed.
+  reports against 1–65 on finishing ones, all on geometry inside the 0.95 m depth
+  near clip.
+- **Two of twenty-three hospital legs ended in a CAPSIZE** (at 487 m³ and
+  290 m³) — the airframe tipped past the plugin's ~35° clamp, which
+  thrust-along-body-z cannot recover from. This is the failure mode the speed
+  ceiling below was derived to prevent, and it is still occurring at roughly one
+  leg in ten, so that derivation is necessary but not sufficient.
+
+  Do not reach for the attitude reflex to fix it. Both capsizes went from
+  routine attitude to unrecoverable between monitor samples — roll 18° pitch 56°
+  in one, roll −47° pitch −82° in the other, against a sampled maximum of 4–6°
+  over the rest of each flight — and the reflex had fired correctly two or three
+  times earlier in the same runs. An aircraft flipped by a contact does not tilt
+  through the threshold on its way over, so a 50 Hz cut-the-drive rule cannot
+  catch it. The place to stop a capsize is before the contact.
+
+Both point the same way, and it is a perception problem before it is a control
+one: **nothing in this stack yet slows the aircraft for flying into cells it has
+never observed.** The depth brake caps forward speed by the nearest return in the
+corridor, which handles what the camera can see; it says nothing about the
+0.95 m it cannot, nor about lateral and reverse motion during a retreat or an
+unstick. Closing that needs the free/unknown cloud the follower deliberately does
+not subscribe to today (`/voxel_mapping/occupancy_grid_free`, published every
+tenth cycle by `falcon_visgrid_cadence.patch`), so it is a real piece of work
+rather than a parameter, and it is the next thing worth doing.
 
 Contacts are counted per Gazebo contact point per physics step, so the figures
 read higher than the number of events — count objects, not reports. They remain
