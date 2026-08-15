@@ -1159,7 +1159,279 @@ the aisles, so early mapping crawled and retreats went up. The flight box in
 `config/warehouse.yaml` remains the tool for keeping the aircraft out of a
 region; the frontier clearances are not.
 
+## Bringing this up on a second machine: four defects the first machine hid
+
+Everything below this section was measured on PCN87653. Moving the campaign to
+LP-Boston-17093 on 2026-08-15 found four defects, and the shape of all four is
+worth reading before trusting any number in this file on a machine that has not
+run it: **each one was invisible from outside, and three of them made the whole
+stack report health while a named capability was simply absent.**
+
+### 1. The images are not the repository, and this machine's were four patches behind
+
+`falcon-ros-custom:v1` here carried `deadend_guard`, `hgrid_clamp`, `simtime`
+and `visgrid_cadence` and none of `replan_from_pose`, `slow_traj_rescale`,
+`publish_fail_blacklist` or `blocked_region_ttl` — all four added on 2026-08-13
+and 08-14, and all four rebuilt into the image only on the machine they were
+written on. `exploration.launch` set every parameter for them and FALCON
+silently ignored the lot, because a rosparam nothing reads is not an error.
+
+The tell, once you know to look for it, is one line of the FALCON log:
+
+```
+[FSM] Avg position velocity: 0.16, avg yaw velocity: 0.16, lengthen ratio: 1.10
+```
+
+A ratio at or above 1.0 means `falcon_slow_traj_rescale.patch` is in the image.
+Ratios of 0.08-0.25 mean it is not, and that every plan is being compressed 4-13x
+before the follower ever sees it. **Check that line before diagnosing anything
+else on a new machine.** Apply the missing patches to a scratch container,
+rebuild `exploration_manager`, `exploration_preprocessing` and `trajectory`,
+verify the sentinels in the built artifacts, and `docker commit` — the procedure
+in `patches/README.md`, which takes about a minute.
+
+> `docker commit` records the CONTAINER's config, so a scratch container started
+> with `--entrypoint bash` produces an image whose `docker run IMAGE roslaunch …`
+> becomes `bash roslaunch …` and dies with `roslaunch: No such file or
+> directory`. Restore it with `--change 'ENTRYPOINT …' --change 'CMD …'`, read
+> off the source image. This reads as a missing binary, not a broken image.
+
+### 2. The bumper was never bridged, so the follower had no contact sense at all
+
+`ros1_bridge` needs the `gazebo_msgs` pair on **both** sides at build time or
+`ContactsState` cannot cross, and `ros_bridge_docker/Dockerfile` did not install
+it. The failure is silent in the worst possible way:
+
+```
+[ros_bridge]: create bidirectional bridge for topic /simple_drone/bumper_states
+failed to create bidirectional bridge for topic '/simple_drone/bumper_states'
+    with ROS 2 type 'gazebo_msgs/msg/ContactsState': No template specialization
+```
+
+The announcement comes first, so a bridge-count check passes, all three
+containers read as Up, and the run flies with the follower's entire ground-truth
+contact reflex removed — the retreat, the three-strikes hold and the hand-off to
+FALCON's dead-end guard are all keyed on that topic and all become
+inference-only. Measured, same world, same configuration, with and without:
+
+| | bumper absent (h01) | bumper bridged (h02) |
+|---|---|---|
+| bumper reports | **513** | 6 |
+| contact episodes / objects | 23 / 1 | 2 / 2 |
+| retreats | 4 | 11 |
+| three-strikes give-ups | 0 | 4 |
+
+h01 hit one closed cubicle curtain **twenty-three separate times**, once for a
+continuous fifteen seconds and 203 reports, all at 0.08-0.23 m/s, and its
+follower never knew. `run_falcon_sjtu.sh` now fails loudly on any topic that
+announces a bridge and then does not build one, and `campaign_run.sh` records
+`bumper_bridged` in `verdict.json`, because a contacts figure from such a run is
+not comparable with one from a healthy stack.
+
+### 3. A blocked viewpoint could never retire the frontier that produced it
+
+The dead-end guard shadows the **viewpoint** the aircraft could not reach.
+A frontier is retired only when a shadow falls within `blocked_region_radius`
+of the frontier's **average**. Viewpoints are sampled `candidate_rmin..rmax`
+(1.0-2.5 m) from that average *by construction*, and the radius is deliberately
+2.0 — under `candidate_rmax` — so the test can never fire for the frontier that
+produced the blocked viewpoint. The frontier survives, samples another viewpoint
+centimetres away, and the tour offers it forever. The TTL ladder cannot help: a
+shadow that matches nothing is refreshed at no cost.
+
+Measured in both halves of the building on the same day: h01 aimed at three
+viewpoints of one frontier **91, 50 and 28 times** and died of no growth with
+the north never visited; h02 aimed at `(-11.57, 10.16)` **95 times** while the
+guard reported the aircraft confined short of that same point four times.
+
+`falcon_blocked_region_widen.patch` puts the radius on the same doubling ladder
+the TTL already uses, under its own cap `blocked_region_radius_max` (3.5).
+Strike 1 stays at 2.0 m and lifts in 90 s, which is exactly what protects a
+transit corridor from one early mistake — the 253.65 m³ failure recorded above.
+From strike 2 the shadow exceeds `candidate_rmax` and the frontier retires. One
+escalation law, two quantities, and the wider width now has to be *earned*.
+
+### 4. ...and even then, only frontiers found AFTER the shadow were ever tested
+
+Widening was necessary and not sufficient, and the reason is the sharpest of the
+four. `computeFrontiersToVisit()` tests blocked regions inside
+`for (auto &tmp_ftr : tmp_frontiers_)`, and `tmp_frontiers_` holds only what
+`searchFrontiers()` re-detected this cycle — which drops a frontier only if it
+`haveOverlap`s the update box **and** `isFrontierChanged`. A frontier the
+aircraft is stuck staring at has stopped changing, so it sits in `frontiers_`
+untouched and is never re-categorised. **A shadow cast on an already-known
+frontier could not retire it at any radius, on any strike, ever.**
+
+Measured in h03: `(-11.60, 9.89)` escalated to strike 6, a 3.5 m shadow held for
+2880 s, and the tour still chose its frontier sixty times in the last 300 s
+before the run died at 311.2 m³. `sweepBlockedFrontiers()` (same patch) sweeps
+the existing list at the top of the function. Dormant frontiers are still
+recycled the normal way — `searchFrontiers` resets their flags once their region
+is observed and changes — so this retires rather than sterilises, and the TTL
+remains the only thing that decides when a place is worth trying again.
+
+### 5. The guard could see a PINNED aircraft but not a LOOPING one
+
+The guard fires when the aircraft's excursion stays under 2 m for 25 s while
+short of its viewpoint. That threshold is smaller than this stack's own recovery
+ladder: a contact retreat backs out 1.3 m and an unstick runs 0.20 m/s for 6 s,
+so one strike-retreat-reapproach cycle spans about 2.6 m and reads as healthy.
+In h04 the aircraft sat at (5.2, 1.6) logging *"commanded 1.9 m of travel and
+moved 0.06 m"*, the tour aimed at one viewpoint forty times, and the guard never
+fired. In h05, with the looping test added, the old span test fired **zero**
+times all run while the new one fired seven — it is not a corner case, it is the
+failure mode.
+
+`falcon_deadend_looping.patch` adds the signature that separates the two: a
+transit spends its path on displacement and on closing the gap; a loop spends it
+on neither. Fires when the aircraft has flown over 2.5 m, more than twice its net
+displacement, **and ended the window further from the viewpoint than it started**.
+
+> That last clause was `closed < 0.5 m` for one run and it was wrong. Two of h05's
+> seven fires were an aircraft genuinely arriving, only slowly — "closed 0.49 m"
+> and "closed 0.33 m". This aircraft plans at 0.15 m/s and legitimately crawls at
+> 0.34-0.61x that through a doorway, and rounding a corner converts path into
+> almost no straight-line closure while being exactly the right thing to do. Half
+> a metre in 25 s is ordinary progress. Only a *negative* closure admits no
+> innocent reading, and all five genuine fires in that run were negative
+> (-0.44 to -1.45 m) while both false positives were positive.
+
+### 6. The tour's model of the world was built 0.1 m off the floor
+
+Under `map_dimension` 2 the coverage tour reduces every hgrid cell by
+connected-component labelling on a single horizontal slice, and the height of
+that slice was the literal `double height = 1.0;` in `getCCLCenters2D`. On a
+flight box of z 0.9-1.6, with the aircraft flying 1.15-1.49 m, that slice sits
+0.1 m off the box floor — inside the layer this building keeps its beds,
+gurneys, wheelchairs, sinks and carts in (0.5-1.2 m). Every one of them reads to
+the tour as a wall at an altitude the drone is never at, so the tour believes
+regions are disconnected that the aircraft crosses without noticing.
+
+`falcon_ccl_slice_height.patch` makes it `/map_config/ccl_slice_height`
+(default 1.0, so an unset config is upstream), set to 1.25 in
+`exploration.launch` — the middle of the usable band, and the altitude the
+follower already calls mid-band. It must stay inside the flight box for the same
+reason `box_min_z` may not exceed 1.0: a slice outside the box selects no voxels
+and the tour's model goes blank rather than merely wrong.
+
+### 7. FINISH was being declared while shadows were still standing
+
+FALCON's FINISH means "the frontier set is empty". Every shadowing mechanism
+SUPPRESSES frontiers, so a FINISH reached with shadows outstanding does not mean
+"there is nothing left", it means "there is nothing left that I am currently
+willing to consider" — and the shadows are at their least trustworthy exactly
+then, because each records a failure from an earlier pose against a much poorer
+map. `grantFinishAmnesty()` drops every shadow and re-offers every retired
+cluster when the set would otherwise empty, bounded by
+`/frontier_finder/finish_amnesty_max` (2) so the mission still terminates.
+
+> It must hand back a CLEAN cluster. `sampleViewpoints()` opens with
+> `CHECK_EQ(frontier.viewpoints_.size(), 0)`, and the clusters
+> `sweepBlockedFrontiers()` retires come off `frontiers_` still carrying the
+> viewpoints they were selected on. The first version aborted the node the
+> instant the first amnesty fired — `Frontier already has viewpoints (4 vs. 0)`,
+> exit -6, and the voxel map with it. Clear `viewpoints_` and let
+> categorisation recompute the rest.
+
+**What the amnesty does not fix, and this is the current frontier of the
+problem.** It can only restore clusters that a *shadow* retired. The premature
+finishes that remain are clusters `sampleViewpoints()` cannot place a viewpoint
+for at all: measured, a run ending at 243.9 m³ with `Frontier number: 1, dormant
+frontier number: 13` and **zero** shadows standing. A candidate viewpoint must
+be in KNOWN-FREE space and pass `isNearUnknown`, but a frontier *is* the boundary
+of known space — roughly half its sampling ring is unknown by construction, and
+`min_candidate_clearance` (0.25, a 5x5x3 voxel test) rejects much of the rest.
+That is where the next work is, and note that the README's existing advice is
+that moving those clearances the OTHER way (0.70, `candidate_rmin` 1.5) made
+everything worse.
+
+### What the fixes bought, measured
+
+**The hospital finished.** Run h11, on all seven fixes and with nothing changed
+since: **`FINISHED_DIRTY`, 822.68 m³, 443.5 m flown in 1727 s.** That is FALCON's
+own verdict — its frontier set emptied — not a watchdog and not a time cap, and
+it clears the 600 m³ completeness floor by 37%. Against this package's whole
+recorded history it is second only to the 856 m³ best round, and above the 760 m³
+that was the best before that campaign.
+
+It reached **x[-12.2, 11.3] y[-34.1, 18.2]** against walls at x ±12.44,
+y -34.94..20.94 — every corner of a 24 x 55 m building. Zero planner deaths,
+zero `No path to next viewpoint` lines, plan-origin gap p99 0.37 m, mapper pose
+lag 0.000 s. Control was nominal throughout: gap p50 0.15 m, cross-track p99
+0.28 m, commanded speed p50/p90/p99 all 0.35 m/s — exactly the derived ceiling,
+for a 0.18 m stopping distance inside a 0.19 m margin.
+
+Its 18 bumper reports are **4 episodes on 2 objects** — one graze of a half-open
+curtain, and three approaches to a scrubs cart — both first approaches to
+geometry inside the 0.95 m depth near clip, which is the known sensor limit
+rather than a tracking failure. Count objects, not reports.
+
+Hospital, same world, same spawn, fresh map each run:
+
+| run | fixes in | verdict | coverage | contacts | ground reached |
+|---|---|---|---|---|---|
+| h01 | none (as found) | `ABORT_NO_GROWTH` | 472.0 m³ | 513 rep / 1 obj | x[-8.9,12.2] y[-33.9,**4.7**] |
+| h03 | + bumper, + widen | `ABORT_NO_GROWTH` | 311.2 m³ | **0** | x[-9.1,11.2] y[**-4.9**,20.1] |
+| h04 | + sweep | `ABORT_NO_GROWTH` | 732.9 m³ | 26 rep / 5 obj | x[-11.2,12.1] y[-32.8,15.0] |
+| **h11** | **all seven** | **`FINISHED_DIRTY`** | **822.7 m³** | 18 rep / **2 obj** | **x[-12.2,11.3] y[-34.1,18.2]** |
+
+h01 and h03 each mapped one half of the building and deadlocked; h04 is the
+first run to sweep both, and it did so with no new contact in the 670 s after
+t=560. Walls are at x ±12.44, y -34.94..20.94.
+
+**The failure mode moved, and that is the substance of this work.** Before the
+fixes every hospital run DEADLOCKED — the tour re-offered one unreachable
+viewpoint until a watchdog ended the run, and no mechanism in the stack could
+retire it. After them no run deadlocks. The legs that still fail do so by
+declaring themselves FINISHED early (479.4, 587.5, 491.3, 243.9 m³ across
+h06-h10, every one caught by `FINISH_MIN_COVERAGE_M3` as `PARTIAL_FINISH`),
+which is a frontier-GENERATION problem rather than a liveness one — and h11
+shows the same configuration mapping the building outright.
+
+### Both worlds, one configuration, measured after the fixes
+
+`rig/both_worlds.sh 2 2700` with `KEEP_GOING=1`, plus the h11 leg that preceded
+it on the identical binary and parameter set — nothing edited between any of
+them:
+
+| world | legs | finished | coverage |
+|---|---|---|---|
+| hospital | h11, r01, r02 | **2 of 3** | 822.7, *350.7 (partial)*, 639.8 m³ |
+| warehouse | w01, r01, r02 | **3 of 3** | 201.18, 201.53, 201.52 m³ |
+
+**The warehouse is unaffected by any of the seven changes**, which is the
+invariant that mattered while touching FALCON's frontier and tour logic seven
+times: three legs, three finishes, 201.18-201.53 m³ against a historical band of
+200.8-202.2, one of them `CLEAN` with zero contacts. Contacts on the other two
+were 3 bumper reports on 2 objects each.
+
+The one hospital failure, r01 at 350.7 m³, is the same premature finish
+described in section 7: the frontier set emptied while clusters sat dormant for
+want of a placeable viewpoint. It is the next thing to fix and the mechanism is
+already named.
+
+**Read the hospital numbers as a sample, not as a rate.** Ten legs on a changing
+configuration ranged 243.9-822.7 m³. This file already records that run-to-run
+variance dominates every difference between configurations tried here, that the
+same code produced 1-in-6 and 4-in-6 in consecutive campaigns, and that the
+historical failure range is 152-689 m³. **Every fix above is justified by a named
+mechanism and a log line, not by a coverage figure**, and none of them is claimed
+to have moved the finish RATE — establishing that needs many more rounds than a
+day allows. What h11 establishes is the thing a rate cannot: that this
+configuration maps the building.
+
 ## Status
+
+> **2026-08-15, LP-Boston-17093: both worlds map on one configuration.** The
+> hospital finished at **822.7 m³** having reached every corner of the building,
+> and again at 639.8 m³; the warehouse finished all three legs at
+> 201.18-201.53 m³. Seven defects had to be fixed first, four of which made the
+> whole stack report health while a named capability was absent — see "Bringing
+> this up on a second machine" above, and read it before trusting any figure in
+> the rest of this file on a machine that has not run this stack.
+>
+> The tallies below are from the PCN87653 campaigns and are kept as the longer
+> baseline they are.
 
 **The warehouse is solved. The hospital finishes about one run in three.**
 

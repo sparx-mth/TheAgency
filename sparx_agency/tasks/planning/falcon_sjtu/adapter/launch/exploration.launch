@@ -211,6 +211,32 @@
        With expiry doing the work, the radius goes back under candidate_rmax so
        one bad viewpoint no longer retires its whole frontier. -->
   <param name="/frontier_finder/blocked_region_radius" value="2.0"/>
+  <!-- ...and that is right exactly ONCE. Measured on 2026-08-15 in both halves
+       of the hospital: a shadow is cast at the VIEWPOINT the aircraft could not
+       reach, but a frontier is retired only when a shadow falls within the
+       radius of the frontier's AVERAGE, and viewpoints are sampled
+       candidate_rmin..rmax (1.0-2.5 m) from that average by construction. With
+       2.0 under candidate_rmax 2.5 the test can never fire for the frontier
+       that produced the blocked viewpoint. The frontier survives, samples
+       another viewpoint centimetres away, and the tour offers it forever. Run
+       h01 aimed at three viewpoints of one frontier 91/50/28 times and died of no
+       growth with the north half of the building never visited; run h02 aimed
+       at (-11.57, 10.16) 95 times while the guard reported the aircraft
+       confined short of that same point four separate times. The TTL ladder
+       cannot help: a shadow that never matches anything is refreshed forever
+       at no cost.
+
+       So the radius escalates on the SAME ladder as the TTL, under its own
+       cap. Strike 1 stays at 2.0 m and lifts in 90 s, which is what protects a
+       transit corridor from one early mistake: the 253.65 m3 failure above.
+       From strike 2 the shadow exceeds candidate_rmax and the frontier finally
+       goes dormant, which is the termination property the flat 3.5 used to
+       buy, now paid for with evidence: two independent 25 s confinements at
+       one place, keyed on the coarse 4 m history below.
+
+       Set this at or below blocked_region_radius to disable the widening and
+       get the old fixed-width behaviour back. -->
+  <param name="/frontier_finder/blocked_region_radius_max" value="3.5"/>
   <param name="/frontier_finder/blocked_region_ttl_s" value="90.0"/>
   <!-- 5, so the ladder is 90, 180, 360, 720, 1440, 2880 s. The cap is what
        decides whether a mission can TERMINATE: at 3 (720 s) the hospital's last
@@ -280,6 +306,35 @@
        building on upstream's 0.5 m.
        The time budget stays raised, because one millisecond is indefensible on
        any lattice, and the pool stays large because headroom is free. -->
+  <!-- ── the coverage tour's connectivity slice ────────────────────────────
+       Under map_dimension 2 the tour reduces every hgrid cell by connected-
+       component labelling on ONE horizontal slice, and the height of that slice
+       was the literal 1.0 in getCCLCenters2D. It is now a parameter, defaulting
+       to 1.0 so an unset config is upstream behaviour.
+
+       1.0 is 0.1 m off the hospital's box floor (0.9) and nowhere near the
+       1.15-1.49 m the aircraft flies. It is, however, exactly where this
+       building keeps its beds, gurneys, wheelchairs, sinks and carts, which run
+       0.5-1.2 m. Every one of them reads to the tour as a wall at an altitude
+       the drone is never at, so the tour believes regions are disconnected that
+       the aircraft crosses without noticing, runs out of world, and declares the
+       building finished. Measured on 2026-08-15: two consecutive runs ended
+       PARTIAL_FINISH at 479.4 and 587.5 m3, the second having never gone south
+       of y = -20.5 in a building that runs to -34.5: a quarter of it never
+       visited, with FALCON's own frontier set empty.
+
+       1.25 is the middle of the usable band (1.0-1.5) and the altitude the
+       follower already calls mid-band and returns to when it unsticks. It is
+       one value for both worlds, like every other tuning here: it sits inside
+       the warehouse box (0.6-2.4) as well, and is strictly closer to where that
+       aircraft flies than 1.0 was.
+
+       It MUST stay inside the flight box. A slice outside it selects no voxels
+       and the tour's model of the world goes blank rather than merely wrong,
+       the same failure recorded above against raising box_min_z past 1.0. -->
+  <arg name="ccl_slice_height" default="1.25"/>
+  <param name="/map_config/ccl_slice_height" value="$(arg ccl_slice_height)"/>
+
   <arg name="astar_resolution"      default="0.5"/>
   <arg name="astar_max_search_time" default="0.05"/>
   <arg name="astar_allocate_num"    default="500000"/>

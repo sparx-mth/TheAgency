@@ -83,14 +83,29 @@ finish() {
     coverage=$(tail -1 "${RUN_DIR}/progress.jsonl" 2>/dev/null \
         | sed -n 's/.*"coverage_m3": *\([0-9.]*\).*/\1/p'); coverage=${coverage:-0}
     finish_line=$(grep -m1 'Exploration finished. Start' "${RUN_DIR}/falcon.log" 2>/dev/null | sed 's/.*\[FSM\]/[FSM]/' || true)
+    # Did the aircraft fly with its ground-truth contact sense connected?
+    # parameter_bridge announces a bridge before it looks for a conversion pair
+    # and only then reports the failure, so a bridge image built without
+    # gazebo_msgs carries no bumper for the whole run while every check upstream
+    # of this one passes. That removes the follower's contact retreat, its
+    # three-strikes hold and FALCON's dead-end-guard hand-off, so a contacts
+    # count from such a run is not comparable with one from a healthy stack.
+    # Recorded rather than judged, exactly as world_models is: a bad sample must
+    # be VISIBLE in the artifact afterwards, not silently averaged in.
+    local bumper_failed bumper_bridged
+    bumper_failed=$(grep -c "failed to create bidirectional bridge for topic '/simple_drone/bumper_states'" \
+        "${RUN_DIR}/bridge.log" 2>/dev/null); bumper_failed=${bumper_failed:-0}
+    if [[ "${bumper_failed}" -gt 0 ]]; then bumper_bridged=false; else bumper_bridged=true; fi
     cat > "${RUN_DIR}/verdict.json" <<EOF
 {"map": "${MAP}", "verdict": "${verdict}", "detail": "${detail}",
  "elapsed_s": ${elapsed}, "contacts": ${contacts}, "wedges": ${wedges},
  "planner_respawns": ${respawns}, "coverage_m3": ${coverage},
  "retreats": ${retreats}, "plan_origin_corrections": ${drifts},
- "world_models": ${SPARX_MODEL_COUNT:-0},
+ "world_models": ${SPARX_MODEL_COUNT:-0}, "bumper_bridged": ${bumper_bridged},
  "finish_line": "${finish_line//\"/\\\"}"}
 EOF
+    [[ "${bumper_bridged}" == "true" ]] || \
+        say "WARNING: /simple_drone/bumper_states never bridged -- this run flew with NO ground-truth contact sense"
     say "VERDICT ${verdict} (${detail}) after ${elapsed}s: coverage=${coverage} m3 contacts=${contacts} retreats=${retreats} respawns=${respawns}"
     exit "${rc}"
 }

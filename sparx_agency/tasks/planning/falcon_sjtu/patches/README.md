@@ -270,6 +270,119 @@ With expiry doing the work, `blocked_region_radius` goes back **under**
 `candidate_rmax` (2.0 against 2.5) in `adapter/launch/exploration.launch`, so
 retiring one viewpoint no longer retires the whole frontier that produced it.
 
+## falcon_blocked_region_widen.patch — a shadow the frontier can actually feel
+
+Touches `frontier_finder.{h,cpp}`, on top of `falcon_blocked_region_ttl.patch`.
+Three changes that only make sense together.
+
+**Why.** The dead-end guard shadows the VIEWPOINT the aircraft could not reach,
+but `computeFrontiersToVisit()` retires a cluster only when a shadow falls within
+`blocked_region_radius` of the cluster's AVERAGE — and `sampleViewpoints()`
+places viewpoints `candidate_rmin..rmax` (1.0-2.5 m) from that average *by
+construction*. At the shipped 2.0, under `candidate_rmax`, the test can never
+fire for the frontier that produced the blocked viewpoint. The frontier
+survives, samples another viewpoint centimetres away, and the tour offers it
+forever. The TTL ladder cannot help: a shadow matching nothing is refreshed at
+no cost. Measured twice on 2026-08-15 in different halves of the hospital — one
+run aimed at three viewpoints of a single frontier 91/50/28 times, another at one
+point 95 times while the guard reported the aircraft confined short of it four
+separate times.
+
+**And the test was only ever applied to freshly detected clusters.** The
+categorisation loop runs over `tmp_frontiers_`, which `searchFrontiers()` fills
+only from clusters that `haveOverlap` the update box AND `isFrontierChanged`. A
+frontier the aircraft is stuck staring at has stopped changing, so it sits in
+`frontiers_` untouched: a shadow cast on an already-known frontier could not
+retire it at ANY radius, on any strike. Measured: `(-11.60, 9.89)` escalated to
+strike 6 with a 3.5 m shadow held for 2880 s while the tour chose its frontier
+sixty times in the last 300 s.
+
+**What it does.**
+
+- `blockedRadiusFor(strikes)` puts the radius on the same doubling ladder the
+  TTL already uses, capped by `/frontier_finder/blocked_region_radius_max`
+  (3.5). Strike 1 stays at 2.0 m and lifts in 90 s, which is what protects a
+  transit corridor from one early mistake — the 253.65 m³ failure this file
+  records. From strike 2 the shadow exceeds `candidate_rmax` and the frontier
+  retires. One escalation law, two quantities, and the wider width is *earned*.
+- `sweepBlockedFrontiers()` sweeps the existing `frontiers_` list at the top of
+  `computeFrontiersToVisit()`, before `first_new_ftr_` is assigned (it erases
+  from the list that iterator points into). It does NOT unflag the retired
+  cells: `searchFrontiers()` recycles a dormant cluster through `resetFlag` once
+  its region is observed and changes, so this retires rather than sterilises.
+- `grantFinishAmnesty()` refuses to let the mission call the world finished
+  while shadows are still standing. A FINISH means "the frontier set is empty",
+  and every shadowing mechanism suppresses frontiers, so that verdict with
+  shadows outstanding means "nothing I am currently willing to consider" — on
+  evidence collected from an earlier pose against a much poorer map. It drops
+  every shadow, re-offers every retired cluster, and relaxes viewpoint placement
+  for that one pass. Bounded by `/frontier_finder/finish_amnesty_max` (2).
+
+**Two traps, both paid for.** `sampleViewpoints()` opens with
+`CHECK_EQ(frontier.viewpoints_.size(), 0)`, and the clusters the sweep retires
+come off `frontiers_` still carrying their viewpoints — handing one back
+unmodified aborts the node (`exit -6`, `Frontier already has viewpoints
+(4 vs. 0)`) and takes the voxel map with it. And the strike HISTORY is
+deliberately not cleared by the amnesty, so a pocket that has already defeated
+the aircraft starts its second life at the strike count it earned and retires
+faster, which is what keeps termination.
+
+## falcon_deadend_looping.patch — a guard that can see a moving failure
+
+Touches `exploration_manager.cpp`, on top of `falcon_deadend_guard.patch`.
+
+**Why.** The guard fires when the aircraft's excursion stays under 2 m for 25 s
+while short of its viewpoint. That threshold is smaller than this stack's own
+recovery ladder: a contact retreat backs out 1.3 m, an unstick runs 0.20 m/s for
+6 s, so one strike-retreat-reapproach cycle spans about 2.6 m and reads as
+healthy. Measured: an aircraft logging *"commanded 1.9 m of travel and moved
+0.06 m"* while the tour aimed at one viewpoint forty times, with the guard
+silent throughout. In the run after this patch the old span test fired ZERO
+times all mission while the new one fired seven — it is the failure mode, not a
+corner case.
+
+**What it does.** Adds the signature that separates the two cases: a transit
+spends its path on displacement and on closing the gap to the target; a loop
+spends it on neither. Fires when the aircraft has flown over 5 m, more than
+twice its net displacement, and ended the window FURTHER from the viewpoint than
+it started.
+
+**Both thresholds were wrong once, and both corrections are the point.**
+
+- `closed < 0.5 m` retired an aircraft that was genuinely arriving, only slowly
+  — two of seven fires in one run were "closed 0.49 m" and "closed 0.33 m". This
+  aircraft plans at 0.15 m/s and legitimately crawls at 0.34-0.61x that through a
+  doorway, and rounding a corner converts path into almost no straight-line
+  closure while being exactly the right thing to do. Only a NEGATIVE closure
+  admits no innocent reading.
+- A 25 s window shared with the pinned test was too impatient. "Has not moved at
+  all" is conclusive; "moved but got no nearer" is also what a hard doorway looks
+  like while the aircraft is still winning — the run that mapped the most of the
+  building spent about 300 s looping at (-10.5, -2.5), escaped unaided and went
+  on to 732.9 m³. The looping test gets 60 s; the pinned test keeps 25 s.
+
+## falcon_ccl_slice_height.patch — build the tour's world where the drone flies
+
+Touches `hierarchical_grid.cpp`.
+
+**Why.** Under `map_dimension` 2 the coverage tour reduces every hgrid cell by
+connected-component labelling on ONE horizontal slice, and its height was the
+literal `double height = 1.0;` in `getCCLCenters2D`. On a hospital flight box of
+z 0.9-1.6, with the aircraft flying 1.15-1.49 m, that slice sits 0.1 m off the
+box floor — inside the layer the building keeps its beds, gurneys, wheelchairs,
+sinks and carts in (0.5-1.2 m). Every one of them reads to the tour as a wall at
+an altitude the drone is never at, so the tour believes regions are disconnected
+that the aircraft crosses without noticing.
+
+**What it does.** Makes it `/map_config/ccl_slice_height`, defaulting to 1.0 so
+an unset config is upstream behaviour; `exploration.launch` sets 1.25, the middle
+of the usable band and the altitude the follower already calls mid-band. Read
+once per call via `ros::param::param` into a function-local static.
+
+**It must stay inside the flight box**, for the same reason `box_min_z` may not
+exceed 1.0: a slice outside the box selects no voxels at all and the tour's model
+of the world goes blank rather than merely wrong.
+
 ## Rebuilding vs. the running image
 
 An image that was `docker commit`ed live carries these already and needs no

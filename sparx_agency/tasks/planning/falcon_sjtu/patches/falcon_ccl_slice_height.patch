@@ -1,0 +1,25 @@
+--- a/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
++++ b/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
+@@ -1568,7 +1568,21 @@
+   ccl_voxels_addr_[cell_id].clear();
+   ccl_voxels_color_[cell_id].clear();
+ 
+-  double height = 1.0;
++  // The altitude this whole model of the world is built at. It was the literal
++  // 1.0, which on a flight box of z 0.9-1.6 is 0.1 m off the floor -- inside the
++  // layer a hospital keeps its beds, gurneys, wheelchairs, sinks and carts in
++  // (0.5-1.2 m), and nowhere near the 1.15-1.49 m the aircraft actually flies.
++  // Every one of those obstacles then reads to the coverage tour as a wall, so
++  // it believes regions are disconnected that the drone crosses without
++  // noticing, and it runs out of world long before the building does.
++  //
++  // Read once: this is called per cell on every hgrid update.
++  //
++  // The slice must stay INSIDE the flight box. One outside it selects no voxels
++  // at all, and the tour's model then goes blank rather than merely wrong.
++  static double height = -1.0;
++  if (height < 0.0)
++    ros::param::param("/map_config/ccl_slice_height", height, 1.0);
+   Position bbox_min = uniform_grid_[cell_id].bbox_min_;
+   Position bbox_max = uniform_grid_[cell_id].bbox_max_;
+   bbox_min.z() = height;

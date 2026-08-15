@@ -1,0 +1,240 @@
+--- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
++++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+@@ -161,6 +161,28 @@
+   vector<Vector3d> blocked_history_;
+   vector<int> blocked_history_strikes_;
+   double blocked_region_radius_;
++  // The width a shadow reaches once the place behind it has proved itself.
++  // blocked_region_radius_ is deliberately UNDER candidate_rmax so that one
++  // bad viewpoint does not retire the frontier that produced it -- which is
++  // right for a shadow cast on a single 25 s confinement, and wrong forever
++  // after, because a frontier whose every viewpoint is unreachable then
++  // re-offers one just outside the shadow on every cycle and the tour never
++  // moves on. Past the first strike the shadow widens past candidate_rmax and
++  // the frontier finally goes dormant. <= blocked_region_radius_ disables the
++  // widening and restores the fixed-width behaviour.
++  double blocked_region_radius_max_;
++  // The shadow radius earned by a region on `strikes` strikes: the same
++  // doubling ladder blocked_region_ttl_s_ uses, under its own cap.
++  double blockedRadiusFor(int strikes) const;
++  // Retire frontiers already on frontiers_ that a shadow now covers. The
++  // categorisation loop only ever sees freshly re-detected clusters, so
++  // without this a shadow cast on a known frontier never reaches it.
++  void sweepBlockedFrontiers();
++  // Drop every shadow and re-offer every retired cluster, once the frontier set
++  // would otherwise be empty. Bounded by finish_amnesty_max_.
++  void grantFinishAmnesty();
++  int finish_amnesty_max_;
++  int finish_amnesty_used_;
+   double blocked_region_escalate_radius_;
+   double blocked_region_ttl_s_;
+   int blocked_region_ttl_max_doubling_;
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -1,6 +1,8 @@
+ #include <Eigen/Eigenvalues>
+ #include <pcl/filters/voxel_grid.h>
+ 
++#include <algorithm>
++
+ #include "exploration_preprocessing/frontier_finder.h"
+ #include "pathfinding/path_cost_evaluator.h"
+ #include "perception_utils/perception_utils.h"
+@@ -38,6 +40,16 @@
+   // COUNT, and the same obstacle defeats the aircraft at scattered points.
+   nh.param("/frontier_finder/blocked_region_escalate_radius",
+            blocked_region_escalate_radius_, 4.0);
++  // Wide enough to exceed candidate_rmax (2.5) and so to catch the frontier
++  // AVERAGE from a shadow cast at one of its viewpoints, which is the whole
++  // point; no wider than blocked_region_escalate_radius_, so a shadow still
++  // cannot reach into the next room.
++  nh.param("/frontier_finder/blocked_region_radius_max",
++           blocked_region_radius_max_, 3.5);
++  // How many times the mission may reconsider everything it gave up on before
++  // being allowed to call the world finished. 0 restores the old behaviour.
++  nh.param("/frontier_finder/finish_amnesty_max", finish_amnesty_max_, 2);
++  finish_amnesty_used_ = 0;
+ 
+   // Reload shadows a previous incarnation persisted: this node respawns after
+   // LKH crashes, and physics-vetoed viewpoints stay vetoed across respawns.
+@@ -81,6 +93,22 @@
+ 
+ FrontierFinder::~FrontierFinder() {}
+ 
++double FrontierFinder::blockedRadiusFor(int strikes) const {
++  if (blocked_region_radius_max_ <= blocked_region_radius_)
++    return blocked_region_radius_;
++  int doublings = strikes - 1;
++  if (doublings < 0)
++    doublings = 0;
++  // Bound the shift itself, not just its result: strikes is unbounded and
++  // 1 << 31 is undefined behaviour long before the std::min would save it.
++  if (doublings > blocked_region_ttl_max_doubling_)
++    doublings = blocked_region_ttl_max_doubling_;
++  if (doublings > 16)
++    doublings = 16;
++  const double r = blocked_region_radius_ * double(1 << doublings);
++  return r < blocked_region_radius_max_ ? r : blocked_region_radius_max_;
++}
++
+ void FrontierFinder::expireBlockedRegions() {
+   if (blocked_region_ttl_s_ <= 0.0 || blocked_regions_.empty())
+     return;
+@@ -151,9 +179,17 @@
+   }
+ 
+   for (size_t i = 0; i < blocked_regions_.size(); ++i)
+-    if ((blocked_regions_[i] - pos).norm() < blocked_region_radius_) {
++    if ((blocked_regions_[i] - pos).norm() <
++        blockedRadiusFor(blocked_regions_strikes_[i])) {
+       blocked_regions_stamp_[i] = ros::Time::now().toSec();
+       blocked_regions_strikes_[i] = strikes;
++      ROS_WARN("[FrontierFinder] Blocked region (%.2f, %.2f, %.2f) re-reported "
++               "on strike %d; shadow now %.1f m for %.0f s",
++               blocked_regions_[i].x(), blocked_regions_[i].y(),
++               blocked_regions_[i].z(), strikes, blockedRadiusFor(strikes),
++               blocked_region_ttl_s_ *
++                   double(1 << std::min(strikes - 1,
++                                        blocked_region_ttl_max_doubling_)));
+       return;
+     }
+   blocked_regions_.push_back(pos);
+@@ -688,10 +724,116 @@
+   downsample(ftr.cells_, ftr.filtered_cells_);
+ }
+ 
++void FrontierFinder::grantFinishAmnesty() {
++  if (finish_amnesty_used_ >= finish_amnesty_max_)
++    return;
++  if (blocked_regions_.empty() && dormant_frontiers_.empty())
++    return;
++  ++finish_amnesty_used_;
++  ROS_WARN("[FrontierFinder] Frontier set is empty with %lu shadow(s) still "
++           "standing and %lu cluster(s) retired behind them. The world is not "
++           "finished, it is unexamined -- dropping every shadow and re-offering "
++           "every retired cluster (amnesty %d of %d)",
++           blocked_regions_.size(), dormant_frontiers_.size(),
++           finish_amnesty_used_, finish_amnesty_max_);
++
++  blocked_regions_.clear();
++  blocked_regions_stamp_.clear();
++  blocked_regions_strikes_.clear();
++  ros::param::set("/frontier_finder/blocked_regions_runtime", std::vector<double>());
++
++  // Hand the retired clusters back through the ordinary categorisation path
++  // rather than resurrecting them by hand: with the shadows gone they get
++  // sampleViewpoints() called on them exactly as a freshly detected cluster
++  // would, and anything still unviewable returns to dormant on its own.
++  //
++  // The strike HISTORY is deliberately not cleared. A pocket that defeated the
++  // aircraft before starts its second life at the strike count it already
++  // earned, so it retires faster this time and the mission still terminates.
++  for (list<Frontier>::iterator it = dormant_frontiers_.begin();
++       it != dormant_frontiers_.end(); ++it) {
++    // sampleViewpoints() asserts the cluster it is handed is CLEAN
++    // (CHECK_EQ(frontier.viewpoints_.size(), 0)), and the clusters
++    // sweepBlockedFrontiers() retires come off frontiers_ still carrying the
++    // viewpoints they were selected on. Handing one of those back unmodified
++    // aborts the node from inside the frontier finder and takes the voxel map
++    // with it -- measured, exit code -6 at "Frontier already has viewpoints
++    // (4 vs. 0)" the instant the first amnesty fired. So the amnesty hands back
++    // a cluster in the state a freshly detected one would be in, and lets
++    // categorisation recompute the rest; visib_num_ is reset by
++    // sampleViewpoints itself.
++    Frontier revived = *it;
++    revived.viewpoints_.clear();
++    revived.visib_num_ = 0;
++    tmp_frontiers_.push_back(revived);
++  }
++  dormant_frontiers_.clear();
++}
++
++void FrontierFinder::sweepBlockedFrontiers() {
++  if (blocked_regions_.empty() || frontiers_.empty())
++    return;
++  int retired = 0;
++  for (list<Frontier>::iterator it = frontiers_.begin(); it != frontiers_.end();) {
++    bool in_blocked = false;
++    for (size_t i = 0; i < blocked_regions_.size(); ++i)
++      if ((blocked_regions_[i] - it->average_).norm() <
++          blockedRadiusFor(blocked_regions_strikes_[i])) {
++        in_blocked = true;
++        break;
++      }
++    if (!in_blocked) {
++      ++it;
++      continue;
++    }
++    // Unflag the cells, exactly as the categorisation loop does for a cluster
++    // it retires: the cluster must be free to be found again once its shadow
++    // expires, or this sweep would quietly turn a timed shadow into a
++    // permanent one and re-introduce the failure the TTL was written to fix.
++    for (vector<Vector3d>::iterator cell = it->cells_.begin(); cell != it->cells_.end();
++         ++cell) {
++      Eigen::Vector3i idx;
++      map_server_->getTSDF()->positionToIndex(*cell, idx);
++      frontier_flag_[toadr(idx)] = false;
++    }
++    dormant_frontiers_.push_back(*it);
++    it = frontiers_.erase(it);
++    ++retired;
++  }
++  if (retired > 0)
++    ROS_WARN("[FrontierFinder] Retired %d already-known frontier(s) into a "
++             "blocked region; %lu still to visit, %lu dormant",
++             retired, frontiers_.size(), dormant_frontiers_.size());
++}
++
+ void FrontierFinder::computeFrontiersToVisit() {
+   // Retire stale shadows before they are used, so an expired region is
+   // reconsidered on this tour rather than the next one.
+   expireBlockedRegions();
++
++  // Retire frontiers that were ALREADY on the list when a shadow was cast.
++  //
++  // The categorisation loop below only ever sees tmp_frontiers_, i.e. clusters
++  // searchFrontiers() re-detected this cycle, and a cluster stops being
++  // re-detected as soon as the map around it stops changing -- which is exactly
++  // what happens when the aircraft is stuck in front of it. So without this
++  // sweep a frontier that is already known when the guard shadows it can never
++  // be retired at all: measured, (-11.60, 9.89) escalated to strike 6 with a
++  // 3.5 m shadow held for 2880 s while the tour went on choosing its frontier
++  // sixty times in the last 300 s of the run.
++  //
++  // Placed before first_new_ftr_ is assigned because this erases from
++  // frontiers_, and that iterator points into the same list.
++  sweepBlockedFrontiers();
++
++  // Both lists empty means this cycle is about to leave the mission with no
++  // frontier at all, which is what the FSM reads as "exploration finished".
++  // Test BOTH: frontiers_ alone is transiently empty early in a mission while
++  // tmp_frontiers_ is full of clusters about to be categorised, and an amnesty
++  // granted there would fire on a perfectly healthy start.
++  if (frontiers_.empty() && tmp_frontiers_.empty())
++    grantFinishAmnesty();
++
+   first_new_ftr_ = frontiers_.end();
+   int new_num = 0;
+   int new_dormant_num = 0;
+@@ -702,9 +844,19 @@
+     // could not physically reach (an obstacle inside the depth near clip the map
+     // never caught) is retired to dormant, so the coverage tour stops re-picking
+     // a route the map believes clear but the airframe keeps grinding into.
++    // Against the EARNED radius, not the fixed one. A shadow is cast at a
++    // viewpoint and tested here against the frontier's average, and viewpoints
++    // are sampled candidate_rmin..rmax from that average -- so at the strike-1
++    // width (deliberately under candidate_rmax) this test cannot fire for the
++    // frontier that produced the blocked viewpoint. That is correct exactly
++    // once: it stops a single early mistake retiring a transit route. From the
++    // second strike the width exceeds candidate_rmax and the frontier retires,
++    // which is what stops the tour re-offering a place the aircraft has now
++    // failed to reach twice.
+     bool in_blocked = false;
+-    for (const auto &b : blocked_regions_)
+-      if ((b - tmp_ftr.average_).norm() < blocked_region_radius_) {
++    for (size_t i = 0; i < blocked_regions_.size(); ++i)
++      if ((blocked_regions_[i] - tmp_ftr.average_).norm() <
++          blockedRadiusFor(blocked_regions_strikes_[i])) {
+         in_blocked = true;
+         break;
+       }

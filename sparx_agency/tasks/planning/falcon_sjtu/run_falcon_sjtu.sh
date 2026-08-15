@@ -77,6 +77,30 @@ if [[ ! -f "${SCRIPT_DIR}/config/${MAP_NAME}.yaml" ]]; then
     exit 2
 fi
 
+# ── the launch files must be well-formed XML, checked HERE ────────────────
+# roslaunch parses with a strict XML parser, so a malformed launch file kills
+# the container at startup with a single RLException line -- and from outside,
+# a container that exits in two seconds is indistinguishable from any other
+# infrastructure failure. campaign_run.sh then spends its sim bring-up (about
+# 100 s) before returning a bare "falcon container died".
+#
+# The trap is specific and easy to walk into while documenting a parameter:
+# an XML comment may not contain a double hyphen, and may not contain a bare
+# '<'. Both read as perfectly ordinary English prose. Two seconds of checking
+# here turns a wasted run into a message naming the file, the line and the
+# column.
+for lf in "${SCRIPT_DIR}"/adapter/launch/*.launch; do
+    if ! python3 -c "import sys,xml.dom.minidom as m; m.parse(sys.argv[1])" "${lf}" 2>/dev/null; then
+        echo "[ERROR] ${lf} is not well-formed XML:" >&2
+        python3 -c "import sys,xml.dom.minidom as m; m.parse(sys.argv[1])" "${lf}" 2>&1 \
+            | tail -1 | sed 's/^/    /' >&2
+        echo "  roslaunch will refuse it and the FALCON container will exit at startup." >&2
+        echo "  Most likely a '--' or a bare '<' inside an XML comment: neither is legal," >&2
+        echo "  and both are natural things to write in a prose explanation." >&2
+        exit 2
+    fi
+done
+
 chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
 
 # ── planner clearance: ONE value, both worlds ─────────────────────────────
@@ -228,6 +252,47 @@ for _ in $(seq 1 15); do
 done
 if [[ "${BRIDGED}" -gt 0 ]]; then
     echo "[falcon_sjtu] bridge up: ${BRIDGED} topic bridges on domain ${SIM_DOMAIN_ID}"
+    # ── and did each of them SURVIVE? ──────────────────────────────────────
+    # Counting the announcements is not enough, and the gap is not academic.
+    # parameter_bridge prints "create bidirectional bridge for topic X" BEFORE
+    # it looks for a conversion pair, and only then prints "failed ... No
+    # template specialization for the pair". So a topic whose message type was
+    # not compiled into the bridge image is counted as bridged, the check above
+    # passes, every container reads as Up, and the topic carries nothing for the
+    # whole run.
+    #
+    # /simple_drone/bumper_states is the one this costs. It is the follower's
+    # only GROUND TRUTH that the airframe has touched something -- the retreat,
+    # the three-strikes hold and the hand-off to FALCON's dead-end guard are all
+    # keyed on it -- and gazebo_msgs is exactly the pair a bridge image gets
+    # built without, because omitting it breaks no build. Measured on
+    # LP-Boston-17093: a hospital run logging 157 bumper contacts against a
+    # cubicle curtain and ZERO retreats, the aircraft grinding on geometry it had
+    # no way to know it was touching, with the whole stack reporting health.
+    #
+    # Reported per topic rather than only for the bumper: the same silence would
+    # follow any type this image was not built for, and the fix is always the
+    # same one line in ros_bridge_docker/Dockerfile.
+    BRIDGE_FAILED=$(docker logs sjtu-ros1-bridge 2>&1 \
+        | sed -n "s/.*failed to create bidirectional bridge for topic '\([^']*\)'.*/\1/p" \
+        | sort -u | tr '\n' ' ')
+    if [[ -n "${BRIDGE_FAILED// /}" ]]; then
+        echo "[falcon_sjtu] ERROR: these topics announced a bridge and then FAILED to build one:" >&2
+        echo "    ${BRIDGE_FAILED}" >&2
+        echo "  They will carry no data for the entire run while every container reads as Up." >&2
+        docker logs sjtu-ros1-bridge 2>&1 | grep 'failed to create bidirectional bridge' \
+            | sed 's/^/    /' >&2
+        case "${BRIDGE_FAILED}" in
+            *bumper_states*)
+                echo "  bumper_states is SAFETY-CRITICAL: without it the follower cannot tell that" >&2
+                echo "  it has hit anything, so its contact retreat, its three-strikes hold and" >&2
+                echo "  FALCON's dead-end guard are all inference-only. Any contact number measured" >&2
+                echo "  on this configuration is measuring a stack flying with that reflex removed." >&2
+                echo "  Fix: add ros-noetic-gazebo-msgs and ros-foxy-gazebo-msgs to" >&2
+                echo "  sjtu_project/ros_bridge_docker/Dockerfile and rebuild ${BRIDGE_IMAGE}." >&2
+                ;;
+        esac
+    fi
 else
     echo "[falcon_sjtu] ERROR: the bridge created NO topic bridges on domain ${SIM_DOMAIN_ID}." >&2
     echo "  It is restarting in a loop and FALCON will receive nothing -- no depth, no" >&2

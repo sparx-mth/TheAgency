@@ -89,15 +89,54 @@ def main():
               "x[%.1f,%.1f] y[%.1f,%.1f]"
               % (len(rows), rows[-1]["t"] - rows[0]["t"], top_speed, max_tilt,
                  min(xs), max(xs), min(ys), max(ys)))
-    for e in events:
+    # Contacts are collapsed into EPISODES before printing. Gazebo's bumper
+    # emits a fresh entry per contact point per physics step, so a single graze
+    # is hundreds of events: one h01 run printed 513 contact lines and buried
+    # the tour deadlock that was the actual diagnosis under them. An episode is
+    # a run of contacts with the same object separated by less than
+    # CONTACT_GAP_S, which is the unit a human reasons about -- "it touched the
+    # curtain, three times, for five seconds each" -- and it is also the unit
+    # the follower's three-strikes rule counts in.
+    CONTACT_GAP_S = 3.0
+    episodes, others = [], []
+    for e in sorted(events, key=lambda e: e["t"]):
+        if e["event"] != "CONTACT":
+            others.append(e)
+            continue
+        obj = e.get("detail", "").replace("began: ", "").split("::")[0]
+        if episodes and episodes[-1]["obj"] == obj \
+                and e["t"] - episodes[-1]["end"] <= CONTACT_GAP_S:
+            episodes[-1]["end"] = e["t"]
+            episodes[-1]["n"] += 1
+        else:
+            episodes.append({"obj": obj, "start": e["t"], "end": e["t"], "n": 1})
+
+    def context(t):
+        pre = [r for r in rows if 0 <= t - r["t"] <= 2.0]
+        if not pre:
+            return ""
+        p = pre[-1]
+        return ("2s prior: speed %.2f m/s, tilt %.0f deg, pos (%.1f, %.1f, %.2f)"
+                % (p.get("speed", 0),
+                   max(abs(p.get("roll_deg", 0)), abs(p.get("pitch_deg", 0))),
+                   p["x"], p["y"], p["z"]))
+
+    for e in others:
         print("event:   t=%7.1fs %-8s %s" % (e["t"], e["event"], e.get("detail", "")))
-        # context: speed and tilt just before the event
-        pre = [r for r in rows if 0 <= e["t"] - r["t"] <= 2.0]
-        if pre:
-            print("         2s prior: speed %.2f m/s, tilt %.0f deg, pos (%.1f, %.1f, %.2f)"
-                  % (pre[-1].get("speed", 0),
-                     max(abs(pre[-1].get("roll_deg", 0)), abs(pre[-1].get("pitch_deg", 0))),
-                     pre[-1]["x"], pre[-1]["y"], pre[-1]["z"]))
+        ctx = context(e["t"])
+        if ctx:
+            print("         %s" % ctx)
+    if episodes:
+        objs = sorted(set(ep["obj"] for ep in episodes))
+        print("contact: %d report(s) in %d episode(s) on %d object(s): %s"
+              % (sum(ep["n"] for ep in episodes), len(episodes), len(objs),
+                 ", ".join(objs)))
+        for ep in episodes:
+            print("         t=%7.1f-%.1fs %-42s %d report(s)"
+                  % (ep["start"], ep["end"], ep["obj"][:42], ep["n"]))
+            ctx = context(ep["start"])
+            if ctx:
+                print("           %s" % ctx)
 
     # ── control side ────────────────────────────────────────────────────
     trk = load_tracking(os.path.join(run_dir, "tracking.csv"))
