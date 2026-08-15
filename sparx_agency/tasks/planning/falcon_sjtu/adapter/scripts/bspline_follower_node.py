@@ -55,6 +55,9 @@ from sparx_agency.core.planning.safety.voxel_brake_gate import (
 from sparx_agency.core.planning.safety.clearance_envelope import (
     ClearanceEnvelope, ClearanceEnvelopeConfig,
 )
+from sparx_agency.core.planning.safety.observation_memory import (
+    ObservationMemory, ObservationMemoryConfig,
+)
 from sparx_agency.core.planning.local_planners.corridor_centering import (
     CorridorCentering, CorridorCenteringConfig,
 )
@@ -470,6 +473,28 @@ class BsplineFollowerNode(object):
         # remembering.
         self._give_up_hold_max_s = float(
             rospy.get_param("~give_up_hold_max_s", 30.0))
+        # ── don't fly fast into what you have not looked at ───────────────
+        # OFF by default, and the burden of proof is on turning it on. The
+        # depth brake caps forward speed by the nearest return in the corridor,
+        # which is a statement about what the camera CAN see; it says nothing
+        # about the 0.95 m it cannot, and nothing at all about lateral or
+        # reverse motion. Every reflex that moves sideways or backwards -- the
+        # contact retreat, the map-gate back-out, the unstick -- therefore
+        # travels at cruise into space nothing has looked at since before the
+        # manoeuvre began.
+        #
+        # The evidence that this matters: across 23 hospital legs the failing
+        # ones carry 152 to 454 bumper reports against 1 to 65 on the finishing
+        # ones, and two ended in a capsize that went from 5 degrees of tilt to
+        # unrecoverable between monitor samples, which no attitude reflex can
+        # catch because the aircraft never tilts through the threshold on its
+        # way over. The place to stop that is before the contact.
+        self._unknown_brake = bool(rospy.get_param("~unknown_brake", False))
+        self._unknown_max_age_s = float(
+            rospy.get_param("~unknown_max_age_s", 3.0))
+        self._unknown_speed = float(rospy.get_param("~unknown_speed", 0.15))
+        self._observed = ObservationMemory(ObservationMemoryConfig(
+            half_fov_rad=float(rospy.get_param("~camera_half_fov_rad", 0.655))))
         # How many holds are worth doing at all, across the whole mission.
         self._give_up_hold_budget = int(
             rospy.get_param("~give_up_hold_budget", 5))
@@ -1959,6 +1984,13 @@ class BsplineFollowerNode(object):
         """Clamp forward speed by the closest return in the flight corridor."""
         if msg.encoding not in ("32FC1",):
             return                      # never guess a depth format
+        # A frame arrived, so the wedge the camera is pointed at has been
+        # looked at -- whatever it contained. The memory records the age of the
+        # evidence, not its verdict.
+        if self._odom is not None:
+            self._observed.observe(
+                _yaw_from_quaternion(self._odom.pose.pose.orientation),
+                rospy.Time.now().to_sec())
         depth = np.frombuffer(msg.data, dtype=np.float32).reshape(
             msg.height, msg.width)
         self._depth_allow = self._depth_brake.allowed_forward_speed(depth)
@@ -2308,6 +2340,26 @@ class BsplineFollowerNode(object):
         passes through this band clamp: above the ceiling forces descent,
         below the floor forces climb, inside the band the command is its own.
         """
+        # Bound speed by the age of the evidence about where we are going. This
+        # sits at the choke point on purpose: the manoeuvres it exists for --
+        # retreat, back-out, unstick -- do not go through the servo, so a cap
+        # applied in the follow path would miss every one of them.
+        if self._unknown_brake and self._odom is not None:
+            speed = math.hypot(twist.linear.x, twist.linear.y)
+            if speed > self._unknown_speed:
+                yaw = _yaw_from_quaternion(self._odom.pose.pose.orientation)
+                # Body command to world bearing of travel.
+                cos, sin = math.cos(yaw), math.sin(yaw)
+                wx = cos * twist.linear.x - sin * twist.linear.y
+                wy = sin * twist.linear.x + cos * twist.linear.y
+                bearing = math.atan2(wy, wx)
+                if self._observed.is_stale(bearing, rospy.Time.now().to_sec(),
+                                           self._unknown_max_age_s):
+                    scale = self._unknown_speed / speed
+                    twist.linear.x *= scale
+                    twist.linear.y *= scale
+                    self._note_limiter("unlooked", scale)
+
         z = self._last_z
         if z is not None:
             if z > self._alt_max and twist.linear.z > -0.15:

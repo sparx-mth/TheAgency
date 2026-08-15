@@ -259,6 +259,21 @@
        they run, since a holding follower commands no travel and the jam
        detector stays flat. Measured across six failed hospital legs: 7 to 14
        give-ups per run at 30 s each, 210 to 420 s of deliberate immobility. -->
+  <!-- Do not fly fast into what you have not looked at. OFF by default; the
+       burden of proof is on turning it on. The depth brake caps forward speed
+       by the nearest return in the corridor, which is about what the camera CAN
+       see: it says nothing about the 0.95 m it cannot, and nothing at all about
+       lateral or reverse motion, so every retreat, back-out and unstick travels
+       at cruise into space nothing has looked at since the manoeuvre began.
+       Across 23 hospital legs the failing ones carry 152 to 454 bumper reports
+       against 1 to 65 on finishing ones, and two capsized from 5 degrees of
+       tilt to unrecoverable between samples, which no attitude reflex can catch.
+       Applied at the send choke point because those manoeuvres bypass the
+       servo. -->
+  <arg name="unknown_brake"       default="false" />
+  <arg name="unknown_max_age_s"   default="3.0" />
+  <arg name="unknown_speed"       default="0.15" />
+  <arg name="camera_half_fov_rad" default="0.655" />
   <arg name="give_up_hold_budget" default="5" />
   <arg name="give_up_hold_s"   default="30.0" />
 
@@ -446,6 +461,10 @@
     <param name="give_up_repeats"      value="$(arg give_up_repeats)" />
     <param name="give_up_radius_m"     value="$(arg give_up_radius_m)" />
     <param name="give_up_window_s"     value="$(arg give_up_window_s)" />
+    <param name="unknown_brake"        value="$(arg unknown_brake)" />
+    <param name="unknown_max_age_s"    value="$(arg unknown_max_age_s)" />
+    <param name="unknown_speed"        value="$(arg unknown_speed)" />
+    <param name="camera_half_fov_rad"  value="$(arg camera_half_fov_rad)" />
     <param name="give_up_hold_budget"  value="$(arg give_up_hold_budget)" />
     <param name="give_up_hold_s"       value="$(arg give_up_hold_s)" />
     <param name="creep_speed"          value="$(arg creep_speed)" />
