@@ -252,6 +252,14 @@
   <arg name="give_up_repeats"  default="3" />
   <arg name="give_up_radius_m" default="1.5" />
   <arg name="give_up_window_s" default="120.0" />
+  <!-- How many holds are worth doing across a whole mission. Each buys 25 s of
+       confinement for FALCON's dead-end guard to observe; after a handful the
+       planner has all the evidence it will get, and further holds only spend
+       flight time standing where the trouble is - and cannot be rescued while
+       they run, since a holding follower commands no travel and the jam
+       detector stays flat. Measured across six failed hospital legs: 7 to 14
+       give-ups per run at 30 s each, 210 to 420 s of deliberate immobility. -->
+  <arg name="give_up_hold_budget" default="5" />
   <arg name="give_up_hold_s"   default="30.0" />
 
   <arg name="creep_speed"   default="0.12" />
@@ -438,6 +446,7 @@
     <param name="give_up_repeats"      value="$(arg give_up_repeats)" />
     <param name="give_up_radius_m"     value="$(arg give_up_radius_m)" />
     <param name="give_up_window_s"     value="$(arg give_up_window_s)" />
+    <param name="give_up_hold_budget"  value="$(arg give_up_hold_budget)" />
     <param name="give_up_hold_s"       value="$(arg give_up_hold_s)" />
     <param name="creep_speed"          value="$(arg creep_speed)" />
     <param name="creep_time_s"         value="$(arg creep_time_s)" />

@@ -1161,46 +1161,57 @@ region; the frontier clearances are not.
 
 ## Status
 
-**Both worlds map to completion on one configuration, repeatably.**
-`rig/both_worlds.sh`, five rounds in one invocation, no per-world tuning of any
-kind and no editing between rounds (2026-08-14, `KEEP_GOING=1` so a failure does
-not end the campaign):
+**The warehouse is solved. The hospital finishes about one run in three.**
 
-| round | hospital | warehouse |
+Seventeen rounds of `rig/both_worlds.sh` across three campaigns, one
+configuration, no per-world tuning and no editing between rounds of a campaign
+(2026-08-14/15, `KEEP_GOING=1` so a failure does not end the campaign):
+
+| campaign | hospital finished | warehouse finished |
 |---|---|---|
-| 1 | ABORT_CONFINED, 578.7 m³ | FINISHED CLEAN, 201.7 m³ |
-| 2 | **FINISHED, 769.0 m³** | **FINISHED, 201.5 m³** |
-| 3 | **FINISHED, 772.7 m³** | **FINISHED, 201.8 m³** |
-| 4 | **FINISHED, 803.4 m³** | **FINISHED, 200.8 m³** |
-| 5 | **FINISHED, 825.5 m³** | **FINISHED, 201.0 m³** |
+| recovered | 4 of 5 | 5 of 5 |
+| confirm_final | **0 of 6** | 6 of 6 |
+| final (+ nudge bypass, hold budget) | 1 of 6 | 6 of 6 |
+| **total** | **5 of 17** | **17 of 17** |
 
-**Nine of ten legs finished, and both worlds finished together in four rounds of
-five.** FINISH here is FALCON's own verdict — its frontier set emptied — not a
-watchdog or a time cap. The warehouse figure is 98–99% of the 204.1 m³ its box
-affords, and its spread across five runs is 1.0 m³. The hospital's best round
-mapped 825.5 m³, against 760 for the best run this package had ever recorded
-before this work.
+**Warehouse: seventeen consecutive finishes, 200.8–201.8 m³** — a spread of
+1.0 m³, and 98–99% of the 204.1 m³ its box affords. It has not failed a leg since
+the image regression was undone.
 
-The single failure is the honest one to look at: round 1 reached 578.7 m³, most
-of the building, before the aircraft confined itself. That is the residual, and
-it is a hospital problem rather than a configuration problem — the warehouse has
-not failed a leg in fifteen consecutive attempts.
+**Hospital: five finishes in seventeen.** Its best round mapped **825.5 m³**,
+against 760 m³ for the best run this package had ever recorded before this work,
+and finishing rounds land at 769–825 m³. Failures range from 152 to 689 m³, so
+most of them map a substantial part of the building and then stop.
 
-Earlier campaigns on this same image, before the follower work below, finished
-**one hospital leg in five, twice over**. The escape ladder is what moved that to
-four in five: a jam is caught by comparing demanded travel with achieved travel,
-a second give-up at one place escalates to a manoeuvre instead of another hold,
-the watchdog's nudge does something once the surveys are spent, all three are
-rate-limited so the escape cannot become the flight plan, and the bearing is
-chosen from the occupancy map rather than by rotating blindly.
+Read the per-campaign column, not the total, and be careful with it: the first
+campaign's 4-of-5 is a lucky window, not a level. It was reported here as a
+result before the second campaign came back at 0-of-6, which was a mistake of
+exactly the kind `KEEP_GOING` exists to prevent. Three campaigns of the same
+stack gave 4/5, 0/6 and 1/6; the run-to-run variance dominates any difference
+between the configurations tried, and nothing below should be read as a measured
+improvement to the hospital rate unless it says so.
 
-Contacts are still present and are counted per Gazebo contact point per physics
-step, so the figures read higher than the number of events: the finishing rounds
-range from 3 to 76 reports on 1 to 7 objects. They are first approaches to
-geometry inside the 0.95 m depth near clip — the known limit described under the
-depth brake below — and remain the largest open item on this stack. **Planner
-respawns are zero across all ten legs**, against a baseline where a single
-hospital run took 15.
+FINISH throughout is FALCON's own verdict — its frontier set emptied — not a
+watchdog or a time cap. Planner respawns are zero in every leg of all three
+campaigns, against a baseline where one hospital run took 15.
+
+**What the residual failures look like**, from all twelve:
+
+- The aircraft confines itself and the map stops growing, usually after mapping
+  400–690 m³. The escape ladder engages and is not the limit: the last campaign
+  measured holds capped at 4–5 per run and **zero** nudges refused, and still
+  failed five legs of six.
+- Contacts are the unhealthy signal. Failing legs reach 152, 212 and 454 bumper
+  reports against 2–27 on finishing ones, all on geometry inside the 0.95 m depth
+  near clip, and one leg ended in a **CAPSIZE** at 487 m³ — the airframe tipped
+  past the plugin's ~35° clamp, the failure mode the speed ceiling below was
+  derived to prevent. That is the open thread worth pulling next, and it is a
+  perception problem before it is a control one: nothing in this stack yet slows
+  the aircraft for flying into cells it has never observed.
+
+Contacts are counted per Gazebo contact point per physics step, so the figures
+read higher than the number of events — count objects, not reports. They remain
+the largest open item on this stack.
 
 What it took is recorded in the sections below and in `patches/README.md`; the
 short version is that four defects had to be fixed together, and each was found

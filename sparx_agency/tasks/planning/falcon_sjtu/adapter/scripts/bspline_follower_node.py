@@ -470,6 +470,9 @@ class BsplineFollowerNode(object):
         # remembering.
         self._give_up_hold_max_s = float(
             rospy.get_param("~give_up_hold_max_s", 30.0))
+        # How many holds are worth doing at all, across the whole mission.
+        self._give_up_hold_budget = int(
+            rospy.get_param("~give_up_hold_budget", 5))
         self._give_ups = 0
         self._give_up_until = None          # type: object
         self._give_up_last_spot = None      # type: object  # (x, y)
@@ -806,7 +809,7 @@ class BsplineFollowerNode(object):
             # returning, and let the bearing rotate on each repeat.
             now = rospy.Time.now()
             if (self._unstick_until is None and self._odom is not None
-                    and self._may_unstick(now)):
+                    and self._may_unstick(now, urgent=True)):
                 self._begin_unstick(
                     now,
                     _yaw_from_quaternion(self._odom.pose.pose.orientation),
@@ -1152,6 +1155,16 @@ class BsplineFollowerNode(object):
                 # only escape was switched off by the rule in front of it.
                 # So the second give-up at a place escalates to an unstick.
                 self._give_ups += 1
+                # The hold buys ONE thing: 25 s of confinement for FALCON's
+                # dead-end guard to observe, so it retires the viewpoint. After
+                # a handful of those the planner has all the evidence it is ever
+                # going to get, and further holds only spend flight time in the
+                # place that keeps defeating the aircraft -- and cannot be
+                # rescued while they run, because a holding follower commands no
+                # travel and the jam detector's demanded-travel test stays flat.
+                # Measured across six failed hospital legs: 7 to 14 give-ups per
+                # run at 30 s each, 210 to 420 s of deliberate immobility.
+                spent = self._give_ups > self._give_up_hold_budget
                 repeat_here = (self._give_up_last_spot is not None
                                and math.hypot(
                                    float(position[0]) - self._give_up_last_spot[0],
@@ -1166,15 +1179,24 @@ class BsplineFollowerNode(object):
                     self._note_limiter("unstick")
                     self._unstick(now, position, yaw)
                     return
-                hold_s = min(self._give_up_hold_s, self._give_up_hold_max_s)
-                self._give_up_until = now + rospy.Duration(hold_s)
-                rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
-                              "%.1f m; this approach does not work -- backing "
-                              "out and holding %.0fs (give-up #%d) so the "
-                              "planner retires the viewpoint",
-                              self._give_up_repeats, float(position[0]),
-                              float(position[1]), self._give_up_radius_m,
-                              hold_s, self._give_ups)
+                if spent:
+                    rospy.logwarn(
+                        "[follower] %d contacts at (%.1f, %.1f); give-up #%d, "
+                        "past the %d-hold budget so backing out without holding "
+                        "-- the planner has seen enough confinement to retire a "
+                        "viewpoint", self._give_up_repeats, float(position[0]),
+                        float(position[1]), self._give_ups,
+                        self._give_up_hold_budget)
+                else:
+                    hold_s = min(self._give_up_hold_s, self._give_up_hold_max_s)
+                    self._give_up_until = now + rospy.Duration(hold_s)
+                    rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
+                                  "%.1f m; this approach does not work -- backing "
+                                  "out and holding %.0fs (give-up #%d) so the "
+                                  "planner retires the viewpoint",
+                                  self._give_up_repeats, float(position[0]),
+                                  float(position[1]), self._give_up_radius_m,
+                                  hold_s, self._give_ups)
             if contact or wedged:
                 # Look only if the MAP does not already have whatever stopped
                 # it. The turn and dwell are 7.5 s of a 12 s manoeuvre and they
@@ -1776,12 +1798,24 @@ class BsplineFollowerNode(object):
         return (demanded > self._jam_demand_m and moved < self._jam_move_m
                 and self._may_unstick(now))
 
-    def _may_unstick(self, now):
-        # type: (object) -> bool
-        """Whether an unstick is allowed to start: budget left, and quiet since
-        the last one. Every trigger goes through here so they cannot add up."""
+    def _may_unstick(self, now, urgent=False):
+        # type: (object, bool) -> bool
+        """Whether an unstick is allowed to start.
+
+        Every trigger goes through here so that three uncoordinated ones cannot
+        add up into the 28-54% duty cycle they produced before the cooldown
+        existed. ``urgent`` skips the cooldown but never the budget, and is for
+        the mission watchdog's nudge alone: the watchdog emits one only every
+        45 s, and only while the aircraft is confined AND the map has stopped
+        growing, so it cannot storm, and refusing it spends the run instead.
+        Measured across seven failed hospital legs: 6 to 13 unsticks used of a
+        budget of 20, and up to four nudges per run refused by the cooldown
+        while coverage sat unchanged.
+        """
         if self._unsticks >= self._max_unsticks:
             return False
+        if urgent:
+            return True
         if self._unstick_ready_at is not None and now < self._unstick_ready_at:
             return False
         return True
