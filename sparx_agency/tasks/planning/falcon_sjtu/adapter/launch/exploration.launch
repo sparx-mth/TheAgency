@@ -25,6 +25,11 @@
   -->
 
   <arg name="map_name" default="small_house"/>
+  <!-- Forwarded to the follower; see bspline_follower.launch for what it does
+       and why the burden of proof is on turning it on. Declared here because an
+       include passes only the args it names, so a knob that is not forwarded is
+       silently the follower default however it is set on the command line. -->
+  <arg name="unknown_brake" default="false"/>
   <arg name="drone_ns" default="/simple_drone"/>
 
   <!-- ONE clock owns everything. Every data stamp in this graph is already
@@ -527,6 +532,7 @@
 
   <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
     <arg name="drone_ns"          value="$(arg drone_ns)"/>
+    <arg name="unknown_brake"     value="$(arg unknown_brake)"/>
     <arg name="max_speed_xy"      value="$(arg max_speed_xy)"/>
     <arg name="max_overspeed"     value="$(arg max_overspeed)"/>
     <arg name="max_catchup_speed" value="$(arg max_catchup_speed)"/>
