@@ -1345,6 +1345,254 @@ That is where the next work is, and note that the README's existing advice is
 that moving those clearances the OTHER way (0.70, `candidate_rmin` 1.5) made
 everything worse.
 
+### 8. Four ways this stack acted on a guess, and what replaced each
+
+Found by flying the warehouse with the box opened to the whole building. Each
+is the same shape: a mechanism that could not distinguish *known to be empty*
+from *never looked at*, and acted as if they were the same.
+
+**The flight box cannot express "not there".** The warehouse box was 39% of the
+building's floor, and the 61% it excluded was not junk — it was the east half,
+both end walls and the open floor north of the racking. But opening the box to
+the building let the aircraft into the 0.909-1.216 m dead-end shelf aisles,
+which is not an inspection product and cost five touched objects in one run.
+Those are two different decisions and one AABB cannot hold both.
+`falcon_keep_out_boxes.patch` adds static keep-out volumes from the map config,
+enforced in `Astar::isValidVoxel`, in `sampleViewpoints` and in frontier
+categorisation — deliberately NOT in `getOccupancy`, for the reason recorded
+above. The aircraft now rounds the rack block through the open floor at
+y > 1.77 and maps the east side. **An aisle does not need to be entered to be
+mapped**: it is 3.92 m deep and the depth camera reaches 5 m, so it maps end to
+end from the open floor at its mouth.
+
+**The box edges were never derived.** They sat 0.17 m off the rack faces and
+0.34 m off ShelfF, both INSIDE the 0.45 m `safe_distance` the planner is asked
+to hold — a margin the box does not physically contain cannot be held by a soft
+cost. Measured: eight bumper reports on the south wall at the full 0.35 m/s
+ceiling while the follower tracked its plan to a cross-track p99 of 0.24 m. The
+aircraft flew the plan correctly and **the plan was routed into the wall**. The
+inset is now `safe_distance + measured cross-track p99 = 0.75 m`, applied to
+every face.
+
+**A\* was a point-robot planner.** It tests one voxel per node, so a 0.14 m slot
+between two clutter piles is a valid node and therefore a valid route, for an
+airframe 0.52 m across. One run flew a 0.36 m slot at the piles' own top height,
+ground there 45 s over 20 contact episodes, and CAPSIZED past 40°.
+`falcon_astar_inflate.patch` requires the aircraft to FIT: every sample of a
+disc of `/astar/inflate_radius` around a node must also be free. 0.20 m is a
+two-sided trade — it closes the 0.14/0.36/0.38 m clutter slots and leaves 0.53 m
+of a 0.930 m hospital doorway open.
+
+> The stencil is built LAZILY, on first use. `Astar::init()` runs before the map
+> server is configured, so `getResolution()` is still 0.0 there and the stencil
+> is refused as unbuildable — leaving A\* a point-robot planner with the
+> parameter set and an error in the log that reads like a config mistake.
+> Measured exactly that, on a run where the inflation appeared to be enabled.
+
+**The planner committed six metres into space it had never seen.**
+`checkTrajCollision` walks the curve 6 m ahead and rejects only OCCUPIED, so
+UNKNOWN passes; and the follower's brake gate accumulates OCCUPIED only, so it
+cannot catch it either. `/fsm/unknown_commit_m` (1.5) treats unknown as a
+collision beyond that radius — tolerating the 0.95 m near-clip band the sensor
+is about to resolve, refusing the guess. It fires constantly and usefully: 25
+refusals in one clean 212 s warehouse run.
+
+### 9. The recovery flew INTO obstacles, and the trigger was a guess
+
+The follower's unstick exists for an aircraft FALCON cannot plan from. Two
+things were wrong with it, and together they made the recovery a hazard.
+
+**It chose the bearing it knew least about.** `_clearest_bearing` casts rays
+with the brake gate, which accumulates OCCUPIED voxels only, so a ray through
+never-observed space strikes nothing and scores the full probe length — every
+log line reading the identical `2.50 m of clear map`, i.e. the cap, i.e. no
+information. Selecting the HIGHEST score therefore aimed the escape at whichever
+direction was least mapped, which is the one most likely to hide the obstacle
+the aircraft was stuck on. It now backs out along its own **breadcrumbs** — a
+rolling trail of where it has physically been, which is evidence no map can
+match, because the aircraft fitted there at its real width. The ray cast is kept
+only as a VETO, never as a chooser.
+
+**And it acted before establishing it was stuck at all.** Every trigger is an
+inference — no plan for 25 s, or commanded travel not achieved — and a
+brake-limited crawl or a merely quiet planner reads exactly like a wedge. So the
+unstick now begins with a **yaw probe**: a full turn on the spot, commanding
+zero translation, which cannot fly the aircraft into anything.
+
+* the turn completes → the airframe is not held → stand down and give the
+  aircraft back to FALCON, with the room freshly re-observed as a bonus, which
+  is what a quiet planner needed anyway;
+* the turn is blocked → it really is held → and only then translate.
+
+A measurement instead of an action, and it costs nothing when the inference was
+wrong — which was most of the time.
+
+### 10. Airframe-aware A* must be a preference, not a requirement
+
+Inflating obstacles by the airframe radius is what stops A* offering a 0.14 m
+slot to a 0.52 m aircraft, and it works: the warehouse leg that first carried it
+finished CLEAN with zero contacts. It also narrows every legitimate opening, and
+on the 0.5 m search lattice a 0.930 m hospital doorway can end up with no node
+centred in its remaining 0.53 m.
+
+Measured, and the number is unambiguous: **1068 `No path to next viewpoint`
+lines in one hospital run**, against 0 in a healthy one and 58 in a
+previously-diagnosed bad one. The mission mapped 775.6 m³ and then stalled 32 m
+from its last frontier with nothing able to route there, and died on the
+no-movement watchdog.
+
+The inflation is therefore an ATTEMPT. `Astar::search` and `searchBBox` try the
+inflated search, and on `NO_PATH` reset and retry with the stencil suppressed. A
+tight route the follower's own reflexes must handle is strictly better than no
+route, because the alternative is a mission that stops. The effect, same world,
+same configuration otherwise:
+
+| | no-path lines | fallbacks used | coverage | verdict |
+|---|---|---|---|---|
+| inflation required | **1068** | — | 775.6 m³ | `ABORT_NO_MOVEMENT` |
+| inflation preferred | **62** | 255 | 759.7-817.2 m³ | one leg `FINISHED_DIRTY` |
+
+### 11. Every guard retired a TARGET; none of them closed a ROUTE
+
+The capsize that ended two consecutive hospital legs, at the same coordinates
+both times, is the sharpest illustration in this file of a whole class of guard
+being subtly the wrong shape.
+
+The aircraft spent **834 s within two metres of (-2.3, -18.0)**, among a scrubs
+cart and an instrument cart, taking 22 bumper reports. Every mechanism in the
+stack fired, correctly: 13 viewpoints blocked, 11 already-known frontiers
+retired, 5 looping-guard fires, 9 "possibly stuck" triggers of which the yaw
+probe correctly cleared 8 as not wedged. And none of it helped, because they all
+retire the *destination* — while A\* went on routing the aircraft back through
+that clutter on its way to somewhere else, until it flipped.
+
+The two capsizes were also different in kind, which matters for what can catch
+them. One LEVERED over: 2 -> 20 -> 9 -> 11 -> 36 deg across 1.4 s, catchable,
+and it passed two degrees under the old 22 deg attitude reflex — which is why
+that threshold is now 15 (over a 943 s flight the tilt was p50 0, p90 2, p99 10,
+with 5 samples of 4718 above 15, so it fires on an anomaly and cannot cost
+coverage). The other went **-9 -> -46 deg in a single 0.2 s sample**, with p99
+tilt of 4 over the whole flight. No attitude threshold catches that one. The
+place had to stop being reachable.
+
+So A\* now reads the frontier finder's own persisted blocked regions and routes
+around them (`/astar/no_go_radius`, 1.0 m). Two properties keep it safe, and
+both matter: it is tested on the STRICT pass only, so if avoiding a region means
+no route at all the existing fallback retries without it and the worst case is
+the route the planner would have taken anyway; and the regions expire on the TTL
+ladder that already governs them, so a wrongly-closed corridor reopens in 90 s.
+
+**Measured, same world, same spot:**
+
+| | before | after |
+|---|---|---|
+| max tilt over the flight | 36 deg, 46 deg | **6 deg** |
+| coverage | 507.9, 665.8 m³ | **856.9 m³** |
+| verdict | `FATAL` (CAPSIZE) x2 | `TIMEOUT`, still gaining 1.6 m³/min |
+
+856.9 m³ is the highest figure this package has ever recorded in that building.
+The aircraft still passes through that area — 1124 samples within 2 m of it —
+it simply is no longer routed *into* the trap, and never came near tipping.
+
+> **The time cap is now the binding constraint on the hospital, not a failure.**
+> That leg was still gaining when the 2400 s watchdog cut it. The safety
+> machinery added here costs wall-clock — detours around learned no-go regions,
+> inflated-then-plain A\* retries, a 16 s yaw probe before any escape — and the
+> hospital needs about an hour to exhaust its frontiers with all of it running.
+> Cap the mission at 3900 s or more before reading a hospital TIMEOUT as a
+> failure to map.
+
+### 12. The A* fallback must keep half the airframe, not none of it
+
+The inflated-then-plain fallback in section 10 fixed the hospital and broke the
+warehouse, and the pair of failures is the clearest statement of what the test
+has to mean.
+
+| configuration | hospital | warehouse |
+|---|---|---|
+| inflation REQUIRED | 1068 no-path lines, stalled at 775.6 m³ | **`CLEAN` 352.1 m³, 0 contacts** |
+| inflation + fallback to a POINT ROBOT | **`FINISHED` 817.2 / 792.7 m³** | **`FATAL` 103.9 m³, 278 reports, CAPSIZE** |
+| inflation 0.26 + 0.3 m lattice | crawls, 79.2 m³ | — |
+| **inflation + fallback to HALF the skirt** | **831.6 m³, 5 reports / 1 obj** | **`FINISHED` 364.5 m³, max tilt 6°** |
+
+The two worlds were failing for opposite reasons and the fallback conflated
+them. The hospital never needed ZERO clearance: its 0.930 m doorways leave a
+0.41-0.53 m band of legal centre positions and the aircraft fits with room --
+what it needed was for a NODE to exist inside that band, and on a 0.5 m lattice
+one need not. The warehouse needed the 0.14-0.38 m clutter slots to stay closed,
+and a point-robot pass reopens every one of them.
+
+Half the radius separates them arithmetically. Against the 0.5 m lattice it
+leaves a 0.73 m band in a 0.930 m doorway, which a node reaches, and a 0.18 m
+band in a 0.38 m clutter slot, which one does not.
+
+> Refining the lattice to 0.3 m to let full inflation through was tried and is
+> the negative result worth keeping: with an 88-sample stencil per node it made
+> the planner produce 68 s trajectories for 7 m of travel, `tight_pass` bound
+> 26-43% of follower ticks, and the mission crawled to 79.2 m³ in a 4 m box. The
+> stencil cost scales with the node count and the node count scales with the
+> lattice; the two cannot both be refined.
+
+### 13. Where it stands, measured over 21 legs on one build lineage
+
+Four `both_worlds.sh` campaigns with `KEEP_GOING=1`, no editing inside a
+campaign. The configuration changed BETWEEN campaigns and each change is named
+below, so read the coverage spread as the process's variance and the finish
+counts as weak evidence about any single change.
+
+| | legs | finished | coverage |
+|---|---|---|---|
+| **warehouse** | 10 | **9** | 268-380 m³, mean 355 |
+| **hospital** | 11 | 2 | 277-852 m³, mean 568 |
+| **capsizes** | **21** | — | **0** |
+
+**The warehouse is solved and the fix was the box, not the controller.** It now
+maps the whole building at 348-380 m³ where the old box confined it to 39% of
+the floor at ~205 m³, with the racking excluded by declared keep-outs rather
+than by shrinking the box around it. Nine finishes in ten.
+
+**The hospital no longer crashes and no longer grinds.** Zero capsizes in 21
+legs against three in the campaigns immediately before; bumper reports down from
+513 in one early run to 2-17 typical; peak coverage 856.9 m³ against 760 for the
+best this package had recorded before this work. What it does NOT do is finish
+reliably: 2 in 11.
+
+**Its residual failure is frontier GENERATION, not control, liveness or
+safety.** The failing legs split two ways and neither is a crash: the map stops
+growing with the aircraft healthy (`ABORT_NO_GROWTH` at 640-790 m³), or FALCON
+declares itself finished with the building unmapped (`PARTIAL_FINISH` at
+277-432 m³). The mechanism behind the second is now pinned down and it is
+NOT the shadow machinery: on one such leg the amnesty re-offered 52 retired
+clusters with `isNearUnknown` AND the visibility bar both relaxed, and every one
+went straight back to dormant. A viewpoint candidate must itself sit in
+KNOWN-FREE space, and those clusters had none: no relaxation of a MARGIN can
+manufacture observed space to stand in.
+
+`unknown_commit_m` is the knob that trades between the two failures and it is
+the sharpest lever found here:
+
+| `unknown_commit_m` | hospital coverage | note |
+|---|---|---|
+| unset (upstream) | 817, 822 m³ | plans 6 m into unobserved space; the contact source |
+| 1.5 m | 277-716, mean 443 | contacts collapse; frontier finder starves |
+| **3.0 m** | **432-852, mean 691** | refuses the deep guess, still reveals frontiers |
+
+Refusing to commit into the unknown is also how the aircraft stops APPROACHING
+it, and approaching is how a frontier becomes viewable at all. 3.0 keeps the
+refusal that killed the contacts (measured refusals ran to a 4.93 m median and
+6.0 m max) while leaving room to close on a frontier.
+
+**What to try next, in order.** All three target frontier generation rather than
+anything this file has already been through:
+1. Let the aircraft plan INTO unknown space deliberately when a cluster has no
+   viewable candidate -- FALCON already has `searchUnknown*` A* variants for
+   exactly this and nothing in our path calls them.
+2. Test `map_dimension: 3` (`getCCLCenters3D`) so the coverage tour stops
+   modelling the world from one horizontal slice.
+3. Re-derive `min_candidate_clearance` against the depth near clip rather than
+   leaving it at 0.25; it is a 5x5x3 voxel test whose z extent is hardcoded to
+   +-1 voxel and therefore means something different vertically.
+
 ### What the fixes bought, measured
 
 **The hospital finished.** Run h11, on all seven fixes and with nothing changed
@@ -1374,6 +1622,15 @@ Hospital, same world, same spawn, fresh map each run:
 | h03 | + bumper, + widen | `ABORT_NO_GROWTH` | 311.2 m³ | **0** | x[-9.1,11.2] y[**-4.9**,20.1] |
 | h04 | + sweep | `ABORT_NO_GROWTH` | 732.9 m³ | 26 rep / 5 obj | x[-11.2,12.1] y[-32.8,15.0] |
 | **h11** | **all seven** | **`FINISHED_DIRTY`** | **822.7 m³** | 18 rep / **2 obj** | **x[-12.2,11.3] y[-34.1,18.2]** |
+| h20 | + keep-outs, unknown-commit, A* inflation, yaw probe | `ABORT_NO_MOVEMENT` | 775.6 m³ | 2 rep / 1 obj | x[-12.1,12.1] y[-33.7,16.3] |
+| h30 | + inflation fallback | `ABORT_NO_GROWTH` | 759.7 m³ | 7 rep / 2 obj | x[-9.8,10.9] y[-33.8,16.6] |
+| **h31** | same as h30 | **`FINISHED_DIRTY`** | **817.2 m³** | **4 rep / 3 obj** | — |
+
+The contact column is the one to read down. It falls 513 -> 26 -> 18 -> 2-7 as
+the guesses come out of the stack: the bumper reaching the follower at all, then
+the planner refusing to commit into unobserved space, then A* refusing gaps the
+airframe does not fit, then the recovery testing its "stuck" inference with a
+turn on the spot before acting on it.
 
 h01 and h03 each mapped one half of the building and deadlocked; h04 is the
 first run to sweep both, and it did so with no new contact in the 670 s after
@@ -1404,6 +1661,15 @@ invariant that mattered while touching FALCON's frontier and tour logic seven
 times: three legs, three finishes, 201.18-201.53 m³ against a historical band of
 200.8-202.2, one of them `CLEAN` with zero contacts. Contacts on the other two
 were 3 bumper reports on 2 objects each.
+
+> Those three legs were flown on the OLD warehouse box, which was 39% of the
+> building's floor and never mapped either end wall, the east half or the rack
+> faces. See sections 8 and 9; with the box opened to the building, keep-outs
+> holding the aircraft out of the racking, airframe-aware A\*, the
+> unknown-commitment limit and the yaw-probed unstick, a leg finished
+> **CLEAN at 352.08 m³ in 212 s with ZERO contacts** — reaching x[-3.88, 4.79]
+> y[-8.95, 8.68], with 268 samples east of x = 2.02 and **0** inside either
+> keep-out.
 
 The one hospital failure, r01 at 350.7 m³, is the same premature finish
 described in section 7: the frontier set emptied while clusters sat dormant for

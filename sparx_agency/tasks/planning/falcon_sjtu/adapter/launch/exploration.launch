@@ -332,9 +332,134 @@
        It MUST stay inside the flight box. A slice outside it selects no voxels
        and the tour's model of the world goes blank rather than merely wrong,
        the same failure recorded above against raising box_min_z past 1.0. -->
+  <!-- ── How far a trajectory may commit through UNOBSERVED space ──────────
+       checkTrajCollision walks the executing curve six metres ahead and
+       rejects a sample only if it is literally OCCUPIED. UNKNOWN passes, so
+       the aircraft will fly the whole six metres into a volume it has never
+       seen, on the assumption that it is empty. The follower cannot catch it
+       either: its voxel brake gate accumulates OCCUPIED only, so "known to be
+       empty" and "never looked at" are the same thing to it as well. Several
+       of these worlds' props are hollow shells whose interiors are never
+       observed and stay UNKNOWN for the whole mission, and they read to the
+       planner as free space it may route through.
+
+       Rejecting UNKNOWN outright would deadlock exploration, because
+       approaching unobserved space is the entire job. What is wrong is
+       COMMITTING to it. Within this radius the sensor is about to resolve the
+       volume anyway (the depth camera's near clip is 0.95 m) and the aircraft
+       can stop inside its own braking distance, 0.18 m at the 0.35 m/s
+       ceiling; beyond it the curve is a guess.
+
+       1.5 m rather than something tighter because the near clip guarantees a
+       band of unobserved space directly ahead at all times, and a limit inside
+       that band would refuse every trajectory. Unset means 1e9, i.e. upstream
+       behaviour. -->
+  <!-- 3.0, from 1.5. This knob has a cost on the other side and it took a
+       while to see it. Refusing to commit into unobserved space is also how the
+       aircraft stops APPROACHING it, and approaching unobserved space is how a
+       frontier gets revealed: a viewpoint candidate must itself be in
+       known-free space, so a cluster whose whole sampling ring is unobserved
+       can never be given one, is retired as unviewable, and the frontier set
+       empties with the building unmapped.
+
+       Measured. Before this limit existed the hospital finished at 817 and
+       822 m3. With it at 1.5 the peak rose to 856.9 m3  -  the best figure ever
+       recorded here, because the aircraft stops driving into things it cannot
+       see  -  but PARTIAL_FINISH legs appeared at 277-300 m3, and on one of them
+       the finish amnesty re-offered 52 retired clusters, with isNearUnknown and
+       the visibility bar both relaxed, and every one of them went straight back
+       to dormant. Nothing was wrong with the margin; there was simply no
+       observed free space to stand in.
+
+       3.0 m still refuses the six-metre guess this was written for  -  the
+       measured refusals ran to a 4.93 m median and 6.0 m max  -  while leaving
+       the aircraft room to close on a frontier and reveal it. -->
+  <arg name="unknown_commit_m" default="3.0"/>
+  <param name="/fsm/unknown_commit_m" value="$(arg unknown_commit_m)"/>
+
   <arg name="ccl_slice_height" default="1.25"/>
   <param name="/map_config/ccl_slice_height" value="$(arg ccl_slice_height)"/>
 
+  <!-- ── A* knows the aircraft has a WIDTH ─────────────────────────────────
+       Upstream A* tests one voxel per node, so a 0.14 m slot between two
+       clutter piles is a valid node and therefore a valid route, for an
+       airframe 0.52 m across. The B-spline optimiser is no help: safe_distance
+       is a SOFT cost it trades away when no curve can satisfy it, which is
+       exactly the case inside a gap narrower than the margin asked for.
+       Measured in the warehouse clutter cluster, where 0.14 / 0.36 / 0.38 m
+       gaps meet: one run flew the 0.36 m slot at the piles' own top height,
+       ground there for 45 s over 20 contact episodes, and CAPSIZED.
+
+       0.20 m is a two-sided trade and both sides are measured. It must exceed
+       half the widest gap to be refused (0.38 / 2 = 0.19) and stay under half
+       the narrowest opening that must stay flyable, the hospital's 26 doorways
+       at 0.930 m which this stack threads today:
+
+         0.14 / 0.36 / 0.38 m clutter slots  ->  closed
+         0.930 m hospital doorway            ->  0.53 m still open
+         0.909 m narrowest warehouse aisle   ->  0.51 m still open
+
+       start_clearance suppresses the skirt near the search start, because an
+       aircraft that has drifted against a wall is inside its own inflation and
+       could otherwise never plan its way off it. 0 disables both and restores
+       upstream point-robot search. -->
+  <!-- ── Places the aircraft has PROVED it cannot get through ──────────────
+       The dead-end guard retires the FRONTIER at such a place, which stops the
+       coverage tour targeting it. Nothing stopped A* ROUTING through it, so the
+       aircraft was sent back in on the way to somewhere else and caught again.
+       Measured in two consecutive hospital legs, both ending in a CAPSIZE at
+       the same coordinates: 834 s spent within two metres of (-2.3, -18.0)
+       among a scrubs cart and an instrument cart, 22 bumper reports, 13
+       viewpoints blocked and 11 frontiers retired around it, and it was still
+       routed back in until it flipped. Every guard fired correctly and none
+       could stop the aircraft going there.
+
+       A* now reads the frontier finder's own persisted blocked regions and
+       treats each as a disc to route around. It is a PREFERENCE: tested on the
+       strict pass only, so if avoiding it means no route at all, search()
+       retries without it and the worst case is the route the planner would
+       have taken anyway. Regions also expire on their existing TTL ladder.
+
+       1.0 m: wide enough to push a route out of the trap that caught the
+       aircraft, narrow enough that it does not straddle a 2 m hospital
+       corridor on its own. 0 disables. -->
+  <arg name="astar_no_go_radius"    default="1.0"/>
+  <arg name="astar_no_go_refresh_s" default="2.0"/>
+  <param name="/astar/no_go_radius"    value="$(arg astar_no_go_radius)"/>
+  <param name="/astar/no_go_refresh_s" value="$(arg astar_no_go_refresh_s)"/>
+
+  <!-- 0.26, the airframe's true half-width (collision mesh 0.52 m across the
+       arms), NOT a compromise value. With a lattice fine enough to resolve what
+       is left (see astar_resolution below), "A* found a route" then means
+       exactly "the aircraft fits", which is the only version of this test that
+       is right in both worlds.
+
+       0.20 was a compromise between closing the warehouse's 0.14-0.38 m clutter
+       slots and not closing the hospital's 0.930 m doorways, and it needed a
+       fallback to a point-robot route when no inflated route existed. That
+       fallback then handed the aircraft straight back into the clutter slots:
+       61 fallbacks in one warehouse leg, 278 bumper reports across 32 episodes
+       on four clutter piles, and a CAPSIZE at 103.9 m3  -  against CLEAN at
+       352.1 m3 with zero contacts on the same world before it. The doorway
+       problem was never that the aircraft did not fit; it was that the SEARCH
+       LATTICE could not represent the gap. Fix the lattice, not the width. -->
+  <arg name="astar_inflate_radius"  default="0.20"/>
+  <arg name="astar_start_clearance" default="0.50"/>
+  <param name="/astar/inflate_radius"  value="$(arg astar_inflate_radius)"/>
+  <param name="/astar/start_clearance" value="$(arg astar_start_clearance)"/>
+
+  <!-- 0.3, from 0.5, and this is what makes the inflation above honest. A
+       0.930 m hospital doorway inflated by the 0.26 m half-width leaves a
+       0.41 m band of legal centre positions; on a 0.5 m lattice no node need
+       land inside it, so a doorway the aircraft fits through reads as sealed.
+       Measured at 0.20 inflation / 0.5 lattice: 1068 "No path to next
+       viewpoint" lines in one hospital run, against 0 in a healthy one.
+
+       0.3 was tried before and abandoned, but for a reason that no longer
+       applies: it needs 248,889 nodes over this map against upstream's 100,000
+       pool, and every query exhausted it. astar_allocate_num is 500000 now,
+       sized for exactly this. max_search_time goes up with it, because a finer
+       lattice is more nodes to expand. -->
   <arg name="astar_resolution"      default="0.5"/>
   <arg name="astar_max_search_time" default="0.05"/>
   <arg name="astar_allocate_num"    default="500000"/>

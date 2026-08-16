@@ -63,15 +63,22 @@ mkdir -p "${BASE}"
 # happen with two thirds of a building unvisited. Measured, a hospital run that
 # "FINISHED" at 260.8 m3 having never gone south of y = -2.3.
 #
-#   warehouse 170: explorable is 192.8 m3 of a 204.1 m3 box, measured off the
-#             collision meshes, and complete runs land at 201.5 (the figure
-#             exceeds explorable because coverage counts observed obstacle
-#             SURFACES as well as free space).
+#   warehouse 180: the box was re-derived on 2026-08-15. It still excludes the
+#             shelf racking on purpose -- the aisles are 0.909-1.216 m dead-end
+#             slots and their insides are not an inspection product -- but it
+#             now runs the full LENGTH of the building (y +-9.70 inside walls at
+#             +-10.45), where it used to stop at y -9.0 / 7.2 and leave both end
+#             walls outside anything FALCON could plan toward. Box 209.9 m3,
+#             explorable 192.6 m3. A run confined to the old footprint inside
+#             the new box lands near 160, so 180 is the bar that fails it; a
+#             complete one should reach about 200 (the figure exceeds
+#             explorable because coverage counts observed obstacle SURFACES as
+#             well as free space).
 #   hospital  600: the box is 24.0 x 55.0 x 0.7 = 924 m3 and the best measured
 #             complete run reached 760 m3 while touching every corner of the
 #             building. 600 is comfortably above any partial finish seen (the
 #             worst was 260.8, the next 304.9) and below a real one.
-WORLDS=("hospital:hospital:600" "warehouse:no_roof_small_warehouse:170")
+WORLDS=("hospital:hospital:600" "warehouse:no_roof_small_warehouse:300")
 
 # Keep the in-container watchdog's cap just under the harness cap so a run that
 # runs out of time gets the watchdog's specific verdict (with its coverage and

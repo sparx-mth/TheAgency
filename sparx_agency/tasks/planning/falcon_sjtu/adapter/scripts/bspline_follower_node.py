@@ -267,6 +267,56 @@ class BsplineFollowerNode(object):
         self._unstick_probe_m = float(rospy.get_param("~unstick_probe_m", 2.5))
         self._unstick_min_clear_m = float(
             rospy.get_param("~unstick_min_clear_m", 0.7))
+
+        # ── back out the way it came in ───────────────────────────────────
+        # The ray cast above cannot tell FREE from NEVER OBSERVED: the brake
+        # gate accumulates OCCUPIED voxels only, so a probe through unmapped
+        # space strikes nothing and scores the full probe length. Selecting the
+        # HIGHEST score therefore steers the recovery toward whichever bearing
+        # the aircraft knows least about -- which is the one most likely to hide
+        # the obstacle it is stuck on. Measured: every unstick in a run logging
+        # the identical "2.50 m of clear map", i.e. the probe cap, i.e. nothing
+        # struck, i.e. no information at all.
+        #
+        # The aircraft's own recent track is better evidence than any map,
+        # because it is not an inference: the drone fitted through those points,
+        # at its real width, however the voxels were labelled. So the unstick
+        # aims back along its breadcrumbs and uses the ray cast only to VETO a
+        # bearing, never to choose one.
+        self._breadcrumbs = []          # type: list  # (x, y, z), oldest first
+        self._breadcrumb_spacing_m = float(
+            rospy.get_param("~breadcrumb_spacing_m", 0.25))
+        self._breadcrumb_max = int(rospy.get_param("~breadcrumb_max", 120))
+        # How far back to aim. Far enough to leave whatever the aircraft is
+        # caught on, close enough that the crumb is still relevant.
+        self._unstick_backtrack_m = float(
+            rospy.get_param("~unstick_backtrack_m", 1.2))
+        # How many learned no-go spots the follower may hand the planner. A* re-
+        # reads the list on every search, so it must not grow without bound.
+        self._no_go_max = int(rospy.get_param("~no_go_max", 24))
+
+        # ── the yaw probe: test the wedge before acting on it ─────────────
+        # Every unstick trigger is an INFERENCE that the aircraft is stuck, and
+        # those inferences are wrong often enough to matter -- a brake-limited
+        # crawl and a quiet planner both look exactly like a wedge. Turning on
+        # the spot distinguishes them at zero risk, because it commands no
+        # translation at all: a free airframe completes the turn, a held one
+        # cannot. Only a failed probe justifies moving.
+        #
+        # A full turn rather than a token one, because it doubles as a
+        # re-observation of the room, which is the other thing a planner that
+        # has gone quiet needs. At max_yaw_vel 0.6 rad/s a full turn takes about
+        # 10.5 s, so the window allows for the servo not hitting the rate.
+        self._unstick_probe_yaw_rad = float(
+            rospy.get_param("~unstick_probe_yaw_rad", 2.0 * math.pi))
+        self._unstick_probe_yaw_rate = float(
+            rospy.get_param("~unstick_probe_yaw_rate", 0.6))
+        self._unstick_probe_time_s = float(
+            rospy.get_param("~unstick_probe_time_s", 16.0))
+        self._unstick_phase = None      # type: object  # yaw_probe | translate
+        self._probe_yaw_accum = 0.0
+        self._probe_last_yaw = 0.0
+        self._probe_until = None        # type: object
         self._jam_window_s = float(rospy.get_param("~jam_window_s", 10.0))
         self._jam_demand_m = float(rospy.get_param("~jam_demand_m", 0.6))
         self._jam_move_m = float(rospy.get_param("~jam_move_m", 0.15))
@@ -606,8 +656,26 @@ class BsplineFollowerNode(object):
         # sideways and cannot recover. A near-clip contact can pitch the aircraft
         # up as it drives into the unseen obstacle; stopping the drive lets it
         # fall back level before it tips over.
+        #
+        # 15, from 22, and the run's own attitude distribution is the argument.
+        # A capsize was recorded at (-2.3, -18.0) after the aircraft spent 124 s
+        # pressed among three clutter items at 0.03-0.17 m/s: it did not flip,
+        # it LEVERED over, tilting 2 -> 20 -> 9 -> 11 -> 36 deg across the last
+        # 1.4 s. The 20 deg excursion passed two degrees under the old threshold
+        # and nothing acted on it.
+        #
+        # Over that whole 943 s flight the tilt was p50 0, p90 2, p99 10,
+        # p99.9 15 deg, with just 5 samples of 4718 above 15. So this fires on
+        # what is already an anomaly and leaves ordinary flight untouched -- it
+        # cannot cost coverage, and it buys a second and a half of warning on
+        # the one failure mode that ends a run outright.
+        #
+        # It does not make the stack capsize-proof, and the note above about
+        # contact-flips still stands: an aircraft thrown over between two 5 Hz
+        # samples never crosses the threshold on its way. This catches the slow
+        # lever, which is the one that was actually being measured.
         self._tilt_limit_rad = math.radians(
-            float(rospy.get_param("~tilt_limit_deg", 22.0)))
+            float(rospy.get_param("~tilt_limit_deg", 15.0)))
         self._track = []                # type: list  # (t_s, x, y, z) history
         self._contact_seen_at = None    # type: object
         self._retreat_until = None      # type: object
@@ -935,6 +1003,11 @@ class BsplineFollowerNode(object):
             self._climb(position)
             return
 
+        # Where the aircraft has actually BEEN. This is the only record in the
+        # stack of space proven traversable by direct evidence rather than by
+        # inference from a map, and the unstick uses it to choose a way out.
+        self._drop_breadcrumb(position)
+
         # Attitude reflex, ahead of everything below (even the retreat, which
         # drives): a near-clip contact can tip the aircraft, and past the plugin's
         # ~35 deg clamp it cannot recover. If roll or pitch crosses the margin,
@@ -1205,6 +1278,8 @@ class BsplineFollowerNode(object):
                     self._unstick(now, position, yaw)
                     return
                 if spent:
+                    self._report_no_go(position, "%d contacts here"
+                                       % self._give_up_repeats)
                     rospy.logwarn(
                         "[follower] %d contacts at (%.1f, %.1f); give-up #%d, "
                         "past the %d-hold budget so backing out without holding "
@@ -1213,6 +1288,8 @@ class BsplineFollowerNode(object):
                         float(position[1]), self._give_ups,
                         self._give_up_hold_budget)
                 else:
+                    self._report_no_go(position, "%d contacts here"
+                                       % self._give_up_repeats)
                     hold_s = min(self._give_up_hold_s, self._give_up_hold_max_s)
                     self._give_up_until = now + rospy.Duration(hold_s)
                     rospy.logwarn("[follower] %d contacts at (%.1f, %.1f) within "
@@ -1570,6 +1647,57 @@ class BsplineFollowerNode(object):
         command.angular.z = self._survey_yaw_rate
         self._send(command)
 
+    def _report_no_go(self, position, why):
+        # type: (object, str) -> None
+        """Tell the PLANNER about a place the aircraft keeps getting hurt in.
+
+        The follower is the only thing in this stack that knows the aircraft has
+        just taken its third contact in one spot. FALCON's own dead-end guard
+        cannot learn it, because that guard only watches places it chose as
+        TARGETS -- and the places that actually end runs are ones the aircraft
+        merely TRANSITS and gets caught in. Measured: three capsizes in three
+        separate hospital legs at (-2.3, -18.0), the aircraft returning to that
+        clutter for 834-1420 samples each time because nothing ever told the
+        planner to route around it.
+
+        `/astar/no_go_runtime` is a list of our own, read by A* on every
+        search. It deliberately is NOT FALCON's own
+        `/frontier_finder/blocked_regions_runtime`: the mission watchdog DELETES
+        that one on every tick, by design, so that a stale blacklist cannot
+        survive a planner respawn -- and anything written there is therefore
+        gone within a second. Appending here is how a contact the follower felt
+        becomes a route the planner will not take.
+
+        Coalesced on the same radius the give-up groups episodes by, so one bad
+        spot is one entry however many times it is hit.
+        """
+        try:
+            flat = rospy.get_param("/astar/no_go_runtime", [])
+            if not isinstance(flat, list):
+                flat = []
+        except Exception:                                  # noqa: BLE001
+            flat = []
+        x, y, z = float(position[0]), float(position[1]), float(position[2])
+        for i in range(0, len(flat) - 2, 3):
+            try:
+                if math.hypot(x - float(flat[i]), y - float(flat[i + 1])) \
+                        < self._give_up_radius_m:
+                    return                                 # already reported
+            except (TypeError, ValueError):
+                return
+        flat = list(flat) + [x, y, z]
+        # Bound it: this list is read by A* on every search, and an unbounded
+        # one would make the planner slower the worse the run went.
+        max_len = 3 * self._no_go_max
+        if len(flat) > max_len:
+            flat = flat[-max_len:]
+        try:
+            rospy.set_param("/astar/no_go_runtime", flat)
+        except Exception:                                  # noqa: BLE001
+            return
+        rospy.logwarn("[follower] reporting (%.1f, %.1f) to the planner as a "
+                      "no-go (%s); it will route around it", x, y, why)
+
     def _note_block_episode(self, now, position):
         # type: (object, np.ndarray) -> None
         """Record a block; concede to the planner if this spot keeps repeating.
@@ -1845,6 +1973,58 @@ class BsplineFollowerNode(object):
             return False
         return True
 
+    def _drop_breadcrumb(self, position):
+        # type: (tuple) -> None
+        """Record where the aircraft has been, one crumb per spacing travelled.
+
+        Spacing rather than time so a hovering aircraft does not flood the trail
+        with a hundred copies of one point and push the useful history out.
+        """
+        x, y, z = float(position[0]), float(position[1]), float(position[2])
+        if self._breadcrumbs:
+            lx, ly, _ = self._breadcrumbs[-1]
+            if math.hypot(x - lx, y - ly) < self._breadcrumb_spacing_m:
+                return
+        self._breadcrumbs.append((x, y, z))
+        while len(self._breadcrumbs) > self._breadcrumb_max:
+            self._breadcrumbs.pop(0)
+
+    def _backtrack_bearing(self, position, yaw):
+        # type: (tuple, float) -> object
+        """The bearing back along the aircraft's own track, or None.
+
+        Walks the trail newest-first for the first crumb at least
+        ``unstick_backtrack_m`` away, and returns the heading toward it. That
+        point is known traversable by the strongest evidence available -- the
+        aircraft was there, at its real width -- which is more than the
+        occupancy map can say about any bearing, since it cannot distinguish
+        free space from space it has never looked at.
+
+        The ray cast still gets a veto: geometry the aircraft did not see on the
+        way in may have been mapped since, and a door can close behind it.
+        """
+        if not self._breadcrumbs:
+            return None
+        px, py = float(position[0]), float(position[1])
+        for i in range(len(self._breadcrumbs) - 1, -1, -1):
+            cx, cy, _ = self._breadcrumbs[i]
+            dx, dy = cx - px, cy - py
+            dist = math.hypot(dx, dy)
+            if dist < self._unstick_backtrack_m:
+                continue
+            heading = math.atan2(dy, dx)
+            if self._odom is not None:
+                p = self._odom.pose.pose.position
+                struck = self._gate.blocked_distance(
+                    (p.x, p.y, p.z), (math.cos(heading), math.sin(heading)),
+                    min(dist, self._unstick_probe_m))
+                if struck is not None and float(struck) < self._unstick_min_clear_m:
+                    # Something now stands between here and a place the aircraft
+                    # used to be. Keep walking back for an older crumb.
+                    continue
+            return heading, dist
+        return None
+
     def _clearest_bearing(self, yaw):
         # type: (float) -> object
         """The most open horizontal bearing according to the accumulated map.
@@ -1901,38 +2081,150 @@ class BsplineFollowerNode(object):
         # The rotation is kept as the tie-break and the fallback: it is what
         # makes two consecutive unsticks at one place differ when the map is
         # uninformative (all bearings equally clear, or no cloud yet).
-        bearings = (math.pi, 0.5 * math.pi, -0.5 * math.pi, 0.0)
-        rel = bearings[(self._unsticks - 1) % len(bearings)]
-        heading = yaw + rel
-        probe = self._clearest_bearing(yaw)
-        if probe is not None:
-            heading, clear_m = probe
-            rospy.loginfo("[follower] unstick bearing %+.0f deg off the nose has "
-                          "%.2f m of clear map, taking it",
-                          math.degrees(heading - yaw), clear_m)
-        self._unstick_heading = (math.cos(heading), math.sin(heading))
-        self._unstick_until = now + rospy.Duration(self._unstick_time_s)
+        # Arm the YAW PROBE, not a translation. Nothing below moves the
+        # aircraft horizontally until the probe has established that it cannot
+        # turn -- see _unstick() for why that ordering is the whole fix.
+        self._unstick_phase = "yaw_probe"
+        self._probe_yaw_accum = 0.0
+        self._probe_last_yaw = yaw
+        self._probe_until = now + rospy.Duration(self._unstick_probe_time_s)
+        self._unstick_heading = None
+        self._unstick_until = now + rospy.Duration(
+            self._unstick_probe_time_s + self._unstick_time_s)
         self._last_bspline_at = now
         self._stall_track = []
         self._jam_track = []
         self._hold_point = None
         self._servo.reset()
         rospy.logwarn(
-            "[follower] stuck (%s). Unstick #%d, %+.0f deg off the nose and back "
-            "toward mid-band z=%.2f", reason, self._unsticks,
-            math.degrees(rel), self._alt_mid)
+            "[follower] possibly stuck (%s). Unstick #%d: turning %.0f deg on the "
+            "spot FIRST to find out -- if it turns it is not wedged",
+            reason, self._unsticks,
+            math.degrees(self._unstick_probe_yaw_rad))
+
+    def _choose_unstick_heading(self, yaw):
+        # type: (float) -> None
+        """Pick the escape bearing, once the probe has proved a real wedge."""
+        bearings = (math.pi, 0.5 * math.pi, -0.5 * math.pi, 0.0)
+        rel = bearings[(self._unsticks - 1) % len(bearings)]
+        heading = yaw + rel
+
+        # Back out the way it came in, FIRST. A crumb is somewhere the aircraft
+        # has physically been, which is stronger evidence than anything the
+        # occupancy map can offer -- that map cannot distinguish free space from
+        # space never looked at, so choosing the "clearest" bearing from it aims
+        # the recovery at whatever is least known and most likely to be the
+        # thing the aircraft is stuck on.
+        back = None
+        if self._odom is not None:
+            _p = self._odom.pose.pose.position
+            back = self._backtrack_bearing((_p.x, _p.y, _p.z), yaw)
+        if back is not None:
+            heading, back_m = back
+            rospy.loginfo("[follower] unstick backtracking %+.0f deg off the nose "
+                          "toward a point %.2f m back that the aircraft has "
+                          "already flown through",
+                          math.degrees(heading - yaw), back_m)
+        else:
+            # No usable trail (just airborne, or every crumb now walled off).
+            # Fall back to the map, knowing it cannot tell unobserved from free.
+            probe = self._clearest_bearing(yaw)
+            if probe is not None:
+                heading, clear_m = probe
+                rospy.loginfo("[follower] no usable backtrack; unstick bearing "
+                              "%+.0f deg off the nose has %.2f m of unstruck map "
+                              "(which may be unobserved), taking it",
+                              math.degrees(heading - yaw), clear_m)
+        self._unstick_heading = (math.cos(heading), math.sin(heading))
+        rospy.logwarn(
+            "[follower] escaping %+.0f deg off the nose and back toward mid-band "
+            "z=%.2f", math.degrees(heading - yaw), self._alt_mid)
 
     def _unstick(self, now, position, yaw):
         # type: (object, np.ndarray, float) -> None
-        """Drive the armed unstick: a fixed world bearing, plus mid-band."""
+        """Drive the armed unstick: first a yaw probe, then a bearing.
+
+        The probe is the whole point. Every trigger that arms an unstick is an
+        INFERENCE that the aircraft is stuck -- no plan for N seconds, or
+        commanded travel it did not achieve -- and those inferences are wrong
+        often enough to matter: an aircraft crawling at a brake-limited speed,
+        or waiting on a planner that is merely quiet, reads exactly like a
+        wedged one. Acting on a wrong inference used to mean flying a bearing
+        open loop, which is how the recovery put the aircraft INTO obstacles it
+        was supposed to be escaping.
+
+        Turning on the spot settles it without that risk. It commands zero
+        translation, so it cannot fly into anything; a free airframe completes
+        the turn and a wedged one cannot. It is a measurement rather than an
+        action, and it pays for itself either way -- a full turn also re-observes
+        the room, which is exactly what a planner that has gone quiet needs.
+        """
         if self._unstick_until is None or now >= self._unstick_until:
             self._unstick_until = None
             self._unstick_heading = None
+            self._unstick_phase = None
             self._unstick_ready_at = now + rospy.Duration(
                 self._unstick_cooldown_s)
             self._send(Twist())
             self._servo.reset()
             return
+
+        # ── phase 1: can it turn at all? ──────────────────────────────────
+        if self._unstick_phase == "yaw_probe":
+            d = yaw - self._probe_last_yaw
+            while d > math.pi:
+                d -= 2.0 * math.pi
+            while d < -math.pi:
+                d += 2.0 * math.pi
+            self._probe_yaw_accum += abs(d)
+            self._probe_last_yaw = yaw
+
+            if self._probe_yaw_accum >= self._unstick_probe_yaw_rad:
+                # It turned. It is not wedged, and it has just re-observed the
+                # room. Stand down and let FALCON have the aircraft back.
+                rospy.logwarn(
+                    "[follower] yaw probe completed %.0f deg on the spot, so the "
+                    "aircraft is NOT wedged -- standing the unstick down and "
+                    "following FALCON again (the turn also re-observed the room)",
+                    math.degrees(self._probe_yaw_accum))
+                self._unstick_until = None
+                self._unstick_heading = None
+                self._unstick_phase = None
+                self._unstick_ready_at = now + rospy.Duration(
+                    self._unstick_cooldown_s)
+                self._last_bspline_at = now
+                self._stall_track = []
+                self._jam_track = []
+                self._send(Twist())
+                self._servo.reset()
+                return
+
+            if now < self._probe_until:
+                twist = Twist()
+                twist.angular.z = self._unstick_probe_yaw_rate
+                # Hold the band while turning; no horizontal drive whatsoever,
+                # which is what makes the probe safe to run when the "stuck"
+                # inference is wrong.
+                dz = self._alt_mid - float(position[2])
+                twist.linear.z = max(-self._unstick_climb_speed,
+                                     min(self._unstick_climb_speed, 0.8 * dz))
+                self._send(twist)
+                return
+
+            # The turn did not complete in its window: the airframe really is
+            # held. Now, and only now, is translating justified.
+            rospy.logwarn(
+                "[follower] yaw probe managed only %.0f of %.0f deg in %.0fs -- "
+                "the airframe is genuinely held; translating to escape",
+                math.degrees(self._probe_yaw_accum),
+                math.degrees(self._unstick_probe_yaw_rad),
+                self._unstick_probe_time_s)
+            self._unstick_phase = "translate"
+            self._choose_unstick_heading(yaw)
+            self._unstick_until = now + rospy.Duration(self._unstick_time_s)
+
+        if self._unstick_heading is None:
+            self._choose_unstick_heading(yaw)
         wx, wy = self._unstick_heading
         cos, sin = math.cos(yaw), math.sin(yaw)
         twist = Twist()

@@ -49,6 +49,40 @@ map_config:
   init_y: 1.0
   init_z: 0.0
   init_yaw: 0.0
+
+  # ── Keep-out volumes: where the aircraft may NOT go ──────────────────────
+  #
+  # Flat groups of six, xmin ymin zmin xmax ymax zmax, in world metres. Read by
+  # the A* node test, by frontier viewpoint sampling and by frontier
+  # categorisation (falcon_keep_out_boxes.patch), so no route, no viewpoint and
+  # no coverage target can be placed inside one. Deliberately NOT enforced in
+  # MapServer::getOccupancy -- frontier detection and coverage read that too,
+  # and changing its meaning for everyone collapsed exploration in both worlds
+  # once already.
+  #
+  # Every value carries a decimal point on purpose: rosparam types a YAML list
+  # by its contents, and one bare integer makes the whole list fail to load as
+  # vector<double> -- silently, leaving the keep-outs empty.
+  #
+  # WHY A KEEP-OUT AND NOT A SMALLER BOX. The racking is not worth entering:
+  # its six units are separated by 0.909-1.216 m dead-end aisles 3.92 m deep,
+  # solid to 2.643 m, which must be reversed out of, and a run allowed in
+  # touched five separate objects doing it. But the aisles do not need to be
+  # ENTERED to be mapped -- each is 3.92 m deep and the depth camera reaches
+  # 5 m, so the aircraft maps one end to end by looking down it from the open
+  # floor at its mouth. Keeping out costs no coverage and removes the wedging
+  # risk entirely. Expressing it with the BOX instead is what excluded
+  # everything beyond the racking too, and that was 60% of the warehouse.
+  #
+  #   1. the east rack block and everything east and south of it. The block
+  #      spans x 2.77-6.69, y -9.11..1.02; this starts 0.75 m west of its faces
+  #      and ends 0.75 m north of its northern end, so the aircraft rounds the
+  #      block through the open floor at y > 1.77 and maps the east side and
+  #      the east wall from there.
+  #   2. ShelfF on the west, x -6.84..-4.74, y -9.98..8.07, plus the same
+  #      0.75 m standoff. North of y 8.82 the west strip stays flyable.
+  keep_out_boxes: [ 2.02, -10.60, -1.0,  7.20,  1.77,  3.2,
+                   -7.20, -10.60, -1.0, -3.99,  8.82,  3.2]
   map_size:
     map_min_x: -8.0
     map_min_y: -12.0
@@ -70,8 +104,51 @@ map_config:
     # extend beyond the face AABB, and ceiling-height flight within ~1 m of the
     # row grazed them (soak contacts at z=1.9 by ShelfE). Faces map fine from
     # the aisle at this distance.
-    box_min_x: -4.4
-    box_min_y: -9.0
+    # ── 2026-08-15: every edge is now DERIVED, and the box still excludes the
+    #    racking on purpose ──
+    #
+    # Two things were wrong with the edges above, and they are opposite errors.
+    #
+    # WRONG IN Y: the box stopped at y -9.0 / 7.2 inside walls at y +-10.45, so
+    # 3.25 m of floor at the north end and 1.45 m at the south were outside the
+    # volume FALCON may plan in. Its frontier finder cannot see them and its
+    # coverage tour can never route there, so the end walls never entered the
+    # map at all -- visible in RViz as a warehouse with its ends missing. That
+    # is a real gap and it is what these new y limits fix.
+    #
+    # WRONG IN X, and this was fixed briefly by making it worse: opening the box
+    # to the whole building (x +-6.5) does let the aircraft reach the shelf
+    # block, and it promptly flew INTO the 0.909-1.216 m dead-end aisles. There
+    # is no reason to. Mapping the inside of a rack slot is not an inspection
+    # product, the aisles are dead ends 3.92 m deep that must be reversed out
+    # of, and the run touched five separate objects doing it. The box excludes
+    # the racking, and that is a judgement about what is worth mapping rather
+    # than a workaround: the rack FACES map perfectly well from the open floor
+    # with a 5 m depth camera, and what is behind them does not need mapping.
+    #
+    # THE INSET IS NOW DERIVED, which no edge here previously was. The box is
+    # where the drone's CENTRE may go, so an edge closer to an obstacle than
+    # safe_distance makes that clearance unsatisfiable -- the planner cannot
+    # hold a margin the box does not contain, and the old edges were 0.17 m off
+    # the rack faces and 0.34 m off ShelfF, both INSIDE the 0.45 m it is asked
+    # for. Measured consequence: eight bumper reports against the south wall at
+    # the full 0.35 m/s ceiling, and two against ShelfF at z 1.63-1.72, while
+    # the follower was tracking its plan to a cross-track p99 of 0.24 m. The
+    # aircraft was flying the plan correctly and the plan was routed into the
+    # wall.
+    #
+    #   inset = safe_distance (0.45) + follower cross-track p99 (0.24) = 0.69,
+    #   rounded up to 0.75.
+    #
+    # Applied to the real faces: ShelfF at x -4.74, rack faces at x 2.77, walls
+    # at y +-10.45. Every edge below is one of those plus or minus 0.75.
+    #
+    # The walls stay OBSERVABLE without being approachable, which is the whole
+    # point of a standoff: at the box edge a wall is 0.75 m away, inside the
+    # 0.95 m depth near clip, but from two metres back it is comfortably in
+    # range. Mapping a wall does not require flying at it.
+    box_min_x: -6.20
+    box_min_y: -9.70
     # 1.3: above the ClutteringA pile deck (tops 1.10 m; 31 of run 027's 39
     # contacts were belly strikes on those tops). No doorway lintels exist in
     # this world, so the high band costs nothing -- the tall C-piles (1.78 m)
@@ -95,8 +172,14 @@ map_config:
     # viewpoints in. Stopping 0.17 m short of the shelf faces removes all six
     # without losing anything the aircraft could map from inside them -- the
     # faces themselves map perfectly well from the open floor to the west.
-    box_max_x:  2.6
-    box_max_y:  7.2
+    # 6.20 / 9.70: the box is the BUILDING now, inset 0.75-0.79 m from the walls.
+    # What must not be entered is expressed by keep_out_boxes below instead,
+    # because a single AABB cannot say "the whole floor except the racking" --
+    # and using the box for it also excluded everything BEYOND the racking,
+    # which was 60% of the warehouse and the reason its east half never
+    # appeared in the map at all.
+    box_max_x:  6.20
+    box_max_y:  9.70
     # 2.4 ceiling: the 1.55-1.8 band was 0.25 m tall and vertical inflation
     # (0.35) let ANY voxel mapped above 1.2 seal an aisle -- one depth speckle
     # walled off the maze and run soak-001 no-pathed for 30 minutes. No roof

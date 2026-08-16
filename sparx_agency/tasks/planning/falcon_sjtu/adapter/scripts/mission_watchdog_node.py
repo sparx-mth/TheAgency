@@ -39,7 +39,7 @@ import math
 import rospy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, Int32, String
 from trajectory.msg import Bspline
 
 from sparx_agency.core.planning.exploration.progress_monitor import (
@@ -125,7 +125,7 @@ class MissionWatchdogNode(object):
                          queue_size=4)
         rospy.Subscriber("/map_ros/pose", PoseStamped, self._on_sensor_pose,
                          queue_size=4)
-        rospy.Subscriber("/planning/replan", rospy.AnyMsg, self._on_replan,
+        rospy.Subscriber("/planning/replan", Int32, self._on_replan,
                          queue_size=10)
 
         rospy.Timer(rospy.Duration(1.0), self._tick)
@@ -201,14 +201,27 @@ class MissionWatchdogNode(object):
         self._plan_gap_sum += gap
         self._plan_gap_n += 1
 
-    def _on_replan(self, _msg):
+    def _on_replan(self, msg):
         # type: (object) -> None
         """Any replan traffic proves FALCON is alive; ``2`` means it is done.
 
-        Subscribed as ``AnyMsg`` so this node never needs the message package
-        to be importable just to notice the mission ended.
+        Reading the VALUE matters, and this used to be a bare ``return``. Once
+        FALCON declares the mission over the follower correctly parks and holds
+        station -- and this node then went on applying its no-movement rule to a
+        stationary aircraft and aborted the run. Measured: two hospital legs
+        that had genuinely FINISHED, one of them having mapped the whole
+        building, reported as ABORT_NO_MOVEMENT because the watchdog did not
+        know the mission was over. A finished mission cannot be failed for not
+        moving.
         """
-        return
+        try:
+            if int(msg.data) == 2:
+                if not self._finished:
+                    rospy.logwarn("[watchdog] FALCON reports the mission over; "
+                                  "standing down the progress rules")
+                self._finished = True
+        except Exception:                       # noqa: BLE001 - never kill the sub
+            return
 
     # ── the loop ─────────────────────────────────────────────────────────
 
@@ -246,6 +259,14 @@ class MissionWatchdogNode(object):
         if self._trace is not None:
             self._trace.write(json.dumps(record) + "\n")
         self._status_pub.publish(String(data=json.dumps(record)))
+
+        # A finished mission is stationary on purpose. Every rule below judges
+        # PROGRESS, and once FALCON has declared its frontier set empty the
+        # follower parks and holds -- so confinement, growth and movement all
+        # read as failure exactly when the mission has succeeded. Keep writing
+        # the record above (it is the run's only 1 Hz history) and stop ruling.
+        if self._finished:
+            return
 
         if verdict.is_nudge:
             rospy.logwarn("[watchdog] NUDGE %s; asking for a fresh survey",

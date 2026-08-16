@@ -383,6 +383,23 @@ once per call via `ros::param::param` into a function-local static.
 exceed 1.0: a slice outside the box selects no voxels at all and the tour's model
 of the world goes blank rather than merely wrong.
 
+## falcon_sjtu_session.patch — the cumulative diff, and how it relates to the rest
+
+Every other file here is ONE change with its own reasoning. This one is the
+whole of `falcon_planner` as the running `falcon-ros-custom:v1` differs from the
+pristine upstream clone, regenerated from the images themselves
+(`v1-pre-patchset` against `v1`).
+
+It exists because the per-change files cannot be applied blind in sequence any
+more: several of them touch the same functions, so their hunk offsets only line
+up against the tree as it stood when each was written. To rebuild the image from
+nothing, apply this one. To understand or revise a single decision, read the
+file named for it.
+
+Keep both in step. If you change FALCON's C++ again, regenerate this from the
+container as well as writing the per-change patch, or the two will disagree and
+the cumulative one is the one a rebuild will believe.
+
 ## Rebuilding vs. the running image
 
 An image that was `docker commit`ed live carries these already and needs no
