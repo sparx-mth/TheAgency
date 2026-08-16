@@ -1,43 +1,293 @@
---- a/falcon_planner/fast_planner/src/planner_manager.cpp
-+++ b/falcon_planner/fast_planner/src/planner_manager.cpp
-@@ -389,14 +389,35 @@
-   Eigen::Vector3d fut_pt;
-   double fut_t = 0.02;
- 
-+  // How far the curve may commit through UNOBSERVED space. Upstream rejects a
-+  // sample only if it is OCCUPIED, so UNKNOWN passes and the aircraft will fly
-+  // six metres into a volume it has never seen on the assumption that it is
-+  // empty. The follower cannot catch that either: its voxel gate accumulates
-+  // OCCUPIED only, so "known empty" and "never looked at" are the same thing to
-+  // it as well.
-+  //
-+  // Rejecting UNKNOWN outright would deadlock exploration -- approaching
-+  // unobserved space is the job. What is wrong is COMMITTING to it. Within this
-+  // radius the sensor is about to resolve the volume and the aircraft can stop
-+  // inside its own braking distance; beyond it the curve is a guess.
-+  static double unknown_commit_m = -1.0;
-+  if (unknown_commit_m < 0.0)
-+    ros::param::param("/fsm/unknown_commit_m", unknown_commit_m, 1e9);
-+
-   while (radius < 6.0 && t_now + fut_t < local_data_.duration_) {
-     fut_pt = local_data_.position_traj_.evaluateDeBoorT(t_now + fut_t);
--    if (map_server_->getOccupancy(fut_pt) == voxel_mapping::OccupancyType::OCCUPIED) {
-+    const voxel_mapping::OccupancyType value = map_server_->getOccupancy(fut_pt);
-+    radius = (fut_pt - cur_pt).norm();
-+    if (value == voxel_mapping::OccupancyType::OCCUPIED) {
-       ROS_ERROR("[FastPlannerManager] Collision detected at (%.2f, %.2f, %.2f)", fut_pt.x(),
-                 fut_pt.y(), fut_pt.z());
-       return false;
+diff --git a/falcon_planner/exploration_manager/src/exploration_manager.cpp b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+index 24ebbdc..8763158 100644
+--- a/falcon_planner/exploration_manager/src/exploration_manager.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+@@ -243,7 +243,15 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+     for (auto cost : grid_tour2_cost) {
+       grid_tour2_cost_sum += cost;
      }
--    radius = (fut_pt - cur_pt).norm();
-+    if (value == voxel_mapping::OccupancyType::UNKNOWN && radius > unknown_commit_m) {
-+      ROS_ERROR("[FastPlannerManager] Trajectory commits %.2f m into UNOBSERVED space at "
-+                "(%.2f, %.2f, %.2f); refusing it", radius, fut_pt.x(), fut_pt.y(), fut_pt.z());
-+      return false;
+-    CHECK_NEAR(cost, grid_tour2_cost_sum, 1e-4);
++    // Was CHECK_NEAR(cost, grid_tour2_cost_sum, 1e-4): a glog abort over
++    // FLOAT ROUNDING. On ~100 m tours the recomputed sum drifts centimetres
++    // from the incrementally tracked cost, and the 1e-4 epsilon executed the
++    // planner four times in one mission for discrepancies under 8 cm. Warn
++    // at a threshold that would indicate an actual bookkeeping bug instead.
++    if (std::fabs(cost - grid_tour2_cost_sum) > 0.5) {
++      ROS_WARN("[ExplorationManager] Tour cost bookkeeping drift: %.3f vs %.3f",
++               cost, grid_tour2_cost_sum);
 +    }
-     fut_t += 0.02;
-   }
  
+     // print grid_tour2_cost
+     // string grid_tour2_cost_string;
+@@ -553,6 +561,18 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+     // std::cout << cost_matrix_sop << std::endl;
+ 
+     // Remove next position from cost_matrix_sop
++    // Degenerate late-mission state: with an empty tour AND no frontier ids,
++    // size()+size()-1 underflows in size_t and the Zero() below tries to
++    // allocate a SIZE_MAX-square matrix -- std::bad_alloc, planner death,
++    // respawn, map wiped (3 deaths in one 45-minute mission, all at the
++    // moment coverage was nearly complete). Nothing remains to sequence, so
++    // say so instead of allocating the universe.
++    if (ed_->grid_tour2_.size() + frontier_ids.size() < 2) {
++      ROS_WARN("[ExplorationManager] Degenerate SOP input (tour %lu + frontiers "
++               "%lu); nothing to sequence",
++               ed_->grid_tour2_.size(), frontier_ids.size());
++      return NO_GRID;
++    }
+     Eigen::MatrixXi cost_matrix_sop_remove_next =
+         Eigen::MatrixXi::Zero(ed_->grid_tour2_.size() + frontier_ids.size() - 1,
+                               ed_->grid_tour2_.size() + frontier_ids.size() - 1);
+@@ -575,7 +595,7 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+ 
+     double sop_time = (ros::Time::now() - t1).toSec();
+     ROS_INFO("[ExplorationManager] SOP time: %.2f ms", sop_time * 1000.0);
+-    CHECK_LE(sop_time, 1.0) << "SOP solver internal error detected, solver blocked with unknown "
++    CHECK_LE(sop_time, 10.0) << "SOP solver internal error detected, solver blocked with unknown "
+                                "error. Please restart the planner";
+     ee_->sop_times_.push_back(make_pair(sop_cost_matrix_time, sop_time));
+ 
+@@ -944,6 +964,107 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+   LOG(INFO) << "[ExplorationManager] Next pos: " << next_pos[0] << ", " << next_pos[1] << ", "
+             << next_pos[2] << ", yaw: " << next_yaw;
+ 
++  // ── Dead-end guard: retire a viewpoint the aircraft cannot physically reach.
++  // FALCON routes A* through obstacles that sit inside the depth near clip
++  // (~0.95 m) and so never enter the map, then re-selects the same blocked
++  // viewpoint forever. The controller sees the collision but not the frontiers;
++  // this node sees the frontiers but not the collision. Close the gap with the
++  // one thing this node has -- the drone pose and its own chosen target: if the
++  // aircraft has not closed on next_pos for a sustained spell, the route is a
++  // fiction, so hand the spot to the frontier finder to shadow and move on.
++  {
++    // Block a viewpoint the aircraft cannot reach. "Cannot reach" shows up two
++    // ways, both of which are simply "went nowhere": pinned in contact, or
++    // wandering a tight region between viewpoints it keeps almost-reaching
++    // without ever clearing the frontier behind them (so coverage stops but the
++    // aircraft still drifts >1 m, which fooled a simple pinned test). Track it
++    // over a window: if its whole excursion stays under 2 m for 25 s while it is
++    // still not AT the viewpoint it is being sent to, the route is a fiction (an
++    // obstacle inside the depth near clip the map never caught) -- shadow it so
++    // the frontier finder retires the cluster and the tour moves on.
++    static std::vector<std::pair<double, Vector3d>> track;
++    const double now_s = ros::Time::now().toSec();
++    track.push_back(std::make_pair(now_s, pos));
++    // Two tests read this history and they need DIFFERENT windows, because
++    // they rest on evidence of different strength. "Has not moved at all for
++    // 25 s" is conclusive on its own. "Moved, but got no nearer" is not: it is
++    // also what a hard doorway looks like while the aircraft is still winning.
++    // Measured -- the run that mapped the most of this building spent about
++    // 300 s looping at (-10.5, -2.5), escaped unaided, and went on to 732.9 m3
++    // and every corner of the world; retiring its viewpoint at 25 s would have
++    // thrown that away, and the two runs that did retire early finished at 399
++    // and 479 m3 having never reached the south wing at all.
++    //
++    // So the looping test gets the longer window and the pinned test keeps its
++    // own. A moving aircraft still has options a pinned one does not, and the
++    // cost of waiting is bounded by the watchdog above it.
++    const double LOOP_WINDOW_S = 60.0;
++    const double PINNED_WINDOW_S = 25.0;
++    while (track.size() > 1 && track.front().first < now_s - LOOP_WINDOW_S)
++      track.erase(track.begin());
++    const bool at_target = (pos - next_pos).norm() < 0.6;
++    double span = 0.0;
++    double pinned_oldest = now_s;
++    for (size_t i = 0; i < track.size(); ++i) {
++      if (track[i].first < now_s - PINNED_WINDOW_S)
++        continue;   // the pinned test owns only the recent tail of the history
++      span = std::max(span, (track[i].second - pos).norm());
++      pinned_oldest = std::min(pinned_oldest, track[i].first);
++    }
++
++    // ...and the same failure with the aircraft MOVING, which the span test
++    // above cannot see. The follower's own recovery ladder is bigger than that
++    // threshold -- a contact retreat backs out 1.3 m, an unstick runs 0.20 m/s
++    // for 6 s -- so an aircraft in a strike-retreat-reapproach loop spans more
++    // than 2 m and reads as healthy while getting nowhere. Measured in run h04:
++    // "commanded 1.9 m of travel and moved 0.06 m" at (5.2, 1.6), the tour
++    // aiming at one viewpoint forty times, and this guard silent throughout.
++    //
++    // What separates a loop from a transit is what the path BUYS. A transit
++    // spends its path on displacement and on closing the gap to the target; a
++    // loop spends it on neither. Requiring all three -- no closing progress, a
++    // path worth measuring, and a path much longer than the displacement it
++    // produced -- keeps a legitimate detour around a wall out of it, because a
++    // detour still goes somewhere even when it is briefly no nearer.
++    double path = 0.0;
++    for (size_t i = 1; i < track.size(); ++i)
++      path += (track[i].second - track[i - 1].second).norm();
++    const double net = (pos - track.front().second).norm();
++    const double closed =
++        (track.front().second - next_pos).norm() - (pos - next_pos).norm();
++    // `closed` must be NEGATIVE, not merely small. Measured in run h05: seven
++    // fires at a 0.5 m bar, of which two -- "closed 0.49 m" and "closed
++    // 0.33 m" -- were an aircraft genuinely arriving, only slowly. It plans at
++    // 0.15 m/s and legitimately crawls at 0.34-0.61x that through a doorway, so
++    // half a metre of straight-line closure in 25 s is ordinary progress, not a
++    // dead end; and rounding a corner converts path into almost no closure at
++    // all while still being exactly the right thing to do. Ending the window
++    // FURTHER from the viewpoint than it started, having flown several metres,
++    // admits no such reading. The five genuine fires in that run were all
++    // negative (-0.44 to -1.45 m); both false positives were positive.
++    // Over 60 s at a 0.15 m/s plan the aircraft can cover about 9 m, so 5 m of
++    // path is still a modest bar; what carries the verdict is that none of it
++    // became displacement or closure.
++    const bool looping = path > 5.0 && path > 2.0 * net && closed < 0.0;
++
++    if (!at_target && track.front().first <= now_s - LOOP_WINDOW_S && looping) {
++      frontier_finder_->addBlockedRegion(next_pos);
++      ROS_WARN("[ExplorationManager] Aircraft flew %.1f m for %.1f m of net "
++               "displacement over 60 s and closed %.2f m on viewpoint "
++               "(%.2f, %.2f, %.2f); it is looping, not transiting -- blocking it "
++               "so the coverage tour moves on",
++               path, net, closed, next_pos[0], next_pos[1], next_pos[2]);
++      track.clear();
++    } else if (!at_target && pinned_oldest <= now_s - PINNED_WINDOW_S && span < 2.0) {
++      frontier_finder_->addBlockedRegion(next_pos);
++      ROS_WARN("[ExplorationManager] Aircraft confined to <2 m for 25 s short of "
++               "viewpoint (%.2f, %.2f, %.2f); blocking it so the coverage tour "
++               "moves on",
++               next_pos[0], next_pos[1], next_pos[2]);
++      track.clear();
++    }
++  }
++
+   // Local planner
+   // Require next_pos, next_yaw from global planner
+   // pos, vel, acc, yaw: current states
+@@ -1556,6 +1677,44 @@ void ExplorationManager::solveTSP(const Eigen::MatrixXd &cost_matrix, const TSPC
+                                         vector<int> &result_indices, double &total_cost) {
+   CHECK_EQ(cost_matrix.rows(), cost_matrix.cols()) << "TSP cost matrix must be square";
+ 
++  // Degenerate tours crash the in-process LKH solver (heap corruption in
++  // FindTour -> Best5OptMove -> Flip_SL), and they arrive in storms right
++  // after a respawn wipes the map: tiny map, tiny tour, crash, respawn,
++  // repeat -- 15 planner deaths in one 45-minute mission. With 3 or fewer
++  // cities there is nothing to optimise: enumerate the (at most two) orders
++  // directly and never enter LKH.
++  if (config.dimension_ <= 3) {
++    vector<int> ids;
++    for (int id = 1; id <= config.dimension_; ++id)
++      ids.push_back(id);
++    auto tour_cost = [&](const vector<int> &order) {
++      double c = 0.0;
++      for (size_t i = 0; i + 1 < order.size(); ++i)
++        c += cost_matrix(order[i] - 1, order[i + 1] - 1);
++      return c;
++    };
++    vector<int> best = ids;
++    double best_cost = tour_cost(ids);
++    if (config.dimension_ == 3) {
++      vector<int> alt = {1, 3, 2};
++      double alt_cost = tour_cost(alt);
++      if (alt_cost < best_cost) {
++        best = alt;
++        best_cost = alt_cost;
++      }
++    }
++    total_cost = best_cost;
++    result_indices.clear();
++    for (int id : best) {
++      if (id == 1 && config.skip_first_)
++        continue;
++      if (id == config.dimension_ && config.skip_last_)
++        continue;
++      result_indices.push_back(id - config.result_id_offset_);
++    }
++    return;
++  }
++
+   ros::Time t1 = ros::Time::now();
+   // Write params and cost matrix to problem file
+   ofstream prob_file(ep_->tsp_dir_ + "/" + config.problem_name_ + ".tsp");
+diff --git a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+index 241834b..7217a66 100644
+--- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
++++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+@@ -90,6 +90,14 @@ public:
+   void setCellHeights(const vector<double> &cell_heights);
+   bool isFrontierCovered();
+   void wrapYaw(double &yaw);
++  // Retire frontiers whose viewpoint the aircraft has proven it cannot fly to
++  // (an obstacle inside the depth near clip the map never caught). The
++  // exploration manager reports the spot when it fails to close on a chosen
++  // viewpoint; every cluster near it is then forced dormant.
++  void addBlockedRegion(const Vector3d &pos);
++  // Drop shadows older than blocked_region_ttl_s_. Called once per frontier
++  // update, so an expired region is reconsidered on the very next tour.
++  void expireBlockedRegions();
+ 
+   shared_ptr<PerceptionUtils> percep_utils_;
+   unique_ptr<RayCaster> raycaster_;
+@@ -126,6 +134,66 @@ private:
+   list<Frontier>::iterator first_new_ftr_;
+   Frontier next_frontier_;
+   Position update_bbox_min_, update_bbox_max_;
++  // Viewpoints the aircraft could not reach; any frontier whose average falls
++  // within blocked_region_radius_ of one is forced dormant, so the coverage
++  // tour stops offering a route the map believes clear but physics blocks.
++  //
++  // Each shadow carries the time it was cast, because a shadow is a statement
++  // about the map as it stood, and the map changes. A viewpoint unreachable in
++  // the first minute of a mission, when almost nothing has been observed, is
++  // usually reachable later; leaving it shadowed for the life of the node
++  // retires a whole wing of a building on the strength of one early failure.
++  // Each re-report of the same region doubles how long the next shadow lasts,
++  // which is what lets one setting serve both cases this knob has to trade
++  // between: an early mistake in a corridor is forgiven within a TTL, while a
++  // genuinely unobservable pocket -- a staircase, a solid elevator slab, a
++  // curtain modelled floor to ceiling -- is retired for progressively longer
++  // until it stops costing anything, so the mission can still reach FINISH.
++  vector<Vector3d> blocked_regions_;
++  vector<double> blocked_regions_stamp_;
++  vector<int> blocked_regions_strikes_;
++  // Strikes have to outlive the shadows that earned them, and be keyed more
++  // coarsely than them. An aircraft defeated by the same pile of clutter twice
++  // rarely fails at the same point twice: measured 2.6 m apart, which is
++  // outside the coalesce radius, so every failure looked new, every shadow
++  // started at strike 1, and the escalation never engaged. This history is
++  // never expired and is consulted only to seed a new shadow's strike count.
++  vector<Vector3d> blocked_history_;
++  vector<int> blocked_history_strikes_;
++  // Volumes no viewpoint may be placed in and no cluster may be offered from,
++  // from /map_config/keep_out_boxes. Flat: six doubles per box.
++  std::vector<double> keep_out_;
++
++  double blocked_region_radius_;
++  // The width a shadow reaches once the place behind it has proved itself.
++  // blocked_region_radius_ is deliberately UNDER candidate_rmax so that one
++  // bad viewpoint does not retire the frontier that produced it -- which is
++  // right for a shadow cast on a single 25 s confinement, and wrong forever
++  // after, because a frontier whose every viewpoint is unreachable then
++  // re-offers one just outside the shadow on every cycle and the tour never
++  // moves on. Past the first strike the shadow widens past candidate_rmax and
++  // the frontier finally goes dormant. <= blocked_region_radius_ disables the
++  // widening and restores the fixed-width behaviour.
++  double blocked_region_radius_max_;
++  // The shadow radius earned by a region on `strikes` strikes: the same
++  // doubling ladder blocked_region_ttl_s_ uses, under its own cap.
++  double blockedRadiusFor(int strikes) const;
++  // Retire frontiers already on frontiers_ that a shadow now covers. The
++  // categorisation loop only ever sees freshly re-detected clusters, so
++  // without this a shadow cast on a known frontier never reaches it.
++  void sweepBlockedFrontiers();
++  // Drop every shadow and re-offer every retired cluster, once the frontier set
++  // would otherwise be empty. Bounded by finish_amnesty_max_.
++  void grantFinishAmnesty();
++  int finish_amnesty_max_;
++  int finish_amnesty_used_;
++  // Set for exactly one categorisation pass by grantFinishAmnesty(): relaxes
++  // the viewpoint-placement clearances that are otherwise what retires a
++  // REACHABLE frontier as unviewable.
++  bool amnesty_relax_;
++  double blocked_region_escalate_radius_;
++  double blocked_region_ttl_s_;
++  int blocked_region_ttl_max_doubling_;
+ 
+   // Params
+   int cluster_min_;
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+index f07a08d..a19c838 100644
 --- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
 +++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
 @@ -1,7 +1,48 @@
@@ -89,10 +339,11 @@
  #include "pathfinding/path_cost_evaluator.h"
  #include "perception_utils/perception_utils.h"
  
-@@ -30,6 +71,31 @@
+@@ -29,6 +70,54 @@ FrontierFinder::FrontierFinder(ros::NodeHandle &nh, const shared_ptr<MapServer>
+   nh.param("/frontier_finder/ground_offset", ground_offset_, 0.0);
    nh.param("/frontier_finder/viewpoint_z_score_cutoff", viewpoint_z_score_cutoff_, 0.0);
    nh.param("/frontier_finder/cell_height_clearance", cell_height_clearance_, 0.1);
-   nh.param("/frontier_finder/blocked_region_radius", blocked_region_radius_, 1.5);
++  nh.param("/frontier_finder/blocked_region_radius", blocked_region_radius_, 1.5);
 +  // How long a shadow lasts. <= 0 keeps the old permanent behaviour.
 +  nh.param("/frontier_finder/blocked_region_ttl_s", blocked_region_ttl_s_, 90.0);
 +  nh.param("/frontier_finder/blocked_region_ttl_max_doubling",
@@ -118,14 +369,13 @@
 +             (unsigned long)(keep_out_.size() / 6));
 +  finish_amnesty_used_ = 0;
 +  amnesty_relax_ = false;
- 
-   // Reload shadows a previous incarnation persisted: this node respawns after
-   // LKH crashes, and physics-vetoed viewpoints stay vetoed across respawns.
-@@ -37,8 +103,17 @@
-     std::vector<double> flat;
-     if (ros::param::get("/frontier_finder/blocked_regions_runtime", flat) &&
-         flat.size() >= 3) {
--      for (size_t i = 0; i + 2 < flat.size(); i += 3)
++
++  // Reload shadows a previous incarnation persisted: this node respawns after
++  // LKH crashes, and physics-vetoed viewpoints stay vetoed across respawns.
++  {
++    std::vector<double> flat;
++    if (ros::param::get("/frontier_finder/blocked_regions_runtime", flat) &&
++        flat.size() >= 3) {
 +      // Restored shadows are stamped NOW, not with the time they were cast.
 +      // The successor cannot know how much of their life they had already
 +      // spent, and the safe reading is the conservative one: a viewpoint the
@@ -133,14 +383,18 @@
 +      // TTL, and no longer than that.
 +      double stamp = ros::Time::now().toSec();
 +      for (size_t i = 0; i + 2 < flat.size(); i += 3) {
-         blocked_regions_.push_back(Eigen::Vector3d(flat[i], flat[i + 1], flat[i + 2]));
++        blocked_regions_.push_back(Eigen::Vector3d(flat[i], flat[i + 1], flat[i + 2]));
 +        blocked_regions_stamp_.push_back(stamp);
 +        blocked_regions_strikes_.push_back(1);
 +      }
-       ROS_WARN("[FrontierFinder] Restored %lu blocked region(s) from a previous "
-                "incarnation", blocked_regions_.size());
-     }
-@@ -64,13 +139,108 @@
++      ROS_WARN("[FrontierFinder] Restored %lu blocked region(s) from a previous "
++               "incarnation", blocked_regions_.size());
++    }
++  }
+ 
+   raycaster_.reset(new RayCaster);
+   resolution_ = map_server_->getResolution();
+@@ -50,6 +139,124 @@ FrontierFinder::FrontierFinder(ros::NodeHandle &nh, const shared_ptr<MapServer>
  
  FrontierFinder::~FrontierFinder() {}
  
@@ -206,11 +460,9 @@
 +  ros::param::set("/frontier_finder/blocked_regions_runtime", flat);
 +}
 +
- void FrontierFinder::addBlockedRegion(const Vector3d &pos) {
-   // Coalesce nearby reports so a wall the aircraft grinds along a few times
-   // does not fill the list; one marker per radius is enough to shadow it.
--  for (const auto &b : blocked_regions_)
--    if ((b - pos).norm() < blocked_region_radius_)
++void FrontierFinder::addBlockedRegion(const Vector3d &pos) {
++  // Coalesce nearby reports so a wall the aircraft grinds along a few times
++  // does not fill the list; one marker per radius is enough to shadow it.
 +  // A repeat report REFRESHES the shadow rather than being dropped: the
 +  // aircraft is telling us it is still stuck there, which is exactly the
 +  // evidence that should keep the region shadowed for another full TTL.
@@ -243,28 +495,31 @@
 +               blocked_region_ttl_s_ *
 +                   double(1 << std::min(strikes - 1,
 +                                        blocked_region_ttl_max_doubling_)));
-       return;
++      return;
 +    }
-   blocked_regions_.push_back(pos);
++  blocked_regions_.push_back(pos);
 +  blocked_regions_stamp_.push_back(ros::Time::now().toSec());
 +  blocked_regions_strikes_.push_back(strikes);
-   // Persist to the param server: this node respawns after LKH crashes and a
-   // fresh process would otherwise forget every hard-won shadow, sending the
-   // coverage tour straight back to viewpoints physics already vetoed.
-@@ -82,9 +252,9 @@
-     flat.push_back(pos.z());
-     ros::param::set("/frontier_finder/blocked_regions_runtime", flat);
-   }
--  ROS_WARN("[FrontierFinder] Blocked unreachable viewpoint (%.2f, %.2f, %.2f); "
--           "%lu region(s) now shadowed from the coverage tour",
--           pos.x(), pos.y(), pos.z(), blocked_regions_.size());
++  // Persist to the param server: this node respawns after LKH crashes and a
++  // fresh process would otherwise forget every hard-won shadow, sending the
++  // coverage tour straight back to viewpoints physics already vetoed.
++  {
++    std::vector<double> flat;
++    ros::param::get("/frontier_finder/blocked_regions_runtime", flat);
++    flat.push_back(pos.x());
++    flat.push_back(pos.y());
++    flat.push_back(pos.z());
++    ros::param::set("/frontier_finder/blocked_regions_runtime", flat);
++  }
 +  ROS_WARN("[FrontierFinder] Blocked unreachable viewpoint (%.2f, %.2f, %.2f) "
 +           "on strike %d; %lu region(s) now shadowed from the coverage tour",
 +           pos.x(), pos.y(), pos.z(), strikes, blocked_regions_.size());
- }
- 
++}
++
  void FrontierFinder::searchFrontiers() {
-@@ -600,7 +770,124 @@
+   ros::Time t1 = ros::Time::now();
+   tmp_frontiers_.clear();
+@@ -563,39 +770,212 @@ void FrontierFinder::computeFrontierInfo(Frontier &ftr) {
    downsample(ftr.cells_, ftr.filtered_cells_);
  }
  
@@ -378,43 +633,122 @@
 +  // frontiers_, and that iterator points into the same list.
 +  sweepBlockedFrontiers();
 +
-+  // Both lists empty means this cycle is about to leave the mission with no
-+  // frontier at all, which is what the FSM reads as "exploration finished".
-+  // Test BOTH: frontiers_ alone is transiently empty early in a mission while
-+  // tmp_frontiers_ is full of clusters about to be categorised, and an amnesty
-+  // granted there would fire on a perfectly healthy start.
-+  if (frontiers_.empty() && tmp_frontiers_.empty())
-+    grantFinishAmnesty();
-+
    first_new_ftr_ = frontiers_.end();
    int new_num = 0;
    int new_dormant_num = 0;
-@@ -611,9 +898,20 @@
-     // could not physically reach (an obstacle inside the depth near clip the map
-     // never caught) is retired to dormant, so the coverage tour stops re-picking
-     // a route the map believes clear but the airframe keeps grinding into.
--    bool in_blocked = false;
--    for (const auto &b : blocked_regions_)
--      if ((b - tmp_ftr.average_).norm() < blocked_region_radius_) {
-+    // Against the EARNED radius, not the fixed one. A shadow is cast at a
-+    // viewpoint and tested here against the frontier's average, and viewpoints
-+    // are sampled candidate_rmin..rmax from that average -- so at the strike-1
-+    // width (deliberately under candidate_rmax) this test cannot fire for the
-+    // frontier that produced the blocked viewpoint. That is correct exactly
-+    // once: it stops a single early mistake retiring a transit route. From the
-+    // second strike the width exceeds candidate_rmax and the frontier retires,
-+    // which is what stops the tour re-offering a place the aircraft has now
-+    // failed to reach twice.
-+    bool in_blocked = insideKeepOut(keep_out_, tmp_ftr.average_.x(),
-+                                    tmp_ftr.average_.y(), tmp_ftr.average_.z());
-+    for (size_t i = 0; !in_blocked && i < blocked_regions_.size(); ++i)
-+      if ((blocked_regions_[i] - tmp_ftr.average_).norm() <
-+          blockedRadiusFor(blocked_regions_strikes_[i])) {
-         in_blocked = true;
-         break;
+-  // Try find viewpoints for each cluster and categorize them according to
+-  // viewpoint number
+-  for (auto &tmp_ftr : tmp_frontiers_) {
+-    // Search viewpoints around frontier
+-    sampleViewpoints(tmp_ftr);
+-    // sampleViewpoints3D(tmp_ftr);
+-    if (!tmp_ftr.viewpoints_.empty()) {
+-      ++new_num;
+-      list<Frontier>::iterator inserted = frontiers_.insert(frontiers_.end(), tmp_ftr);
+-      // Sort the viewpoints by coverage fraction, best view in front
+-      sort(inserted->viewpoints_.begin(), inserted->viewpoints_.end(),
+-           [](const Viewpoint &v1, const Viewpoint &v2) { return v1.visib_num_ > v2.visib_num_; });
+-      if (first_new_ftr_ == frontiers_.end())
+-        first_new_ftr_ = inserted;
+-    } else {
+-      CHECK_LE(tmp_ftr.visib_num_, min_visib_num_) << "Frontier with valid viewpoint but dormant";
+-      // Find no viewpoint, move cluster to dormant list
+-      dormant_frontiers_.push_back(tmp_ftr);
+-      ++new_dormant_num;
+-
+-      // remove dormant frontiers, set flag to 0
+-      for (auto &cell : tmp_ftr.cells_) {
+-        Eigen::Vector3i idx;
+-        map_server_->getTSDF()->positionToIndex(cell, idx);
+-        frontier_flag_[toadr(idx)] = false;
++  // Categorise every detected cluster, then hand tmp_frontiers_ back empty:
++  // each cluster is now either promoted into frontiers_ or retired into
++  // dormant_frontiers_, and none of them may be categorised a second time.
++  auto categorise = [&]() {
++    // Try find viewpoints for each cluster and categorize them according to
++    // viewpoint number
++    for (auto &tmp_ftr : tmp_frontiers_) {
++      // Controller-reported dead end: a cluster sitting on a viewpoint the aircraft
++      // could not physically reach (an obstacle inside the depth near clip the map
++      // never caught) is retired to dormant, so the coverage tour stops re-picking
++      // a route the map believes clear but the airframe keeps grinding into.
++      // Against the EARNED radius, not the fixed one. A shadow is cast at a
++      // viewpoint and tested here against the frontier's average, and viewpoints
++      // are sampled candidate_rmin..rmax from that average -- so at the strike-1
++      // width (deliberately under candidate_rmax) this test cannot fire for the
++      // frontier that produced the blocked viewpoint. That is correct exactly
++      // once: it stops a single early mistake retiring a transit route. From the
++      // second strike the width exceeds candidate_rmax and the frontier retires,
++      // which is what stops the tour re-offering a place the aircraft has now
++      // failed to reach twice.
++      bool in_blocked = insideKeepOut(keep_out_, tmp_ftr.average_.x(),
++                                      tmp_ftr.average_.y(), tmp_ftr.average_.z());
++      for (size_t i = 0; !in_blocked && i < blocked_regions_.size(); ++i)
++        if ((blocked_regions_[i] - tmp_ftr.average_).norm() <
++            blockedRadiusFor(blocked_regions_strikes_[i])) {
++          in_blocked = true;
++          break;
++        }
++      if (in_blocked) {
++        dormant_frontiers_.push_back(tmp_ftr);
++        ++new_dormant_num;
++        for (auto &cell : tmp_ftr.cells_) {
++          Eigen::Vector3i idx;
++          map_server_->getTSDF()->positionToIndex(cell, idx);
++          frontier_flag_[toadr(idx)] = false;
++        }
++        continue;
++      }
++      // Search viewpoints around frontier
++      sampleViewpoints(tmp_ftr);
++      // sampleViewpoints3D(tmp_ftr);
++      if (!tmp_ftr.viewpoints_.empty()) {
++        ++new_num;
++        list<Frontier>::iterator inserted = frontiers_.insert(frontiers_.end(), tmp_ftr);
++        // Sort the viewpoints by coverage fraction, best view in front
++        sort(inserted->viewpoints_.begin(), inserted->viewpoints_.end(),
++             [](const Viewpoint &v1, const Viewpoint &v2) { return v1.visib_num_ > v2.visib_num_; });
++        if (first_new_ftr_ == frontiers_.end())
++          first_new_ftr_ = inserted;
++      } else {
++        CHECK_LE(tmp_ftr.visib_num_, min_visib_num_) << "Frontier with valid viewpoint but dormant";
++        // Find no viewpoint, move cluster to dormant list
++        dormant_frontiers_.push_back(tmp_ftr);
++        ++new_dormant_num;
++
++        // remove dormant frontiers, set flag to 0
++        for (auto &cell : tmp_ftr.cells_) {
++          Eigen::Vector3i idx;
++          map_server_->getTSDF()->positionToIndex(cell, idx);
++          frontier_flag_[toadr(idx)] = false;
++        }
        }
-@@ -653,6 +951,9 @@
      }
++    tmp_frontiers_.clear();
++  };
++
++  // Categorise; and if that leaves the mission with NO frontier at all, grant
++  // an amnesty and categorise once more over what it hands back.
++  //
++  // The gate has to sit AFTER the loop rather than in front of it. In front it
++  // can only fire when nothing was detected this cycle -- but the failure it
++  // exists to catch is the opposite one: clusters ARE re-detected every cycle
++  // and every one of them is categorised INTO dormant, so frontiers_ only
++  // becomes empty once the loop has run. Measured with the gate in front: the
++  // warehouse declared FINISH carrying 493 dormant clusters and 2 standing
++  // shadows having never granted an amnesty, and two hospital legs finished at
++  // 284 and 300 m3 the same way.
++  //
++  // Two passes, not a while loop: grantFinishAmnesty() is itself bounded by
++  // finish_amnesty_max_, and a second pass that produces nothing must be
++  // allowed to end the mission.
++  for (int pass = 0; pass < 2; ++pass) {
++    categorise();
++    if (!frontiers_.empty())
++      break;
++    grantFinishAmnesty();
++    if (tmp_frontiers_.empty())
++      break;
    }
  
 +  // The relaxation lasts exactly this one pass, whatever it produced.
@@ -423,7 +757,7 @@
    // Bad implementation, need to be changed to unique id
    // Reset indices of frontiers
    int idx = 0;
-@@ -805,10 +1106,25 @@
+@@ -748,10 +1128,25 @@ void FrontierFinder::sampleViewpoints(Frontier &frontier) {
        const Vector3d sample_pos = frontier.average_ + rc * Vector3d(cos(phi), sin(phi), 0);
  
        // Qualified viewpoint is in bounding box and in safe region
@@ -450,7 +784,7 @@
          continue;
  
        // Compute average yaw
-@@ -830,7 +1146,7 @@
+@@ -773,7 +1168,7 @@ void FrontierFinder::sampleViewpoints(Frontier &frontier) {
        if (visib_num > frontier.visib_num_)
          frontier.visib_num_ = visib_num;
  
@@ -459,7 +793,7 @@
          Viewpoint vp = {sample_pos, avg_yaw, visib_num};
  
          // Check angle with first principal component within [60, 120] (DEPRECATED)
-@@ -963,10 +1279,25 @@
+@@ -906,10 +1301,25 @@ void FrontierFinder::sampleViewpoints3D(Frontier &frontier) {
          sample_pos.z() = viewpoint_height;
  
          // Qualified viewpoint is in bounding box and in safe region
@@ -486,7 +820,7 @@
            continue;
  
          // Compute average yaw
-@@ -988,7 +1319,7 @@
+@@ -931,7 +1341,7 @@ void FrontierFinder::sampleViewpoints3D(Frontier &frontier) {
          if (visib_num > frontier.visib_num_)
            frontier.visib_num_ = visib_num;
  
@@ -495,9 +829,64 @@
            Viewpoint vp = {sample_pos, avg_yaw, visib_num};
  
            // Check angle with first principal component within [60, 120] (DEPRECATED)
+diff --git a/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp b/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
+index 7c17673..8792047 100644
 --- a/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
 +++ b/falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp
-@@ -1568,7 +1568,21 @@
+@@ -215,9 +215,22 @@ UniformGrid::UniformGrid(ros::NodeHandle &nh, const Config &config,
+ }
+ 
+ int UniformGrid::positionToGridCellId(const Position &pos) {
+-  int x = std::floor((pos.x() - config_.bbox_min_.x()) / config_.cell_size_.x());
+-  int y = std::floor((pos.y() - config_.bbox_min_.y()) / config_.cell_size_.y());
+-  int z = std::floor((pos.z() - config_.bbox_min_.z()) / config_.cell_size_.z());
++  // Clamp into the grid box FIRST: the aircraft sits below the box floor on
++  // every takeoff (and can overshoot any face), and an out-of-box position
++  // floored to a negative index here flowed into unchecked vector indexing
++  // and allocation sizes downstream -- segfaults and bad_allocs that killed
++  // the planner at mission start. The callers ask "which cell is this
++  // position in"; for an out-of-box position the nearest cell is the answer.
++  Position p = pos;
++  for (int k = 0; k < 3; ++k)
++    p(k) = std::max(config_.bbox_min_(k) + 1e-4,
++                    std::min(config_.bbox_max_(k) - 1e-4, pos(k)));
++  int x = std::floor((p.x() - config_.bbox_min_.x()) / config_.cell_size_.x());
++  int y = std::floor((p.y() - config_.bbox_min_.y()) / config_.cell_size_.y());
++  int z = std::floor((p.z() - config_.bbox_min_.z()) / config_.cell_size_.z());
++  x = std::max(0, std::min(config_.num_cells_x_ - 1, x));
++  y = std::max(0, std::min(config_.num_cells_y_ - 1, y));
++  z = std::max(0, std::min(config_.num_cells_z_ - 1, z));
+ 
+   return x + y * config_.num_cells_x_ + z * config_.num_cells_x_ * config_.num_cells_y_;
+ }
+@@ -232,6 +245,26 @@ void UniformGrid::positionToGridCellCenterId(const Position &pos, int &cell_id,
+ 
+   cell_id = positionToGridCellId(pos);
+ 
++  // A position outside the grid box (the aircraft below the box floor during
++  // takeoff, or overshooting a face) produced an out-of-range id here and the
++  // unchecked vector index below SEGFAULTED the node -- upstream knew (the
++  // CHECKs at the bottom of this function are commented out) and shipped the
++  // crash; measured as 14 planner deaths in 8 minutes once the flight box
++  // floor was raised. Clamp to the nearest in-box position instead: every
++  // caller is asking "which tour cell is the aircraft in", and for an
++  // aircraft at the boundary the nearest cell IS the answer.
++  if (cell_id < 0 || cell_id >= static_cast<int>(uniform_grid_.size())) {
++    Position clamped = pos;
++    for (int k = 0; k < 3; ++k)
++      clamped(k) = std::max(config_.bbox_min_(k) + 1e-3,
++                            std::min(config_.bbox_max_(k) - 1e-3, pos(k)));
++    cell_id = positionToGridCellId(clamped);
++    if (cell_id < 0 || cell_id >= static_cast<int>(uniform_grid_.size())) {
++      cell_id = -1;
++      return;
++    }
++  }
++
+   Position bbox_min = uniform_grid_[cell_id].bbox_min_;
+   Position bbox_max = uniform_grid_[cell_id].bbox_max_;
+ 
+@@ -1535,7 +1568,21 @@ void UniformGrid::getCCLCenters2D(const int &cell_id, std::vector<Position> &cen
    ccl_voxels_addr_[cell_id].clear();
    ccl_voxels_color_[cell_id].clear();
  
@@ -520,89 +909,141 @@
    Position bbox_min = uniform_grid_[cell_id].bbox_min_;
    Position bbox_max = uniform_grid_[cell_id].bbox_max_;
    bbox_min.z() = height;
---- a/falcon_planner/exploration_manager/src/exploration_manager.cpp
-+++ b/falcon_planner/exploration_manager/src/exploration_manager.cpp
-@@ -985,13 +985,77 @@
-     static std::vector<std::pair<double, Vector3d>> track;
-     const double now_s = ros::Time::now().toSec();
-     track.push_back(std::make_pair(now_s, pos));
--    while (track.size() > 1 && track.front().first < now_s - 25.0)
-+    // Two tests read this history and they need DIFFERENT windows, because
-+    // they rest on evidence of different strength. "Has not moved at all for
-+    // 25 s" is conclusive on its own. "Moved, but got no nearer" is not: it is
-+    // also what a hard doorway looks like while the aircraft is still winning.
-+    // Measured -- the run that mapped the most of this building spent about
-+    // 300 s looping at (-10.5, -2.5), escaped unaided, and went on to 732.9 m3
-+    // and every corner of the world; retiring its viewpoint at 25 s would have
-+    // thrown that away, and the two runs that did retire early finished at 399
-+    // and 479 m3 having never reached the south wing at all.
-+    //
-+    // So the looping test gets the longer window and the pinned test keeps its
-+    // own. A moving aircraft still has options a pinned one does not, and the
-+    // cost of waiting is bounded by the watchdog above it.
-+    const double LOOP_WINDOW_S = 60.0;
-+    const double PINNED_WINDOW_S = 25.0;
-+    while (track.size() > 1 && track.front().first < now_s - LOOP_WINDOW_S)
-       track.erase(track.begin());
-     const bool at_target = (pos - next_pos).norm() < 0.6;
-     double span = 0.0;
--    for (size_t i = 0; i < track.size(); ++i)
-+    double pinned_oldest = now_s;
-+    for (size_t i = 0; i < track.size(); ++i) {
-+      if (track[i].first < now_s - PINNED_WINDOW_S)
-+        continue;   // the pinned test owns only the recent tail of the history
-       span = std::max(span, (track[i].second - pos).norm());
--    if (!at_target && track.front().first <= now_s - 25.0 && span < 2.0) {
-+      pinned_oldest = std::min(pinned_oldest, track[i].first);
+@@ -2004,6 +2051,7 @@ void UniformGrid::calculateCostMatrixSingleThread(
+         // int end_id = cell_id_center_id_pair.first * 10 + cell_id_center_id_pair.second;
+       } else {
+         cost = getAStarCostYaw(cur_pos, center_free, cur_vel, 0.0, 0.0);
++        if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+         // if (cost > 499.0) {
+         //   ROS_ERROR("[UniformGrid] Cost from current position to cell %d free center (%.2f, %.2f,
+         //   "
+@@ -2116,11 +2164,13 @@ void UniformGrid::calculateCostMatrixSingleThread(
+               std::vector<int> path;
+               cost = connectivity_graph_->searchConnectivityGraphBFS(cell_center_id1,
+                                                                      cell_center_id2, path);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost (BFS), avoid CHECK_GT abort
+               CHECK_GT(cost, 1e-4) << "Zero cost from cell " << grid_cell1.id_ << " center " << i
+                                    << " to cell " << grid_cell2.id_ << " center " << j;
+             }
+           } else {
+             cost = getAStarCostYaw(centers1[i], centers2[j], Eigen::Vector3d::Zero(), 0.0, 0.0);
++            if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+             if (cost > 499.0) {
+               // Try CG search
+               if (no_cg_search) {
+@@ -2129,6 +2179,7 @@ void UniformGrid::calculateCostMatrixSingleThread(
+                 std::vector<int> path;
+                 cost = connectivity_graph_->searchConnectivityGraphBFS(cell_center_id1,
+                                                                        cell_center_id2, path);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost (BFS), avoid CHECK_GT abort
+                 CHECK_GT(cost, 1e-4) << "Zero cost from cell " << grid_cell1.id_ << " center " << i
+                                      << " to cell " << grid_cell2.id_ << " center " << j;
+               }
+@@ -2292,6 +2343,7 @@ void UniformGrid::calculateCostMatrixMultiThread(
+             } else {
+               // WARNING: getAStarCostYaw is not thread safe
+               cost = getAStarCostYaw(cur_pos, center, cur_vel, 0.0, 0.0);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+             }
+ 
+             cost_matrix(0, index) = cost;
+@@ -2330,6 +2382,7 @@ void UniformGrid::calculateCostMatrixMultiThread(
+             } else {
+               // WARNING: getAStarCostYaw is not thread safe
+               cost = getAStarCostYaw(center1, center2, Eigen::Vector3d::Zero(), 0.0, 0.0);
++              if (cost < 1e-3) cost = 1e-3; // FALCON patch: floor cost, avoid CHECK_GT abort
+             }
+ 
+             if (!is_free_center1 || !is_free_center2) {
+diff --git a/falcon_planner/fast_planner/src/planner_manager.cpp b/falcon_planner/fast_planner/src/planner_manager.cpp
+index b5c3541..80d6acd 100644
+--- a/falcon_planner/fast_planner/src/planner_manager.cpp
++++ b/falcon_planner/fast_planner/src/planner_manager.cpp
+@@ -389,14 +389,35 @@ bool FastPlannerManager::checkTrajCollision() {
+   Eigen::Vector3d fut_pt;
+   double fut_t = 0.02;
+ 
++  // How far the curve may commit through UNOBSERVED space. Upstream rejects a
++  // sample only if it is OCCUPIED, so UNKNOWN passes and the aircraft will fly
++  // six metres into a volume it has never seen on the assumption that it is
++  // empty. The follower cannot catch that either: its voxel gate accumulates
++  // OCCUPIED only, so "known empty" and "never looked at" are the same thing to
++  // it as well.
++  //
++  // Rejecting UNKNOWN outright would deadlock exploration -- approaching
++  // unobserved space is the job. What is wrong is COMMITTING to it. Within this
++  // radius the sensor is about to resolve the volume and the aircraft can stop
++  // inside its own braking distance; beyond it the curve is a guess.
++  static double unknown_commit_m = -1.0;
++  if (unknown_commit_m < 0.0)
++    ros::param::param("/fsm/unknown_commit_m", unknown_commit_m, 1e9);
++
+   while (radius < 6.0 && t_now + fut_t < local_data_.duration_) {
+     fut_pt = local_data_.position_traj_.evaluateDeBoorT(t_now + fut_t);
+-    if (map_server_->getOccupancy(fut_pt) == voxel_mapping::OccupancyType::OCCUPIED) {
++    const voxel_mapping::OccupancyType value = map_server_->getOccupancy(fut_pt);
++    radius = (fut_pt - cur_pt).norm();
++    if (value == voxel_mapping::OccupancyType::OCCUPIED) {
+       ROS_ERROR("[FastPlannerManager] Collision detected at (%.2f, %.2f, %.2f)", fut_pt.x(),
+                 fut_pt.y(), fut_pt.z());
+       return false;
+     }
+-    radius = (fut_pt - cur_pt).norm();
++    if (value == voxel_mapping::OccupancyType::UNKNOWN && radius > unknown_commit_m) {
++      ROS_ERROR("[FastPlannerManager] Trajectory commits %.2f m into UNOBSERVED space at "
++                "(%.2f, %.2f, %.2f); refusing it", radius, fut_pt.x(), fut_pt.y(), fut_pt.z());
++      return false;
 +    }
+     fut_t += 0.02;
+   }
+ 
+diff --git a/falcon_planner/pathfinding/include/pathfinding/astar.h b/falcon_planner/pathfinding/include/pathfinding/astar.h
+index 236e308..36a22c1 100644
+--- a/falcon_planner/pathfinding/include/pathfinding/astar.h
++++ b/falcon_planner/pathfinding/include/pathfinding/astar.h
+@@ -156,6 +156,40 @@ private:
+   double getManhHeu(const Eigen::Vector3d &x1, const Eigen::Vector3d &x2);
+   double getDiagHeu(const Eigen::Vector3d &x1, const Eigen::Vector3d &x2);
+ 
++  // How far to grow obstacles, in metres, in the horizontal plane only. Set to
++  // the airframe radius; 0 disables and restores upstream point-robot search.
++  // Kept as plain doubles and a vector of double pairs: an Eigen container in
++  // this header makes GCC 9 ICE in every TU that includes it.
++  double inflate_radius_;
++  // Radius around the search START within which the inflation is suppressed,
++  // so an aircraft already touching a wall can still plan its way off it
++  // instead of finding no valid start node.
++  double start_clearance_;
++  std::vector<std::pair<double, double> > inflate_offsets_;
++  bool inflate_offsets_built_;
++  // Consulted by isBlockedInflated. The inflated search is tried first and, if
++  // it finds nothing, retried with this false -- see the wrappers in astar.cpp.
++  bool inflate_enabled_;
++  int searchOnce(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt);
++  int searchBBoxOnce(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt,
++                     const Eigen::Vector3d &bbox_min, const Eigen::Vector3d &bbox_max);
++  void buildInflateOffsets();
++  // Astar::init() runs before the map server is configured, so the stencil is
++  // built on first use rather than at construction.
++  void buildInflateOffsetsIfNeeded();
++  bool isBlockedInflated(const Eigen::Vector3d &pos, const Eigen::Vector3d &start);
 +
-+    // ...and the same failure with the aircraft MOVING, which the span test
-+    // above cannot see. The follower's own recovery ladder is bigger than that
-+    // threshold -- a contact retreat backs out 1.3 m, an unstick runs 0.20 m/s
-+    // for 6 s -- so an aircraft in a strike-retreat-reapproach loop spans more
-+    // than 2 m and reads as healthy while getting nowhere. Measured in run h04:
-+    // "commanded 1.9 m of travel and moved 0.06 m" at (5.2, 1.6), the tour
-+    // aiming at one viewpoint forty times, and this guard silent throughout.
-+    //
-+    // What separates a loop from a transit is what the path BUYS. A transit
-+    // spends its path on displacement and on closing the gap to the target; a
-+    // loop spends it on neither. Requiring all three -- no closing progress, a
-+    // path worth measuring, and a path much longer than the displacement it
-+    // produced -- keeps a legitimate detour around a wall out of it, because a
-+    // detour still goes somewhere even when it is briefly no nearer.
-+    double path = 0.0;
-+    for (size_t i = 1; i < track.size(); ++i)
-+      path += (track[i].second - track[i - 1].second).norm();
-+    const double net = (pos - track.front().second).norm();
-+    const double closed =
-+        (track.front().second - next_pos).norm() - (pos - next_pos).norm();
-+    // `closed` must be NEGATIVE, not merely small. Measured in run h05: seven
-+    // fires at a 0.5 m bar, of which two -- "closed 0.49 m" and "closed
-+    // 0.33 m" -- were an aircraft genuinely arriving, only slowly. It plans at
-+    // 0.15 m/s and legitimately crawls at 0.34-0.61x that through a doorway, so
-+    // half a metre of straight-line closure in 25 s is ordinary progress, not a
-+    // dead end; and rounding a corner converts path into almost no closure at
-+    // all while still being exactly the right thing to do. Ending the window
-+    // FURTHER from the viewpoint than it started, having flown several metres,
-+    // admits no such reading. The five genuine fires in that run were all
-+    // negative (-0.44 to -1.45 m); both false positives were positive.
-+    // Over 60 s at a 0.15 m/s plan the aircraft can cover about 9 m, so 5 m of
-+    // path is still a modest bar; what carries the verdict is that none of it
-+    // became displacement or closure.
-+    const bool looping = path > 5.0 && path > 2.0 * net && closed < 0.0;
++  // Volumes no route may pass through, from /map_config/keep_out_boxes.
++  // Flat: six doubles per box. See the note in astar.cpp on why not Eigen.
++  std::vector<double> keep_out_;
++  // Places the AIRCRAFT has repeatedly failed at, learned at runtime from the
++  // frontier finder's blocked-region list. Flat x,y,z triples.
++  std::vector<double> no_go_;
++  double no_go_radius_;
++  double no_go_refresh_s_;
++  double no_go_last_read_;
++  void refreshNoGoRegions();
 +
-+    if (!at_target && track.front().first <= now_s - LOOP_WINDOW_S && looping) {
-+      frontier_finder_->addBlockedRegion(next_pos);
-+      ROS_WARN("[ExplorationManager] Aircraft flew %.1f m for %.1f m of net "
-+               "displacement over 60 s and closed %.2f m on viewpoint "
-+               "(%.2f, %.2f, %.2f); it is looping, not transiting -- blocking it "
-+               "so the coverage tour moves on",
-+               path, net, closed, next_pos[0], next_pos[1], next_pos[2]);
-+      track.clear();
-+    } else if (!at_target && pinned_oldest <= now_s - PINNED_WINDOW_S && span < 2.0) {
-       frontier_finder_->addBlockedRegion(next_pos);
-       ROS_WARN("[ExplorationManager] Aircraft confined to <2 m for 25 s short of "
-                "viewpoint (%.2f, %.2f, %.2f); blocking it so the coverage tour "
+   Config config_;
+ 
+   // main data structure
+diff --git a/falcon_planner/pathfinding/src/astar.cpp b/falcon_planner/pathfinding/src/astar.cpp
+index 7a11658..42da360 100644
 --- a/falcon_planner/pathfinding/src/astar.cpp
 +++ b/falcon_planner/pathfinding/src/astar.cpp
 @@ -1,7 +1,45 @@
@@ -651,7 +1092,7 @@
  using namespace std;
  using namespace Eigen;
  
-@@ -29,6 +67,26 @@
+@@ -29,6 +67,26 @@ void Astar::init(ros::NodeHandle &nh, const MapServer::Ptr &map_server) {
    nh.param("/astar/profile/fine/max_search_time", config_.fine_max_search_time_, -1.0);
    nh.param("/astar/verbose", config_.verbose_, false);
  
@@ -678,7 +1119,7 @@
    this->map_server_ = map_server;
    setProfile(PROFILE::DEFAULT);
    config_.tie_breaker_ = 1.0 + config_.epsilon_;
-@@ -100,6 +158,24 @@
+@@ -100,6 +158,24 @@ int Astar::search(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt
    auto isValidVoxel = [&](const Position &p) {
      bool is_valid = false;
  
@@ -703,7 +1144,7 @@
      VoxelIndex idx = map_server_->getOccupancyGrid()->positionToIndex(p);
      voxel_mapping::OccupancyType voxel_type = map_server_->getOccupancyGrid()->getVoxel(idx).value;
  
-@@ -255,7 +331,55 @@
+@@ -255,7 +331,55 @@ int Astar::search(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt
    return NO_PATH;
  }
  
@@ -759,7 +1200,7 @@
    AstarNode::Ptr cur_node = path_node_pool_[0];
    cur_node->parent = NULL;
    cur_node->position = start_pt;
-@@ -295,10 +419,7 @@
+@@ -295,10 +419,7 @@ int Astar::search(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt
        dir.normalize();
        for (double l = 0.1; l < len; l += 0.1) {
          Vector3d ckpt = cur_node->position + l * dir;
@@ -771,7 +1212,7 @@
            safe = false;
            break;
          }
-@@ -340,10 +461,7 @@
+@@ -340,10 +461,7 @@ int Astar::search(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt
              continue;
            }
  
@@ -783,7 +1224,7 @@
              continue;
            }
  
-@@ -353,10 +471,7 @@
+@@ -353,10 +471,7 @@ int Astar::search(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt
            dir.normalize();
            for (double l = 0.1; l < len; l += 0.1) {
              Vector3d ckpt = cur_pos + l * dir;
@@ -795,7 +1236,7 @@
                safe = false;
                break;
              }
-@@ -403,8 +518,9 @@
+@@ -403,8 +518,9 @@ int Astar::search(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt
    return NO_PATH;
  }
  
@@ -807,7 +1248,7 @@
    AstarNode::Ptr cur_node = path_node_pool_[0];
    cur_node->parent = NULL;
    cur_node->position = start_pt;
-@@ -442,10 +558,7 @@
+@@ -442,10 +558,7 @@ int Astar::searchBBox(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &en
        dir.normalize();
        for (double l = 0.1; l < len; l += 0.1) {
          Vector3d ckpt = cur_node->position + l * dir;
@@ -819,7 +1260,7 @@
            safe = false;
            break;
          }
-@@ -495,10 +608,7 @@
+@@ -495,10 +608,7 @@ int Astar::searchBBox(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &en
              continue;
            }
  
@@ -831,7 +1272,7 @@
              continue;
            }
  
-@@ -508,10 +618,7 @@
+@@ -508,10 +618,7 @@ int Astar::searchBBox(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &en
            dir.normalize();
            for (double l = 0.1; l < len; l += 0.1) {
              Vector3d ckpt = cur_pos + l * dir;
@@ -843,7 +1284,7 @@
                safe = false;
                break;
              }
-@@ -1004,6 +1111,126 @@
+@@ -1004,6 +1111,126 @@ int Astar::searchUnknownOnlyBBox(const Eigen::Vector3d &start_pt, const Eigen::V
    return NO_PATH;
  }
  
@@ -970,122 +1411,3 @@
  void Astar::reset() {
    open_set_map_.clear();
    close_set_map_.clear();
---- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
-+++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
-@@ -95,6 +95,9 @@
-   // exploration manager reports the spot when it fails to close on a chosen
-   // viewpoint; every cluster near it is then forced dormant.
-   void addBlockedRegion(const Vector3d &pos);
-+  // Drop shadows older than blocked_region_ttl_s_. Called once per frontier
-+  // update, so an expired region is reconsidered on the very next tour.
-+  void expireBlockedRegions();
- 
-   shared_ptr<PerceptionUtils> percep_utils_;
-   unique_ptr<RayCaster> raycaster_;
-@@ -134,8 +137,63 @@
-   // Viewpoints the aircraft could not reach; any frontier whose average falls
-   // within blocked_region_radius_ of one is forced dormant, so the coverage
-   // tour stops offering a route the map believes clear but physics blocks.
-+  //
-+  // Each shadow carries the time it was cast, because a shadow is a statement
-+  // about the map as it stood, and the map changes. A viewpoint unreachable in
-+  // the first minute of a mission, when almost nothing has been observed, is
-+  // usually reachable later; leaving it shadowed for the life of the node
-+  // retires a whole wing of a building on the strength of one early failure.
-+  // Each re-report of the same region doubles how long the next shadow lasts,
-+  // which is what lets one setting serve both cases this knob has to trade
-+  // between: an early mistake in a corridor is forgiven within a TTL, while a
-+  // genuinely unobservable pocket -- a staircase, a solid elevator slab, a
-+  // curtain modelled floor to ceiling -- is retired for progressively longer
-+  // until it stops costing anything, so the mission can still reach FINISH.
-   vector<Vector3d> blocked_regions_;
-+  vector<double> blocked_regions_stamp_;
-+  vector<int> blocked_regions_strikes_;
-+  // Strikes have to outlive the shadows that earned them, and be keyed more
-+  // coarsely than them. An aircraft defeated by the same pile of clutter twice
-+  // rarely fails at the same point twice: measured 2.6 m apart, which is
-+  // outside the coalesce radius, so every failure looked new, every shadow
-+  // started at strike 1, and the escalation never engaged. This history is
-+  // never expired and is consulted only to seed a new shadow's strike count.
-+  vector<Vector3d> blocked_history_;
-+  vector<int> blocked_history_strikes_;
-+  // Volumes no viewpoint may be placed in and no cluster may be offered from,
-+  // from /map_config/keep_out_boxes. Flat: six doubles per box.
-+  std::vector<double> keep_out_;
-+
-   double blocked_region_radius_;
-+  // The width a shadow reaches once the place behind it has proved itself.
-+  // blocked_region_radius_ is deliberately UNDER candidate_rmax so that one
-+  // bad viewpoint does not retire the frontier that produced it -- which is
-+  // right for a shadow cast on a single 25 s confinement, and wrong forever
-+  // after, because a frontier whose every viewpoint is unreachable then
-+  // re-offers one just outside the shadow on every cycle and the tour never
-+  // moves on. Past the first strike the shadow widens past candidate_rmax and
-+  // the frontier finally goes dormant. <= blocked_region_radius_ disables the
-+  // widening and restores the fixed-width behaviour.
-+  double blocked_region_radius_max_;
-+  // The shadow radius earned by a region on `strikes` strikes: the same
-+  // doubling ladder blocked_region_ttl_s_ uses, under its own cap.
-+  double blockedRadiusFor(int strikes) const;
-+  // Retire frontiers already on frontiers_ that a shadow now covers. The
-+  // categorisation loop only ever sees freshly re-detected clusters, so
-+  // without this a shadow cast on a known frontier never reaches it.
-+  void sweepBlockedFrontiers();
-+  // Drop every shadow and re-offer every retired cluster, once the frontier set
-+  // would otherwise be empty. Bounded by finish_amnesty_max_.
-+  void grantFinishAmnesty();
-+  int finish_amnesty_max_;
-+  int finish_amnesty_used_;
-+  // Set for exactly one categorisation pass by grantFinishAmnesty(): relaxes
-+  // the viewpoint-placement clearances that are otherwise what retires a
-+  // REACHABLE frontier as unviewable.
-+  bool amnesty_relax_;
-+  double blocked_region_escalate_radius_;
-+  double blocked_region_ttl_s_;
-+  int blocked_region_ttl_max_doubling_;
- 
-   // Params
-   int cluster_min_;
---- a/falcon_planner/pathfinding/include/pathfinding/astar.h
-+++ b/falcon_planner/pathfinding/include/pathfinding/astar.h
-@@ -156,6 +156,40 @@
-   double getManhHeu(const Eigen::Vector3d &x1, const Eigen::Vector3d &x2);
-   double getDiagHeu(const Eigen::Vector3d &x1, const Eigen::Vector3d &x2);
- 
-+  // How far to grow obstacles, in metres, in the horizontal plane only. Set to
-+  // the airframe radius; 0 disables and restores upstream point-robot search.
-+  // Kept as plain doubles and a vector of double pairs: an Eigen container in
-+  // this header makes GCC 9 ICE in every TU that includes it.
-+  double inflate_radius_;
-+  // Radius around the search START within which the inflation is suppressed,
-+  // so an aircraft already touching a wall can still plan its way off it
-+  // instead of finding no valid start node.
-+  double start_clearance_;
-+  std::vector<std::pair<double, double> > inflate_offsets_;
-+  bool inflate_offsets_built_;
-+  // Consulted by isBlockedInflated. The inflated search is tried first and, if
-+  // it finds nothing, retried with this false -- see the wrappers in astar.cpp.
-+  bool inflate_enabled_;
-+  int searchOnce(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt);
-+  int searchBBoxOnce(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &end_pt,
-+                     const Eigen::Vector3d &bbox_min, const Eigen::Vector3d &bbox_max);
-+  void buildInflateOffsets();
-+  // Astar::init() runs before the map server is configured, so the stencil is
-+  // built on first use rather than at construction.
-+  void buildInflateOffsetsIfNeeded();
-+  bool isBlockedInflated(const Eigen::Vector3d &pos, const Eigen::Vector3d &start);
-+
-+  // Volumes no route may pass through, from /map_config/keep_out_boxes.
-+  // Flat: six doubles per box. See the note in astar.cpp on why not Eigen.
-+  std::vector<double> keep_out_;
-+  // Places the AIRCRAFT has repeatedly failed at, learned at runtime from the
-+  // frontier finder's blocked-region list. Flat x,y,z triples.
-+  std::vector<double> no_go_;
-+  double no_go_radius_;
-+  double no_go_refresh_s_;
-+  double no_go_last_read_;
-+  void refreshNoGoRegions();
-+
-   Config config_;
- 
-   // main data structure

@@ -9,17 +9,33 @@ silently drops it. Each such change is a patch here, applied by the image build.
 
 The image is built by **`sjtu_project/falcon_docker/Dockerfile`** (an external
 repo), which `git clone`s FALCON (`ros1-noetic`) and then runs a series of
-self-verifying `fix_falcon_*.sh` scripts before `catkin_make`. All four patches
-here are wired in as one step:
+self-verifying `fix_falcon_*.sh` scripts before `catkin_make`.
 
-- `sjtu_project/falcon_docker/sparx_patches/*.patch` — a copy of this directory.
-- `sjtu_project/falcon_docker/fix_falcon_sparx_patches.sh` — `git apply`s each
-  one in turn and verifies its sentinel, failing the **image build** rather than
-  shipping a silently unpatched FALCON.
-- `Dockerfile` step "6a-ter" — `COPY`s both in and runs the script.
+**IT DOES NOT APPLY THE PATCHES IN THIS DIRECTORY.** Verified against the
+Dockerfile: the only FALCON edits a clean build performs are `system_info`,
+`cost_check`, `depth_overflow`, `deadend_guard`, `simtime`, `visgrid_cadence`,
+`hgrid_clamp`, `inflate_astar_by_airframe`, `replan_from_measured_state` and
+`sop`. Nothing references `sparx_patches/`, no `fix_falcon_sparx_patches.sh`
+exists, and neither does the `sparx_patches/` directory itself. An earlier
+revision of this file described that wiring as if it were in place; it never was.
 
-The copies in this directory are the **authoritative source**; the build reads
-the mirror in `falcon_docker/sparx_patches/`. Keep them in sync.
+So the running `falcon-ros-custom:v1` is a **`docker commit` lineage**, not a
+reproducible build, and everything here beyond that list lives only in its
+layers. The patches in this directory are the record that makes those layers
+reproducible **by hand** — the authoritative text of each change, and
+`falcon_sjtu_session.patch` as the one-shot cumulative diff — but a `docker
+build` will not read them.
+
+**Two consequences worth stating plainly.** A rebuild from the external
+Dockerfile silently produces a FALCON without any of this session's work, which
+looks like a regression with no diff to explain it (this is the "stale image on a
+second machine" trap). And the lineage is one machine deep: if these image tags
+are lost, the only route back is applying `falcon_sjtu_session.patch` to a fresh
+clone and rebuilding.
+
+Wiring the patches into the Dockerfile — a `sparx_patches/` copy plus a
+`git apply`-and-verify step that fails the build rather than shipping an
+unpatched planner — is the fix, and it is not done.
 
 **Two older fix scripts are subsumed and must not run alongside these.** The
 patches were cut with `git diff` inside a container where the sed-based fixes had
@@ -382,6 +398,45 @@ once per call via `ros::param::param` into a function-local static.
 **It must stay inside the flight box**, for the same reason `box_min_z` may not
 exceed 1.0: a slice outside the box selects no voxels at all and the tour's model
 of the world goes blank rather than merely wrong.
+
+## falcon_finish_amnesty_gate.patch — gate the amnesty where the list actually empties
+
+Touches `frontier_finder.cpp`.
+
+**Why.** `grantFinishAmnesty()` refuses to let the mission call a world finished
+while shadows are standing and clusters sit retired behind them. It was gated on
+`frontiers_.empty() && tmp_frontiers_.empty()`, tested **before** the loop that
+categorises `tmp_frontiers_` — so it could only fire on a cycle where nothing was
+detected at all. The failure it exists to catch is the opposite one: clusters
+*are* re-detected every cycle and every one of them is categorised *into*
+dormant, so `frontiers_` only becomes empty once the loop has already run, and
+the gate is behind us by then. Measured, all three with the gate in front:
+
+| leg | verdict | dormant at FINISH | shadows | amnesties granted |
+|---|---|---|---|---|
+| `loop/wviz` warehouse | FINISHED 349.8 m³ | 493 | 2 | **0** |
+| `accept9/r02_hospital` | PARTIAL_FINISH 284.1 m³ | 10 | 1 | **0** |
+| `accept9/r03_hospital` | PARTIAL_FINISH 300.4 m³ | 36 | 1 | 1 of 2 |
+
+**What it does.** Moves the gate behind the categorisation loop. The loop body
+becomes a `categorise` lambda that clears `tmp_frontiers_` when it is done — each
+cluster is by then either promoted into `frontiers_` or retired into
+`dormant_frontiers_`, and none may be categorised twice — driven by a two-pass
+loop that grants the amnesty between passes. Two passes rather than a `while`:
+`grantFinishAmnesty()` is already bounded by `finish_amnesty_max_`, and a second
+pass that produces nothing must still be allowed to end the mission.
+
+**The old pre-loop gate is deleted, not kept alongside.** The new one strictly
+subsumes it — an empty `tmp_frontiers_` makes pass 0 a no-op and the gate fires
+on the same cycle — and leaving both in could spend two of the two permitted
+amnesties within a single cycle.
+
+**It stays inside the `.cpp` on purpose.** The obvious shape is to extract the
+loop body into a private method, but that means a new member in a header shared
+by four packages, and rebuilding only the owning package against it is an ODR
+violation that corrupts the heap at startup and ships an empty voxel map. A
+lambda gets the same structure with no header change and no cross-package
+rebuild.
 
 ## falcon_sjtu_session.patch — the cumulative diff, and how it relates to the rest
 
