@@ -28,7 +28,24 @@
   <!-- Forwarded to the follower; see bspline_follower.launch for what it does
        and why the burden of proof is on turning it on. Declared here because an
        include passes only the args it names, so a knob that is not forwarded is
-       silently the follower default however it is set on the command line. -->
+       silently the follower default however it is set on the command line.
+
+       RE-TESTED 2026-08-16 AND STILL OFF. The original verdict was honest but
+       weak: 6 hospital legs compared on FINISH RATE, which is the noisiest
+       metric this stack has, and it was recorded as "no effect this rig can
+       resolve". Re-run as a proper A/B on the warehouse, where legs are cheap
+       and contacts are the thing the brake is supposed to buy:
+
+         on    2/3 finished, contacts 188/77/204 (mean 156), 303.5 m3, 472 s
+         off   3/3 finished, contacts  58/83/263 (mean 135), 378.1 m3, 462 s
+
+       No safety benefit, one fewer finish, no time saved. The diagnosis behind
+       it still stands — 68% of this aircraft's travel is more than 60 degrees
+       off the nose, so the forward depth cone covers the direction of travel
+       only a third of the time — but bounding speed by the AGE of the evidence
+       is not the answer, because a bearing that is stale but open costs speed
+       for nothing. Telling stale-and-open from stale-and-occupied needs the
+       free/unknown cloud the follower does not subscribe to. -->
   <arg name="unknown_brake" default="false"/>
   <arg name="drone_ns" default="/simple_drone"/>
 
