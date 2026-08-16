@@ -174,6 +174,36 @@
   <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)"/>
   <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)"/>
 
+  <!-- ── How much unobserved space a line of sight may cross ────────────────
+       countVisibleCells treats UNKNOWN as an occluder, exactly like a wall. A
+       frontier cell IS the boundary of unknown space, so a ray arriving at one
+       crosses the unobserved boundary layer by construction: the test reports
+       "you cannot see this frontier" BECAUSE it is a frontier.
+
+       Measured with rig/vp_audit.py, and it is not a corner case. Across three
+       warehouse legs with this at 0, 43 clusters had somewhere legal to stand
+       and ZERO measured visibility from anywhere — 16% of every retirement.
+       Those cannot be rescued by the finish amnesty either, because it already
+       drops the visibility bar to zero and no bar saves a cluster nothing can
+       see. They stay dormant, the frontier set empties, and FALCON declares a
+       half-mapped world finished.
+
+       At 2 voxels the same three legs produced ZERO such clusters, retirements
+       fell 267 to 147, and the share of rays arriving clear rose from 6.8% to
+       9.2%, with the finish rate unchanged at 2 of 3 in both arms.
+
+       A ray may cross this many unobserved voxels and no more. The raycast runs
+       from the frontier cell toward the viewpoint, so the tolerated voxels are
+       the boundary layer; unknown further along is an unexplored volume being
+       looked through, and still blocks. OCCUPIED blocks at any distance, which
+       is what keeps the warehouse hollow ClutteringC crates unviewable — a ray
+       into one crosses the shell first.
+
+       2 voxels is 0.20 m at the 0.10 m map resolution. 0 restores upstream. -->
+  <arg name="frontier_visib_unknown_tolerance" default="2"/>
+  <param name="/frontier_finder/visib_unknown_tolerance" value="$(arg frontier_visib_unknown_tolerance)"/>
+
+
   <!-- Dead-end guard (patched into exploration_manager + frontier_finder): when
        the aircraft sits pinned short of a chosen viewpoint for 20 s, that
        viewpoint is handed to the frontier finder, which retires every cluster

@@ -438,6 +438,175 @@ violation that corrupts the heap at startup and ships an empty voxel map. A
 lambda gets the same structure with no header change and no cross-package
 rebuild.
 
+## falcon_raycast_out_of_map.patch — a depth ray that leaves the map must not kill the mapper
+
+Touches `voxel_mapping/src/tsdf.cpp`, which **no other patch in this directory
+touches** and which was still the pristine upstream file (dated 2026-05-12)
+until this landed. Ported verbatim from
+`tasks/planning/falcon_pegasus/patches/fix_falcon_raycast_out_of_map.sh`, where
+it has been in force since 2026-08 — the two deployments share the defect and
+this one had simply never received the fix.
+
+**Why.** `TSDF::inputPointCloud` walks every voxel between the sensor and each
+returned depth point with a DDA raycaster and turns each one into a flat array
+address with no bounds check. The ray's *endpoints* are clamped into the map,
+but the clamp is in **metres** while the stepping is in **voxels**, so the DDA
+can still land one index past a face on the way there. Neither consumer checks
+the address: `updateTSDFVoxel` writes the data array directly, and
+`updateOccupancyVoxel` reads through a glog `CHECK` that calls `abort()`.
+
+On Pegasus it surfaced as the CHECK; here it surfaces as a raw segfault in the
+writer, and it is worse on this stack for the reason everything is worse on this
+stack — **`exploration_node` owns the voxel map**, so the mapper dying does not
+interrupt the mission, it *resets* it. Measured on the hospital, 2026-08-16:
+
+```
+Stack trace (most recent call last) in thread 22475:
+#0  Object "/catkin_ws/devel/lib/libvoxel_mapping.so", at 0x716321b67c22, in
+    voxel_mapping::TSDF::updateTSDFVoxel(int const&, double const&, double const&)
+Segmentation fault (Address not mapped to object [0x715c8adee9b8])
+[exploration_node-3] process has died [pid 112, exit code -11]
+```
+
+at t = 1563 s of a healthy leg — occupied voxels **468,485 → 9,159** in one
+second, coverage 543 m³ at t = 951 s ending as `TIMEOUT` at **194.34 m³**. The
+run had been gaining 32.6 m³/min with a plan-origin gap of 0.12 m and nine
+dormant frontiers; nothing was wrong with it except that the mapper died.
+
+**What it does.** Guards the loop rather than the two callees: test the voxel
+index where it is produced, using the `isInMap(VoxelIndex)` predicate that
+already exists, and skip it. One condition per raycast step fixes both
+consumers, and a voxel outside the map is somewhere the map cannot record
+anything about, so nothing is lost by skipping it. The same file already applies
+exactly this policy one function away in `OccupancyGrid::setOccupancy`, so this
+is the existing policy applied on the path that was missed, not a new one.
+
+**Verification.** There is no string sentinel to grep — the change compiles to a
+comparison, not a message. Verify instead that `libvoxel_mapping.so` differs
+from the pre-patch build (measured `6692f4ab…` → `4a67ba3a…`) *and* that the
+container's `tsdf.cpp` carries `isInMap(voxel_idx)`. Both are checked at build
+time.
+
+> **Build note, and it is this machine rather than the patch.** Linking
+> `voxel_mapping` failed once with `collect2: fatal error: ld terminated with
+> signal 11` and succeeded on a retry at lower parallelism. That is the known
+> intermittent toolchain flakiness recorded in `falcon_pegasus/README.md`, not a
+> defect in the change. Retry the link before diagnosing anything.
+
+## falcon_vp_audit.patch — say WHY a cluster retired
+
+Touches `frontier_finder.cpp` only. Pure instrumentation: no behaviour changes,
+nothing is accepted or rejected differently (sentinel: `[vp_audit] retire`).
+
+**Why.** A frontier cluster retires to dormant when `sampleViewpoints()` returns
+nothing, and *three* entirely different failures wear that one verdict:
+
+1. no candidate POSITION survives the box / occupied / unknown / clearance
+   tests, so visibility is never even evaluated;
+2. positions exist but every ray to the frontier is judged blocked;
+3. positions exist and the frontier is visible from them, but not *enough* of it.
+
+They need opposite fixes, and from outside a premature FINISH looks identical
+either way. This package spent a long time acting on (1) — the finish amnesty
+exists to relax the margin to unobserved space — on the strength of a diagnosis
+that could not be checked against anything. Same shape as the follower's
+binding-limiter problem, and the same answer: attribute, do not guess.
+
+**What it adds.** A file-scope histogram, reset per `sampleViewpoints()` call,
+counting every candidate rejection by cause, every ray by outcome, and the best
+visibility any legal position achieved; and one `ROS_WARN` per retirement
+carrying all of it plus the cluster's position and size.
+
+It stays at file scope on purpose. `frontier_finder.h` is included by four
+packages, and adding a member to it while rebuilding only the owning package is
+the ODR violation that corrupts the heap at startup and ships an empty voxel map
+— the same trap `falcon_finish_amnesty_gate.patch` avoids with its lambda.
+
+`rig/vp_audit.py` reads the lines back and aggregates them.
+
+**Result** (hospital, 2026-08-16, first run carrying it). The measurement is
+unambiguous and it refuted both standing theories, including the one this
+directory had written down:
+
+| | observed |
+|---|---|
+| retirements with NO legal standing position | **0** |
+| candidate positions surviving every test, per cluster | **11–72** |
+| retirements where nothing at all was visible | **0** |
+| best visibility achieved, per cluster | **6–15 cells** |
+| the bar (`min_visib_num`) | **15** |
+| cluster sizes (downsampled) | **18–29 cells** |
+
+Every cluster had somewhere to stand, saw the frontier from there, and was
+retired on the visibility bar alone. See the next patch.
+
+## falcon_visib_unknown_tolerance.patch — a frontier is not invisible for being a frontier
+
+Touches `frontier_finder.cpp`, on top of `falcon_vp_audit.patch` (sentinel:
+`[visib_unknown]`). **This is the fix for the premature FINISH.**
+
+**Why.** `countVisibleCells()` treats UNKNOWN as an occluder, exactly like a
+wall. But `searchFrontiers()` only promotes a cell that is knownfree AND has an
+unknown neighbour — a frontier cell *is* the boundary of unobserved space — so
+a ray arriving at one crosses unobserved voxels by construction. The test
+therefore reports "you cannot see this frontier" **because** it is a frontier.
+
+Measured across three warehouse legs with the tolerance at 0: only **6.8% of
+rays arrived clear**, against 44.9% rejected on UNKNOWN and 44.1% on real
+structure. **43 clusters — 16% of every retirement — had somewhere legal to
+stand and ZERO measured visibility from anywhere.**
+
+Those are unrecoverable by every mechanism this package already has. The finish
+amnesty drops the visibility bar to zero, and no bar of any height saves a
+cluster that nothing can see. They stay dormant, the frontier set empties, and
+FALCON declares a half-mapped world finished. That is the mechanism behind the
+277–432 m³ `PARTIAL_FINISH` legs, and it is why
+`falcon_blocked_region_widen.patch` measured its amnesty re-offering 52 retired
+clusters and every one returning straight to dormant.
+
+**What it does.** A ray may cross a bounded prefix of unobserved voxels and no
+more. The raycast runs **from the frontier cell toward the viewpoint**, so the
+tolerated voxels are exactly the boundary layer that makes the cell a frontier;
+unknown encountered further along is a genuinely unexplored volume being looked
+through, and still blocks. **OCCUPIED blocks at any distance**, which is what
+keeps a sealed cavity unviewable — a ray into the warehouse's hollow
+`ClutteringC` crates crosses the shell first.
+
+`/frontier_finder/visib_unknown_tolerance` (2 voxels = 0.20 m at the 0.10 m map
+resolution; **0 restores upstream exactly**), declared in
+`adapter/launch/exploration.launch`.
+
+**Result**, A/B on the warehouse — same binary, only the rosparam differing,
+three legs per arm (`rig/tolerance_ab.sh`):
+
+| | tolerance 0 | tolerance 2 |
+|---|---|---|
+| cluster retirements | 267 | **147** |
+| retired for "nothing visible" | 15.4% (41) | **0%** |
+| legal stance, ZERO visibility | **43** (16.1%) | **0** (0.0%) |
+| rays arriving clear | 6.8% | **9.2%** |
+| legs finished | 2 of 3 | 2 of 3 |
+| contacts (total across arm) | 263 | 263 |
+
+The class this exists to eliminate goes to zero, retirements fall 45%, and the
+warehouse finish rate and contact count are unchanged — it costs nothing in the
+world that had the most to lose. On the hospital the same configuration reached
+**812.02 m³**, still gaining when the mission time cap cut it; read that against
+the package README's standing warning to cap the hospital at 3900 s or more
+before calling a TIMEOUT a failure to map.
+
+**A rejected alternative is recorded rather than deleted.** Making the
+*visibility bar* relative to the cluster size was tried first, on the reasoning
+that an absolute count of 15 asks 89% of an 18-cell cluster and 16% of a
+100-cell one. It is a real observation and it is not the fix: flown at 0.25 it
+turned a warehouse FINISH into a pinned abort, because relaxing the bar admits
+frontiers bounding the `ClutteringC` crates' permanently unobservable interior
+cavities and the aircraft grinds across the crate tops chasing them (measured
+pinned at z = 1.78 m on a 1.79 m crate). The general lesson is worth keeping:
+**the visibility bar was also, accidentally, the filter that rejected frontiers
+which can never be resolved at all** — lower it and you inherit that second job.
+The patch was deleted; this paragraph is what survives of it.
+
 ## falcon_sjtu_session.patch — the cumulative diff, and how it relates to the rest
 
 Every other file here is ONE change with its own reasoning. This one is the
