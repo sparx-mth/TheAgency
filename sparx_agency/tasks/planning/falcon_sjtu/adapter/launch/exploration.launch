@@ -715,7 +715,27 @@
        campaign harness ends the run on. It never kills anything itself, so an
        interactive session is not torn down under its operator. -->
   <arg name="watchdog"             default="true"/>
-  <arg name="watchdog_time_cap_s"  default="2400.0"/>
+  <!-- 3900, raised from 2400 on 2026-08-16. 2400 is below what this package's
+       own README asks for ("cap the mission at 3900 s or more before reading a
+       hospital TIMEOUT as a failure to map"), so the default was truncating
+       hospital missions that were still making progress rather than ending
+       ones that had stopped.
+
+       Measured: a hospital leg reached 812.02 m3 — the second-best figure this
+       package has ever recorded — and was cut by this cap while still gaining
+       1.8 m3/min, with a 9.1 m confinement radius and 48 dormant frontiers.
+       Nothing about that run had failed; it simply ran out of permission.
+
+       The safety machinery added over this campaign costs wall-clock on
+       purpose: detours around learned no-go regions, inflated-then-plain A*
+       retries, a 16 s yaw probe before any escape. The hospital needs about an
+       hour to exhaust its frontiers with all of it running.
+
+       Costs the warehouse nothing, since it finishes in 300-700 s and never
+       reaches this cap. The confinement, barren and no-movement watchdogs below
+       are unchanged and still end a run that has genuinely stopped, so this
+       raises the ceiling on healthy runs without letting a dead one linger. -->
+  <arg name="watchdog_time_cap_s"  default="3900.0"/>
   <!-- Radius and growth are a PAIR and only fire together. 3.0 m is above the
        largest legitimate stationary maneuver (a survey turn is a point, a
        retreat 1.3 m) and below the smallest useful exploration leg. 3.0 m3/min
