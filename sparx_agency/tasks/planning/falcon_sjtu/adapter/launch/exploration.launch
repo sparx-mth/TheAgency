@@ -200,6 +200,49 @@
        into one crosses the shell first.
 
        2 voxels is 0.20 m at the 0.10 m map resolution. 0 restores upstream. -->
+<!--— ── Sample viewpoints at three altitudes, not one ──────────────────────
+       sampleViewpoints places every candidate on a HORIZONTAL ring at the
+       frontier cluster's own z, and nothing in that placement consults
+       clearance. A frontier sitting on top of an obstacle therefore puts the
+       candidate at exactly that obstacle's height, and the aircraft is flown
+       there.
+
+       Measured on the warehouse over three legs: contacts cluster at
+       z 1.77-1.78 m against 1.79 m ClutteringC crate tops, and on a third leg
+       at 1.41-1.42 m against 1.41 m bucket tops. They are belly strikes on
+       obstacle TOPS at the exact altitude of the top. A forward-looking depth
+       camera sees a surface edge-on at its own altitude and barely maps it, so
+       the follower's brake gate has nothing to fire on either.
+
+       Raising the flight ceiling does NOT fix this and was measured making it
+       worse (see config/warehouse.yaml) — the planner never asks for the
+       headroom. What it needs is a choice of altitude, which upstream already
+       wrote and left disabled at the call site: sampleViewpoints3D sweeps
+       z-0.5, z and z+0.5, so a candidate half a metre above a crate top has
+       real clearance and sorts into the clear bucket rather than the
+       near-occupied fallback the flat ring forces.
+
+       MEASURED 2026-08-16 AND SHIPPED OFF. Enabling it destroys the mission:
+       one warehouse leg gave 39.25 m3 of coverage, 816 contacts and THIRTEEN
+       planner respawns, against a normal 344-400 m3 and zero respawns. The
+       call site was commented out upstream for a reason.
+
+       The defect is in sampleViewpoints3D itself, not in the extra altitudes.
+       Its tail keeps only viewpoints whose visibility exceeds
+       `mean + viewpoint_z_score_cutoff * sd`, and that cutoff ships at 0.0, so
+       when candidates share a visibility value the standard deviation is zero
+       and NOTHING clears the bar. frontier.viewpoints_ comes back empty while
+       frontier.visib_num_ still holds the best value seen, and the dormant
+       branch's CHECK_LE against min_visib_num_ is a fatal glog abort.
+       Measured, repeatedly: "Check failed: tmp_ftr.visib_num_ &lt;=
+       min_visib_num_ (16 vs. 15) Frontier with valid viewpoint but dormant".
+
+       The same z-score filter sits on the 2D path, so that CHECK is a latent
+       hazard there too and is worth fixing on its own terms before this flag
+       is ever revisited. Do not simply turn this on. -->
+  <arg name="frontier_viewpoint_sampling_3d" default="false"/>
+  <param name="/frontier_finder/viewpoint_sampling_3d" value="$(arg frontier_viewpoint_sampling_3d)"/>
+
   <arg name="frontier_visib_unknown_tolerance" default="2"/>
   <param name="/frontier_finder/visib_unknown_tolerance" value="$(arg frontier_visib_unknown_tolerance)"/>
 
