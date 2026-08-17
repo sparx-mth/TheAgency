@@ -607,6 +607,75 @@ pinned at z = 1.78 m on a 1.79 m crate). The general lesson is worth keeping:
 which can never be resolved at all** — lower it and you inherit that second job.
 The patch was deleted; this paragraph is what survives of it.
 
+## falcon_open_visib_bar.patch — relax the visibility bar only where there is room
+
+Touches `frontier_finder.cpp`, on top of `falcon_visib_unknown_tolerance.patch`
+(sentinel: `[open_bar]`).
+
+**Why.** `min_visib_num` (15) is an absolute count of downsampled frontier
+cells, but the most any viewpoint CAN see is the cluster's own size. Against a
+100-cell cluster it asks a few percent; against an 18-cell one it asks 16 of 18.
+The bar is hardest exactly where the cluster is smallest, and small leftover
+clusters are what remains late in a mission. Measured on two hospital legs:
+**96.9% and 100% of every cluster retirement was "saw something, under the
+bar"**, one leg ending with 46 clusters still dormant.
+
+**A global relaxation was tried first and regressed the warehouse**, turning a
+finish into a pinned abort at 364.8 m³. The mechanism is specific: relaxing the
+bar admits frontiers bounding the hollow `ClutteringC` crates' sealed interior
+cavities, which can never be observed and so never stop being frontiers, and the
+aircraft grinds across the crate tops chasing them (measured pinned at z = 1.78 m
+on a 1.79 m crate).
+
+**What it does.** The discriminator was already in `sampleViewpoints`: those
+cavity candidates are all `isNearOccupied`, wedged against the shell they are
+trying to see past, while a frontier in an open hospital room is not. So the
+relative bar applies **only to candidates with real clearance**; anything near
+structure keeps upstream's full absolute bar.
+
+```
+bar = near_occupied ? min_visib_num
+                    : max(open_visib_floor,
+                          min(min_visib_num, open_visib_fraction * cluster_cells))
+```
+
+`/frontier_finder/open_visib_fraction` (**0.5**) and `open_visib_floor` (4),
+declared in `adapter/launch/exploration.launch`. **0 restores upstream
+everywhere.** The bar can only ever be relaxed, never tightened.
+
+**Result**, three warehouse legs and two hospital legs per arm, same image:
+
+| | finishes | coverage | contacts | elapsed |
+|---|---|---|---|---|
+| warehouse, 0.5 | **2/3** | 335.0 m³ | **38** | **425 s** |
+| warehouse, off | 1/3 | 387.0 m³ | 92 | 510 s |
+| hospital, 0.5 | **1/2** | **816.6 m³** | 145 | **2277 s** |
+| hospital, off | 0/2 | 763.3 m³ | 46 | 2358 s |
+
+More finishes in **both** worlds, more hospital coverage, faster in both, and
+warehouse contacts more than halved. The hospital leg that finished did so at
+**809.11 m³ with 9 contacts** — the first hospital FINISH recorded in this
+campaign, on FALCON's own verdict.
+
+**The one number that is worse, stated plainly.** Hospital contacts averaged 145
+against 46. That mean is 280 and 9 *within the same two-leg arm* — a 31× spread —
+so it is **unresolved, not a measured regression**, and it wants more legs before
+anyone trusts it either way. Set the fraction to 0 to fall back with no rebuild.
+
+**A fraction of 0.25 was also measured and rejected**: it finished 3/3 on the
+warehouse but at a mean of 258 contacts against the control's 92, buying finishes
+by trading safety. 0.5 admits far fewer marginal clusters and was better on every
+axis.
+
+> **Reproducibility note.** Verifying this patch found that the refuted 3-D
+> viewpoint sampling code from `falcon_visib_unknown_tolerance`'s session was
+> sitting in the image with **no patch file recording it** — inert behind a
+> parameter, but a planner-crashing path one rosparam away. It has been removed
+> from the source outright rather than left dormant. The four patches in this
+> directory now apply in sequence to a pristine tree and reproduce the running
+> image's `frontier_finder.cpp` byte for byte (md5 `de6f5a21…`), which is checked
+> rather than assumed.
+
 ## falcon_sjtu_session.patch — the cumulative diff, and how it relates to the rest
 
 Every other file here is ONE change with its own reasoning. This one is the
