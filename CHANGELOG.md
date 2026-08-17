@@ -51,6 +51,26 @@ future-you, not for a commit log.
   equivalent of `xtend_drone_demo_manager.py` — echoes a requested demo mode back as
   the authoritative current mode, with no other side effects (deliberately does not
   auto-land on FINISH the way the XTEND version does).
+- `sparx_agency/tools/sphera_battery_watchdog.py`: polls R1's battery inside `it` and, once
+  it drops to 10% (re-arms above 80%), force-removes `R1` and runs
+  `~/.sphera/sphera-restart.sh` — replacing the manual "exit and relaunch the simulator"
+  action. The `R1` removal is required, not optional: confirmed live that
+  `sphera-restart.sh` alone doesn't reset battery, since `R1` is a sibling container that
+  survives a `drone_simulator` bounce untouched (see LESSONS.md's 2026-08-17 entry).
+  Deliberately scoped to just that — no Falcon/bridge/node reconnect logic — wired into
+  `mission_control.py` as a new "Sphera Battery Watchdog" service card (`rooster_watchdog`
+  group). See `docs/progress/entries/008-sphera-battery-watchdog.md` and the
+  `sphera-battery-watchdog` Claude Code skill.
+- `sparx_agency/tools/sphera_gui_automation.py`: drives Sphera's post-restart GUI walkthrough
+  (Continue -> Manager -> Standalone -> select Rooster_1 -> Play) via `xdotool`, using
+  proportional (fraction-of-window) coordinates so it doesn't depend on Sphera's window
+  staying at one exact position/size. Wired into `sphera_battery_watchdog.py` as the new
+  default (`--no-gui-reentry` opts back out) so the whole recovery — container restart AND
+  getting a flyable drone back — runs unattended, ~38s end-to-end, confirmed live twice in a
+  row. Caught and fixed a real race live (window exists before Sphera is actually
+  interactive — see LESSONS.md's second 2026-08-17 entry) via a structural post-Play check
+  (`R1` exists + reports a real battery reading) rather than trusting the click sequence
+  blindly. See `docs/progress/entries/009-sphera-gui-reentry-automation.md`.
 
 ### Changed
 - `sphera_drone.launch` now overrides FALCON's navigation controller to `multi_axis`

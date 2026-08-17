@@ -1001,6 +1001,32 @@ ROBOTICAN_SERVICES: list[Service] = [
         container_name=ROOSTER_CONTAINER,
         proc_pattern="topic hz /R1/manual_control",
     ),
+    # ── Watchdogs ─────────────────────────────────────────────────────────────
+    # Unlike the monitors above (read-only, just stream a topic), this one
+    # acts: it restarts Sphera itself on dead battery. Deliberately scoped to
+    # ONLY that -- it does not touch Falcon, the ROS1 bridge, or any Rooster
+    # node, see sphera_battery_watchdog.py's own docstring.
+    Service(
+        name="Sphera Battery Watchdog",
+        key="rooster_battery_watchdog",
+        group="rooster_watchdog",
+        description=(
+            "Polls /R1/state's battery percentage inside `it` and, once it "
+            "drops to 10% or below: force-removes R1, runs "
+            "~/.sphera/sphera-restart.sh (the same headless docker compose "
+            "down/up cycle the desktop icon triggers), then drives Sphera's "
+            "own GUI back into the scenario via xdotool (Continue -> Manager "
+            "-> Standalone -> select Rooster_1 -> Play) so a fresh, flyable "
+            "R1 comes back unattended -- confirmed live end-to-end 2026-08-17, "
+            "~38s total. Re-arms once battery is seen back above 80%. Does "
+            "not restart Falcon, the bridge, or any Rooster node -- see "
+            "sphera_battery_watchdog.py / sphera_gui_automation.py."
+        ),
+        cmd="python3 /home/user1/GIT/TheAgency/sparx_agency/tools/sphera_battery_watchdog.py",
+        env="none",
+        machine="pc",
+        proc_pattern="sphera_battery_watchdog.py",
+    ),
 ]
 
 ALL_SERVICES = XTEND_SERVICES + NANOOWL_SERVICES + ROBOTICAN_SERVICES
@@ -1781,6 +1807,9 @@ with tab_rooster:
 
     st.markdown("#### Planner (Falcon)")
     _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_planner"], states)
+
+    st.markdown("#### Watchdog")
+    _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_watchdog"], states)
 
     with st.expander("📊  Monitors", expanded=False):
         _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_monitor"], states)

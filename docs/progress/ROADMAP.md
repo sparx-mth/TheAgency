@@ -24,3 +24,5 @@ entry under `entries/` when work actually starts on it.
 - [x] GPU hardware-detection consolidation, model/engine registry, x86 dev container for Sphera/ROBOTICAN (commit `55f96e33`)
 - [x] Rooster/Sphera takeoff, video streaming, depth `.npy` output, closed-loop altitude hold
 - [x] Rooster frame capture → direct relay to the Jetson, orchestrated via mission_control.py → `entries/006-rooster-frame-jetson-relay.md`
+- [x] Automatic Sphera restart on dead battery (no Falcon/node reconnect logic) → `entries/008-sphera-battery-watchdog.md`
+- [x] Fold Sphera's post-restart GUI walkthrough into the battery watchdog, unattended → `entries/009-sphera-gui-reentry-automation.md`

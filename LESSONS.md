@@ -905,6 +905,78 @@ decided against for now given the fragility of blind GUI-coordinate clicking. Ma
 always confirm ROS2 nodes/topics under `/R1/*` and `/Rooster_1` actually reappear before moving
 on to restarting the falcon-side stack.
 
+---
+
+## 2026-08-17 — `sphera-restart.sh` alone does not reset the drone's battery
+
+**Symptom:** Built `sphera_battery_watchdog.py` to auto-restart Sphera on low battery via
+`~/.sphera/sphera-restart.sh`. Live test: `drone_simulator` cleanly recreated (confirmed via
+`docker inspect -f '{{.State.StartedAt}}'`), but `/R1/state`'s battery stayed flat at 97%
+instead of resetting to ~99-100% as `fly-rooster-sphera/SKILL.md` documents.
+
+**Root cause:** `R1` is a sibling container Sphera spawns via the host Docker socket
+(bind-mounted into `drone_simulator`, not a child of its cgroup) — bouncing the
+`drone_simulator` engine container alone does not kill or recreate it, confirmed via
+`docker inspect`'s `StartedAt` predating the restart. Matches the 2026-08-13 entry above:
+Sphera's green ▶ Play button only spawns a new `R1` "if R1 dies mid-scenario" — it does NOT
+replace a still-alive one. A real full quit-and-relaunch of the Sphera app apparently kills
+`R1` as a side effect (which is why the user's manual ritual "just works"); the lighter
+`docker compose down`/`up` cycle `sphera-restart.sh` does does not.
+
+**Fix / workaround:** Force-remove `R1` explicitly (`docker rm -f R1`) before running
+`sphera-restart.sh`, guaranteeing the next Play spawns a genuinely fresh instance. Confirmed
+live: with this fix, `R1` came back with a fresh container (`StartedAt` after the restart)
+and battery read 99%.
+
+Also confirmed live (2026-08-17): entering the scenario after a restart requires clicking
+the specific drone (`Rooster_1`) in the "Drones Assignment" panel *before* pressing Play —
+skipping straight to Play raises a "Not all drones have operators associated with them, do
+you want to continue anyway?" dialog. Answering "Yes" still seems to work for this stack
+(control goes through ROS2 to `it`, not Sphera's own Operator role), but the clean/intended
+order is Continue → choose role (Manager) → Start → Standalone → click `Rooster_1` in Drones
+Assignment → Play.
+
+**Don't:** Don't assume "the engine container came back up cleanly" means the drone's state
+reset too — `drone_simulator` and `R1` have independent lifecycles; always check `R1`
+specifically (`docker inspect ... StartedAt`, or just the battery reading itself).
+
+---
+
+## 2026-08-17 — automating the post-restart GUI walkthrough: window exists before Sphera is interactive
+
+**Symptom:** Extended `sphera_battery_watchdog.py` to drive the whole post-restart GUI
+sequence itself (`sphera_gui_automation.py`, new) instead of leaving it for a human, since
+the user won't be at the keyboard when this fires. First live end-to-end test (real battery
+trigger -> `sphera-restart.sh` -> immediately drive the GUI): failed silently — no exception,
+no error, `enter_scenario()` returned `True`, but `R1` never appeared and battery stayed
+unreadable. Called `enter_scenario()` again moments later on the exact same window/
+coordinates and it worked immediately.
+
+**Root cause:** The X11 window that `xdotool search --name Sphera` matches exists — and is
+therefore found by `wait_for_window()` — well before Sphera/Unreal is actually rendering the
+"Welcome to SPHERA" screen and accepting input. Clicking `Continue` the moment the window is
+found lands on nothing (a still-loading/black frame), and every click after that keeps
+computing coordinates for screens that never actually advance — the whole sequence silently
+misfires against screen 1, with no error at any step to catch it. Confirmed by taking a
+screenshot right after the failed run: still exactly on "Welcome to SPHERA", not stuck
+mid-sequence somewhere later.
+
+**Fix:** Two changes to `sphera_gui_automation.enter_scenario()`: (1) a fixed 10s warmup
+sleep after the window is first found, before clicking anything — window-*exists* is not
+window-*interactive*, and there's no cheap way to detect Unreal's actual render-readiness
+without image-diffing, which was judged not worth the complexity here; (2) an idempotent
+redundant second `Continue` click 1s after the first (harmless no-op if the first already
+landed — it hits empty background on the next screen). Re-tested twice more after the fix:
+both fully unattended runs succeeded, ~38s total (trigger to verified-fresh-R1-and-battery).
+
+**Don't:** Don't trust "the window exists" (`xdotool search` returning a hit) as "the app is
+ready for input" for any Unreal/game-engine window — window creation and first-interactive-
+frame are two different milestones, and the gap between them was large enough here to break
+every click after the first. Also don't assume a GUI-automation function returning normally
+means it worked — this is exactly why `restart_and_reenter()` verifies success independently
+afterward (`docker ps` for `R1` + a real battery reading), not by trusting
+`enter_scenario()`'s return value alone.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 
