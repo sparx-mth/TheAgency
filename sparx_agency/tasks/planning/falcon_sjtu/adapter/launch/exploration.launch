@@ -111,7 +111,39 @@
        0.28 m — so the planner's best legal curve sat inside the gate's trip
        line and the two fought each other.
        0.35 m: above the gate's bubble, and a 1.4 m warehouse aisle still
-       leaves 0.35 m of slack on each side. -->
+       leaves 0.35 m of slack on each side.
+
+       ── WHAT IT ACTUALLY DELIVERS, measured 2026-08-17. The optimiser's final
+       map is now dumped per leg (rig/dump_occupied_voxels.py), so the clearance
+       the plan really achieved can be checked against the clearance it asked
+       for. At every contact location across two contact-bearing warehouse legs
+       (22 distinct locations, ~100k mapped voxels per leg):
+
+         centre clearance to the nearest MAPPED occupied voxel
+           p10 0.08   p25 0.22   p50 0.36   p75 0.47   p90 0.48 m
+         below safe_distance 0.55 m ............................ 100.0%
+         hull (centre minus the 0.26 m airframe radius) inside
+           mapped structure ..................................... 36.4%
+         no mapped structure within 0.40 m (a genuine map hole) .. 27.3%
+
+       So contacts are not one fault but a stack of three, and only the last is
+       a surprise. The aircraft tracks its plan to a median 0.03 m, so control
+       is exonerated. About a quarter of contacts are map holes — pile tops are
+       only ever seen edge-on, since 0.0% of commanded altitudes reach the
+       2.34 m needed to overfly a 1.79 m pile under a 2.4 m ceiling. But the
+       universal factor, present at 100% of contacts, is that the TRAJECTORY IS
+       ROUTED INSIDE ITS OWN MARGIN: 0.36 m delivered where 0.55 m was asked.
+
+       And the reason that hurts is that nothing subtracts the airframe.
+       BsplineOptimizer::calcDistanceCost queries the ESDF at the control point
+       — the drone's CENTRE — and penalises dist < safe_distance. There is no
+       robot radius anywhere in the term. safe_distance is therefore the whole
+       allowance for a 0.26 m radius PLUS margin, so a fully satisfied 0.55
+       leaves only 0.29 m of real clearance, and the measured 0.36 leaves 0.10.
+       Raising the weight to force satisfaction was tried and refuted (see the
+       distance-weight block below): near a pile the constraint is
+       unsatisfiable, so weighting it harder just stops the aircraft. -->
+  <!-- Airframe radius, for the record, is ~0.26 m; the planner does not use it. -->
   <arg name="obstacles_inflation" default="0.25"/>
   <arg name="safe_distance"       default="0.55"/>
 
