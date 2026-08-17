@@ -142,13 +142,18 @@ def _wait_for_fresh_r1(timeout_sec: float, drone_id: str) -> bool:
     return False
 
 
-def restart_and_reenter(drone_id: str, gui_reentry: bool) -> None:
+def restart_and_reenter(drone_id: str, gui_reentry: bool) -> bool:
     """`restart_sphera()`, then (by default) drive Sphera's GUI back into
     the scenario so a fresh, flyable drone comes back with no one at the
     keyboard. Never raises — a failure here is reported via `notify()` and
     logged, and the watchdog just keeps polling (it stays disarmed until a
     battery reading recovers, which won't happen on its own if re-entry
     failed — that's the honest state to be in, not a silent retry loop).
+
+    Returns whether the whole cycle actually succeeded (True if
+    `gui_reentry=False`, since then there's nothing further to verify) --
+    used by `--once` mode (see `main()`) to set a real exit code for callers
+    like mission_control.py's "Restart Sphera Now" button.
 
     Timed end-to-end (logged and included in the final notification) so
     real-world runs are self-documenting — confirmed live 2026-08-17 at
@@ -159,28 +164,30 @@ def restart_and_reenter(drone_id: str, gui_reentry: bool) -> None:
     restart_sphera()
     if not gui_reentry:
         print(f"[watchdog] restart done ({time.time() - start:.1f}s, no GUI re-entry requested)", flush=True)
-        return
+        return True
 
     print("[watchdog] restart done, driving Sphera's GUI back into the scenario...", flush=True)
     if not sphera_gui_automation.enter_scenario():
         elapsed = time.time() - start
         notify(f"Sphera restarted, but its window never reappeared ({elapsed:.0f}s) — check manually")
         print(f"[watchdog] GUI re-entry aborted after {elapsed:.1f}s: Sphera window not found", flush=True)
-        return
+        return False
 
     elapsed = time.time() - start
     if _wait_for_fresh_r1(POST_PLAY_VERIFY_TIMEOUT_SEC, drone_id):
         total = time.time() - start
         print(f"[watchdog] scenario re-entered, R1 fresh, battery restored — {total:.1f}s end-to-end", flush=True)
-    else:
-        total = time.time() - start
-        notify(f"Sphera restarted, but R1/battery never came back ({total:.0f}s) — check manually")
-        print(
-            f"[watchdog] GUI re-entry finished after {elapsed:.1f}s but R1/battery didn't come up "
-            f"within {POST_PLAY_VERIFY_TIMEOUT_SEC:.0f}s more ({total:.1f}s total) — a click likely "
-            "landed wrong (unexpected dialog, moved/resized window, ...)",
-            flush=True,
-        )
+        return True
+
+    total = time.time() - start
+    notify(f"Sphera restarted, but R1/battery never came back ({total:.0f}s) — check manually")
+    print(
+        f"[watchdog] GUI re-entry finished after {elapsed:.1f}s but R1/battery didn't come up "
+        f"within {POST_PLAY_VERIFY_TIMEOUT_SEC:.0f}s more ({total:.1f}s total) — a click likely "
+        "landed wrong (unexpected dialog, moved/resized window, ...)",
+        flush=True,
+    )
+    return False
 
 
 def watch(
@@ -238,14 +245,25 @@ def main() -> None:
         help="Stop at the container restart; don't drive Sphera's GUI back into "
              "the scenario. Use this if you'll be at the keyboard to do it yourself.",
     )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Run the restart+re-entry cycle immediately, once, regardless of the "
+             "current battery level, then exit -- for on-demand use (e.g. a "
+             "'Restart Sphera Now' button), not the continuous watchdog loop. "
+             "Exit code reflects success (0) or failure (1).",
+    )
     args = parser.parse_args()
 
     if not SPHERA_RESTART_SCRIPT.exists():
         sys.exit(f"Sphera restart script not found: {SPHERA_RESTART_SCRIPT}")
-    if not (0.0 <= args.threshold < args.recovery_threshold <= 1.0):
+    if not args.once and not (0.0 <= args.threshold < args.recovery_threshold <= 1.0):
         sys.exit("--threshold must be < --recovery-threshold, both within [0, 1].")
     if not args.no_gui_reentry and shutil.which("xdotool") is None:
         sys.exit("xdotool not found (required for GUI re-entry) — install it, or pass --no-gui-reentry.")
+
+    if args.once:
+        ok = restart_and_reenter(args.drone_id, not args.no_gui_reentry)
+        sys.exit(0 if ok else 1)
 
     try:
         watch(args.threshold, args.recovery_threshold, args.poll_interval, args.drone_id, not args.no_gui_reentry)

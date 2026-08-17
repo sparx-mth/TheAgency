@@ -71,6 +71,12 @@ future-you, not for a commit log.
   interactive — see LESSONS.md's second 2026-08-17 entry) via a structural post-Play check
   (`R1` exists + reports a real battery reading) rather than trusting the click sequence
   blindly. See `docs/progress/entries/009-sphera-gui-reentry-automation.md`.
+- `sphera_battery_watchdog.py --once`: runs the full restart+re-entry cycle immediately
+  regardless of current battery, then exits with a real 0/1 exit code (was previously only
+  reachable via the continuous polling loop). Powers a new "⚡ Restart Sphera Now" button on
+  `mission_control.py`'s Watchdog card (two-click confirm, blocks with a spinner for the
+  ~40s the cycle takes). `restart_and_reenter()` now returns a real success `bool` instead
+  of `None` to support this.
 
 ### Changed
 - `sphera_drone.launch` now overrides FALCON's navigation controller to `multi_axis`

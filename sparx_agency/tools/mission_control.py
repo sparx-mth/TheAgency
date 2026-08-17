@@ -1811,6 +1811,52 @@ with tab_rooster:
     st.markdown("#### Watchdog")
     _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_watchdog"], states)
 
+    # On-demand trigger for the exact same restart_and_reenter() cycle the
+    # watchdog runs automatically on low battery -- via `--once` (see
+    # sphera_battery_watchdog.py's main()), not by importing the module
+    # (which would run its full CLI/Streamlit-incompatible top level).
+    with st.container(border=True):
+        st.markdown("**⚡ Restart Sphera Now**")
+        st.caption(
+            "Runs the watchdog's full cycle immediately, regardless of current "
+            "battery level: force-removes R1, runs sphera-restart.sh, drives "
+            "Sphera's GUI back into the scenario, and verifies R1/battery came "
+            "back. Takes ~40s -- this blocks until it finishes. Interrupts "
+            "whatever is currently running in Sphera."
+        )
+        if st.session_state.get("sphera_restart_pending"):
+            st.warning("This will interrupt the current Sphera session.")
+            c1, c2 = st.columns(2)
+            with c1:
+                confirmed = st.button("✅ Confirm restart", key="sphera_restart_confirm", use_container_width=True)
+            with c2:
+                if st.button("Cancel", key="sphera_restart_cancel", use_container_width=True):
+                    st.session_state["sphera_restart_pending"] = False
+                    st.rerun()
+            if confirmed:
+                st.session_state["sphera_restart_pending"] = False
+                with st.spinner("Restarting Sphera and re-entering the scenario (~40s)…"):
+                    try:
+                        result = subprocess.run(
+                            ["python3", "/home/user1/GIT/TheAgency/sparx_agency/tools/sphera_battery_watchdog.py", "--once"],
+                            capture_output=True, text=True, timeout=180, check=False,
+                        )
+                        success = result.returncode == 0
+                        output = (result.stdout or "") + (result.stderr or "")
+                    except subprocess.TimeoutExpired as exc:
+                        success = False
+                        output = f"Timed out after 180s.\n{exc.stdout or ''}{exc.stderr or ''}"
+                if success:
+                    st.success("Sphera restarted and re-entered the scenario successfully.")
+                else:
+                    st.error("Restart failed -- check Sphera manually (see output below).")
+                with st.expander("Output"):
+                    st.code(output)
+        else:
+            if st.button("⚡ Restart Sphera Now", key="sphera_restart_start"):
+                st.session_state["sphera_restart_pending"] = True
+                st.rerun()
+
     with st.expander("📊  Monitors", expanded=False):
         _service_cards([s for s in ROBOTICAN_SERVICES if s.group == "rooster_monitor"], states)
 

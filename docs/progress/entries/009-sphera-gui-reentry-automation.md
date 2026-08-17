@@ -55,6 +55,14 @@ entirely, independent of the unattended-operation requirement.
       the two prior manual measurements (38.1s, 38.2s).
 - [x] Startup check: hard-fails with a clear message if `xdotool` isn't installed and GUI
       re-entry wasn't opted out of (this repo's "raise, don't silently fall back" convention).
+- [x] Added `--once` (run `restart_and_reenter()` immediately regardless of current battery,
+      then exit with a real 0/1 exit code) and a "⚡ Restart Sphera Now" button on
+      `mission_control.py`'s Watchdog card (two-click confirm, blocks with a spinner for the
+      ~40s the cycle takes, shows the run's output in an expander) — on-demand testing/reset
+      without waiting for a real battery drain. `restart_and_reenter()` changed from
+      returning `None` to returning a real success `bool` to support this. Confirmed live:
+      `--once` invoked exactly as the button does (subprocess, `capture_output=True`),
+      `returncode=0`, 36.1s, fresh `R1` + 99% battery verified afterward.
 
 ## Notes
 - The 10s warmup and per-step settle delays are empirically tuned against this one machine's
