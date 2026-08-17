@@ -339,6 +339,40 @@
   <arg name="unstick_time_s"      default="8.0" />
   <arg name="unstick_speed"       default="0.35" />
   <arg name="unstick_climb_speed" default="0.25" />
+
+  <!-- ── The yaw probe never once finds a wedge, and that is worth knowing ──
+       MEASURED 2026-08-17, and a fix for it was built, flown and DELETED.
+
+       The probe exists because "possibly stuck" is an inference and a
+       brake-limited crawl reads exactly like a wedge, so it measures before
+       acting. The measurement is emphatic and one-sided: across four hospital
+       legs it returned NOT WEDGED on essentially every attempt and found the
+       aircraft actually held ZERO times — 20 unsticks and 20 clears in a single
+       leg — at 11-16 s of rotation each, commanding zero translation.
+
+       The obvious inference is that after N consecutive fruitless probes the
+       aircraft is not the problem and the TARGET is, so the follower should
+       stop re-probing and hold station for FALCON's dead-end guard. That was
+       implemented twice and both times failed to fire at all:
+
+         * resetting the counter per TICK, on "not jammed right now", which is
+           true on nearly every tick, so it never reached two;
+         * resetting on 1.5 m of displacement since the last clear, which is
+           BELOW the recovery ladder's own excursion — a 1.3 m retreat plus a
+           6 s unstick at 0.20 m/s spans about 2.6 m — so the counter reset
+           every cycle even while the aircraft went nowhere overall. This is
+           the same trap falcon_deadend_looping.patch documents, reproduced.
+
+       A leg that ended ABORT_NO_GROWTH at 802.21 m3 — exactly the failure the
+       give-up targets — still fired it zero times. Deleted rather than left in
+       as dead weight.
+
+       Anyone retrying this needs an anchor that holds at the FIRST clear of an
+       episode rather than moving to each one, and a threshold above the
+       recovery ladder's excursion. But check the premise first: the pinning
+       this was built for was measured BEFORE falcon_open_visib_bar.patch
+       shipped, and the hospital legs after it finished at 861 and 873 m3, the
+       two highest figures this package has recorded. The target may be gone. -->
   <arg name="unstick_move_m"      default="0.35" />
   <arg name="max_unsticks"        default="20" />
 

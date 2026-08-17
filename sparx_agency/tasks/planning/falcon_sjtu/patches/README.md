@@ -377,6 +377,17 @@ it started.
   building spent about 300 s looping at (-10.5, -2.5), escaped unaided and went
   on to 732.9 m³. The looping test gets 60 s; the pinned test keeps 25 s.
 
+**That 2.6 m excursion figure has since bitten a second time, in our own code.**
+A give-up rule for the follower's yaw probe was built to stop re-probing after N
+consecutive "not wedged" verdicts, and it reset its counter on 1.5 m of travel
+since the last clear — below the ladder's own span, so it reset every cycle and
+never once fired, including on a leg that ended `ABORT_NO_GROWTH` at 802.21 m³.
+It has been deleted; the measurement behind it (four hospital legs, ~25 probes,
+ZERO findings that the aircraft was actually held) and the anchor requirement are
+written up in `adapter/launch/bspline_follower.launch`. **Any threshold compared
+against aircraft displacement in this stack must sit above ~2.6 m**, or it is
+measuring the recovery ladder rather than the failure.
+
 ## falcon_ccl_slice_height.patch — build the tour's world where the drone flies
 
 Touches `hierarchical_grid.cpp`.
