@@ -77,10 +77,32 @@ map_config:
   area:
     # The exploration footprint [x0, y0, x1, y1].
     building: [38.75, -30.66, 70.75, 1.34]
-    # The z band the planner may fly in.
-    flight_band: [-1, 3.5]
+    # The z band the planner may fly in. 2026-08-13: raised 1.8 -> 2.2 -> 3.8
+    # over the course of one day, chasing the same crash each time:
+    # flight_band sizes the exploration/HGrid structures (UniformGrid), and
+    # the still-unresolved altitude-hold drift bug (rooster_unit.py) keeps
+    # pushing the drone above whatever ceiling is configured here -- even
+    # 2.2 wasn't enough margin, confirmed live (drone reached 2.14-2.58m
+    # mid-flight, briefly spiked to 3.9m during one landing). Once the
+    # drone's real position exceeds this band, UniformGrid indexes out of
+    # bounds and segfaults (UniformGrid::positionToGridCellCenterId) -- the
+    # exact crash class this file's own map_max_z history already
+    # documents, now hit on nearly every flight. 3.8 gives real margin
+    # against that drift (up to vertical_extent's own 4.0 ceiling) with zero
+    # visualization cost, since ceiling voxels are handled separately and
+    # correctly via `visualisation` below, which can't trigger this crash
+    # at all (it only affects drawing). This does NOT fix the drift bug
+    # itself -- it only stops the drift from crashing exploration_node.
+    flight_band: [-1, 3.8]
     # The z range ALLOCATED -- wider, because the camera sees the floor.
     vertical_extent: [-2, 4]
+    # What RViz actually draws -- independent of flight_band/vertical_extent
+    # above, so tightening this can't affect exploration or UniformGrid
+    # sizing at all, only the rendered view. Capped at 1.8m (0.2m headroom
+    # above the intended 1.6m cruise height, target_ranger_m in
+    # mission_control.py's Rooster Command Unit) so ceiling geometry never
+    # renders regardless of what's actually allocated/explored above it.
+    visualisation: [38.75, -30.66, -1, 70.75, 1.34, 1.8]
     # Metres per voxel, CHOSEN rather than inherited. Upstream picks this from
     # the exploration box's volume -- under 4000 m3 it maps at 10 cm, at or
     # above it 20 cm -- so a change to the box used to silently change the grid.

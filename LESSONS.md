@@ -775,6 +775,136 @@ day.
 `rooster_frame_dir_publisher.py` itself — check `ls -ld` on the two shared dirs first;
 whichever container starts first on a clean `/tmp` decides the ownership for everyone else.
 
+---
+
+## 2026-08-13 — `rooster_ground_truth_localization` silently received nothing after Sphera restart
+
+**Symptom:** After restarting Sphera, `/R1/localization` published nothing (confirmed via a
+real subscriber script, not `ros2 topic hz` — see the entry below on why that tool lied).
+Restarting `rooster_ground_truth_localization` didn't fix it either.
+
+**Root cause:** Sphera's own engine publishes `/R1/sphera/state` at `BEST_EFFORT` reliability
+from a bare DDS participant (not rclcpp). `rooster_ground_truth_localization.py`'s subscriber
+used a plain integer queue depth (`create_subscription(..., 10)`), which rclpy expands to the
+default `RELIABLE` profile — incompatible with a `BEST_EFFORT` publisher, so it silently
+received zero messages. `ros2 topic info --verbose` showed the exact warning: `New publisher
+discovered on this topic, offering incompatible QoS... RELIABILITY_QOS_POLICY`.
+
+**Fix / workaround:** Subscribe with an explicit `QoSProfile(depth=10,
+reliability=ReliabilityPolicy.BEST_EFFORT)` instead of a bare int. Confirmed live: ~140Hz
+real pose data end-to-end afterward. The same two-publishers-different-QoS pattern also
+shows up on `/R1/state` (ranger) — one `BEST_EFFORT` bare-DDS publisher, one `RELIABLE`
+`rooster_manager` publisher — but that one has always been benign since the real consumer
+subscribes `RELIABLE` (compatible with `rooster_manager`), so don't chase the warning there.
+
+**Don't:** Don't assume "the process is alive and logs 'ready'" means it's receiving data.
+Check `ros2 topic info --verbose` for a QoS mismatch warning before assuming the bug is
+somewhere else (Sphera itself, the bridge, network).
+
+---
+
+## 2026-08-13 — `ros2 topic hz` / `rostopic hz` report nothing on `BEST_EFFORT`-only topics
+
+**Symptom:** Repeatedly checked "is data flowing?" with `ros2 topic hz` / `rostopic hz` and
+got zero output, even when a real, independently-confirmed consumer (a node's own log
+showing incrementing counts) proved the topic was very much alive.
+
+**Root cause:** Both tools subscribe with default (`RELIABLE`) QoS. Any topic whose only
+publisher is `BEST_EFFORT` (Sphera's own sim-engine topics are, throughout this stack) is
+QoS-incompatible with that default subscription, so the tool silently sees nothing. This
+ROS2 distro (Foxy) doesn't even have a `--qos-reliability` override flag for `ros2 topic hz`.
+
+**Fix / workaround:** Don't trust `hz`/`rostopic hz` as ground truth on any Sphera-originated
+topic. Write a one-off subscriber script with explicit `BEST_EFFORT` QoS instead (a few lines
+of rclpy/rospy) — that's what actually caught the real data rate every time this came up today.
+
+**Don't:** Don't conclude a topic is dead from `hz` alone. Cross-check against a real
+consumer's own log, or a hand-rolled subscriber with matching QoS, before restarting things.
+
+---
+
+## 2026-08-13 — Altitude-hold PD loop ran at 1Hz, ~10x slower than its own sensor
+
+**Symptom:** `rooster_command_unit`'s altitude hold would drift 0.5-1m past target and
+either never recover, or oscillate in a stuck band for minutes — confirmed live across many
+flights, at multiple `altitude_hold_max_correction` values (200, then 380).
+
+**Root cause:** Two separate bugs stacked on each other.
+(1) `altitude_hold_interval_sec` defaulted to `1.0`, but `/R1/state` (the ranger source)
+actually updates at ~10Hz — the loop was reacting to only 1 in 10 fresh readings on a true
+double-integrator plant (throttle → accel → velocity → position), way too slow to converge.
+(2) Naively raising the loop rate to match (~10Hz) then aliased against the sensor's own
+~10Hz rate: on ticks where no new sample had arrived yet, `ranger == prev_ranger` computed a
+false `velocity=0`, producing an undamped P-only correction that alternated with properly
+-damped ticks every other cycle — visible directly in the log as a correction value bouncing
+between wildly different numbers tick to tick.
+
+**Fix / workaround:** `altitude_hold_interval_sec` raised to `0.1` (still runs the ROS timer
+at 10Hz), AND `_altitude_hold_tick` now skips entirely when `ranger` hasn't actually changed
+since the last real sample, using the true elapsed wall-clock time (`time.monotonic()`) for
+the velocity term instead of the fixed loop interval. Confirmed live: a clean, monotonic
+convergence to within 2cm of target in under 5 seconds on one flight (vs. minutes of
+oscillation before) — though a later flight still didn't converge cleanly, and turned out to
+be physically wedged against a door frame at the time, not a control-loop failure.
+
+**Don't:** Don't just widen the correction clamp again if this recurs — check `/R1/state`'s
+actual publish rate first (a hand-rolled subscriber, not `hz` — see the entry above) before
+assuming the gains or the clamp are the problem.
+
+---
+
+## 2026-08-13 — Voxel map looks fragmented/floating; root cause is altitude instability, not FALCON
+
+**Symptom:** RViz's Voxel Mapping display repeatedly showed disconnected chunks of occupied
+cells floating above the main wall/floor structure, with visible gaps — reproduced fresh on
+multiple flights, on a completely reset map each time, so not stale/leftover data.
+
+**Root cause:** Confirmed via direct query (subscribing to `/voxel_mapping/occupancy_grid_occupied`
+and comparing X/Y footprints across height bands): the vast majority of "floating" cells had
+zero occupied structure directly below them, while every low cell also had structure above
+it. This matches a coverage gap, not corrupted data: the drone scans real walls at whatever
+height it happens to be flying, but the still-imperfect altitude hold means that height
+varies flight to flight (and even within one flight), so the same X/Y spot's lower wall
+section sometimes never gets scanned from a floor-hugging vantage. FALCON's own exploration
+logic doesn't force a second, different-height pass over an already-"seen" frontier.
+
+**Fix / workaround:** None yet — the aliasing fix above improves *convergence* but the hold
+still isn't perfectly steady through a whole flight, and that residual variance is enough to
+leave gaps. The real fix is making our own altitude hold hold a genuinely constant height
+throughout exploration, not a FALCON-side change (FALCON's frontier logic just faithfully
+maps whatever height band the camera was actually pointed at).
+
+**Don't:** Don't reach for FALCON's own exploration/frontier code to fix this — the root
+cause is in our altitude-hold stability (`rooster_unit.py`), not upstream FALCON logic.
+
+---
+
+## 2026-08-13 — Launching Sphera + Rooster has no CLI/service hook; it's GUI-only past the container restart
+
+**Symptom:** Wanted to script/automate the full Sphera + Rooster bring-up. Found and confirmed
+`~/.sphera/sphera-restart.sh` handles the container restart itself cleanly (`docker compose
+down` + `up -d run_sphera`), but the drone never actually became controllable after just that.
+
+**Root cause:** Everything past the container restart is a click inside Sphera's own rendered
+(Unreal) window, with zero corresponding shell command, ROS topic, or file change to key off
+of: a "Welcome to SPHERA" screen needing a "Continue" click, a role-select screen ("Manager" is
+the only enabled option in this build), a "Manager mode" scenario picker (`Start` →
+`Standalone`), then assigning the drone to an operator and pressing the green ▶ Play button.
+`ros2 service list`/binary `strings` turned up no scenario-control service or CLI flag.
+**Play is also what spawns the separate `R1` backend container** (`sphera-backend:rooster`,
+`docker run --name R1 ...`) — it's not a distinct manual step, just an automatic side effect of
+that one click. If `R1` dies mid-scenario (vs. the container never having existed), Sphera does
+NOT auto-respawn it — replaying the exact captured `docker run` command by hand works fine.
+
+**Fix / workaround:** No automation exists for the GUI portion. `xdotool` could theoretically
+click through it (proportional coordinates within the window's current geometry, not absolute
+screen position — Sphera's window isn't pinned to one place or size), but that was explicitly
+decided against for now given the fragility of blind GUI-coordinate clicking. Manual for now.
+
+**Don't:** Don't assume "restart the container" is equivalent to "the drone is flyable again" —
+always confirm ROS2 nodes/topics under `/R1/*` and `/Rooster_1` actually reappear before moving
+on to restarting the falcon-side stack.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

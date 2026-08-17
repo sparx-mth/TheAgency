@@ -11,10 +11,25 @@ will use, so this UI and a planner are just two peers talking to the
 same RoosterCommandUnitNode (see adapters/rooster_command_unit.py).
 """
 
+import faulthandler
 import json
+import sys
 import time
 import tkinter as tk
 from tkinter import ttk
+
+# Enable BEFORE anything else (Gst.init, Tkinter, rclpy) -- this app has
+# crashed with no Python traceback at all, immediately at startup, twice.
+# That signature (no exception, nothing our own try/except catches) means
+# a native segfault, not a Python-level error -- GStreamer's ximagesink
+# embeds directly into Tkinter's raw X11 window handle, and combining that
+# with rclpy's own threading/signal handling is exactly the kind of
+# cross-toolkit interaction that crashes below the Python interpreter.
+# faulthandler traps fatal signals (SIGSEGV/SIGABRT/SIGBUS) and prints the
+# Python stack that was executing at the moment of the crash -- it can't
+# prevent the crash, but it turns a silent, undiagnosable one into a real
+# traceback in the log.
+faulthandler.enable(file=sys.stderr, all_threads=True)
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -416,13 +431,32 @@ class RoosterControlUI(Node):
 
 def main():
     rclpy.init()
-    gui = RoosterControlUI()
+    gui = None
     try:
+        # Widened to cover construction too -- it was only wrapping run()
+        # before, so a crash during widget/ROS setup (before the main loop
+        # even started) was invisible to this handler entirely. Confirmed
+        # live: the app has crashed immediately at startup, before any
+        # button press, with none of this ever printing.
+        gui = RoosterControlUI()
         gui.run()
-    except tk.TclError:
-        pass
+    except tk.TclError as e:
+        # A normal window-close raises this too, but it was being swallowed
+        # unconditionally -- indistinguishable from a real widget-access
+        # crash (e.g. touching a destroyed widget, or the GStreamer video
+        # sink's ximagesink racing Tkinter for the same X11 window handle).
+        # Log it so the next occurrence is diagnosable instead of silent.
+        print(f"[ui.py] Tk loop exited with TclError: {e}")
+    except Exception as e:
+        # Anything else that's an actual Python exception (as opposed to a
+        # native segfault, which faulthandler above is for) -- previously
+        # this would propagate uncaught with no context about which phase
+        # (construction vs. run) it happened in.
+        print(f"[ui.py] Crashed with {type(e).__name__}: {e}")
+        raise
     finally:
-        gui._stop_video_viewer()
+        if gui is not None:
+            gui._stop_video_viewer()
         rclpy.shutdown()
 
 
