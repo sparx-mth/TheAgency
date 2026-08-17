@@ -657,10 +657,27 @@ warehouse contacts more than halved. The hospital leg that finished did so at
 **809.11 m³ with 9 contacts** — the first hospital FINISH recorded in this
 campaign, on FALCON's own verdict.
 
-**The one number that is worse, stated plainly.** Hospital contacts averaged 145
-against 46. That mean is 280 and 9 *within the same two-leg arm* — a 31× spread —
-so it is **unresolved, not a measured regression**, and it wants more legs before
-anyone trusts it either way. Set the fraction to 0 to fall back with no rebuild.
+**The number that looked worse, and what it turned out to be.** Hospital contact
+*reports* averaged 145 against 46, which read as a safety cost. Counted the way
+this package says to count — **objects touched, not reports** — it reverses:
+
+| leg | reports | objects |
+|---|---|---|
+| 0.5, leg 1 | 280 | **5** |
+| 0.5, leg 2 | 9 | **1** |
+| off, leg 1 | 73 | **6** |
+| off, leg 2 | 19 | **2** |
+
+Mean 3.0 objects against 4.0: the treatment touched FEWER. The 280 reports are
+186 of them on a single `IVStand_2` — one object grazed repeatedly, exactly the
+"one five-second graze reads as eight contacts" pattern recorded elsewhere in
+this file. Set the fraction to 0 to fall back with no rebuild.
+
+> This was nearly a wrong verdict, and the reason is worth keeping: the A/B
+> harnesses were reading `contacts` out of `verdict.json`, which is the raw
+> report count, while the object count existed only in `both_worlds.sh`'s console
+> line. `campaign_run.sh` now writes `contact_objects` into the verdict, and both
+> harnesses print OBJECTS as the headline with reports as context.
 
 **A fraction of 0.25 was also measured and rejected**: it finished 3/3 on the
 warehouse but at a mean of 258 contacts against the control's 92, buying finishes

@@ -69,10 +69,10 @@ import json, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
-    print("NO_VERDICT\t0\t0\t0\t0"); raise SystemExit
-print("%s\t%.2f\t%d\t%d\t%d" % (d.get("verdict", "?"), d.get("coverage_m3", 0),
-                                d.get("contacts", 0), d.get("planner_respawns", 0),
-                                d.get("elapsed_s", 0)))
+    print("NO_VERDICT\t0\t0\t0\t0\t0"); raise SystemExit
+print("%s\t%.2f\t%d\t%d\t%d\t%d" % (d.get("verdict", "?"), d.get("coverage_m3", 0),
+                                    d.get("contacts", 0), d.get("planner_respawns", 0),
+                                    d.get("elapsed_s", 0), d.get("contact_objects", 0)))
 READER_EOF
 
 for arm in "${TREATMENT}" "${CONTROL}"; do
@@ -110,13 +110,18 @@ for arm in ("treat", "ctrl"):
     fin = sum(1 for x in r if "FINISHED" in x[3])
     fatal = sum(1 for x in r if "FATAL" in x[3])
     con = [int(x[5]) for x in r]
+    obj = [int(x[8]) if len(x) > 8 else 0 for x in r]
     cov = [float(x[4]) for x in r]
     el = [int(x[7]) for x in r]
-    print("[ab] %-5s %s=%-6s finished %d/%d  fatal %d  contacts %s (mean %.0f)  "
-          "coverage mean %.1f m3  elapsed mean %.0f s"
-          % (arm, "value", r[0][1], fin, len(r), fatal, "/".join(map(str, con)),
-             sum(con) / len(con), sum(cov) / len(cov), sum(el) / len(el)))
-print("[ab] contacts and finish rate are the safety verdict; watch elapsed too, "
+    print("[ab] %-5s %s=%-6s finished %d/%d  fatal %d  OBJECTS %s (mean %.1f)  "
+          "reports %s  coverage mean %.1f m3  elapsed mean %.0f s"
+          % (arm, "value", r[0][1], fin, len(r), fatal, "/".join(map(str, obj)),
+             sum(obj) / len(obj), "/".join(map(str, con)),
+             sum(cov) / len(cov), sum(el) / len(el)))
+print("[ab] OBJECTS TOUCHED and finish rate are the safety verdict, not raw\n"
+      "     reports: Gazebo emits one per contact point per physics step, so a\n"
+      "     single IV stand grazed repeatedly has read as 186 reports on 1 object.\n"
+      "[ab] also: watch elapsed too, "
       "since a sampling change can cost planner CPU without showing in coverage.")
 SUMMARY_EOF
 python3 "${SUMMARY}" "${RESULTS}"

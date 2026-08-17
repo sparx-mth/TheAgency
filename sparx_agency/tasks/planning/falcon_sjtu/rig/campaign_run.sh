@@ -74,6 +74,15 @@ finish() {
 
     local contacts wedges respawns finish_line coverage retreats drifts
     contacts=$(grep -c '\[CONTACT\]' "${RUN_DIR}/monitor.log" 2>/dev/null); contacts=${contacts:-0}
+    # Distinct objects touched, which is the metric this package judges on.
+    # Gazebo emits a fresh contacts entry per contact point per physics step, so
+    # one five-second graze along a crate reads as eight "contacts" -- and a
+    # single IV stand grazed repeatedly has read as 186 reports on one object.
+    # Reporting only the raw count has already produced one wrong verdict, so
+    # the object count belongs in the machine-readable artifact and not just in
+    # both_worlds.sh's console line.
+    contact_objects=$(grep -oE 'began: [A-Za-z_0-9]+' "${RUN_DIR}/monitor.log" 2>/dev/null | sort -u | wc -l)
+    contact_objects=${contact_objects:-0}
     wedges=$(grep -c '\[WEDGED\]' "${RUN_DIR}/monitor.log" 2>/dev/null); wedges=${wedges:-0}
     respawns=$(grep -c 'process has died' "${RUN_DIR}/falcon.log" 2>/dev/null); respawns=${respawns:-0}
     retreats=$(grep -c 'contact/wedge (retreat #' "${RUN_DIR}/falcon.log" 2>/dev/null); retreats=${retreats:-0}
@@ -98,7 +107,8 @@ finish() {
     if [[ "${bumper_failed}" -gt 0 ]]; then bumper_bridged=false; else bumper_bridged=true; fi
     cat > "${RUN_DIR}/verdict.json" <<EOF
 {"map": "${MAP}", "verdict": "${verdict}", "detail": "${detail}",
- "elapsed_s": ${elapsed}, "contacts": ${contacts}, "wedges": ${wedges},
+ "elapsed_s": ${elapsed}, "contacts": ${contacts},
+ "contact_objects": ${contact_objects}, "wedges": ${wedges},
  "planner_respawns": ${respawns}, "coverage_m3": ${coverage},
  "retreats": ${retreats}, "plan_origin_corrections": ${drifts},
  "world_models": ${SPARX_MODEL_COUNT:-0}, "bumper_bridged": ${bumper_bridged},
@@ -106,7 +116,7 @@ finish() {
 EOF
     [[ "${bumper_bridged}" == "true" ]] || \
         say "WARNING: /simple_drone/bumper_states never bridged -- this run flew with NO ground-truth contact sense"
-    say "VERDICT ${verdict} (${detail}) after ${elapsed}s: coverage=${coverage} m3 contacts=${contacts} retreats=${retreats} respawns=${respawns}"
+    say "VERDICT ${verdict} (${detail}) after ${elapsed}s: coverage=${coverage} m3 contacts=${contacts} on ${contact_objects} object(s) retreats=${retreats} respawns=${respawns}"
     exit "${rc}"
 }
 
