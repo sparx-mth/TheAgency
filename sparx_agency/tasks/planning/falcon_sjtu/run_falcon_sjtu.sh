@@ -133,6 +133,36 @@ chmod +x "${SCRIPT_DIR}"/adapter/scripts/*.py 2>/dev/null || true
 # (100), END (50) and SMOOTHNESS (20) on every curve, so the optimiser bought
 # clearance by distorting routes it had no room to distort.
 #
+# ── 0.70 MEASURED BETTER IN THE WAREHOUSE. NOT SHIPPED. 2026-08-17. ────────
+# The best safety result this campaign has produced, and it is left OFF because
+# only half the evidence exists. Interleaved warehouse A/B, n=6 per arm, the
+# live rosparam checked on every single leg:
+#
+#              objects/leg   CLEAN legs   finished   coverage   elapsed
+#   0.45 (now)     3.33         0/6          5/6      378 m3     431 s
+#   0.70           0.67         4/6          5/6      366 m3     295 s
+#
+# Objects touched -80%, bumper reports -87% (158 -> 20), the warehouse goes from
+# NEVER producing a contact-free leg to four in six, finishes TIE, and runs are
+# 32% faster, for ~3% less coverage. Both arms aborted exactly once, which is
+# what showed the treatment's single abort was the world and not the change.
+#
+# Why it is not shipped anyway. This value was deliberately unified across both
+# worlds (see above) because the warehouse's aisles (0.909-1.216 m) and the
+# hospital's doorways (0.930 m) are the SAME size, with 0.45 chosen as the
+# half-width so the one-sided cost has its minimum on the centreline. Raising it
+# to 0.70 makes the constraint unsatisfiable in every opening in BOTH worlds --
+# which is precisely the 0.85 failure described above, where a permanent cost
+# residual bought clearance by distorting routes. The warehouse result
+# CONTRADICTS that theory rather than confirming it, so the theory cannot be
+# used to predict the hospital in either direction. The hospital A/B was flying
+# when it was stopped to open RViz, so the hospital has NOT been measured.
+#
+# To finish this: SAFE_DISTANCE=0.70 vs 0.45, interleaved, 2+ rounds, hospital,
+# cap 4200 s, checking `live=` per leg. Keep ONE value if the hospital is neutral
+# or better; only split per-map if it regresses, and say plainly that doing so
+# overturns a deliberate design decision.
+#
 # An explicit safe_distance in FALCON_LAUNCH_ARGS always wins.
 if [[ "${FALCON_LAUNCH_ARGS:-}" != *safe_distance* ]]; then
     MAP_SAFE_DISTANCE="${SAFE_DISTANCE:-0.45}"
