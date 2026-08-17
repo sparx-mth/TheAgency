@@ -1,0 +1,163 @@
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -880,75 +880,97 @@
+   // frontiers_, and that iterator points into the same list.
+   sweepBlockedFrontiers();
+ 
+-  // Both lists empty means this cycle is about to leave the mission with no
+-  // frontier at all, which is what the FSM reads as "exploration finished".
+-  // Test BOTH: frontiers_ alone is transiently empty early in a mission while
+-  // tmp_frontiers_ is full of clusters about to be categorised, and an amnesty
+-  // granted there would fire on a perfectly healthy start.
+-  if (frontiers_.empty() && tmp_frontiers_.empty())
+-    grantFinishAmnesty();
+-
+   first_new_ftr_ = frontiers_.end();
+   int new_num = 0;
+   int new_dormant_num = 0;
+-  // Try find viewpoints for each cluster and categorize them according to
+-  // viewpoint number
+-  for (auto &tmp_ftr : tmp_frontiers_) {
+-    // Controller-reported dead end: a cluster sitting on a viewpoint the aircraft
+-    // could not physically reach (an obstacle inside the depth near clip the map
+-    // never caught) is retired to dormant, so the coverage tour stops re-picking
+-    // a route the map believes clear but the airframe keeps grinding into.
+-    // Against the EARNED radius, not the fixed one. A shadow is cast at a
+-    // viewpoint and tested here against the frontier's average, and viewpoints
+-    // are sampled candidate_rmin..rmax from that average -- so at the strike-1
+-    // width (deliberately under candidate_rmax) this test cannot fire for the
+-    // frontier that produced the blocked viewpoint. That is correct exactly
+-    // once: it stops a single early mistake retiring a transit route. From the
+-    // second strike the width exceeds candidate_rmax and the frontier retires,
+-    // which is what stops the tour re-offering a place the aircraft has now
+-    // failed to reach twice.
+-    bool in_blocked = insideKeepOut(keep_out_, tmp_ftr.average_.x(),
+-                                    tmp_ftr.average_.y(), tmp_ftr.average_.z());
+-    for (size_t i = 0; !in_blocked && i < blocked_regions_.size(); ++i)
+-      if ((blocked_regions_[i] - tmp_ftr.average_).norm() <
+-          blockedRadiusFor(blocked_regions_strikes_[i])) {
+-        in_blocked = true;
+-        break;
+-      }
+-    if (in_blocked) {
+-      dormant_frontiers_.push_back(tmp_ftr);
+-      ++new_dormant_num;
+-      for (auto &cell : tmp_ftr.cells_) {
+-        Eigen::Vector3i idx;
+-        map_server_->getTSDF()->positionToIndex(cell, idx);
+-        frontier_flag_[toadr(idx)] = false;
++  // Categorise every detected cluster, then hand tmp_frontiers_ back empty:
++  // each cluster is now either promoted into frontiers_ or retired into
++  // dormant_frontiers_, and none of them may be categorised a second time.
++  auto categorise = [&]() {
++    // Try find viewpoints for each cluster and categorize them according to
++    // viewpoint number
++    for (auto &tmp_ftr : tmp_frontiers_) {
++      // Controller-reported dead end: a cluster sitting on a viewpoint the aircraft
++      // could not physically reach (an obstacle inside the depth near clip the map
++      // never caught) is retired to dormant, so the coverage tour stops re-picking
++      // a route the map believes clear but the airframe keeps grinding into.
++      // Against the EARNED radius, not the fixed one. A shadow is cast at a
++      // viewpoint and tested here against the frontier's average, and viewpoints
++      // are sampled candidate_rmin..rmax from that average -- so at the strike-1
++      // width (deliberately under candidate_rmax) this test cannot fire for the
++      // frontier that produced the blocked viewpoint. That is correct exactly
++      // once: it stops a single early mistake retiring a transit route. From the
++      // second strike the width exceeds candidate_rmax and the frontier retires,
++      // which is what stops the tour re-offering a place the aircraft has now
++      // failed to reach twice.
++      bool in_blocked = insideKeepOut(keep_out_, tmp_ftr.average_.x(),
++                                      tmp_ftr.average_.y(), tmp_ftr.average_.z());
++      for (size_t i = 0; !in_blocked && i < blocked_regions_.size(); ++i)
++        if ((blocked_regions_[i] - tmp_ftr.average_).norm() <
++            blockedRadiusFor(blocked_regions_strikes_[i])) {
++          in_blocked = true;
++          break;
++        }
++      if (in_blocked) {
++        dormant_frontiers_.push_back(tmp_ftr);
++        ++new_dormant_num;
++        for (auto &cell : tmp_ftr.cells_) {
++          Eigen::Vector3i idx;
++          map_server_->getTSDF()->positionToIndex(cell, idx);
++          frontier_flag_[toadr(idx)] = false;
++        }
++        continue;
+       }
+-      continue;
+-    }
+-    // Search viewpoints around frontier
+-    sampleViewpoints(tmp_ftr);
+-    // sampleViewpoints3D(tmp_ftr);
+-    if (!tmp_ftr.viewpoints_.empty()) {
+-      ++new_num;
+-      list<Frontier>::iterator inserted = frontiers_.insert(frontiers_.end(), tmp_ftr);
+-      // Sort the viewpoints by coverage fraction, best view in front
+-      sort(inserted->viewpoints_.begin(), inserted->viewpoints_.end(),
+-           [](const Viewpoint &v1, const Viewpoint &v2) { return v1.visib_num_ > v2.visib_num_; });
+-      if (first_new_ftr_ == frontiers_.end())
+-        first_new_ftr_ = inserted;
+-    } else {
+-      CHECK_LE(tmp_ftr.visib_num_, min_visib_num_) << "Frontier with valid viewpoint but dormant";
+-      // Find no viewpoint, move cluster to dormant list
+-      dormant_frontiers_.push_back(tmp_ftr);
+-      ++new_dormant_num;
++      // Search viewpoints around frontier
++      sampleViewpoints(tmp_ftr);
++      // sampleViewpoints3D(tmp_ftr);
++      if (!tmp_ftr.viewpoints_.empty()) {
++        ++new_num;
++        list<Frontier>::iterator inserted = frontiers_.insert(frontiers_.end(), tmp_ftr);
++        // Sort the viewpoints by coverage fraction, best view in front
++        sort(inserted->viewpoints_.begin(), inserted->viewpoints_.end(),
++             [](const Viewpoint &v1, const Viewpoint &v2) { return v1.visib_num_ > v2.visib_num_; });
++        if (first_new_ftr_ == frontiers_.end())
++          first_new_ftr_ = inserted;
++      } else {
++        CHECK_LE(tmp_ftr.visib_num_, min_visib_num_) << "Frontier with valid viewpoint but dormant";
++        // Find no viewpoint, move cluster to dormant list
++        dormant_frontiers_.push_back(tmp_ftr);
++        ++new_dormant_num;
+ 
+-      // remove dormant frontiers, set flag to 0
+-      for (auto &cell : tmp_ftr.cells_) {
+-        Eigen::Vector3i idx;
+-        map_server_->getTSDF()->positionToIndex(cell, idx);
+-        frontier_flag_[toadr(idx)] = false;
++        // remove dormant frontiers, set flag to 0
++        for (auto &cell : tmp_ftr.cells_) {
++          Eigen::Vector3i idx;
++          map_server_->getTSDF()->positionToIndex(cell, idx);
++          frontier_flag_[toadr(idx)] = false;
++        }
+       }
+     }
++    tmp_frontiers_.clear();
++  };
++
++  // Categorise; and if that leaves the mission with NO frontier at all, grant
++  // an amnesty and categorise once more over what it hands back.
++  //
++  // The gate has to sit AFTER the loop rather than in front of it. In front it
++  // can only fire when nothing was detected this cycle -- but the failure it
++  // exists to catch is the opposite one: clusters ARE re-detected every cycle
++  // and every one of them is categorised INTO dormant, so frontiers_ only
++  // becomes empty once the loop has run. Measured with the gate in front: the
++  // warehouse declared FINISH carrying 493 dormant clusters and 2 standing
++  // shadows having never granted an amnesty, and two hospital legs finished at
++  // 284 and 300 m3 the same way.
++  //
++  // Two passes, not a while loop: grantFinishAmnesty() is itself bounded by
++  // finish_amnesty_max_, and a second pass that produces nothing must be
++  // allowed to end the mission.
++  for (int pass = 0; pass < 2; ++pass) {
++    categorise();
++    if (!frontiers_.empty())
++      break;
++    grantFinishAmnesty();
++    if (tmp_frontiers_.empty())
++      break;
+   }
+ 
+   // The relaxation lasts exactly this one pass, whatever it produced.

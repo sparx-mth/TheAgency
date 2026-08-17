@@ -25,6 +25,28 @@
   -->
 
   <arg name="map_name" default="small_house"/>
+  <!-- Forwarded to the follower; see bspline_follower.launch for what it does
+       and why the burden of proof is on turning it on. Declared here because an
+       include passes only the args it names, so a knob that is not forwarded is
+       silently the follower default however it is set on the command line.
+
+       RE-TESTED 2026-08-16 AND STILL OFF. The original verdict was honest but
+       weak: 6 hospital legs compared on FINISH RATE, which is the noisiest
+       metric this stack has, and it was recorded as "no effect this rig can
+       resolve". Re-run as a proper A/B on the warehouse, where legs are cheap
+       and contacts are the thing the brake is supposed to buy:
+
+         on    2/3 finished, contacts 188/77/204 (mean 156), 303.5 m3, 472 s
+         off   3/3 finished, contacts  58/83/263 (mean 135), 378.1 m3, 462 s
+
+       No safety benefit, one fewer finish, no time saved. The diagnosis behind
+       it still stands — 68% of this aircraft's travel is more than 60 degrees
+       off the nose, so the forward depth cone covers the direction of travel
+       only a third of the time — but bounding speed by the AGE of the evidence
+       is not the answer, because a bearing that is stale but open costs speed
+       for nothing. Telling stale-and-open from stale-and-occupied needs the
+       free/unknown cloud the follower does not subscribe to. -->
+  <arg name="unknown_brake" default="false"/>
   <arg name="drone_ns" default="/simple_drone"/>
 
   <!-- ONE clock owns everything. Every data stamp in this graph is already
@@ -38,26 +60,60 @@
        tolerates. -->
   <param name="/use_sim_time" value="true"/>
 
-  <!-- ── Speeds: the old stack's indoor tuning, kept. At 0.25 m/s a 4 m leg is
-       a ~16 s spline, comfortably inside FALCON's well-behaved regime; yaw
-       faster than translation so the camera can align at a door before the
-       aircraft is committed through it. -->
-  <arg name="max_vel"     default="0.25"/>
+  <!-- ── Speeds. Yaw faster than translation so the camera can align at a door
+       before the aircraft is committed through it.
+
+       0.15, down from the old stack's 0.25, and the number comes out of the
+       doorway rather than out of comfort. What decides whether an aircraft can
+       thread a 0.93 m opening is not its speed but its CORRECTION PER METRE
+       TRAVELLED: how much cross-track it can take out before it arrives. The
+       follower's per-tick ceiling is `max_vel + max_overspeed`, so that ratio
+       is max_overspeed / max_vel, and the ceiling itself is bounded by
+       clearance (see the speed block below). With the ceiling pinned at
+       0.35 m/s the only way to buy correction is to lower the plan:
+
+         config                        plan  ceiling  corr  ratio  stopping
+         run 003 (finished the world)  0.25   0.60    0.35   1.40   0.41 m
+         ceiling capped, plan kept     0.25   0.35    0.10   0.40   0.18 m
+         ceiling capped, plan 0.20     0.20   0.35    0.15   0.75   0.18 m
+         this                          0.15   0.35    0.20   1.33   0.18 m
+
+       The middle two both stalled at hospital doorways with zero contacts, at
+       297 m3 and 211 m3, having simply run out of authority to centre. This
+       one restores run 003's ratio while keeping its stopping distance inside
+       the 0.19 m the planner reserves. The cost is wall-clock. -->
+  <arg name="max_vel"     default="0.15"/>
   <arg name="max_acc"     default="0.25"/>
   <arg name="max_yaw_vel" default="0.6"/>
   <arg name="max_yaw_acc" default="0.5"/>
 
-  <!-- ── Safety: HARD inflation in the map vs SOFT optimiser penalty. The rule
-       that must hold: safe_distance <= narrowest_half_width - inflation, or the
-       optimiser is asked for clearance the corridor cannot provide and trades it
-       away unpredictably. Lowered 0.30 to 0.25 (the drone radius, zero spare) to
-       open hospital doorways: a 0.9 m door widens the centre corridor from
-       0.30 m to 0.40 m, enough for the follower to hold the centre through it.
-       Grazes are survivable now (speed capped 0.6 m/s, contact reflex backs
-       out), so the old margin is spent reaching frontiers the 0.30 m map had
-       walled off rather than left on the table. -->
+  <!-- ── Safety. READ THIS BEFORE TUNING EITHER NUMBER.
+       `obstacles_inflation` DOES NOTHING. The string "inflation" does not occur
+       anywhere in FALCON's source — `/voxel_mapping/obstacles_inflation` is
+       read by no node, so every value it has ever been given, and every
+       conclusion drawn from changing it (including the aisle-sealing notes in
+       config/warehouse.yaml), is about a parameter that was never consumed. It
+       is kept only so the old command lines do not break, and so the next
+       person finds this note instead of re-deriving it.
+
+       `safe_distance` is the ONLY clearance the planner respects. It is used
+       in BsplineOptimizer::calcDistanceCost against the 3D ESDF:
+
+           getDistanceAndGradient(q[i], dist, dist_grad);
+           if (dist < safe_distance_) cost += pow(dist - safe_distance_, 2);
+
+       Three consequences. It is ISOTROPIC — the same margin over and under an
+       obstacle as beside it, which is the only vertical clearance in the
+       stack. It is SOFT — a penalty weighed against smoothness and dynamic
+       feasibility, so the optimiser will spend it to keep a curve flyable. And
+       at the old 0.15 m it asked for less margin than the aircraft's own
+       0.25 m radius, while the follower's map gate vetoes anything inside
+       0.28 m — so the planner's best legal curve sat inside the gate's trip
+       line and the two fought each other.
+       0.35 m: above the gate's bubble, and a 1.4 m warehouse aisle still
+       leaves 0.35 m of slack on each side. -->
   <arg name="obstacles_inflation" default="0.25"/>
-  <arg name="safe_distance"       default="0.15"/>
+  <arg name="safe_distance"       default="0.55"/>
 
   <!-- ── Frontier viewpoints: clearances lowered (0.35 to 0.25, 0.60 to 0.40) so
        FALCON places a viewpoint in a tighter space and observes a frontier
@@ -104,21 +160,481 @@
        from ~64 five-metre cells to ~16 ten-metre ones — which shrinks the TSP
        and the crash rate while keeping the whole hospital in scope. The tour is
        slightly less optimal; that is the trade for surviving. -->
+  <!-- 10.0, and it stays there. It was briefly raised to 14.0 on the theory
+       that the node's aborts were LKH crashes scaling with the tour size. That
+       theory is wrong: the measured stack trace is an Eigen assertion in the
+       RViz drawBspline path, nothing to do with the TSP (see the crash section
+       in the README), and 10.0 is what the one run that mapped the whole
+       hospital used. Coarser cells make the coverage tour worse for no gain. -->
   <arg name="hgrid_cell_size_max" default="10.0"/>
   <param name="/hgrid/cell_size_max" value="$(arg hgrid_cell_size_max)"/>
+
+  <!-- ── Do not choose a viewpoint the aircraft is already standing on ────
+       getTopViewpointsInfo takes the first viewpoint at least this far from the
+       current pose. At 0.5 m FALCON regularly picks one essentially on top of
+       the aircraft, and the trajectory it then fits is a near-zero-length
+       curve. That is the direct precursor of the crash that dominates this
+       deployment: evaluating such a curve outside its own knot span trips an
+       Eigen assertion inside PlanningVisualization::drawBspline and aborts the
+       node, which wipes the map (see "A planner respawn wipes the map" in the
+       README for the measured stack trace and what it costs).
+
+       1.2 m is above the 0.6 m the dead-end guard already calls "at target",
+       so it does not shadow a viewpoint the aircraft could usefully fly to,
+       and it is below candidate_rmin 1.0 plus the 0.5 m grid the viewpoints
+       are sampled on, so it does not empty the candidate set. -->
+  <arg name="frontier_min_candidate_dist" default="1.2"/>
+  <param name="/frontier_finder/min_candidate_dist" value="$(arg frontier_min_candidate_dist)"/>
 
   <param name="/frontier_finder/min_candidate_clearance"          value="$(arg frontier_min_clearance)"/>
   <param name="/frontier_finder/min_candidate_occupied_clearance" value="$(arg frontier_min_occ_clearance)"/>
   <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)"/>
   <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)"/>
 
+  <!-- ── How much unobserved space a line of sight may cross ────────────────
+       countVisibleCells treats UNKNOWN as an occluder, exactly like a wall. A
+       frontier cell IS the boundary of unknown space, so a ray arriving at one
+       crosses the unobserved boundary layer by construction: the test reports
+       "you cannot see this frontier" BECAUSE it is a frontier.
+
+       Measured with rig/vp_audit.py, and it is not a corner case. Across three
+       warehouse legs with this at 0, 43 clusters had somewhere legal to stand
+       and ZERO measured visibility from anywhere — 16% of every retirement.
+       Those cannot be rescued by the finish amnesty either, because it already
+       drops the visibility bar to zero and no bar saves a cluster nothing can
+       see. They stay dormant, the frontier set empties, and FALCON declares a
+       half-mapped world finished.
+
+       At 2 voxels the same three legs produced ZERO such clusters, retirements
+       fell 267 to 147, and the share of rays arriving clear rose from 6.8% to
+       9.2%, with the finish rate unchanged at 2 of 3 in both arms.
+
+       A ray may cross this many unobserved voxels and no more. The raycast runs
+       from the frontier cell toward the viewpoint, so the tolerated voxels are
+       the boundary layer; unknown further along is an unexplored volume being
+       looked through, and still blocks. OCCUPIED blocks at any distance, which
+       is what keeps the warehouse hollow ClutteringC crates unviewable — a ray
+       into one crosses the shell first.
+
+       2 voxels is 0.20 m at the 0.10 m map resolution. 0 restores upstream. -->
+  <!-- ── How much of a frontier an OPEN-SPACE viewpoint must see ────────────
+       min_visib_num is an absolute cell count, but the most any viewpoint can
+       see is the cluster's own size, so the bar is hardest exactly where the
+       cluster is smallest. Small leftover clusters are what remains late in a
+       mission: measured on two hospital legs, 96.9% and 100% of every cluster
+       retirement was "saw something, under the bar", one ending with 46
+       clusters still dormant.
+
+       A relative bar applied EVERYWHERE was tried and regressed the warehouse
+       from a finish to a pinned abort, because it admits frontiers bounding the
+       hollow ClutteringC crates' sealed interior cavities, which can never be
+       observed and so never stop being frontiers.
+
+       The discriminator was already in sampleViewpoints: those cavity
+       candidates are all isNearOccupied, wedged against the shell they are
+       trying to see past, while a frontier in an open hospital room is not. So
+       the relative bar applies only to candidates with real clearance and
+       anything near structure keeps upstream's absolute bar.
+
+       Judge on finish rate and contacts in BOTH worlds; the warehouse is the
+       one with something to lose. 0 restores the absolute bar everywhere. -->
+  <arg name="frontier_open_visib_fraction" default="0.5"/>
+  <arg name="frontier_open_visib_floor"    default="4"/>
+  <param name="/frontier_finder/open_visib_fraction" value="$(arg frontier_open_visib_fraction)"/>
+  <param name="/frontier_finder/open_visib_floor"    value="$(arg frontier_open_visib_floor)"/>
+
+  <arg name="frontier_visib_unknown_tolerance" default="2"/>
+  <param name="/frontier_finder/visib_unknown_tolerance" value="$(arg frontier_visib_unknown_tolerance)"/>
+
+
   <!-- Dead-end guard (patched into exploration_manager + frontier_finder): when
        the aircraft sits pinned short of a chosen viewpoint for 20 s, that
        viewpoint is handed to the frontier finder, which retires every cluster
        whose average is within this radius to dormant so the coverage tour stops
-       re-selecting a route the map thinks is clear but physics blocks. 2.5 m so
-       it reaches the frontier sitting up to candidate_rmax behind the viewpoint. -->
-  <param name="/frontier_finder/blocked_region_radius" value="2.5"/>
+       re-selecting a route the map thinks is clear but physics blocks.
+
+       This knob traded completeness against termination, and it was set at 3.5
+       for termination: parts of both worlds are genuinely unobservable and the
+       mission cannot FINISH until those frontiers retire (the hospital's two
+       north corner rooms are filled by staircases climbing z 0 to 3.0, both its
+       elevators are modelled as solid door slabs, seven cubicle curtains are
+       solid from 0.095 to 2.483 m). 3.5 exceeded candidate_rmax (2.5), so
+       retiring a viewpoint also retired the frontier that produced it, which
+       stopped run 002 making twenty-three attempts on one north-west pocket.
+
+       That was the wrong half of the trade, and the note here used to say what
+       would prove it: lower this if a run ever finishes with a room genuinely
+       missing rather than merely unreachable. One did. On 2026-08-14 the guard
+       blocked (5.11, -1.21) at t = 53 s, eight seconds into the flight with
+       almost nothing observed yet, and at 3.5 m that shadow covered the
+       corridor joining the north wing to the south. The aircraft mapped the
+       north, ran out of frontiers and declared FINISH at 253.65 m3, with the
+       entire southern half of the building never visited. A shadow cast over a
+       TRANSIT route is not the same mistake as one cast over a dead-end pocket,
+       and permanence made the first one fatal.
+
+       The resolution is not to pick a side of the trade but to put time into
+       it, which falcon_blocked_region_ttl.patch does. A shadow now expires, and
+       each re-report of the same region DOUBLES the next one (capped at
+       2^ttl_max_doubling). An early mistake in a corridor is forgiven after
+       90 s; a pocket that really is unobservable is re-reported and retires for
+       90, 180, 360, then 720 s, which is the rest of the mission. Termination
+       survives, completeness stops depending on the first minute of the flight.
+
+       With expiry doing the work, the radius goes back under candidate_rmax so
+       one bad viewpoint no longer retires its whole frontier. -->
+  <param name="/frontier_finder/blocked_region_radius" value="2.0"/>
+  <!-- ...and that is right exactly ONCE. Measured on 2026-08-15 in both halves
+       of the hospital: a shadow is cast at the VIEWPOINT the aircraft could not
+       reach, but a frontier is retired only when a shadow falls within the
+       radius of the frontier's AVERAGE, and viewpoints are sampled
+       candidate_rmin..rmax (1.0-2.5 m) from that average by construction. With
+       2.0 under candidate_rmax 2.5 the test can never fire for the frontier
+       that produced the blocked viewpoint. The frontier survives, samples
+       another viewpoint centimetres away, and the tour offers it forever. Run
+       h01 aimed at three viewpoints of one frontier 91/50/28 times and died of no
+       growth with the north half of the building never visited; run h02 aimed
+       at (-11.57, 10.16) 95 times while the guard reported the aircraft
+       confined short of that same point four separate times. The TTL ladder
+       cannot help: a shadow that never matches anything is refreshed forever
+       at no cost.
+
+       So the radius escalates on the SAME ladder as the TTL, under its own
+       cap. Strike 1 stays at 2.0 m and lifts in 90 s, which is what protects a
+       transit corridor from one early mistake: the 253.65 m3 failure above.
+       From strike 2 the shadow exceeds candidate_rmax and the frontier finally
+       goes dormant, which is the termination property the flat 3.5 used to
+       buy, now paid for with evidence: two independent 25 s confinements at
+       one place, keyed on the coarse 4 m history below.
+
+       Set this at or below blocked_region_radius to disable the widening and
+       get the old fixed-width behaviour back. -->
+  <param name="/frontier_finder/blocked_region_radius_max" value="3.5"/>
+  <param name="/frontier_finder/blocked_region_ttl_s" value="90.0"/>
+  <!-- 5, so the ladder is 90, 180, 360, 720, 1440, 2880 s. The cap is what
+       decides whether a mission can TERMINATE: at 3 (720 s) the hospital's last
+       unreachable frontier came back twice inside one run, and FALCON spent the
+       endgame re-attempting it, 1911 "No path to next viewpoint" lines, holding
+       at 736.3 m3 until the no-growth watchdog ended a mission that had already
+       mapped the building. A place that has independently defeated the aircraft
+       five times is not worth offering again, and at 1440 s it is retired for
+       the rest of any run this campaign flies, which lets the frontier set
+       actually empty and the FSM reach FINISH. -->
+  <param name="/frontier_finder/blocked_region_ttl_max_doubling" value="5"/>
+  <!-- Strikes are keyed more coarsely than shadows, and on a history that
+       never expires. An aircraft defeated twice by the same pile of clutter
+       does not fail at the same point twice: measured 2.6 m apart in the
+       hospital's north-west corner, which is outside the 2.0 m coalesce
+       radius, so both failures read as new, both shadows started at strike 1,
+       and the escalation above never engaged at all. The aircraft went back
+       into that corner and ground on it for 297 s of a 485 s run, 78 bumper
+       reports on one clutter pile. 4.0 m spans an obstacle and the pocket
+       around it without reaching the next room. -->
+  <param name="/frontier_finder/blocked_region_escalate_radius" value="4.0"/>
+
+  <!-- ── A*: give it time to find the route, and cells to find it through ─
+       These override two values loaded from pathfinding/config/astar.yaml, and
+       they are the difference between an exploration that reaches the far end
+       of a building and one that declares itself finished a third of the way
+       in.
+
+       The DEFAULT profile is the search `planTrajToView` runs to route the
+       aircraft to its chosen viewpoint, once per replan (~2.5 s). Upstream
+       gives it `max_search_time: 0.001`, ONE MILLISECOND, over a 0.5 m
+       lattice. Across a 24 x 56 m hospital that budget expires long before the
+       frontier is reached, and FALCON reports "No path to next viewpoint",
+       eventually retires the cluster as unreachable, and stops. Measured, two
+       runs of the same configuration: the one that mapped the whole building
+       logged 0 no-path lines, the one that finished at 260.8 m3 having never
+       gone south of y = -2.3 logged 58.
+
+       0.05 s is still 5% of one replan cycle and two orders of magnitude more
+       search. The COARSE profiles are deliberately left alone: they build the
+       tour's cost matrix over many pairs at once and are meant to degenerate
+       to a straight-line estimate.
+
+       Resolution 0.5 -> 0.3 for the same reason from the other direction: a
+       0.93 m doorway is TWO cells on a 0.5 m lattice, so a single occupied
+       cell closes it to the search, and the aircraft is asked to reach rooms
+       it can see through a door the planner thinks is a wall. At 0.3 m it is
+       three cells. The cost is ~4.6x the cells, which the time budget above
+       now covers. -->
+  <!-- allocate_num is the A* NODE POOL, and it has to move with the
+       resolution or refining the lattice makes the search worse, not better.
+       Upstream pairs 100000 nodes with a 0.5 m grid. At 0.3 m the same volume
+       needs (0.5/0.3)^3 = 4.6x as many, the pool runs out mid-search, and every
+       query returns no-path: measured 2012 "No path to next viewpoint" lines
+       in one run against 58 in a healthy one, after which FALCON went silent,
+       the follower's respawn-recovery survey fired seven times, and the
+       aircraft spent 93% of its ticks turning on the spot until the watchdog
+       ended it for not moving. 500000 nodes is about 25 MB. -->
+  <!-- RESOLUTION IS BACK AT UPSTREAM'S 0.5, and the round trip is the lesson.
+       0.3 was chosen to give a 0.93 m doorway three cells instead of two, on
+       the theory that one occupied cell was closing doors to the search. That
+       theory was never confirmed and the change did measurable harm: it made
+       every query 4.6x more expensive, and after a planner respawn, when the
+       map is empty and A* must expand through unknown space with nothing to
+       guide it, searches stopped completing at all. 976 no-path lines in one
+       run, coverage frozen, against ZERO in the run that mapped the whole
+       building on upstream's 0.5 m.
+       The time budget stays raised, because one millisecond is indefensible on
+       any lattice, and the pool stays large because headroom is free. -->
+  <!-- ── the coverage tour's connectivity slice ────────────────────────────
+       Under map_dimension 2 the tour reduces every hgrid cell by connected-
+       component labelling on ONE horizontal slice, and the height of that slice
+       was the literal 1.0 in getCCLCenters2D. It is now a parameter, defaulting
+       to 1.0 so an unset config is upstream behaviour.
+
+       1.0 is 0.1 m off the hospital's box floor (0.9) and nowhere near the
+       1.15-1.49 m the aircraft flies. It is, however, exactly where this
+       building keeps its beds, gurneys, wheelchairs, sinks and carts, which run
+       0.5-1.2 m. Every one of them reads to the tour as a wall at an altitude
+       the drone is never at, so the tour believes regions are disconnected that
+       the aircraft crosses without noticing, runs out of world, and declares the
+       building finished. Measured on 2026-08-15: two consecutive runs ended
+       PARTIAL_FINISH at 479.4 and 587.5 m3, the second having never gone south
+       of y = -20.5 in a building that runs to -34.5: a quarter of it never
+       visited, with FALCON's own frontier set empty.
+
+       1.25 is the middle of the usable band (1.0-1.5) and the altitude the
+       follower already calls mid-band and returns to when it unsticks. It is
+       one value for both worlds, like every other tuning here: it sits inside
+       the warehouse box (0.6-2.4) as well, and is strictly closer to where that
+       aircraft flies than 1.0 was.
+
+       It MUST stay inside the flight box. A slice outside it selects no voxels
+       and the tour's model of the world goes blank rather than merely wrong,
+       the same failure recorded above against raising box_min_z past 1.0. -->
+  <!-- ── How far a trajectory may commit through UNOBSERVED space ──────────
+       checkTrajCollision walks the executing curve six metres ahead and
+       rejects a sample only if it is literally OCCUPIED. UNKNOWN passes, so
+       the aircraft will fly the whole six metres into a volume it has never
+       seen, on the assumption that it is empty. The follower cannot catch it
+       either: its voxel brake gate accumulates OCCUPIED only, so "known to be
+       empty" and "never looked at" are the same thing to it as well. Several
+       of these worlds' props are hollow shells whose interiors are never
+       observed and stay UNKNOWN for the whole mission, and they read to the
+       planner as free space it may route through.
+
+       Rejecting UNKNOWN outright would deadlock exploration, because
+       approaching unobserved space is the entire job. What is wrong is
+       COMMITTING to it. Within this radius the sensor is about to resolve the
+       volume anyway (the depth camera's near clip is 0.95 m) and the aircraft
+       can stop inside its own braking distance, 0.18 m at the 0.35 m/s
+       ceiling; beyond it the curve is a guess.
+
+       1.5 m rather than something tighter because the near clip guarantees a
+       band of unobserved space directly ahead at all times, and a limit inside
+       that band would refuse every trajectory. Unset means 1e9, i.e. upstream
+       behaviour. -->
+  <!-- 3.0, from 1.5. This knob has a cost on the other side and it took a
+       while to see it. Refusing to commit into unobserved space is also how the
+       aircraft stops APPROACHING it, and approaching unobserved space is how a
+       frontier gets revealed: a viewpoint candidate must itself be in
+       known-free space, so a cluster whose whole sampling ring is unobserved
+       can never be given one, is retired as unviewable, and the frontier set
+       empties with the building unmapped.
+
+       Measured. Before this limit existed the hospital finished at 817 and
+       822 m3. With it at 1.5 the peak rose to 856.9 m3  -  the best figure ever
+       recorded here, because the aircraft stops driving into things it cannot
+       see  -  but PARTIAL_FINISH legs appeared at 277-300 m3, and on one of them
+       the finish amnesty re-offered 52 retired clusters, with isNearUnknown and
+       the visibility bar both relaxed, and every one of them went straight back
+       to dormant. Nothing was wrong with the margin; there was simply no
+       observed free space to stand in.
+
+       3.0 m still refuses the six-metre guess this was written for  -  the
+       measured refusals ran to a 4.93 m median and 6.0 m max  -  while leaving
+       the aircraft room to close on a frontier and reveal it. -->
+  <arg name="unknown_commit_m" default="3.0"/>
+  <param name="/fsm/unknown_commit_m" value="$(arg unknown_commit_m)"/>
+
+  <arg name="ccl_slice_height" default="1.25"/>
+  <param name="/map_config/ccl_slice_height" value="$(arg ccl_slice_height)"/>
+
+  <!-- ── A* knows the aircraft has a WIDTH ─────────────────────────────────
+       Upstream A* tests one voxel per node, so a 0.14 m slot between two
+       clutter piles is a valid node and therefore a valid route, for an
+       airframe 0.52 m across. The B-spline optimiser is no help: safe_distance
+       is a SOFT cost it trades away when no curve can satisfy it, which is
+       exactly the case inside a gap narrower than the margin asked for.
+       Measured in the warehouse clutter cluster, where 0.14 / 0.36 / 0.38 m
+       gaps meet: one run flew the 0.36 m slot at the piles' own top height,
+       ground there for 45 s over 20 contact episodes, and CAPSIZED.
+
+       0.20 m is a two-sided trade and both sides are measured. It must exceed
+       half the widest gap to be refused (0.38 / 2 = 0.19) and stay under half
+       the narrowest opening that must stay flyable, the hospital's 26 doorways
+       at 0.930 m which this stack threads today:
+
+         0.14 / 0.36 / 0.38 m clutter slots  ->  closed
+         0.930 m hospital doorway            ->  0.53 m still open
+         0.909 m narrowest warehouse aisle   ->  0.51 m still open
+
+       start_clearance suppresses the skirt near the search start, because an
+       aircraft that has drifted against a wall is inside its own inflation and
+       could otherwise never plan its way off it. 0 disables both and restores
+       upstream point-robot search. -->
+  <!-- ── Places the aircraft has PROVED it cannot get through ──────────────
+       The dead-end guard retires the FRONTIER at such a place, which stops the
+       coverage tour targeting it. Nothing stopped A* ROUTING through it, so the
+       aircraft was sent back in on the way to somewhere else and caught again.
+       Measured in two consecutive hospital legs, both ending in a CAPSIZE at
+       the same coordinates: 834 s spent within two metres of (-2.3, -18.0)
+       among a scrubs cart and an instrument cart, 22 bumper reports, 13
+       viewpoints blocked and 11 frontiers retired around it, and it was still
+       routed back in until it flipped. Every guard fired correctly and none
+       could stop the aircraft going there.
+
+       A* now reads the frontier finder's own persisted blocked regions and
+       treats each as a disc to route around. It is a PREFERENCE: tested on the
+       strict pass only, so if avoiding it means no route at all, search()
+       retries without it and the worst case is the route the planner would
+       have taken anyway. Regions also expire on their existing TTL ladder.
+
+       1.0 m: wide enough to push a route out of the trap that caught the
+       aircraft, narrow enough that it does not straddle a 2 m hospital
+       corridor on its own. 0 disables. -->
+  <arg name="astar_no_go_radius"    default="1.0"/>
+  <arg name="astar_no_go_refresh_s" default="2.0"/>
+  <param name="/astar/no_go_radius"    value="$(arg astar_no_go_radius)"/>
+  <param name="/astar/no_go_refresh_s" value="$(arg astar_no_go_refresh_s)"/>
+
+  <!-- 0.26, the airframe's true half-width (collision mesh 0.52 m across the
+       arms), NOT a compromise value. With a lattice fine enough to resolve what
+       is left (see astar_resolution below), "A* found a route" then means
+       exactly "the aircraft fits", which is the only version of this test that
+       is right in both worlds.
+
+       0.20 was a compromise between closing the warehouse's 0.14-0.38 m clutter
+       slots and not closing the hospital's 0.930 m doorways, and it needed a
+       fallback to a point-robot route when no inflated route existed. That
+       fallback then handed the aircraft straight back into the clutter slots:
+       61 fallbacks in one warehouse leg, 278 bumper reports across 32 episodes
+       on four clutter piles, and a CAPSIZE at 103.9 m3  -  against CLEAN at
+       352.1 m3 with zero contacts on the same world before it. The doorway
+       problem was never that the aircraft did not fit; it was that the SEARCH
+       LATTICE could not represent the gap. Fix the lattice, not the width. -->
+  <arg name="astar_inflate_radius"  default="0.20"/>
+  <arg name="astar_start_clearance" default="0.50"/>
+  <param name="/astar/inflate_radius"  value="$(arg astar_inflate_radius)"/>
+  <param name="/astar/start_clearance" value="$(arg astar_start_clearance)"/>
+
+  <!-- 0.3, from 0.5, and this is what makes the inflation above honest. A
+       0.930 m hospital doorway inflated by the 0.26 m half-width leaves a
+       0.41 m band of legal centre positions; on a 0.5 m lattice no node need
+       land inside it, so a doorway the aircraft fits through reads as sealed.
+       Measured at 0.20 inflation / 0.5 lattice: 1068 "No path to next
+       viewpoint" lines in one hospital run, against 0 in a healthy one.
+
+       0.3 was tried before and abandoned, but for a reason that no longer
+       applies: it needs 248,889 nodes over this map against upstream's 100,000
+       pool, and every query exhausted it. astar_allocate_num is 500000 now,
+       sized for exactly this. max_search_time goes up with it, because a finer
+       lattice is more nodes to expand. -->
+  <arg name="astar_resolution"      default="0.5"/>
+  <arg name="astar_max_search_time" default="0.05"/>
+  <arg name="astar_allocate_num"    default="500000"/>
+  <param name="/astar/profile/default/resolution"      value="$(arg astar_resolution)"/>
+  <param name="/astar/profile/default/max_search_time" value="$(arg astar_max_search_time)"/>
+  <param name="/astar/allocate_num"                    value="$(arg astar_allocate_num)"/>
+
+  <!-- ── How far FALCON may plan from a pose the aircraft is not at ───────
+       falcon_replan_from_pose.patch corrects the replan origin to odometry
+       once it has drifted past this. The origin drifts because FALCON derives
+       it by evaluating the PREVIOUS trajectory at the current instant rather
+       than by reading odometry, and t_r saturates at the curve's duration, so
+       every second this stack spends braked, held or retreating (which is most
+       of the seconds it spends near an obstacle) opens a gap.
+
+       1.5 was chosen to end a runaway where the gap reached 5.4 m, and it does.
+       But it also LICENSES a gap of up to 1.5 m as normal, and that is not a
+       constant cost across worlds: in a 1.4 m warehouse aisle the aircraft has
+       0.70 m of half width and a metre of origin error is absorbed by the
+       optimiser; in a 0.90 m hospital doorway it has 0.45 m, so a plan anchored
+       1.5 m away is a plan whose first metre lies in the wall. Measured: 82
+       corrections in one hospital run, every one of them 1.5 to 2.1 m, i.e. the
+       threshold sat permanently saturated.
+
+       0.40 is the follower's own acquisition tolerance. Under it the previous
+       curve's endpoint is the BETTER origin (it joins the trajectory being
+       flown smoothly, with no velocity step); over it the curve is a fiction
+       and odometry wins. -->
+  <arg name="replan_from_pose_drift" default="0.40"/>
+  <param name="/fsm/replan_from_pose_drift" value="$(arg replan_from_pose_drift)"/>
+
+  <!-- ── When an unpublishable destination is given up on ─────────────────
+       PUB_TRAJ rejects a plan when either the optimised curve or the initial
+       path samples one occupied voxel inside its first six metres, and
+       checkTrajCollision is a point test with no radius while safe_distance is
+       a soft cost the optimiser may trade away. A curve fitted through a tight
+       doorway therefore cuts the corner its own waypoints went round, fails the
+       check, and nothing is published. The FSM replans, the tour offers the same
+       viewpoint, and the identical pair of curves comes back: measured 1781 of
+       1808 publish attempts in one hospital run, 823 in another, with the
+       aircraft holding station because an unpublished plan is indistinguishable
+       from a dead planner from outside the node.
+
+       After this many consecutive failures against the same destination, hand
+       it to the frontier finder's blacklist, which expires and escalates on its
+       own. 4 is deliberately small: the evidence is direct and already proved,
+       unlike the dead-end guard's 25 s of confinement, which is a slow and
+       indirect way to notice the same thing.
+
+       The streak must span real TIME, and that is not a detail. PUB_TRAJ is
+       entered on every FSM tick, so four consecutive failures is a third of a
+       second and a sustained deadlock becomes one shadow every four ticks:
+       measured 192 of them in a 481 s run, each covering a 2 m radius, which
+       sterilised the map faster than the aircraft could explore it and left the
+       mission confined to one corner of the building at 146.0 m3. A count alone
+       was never the right test. -->
+  <arg name="publish_fail_blacklist_after" default="4"/>
+  <arg name="publish_fail_same_target_m"   default="1.0"/>
+  <arg name="publish_fail_min_span_s"      default="6.0"/>
+  <arg name="publish_fail_cooldown_s"      default="20.0"/>
+  <param name="/fsm/publish_fail_blacklist_after"
+         value="$(arg publish_fail_blacklist_after)"/>
+  <param name="/fsm/publish_fail_same_target_m"
+         value="$(arg publish_fail_same_target_m)"/>
+  <param name="/fsm/publish_fail_min_span_s"
+         value="$(arg publish_fail_min_span_s)"/>
+  <param name="/fsm/publish_fail_cooldown_s"
+         value="$(arg publish_fail_cooldown_s)"/>
+
+  <!-- ── Which speed a "slow" trajectory is re-timed onto ─────────────────
+       On seeing a trajectory averaging under trigger_vel, FALCON rewrites its
+       knot vector so it would average target_vel instead. Upstream's target is
+       2.0 m/s, which on this aircraft is not a correction but a compression:
+       measured 324 rescales in one 16-minute hospital mission, ratios clustered
+       at 0.08 to 0.25, i.e. every seventh plan handed the follower a reference
+       four to thirteen times faster than the 0.15 m/s the optimiser had just
+       been told was the limit. The follower cannot legally chase it, so the gap
+       it opens is the same gap replan_from_pose_drift above keeps repairing.
+
+       Two things are set here. The target becomes the configured cruise, so a
+       trajectory already flying at the speed it was asked for is left alone.
+       And ratio_min is 1.0, which permits the rescale to STRETCH time only.
+       That direction is a genuine safety valve - a trajectory whose time
+       allocation is too tight gets slowed to something flyable - while the
+       compressing direction is exactly what breaks a velocity feasibility the
+       B-spline optimiser had already guaranteed. Nothing here can now speed a
+       reference up.
+
+       This also removes the divide-by-zero behind the node's aborts: a
+       trajectory that does not turn has avg_yaw_vel 0, and 1.57/0 fed through
+       std::min produced a non-finite re-timing whose knot vector later killed
+       exploration_node from inside its own visualiser. -->
+  <arg name="slow_traj_target_vel"  default="0.15"/>
+  <arg name="slow_traj_target_yaw"  default="1.57"/>
+  <arg name="slow_traj_trigger_vel" default="0.5"/>
+  <arg name="slow_traj_ratio_min"   default="1.0"/>
+  <arg name="slow_traj_ratio_max"   default="2.0"/>
+  <param name="/fsm/slow_traj_target_vel"  value="$(arg slow_traj_target_vel)"/>
+  <param name="/fsm/slow_traj_target_yaw"  value="$(arg slow_traj_target_yaw)"/>
+  <param name="/fsm/slow_traj_trigger_vel" value="$(arg slow_traj_trigger_vel)"/>
+  <param name="/fsm/slow_traj_ratio_min"   value="$(arg slow_traj_ratio_min)"/>
+  <param name="/fsm/slow_traj_ratio_max"   value="$(arg slow_traj_ratio_max)"/>
 
   <!-- traj_server parks its pre-plan command at the init pose, no ramp:
        the follower owns takeoff. -->
@@ -163,8 +679,135 @@
     <param name="color/b" value="0.0"/>
   </node>
 
+  <!-- ── Mission watchdog: end a run that has stopped earning its clock ──
+       An exploration fails in ways every node here reads as success. The FSM
+       is in EXEC_TRAJ, the follower is tracking, the aircraft is moving, and
+       the map has not gained a voxel in four minutes because the drone is
+       orbiting a room whose only exit is a doorway it cannot thread. The two
+       facts that settle it (where the aircraft has been, and how much map that
+       bought) are not in the same place anywhere else in this graph.
+
+       The judgement is in core/planning/exploration/progress_monitor.py and is
+       unit tested against both the stuck shapes and the healthy missions they
+       are confused with: a slow thorough sweep of one crowded room is confined
+       and must NOT be aborted; a long transit through mapped corridors is
+       barren and must not either. It takes both at once.
+
+       It publishes /mission/nudge (recoverable: the follower answers with a
+       fresh survey turn) and /mission/abort, and prints a greppable banner the
+       campaign harness ends the run on. It never kills anything itself, so an
+       interactive session is not torn down under its operator. -->
+  <arg name="watchdog"             default="true"/>
+  <!-- 3900, raised from 2400 on 2026-08-16. 2400 is below what this package's
+       own README asks for ("cap the mission at 3900 s or more before reading a
+       hospital TIMEOUT as a failure to map"), so the default was truncating
+       hospital missions that were still making progress rather than ending
+       ones that had stopped.
+
+       Measured: a hospital leg reached 812.02 m3 — the second-best figure this
+       package has ever recorded — and was cut by this cap while still gaining
+       1.8 m3/min, with a 9.1 m confinement radius and 48 dormant frontiers.
+       Nothing about that run had failed; it simply ran out of permission.
+
+       The safety machinery added over this campaign costs wall-clock on
+       purpose: detours around learned no-go regions, inflated-then-plain A*
+       retries, a 16 s yaw probe before any escape. The hospital needs about an
+       hour to exhaust its frontiers with all of it running.
+
+       Costs the warehouse nothing, since it finishes in 300-700 s and never
+       reaches this cap. The confinement, barren and no-movement watchdogs below
+       are unchanged and still end a run that has genuinely stopped, so this
+       raises the ceiling on healthy runs without letting a dead one linger. -->
+  <arg name="watchdog_time_cap_s"  default="3900.0"/>
+  <!-- Radius and growth are a PAIR and only fire together. 3.0 m is above the
+       largest legitimate stationary maneuver (a survey turn is a point, a
+       retreat 1.3 m) and below the smallest useful exploration leg. 3.0 m3/min
+       is a third of the rate a healthy hospital run sustains (measured: 430 m3
+       in 11 min = 39 m3/min) and well above mapper dither. -->
+  <arg name="watchdog_confine_radius_m"  default="3.0"/>
+  <arg name="watchdog_growth_m3_per_min" default="3.0"/>
+  <arg name="watchdog_confine_cap_s"     default="240.0"/>
+  <arg name="watchdog_barren_cap_s"      default="300.0"/>
+  <arg name="watchdog_grace_s"           default="90.0"/>
+  <!-- 180, from the node's own 120. The follower now deliberately HOLDS for up
+       to 90 s when a place has defeated it three times, so the aircraft can be
+       legitimately stationary far longer than it used to be and the watchdog
+       must not read that as pinned. It still ends a run that stays put through
+       two of the longest holds the follower is able to take. -->
+  <arg name="watchdog_no_move_cap_s"     default="180.0"/>
+  <node if="$(arg watchdog)" pkg="falcon_adapter" type="mission_watchdog_node.py"
+        name="mission_watchdog" output="screen">
+    <param name="odom_topic"         value="$(arg drone_ns)/odom"/>
+    <param name="time_cap_s"         value="$(arg watchdog_time_cap_s)"/>
+    <param name="grace_s"            value="$(arg watchdog_grace_s)"/>
+    <param name="confine_radius_m"   value="$(arg watchdog_confine_radius_m)"/>
+    <param name="growth_m3_per_min"  value="$(arg watchdog_growth_m3_per_min)"/>
+    <param name="confine_cap_s"      value="$(arg watchdog_confine_cap_s)"/>
+    <param name="barren_cap_s"       value="$(arg watchdog_barren_cap_s)"/>
+    <param name="no_move_cap_s"      value="$(arg watchdog_no_move_cap_s)"/>
+  </node>
+
   <!-- ── Our follower: takeoff, survey turn, then fly the B-spline ─────── -->
+  <!-- Tracking authority, forwarded so a run can be tuned without editing a
+       file. Defaults match bspline_follower.launch exactly, so forwarding
+       them changes nothing by itself.
+
+       max_overspeed is a CLEARANCE budget, not a comfort setting: FALCON
+       checks its curve against the map at the speed it planned, and flying the
+       same curve faster spends that margin on stopping distance. It is only
+       safe to raise it in step with safe_distance — which is why these two
+       knobs are named together here. max_overspeed >= max_catchup_speed is
+       enforced by VelocityServoParams and raises if violated. -->
+  <!-- ── The speed ceiling is DERIVED from the clearance, not chosen ──────
+       The follower must never be allowed to fly at a speed whose stopping
+       distance exceeds the margin the planner reserved. That margin is
+           safe_distance (0.45) - airframe half width (0.26) = 0.19 m
+       and the stopping distance at speed v, with this airframe's measured
+       0.30 s of command latency and 0.8 m/s^2 of braking, is
+           d(v) = 0.30 v + v^2 / 1.6
+       d(0.25) = 0.11 m, inside the margin. d(0.35) = 0.18 m, AT it.
+       d(0.40) = 0.22 m, over it. d(0.60) = 0.41 m, more than twice it.
+
+       The servo's per-tick ceiling is exactly `planned_speed + max_overspeed`
+       (servo.py:320 passes it as max_speed_xy to limit_velocity, overriding the
+       limits' own), so max_overspeed is not a cruise setting. It is the
+       CORRECTION BUDGET: everything the position loop has above the
+       feedforward, which is what closes a cross-track error.
+
+       That distinction cost a run. Cutting max_overspeed from 0.35 to 0.10 to
+       bound the absolute speed also cut the authority to correct, and
+       cross-track errors that used to close in a second began to persist,
+       straight into the clearance-breach retreat. Measured: the aircraft
+       stalled at a 0.93 m doorway it had flown through in the previous
+       configuration, retreating on breaches of 0.27 to 0.51 m with 0.32 to
+       0.54 m of cross-track, coverage frozen at 670 m3.
+
+       The right lever is the PLAN, not the correction. max_vel 0.20 with
+       max_overspeed 0.15 puts the ceiling on the same 0.35 m/s while leaving
+       0.15 m/s of correction everywhere, and because the ceiling is relative,
+       leaving it in the slow sections too, which is where a corner and a
+       doorway both are.
+
+       The old 0.6 / 0.35 / 0.25 let the servo sprint to 0.60 m/s to close a
+       lag against a 0.25 m/s plan, i.e. fly at 2.4x the speed FALCON checked
+       its curve at, spending the whole clearance budget on stopping distance
+       before anything had gone wrong. Measured in the first acceptance
+       attempt: every contact was at 0.48-0.59 m/s, all of them the aircraft
+       accelerating into an obstacle the map did not yet have.
+
+       The cost is wall-clock and it is small: the aircraft spends most of a
+       mission at plan speed anyway, and the catch-up being given up was only
+       ever used after a hold or a retreat. Raise these ONLY together with
+       safe_distance. -->
+  <arg name="max_speed_xy"      default="0.35"/>
+  <arg name="max_overspeed"     default="0.20"/>
+  <arg name="max_catchup_speed" default="0.15"/>
+
   <include file="$(find falcon_adapter)/launch/bspline_follower.launch">
-    <arg name="drone_ns" value="$(arg drone_ns)"/>
+    <arg name="drone_ns"          value="$(arg drone_ns)"/>
+    <arg name="unknown_brake"     value="$(arg unknown_brake)"/>
+    <arg name="max_speed_xy"      value="$(arg max_speed_xy)"/>
+    <arg name="max_overspeed"     value="$(arg max_overspeed)"/>
+    <arg name="max_catchup_speed" value="$(arg max_catchup_speed)"/>
   </include>
 </launch>

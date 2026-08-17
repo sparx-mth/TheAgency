@@ -1,0 +1,83 @@
+--- a/falcon_planner/exploration_manager/src/exploration_manager.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+@@ -985,13 +985,77 @@
+     static std::vector<std::pair<double, Vector3d>> track;
+     const double now_s = ros::Time::now().toSec();
+     track.push_back(std::make_pair(now_s, pos));
+-    while (track.size() > 1 && track.front().first < now_s - 25.0)
++    // Two tests read this history and they need DIFFERENT windows, because
++    // they rest on evidence of different strength. "Has not moved at all for
++    // 25 s" is conclusive on its own. "Moved, but got no nearer" is not: it is
++    // also what a hard doorway looks like while the aircraft is still winning.
++    // Measured -- the run that mapped the most of this building spent about
++    // 300 s looping at (-10.5, -2.5), escaped unaided, and went on to 732.9 m3
++    // and every corner of the world; retiring its viewpoint at 25 s would have
++    // thrown that away, and the two runs that did retire early finished at 399
++    // and 479 m3 having never reached the south wing at all.
++    //
++    // So the looping test gets the longer window and the pinned test keeps its
++    // own. A moving aircraft still has options a pinned one does not, and the
++    // cost of waiting is bounded by the watchdog above it.
++    const double LOOP_WINDOW_S = 60.0;
++    const double PINNED_WINDOW_S = 25.0;
++    while (track.size() > 1 && track.front().first < now_s - LOOP_WINDOW_S)
+       track.erase(track.begin());
+     const bool at_target = (pos - next_pos).norm() < 0.6;
+     double span = 0.0;
+-    for (size_t i = 0; i < track.size(); ++i)
++    double pinned_oldest = now_s;
++    for (size_t i = 0; i < track.size(); ++i) {
++      if (track[i].first < now_s - PINNED_WINDOW_S)
++        continue;   // the pinned test owns only the recent tail of the history
+       span = std::max(span, (track[i].second - pos).norm());
+-    if (!at_target && track.front().first <= now_s - 25.0 && span < 2.0) {
++      pinned_oldest = std::min(pinned_oldest, track[i].first);
++    }
++
++    // ...and the same failure with the aircraft MOVING, which the span test
++    // above cannot see. The follower's own recovery ladder is bigger than that
++    // threshold -- a contact retreat backs out 1.3 m, an unstick runs 0.20 m/s
++    // for 6 s -- so an aircraft in a strike-retreat-reapproach loop spans more
++    // than 2 m and reads as healthy while getting nowhere. Measured in run h04:
++    // "commanded 1.9 m of travel and moved 0.06 m" at (5.2, 1.6), the tour
++    // aiming at one viewpoint forty times, and this guard silent throughout.
++    //
++    // What separates a loop from a transit is what the path BUYS. A transit
++    // spends its path on displacement and on closing the gap to the target; a
++    // loop spends it on neither. Requiring all three -- no closing progress, a
++    // path worth measuring, and a path much longer than the displacement it
++    // produced -- keeps a legitimate detour around a wall out of it, because a
++    // detour still goes somewhere even when it is briefly no nearer.
++    double path = 0.0;
++    for (size_t i = 1; i < track.size(); ++i)
++      path += (track[i].second - track[i - 1].second).norm();
++    const double net = (pos - track.front().second).norm();
++    const double closed =
++        (track.front().second - next_pos).norm() - (pos - next_pos).norm();
++    // `closed` must be NEGATIVE, not merely small. Measured in run h05: seven
++    // fires at a 0.5 m bar, of which two -- "closed 0.49 m" and "closed
++    // 0.33 m" -- were an aircraft genuinely arriving, only slowly. It plans at
++    // 0.15 m/s and legitimately crawls at 0.34-0.61x that through a doorway, so
++    // half a metre of straight-line closure in 25 s is ordinary progress, not a
++    // dead end; and rounding a corner converts path into almost no closure at
++    // all while still being exactly the right thing to do. Ending the window
++    // FURTHER from the viewpoint than it started, having flown several metres,
++    // admits no such reading. The five genuine fires in that run were all
++    // negative (-0.44 to -1.45 m); both false positives were positive.
++    // Over 60 s at a 0.15 m/s plan the aircraft can cover about 9 m, so 5 m of
++    // path is still a modest bar; what carries the verdict is that none of it
++    // became displacement or closure.
++    const bool looping = path > 5.0 && path > 2.0 * net && closed < 0.0;
++
++    if (!at_target && track.front().first <= now_s - LOOP_WINDOW_S && looping) {
++      frontier_finder_->addBlockedRegion(next_pos);
++      ROS_WARN("[ExplorationManager] Aircraft flew %.1f m for %.1f m of net "
++               "displacement over 60 s and closed %.2f m on viewpoint "
++               "(%.2f, %.2f, %.2f); it is looping, not transiting -- blocking it "
++               "so the coverage tour moves on",
++               path, net, closed, next_pos[0], next_pos[1], next_pos[2]);
++      track.clear();
++    } else if (!at_target && pinned_oldest <= now_s - PINNED_WINDOW_S && span < 2.0) {
+       frontier_finder_->addBlockedRegion(next_pos);
+       ROS_WARN("[ExplorationManager] Aircraft confined to <2 m for 25 s short of "
+                "viewpoint (%.2f, %.2f, %.2f); blocking it so the coverage tour "

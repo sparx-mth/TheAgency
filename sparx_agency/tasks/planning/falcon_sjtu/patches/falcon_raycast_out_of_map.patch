@@ -1,0 +1,18 @@
+diff --git a/falcon_planner/voxel_mapping/src/tsdf.cpp b/falcon_planner/voxel_mapping/src/tsdf.cpp
+--- a/falcon_planner/voxel_mapping/src/tsdf.cpp
++++ b/falcon_planner/voxel_mapping/src/tsdf.cpp
+@@ -58,6 +58,14 @@
+     // Update each voxel on the ray from point to sensor
+     raycaster_->input(raycast_start, raycast_end);
+     while (raycaster_->nextId(voxel_idx)) {
++      // The ray's endpoints were clamped into the map in metres, but the DDA
++      // steps in voxels and can still land one index past an edge. Neither
++      // updateTSDFVoxel nor updateOccupancyVoxel checks the address it is
++      // given: the first writes the array directly, the second reads through a
++      // glog CHECK that calls abort(). A voxel outside the map holds nothing
++      // worth recording, so skip it.
++      if (!isInMap(voxel_idx))
++        continue;
+       voxel_pos = indexToPosition(voxel_idx);
+       voxel_addr = indexToAddress(voxel_idx);
+       value = computeDistance(sensor_position, point_w, voxel_pos);

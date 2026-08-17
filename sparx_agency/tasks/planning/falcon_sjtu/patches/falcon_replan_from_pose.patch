@@ -1,0 +1,32 @@
+diff --git a/falcon_planner/exploration_manager/src/exploration_fsm.cpp b/falcon_planner/exploration_manager/src/exploration_fsm.cpp
+index ed68d69..1771bd9 100644
+--- a/falcon_planner/exploration_manager/src/exploration_fsm.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_fsm.cpp
+@@ -312,6 +312,27 @@ void ExplorationFSM::FSMCallback(const ros::TimerEvent &e) {
+       fd_->start_yaw_(0) = info->yaw_traj_.evaluateDeBoorT(t_r)[0];
+       fd_->start_yaw_(1) = info->yawdot_traj_.evaluateDeBoorT(t_r)[0];
+       fd_->start_yaw_(2) = info->yawdotdot_traj_.evaluateDeBoorT(t_r)[0];
++
++      // SPARX: the point above is where the PREVIOUS trajectory says the
++      // aircraft should be, not where it is. t_r saturates at duration_, so an
++      // aircraft that stopped tracking (our brakes and gates stop it often)
++      // leaves every later plan starting from a ghost that never comes back --
++      // measured 5.4 m of gap, reference_time pinned at 0, and 118 trajectories
++      // none of which the follower could ever acquire. Past a threshold, plan
++      // from the real pose instead; that is what static_state_ already does.
++      static double sparx_max_drift = -1.0;
++      if (sparx_max_drift < 0.0)
++        ros::param::param("/fsm/replan_from_pose_drift", sparx_max_drift, 1.5);
++      double sparx_drift = (fd_->start_pos_ - fd_->odom_pos_).norm();
++      if (sparx_drift > sparx_max_drift) {
++        ROS_WARN("[FSM] plan start is %.2f m from the aircraft; replanning from the real pose",
++                 sparx_drift);
++        fd_->start_pos_ = fd_->odom_pos_;
++        fd_->start_vel_ = fd_->odom_vel_;
++        fd_->start_acc_.setZero();
++        fd_->start_yaw_ << fd_->odom_yaw_, 0, 0;
++        trajectory_start_time_ = ros::Time::now() + ros::Duration(fp_->replan_duration_);
++      }
+     }
+ 
+     if (false) {

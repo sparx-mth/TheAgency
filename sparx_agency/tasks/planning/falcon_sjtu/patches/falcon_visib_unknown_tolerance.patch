@@ -1,0 +1,80 @@
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -83,6 +83,48 @@
+ };
+ ViewpointAudit g_vp_audit;
+ 
++// ── How much unobserved space a line of sight may cross ────────────────────
++//
++// countVisibleCells() treats UNKNOWN as an occluder, exactly like a wall. But
++// a frontier cell IS the boundary of unknown space -- searchFrontiers() only
++// promotes a cell that is knownfree AND has an unknown neighbour -- so a ray
++// arriving at one passes through the unobserved boundary layer by
++// construction. The test therefore reports "you cannot see this frontier"
++// *because* it is a frontier.
++//
++// Measured, and it is not a corner case. Of the rays cast to frontier cells in
++// a hospital leg, 67.5% were rejected on UNKNOWN against 28.4% on real
++// structure, and only 1.6% arrived clear; in the warehouse, 46.9% against
++// 42.8%, with 2.2% clear. Clusters that no viewpoint can see are retired to
++// dormant, and when only those are left the frontier set empties and FALCON
++// declares the world finished. That is why the finish amnesty, which already
++// drops the visibility bar to zero, rescues nothing: the clusters it re-offers
++// have zero measured visibility, and no bar of any height saves a cluster
++// nothing can see.
++//
++// So allow a ray to cross a BOUNDED prefix of unobserved voxels and no more.
++// The raycast runs from the frontier cell toward the viewpoint, so the
++// tolerated voxels are exactly the boundary layer around the cell; unknown
++// encountered further along the ray is a genuinely unexplored volume being
++// looked through, and still blocks. OCCUPIED always blocks, at any distance,
++// which is what keeps a sealed cavity -- the warehouse's hollow crates --
++// unviewable: a ray into one crosses the shell first.
++//
++// 0 restores upstream exactly.
++int unknownVisibilityTolerance() {
++  static bool loaded = false;
++  static int tolerance = 0;
++  if (!loaded) {
++    ros::param::param("/frontier_finder/visib_unknown_tolerance", tolerance, 0);
++    loaded = true;
++    ROS_WARN("[visib_unknown] tolerance=%d voxel(s) of unobserved space per ray "
++             "(0 restores upstream: any UNKNOWN blocks the line of sight)",
++             tolerance);
++  }
++  return tolerance;
++}
++
++
+ }  // namespace
+ 
+ #include "pathfinding/path_cost_evaluator.h"
+@@ -1623,6 +1665,8 @@
+     // is the question the counters below exist to settle.
+     raycaster_->input(cell, pos);
+     bool visib = true;
++    const int unknown_budget = unknownVisibilityTolerance();
++    int unknown_crossed = 0;
+     while (raycaster_->nextId(idx)) {
+       const voxel_mapping::OccupancyType occ = map_server_->getOccupancy(idx);
+       if (occ == voxel_mapping::OccupancyType::OCCUPIED) {
+@@ -1631,9 +1675,15 @@
+         break;
+       }
+       if (occ == voxel_mapping::OccupancyType::UNKNOWN) {
+-        ++g_vp_audit.ray_blocked_unknown;
+-        visib = false;
+-        break;
++        // The ray starts AT the frontier cell, so the first unobserved voxels
++        // it meets are the boundary layer that makes the cell a frontier at
++        // all. Spend the budget on those; beyond it we are looking through
++        // unexplored volume and that is a real occlusion.
++        if (++unknown_crossed > unknown_budget) {
++          ++g_vp_audit.ray_blocked_unknown;
++          visib = false;
++          break;
++        }
+       }
+     }
+     if (visib) {

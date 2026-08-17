@@ -85,6 +85,16 @@ class VoxelBrakeGate(object):
         # type: (object) -> None
         self._cfg = config or VoxelBrakeGateConfig()
         self._occupied = set()   # packed int keys
+        # Cell offsets sorted by distance, per search radius, built once and
+        # reused. Both radial queries below want "the nearest occupied cell",
+        # and scanning a square and keeping the best answer costs the WHOLE
+        # square every call -- (2n+1)^2 = 625 lookups at a 1.2 m radius on a
+        # 0.1 m grid. Walking the same cells nearest-first instead lets the
+        # answer return on the first hit, which in a corridor is a few dozen
+        # lookups. It matters because these are now called several times per
+        # 50 Hz tick (the aircraft, the reference point, and two lateral
+        # probes), in Python, inside the flight loop.
+        self._rings = {}         # type: dict  # max_r -> ((ix, iy, d), ...)
 
     # ── map ingest ───────────────────────────────────────────────────────
 
@@ -160,6 +170,32 @@ class VoxelBrakeGate(object):
         hi = min(31, int(math.floor((z + h) / lm)))
         return tuple(range(lo, hi + 1))
 
+    def _ring(self, max_r):
+        # type: (float) -> tuple
+        """Cell offsets within ``max_r``, nearest first. Built once per radius.
+
+        Keyed on the rounded radius so a caller passing a computed float does
+        not build a new table on every call; the radii this is asked for come
+        from a handful of parameters, so the cache stays two or three entries
+        wide for the life of the process.
+        """
+        key = round(float(max_r), 3)
+        ring = self._rings.get(key)
+        if ring is not None:
+            return ring
+        v = self._cfg.voxel_m
+        n = int(math.ceil(key / v))
+        cells = []
+        for ix in range(-n, n + 1):
+            for iy in range(-n, n + 1):
+                d = math.hypot(ix * v, iy * v)
+                if d <= key:
+                    cells.append((d, ix, iy))
+        cells.sort()
+        ring = tuple((ix, iy, d) for d, ix, iy in cells)
+        self._rings[key] = ring
+        return ring
+
     def nearest_occupied(self, pos_xyz, max_r):
         # type: (tuple, float) -> object
         """Distance to the nearest occupied voxel centre within ``max_r``.
@@ -169,20 +205,19 @@ class VoxelBrakeGate(object):
         blind arc (nose-only depth, commanded-direction corridor) and a
         cruise-speed strike proved a race between them is winnable. Returns
         None when nothing occupied is within ``max_r``.
+
+        Also the clearance measurement the follower compares against the
+        PLAN's clearance, which is what lets one set of reflex thresholds serve
+        a 1.4 m warehouse aisle and a 0.90 m hospital doorway. See
+        ``core/planning/safety/clearance_envelope.py``.
         """
         layers = self._layers_for_z(float(pos_xyz[2]) if len(pos_xyz) > 2 else 1.2)
         v = self._cfg.voxel_m
-        n = int(math.ceil(max_r / v))
         cx, cy = float(pos_xyz[0]), float(pos_xyz[1])
-        best = None
-        for ix in range(-n, n + 1):
-            for iy in range(-n, n + 1):
-                d = math.hypot(ix * v, iy * v)
-                if d > max_r or (best is not None and d >= best):
-                    continue
-                if self._blocked_at(cx + ix * v, cy + iy * v, layers):
-                    best = d
-        return best
+        for ix, iy, d in self._ring(max_r):
+            if self._blocked_at(cx + ix * v, cy + iy * v, layers):
+                return d
+        return None
 
     def bubble_blocked(self, pos_xyz, clearance_m):
         # type: (tuple, float) -> bool
@@ -194,18 +229,11 @@ class VoxelBrakeGate(object):
         along a pile face with every forward check passing). This is the
         personal-space check that catches closure from ANY side.
         """
-        layers = self._layers_for_z(float(pos_xyz[2]) if len(pos_xyz) > 2 else 1.2)
-        v = self._cfg.voxel_m
-        n = int(math.ceil(clearance_m / v))
-        cx, cy = float(pos_xyz[0]), float(pos_xyz[1])
-        for ix in range(-n, n + 1):
-            for iy in range(-n, n + 1):
-                x = cx + ix * v
-                y = cy + iy * v
-                if math.hypot(x - cx, y - cy) <= clearance_m + v * 0.5:
-                    if self._blocked_at(x, y, layers):
-                        return True
-        return False
+        # Half a voxel of slack, as before: a voxel whose CENTRE is just
+        # outside the radius still has body inside it.
+        nearest = self.nearest_occupied(
+            pos_xyz, clearance_m + self._cfg.voxel_m * 0.5)
+        return nearest is not None
 
     def blocked_distance(self, pos_xyz, dir_xy, max_dist):
         # type: (tuple, tuple, float) -> object
