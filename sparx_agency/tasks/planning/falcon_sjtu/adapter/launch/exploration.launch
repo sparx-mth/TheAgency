@@ -113,15 +113,31 @@
        0.35 m: above the gate's bubble, and a 1.4 m warehouse aisle still
        leaves 0.35 m of slack on each side.
 
-       ── WHAT IT ACTUALLY DELIVERS, measured 2026-08-17. The optimiser's final
-       map is now dumped per leg (rig/dump_occupied_voxels.py), so the clearance
-       the plan really achieved can be checked against the clearance it asked
-       for. At every contact location across two contact-bearing warehouse legs
-       (22 distinct locations, ~100k mapped voxels per leg):
+       ── THE DEFAULT BELOW IS DEAD. READ THIS BEFORE CHANGING IT.
+       run_falcon_sjtu.sh injects `safe_distance:=${SAFE_DISTANCE:-0.45}` into
+       FALCON_LAUNCH_ARGS unless one is already present, and a roslaunch command
+       -line argument always beats an <arg default>. So the 0.55 below has never
+       reached the planner from here: a live leg reads
+       `/bspline_opt/safe_distance: 0.45`. Editing it changes nothing, which is
+       exactly how one A/B of this value was flown ENTIRELY INERT before the
+       activation check caught it. To vary it, set the ENV VAR:
+           SAFE_DISTANCE=0.75 bash rig/campaign_run.sh warehouse <dir> 900
+       The default is left at 0.55 rather than corrected to 0.45 only because
+       changing it would still do nothing and would imply it were live.
+
+       ── WHAT IT ACTUALLY DELIVERS, measured 2026-08-17, against the operative
+       0.45. The optimiser's final map is now dumped per leg
+       (rig/dump_occupied_voxels.py), so the clearance the plan really achieved
+       can be checked against the clearance it asked for. Over the WHOLE flight
+       the plan sits inside its own clearance 32.2% of the time (median 0.59 m)
+       with the hull inside mapped structure 8.5% of the time; at contact that
+       becomes 99.2% and 75.9%, so contacts are genuinely ENRICHED rather than
+       trivially near obstacles. Per contact location (22 distinct, across two
+       contact-bearing warehouse legs, ~100k mapped voxels per leg):
 
          centre clearance to the nearest MAPPED occupied voxel
            p10 0.08   p25 0.22   p50 0.36   p75 0.47   p90 0.48 m
-         below safe_distance 0.55 m ............................ 100.0%
+         below the operative safe_distance 0.45 m .............. 99.2%
          hull (centre minus the 0.26 m airframe radius) inside
            mapped structure ..................................... 36.4%
          no mapped structure within 0.40 m (a genuine map hole) .. 27.3%
@@ -131,15 +147,18 @@
        is exonerated. About a quarter of contacts are map holes — pile tops are
        only ever seen edge-on, since 0.0% of commanded altitudes reach the
        2.34 m needed to overfly a 1.79 m pile under a 2.4 m ceiling. But the
-       universal factor, present at 100% of contacts, is that the TRAJECTORY IS
-       ROUTED INSIDE ITS OWN MARGIN: 0.36 m delivered where 0.55 m was asked.
+       universal factor, present at 99.2% of contacts, is that the TRAJECTORY
+       IS ROUTED INSIDE ITS OWN MARGIN: 0.36 m delivered where 0.45 m is asked.
 
        And the reason that hurts is that nothing subtracts the airframe.
        BsplineOptimizer::calcDistanceCost queries the ESDF at the control point
        — the drone's CENTRE — and penalises dist < safe_distance. There is no
        robot radius anywhere in the term. safe_distance is therefore the whole
-       allowance for a 0.26 m radius PLUS margin, so a fully satisfied 0.55
-       leaves only 0.29 m of real clearance, and the measured 0.36 leaves 0.10.
+       allowance for a 0.26 m radius PLUS margin, so a fully satisfied 0.45
+       leaves only 0.19 m of real clearance, and the measured 0.36 leaves 0.10.
+       0.45 is the doorway HALF-WIDTH, chosen so the one-sided cost has its
+       minimum on the centreline of a 0.90 m opening — see run_falcon_sjtu.sh,
+       which is where the value actually lives.
        Raising the weight to force satisfaction was tried and refuted (see the
        distance-weight block below): near a pile the constraint is
        unsatisfiable, so weighting it harder just stops the aircraft. -->
