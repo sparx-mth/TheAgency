@@ -54,14 +54,63 @@ def test_overspeed_pulls_the_axis_back_below_feedforward():
     assert axis < open_loop
 
 
-def test_stop_request_resets_the_integrator():
+def test_a_brief_zero_demand_keeps_the_integrator():
+    """A momentary zero must not cost the loop what it learned.
+
+    The follower emits exact zeros on ordinary ticks (a hold, a taper, an
+    alignment gate). Resetting on the first of them destroyed the standing
+    bias several times a second, which is the whole thing the integrator
+    exists to find.
+    """
     servo = AxisVelocityServo(DEADZONE, V_FULL, kp=220.0, ki=260.0,
-                              min_command_mps=0.15)
+                              min_command_mps=0.15, integral_hold_s=0.6)
+    for _ in range(20):
+        servo.update(0.30, 0.10, 0.05)
+    learned = servo.integral
+    assert learned != 0.0
+    assert servo.update(0.0, 0.10, 0.05) == 0.0
+    assert servo.integral == learned
+
+
+def test_a_sustained_stop_still_resets_the_integrator():
+    servo = AxisVelocityServo(DEADZONE, V_FULL, kp=220.0, ki=260.0,
+                              min_command_mps=0.15, integral_hold_s=0.6)
     for _ in range(20):
         servo.update(0.30, 0.10, 0.05)
     assert servo.integral != 0.0
-    assert servo.update(0.0, 0.10, 0.05) == 0.0
+    for _ in range(int(0.6 / 0.05) + 1):
+        assert servo.update(0.0, 0.10, 0.05) == 0.0
     assert servo.integral == 0.0
+
+
+def test_a_moving_aircraft_uses_the_moving_curve():
+    """The same demand must ask for less stick once the aircraft is rolling."""
+    servo = AxisVelocityServo(DEADZONE, V_FULL, kp=0.0, ki=0.0,
+                              v_full_moving=4.0, move_eps_mps=0.10)
+    standing = servo.update(0.30, 0.0, 0.05)
+    moving = servo.update(0.30, 0.50, 0.05)
+    assert DEADZONE < moving < standing
+
+
+def test_the_axis_is_never_muted_while_motion_is_wanted():
+    """A correction may slow the aircraft but must not release the stick.
+
+    Below the dead band the platform does not go slower, it stops -- and a
+    released stick is an active brake in PX4 Position mode, so the loop then
+    has to climb back through the dead band to restart. That is a limit cycle,
+    not control.
+    """
+    servo = AxisVelocityServo(DEADZONE, V_FULL, kp=220.0, ki=260.0,
+                              max_correction=350.0, brake_release_margin_mps=0.15)
+    axis = servo.update(0.30, 0.38, 0.05)      # slightly fast, not braking
+    assert abs(axis) >= DEADZONE
+
+
+def test_a_genuine_overspeed_may_still_release_the_stick():
+    servo = AxisVelocityServo(DEADZONE, V_FULL, kp=220.0, ki=260.0,
+                              max_correction=350.0, brake_release_margin_mps=0.15)
+    axis = servo.update(0.30, 1.20, 0.05)      # far over the demand
+    assert axis < DEADZONE
 
 
 def test_zero_dt_integrates_nothing():

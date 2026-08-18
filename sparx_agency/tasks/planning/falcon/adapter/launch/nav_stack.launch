@@ -1064,7 +1064,7 @@
 
   <!-- vertical column + height weighting (stage 1, the core de-noiser) -->
   <arg name="bev_z_floor"           default="0.70" />            <!-- column z-range considered (wide band: walls reconstruct densely below cruise_z, a thin slice at flight height starves side walls) -->
-  <arg name="bev_z_ceil"            default="1.50" />
+  <arg name="bev_z_ceil"            default="2.20" />
   <arg name="bev_z_peak"            default="$(arg cruise_z)" />  <!-- weight peaks at flight altitude -->
   <arg name="bev_weight_profile"    default="triangular" />      <!-- triangular | gaussian | flat -->
   <arg name="bev_weight_sigma"      default="0.50" />            <!-- gaussian width (profile=gaussian) -->
@@ -1194,7 +1194,11 @@
        max_measured_speed_xy for the full rationale. 0.4 = 2x explore_fixed_vx,
        enough headroom for normal combined vx+vy motion without catching
        intended cruising speed as "too fast". <=0.0 disables. -->
-  <arg name="explore_max_measured_speed_xy" default="0.7" />
+  <arg name="explore_max_measured_speed_xy" default="1.5" />
+  <!-- Fraction of the cap the taper runs over. 0.5 (the Python default that
+       was live because this was never wired) reached ZERO translation at only
+       1.5x the cap, which re-created the bang-bang the taper replaced. -->
+  <arg name="explore_measured_speed_taper" default="2.0" />
 
   <!-- 2026-08-17: force_mode was never wired here at all, so the follower
        silently ran its own Python default ("fixed" = bang-bang) — every
@@ -1209,12 +1213,12 @@
        motion looks jerky/binary rather than proportional, confirm this param
        actually reached the node (roslaunch echoes it) before assuming the
        code path is wrong. -->
-  <arg name="explore_force_mode"  default="snap" />          <!-- fixed | snap | none -->
+  <arg name="explore_force_mode"  default="none" />          <!-- fixed | snap | none -->
   <arg name="explore_max_speed_xy" default="0.6" />           <!-- must exceed max_vel with headroom; full-scale measured ~1.25 m/s -->
   <!-- Snap-up floor: below ~0.26 m/s the platform cannot move continuously
        (measured deadzone), so a smaller request is not worth emitting. -->
-  <arg name="explore_min_vxy"      default="0.26" />
-  <arg name="explore_max_yaw_rate_deg" default="45.0" />
+  <arg name="explore_min_vxy"      default="0.0" />
+  <arg name="explore_max_yaw_rate_deg" default="90.0" />
 
   <!-- Reverted to 0.85/0.85 alongside max_vel/max_acc above; see that
        comment for why. -->
@@ -1522,6 +1526,7 @@
     <param name="fixed_vy"     value="$(arg explore_fixed_vy)" />
     <param name="fixed_wz_deg" value="$(arg explore_fixed_wz_deg)" />
     <param name="max_measured_speed_xy" value="$(arg explore_max_measured_speed_xy)" />
+    <param name="measured_speed_taper" value="$(arg explore_measured_speed_taper)" />
     <param name="force_mode"      value="$(arg explore_force_mode)" />
     <param name="max_speed_xy"    value="$(arg explore_max_speed_xy)" />
     <param name="max_yaw_rate_deg" value="$(arg explore_max_yaw_rate_deg)" />

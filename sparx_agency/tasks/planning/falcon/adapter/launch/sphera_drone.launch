@@ -192,6 +192,22 @@
   <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
   <arg name="exploration_follower" default="reference" />  <!-- reference | bspline, nav_mode:=exploration only -->
   <arg name="tilt_limit_deg" default="45.0" />
+
+  <!-- Clearance / speed / frontier knobs the autonomous campaign tunes between
+       runs. Declared here purely as pass-throughs so they can be set on the
+       roslaunch line; every default below is nav_stack.launch's own, so a
+       command that does not mention them behaves exactly as before.
+
+       obstacles_inflation / safe_distance deserve a note: at the inherited 0.85 m
+       against a 0.20 m voxel grid, a B-spline must keep 0.85 m from every
+       occupied voxel, i.e. it needs a 1.7 m-wide free corridor -- which makes a
+       ~0.9 m doorway unplannable at any altitude. The stack's own 2D planner
+       uses inflate_radius_m 0.40 for the same map. -->
+  <arg name="obstacles_inflation"     default="0.85" />
+  <arg name="safe_distance"           default="0.85" />
+  <arg name="frontier_candidate_rmax" default="5.5" />
+  <arg name="max_vel"                 default="0.4" />
+  <arg name="explore_max_speed_xy"    default="0.6" />
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/vlas/flownav/serve/...). -->
@@ -679,6 +695,11 @@
     <arg name="nav_mode"                value="$(arg nav_mode)" />
     <arg name="exploration_follower"     value="$(arg exploration_follower)" />
     <arg name="tilt_limit_deg"           value="$(arg tilt_limit_deg)" />
+    <arg name="obstacles_inflation"      value="$(arg obstacles_inflation)" />
+    <arg name="safe_distance"            value="$(arg safe_distance)" />
+    <arg name="frontier_candidate_rmax"  value="$(arg frontier_candidate_rmax)" />
+    <arg name="max_vel"                  value="$(arg max_vel)" />
+    <arg name="explore_max_speed_xy"     value="$(arg explore_max_speed_xy)" />
     <arg name="vla"                      value="$(arg vla)" />
     <arg name="flownav_goal_image"       value="$(arg flownav_goal_image)" />
     <arg name="flownav_goal_image_topic" value="$(arg flownav_goal_image_topic)" />

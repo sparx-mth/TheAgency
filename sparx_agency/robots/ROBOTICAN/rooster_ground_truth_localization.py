@@ -97,6 +97,19 @@ class RoosterGroundTruthLocalization(Node):
                           or f"/{rooster_id}/velocity_truth")
         self.velocity_filter_tau_s = float(
             self.get_parameter("velocity_filter_tau_s").value)
+        # Prefer the physics engine's own velocity over differentiating the
+        # pose -- see _publish_velocity. False restores the pre-2026-08-18
+        # differentiated path.
+        self.declare_parameter("use_sphera_velocity", True)
+        self.declare_parameter("dead_field_samples", 25)
+        self.declare_parameter("dead_field_speed_mps", 0.05)
+        self.use_sphera_velocity = bool(
+            self.get_parameter("use_sphera_velocity").value)
+        self.dead_field_samples = int(
+            self.get_parameter("dead_field_samples").value)
+        self.dead_field_speed_mps = float(
+            self.get_parameter("dead_field_speed_mps").value)
+        self._dead_velocity_field = 0
         self._prev_sample = None      # (t_sec, x, y, z, yaw)
         self._filtered = [0.0, 0.0, 0.0, 0.0]   # vx, vy, vz, yaw_rate
 
@@ -174,21 +187,33 @@ class RoosterGroundTruthLocalization(Node):
         attitude.z = float(msg.rotation.yaw)
         self.attitude_pub.publish(attitude)
 
-        self._publish_velocity(pose, yaw)
+        self._publish_velocity(pose, yaw, msg.velocity)
 
         source = String()
         source.data = "sphera_ground_truth"
         self.source_pub.publish(source)
 
-    def _publish_velocity(self, pose: PoseStamped, yaw: float) -> None:
-        """Differentiate the accepted truth pose into a world-frame velocity.
+    def _publish_velocity(self, pose: PoseStamped, yaw: float,
+                          sphera_velocity=None) -> None:
+        """Publish a world-frame velocity for the controllers to close on.
 
-        Uses the message stamp, not wall clock: Sphera's stream is not perfectly
-        periodic and a wall-clock dt turns that jitter into velocity noise.
+        Linear velocity comes from Sphera's own physics engine when it is
+        available (``SpheraPawnState.velocity``, m/s) rather than from
+        differentiating position. That matters more than it sounds: the
+        differentiated path needed a 0.25 s low-pass to be usable at all, and
+        that lag landed straight on the velocity servo's proportional term --
+        it is why ``servo_kp`` had to be cut from 220 to 90 after a ~1.15 Hz
+        limit cycle. Physics velocity carries neither the differentiation noise
+        nor the filter lag.
+
+        Yaw rate has no equivalent field (``Rotator`` carries angles only), so
+        it stays differentiated and filtered.
 
         Args:
             pose: The pose just published (already sign-corrected).
             yaw: Planar yaw of that pose, radians.
+            sphera_velocity: Raw ``SpheraPawnState.velocity``, in Sphera's own
+                frame. ``None`` forces the differentiated path.
         """
         stamp = pose.header.stamp
         now = float(stamp.sec) + float(stamp.nanosec) * 1e-9
@@ -199,21 +224,70 @@ class RoosterGroundTruthLocalization(Node):
         dt = now - prev[0]
         if dt <= 0.0:
             return
+
         yaw_delta = math.atan2(math.sin(yaw - prev[4]), math.cos(yaw - prev[4]))
-        raw = [(x - prev[1]) / dt, (y - prev[2]) / dt, (z - prev[3]) / dt,
-               yaw_delta / dt]
+        derived = [(x - prev[1]) / dt, (y - prev[2]) / dt, (z - prev[3]) / dt]
         tau = self.velocity_filter_tau_s
         alpha = 1.0 if tau <= 0.0 else dt / (tau + dt)
-        for i in range(4):
-            self._filtered[i] += alpha * (raw[i] - self._filtered[i])
+
+        physics = self._physics_velocity(sphera_velocity, derived)
+        if physics is None:
+            for i in range(3):
+                self._filtered[i] += alpha * (derived[i] - self._filtered[i])
+            linear = list(self._filtered[:3])
+        else:
+            # Unfiltered on purpose -- this is a measurement, not a difference.
+            linear = physics
+            self._filtered[:3] = physics
+        self._filtered[3] += alpha * (yaw_delta / dt - self._filtered[3])
 
         twist = TwistStamped()
         twist.header = pose.header
-        twist.twist.linear.x = self._filtered[0]
-        twist.twist.linear.y = self._filtered[1]
-        twist.twist.linear.z = self._filtered[2]
+        twist.twist.linear.x = linear[0]
+        twist.twist.linear.y = linear[1]
+        twist.twist.linear.z = linear[2]
         twist.twist.angular.z = self._filtered[3]
         self.velocity_pub.publish(twist)
+
+    def _physics_velocity(self, raw, derived):
+        """Sphera's physics velocity in ROS world frame, or None to fall back.
+
+        Same handedness correction as the pose (x and y negated, z untouched) --
+        velocity is the derivative of a position we already negate, so it must
+        carry the identical sign flip.
+
+        A vendor build that leaves the field unpopulated would otherwise pin the
+        servo's feedback at zero and let its integrator wind to full deflection,
+        so an all-zero field seen repeatedly while the position is demonstrably
+        moving disables this path for the rest of the run, loudly.
+
+        Args:
+            raw: ``SpheraPawnState.velocity``, or None.
+            derived: The differentiated ``[vx, vy, vz]``, used only to decide
+                whether an all-zero field is a real standstill or a dead field.
+
+        Returns:
+            ``[vx, vy, vz]`` in the ROS world frame, or ``None`` to differentiate.
+        """
+        if raw is None or not self.use_sphera_velocity:
+            return None
+        vx, vy, vz = -float(raw.x), -float(raw.y), float(raw.z)
+        if vx or vy or vz:
+            self._dead_velocity_field = 0
+            return [vx, vy, vz]
+        if math.sqrt(sum(c * c for c in derived)) < self.dead_field_speed_mps:
+            return [0.0, 0.0, 0.0]          # genuinely stationary
+        self._dead_velocity_field += 1
+        if self._dead_velocity_field < self.dead_field_samples:
+            return [0.0, 0.0, 0.0]
+        self.use_sphera_velocity = False
+        self.get_logger().error(
+            f"SpheraPawnState.velocity stayed all-zero for "
+            f"{self._dead_velocity_field} samples while the pose moved -- this "
+            f"vendor build does not populate it. Falling back to a "
+            f"differentiated position for the rest of this run; expect the "
+            f"~0.25 s of filter lag the servo gains were cut for.")
+        return None
 
 
 def main(args=None):

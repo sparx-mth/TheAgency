@@ -114,6 +114,14 @@ class RoosterTwistControlNode(Node):
         use_measured_axis_curve: bool = True,
         x_deadzone: float = 620.0,
         x_v_full: float = 1.25,
+        # Full-scale speed once ALREADY MOVING. The 1.25 above is a hover-start
+        # fit; measured in flight 2026-08-18 the same ~700 counts produced
+        # ~0.9-1.0 m/s, so a single curve fitted to the standing case made the
+        # aircraft fly 2-4x faster than commanded (achieved p90 1.0 m/s against
+        # a 0.26-0.6 m/s demand). PROVISIONAL -- derived from one in-flight
+        # operating point; the calibration run replaces it. <=0 disables.
+        x_v_full_moving: float = 4.0,
+        move_eps_mps: float = 0.10,
         y_deadzone: float = 700.0,
         y_v_full: float = 1.02,
         min_command_mps: float = 0.15,
@@ -151,6 +159,12 @@ class RoosterTwistControlNode(Node):
         # a large step. 1200 crosses the whole usable span (~380 counts above the
         # dead band) in ~0.3s. <=0 disables.
         forward_axis_step_per_sec: float = 1200.0,
+        # Releases were instantaneous, which on this platform is not a coast:
+        # PX4 flies Position mode, so a dropped stick is an active brake. That
+        # is what made every cutoff feel like a hard stop. Ramp them too, just
+        # faster than the acceleration ramp. stop_motion() stays instant -- the
+        # 0.4s command-timeout path really is an emergency.
+        forward_axis_release_per_sec: float = 3000.0,
         # Feedback older than this is not feedback. The servo holds
         # feed-forward-only rather than integrating against a frozen number.
         velocity_timeout_sec: float = 0.5,
@@ -184,6 +198,8 @@ class RoosterTwistControlNode(Node):
         self.use_measured_axis_curve = bool(use_measured_axis_curve)
         self.x_deadzone = float(x_deadzone)
         self.x_v_full = float(x_v_full)
+        self.x_v_full_moving = float(x_v_full_moving)
+        self.move_eps_mps = float(move_eps_mps)
         self.y_deadzone = float(y_deadzone)
         self.y_v_full = float(y_v_full)
         self.min_command_mps = float(min_command_mps)
@@ -211,6 +227,7 @@ class RoosterTwistControlNode(Node):
 
         self.use_velocity_servo = bool(use_velocity_servo)
         self.forward_axis_step_per_sec = float(forward_axis_step_per_sec)
+        self.forward_axis_release_per_sec = float(forward_axis_release_per_sec)
         self._x_axis = 0.0
         self.follow_altitude = bool(follow_altitude)
         self.altitude_nudge_m = float(altitude_nudge_m)
@@ -230,7 +247,9 @@ class RoosterTwistControlNode(Node):
             deadzone=self.x_deadzone, v_full=self.x_v_full,
             kp=float(servo_kp), ki=float(servo_ki),
             max_correction=float(servo_max_correction),
-            min_command_mps=self.min_command_mps)
+            min_command_mps=self.min_command_mps,
+            v_full_moving=self.x_v_full_moving,
+            move_eps_mps=self.move_eps_mps)
         if self.use_velocity_servo:
             velocity_topic = (velocity_topic
                               or f"/{self.rooster_id}/velocity_truth")
@@ -396,13 +415,12 @@ class RoosterTwistControlNode(Node):
                                       self.min_command_mps)
         else:
             target = self._forward_servo.update(v_cmd, v_meas, dt)
-        if self.forward_axis_step_per_sec <= 0.0 or target == 0.0:
-            # A stop is never slew-limited: the fastest way to shed speed on this
-            # platform is to release the stick completely.
+        if self.forward_axis_step_per_sec <= 0.0:
             self._x_axis = target
         else:
-            self._x_axis = slew(target, self._x_axis,
-                                self.forward_axis_step_per_sec / self.command_hz)
+            rate = (self.forward_axis_release_per_sec if target == 0.0
+                    else self.forward_axis_step_per_sec)
+            self._x_axis = slew(target, self._x_axis, rate / self.command_hz)
         return clamp_axis(self._x_axis)
 
     def _publish_cmd_nav(self, action: str, **payload) -> None:

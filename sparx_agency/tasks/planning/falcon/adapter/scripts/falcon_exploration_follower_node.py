@@ -120,6 +120,11 @@ class FalconExplorationFollowerNode:
         # only needs to catch the sign change past 90 deg. See the shaping block
         # in the command path for the measurement behind that.
         self.align_gate_deg = float(G("~align_gate_deg", 85.0))
+        # Forward speed floor held through a turn, and the planned speed above
+        # which it arms. See the cos-fade block in _step for why a floor beats
+        # letting cos() brake the aircraft to zero.
+        self.turn_creep_mps = float(G("~turn_creep_mps", 0.18))
+        self.turn_creep_arm_mps = float(G("~turn_creep_arm_mps", 0.05))
 
         limits = KinematicLimits(
             max_speed_xy=float(G("~max_speed_xy", 1.2)),
@@ -396,6 +401,18 @@ class FalconExplorationFollowerNode:
                 body_vx = 0.0
             else:
                 body_vx = world_speed * math.cos(heading_err)
+                # ...but never let the cos fade brake the aircraft to a stop
+                # inside the gate. Measured 2026-08-18 over a full run: heading
+                # error is p50 56deg / p75 88deg, so cos() alone spent 17% of
+                # the flight at zero speed across 189 separate stops (median
+                # 0.7s). On this platform a stop is not a coast -- PX4 is in
+                # Position mode, so a released stick is an active brake -- and
+                # re-acceleration then has to climb back through the axis dead
+                # band. Creeping through the turn keeps the momentum that
+                # braking throws away. Only while the plan actually wants
+                # motion: a holding reference must still hold.
+                if world_speed > self.turn_creep_arm_mps and body_vx < self.turn_creep_mps:
+                    body_vx = self.turn_creep_mps
             body_vy = 0.0
 
         if self.max_measured_speed_xy > 0.0 and self._velocity is not None:

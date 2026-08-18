@@ -74,6 +74,9 @@ class RoosterCommandUnitNode(Node):
         self.declare_parameter("climb_duration_sec", 1.0)
         self.declare_parameter("climb_settle_sec", 1.0)
         self.declare_parameter("altitude_hold_kp", 500.0)
+        # See RoosterUnit._altitude_hold_tick -- the z axis is three-zone,
+        # so descent needs a larger gain than climb to reach its zone at all.
+        self.declare_parameter("altitude_hold_kp_down", 900.0)
         self.declare_parameter("altitude_hold_kd", 600.0)
         # See RoosterUnit.__init__ (rooster_unit.py) for why the default was
         # raised from 200 to 380 -- 2026-08-13.
@@ -110,6 +113,7 @@ class RoosterCommandUnitNode(Node):
         climb_duration_sec = float(self.get_parameter("climb_duration_sec").value)
         climb_settle_sec = float(self.get_parameter("climb_settle_sec").value)
         altitude_hold_kp = float(self.get_parameter("altitude_hold_kp").value)
+        altitude_hold_kp_down = float(self.get_parameter("altitude_hold_kp_down").value)
         altitude_hold_kd = float(self.get_parameter("altitude_hold_kd").value)
         altitude_hold_max_correction = float(self.get_parameter("altitude_hold_max_correction").value)
         altitude_hold_max_step = float(self.get_parameter("altitude_hold_max_step").value)
@@ -143,6 +147,7 @@ class RoosterCommandUnitNode(Node):
             climb_duration_sec=climb_duration_sec,
             climb_settle_sec=climb_settle_sec,
             altitude_hold_kp=altitude_hold_kp,
+            altitude_hold_kp_down=altitude_hold_kp_down,
             altitude_hold_kd=altitude_hold_kd,
             altitude_hold_max_correction=altitude_hold_max_correction,
             altitude_hold_max_step=altitude_hold_max_step,

@@ -100,16 +100,36 @@ class AxisVelocityServo(object):
     """
 
     def __init__(self, deadzone, v_full, kp=0.0, ki=0.0, max_correction=250.0,
-                 axis_limit=1000.0, min_command_mps=0.0):
-        # type: (float, float, float, float, float, float, float) -> None
+                 axis_limit=1000.0, min_command_mps=0.0,
+                 v_full_moving=0.0, move_eps_mps=0.10,
+                 brake_release_margin_mps=0.15, integral_hold_s=0.6):
+        # type: (float, float, float, float, float, float, float, float, float, float, float) -> None
         self.deadzone = float(deadzone)
         self.v_full = float(v_full)
+        #: Velocity at full deflection once the aircraft is ALREADY MOVING.
+        #: The platform's effective gain is regime-dependent: a hover-start step
+        #: measured 0.26 m/s at axis 700, while in flight the same axis produced
+        #: ~0.9-1.0 m/s. One steady-state curve therefore cannot fit both, and
+        #: fitting it to the standing case is what made the aircraft fly 2-4x
+        #: faster than commanded once moving. <=0 falls back to ``v_full``.
+        self.v_full_moving = float(v_full_moving)
+        self.move_eps_mps = float(move_eps_mps)
+        #: Only release the stick below the dead band when the aircraft is
+        #: genuinely this much over the demand -- i.e. when braking is what is
+        #: wanted. Otherwise a negative correction merely mutes the axis, the
+        #: aircraft coasts, and the loop re-commands: a limit cycle.
+        self.brake_release_margin_mps = float(brake_release_margin_mps)
+        #: Seconds a below-minimum demand keeps the learned integral before it
+        #: is dropped. A follower that emits brief zeros would otherwise destroy
+        #: the standing bias several times a second.
+        self.integral_hold_s = float(integral_hold_s)
         self.kp = float(kp)
         self.ki = float(ki)
         self.max_correction = float(max_correction)
         self.axis_limit = float(axis_limit)
         self.min_command_mps = float(min_command_mps)
         self._integral = 0.0
+        self._idle_s = 0.0
         self.last_error = 0.0
         self.last_correction = 0.0
 
@@ -117,6 +137,7 @@ class AxisVelocityServo(object):
         # type: () -> None
         """Clear the integrator. Call on stop, mode change, or loss of feedback."""
         self._integral = 0.0
+        self._idle_s = 0.0
         self.last_error = 0.0
         self.last_correction = 0.0
 
@@ -143,10 +164,19 @@ class AxisVelocityServo(object):
             Signed axis value in ``[-axis_limit, axis_limit]``.
         """
         if abs(v_cmd) < self.min_command_mps:
-            self.reset()
+            # Hold the learned bias briefly rather than dropping it: a follower
+            # that dips through zero for a tick or two must not cost the loop
+            # everything it learned about the standing shortfall.
+            self._idle_s += max(0.0, float(dt))
+            if self._idle_s >= self.integral_hold_s:
+                self.reset()
             return 0.0
+        self._idle_s = 0.0
 
-        ff = feedforward_axis(v_cmd, self.deadzone, self.v_full, self.axis_limit)
+        v_full = self.v_full
+        if self.v_full_moving > 0.0 and abs(v_meas) >= self.move_eps_mps:
+            v_full = self.v_full_moving
+        ff = feedforward_axis(v_cmd, self.deadzone, v_full, self.axis_limit)
         error = v_cmd - v_meas
         self.last_error = error
 
@@ -158,6 +188,16 @@ class AxisVelocityServo(object):
         correction = clamp(self.kp * error + candidate,
                            -self.max_correction, self.max_correction)
         axis = clamp(ff + correction, -self.axis_limit, self.axis_limit)
+
+        # Never mute the stick while still asking for motion. Below the dead
+        # band the platform does not merely go slower -- it stops, and on this
+        # airframe a released stick is an active brake (PX4 Position mode), so
+        # the aircraft then has to climb back through the dead band to restart.
+        # The one case where releasing IS what the loop wants is a genuine
+        # overspeed, so that stays allowed.
+        braking = abs(v_meas) > abs(v_cmd) + self.brake_release_margin_mps
+        if not braking and abs(axis) < self.deadzone:
+            axis = self.deadzone if v_cmd > 0.0 else -self.deadzone
 
         saturated_high = axis >= self.axis_limit and error > 0.0
         saturated_low = axis <= -self.axis_limit and error < 0.0

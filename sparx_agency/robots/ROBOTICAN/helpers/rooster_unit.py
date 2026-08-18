@@ -100,6 +100,9 @@ class RoosterUnit:
         # -- see _climb(). Long enough for climb momentum to mostly settle.
         climb_settle_sec: float = 1.0,
         altitude_hold_kp: float = 500.0,
+        # Downward-error gain; <=0 means "same as altitude_hold_kp". See
+        # _altitude_hold_tick for why descent needs its own, larger gain.
+        altitude_hold_kp_down: float = 900.0,
         altitude_hold_kd: float = 600.0,
         # Was 200 -- confirmed live (2026-08-13) that's too weak to recover
         # once drifted past max_ranger_m: pinned at hover_z-200 continuously
@@ -200,6 +203,7 @@ class RoosterUnit:
         self.climb_duration_sec = float(climb_duration_sec)
         self.climb_settle_sec = float(climb_settle_sec)
         self.altitude_hold_kp = float(altitude_hold_kp)
+        self.altitude_hold_kp_down = float(altitude_hold_kp_down)
         self.altitude_hold_kd = float(altitude_hold_kd)
         self.altitude_hold_max_correction = float(altitude_hold_max_correction)
         self.altitude_hold_max_step = float(altitude_hold_max_step)
@@ -347,8 +351,17 @@ class RoosterUnit:
             alpha = dt / (tau + dt)
             velocity = self._hold_filtered_velocity + alpha * (raw_velocity - self._hold_filtered_velocity)
         self._hold_filtered_velocity = velocity
+        # Asymmetric gain: the z axis is a THREE-zone actuator, not a curve --
+        # >=700 climbs hard, ~400-690 does nothing, <=400 descends weakly
+        # (measured 2026-08-18 across nine 700s runs). At a symmetric kp=500 the
+        # loop only reaches the descend zone at error <= -0.6 m, so every flight
+        # overshot its setpoint by 0.35-0.5 m and simply stayed there. A larger
+        # downward gain reaches that zone on a realistic error without making a
+        # small upward error trigger the 1.6 m/s climb.
+        kp = (self.altitude_hold_kp_down if error < 0.0 and self.altitude_hold_kp_down > 0.0
+              else self.altitude_hold_kp)
         correction = clamp_symmetric(
-            self.altitude_hold_kp * error - self.altitude_hold_kd * velocity,
+            kp * error - self.altitude_hold_kd * velocity,
             self.altitude_hold_max_correction)
         at_ceiling = self.max_ranger_m > 0.0 and self.ranger >= self.max_ranger_m
         if at_ceiling:

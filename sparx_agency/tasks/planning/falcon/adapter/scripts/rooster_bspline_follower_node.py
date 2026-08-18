@@ -259,10 +259,15 @@ class RoosterBsplineFollowerNode:
             start_time_s=msg.start_time.to_sec(),
             traj_id=msg.traj_id)
         if self._servo.set_trajectory(trajectory):
-            # A new plan supersedes a stop: FALCON only replans after
+            # A new plan supersedes both latches: FALCON only replans after
             # condemning what it was flying, so a fresh curve is its own
-            # statement that it found a way out.
+            # statement that it found a way out -- and that the mission is
+            # live again. Without clearing _finished here, one EXPLORATION_
+            # FINISHED verdict killed this follower for the rest of the
+            # process even after FALCON resumed planning (FALCON's FSM
+            # republishes that verdict every tick while it sits in FINISH).
             self._stopped = False
+            self._finished = False
 
     def _replan_cb(self, msg):
         """FALCON's own verdict on the trajectory it is flying -- a control

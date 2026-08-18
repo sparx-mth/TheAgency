@@ -279,3 +279,6 @@ sparx_agency/robots/PEGASUS/scenes/
 # large, so they stay local; a hand-authored scene definition in this directory is
 # still tracked.
 sparx_agency/robots/PEGASUS/scenes/*_augmented.json
+
+# Autonomous campaign run artifacts (telemetry, copied logs) -- large, machine-generated.
+runs/
