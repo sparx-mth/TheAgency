@@ -66,6 +66,10 @@ did, `git commit` + `git push`. If it did not, revert or iterate. Record the out
 | Altitude | `RoosterUnit` owns the `z` axis exclusively. The z response is a **~10-count step gate near 700**, not a thrust curve. Never let a second publisher touch `/R1/manual_control`. |
 | Horizontal axes | ManualControl x/y are **dead below ~620 (x) / ~700 (y) counts**. Flying slower is *worse* here. |
 | Ground truth | Validate against `/R1/sphera/state` only. PX4's own estimate drifts convincingly while the aircraft is motionless. |
+| Sphera restart, programmatically | `bringup.restart_sphera()`. Success means **the battery reset**, not that a container exists — a still-running old `R1` satisfies "exists" while reporting 0%. |
+| FALCON C++ patches | Verify with `patches/verify_patch.sh <patch>.sh` (~1 min) BEFORE a full `docker build` (~12 min). Applying cleanly is not compiling. |
+| `it` container is ROS 2 **Foxy** | `ros2 topic echo --once` does not exist there. Use `timeout N ros2 topic echo <t> \| grep -m1 <field>`. |
+| Battery endurance | A ~5 min flight drains 92% → 40%. A full 10-min window needs a near-full pack, so essentially every cycle restarts Sphera. |
 | Duplicate publishers | Before blaming code, run `ros2 topic info /R1/manual_control --verbose` and `/R1/keep_alive --verbose` and confirm exactly **one** publisher. |
 
 ## 5. Campaign harness
@@ -76,11 +80,11 @@ Lives in `sparx_agency/tools/falcon_campaign/`.
 |---|---|
 | `campaign.py` | one full cycle: restart → bring up → arm/takeoff → exploration → log → land → teardown |
 | `bringup.py` | ordered, health-checked bring-up of every container/node |
-| `telemetry.py` | the flight recorder (§6) |
+| `recorder.py` | the flight recorder (§6). Runs inside the **`it`** container -- it is the only one with the vendor message types for ground truth and the rangefinder. Its output is copied out afterwards. |
 | `analyze.py` | post-flight metrics + ranked findings |
 | `supervisor.sh` | the never-dying outer loop; survives reboot via cron `@reboot` |
 
-Run artifacts: `runs/<UTC timestamp>/` — `telemetry.jsonl`, `metrics.json`, `findings.md`,
+Run artifacts: `runs/<UTC timestamp>/` — `truth.jsonl`, `metrics.json`, `findings.md`, `summary.json`,
 plus copies of every relevant log.
 
 **Pause sentinel:** `runs/PAUSE` — while this file exists the supervisor finishes the current
@@ -89,7 +93,7 @@ flight and then waits. Touch it before editing code, remove it after. The superv
 
 ## 6. What every flight must log
 
-Sampled at ≥10 Hz into `telemetry.jsonl`:
+Sampled at 20 Hz into `truth.jsonl`:
 
 - **Truth**: position, velocity, yaw, roll/pitch from `/R1/sphera/state`.
 - **FALCON's plan**: `/planning/bspline` (traj id, knots, start time), `/planning/pos_cmd`,
