@@ -428,6 +428,7 @@ def health_metrics(samples, lines):
 def exploration_metrics(lines):
     """FSM transitions, replan verdicts, and whether exploration finished."""
     transitions, replans, plan_fail, finish_t = [], {}, 0, None
+    reopened, traj_server_exited = 0, False
     base = next((t for t in (_log_time(ln) for ln in lines)
                  if t is not None), None)
     for line in lines:
@@ -435,6 +436,8 @@ def exploration_metrics(lines):
         stamp = _log_time(line)
         when = None if None in (stamp, base) else stamp - base
         plan_fail += "plan fail" in low
+        reopened += "re-opening exploration" in low
+        traj_server_exited |= "traj server shutdown" in low
         if "[fsm]" in low:
             transitions.append(
                 dict(t=when, text=line[low.index("[fsm]"):].strip()[:160]))
@@ -447,6 +450,7 @@ def exploration_metrics(lines):
             replans[key] = replans.get(key, 0) + 1
     return dict(fsm_transitions=len(transitions), fsm_lines=transitions[:40],
                 finished=finish_t is not None, finish_t_s=finish_t,
+                reopened=reopened, traj_server_exited=traj_server_exited,
                 plan_fail=plan_fail, replan_verdicts=dict(
                     sorted(replans.items(), key=lambda kv: -kv[1])[:12]))
 
@@ -528,6 +532,15 @@ def _rank(m):
     add(1.5 if (ex["fsm_transitions"] and not ex["finished"]) else 0,
         "Exploration never reached FINISH in %ss (%d FSM transitions)." % (
             _f(mo["duration_s"], "%.0f"), ex["fsm_transitions"]))
+    add(9.0 if ex.get("traj_server_exited") else 0,
+        "traj_server SHUT DOWN mid-flight: every later tick has no reference, so "
+        "the follower holds station for the rest of the run. Check that "
+        "/traj_server/exit_on_finish is false and that the image carries "
+        "fix_falcon_finish_reopen.sh.")
+    add(4.0 if (ex["finished"] and not ex.get("reopened")) else 0,
+        "Exploration finished at t=%ss and never re-opened -- the rest of the "
+        "flight was station-keeping. Expected 'Re-opening exploration' in the "
+        "FSM log." % _f(ex.get("finish_t_s"), "%.0f"))
     for stream in he["streams_stalled"]:
         add(3.5, "Stream '%s' went stale mid-flight: max age %ss over %d "
                  "samples." % (stream["stream"],
