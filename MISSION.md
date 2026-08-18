@@ -196,6 +196,24 @@ Still to do:
 - `turn_coordination()` (a *measured* yaw/translation coupling law) already exists in this
   repo but is wired only into the XTEND followers, never the Rooster path.
 
+### P6 — Tracking error is 1.42 m now that the aircraft actually follows (OPEN, top)
+
+Only visible once P2 was fixed: while the follower was holding station 84 % of the time its
+`pos_err` looked excellent (mean 0.40 m) because it was tracking a stationary point. Flying
+the real reference, cycle 11 measured **pos_err mean 1.42 m, p90 1.91 m, max 3.94 m**.
+
+Almost certainly the same defect as P5: the platform delivers only **0.42–0.63×** the
+commanded speed, so the aircraft falls progressively behind a reference that keeps moving.
+Fix the gain first and re-measure before touching any controller gain — a position loop
+tuned against a plant that under-delivers by half will be wrong twice over.
+
+### P7 — Plan-fail rate (OPEN, watch)
+
+Cycle 11: 1650 `[FSM] Plan fail` across 40860 FSM lines (4 %). Cycle 2 was 36/7788 (0.5 %),
+but that comparison is unfair — cycle 2 spent 84 % of its flight in FINISH not planning at
+all. Against cycle 1's 16949 it is a 10× improvement. Watch whether it tracks coverage rate;
+if coverage keeps climbing, this is FALCON discarding unreachable viewpoints and is healthy.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.
