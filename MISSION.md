@@ -129,30 +129,30 @@ turns, the measured-speed backstop raised 0.7→1.5 m/s with its taper wired, ra
 releases, and a warm-start across the axis dead band. Keep watching `stops_per_min` and
 `frac_time_below_stop_speed` in every run's metrics — this is the headline smoothness pair.
 
-### P2 — Exploration stops permanently (SECOND ROOT CAUSE FOUND 2026-08-18)
+### P2 — Exploration stops permanently (SOLVED 2026-08-18, verified in flight)
 
-The stale-image fix was necessary but **not sufficient**. Measured on a clean 610 s run:
-the follower tracked for its first **106 s**, FALCON logged "Exploration finished" once,
-and the follower then reported `holding=True` for the remaining **560 s** — 84 % of the
-flight.
+Two root causes, found in sequence. First a **stale docker image**: `falcon-ros:noetic` was
+built 3 h 19 m before the commit adding the finish-grace fix, so ten committed C++ patches
+were silently inert and the FSM quit after 26 s. Second, and deeper: `FINISH` was an
+**absorbing state** with no exit anywhere in `exploration_fsm.cpp`, and entering it published
+`replan == 2`, which sets `task_finished_` and **ends the traj_server process** — so the
+follower watched its last setpoint go stale and station-kept for the rest of the flight.
 
-Two things make FINISH permanent, and both are now patched
-(`patches/fix_falcon_finish_reopen.sh`, wired into the Dockerfile):
+Fixed by `patches/fix_falcon_finish_reopen.sh` (FINISH re-opens to PLAN_TRAJ when frontiers
+reappear; type 2 stops the trajectory without stopping the server).
 
-1. **`FINISH` is an absorbing FSM state** — no transition out of it exists anywhere in
-   `exploration_fsm.cpp`, while `frontierCallback` happily goes on finding frontiers *in*
-   that state. It now re-opens to `PLAN_TRAJ` once frontiers reappear and a cooldown has
-   passed, resetting the grace counters on the way out.
-2. **`replan == 2` ends the traj_server PROCESS** (`task_finished_` breaks its main loop).
-   So even a re-opened FSM would have had nothing to fly its plan. Type 2 now stops the
-   trajectory without stopping the process; `/traj_server/exit_on_finish` restores upstream.
+| metric | before | after |
+|---|---|---|
+| `frac_holding` | **0.84** | **0.031** |
+| `traj_server_exited` | true | **false** |
+| `reopened` | 0 | **2** |
+| distance flown | 252.6 m | **298.9 m** |
+| finished at | 107 s (terminal) | 188 s, then re-opened |
 
-Diagnosis aid added: the follower heartbeat now prints `ref_age` and warns past 5 s.
-`ref_ready=True` printed for the whole 560 s because it only reflects the last message's
-flag — that is what sent the first diagnosis into the controller instead of the planner.
-
-**Verify next run:** `grep -c "Re-opening exploration"` in the FSM log, `frac_holding` in
-metrics.json (was 0.84), and that `traj_server` is still alive at the end of the flight.
+The aircraft now actually tracks FALCON for the whole window instead of holding station for
+84 % of it. `bringup.assert_falcon_patches()` refuses to fly an image missing either half,
+checked at **every** bring-up, and the analyzer reports `reopened` / `traj_server_exited`
+itself so this never needs grepping again.
 
 ### P3 — Walls not mapped high enough (FIXED 2026-08-18)
 The walls *were* mapped; they were never *published*. `vbox_max_z = 2.8` guillotined every
@@ -218,6 +218,10 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-18 | Battery gate fixed (one constant, unreadable ⇒ restart) | stops flying dead-battery cycles | 01e1b399 |
 | 2026-08-18 | Analyzer: through-origin gain instead of ratio-of-small-numbers | corrected "2.18x too fast" → **0.63x too slow** | 01e1b399 |
 | 2026-08-18 | `patches/verify_patch.sh` | compiles a patch in ~1 min instead of failing a 12 min build | 01e1b399 |
+| 2026-08-18 | FINISH re-open + traj_server survives (verified) | **frac_holding 0.84 → 0.031**, distance 252 → 299 m, reopened ×2 | 01e1b399 |
+| 2026-08-18 | Fixed the Sphera restart (bare import; verify battery not container) | ended a 6-cycle stall where every restart silently no-oped | (this iter) |
+| 2026-08-18 | Analyzer reports finish/traj_server verdict | the loop self-diagnoses this class now | (this iter) |
+| 2026-08-18 | Coverage metric (`map_coverage` + frontier count) | the mission is now measured, not proxied | (this iter) |
 
 ## 9. Resuming after a context loss
 

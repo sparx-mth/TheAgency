@@ -355,11 +355,13 @@ def _markdown(result):
     lines += ["", "## Standing vs moving (forward axis)", "",
               "Mean speed gap between the two approaches: **%s m/s**."
               % _fmt(result["hysteresis"]["mean_gap_mps"], 3), ""]
+    preload = {"down": "850", "up": "650"}
     for key in sorted(result["moving"]):
         curve = result["moving"][key] or {}
-        lines.append("- pre-loaded %s: dead band %s counts, %s m/s at 1000"
-                     % (key, _fmt(curve.get("deadzone"), 0),
-                        _fmt(curve.get("full_scale"), 3)))
+        lines.append("- approached from the %s pre-load: dead band %s counts, "
+                     "%s m/s at 1000" % (preload.get(key, key),
+                                         _fmt(curve.get("deadzone"), 0),
+                                         _fmt(curve.get("full_scale"), 3)))
     lines += ["", "## Combined axes", ""]
     for key, ratio in sorted(result["combined"]["mean_ratio"].items()):
         lines.append("- `%s`: achieved / single-axis prediction = **%.2f**" % (key, ratio))
@@ -370,7 +372,9 @@ def _markdown(result):
               "## Put these into `rooster_twist_control_adapter.py`", ""]
     for name in ("x_deadzone", "x_v_full", "x_v_full_moving",
                  "y_deadzone", "y_v_full", "r_deadzone", "r_v_full"):
-        lines.append("- `%s = %s`" % (name, _fmt(values.get(name), 3)))
+        # Dead bands are axis counts; everything else is a rate.
+        digits = 0 if name.endswith("_deadzone") else 3
+        lines.append("- `%s = %s`" % (name, _fmt(values.get(name), digits)))
     lines += ["",
               "`r_deadzone` / `r_v_full` have no parameter in the adapter today --",
               "yaw still goes through `wz / max_yaw_rate * 1000`, with no dead band",
