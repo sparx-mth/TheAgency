@@ -185,9 +185,11 @@ def assert_falcon_patches():
 
 def battery_fraction():
     """Battery as a 0-1 fraction from ``/R1/state``, or None if unreadable."""
+    # No `--once`: this container is ROS 2 Foxy, where that flag does not exist.
+    # `timeout` + `grep -m1` is the form the runbook has always used here.
     cmd = ("docker exec %s bash -lc %s" % (
         C.IT_CONTAINER,
-        shlex.quote(C.IT_ENV + "timeout 6 ros2 topic echo --once %s 2>/dev/null "
+        shlex.quote(C.IT_ENV + "timeout 6 ros2 topic echo %s 2>/dev/null "
                     "| grep -m1 percentage" % C.ROS2_TOPICS["state"])))
     r = sh(cmd, 25)
     for token in r.stdout.replace(":", " ").split():
@@ -387,6 +389,56 @@ def ros2_publisher_count(topic):
     return -1
 
 
+def ros2_publisher_names(topic):
+    """Node names publishing a ROS2 topic, as a list (may contain duplicates).
+
+    Counting publishers is not enough to detect the failure that matters. The
+    vendor's own ``rooster_manager`` legitimately publishes on
+    ``/R1/manual_control`` alongside ours, so the healthy count is two -- while a
+    stray ``position_fly_controller`` also makes it two and silently fights us
+    for the throttle axis. Only the names distinguish them.
+    """
+    r = sh("docker exec %s bash -lc %s" % (
+        C.IT_CONTAINER,
+        shlex.quote(C.IT_ENV +
+                    "timeout 10 ros2 topic info %s --verbose 2>/dev/null" % topic)), 30)
+    names = []
+    for line in r.stdout.splitlines():
+        if line.strip().startswith("Node name:"):
+            names.append(line.split(":", 1)[1].strip())
+    return names
+
+
+#: Node names allowed to publish /<drone>/manual_control. Anything else is a
+#: second controller flying the same aircraft.
+_ALLOWED_MANUAL_PUBLISHERS = {
+    "rooster_command_unit",              # ours, the sole legitimate commander
+    "rooster_manager",                   # the vendor's own relay
+    "_CREATED_BY_BARE_DDS_APP_",         # how CycloneDDS reports a non-rclpy peer
+}
+
+
+def manual_control_authority():
+    """Check that exactly one of *our* commanders owns the throttle axis.
+
+    Returns:
+        ``(ok, detail)``. Not ok means either nothing of ours is publishing, or
+        something unrecognised is -- both of which invalidate a flight.
+    """
+    names = ros2_publisher_names(C.ROS2_TOPICS["manual"])
+    if not names:
+        return False, "could not read publishers on %s" % C.ROS2_TOPICS["manual"]
+    ours = [n for n in names if n == "rooster_command_unit"]
+    strangers = [n for n in names if n not in _ALLOWED_MANUAL_PUBLISHERS]
+    if len(ours) != 1:
+        return False, "expected exactly 1 rooster_command_unit, found %d (%s)" % (
+            len(ours), ", ".join(names))
+    if strangers:
+        return False, "unrecognised publisher(s) on the throttle axis: %s" % (
+            ", ".join(sorted(set(strangers))))
+    return True, "rooster_command_unit + %d expected peer(s)" % (len(names) - 1)
+
+
 def frames_fresh(max_age_s=10):
     """Whether new camera frames are landing AND their content is changing.
 
@@ -434,9 +486,12 @@ def health_report():
         "bridge_up": container_up(C.BRIDGE_CONTAINER),
         "exploration_node": rosnode_exists("/exploration_node"),
         "frames_fresh": frames_fresh(),
-        "manual_control_publishers": ros2_publisher_count(C.ROS2_TOPICS["manual"]),
+        # Advisory only: the active follower and lost_localization both
+        # legitimately advertise cmd_vel_raw (the latter never publishes on the
+        # Rooster stack -- it watches an XTEND pose topic that is never fed).
         "cmd_vel_raw_publishers": ros1_publisher_count(C.ROS1_TOPICS["cmd_vel_raw"]),
     }
+    report["manual_authority_ok"], report["manual_authority"] = manual_control_authority()
     try:
         report["drone_image"] = assert_simulator()
     except BringupError as exc:
@@ -444,8 +499,7 @@ def health_report():
 
     report["ok"] = bool(
         report["falcon_up"] and report["bridge_up"] and report["exploration_node"]
-        and report["frames_fresh"]
-        and report["manual_control_publishers"] == 1
+        and report["frames_fresh"] and report["manual_authority_ok"]
         and str(report["drone_image"]).startswith(C.SIM_IMAGE_PREFIX))
     return report
 

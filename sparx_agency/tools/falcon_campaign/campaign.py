@@ -61,25 +61,31 @@ def new_run_dir():
 
 
 def start_recorder(run_dir, duration_s):
-    """Launch the flight recorder inside the dev container, detached.
+    """Launch the flight recorder inside the vendor container, detached.
 
-    Runs in ``robotican_dev`` because that container has both a ROS 2 Humble
-    environment on Sphera's domain and the repo mounted at its real host path,
-    so the JSONL lands straight in the run folder with no copy step.
+    Runs in ``it`` rather than ``robotican_dev``: only ``it`` has the vendor
+    message definitions for ground truth and the rangefinder. See
+    ``config.RECORDER_DIR_IN_IT`` for why the output is copied out afterwards
+    instead of written straight into the run folder.
     """
-    cmd = (C.DEV_ENV +
+    bringup.kill_in(C.IT_CONTAINER, "falcon_campaign.recorder")
+    subprocess.run(["docker", "exec", C.IT_CONTAINER, "bash", "-lc",
+                    "rm -rf %s && mkdir -p %s"
+                    % (C.RECORDER_DIR_IN_IT, C.RECORDER_DIR_IN_IT)],
+                   capture_output=True, timeout=30)
+    cmd = (C.IT_ENV +
            "python3 -m sparx_agency.tools.falcon_campaign.recorder "
            "--run-dir %s --rooster-id %s --duration-sec %d"
-           % (shlex.quote(str(run_dir)), C.DRONE_ID, int(duration_s) + 30))
+           % (C.RECORDER_DIR_IN_IT, C.DRONE_ID, int(duration_s) + 30))
     subprocess.run(
-        ["docker", "exec", "-d", "-w", str(C.REPO_ROOT), C.DEV_CONTAINER,
-         "bash", "-lc", cmd + " > /tmp/campaign_recorder.log 2>&1"],
+        ["docker", "exec", "-d", C.IT_CONTAINER, "bash", "-lc",
+         cmd + " > /tmp/campaign_recorder.log 2>&1"],
         capture_output=True, timeout=30)
 
 
 def stop_recorder():
     """Ask the recorder to finish its current line and write its metadata."""
-    bringup.kill_in(C.DEV_CONTAINER, "falcon_campaign.recorder")
+    bringup.kill_in(C.IT_CONTAINER, "falcon_campaign.recorder")
     time.sleep(2)
 
 
@@ -91,6 +97,12 @@ def collect_logs(run_dir):
                    % (C.IT_CONTAINER, name, shlex.quote(str(dest))), 60)
     for path in _HOST_LOGS:
         bringup.sh("cp %s %s/ 2>/dev/null" % (shlex.quote(path), shlex.quote(str(dest))), 30)
+    # The recorder's own output, which lives inside `it` (see config).
+    bringup.sh("docker cp %s:%s/. %s/ 2>/dev/null"
+               % (C.IT_CONTAINER, C.RECORDER_DIR_IN_IT,
+                  shlex.quote(str(run_dir))), 90)
+    bringup.sh("docker cp %s:/tmp/campaign_recorder.log %s/ 2>/dev/null"
+               % (C.IT_CONTAINER, shlex.quote(str(dest))), 30)
     # The follower/FSM logs live in falcon's rotating roslaunch log dir.
     bringup.sh(
         "docker exec %s bash -lc 'L=$(ls -td /root/.ros/log/*/ | head -1); "

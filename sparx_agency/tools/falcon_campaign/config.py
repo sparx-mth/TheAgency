@@ -22,8 +22,17 @@ PAUSE_FILE = RUNS_DIR / "PAUSE"
 STOP_FILE = RUNS_DIR / "STOP"
 
 #: Host dir bind-mounted read-write into the falcon container at the same path.
-#: The ROS1 recorder writes here so the host can read it without docker cp.
 FALCON_SHARED_DIR = pathlib.Path("/tmp/falcon")
+
+#: Where the flight recorder writes INSIDE the vendor container.
+#:
+#: The recorder has to run in ``it``: it is the only container with the vendor
+#: message definitions (``sphera_common_interfaces``, ``rooster_manager_
+#: interfaces``) needed to read ground truth and the rangefinder at all --
+#: ``robotican_dev`` has ROS 2 Humble but not those packages. Only
+#: ``sparx_agency/`` is mounted into ``it``, not the repo root, so ``runs/`` is
+#: not visible from there and the data is copied out after the flight instead.
+RECORDER_DIR_IN_IT = "/tmp/campaign_run"
 
 # ── Identity ─────────────────────────────────────────────────────────────
 DRONE_ID = "R1"
@@ -100,6 +109,11 @@ HOVER_Z = 700.0
 #: deliberate A/B against a baseline run, after the plant is measured.
 EXPLORATION_FOLLOWER = "reference"
 
+#: Clearance FALCON's planner and optimiser keep from occupied voxels, metres.
+#: See adapter_launch_cmd for why this is 0.40 rather than the inherited 0.85.
+OBSTACLES_INFLATION = 0.40
+SAFE_DISTANCE = 0.40
+
 FLIGHT_SECONDS = 600           # the operator's 10-minute window
 HOVER_SETTLE_TIMEOUT_S = 60.0
 
@@ -141,11 +155,20 @@ def adapter_launch_cmd(follower=None, extra=""):
         "bev_xmin:={bxmin} bev_ymin:={bymin} bev_xmax:={bxmax} bev_ymax:={bymax} "
         "apf_max_total_shift_m:=0.3 "
         "bev_t_on:=3.0 bev_occ_conf_full:=4.0 bev_min_wall_run:=4 "
+        # 0.85 (the inherited default) against a 0.20 m voxel grid demands a
+        # 1.7 m-wide free corridor, and measured live 2026-08-18 that is what
+        # made exploration fail: FALCON kept picking reachable-looking
+        # viewpoints and A* could not route to any of them
+        # ("No path to next viewpoint using default A*" then "coarse A*",
+        # 1156 consecutive [FSM] Plan fail). 0.40 matches this stack's own 2D
+        # planner (inflate_radius_m) and is still two full voxels of margin.
+        "obstacles_inflation:={infl} safe_distance:={safe} "
     ).format(map=MAP_NAME, follower=follower, drone=DRONE_ID,
              fx=CAM["fx"], fy=CAM["fy"], cx=CAM["cx"], cy=CAM["cy"],
              w=CAM["width"], h=CAM["height"], mind=CAM["min_depth"],
              gx=GOAL_X, gy=GOAL_Y,
-             bxmin=BEV_XMIN, bymin=BEV_YMIN, bxmax=BEV_XMAX, bymax=BEV_YMAX)
+             bxmin=BEV_XMIN, bymin=BEV_YMIN, bxmax=BEV_XMAX, bymax=BEV_YMAX,
+             infl=OBSTACLES_INFLATION, safe=SAFE_DISTANCE)
     return ("docker exec {c} bash -lc '{env} roslaunch falcon_adapter "
             "sphera_drone.launch {args}{extra}'").format(
         c=FALCON_CONTAINER, env=FALCON_ENV, args=args, extra=extra)

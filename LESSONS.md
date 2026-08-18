@@ -67,6 +67,60 @@ and it is indistinguishable from perfect tracking of a moving one. Check
 `/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
 the roslaunch stdout redirect instead.
 
+## 2026-08-18 — a stale docker image made ten committed FALCON fixes silently inert, and exploration quit after 26 seconds
+
+**Symptom:** FALCON "froze and never replanned". `/planning/replan` sat at `2`
+(EXPLORATION_FINISHED) for 6.5 hours while its own frontier finder still reported 560
+frontier points and 736 dormant ones. `traj_server` was gone, so `/planning/pos_cmd` had
+**zero publishers** and the reference follower held station forever — which reads exactly
+like a control bug.
+
+**Root cause:** `falcon-ros:noetic` was built at 11:17; the commit adding the finish-grace
+fix landed at **14:36**. The container had no `/catkin_ws` bind mount, so the image content
+was authoritative and three hours of committed C++ patches were simply not in it.
+`nav_stack.launch` dutifully set `/fsm/finish_grace_*` and the frontier-visibility params,
+roslaunch echoed them, and **nothing read them**: `strings
+/catkin_ws/devel/lib/exploration_manager/exploration_node | grep -c finish_grace` returned
+`0`. FALCON's `FINISH` state is absorbing, and it is entered on the *first* cycle where
+`updateFrontierStruct()` returns 0 — so without the grace patch, 26 seconds of exploration
+was enough to end the mission permanently.
+
+**Fix:** rebuild, then *verify the artifact rather than the source*. `bringup.py`'s
+`assert_falcon_patches()` now greps each compiled binary for a marker string per patch and
+refuses to fly if any is missing. Checked at **bring-up**, not build time: a build-time gate
+only protects the build that runs it, while this catches any stale image that later gets
+started.
+
+**Don't:** don't infer from "the launch file sets the parameter" that the parameter does
+anything — for a vendored C++ node, confirm the string is in the binary. And don't debug a
+"planner froze" symptom in the follower until you have checked `/planning/replan`'s value and
+whether `/planning/pos_cmd` has a publisher at all; both are one `rostopic` call.
+
+## 2026-08-18 — `SpheraPawnState.velocity` exists, is documented as m/s, and is all-zero in this build
+
+**Symptom / temptation:** `rooster_ground_truth_localization.py` differentiates the truth
+pose and low-passes it with `velocity_filter_tau_s=0.25` to get a usable velocity. That lag
+lands straight on the velocity servo's proportional term and is why `servo_kp` had to be cut
+from 220 to 90 after a ~1.15 Hz limit cycle. `SpheraPawnState` carries a `velocity` field
+(`geometry_msgs/Vector3 velocity #m/s`), and `manual_flight_logger.py` even documents it as
+"true physics-engine linear velocity (not derived by differencing position)" — so switching
+to it looks like a free removal of 250 ms of feedback lag.
+
+**It is all-zero.** Measured live on `sphera-backend:rooster`: `ros2 topic echo
+/R1/sphera/state` shows `velocity: {x: 0.0, y: -0.0, z: 0.0}` while the aircraft is flying at
+0.5 m/s and its position is visibly changing. The field is declared and never populated.
+
+**Why it matters more than "the optimisation is unavailable":** a controller that closes on
+that field sees a permanent zero, reads it as "not moving", and winds its integrator to full
+deflection while the aircraft is already at speed. The guard that caught this treats an
+all-zero field as suspicious only when the differentiated position disagrees, waits 25
+samples to avoid tripping on a real standstill, then logs an ERROR and falls back to
+differentiation for the rest of the run.
+
+**Don't:** don't trust a message field because it is declared and documented — check that it
+is populated, against motion you can independently see. And when adding a feedback source,
+make "the source went dead" a distinguishable state rather than a plausible zero.
+
 ## 2026-08-18 — a calibrated axis curve is still open loop, and it under-delivered by 3x in flight
 
 **Symptom:** With the measured ManualControl axis curve in place (forward dead until ~620

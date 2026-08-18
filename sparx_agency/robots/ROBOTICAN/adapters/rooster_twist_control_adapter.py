@@ -418,6 +418,17 @@ class RoosterTwistControlNode(Node):
         if self.forward_axis_step_per_sec <= 0.0:
             self._x_axis = target
         else:
+            # Warm-start across the dead band. Ramping up from zero at
+            # forward_axis_step_per_sec spends 620/60 = ~10 ticks (~0.5 s) below
+            # the dead band on EVERY restart of motion, where the platform does
+            # not move at all -- measured 2026-08-18, 25% of a flight's ticks sat
+            # inside the dead band for exactly this reason. Jumping straight to
+            # the edge is not a real step change, because nothing below the edge
+            # reaches the actuator; the ramp then does its job over the part of
+            # the range that actually does something.
+            if self._x_axis == 0.0 and target != 0.0:
+                edge = min(abs(target), self.x_deadzone)
+                self._x_axis = edge if target > 0.0 else -edge
             rate = (self.forward_axis_release_per_sec if target == 0.0
                     else self.forward_axis_step_per_sec)
             self._x_axis = slew(target, self._x_axis, rate / self.command_hz)

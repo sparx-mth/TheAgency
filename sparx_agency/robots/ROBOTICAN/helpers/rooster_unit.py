@@ -53,6 +53,11 @@ ARM_CONFIRM_TIMEOUT_SEC = 2.0
 LAND_MIN_THROTTLE_FRACTION = 0.3
 GROUND_RANGER_M = 0.3
 
+# Lowest altitude-hold setpoint a nudge may reach, metres AGL. Below this the
+# rangefinder is reading floor clutter as often as floor, and the hold loop
+# starts chasing furniture. See nudge_altitude_target().
+MIN_ALTITUDE_TARGET_M = 0.6
+
 
 class AxisModel:
     """Manual-control axes (x/y/z/r), each clamped to [-1000, 1000]."""
@@ -430,7 +435,20 @@ class RoosterUnit:
                 f"[{self.id}] nudge_altitude_target({delta_m:+.2f}m) ignored -- "
                 f"altitude hold not engaged yet.")
             return
-        self._hold_ranger_target += float(delta_m)
+        # Clamped, because the nudge caller has no idea what altitude is safe
+        # here. Confirmed live 2026-08-18: FALCON's own climb demand walked the
+        # target 1.20 -> 1.80 m within a minute of takeoff, straight past
+        # max_ranger_m -- and max_ranger_m only caps the hold loop's CORRECTION,
+        # it never bounded the setpoint the loop was chasing.
+        ceiling = self.max_ranger_m if self.max_ranger_m > 0.0 else float("inf")
+        wanted = self._hold_ranger_target + float(delta_m)
+        clamped = max(MIN_ALTITUDE_TARGET_M, min(ceiling, wanted))
+        if clamped != wanted:
+            self.node.get_logger().warn(
+                f"[{self.id}] altitude nudge {delta_m:+.2f}m clamped: "
+                f"{wanted:.2f}m is outside "
+                f"[{MIN_ALTITUDE_TARGET_M:.2f}, {ceiling:.2f}]m")
+        self._hold_ranger_target = clamped
         self.node.get_logger().info(
             f"[{self.id}] altitude target nudged by {delta_m:+.2f}m -> "
             f"{self._hold_ranger_target:.2f}m")
