@@ -214,6 +214,31 @@ but that comparison is unfair — cycle 2 spent 84 % of its flight in FINISH not
 all. Against cycle 1's 16949 it is a 10× improvement. Watch whether it tracks coverage rate;
 if coverage keeps climbing, this is FALCON discarding unreachable viewpoints and is healthy.
 
+### P8 — The airframe holds ~19 deg roll excursions while hovering still (OPEN)
+
+Measured from the calibration sweep's own rest periods (3240 samples with nothing commanded
+and speed < 0.05 m/s): |roll| p90 is **18.9 deg**, and it does **not decay** — 18.9 / 19.0 /
+19.0 / 17.3 deg for 0-1 s, 1-2 s, 2-3 s and >3 s after the stop, while speed settles to
+0.03 m/s. Median roll is only ~1 deg, so these are recurring excursions rather than a
+standing bias.
+
+Why it matters, in order:
+1. **Map quality.** Depth comes from monocular DA3, and roll skews the geometry it infers.
+   Roughly a tenth of all mapping frames are being captured at >=18 deg of roll.
+2. **The tilt reflex is mis-set either way.** The follower's node default is 15 deg, which
+   this would trip on ~10 % of ticks and cut drive spuriously; `nav_stack.launch` passes
+   45 deg, which cannot fire before the airframe's ~35 deg recoverability ceiling. Neither
+   number was chosen against this measurement.
+3. Backward commands specifically tripped 26-33 deg during the sweep, and the stall-escape
+   reflex commands -0.30 m/s backward — so the escape may be inducing the tilt that the
+   tilt cutoff then reacts to.
+
+**Most likely benign explanation to rule out first:** PX4 is in Position mode, so holding
+station against drift *requires* tilting. 19 deg is a lot for that, but check it before
+treating this as a control defect — compare rest-period roll with and without a commanded
+position hold, and against `altitude_hold` activity, since the z axis is a narrow step gate
+that slews every tick.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.
