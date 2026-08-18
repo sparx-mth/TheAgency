@@ -48,7 +48,16 @@ import sys
 import time
 from pathlib import Path
 
-import sphera_gui_automation
+# Importable both as a script from this directory (`python3 sphera_battery_
+# watchdog.py`) and as a module (`python3 -m sparx_agency.tools.sphera_battery_
+# watchdog`). The bare form alone silently broke every module-style invocation
+# with ModuleNotFoundError -- which an automated caller reads as "the restart
+# ran", so a campaign spent six cycles refusing to fly a flat battery it kept
+# asking to have replaced.
+try:
+    from sparx_agency.tools import sphera_gui_automation
+except ImportError:  # pragma: no cover - script-style invocation
+    import sphera_gui_automation
 
 ROOSTER_CONTAINER = "it"
 R1_CONTAINER = "R1"

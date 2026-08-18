@@ -234,23 +234,43 @@ def restart_sphera(reentry_attempts=4):
     Returns:
         True if a fresh drone container came back.
     """
-    sh(C.SPHERA_RESTART_CMD, timeout=420)
-    if container_up(C.DRONE_CONTAINER):
-        return True
+    r = sh(C.SPHERA_RESTART_CMD, timeout=420)
+    if r.returncode != 0:
+        # Say so loudly rather than fall through to the container check: an
+        # existing container proves nothing when the restart never ran, and
+        # "the old drone is still up" reads identically to "a fresh one came
+        # back". A ModuleNotFoundError here once cost six cycles.
+        print("[bringup] Sphera restart command FAILED (rc=%s): %s"
+              % (r.returncode, (r.stderr or r.stdout)[-400:]), flush=True)
 
     from sparx_agency.tools import sphera_gui_automation
 
     for attempt in range(1, reentry_attempts + 1):
+        if _fresh_drone_ready():
+            return True
         # Let Sphera finish becoming interactive before clicking at it.
         time.sleep(15)
         try:
             sphera_gui_automation.enter_scenario()
         except Exception:                          # noqa: BLE001 -- GUI is flaky
             pass
-        if wait_for(lambda: container_up(C.DRONE_CONTAINER), 60,
-                    "fresh %s (re-entry attempt %d)" % (C.DRONE_CONTAINER, attempt)):
-            return True
-    return False
+        wait_for(_fresh_drone_ready, 90,
+                 "fresh %s (re-entry attempt %d)" % (C.DRONE_CONTAINER, attempt))
+    return _fresh_drone_ready()
+
+
+def _fresh_drone_ready():
+    """Whether the drone is back AND its battery actually reset.
+
+    The container existing is the wrong success criterion -- the whole point of
+    the restart is the battery, and a still-running old container satisfies
+    "exists" while reporting 0%. Checking what was actually wanted is what turns
+    a silently-failing restart into a loud one.
+    """
+    if not container_up(C.DRONE_CONTAINER):
+        return False
+    level = battery_fraction()
+    return level is not None and level >= MIN_FLIGHT_BATTERY
 
 
 def ensure_sphera(min_battery=None):

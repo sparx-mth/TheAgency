@@ -67,6 +67,37 @@ and it is indistinguishable from perfect tracking of a moving one. Check
 `/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
 the roslaunch stdout redirect instead.
 
+## 2026-08-18 — a bare `import` broke every automated Sphera restart, and three layers of "success" hid it
+
+**Symptom:** an autonomous campaign refused to fly for six consecutive cycles, each one
+correctly reporting `battery_ok: false` and then correctly asking for a Sphera restart. The
+restart reported success every time. `R1` stayed up for two hours with `voltage: 0.0,
+percentage: 0.0`.
+
+**Root cause:** `sphera_battery_watchdog.py` did `import sphera_gui_automation` — a bare
+import that resolves only when the file is run as a script from its own directory. Invoked
+the module way (`python3 -m sparx_agency.tools.sphera_battery_watchdog`, which is how any
+programmatic caller will do it) it died instantly with `ModuleNotFoundError` before executing
+a single line of its own logic — including the `docker rm -f R1` that the whole procedure
+depends on.
+
+**Why it stayed hidden is the more useful half.** Three separate things each turned a failure
+into a "success":
+1. the caller ran the restart with `sh(...)` and **ignored the return code**;
+2. it then treated **"the drone container exists"** as proof the restart worked — but a
+   still-running *old* container satisfies that just as well as a fresh one;
+3. the thing actually wanted (a charged battery) was never checked, even though it is one
+   call away and is the entire reason for restarting.
+
+**Fix:** make the import work both ways (`try: from sparx_agency.tools import ... except
+ImportError: import ...`), check the return code and print the stderr when it is non-zero,
+and — the general lesson — **verify the goal, not a proxy for it**. `_fresh_drone_ready()`
+now returns true only when the container is up *and* the battery has actually reset.
+
+**Don't:** don't let a subprocess wrapper discard a non-zero exit; and when writing a
+"did it work?" check, ask what the operation was *for* rather than what it *touched*. A
+proxy that the pre-existing state already satisfies cannot detect failure at all.
+
 ## 2026-08-18 — a stale docker image made ten committed FALCON fixes silently inert, and exploration quit after 26 seconds
 
 **Symptom:** FALCON "froze and never replanned". `/planning/replan` sat at `2`
