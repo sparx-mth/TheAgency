@@ -1134,8 +1134,16 @@
        if crashes stop, that confirms it; if they continue, it's a FALCON bug
        independent of our tuning. Do NOT re-lower these without also
        retesting stability; see LESSONS.md for the crash history. -->
-  <arg name="max_vel"     default="0.25" />
-  <arg name="max_acc"     default="0.25" />
+  <!-- 2026-08-17: raised 0.25 -> 0.6. Measured against Sphera ground truth,
+       Rooster's ManualControl x/y axes are DEAD below ~620/1000 counts and the
+       slowest continuously-commandable horizontal speed is ~0.26 m/s (see
+       LESSONS.md). Planning at 0.25 m/s therefore asked the follower for
+       speeds the airframe physically cannot hold, which is why tracking was
+       jerky and why the follower was pinned to bang-bang pulses. Planning
+       above the deadzone is what makes proportional tracking possible at all;
+       on this platform "fly slower for better tracking" is backwards. -->
+  <arg name="max_vel"     default="0.4" />
+  <arg name="max_acc"     default="0.3" />
   <arg name="max_yaw_vel" default="0.6" />
   <arg name="max_yaw_acc" default="0.5" />
 
@@ -1186,7 +1194,27 @@
        max_measured_speed_xy for the full rationale. 0.4 = 2x explore_fixed_vx,
        enough headroom for normal combined vx+vy motion without catching
        intended cruising speed as "too fast". <=0.0 disables. -->
-  <arg name="explore_max_measured_speed_xy" default="0.4" />
+  <arg name="explore_max_measured_speed_xy" default="0.7" />
+
+  <!-- 2026-08-17: force_mode was never wired here at all, so the follower
+       silently ran its own Python default ("fixed" = bang-bang) — every
+       cmd_vel_raw command was pegged to exactly explore_fixed_vx/vy/wz
+       regardless of how large or small ReferenceTracker3D's actual computed
+       error was, discarding FALCON's continuous reference down to direction
+       + deadband only. "snap" keeps the same platform-minimum-command floor
+       (below it the FCU doesn't move at all) but passes analog magnitude
+       through above that floor, clamped at explore_max_speed_xy/wz below —
+       this is what actually lets the follower track the plan's speed instead
+       of always flying at one fixed speed. UNTESTED at these settings; if
+       motion looks jerky/binary rather than proportional, confirm this param
+       actually reached the node (roslaunch echoes it) before assuming the
+       code path is wrong. -->
+  <arg name="explore_force_mode"  default="snap" />          <!-- fixed | snap | none -->
+  <arg name="explore_max_speed_xy" default="0.6" />           <!-- must exceed max_vel with headroom; full-scale measured ~1.25 m/s -->
+  <!-- Snap-up floor: below ~0.26 m/s the platform cannot move continuously
+       (measured deadzone), so a smaller request is not worth emitting. -->
+  <arg name="explore_min_vxy"      default="0.26" />
+  <arg name="explore_max_yaw_rate_deg" default="45.0" />
 
   <!-- Reverted to 0.85/0.85 alongside max_vel/max_acc above; see that
        comment for why. -->
@@ -1361,30 +1389,71 @@
   <!-- ══ EXPLORATION MODE (nav_mode:=exploration) ══════════════════════════════
        exploration_node above computes FALCON's own frontier-driven plan on every
        mission regardless of nav_mode (auto_start:=true in exploration_manager.yaml);
-       it has just never had anything to fly it. traj_server turns its raw
-       trajectory (/planning/bspline) into a continuous dynamically-feasible
-       setpoint stream (/planning/pos_cmd); falcon_exploration_follower_node.py
-       tracks that setpoint (core.planning.trackers.reference_tracker_3d) and
-       drives cmd_vel_raw the same way every other mode's follower does. Gated to
-       this mode only: astar/combination/hybrid/navdp all have their own follower
-       (waypoint_follower_node.py, disabled above for this mode) driving from a
-       discrete path instead of a continuous reference. -->
+       it has just never had anything to fly it. Two mutually-exclusive followers
+       select via exploration_follower (never run both — two publishers on
+       cmd_vel_raw is exactly the "competing publisher" bug class LESSONS.md
+       documents three times over for this stack):
+
+         exploration_follower:=reference (default) — traj_server turns the raw
+           trajectory (/planning/bspline) into a continuous dynamically-feasible
+           setpoint stream (/planning/pos_cmd); falcon_exploration_follower_node.py
+           tracks that (core.planning.trackers.reference_tracker_3d).
+
+         exploration_follower:=bspline (2026-08-17, UNTESTED) — rooster_bspline_
+           follower_node.py subscribes /planning/bspline directly (no traj_server)
+           and tracks it with core.control.velocity_servo.VelocityServo — the
+           same measured-plant-inversion control law proven 2.8-3.8x tighter on
+           the falcon_sjtu deployment. See that node's module docstring before
+           trusting its tracking numbers: the plant constants are UNMEASURED for
+           Rooster.
+
+       Gated to nav_mode:=exploration only: astar/combination/hybrid/navdp all
+       have their own follower (waypoint_follower_node.py, disabled above for
+       this mode) driving from a discrete path instead of a continuous reference. -->
+  <arg name="exploration_follower" default="reference" />    <!-- reference | bspline -->
+  <!-- 2026-08-17: cuts horizontal drive the instant roll/pitch crosses this,
+       on BOTH followers below — see LESSONS.md's 2026-08-17 entry (a live
+       capsize exposed neither follower had any attitude awareness at all). -->
+  <arg name="tilt_limit_deg" default="45.0" />
+
   <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"
-        if="$(eval arg('nav_mode') == 'exploration')" />
+        if="$(eval arg('nav_mode') == 'exploration' and arg('exploration_follower') == 'reference')" />
 
   <node pkg="falcon_adapter" type="falcon_exploration_follower_node.py"
         name="falcon_exploration_follower" output="screen"
-        if="$(eval arg('nav_mode') == 'exploration')">
+        if="$(eval arg('nav_mode') == 'exploration' and arg('exploration_follower') == 'reference')">
     <param name="drone_ns"        value="$(arg drone_ns)" />
     <param name="cmd_vel_topic"   value="$(arg cmd_vel_raw_topic)" />
     <param name="demo_mode_topic"         value="$(arg demo_mode_topic)" />
     <param name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
-    <!-- The actual speed bottleneck for this mode; see the
-         explore_fixed_* arg declarations above. -->
+    <!-- fixed_vx/vy/wz_deg only matter in force_mode:=fixed (the bang-bang
+         pulse level); in force_mode:=snap (now the default, see above) they
+         are unused — min_vxy/min_wz_deg (Python defaults 0.06 m/s / 8 deg/s)
+         are the floor and max_speed_xy/max_yaw_rate_deg below are the
+         ceiling. Left wired so switching back to fixed:= for comparison
+         needs no other change. -->
     <param name="fixed_vx"     value="$(arg explore_fixed_vx)" />
     <param name="fixed_vy"     value="$(arg explore_fixed_vy)" />
     <param name="fixed_wz_deg" value="$(arg explore_fixed_wz_deg)" />
     <param name="max_measured_speed_xy" value="$(arg explore_max_measured_speed_xy)" />
+    <param name="force_mode"      value="$(arg explore_force_mode)" />
+    <param name="max_speed_xy"    value="$(arg explore_max_speed_xy)" />
+    <param name="max_yaw_rate_deg" value="$(arg explore_max_yaw_rate_deg)" />
+    <param name="tilt_limit_deg"  value="$(arg tilt_limit_deg)" />
+    <param name="min_vxy"         value="$(arg explore_min_vxy)" />
+  </node>
+
+  <node pkg="falcon_adapter" type="rooster_bspline_follower_node.py"
+        name="rooster_bspline_follower" output="screen"
+        if="$(eval arg('nav_mode') == 'exploration' and arg('exploration_follower') == 'bspline')">
+    <param name="drone_ns"        value="$(arg drone_ns)" />
+    <param name="cmd_vel_topic"   value="$(arg cmd_vel_raw_topic)" />
+    <param name="demo_mode_topic"         value="$(arg demo_mode_topic)" />
+    <param name="demo_mode_request_topic" value="$(arg demo_mode_request_topic)" />
+    <param name="max_measured_speed_xy" value="$(arg explore_max_measured_speed_xy)" />
+    <param name="max_speed_xy"    value="$(arg explore_max_speed_xy)" />
+    <param name="max_yaw_rate_deg" value="$(arg explore_max_yaw_rate_deg)" />
+    <param name="tilt_limit_deg"  value="$(arg tilt_limit_deg)" />
   </node>
 
   <node pkg="falcon_adapter" type="bev_publisher_node.py"

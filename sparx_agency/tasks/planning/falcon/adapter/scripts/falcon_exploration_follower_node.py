@@ -27,9 +27,19 @@ A stale or invalid reference (traj_server not READY, or too old) makes the
 tracker hold station rather than chase a dead setpoint -- built into
 ReferenceTracker3D itself, not reimplemented here.
 
+**2026-08-17 addition**: a tilt-cutoff reflex (``~tilt_limit_deg``) cuts
+horizontal drive the instant roll/pitch crosses a threshold -- this node had
+none at all before (only ever tracked yaw). Attitude comes from
+``~attitude_topic`` (``/R1/attitude_rpy``, a plain ``geometry_msgs/Vector3``),
+NOT from ``/odom_world``'s orientation, which is always yaw-only by a
+deliberate, shared contract with other consumers
+(``rooster_ground_truth_localization.py``) -- reading roll/pitch off it would
+silently never see a real tilt. See LESSONS.md's 2026-08-17 entry.
+
 ROS I/O:
   in   ~pos_cmd_topic          quadrotor_msgs/PositionCommand (traj_server)
   in   ~odom_topic             nav_msgs/Odometry (falcon_adapter_node's /odom_world)
+  in   ~attitude_topic         geometry_msgs/Vector3 (raw roll/pitch/yaw, rad)
   in   ~demo_mode_topic        std_msgs/String   (granted mode, from the arbiter)
   out  ~demo_mode_request_topic std_msgs/String  (this node's mode request)
   out  ~cmd_vel_topic          geometry_msgs/Twist (gated cmd_vel_raw)
@@ -41,7 +51,7 @@ from __future__ import annotations
 import math
 
 import rospy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Vector3
 from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
 from std_msgs.msg import String
@@ -79,8 +89,16 @@ class FalconExplorationFollowerNode:
         self.demo_mode_topic = str(G("~demo_mode_topic", "/R1/demo_mode"))
         self.demo_mode_request_topic = str(
             G("~demo_mode_request_topic", "/R1/demo_mode_request"))
+        self.attitude_topic = str(G("~attitude_topic", "/R1/attitude_rpy"))
         self.request_repeat_sec = float(G("~request_repeat_sec", 0.5))
         self.ctrl_hz = float(G("~ctrl_hz", 20.0))
+        self.state_timeout_s = float(G("~state_timeout_s", 0.5))
+        # Same default as falcon_sjtu's bspline_follower_node.py -- cuts
+        # horizontal drive the instant roll/pitch crosses this, well before
+        # the airframe's physical recoverability ceiling. Added 2026-08-17
+        # after a live capsize exposed that this node had no attitude
+        # awareness at all (only tracked yaw). See LESSONS.md.
+        self.tilt_limit_deg = float(G("~tilt_limit_deg", 15.0))
 
         limits = KinematicLimits(
             max_speed_xy=float(G("~max_speed_xy", 1.2)),
@@ -133,6 +151,9 @@ class FalconExplorationFollowerNode:
 
         self._pose = None          # (x, y, z), world frame
         self._yaw = None           # radians
+        self._roll_deg = 0.0
+        self._pitch_deg = 0.0
+        self._attitude_at = None   # rospy.Time of the last real attitude message
         self._velocity = None      # (vx, vy, vz), world frame
 
         self._reference = None         # TrajectoryPoint, last received
@@ -151,6 +172,7 @@ class FalconExplorationFollowerNode:
                                             queue_size=1, latch=True)
 
         rospy.Subscriber(self.odom_topic, Odometry, self._odom_cb, queue_size=10)
+        rospy.Subscriber(self.attitude_topic, Vector3, self._attitude_cb, queue_size=5)
         rospy.Subscriber(self.pos_cmd_topic, PositionCommand, self._pos_cmd_cb, queue_size=1)
         rospy.Subscriber(self.demo_mode_topic, String, self._demo_mode_cb, queue_size=10)
 
@@ -179,6 +201,13 @@ class FalconExplorationFollowerNode:
         self._pose = (p.x, p.y, p.z)
         self._yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
         self._velocity = (v.x, v.y, v.z)
+
+    def _attitude_cb(self, msg):
+        # Vector3.x/y = raw roll/pitch, radians, sign UNVERIFIED -- magnitude
+        # only. Deliberately not read off /odom_world -- see module docstring.
+        self._roll_deg = math.degrees(msg.x)
+        self._pitch_deg = math.degrees(msg.y)
+        self._attitude_at = rospy.Time.now()
 
     def _pos_cmd_cb(self, msg):
         self._reference = TrajectoryPoint(
@@ -236,6 +265,35 @@ class FalconExplorationFollowerNode:
 
         if self._pose is None or self._yaw is None:
             return   # no odometry yet -- nothing to track from
+
+        # No real attitude yet, or it went stale: assume the worst rather
+        # than silently fly as if level.
+        if (self._attitude_at is None
+                or (now - self._attitude_at).to_sec() > self.state_timeout_s):
+            self._publish_cmd(0.0, 0.0, 0.0)
+            self.tracker.reset(yaw=self._yaw)
+            self.shaper.reset()
+            rospy.logwarn_throttle(
+                1.0, "falcon_exploration_follower: no fresh attitude on %s; "
+                "cutting drive rather than fly blind on tilt", self.attitude_topic)
+            return
+
+        # Attitude reflex, ahead of everything else: a contact the depth
+        # camera's near clip can't see can tip the aircraft, and past its
+        # physical recoverability ceiling it cannot come back. Cut
+        # horizontal drive and hold so it settles back level rather than
+        # tipping further under continued translation commands. Added
+        # 2026-08-17 after a live capsize exposed that this node tracked
+        # yaw only and had no attitude awareness at all -- see LESSONS.md.
+        if (abs(self._roll_deg) > self.tilt_limit_deg
+                or abs(self._pitch_deg) > self.tilt_limit_deg):
+            self._publish_cmd(0.0, 0.0, 0.0)
+            self.tracker.reset(yaw=self._yaw)
+            self.shaper.reset()
+            rospy.logwarn_throttle(
+                1.0, "falcon_exploration_follower: tilt roll=%.0f pitch=%.0f deg; "
+                "cutting drive to let it settle level", self._roll_deg, self._pitch_deg)
+            return
 
         self._request_mode(MODE_EXPLORING)
         if not self._driving():

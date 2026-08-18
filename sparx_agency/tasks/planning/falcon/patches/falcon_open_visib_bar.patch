@@ -1,0 +1,170 @@
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -111,6 +111,51 @@
+ // unviewable: a ray into one crosses the shell first.
+ //
+ // 0 restores upstream exactly.
++// ── How much of a frontier an OPEN-SPACE viewpoint must see ────────────────
++//
++// min_visib_num is an absolute count of downsampled frontier cells, but the
++// most any viewpoint CAN see is the cluster's own size. Against a 100-cell
++// cluster it asks for a few percent; against an 18-cell one it asks for 16 of
++// 18. The bar is hardest exactly where the cluster is smallest, and small
++// leftover clusters are what remains late in a mission -- which is why runs
++// stop growing with clusters still retired behind it. Measured on two hospital
++// legs: 96.9% and 100% of ALL retirements were "saw something, under the bar",
++// one of them ending with 46 clusters dormant.
++//
++// A relative bar was tried globally and REGRESSED THE WAREHOUSE, turning a
++// finish into a pinned abort. The mechanism was specific: relaxing the bar
++// admits frontiers bounding the hollow ClutteringC crates' sealed interior
++// cavities, which can never be observed and so never stop being frontiers, and
++// the aircraft grinds across the crate tops chasing them.
++//
++// The discriminator was already in this function. Those cavity viewpoints are
++// all isNearOccupied -- wedged against the shell they are trying to see past.
++// A frontier in an open hospital room is not. So the relaxation applies ONLY to
++// candidates with real clearance, and anything standing near structure still
++// faces upstream's full absolute bar. That keeps the warehouse's sealed pockets
++// unreachable while letting an open-space leftover be observed.
++//
++// Fraction <= 0 restores the absolute bar everywhere, which is upstream exactly.
++int openSpaceVisibilityBar(const int cluster_cells, const int absolute_bar) {
++  static bool loaded = false;
++  static double fraction = 0.0;
++  static int floor_cells = 0;
++  if (!loaded) {
++    ros::param::param("/frontier_finder/open_visib_fraction", fraction, 0.0);
++    ros::param::param("/frontier_finder/open_visib_floor", floor_cells, 0);
++    loaded = true;
++    ROS_WARN("[open_bar] absolute=%d fraction=%.2f floor=%d (applies only to "
++             "candidates that are NOT near occupied; fraction <= 0 restores the "
++             "absolute bar everywhere)", absolute_bar, fraction, floor_cells);
++  }
++  if (fraction <= 0.0)
++    return absolute_bar;
++  int bar = static_cast<int>(fraction * static_cast<double>(cluster_cells));
++  if (bar > absolute_bar) bar = absolute_bar;   // relax only, never tighten
++  if (bar < floor_cells) bar = floor_cells;
++  return bar;
++}
++
+ int unknownVisibilityTolerance() {
+   static bool loaded = false;
+   static int tolerance = 0;
+@@ -1007,7 +1052,6 @@
+       }
+       // Search viewpoints around frontier
+       sampleViewpoints(tmp_ftr);
+-      // sampleViewpoints3D(tmp_ftr);
+       if (!tmp_ftr.viewpoints_.empty()) {
+         ++new_num;
+         list<Frontier>::iterator inserted = frontiers_.insert(frontiers_.end(), tmp_ftr);
+@@ -1017,6 +1061,9 @@
+         if (first_new_ftr_ == frontiers_.end())
+           first_new_ftr_ = inserted;
+       } else {
++        // Against the absolute bar still: the relative bar can only be LOWER,
++        // so a cluster retired with visib_num_ above min_visib_num_ remains the
++        // impossible case this CHECK was written for.
+         CHECK_LE(tmp_ftr.visib_num_, min_visib_num_) << "Frontier with valid viewpoint but dormant";
+         // Say WHY, once per retirement. Two failures wear this same verdict --
+         // "nowhere legal to stand" and "nothing visible from anywhere legal"
+@@ -1287,7 +1334,17 @@
+         frontier.visib_num_ = visib_num;
+       if (visib_num > g_vp_audit.max_visible)
+         g_vp_audit.max_visible = visib_num;
+-      const int visib_bar = amnesty_relax_ ? 0 : min_visib_num_;
++      // Near structure keeps upstream's absolute bar; only a candidate with
++      // real clearance may use the cluster-relative one. isNearOccupied is
++      // computed once here and reused for the bucketing below.
++      const bool near_occupied = isNearOccupied(sample_pos);
++      const int visib_bar =
++          amnesty_relax_
++              ? 0
++              : (near_occupied
++                     ? min_visib_num_
++                     : openSpaceVisibilityBar(static_cast<int>(cells.size()),
++                                              min_visib_num_));
+       if (visib_num == 0)
+         ++g_vp_audit.zero_visible;
+       else if (visib_num <= visib_bar)
+@@ -1306,7 +1363,7 @@
+         // if (angle < M_PI_2 - 0.4 * M_PI || angle > M_PI_2 + 0.4 * M_PI)
+         //   continue;
+ 
+-        if (isNearOccupied(sample_pos))
++        if (near_occupied)
+           viewpoints_near_occupied.push_back(vp);
+         else
+           viewpoints.push_back(vp);
+@@ -1412,6 +1469,10 @@
+ 
+ void FrontierFinder::sampleViewpoints3D(Frontier &frontier) {
+   CHECK_EQ(frontier.viewpoints_.size(), 0) << "Frontier already has viewpoints";
++  // Same attribution as the 2D sampler, or the retirement histogram silently
++  // reports whatever the previous call left behind.
++  g_vp_audit.reset();
++  frontier.visib_num_ = 0;
+ 
+   std::vector<fast_planner::Viewpoint> viewpoints, viewpoints_near_occupied;
+   // Evaluate sample viewpoints on cylinders, find ones that cover most cells
+@@ -1431,9 +1492,12 @@
+         // test and regardless of the amnesty relaxation below: the amnesty
+         // trades margin for coverage in places worth covering, and a
+         // keep-out is the declaration that this one is not.
++        ++g_vp_audit.candidates;
+         if (insideKeepOut(keep_out_, sample_pos.x(), sample_pos.y(),
+-                          sample_pos.z()))
++                          sample_pos.z())) {
++          ++g_vp_audit.keep_out;
+           continue;
++        }
+ 
+         // On the amnesty pass the isNearUnknown test is dropped. Everything
+         // that protects the aircraft is kept: the candidate must still be in
+@@ -1442,11 +1506,23 @@
+         // by definition, so demanding the margin is what makes a reachable
+         // frontier unviewable and ends the mission early.
+         const bool relax = amnesty_relax_;
+-        if (!map_server_->isInBox(sample_pos) ||
+-            map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::OCCUPIED ||
+-            map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::UNKNOWN ||
+-            (!relax && isNearUnknown(sample_pos)))
++        if (!map_server_->isInBox(sample_pos)) {
++          ++g_vp_audit.out_of_box;
++          continue;
++        }
++        if (map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::OCCUPIED) {
++          ++g_vp_audit.occupied;
++          continue;
++        }
++        if (map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::UNKNOWN) {
++          ++g_vp_audit.unknown;
++          continue;
++        }
++        if (!relax && isNearUnknown(sample_pos)) {
++          ++g_vp_audit.near_unknown;
+           continue;
++        }
++        ++g_vp_audit.placeable;
+ 
+         // Compute average yaw
+         auto &cells = frontier.filtered_cells_;
+@@ -1467,7 +1543,15 @@
+         if (visib_num > frontier.visib_num_)
+           frontier.visib_num_ = visib_num;
+ 
++        if (visib_num > g_vp_audit.max_visible)
++          g_vp_audit.max_visible = visib_num;
++        if (visib_num == 0)
++          ++g_vp_audit.zero_visible;
++        else if (visib_num <= (amnesty_relax_ ? 0 : min_visib_num_))
++          ++g_vp_audit.below_bar;
++
+         if (visib_num > (amnesty_relax_ ? 0 : min_visib_num_)) {
++          ++g_vp_audit.accepted;
+           Viewpoint vp = {sample_pos, avg_yaw, visib_num};
+ 
+           // Check angle with first principal component within [60, 120] (DEPRECATED)

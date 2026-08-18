@@ -179,6 +179,53 @@ WORKDIR /catkin_ws/src
 RUN git clone --branch ros1-noetic \
         https://github.com/HKUST-Aerial-Robotics/FALCON.git
 
+# ── 6-sparx. Apply SPARX control/crash patches ported from falcon_sjtu ─
+# Four upstream fixes proven live on the SJTU deployment, ported here so
+# Rooster/Sphera gets the same crash-safety and tracking-quality floor.
+# Applied as clean git diffs against the fresh clone above, BEFORE any of
+# the sed-based fix_falcon_*.sh scripts below touch the same files.
+#   - falcon_hgrid_clamp.patch: clamps UniformGrid grid-cell lookups into
+#     the box (crashes on every takeoff below the box floor) AND floors
+#     the A*/BFS cost-matrix CHECK_GT(cost>1e-4) -- this SUPERSEDES
+#     fix_falcon_cost_check.sh, which is therefore removed below.
+#   - falcon_slow_traj_rescale.patch: fixes the FSM's <0.5m/s trajectory
+#     rescale, which both DIVIDES BY ZERO (inf/NaN ratio) on a
+#     non-turning leg and compresses every plan 4-13x for an aircraft
+#     configured to cruise under 0.5 m/s (Rooster's own
+#     explore_fixed_vx=0.2/vy=0.1 are both under that trigger) -- the
+#     non-finite ratio aborts exploration_node from inside a
+#     visualization call and wipes the (non-decaying) voxel map.
+#   - falcon_replan_from_pose.patch: falls back to the measured pose once
+#     a replan's predicted start drifts >1.5m from odometry, instead of
+#     compounding from a "ghost" start point on the previous trajectory
+#     -- directly a control-tracking fix (this is exactly the class of
+#     lag the follower/velocity_servo layer cannot correct on its own).
+#   - falcon_raycast_out_of_map.patch: skips a TSDF voxel address one
+#     step past the map edge instead of writing/CHECK-aborting on it.
+# See sparx_agency/tasks/planning/falcon_sjtu/patches/README.md for the
+# full derivation/measurements behind each fix.
+COPY patches/ /tmp/sparx_patches/
+# Order matters: falcon_deadend_guard introduces FrontierFinder::addBlockedRegion
+# and blocked_regions_, which blocked_region_ttl/widen then extend. The four
+# original ports stay first so their context is unchanged.
+RUN cd /catkin_ws/src/FALCON && \
+    for p in falcon_hgrid_clamp falcon_slow_traj_rescale falcon_replan_from_pose \
+             falcon_raycast_out_of_map falcon_deadend_guard falcon_blocked_region_ttl \
+             falcon_blocked_region_widen falcon_deadend_looping \
+             falcon_ccl_slice_height falcon_publish_fail_blacklist; do \
+        echo "[sparx-patch] Applying ${p}.patch" && \
+        { git apply "/tmp/sparx_patches/${p}.patch" \
+          || git apply --3way "/tmp/sparx_patches/${p}.patch" \
+          || { echo "[sparx-patch] ERROR: ${p}.patch failed to apply" >&2; exit 1; }; }; \
+    done && \
+    grep -q "positionToGridCellId" falcon_planner/exploration_preprocessing/src/hierarchical_grid.cpp && \
+    grep -q "slow_traj_target_vel" falcon_planner/exploration_manager/src/exploration_fsm.cpp && \
+    grep -q "replan_from_pose_drift" falcon_planner/exploration_manager/src/exploration_fsm.cpp && \
+    grep -q "isInMap(voxel_idx)" falcon_planner/voxel_mapping/src/tsdf.cpp && \
+    grep -q "addBlockedRegion" falcon_planner/exploration_preprocessing/src/frontier_finder.cpp && \
+    grep -q "never enter LKH" falcon_planner/exploration_manager/src/exploration_manager.cpp && \
+    echo "[sparx-patch] OK: all 10 patches applied and verified"
+
 # ── 6a. Patch FALCON CMakeLists.txt for new CMake (3.27+) ─────
 RUN sed -i \
       's|multi_map_server_messages_cpp|multi_map_server_generate_messages_cpp|g' \
@@ -200,15 +247,17 @@ RUN if [ "$WITH_SIM" = "1" ]; then \
 COPY patches/fix_falcon_system_info.sh /tmp/fix_falcon_system_info.sh
 RUN chmod +x /tmp/fix_falcon_system_info.sh && /tmp/fix_falcon_system_info.sh
 
-# ── 6a-ter. Patch FALCON hierarchical_grid.cpp cost CHECK ─────
+# ── 6a-ter. hierarchical_grid.cpp cost CHECK: superseded ──────
 # UniformGrid::calculateCostMatrixSingleThread() guards every cost-matrix
-# edge with a glog FATAL CHECK_GT(cost, 1e-4). When the drone sits ~on a
-# grid-cell free center, the A*/connectivity cost is a tiny-but-nonzero
-# value below the threshold, so the node aborts (SIGABRT / exit -6) at
-# RUNTIME during planning. This floors every such cost so the check
-# can't fire while still keeping a zero-weight edge out of the solver.
-COPY patches/fix_falcon_cost_check.sh /tmp/fix_falcon_cost_check.sh
-RUN chmod +x /tmp/fix_falcon_cost_check.sh && /tmp/fix_falcon_cost_check.sh
+# edge with a glog FATAL CHECK_GT(cost, 1e-4); a grid-cell-center A* cost
+# can legitimately be tiny-but-nonzero and abort the node at RUNTIME.
+# Formerly fixed here by fix_falcon_cost_check.sh (floors the cost). Now
+# subsumed by falcon_hgrid_clamp.patch (applied in step 6-sparx above),
+# which carries the same cost floors PLUS the grid-cell-index box clamp
+# fix_falcon_cost_check.sh never addressed. Do not re-add
+# fix_falcon_cost_check.sh here -- its sed edits target the exact lines
+# falcon_hgrid_clamp.patch's context expects unmodified, so running both
+# leaves the tree unpatchable.
 
 # Occupancy-grid publish cadence vs map growth: free/unknown clouds grow with
 # explored volume and scale publish+parse cost with mapping progress.

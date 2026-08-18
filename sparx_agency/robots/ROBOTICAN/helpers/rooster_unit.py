@@ -23,7 +23,16 @@ from rooster_manager_interfaces.msg import RoosterState
 
 from sparx_agency.robots.common.math_utils import clamp_symmetric
 
+# From RoosterState.msg / KeepAlive.msg (rooster_manager_interfaces,
+# rooster_handler_interfaces). Only POSITION and ALTITUDE are currently
+# used/tested by this repo -- see the requested_flight_mode docstring above.
+FLIGHT_MODE_NONE = 0
+FLIGHT_MODE_GROUND_ROLL = 1
+FLIGHT_MODE_MANUAL = 2
 FLIGHT_MODE_POSITION = 3
+FLIGHT_MODE_ALTITUDE = 4
+FLIGHT_MODE_ACRO = 5
+FLIGHT_MODE_STABILIZED = 6
 MAX_AXIS = 1000.0
 
 # Arming: let zeroed axes reach the FCU before arming, then confirm via
@@ -100,7 +109,45 @@ class RoosterUnit:
         # similar height in ~11s -- so the vehicle *can* respond, -200 just
         # isn't enough push. Raised toward that demonstrated-working range;
         # re-verify against a live drift before trusting it further.
+        # 2026-08-17: measured live (open-loop, altitude_hold_kp/kd=0, from a
+        # ground start) that the real z-axis response is NOT a smooth thrust
+        # curve -- z<=690 produced literally zero climb (ranger frozen at
+        # ground level for 16-20s straight, repeated at 550/625/670/690) and
+        # z=700 produced a fast, sustained ~1.6 m/s climb that didn't level
+        # off on its own -- it climbed straight into the room's real physical
+        # ceiling (~3.4-3.5m, confirmed against sphera_jail.yaml's own
+        # documented ceiling height) and got physically pinned there. The
+        # effective control band is a narrow (<=10 unit) step near 700, not a
+        # gradual curve across the full 380-unit correction range below --
+        # every prior flight's "rising and falling out of control" was this
+        # loop's correction regularly saturating past that narrow band in
+        # EITHER direction in one tick (>=700 -> full climb-to-ceiling,
+        # <700 -> zero lift, i.e. an uncommanded sink). 380 was 5-40x wider
+        # than the band it needs to move within. See LESSONS.md.
         altitude_hold_max_correction: float = 380.0,
+        # The actual fix: bound how much z may change in ONE tick, separate
+        # from (and tighter than) the correction magnitude bound above. This
+        # is what stops the loop from ever jumping straight from "zero lift"
+        # to "full climb" (or back) in a single 0.1s tick regardless of how
+        # large the computed correction is -- it can still reach the same
+        # eventual value, just over several ticks, which is exactly what
+        # lets it find and hold the narrow effective band instead of
+        # overshooting through it. UNVALIDATED live past a short bench test;
+        # tune down further if altitude still swings, not up.
+        altitude_hold_max_step: float = 15.0,
+        # 2026-08-17: the velocity term feeding kd was a raw single-sample
+        # finite difference on the ranger reading -- exactly the kind of
+        # signal this file's own docstring already calls "fairly noise-
+        # sensitive". Observed live in FLIGHT_MODE_ALTITUDE (see
+        # requested_flight_mode): with roll/pitch finally stable, altitude
+        # itself settled into a bounded ~0.2m limit-cycle around the
+        # target rather than converging -- a noisy kd term is the textbook
+        # cause of exactly that symptom (it injects high-frequency
+        # correction that a P-only loop wouldn't have). An exponential
+        # low-pass filter (time constant, seconds) smooths the estimate
+        # before it multiplies kd. <=0.0 disables filtering (raw velocity,
+        # the previous behavior).
+        altitude_hold_velocity_filter_tau_s: float = 0.5,
         # Was 1.0s -- confirmed live (2026-08-13) that /R1/state (ranger's
         # source) actually updates at ~10Hz, so a 1Hz loop was reacting to
         # only 1 in 10 fresh readings and holding a stale throttle for up to
@@ -124,9 +171,27 @@ class RoosterUnit:
         # height instead of however climb_z/climb_duration_sec/hover_z's
         # open-loop throttle burst happens to land. Added 2026-08-11.
         target_ranger_m: float = 0.0,
+        # 2026-08-17: was hardcoded to FLIGHT_MODE_POSITION everywhere below.
+        # Made selectable to test the user's own hypothesis after two
+        # in-flight tilt events in POSITION mode with zero x/y/r commanded:
+        # POSITION holds horizontal POSITION as well as attitude/altitude,
+        # so with the stick centered it is actively correcting against
+        # whatever the position/velocity estimate says, even though nothing
+        # asked it to move. ALTITUDE mode drops that horizontal loop
+        # entirely (self-level attitude + altitude hold only, no position
+        # estimate in the loop at all) -- if POSITION's own position-hold is
+        # fighting a noisy/wrong estimate, ALTITUDE mode should be visibly
+        # more stable under the exact same z-axis control. See LESSONS.md.
+        requested_flight_mode: int = FLIGHT_MODE_POSITION,
+        # Sphera itself keeps one dormant bare-DDS publisher on
+        # manual_control that cannot be removed, so 1 "other" is normal here.
+        # Anything above this is a real second altitude authority.
+        expected_other_manual_publishers: int = 1,
     ):
         self.id = rooster_id
         self.node = node
+        self.requested_flight_mode = int(requested_flight_mode)
+        self.expected_other_manual_publishers = int(expected_other_manual_publishers)
         self.climb_z = float(climb_z)
         self.hover_z = float(hover_z)
         self.land_step = float(land_step)
@@ -137,6 +202,8 @@ class RoosterUnit:
         self.altitude_hold_kp = float(altitude_hold_kp)
         self.altitude_hold_kd = float(altitude_hold_kd)
         self.altitude_hold_max_correction = float(altitude_hold_max_correction)
+        self.altitude_hold_max_step = float(altitude_hold_max_step)
+        self.altitude_hold_velocity_filter_tau_s = float(altitude_hold_velocity_filter_tau_s)
         self.altitude_hold_interval_sec = float(altitude_hold_interval_sec)
         self.max_ranger_m = float(max_ranger_m)
         self.target_ranger_m = float(target_ranger_m)
@@ -181,6 +248,7 @@ class RoosterUnit:
         self._hold_ranger_target: Optional[float] = None
         self._hold_prev_ranger: Optional[float] = None
         self._hold_prev_ranger_time: Optional[float] = None
+        self._hold_filtered_velocity: Optional[float] = None
 
         self.manual_pub = node.create_publisher(
             ManualControl, f"/{rooster_id}/manual_control", 10)
@@ -191,8 +259,31 @@ class RoosterUnit:
         self.force_arm_client = node.create_client(
             SetBool, f"/{rooster_id}/fcu/command/force_arm")
         node.create_timer(float(altitude_hold_interval_sec), self._altitude_hold_tick)
+        # Altitude authority must be EXCLUSIVE. This class is documented as the
+        # single owner of manual_control, but nothing enforced it -- and on
+        # 2026-08-17 a stray examples/position_fly_controller.py silently
+        # co-published for hours, fighting this loop for the z axis and making
+        # every flight test unreproducible. Watch the real publisher count and
+        # say so loudly instead of trusting convention.
+        self._manual_topic = f"/{rooster_id}/manual_control"
+        node.create_timer(5.0, self._check_exclusive_authority)
 
         node.get_logger().info(f"RoosterUnit ready for {rooster_id}")
+
+    def _check_exclusive_authority(self) -> None:
+        """Warn if anything else is also publishing manual_control."""
+        try:
+            others = self.node.count_publishers(self._manual_topic) - 1
+        except Exception:            # count_publishers is rclpy-version dependent
+            return
+        if others > self.expected_other_manual_publishers:
+            self.node.get_logger().warn(
+                f"[{self.id}] ALTITUDE AUTHORITY CONFLICT: {others} other "
+                f"(expected {self.expected_other_manual_publishers}) "
+                f"publisher(s) on {self._manual_topic}. Altitude hold will fight "
+                f"them and flights will not be reproducible -- find and stop them "
+                f"(e.g. position_fly_controller.py, rooster_manual_control, "
+                f"PathRunnerNode, keyboard tools).")
 
     # ---- telemetry ----
 
@@ -213,7 +304,7 @@ class RoosterUnit:
         msg = KeepAlive()
         msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.is_active = True
-        msg.requested_flight_mode = FLIGHT_MODE_POSITION
+        msg.requested_flight_mode = self.requested_flight_mode
         msg.command_reboot = False
         self.keep_alive_pub.publish(msg)
 
@@ -236,13 +327,26 @@ class RoosterUnit:
             return
         now = time.monotonic()
         error = self._hold_ranger_target - self.ranger  # +: sunk low, -: drifted high
-        velocity = 0.0
+        raw_velocity = 0.0
+        dt = 0.0
         if self._hold_prev_ranger is not None and self._hold_prev_ranger_time is not None:
             dt = now - self._hold_prev_ranger_time
             if dt > 0.0:
-                velocity = (self.ranger - self._hold_prev_ranger) / dt
+                raw_velocity = (self.ranger - self._hold_prev_ranger) / dt
         self._hold_prev_ranger = self.ranger
         self._hold_prev_ranger_time = now
+        # Exponential low-pass on the raw single-sample finite difference --
+        # see altitude_hold_velocity_filter_tau_s's docstring. First real
+        # sample seeds the filter directly rather than smoothing from zero.
+        tau = self.altitude_hold_velocity_filter_tau_s
+        if tau <= 0.0 or dt <= 0.0:
+            velocity = raw_velocity
+        elif self._hold_filtered_velocity is None:
+            velocity = raw_velocity
+        else:
+            alpha = dt / (tau + dt)
+            velocity = self._hold_filtered_velocity + alpha * (raw_velocity - self._hold_filtered_velocity)
+        self._hold_filtered_velocity = velocity
         correction = clamp_symmetric(
             self.altitude_hold_kp * error - self.altitude_hold_kd * velocity,
             self.altitude_hold_max_correction)
@@ -255,12 +359,21 @@ class RoosterUnit:
             # absolute altitude, so a sustained drift (see the hover_z drift
             # entry in LESSONS.md) could climb past any per-tick bound.
             correction = min(correction, 0.0)
-        new_z = self.hover_z + correction
+        wanted_z = self.hover_z + correction
+        # Slew-limit the actual axis, not just the correction term: the
+        # 700 vs. <=690 measurement above means the wanted_z the formula
+        # above computes can legitimately be on the wrong side of the
+        # narrow effective band even after the correction clamp, and jumping
+        # straight to it in one tick is exactly the "shoots to the ceiling
+        # or drops like a stone" failure this fixes. See the constructor's
+        # altitude_hold_max_step docstring.
+        step = clamp_symmetric(wanted_z - self.axes.z, self.altitude_hold_max_step)
+        new_z = self.axes.z + step
         self.axes.set(x=self.axes.x, y=self.axes.y, z=new_z, r=self.axes.r)
         self.node.get_logger().info(
             f"[{self.id}] altitude hold: ranger={self.ranger:.3f}m "
             f"target={self._hold_ranger_target:.3f}m error={error:+.3f}m "
-            f"vel={velocity:+.4f}m/s z={new_z:.0f}"
+            f"vel={velocity:+.4f}m/s wanted_z={wanted_z:.0f} z={new_z:.0f}"
             + (" [AT CEILING]" if at_ceiling else ""))
 
     def _enable_altitude_hold(self):
@@ -276,10 +389,38 @@ class RoosterUnit:
             self.target_ranger_m if self.target_ranger_m > 0.0 else self.ranger)
         self._hold_prev_ranger = None
         self._hold_prev_ranger_time = None
+        self._hold_filtered_velocity = None
         self._holding_altitude = True
         self.node.get_logger().info(
             f"[{self.id}] Altitude hold engaged at ranger={self.ranger:.3f}m, "
             f"target={self._hold_ranger_target:.3f}m.")
+
+    @property
+    def holding_altitude(self) -> bool:
+        return self._holding_altitude
+
+    def nudge_altitude_target(self, delta_m: float) -> None:
+        """Move the altitude-hold setpoint by ``delta_m`` (signed, metres).
+
+        2026-08-17: added because the ``up``/``down`` cmd_nav actions set a
+        raw z pulse via set_axes() that _altitude_hold_tick() then
+        overwrites within one tick (<=altitude_hold_interval_sec later) --
+        while holding is engaged, "up"/"down" were nearly a no-op. This
+        moves the actual setpoint the PD loop is chasing, so the same
+        slew-limited, filtered controller already tuned for hover carries
+        the climb/descent instead of a competing raw pulse. No-op (logs a
+        warning) if altitude hold isn't engaged yet -- there is no sensible
+        target to nudge before the first hold point is sampled.
+        """
+        if not self._holding_altitude or self._hold_ranger_target is None:
+            self.node.get_logger().warn(
+                f"[{self.id}] nudge_altitude_target({delta_m:+.2f}m) ignored -- "
+                f"altitude hold not engaged yet.")
+            return
+        self._hold_ranger_target += float(delta_m)
+        self.node.get_logger().info(
+            f"[{self.id}] altitude target nudged by {delta_m:+.2f}m -> "
+            f"{self._hold_ranger_target:.2f}m")
 
     # ---- manual movement ----
 

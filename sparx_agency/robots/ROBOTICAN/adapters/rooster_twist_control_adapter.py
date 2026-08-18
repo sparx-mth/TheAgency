@@ -63,6 +63,37 @@ from std_msgs.msg import String
 from sparx_agency.robots.common.math_utils import clamp_axis, slew
 
 
+def velocity_to_axis(v_mps: float, deadzone: float, v_full: float,
+                     min_command_mps: float) -> float:
+    """Convert a requested body velocity (m/s) into a ManualControl axis.
+
+    The horizontal axes are NOT linear from zero: measured against Sphera
+    ground truth 2026-08-17, forward is dead until ~620 counts and then ramps
+    to ~1.25 m/s at 1000 (lateral: dead until ~700, ~1.02 m/s at 1000). The
+    old ``v / max_v * 1000`` scale therefore put every normal FALCON request
+    (0.15-0.2 m/s) right on the deadzone edge, where real speed flips between
+    0.00 and 0.26 m/s for a few counts -- the actual cause of the long-standing
+    jerky tracking. See LESSONS.md and the axis-calibration memory.
+
+    Args:
+        v_mps: Requested velocity along this axis, m/s (signed).
+        deadzone: Axis counts below which the platform does not move at all.
+        v_full: Velocity produced at axis 1000, m/s.
+        min_command_mps: Requests smaller than this are emitted as 0 rather
+            than as a deadzone-edge command, because speeds below roughly
+            ``v_full * (1 - deadzone/1000)``'s first step are not continuously
+            achievable on this platform at all.
+
+    Returns:
+        Axis value in [-1000, 1000].
+    """
+    if v_full <= 0.0 or abs(v_mps) < min_command_mps:
+        return 0.0
+    span = max(1.0, 1000.0 - deadzone)
+    magnitude = deadzone + min(1.0, abs(v_mps) / v_full) * span
+    return clamp_axis(magnitude if v_mps > 0.0 else -magnitude)
+
+
 class RoosterTwistControlNode(Node):
     def __init__(
         self,
@@ -74,6 +105,24 @@ class RoosterTwistControlNode(Node):
         max_yaw_axis_step_per_sec: float = 2500.0,
         command_hz: float = 20.0,
         cmd_timeout_sec: float = 0.4,
+        # Ground-truth-measured axis response (2026-08-17). See
+        # velocity_to_axis() above and LESSONS.md; these replace the
+        # never-validated linear max_linear_x/y scaling, which is now only
+        # used when use_measured_axis_curve=False.
+        use_measured_axis_curve: bool = True,
+        x_deadzone: float = 620.0,
+        x_v_full: float = 1.25,
+        y_deadzone: float = 700.0,
+        y_v_full: float = 1.02,
+        min_command_mps: float = 0.15,
+        # The lateral axis is the worst-behaved one: measured dead until
+        # ~axis 1000, so ANY sideways demand slams the stick and produces
+        # 27-36 deg of roll plus a speed overshoot past the measured cap.
+        # There is no gentle middle on this axis. Capping it keeps the
+        # airframe flat, which also matters for map quality -- depth comes
+        # from monocular DA3, and steep roll skews the geometry it infers.
+        # 0.0 disables lateral entirely (turn-and-go via yaw instead).
+        max_lateral_axis: float = 0.0,
     ):
         super().__init__(f"{rooster_id.lower()}_twist_control")
 
@@ -81,6 +130,13 @@ class RoosterTwistControlNode(Node):
         self.max_linear_x = float(max_linear_x)
         self.max_linear_y = float(max_linear_y)
         self.max_yaw_rate = float(max_yaw_rate)
+        self.use_measured_axis_curve = bool(use_measured_axis_curve)
+        self.x_deadzone = float(x_deadzone)
+        self.x_v_full = float(x_v_full)
+        self.y_deadzone = float(y_deadzone)
+        self.y_v_full = float(y_v_full)
+        self.min_command_mps = float(min_command_mps)
+        self.max_lateral_axis = float(max_lateral_axis)
         self.max_yaw_axis_step_per_sec = float(max_yaw_axis_step_per_sec)
         self.command_hz = float(command_hz)
 
@@ -133,11 +189,24 @@ class RoosterTwistControlNode(Node):
                     if self.max_yaw_rate else 0.0)
         max_step = self.max_yaw_axis_step_per_sec / self.command_hz
         self._r_axis = slew(target_r, self._r_axis, max_step)
+        if self.use_measured_axis_curve:
+            ax_x = velocity_to_axis(twist.linear.x, self.x_deadzone,
+                                    self.x_v_full, self.min_command_mps)
+            ax_y = velocity_to_axis(twist.linear.y, self.y_deadzone,
+                                    self.y_v_full, self.min_command_mps)
+        else:
+            ax_x = clamp_axis(twist.linear.x / self.max_linear_x * 1000.0
+                              if self.max_linear_x else 0.0)
+            ax_y = clamp_axis(twist.linear.y / self.max_linear_y * 1000.0
+                              if self.max_linear_y else 0.0)
+        # Clamp lateral to keep the airframe flat -- see max_lateral_axis.
+        if self.max_lateral_axis <= 0.0:
+            ax_y = 0.0
+        else:
+            ax_y = max(-self.max_lateral_axis, min(self.max_lateral_axis, ax_y))
         axes = {
-            "x": clamp_axis(twist.linear.x / self.max_linear_x * 1000.0
-                            if self.max_linear_x else 0.0),
-            "y": clamp_axis(twist.linear.y / self.max_linear_y * 1000.0
-                            if self.max_linear_y else 0.0),
+            "x": ax_x,
+            "y": ax_y,
             "r": clamp_axis(self._r_axis),
         }
         self._publish_cmd_nav("move", axes=axes)
@@ -160,6 +229,7 @@ def main(args=None):
     parser.add_argument("--max-yaw-axis-step-per-sec", type=float, default=2500.0)
     parser.add_argument("--command-hz", type=float, default=20.0)
     parser.add_argument("--cmd-timeout-sec", type=float, default=0.4)
+    parser.add_argument("--max-lateral-axis", type=float, default=0.0)
     parsed, _ = parser.parse_known_args()
 
     rclpy.init(args=args)
@@ -172,6 +242,7 @@ def main(args=None):
         max_yaw_axis_step_per_sec=parsed.max_yaw_axis_step_per_sec,
         command_hz=parsed.command_hz,
         cmd_timeout_sec=parsed.cmd_timeout_sec,
+        max_lateral_axis=parsed.max_lateral_axis,
     )
     try:
         rclpy.spin(node)

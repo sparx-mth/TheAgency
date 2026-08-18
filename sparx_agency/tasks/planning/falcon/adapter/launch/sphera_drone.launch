@@ -190,6 +190,8 @@
        True' on combination_enable_topic later. use_navdp:=true selects pure navdp;
        nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
   <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
+  <arg name="exploration_follower" default="reference" />  <!-- reference | bspline, nav_mode:=exploration only -->
+  <arg name="tilt_limit_deg" default="45.0" />
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/vlas/flownav/serve/...). -->
@@ -675,6 +677,8 @@
 
     <arg name="use_navdp"               value="$(arg use_navdp)" />
     <arg name="nav_mode"                value="$(arg nav_mode)" />
+    <arg name="exploration_follower"     value="$(arg exploration_follower)" />
+    <arg name="tilt_limit_deg"           value="$(arg tilt_limit_deg)" />
     <arg name="vla"                      value="$(arg vla)" />
     <arg name="flownav_goal_image"       value="$(arg flownav_goal_image)" />
     <arg name="flownav_goal_image_topic" value="$(arg flownav_goal_image_topic)" />

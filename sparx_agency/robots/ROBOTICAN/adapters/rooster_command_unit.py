@@ -30,10 +30,16 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from sparx_agency.robots.ROBOTICAN.helpers.rooster_unit import RoosterUnit
+from sparx_agency.robots.ROBOTICAN.helpers.rooster_unit import (
+    FLIGHT_MODE_ALTITUDE, FLIGHT_MODE_POSITION, RoosterUnit,
+)
 from sparx_agency.robots.ROBOTICAN.helpers.rooster_payload import RoosterPayload
 
 DEFAULT_AXIS_VALUE = 400.0
+# 2026-08-17: metres, not axis units -- see the "up"/"down" special-case in
+# _on_cmd_nav below. Separate default from DEFAULT_AXIS_VALUE on purpose,
+# different units.
+DEFAULT_ALTITUDE_NUDGE_M = 0.5
 
 _MOVE_ACTIONS = {
     "forward": dict(x=1),
@@ -72,6 +78,16 @@ class RoosterCommandUnitNode(Node):
         # See RoosterUnit.__init__ (rooster_unit.py) for why the default was
         # raised from 200 to 380 -- 2026-08-13.
         self.declare_parameter("altitude_hold_max_correction", 380.0)
+        # See RoosterUnit.__init__ -- added 2026-08-17, the actual fix for
+        # the "rises and falls out of control" symptom: bounds how much z
+        # may change in ONE tick, tighter than altitude_hold_max_correction.
+        self.declare_parameter("altitude_hold_max_step", 15.0)
+        self.declare_parameter("altitude_hold_velocity_filter_tau_s", 0.5)
+        # See RoosterUnit.__init__ -- 2026-08-17, "position" | "altitude"
+        # (case-insensitive), selects FLIGHT_MODE_POSITION (3, default,
+        # unchanged) or FLIGHT_MODE_ALTITUDE (4, drops horizontal position-
+        # hold entirely -- self-level attitude + altitude hold only).
+        self.declare_parameter("requested_flight_mode", "position")
         # See RoosterUnit.__init__ for why this was raised from 1.0 to
         # 0.1 -- 2026-08-13 (matches /R1/state's real ~10Hz ranger rate).
         self.declare_parameter("altitude_hold_interval_sec", 0.1)
@@ -96,6 +112,18 @@ class RoosterCommandUnitNode(Node):
         altitude_hold_kp = float(self.get_parameter("altitude_hold_kp").value)
         altitude_hold_kd = float(self.get_parameter("altitude_hold_kd").value)
         altitude_hold_max_correction = float(self.get_parameter("altitude_hold_max_correction").value)
+        altitude_hold_max_step = float(self.get_parameter("altitude_hold_max_step").value)
+        altitude_hold_velocity_filter_tau_s = float(
+            self.get_parameter("altitude_hold_velocity_filter_tau_s").value)
+        flight_mode_name = str(self.get_parameter("requested_flight_mode").value).strip().lower()
+        requested_flight_mode = {
+            "position": FLIGHT_MODE_POSITION,
+            "altitude": FLIGHT_MODE_ALTITUDE,
+        }.get(flight_mode_name)
+        if requested_flight_mode is None:
+            raise ValueError(
+                "requested_flight_mode must be 'position' or 'altitude', got %r"
+                % (flight_mode_name,))
         altitude_hold_interval_sec = float(self.get_parameter("altitude_hold_interval_sec").value)
         max_ranger_m = float(self.get_parameter("max_ranger_m").value)
         target_ranger_m = float(self.get_parameter("target_ranger_m").value)
@@ -117,9 +145,12 @@ class RoosterCommandUnitNode(Node):
             altitude_hold_kp=altitude_hold_kp,
             altitude_hold_kd=altitude_hold_kd,
             altitude_hold_max_correction=altitude_hold_max_correction,
+            altitude_hold_max_step=altitude_hold_max_step,
+            altitude_hold_velocity_filter_tau_s=altitude_hold_velocity_filter_tau_s,
             altitude_hold_interval_sec=altitude_hold_interval_sec,
             max_ranger_m=max_ranger_m,
             target_ranger_m=target_ranger_m,
+            requested_flight_mode=requested_flight_mode,
         )
         self.payload = RoosterPayload(
             self, rooster_id,
@@ -180,6 +211,14 @@ class RoosterCommandUnitNode(Node):
             self.payload.set_video(True)
         elif action == "video_off":
             self.payload.set_video(False)
+        elif action in ("up", "down") and unit.holding_altitude:
+            # While altitude hold is engaged it overwrites axes.z every tick
+            # (see RoosterUnit._altitude_hold_tick) -- a raw z pulse here
+            # would be fought and mostly cancelled within one tick. Move the
+            # setpoint the PD loop is chasing instead. "value" is METRES
+            # here, not axis units (see DEFAULT_ALTITUDE_NUDGE_M).
+            nudge_m = float(cmd.get("value", DEFAULT_ALTITUDE_NUDGE_M))
+            unit.nudge_altitude_target(nudge_m if action == "up" else -nudge_m)
         elif action in _MOVE_ACTIONS:
             # Only override the axis this action controls - z in particular
             # is throttle/altitude-hold, and defaulting it to 0 here would

@@ -1,0 +1,248 @@
+diff --git a/falcon_planner/exploration_manager/src/exploration_manager.cpp b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+index 24ebbdc..b6b3a11 100644
+--- a/falcon_planner/exploration_manager/src/exploration_manager.cpp
++++ b/falcon_planner/exploration_manager/src/exploration_manager.cpp
+@@ -243,7 +243,15 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+     for (auto cost : grid_tour2_cost) {
+       grid_tour2_cost_sum += cost;
+     }
+-    CHECK_NEAR(cost, grid_tour2_cost_sum, 1e-4);
++    // Was CHECK_NEAR(cost, grid_tour2_cost_sum, 1e-4): a glog abort over
++    // FLOAT ROUNDING. On ~100 m tours the recomputed sum drifts centimetres
++    // from the incrementally tracked cost, and the 1e-4 epsilon executed the
++    // planner four times in one mission for discrepancies under 8 cm. Warn
++    // at a threshold that would indicate an actual bookkeeping bug instead.
++    if (std::fabs(cost - grid_tour2_cost_sum) > 0.5) {
++      ROS_WARN("[ExplorationManager] Tour cost bookkeeping drift: %.3f vs %.3f",
++               cost, grid_tour2_cost_sum);
++    }
+ 
+     // print grid_tour2_cost
+     // string grid_tour2_cost_string;
+@@ -553,6 +561,18 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+     // std::cout << cost_matrix_sop << std::endl;
+ 
+     // Remove next position from cost_matrix_sop
++    // Degenerate late-mission state: with an empty tour AND no frontier ids,
++    // size()+size()-1 underflows in size_t and the Zero() below tries to
++    // allocate a SIZE_MAX-square matrix -- std::bad_alloc, planner death,
++    // respawn, map wiped (3 deaths in one 45-minute mission, all at the
++    // moment coverage was nearly complete). Nothing remains to sequence, so
++    // say so instead of allocating the universe.
++    if (ed_->grid_tour2_.size() + frontier_ids.size() < 2) {
++      ROS_WARN("[ExplorationManager] Degenerate SOP input (tour %lu + frontiers "
++               "%lu); nothing to sequence",
++               ed_->grid_tour2_.size(), frontier_ids.size());
++      return NO_GRID;
++    }
+     Eigen::MatrixXi cost_matrix_sop_remove_next =
+         Eigen::MatrixXi::Zero(ed_->grid_tour2_.size() + frontier_ids.size() - 1,
+                               ed_->grid_tour2_.size() + frontier_ids.size() - 1);
+@@ -575,7 +595,7 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+ 
+     double sop_time = (ros::Time::now() - t1).toSec();
+     ROS_INFO("[ExplorationManager] SOP time: %.2f ms", sop_time * 1000.0);
+-    CHECK_LE(sop_time, 1.0) << "SOP solver internal error detected, solver blocked with unknown "
++    CHECK_LE(sop_time, 10.0) << "SOP solver internal error detected, solver blocked with unknown "
+                                "error. Please restart the planner";
+     ee_->sop_times_.push_back(make_pair(sop_cost_matrix_time, sop_time));
+ 
+@@ -944,6 +964,43 @@ int ExplorationManager::planExploreMotionHGrid(const Vector3d &pos, const Vector
+   LOG(INFO) << "[ExplorationManager] Next pos: " << next_pos[0] << ", " << next_pos[1] << ", "
+             << next_pos[2] << ", yaw: " << next_yaw;
+ 
++  // ── Dead-end guard: retire a viewpoint the aircraft cannot physically reach.
++  // FALCON routes A* through obstacles that sit inside the depth near clip
++  // (~0.95 m) and so never enter the map, then re-selects the same blocked
++  // viewpoint forever. The controller sees the collision but not the frontiers;
++  // this node sees the frontiers but not the collision. Close the gap with the
++  // one thing this node has -- the drone pose and its own chosen target: if the
++  // aircraft has not closed on next_pos for a sustained spell, the route is a
++  // fiction, so hand the spot to the frontier finder to shadow and move on.
++  {
++    // Block a viewpoint the aircraft cannot reach. "Cannot reach" shows up two
++    // ways, both of which are simply "went nowhere": pinned in contact, or
++    // wandering a tight region between viewpoints it keeps almost-reaching
++    // without ever clearing the frontier behind them (so coverage stops but the
++    // aircraft still drifts >1 m, which fooled a simple pinned test). Track it
++    // over a window: if its whole excursion stays under 2 m for 25 s while it is
++    // still not AT the viewpoint it is being sent to, the route is a fiction (an
++    // obstacle inside the depth near clip the map never caught) -- shadow it so
++    // the frontier finder retires the cluster and the tour moves on.
++    static std::vector<std::pair<double, Vector3d>> track;
++    const double now_s = ros::Time::now().toSec();
++    track.push_back(std::make_pair(now_s, pos));
++    while (track.size() > 1 && track.front().first < now_s - 25.0)
++      track.erase(track.begin());
++    const bool at_target = (pos - next_pos).norm() < 0.6;
++    double span = 0.0;
++    for (size_t i = 0; i < track.size(); ++i)
++      span = std::max(span, (track[i].second - pos).norm());
++    if (!at_target && track.front().first <= now_s - 25.0 && span < 2.0) {
++      frontier_finder_->addBlockedRegion(next_pos);
++      ROS_WARN("[ExplorationManager] Aircraft confined to <2 m for 25 s short of "
++               "viewpoint (%.2f, %.2f, %.2f); blocking it so the coverage tour "
++               "moves on",
++               next_pos[0], next_pos[1], next_pos[2]);
++      track.clear();
++    }
++  }
++
+   // Local planner
+   // Require next_pos, next_yaw from global planner
+   // pos, vel, acc, yaw: current states
+@@ -1556,6 +1613,44 @@ void ExplorationManager::solveTSP(const Eigen::MatrixXd &cost_matrix, const TSPC
+                                         vector<int> &result_indices, double &total_cost) {
+   CHECK_EQ(cost_matrix.rows(), cost_matrix.cols()) << "TSP cost matrix must be square";
+ 
++  // Degenerate tours crash the in-process LKH solver (heap corruption in
++  // FindTour -> Best5OptMove -> Flip_SL), and they arrive in storms right
++  // after a respawn wipes the map: tiny map, tiny tour, crash, respawn,
++  // repeat -- 15 planner deaths in one 45-minute mission. With 3 or fewer
++  // cities there is nothing to optimise: enumerate the (at most two) orders
++  // directly and never enter LKH.
++  if (config.dimension_ <= 3) {
++    vector<int> ids;
++    for (int id = 1; id <= config.dimension_; ++id)
++      ids.push_back(id);
++    auto tour_cost = [&](const vector<int> &order) {
++      double c = 0.0;
++      for (size_t i = 0; i + 1 < order.size(); ++i)
++        c += cost_matrix(order[i] - 1, order[i + 1] - 1);
++      return c;
++    };
++    vector<int> best = ids;
++    double best_cost = tour_cost(ids);
++    if (config.dimension_ == 3) {
++      vector<int> alt = {1, 3, 2};
++      double alt_cost = tour_cost(alt);
++      if (alt_cost < best_cost) {
++        best = alt;
++        best_cost = alt_cost;
++      }
++    }
++    total_cost = best_cost;
++    result_indices.clear();
++    for (int id : best) {
++      if (id == 1 && config.skip_first_)
++        continue;
++      if (id == config.dimension_ && config.skip_last_)
++        continue;
++      result_indices.push_back(id - config.result_id_offset_);
++    }
++    return;
++  }
++
+   ros::Time t1 = ros::Time::now();
+   // Write params and cost matrix to problem file
+   ofstream prob_file(ep_->tsp_dir_ + "/" + config.problem_name_ + ".tsp");
+diff --git a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+index 241834b..0f2ab59 100644
+--- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
++++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+@@ -90,6 +90,11 @@ public:
+   void setCellHeights(const vector<double> &cell_heights);
+   bool isFrontierCovered();
+   void wrapYaw(double &yaw);
++  // Retire frontiers whose viewpoint the aircraft has proven it cannot fly to
++  // (an obstacle inside the depth near clip the map never caught). The
++  // exploration manager reports the spot when it fails to close on a chosen
++  // viewpoint; every cluster near it is then forced dormant.
++  void addBlockedRegion(const Vector3d &pos);
+ 
+   shared_ptr<PerceptionUtils> percep_utils_;
+   unique_ptr<RayCaster> raycaster_;
+@@ -126,6 +131,11 @@ private:
+   list<Frontier>::iterator first_new_ftr_;
+   Frontier next_frontier_;
+   Position update_bbox_min_, update_bbox_max_;
++  // Viewpoints the aircraft could not reach; any frontier whose average falls
++  // within blocked_region_radius_ of one is forced dormant, so the coverage
++  // tour stops offering a route the map believes clear but physics blocks.
++  vector<Vector3d> blocked_regions_;
++  double blocked_region_radius_;
+ 
+   // Params
+   int cluster_min_;
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+index f07a08d..e541bfa 100644
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -29,6 +29,20 @@ FrontierFinder::FrontierFinder(ros::NodeHandle &nh, const shared_ptr<MapServer>
+   nh.param("/frontier_finder/ground_offset", ground_offset_, 0.0);
+   nh.param("/frontier_finder/viewpoint_z_score_cutoff", viewpoint_z_score_cutoff_, 0.0);
+   nh.param("/frontier_finder/cell_height_clearance", cell_height_clearance_, 0.1);
++  nh.param("/frontier_finder/blocked_region_radius", blocked_region_radius_, 1.5);
++
++  // Reload shadows a previous incarnation persisted: this node respawns after
++  // LKH crashes, and physics-vetoed viewpoints stay vetoed across respawns.
++  {
++    std::vector<double> flat;
++    if (ros::param::get("/frontier_finder/blocked_regions_runtime", flat) &&
++        flat.size() >= 3) {
++      for (size_t i = 0; i + 2 < flat.size(); i += 3)
++        blocked_regions_.push_back(Eigen::Vector3d(flat[i], flat[i + 1], flat[i + 2]));
++      ROS_WARN("[FrontierFinder] Restored %lu blocked region(s) from a previous "
++               "incarnation", blocked_regions_.size());
++    }
++  }
+ 
+   raycaster_.reset(new RayCaster);
+   resolution_ = map_server_->getResolution();
+@@ -50,6 +64,29 @@ FrontierFinder::FrontierFinder(ros::NodeHandle &nh, const shared_ptr<MapServer>
+ 
+ FrontierFinder::~FrontierFinder() {}
+ 
++void FrontierFinder::addBlockedRegion(const Vector3d &pos) {
++  // Coalesce nearby reports so a wall the aircraft grinds along a few times
++  // does not fill the list; one marker per radius is enough to shadow it.
++  for (const auto &b : blocked_regions_)
++    if ((b - pos).norm() < blocked_region_radius_)
++      return;
++  blocked_regions_.push_back(pos);
++  // Persist to the param server: this node respawns after LKH crashes and a
++  // fresh process would otherwise forget every hard-won shadow, sending the
++  // coverage tour straight back to viewpoints physics already vetoed.
++  {
++    std::vector<double> flat;
++    ros::param::get("/frontier_finder/blocked_regions_runtime", flat);
++    flat.push_back(pos.x());
++    flat.push_back(pos.y());
++    flat.push_back(pos.z());
++    ros::param::set("/frontier_finder/blocked_regions_runtime", flat);
++  }
++  ROS_WARN("[FrontierFinder] Blocked unreachable viewpoint (%.2f, %.2f, %.2f); "
++           "%lu region(s) now shadowed from the coverage tour",
++           pos.x(), pos.y(), pos.z(), blocked_regions_.size());
++}
++
+ void FrontierFinder::searchFrontiers() {
+   ros::Time t1 = ros::Time::now();
+   tmp_frontiers_.clear();
+@@ -570,6 +607,26 @@ void FrontierFinder::computeFrontiersToVisit() {
+   // Try find viewpoints for each cluster and categorize them according to
+   // viewpoint number
+   for (auto &tmp_ftr : tmp_frontiers_) {
++    // Controller-reported dead end: a cluster sitting on a viewpoint the aircraft
++    // could not physically reach (an obstacle inside the depth near clip the map
++    // never caught) is retired to dormant, so the coverage tour stops re-picking
++    // a route the map believes clear but the airframe keeps grinding into.
++    bool in_blocked = false;
++    for (const auto &b : blocked_regions_)
++      if ((b - tmp_ftr.average_).norm() < blocked_region_radius_) {
++        in_blocked = true;
++        break;
++      }
++    if (in_blocked) {
++      dormant_frontiers_.push_back(tmp_ftr);
++      ++new_dormant_num;
++      for (auto &cell : tmp_ftr.cells_) {
++        Eigen::Vector3i idx;
++        map_server_->getTSDF()->positionToIndex(cell, idx);
++        frontier_flag_[toadr(idx)] = false;
++      }
++      continue;
++    }
+     // Search viewpoints around frontier
+     sampleViewpoints(tmp_ftr);
+     // sampleViewpoints3D(tmp_ftr);

@@ -84,6 +84,21 @@ topics:
       reliability: best_effort
       durability: volatile
 
+  # 2026-08-17: /R1/localization above is deliberately yaw-only (a shared
+  # contract with DA3/room_mapper consumers) -- no follower can see real
+  # roll/pitch through it. rooster_ground_truth_localization.py now also
+  # publishes raw roll/pitch/yaw (Vector3.x/y/z, radians, unverified sign)
+  # here specifically so a tilt-cutoff reflex has something real to read.
+  # See LESSONS.md's 2026-08-17 entry.
+  - topic: /R1/attitude_rpy
+    type: geometry_msgs/msg/Vector3
+    queue_size: 5
+    qos:
+      history: keep_last
+      depth: 5
+      reliability: best_effort
+      durability: volatile
+
 #- topic: /flow_depth/pose_est
 #  - topic: /xtend/amcl_pose
 #  - topic: /flow_depth/pose_est

@@ -977,6 +977,109 @@ means it worked — this is exactly why `restart_and_reenter()` verifies success
 afterward (`docker ps` for `R1` + a real battery reading), not by trusting
 `enter_scenario()`'s return value alone.
 
+## 2026-08-17 — Rooster's ManualControl x/y axes have a ~65%-of-stick DEADZONE; this is why trajectory tracking was jerky all day
+
+**Symptom:** Every attempt at smooth low-speed trajectory following produced jerky, unpredictable horizontal motion, whatever the follower or control law. FALCON's exploration mode had already been "fixed" by pegging commands to a constant magnitude (`force_mode=fixed` bang-bang) rather than tracking proportionally — which always looked like a workaround for something unexplained.
+
+**Root cause, measured against SPHERA GROUND TRUTH while hovering in Posctl:**
+
+| ManualControl axis | forward (x) m/s | lateral (y) m/s |
+|---|---|---|
+| 150 / 300 / 450 | 0.002 / 0.011 / 0.001 | ~0 |
+| 600 | 0.000 | ~0 |
+| 700 | **0.261** | ~0.00 |
+| 1000 | **1.248** | **-1.023** |
+
+So the horizontal axes are **dead until roughly 600-650 counts (65% of full stick)**, then ramp steeply and non-linearly. Lateral is even deader than forward (still ~0 at 700). Yaw, by contrast, is well behaved with only a small deadzone: axis 200 -> -0.278 rad/s, axis 400 -> -0.845 rad/s (~-1.75 to -2.1 rad/s extrapolated to full stick, negative for positive `r`, consistent with the documented sign flip).
+
+**Why that produced exactly the observed jerkiness:** FALCON cruises at 0.15-0.2 m/s. `rooster_twist_control_adapter.py` converts that with `max_linear_x/y = 0.25 m/s @ axis 1000`, so a 0.15 m/s request becomes axis ~600 and 0.2 m/s becomes ~800 — i.e. every normal command lands **right on the deadzone edge**, where the real response swings between 0.00 and 0.26 m/s for a few counts of change. That is not a tuning problem; it is an actuator-resolution problem.
+
+**Consequences that matter for design:**
+- **Minimum controllable horizontal speed is ~0.26 m/s.** Anything slower cannot be commanded continuously at all — only approximated by pulsing, which is precisely what `PulseShaper`'s `force_mode=fixed` was doing. That bang-bang default was a rational response to this hardware, not a mistake.
+- Therefore **"fly slower for better tracking" is backwards here.** Proportional control only exists above the deadzone, so FALCON's cruise should be raised into the responsive band (~0.4-0.8 m/s) if smooth tracking is the goal.
+- Usable resolution is only ~350 of 1000 counts, and the x and y axes are asymmetric, so any velocity->axis conversion must be a **calibrated inverse (deadzone offset + measured gain), per axis** — a single linear `v/max*1000` scale factor cannot work.
+- `max_linear_x/y = 0.25` is wrong in both directions depending on regime (it under-reads full-scale ~1.25 m/s while over-promising that small values do anything). It was never live-validated; its own docstring says so.
+
+**Don't:** Don't calibrate these axes from PX4's `MPC_VEL_MANUAL` (2.0 m/s) — the vendor's `rooster_manager` sits in between with its own `manual_ctrl_deadband` (150) and scaling, so the PX4 param is not the effective end-to-end gain (measured full-scale was ~1.25 m/s forward, not 2.0). And don't measure any of this from PX4's own `UAVState.position/velocity` — use `/R1/sphera/state` ground truth (see the offboard entry below for how PX4's estimator drifts convincingly while the aircraft is motionless). Also avoid measuring while battery is low (<~25%): samples taken at 19% had a "forward" command produce mostly lateral motion as thrust authority and yaw drift corrupted the body-frame projection.
+
+## 2026-08-17 — Rooster's native PX4 offboard setpoints do NOT actuate Sphera at all (and how a convincing false positive nearly hid that)
+
+**Symptom / question:** After a day of poor Rooster control through the RC-style `ManualControl` axes, the question was whether ROBOTICAN's native `fcu_driver` setpoint topics (`local/velocity`, `body/velocity`, `attitude`, `local/position`) are real working control interfaces — the plan being to use one of them the way the SJTU stack uses its Gazebo velocity plugin.
+
+**First answer was WRONG, and the way it was wrong matters.** Streaming `LocalVelocityCommand` in Offboard produced beautiful numbers: commanded +0.50 m/s vs PX4-measured +0.478 (ratio 0.96), commanded +0.40 vs +0.419 (1.05), hold drift only -0.11 m over 5 s, ±2% spread, plus `position` deltas that matched the commanded distance. It was written up as proven. **It was measured entirely from `/R1/fcu/state` (`UAVState`) — PX4's own estimator — which was agreeing with itself while the aircraft never moved.**
+
+**The truth, from Sphera ground truth (`/R1/sphera/state`):** displacement was **0.00 m on every axis** across multiple offboard runs. PX4 engaged Offboard (`fcu_mode == "Offboard"`, held 19 s+), even logged `FCU [Info]: Takeoff detected`, while the drone sat on the ground with `ranger` pinned at 0.13 m. In the same session the **`ManualControl` path flew for real** — ground truth `dz = +1.53 m`, then holding **TRUTH z = 1.75 m / ranger 1.77 m rock-steady for 10+ s**.
+
+**Root cause (architectural):** Sphera's `sphera_physical_rooster_backend_node` drives the simulated physics from the **vendor's `ManualControl` → `rooster_manager` → backend** pipeline, *not* from PX4's motor/actuator outputs. PX4 runs only as an estimator and mode manager. So every PX4-native setpoint interface is inert **in Sphera**, no matter how correct the messages are. (On real hardware they may work fine — this is simulator-specific, and there is no way to validate them in Sphera.)
+
+**Consequence:** in Sphera, the ManualControl axis interface (-1000..1000) is the only actuation route, so trajectory tracking has to close the loop on our side.
+
+**Don't:** Don't validate a control interface using the same autopilot's own state estimate — it will happily confirm your command while the vehicle is motionless. Use an independent ground truth (here `/R1/sphera/state`). Don't trust `set_offboard`/`force_arm` returning `success=True`, or `fcu_mode == "Offboard"`, or even PX4's `Takeoff detected`, as evidence the aircraft moved. And `body/velocity` specifically satisfies the driver's "setpoint present" gate (Offboard *will* engage on it) while tracking nothing — it is not a usable interface even before the actuation issue.
+
+**Sequencing rules that DO engage/hold Offboard** (kept because they're correct and needed for real hardware): `ManualControl` must stream continuously or PX4 raises `Failsafe enabled: No manual control stick input`; `KeepAlive.requested_flight_mode` is enforced by `rooster_manager` and drags PX4 out of Offboard after ~2.0 s unless set to `NONE (0)`; the setpoint stream must never go stale (>~1 s) or `set_offboard` fails with `'Failed to start Offboard mode: No Setpoint Set'` (publish it from its own timer, not inline in a phase loop); minimise armed-on-ground time or PX4 fires `Disarmed by auto preflight disarming`. Note `rooster_manager` only relays `ManualControl` to the FCU while `KeepAlive` requests a real flight mode, so `NONE` triggers `Manual control lost` — break that catch-22 with PX4 `COM_RCL_EXCEPT = 4` (bit 2 excepts Offboard from RC-loss failsafe; default 0, with `NAV_RCL_ACT = 3` = Land). Set params via rclpy: `ros2 service call` crashes with `munmap_chunk(): invalid pointer` on this Foxy/CycloneDDS build.
+
+**Also, better telemetry:** `/R1/fcu/state` (`UAVState`) beats `/R1/state` for control work — `fcu_mode` as a readable string plus PX4 `position`/`velocity` — but treat its position/velocity as **estimates, not truth** (they drift; its local origin is also re-initialised per boot and drifted ~2 m when a run ended still armed/airborne, so never use `position.z` as absolute altitude — use `ranger`, and always force-disarm after landing). `RoosterState.flight_mode` reports 0 (`NONE`) during Offboard because the vendor enum has no Offboard value.
+
+## 2026-08-17 — a vendor example script left running since the morning fought every flight-control test run that day
+
+**Symptom:** A full day of Rooster flight-control investigation (altitude-hold PD retuning, switching flight modes, per-axis characterization) kept producing inconsistent, sometimes-wildly-unstable results that didn't match earlier clean tests on the same code -- including the FCU's own log repeatedly showing `FCU flight mode change detected: Posctl -> Altctl -> Posctl -> Altctl...` every 2-3s, even though only one process (`rooster_command_unit`, requesting ALTITUDE) should have been asking for a mode at all.
+
+**Root cause:** `ros2 topic info /R1/keep_alive --verbose` showed **3 publishers**, not 1: `rooster_command_unit` (ours, correct) plus a node named `position_fly_controller` plus a bare/unnamed DDS participant. `position_fly_controller.py` (`sparx_agency/robots/ROBOTICAN/examples/src/`, a vendor-example-style script, launchable as a `mission_control.py` service) had been started via mission_control at **10:49 that morning** -- hours before any of the day's testing began -- and was never stopped. It independently publishes its own `ManualControl` and `KeepAlive` (requesting `FLIGHT_MODE_POSITION`, per its name) at its own rate, on the exact same topics `rooster_command_unit` owns. Two processes were flying the same drone the entire day, each periodically overwriting the other's flight-mode request and z-axis command -- this is the same *class* of bug already documented for `RoosterManualControl`/`PathRunnerNode` (see `[[project_falcon_robotican_bridging]]`-adjacent memory: "single owner" is asserted in code comments but never enforced), just a third, previously-uncatalogued instance of it, and the most damaging one found yet because it ran silently for hours before anyone thought to check `ros2 topic info --verbose` for publisher count.
+
+**Fix:** Killed `position_fly_controller.py`. Immediately confirmed live: `flight_mode` held at 4 (Altitude) with zero flickering across a full takeoff+hold, roll/pitch stayed under 0.4° the whole time, and ranger climbed smoothly and monotonically (no more wild swings). This single process being alive explained essentially all of that day's instability -- more than any PD gain, slew limit, or flight-mode choice investigated before finding it.
+
+**Don't:** Don't trust that only the processes *you* started are the only things talking to a drone's control topics, especially on a shared host with a long-running `mission_control.py` (services started hours or days earlier persist across unrelated sessions/conversations). **Before any flight-control debugging session, check `ros2 topic info /<id>/manual_control --verbose` and `.../keep_alive --verbose` for publisher count > 1** -- this is now the first thing to check, ahead of gain tuning, flight-mode selection, or plant characterization, all of which are meaningless while a second, uncoordinated publisher is fighting on the same topic.
+
+## 2026-08-17 — altitude "rises and falls with no control": the z-axis response is a narrow step, not a smooth thrust curve, and the PD loop's correction range was 5-40x wider than it
+
+**Symptom:** Every Rooster flight this session (and, per the user, prior sessions) shows altitude climbing and sinking with no apparent control -- ranger swinging anywhere from ground level to 6+ meters, never settling, independent of which follower or control law was driving x/y/yaw.
+
+**Root cause:** Measured directly with `altitude_hold_kp`/`kd` forced to 0 (pure open-loop, one fixed z value held constant from a ground start, no correction at all): `z<=690` (tested at 550, 625, 670, 690, each held 16-20s) produced **literally zero climb** -- ranger frozen at ground level to 3 decimal places the entire time, despite `armed`/`airborne` telemetry both reading true throughout. `z=700` produced a fast, sustained ~1.6 m/s climb that did NOT level off on its own -- it climbed straight into the room's real physical ceiling (~3.4-3.5m, matching `sphera_jail.yaml`'s own documented ceiling height) and sat pinned there, stable, for the rest of the test. The entire *effective* control band sits inside a ~10-unit window near 700, out of the axis's full 2000-unit range -- consistent with a discrete ground-idle/landing-detector lockout gate (the FCU refusing to leave "landed" state below some commanded-rate threshold) rather than a continuous thrust-vs-lift curve; `rooster_unit.py`'s own history already contains a matching data point (`climb_z` raised 600->1000 specifically "to escape PX4's landing-detector confirm window"). `_altitude_hold_tick`'s `altitude_hold_max_correction=380` let ONE tick's correction move `z` across virtually the entire span between "zero lift" and "full climb to ceiling" -- every apparent "instability" was this loop's own correction saturating past that narrow band in either direction, not a tuning-quality problem with the PD gains themselves.
+
+**Fix:** Added a separate, tighter slew-rate limit (`altitude_hold_max_step`, default 15 units/tick at the existing 10Hz loop rate) on top of the existing correction clamp -- `_altitude_hold_tick` now moves the actual commanded `z` toward the PD-computed target by at most this much per tick, regardless of how large the instantaneous correction is. Verified live: with real gains restored (kp=500, kd=600, max_correction=380 unchanged) plus `altitude_hold_max_step=15`, `target_ranger_m=1.5`, ranger held **1.33-1.62m for the full 15s test** -- tight, converging, no runaway climb, no floor-sink. Compare to the exact same gains without the step limit, which produced the original unbounded 0.13-6m swings.
+
+**Don't:** Don't assume a fresh round of PD gain-tuning (different kp/kd) fixes this -- the problem is that ANY gain, applied without a per-tick step limit, can compute a `wanted_z` correction that overshoots the narrow effective band in one tick; the axis-level slew limit is the fix, not the gains. Also don't trust an "armed: true, airborne: true" telemetry pair as proof the vehicle is actually climbing when testing z-axis response in isolation -- cross-check `docker logs R1 | grep uav_state_subscriber_cb` for the vendor CDR-corruption signature (see `project_sphera_cyclonedds_interface` memory) before reading a flat ranger as a real physics measurement; this session hit that corruption at least twice mid-investigation and it produced misleading "no response at any z value" results until a fresh Sphera restart cleared it.
+
+## 2026-08-17 — first live flight of a new Rooster follower capsized the drone; neither follower had any attitude awareness
+
+**Symptom:** ~90s into the first live test of `rooster_bspline_follower_node.py` (new
+`core.control.velocity_servo`-based follower, swapped in mid-flight for
+`falcon_exploration_follower_node.py` to A/B tracking quality), `/R1/state` showed `ranger`
+jump to 6.09m (the flight box is 4.8m tall) and `roll` at 0.88 rad (~51deg), worsening to
+-1.07 rad (~61deg) over the next ~25s even after commanding `stop` via `/R1/cmd_nav` and
+killing the follower node entirely — nothing published to `cmd_vel_raw` and the tilt still
+grew. Battery drained abnormally fast alongside it (92% -> 52% in under 3 minutes).
+
+**Root cause:** A capsize, matching this repo's own prior finding (`b4ec96a0`, "the capsizes
+are not a control problem" — a contact tips the airframe between monitor samples, with no
+threshold-crossing window a reflex could catch, and past the physical recoverability ceiling
+no command can right it). What made THIS one findable as more than "just bad luck": **neither
+`falcon_exploration_follower_node.py` (the production follower) nor the new
+`rooster_bspline_follower_node.py` read roll/pitch at all** — both tracked yaw only. Every
+other follower already in this codebase (`falcon_sjtu`'s `bspline_follower_node.py`) has a
+tilt-cutoff reflex specifically because of this; Rooster's followers never got one, so nothing
+ever cut horizontal drive once the aircraft was already past recoverable tilt — the follower
+kept commanding translation into a tip that was already unrecoverable, for as long as it kept
+running.
+
+**Fix:** Ported the tilt-cutoff reflex (`~tilt_limit_deg`, default 15deg, same default as
+`falcon_sjtu`) to both `falcon_exploration_follower_node.py` and
+`rooster_bspline_follower_node.py`: the instant `|roll|` or `|pitch|` crosses the limit, cut
+to zero Twist and reset the tracker/servo's integrators, every control tick, ahead of the
+demo-mode gate. This does not prevent a capsize (nothing can, per `b4ec96a0`) — it stops the
+follower from fighting the recovery attempt or continuing to drive translation into an already-
+tipped airframe. Recovery from the capsize itself was via
+`sphera_battery_watchdog.py --once` (force an immediate Sphera restart+GUI-re-entry cycle,
+regardless of battery) — ~36s to a fresh, level, 99%-battery `R1`.
+
+**Don't:** Don't add a NEW follower (or copy an existing one) for this airframe without this
+reflex — it's not exotic safety machinery, it's the one thing standing between "aircraft tips
+over" and "aircraft tips over AND keeps getting horizontal-drive commands while it happens."
+Also don't assume commanding `stop` (a `cmd_nav` action) or killing the follower node stops an
+already-capsized aircraft from getting worse — once physically past the recoverability
+ceiling, only a sim restart (or, on hardware, a real recovery/kill) fixes it; the tilt-cutoff's
+job is to stop BEFORE that point, not to undo it after.
+
 <!--
 Example, in the style already proven useful in project-specific skills:
 

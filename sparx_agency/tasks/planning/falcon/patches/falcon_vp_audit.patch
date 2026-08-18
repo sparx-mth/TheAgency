@@ -1,0 +1,192 @@
+diff --git a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -41,6 +41,48 @@
+   return false;
+ }
+ 
++// ── Viewpoint-placement attribution ────────────────────────────────────────
++//
++// A cluster retires to dormant when sampleViewpoints() returns nothing, and
++// there are two entirely different reasons that happens which no log
++// distinguishes today: either no candidate POSITION is in observed free space,
++// or candidate positions exist and every ray from them to the frontier is
++// judged blocked. Those need opposite fixes -- the first is about where the
++// aircraft is allowed to stand, the second about what counts as seeing -- and
++// a premature FINISH looks identical either way from outside.
++//
++// So record which, for every cluster that retires, in the same spirit as the
++// follower's binding-limiter histogram: attribute, do not guess.
++//
++// File scope rather than a member deliberately. frontier_finder.h is shared by
++// four packages, and adding a member to it while rebuilding only the owning
++// package is an ODR violation that corrupts the heap at startup and ships an
++// empty voxel map. This costs one translation unit and no header change.
++struct ViewpointAudit {
++  int candidates;      // ring positions considered
++  int keep_out;        // rejected: inside a declared keep-out volume
++  int out_of_box;      // rejected: outside the map box
++  int occupied;        // rejected: standing inside an obstacle
++  int unknown;         // rejected: standing in never-observed space
++  int near_unknown;    // rejected: too close to never-observed space
++  int placeable;       // survived every position test
++  int zero_visible;    // placeable, but saw not one frontier cell
++  int below_bar;       // placeable, saw something, under the visibility bar
++  int accepted;        // became a viewpoint
++  int max_visible;     // best visibility any placeable candidate achieved
++  long rays;                  // rays cast to frontier cells this call
++  long ray_outside_fov;       // cell not in the camera cone at all
++  long ray_blocked_occupied;  // blocked by mapped structure -- a real wall
++  long ray_blocked_unknown;   // blocked by UNOBSERVED space
++  long ray_clear;             // cell seen
++  void reset() {
++    candidates = keep_out = out_of_box = occupied = unknown = near_unknown = 0;
++    placeable = zero_visible = below_bar = accepted = max_visible = 0;
++    rays = ray_outside_fov = ray_blocked_occupied = ray_blocked_unknown = ray_clear = 0;
++  }
++};
++ViewpointAudit g_vp_audit;
++
+ }  // namespace
+ 
+ #include "pathfinding/path_cost_evaluator.h"
+@@ -934,6 +976,22 @@
+           first_new_ftr_ = inserted;
+       } else {
+         CHECK_LE(tmp_ftr.visib_num_, min_visib_num_) << "Frontier with valid viewpoint but dormant";
++        // Say WHY, once per retirement. Two failures wear this same verdict --
++        // "nowhere legal to stand" and "nothing visible from anywhere legal"
++        // -- and they need opposite fixes.
++        ROS_WARN("[vp_audit] retire (%.2f,%.2f,%.2f) cells=%lu relax=%d | cand=%d "
++                 "keepout=%d outbox=%d occ=%d unk=%d nearunk=%d placeable=%d "
++                 "| visib0=%d belowbar=%d maxvisib=%d bar=%d "
++                 "| rays=%ld nofov=%ld blockocc=%ld blockunk=%ld clear=%ld",
++                 tmp_ftr.average_.x(), tmp_ftr.average_.y(), tmp_ftr.average_.z(),
++                 (unsigned long)tmp_ftr.filtered_cells_.size(), amnesty_relax_ ? 1 : 0,
++                 g_vp_audit.candidates, g_vp_audit.keep_out, g_vp_audit.out_of_box,
++                 g_vp_audit.occupied, g_vp_audit.unknown, g_vp_audit.near_unknown,
++                 g_vp_audit.placeable, g_vp_audit.zero_visible, g_vp_audit.below_bar,
++                 g_vp_audit.max_visible, amnesty_relax_ ? 0 : min_visib_num_,
++                 g_vp_audit.rays, g_vp_audit.ray_outside_fov,
++                 g_vp_audit.ray_blocked_occupied, g_vp_audit.ray_blocked_unknown,
++                 g_vp_audit.ray_clear);
+         // Find no viewpoint, move cluster to dormant list
+         dormant_frontiers_.push_back(tmp_ftr);
+         ++new_dormant_num;
+@@ -1116,6 +1174,7 @@
+ void FrontierFinder::sampleViewpoints(Frontier &frontier) {
+   CHECK_EQ(frontier.viewpoints_.size(), 0) << "Frontier already has viewpoints";
+   frontier.visib_num_ = 0;
++  g_vp_audit.reset();
+ 
+   std::vector<fast_planner::Viewpoint> viewpoints, viewpoints_near_occupied;
+   // Evaluate sample viewpoints on circles, find ones that cover most cells
+@@ -1132,9 +1191,12 @@
+       // test and regardless of the amnesty relaxation below: the amnesty
+       // trades margin for coverage in places worth covering, and a
+       // keep-out is the declaration that this one is not.
++      ++g_vp_audit.candidates;
+       if (insideKeepOut(keep_out_, sample_pos.x(), sample_pos.y(),
+-                        sample_pos.z()))
++                        sample_pos.z())) {
++        ++g_vp_audit.keep_out;
+         continue;
++      }
+ 
+       // On the amnesty pass the isNearUnknown test is dropped. Everything
+       // that protects the aircraft is kept: the candidate must still be in
+@@ -1142,12 +1204,26 @@
+       // margin to UNOBSERVED space -- and a frontier sits on that boundary
+       // by definition, so demanding the margin is what makes a reachable
+       // frontier unviewable and ends the mission early.
++      // Split one test per line so a rejection is attributable. Order and
++      // short-circuit behaviour are exactly as they were.
+       const bool relax = amnesty_relax_;
+-      if (!map_server_->isInBox(sample_pos) ||
+-          map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::OCCUPIED ||
+-          map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::UNKNOWN ||
+-          (!relax && isNearUnknown(sample_pos)))
++      if (!map_server_->isInBox(sample_pos)) {
++        ++g_vp_audit.out_of_box;
++        continue;
++      }
++      if (map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::OCCUPIED) {
++        ++g_vp_audit.occupied;
++        continue;
++      }
++      if (map_server_->getOccupancy(sample_pos) == voxel_mapping::OccupancyType::UNKNOWN) {
++        ++g_vp_audit.unknown;
+         continue;
++      }
++      if (!relax && isNearUnknown(sample_pos)) {
++        ++g_vp_audit.near_unknown;
++        continue;
++      }
++      ++g_vp_audit.placeable;
+ 
+       // Compute average yaw
+       auto &cells = frontier.filtered_cells_;
+@@ -1167,8 +1243,16 @@
+       int visib_num = countVisibleCells(sample_pos, avg_yaw, cells);
+       if (visib_num > frontier.visib_num_)
+         frontier.visib_num_ = visib_num;
++      if (visib_num > g_vp_audit.max_visible)
++        g_vp_audit.max_visible = visib_num;
++      const int visib_bar = amnesty_relax_ ? 0 : min_visib_num_;
++      if (visib_num == 0)
++        ++g_vp_audit.zero_visible;
++      else if (visib_num <= visib_bar)
++        ++g_vp_audit.below_bar;
+ 
+-      if (visib_num > (amnesty_relax_ ? 0 : min_visib_num_)) {
++      if (visib_num > visib_bar) {
++        ++g_vp_audit.accepted;
+         Viewpoint vp = {sample_pos, avg_yaw, visib_num};
+ 
+         // Check angle with first principal component within [60, 120] (DEPRECATED)
+@@ -1522,22 +1606,40 @@
+   int visib_num = 0;
+   Eigen::Vector3i idx;
+   for (auto cell : cluster) {
++    ++g_vp_audit.rays;
+     // Check if frontier cell is inside FOV
+-    if (!percep_utils_->insideFOV(cell))
++    if (!percep_utils_->insideFOV(cell)) {
++      ++g_vp_audit.ray_outside_fov;
+       continue;
++    }
+ 
+-    // Check if frontier cell is visible (not occulded by obstacles)
++    // Check if frontier cell is visible (not occulded by obstacles).
++    //
++    // Note what counts as an occluder here: UNKNOWN as well as OCCUPIED. A
++    // frontier IS the boundary of unknown space, so a ray reaching one grazes
++    // unobserved voxels by construction -- which makes this test able to
++    // report a frontier invisible from every legal standing position, for no
++    // reason a wall put there. Whether that is what actually retires clusters
++    // is the question the counters below exist to settle.
+     raycaster_->input(cell, pos);
+     bool visib = true;
+     while (raycaster_->nextId(idx)) {
+-      if (map_server_->getOccupancy(idx) == voxel_mapping::OccupancyType::OCCUPIED ||
+-          map_server_->getOccupancy(idx) == voxel_mapping::OccupancyType::UNKNOWN) {
++      const voxel_mapping::OccupancyType occ = map_server_->getOccupancy(idx);
++      if (occ == voxel_mapping::OccupancyType::OCCUPIED) {
++        ++g_vp_audit.ray_blocked_occupied;
++        visib = false;
++        break;
++      }
++      if (occ == voxel_mapping::OccupancyType::UNKNOWN) {
++        ++g_vp_audit.ray_blocked_unknown;
+         visib = false;
+         break;
+       }
+     }
+-    if (visib)
++    if (visib) {
++      ++g_vp_audit.ray_clear;
+       visib_num += 1;
++    }
+   }
+   return visib_num;
+ }
