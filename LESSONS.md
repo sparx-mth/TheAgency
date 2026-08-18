@@ -11,6 +11,113 @@ Format per entry:
 
 ---
 
+## 2026-08-18 — FALCON declared the jail "explored" after 372s with 12 clusters retired behind one; the flight was fine, the frontier tests were not
+
+**Symptom:** A mapping run in `sphera_jail` looked healthy by every control metric — reference
+tracking error 0.02–0.10 m, zero `Collision detected before publishing`, roll p90 0.6°,
+altitude spread ±0.04 m, voxel count climbing 7k → 43.7k — and then stopped dead. The
+follower reported `holding=True` for minutes on end and `/planning/bspline` went silent. The
+first instinct was a control or follower bug, because that is where every previous stall had
+been.
+
+**Root cause:** FALCON had quit on purpose, and said so in `exploration_node`'s stdout (which
+goes to the container's roslaunch log, NOT to any `/root/.ros/log/*/` file — it was invisible
+in the place we habitually look):
+
+```
+[ExplorationManager] Frontier number: 1, dormant frontier number: 12
+[UniformGrid] Cell 15 has 1 frontiers, but no free subspace
+[ExplorationManager] No frontier
+[FSM] Transit state from EXEC_TRAJ to FINISH by FSM
+[FSM] Finish exploration: No frontier detected
+[TrajServer] Task finished, traj server shutdown
+```
+
+Twelve of the thirteen clusters were retired, not absent. Three separate tests in
+`frontier_finder.cpp` did the retiring:
+1. `countVisibleCells()` treats `UNKNOWN` as an occluder, exactly like a wall. But a frontier
+   cell **is** the boundary of unknown space, so a ray arriving at one crosses that boundary
+   by construction — the test reports "you cannot see this frontier" *because* it is a
+   frontier.
+2. `min_visib_num` is an absolute count of frontier cells, while the most any viewpoint *can*
+   see is the cluster's own size. The bar is therefore hardest exactly where the cluster is
+   smallest, and small leftover clusters are what remains late in a mission.
+3. `grantFinishAmnesty()` already existed and was already wired — but it is checked *before*
+   categorisation, guarded on `frontiers_` **and** `tmp_frontiers_` both being empty. In this
+   failure the last surviving cluster was sitting in `tmp_frontiers_` and went dormant
+   *during* categorisation, so the amnesty never fired at all.
+
+**Fix / workaround:** `patches/fix_falcon_frontier_visibility.sh` — a bounded unknown-crossing
+budget per ray (`/frontier_finder/visib_unknown_tolerance=2`), a cluster-relative visibility
+bar applied only to viewpoints that are not `isNearOccupied`
+(`open_visib_fraction=0.5`, `open_visib_floor=4`), and a second categorisation pass that
+re-checks the amnesty *after* the loop. All three default to upstream behaviour in the source
+and are switched on in `nav_stack.launch`.
+
+Written as an anchor-based script, not a `.patch`: falcon_sjtu's `falcon_vp_audit`,
+`falcon_visib_unknown_tolerance` and `falcon_open_visib_bar` all target the same regions of
+`frontier_finder.cpp` that our own ports (`falcon_deadend_guard`,
+`falcon_blocked_region_ttl/widen`, `falcon_publish_fail_blacklist`) already rewrote, and fail
+to apply in *any* order — verified by trying all four against the live tree.
+
+**Don't:** Don't debug a stalled mapping run from the follower's heartbeat alone —
+`holding=True` with a low `pos_err` is what perfect tracking of a *stopped plan* looks like,
+and it is indistinguishable from perfect tracking of a moving one. Check
+`/planning/bspline` liveness and the exploration FSM state first. And don't grep only
+`/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
+the roslaunch stdout redirect instead.
+
+## 2026-08-18 — a calibrated axis curve is still open loop, and it under-delivered by 3x in flight
+
+**Symptom:** With the measured ManualControl axis curve in place (forward dead until ~620
+counts, ~1.25 m/s at 1000), a full FALCON exploration leg commanded a mean 0.30 m/s and
+achieved a mean 0.11 m/s against Sphera ground truth — ratio 0.31, i.e. the aircraft could
+not keep up with a plan that had been deliberately slowed down for it. Achieved speed was
+also spiky (max 0.99 m/s against a 0.60 m/s ceiling).
+
+**Root cause:** Two compounding things. The curve is a fit of the *steady-state* response to
+an isolated axis step, and an exploring aircraft is almost never settled — it is accelerating,
+turning, or being braked, and every one of those states needs more deflection than the fit
+predicts. Separately, the follower's `max_measured_speed_xy` backstop **zeroed** translation
+outright the instant measured speed touched the cap, so the loop was bang-bang: full command,
+overspeed, zero, coast, full command. That is where the 0.99 m/s spikes came from.
+
+**Fix / workaround:** Close the loop. `core/control/axis_velocity_servo.py` adds a PI
+correction on top of the curve (which becomes feed-forward), with dead-band-aware anti-windup,
+a bounded correction, and a reset on stop; the velocity it closes on is differentiated from
+Sphera ground truth and published by `rooster_ground_truth_localization.py` as
+`/R1/velocity_truth`. The follower's hard cutoff became a linear taper that only bites past
+the cap.
+
+**Don't:** Don't tune the curve harder instead — the number it is missing is not a constant,
+which is exactly why an integrator finds it and a re-measurement doesn't. And don't close this
+loop on the autopilot's own velocity estimate; PX4's was measured drifting convincingly while
+the aircraft sat still (see the 2026-08-17 offboard entry).
+
+## 2026-08-18 — `ros2 topic echo | grep -q` inside a short `timeout` hangs a bring-up script for 13 minutes
+
+**Symptom:** A bring-up script's "wait for the drone to come back" loop
+(`docker exec it ... timeout -s KILL 4 ros2 topic echo /R1/state | grep -q "^armable"`)
+never satisfied its condition and sat spinning for 13 minutes, even though running the same
+`ros2 topic echo` by hand printed `armable: true` immediately.
+
+**Root cause:** `ros2 topic echo`'s stdout is block-buffered when it is a pipe rather than a
+TTY, and `timeout -s KILL` discards whatever is still sitting in that buffer. Whether the
+condition is ever met depends on whether the message rate happens to fill a buffer inside the
+timeout window — so the same loop passes some runs and hangs others, which is worse than
+failing outright.
+
+**Fix / workaround:** Redirect to a file inside the container and read the file, never pipe
+`ros2 topic echo` into a short-lived `timeout`:
+`timeout -s KILL 6 ros2 topic echo /R1/state > /tmp/state_probe.txt; grep -m1 '^percentage:' /tmp/state_probe.txt`.
+`sparx_agency/tools/sphera_battery_watchdog.py` already does the equivalent — that is why the
+watchdog's own battery poll has always been reliable while ad-hoc loops in shell scripts are
+not.
+
+**Don't:** Don't "fix" it by lengthening the timeout or adding `stdbuf` — the buffering is on
+the far side of a `docker exec`, so a host-side `stdbuf` does nothing, and a longer timeout
+only makes the hang less frequent, not absent.
+
 ## 2026-07-29 — new detector container: numpy/CLIP/TensorRT-version traps, in sequence
 
 **Symptom:** Building `docker/Dockerfile.detector` (torch + ultralytics on top of the

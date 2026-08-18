@@ -1246,6 +1246,92 @@
   <rosparam command="load" file="$(find exploration_utils)/config/perception_utils.yaml"/>
   <rosparam command="load" file="$(find exploration_manager)/config/exploration_manager.yaml"/>
 
+  <!-- ══ FRONTIER VISIBILITY (patches/fix_falcon_frontier_visibility.sh) ══════
+       Measured live 2026-08-18 in sphera_jail: 372s into a healthy run
+       (tracking error 0.02-0.10m, zero collisions, voxel count still climbing)
+       the frontier set collapsed to ONE cluster with TWELVE retired behind it
+       and the FSM declared "Finish exploration: No frontier detected".
+       These three params open the two tests that retired them. All default to
+       upstream behaviour in the source, so they must be set here to take
+       effect. Values match falcon_sjtu's exploration.launch. -->
+  <arg name="frontier_visib_unknown_tolerance" default="2"/>
+  <arg name="frontier_open_visib_fraction"     default="0.5"/>
+  <arg name="frontier_open_visib_floor"        default="4"/>
+  <!-- Voxels of unobserved space a line of sight may cross before it counts as
+       occluded. A frontier cell IS the boundary of unknown space, so a ray
+       reaching one crosses that boundary by construction; 0 means every
+       frontier is invisible for being a frontier. OCCUPIED still blocks at any
+       distance, which is what keeps sealed cavities unviewable. -->
+  <param name="/frontier_finder/visib_unknown_tolerance"
+         value="$(arg frontier_visib_unknown_tolerance)"/>
+  <!-- min_visib_num is an absolute cell count, so it is hardest against the
+       smallest clusters — exactly what is left late in a mission. Apply a
+       cluster-relative bar, but only to viewpoints with real clearance. -->
+  <param name="/frontier_finder/open_visib_fraction"
+         value="$(arg frontier_open_visib_fraction)"/>
+  <param name="/frontier_finder/open_visib_floor"
+         value="$(arg frontier_open_visib_floor)"/>
+
+  <!-- The relaxed re-examination of retired clusters is a RESCUE, not a target
+       generator. Measured 2026-08-18 without these gates: it ran 8465 times in
+       700s and, with no visibility floor, kept offering viewpoints the aircraft
+       was already standing on — FALCON planned 500 trajectories, flew 384m of
+       them and moved 3m net. Between attempts the frontier set is simply empty,
+       which the FSM's finish grace turns into a hover; a hover that recovers is
+       strictly better than a livelock that does not. -->
+  <arg name="frontier_amnesty_min_empty_cycles" default="10"/>
+  <arg name="frontier_amnesty_interval_sec"     default="10.0"/>
+  <arg name="frontier_amnesty_visib_divisor"    default="4"/>
+  <param name="/frontier_finder/amnesty_min_empty_cycles"
+         value="$(arg frontier_amnesty_min_empty_cycles)"/>
+  <param name="/frontier_finder/amnesty_interval_sec"
+         value="$(arg frontier_amnesty_interval_sec)"/>
+  <param name="/frontier_finder/amnesty_visib_divisor"
+         value="$(arg frontier_amnesty_visib_divisor)"/>
+
+  <!-- ══ FINISH GRACE (patches/fix_falcon_finish_grace.sh) ════════════════════
+       Upstream ends the mission on the FIRST empty frontier verdict, and that is
+       terminal — traj_server shuts down on the resulting replan. Measured
+       2026-08-18: a run that had flown 90.2m in 137.8s quit that way, and 43s
+       later the frontier finder had four recoverable clusters again. The map is
+       still being fused while the aircraft hovers, so an empty verdict describes
+       this instant, not the world. Require it to hold. 0/0 restores upstream. -->
+  <!-- ══ SLOW-TRAJECTORY RESCALE, MATCHED TO THE AIRFRAME ═════════════════════
+       falcon_slow_traj_rescale.patch's defaults come from a 2 m/s-class drone:
+       any trajectory averaging under 0.5 m/s is rescaled TOWARD 2.0 m/s, capped
+       at a 4x speed-up. Measured 2026-08-18: a 0.32 m/s plan came out at 1.28
+       m/s and traj_server reported a 0.79 m/s reference mean, while the follower
+       caps demand at 0.6 m/s and the airframe tops out near 1.25 m/s at full
+       stick. The aircraft was being asked to chase a reference deliberately
+       rescaled past its own limits, which is a guaranteed tracking error no
+       controller can close.
+
+       Target the planner's own max_vel instead, and only rescale a genuinely
+       stalled trajectory. The patch exists to stop a near-zero-velocity segment
+       producing a non-finite rescale (which aborts the node and wipes the voxel
+       map) — that protection is preserved, it just no longer doubles as a
+       speed-up. -->
+  <!-- falcon_replan_from_pose.patch's 1.5m default is a lot of rope for a 0.4 m/s
+       aircraft — 1.5m of drift is nearly 4 seconds of lag, and until it trips
+       every replan starts from where the PREVIOUS plan said the aircraft would
+       be. Measured 2026-08-18: the follower's tracking error sawtoothed between
+       ~0.1m and 2.07m, snapping back at each replan, and this guard never fired
+       once in 700s. 0.6m keeps each replan anchored near the real aircraft. -->
+  <arg name="fsm_replan_from_pose_drift" default="0.6"/>
+  <param name="/fsm/replan_from_pose_drift" value="$(arg fsm_replan_from_pose_drift)"/>
+
+  <arg name="fsm_slow_traj_target_vel"  default="0.40"/>
+  <arg name="fsm_slow_traj_trigger_vel" default="0.25"/>
+  <arg name="fsm_slow_traj_ratio_min"   default="0.60"/>
+  <param name="/fsm/slow_traj_target_vel"  value="$(arg fsm_slow_traj_target_vel)"/>
+  <param name="/fsm/slow_traj_trigger_vel" value="$(arg fsm_slow_traj_trigger_vel)"/>
+  <param name="/fsm/slow_traj_ratio_min"   value="$(arg fsm_slow_traj_ratio_min)"/>
+
+  <arg name="fsm_finish_grace_checks" default="40"/>
+  <arg name="fsm_finish_grace_sec"    default="90.0"/>
+  <param name="/fsm/finish_grace_checks" value="$(arg fsm_finish_grace_checks)"/>
+  <param name="/fsm/finish_grace_sec"    value="$(arg fsm_finish_grace_sec)"/>
+
   <!-- Camera intrinsics: the cam_* args are now fully resolved
        (either from the YAML's camera_matrix.data via $(eval) above,
        or from literal fallbacks / CLI overrides), so a flat

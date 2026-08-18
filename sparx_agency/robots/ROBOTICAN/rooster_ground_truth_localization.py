@@ -39,7 +39,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from geometry_msgs.msg import PoseStamped, Vector3
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3
 from std_msgs.msg import String
 from sphera_common_interfaces.msg import SpheraPawnState
 
@@ -82,9 +82,28 @@ class RoosterGroundTruthLocalization(Node):
         self._rejected = 0
         self._consecutive_rejects = 0
 
+        # Velocity is differentiated here rather than in each consumer: this is
+        # the only node holding the raw truth stream, and a controller closing a
+        # loop on velocity must not close it on the autopilot's own estimate
+        # (PX4's drifted convincingly while the aircraft sat still -- LESSONS.md).
+        # World-frame linear + yaw rate; consumers rotate into body frame using
+        # the pose published alongside. tau=0 disables the filter.
+        self.declare_parameter("velocity_topic", "")
+        # 0.25s, raised from 0.15 after the first closed-loop flight: this is a
+        # differentiated position, so the noise it carries lands straight on the
+        # controller's proportional term. Costs a little lag, buys a usable signal.
+        self.declare_parameter("velocity_filter_tau_s", 0.25)
+        velocity_topic = (self.get_parameter("velocity_topic").value
+                          or f"/{rooster_id}/velocity_truth")
+        self.velocity_filter_tau_s = float(
+            self.get_parameter("velocity_filter_tau_s").value)
+        self._prev_sample = None      # (t_sec, x, y, z, yaw)
+        self._filtered = [0.0, 0.0, 0.0, 0.0]   # vx, vy, vz, yaw_rate
+
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, 10)
         self.source_pub = self.create_publisher(String, source_topic, 10)
         self.attitude_pub = self.create_publisher(Vector3, attitude_topic, 10)
+        self.velocity_pub = self.create_publisher(TwistStamped, velocity_topic, 10)
         # Sphera publishes this at BEST_EFFORT; must match explicitly or we
         # silently receive nothing (a plain int here defaults to RELIABLE).
         self.create_subscription(
@@ -95,7 +114,8 @@ class RoosterGroundTruthLocalization(Node):
             f"rooster_ground_truth_localization ready for {rooster_id}\n"
             f"  sphera state in: /{rooster_id}/sphera/state\n"
             f"  pose out:        {pose_topic} (yaw-only, planar contract)\n"
-            f"  attitude out:    {attitude_topic} (raw roll/pitch/yaw, rad)"
+            f"  attitude out:    {attitude_topic} (raw roll/pitch/yaw, rad)\n"
+            f"  velocity out:    {velocity_topic} (world frame, truth-derived)"
         )
 
     def _keep(self, x: float, y: float) -> bool:
@@ -154,9 +174,46 @@ class RoosterGroundTruthLocalization(Node):
         attitude.z = float(msg.rotation.yaw)
         self.attitude_pub.publish(attitude)
 
+        self._publish_velocity(pose, yaw)
+
         source = String()
         source.data = "sphera_ground_truth"
         self.source_pub.publish(source)
+
+    def _publish_velocity(self, pose: PoseStamped, yaw: float) -> None:
+        """Differentiate the accepted truth pose into a world-frame velocity.
+
+        Uses the message stamp, not wall clock: Sphera's stream is not perfectly
+        periodic and a wall-clock dt turns that jitter into velocity noise.
+
+        Args:
+            pose: The pose just published (already sign-corrected).
+            yaw: Planar yaw of that pose, radians.
+        """
+        stamp = pose.header.stamp
+        now = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        x, y, z = (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
+        prev, self._prev_sample = self._prev_sample, (now, x, y, z, yaw)
+        if prev is None:
+            return
+        dt = now - prev[0]
+        if dt <= 0.0:
+            return
+        yaw_delta = math.atan2(math.sin(yaw - prev[4]), math.cos(yaw - prev[4]))
+        raw = [(x - prev[1]) / dt, (y - prev[2]) / dt, (z - prev[3]) / dt,
+               yaw_delta / dt]
+        tau = self.velocity_filter_tau_s
+        alpha = 1.0 if tau <= 0.0 else dt / (tau + dt)
+        for i in range(4):
+            self._filtered[i] += alpha * (raw[i] - self._filtered[i])
+
+        twist = TwistStamped()
+        twist.header = pose.header
+        twist.twist.linear.x = self._filtered[0]
+        twist.twist.linear.y = self._filtered[1]
+        twist.twist.linear.z = self._filtered[2]
+        twist.twist.angular.z = self._filtered[3]
+        self.velocity_pub.publish(twist)
 
 
 def main(args=None):

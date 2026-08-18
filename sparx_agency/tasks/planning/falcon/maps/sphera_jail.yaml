@@ -98,11 +98,19 @@ map_config:
     vertical_extent: [-2, 4]
     # What RViz actually draws -- independent of flight_band/vertical_extent
     # above, so tightening this can't affect exploration or UniformGrid
-    # sizing at all, only the rendered view. Capped at 1.8m (0.2m headroom
-    # above the intended 1.6m cruise height, target_ranger_m in
-    # mission_control.py's Rooster Command Unit) so ceiling geometry never
-    # renders regardless of what's actually allocated/explored above it.
-    visualisation: [38.75, -30.66, -1, 70.75, 1.34, 1.8]
+    # sizing at all, only the rendered view.
+    #
+    # 2026-08-18: raised 1.8 -> 2.8. The 1.8 cap was 0.2m of headroom over an
+    # intended 1.6m cruise, but the aircraft actually cruises at ~2.07m (world z,
+    # ground-truth measured over four 700s runs), so the clip sat BELOW the drone
+    # and hid every wall voxel at or above its own altitude. Reported from the
+    # RViz view as "it does not map the upper half of the walls" -- the upper half
+    # was always being mapped and explored, only never drawn. 2.8 covers the walls
+    # with real margin over the cruise height while still staying below the
+    # measured ceiling (~3.38m), which is what this cap exists to keep out of the
+    # view. Rendering-only, so it cannot affect exploration or the UniformGrid
+    # sizing crash class documented above.
+    visualisation: [38.75, -30.66, -1, 70.75, 1.34, 2.8]
     # Metres per voxel, CHOSEN rather than inherited. Upstream picks this from
     # the exploration box's volume -- under 4000 m3 it maps at 10 cm, at or
     # above it 20 cm -- so a change to the box used to silently change the grid.

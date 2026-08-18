@@ -51,7 +51,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        fi \
     && locale-gen en_US.UTF-8 && rm -rf /var/lib/apt/lists/*
 
-RUN rosdep update
+# --include-eol-distros is required, not optional: ROS Noetic went end-of-life,
+# so a plain `rosdep update` now prints "Skip end-of-life distro noetic" and
+# exits 1, which fails the build at this line. Found 2026-08-18 attempting the
+# first from-scratch rebuild in months.
+RUN rosdep update --include-eol-distros
 
 # ── 2. FALCON-required apt deps + perception/geometry ROS pkgs ─────
 # C++ libs:
@@ -287,6 +291,52 @@ RUN chmod +x /tmp/fix_falcon_map_resolution.sh && /tmp/fix_falcon_map_resolution
 # GLOG_v=99. See patches/fix_falcon_fsm_logspam.sh.
 COPY patches/fix_falcon_fsm_logspam.sh /tmp/fix_falcon_fsm_logspam.sh
 RUN chmod +x /tmp/fix_falcon_fsm_logspam.sh && /tmp/fix_falcon_fsm_logspam.sh
+
+# ── 6a-septies. Stop FALCON finishing while the world is unexamined ─
+# ============== ROBOTICAN FIX ==============
+# Measured live 2026-08-18 (sphera_jail): 372s into an otherwise healthy run --
+# tracking error 0.02-0.10m, zero collisions, voxel count still climbing -- the
+# frontier set collapsed to ONE cluster with TWELVE retired behind it and the
+# FSM quit with "Finish exploration: No frontier detected".
+#
+# Three causes, all in frontier_finder.cpp: UNKNOWN treated as an occluder (so a
+# frontier is invisible for being a frontier), an absolute visibility bar that
+# bites hardest on the small leftover clusters, and grantFinishAmnesty() being
+# checked only BEFORE categorisation, which misses the case where the last
+# cluster goes dormant during it.
+#
+# This is an anchor-based script rather than a .patch on purpose: falcon_sjtu's
+# falcon_vp_audit / falcon_visib_unknown_tolerance / falcon_open_visib_bar all
+# collide with our own frontier_finder.cpp ports in step 6-sparx and cannot be
+# applied in any order. See patches/README.md.
+# ============================================
+COPY patches/fix_falcon_frontier_visibility.sh /tmp/fix_falcon_frontier_visibility.sh
+RUN chmod +x /tmp/fix_falcon_frontier_visibility.sh && /tmp/fix_falcon_frontier_visibility.sh
+
+# ── 6a-octies. Make "exploration finished" hard to reach, because it is terminal ─
+# ============== ROBOTICAN FIX ==============
+# The FSM finishes on the FIRST empty frontier verdict and traj_server shuts down
+# on the resulting replan, so the decision cannot be walked back. Measured
+# 2026-08-18 with 6a-septies already in place: a run that had flown 90.2m in
+# 137.8s quit that way, and 43s later the frontier finder was offering four
+# recoverable clusters to a state machine that had already stopped. Require the
+# verdict to hold, in both consecutive checks and wall-clock seconds.
+# ============================================
+COPY patches/fix_falcon_finish_grace.sh /tmp/fix_falcon_finish_grace.sh
+RUN chmod +x /tmp/fix_falcon_finish_grace.sh && /tmp/fix_falcon_finish_grace.sh
+
+# ── 6a-nonies. Never fly (or hand downstream) a zero-duration trajectory ─
+# ============== ROBOTICAN FIX ==============
+# planTrajToView() logs "Time lower bound not satified" and then uses the
+# trajectory anyway. When the optimiser returns duration 0.00, everything
+# downstream divides by it (dt_yaw = duration_/seg_num) and the yaw stage spins.
+# Measured 2026-08-18: that log line was the LAST output of the mission --
+# exploration_node then pinned a core at 94% and grew to 35 GB RSS at ~90 MB/s
+# with no further logging, and had to be killed to protect the host. FAIL is
+# already handled by the FSM, which simply replans.
+# ============================================
+COPY patches/fix_falcon_degenerate_traj.sh /tmp/fix_falcon_degenerate_traj.sh
+RUN chmod +x /tmp/fix_falcon_degenerate_traj.sh && /tmp/fix_falcon_degenerate_traj.sh
 
 # ── 6a-sexies. Patch so3_disturbance_generator missing gencfg ─
 # ============== ROBOTICAN FIX ==============

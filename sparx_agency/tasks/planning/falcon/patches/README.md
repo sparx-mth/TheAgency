@@ -88,17 +88,60 @@ here unmodified.
   (step 8b) since it self-skips if already applied and only needs an
   incremental rebuild.
 
-## Not yet ported from `falcon_sjtu` (lower priority — mapping/exploration
-quality, not crash/control-critical; see that dir's `README.md` for each)
+## `fix_falcon_frontier_visibility.sh` — the frontier tests that ended a healthy run
 
-`falcon_blocked_region_ttl`, `falcon_blocked_region_widen`,
-`falcon_deadend_looping`, `falcon_deadend_guard` (supersedes
-`fix_falcon_sop.sh` there — NOT applied that way here, since Rooster's
-simpler `fix_falcon_sop.sh` sed is still in place and untouched by this
-port), `falcon_finish_amnesty_gate`, `falcon_ccl_slice_height`,
+Applied as a script, not a `.patch`, and that is deliberate. It carries the
+behaviour of falcon_sjtu's `falcon_visib_unknown_tolerance` +
+`falcon_open_visib_bar` plus a fix of our own to the amnesty call site.
+
+Measured live 2026-08-18 in `sphera_jail`: 372 s into a run with 0.02–0.10 m
+tracking error, zero collisions and a still-growing voxel map, the frontier set
+collapsed to one cluster with twelve retired behind it and the FSM declared
+`Finish exploration: No frontier detected`. Three tests did the retiring:
+
+1. `countVisibleCells()` treats `UNKNOWN` as an occluder, but a frontier cell IS
+   the boundary of unknown space, so a ray reaching one crosses that boundary by
+   construction. Now a bounded prefix of unobserved voxels may be crossed
+   (`/frontier_finder/visib_unknown_tolerance`, 2); `OCCUPIED` still blocks at
+   any distance, which keeps sealed cavities unviewable.
+2. `min_visib_num` is absolute, so it bites hardest on the smallest clusters —
+   what is left late in a mission. A cluster-relative bar now applies, but only
+   to viewpoints that are NOT `isNearOccupied`
+   (`open_visib_fraction` 0.5, `open_visib_floor` 4). The near-occupied
+   exclusion is load-bearing: relaxing globally regressed falcon_sjtu's
+   warehouse into a pinned abort by admitting frontiers bounding sealed crate
+   interiors.
+3. `grantFinishAmnesty()` was already ported and already wired, but is checked
+   BEFORE categorisation and guarded on `frontiers_` and `tmp_frontiers_` both
+   being empty — so it misses the case that actually ends missions, where the
+   last cluster is in `tmp_frontiers_` and goes dormant during categorisation.
+   A second categorisation pass now re-checks it afterwards, bounded by
+   `finish_amnesty_max_` as before.
+
+All three default to upstream behaviour in the source; `nav_stack.launch` sets
+the params that switch them on. The script is idempotent (it no-ops if
+`visib_unknown_tolerance` is already present) and fails loudly if any anchor
+does not match exactly once.
+
+## Not ported from `falcon_sjtu`, and why
+
 `falcon_vp_audit`, `falcon_visib_unknown_tolerance`, `falcon_open_visib_bar`,
-`falcon_simtime`, `falcon_sjtu_session`, `falcon_publish_fail_blacklist`.
-Also not ported: `falcon_keep_out_boxes`/`falcon_astar_inflate`, which exist
-only inside falcon_sjtu's `falcon-ros-custom:v1` docker-commit image with no
-`.patch` file at all — see `[[project_falcon_patch_porting_gap]]` (repo
+`falcon_finish_amnesty_gate` — all four target the same regions of
+`frontier_finder.cpp` that our own ports (`falcon_deadend_guard`,
+`falcon_blocked_region_ttl`, `falcon_blocked_region_widen`,
+`falcon_publish_fail_blacklist`) already rewrote, and fail `git apply` and
+`git apply --3way` in **any** order. Verified against the live tree
+2026-08-18: each fails at a different hunk of the same file. The two that
+matter for exploration coverage are carried by
+`fix_falcon_frontier_visibility.sh` above instead; `falcon_vp_audit` is a
+diagnostic counter set we do without.
+
+`fix_falcon_sop.sh` is superseded by `falcon_deadend_guard` in falcon_sjtu but
+NOT applied that way here — Rooster's simpler `fix_falcon_sop.sh` sed is still
+in place and untouched by the port.
+
+Still unported: `falcon_simtime`, `falcon_sjtu_session` (session/bookkeeping,
+not behaviour). Also not ported: `falcon_keep_out_boxes`/`falcon_astar_inflate`,
+which exist only inside falcon_sjtu's `falcon-ros-custom:v1` docker-commit image
+with no `.patch` file at all — see `[[project_falcon_patch_porting_gap]]` (repo
 memory) before assuming that image is disposable.

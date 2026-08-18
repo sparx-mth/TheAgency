@@ -100,6 +100,27 @@ class FalconExplorationFollowerNode:
         # awareness at all (only tracked yaw). See LESSONS.md.
         self.tilt_limit_deg = float(G("~tilt_limit_deg", 15.0))
 
+        # 2026-08-18: measured that this node was emitting PURE LATERAL demand
+        # -- cmd_fwd exactly 0.000 and cmd_wz exactly 0.000 across 2254
+        # consecutive samples, while cmd_lat averaged 0.49 m/s. Rooster's
+        # lateral axis is its worst (ground-truth measured dead until ~axis
+        # 1000, then 30deg+ of roll), and its forward axis is its best (usable
+        # from ~620, up to 1.25 m/s). Following FALCON's independently-planned
+        # yaw curve leaves the nose across the direction of travel, so every
+        # command lands on the bad axis.
+        #
+        # "course" mode instead points the nose ALONG the commanded velocity,
+        # turning sideways demand into forward demand, and holds translation
+        # until roughly aligned (turn-then-go) so the aircraft is not sliding
+        # sideways mid-turn. "reference" restores the old behaviour of tracking
+        # FALCON's own yaw curve -- keep it for comparison, not as the default.
+        self.yaw_mode = str(G("~yaw_mode", "course")).strip().lower()
+        self.course_min_speed = float(G("~course_min_speed", 0.05))
+        # Near 90, not 40: cos(err) fades forward speed out on its own, so this
+        # only needs to catch the sign change past 90 deg. See the shaping block
+        # in the command path for the measurement behind that.
+        self.align_gate_deg = float(G("~align_gate_deg", 85.0))
+
         limits = KinematicLimits(
             max_speed_xy=float(G("~max_speed_xy", 1.2)),
             max_speed_z=float(G("~max_speed_z", 0.6)),
@@ -116,15 +137,49 @@ class FalconExplorationFollowerNode:
         # <=0.0 disables. This checks MEASURED speed (from odometry), not the
         # commanded reference -- max_speed_xy above only clamps what the
         # tracker asks for, it says nothing about what the aircraft is
-        # actually doing. Rooster's own velocity response to a fixed-
-        # magnitude Twist pulse is a closed FCU control loop we don't own
-        # and can overshoot; this is a backstop against that, independent of
-        # whatever FALCON/the tracker computed. When measured horizontal
-        # speed is already at/above this, translation is withheld for that
-        # tick (let it coast down) rather than adding another pulse on top
-        # of a already-fast platform. Yaw is unaffected -- it isn't
-        # "thrust" in the same sense and turning doesn't add speed.
+        # actually doing. It is a backstop against a genuine runaway, not a
+        # speed regulator: the adapter downstream now closes a real velocity
+        # loop on truth-derived velocity, so ordinary overshoot is its job.
+        #
+        # It used to zero translation outright the instant measured speed
+        # touched the cap. Measured 2026-08-18: that produced bang-bang -- full
+        # command, overspeed, zero, coast, full command -- and the achieved
+        # speed histogram showed spikes to 0.99 m/s against a 0.30 m/s demand.
+        # A hard cutoff also hands the downstream servo a step to zero, which
+        # discards its integrator. So taper instead, and only past the cap.
+        # Yaw is unaffected -- turning doesn't add speed.
         self.max_measured_speed_xy = float(G("~max_measured_speed_xy", 0.0))
+        # Fraction of the cap over which the taper runs to zero: 0.5 means
+        # translation is fully withheld at 1.5x the cap and scaled linearly
+        # between. <=0 restores the old hard cutoff at the cap.
+        self.measured_speed_taper = float(G("~measured_speed_taper", 0.5))
+
+        # ── Pinned-against-something escape ────────────────────────────────
+        # Measured 2026-08-18: the aircraft sat at one point for 400 SECONDS
+        # while this node commanded 0.45 m/s forward the whole time, and nothing
+        # anywhere reacted. FALCON's own stall guard could not help -- it only
+        # fires when the aircraft is SHORT of its target viewpoint, and FALCON
+        # believed it had already arrived, because a wall inside the depth near
+        # clip (0.45 m) is invisible to the map, so the viewpoint it chose was
+        # on the far side of a wall it could not see.
+        #
+        # This detector deliberately depends on nothing but its own two
+        # measurements -- "I am asking for motion" and "the aircraft is not
+        # moving". It cannot be fooled by a wrong map or a confident planner,
+        # and reverse is the only direction that gets this airframe off a wall
+        # (there is no lateral authority worth using).
+        self.stall_cmd_mps = float(G("~stall_cmd_mps", 0.15))
+        self.stall_speed_mps = float(G("~stall_speed_mps", 0.06))
+        self.stall_detect_sec = float(G("~stall_detect_sec", 3.0))
+        self.escape_sec = float(G("~escape_sec", 2.5))
+        self.escape_speed_mps = float(G("~escape_speed_mps", 0.30))
+        self.escape_yaw_rate_deg = float(G("~escape_yaw_rate_deg", 35.0))
+        self.escape_cooldown_sec = float(G("~escape_cooldown_sec", 4.0))
+        self._stall_since = None
+        self._escape_until = None
+        self._escape_ready_at = None
+        self._escape_sign = 1.0
+        self._escapes = 0
 
         # ── Rooster force shaping: fixed-magnitude pulses, no docking gait ──
         # See the module docstring for why ClosureGait is deliberately not used
@@ -164,6 +219,7 @@ class FalconExplorationFollowerNode:
         self._requested_mode = None
         self._last_request_pub_t = rospy.Time(0)
         self._last_setpoint = None
+        self._last_heading_err = None
         self._prev_tick_t = None
 
         # ── ROS I/O (publishers before subscribers) ──────────────────
@@ -308,36 +364,166 @@ class FalconExplorationFollowerNode:
             velocity=self._velocity, reference_age=reference_age)
         self._last_setpoint = setpoint
 
+        # ── Heading: aim the nose along the path, not along FALCON's own yaw ──
+        world_speed = math.hypot(setpoint.vx, setpoint.vy)
+        heading_err = None
+        if self.yaw_mode == "course" and world_speed > self.course_min_speed:
+            desired_yaw = math.atan2(setpoint.vy, setpoint.vx)
+            heading_err = math.atan2(math.sin(desired_yaw - self._yaw),
+                                     math.cos(desired_yaw - self._yaw))
+
         # World-frame velocity -> body frame (Rooster's cmd_vel convention).
         cos_y, sin_y = math.cos(self._yaw), math.sin(self._yaw)
         body_vx = setpoint.vx * cos_y + setpoint.vy * sin_y
         body_vy = -setpoint.vx * sin_y + setpoint.vy * cos_y
 
+        if heading_err is not None:
+            # Turn while going, and only stop turning-in-place when the nose is
+            # so far off that forward thrust would take the aircraft away from
+            # the reference. Lateral is dropped either way -- it is what causes
+            # the roll excursions, and a course-aligned nose does not need it.
+            #
+            # cos(err) already does the right thing across the whole range: it
+            # fades forward speed out as the nose swings away and goes negative
+            # past 90 deg, where "forward" genuinely is the wrong direction. The
+            # gate only has to catch that sign change, so it sits near 90 rather
+            # than at 40 -- measured 2026-08-18, a 40 deg gate stopped the
+            # aircraft dead at heading errors of 45-57 deg, which are completely
+            # ordinary mid-turn values, and the reference kept moving while it
+            # stood still. That was a large part of a tracking error that
+            # sawtoothed to 4.2 m.
+            if abs(heading_err) > math.radians(self.align_gate_deg):
+                body_vx = 0.0
+            else:
+                body_vx = world_speed * math.cos(heading_err)
+            body_vy = 0.0
+
         if self.max_measured_speed_xy > 0.0 and self._velocity is not None:
             measured_speed = math.hypot(self._velocity[0], self._velocity[1])
-            if measured_speed >= self.max_measured_speed_xy:
+            overspeed = measured_speed / self.max_measured_speed_xy
+            if overspeed > 1.0:
+                if self.measured_speed_taper > 0.0:
+                    scale = 1.0 - (overspeed - 1.0) / self.measured_speed_taper
+                    scale = max(0.0, min(1.0, scale))
+                else:
+                    scale = 0.0
                 rospy.logwarn_throttle(
-                    2.0, "falcon_exploration_follower: measured speed %.2fm/s >= "
-                    "%.2fm/s cap, withholding translation this tick",
-                    measured_speed, self.max_measured_speed_xy)
-                body_vx = 0.0
-                body_vy = 0.0
+                    2.0, "falcon_exploration_follower: measured speed %.2fm/s over "
+                    "%.2fm/s cap, scaling translation to %.0f%%",
+                    measured_speed, self.max_measured_speed_xy, 100.0 * scale)
+                body_vx *= scale
+                body_vy *= scale
+
+        # Pinned? Then nothing above matters: back off and turn away. Placed
+        # after all normal shaping precisely so it overrides it.
+        escape_yaw_rate = self._update_escape(body_vx, body_vy)
+        if escape_yaw_rate is not None:
+            body_vx = -self.escape_speed_mps
+            body_vy = 0.0
 
         # The tracker gives an absolute heading; a yaw RATE command is what
         # cmd_vel needs. Proportional on the same signed error the tracker
         # already computed (reference heading vs. measured), capped at the
         # platform's own ceiling.
-        yaw_rate = saturate(self.yaw_kp * setpoint.yaw_error_rad,
+        yaw_error = heading_err if heading_err is not None else setpoint.yaw_error_rad
+        yaw_rate = saturate(self.yaw_kp * yaw_error,
                             self.tracker.params.limits.max_yaw_rate)
+        if escape_yaw_rate is not None:
+            yaw_rate = escape_yaw_rate
 
-        self._publish_cmd(body_vx, body_vy, yaw_rate)
+        # Altitude was deliberately dropped here for a long time, because
+        # rooster_command_unit owns the throttle axis and a second publisher
+        # would fight it. It is now forwarded instead of discarded: the adapter
+        # turns it into bounded nudges of that node's OWN hold setpoint, so the
+        # single-owner guarantee holds and the tuned hold loop still flies it.
+        # Without this the aircraft maps one horizontal band at a fixed height.
+        # Never during an escape -- climbing while pinned is not an escape.
+        body_vz = 0.0 if escape_yaw_rate is not None else float(setpoint.vz)
 
-    def _publish_cmd(self, vx, vy, wz):
+        self._last_heading_err = heading_err
+        self._publish_cmd(body_vx, body_vy, yaw_rate, body_vz)
+
+    def _update_escape(self, body_vx, body_vy):
+        """Detect being pinned, and drive the escape while one is running.
+
+        Depends on nothing but the command this node just computed and the
+        measured speed -- no map, no planner opinion, no attitude. See the
+        stall_* parameter comments for why that independence is the point.
+
+        Args:
+            body_vx: Forward velocity about to be commanded, m/s.
+            body_vy: Lateral velocity about to be commanded, m/s.
+
+        Returns:
+            Yaw rate to command (rad/s) while escaping, or ``None`` when the
+            aircraft is flying normally and the caller should keep its own
+            command.
+        """
+        now = rospy.Time.now().to_sec()
+
+        if self._escape_until is not None:
+            if now < self._escape_until:
+                return self._escape_sign * math.radians(self.escape_yaw_rate_deg)
+            self._escape_until = None
+            self._escape_ready_at = now + self.escape_cooldown_sec
+            self._stall_since = None
+            rospy.logwarn("falcon_exploration_follower: escape complete, resuming "
+                          "(cooldown %.0fs)", self.escape_cooldown_sec)
+            return None
+
+        if self._escape_ready_at is not None and now < self._escape_ready_at:
+            return None
+
+        asking = math.hypot(body_vx, body_vy) > self.stall_cmd_mps
+        if not asking or self._velocity is None:
+            self._stall_since = None
+            return None
+
+        moving = math.hypot(self._velocity[0], self._velocity[1]) > self.stall_speed_mps
+        if moving:
+            self._stall_since = None
+            return None
+
+        if self._stall_since is None:
+            self._stall_since = now
+            return None
+        if now - self._stall_since < self.stall_detect_sec:
+            return None
+
+        # Alternate the turn direction between escapes: if one side is blocked,
+        # repeating the same turn walks the aircraft along the same wall.
+        self._escapes += 1
+        self._escape_sign = 1.0 if self._escapes % 2 else -1.0
+        self._escape_until = now + self.escape_sec
+        rospy.logwarn(
+            "falcon_exploration_follower: PINNED -- asked for %.2f m/s for %.1fs and "
+            "measured %.2f m/s. Reversing at %.2f m/s and turning %+.0f deg/s "
+            "(escape #%d)",
+            math.hypot(body_vx, body_vy), now - self._stall_since,
+            math.hypot(self._velocity[0], self._velocity[1]),
+            self.escape_speed_mps, self._escape_sign * self.escape_yaw_rate_deg,
+            self._escapes)
+        return self._escape_sign * math.radians(self.escape_yaw_rate_deg)
+
+    def _publish_cmd(self, vx, vy, wz, vz=0.0):
+        """Publish a body-frame velocity command.
+
+        Args:
+            vx: Forward velocity, m/s.
+            vy: Lateral velocity, m/s.
+            wz: Yaw rate, rad/s.
+            vz: World-frame vertical velocity, m/s. Passed through UNSHAPED --
+                the pulse shaper exists to beat the horizontal axes' dead band,
+                and the vertical path downstream is not an axis at all: the
+                adapter integrates this into bounded altitude-target nudges and
+                lets rooster_command_unit's own hold loop fly them, so it must
+                see the real demand rather than a pulse.
+        """
         shaped = self.shaper.shape(ControlCommand.velocity(float(vx), float(vy), 0.0, float(wz)))
         m = Twist()
         m.linear.x = float(shaped.x)
         m.linear.y = float(shaped.y)
-        m.linear.z = 0.0
+        m.linear.z = float(vz)
         m.angular.z = float(shaped.yaw_rate)
         self.cmd_pub.publish(m)
 
@@ -345,10 +531,13 @@ class FalconExplorationFollowerNode:
         sp = self._last_setpoint
         rospy.loginfo(
             "falcon_exploration_follower hb  demo=%s  ref_ready=%s  "
-            "pos_err=%s  holding=%s",
+            "pos_err=%s  holding=%s  hdg_err=%s  escapes=%d%s",
             self.current_demo_mode, self._reference_ready,
             "-" if sp is None else "%.2fm" % sp.position_error_m,
-            "-" if sp is None else sp.holding)
+            "-" if sp is None else sp.holding,
+            "-" if getattr(self, "_last_heading_err", None) is None
+            else "%.0fdeg" % math.degrees(self._last_heading_err),
+            self._escapes, " ESCAPING" if self._escape_until else "")
 
 
 def main():
