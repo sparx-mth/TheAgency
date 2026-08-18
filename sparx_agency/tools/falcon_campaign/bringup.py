@@ -148,6 +148,9 @@ _PATCH_MARKERS = {
         "replan_from_pose",         # falcon_replan_from_pose.patch
         "finish_reopen",            # fix_falcon_finish_reopen.sh
     ],
+    "/catkin_ws/devel/lib/fast_planner/traj_server": [
+        "exit_on_finish",           # fix_falcon_finish_reopen.sh (traj_server half)
+    ],
     "/catkin_ws/devel/lib/libexploration_preprocessing.so": [
         "visib_unknown",            # fix_falcon_frontier_visibility.sh
         "amnesty",                  # falcon_finish_amnesty_gate.patch
