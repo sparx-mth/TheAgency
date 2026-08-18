@@ -334,7 +334,19 @@ def _land():
     seq.send_cmd_nav("disarm", C.DRONE_ID)
 
 
-def run(blocks, min_battery):
+#: Battery floor for ABORTING a sweep in progress, as opposed to starting one.
+#:
+#: These are deliberately different numbers. Starting needs a near-full pack
+#: (bringup.MIN_FLIGHT_BATTERY) because a sweep that dies a third of the way
+#: through wastes a Sphera restart. Aborting only needs the point past which the
+#: samples stop being trustworthy -- measured below ~25% a "forward" command
+#: produces mostly lateral motion as thrust authority runs out (LESSONS.md).
+#: Using the start threshold as the abort floor would end every sweep after
+#: about a minute of flying and need ~20 Sphera restarts to finish.
+ABORT_BATTERY_FRACTION = 0.25
+
+
+def run(blocks, min_battery, abort_battery=ABORT_BATTERY_FRACTION):
     """Fly the experiment, resuming whatever a previous battery left unflown.
 
     Returns:
@@ -363,7 +375,7 @@ def run(blocks, min_battery):
         recording = True
         time.sleep(3)
         for segment in remaining:
-            record = _run_segment(segment, min_battery)
+            record = _run_segment(segment, abort_battery)
             _checkpoint(run_dir, checkpoint, record)
             summary["flown"] += 1
             summary["aborted_segments"] += int(record["aborted"])
@@ -406,6 +418,10 @@ def main(argv=None):
                         help="Battery floor, 0-1 (default: %(default)s). It is a "
                              "data-quality gate as well as a safety one, so lowering "
                              "it trades sample quality for sample count.")
+    parser.add_argument("--abort-battery", type=float, default=ABORT_BATTERY_FRACTION,
+                        help="Battery floor for aborting a sweep already in the "
+                             "air, 0-1 (default: %(default)s). Separate from "
+                             "--min-battery, which only gates STARTING one.")
     args = parser.parse_args(argv)
     blocks = [part.strip() for part in args.blocks.split(",") if part.strip()]
     if args.dry_run:
@@ -415,7 +431,8 @@ def main(argv=None):
         print(json.dumps(fitting.fit(args.fit)["recommended"], indent=2))
         return 0
     if args.run:
-        return 0 if run(blocks, args.min_battery)["ended"] == "completed" else 1
+        summary = run(blocks, args.min_battery, args.abort_battery)
+        return 0 if summary["ended"] == "completed" else 1
     parser.error("choose one of --run, --fit RUN_DIR or --dry-run")
 
 

@@ -20,7 +20,7 @@ Truth is recorded raw -- no sign flips, no frame corrections, no filtering: a
 recording that applied a correction cannot un-apply it once that correction
 turns out to be wrong.
 
-Runs inside the ``robotican_dev`` container (ROS 2 Humble, ROS_DOMAIN_ID 9,
+Runs inside the ``it`` container (ROS 2 Humble, ROS_DOMAIN_ID 9,
 CycloneDDS), where the repo is mounted at its host path so output lands straight
 in ``config.RUNS_DIR``. Subscribe-only: it never publishes and never actuates.
 """
