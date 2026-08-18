@@ -109,35 +109,46 @@ collisions, whether exploration completed or froze.
 
 Ranked. **Delete a problem when it is fixed and verified in flight. Add new ones as found.**
 
-### P1 — Stop/go stutter (FIXES APPLIED 2026-08-18, awaiting flight verification)
-Measured from a real run: **189 stops, median 0.7 s, 17 % of flight time at zero speed.**
-Root causes, all fixed in commit `cb2e38fc`:
-1. `yaw_mode="course"` zeroed forward drive whenever |heading error| > 85°, and the 45°/s
-   yaw cap kept it there (error p50 56°, p75 88°, 28 % of ticks past the gate).
-   → yaw cap 45→90°/s, and a forward-speed floor through the turn (`turn_creep_mps`).
-2. `PulseShaper` in `snap` mode with `min_vxy=0.26` quantised every command to {0, 0.26,
-   analog} — a *duplicate* dead-band compensator, since the adapter already does this
-   closed-loop. → `force_mode=none`, `min_vxy=0`.
-3. Aircraft flew 2–4× faster than commanded, so it overshot and reversed course
-   constantly. → moving-regime axis curve (`x_v_full_moving`).
-4. `max_measured_speed_xy=0.7` sat *below* normal cruise, modulating 22 % of the flight.
-   → 1.5, plus its taper actually wired.
-5. Axis releases were instantaneous = an active brake in PX4 Position mode.
-   → ramped (`forward_axis_release_per_sec`).
-**Verify:** `metrics.json` → stops/min, `% below 0.05 m/s`, achieved/commanded ratio.
+### P1 — Stop/go stutter (SOLVED 2026-08-18, verified in flight)
 
-### P2 — FALCON stops replanning (ROOT CAUSE FOUND + FIXED 2026-08-18)
-**The image was stale.** `falcon-ros:noetic` was built 11:17; the commit adding the
-finish-grace fix landed 14:36. `strings` showed `finish_grace` **0 times** in the binary, so
-`nav_stack.launch` was setting rosparams nothing read. FALCON's FSM entered its *terminal*
-`FINISH` state after 26 s (with 560 frontier points still live), `traj_server` printed
-"Task finished" and **exited**, leaving `/planning/pos_cmd` with no publisher and the
-follower holding station forever — for 6.5 h.
-Fixed by rebuilding the image, and `bringup.assert_falcon_patches()` now refuses to fly a
-stale image at **every bring-up**, not just at build time.
-Still open, lower priority: `FINISH` remains an absorbing state with no exit; the
-blocked-region blacklist can latch near-permanently; `blocked_region_radius_max` (3.5 m) <
-`candidate_rmax` (5.5 m) so a shadow can never retire the frontier that produced it.
+| metric | baseline | after fixes |
+|---|---|---|
+| stops per minute | 12.6 | **0.49** |
+| time below 0.05 m/s | 17 % | **1.1 %** |
+| tracking error | sawtooth to 4.2 m | mean 0.40 m, p90 0.47 m |
+| ticks past the 85° align gate | 28 % | **6.3 %** |
+| speed-taper warnings | 332 | 4 |
+
+What did it: yaw cap 45→90°/s, `force_mode=none` + `min_vxy=0` (a duplicate dead-band
+quantiser that turned partial commands into exact zeros), a forward-speed floor through
+turns, the measured-speed backstop raised 0.7→1.5 m/s with its taper wired, ramped axis
+releases, and a warm-start across the axis dead band. Keep watching `stops_per_min` and
+`frac_time_below_stop_speed` in every run's metrics — this is the headline smoothness pair.
+
+### P2 — Exploration stops permanently (SECOND ROOT CAUSE FOUND 2026-08-18)
+
+The stale-image fix was necessary but **not sufficient**. Measured on a clean 610 s run:
+the follower tracked for its first **106 s**, FALCON logged "Exploration finished" once,
+and the follower then reported `holding=True` for the remaining **560 s** — 84 % of the
+flight.
+
+Two things make FINISH permanent, and both are now patched
+(`patches/fix_falcon_finish_reopen.sh`, wired into the Dockerfile):
+
+1. **`FINISH` is an absorbing FSM state** — no transition out of it exists anywhere in
+   `exploration_fsm.cpp`, while `frontierCallback` happily goes on finding frontiers *in*
+   that state. It now re-opens to `PLAN_TRAJ` once frontiers reappear and a cooldown has
+   passed, resetting the grace counters on the way out.
+2. **`replan == 2` ends the traj_server PROCESS** (`task_finished_` breaks its main loop).
+   So even a re-opened FSM would have had nothing to fly its plan. Type 2 now stops the
+   trajectory without stopping the process; `/traj_server/exit_on_finish` restores upstream.
+
+Diagnosis aid added: the follower heartbeat now prints `ref_age` and warns past 5 s.
+`ref_ready=True` printed for the whole 560 s because it only reflects the last message's
+flag — that is what sent the first diagnosis into the controller instead of the planner.
+
+**Verify next run:** `grep -c "Re-opening exploration"` in the FSM log, `frac_holding` in
+metrics.json (was 0.84), and that `traj_server` is still alive at the end of the flight.
 
 ### P3 — Walls not mapped high enough (FIXED 2026-08-18)
 The walls *were* mapped; they were never *published*. `vbox_max_z = 2.8` guillotined every

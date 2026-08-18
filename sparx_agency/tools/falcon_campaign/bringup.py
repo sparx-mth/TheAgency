@@ -30,6 +30,16 @@ import time
 from sparx_agency.tools.falcon_campaign import config as C
 
 
+#: Battery fraction below which a cycle must not fly.
+#:
+#: High on purpose. Measured 2026-08-18: a ~5 minute flight took the pack from
+#: 92% to 40%, so a full ten-minute window does not fit in anything less than a
+#: nearly-full battery. It is also a data-quality gate -- below ~25% a "forward"
+#: command produces mostly lateral motion as thrust authority runs out, which
+#: silently corrupts every speed and calibration number the run produces.
+MIN_FLIGHT_BATTERY = 0.80
+
+
 class BringupError(RuntimeError):
     """A step failed its health check. Never raised for a recoverable retry."""
 
@@ -136,6 +146,7 @@ _PATCH_MARKERS = {
         "finish_grace",             # fix_falcon_finish_grace.sh
         "publish_fail_blacklist",   # falcon_publish_fail_blacklist.patch
         "replan_from_pose",         # falcon_replan_from_pose.patch
+        "finish_reopen",            # fix_falcon_finish_reopen.sh
     ],
     "/catkin_ws/devel/lib/libexploration_preprocessing.so": [
         "visib_unknown",            # fix_falcon_frontier_visibility.sh
@@ -239,7 +250,7 @@ def restart_sphera(reentry_attempts=4):
     return False
 
 
-def ensure_sphera(min_battery=0.80):
+def ensure_sphera(min_battery=None):
     """Make sure a fresh, flyable ``R1`` exists with usable battery.
 
     Args:
@@ -256,10 +267,17 @@ def ensure_sphera(min_battery=0.80):
     Returns:
         True if the simulator is ready to fly.
     """
+    min_battery = MIN_FLIGHT_BATTERY if min_battery is None else min_battery
     if not container_up(C.DRONE_CONTAINER):
         return restart_sphera()
     level = battery_fraction()
-    if level is not None and level < min_battery:
+    if level is None:
+        # Unreadable is NOT healthy. Treating it as healthy is what let three
+        # cycles fly on a pack that had already reached 0%, and every number
+        # those flights produced is worthless. A restart costs ~40 s; an
+        # unverifiable flight costs the whole cycle.
+        return restart_sphera()
+    if level < min_battery:
         return restart_sphera()
     return True
 
@@ -497,6 +515,8 @@ def health_report():
         "cmd_vel_raw_publishers": ros1_publisher_count(C.ROS1_TOPICS["cmd_vel_raw"]),
     }
     report["manual_authority_ok"], report["manual_authority"] = manual_control_authority()
+    report["battery_ok"] = (report["battery"] is not None
+                            and report["battery"] >= MIN_FLIGHT_BATTERY)
     try:
         report["drone_image"] = assert_simulator()
     except BringupError as exc:
@@ -505,11 +525,12 @@ def health_report():
     report["ok"] = bool(
         report["falcon_up"] and report["bridge_up"] and report["exploration_node"]
         and report["frames_fresh"] and report["manual_authority_ok"]
+        and report["battery_ok"]
         and str(report["drone_image"]).startswith(C.SIM_IMAGE_PREFIX))
     return report
 
 
-def full_bringup(follower=None, extra="", min_battery=0.30):
+def full_bringup(follower=None, extra="", min_battery=None):
     """Everything, in order, ending with a verified-healthy stack on the ground.
 
     Deliberately stops short of arming: the twist adapter is not started and

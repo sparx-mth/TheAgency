@@ -546,15 +546,29 @@ class FalconExplorationFollowerNode:
 
     def _hb(self, _evt):
         sp = self._last_setpoint
+        # ref_age, not just ref_ready: the flag only reports the LAST message's
+        # trajectory_flag, so it reads True forever once traj_server dies. A run
+        # on 2026-08-18 held station for 560 s printing ref_ready=True the whole
+        # way, which sent the diagnosis into the controller instead of into the
+        # planner. The age is the number that would have said so immediately.
+        age = None
+        if self._reference_stamp is not None:
+            age = (rospy.Time.now() - self._reference_stamp).to_sec()
         rospy.loginfo(
-            "falcon_exploration_follower hb  demo=%s  ref_ready=%s  "
+            "falcon_exploration_follower hb  demo=%s  ref_ready=%s  ref_age=%s  "
             "pos_err=%s  holding=%s  hdg_err=%s  escapes=%d%s",
             self.current_demo_mode, self._reference_ready,
+            "-" if age is None else "%.1fs" % age,
             "-" if sp is None else "%.2fm" % sp.position_error_m,
             "-" if sp is None else sp.holding,
             "-" if getattr(self, "_last_heading_err", None) is None
             else "%.0fdeg" % math.degrees(self._last_heading_err),
             self._escapes, " ESCAPING" if self._escape_until else "")
+        if age is not None and age > 5.0:
+            rospy.logwarn(
+                "falcon_exploration_follower: no fresh /planning/pos_cmd for "
+                "%.0fs -- traj_server is gone or FALCON is in FINISH. The "
+                "aircraft is holding station, not tracking.", age)
 
 
 def main():

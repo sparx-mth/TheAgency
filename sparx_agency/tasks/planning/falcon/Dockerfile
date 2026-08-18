@@ -325,6 +325,18 @@ RUN chmod +x /tmp/fix_falcon_frontier_visibility.sh && /tmp/fix_falcon_frontier_
 COPY patches/fix_falcon_finish_grace.sh /tmp/fix_falcon_finish_grace.sh
 RUN chmod +x /tmp/fix_falcon_finish_grace.sh && /tmp/fix_falcon_finish_grace.sh
 
+# ── 6a-decies. And let a finished exploration START AGAIN ────────────────
+# ============== ROBOTICAN FIX ==============
+# The grace window above makes FINISH hard to REACH; it is still impossible to
+# LEAVE, and entering it publishes replan type 2, which ENDS the traj_server
+# process. Measured live 2026-08-18: a 610 s run tracked for its first 106 s,
+# finished once, and then held station for the remaining 560 s while its own
+# frontier finder -- which keeps running in FINISH -- went on finding work.
+# Re-opens FINISH when frontiers reappear, and stops traj_server exiting.
+# ============================================
+COPY patches/fix_falcon_finish_reopen.sh /tmp/fix_falcon_finish_reopen.sh
+RUN chmod +x /tmp/fix_falcon_finish_reopen.sh && /tmp/fix_falcon_finish_reopen.sh
+
 # ── 6a-nonies. Never fly (or hand downstream) a zero-duration trajectory ─
 # ============== ROBOTICAN FIX ==============
 # planTrajToView() logs "Time lower bound not satified" and then uses the

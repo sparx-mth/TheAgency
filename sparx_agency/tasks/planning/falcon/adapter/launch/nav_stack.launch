@@ -1336,6 +1336,19 @@
   <param name="/fsm/finish_grace_checks" value="$(arg fsm_finish_grace_checks)"/>
   <param name="/fsm/finish_grace_sec"    value="$(arg fsm_finish_grace_sec)"/>
 
+  <!-- FINISH RE-OPEN (patches/fix_falcon_finish_reopen.sh). The grace window
+       above only makes FINISH hard to reach; without this it is still
+       impossible to leave, and entering it stops traj_server flying anything.
+       Measured 2026-08-18: a 610s run tracked for 106s, finished once, then
+       held station for the remaining 560s while its own frontier finder kept
+       reporting work. Cooldown below 0 restores upstream's terminal FINISH. -->
+  <arg name="fsm_finish_reopen_cooldown_sec" default="5.0"/>
+  <arg name="fsm_finish_reopen_min_frontiers" default="1"/>
+  <arg name="traj_server_exit_on_finish" default="false"/>
+  <param name="/fsm/finish_reopen_cooldown_sec"  value="$(arg fsm_finish_reopen_cooldown_sec)"/>
+  <param name="/fsm/finish_reopen_min_frontiers" value="$(arg fsm_finish_reopen_min_frontiers)"/>
+  <param name="/traj_server/exit_on_finish"      value="$(arg traj_server_exit_on_finish)"/>
+
   <!-- Camera intrinsics: the cam_* args are now fully resolved
        (either from the YAML's camera_matrix.data via $(eval) above,
        or from literal fallbacks / CLI overrides), so a flat

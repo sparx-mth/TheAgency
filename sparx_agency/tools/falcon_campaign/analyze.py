@@ -36,6 +36,15 @@ except ImportError:  # executed as a plain script, e.g. inside a container
 #: speed lasting longer than MIN_STOP_S.
 STOP_SPEED_MPS, MIN_STOP_S = 0.05, 0.3
 
+#: Smallest commanded speed a per-tick achieved/commanded RATIO is computed at.
+#:
+#: Ratios of small numbers are not evidence. Gating at STOP_SPEED_MPS let a
+#: 0.05 m/s demand divide into a 0.8 m/s coast and report 16x, which pushed
+#: "axis calibration off, p90 5.14" to the top of a run's ranked findings while
+#: the mean achieved speed (0.378) and mean demand (0.380) were in fact within
+#: 1%. The platform cannot hold anything below ~0.15 m/s anyway.
+RATIO_MIN_COMMANDED_MPS = 0.15
+
 #: The FALCON follower gates translation until heading error drops below this.
 ALIGN_GATE_DEG = 85.0
 
@@ -78,6 +87,25 @@ def _num(value):
     except (TypeError, ValueError):
         return None
     return None if math.isnan(out) or math.isinf(out) else out
+
+
+def _through_origin_gain(pairs):
+    """Least-squares slope of achieved against commanded, forced through zero.
+
+    The honest single number for "does the platform deliver what was asked".
+    Unlike a mean of per-tick ratios it cannot be dominated by ticks where the
+    demand was nearly zero, and unlike a mean of speeds it is not fooled by a
+    run that spent most of its time near one operating point.
+
+    Args:
+        pairs: ``(commanded_mps, achieved_mps)`` samples.
+
+    Returns:
+        The slope, or None if there is nothing to fit. 1.0 is perfect.
+    """
+    num = sum(w * g for w, g in pairs)
+    den = sum(w * w for w, g in pairs)
+    return (num / den) if den > 0.0 else None
 
 
 def _stats(values):
@@ -321,6 +349,7 @@ def actuation_metrics(samples):
     for axis, key in (("x", "ax"), ("y", "ay")):
         dead, v_full = AXIS_CURVE[axis]
         counts, ratios, want_all, got_all, dead_ticks = [], [], [], [], 0
+        pairs = []                     # (commanded, achieved), for the slope
         for sample in samples:
             value = sample[key]
             if value is None:
@@ -334,12 +363,15 @@ def actuation_metrics(samples):
                 want_all.append(want)
                 if got is not None:
                     got_all.append(abs(got))
-                    ratios.append(abs(got) / want)
+                    if want >= RATIO_MIN_COMMANDED_MPS:
+                        ratios.append(abs(got) / want)
+                    pairs.append((want, abs(got)))
         out[axis] = dict(ticks=len(counts), dead_band_ticks=dead_ticks,
                          axis_counts=_stats([c for c in counts if c > 0]),
                          commanded_mps=_stats(want_all),
                          achieved_mps=_stats(got_all),
                          achieved_over_commanded=_stats(ratios),
+                         gain=_through_origin_gain(pairs),
                          frac_dead_band=(None if not counts
                                          else dead_ticks / float(len(counts))))
     return out
@@ -459,12 +491,14 @@ def _rank(m):
             "motion demanded, none produced." % (
                 axis, d["dead_band_ticks"], d["ticks"],
                 _pct(d["frac_dead_band"]), int(AXIS_CURVE[axis][0])))
-        gap = abs((ratio["mean"] or 1.0) - 1.0)
-        add(3.0 * gap if gap > 0.3 else 0,
-            "Axis %s calibration off: achieved/commanded %s over %d ticks -- "
+        gain = d.get("gain")
+        gap = abs((gain if gain is not None else 1.0) - 1.0)
+        add(3.0 * gap if gap > 0.25 else 0,
+            "Axis %s calibration off: delivers %sx what is commanded "
+            "(through-origin gain over %d ticks; per-tick ratio %s) -- "
             "flies %s than commanded (%s vs %s m/s mean)." % (
-                axis, _spread(ratio), ratio["n"],
-                "slower" if (ratio["mean"] or 1) < 1 else "faster",
+                axis, _f(gain), ratio["n"], _spread(ratio),
+                "slower" if (gain or 1) < 1 else "faster",
                 _f(d["commanded_mps"]["mean"]), _f(d["achieved_mps"]["mean"])))
     p90 = tr["pos_err_m"]["p90"] or 0
     add(2.0 * p90 if p90 > 0.8 else 0,
