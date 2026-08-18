@@ -122,6 +122,40 @@ def land_and_disarm(run_dir):
     seq.send_cmd_nav("disarm", C.DRONE_ID)
 
 
+def sample_coverage(run_dir):
+    """Append one coverage sample to ``coverage.jsonl``.
+
+    Coverage is the mission's actual goal, and until now nothing recorded it --
+    every metric the campaign optimised (smoothness, tracking error, stops) was
+    a proxy. FALCON publishes it on a ROS 1 topic inside the falcon container,
+    so it is sampled by exec rather than by the ROS 2 recorder. A plateau in
+    this number is the honest signal that exploration has stalled, whatever the
+    aircraft looks like it is doing.
+    """
+    cmd = (C.FALCON_ENV +
+           "timeout 6 rostopic echo -n1 /voxel_mapping/map_coverage 2>/dev/null "
+           "| head -1; timeout 6 rostopic echo -n1 "
+           "/planning_vis/frontier_pcl/width 2>/dev/null | head -1")
+    r = bringup.sh("docker exec %s bash -lc %s" % (C.FALCON_CONTAINER, shlex.quote(cmd)), 30)
+    numbers = []
+    for line in r.stdout.splitlines():
+        token = line.replace("data:", "").strip()
+        try:
+            numbers.append(float(token))
+        except ValueError:
+            continue
+    if not numbers:
+        return
+    row = {"wall": round(time.time(), 3), "coverage_m3": numbers[0]}
+    if len(numbers) > 1:
+        row["frontier_points"] = int(numbers[1])
+    try:
+        with open(str(run_dir / "coverage.jsonl"), "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except OSError:
+        pass
+
+
 def liveness_check(run_dir, tick):
     """Cheap mid-flight checks. Returns a reason to abort, or None.
 
@@ -180,6 +214,7 @@ def fly(run_dir, duration_s):
     while time.time() - started < duration_s:
         time.sleep(15)
         tick += 1
+        sample_coverage(run_dir)
         reason = liveness_check(run_dir, tick)
         if reason:
             result["ended"] = "aborted: %s" % reason

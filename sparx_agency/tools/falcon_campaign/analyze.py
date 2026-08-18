@@ -36,6 +36,9 @@ except ImportError:  # executed as a plain script, e.g. inside a container
 #: speed lasting longer than MIN_STOP_S.
 STOP_SPEED_MPS, MIN_STOP_S = 0.05, 0.3
 
+#: Coverage change below this counts as no change, m^3.
+COVERAGE_EPS_M3 = 0.5
+
 #: Smallest commanded speed a per-tick achieved/commanded RATIO is computed at.
 #:
 #: Ratios of small numbers are not evidence. Gating at STOP_SPEED_MPS let a
@@ -425,6 +428,52 @@ def health_metrics(samples, lines):
                                 for key, needle in _EVENTS))
 
 
+def coverage_metrics(run_dir):
+    """Explored volume over time -- the one metric that IS the mission.
+
+    Everything else this module reports is a proxy: an aircraft can fly
+    beautifully smooth circles forever and map nothing. A plateau here is the
+    honest signal that exploration has stalled, and it is the number to compare
+    across runs when judging whether a change actually helped.
+
+    Args:
+        run_dir: The run folder, expected to hold ``coverage.jsonl``.
+
+    Returns:
+        Final volume, the fraction of the box it represents, the mean rate, and
+        how long the trace spent flat at the end.
+    """
+    path = run_dir / "coverage.jsonl"
+    rows = []
+    if path.exists():
+        for line in path.read_text(errors="ignore").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    if len(rows) < 2:
+        return dict(samples=len(rows), final_m3=None, frac_of_box=None,
+                    rate_m3_per_min=None, plateau_s=None, frontier_points=None)
+
+    span = rows[-1]["wall"] - rows[0]["wall"]
+    gained = rows[-1]["coverage_m3"] - rows[0]["coverage_m3"]
+    # Trailing plateau: how long the last sample's value has already held.
+    plateau_s = 0.0
+    final = rows[-1]["coverage_m3"]
+    for row in reversed(rows[:-1]):
+        if abs(final - row["coverage_m3"]) > COVERAGE_EPS_M3:
+            break
+        plateau_s = rows[-1]["wall"] - row["wall"]
+    return dict(
+        samples=len(rows), final_m3=final,
+        frac_of_box=(final / config.EXPLORABLE_VOLUME_M3
+                     if getattr(config, 'EXPLORABLE_VOLUME_M3', 0) else None),
+        gained_m3=gained,
+        rate_m3_per_min=(gained / span * 60.0) if span > 0 else None,
+        plateau_s=plateau_s,
+        frontier_points=rows[-1].get("frontier_points"))
+
+
 def exploration_metrics(lines):
     """FSM transitions, replan verdicts, and whether exploration finished."""
     transitions, replans, plan_fail, finish_t = [], {}, 0, None
@@ -464,14 +513,20 @@ def _spread(stats, spec="%.2f"):
 
 
 def _pct(fraction):
-    """A 0-1 fraction as an integer-percent string; ``None`` reads as zero."""
-    return _f(100 * (fraction or 0), "%.0f")
+    """A 0-1 fraction as an integer-percent string.
+
+    ``None`` renders as ``?``, not as zero: "0% of the box" is a claim that the
+    aircraft mapped nothing, while the truth is that nothing was measured, and
+    those two lead to opposite decisions.
+    """
+    return "?" if fraction is None else _f(100 * fraction, "%.0f")
 
 
 def _rank(m):
     """Score candidate next fixes; the highest score is the most urgent."""
     mo, tr, al, ex, he = (m["motion"], m["tracking"], m["altitude"],
                           m["exploration"], m["health"])
+    cov = m.get("coverage") or {}
     out = []
 
     def add(score, text):
@@ -532,6 +587,21 @@ def _rank(m):
     add(1.5 if (ex["fsm_transitions"] and not ex["finished"]) else 0,
         "Exploration never reached FINISH in %ss (%d FSM transitions)." % (
             _f(mo["duration_s"], "%.0f"), ex["fsm_transitions"]))
+    # Coverage is the mission. A long plateau outranks everything except a dead
+    # traj_server, because a smooth, well-tracked flight that maps nothing is a
+    # failure that every other metric in this file will happily call a success.
+    plateau = cov.get("plateau_s") or 0.0
+    add(min(8.0, plateau / 60.0) if plateau >= 90.0 else 0,
+        "Coverage PLATEAUED for the last %ss at %s m3 (%s of the box) with %s "
+        "frontier points still reported -- the aircraft is flying but no longer "
+        "mapping." % (_f(plateau, "%.0f"), _f(cov.get("final_m3"), "%.0f"),
+                      _pct(cov.get("frac_of_box")), cov.get("frontier_points")))
+    rate = cov.get("rate_m3_per_min")
+    add(2.0 if (rate is not None and rate < 5.0 and plateau < 90.0) else 0,
+        "Coverage rate is only %s m3/min (%s m3 total, %s of the box) -- the "
+        "flight is smooth but slow to explore."
+        % (_f(rate, "%.1f"), _f(cov.get("final_m3"), "%.0f"),
+           _pct(cov.get("frac_of_box"))))
     add(9.0 if ex.get("traj_server_exited") else 0,
         "traj_server SHUT DOWN mid-flight: every later tick has no reference, so "
         "the follower holds station for the rest of the run. Check that "
@@ -562,6 +632,12 @@ def _render(run_dir, metrics):
              "Drone `%s`, map `%s`, %ss of telemetry (%d samples), %s m flown."
              % (config.DRONE_ID, config.MAP_NAME, _f(mo["duration_s"], "%.0f"),
                 metrics["samples_analyzed"], _f(mo["distance_m"], "%.1f")),
+             "",
+             "**Coverage: %s m3 (%s of the box), %s m3/min.** This is the "
+             "mission; everything below is a proxy for it."
+             % (_f((metrics.get("coverage") or {}).get("final_m3"), "%.0f"),
+                _pct((metrics.get("coverage") or {}).get("frac_of_box")),
+                _f((metrics.get("coverage") or {}).get("rate_m3_per_min"), "%.1f")),
              "", "## Fix next (ranked)", ""]
     lines += ["%d. %s" % (i, t)
               for i, t in enumerate(metrics["ranked_findings"], 1)] or [
@@ -631,6 +707,7 @@ def analyze(run_dir):
         actuation=actuation_metrics(flying),
         tracking=tracking_metrics(lines),
         altitude=altitude_metrics(flying, lines),
+        coverage=coverage_metrics(run_dir),
         health=health_metrics(samples, lines),
         exploration=exploration_metrics(lines))
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)

@@ -114,6 +114,13 @@ EXPLORATION_FOLLOWER = "reference"
 OBSTACLES_INFLATION = 0.40
 SAFE_DISTANCE = 0.40
 
+#: Volume of the exploration box, m^3 -- the denominator for coverage.
+#: From `python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize` on
+#: maps/sphera_jail.yaml: box 32.0 x 32.0 x 4.8 m. Re-derive it there if the
+#: map's flight_band or bounds change; it is a reporting scale only and nothing
+#: in the flight path reads it.
+EXPLORABLE_VOLUME_M3 = 4915.0
+
 FLIGHT_SECONDS = 600           # the operator's 10-minute window
 HOVER_SETTLE_TIMEOUT_S = 60.0
 
