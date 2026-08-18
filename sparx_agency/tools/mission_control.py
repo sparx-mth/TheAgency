@@ -13,10 +13,18 @@ import shlex
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import streamlit as st
 import yaml
+
+from sparx_agency.tools.falcon_flight_sequence import (
+    FALCON_PREFLIGHT_ORDER,
+    TWIST_ADAPTER_KEY,
+    send_cmd_nav,
+    wait_for_stable_hover,
+)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -105,6 +113,12 @@ _NANOOWL_ENV = f"cd {NANOOWL_REPO}"
 # ROBOTICAN container (docker compose service `it`, network_mode: host)
 ROOSTER_CONTAINER   = "it"
 ROOSTER_DOCKER_COMPOSE = "~/rqs_iai_ws/src"
+# This repo's root, derived rather than hardcoded (tools/ -> sparx_agency/ -> root).
+PC_REPO = str(Path(__file__).resolve().parents[2])
+# Dev container the vision/control host-side wrappers exec into. Unlike `it`,
+# nothing used to start this from the UI -- three services simply failed if it
+# was down, which is exactly the kind of silent gap this launcher exists to close.
+ROOSTER_DEV_CONTAINER = "robotican_dev"
 _CONTAINER_ENV = """\
 export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.8/site-packages:/home/rooster
 source /opt/ros/foxy/setup.bash
@@ -434,6 +448,27 @@ ROBOTICAN_SERVICES: list[Service] = [
     # talks to a topic it publishes. Added 2026-08-13 so a fresh bring-up no
     # longer needs a separate manual `docker compose up -d it` outside this UI
     # (see the "Container commands" expander below for the equivalent by hand).
+    Service(
+        name="Rooster Dev Container (robotican_dev)",
+        key="rooster_dev_container",
+        group="rooster_core",
+        description=(
+            "Humble + TensorRT dev container that Rooster Frame Capture, Rooster "
+            "Depth Processor and Rooster Twist Control Adapter all docker-exec "
+            "into. Until 2026-08-18 nothing in this UI started it -- those three "
+            "services just failed if it was down, with no hint that a container "
+            "was the reason. Survives a Sphera restart; only needs starting once "
+            "per boot."
+        ),
+        cmd=(f"cd {PC_REPO} && "
+             "docker compose -f docker-compose.robotican.yml up -d robotican"),
+        env="docker",
+        machine="pc",
+        docker_container=ROOSTER_DEV_CONTAINER,
+        stop_extra=(f"cd {PC_REPO} && "
+                    "docker compose -f docker-compose.robotican.yml stop robotican "
+                    "2>/dev/null || true"),
+    ),
     Service(
         name="Rooster Sphera Interface Container (it)",
         key="rooster_it_container",
@@ -1250,6 +1285,7 @@ def _wait_until(svc: Service, timeout: float = 15, interval: float = 0.5) -> boo
 # (service_key, wait_timeout_s); the launcher waits for one to come up
 # before starting the next, instead of a fixed sleep between every step.
 ROOSTER_LAUNCH_ORDER: list[tuple[str, float]] = [
+    ("rooster_dev_container", 20),       # hosts frame capture / depth / twist adapter
     ("rooster_it_container", 15),        # vendor backend -- everything else execs into it
     ("rooster_planner_falcon", 20),      # falcon container must exist first
     ("rooster_gtl_R1", 8),
@@ -1265,6 +1301,94 @@ ROOSTER_LAUNCH_ORDER: list[tuple[str, float]] = [
     ("rooster_planner_rviz", 8),
     ("rooster_planner_bev_goal", 8),
 ]
+
+
+def _run_falcon_sequence(follow_altitude: bool = False) -> None:
+    """Bring the stack up, take off, and hand control to FALCON exploration.
+
+    Writes progress straight into the page as it goes, so a stall is visible
+    at the step it stalled on rather than as a frozen button.
+
+    Args:
+        follow_altitude: Whether the twist adapter is allowed to drive
+            altitude. Default off -- see the checkbox comment for the measured
+            direction inversion behind that.
+    """
+    svc_map = {s.key: s for s in ROBOTICAN_SERVICES}
+    progress = st.empty()
+    log: list[str] = []
+
+    def say(line: str) -> None:
+        log.append(line)
+        progress.markdown("  \n".join(log))
+
+    # ── 1. Ground work: everything that must exist before the aircraft moves ──
+    for key, timeout in FALCON_PREFLIGHT_ORDER:
+        svc = svc_map[key]
+        if _is_running(svc):
+            say(f"✅ {svc.name} — already running")
+            continue
+        say(f"⏳ {svc.name}…")
+        err = start_service(svc)
+        if err:
+            say(f"⚠️ {svc.name} — start error: {err}")
+            continue
+        ok = _wait_until(svc, timeout=timeout)
+        say(f"{'✅' if ok else '⚠️ (timed out, continuing)'} {svc.name}")
+        # Same stopgap as Launch All: the shipped falcon-ros:noetic image
+        # predates the Dockerfile declaring python3-requests/python3-pil.
+        if key == "rooster_planner_falcon":
+            say("⏳ Installing python3-requests/pil (stopgap)…")
+            subprocess.run(
+                ["docker", "exec", "falcon", "bash", "-c",
+                 "apt-get update -qq && apt-get install -y python3-requests python3-pil"],
+                capture_output=True, check=False, timeout=60,
+            )
+
+    # ── 2. Clear the takeoff path ────────────────────────────────────────────
+    twist = svc_map[TWIST_ADAPTER_KEY]
+    if _is_running(twist):
+        say("⏸️ Stopping the twist adapter so it cannot cancel the climb…")
+        stop_service(twist)
+        time.sleep(1.5)
+
+    # ── 3. Arm and take off, back to back ────────────────────────────────────
+    # A gap here lets the drone silently disarm and re-arm inside takeoff(),
+    # which produces anomalous climbs -- so no status check between the two.
+    say("🔴 Arming R1…")
+    err = send_cmd_nav("arm")
+    if err:
+        say(f"❌ Arm failed: {err}")
+        return
+    err = send_cmd_nav("takeoff")
+    if err:
+        say(f"❌ Takeoff failed: {err}")
+        return
+    say("🛫 Takeoff sent — watch the simulator.")
+
+    # ── 4. Only hand over once the hold loop has actually settled ────────────
+    say("⏳ Waiting for the hover to settle…")
+    settled, detail = wait_for_stable_hover()
+    if not settled:
+        say(f"⚠️ {detail}")
+        say("🛑 Twist adapter NOT started — exploration needs a settled hover. "
+            "Check the altitude, then start it by hand when the drone is steady.")
+        return
+    say(f"✅ {detail}")
+
+    # ── 5. Hand control to FALCON ────────────────────────────────────────────
+    if not follow_altitude:
+        twist = replace(twist, cmd=twist.cmd + " --no-follow-altitude")
+        say("ℹ️ Altitude follow disabled — FALCON steers, the command unit "
+            "holds the height.")
+    say(f"⏳ {twist.name}…")
+    err = start_service(twist)
+    if err:
+        say(f"⚠️ {twist.name} — start error: {err}")
+        return
+    ok = _wait_until(twist, timeout=10)
+    say(f"{'✅' if ok else '⚠️ (timed out)'} {twist.name}")
+    say("🚁 FALCON has control — exploration drives itself from here.")
 
 
 def start_service(svc: Service) -> str | None:
@@ -1724,6 +1848,38 @@ with tab_rooster:
             "Falcon RViz / BEV Click Goal, since a fresh roslaunch spins a "
             "brand-new ROS master and those two don't reconnect on their own."
         )
+
+    falcon_col, follow_alt_col = st.columns([1, 2])
+    with falcon_col:
+        falcon_go = st.button("🚁 Run All for FALCON", use_container_width=True,
+                              type="primary")
+    with follow_alt_col:
+        # Off by default: measured 2026-08-18, the adapter logged three
+        # "altitude nudge -0.30m" entries (commanding DOWN) while the hold
+        # target moved UP 1.60 -> 2.50 m and the aircraft climbed to [AT
+        # CEILING]. Until that inversion is traced, FALCON plans the route and
+        # rooster_command_unit keeps the height it took off at.
+        follow_altitude = st.checkbox(
+            "Let FALCON drive altitude (known inverted — leave off)",
+            value=False, key="falcon_follow_altitude")
+    if falcon_go:
+        if not st.session_state.get("falcon_seq_confirm", False):
+            st.session_state.falcon_seq_confirm = True
+            st.warning("Click **Run All for FALCON** again to confirm — "
+                       "this arms R1 and takes off.")
+            st.stop()
+        st.session_state.falcon_seq_confirm = False
+        _run_falcon_sequence(follow_altitude=follow_altitude)
+        st.rerun()
+
+    st.caption(
+        "Runs only what FALCON exploration needs, in order, then arms, takes "
+        "off, waits for the hover to settle, and only then starts the twist "
+        "adapter — which would otherwise cancel the takeoff within ~50 ms. "
+        "Object Approach, the YOLO detector and the Position Fly Controller "
+        "are deliberately left out: the first two fight for /cmd_vel_raw, the "
+        "third fights for the manual-control axes."
+    )
 
     launch_all_col, stop_all_col, _ = st.columns([1, 1, 2])
     with launch_all_col:
