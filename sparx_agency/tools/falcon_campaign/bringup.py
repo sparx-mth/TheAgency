@@ -239,14 +239,19 @@ def restart_sphera(reentry_attempts=4):
     return False
 
 
-def ensure_sphera(min_battery=0.30):
+def ensure_sphera(min_battery=0.80):
     """Make sure a fresh, flyable ``R1`` exists with usable battery.
 
     Args:
         min_battery: Restart Sphera if the battery is below this fraction.
-            Calibration and speed measurements taken below ~25% are corrupted
-            by loss of thrust authority, so this is a data-quality gate as much
-            as an endurance one.
+            High on purpose, so in practice nearly every cycle starts with a
+            restart. Measured 2026-08-18: a ~5 minute flight took the pack from
+            92% to 40%, so a full ten-minute window does not fit in anything
+            less than a nearly-full battery -- and a flight that dies half way
+            through produces a run folder whose metrics say "the aircraft
+            stopped" without saying why. It is also a data-quality gate:
+            samples taken below ~25% have a "forward" command producing mostly
+            lateral motion as thrust authority runs out.
 
     Returns:
         True if the simulator is ready to fly.

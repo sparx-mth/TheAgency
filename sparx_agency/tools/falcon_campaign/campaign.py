@@ -54,7 +54,7 @@ def log(run_dir, message):
 
 def new_run_dir():
     """Create and return a fresh timestamped run folder."""
-    stamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
+    stamp = time.strftime("%Y%m%d_%H%M%SZ", time.gmtime())
     run = C.RUNS_DIR / stamp
     (run / "logs").mkdir(parents=True, exist_ok=True)
     return run
