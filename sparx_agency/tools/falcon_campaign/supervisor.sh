@@ -94,8 +94,23 @@ while true; do
       break
     fi
   done
+  # Launch files too: roslaunch rejects the whole file on one XML slip (a `--`
+  # inside an XML comment is illegal, and that alone cost one cycle), and it
+  # fails minutes into a bring-up rather than up front.
+  if [[ -z "$bad" ]]; then
+    bad=$("$PY" - <<'EOF'
+import glob, xml.etree.ElementTree as ET
+for f in sorted(glob.glob("sparx_agency/tasks/planning/falcon/adapter/launch/*.launch")):
+    try:
+        ET.parse(f)
+    except ET.ParseError as exc:
+        print("%s (%s)" % (f, exc))
+        break
+EOF
+)
+  fi
   if [[ -n "$bad" ]]; then
-    say "REFUSING TO FLY: $bad does not compile. Waiting for it to be fixed."
+    say "REFUSING TO FLY: $bad is invalid. Waiting for it to be fixed."
     sleep 60
     continue
   fi

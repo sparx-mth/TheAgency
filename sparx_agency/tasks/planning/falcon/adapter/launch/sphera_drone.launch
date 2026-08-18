@@ -200,7 +200,7 @@
 
        obstacles_inflation / safe_distance deserve a note: at the inherited 0.85 m
        against a 0.20 m voxel grid, a B-spline must keep 0.85 m from every
-       occupied voxel, i.e. it needs a 1.7 m-wide free corridor -- which makes a
+       occupied voxel, i.e. it needs a 1.7 m-wide free corridor, which makes a
        ~0.9 m doorway unplannable at any altitude. The stack's own 2D planner
        uses inflate_radius_m 0.40 for the same map. -->
   <arg name="obstacles_inflation"     default="0.85" />

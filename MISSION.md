@@ -109,22 +109,77 @@ collisions, whether exploration completed or froze.
 
 Ranked. **Delete a problem when it is fixed and verified in flight. Add new ones as found.**
 
-### P1 — Stop/go stutter (OPEN, top priority)
-Flight is: move, hard stop, move, hard stop. No smooth tracking.
-_Investigation in progress — see §8 for findings._
+### P1 — Stop/go stutter (FIXES APPLIED 2026-08-18, awaiting flight verification)
+Measured from a real run: **189 stops, median 0.7 s, 17 % of flight time at zero speed.**
+Root causes, all fixed in commit `cb2e38fc`:
+1. `yaw_mode="course"` zeroed forward drive whenever |heading error| > 85°, and the 45°/s
+   yaw cap kept it there (error p50 56°, p75 88°, 28 % of ticks past the gate).
+   → yaw cap 45→90°/s, and a forward-speed floor through the turn (`turn_creep_mps`).
+2. `PulseShaper` in `snap` mode with `min_vxy=0.26` quantised every command to {0, 0.26,
+   analog} — a *duplicate* dead-band compensator, since the adapter already does this
+   closed-loop. → `force_mode=none`, `min_vxy=0`.
+3. Aircraft flew 2–4× faster than commanded, so it overshot and reversed course
+   constantly. → moving-regime axis curve (`x_v_full_moving`).
+4. `max_measured_speed_xy=0.7` sat *below* normal cruise, modulating 22 % of the flight.
+   → 1.5, plus its taper actually wired.
+5. Axis releases were instantaneous = an active brake in PX4 Position mode.
+   → ramped (`forward_axis_release_per_sec`).
+**Verify:** `metrics.json` → stops/min, `% below 0.05 m/s`, achieved/commanded ratio.
 
-### P2 — FALCON stops replanning after a "recovery"/circling episode (OPEN)
-Drone circles, then FALCON freezes and never plans again.
+### P2 — FALCON stops replanning (ROOT CAUSE FOUND + FIXED 2026-08-18)
+**The image was stale.** `falcon-ros:noetic` was built 11:17; the commit adding the
+finish-grace fix landed 14:36. `strings` showed `finish_grace` **0 times** in the binary, so
+`nav_stack.launch` was setting rosparams nothing read. FALCON's FSM entered its *terminal*
+`FINISH` state after 26 s (with 560 frontier points still live), `traj_server` printed
+"Task finished" and **exited**, leaving `/planning/pos_cmd` with no publisher and the
+follower holding station forever — for 6.5 h.
+Fixed by rebuilding the image, and `bringup.assert_falcon_patches()` now refuses to fly a
+stale image at **every bring-up**, not just at build time.
+Still open, lower priority: `FINISH` remains an absorbing state with no exit; the
+blocked-region blacklist can latch near-permanently; `blocked_region_radius_max` (3.5 m) <
+`candidate_rmax` (5.5 m) so a shadow can never retire the frontier that produced it.
 
-### P3 — Walls not mapped high enough (OPEN)
-Voxel map truncates wall height.
+### P3 — Walls not mapped high enough (FIXED 2026-08-18)
+The walls *were* mapped; they were never *published*. `vbox_max_z = 2.8` guillotined every
+occupancy cloud — live proof: cloud zmax exactly 2.750 m with the **top bin the densest**
+(a real wall end would taper). Room ceiling is ~3.4 m.
+→ `visualisation` z-max 2.8 → 3.6, `vertical_extent` [-2,4] → [-2,5] (required together or
+`exploration_node` crashes), RViz ramp/voxel size, `bev_z_ceil` 1.50 → 2.20.
+Still open: `raycast_max = 5.0` carves anything beyond 5 m as free (needs a Dockerfile
+patch, no repo-side override exists); `fy=180` implies vfov 90° but a live fit says ~95°,
+so mapped heights are ~8–10 % short.
 
-### P4 — Fly lower (OPEN)
-Doors into rooms are lower than the current cruise altitude; the drone cannot enter.
+### P4 — Fly lower (FIXED 2026-08-18, awaiting verification)
+The drone was **not** flying at its commanded 1.6 m — measured median cruise 1.91–2.11 m
+across nine runs. Two causes: ~0.35 m climb overshoot, then **no descent authority** —
+the z axis is a *three-zone* actuator (≥700 climbs hard, ~400–690 does nothing, ≤400
+descends weakly) and at a symmetric kp=500 the loop only reaches the descend zone at
+−0.6 m of error.
+→ new `altitude_hold_kp_down` (900), `target_ranger_m` 1.20, `max_ranger_m` 1.35.
+**Do NOT lower `hover_z`/`climb_z` to fly lower** — they are throttle counts, and below
+~700 the aircraft does not leave the ground at all.
+Also worth doing: `obstacles_inflation`/`safe_distance` are 0.85 m against 0.20 m voxels,
+which needs a 1.7 m-wide free corridor and makes a ~0.9 m doorway unplannable at *any*
+altitude. Pass-through args are now wired; try 0.40 (the 2D planner's own value).
 
-### P5 — Axis calibration is incomplete (OPEN)
-Needs: standing-start vs in-motion response, and multi-axis combined deflection
-(commanding x+y+r together must not over-drive the vector magnitude).
+### P5 — Axis calibration is incomplete (PARTLY FIXED, needs a calibration flight)
+Done: a moving-regime full-scale, the servo no longer mutes the stick below the dead band
+while motion is wanted, the integral survives brief zero demands, and the velocity it
+closes on is now Sphera's **true physics velocity** instead of a 250 ms-filtered
+differentiated position (that lag is why `servo_kp` had to be cut 220 → 90; it can now be
+raised back).
+Still to do:
+- A dedicated calibration flight: standing-start breakaway per axis **per sign**, then
+  steady-state gain while already moving (approached from above *and* below — the gap
+  between those curves *is* the standing-vs-moving hysteresis), then combined x+y, x+r,
+  x+y+r grids. Full experiment design is in the 2026-08-18 investigation output.
+- No cross-axis compensation exists: the dead-band offset is added *per axis*, so a
+  diagonal request pays it twice (`hypot(620,700)=935` counts for an infinitesimal speed).
+  Currently masked by `max_lateral_axis=0`, but it will bite the moment lateral is enabled.
+- Yaw has no calibrated inverse at all — still `wz/max_yaw_rate*1000`. Re-fitting the two
+  logged points suggests a ~100-count dead band and ~2.55 rad/s full scale.
+- `turn_coordination()` (a *measured* yaw/translation coupling law) already exists in this
+  repo but is wired only into the XTEND followers, never the Rooster path.
 
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.

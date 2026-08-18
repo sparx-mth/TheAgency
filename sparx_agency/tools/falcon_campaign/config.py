@@ -85,11 +85,20 @@ MAX_RANGER_M = 1.35
 CLIMB_Z = 700.0
 HOVER_Z = 700.0
 
-#: Which follower consumes FALCON's plan. "bspline" subscribes /planning/bspline
-#: directly and does not need traj_server at all -- traj_server was found dead
-#: mid-campaign with /planning/pos_cmd left publisher-less, which silently
-#: stops the "reference" follower dead. See MISSION.md P1.
-EXPLORATION_FOLLOWER = "bspline"
+#: Which follower consumes FALCON's plan.
+#:
+#: "reference" (traj_server -> /planning/pos_cmd -> ReferenceTracker3D) is the
+#: campaign's baseline: it is the proven one, it carries the measured-speed
+#: taper and the pinned-escape reflex, and every smoothness fix so far (turn
+#: creep, the dropped duplicate dead-band quantiser, the yaw-rate cap) lives in
+#: it. Its weakness is that traj_server EXITS when FALCON reaches FINISH, which
+#: leaves /planning/pos_cmd publisher-less and the follower holding forever.
+#:
+#: "bspline" reads /planning/bspline directly, so it needs no traj_server at
+#: all, and its control law measured 2.8-3.8x tighter on SJTU's airframe -- but
+#: its plant constants are UNMEASURED for Rooster. Switch to it only as a
+#: deliberate A/B against a baseline run, after the plant is measured.
+EXPLORATION_FOLLOWER = "reference"
 
 FLIGHT_SECONDS = 600           # the operator's 10-minute window
 HOVER_SETTLE_TIMEOUT_S = 60.0

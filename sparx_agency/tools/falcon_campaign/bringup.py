@@ -200,14 +200,41 @@ def battery_fraction():
 
 
 # ── steps ────────────────────────────────────────────────────────────────
-def restart_sphera():
+def restart_sphera(reentry_attempts=4):
     """Restart Sphera and drive its GUI back into the scenario.
 
+    The GUI re-entry is retried rather than trusted once. An X window exists
+    well before Sphera is actually rendering and accepting input, so the first
+    click after a cold start is regularly swallowed -- observed live: the
+    watchdog's single attempt left Sphera sitting on its Welcome screen, and the
+    identical click sequence worked first time a few minutes later. Retrying is
+    safe because every step is idempotent from the caller's point of view: the
+    only success criterion is a fresh drone container appearing.
+
+    Args:
+        reentry_attempts: How many times to drive the click sequence before
+            giving up.
+
     Returns:
-        True if a fresh ``R1`` came back.
+        True if a fresh drone container came back.
     """
-    r = sh(C.SPHERA_RESTART_CMD, timeout=420)
-    return r.returncode == 0
+    sh(C.SPHERA_RESTART_CMD, timeout=420)
+    if container_up(C.DRONE_CONTAINER):
+        return True
+
+    from sparx_agency.tools import sphera_gui_automation
+
+    for attempt in range(1, reentry_attempts + 1):
+        # Let Sphera finish becoming interactive before clicking at it.
+        time.sleep(15)
+        try:
+            sphera_gui_automation.enter_scenario()
+        except Exception:                          # noqa: BLE001 -- GUI is flaky
+            pass
+        if wait_for(lambda: container_up(C.DRONE_CONTAINER), 60,
+                    "fresh %s (re-entry attempt %d)" % (C.DRONE_CONTAINER, attempt)):
+            return True
+    return False
 
 
 def ensure_sphera(min_battery=0.30):
