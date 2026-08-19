@@ -204,7 +204,12 @@ TILT_RESUME_DEG = 27.0
 #: — hence the readback below.
 FRONTIER_CLUSTER_MIN = 50.0
 
+#: Range at which the TSDF stops raycasting. 5.0 discarded 4.8 % of every depth
+#: frame; sensing max_depth already allows 10 m.
+VOXEL_RAYCAST_MAX = 8.0
+
 EXPECTED_ROSPARAMS = {
+    "/voxel_mapping/tsdf/raycast_max": VOXEL_RAYCAST_MAX,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
