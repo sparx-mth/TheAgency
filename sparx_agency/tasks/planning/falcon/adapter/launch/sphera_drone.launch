@@ -207,6 +207,7 @@
   <arg name="safe_distance"           default="0.85" />
   <arg name="frontier_candidate_rmax" default="5.5" />
   <arg name="max_vel"                 default="0.6" />          <!-- planner speed; coverage = speed x swath and the swath is DA3-limited to ~3.5 m -->
+  <arg name="fsm_slow_traj_target_vel" default="0.6" />         <!-- tracks max_vel: a lower target undoes the raise on the segments it fires on -->
   <arg name="explore_max_speed_xy"    default="0.8" />          <!-- must stay above max_vel with headroom -->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
@@ -699,6 +700,7 @@
     <arg name="safe_distance"            value="$(arg safe_distance)" />
     <arg name="frontier_candidate_rmax"  value="$(arg frontier_candidate_rmax)" />
     <arg name="max_vel"                  value="$(arg max_vel)" />
+    <arg name="fsm_slow_traj_target_vel"  value="$(arg fsm_slow_traj_target_vel)" />
     <arg name="explore_max_speed_xy"     value="$(arg explore_max_speed_xy)" />
     <arg name="vla"                      value="$(arg vla)" />
     <arg name="flownav_goal_image"       value="$(arg flownav_goal_image)" />

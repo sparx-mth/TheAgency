@@ -127,6 +127,22 @@ for f in sorted(glob.glob("sparx_agency/tasks/planning/falcon/adapter/launch/*.l
 EOF
 )
   fi
+  # An arg the entry launch file never declared is accepted on the command line
+  # and then silently dropped -- roslaunch does not complain. That cost three
+  # cycles once; catching it here costs nothing.
+  if [[ -z "$bad" ]]; then
+    bad=$(PYTHONPATH="$REPO" "$PY" - <<'EOF'
+import re
+from sparx_agency.tools.falcon_campaign import config as C
+entry = ("sparx_agency/tasks/planning/falcon/adapter/launch/sphera_drone.launch")
+declared = set(re.findall(r'<arg\s+name="([^"]+)"', open(entry).read()))
+passed = set(re.findall(r'([A-Za-z_][A-Za-z0-9_]*):=', C.adapter_launch_cmd()))
+missing = sorted(passed - declared)
+if missing:
+    print("%s does not declare: %s" % (entry, ", ".join(missing)))
+EOF
+)
+  fi
   if [[ -n "$bad" ]]; then
     say "REFUSING TO FLY: $bad is invalid. Waiting for it to be fixed."
     sleep 60
