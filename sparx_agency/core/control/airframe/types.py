@@ -53,6 +53,18 @@ class AirframeCommand:
         return self.tracking.position_error_m
 
     @property
+    def reference_z_m(self):
+        # type: () -> float
+        """Altitude the plan asked for, world frame. NaN while holding station.
+
+        Paired with the aircraft's measured altitude this separates a planned
+        descent from a sagging one, which is the difference between a planning
+        fault and a control fault when the aircraft ends up on top of an
+        obstacle.
+        """
+        return self.tracking.reference_z_m
+
+    @property
     def along_track_lag_m(self):
         # type: () -> float
         """How far behind schedule the aircraft is. Benign; being late is fine."""

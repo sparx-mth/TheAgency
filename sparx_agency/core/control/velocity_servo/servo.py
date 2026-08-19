@@ -195,7 +195,8 @@ class VelocityServo:
             trajectory_id=reference.trajectory_id,
             diverged=reference.gap_m > self.params.max_position_error_m,
             past_end=reference.past_end,
-            saturated=saturated, rate_limited=rate_limited)
+            saturated=saturated, rate_limited=rate_limited,
+            reference_z_m=float(reference.position[2]))
 
     def _world_command(self, reference, measured, dt):
         # type: (object, np.ndarray, float) -> tuple

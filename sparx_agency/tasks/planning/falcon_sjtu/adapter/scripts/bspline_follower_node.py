@@ -2697,7 +2697,22 @@ class BsplineFollowerNode(object):
             command.reference_time_s,
             1.0 if command.saturated else 0.0,
             1.0 if command.holding else 0.0,
-            1.0 if command.past_end else 0.0]))
+            1.0 if command.past_end else 0.0,
+            # data13: the altitude the PLAN asked for. Appended, never inserted
+            # -- postmortem.py reads this array positionally, so a new field may
+            # only ever go on the end. NaN while holding, where there is no plan.
+            #
+            # getattr rather than a plain attribute, against this file's usual
+            # rule of raising instead of defaulting, and the exception is
+            # deliberate. Two different command types reach this line -- an
+            # AccelerationCommand from the acceleration backend and a
+            # BodyTwistCommand from the velocity servo -- and reading the field
+            # off only one of them raised AttributeError inside the control
+            # thread, which killed the follower outright: a leg ended
+            # STALLED_POSITION at 65 m3 with the aircraft never moving. A
+            # DIAGNOSTIC must not be able to stop the aircraft. A missing field
+            # here costs one NaN in a log column; raising costs the flight.
+            getattr(command, "reference_z_m", float("nan"))]))
 
 
 def main():

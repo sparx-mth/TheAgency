@@ -111,7 +111,58 @@
        0.28 m — so the planner's best legal curve sat inside the gate's trip
        line and the two fought each other.
        0.35 m: above the gate's bubble, and a 1.4 m warehouse aisle still
-       leaves 0.35 m of slack on each side. -->
+       leaves 0.35 m of slack on each side.
+
+       ── THE DEFAULT BELOW IS DEAD. READ THIS BEFORE CHANGING IT.
+       run_falcon_sjtu.sh injects `safe_distance:=${SAFE_DISTANCE:-0.45}` into
+       FALCON_LAUNCH_ARGS unless one is already present, and a roslaunch command
+       -line argument always beats an <arg default>. So the 0.55 below has never
+       reached the planner from here: a live leg reads
+       `/bspline_opt/safe_distance: 0.45`. Editing it changes nothing, which is
+       exactly how one A/B of this value was flown ENTIRELY INERT before the
+       activation check caught it. To vary it, set the ENV VAR:
+           SAFE_DISTANCE=0.75 bash rig/campaign_run.sh warehouse <dir> 900
+       The default is left at 0.55 rather than corrected to 0.45 only because
+       changing it would still do nothing and would imply it were live.
+
+       ── WHAT IT ACTUALLY DELIVERS, measured 2026-08-17, against the operative
+       0.45. The optimiser's final map is now dumped per leg
+       (rig/dump_occupied_voxels.py), so the clearance the plan really achieved
+       can be checked against the clearance it asked for. Over the WHOLE flight
+       the plan sits inside its own clearance 32.2% of the time (median 0.59 m)
+       with the hull inside mapped structure 8.5% of the time; at contact that
+       becomes 99.2% and 75.9%, so contacts are genuinely ENRICHED rather than
+       trivially near obstacles. Per contact location (22 distinct, across two
+       contact-bearing warehouse legs, ~100k mapped voxels per leg):
+
+         centre clearance to the nearest MAPPED occupied voxel
+           p10 0.08   p25 0.22   p50 0.36   p75 0.47   p90 0.48 m
+         below the operative safe_distance 0.45 m .............. 99.2%
+         hull (centre minus the 0.26 m airframe radius) inside
+           mapped structure ..................................... 36.4%
+         no mapped structure within 0.40 m (a genuine map hole) .. 27.3%
+
+       So contacts are not one fault but a stack of three, and only the last is
+       a surprise. The aircraft tracks its plan to a median 0.03 m, so control
+       is exonerated. About a quarter of contacts are map holes — pile tops are
+       only ever seen edge-on, since 0.0% of commanded altitudes reach the
+       2.34 m needed to overfly a 1.79 m pile under a 2.4 m ceiling. But the
+       universal factor, present at 99.2% of contacts, is that the TRAJECTORY
+       IS ROUTED INSIDE ITS OWN MARGIN: 0.36 m delivered where 0.45 m is asked.
+
+       And the reason that hurts is that nothing subtracts the airframe.
+       BsplineOptimizer::calcDistanceCost queries the ESDF at the control point
+       — the drone's CENTRE — and penalises dist < safe_distance. There is no
+       robot radius anywhere in the term. safe_distance is therefore the whole
+       allowance for a 0.26 m radius PLUS margin, so a fully satisfied 0.45
+       leaves only 0.19 m of real clearance, and the measured 0.36 leaves 0.10.
+       0.45 is the doorway HALF-WIDTH, chosen so the one-sided cost has its
+       minimum on the centreline of a 0.90 m opening — see run_falcon_sjtu.sh,
+       which is where the value actually lives.
+       Raising the weight to force satisfaction was tried and refuted (see the
+       distance-weight block below): near a pile the constraint is
+       unsatisfiable, so weighting it harder just stops the aircraft. -->
+  <!-- Airframe radius, for the record, is ~0.26 m; the planner does not use it. -->
   <arg name="obstacles_inflation" default="0.25"/>
   <arg name="safe_distance"       default="0.55"/>
 
@@ -119,9 +170,52 @@
        FALCON places a viewpoint in a tighter space and observes a frontier
        tucked behind a doorway, instead of declaring it un-viewable and leaving
        that room unmapped. rmin stays 1.0 (above the 0.95 m near clip) so a
-       viewpoint can still actually see what it is placed to observe. -->
+       viewpoint can still actually see what it is placed to observe.
+
+       ── occ_clearance RAISED BACK to 0.55, to match safe_distance. 2026-08-17.
+       The 0.40 above was our own value and it put the goal inside the cost bowl
+       the optimiser was simultaneously trying to escape: safe_distance is 0.55,
+       so the B-spline is penalised for anything within 0.55 m of structure while
+       the frontier finder was free to place the VIEWPOINT it must reach at
+       0.40 m. Nothing reconciles the two; the optimiser just carries a standing
+       penalty it cannot discharge, and the aircraft grinds along the obstacle it
+       was sent to hug. Selection makes it worse rather than better: viewpoints
+       are ranked purely on unknown volume gained, with no clearance term at any
+       stage, and a candidate nearer the frontier generally sees MORE — so the
+       one hugging structure systematically wins.
+
+       Measured, interleaved arms, same image, only this value differing:
+
+         warehouse, 6 legs/arm   0.55            0.40
+           FATAL capsizes        0               2
+           finished              4/6 (1 CLEAN)   3/6
+           coverage mean         369.8 m3        287.1 m3
+           coverage WORST leg    358.8 m3        149.1 m3
+           bumper reports mean   95.7            142.7
+
+         hospital, 2 legs/arm    0.55            0.40
+           coverage mean         847.1 m3        787.9 m3
+           coverage range        841.6-852.6     749.2-826.6   (no overlap)
+           bumper reports mean   45.0            383.5
+           objects touched       3, 3            5, 3
+
+       Raising it is NOT a coverage/safety trade, which is why it was worth
+       taking: a viewpoint over the threshold is not FORBIDDEN, only DEMOTED.
+       sampleViewpoints() buckets candidates into clear and near-occupied and
+       falls back to the near-occupied bucket wholesale when the clear one is
+       empty — so a frontier whose only stances are tight (the doorway case the
+       0.40 was chosen for) still gets exactly the viewpoints it always did. All
+       that changes is which stance is PREFERRED when both exist. The hospital,
+       with 26 doorways, was the place a coverage loss would have shown, and its
+       worst treatment leg still beat its best control leg.
+
+       One coupling to know about: near_occupied also selects the STRICT visibility
+       bar over the relaxed open-space one (see falcon_open_visib_bar.patch), so
+       raising this reclassifies some candidates onto the strict bar. That did not
+       cost coverage in either world, but it is the first thing to check if a
+       future premature FINISH appears. -->
   <arg name="frontier_min_clearance"     default="0.25"/>
-  <arg name="frontier_min_occ_clearance" default="0.40"/>
+  <arg name="frontier_min_occ_clearance" default="0.55"/>
   <arg name="frontier_candidate_rmin"    default="1.0"/>
   <arg name="frontier_candidate_rmax"    default="2.5"/>
 
@@ -152,6 +246,60 @@
 
   <param name="/voxel_mapping/obstacles_inflation" value="$(arg obstacles_inflation)"/>
   <param name="/bspline_opt/safe_distance"         value="$(arg safe_distance)"/>
+
+  <!-- ── How hard the optimiser defends its own clearance. Upstream 50.0, against
+       smoothness 20.0. safe_distance is a SOFT penalty, so this weight decides how
+       much of the margin the optimiser is willing to spend to keep a curve smooth.
+
+       Measured 2026-08-17, and it is why the aircraft touches things. Contacts are
+       almost entirely one model — ClutteringC, 3443 samples against 42 for
+       everything else — in a very tight altitude band: p10 1.73, p50 1.74,
+       p90 1.78 m, against 1.79 m crate tops. Speed while in contact is p50 0.00
+       and p90 0.05 m/s, so these are not collisions at speed, they are the
+       aircraft arriving and staying.
+
+       The approach geometry names the mechanism. In all 8 legs traced, the
+       aircraft was DESCENDING into its first contact (dz over the last 4 s from
+       -0.05 to -0.41 m, vertical rate -0.045 to -0.172 m/s), and in five of them
+       it started ABOVE the crate tops (1.92 to 2.18 m) and came down into them.
+       So it is a descent onto the pile, not a drive into a face: a frontier ON a
+       crate top sits at ~1.79 m, the viewpoint inherits the frontier's own z with
+       no vertical clearance term, and the aircraft descends from a safe cruise
+       altitude to occupy it. The isotropic 0.55 m safe_distance should forbid the
+       last part of that descent, and does not, because it is soft and smoothness
+       outbids it.
+
+       RAISING THIS WAS TRIED AT 100 AND 200 AND IS REFUTED. Left at upstream 50.
+       The knob stays wired, defaulting to upstream, so a retest is one line — and
+       so the next person finds this note instead of re-running it.
+
+       Warehouse, 3 interleaved rounds per value, override verified live with
+       `rosparam get /bspline_opt/pos/distance` on a treatment leg:
+
+         weight  objects touched        mean  finished
+           50    4 / 5 / 4 / 3 / 4 / 1  3.5    5/6
+          100    1 / 6 / 4              3.67   1/3
+          200    1 / 2 / 2              1.67   1/3
+
+       Read the 200 row alone and it looks like a large safety win — objects more
+       than halved, bumper reports 245 to 129. Two things refute it. Finish rate
+       fell from 3/3 to 1/3 against its own control, both failures being
+       ABORT_NO_MOVEMENT, which is the coherent cost: weight the clearance term
+       hard enough and the optimiser will not spend margin to keep a curve
+       flyable, so in a tight aisle it produces nothing and the aircraft stops.
+       And there is NO DOSE-RESPONSE — 100 is worse than both 50 and 200. A real
+       mechanism would be monotonic in the weight. Against a control arm that
+       itself ranged 1 to 5 objects per leg, 1.67 over three legs is variance.
+
+       The hospital was deliberately not flown for this: the warehouse already
+       failed both halves of the pre-registered keep criterion, and hospital legs
+       cost about 45 minutes each.
+
+       So the attribution above stands and the lever does not. The real fix is a
+       vertical clearance term on viewpoint placement, so the goal is never at pile
+       height to begin with — that needs a C++ patch and is not done. -->
+  <arg name="bspline_distance_weight" default="50.0"/>
+  <param name="/bspline_opt/pos/distance" value="$(arg bspline_distance_weight)"/>
 
   <!-- ── Coverage-tour TSP size vs LKH stability. FALCON's coverage tour is a
        TSP over hgrid cell centres, solved in-process by LKH, which segfaults

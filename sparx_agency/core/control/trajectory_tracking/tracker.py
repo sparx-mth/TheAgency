@@ -261,7 +261,8 @@ class TrajectoryTracker:
             trajectory_id=sample.trajectory_id,
             diverged=sample.gap_m > self.params.max_position_error_m,
             past_end=sample.past_end,
-            saturated=saturated)
+            saturated=saturated,
+            reference_z_m=float(sample.point.z))
 
     def _note_saturation(self, wanted, delivered, tolerance=1e-9):
         # type: (np.ndarray, np.ndarray, float) -> None

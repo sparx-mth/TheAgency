@@ -69,6 +69,20 @@ finish() {
     # growth rate and the plan-origin gap. It is the only artifact that says
     # WHY a run went nowhere rather than merely that it did.
     docker cp "falcon-sjtu:/tmp/mission_progress.jsonl" "${RUN_DIR}/progress.jsonl" 2>/dev/null || true
+    # ── The occupied-voxel map as it stood at the end, xyz per line ──────────
+    # Answers one question no other artifact can: when the aircraft physically
+    # touched an obstacle while tracking its plan to 0.03 m, did the MAP know
+    # the obstacle was there? A contact point still empty in the final map is a
+    # mapping hole, and blames neither the planner nor the controller.
+    # Best effort and last, so a missing topic can never cost the verdict.
+    docker cp "${SCRIPT_DIR}/dump_occupied_voxels.py" \
+        falcon-sjtu:/tmp/dump_occupied_voxels.py 2>/dev/null || true
+    docker exec falcon-sjtu bash -lc \
+        'source /opt/ros/noetic/setup.bash 2>/dev/null; \
+         timeout 25 python3 /tmp/dump_occupied_voxels.py /tmp/occupied_voxels.xyz' \
+        >/dev/null 2>&1 || true
+    docker cp "falcon-sjtu:/tmp/occupied_voxels.xyz" \
+        "${RUN_DIR}/occupied_voxels.xyz" 2>/dev/null || true
     kill "${MON_PID:-0}" "${TRK_PID:-0}" 2>/dev/null || true
     docker rm -f falcon-sjtu sjtu-ros1-bridge > /dev/null 2>&1 || true
 

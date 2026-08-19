@@ -207,6 +207,21 @@ map_config:
     # a 1.79 m pile with 41-65% of samples inside the 1.60-1.90 m band. Raising
     # the ceiling to 2.7 should have given the optimiser somewhere to go.
     #
+    # MEASURED 2026-08-17, now that the plan's own commanded altitude is logged
+    # (tracking.csv field.data13). That 0.06 m of slack is not slack at all: of
+    # 7873 commanded altitudes across three legs, the fraction at or above the
+    # 2.34 m needed to overfly a C-pile at full safe_distance is 0.0%. NONE.
+    # 27.1% of the plan is commanded inside the 1.60-1.90 m crate band, and
+    # 31.1% within safe_distance of a 1.79 m top. So overflight of a C-pile is
+    # not merely rare here, it is geometrically UNAVAILABLE -- the optimiser can
+    # only ever route laterally past a pile, and whatever vertical margin it
+    # holds near one is necessarily less than the clearance it is being
+    # penalised for missing. It is permanently inside a cost bowl it cannot
+    # leave, which is the same shape of defect as the viewpoint-clearance bug
+    # and explains why weighting the distance term harder (tried at 100 and 200,
+    # refuted -- see exploration.launch) cut contacts but stopped the aircraft
+    # moving: asked to satisfy an unsatisfiable constraint, it declines to move.
+    #
     # It did not go there. At 2.7 the aircraft flew LOWER, not higher -- median
     # 1.74 m, and 0.1% of samples above 2.40 -- while time spent in the
     # 1.60-1.90 crate band rose from 41% to 58%. Three legs per arm, same image,
