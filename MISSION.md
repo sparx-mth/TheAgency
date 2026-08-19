@@ -387,6 +387,18 @@ The follower has a tilt-cutoff reflex for exactly this, but `tilt_limit_deg` was
 could never fire before the airframe was useless. Lowered to **25°**, clear of the ~19° p90
 roll excursions measured while merely hovering (P8). UNVERIFIED.
 
+**tilt_limit_deg 25 verified over two runs (2026-08-19).** The lock-up did not recur: axis
+median 644-650 instead of 1000, gain 0.099-0.190 instead of 0.007-0.021, speed 0.345-0.392
+against 0.160-0.196 in the degenerate runs and 0.309-0.324 at tilt45. The reflex fires on
+genuine tilt (logged examples: `pitch=-26`, `roll=25`), 6-23 times per run, at a cost of more
+interruptions (escapes 6-14, stops 1.36-2.48/min).
+
+Do **not** raise it to 30 to reduce those interruptions: one degenerate run locked up at a
+pitch p90 of only 20.1°, so 30 would not have caught it. If the interruption cost needs
+reducing, attack the other half of the loop instead — `servo_max_correction` (350) is what lets
+feedforward plus correction reach saturation; capping it near 200 would hold the axis around
+800 and stop the integrator ever commanding full stick.
+
 This was NOT the vendor FCU: no FCU errors, no stalled streams, ranger healthy at 1.22-1.28 m
 throughout. Our own control chain commanded the aircraft into a corner with no reflex set
 tightly enough to notice. If it recurs at 25°, the next lever is `servo_max_correction` (350),
