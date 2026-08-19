@@ -117,3 +117,23 @@ def test_zero_dt_integrates_nothing():
     servo = AxisVelocityServo(DEADZONE, V_FULL, kp=0.0, ki=260.0)
     servo.update(0.30, 0.10, 0.0)
     assert servo.integral == 0.0
+
+
+def test_the_moving_curve_uses_both_of_its_halves():
+    """A regime is an offset AND a slope; taking one from each over-commands.
+
+    Switching only the full scale, while the dead band stayed at the standing
+    value, was flown and pushed peak speed from ~2 to ~3.5 m/s.
+    """
+    mixed = AxisVelocityServo(DEADZONE, V_FULL, v_full_moving=1.847)
+    paired = AxisVelocityServo(DEADZONE, V_FULL, v_full_moving=1.847,
+                               deadzone_moving=412.0)
+    moving = 0.5
+    assert mixed.update(0.6, moving, 0.05) > paired.update(0.6, moving, 0.05)
+
+
+def test_the_moving_dead_band_is_ignored_while_standing_still():
+    servo = AxisVelocityServo(DEADZONE, V_FULL, v_full_moving=1.847,
+                              deadzone_moving=412.0)
+    standing = servo.update(0.6, 0.0, 0.05)
+    assert standing >= DEADZONE

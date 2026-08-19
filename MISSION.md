@@ -333,6 +333,8 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Coverage trace marked unreliable when it does not span the flight | caught a phantom "record" 90.7 m3/min from 110 s of a 600 s flight | 2026-08-19 |
 | 2026-08-19 | Stall-escape give-up budget | caps a reflex that consumed ~half of two flights (38 and 14 escapes) | 2026-08-19 |
 | 2026-08-19 | Block (ii) flown; x_v_full_moving 4.0 → **1.847** (measured) | standing-vs-moving quantified: moving is ~1.5x more responsive, ~100-count hysteresis | 2026-08-19 |
+| 2026-08-19 | x_v_full_moving 1.847 | **REVERTED** — mixed the moving slope with the standing offset; peak speed 2.1 → 3.5 m/s, 30 % of flight stopped | 2026-08-19 |
+| 2026-08-19 | `deadzone_moving` added (default off) + 2 tests | makes the consistent (412, 1.847) pair possible to try next | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 

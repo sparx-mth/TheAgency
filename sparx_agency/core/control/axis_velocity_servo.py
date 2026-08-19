@@ -101,7 +101,7 @@ class AxisVelocityServo(object):
 
     def __init__(self, deadzone, v_full, kp=0.0, ki=0.0, max_correction=250.0,
                  axis_limit=1000.0, min_command_mps=0.0,
-                 v_full_moving=0.0, move_eps_mps=0.10,
+                 v_full_moving=0.0, deadzone_moving=0.0, move_eps_mps=0.10,
                  brake_release_margin_mps=0.15, integral_hold_s=0.6):
         # type: (float, float, float, float, float, float, float, float, float, float, float) -> None
         self.deadzone = float(deadzone)
@@ -113,6 +113,15 @@ class AxisVelocityServo(object):
         #: fitting it to the standing case is what made the aircraft fly 2-4x
         #: faster than commanded once moving. <=0 falls back to ``v_full``.
         self.v_full_moving = float(v_full_moving)
+        #: Dead band once ALREADY MOVING. <=0 keeps ``deadzone`` in both regimes.
+        #:
+        #: A regime is a CURVE -- an offset and a slope together -- and the two
+        #: halves cannot be taken from different regimes. Switching only the
+        #: full scale, while the offset stayed at the standing value, was flown
+        #: and over-commanded badly: peak speed rose from ~1.5-2.1 to 3.1-3.5
+        #: m/s and a third of the flight ended up stopped. Set this alongside
+        #: ``v_full_moving`` or set neither.
+        self.deadzone_moving = float(deadzone_moving)
         self.move_eps_mps = float(move_eps_mps)
         #: Only release the stick below the dead band when the aircraft is
         #: genuinely this much over the demand -- i.e. when braking is what is
@@ -173,10 +182,15 @@ class AxisVelocityServo(object):
             return 0.0
         self._idle_s = 0.0
 
+        moving = abs(v_meas) >= self.move_eps_mps
         v_full = self.v_full
-        if self.v_full_moving > 0.0 and abs(v_meas) >= self.move_eps_mps:
+        deadzone = self.deadzone
+        if moving and self.v_full_moving > 0.0:
             v_full = self.v_full_moving
-        ff = feedforward_axis(v_cmd, self.deadzone, v_full, self.axis_limit)
+            # Both halves of the curve move together, or neither does.
+            if self.deadzone_moving > 0.0:
+                deadzone = self.deadzone_moving
+        ff = feedforward_axis(v_cmd, deadzone, v_full, self.axis_limit)
         error = v_cmd - v_meas
         self.last_error = error
 

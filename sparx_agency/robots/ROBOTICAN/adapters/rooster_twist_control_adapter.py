@@ -131,22 +131,27 @@ class RoosterTwistControlNode(Node):
         x_v_full: float = 1.25,
         # Full-scale speed once ALREADY MOVING; <=0 disables the second regime.
         #
-        # MEASURED 2026-08-19, calibration block (ii): the axis is pre-loaded and
-        # then stepped to each value, so this is the regime the aircraft is
-        # actually in for most of a flight. Approached from an 850 pre-load the
-        # forward axis reaches 1.847 m/s at full stick with a 412-count dead
-        # band; approached from 650 it reaches 2.467 with a 511-count dead band.
-        # That ~100-count spread IS the standing-vs-moving hysteresis, and the
-        # moving regime is roughly 1.5x more responsive than a standing start
-        # (~1.2 m/s at full stick). 4.0 was a guess from one in-flight operating
-        # point and commanded far too little stick.
+        # REVERTED to 4.0 after 1.847 -- the block (ii) measurement -- flew worse
+        # over two runs: stops 0.4-1.1 -> 2.5-3.9 per minute, time at zero speed
+        # 2-5% -> 12-30%, escapes 2 -> 7, and peak speed 1.5-2.1 -> 3.1-3.5 m/s.
         #
-        # Only x_v_full_moving is adopted here. The measured moving dead band
-        # (412) is deliberately NOT applied: the standing-start dead band was
-        # lowered once already (620 -> 466) and halved the distance flown, so
-        # the dead band stays at the value proven in flight until a lower one
-        # is itself proven in flight.
-        x_v_full_moving: float = 1.847,
+        # The measurement was not wrong; PAIRING it was. Block (ii) measured the
+        # moving regime as (dead band 412, 1.847 m/s at full stick) -- a curve.
+        # Feeding its full-scale into a feedforward that still uses the STANDING
+        # dead band of 620 describes no real regime at all, and over-commands: at
+        # a 0.6 m/s request it asks 743 counts, which on the real moving curve is
+        # ((743-412) * 1.847/588) = 1.04 m/s. Hence the overspeed.
+        #
+        # The fix is deadzone_moving below, so the pair stays consistent. 4.0 is
+        # an empirical value that happens to compensate the mismatch; it should
+        # be retired once the consistent (412, 1.847) pair is proven in flight.
+        x_v_full_moving: float = 4.0,
+        # Dead band once already moving, measured 1.847-regime = 412 counts by
+        # calibration block (ii). 0 keeps x_deadzone in both regimes, which is
+        # the current default: the consistent (412, 1.847) pair has not been
+        # flown yet, and the last two attempts to change this curve both had to
+        # be reverted, so it is enabled deliberately or not at all.
+        x_deadzone_moving: float = 0.0,
         move_eps_mps: float = 0.10,
         # Lateral is capped off by max_lateral_axis below, so these are inert
         # today. The sweep fitted 406 / 0.969 from 3 points (y- only; every y+
@@ -229,6 +234,7 @@ class RoosterTwistControlNode(Node):
         self.x_deadzone = float(x_deadzone)
         self.x_v_full = float(x_v_full)
         self.x_v_full_moving = float(x_v_full_moving)
+        self.x_deadzone_moving = float(x_deadzone_moving)
         self.move_eps_mps = float(move_eps_mps)
         self.y_deadzone = float(y_deadzone)
         self.y_v_full = float(y_v_full)
@@ -279,6 +285,7 @@ class RoosterTwistControlNode(Node):
             max_correction=float(servo_max_correction),
             min_command_mps=self.min_command_mps,
             v_full_moving=self.x_v_full_moving,
+            deadzone_moving=self.x_deadzone_moving,
             move_eps_mps=self.move_eps_mps)
         if self.use_velocity_servo:
             velocity_topic = (velocity_topic

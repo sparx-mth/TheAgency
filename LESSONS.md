@@ -67,6 +67,37 @@ and it is indistinguishable from perfect tracking of a moving one. Check
 `/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
 the roslaunch stdout redirect instead.
 
+## 2026-08-19 — a calibration regime is a CURVE; taking the offset from one and the slope from another over-commands
+
+**Second failed attempt to apply the axis calibration, and the failure is instructive.**
+Block (ii) measured the Rooster's forward axis while ALREADY MOVING as *(dead band 412 counts,
+1.847 m/s at full stick)*. That is one curve. The feedforward, though, switched only the full
+scale when the aircraft was moving and kept the **standing** dead band of 620.
+
+(620, 1.847) describes no regime that exists. At a 0.6 m/s request it asks for 743 counts,
+which on the real moving curve is `(743 - 412) x 1.847/588 = 1.04 m/s` -- nearly double. Flown
+over two runs against the incumbent:
+
+| | incumbent | mixed pair |
+|---|---|---|
+| peak speed | 1.5-2.1 m/s | **3.1-3.5 m/s** |
+| stops per minute | 0.4-1.1 | 2.5-3.9 |
+| time below 0.05 m/s | 2-5 % | 12-30 % |
+| escapes | 2 | 7 |
+
+**Both halves move together or neither does.** `AxisVelocityServo` now takes
+`deadzone_moving` alongside `v_full_moving`, and two tests pin the invariant: the mixed pair
+must command strictly more stick than the paired one, and the moving dead band must not apply
+while the aircraft is standing still.
+
+**The wider point, now twice over.** Block (i)'s standing curve was reverted because it was
+measured out of the regime it was applied to; this one was reverted because it was applied as
+half of one regime and half of another. A measurement is only usable together with the
+conditions it was taken under, and "apply just the one number" is exactly the move that
+smuggles in a mismatch. The incumbent 4.0 is not a better *measurement* -- it is an empirical
+value that happens to compensate the mismatch, and it should be retired once the consistent
+(412, 1.847) pair has itself been proven in flight.
+
 ## 2026-08-19 — a standing-start axis calibration does not describe an aircraft in flight, and applying it halved the distance flown
 
 **What was measured:** a per-sign sweep of standing starts (4 s at rest, 3 s hold, fitted over
