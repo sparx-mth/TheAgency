@@ -69,13 +69,18 @@ def velocity_to_axis(v_mps: float, deadzone: float, v_full: float,
                      min_command_mps: float) -> float:
     """Convert a requested body velocity (m/s) into a ManualControl axis.
 
-    The horizontal axes are NOT linear from zero: measured against Sphera
-    ground truth 2026-08-17, forward is dead until ~620 counts and then ramps
-    to ~1.25 m/s at 1000 (lateral: dead until ~700, ~1.02 m/s at 1000). The
-    old ``v / max_v * 1000`` scale therefore put every normal FALCON request
-    (0.15-0.2 m/s) right on the deadzone edge, where real speed flips between
-    0.00 and 0.26 m/s for a few counts -- the actual cause of the long-standing
-    jerky tracking. See LESSONS.md and the axis-calibration memory.
+    The horizontal axes are NOT linear from zero: they are dead up to a
+    breakaway and then ramp roughly linearly. Measured 2026-08-18 by
+    ``tools/rooster_axis_calibration.py`` over a per-sign sweep of standing
+    starts: forward is dead to ~466 counts and reaches ~1.31 m/s at 1000;
+    lateral to ~406 counts and ~0.97 m/s. An earlier single hover-step test put
+    the forward dead band at 620, but it never probed below it -- the sweep's
+    lowest value, 550, already moved the aircraft.
+
+    This shape is why the old ``v / max_v * 1000`` scale failed: it put every
+    normal FALCON request right on the dead-band edge, where a few counts flip
+    the real speed between nothing and a lurch. That was the long-standing
+    jerky tracking. See LESSONS.md and the calibration run's calibration.md.
 
     Args:
         v_mps: Requested velocity along this axis, m/s (signed).
@@ -112,18 +117,29 @@ class RoosterTwistControlNode(Node):
         # never-validated linear max_linear_x/y scaling, which is now only
         # used when use_measured_axis_curve=False.
         use_measured_axis_curve: bool = True,
-        x_deadzone: float = 620.0,
-        x_v_full: float = 1.25,
-        # Full-scale speed once ALREADY MOVING. The 1.25 above is a hover-start
-        # fit; measured in flight 2026-08-18 the same ~700 counts produced
-        # ~0.9-1.0 m/s, so a single curve fitted to the standing case made the
-        # aircraft fly 2-4x faster than commanded (achieved p90 1.0 m/s against
-        # a 0.26-0.6 m/s demand). PROVISIONAL -- derived from one in-flight
-        # operating point; the calibration run replaces it. <=0 disables.
-        x_v_full_moving: float = 4.0,
+        # MEASURED 2026-08-18 by tools/rooster_axis_calibration.py, block (i):
+        # a per-sign sweep of standing starts, fitted over the settled last 1.5s
+        # of each 3s hold. The forward axis moved at 550 counts -- the LOWEST
+        # value the sweep tried -- so the true breakaway is at or below that, and
+        # the 620 assumed here before came from a single hover-step test that
+        # never probed underneath it. 6 fitted points; re-measure with a sweep
+        # that goes below 550 to pin the intercept properly.
+        x_deadzone: float = 466.0,
+        x_v_full: float = 1.313,
+        # Full-scale speed once ALREADY MOVING; <=0 disables the second regime.
+        # DISABLED (0) until block (ii) of the calibration actually measures it.
+        # 4.0 was a provisional estimate reverse-engineered from one in-flight
+        # operating point; now that the standing curve above is a real fit, a
+        # measured curve everywhere beats a measured curve plus a guess. The
+        # moving regime is real -- block (ii) approaches the same speeds from
+        # above and below precisely to size it -- it is simply not measured yet.
+        x_v_full_moving: float = 0.0,
         move_eps_mps: float = 0.10,
-        y_deadzone: float = 700.0,
-        y_v_full: float = 1.02,
+        # Measured in the same sweep (3 fitted points, y- only: every y+ segment
+        # either aborted on tilt or never settled). Lateral is capped off by
+        # max_lateral_axis below, so these are recorded rather than relied on.
+        y_deadzone: float = 406.0,
+        y_v_full: float = 0.969,
         min_command_mps: float = 0.15,
         # The lateral axis is the worst-behaved one: measured dead until
         # ~axis 1000, so ANY sideways demand slams the stick and produces

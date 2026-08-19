@@ -177,24 +177,36 @@ Also worth doing: `obstacles_inflation`/`safe_distance` are 0.85 m against 0.20 
 which needs a 1.7 m-wide free corridor and makes a ~0.9 m doorway unplannable at *any*
 altitude. Pass-through args are now wired; try 0.40 (the 2D planner's own value).
 
-### P5 — Axis calibration is incomplete (PARTLY FIXED, needs a calibration flight)
-Done: a moving-regime full-scale, the servo no longer mutes the stick below the dead band
-while motion is wanted, the integral survives brief zero demands, and the velocity it
-closes on is now Sphera's **true physics velocity** instead of a 250 ms-filtered
-differentiated position (that lag is why `servo_kp` had to be cut 220 → 90; it can now be
-raised back).
-Still to do:
-- A dedicated calibration flight: standing-start breakaway per axis **per sign**, then
-  steady-state gain while already moving (approached from above *and* below — the gap
-  between those curves *is* the standing-vs-moving hysteresis), then combined x+y, x+r,
-  x+y+r grids. Full experiment design is in the 2026-08-18 investigation output.
-- No cross-axis compensation exists: the dead-band offset is added *per axis*, so a
-  diagonal request pays it twice (`hypot(620,700)=935` counts for an infinitesimal speed).
-  Currently masked by `max_lateral_axis=0`, but it will bite the moment lateral is enabled.
-- Yaw has no calibrated inverse at all — still `wz/max_yaw_rate*1000`. Re-fitting the two
-  logged points suggests a ~100-count dead band and ~2.55 rad/s full scale.
-- `turn_coordination()` (a *measured* yaw/translation coupling law) already exists in this
-  repo but is wired only into the XTEND followers, never the Rooster path.
+### P5 — Axis calibration (MEASURED 2026-08-18, partially; blocks ii/iii still owed)
+
+Block (i) flew: 47 segments, 28 with settled samples, 19 aborted (mostly the yaw sweep, see
+below). Fitted from the settled last 1.5 s of each hold:
+
+| axis | dead band | m/s at axis 1000 | fitted points | lowest value that moved |
+|---|---|---|---|---|
+| x+ | **466** | 1.313 | 6 | **550 — the lowest swept** |
+| x- | 289 | 0.988 | 4 | 640 |
+| y- | 406 | 0.969 | 3 | 580 |
+
+The forward dead band was assumed to be **620**; it is ~466, and possibly lower still,
+because the sweep never probed below 550 and the aircraft already moved there. `x_deadzone`,
+`x_v_full`, `y_deadzone` and `y_v_full` now carry the measured values, and `analyze.py`'s
+`AXIS_CURVE` was updated to match — otherwise the reported achieved/commanded gain measures
+the disagreement between two models rather than anything the aircraft did.
+
+`x_v_full_moving` is **disabled** (was a guessed 4.0). A measured curve everywhere beats a
+measured curve plus a guess; block (ii) exists to size the moving regime properly.
+
+**Still owed, in priority order:**
+1. **Block (ii)** — the moving-regime gain, approached from above and below. This is the
+   standing-vs-moving hysteresis the operator asked about and it is still unmeasured.
+2. **Re-sweep x+ below 550** (say 350–550) to pin the intercept instead of extrapolating it.
+3. **Block (iii)** — combined x+y / x+r / x+y+r. Nothing in the stack compensates cross-axis
+   dead bands; a diagonal currently pays the offset twice.
+4. **The yaw sweep aborted almost entirely**: r+ segments drove the aircraft to ranger
+   3.5–4.0 m (through the ~3.4 m ceiling) and one logged 180° roll. Yaw commands are
+   disturbing altitude badly. Investigate before re-running that block — this is a real
+   flight-behaviour finding, not a test-rig problem.
 
 ### P6 — Tracking error is 1.42 m now that the aircraft actually follows (OPEN, top)
 

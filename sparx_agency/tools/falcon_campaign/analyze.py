@@ -53,7 +53,12 @@ ALIGN_GATE_DEG = 85.0
 
 #: Measured ManualControl response (rooster_twist_control_adapter defaults):
 #: per body axis, the dead-band counts and the m/s produced at 1000 counts.
-AXIS_CURVE = {"x": (620.0, 1.25), "y": (700.0, 1.02)}
+#: The curve the analyzer uses to turn a commanded axis back into the speed that
+#: was ASKED for. It must track the adapter's own constants, or the reported
+#: achieved/commanded gain measures the disagreement between two models rather
+#: than anything the aircraft did. Measured 2026-08-18, see
+#: tools/rooster_axis_calibration.py.
+AXIS_CURVE = {"x": (466.0, 1.313), "y": (406.0, 0.969)}
 
 STALE_AGE_S = 1.0        # a stream older than this is not flowing
 ALT_BAND_M = 0.15        # ranger error that counts as "on target"
