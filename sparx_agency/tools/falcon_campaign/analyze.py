@@ -516,9 +516,20 @@ def coverage_metrics(run_dir, flight_s=None):
             except ValueError:
                 continue
             if row.get("coverage_m3") is None:
+                # A gap is not missing data, it is data. FALCON stops publishing
+                # coverage while the FSM sits in FINISH -- i.e. exactly when
+                # nothing is being explored -- so dropping these rows deleted
+                # the stalls and then measured the rate over what was left. One
+                # run scored 258 m3/min that way, from 185 s of a 437 s flight.
+                # Carry the last known volume forward: a gap is a flat interval.
                 gaps += 1
+                if rows:
+                    rows.append(dict(wall=row.get("wall"),
+                                     coverage_m3=rows[-1]["coverage_m3"],
+                                     filled=True))
                 continue
             rows.append(row)
+    rows = [r for r in rows if r.get("wall") is not None]
     if len(rows) < 2:
         return dict(samples=len(rows), gaps=gaps, final_m3=None, frac_of_box=None,
                     rate_m3_per_min=None, plateau_s=None, frontier_points=None,

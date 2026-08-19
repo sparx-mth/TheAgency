@@ -1468,3 +1468,18 @@ close.
 bandwidth of what it is being asked to follow before touching gains. And measure effort
 against progress — turning per metre, commanded metres per metre achieved — because a
 loop that is working hard and getting nowhere reads as "active" in every rate metric.
+
+## A gap in a metric is data, not missing data (2026-08-20)
+
+The coverage sampler writes an `ok:false` row when `/voxel_mapping/map_coverage` does not
+answer within its timeout, and the analyzer skipped those rows. But FALCON stops publishing
+coverage while the FSM sits in FINISH — that is, precisely when nothing is being explored.
+So the rows being dropped were the stalls, and the rate was then computed over what was left.
+
+One run scored **257.7 m3/min** that way, from 185 s of a 437 s flight, and would have been
+recorded as a campaign record. The `reliable` flag (span >= 70 % of the flight) is what caught
+it. Carrying the last known volume forward across a gap — a gap is a flat interval — gives the
+honest 115.3 m3/min and a 55 % stall fraction.
+
+**The general trap:** when a measurement fails *because* of the condition you are measuring,
+discarding the failures inverts the result. Ask what a missing sample means before dropping it.

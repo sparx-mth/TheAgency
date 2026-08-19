@@ -456,6 +456,18 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### Measurement note — coverage gaps count as stall (2026-08-20)
+
+The analyzer used to DROP `ok:false` coverage rows. FALCON stops publishing coverage while the
+FSM sits in FINISH, i.e. exactly when nothing is being explored, so the dropped rows were the
+stalls and the rate was computed over what was left. A run scored 257.7 m3/min that way, from
+185 s of a 437 s flight; the `reliable` flag caught it, and carrying the last volume forward
+gives the honest 115.3 and a 55 % stall. **All runs re-analysed**, so numbers quoted before
+2026-08-20 00:45 may be optimistic for any run with `gaps > 0`.
+
+Corrected history (reliable runs, post-course-slew): 101.6, 149.6, 124.1, 104.9, 98.7, 107.5,
+133.4, 115.3 m3/min — mean ~117, best 149.6. Pre-slew for comparison: 52-109.
+
 ### P20 — The tilt reflex was a stutter generator (fix applied 2026-08-20)
 
 The safety reflex that cuts drive on tilt fired **56-196 times in a single run** — once every
