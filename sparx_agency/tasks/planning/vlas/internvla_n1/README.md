@@ -1,6 +1,17 @@
-# InternNav ROS2 Bridge
+# InternVLA-N1 (InternNav)
 
-ROS2 bridge connecting camera topics to the InternVLA-N1 model server for vision-language navigation.
+Two things live here:
+
+- **`ros2/`** — the ROS2 bridge below, connecting camera topics to the
+  InternVLA-N1 model server.
+- **`trt/`** — TensorRT build tooling for **System 1**, the 91.4 M-parameter
+  trajectory policy that is 1.1% of the checkpoint's weights and runs twice as
+  often as System 2. Read `trt/README.md` before touching it: it records why
+  System 2 is deliberately *not* converted, and what the whole-pipeline
+  arithmetic looks like on an 8 GB card. The deployment runtime is
+  `core/planning/vlas/internvla_n1/trt/`.
+
+## ROS2 Bridge
 
 ## Architecture
 

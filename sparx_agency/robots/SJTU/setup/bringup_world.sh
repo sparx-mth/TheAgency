@@ -248,6 +248,8 @@ docker run "${TTY_ARGS[@]}" --rm \
   --gpus all \
   --privileged \
   --net=host \
+  --ipc=host \
+  -v /dev/shm:/dev/shm \
   --name "${CONTAINER_NAME}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v "${SJTU_PROJECT_DIR}:${SJTU_CONTAINER_WS}:rw" \

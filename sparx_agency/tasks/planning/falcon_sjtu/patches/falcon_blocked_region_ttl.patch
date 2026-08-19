@@ -1,0 +1,192 @@
+--- a/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
++++ b/falcon_planner/exploration_preprocessing/include/exploration_preprocessing/frontier_finder.h
+@@ -95,6 +95,9 @@
+   // exploration manager reports the spot when it fails to close on a chosen
+   // viewpoint; every cluster near it is then forced dormant.
+   void addBlockedRegion(const Vector3d &pos);
++  // Drop shadows older than blocked_region_ttl_s_. Called once per frontier
++  // update, so an expired region is reconsidered on the very next tour.
++  void expireBlockedRegions();
+ 
+   shared_ptr<PerceptionUtils> percep_utils_;
+   unique_ptr<RayCaster> raycaster_;
+@@ -134,8 +137,33 @@
+   // Viewpoints the aircraft could not reach; any frontier whose average falls
+   // within blocked_region_radius_ of one is forced dormant, so the coverage
+   // tour stops offering a route the map believes clear but physics blocks.
++  //
++  // Each shadow carries the time it was cast, because a shadow is a statement
++  // about the map as it stood, and the map changes. A viewpoint unreachable in
++  // the first minute of a mission, when almost nothing has been observed, is
++  // usually reachable later; leaving it shadowed for the life of the node
++  // retires a whole wing of a building on the strength of one early failure.
++  // Each re-report of the same region doubles how long the next shadow lasts,
++  // which is what lets one setting serve both cases this knob has to trade
++  // between: an early mistake in a corridor is forgiven within a TTL, while a
++  // genuinely unobservable pocket -- a staircase, a solid elevator slab, a
++  // curtain modelled floor to ceiling -- is retired for progressively longer
++  // until it stops costing anything, so the mission can still reach FINISH.
+   vector<Vector3d> blocked_regions_;
++  vector<double> blocked_regions_stamp_;
++  vector<int> blocked_regions_strikes_;
++  // Strikes have to outlive the shadows that earned them, and be keyed more
++  // coarsely than them. An aircraft defeated by the same pile of clutter twice
++  // rarely fails at the same point twice: measured 2.6 m apart, which is
++  // outside the coalesce radius, so every failure looked new, every shadow
++  // started at strike 1, and the escalation never engaged. This history is
++  // never expired and is consulted only to seed a new shadow's strike count.
++  vector<Vector3d> blocked_history_;
++  vector<int> blocked_history_strikes_;
+   double blocked_region_radius_;
++  double blocked_region_escalate_radius_;
++  double blocked_region_ttl_s_;
++  int blocked_region_ttl_max_doubling_;
+ 
+   // Params
+   int cluster_min_;
+--- a/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
++++ b/falcon_planner/exploration_preprocessing/src/frontier_finder.cpp
+@@ -30,6 +30,14 @@
+   nh.param("/frontier_finder/viewpoint_z_score_cutoff", viewpoint_z_score_cutoff_, 0.0);
+   nh.param("/frontier_finder/cell_height_clearance", cell_height_clearance_, 0.1);
+   nh.param("/frontier_finder/blocked_region_radius", blocked_region_radius_, 1.5);
++  // How long a shadow lasts. <= 0 keeps the old permanent behaviour.
++  nh.param("/frontier_finder/blocked_region_ttl_s", blocked_region_ttl_s_, 90.0);
++  nh.param("/frontier_finder/blocked_region_ttl_max_doubling",
++           blocked_region_ttl_max_doubling_, 3);
++  // Deliberately wider than blocked_region_radius_: this one keys the STRIKE
++  // COUNT, and the same obstacle defeats the aircraft at scattered points.
++  nh.param("/frontier_finder/blocked_region_escalate_radius",
++           blocked_region_escalate_radius_, 4.0);
+ 
+   // Reload shadows a previous incarnation persisted: this node respawns after
+   // LKH crashes, and physics-vetoed viewpoints stay vetoed across respawns.
+@@ -37,8 +45,17 @@
+     std::vector<double> flat;
+     if (ros::param::get("/frontier_finder/blocked_regions_runtime", flat) &&
+         flat.size() >= 3) {
+-      for (size_t i = 0; i + 2 < flat.size(); i += 3)
++      // Restored shadows are stamped NOW, not with the time they were cast.
++      // The successor cannot know how much of their life they had already
++      // spent, and the safe reading is the conservative one: a viewpoint the
++      // previous incarnation could not reach is worth avoiding for one more
++      // TTL, and no longer than that.
++      double stamp = ros::Time::now().toSec();
++      for (size_t i = 0; i + 2 < flat.size(); i += 3) {
+         blocked_regions_.push_back(Eigen::Vector3d(flat[i], flat[i + 1], flat[i + 2]));
++        blocked_regions_stamp_.push_back(stamp);
++        blocked_regions_strikes_.push_back(1);
++      }
+       ROS_WARN("[FrontierFinder] Restored %lu blocked region(s) from a previous "
+                "incarnation", blocked_regions_.size());
+     }
+@@ -64,13 +81,84 @@
+ 
+ FrontierFinder::~FrontierFinder() {}
+ 
++void FrontierFinder::expireBlockedRegions() {
++  if (blocked_region_ttl_s_ <= 0.0 || blocked_regions_.empty())
++    return;
++  const double now = ros::Time::now().toSec();
++  vector<Vector3d> kept;
++  vector<double> kept_stamp;
++  vector<int> kept_strikes;
++  kept.reserve(blocked_regions_.size());
++  kept_stamp.reserve(blocked_regions_stamp_.size());
++  kept_strikes.reserve(blocked_regions_strikes_.size());
++  for (size_t i = 0; i < blocked_regions_.size(); ++i) {
++    // A stamp in the future means the clock was reset under us (sim restart).
++    // Treat that as fresh rather than as infinitely old.
++    double age = now - blocked_regions_stamp_[i];
++    int doublings = blocked_regions_strikes_[i] - 1;
++    if (doublings > blocked_region_ttl_max_doubling_)
++      doublings = blocked_region_ttl_max_doubling_;
++    double ttl = blocked_region_ttl_s_ * double(1 << doublings);
++    if (age < 0.0 || age <= ttl) {
++      kept.push_back(blocked_regions_[i]);
++      kept_stamp.push_back(blocked_regions_stamp_[i]);
++      kept_strikes.push_back(blocked_regions_strikes_[i]);
++    } else {
++      ROS_WARN("[FrontierFinder] Blocked region (%.2f, %.2f, %.2f) has expired "
++               "after %.0f s (strike %d, ttl %.0f s); the coverage tour may try "
++               "it again", blocked_regions_[i].x(), blocked_regions_[i].y(),
++               blocked_regions_[i].z(), age, blocked_regions_strikes_[i], ttl);
++    }
++  }
++  if (kept.size() == blocked_regions_.size())
++    return;
++  blocked_regions_.swap(kept);
++  blocked_regions_stamp_.swap(kept_stamp);
++  blocked_regions_strikes_.swap(kept_strikes);
++  // Keep the persisted copy in step, or a respawn would restore the shadows
++  // that have just been retired and make the TTL unobservable across a crash.
++  std::vector<double> flat;
++  flat.reserve(blocked_regions_.size() * 3);
++  for (const auto &b : blocked_regions_) {
++    flat.push_back(b.x());
++    flat.push_back(b.y());
++    flat.push_back(b.z());
++  }
++  ros::param::set("/frontier_finder/blocked_regions_runtime", flat);
++}
++
+ void FrontierFinder::addBlockedRegion(const Vector3d &pos) {
+   // Coalesce nearby reports so a wall the aircraft grinds along a few times
+   // does not fill the list; one marker per radius is enough to shadow it.
+-  for (const auto &b : blocked_regions_)
+-    if ((b - pos).norm() < blocked_region_radius_)
++  // A repeat report REFRESHES the shadow rather than being dropped: the
++  // aircraft is telling us it is still stuck there, which is exactly the
++  // evidence that should keep the region shadowed for another full TTL.
++  // One strike per report against the coarse history, whether or not this
++  // report becomes a new shadow. This is what makes a pocket that keeps
++  // defeating the aircraft retire, even though it never fails twice in the
++  // same spot.
++  int strikes = 1;
++  bool found_history = false;
++  for (size_t i = 0; i < blocked_history_.size(); ++i)
++    if ((blocked_history_[i] - pos).norm() < blocked_region_escalate_radius_) {
++      strikes = ++blocked_history_strikes_[i];
++      found_history = true;
++      break;
++    }
++  if (!found_history) {
++    blocked_history_.push_back(pos);
++    blocked_history_strikes_.push_back(1);
++  }
++
++  for (size_t i = 0; i < blocked_regions_.size(); ++i)
++    if ((blocked_regions_[i] - pos).norm() < blocked_region_radius_) {
++      blocked_regions_stamp_[i] = ros::Time::now().toSec();
++      blocked_regions_strikes_[i] = strikes;
+       return;
++    }
+   blocked_regions_.push_back(pos);
++  blocked_regions_stamp_.push_back(ros::Time::now().toSec());
++  blocked_regions_strikes_.push_back(strikes);
+   // Persist to the param server: this node respawns after LKH crashes and a
+   // fresh process would otherwise forget every hard-won shadow, sending the
+   // coverage tour straight back to viewpoints physics already vetoed.
+@@ -82,9 +170,9 @@
+     flat.push_back(pos.z());
+     ros::param::set("/frontier_finder/blocked_regions_runtime", flat);
+   }
+-  ROS_WARN("[FrontierFinder] Blocked unreachable viewpoint (%.2f, %.2f, %.2f); "
+-           "%lu region(s) now shadowed from the coverage tour",
+-           pos.x(), pos.y(), pos.z(), blocked_regions_.size());
++  ROS_WARN("[FrontierFinder] Blocked unreachable viewpoint (%.2f, %.2f, %.2f) "
++           "on strike %d; %lu region(s) now shadowed from the coverage tour",
++           pos.x(), pos.y(), pos.z(), strikes, blocked_regions_.size());
+ }
+ 
+ void FrontierFinder::searchFrontiers() {
+@@ -601,6 +689,9 @@
+ }
+ 
+ void FrontierFinder::computeFrontiersToVisit() {
++  // Retire stale shadows before they are used, so an expired region is
++  // reconsidered on this tour rather than the next one.
++  expireBlockedRegions();
+   first_new_ftr_ = frontiers_.end();
+   int new_num = 0;
+   int new_dormant_num = 0;

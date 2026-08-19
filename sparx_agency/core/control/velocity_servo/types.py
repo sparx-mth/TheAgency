@@ -59,6 +59,16 @@ class BodyTwistCommand:
             go too fast, the other is asking to change too abruptly, and a
             replan blend that trips this every tick is a blend that is not
             working.
+        reference_z_m: Altitude the plan asked for at this instant, world frame.
+            Carried purely so a contact can be attributed: ``position_error_m``
+            says the aircraft is off its plan but not in which direction, and
+            for a strike on top of an obstacle the direction is the whole
+            question. A descent onto a crate with the reference already down
+            there is a PLANNING fault -- the curve was routed through the
+            obstacle. The same descent with the reference holding station above
+            is a CONTROL fault -- altitude sagging out from under a good plan.
+            The two need opposite fixes. NaN while holding, where there is no
+            plan to quote.
     """
 
     vx: float
@@ -80,6 +90,7 @@ class BodyTwistCommand:
     past_end: bool = False
     saturated: bool = False
     rate_limited: bool = False
+    reference_z_m: float = float("nan")
 
     def body_velocity(self):
         # type: () -> tuple

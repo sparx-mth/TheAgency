@@ -146,9 +146,34 @@ Four things to carry away, all of them in `config/camera_front_600x600.yaml` and
   free space outward from *itself*, so the body origin is the one place it can
   never observe.
 
-The xacro's own comment block above the depth sensor claims the parameters were
-"matched to FALCON simulator exactly" at 640x480 / 90 deg / 5 m. They were not —
-the tags in the same file say 600x600 / 75 deg / 10 m. Trust the tags.
+The xacro's own comment block above the depth sensor used to claim the
+parameters were "matched to FALCON simulator exactly" at 640x480 / 90 deg / 5 m.
+They were not — the tags in the same file say 600x600 / 75 deg / 10 m. That
+comment has been replaced with the derivation above; trust the tags either way.
+
+**But the tags are only what runs after a workspace rebuild.** Gazebo loads the
+*installed* URDF under `$SJTU_PROJECT_DIR/install/`, so `--skip-build` flies
+whatever was installed last, and an edit to the source xacro is invisible with
+no warning anywhere. This is not hypothetical: an April 2026 build of
+`sjtu_drone_description` — **640x360 at `horizontal_fov` 2.09 rad, fx 185.69** —
+was still being flown against a stack configured for 600x600 / fx 390.64. The
+mismatch does not fail; it back-projects every ray with a focal length 2.1x too
+long and builds a map that is wrong in a way that looks plausible on screen:
+obstacles collapse toward the optical axis, occupied voxels land inside the
+aircraft's own footprint, and the follower retreats from walls the physics says
+it never touched (measured: 40 "bubble breach" retreats, zero bumper contacts,
+coverage frozen at 31 of 161 m³). Rebuilt, the same mission mapped 99 m³ in two
+minutes with zero breaches.
+
+**Verify against the sim, not the file**, whenever the map looks wrong:
+
+```bash
+ros2 topic echo --once /simple_drone/front_depth/depth/camera_info   # K, width, height
+ros2 topic hz /simple_drone/front_depth/depth/image_raw              # 15 Hz nominal
+```
+
+`k[0]` must equal the `fx` in `falcon_sjtu`'s `bspline_follower.launch`, and
+`width`/`height` must equal its `image_width`/`image_height`.
 
 ## Frames, and their three different conventions
 
@@ -187,6 +212,41 @@ startup):
 
 Airframe: 1.477 kg, `maxForce` 30 N — thrust-to-weight 2.07, comfortable but not
 aerobatic. Tilt limit 0.5 rad, yaw rate 1.5 rad/s, body velocity 2 m/s.
+
+### How big it actually is, and why that keeps being got wrong
+
+The collision geometry is a **mesh**, not a box —
+`sjtu_drone_description/models/sjtu_drone/quadrotor_4.stl`, offset `z + 0.04` in
+the URDF — so nothing in the SDF states a size and everyone who needs one
+invents it. Parsed off the 1,744 facets:
+
+| | measured |
+|---|---|
+| x extent | −0.260 .. 0.260 (**0.520 m** across) |
+| y extent | −0.260 .. 0.260 (**0.520 m** across) |
+| z extent | −0.040 .. 0.070 (**0.110 m** tall) |
+| max horizontal radius | **0.314 m** (the arm tips, at 45°) |
+
+Three numbers follow, and every one of them was wrong somewhere in this repo:
+
+* **On-axis half width 0.26 m.** This is the one a corridor or doorway test
+  wants — 0.25 is a fair rounding of it and is what `gate_drone_radius_m` uses.
+  Do **not** round it up to 0.30 "to be safe": the voxel gate sweeps a corridor
+  of that half width, and at 0.30 the cross-track budget through a 0.90 m
+  doorway falls to ±0.10 m in the worst grid phase, inside the follower's own
+  tracking noise.
+* **Circumscribed radius 0.314 m**, which is what matters when the aircraft is
+  yawed away from the axis of the opening it is passing. FALCON picks yaw to aim
+  the camera at the next frontier, not to align the airframe with a door, so
+  this is a live 0.05 m of budget that nothing currently manages.
+* **Half height 0.055 m.** The aircraft is a plate, not a cube. Two brakes in
+  `falcon_sjtu` defaulted to modelling it as 0.70 m tall
+  (`VoxelBrakeGateConfig.body_halfheight_m` and
+  `DepthProximityBrakeConfig.corridor_halfheight_m`, both 0.35), which makes it
+  clear every obstacle by 0.35 m instead of by its own body: it demanded 2.14 m
+  of altitude to overfly a 1.79 m pile under a 1.9 m ceiling, and vetoed a
+  1.14 m desk while cruising at 1.30 m. Both now carry 0.15 (measured plus one
+  0.1 m voxel).
 
 What actually matters to a controller is not those gains but the **closed-loop
 response they produce**, measured by stepping `cmd_vel` and fitting `odom`'s
@@ -248,12 +308,26 @@ Flags: `--gui` / `--headless` (default), `--domain <N>` (ROS_DOMAIN_ID, default
 that never started), `--name <NAME>`, `--skip-build`, `--help`. `--help` lists
 the worlds actually present in your checkout.
 
-Only two worlds are in the checkout today: **`hospital`** (from
-`aws-robomaker-hospital-world`, plus its `hospital_two_floors` /
-`hospital_three_floors` variants) and **`playground`** (sjtu's own).
-`small_house`, `bookstore` and `small_warehouse` are *not* — they are separate
-aws-robomaker repositories. Cloning one next to `sjtu_drone/` makes it appear
-with no change to the script.
+`--help` lists what is cloned, which is the only reliable inventory. Today that
+is **`hospital`** (from `aws-robomaker-hospital-world`, plus its
+`hospital_two_floors` / `hospital_three_floors` variants), **`playground`**
+(sjtu's own), **`small_house`**, **`bookstore`**, and the two warehouses,
+**`no_roof_small_warehouse`** and `small_warehouse`. Each aws-robomaker world is
+a separate repository; cloning one next to `sjtu_drone/` makes it appear with no
+change to the script.
+
+**The small-warehouse repository is archived and its default branch holds only a
+README.** The worlds and models are on the `ros1` branch — a plain
+`git clone` of it leaves you with a repo that contributes no world at all:
+
+```bash
+git clone --depth 1 https://github.com/aws-robotics/aws-robomaker-small-warehouse-world.git
+cd aws-robomaker-small-warehouse-world && git fetch --depth 1 origin ros1:ros1 && git checkout ros1
+```
+
+`no_roof_small_warehouse` is the one FALCON is flown in (`falcon_sjtu`'s map
+config for it is named `warehouse`); the roofed `small_warehouse` traps a depth
+camera under a ceiling the box was never sized for.
 
 **Why not the external repo's `run.sh`.** Three reasons, and the first is the
 one that matters:
@@ -306,11 +380,15 @@ of work.
 
 ## What's still open
 
-- Nothing flies this platform yet. The contract, the calibrations and the plant
-  are in place; the mission-level node that composes them with a core velocity
-  servo is not, and belongs under `tasks/`, not here.
-- No `config/vla/*.yaml`, per the VLA layering rule — no policy has been pointed
-  at this robot.
+- The mission-level node that composes this platform with a core **velocity
+  servo** is not here (it belongs under `tasks/`). One VLA stack now does fly it:
+  `tasks/planning/sjtu_internvla_n1/` pursues an InternVLA-N1 trajectory into
+  `cmd_vel`, and `tasks/planning/falcon_sjtu/` flies FALCON exploration.
+- The first policy has been pointed at this robot:
+  `config/vla/internvla_n1.yaml` binds InternVLA-N1 to these topics, the front
+  camera intrinsics and the airframe limits (read by the
+  `tasks/planning/sjtu_internvla_n1` nodes). It is the only `config/vla/*.yaml`
+  so far; add one per policy, per the VLA layering rule.
 - The measured plant is from one campaign at one world and one flight envelope.
   It is a first-order-plus-delay fit to a second-order reality, which is the
   right trade for a lead term that cancels the dominant pole, but it has not
