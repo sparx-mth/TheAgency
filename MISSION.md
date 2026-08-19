@@ -76,6 +76,7 @@ did, `git commit` + `git push`. If it did not, revert or iterate. Record the out
 | FALCON C++ patches | Verify with `patches/verify_patch.sh <patch>.sh` (~1 min) BEFORE a full `docker build` (~12 min). Applying cleanly is not compiling. |
 | `it` container is ROS 2 **Foxy** | `ros2 topic echo --once` does not exist there. Use `timeout N ros2 topic echo <t> \| grep -m1 <field>`. |
 | Battery endurance | A ~5 min flight drains 92% → 40%. A full 10-min window needs a near-full pack, so essentially every cycle restarts Sphera. |
+| FCU stops connecting | The vendor `fcu_driver` inside `R1` spams `Failed to execute: Not connected to FCU` and `RoosterState.armable` stays false, while PX4 sits at ~0.3 % CPU (a healthy SITL runs hot). **A charged battery does not mean a flyable drone.** The only known remedy is a Sphera restart, and `ensure_sphera` now triggers one on `armable == false` as well as on a flat pack. |
 | Duplicate publishers | Before blaming code, run `ros2 topic info /R1/manual_control --verbose` and `/R1/keep_alive --verbose` and confirm exactly **one** publisher. |
 
 ## 5. Campaign harness
@@ -363,6 +364,7 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | altitude_hold_kp_down 900 → 1500 | **helped, 1 run**: converged for the first time, in-band 3.8 s → 19.2 s, \|err\| 0.26 → 0.21 m, ranger 1.60 → 1.50 m | 2026-08-19 |
 | 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
 | 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
+| 2026-08-19 | Restart Sphera when the FCU is unarmable, and gate health on it | six cycles were lost re-attempting a dead aircraft, because the battery read 0.99 so nothing ever restarted | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 

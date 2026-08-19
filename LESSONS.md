@@ -67,6 +67,32 @@ and it is indistinguishable from perfect tracking of a moving one. Check
 `/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
 the roslaunch stdout redirect instead.
 
+## 2026-08-19 — "the battery is charged" is not "the drone can fly", and six cycles died on the difference
+
+**Symptom:** six consecutive campaign cycles failed at takeoff with
+`Arm refused: Failed: Not connected to FCU`. The vendor `fcu_driver` inside `R1` was spamming
+`Failed to execute: Not connected to FCU` about once a second, and `RoosterState.armable`
+stayed false for the full 90 s the campaign waited. PX4 itself was running -- but at **0.3 %
+CPU**, where a healthy SITL instance runs hot (a second, unrelated PX4 on the same box sat at
+100 %). It had connected once earlier in that container's life (`FCU is Connected!`) and then
+stopped.
+
+**Why it persisted:** the campaign restarts Sphera when the battery is low, and the battery
+read 0.99 the whole time -- freshly restored by an earlier restart. So the one lever that
+fixes this was never pulled, and every cycle re-attempted the same dead aircraft, each burning
+a bring-up and a 60-90 s timeout.
+
+**Fix:** treat "cannot arm" as its own restart trigger, not a subcase of "battery low". A
+Sphera restart cleared it immediately (`armable` false -> true). The health report also gates
+on `armable` now; it had been reporting `ok: true` for a drone that could not arm, which is
+the same class of error as the coverage and telemetry bugs found earlier this campaign.
+
+**Don't:** don't let one precondition stand in for another because they usually coincide. A
+charged pack and a connected flight controller are independent facts, and an autonomous loop
+needs a remedy keyed to each. And when a health report says OK, check that every gate it names
+is actually in the boolean -- adding a field without adding it to the verdict is worse than not
+measuring it, because it looks measured.
+
 ## 2026-08-19 — a calibration regime is a CURVE; taking the offset from one and the slope from another over-commands
 
 **Second failed attempt to apply the axis calibration, and the failure is instructive.**

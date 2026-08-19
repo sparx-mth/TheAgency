@@ -332,6 +332,16 @@ def ensure_sphera(min_battery=None):
         return restart_sphera()
     if level < min_battery:
         return restart_sphera()
+    # A charged battery is not the same as a flyable drone. Six cycles in a row
+    # were lost with the FCU reporting "Not connected" while the pack read 0.99,
+    # so nothing here ever restarted and every cycle re-attempted the same dead
+    # aircraft. If it cannot arm, the drone is unflyable and a restart is the
+    # only lever this campaign has.
+    if not drone_armable():
+        print("[bringup] battery is fine but the FCU is not armable -- "
+              "restarting Sphera rather than flying a drone that cannot arm",
+              flush=True)
+        return restart_sphera()
     return True
 
 
@@ -579,7 +589,7 @@ def health_report():
     report["ok"] = bool(
         report["falcon_up"] and report["bridge_up"] and report["exploration_node"]
         and report["frames_fresh"] and report["manual_authority_ok"]
-        and report["battery_ok"]
+        and report["battery_ok"] and report["armable"]
         and str(report["drone_image"]).startswith(C.SIM_IMAGE_PREFIX))
     return report
 
