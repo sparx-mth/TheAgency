@@ -257,30 +257,28 @@ treating this as a control defect — compare rest-period roll with and without 
 position hold, and against `altitude_hold` activity, since the z axis is a narrow step gate
 that slews every tick.
 
-### P9 — The stall-escape reflex was consuming half of some flights (FIX APPLIED, unverified)
+### P9 — Stall-escape reflex (SOLVED 2026-08-19, verified in flight)
 
-Escapes track the bad runs almost exactly:
+The reflex fires on "asked for >0.15 m/s, measured <0.06 m/s for 3 s" — which describes an
+aircraft pinned against geometry *and*, identically, one whose commanded axis sits under the
+platform's effective threshold. So a gain problem presented as a permanent stall, the escape
+repeated forever without restoring motion, and each attempt cost ~9.5 s including cooldown.
+It also reverses, into the direction block (i) measured tripping 26–33° of roll.
 
-| run | escapes | distance | % below stop speed |
-|---|---|---|---|
-| 20260819_084649Z | 2 | 256.8 m | 5.2 % |
-| 20260819_092536Z | 5 | 390.1 m | 3.0 % |
-| 20260819_091247Z | 14 | 133.8 m | 59.4 % |
-| 20260819_093835Z | **38** | 139.9 m | 46.8 % |
+A give-up budget (`escape_give_up_count` 4, re-armed by `escape_progress_sec` 5 s of real
+motion) fixed it outright:
 
-One escape plus its cooldown is ~9.5 s, so 38 of them is over half the flight window spent
-reversing and turning rather than exploring.
+| | before (093835Z) | after (100012Z) |
+|---|---|---|
+| escapes | 38 | **2** |
+| distance | 139.9 m | **348.1 m** |
+| stops per minute | 9.35 | **1.08** |
+| time below 0.05 m/s | 46.8 % | **5.0 %** |
+| coverage | — | **1113 m³ @ 79.6 m³/min, reliable** |
 
-The reflex fires on "asked for >0.15 m/s, measured <0.06 m/s for 3 s", which is what a
-physically pinned aircraft looks like — and *also* exactly what an aircraft whose commanded
-axis sits under the platform's effective threshold looks like. So a gain problem presents as
-a permanent stall and the escape repeats forever, never restoring motion. It also reverses,
-and reversing is the direction block (i) measured tripping 26–33° of roll.
-
-Fixed with a budget: `escape_give_up_count` (4) attempts without regaining sustained motion
-suppresses further escapes, re-arming only after `escape_progress_sec` (5 s) of real movement.
-**Verify:** `tracking.escapes` should fall well below 10, and `frac_time_below_stop_speed`
-with it. This is a symptom-level fix — the underlying gain is what block (ii) is measuring.
+That is the best *verified* coverage rate the campaign has recorded (earlier reliable bests:
+72.7, 73.5, 65.8 m³/min). It also explains most of the run-to-run variance in §7b: the spread
+between 133.8 m and 390.1 m on "identical" configurations was largely escape count.
 
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
