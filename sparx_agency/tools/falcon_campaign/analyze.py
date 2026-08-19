@@ -443,6 +443,16 @@ def health_metrics(samples, lines):
                                 for key, needle in _EVENTS))
 
 
+def _requested_window(run_dir):
+    """The flight window this run was asked to fly, seconds, or None."""
+    try:
+        summary = json.loads((run_dir / "summary.json").read_text())
+    except (OSError, ValueError):
+        return getattr(config, "FLIGHT_SECONDS", None)
+    return summary.get("duration_requested_s") or getattr(
+        config, "FLIGHT_SECONDS", None)
+
+
 def coverage_metrics(run_dir, flight_s=None):
     """Explored volume over time -- the one metric that IS the mission.
 
@@ -460,6 +470,7 @@ def coverage_metrics(run_dir, flight_s=None):
     """
     path = run_dir / "coverage.jsonl"
     rows, gaps = [], 0
+    window_s = _requested_window(run_dir)
     if path.exists():
         for line in path.read_text(errors="ignore").splitlines():
             try:
@@ -474,6 +485,14 @@ def coverage_metrics(run_dir, flight_s=None):
         return dict(samples=len(rows), gaps=gaps, final_m3=None, frac_of_box=None,
                     rate_m3_per_min=None, plateau_s=None, frontier_points=None,
                     span_s=None, reliable=False)
+
+    # Samples keep arriving after the flight window closes, and a tail flown on
+    # a flat battery is not exploration -- it dilutes the rate and inflates the
+    # stall. Judge the flight the campaign actually asked for.
+    if window_s:
+        kept = [r for r in rows if r["wall"] - rows[0]["wall"] <= window_s]
+        if len(kept) >= 2:
+            rows = kept
 
     span = rows[-1]["wall"] - rows[0]["wall"]
     gained = rows[-1]["coverage_m3"] - rows[0]["coverage_m3"]
@@ -496,7 +515,48 @@ def coverage_metrics(run_dir, flight_s=None):
         gained_m3=gained,
         rate_m3_per_min=(gained / span * 60.0) if span > 0 else None,
         plateau_s=plateau_s,
-        frontier_points=rows[-1].get("frontier_points"))
+        frontier_points=rows[-1].get("frontier_points"),
+        **_stall_metrics(rows))
+
+
+#: A coverage gain slower than this counts as "not exploring", m3/min.
+#: Productive stretches measure 110-480 and a stalled planner dribbles 0-26,
+#: so the gap is an order of magnitude wide and the threshold sits in it.
+STALL_RATE_M3_PER_MIN = 30.0
+
+
+def _stall_metrics(rows):
+    """How much of the flight produced no coverage, and when it stopped.
+
+    ``plateau_s`` only sees a flat TAIL, and one run ended with a single large
+    jump that reset it to zero while the middle of the flight held flat for
+    285 s. The mission loses the same time either way, so measure the longest
+    barren stretch wherever it falls, plus how long the productive part lasted.
+
+    Args:
+        rows: Coverage samples, oldest first, each with ``wall`` and
+            ``coverage_m3``.
+
+    Returns:
+        ``longest_stall_s`` (longest stretch under
+        :data:`STALL_RATE_M3_PER_MIN`), ``stall_frac`` of the sampled span,
+        and ``t95_s`` (seconds to reach 95 % of the run's final volume).
+    """
+    longest = run_s = 0.0
+    for prev, cur in zip(rows, rows[1:]):
+        dt = cur["wall"] - prev["wall"]
+        if dt <= 0:
+            continue
+        rate = (cur["coverage_m3"] - prev["coverage_m3"]) / dt * 60.0
+        run_s = run_s + dt if rate < STALL_RATE_M3_PER_MIN else 0.0
+        longest = max(longest, run_s)
+    span = rows[-1]["wall"] - rows[0]["wall"]
+    target = 0.95 * rows[-1]["coverage_m3"]
+    t95 = next((r["wall"] - rows[0]["wall"] for r in rows
+                if r["coverage_m3"] >= target), span)
+    return dict(longest_stall_s=round(longest, 1),
+                stall_frac=round(longest / span, 3) if span > 0 else None,
+                t95_s=round(t95, 1))
 
 
 def exploration_metrics(lines):
@@ -522,11 +582,63 @@ def exploration_metrics(lines):
         if "replan" in low:
             key = re.sub(r"[-+]?\d*\.?\d+", "N", line.strip())[-90:]
             replans[key] = replans.get(key, 0) + 1
-    return dict(fsm_transitions=len(transitions), fsm_lines=transitions[:40],
+    result = dict(fsm_transitions=len(transitions), fsm_lines=transitions[:40],
                 finished=finish_t is not None, finish_t_s=finish_t,
                 reopened=reopened, traj_server_exited=traj_server_exited,
                 plan_fail=plan_fail, replan_verdicts=dict(
                     sorted(replans.items(), key=lambda kv: -kv[1])[:12]))
+    result.update(_unreachable_viewpoint(lines, base))
+    return result
+
+
+def _unreachable_viewpoint(lines, base):
+    """How long the planner stayed locked on a viewpoint A* could not reach.
+
+    Measured 2026-08-19: for 21 315 consecutive planning iterations across five
+    minutes the exploration manager chose the SAME viewpoint, A* failed on it
+    every time (default profile then coarse), and coverage did not move while
+    the aircraft flew 20 m per minute inside a one-metre box. Nothing upstream
+    retires a destination for being unreachable -- the coverage tour simply
+    offers it again -- so this is the shape a stalled run takes, and it is
+    invisible in every other metric here.
+
+    Args:
+        lines: Log lines from the run.
+        base: Timestamp of the first stamped line, or None.
+
+    Returns:
+        ``no_path_fails``, the most-repeated target as ``locked_target``, its
+        repeat count, and ``locked_s``: the wall time spanned by the longest
+        unbroken run of that same target.
+    """
+    fails = 0
+    targets, times = [], []
+    for line in lines:
+        if "No path to next viewpoint" in line:
+            fails += 1
+            continue
+        hit = re.search(r"Next pos: (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)", line)
+        # Each of these is logged twice, once by glog without a parseable
+        # timestamp; keeping only the stamped copy leaves the series intact.
+        stamp = _log_time(line) if hit else None
+        if hit and stamp is not None:
+            targets.append(tuple(round(float(g), 1) for g in hit.groups()))
+            times.append(stamp)
+    longest, longest_key, count = 0.0, None, 0
+    start = run_len = 0
+    for i, key in enumerate(targets):
+        if i and key == targets[i - 1]:
+            run_len += 1
+        else:
+            start, run_len = i, 1
+        if run_len > count:
+            count = run_len
+            longest_key = key
+            first, last = times[start], times[i]
+            longest = (last - first) if None not in (first, last) else 0.0
+    return dict(no_path_fails=fails,
+                locked_target=list(longest_key) if longest_key else None,
+                locked_repeats=count, locked_s=round(longest, 1))
 
 
 # -- ranking and rendering ------------------------------------------------

@@ -25,13 +25,13 @@
      const bool at_target = (pos - next_pos).norm() < 0.6;
      double span = 0.0;
 -    for (size_t i = 0; i < track.size(); ++i)
-+    double pinned_oldest = now_s;
++    // The span below reads only the last PINNED_WINDOW_S of the history;
 +    for (size_t i = 0; i < track.size(); ++i) {
 +      if (track[i].first < now_s - PINNED_WINDOW_S)
 +        continue;   // the pinned test owns only the recent tail of the history
        span = std::max(span, (track[i].second - pos).norm());
 -    if (!at_target && track.front().first <= now_s - 25.0 && span < 2.0) {
-+      pinned_oldest = std::min(pinned_oldest, track[i].first);
++      // whether that history is long ENOUGH is asked of track.front().
 +    }
 +
 +    // ...and the same failure with the aircraft MOVING, which the span test
@@ -77,7 +77,7 @@
 +               "so the coverage tour moves on",
 +               path, net, closed, next_pos[0], next_pos[1], next_pos[2]);
 +      track.clear();
-+    } else if (!at_target && pinned_oldest <= now_s - PINNED_WINDOW_S && span < 2.0) {
++    } else if (!at_target && track.front().first <= now_s - PINNED_WINDOW_S && span < 2.0) {
        frontier_finder_->addBlockedRegion(next_pos);
        ROS_WARN("[ExplorationManager] Aircraft confined to <2 m for 25 s short of "
                 "viewpoint (%.2f, %.2f, %.2f); blocking it so the coverage tour "

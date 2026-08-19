@@ -25,7 +25,10 @@ set -uo pipefail
 REPO="${SPARX_REPO:-/home/user1/GIT/TheAgency}"
 RUNS="$REPO/runs"
 PY="${CAMPAIGN_PYTHON:-python3}"
-DURATION="${CAMPAIGN_DURATION:-600}"
+# The window comes from config.py, which sets it to what the battery actually
+# supports; a hardcoded 600 here quietly overrode that and every run flew ~170 s
+# on a dying pack, which is recorded as flight and is not.
+DURATION="${CAMPAIGN_DURATION:-$(cd "$REPO" && PYTHONPATH="$REPO" "$PY" -c 'from sparx_agency.tools.falcon_campaign import config; print(config.FLIGHT_SECONDS)' 2>/dev/null || echo 430)}"
 # A pause protects an edit or a manual flight -- both minutes of work. Left
 # behind it silently idles the whole campaign: one forgotten sentinel cost 13.5
 # hours of flying while this loop logged "holding" every 30s and did exactly what
