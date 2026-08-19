@@ -76,7 +76,7 @@ class RoosterCommandUnitNode(Node):
         self.declare_parameter("altitude_hold_kp", 500.0)
         # See RoosterUnit._altitude_hold_tick -- the z axis is three-zone,
         # so descent needs a larger gain than climb to reach its zone at all.
-        self.declare_parameter("altitude_hold_kp_down", 900.0)
+        self.declare_parameter("altitude_hold_kp_down", 1500.0)
         self.declare_parameter("altitude_hold_kd", 600.0)
         # See RoosterUnit.__init__ (rooster_unit.py) for why the default was
         # raised from 200 to 380 -- 2026-08-13.

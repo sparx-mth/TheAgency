@@ -107,7 +107,15 @@ class RoosterUnit:
         altitude_hold_kp: float = 500.0,
         # Downward-error gain; <=0 means "same as altitude_hold_kp". See
         # _altitude_hold_tick for why descent needs its own, larger gain.
-        altitude_hold_kp_down: float = 900.0,
+        #
+        # 900 was not enough. Measured over several 600 s flights, the loop
+        # parked a steady ~0.22 m ABOVE its own setpoint (holding 1.54-1.57 m
+        # against a 1.35 m target) and never converged. Solving the loop for the
+        # observed thresholds: descent needs z <= ~400 and hover_z is 700, so a
+        # -0.22 m error only reaches the descend zone once the gain exceeds
+        # 300/0.22 = 1364. 1500 gives margin, and the per-tick slew limit plus
+        # altitude_hold_max_correction still bound what one tick can do.
+        altitude_hold_kp_down: float = 1500.0,
         altitude_hold_kd: float = 600.0,
         # Was 200 -- confirmed live (2026-08-13) that's too weak to recover
         # once drifted past max_ranger_m: pinned at hover_z-200 continuously

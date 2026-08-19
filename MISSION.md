@@ -280,28 +280,26 @@ That is the best *verified* coverage rate the campaign has recorded (earlier rel
 72.7, 73.5, 65.8 m³/min). It also explains most of the run-to-run variance in §7b: the spread
 between 133.8 m and 390.1 m on "identical" configurations was largely escape count.
 
-### P10 — Exploration can end at 13 % coverage with ZERO frontiers (FIX APPLIED, unverified)
+### P10 — Exploration ending at 13 % coverage with zero frontiers (SOLVED 2026-08-19)
 
-Run `20260819_111738Z`: FALCON declared exploration finished at **t=109 s** with **0 frontier
-points** at **13 % coverage**, so the finish-reopen correctly declined to fire (there was
-nothing to re-open for) and the aircraft parked for the remaining 500 s — **77 % of the flight
-at zero speed**, 80 m flown, coverage plateaued for 458 s. Comparable runs reach 21 % and keep
-going, so this is intermittent, not the map running out.
+The blocked-region blacklist retired frontiers permanently. **None of its parameters had ever
+been set** in `nav_stack.launch`, so all ran at C++ defaults — and a shadow could only grow to
+`blocked_region_radius_max` 3.5 m while viewpoints are sampled to `candidate_rmax` 5.5 m, so a
+blacklisted viewpoint could never retire the frontier that produced it. The tour re-offered the
+same unreachable target, struck it again each time, and the frontier set emptied. The valve
+that un-retires frontiers, `finish_amnesty_max`, was capped at 2 uses per process.
 
-Cause: the blocked-region blacklist retires frontiers permanently. None of its parameters were
-ever set in `nav_stack.launch`, so all ran at C++ defaults — and a shadow could only grow to
-`blocked_region_radius_max` **3.5 m** while viewpoints are sampled out to `candidate_rmax`
-**5.5 m**. A blacklisted viewpoint therefore could never retire the frontier that produced it:
-the coverage tour re-offered the same unreachable target, struck it again each time, and the
-frontier set emptied. The release valve, `finish_amnesty_max`, was capped at **2 uses per
-process**.
+| run | reopened | coverage plateau | frontiers | distance | % at zero |
+|---|---|---|---|---|---|
+| 111738Z (pre-fix) | **0** | **458 s** | **0** | 80 m | **76.9 %** |
+| 115748Z | 5 | 0 s | 1104 | 290.2 m | 6.6 % |
+| 121053Z | 2 | 0 s | 0 | 356.9 m | 2.9 % |
 
-Now set: shadow cap 6.0 m, escalation radius 6.0 m, TTL doubling capped at 1 (a shadow lasts
-≤180 s instead of ≤720 s), amnesty cap 20.
-
-**Verify:** `exploration.finished` should stop coinciding with `reopened: 0`; watch for runs
-where `coverage.plateau_s` is large while `frontier_points` is 0. A recurrence means the
-frontier finder itself is failing to see reachable frontiers, not the blacklist.
+Set: shadow cap 6.0 m, escalation 6.0 m, TTL doubling capped at 1 (≤180 s, was ≤720 s),
+amnesty cap 20. The signature to watch for a recurrence is `finished` **and** `reopened: 0`
+**and** a large `coverage.plateau_s` — if that returns with these params live, the frontier
+finder itself is failing to see reachable frontiers and the blacklist is the wrong place to
+keep tuning.
 
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
@@ -361,6 +359,8 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Dead-band FLOOR now uses the regime's own dead band | it clamped moving commands back to the standing 620, which would have silently defeated the paired test | 2026-08-19 |
 | 2026-08-19 | Paired moving curve (412, 1.847) | **KEPT** — equal on distance/stops, better peak speed (1.46-2.14 vs 1.64-5.43 m/s) and time at zero | 2026-08-19 |
 | 2026-08-19 | Blocked-region blacklist params finally set | shadow cap 3.5 → 6.0 m (was below candidate_rmax 5.5), TTL doubling 3 → 1, amnesty cap 2 → 20 | 2026-08-19 |
+| 2026-08-19 | Blacklist fix **verified** over two runs | plateau 458 s → 0 s, reopened 0 → 2-5, distance 80 → 290-357 m | 2026-08-19 |
+| 2026-08-19 | altitude_hold_kp_down 900 → 1500 | **UNVERIFIED** — targets the steady +0.22 m offset above setpoint (P4 door clearance) | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 
