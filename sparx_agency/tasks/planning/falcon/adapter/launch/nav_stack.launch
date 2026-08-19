@@ -1289,6 +1289,18 @@
   <!-- min_visib_num is an absolute cell count, so it is hardest against the
        smallest clusters — exactly what is left late in a mission. Apply a
        cluster-relative bar, but only to viewpoints with real clearance. -->
+  <!-- A frontier cluster must hold at least cluster_min cells to exist at all.
+       FALCON ships 100 and halves it to 50 on a map coarser than 0.15 m, which
+       ours is at 0.20. At 0.20 m a cell is 0.04 m2, so 50 cells is a 2 m2 patch
+       of boundary — larger than a doorway. Measured 2026-08-20: a run declared
+       FINISH at 27 % of the box with only THREE clusters in the whole map,
+       while an independent count of free voxels touching unknown found 4542 of
+       them spread across the full extent. The boundary was there; it was
+       arriving in patches too small to be called a cluster. 30 halves to 15,
+       about 0.6 m2, which admits a doorway and still rejects specks. -->
+  <arg name="frontier_cluster_min" default="30" />
+  <param name="/frontier_finder/cluster_min" value="$(arg frontier_cluster_min)"/>
+
   <param name="/frontier_finder/open_visib_fraction"
          value="$(arg frontier_open_visib_fraction)"/>
   <param name="/frontier_finder/open_visib_floor"

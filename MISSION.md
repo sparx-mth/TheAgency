@@ -456,6 +456,35 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P21 — FINISH at 27 % of the box: the boundary is there, the CLUSTERS are not (2026-08-20)
+
+With P16 and P17 fixed the stall changed shape. It is no longer a lock or a spin: FALCON simply
+declares **FINISH at t=230-320 s** with 73 % of the box unexplored, re-opens (patch), finds
+nothing, and the aircraft circles a 2 m box for the rest of the flight.
+
+Measured against FALCON rather than trusting it — `probe_frontier_boundary.py` counts free
+voxels touching unknown, independently:
+
+* **4542 boundary voxels**, spanning x 39.4-70.7, y -25.2-0.1, z -0.9-3.5 — the full extent.
+* `footprint` probe: only **30 % of the box floor has any mapped free space**, 36 % seen at all.
+* FALCON's own verdict at that moment: *"Frontier set is empty with 0 shadow(s) still standing
+  and **3 cluster(s)** retired"*, amnesty firing 10 times against the same three.
+
+So the map is not sealed and the finder is not being starved by our blacklists (1-6 per run
+now, not the 20 that motivated the earlier warning). The boundary is arriving in patches too
+small to be called a cluster.
+
+**Cause:** `cluster_min` = 100, halved to 50 by FALCON's own low-resolution branch (our map is
+0.20 m, its threshold 0.15). At 0.20 m a cell is 0.04 m2, so 50 cells demands a **2 m2 patch of
+boundary — bigger than a doorway**. Everything doorway-scale is discarded before it can become
+a target. **30 (halving to 15, ~0.6 m2)** admits a doorway and still rejects specks. Set from
+`nav_stack.launch` and in `EXPECTED_ROSPARAMS`, because the value otherwise comes from the
+package's own `frontier_finder.yaml` inside the image.
+
+**Verify:** FINISH later or not at all, `coverage.final_m3` above the 891-1335 band, floor
+footprint above 30 %. **Watch:** DA3 is noisy, so many tiny clusters could make the tour thrash
+— if `locked_s` or `no_path_fails` climb sharply, raise it to 50.
+
 ### Measurement note — coverage gaps count as stall (2026-08-20)
 
 The analyzer used to DROP `ok:false` coverage rows. FALCON stops publishing coverage while the

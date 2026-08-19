@@ -199,7 +199,13 @@ BRIDGE_CMD = (
 TILT_LIMIT_DEG = 35.0
 TILT_RESUME_DEG = 27.0
 
+#: Smallest frontier cluster FALCON will treat as a cluster at all. Set from
+#: nav_stack.launch, which must win over the package's own frontier_finder.yaml
+#: — hence the readback below.
+FRONTIER_CLUSTER_MIN = 30.0
+
 EXPECTED_ROSPARAMS = {
+    "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
     "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,
