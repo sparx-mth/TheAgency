@@ -617,6 +617,11 @@ def full_bringup(follower=None, extra="", min_battery=None):
     start_video_watchdog()
     if not wait_for(frames_fresh, 90, "fresh camera frames"):
         raise BringupError("camera frames never went fresh -- video_trigger is stuck")
+    # Give the FCU its connection time BEFORE the verdict is taken. It routinely
+    # reads unarmable for another minute after everything else is up -- observed
+    # false at 16:27 and armed fine at 16:28 -- so an instantaneous read here
+    # would fail cycles that were only ever going to need a few more seconds.
+    wait_for_armable()
     return health_report()
 
 
