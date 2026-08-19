@@ -443,6 +443,11 @@ Fixed: when the budget is spent, translation is held at zero as well. Yaw is del
 alone so the aircraft can still turn and let FALCON replan from a different heading, and the
 hold clears as soon as sustained motion returns.
 
+**VERIFIED over two runs (2026-08-19):** gain 0.302 and 0.213 (against 0.021 when locked up),
+axis median 641 and 652 rather than pinned at the ceiling, roll/pitch p90 3.1/7.4 and healthy,
+stops 1.17 and 1.77 per minute, and coverage 83.1 m3/min on the better run — the highest gain
+recorded in the campaign. The lock-up did not recur.
+
 **Verify:** `actuation.x.axis_counts.median` should stop sitting at the ceiling, gain should
 stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hold above
 0.30 m/s. If the aircraft now sits still for long stretches instead, the hold is too sticky and
@@ -450,6 +455,28 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
+
+### P14 — Raising the coverage ceiling (change applied 2026-08-19)
+
+Every fix before this removed a failure mode; coverage stayed at 85-98 m3/min and ~24 % of the
+box per 430 s window. Coverage is bounded by **flying speed x sensor swath**, so:
+
+**The swath cannot be raised.** Measured from live DA3 frames at cruise: depth p50 1.06 m,
+p90 2.57, p99 3.27, **max 3.51 m, 0 % of pixels beyond 5 m**. The voxel mapper's
+`raycast_max = 5.0` was a suspect (an early investigation recommended raising it to 8.0) but it
+is not the limit — the depth model simply does not see that far in this map. Raising it would
+have cost a 12-minute rebuild and bought nothing. *(Measured in 30 seconds instead.)*
+
+**So speed is the only lever left.** FALCON was planning at `max_vel = 0.4` m/s while the
+follower was allowed 0.6, so the **plan** was binding, not the follower. `max_vel` 0.4 → 0.6
+and `explore_max_speed_xy` 0.6 → 0.8 to keep headroom above it.
+
+Arithmetic checked before flying: a 0.6 m/s demand asks 802 counts standing and 603 moving,
+both under the 900 axis ceiling; 1.0 m/s would ask 924 and clip, so 0.6 is the sensible step.
+
+**Verify:** coverage rate above the 85-98 band, speed above ~0.37 m/s. **Watch:** saturation
+returning (axis median at 900, gain collapsing) or tilt-cut firings rising — faster plans mean
+harder demands, and the lock-up chain is exactly what harder demands used to trigger.
 
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.

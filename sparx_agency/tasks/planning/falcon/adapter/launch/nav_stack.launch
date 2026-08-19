@@ -1142,7 +1142,17 @@
        jerky and why the follower was pinned to bang-bang pulses. Planning
        above the deadzone is what makes proportional tracking possible at all;
        on this platform "fly slower for better tracking" is backwards. -->
-  <arg name="max_vel"     default="0.4" />
+  <!-- 0.4 -> 0.6 on 2026-08-19, aimed at the coverage ceiling rather than at a
+       failure. Coverage has sat at 85-98 m3/min all campaign because it is
+       bounded by flying speed times sensor swath, and the swath cannot be
+       raised: measured from live DA3 frames at cruise, depth is p50 1.06 m,
+       max 3.51 m, with 0% of pixels beyond 5 m, so the voxel mapper's
+       raycast_max of 5.0 is not the limit and raising it would buy nothing.
+       That leaves speed, and FALCON was planning at 0.4 m/s while the follower
+       was allowed 0.6, so the plan was the binding constraint.
+       Arithmetic checked before flying: a 0.6 m/s demand asks 802 counts in the
+       standing regime and 603 while moving, both under the 900 axis ceiling. -->
+  <arg name="max_vel"     default="0.6" />
   <arg name="max_acc"     default="0.3" />
   <arg name="max_yaw_vel" default="0.6" />
   <arg name="max_yaw_acc" default="0.5" />
@@ -1214,7 +1224,7 @@
        actually reached the node (roslaunch echoes it) before assuming the
        code path is wrong. -->
   <arg name="explore_force_mode"  default="none" />          <!-- fixed | snap | none -->
-  <arg name="explore_max_speed_xy" default="0.6" />           <!-- must exceed max_vel with headroom; full-scale measured ~1.25 m/s -->
+  <arg name="explore_max_speed_xy" default="0.8" />           <!-- must exceed max_vel with headroom; full-scale measured ~1.25 m/s -->
   <!-- Snap-up floor: below ~0.26 m/s the platform cannot move continuously
        (measured deadzone), so a smaller request is not worth emitting. -->
   <arg name="explore_min_vxy"      default="0.0" />
