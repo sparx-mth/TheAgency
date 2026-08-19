@@ -380,11 +380,15 @@ of work.
 
 ## What's still open
 
-- Nothing flies this platform yet. The contract, the calibrations and the plant
-  are in place; the mission-level node that composes them with a core velocity
-  servo is not, and belongs under `tasks/`, not here.
-- No `config/vla/*.yaml`, per the VLA layering rule — no policy has been pointed
-  at this robot.
+- The mission-level node that composes this platform with a core **velocity
+  servo** is not here (it belongs under `tasks/`). One VLA stack now does fly it:
+  `tasks/planning/sjtu_internvla_n1/` pursues an InternVLA-N1 trajectory into
+  `cmd_vel`, and `tasks/planning/falcon_sjtu/` flies FALCON exploration.
+- The first policy has been pointed at this robot:
+  `config/vla/internvla_n1.yaml` binds InternVLA-N1 to these topics, the front
+  camera intrinsics and the airframe limits (read by the
+  `tasks/planning/sjtu_internvla_n1` nodes). It is the only `config/vla/*.yaml`
+  so far; add one per policy, per the VLA layering rule.
 - The measured plant is from one campaign at one world and one flight envelope.
   It is a first-order-plus-delay fit to a second-order reality, which is the
   right trade for a lead term that cancels the dominant pole, but it has not

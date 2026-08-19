@@ -71,17 +71,18 @@ def fake_requests(monkeypatch):
 
 # ── registry ─────────────────────────────────────────────────────────────
 def test_default_registry_lists_the_adapters_that_exist():
-    assert default_vla_registry().names() == ["flownav", "navdp"]
+    assert default_vla_registry().names() == ["flownav", "internvla_n1", "navdp"]
 
 
 def test_registry_reports_goal_modality_without_constructing():
     registry = default_vla_registry()
     assert registry.get("navdp").goal_modality == "point"
     assert registry.get("flownav").goal_modality == "image"
+    assert registry.get("internvla_n1").goal_modality == "language"
 
 
 def test_unknown_name_lists_what_is_available():
-    with pytest.raises(KeyError, match="flownav, navdp"):
+    with pytest.raises(KeyError, match="flownav, internvla_n1, navdp"):
         default_vla_registry().get("pi0")
 
 

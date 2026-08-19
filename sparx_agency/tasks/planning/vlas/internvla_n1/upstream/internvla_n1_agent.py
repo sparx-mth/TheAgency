@@ -42,6 +42,26 @@ class InternVLAN1Agent(Agent):
         self.policy = policy(config=policy_config(model_cfg=model_config))
         self.policy.eval()
 
+        # PATCH: time System 1 and System 2 inference for FPS reporting. Wrapping
+        # the two policy methods once here keeps every call site untouched; the
+        # last durations ride out in the HTTP response (see step()).
+        self._last_s1_ms = None
+        self._last_s2_ms = None
+
+        def _timed(fn, attr):
+            import time as _time
+
+            def _wrapper(*args, **kwargs):
+                _t0 = _time.time()
+                out = fn(*args, **kwargs)
+                setattr(self, attr, (_time.time() - _t0) * 1000.0)
+                return out
+
+            return _wrapper
+
+        self.policy.s1_step_latent = _timed(self.policy.s1_step_latent, '_last_s1_ms')
+        self.policy.s2_step = _timed(self.policy.s2_step, '_last_s2_ms')
+
         self.camera_intrinsic = self.get_intrinsic_matrix(
             self._model_settings.width, self._model_settings.height, self._model_settings.hfov
         )
@@ -296,6 +316,10 @@ class InternVLAN1Agent(Agent):
             # replaced on the next successful S2 invocation.
 
         output = {}
+        # PATCH 5/5: S1's continuous body-frame trajectory for the HTTP response,
+        # reset each step so a pure-S2 discrete step (a turn / look-down) reports
+        # no curve and the client falls back to the discrete action for it.
+        self._current_trajectory = None
         # Simple branch:
         # 1. If S2 output is full discrete actions, don't execute S1 and return directly
         print('===============', self.s2_output.output_action, '=================')
@@ -356,6 +380,12 @@ class InternVLAN1Agent(Agent):
                     self.s1_output = self.policy.s1_step_latent(rgbs, depths, self.s2_output.output_latent)
                 else:
                     self.s1_output = self.policy.s1_step_latent(rgb, depth * 10000.0, self.s2_output.output_latent)
+
+                # PATCH 5/5: keep S1's continuous body-frame trajectory (metres,
+                # FLU) for the HTTP response. Present only on S1 steps; a pure-S2
+                # discrete step leaves it None (reset above).
+                _tr = getattr(self.s1_output, 'trajectory', None)
+                self._current_trajectory = _tr.tolist() if hasattr(_tr, 'tolist') else _tr
 
             else:
                 assert False, f"S2 output should be either action or latent, but got neither!  {self.s2_output}"
@@ -423,13 +453,19 @@ class InternVLAN1Agent(Agent):
         self.episode_step += 1
 
         # PATCH 4/4: Include pixel_goal in return value for HTTP response
+        # PATCH 5/5: ...and S1's continuous trajectory, so a trajectory follower
+        # can fly the curve instead of the discrete action.
         if 'action' in output:
             return [{'action': output['action'], 'ideal_flag': True,
                      'pixel_goal': self._current_pixel_goal,
-                     'pixel_goal_step': self._pixel_goal_step}]
+                     'pixel_goal_step': self._pixel_goal_step,
+                     'trajectory': self._current_trajectory,
+                     's1_ms': self._last_s1_ms, 's2_ms': self._last_s2_ms}]
         elif 'velocity' in output:
             return [{'action': output['velocity'], 'ideal_flag': False,
                      'pixel_goal': self._current_pixel_goal,
-                     'pixel_goal_step': self._pixel_goal_step}]
+                     'pixel_goal_step': self._pixel_goal_step,
+                     'trajectory': self._current_trajectory,
+                     's1_ms': self._last_s1_ms, 's2_ms': self._last_s2_ms}]
         else:
             assert False

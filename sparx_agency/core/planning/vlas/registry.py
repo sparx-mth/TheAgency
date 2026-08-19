@@ -101,16 +101,24 @@ def _flownav(**kwargs):
     return FlowNavPolicy(**kwargs)
 
 
+def _internvla_n1(**kwargs):
+    """Build the InternVLA-N1 language-goal policy (import kept in the closure)."""
+    from sparx_agency.core.planning.vlas.internvla_n1.policy import InternVLAN1Policy
+    return InternVLAN1Policy(**kwargs)
+
+
 def default_vla_registry():
     """The policies that have a :class:`NavigationPolicy` adapter today.
 
-    NavDP and FlowNav are here because they are the two with live consumers.
-    InternVLA-N1, OmniVLA and NoMaD ship their ROS-free contract under
+    NavDP, FlowNav and InternVLA-N1 are here because they are driven through this
+    interface. OmniVLA and NoMaD ship their ROS-free contract under
     ``core/planning/vlas/`` but no adapter yet -- deliberately, since nothing
-    drives them through this interface. Adding one is ~40 lines plus an entry
-    here; it is not a redesign.
+    drives them that way. Adding one is ~40 lines plus an entry here; it is not
+    a redesign.
     """
     registry = VlaRegistry()
     registry.register(VlaFactory(name="navdp", create=_navdp, goal_modality="point"))
     registry.register(VlaFactory(name="flownav", create=_flownav, goal_modality="image"))
+    registry.register(VlaFactory(name="internvla_n1", create=_internvla_n1,
+                                 goal_modality="language"))
     return registry

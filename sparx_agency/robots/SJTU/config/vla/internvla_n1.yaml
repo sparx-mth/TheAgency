@@ -1,0 +1,88 @@
+# InternVLA-N1 flown on the SJTU Gazebo drone.
+#
+# The one YAML where the policy and the robot meet (the VLA layering rule): the
+# policy never names the SJTU topics and the SJTU robot layer never names N1 --
+# they are bound here, and both ROS2 nodes of tasks/planning/sjtu_internvla_n1
+# read this file via their `config_file` parameter.
+#
+# Everything runs on the CPU except the InternVLA-N1 model server, which owns the
+# GPU alone (~8 GB). The camera intrinsics below are the SJTU front pair's
+# measured pinhole (robots/SJTU/config/camera_front_600x600.yaml) -- a wrong
+# intrinsic is the single most expensive bug on this platform, so the server is
+# told the real one rather than left at its 640x480 default.
+
+policy: internvla_n1
+
+# The InternVLA-N1 model server (GPU, host conda env `internnav`). Reached over
+# HTTP loopback; this stack does not start it -- see scripts/run_sjtu_n1.sh.
+server:
+  host: 127.0.0.1
+  port: 8087
+  timeout_sec: 30.0
+
+# SJTU front camera, 600x600, from the SDF (not a calibration run).
+camera:
+  width: 600
+  height: 600
+  fx: 390.642735
+  fy: 390.642735
+  cx: 300.0
+  cy: 300.0
+  hfov_deg: 75.046
+
+topics:
+  rgb: /simple_drone/front/image_raw
+  rgb_type: raw                       # raw | compressed
+  depth: /simple_drone/front_depth/depth/image_raw
+  depth_enabled: true
+  odom: /simple_drone/odom
+  instruction: /simple_drone/navigation/instruction
+  trajectory: /simple_drone/n1/trajectory          # committed route (nav_msgs/Path, world)
+  trajectory_full: /simple_drone/n1/trajectory_full  # whole prediction, for RViz
+  info: /simple_drone/n1/info                        # JSON status: action, S1/S2 FPS, pixel goal
+  cmd_vel: /simple_drone/cmd_vel                    # the drone's only control input
+
+frames:
+  world: world
+
+# The N1 policy node: how often it asks the server, and the default instruction.
+policy_params:
+  inference_rate_hz: 4.0
+  default_instruction: "explore the warehouse and avoid the shelves"
+  step_m: 0.25          # forward reach rendered from a discrete FORWARD action
+  turn_deg: 15.0        # heading a discrete turn action bends its step by
+
+# Plan-commitment: fly one prediction as a route until roughly half is behind
+# the aircraft, then re-infer -- the same discipline NavDP flies. Kept short
+# because N1's discrete-action fallback produces ~0.25 m steps.
+commit:
+  fraction: 0.5
+  lookahead_m: 1.0
+  arrive_radius_m: 0.15
+  min_commit_m: 0.20
+  max_commit_s: 8.0
+  max_deviation_m: 1.5
+  min_period_s: 0.5
+
+# The pure-pursuit follower. Speeds are held well under the SJTU airframe's 2 m/s
+# ceiling; the follower rotates the tracker's world velocity into the body frame
+# and clamps it with the SJTU velocity adapter before publishing cmd_vel.
+follower:
+  control_rate_hz: 20.0
+  cruise_speed: 0.4
+  max_speed_xy: 1.0
+  max_speed_z: 0.5
+  max_yaw_rate: 1.2
+  goal_tolerance_m: 0.2
+  target_altitude_m: 1.2      # cruise altitude the follower holds after takeoff
+  lookahead_m: 0.8
+  yaw_lookahead_m: 1.5
+
+# The run recorder: drone camera (left) + N1's route top-down (right), with the
+# System-1 / System-2 FPS drawn on. Written with OpenCV's mp4v encoder.
+recorder:
+  fps: 10.0
+  panel_width: 640
+  panel_height: 480
+  output: /tmp/sjtu_n1/run.mp4
+
