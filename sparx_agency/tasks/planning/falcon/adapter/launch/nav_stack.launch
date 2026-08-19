@@ -1228,6 +1228,14 @@
   <!-- Snap-up floor: below ~0.26 m/s the platform cannot move continuously
        (measured deadzone), so a smaller request is not worth emitting. -->
   <arg name="explore_min_vxy"      default="0.0" />
+  <!-- Ceiling on how fast the COMMANDED course may rotate. A reference cannot
+       be tracked faster than the plant can follow it: measured 2026-08-19, the
+       stalled half of a run yawed 65 deg/s (near the aircraft's own ceiling)
+       while travelling 15 m inside a one-metre box, heading error never
+       converging because the demand swung as fast as the nose could chase it.
+       Half the yaw ceiling keeps the aircraft faster than its own reference.
+       0 disables the limit. -->
+  <arg name="explore_course_slew_deg" default="45.0" />
   <arg name="explore_max_yaw_rate_deg" default="90.0" />
 
   <!-- Reverted to 0.85/0.85 alongside max_vel/max_acc above; see that
@@ -1591,6 +1599,7 @@
     <param name="max_yaw_rate_deg" value="$(arg explore_max_yaw_rate_deg)" />
     <param name="tilt_limit_deg"  value="$(arg tilt_limit_deg)" />
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
+    <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
   </node>
 
   <node pkg="falcon_adapter" type="rooster_bspline_follower_node.py"

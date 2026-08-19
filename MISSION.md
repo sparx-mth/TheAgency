@@ -456,6 +456,32 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P17 — The stall is a YAW LIMIT CYCLE (found 2026-08-19, fix applied)
+
+Following P16's guard repair the viewpoint lock collapsed (`no_path_fails` 91 688 -> 2 308,
+`locked_s` 86 s -> 15 s) **and the aircraft still went nowhere**. Measuring turning against
+travel showed why:
+
+| flight phase | yaw per minute | distance | deg per metre |
+|---|---|---|---|
+| exploring (0-180 s) | 1 500-2 100 deg | 30-36 m | 41-70 |
+| stalled (180 s+) | **3 900 deg** | 15-18 m *inside a 1 m box* | **200-270** |
+
+65 deg/s sustained, near the platform's own 90 deg/s ceiling, for five minutes. Heading error
+never converged — 39-147 deg for 300 s — and position error sat pinned at 1.10-1.15 m, one
+lookahead, the whole time. The nose was chasing a course that swung as fast as it could turn.
+
+**A reference cannot be tracked faster than the plant can follow it.** FALCON replans at
+~68 Hz and each plan sets off in its own direction, so `atan2(vy, vx)` handed the follower a
+demand with more bandwidth than the airframe has. `course_slew_deg_s` (default 45, half the
+yaw ceiling) rate-limits the COMMANDED course, which leaves the aircraft comfortably faster
+than its own reference — the condition for the error to close at all. Python-side, no rebuild.
+
+**Verify:** deg-per-metre in the late flight falls toward the 41-70 band, `longest_stall_s`
+and `stall_frac` fall, `coverage.final_m3` rises above 850-1420. **Watch:** a genuine 180 deg
+turn now costs 4 s rather than 2 — if `stops_per_min` or tracking error climbs, the limit is
+too tight rather than wrong.
+
 ### P16 — HALF THE FLIGHT MAPS NOTHING (found 2026-08-19) — the real ceiling
 
 **This is the biggest finding of the campaign so far and the top priority until it is closed.**

@@ -1443,3 +1443,28 @@ Corollary for any tuning campaign: **verify that a change took effect before mea
 whether it helped.** Two runs of careful metrics were spent on a parameter that was
 never applied, and the honest reading of those runs is "no evidence either way", not
 "the change did nothing".
+
+## A reference cannot be tracked faster than the plant can follow it (2026-08-19)
+
+The exploration follower aims the nose along `atan2(setpoint.vy, setpoint.vx)` — the
+direction the tracker wants to move. FALCON replans at ~68 Hz and each plan sets off in
+its own direction, so that demand can rotate faster than the airframe's 90 deg/s yaw
+ceiling. When it does, the result is not poor tracking, it is a **limit cycle**: the nose
+chases a course it can never reach, the align gate blocks translation while the error is
+large, and the aircraft spins in place.
+
+Measured signature, and it is unmistakable once you look for it: **degrees of turning per
+metre travelled**. 41-70 deg/m while exploring; 200-270 deg/m while stalled, at 65 deg/s
+sustained for five minutes inside a one-metre box. Heading error stuck at 39-147 deg and
+position error pinned at exactly one lookahead (1.10-1.15 m) for 300 s — the aircraft was
+never converging on anything, and no single-instant metric said so.
+
+The fix is a rate limit on the COMMANDED course (half the yaw ceiling), not on the plant.
+Damping the plant would have made it slower to chase; capping the reference makes the
+aircraft faster than what it is chasing, which is the actual requirement for the error to
+close.
+
+**Generally:** when a controller oscillates and the plant looks healthy, check the
+bandwidth of what it is being asked to follow before touching gains. And measure effort
+against progress — turning per metre, commanded metres per metre achieved — because a
+loop that is working hard and getting nowhere reads as "active" in every rate metric.

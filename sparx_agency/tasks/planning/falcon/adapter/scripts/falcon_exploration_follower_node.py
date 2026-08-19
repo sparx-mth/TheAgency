@@ -120,6 +120,23 @@ class FalconExplorationFollowerNode:
         # only needs to catch the sign change past 90 deg. See the shaping block
         # in the command path for the measurement behind that.
         self.align_gate_deg = float(G("~align_gate_deg", 85.0))
+        #: Ceiling on how fast the COMMANDED course may rotate, deg/s. 0 = off.
+        #:
+        #: A reference cannot be tracked faster than the plant can follow it.
+        #: Measured 2026-08-19: in the stalled half of a run the aircraft yawed
+        #: ~3900 deg per minute (65 deg/s, near its own 90 deg/s ceiling) while
+        #: travelling 15 m inside a ONE-METRE box -- 230 deg of turning per
+        #: metre against 45 deg/m when it was exploring properly. Heading error
+        #: never converged (39-147 deg for 300 s straight) because the demand
+        #: swung as fast as the aircraft could chase it: FALCON replans at ~68 Hz
+        #: and each plan sets off in its own direction, so the nose chased a
+        #: course that never held still long enough to fly.
+        #:
+        #: Half the platform's yaw ceiling leaves the aircraft comfortably
+        #: faster than its own reference, which is the condition for the error
+        #: to close at all. A genuine 180 deg turn costs 4 s instead of 2.
+        self.course_slew_deg_s = float(G("~course_slew_deg_s", 45.0))
+        self._course_cmd = None
         # Forward speed floor held through a turn, and the planned speed above
         # which it arms. See the cos-fade block in _step for why a floor beats
         # letting cos() brake the aircraft to zero.
@@ -325,6 +342,33 @@ class FalconExplorationFollowerNode:
             rospy.logwarn_throttle(2.0, "falcon_exploration_follower: tick error (%s: %s)",
                                    type(e).__name__, e)
 
+    def _slew_course(self, desired_yaw, dt):
+        """Rate-limit the commanded course so the aircraft can actually catch it.
+
+        Args:
+            desired_yaw: Course the tracker wants this tick, radians.
+            dt: Seconds since the previous tick.
+
+        Returns:
+            The commanded course, radians -- ``desired_yaw`` when the limit is
+            disabled or the demand is already within reach this tick.
+        """
+        if self.course_slew_deg_s <= 0.0 or dt <= 0.0:
+            self._course_cmd = desired_yaw
+            return desired_yaw
+        if self._course_cmd is None:
+            self._course_cmd = self._yaw
+        delta = math.atan2(math.sin(desired_yaw - self._course_cmd),
+                           math.cos(desired_yaw - self._course_cmd))
+        step = math.radians(self.course_slew_deg_s) * dt
+        if delta > step:
+            delta = step
+        elif delta < -step:
+            delta = -step
+        self._course_cmd = math.atan2(math.sin(self._course_cmd + delta),
+                                      math.cos(self._course_cmd + delta))
+        return self._course_cmd
+
     def _step(self):
         now = rospy.Time.now()
         now_s = now.to_sec()
@@ -380,9 +424,14 @@ class FalconExplorationFollowerNode:
         world_speed = math.hypot(setpoint.vx, setpoint.vy)
         heading_err = None
         if self.yaw_mode == "course" and world_speed > self.course_min_speed:
-            desired_yaw = math.atan2(setpoint.vy, setpoint.vx)
+            desired_yaw = self._slew_course(
+                math.atan2(setpoint.vy, setpoint.vx), dt)
             heading_err = math.atan2(math.sin(desired_yaw - self._yaw),
                                      math.cos(desired_yaw - self._yaw))
+        else:
+            # Not steering: the next course starts from where the nose is, not
+            # from a stale demand the aircraft never flew.
+            self._course_cmd = None
 
         # World-frame velocity -> body frame (Rooster's cmd_vel convention).
         cos_y, sin_y = math.cos(self._yaw), math.sin(self._yaw)
