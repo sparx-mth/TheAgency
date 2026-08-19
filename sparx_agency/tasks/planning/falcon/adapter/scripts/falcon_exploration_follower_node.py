@@ -654,10 +654,17 @@ class FalconExplorationFollowerNode:
             age = (rospy.Time.now() - self._reference_stamp).to_sec()
         rospy.loginfo(
             "falcon_exploration_follower hb  demo=%s  ref_ready=%s  ref_age=%s  "
-            "pos_err=%s  holding=%s  hdg_err=%s  escapes=%d%s",
+            "pos_err=%s  dz=%s  holding=%s  hdg_err=%s  escapes=%d%s",
             self.current_demo_mode, self._reference_ready,
             "-" if age is None else "%.1fs" % age,
             "-" if sp is None else "%.2fm" % sp.position_error_m,
+            # Vertical error alone, signed: the aircraft has been flying a
+            # metre under FALCON's own viewpoints (planned z p50 2.04, flown
+            # ~1.1) while the altitude demand sat pinned at the band edge
+            # asking to DESCEND. Those two cannot both be right, and no metric
+            # here could tell them apart.
+            "-" if (self._reference is None or self._pose is None)
+            else "%+.2fm" % (self._reference.z - self._pose[2]),
             "-" if sp is None else sp.holding,
             "-" if getattr(self, "_last_heading_err", None) is None
             else "%.0fdeg" % math.degrees(self._last_heading_err),

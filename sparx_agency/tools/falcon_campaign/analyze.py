@@ -348,6 +348,7 @@ def _turning_effort(samples):
 def tracking_metrics(lines):
     """Follower heartbeats: position error, heading error, gate, holds."""
     pos, hdg, holding, diverged, ticks, escapes = [], [], 0, 0, 0, 0
+    dz = []
     for line in lines:
         found = _HB.search(line)
         if not found:
@@ -360,11 +361,18 @@ def tracking_metrics(lines):
         value = _num(fields.get("hdg_err", "-").replace("deg", ""))
         if value is not None:
             hdg.append(abs(value))
+        value = _num(fields.get("dz", "-").rstrip("m"))
+        if value is not None:
+            dz.append(value)
         holding += fields.get("holding") == "True"
         diverged += fields.get("diverged") == "True"
         escapes = max(escapes, int(_num(fields.get("escapes")) or 0))
     gated = sum(1 for h in hdg if h > ALIGN_GATE_DEG)
     return dict(heartbeats=ticks, pos_err_m=_stats(pos),
+                # SIGNED, unlike pos_err: a bias means the aircraft is flying a
+                # different height from the one being planned for it, which an
+                # absolute error hides completely.
+                ref_minus_pose_z_m=_stats(dz),
                 hdg_err_deg=_stats(hdg), holding_ticks=holding,
                 diverged_ticks=diverged, escapes=escapes,
                 frac_past_align_gate=(None if not hdg
