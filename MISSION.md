@@ -257,6 +257,31 @@ treating this as a control defect — compare rest-period roll with and without 
 position hold, and against `altitude_hold` activity, since the z axis is a narrow step gate
 that slews every tick.
 
+### P9 — The stall-escape reflex was consuming half of some flights (FIX APPLIED, unverified)
+
+Escapes track the bad runs almost exactly:
+
+| run | escapes | distance | % below stop speed |
+|---|---|---|---|
+| 20260819_084649Z | 2 | 256.8 m | 5.2 % |
+| 20260819_092536Z | 5 | 390.1 m | 3.0 % |
+| 20260819_091247Z | 14 | 133.8 m | 59.4 % |
+| 20260819_093835Z | **38** | 139.9 m | 46.8 % |
+
+One escape plus its cooldown is ~9.5 s, so 38 of them is over half the flight window spent
+reversing and turning rather than exploring.
+
+The reflex fires on "asked for >0.15 m/s, measured <0.06 m/s for 3 s", which is what a
+physically pinned aircraft looks like — and *also* exactly what an aircraft whose commanded
+axis sits under the platform's effective threshold looks like. So a gain problem presents as
+a permanent stall and the escape repeats forever, never restoring motion. It also reverses,
+and reversing is the direction block (i) measured tripping 26–33° of roll.
+
+Fixed with a budget: `escape_give_up_count` (4) attempts without regaining sustained motion
+suppresses further escapes, re-arming only after `escape_progress_sec` (5 s) of real movement.
+**Verify:** `tracking.escapes` should fall well below 10, and `frac_time_below_stop_speed`
+with it. This is a symptom-level fix — the underlying gain is what block (ii) is measuring.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.
@@ -298,6 +323,7 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Applied block (i) standing-start curve (466/1.313) | **REVERTED** — distance 257→126 m, stops 1.3→8.7/min, 42% at zero | 2026-08-19 |
 | 2026-08-19 | Altitude error now reported against the live target | removed a misleading top-3 finding | 2026-08-19 |
 | 2026-08-19 | Coverage trace marked unreliable when it does not span the flight | caught a phantom "record" 90.7 m3/min from 110 s of a 600 s flight | 2026-08-19 |
+| 2026-08-19 | Stall-escape give-up budget | caps a reflex that consumed ~half of two flights (38 and 14 escapes) | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 
