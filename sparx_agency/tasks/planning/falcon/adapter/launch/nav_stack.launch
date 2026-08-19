@@ -1298,7 +1298,14 @@
        them spread across the full extent. The boundary was there; it was
        arriving in patches too small to be called a cluster. 30 halves to 15,
        about 0.6 m2, which admits a doorway and still rejects specks. -->
-  <arg name="frontier_cluster_min" default="30" />
+  <!-- Sweep, 2026-08-20. 100 (upstream, halving to 50): FINISH at 230-320 s with
+       three clusters left and 73 % of the box unexplored. 30 (halving to 15):
+       FINISH gone entirely and stall 24-55 % -> 13-26 %, but the aircraft crawled
+       between crumbs — distance 132-189 m against 195-234, mean speed 0.28-0.41
+       against 0.43-0.52, stops 4.8-8.8/min against 0.5-3.3 — so coverage FELL to
+       65-118 m3/min. Volume per metre flown was unchanged at 350-443, which is
+       what says the loss is metres not efficiency. 50 halves to 25 (~1 m2). -->
+  <arg name="frontier_cluster_min" default="50" />
   <param name="/frontier_finder/cluster_min" value="$(arg frontier_cluster_min)"/>
 
   <param name="/frontier_finder/open_visib_fraction"

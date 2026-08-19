@@ -481,9 +481,32 @@ a target. **30 (halving to 15, ~0.6 m2)** admits a doorway and still rejects spe
 `nav_stack.launch` and in `EXPECTED_ROSPARAMS`, because the value otherwise comes from the
 package's own `frontier_finder.yaml` inside the image.
 
-**Verify:** FINISH later or not at all, `coverage.final_m3` above the 891-1335 band, floor
-footprint above 30 %. **Watch:** DA3 is noisy, so many tiny clusters could make the tour thrash
-— if `locked_s` or `no_path_fails` climb sharply, raise it to 50.
+**RESULT at 30, three runs: the premature FINISH is GONE** (`finished: False` in all three,
+against FINISH at 230-320 s before) **and stall fell from 24-55 % to 13-26 %** — the diagnosis
+was right. Late-flight turning also came back to 34-54 deg/m from 88-106, which incidentally
+answers the open question in P20.
+
+**But coverage FELL to 65.2 / 83.1 / 118.0** (band was 99-150), and the reason is not
+inefficiency:
+
+| | cluster_min 100 | cluster_min 30 |
+|---|---|---|
+| distance flown | 195-234 m | **132-189 m** |
+| mean speed | 0.43-0.52 | **0.28-0.41** |
+| stops per minute | 0.5-3.3 | **4.8-8.8** |
+| volume per 100 m | 297-453 | 351-443 (unchanged) |
+| `no_path_fails` | 2288-2792 | **4234-21046** |
+
+Volume per metre flown is the same; the aircraft simply flies fewer metres. With frontiers
+admitted at 0.6 m2 the tour is dominated by nearby crumbs, each trajectory is short and slow,
+and the aircraft stop-starts between them instead of committing to the transit that opens a new
+room. **A frontier the planner will chase is not the same thing as a frontier worth chasing.**
+
+**Now sweeping the third point: 50 (halving to 25, ~1 m2).** Judge it on coverage AND on
+`finished`, since those two moved in opposite directions between the first two points. If 50
+brings back an early FINISH without restoring distance, the answer is not this parameter at all
+— it is the stop-start crawl, and the lever there is the follower's speed floor, not the
+frontier size.
 
 ### Measurement note — coverage gaps count as stall (2026-08-20)
 

@@ -202,7 +202,7 @@ TILT_RESUME_DEG = 27.0
 #: Smallest frontier cluster FALCON will treat as a cluster at all. Set from
 #: nav_stack.launch, which must win over the package's own frontier_finder.yaml
 #: — hence the readback below.
-FRONTIER_CLUSTER_MIN = 30.0
+FRONTIER_CLUSTER_MIN = 50.0
 
 EXPECTED_ROSPARAMS = {
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
