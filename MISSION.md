@@ -516,9 +516,15 @@ Two things were wrong and both are fixed:
 `tilt_limit_deg` is declared in BOTH launch files and the entry one wins (P15), so both were
 changed and both are now in `EXPECTED_ROSPARAMS` for the readback guard.
 
-**Verify:** `stops_per_min` back toward 1-2 (from 4-8), tilt firings down an order of
-magnitude, coverage holding at 100-170. **Watch:** roll p95 was 53 deg in one run — if extreme
-attitude rises rather than the reflex simply firing less, the limit went too far.
+**VERIFIED over three runs (2026-08-20):** firings **9, 2, 3** against 56-196 before; stops
+**3.3, 0.9, 0.5** per minute against 4.2-7.7; coverage 123.7, 98.7, 146.4 — in band, with 0
+gaps each. Contacts did not rise either: `pinned` 17, 6, 4 against 10-14.
+
+**Open observation:** late-flight turning rose again in the two quietest runs (88.8 and 106.0
+deg/m against the 28-69 of the post-slew runs). The tilt cut used to zero **yaw as well as
+translation**, so it may have been interrupting the yaw chase as a side effect. If deg/m stays
+high, that is the thing to look at — not by restoring the chatter, but by asking why the course
+demand still rotates that fast late in a flight.
 
 ### P19 — Anti-windup guarded a ceiling the actuator does not have (fix applied 2026-08-20)
 
