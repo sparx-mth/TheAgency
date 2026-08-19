@@ -360,7 +360,9 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Paired moving curve (412, 1.847) | **KEPT** — equal on distance/stops, better peak speed (1.46-2.14 vs 1.64-5.43 m/s) and time at zero | 2026-08-19 |
 | 2026-08-19 | Blocked-region blacklist params finally set | shadow cap 3.5 → 6.0 m (was below candidate_rmax 5.5), TTL doubling 3 → 1, amnesty cap 2 → 20 | 2026-08-19 |
 | 2026-08-19 | Blacklist fix **verified** over two runs | plateau 458 s → 0 s, reopened 0 → 2-5, distance 80 → 290-357 m | 2026-08-19 |
-| 2026-08-19 | altitude_hold_kp_down 900 → 1500 | **UNVERIFIED** — targets the steady +0.22 m offset above setpoint (P4 door clearance) | 2026-08-19 |
+| 2026-08-19 | altitude_hold_kp_down 900 → 1500 | **helped, 1 run**: converged for the first time, in-band 3.8 s → 19.2 s, \|err\| 0.26 → 0.21 m, ranger 1.60 → 1.50 m | 2026-08-19 |
+| 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
+| 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 

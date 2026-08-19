@@ -197,6 +197,36 @@ def assert_falcon_patches():
     return True
 
 
+def drone_armable(timeout=8):
+    """Whether the vendor stack says the FCU will accept an arm right now.
+
+    ``RoosterState.armable`` is the FCU driver's own precondition, and asking it
+    is the difference between waiting a few seconds and losing a whole cycle:
+    arming too soon after a Sphera restart returns "Arm refused: Failed: Not
+    connected to FCU", the takeoff never happens, and the hover wait then burns
+    its full 60 s timeout before the cycle gives up.
+
+    Args:
+        timeout: Seconds to allow the telemetry read.
+
+    Returns:
+        True only if the flag was read and is true.
+    """
+    cmd = (C.IT_ENV + "timeout %d ros2 topic echo %s 2>/dev/null | grep -m1 armable"
+           % (timeout, C.ROS2_TOPICS["state"]))
+    r = sh("docker exec %s bash -lc %s" % (C.IT_CONTAINER, shlex.quote(cmd)), timeout + 20)
+    return "true" in r.stdout.lower()
+
+
+def wait_for_armable(timeout_s=90.0):
+    """Block until the FCU is armable, or give up.
+
+    Returns:
+        True if it became armable within the timeout.
+    """
+    return wait_for(drone_armable, timeout_s, "FCU armable", poll_s=3.0)
+
+
 def battery_fraction():
     """Battery as a 0-1 fraction from ``/R1/state``, or None if unreadable."""
     # No `--once`: this container is ROS 2 Foxy, where that flag does not exist.
@@ -540,6 +570,7 @@ def health_report():
     report["manual_authority_ok"], report["manual_authority"] = manual_control_authority()
     report["battery_ok"] = (report["battery"] is not None
                             and report["battery"] >= MIN_FLIGHT_BATTERY)
+    report["armable"] = drone_armable()
     try:
         report["drone_image"] = assert_simulator()
     except BringupError as exc:

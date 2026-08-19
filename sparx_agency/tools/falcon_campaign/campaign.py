@@ -89,8 +89,18 @@ def stop_recorder():
     time.sleep(2)
 
 
-def collect_logs(run_dir):
-    """Copy every log a post-mortem might need into the run folder."""
+def collect_logs(run_dir, recorded):
+    """Copy every log a post-mortem might need into the run folder.
+
+    Args:
+        run_dir: This cycle's folder.
+        recorded: Whether THIS cycle actually started the flight recorder. The
+            recorder writes inside the vendor container and is only wiped when
+            it starts, so a cycle that never got that far would otherwise copy
+            out the PREVIOUS flight's telemetry and be analysed as if it had
+            flown it. Two takeoff failures did exactly that, reporting the last
+            good flight's 336 m and 12309 samples as their own.
+    """
     dest = run_dir / "logs"
     for name in _IT_LOGS:
         bringup.sh("docker cp %s:/tmp/%s %s/ 2>/dev/null"
@@ -98,11 +108,15 @@ def collect_logs(run_dir):
     for path in _HOST_LOGS:
         bringup.sh("cp %s %s/ 2>/dev/null" % (shlex.quote(path), shlex.quote(str(dest))), 30)
     # The recorder's own output, which lives inside `it` (see config).
-    bringup.sh("docker cp %s:%s/. %s/ 2>/dev/null"
-               % (C.IT_CONTAINER, C.RECORDER_DIR_IN_IT,
-                  shlex.quote(str(run_dir))), 90)
-    bringup.sh("docker cp %s:/tmp/campaign_recorder.log %s/ 2>/dev/null"
-               % (C.IT_CONTAINER, shlex.quote(str(dest))), 30)
+    if recorded:
+        bringup.sh("docker cp %s:%s/. %s/ 2>/dev/null"
+                   % (C.IT_CONTAINER, C.RECORDER_DIR_IN_IT,
+                      shlex.quote(str(run_dir))), 90)
+        bringup.sh("docker cp %s:/tmp/campaign_recorder.log %s/ 2>/dev/null"
+                   % (C.IT_CONTAINER, shlex.quote(str(dest))), 30)
+    else:
+        log(run_dir, "no recorder ran this cycle -- not copying telemetry, it "
+                     "would be the previous flight's")
     # The follower/FSM logs live in falcon's rotating roslaunch log dir.
     bringup.sh(
         "docker exec %s bash -lc 'L=$(ls -td /root/.ros/log/*/ | head -1); "
@@ -193,7 +207,14 @@ def fly(run_dir, duration_s):
         A dict describing how the flight went, including why it ended.
     """
     result = {"armed": False, "hover": None, "ended": "completed",
-              "flight_seconds": 0.0}
+              "flight_seconds": 0.0, "recorded": False}
+
+    # The FCU connects a little after its container does, and arming into that
+    # gap fails outright ("Not connected to FCU") -- then the hover wait burns
+    # its whole 60 s timeout before the cycle gives up. Waiting costs seconds.
+    if not bringup.wait_for_armable():
+        result["ended"] = "FCU never became armable"
+        return result
 
     # Back-to-back with no gap: a ~30 s pause between them has silently
     # disarmed the aircraft and forced an internal re-arm inside takeoff().
@@ -218,6 +239,7 @@ def fly(run_dir, duration_s):
 
     log(run_dir, "hover settled -- starting recorder and handing over to FALCON")
     start_recorder(run_dir, duration_s)
+    result["recorded"] = True
     time.sleep(2)
     bringup.start_twist_adapter()
 
@@ -268,7 +290,7 @@ def run_cycle(duration_s=None, follower=None):
         try:
             stop_recorder()
             land_and_disarm(run_dir)
-            collect_logs(run_dir)
+            collect_logs(run_dir, (summary.get("flight") or {}).get("recorded", False))
         except Exception as exc:                   # noqa: BLE001
             log(run_dir, "teardown problem: %s" % exc)
     return _finish(run_dir, summary)
