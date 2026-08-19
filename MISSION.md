@@ -428,6 +428,29 @@ simulation showed it before it ever flew — in the *standing* regime the feedfo
 of its cap. Only a ceiling on the total helps. Check the arithmetic of a control change against
 the actual curves before flying it.
 
+### P13 — The escape give-up created the lock-up it was meant to avoid (fix applied 2026-08-19)
+
+`max_forward_axis = 900` did **not** break the lock-up. One run pinned at exactly the new
+ceiling: axis median **900**, gain **0.021**, speed 0.189 m/s. The integrator simply winds to
+whatever ceiling exists, so a ceiling relocates saturation rather than preventing it.
+
+Tracing back to what starts it: **P9's escape give-up budget suppresses the escape manoeuvre
+but leaves the follower commanding full drive.** So a genuinely pinned aircraft stops trying to
+free itself and instead pushes indefinitely — which is exactly the windup input. P9 fixed a real
+problem (38 escapes consuming half a flight) and introduced this one.
+
+Fixed: when the budget is spent, translation is held at zero as well. Yaw is deliberately left
+alone so the aircraft can still turn and let FALCON replan from a different heading, and the
+hold clears as soon as sustained motion returns.
+
+**Verify:** `actuation.x.axis_counts.median` should stop sitting at the ceiling, gain should
+stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hold above
+0.30 m/s. If the aircraft now sits still for long stretches instead, the hold is too sticky and
+`escape_progress_sec` (5 s) is the knob.
+
+**Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
+the ≥900 bin) even though it does not stop the lock-up.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.

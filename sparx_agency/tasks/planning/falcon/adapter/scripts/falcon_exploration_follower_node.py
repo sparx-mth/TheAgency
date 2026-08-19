@@ -191,6 +191,7 @@ class FalconExplorationFollowerNode:
         self._escapes = 0
         self._escapes_since_progress = 0
         self._moving_since = None
+        self._pinned_hold = False
 
         # ── Rooster force shaping: fixed-magnitude pulses, no docking gait ──
         # See the module docstring for why ClosureGait is deliberately not used
@@ -443,6 +444,11 @@ class FalconExplorationFollowerNode:
         if escape_yaw_rate is not None:
             body_vx = -self.escape_speed_mps
             body_vy = 0.0
+        elif self._pinned_hold:
+            # Pinned with the escape budget spent: stop driving into whatever is
+            # holding the aircraft. Yaw is deliberately left untouched.
+            body_vx = 0.0
+            body_vy = 0.0
 
         # The tracker gives an absolute heading; a yaw RATE command is what
         # cmd_vel needs. Proportional on the same signed error the tracker
@@ -510,6 +516,7 @@ class FalconExplorationFollowerNode:
                 self._moving_since = now
             elif now - self._moving_since >= self.escape_progress_sec:
                 self._escapes_since_progress = 0
+                self._pinned_hold = False
             self._stall_since = None
             return None
         self._moving_since = None
@@ -537,6 +544,15 @@ class FalconExplorationFollowerNode:
                 self._escapes_since_progress, self.escape_progress_sec,
                 math.hypot(body_vx, body_vy),
                 math.hypot(self._velocity[0], self._velocity[1]))
+            # Giving up on escaping must ALSO stop pushing. Suppressing the
+            # escape while still commanding full drive is what produced the
+            # lock-up: the aircraft cannot move, the velocity servo's integrator
+            # winds to whatever ceiling exists (1000, then 900 once capped), the
+            # airframe pitches 20-35 deg and translates even less. Holding
+            # translation lets the integrator unwind and the airframe settle,
+            # while yaw is left alone so the aircraft can still turn and let
+            # FALCON replan from a different heading.
+            self._pinned_hold = True
             return None
 
         # Alternate the turn direction between escapes: if one side is blocked,
