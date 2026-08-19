@@ -462,6 +462,38 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P22 — The depth measurement that killed the raycast change was wrong (2026-08-20)
+
+On 2026-08-19 I ruled out raising the mapper's `raycast_max` on the strength of a live depth
+sample: *"p50 1.06 m, max 3.51 m, 0 % of pixels beyond 5 m"*. That sample came off
+`/tmp/rooster_frames/depth`, **not** `/tmp/rooster_depth`, which is the `depth_dir` the depth
+processor writes and the mapper is fed.
+
+Re-measured from the right directory, 2.38M pixels over 12 consecutive frames:
+
+| | p1 | p5 | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| depth, m | 0.85 | 0.95 | **2.10** | 3.90 | **8.57** | 11.41 |
+
+**4.8 % of every frame lies beyond the 5.0 m `raycast_max` and is thrown away**, while
+`sensing_parameters/max_depth` already allows 10 m — so the truncation is ours, not the model's.
+Raised to **8.0** (98.8 % of returns kept), as a rosparam override after the yaml load, so no
+rebuild: `/voxel_mapping/tsdf/raycast_max`, guarded in `EXPECTED_ROSPARAMS`.
+
+**Verify:** coverage above the 119-129 band at cluster_min 50, and far walls resolving earlier.
+**Watch:** raycasting cost scales with range and monocular depth degrades with distance, so
+phantom far geometry would show up as rising `no_path_fails` or unreachable targets. If it does,
+6.5 is the fallback before reverting.
+
+**The near end matters too, and explains the contacts:** the same measurement shows a hard floor
+at **0.62 m**, p1 0.85 — DA3 returns nothing closer. An obstacle within ~0.6 m is invisible to
+the map whatever `cam_min_depth` (0.45) says, which is exactly why the aircraft presses against
+geometry it never saw. That is a sensing limit, not a tuning one; the mitigation is behavioural
+(the dead-end guard, the escape reflex), not a parameter.
+
+**Lesson:** a measurement that KILLS a change deserves the same scrutiny as one that justifies
+it — check you sampled what the system actually reads.
+
 ### P21 — FINISH at 27 % of the box: the boundary is there, the CLUSTERS are not (2026-08-20)
 
 With P16 and P17 fixed the stall changed shape. It is no longer a lock or a spin: FALCON simply
@@ -748,11 +780,10 @@ mismatch. Add any future tuned param to `EXPECTED_ROSPARAMS` as well as setting 
 Every fix before this removed a failure mode; coverage stayed at 85-98 m3/min and ~24 % of the
 box per 430 s window. Coverage is bounded by **flying speed x sensor swath**, so:
 
-**The swath cannot be raised.** Measured from live DA3 frames at cruise: depth p50 1.06 m,
-p90 2.57, p99 3.27, **max 3.51 m, 0 % of pixels beyond 5 m**. The voxel mapper's
-`raycast_max = 5.0` was a suspect (an early investigation recommended raising it to 8.0) but it
-is not the limit — the depth model simply does not see that far in this map. Raising it would
-have cost a 12-minute rebuild and bought nothing. *(Measured in 30 seconds instead.)*
+**~~The swath cannot be raised.~~ THIS WAS WRONG — see P22.** The sample behind it came off the
+wrong directory. Re-measured 2026-08-20 over 2.38M pixels of the frames the mapper actually
+consumes: p50 2.10 m, p90 3.90, p99 8.57, max 11.41, with **4.8 % beyond 5 m**. `raycast_max`
+was discarding them.
 
 **So speed is the only lever left.** FALCON was planning at `max_vel = 0.4` m/s while the
 follower was allowed 0.6, so the **plan** was binding, not the follower. `max_vel` 0.4 → 0.6
