@@ -371,6 +371,29 @@ an identical configuration, so no 1-vs-1 or even 1-vs-3 comparison can settle a 
 change. Either accumulate many runs per configuration, or work on defects with unambiguous
 signatures instead. The remaining queue is deliberately the latter.
 
+### P5 item 4 — "Yaw disturbs altitude badly" (DOWNGRADED 2026-08-19, measured)
+
+Block (i)'s yaw segments drove the aircraft to ranger 3.5-4.0 m, through the ~3.4 m ceiling,
+with one 180° roll logged — which read as a serious flight defect. Measured across three
+exploration runs (25 668 samples in the healthy first 430 s), the coupling in **normal flight
+is small**:
+
+| yaw command | mean vz | ranger median |
+|---|---|---|
+| r ≈ 0 | −0.0115 m/s | 1.19 m |
+| \|r\| < 300 | −0.0024 | 1.22 |
+| \|r\| < 600 | −0.0026 | 1.24 |
+| \|r\| ≥ 600 | **+0.0086** | 1.24 |
+
+The sign flips with hard yaw, so the coupling is real, but the altitude loop absorbs it: a 5 cm
+difference in held height between no yaw and full yaw. The ceiling strikes came from
+**sustained pure-yaw at high rate for seconds**, which the sweep commands and exploration never
+does.
+
+So this is a **calibration-sweep hazard, not an exploration defect**. Do not spend flight time
+tuning it. It does mean the yaw sweep needs the aircraft protected before it can produce data —
+its segments abort on the ranger limit by design, which is the guard working.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.
