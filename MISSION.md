@@ -184,192 +184,34 @@ Also worth doing: `obstacles_inflation`/`safe_distance` are 0.85 m against 0.20 
 which needs a 1.7 m-wide free corridor and makes a ~0.9 m doorway unplannable at *any*
 altitude. Pass-through args are now wired; try 0.40 (the 2D planner's own value).
 
-### P5 — Axis calibration (MEASURED; blocks i+ii flown, iii still owed)
+### P5 — Axis calibration (blocks i, ii, iii all flown)
 
-**The standing-vs-moving question is answered.** Block (ii) pre-loads the axis and steps to
-each value, so it measures the regime the aircraft is actually in for most of a flight:
+**Yaw is now calibrated for the first time** (block iii): dead band **102** counts, **2.589
+rad/s** at full stick, and symmetric — r+ 104/2.580 over 7 points, r- 101/2.597 over 8. That
+retires the 2026-07-30 claim of a 1.9-vs-1.5 rad/s left/right asymmetry.
 
-| regime | dead band | m/s at full stick |
-|---|---|---|
-| standing start (block i) | 466–620 | 1.15–1.31 |
-| moving, approached from an 850 pre-load | **412** | **1.847** |
-| moving, approached from a 650 pre-load | **511** | **2.467** |
+Yaw had never had a calibrated inverse: it used `wz / max_yaw_rate * 1000`, a through-origin
+scale with **no dead band**, which is the exact form this module's own docstring says cannot
+work for a dead-banded axis. Consequences either side of the crossover:
 
-Two things follow. The moving regime is roughly **1.5× more responsive** than a standing
-start, and the ~100-count spread between the two approaches is a real **hysteresis band** —
-the same axis value means a different speed depending on which side you came from. Nothing in
-the stack modelled either before.
-
-`x_v_full_moving` is now **1.847** (was a guessed 4.0, which commanded far too little stick).
-Only that one number was adopted: the measured moving dead band of 412 is deliberately NOT
-applied, because lowering the dead band 620 → 466 was already flown and halved the distance.
-A number measured out of regime is not evidence about the regime you fly in — that is the
-whole lesson of the block (i) revert.
-
-**Still owed:**
-1. **Block (iii)** — combined x+y / x+r / x+y+r. Nothing compensates cross-axis dead bands; a
-   diagonal pays the offset twice.
-2. **A moving-regime dead-band trial**, one variable at a time, once the 1.847 change is
-   verified: the evidence says 412–511, the flight says 620 works. That gap is unexplained.
-3. **The yaw sweep still has not run.** Its block (i) segments drove the aircraft to ranger
-   3.5–4.0 m — through the ~3.4 m ceiling — with one 180° roll logged. Yaw commands disturb
-   altitude badly, and that is a flight-behaviour finding, not a test-rig problem.
-
-### P6 — Tracking error is 1.42 m now that the aircraft actually follows (OPEN, top)
-
-Only visible once P2 was fixed: while the follower was holding station 84 % of the time its
-`pos_err` looked excellent (mean 0.40 m) because it was tracking a stationary point. Flying
-the real reference, cycle 11 measured **pos_err mean 1.42 m, p90 1.91 m, max 3.94 m**.
-
-Almost certainly the same defect as P5: the platform delivers only **0.42–0.63×** the
-commanded speed, so the aircraft falls progressively behind a reference that keeps moving.
-Fix the gain first and re-measure before touching any controller gain — a position loop
-tuned against a plant that under-delivers by half will be wrong twice over.
-
-### P7 — Plan-fail rate (OPEN, watch)
-
-Cycle 11: 1650 `[FSM] Plan fail` across 40860 FSM lines (4 %). Cycle 2 was 36/7788 (0.5 %),
-but that comparison is unfair — cycle 2 spent 84 % of its flight in FINISH not planning at
-all. Against cycle 1's 16949 it is a 10× improvement. Watch whether it tracks coverage rate;
-if coverage keeps climbing, this is FALCON discarding unreachable viewpoints and is healthy.
-
-### P8 — The airframe holds ~19 deg roll excursions while hovering still (OPEN)
-
-Measured from the calibration sweep's own rest periods (3240 samples with nothing commanded
-and speed < 0.05 m/s): |roll| p90 is **18.9 deg**, and it does **not decay** — 18.9 / 19.0 /
-19.0 / 17.3 deg for 0-1 s, 1-2 s, 2-3 s and >3 s after the stop, while speed settles to
-0.03 m/s. Median roll is only ~1 deg, so these are recurring excursions rather than a
-standing bias.
-
-Why it matters, in order:
-1. **Map quality.** Depth comes from monocular DA3, and roll skews the geometry it infers.
-   Roughly a tenth of all mapping frames are being captured at >=18 deg of roll.
-2. **The tilt reflex is mis-set either way.** The follower's node default is 15 deg, which
-   this would trip on ~10 % of ticks and cut drive spuriously; `nav_stack.launch` passes
-   45 deg, which cannot fire before the airframe's ~35 deg recoverability ceiling. Neither
-   number was chosen against this measurement.
-3. Backward commands specifically tripped 26-33 deg during the sweep, and the stall-escape
-   reflex commands -0.30 m/s backward — so the escape may be inducing the tilt that the
-   tilt cutoff then reacts to.
-
-**Most likely benign explanation to rule out first:** PX4 is in Position mode, so holding
-station against drift *requires* tilting. 19 deg is a lot for that, but check it before
-treating this as a control defect — compare rest-period roll with and without a commanded
-position hold, and against `altitude_hold` activity, since the z axis is a narrow step gate
-that slews every tick.
-
-### P9 — Stall-escape reflex (SOLVED 2026-08-19, verified in flight)
-
-The reflex fires on "asked for >0.15 m/s, measured <0.06 m/s for 3 s" — which describes an
-aircraft pinned against geometry *and*, identically, one whose commanded axis sits under the
-platform's effective threshold. So a gain problem presented as a permanent stall, the escape
-repeated forever without restoring motion, and each attempt cost ~9.5 s including cooldown.
-It also reverses, into the direction block (i) measured tripping 26–33° of roll.
-
-A give-up budget (`escape_give_up_count` 4, re-armed by `escape_progress_sec` 5 s of real
-motion) fixed it outright:
-
-| | before (093835Z) | after (100012Z) | after (101301Z) |
+| requested | old axis | measured-curve axis | effect |
 |---|---|---|---|
-| escapes | 38 | **2** | **2** |
-| distance | 139.9 m | **348.1 m** | **357.1 m** |
-| stops per minute | 9.35 | **1.08** | **0.40** |
-| time below 0.05 m/s | 46.8 % | **5.0 %** | **2.1 %** |
-| coverage rate | (unreliable) | 79.6 m³/min | 32.7 m³/min |
+| 0.14 rad/s (the follower's snap floor) | **78** | 151 | **below the 102 dead band — no yaw at all** |
+| 0.50 | 278 | 275 | coincidentally right |
+| 1.00 | 556 | 449 | over-commands ~24 % |
+| 1.50 | 833 | 622 | over-commands ~34 % |
 
-That is the best *verified* coverage rate the campaign has recorded (earlier reliable bests:
-72.7, 73.5, 65.8 m³/min). It also explains most of the run-to-run variance in §7b: the spread
-between 133.8 m and 390.1 m on "identical" configurations was largely escape count.
+So small heading corrections did nothing and large ones overshot. This matters during
+exploration because the follower turns constantly in course mode and heading error feeds back
+into forward speed through `cos(heading_err)`. Both halves of the curve are applied together.
+UNVERIFIED in flight.
 
-### P10 — Exploration ending at 13 % coverage with zero frontiers (SOLVED 2026-08-19)
-
-The blocked-region blacklist retired frontiers permanently. **None of its parameters had ever
-been set** in `nav_stack.launch`, so all ran at C++ defaults — and a shadow could only grow to
-`blocked_region_radius_max` 3.5 m while viewpoints are sampled to `candidate_rmax` 5.5 m, so a
-blacklisted viewpoint could never retire the frontier that produced it. The tour re-offered the
-same unreachable target, struck it again each time, and the frontier set emptied. The valve
-that un-retires frontiers, `finish_amnesty_max`, was capped at 2 uses per process.
-
-| run | reopened | coverage plateau | frontiers | distance | % at zero |
-|---|---|---|---|---|---|
-| 111738Z (pre-fix) | **0** | **458 s** | **0** | 80 m | **76.9 %** |
-| 115748Z | 5 | 0 s | 1104 | 290.2 m | 6.6 % |
-| 121053Z | 2 | 0 s | 0 | 356.9 m | 2.9 % |
-
-Set: shadow cap 6.0 m, escalation 6.0 m, TTL doubling capped at 1 (≤180 s, was ≤720 s),
-amnesty cap 20. The signature to watch for a recurrence is `finished` **and** `reopened: 0`
-**and** a large `coverage.plateau_s` — if that returns with these params live, the frontier
-finder itself is failing to see reachable frontiers and the blacklist is the wrong place to
-keep tuning.
-
-### P4 — Fly lower (ALTITUDE LOOP FIXED 2026-08-19; door clearance still to prove)
-
-The loop no longer parks above its setpoint. Across three runs at
-`altitude_hold_kp_down = 1500`: `converged` True every time (it had never been true),
-longest in-band stretch 3.8 s → 19–45 s, mean absolute error down to 0.131 m, and the held
-ranger came from 1.60 m to 1.27–1.50 m — now bracketing the 1.35 m target instead of sitting
-0.25 m above it.
-
-**But it is bimodal**, and that is the open part. One run held ranger to a 0.054 m standard
-deviation; another swung with z standard deviation 170, spending 19 % of ticks in the descend
-zone *and* 8.9 % in the climb zone — the "rises and falls" mode. That run also had the worst
-plan-fail count (37 422) and lowest distance (218 m), so the aircraft was fighting its own
-altitude instead of exploring. `altitude_hold_max_step` 15 → 8 is the documented remedy
-(LESSONS.md 2026-08-17: the step limit is the fix, the gain is not).
-
-**Still to prove:** that a ~1.35 m cruise actually gets through the map's low doorways. That
-was the original point of P4 and no run has yet been checked for door transits specifically.
-
-### P11 — Horizontal speed collapse (PARTLY EXPLAINED 2026-08-19)
-
-Speed over the healthy first 430 s, by altitude configuration:
-
-| config | runs | mean speed | distance |
-|---|---|---|---|
-| kp900 / step15 | 121053Z, 143251Z, 144550Z | 0.556, 0.449, 0.305 | 253, 194, 140 m |
-| kp1500 / step15 | 133951Z, 135302Z | 0.341, 0.320 | 152, 140 m |
-| kp1500 / step8 | 140625Z | **0.126** | **57 m** |
-
-Reverting the gain recovered speed from 0.126 to 0.305-0.449, so the altitude loop **was** a
-contributor — consistent with z and translation sharing thrust authority on this airframe.
-But it is **not the whole story**: kp900 itself spans 0.305-0.556, so run-to-run variance is
-large and the single kp1500/step8 run may also have been an outlier. Do not treat the causal
-link as settled; treat it as "raising the descent gain is not free, and cost more than the
-altitude accuracy was worth".
-
-Still unexplained: in the worst run the adapter commanded a mean 1.13 m/s while the aircraft
-achieved 0.038 (gain 0.008), with 632 frontier points available and coverage flat for 439 s.
-Full stick, no motion. If a run like that recurs, check in order: the vendor stack
-(`docker logs R1 | grep -c "Communication lost"`), then the paired moving curve (revert to
-4.0 / 0.0), then whether the planner is routing into spaces the airframe cannot fit.
-
-### P4 — Fly lower (HEIGHT ACHIEVED; premise UNPROVEN — earlier claim retracted)
-
-**The height works.** Biasing the setpoint took the held ranger from 1.58 to 1.21-1.25 m at no
-thrust cost, and bounding the nudge (`altitude_nudge_m` 0.15, `altitude_band_m` 0.3) stopped
-the live target railing: it now stays in 0.70-1.00 instead of walking to its 0.60 floor, and
-the loop calmed (z sd 114 → 77, ranger sd 0.204 → 0.132, escapes 11 → 4).
-
-**The reason for flying lower is NOT established, and a previous entry claiming it was is
-retracted.** Distinct 2 m cells of the track, first 430 s:
-
-| cruise | cells reached | coverage rate |
-|---|---|---|
-| ~1.58 m | 12, 14, 29 | 87.4 |
-| ~1.21 m | **41, 21, 19** | 85.1, 69.5, 50.8 |
-
-The 41 was a single lucky run; the repeats gave 21 and 19, which sit inside the high-cruise
-range. If anything the low-cruise coverage rate is *worse*, though not outside the noise
-either. **Flying lower has not been shown to reach more of the map.**
-
-Kept anyway, for reasons that do not depend on that claim: 1.2 m matches FALCON's own
-`cruise_z` of 1.0 and sits inside the BEV trust band (0.70-2.20), where 1.58 m did not. If a
-future run set shows a real coverage cost, revert `MAX_RANGER_M` to 1.35 rather than defend it.
-
-**Lesson for this campaign's method:** cell count and coverage rate both vary ~2x run to run at
-an identical configuration, so no 1-vs-1 or even 1-vs-3 comparison can settle a marginal
-change. Either accumulate many runs per configuration, or work on defects with unambiguous
-signatures instead. The remaining queue is deliberately the latter.
+**Cross-axis ratio remains UNMEASURED.** 16 of 39 block (iii) segments aborted on the guards:
+combined x+r at 700-800 counts drove the aircraft to ranger 3.4-3.7 m, and several pairs
+exceeded 25-30° of roll or pitch. Notably `x700_r0` — pure forward, no yaw — also hit ranger
+3.7 m, so high forward stick alone climbs; this is not specific to combining axes. Getting the
+ratio would need the sweep to hold altitude against much stronger disturbance than it can now.
+Do not spend more flights on it until something else needs it.
 
 ### P5 item 4 — "Yaw disturbs altitude badly" (DOWNGRADED 2026-08-19, measured)
 
@@ -461,6 +303,7 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | P4 by setpoint instead of gain: MAX_RANGER_M 1.35 → 1.00 | **WORKED** — held ranger 1.58 → 1.21 m, speed 0.483 (no cost), and 2 m-cells reached 12-29 → 41 | 2026-08-19 |
 | 2026-08-19 | Nudge authority bounded: nudge 0.3 → 0.15 m, band 1.0 → 0.3 m | **WORKED** — target now holds 0.70-1.00 instead of railing to 0.60; z sd 114 → 77, ranger sd 0.204 → 0.132, escapes 11 → 4 | 2026-08-19 |
 | 2026-08-19 | P4 premise **RETRACTED** | the 41-cell low-cruise run was noise: repeats gave 21 and 19, inside the 12-29 high-cruise range | 2026-08-19 |
+| 2026-08-19 | Block (iii) flown; yaw curve measured and applied (dead band 102, 2.589 rad/s) | **UNVERIFIED** — yaw had no dead-band compensation at all; 0.14 rad/s requests were producing nothing | 2026-08-19 |
 | 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
 | 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
 | 2026-08-19 | Restart Sphera when the FCU is unarmable, and gate health on it | six cycles were lost re-attempting a dead aircraft, because the battery read 0.99 so nothing ever restarted | 2026-08-19 |

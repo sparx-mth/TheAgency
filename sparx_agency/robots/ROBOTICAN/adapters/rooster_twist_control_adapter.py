@@ -61,7 +61,9 @@ from rclpy.duration import Duration
 from geometry_msgs.msg import PoseStamped, Twist, TwistStamped
 from std_msgs.msg import String
 
-from sparx_agency.core.control.axis_velocity_servo import AxisVelocityServo
+from sparx_agency.core.control.axis_velocity_servo import (
+    AxisVelocityServo, feedforward_axis,
+)
 from sparx_agency.robots.common.math_utils import clamp_axis, slew
 
 
@@ -108,7 +110,25 @@ class RoosterTwistControlNode(Node):
         cmd_vel_topic: str | None = None,
         max_linear_x: float = 0.25,
         max_linear_y: float = 0.25,
+        # Superseded by the measured r curve below; kept only for
+        # use_measured_axis_curve=False. See r_deadzone / r_v_full.
         max_yaw_rate: float = 1.8,
+        # MEASURED 2026-08-19, calibration block (iii): the yaw axis is dead
+        # below ~102 counts and reaches ~2.59 rad/s at full stick, and it is
+        # symmetric (r+ 104/2.580 over 7 points, r- 101/2.597 over 8) -- which
+        # retires the 2026-07-30 claim of a 1.9-vs-1.5 rad/s left/right split.
+        #
+        # Yaw had never had a calibrated inverse: it went through
+        # `wz / max_yaw_rate * 1000`, a through-origin scale with NO dead band,
+        # which is exactly the form velocity_to_axis's docstring says cannot work
+        # for a dead-banded axis. The consequences either side of the crossover:
+        # at the follower's own snap floor of 0.14 rad/s it asked for axis 78,
+        # below the dead band, so small heading corrections produced NO yaw at
+        # all; above ~0.8 rad/s it over-commanded by 15-25%. Both matter during
+        # exploration, where the follower turns constantly and heading error
+        # feeds straight back into forward speed through cos(heading_err).
+        r_deadzone: float = 102.0,
+        r_v_full: float = 2.589,
         max_yaw_axis_step_per_sec: float = 2500.0,
         command_hz: float = 20.0,
         cmd_timeout_sec: float = 0.4,
@@ -240,6 +260,8 @@ class RoosterTwistControlNode(Node):
         self.max_linear_x = float(max_linear_x)
         self.max_linear_y = float(max_linear_y)
         self.max_yaw_rate = float(max_yaw_rate)
+        self.r_deadzone = float(r_deadzone)
+        self.r_v_full = float(r_v_full)
         self.use_measured_axis_curve = bool(use_measured_axis_curve)
         self.x_deadzone = float(x_deadzone)
         self.x_v_full = float(x_v_full)
@@ -357,9 +379,14 @@ class RoosterTwistControlNode(Node):
         self._publish_cmd_nav("stop")
 
     def publish_move(self, twist: Twist) -> None:
-        # Negated -- see module docstring.
-        target_r = (-twist.angular.z / self.max_yaw_rate * 1000.0
-                    if self.max_yaw_rate else 0.0)
+        # Negated -- see module docstring. Through the measured dead-banded
+        # curve, not a through-origin scale: see r_deadzone above.
+        if self.use_measured_axis_curve and self.r_v_full > 0.0:
+            target_r = feedforward_axis(-twist.angular.z, self.r_deadzone,
+                                        self.r_v_full)
+        else:
+            target_r = (-twist.angular.z / self.max_yaw_rate * 1000.0
+                        if self.max_yaw_rate else 0.0)
         max_step = self.max_yaw_axis_step_per_sec / self.command_hz
         self._r_axis = slew(target_r, self._r_axis, max_step)
         if self.use_velocity_servo:
