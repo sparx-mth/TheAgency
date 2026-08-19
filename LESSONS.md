@@ -67,6 +67,35 @@ and it is indistinguishable from perfect tracking of a moving one. Check
 `/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
 the roslaunch stdout redirect instead.
 
+## 2026-08-19 — a sentinel that gates autonomy must expire, and `pkill -f` matches the shell that runs it
+
+**What happened:** an autonomous campaign sat idle for **13.5 hours**. Nothing crashed. A
+`runs/PAUSE` sentinel had been created to let a calibration flight own the aircraft alone,
+the calibration finished normally twenty minutes later, and nothing ever removed the file.
+The supervisor did exactly what it was told and logged `PAUSE sentinel present -- holding`
+1,600 times.
+
+**The design lesson, which is the important one:** a pause protects an edit or a manual
+flight — minutes of work. The thing it gates is a loop meant to run for days unattended.
+Those two lifetimes are wildly mismatched, so the sentinel has to carry an expiry: past
+`CAMPAIGN_PAUSE_MAX_AGE_S` (30 min) the supervisor now treats it as forgotten, says so
+loudly, and resumes. `STOP` deliberately does **not** expire — stopping is intent, pausing
+is a temporary courtesy, and only one of them should survive being forgotten. Any state that
+can silently disable an autonomous system should be asked the same question: what happens if
+whoever set it never comes back?
+
+**Second trap, hit while fixing the first:** `pkill -f "falcon_campaign/supervisor.sh"` killed
+the shell that ran it — the pattern matches that shell's own command line. This file already
+documents the same self-match for `pgrep -f` inside a container watchdog; it is exactly as
+true for `pkill` on the host, and it kills the process doing the cleanup, so the rest of the
+command (restarting the thing) never runs. Match on something the caller cannot contain, or
+read the pid from a lockfile.
+
+**Don't:** don't leave a "temporary" flag as the only thing standing between an autonomous
+loop and running. And when a turn ends with such a flag set, the *same* turn must schedule
+whatever will come back to clear it — that scheduling step, not the flag, was the real
+omission here.
+
 ## 2026-08-18 — a bare `import` broke every automated Sphera restart, and three layers of "success" hid it
 
 **Symptom:** an autonomous campaign refused to fly for six consecutive cycles, each one

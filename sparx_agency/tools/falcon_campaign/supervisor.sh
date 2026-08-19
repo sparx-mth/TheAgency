@@ -7,8 +7,11 @@
 # to fly code that does not compile.
 #
 # Two sentinels, both under runs/:
-#   PAUSE  finish the current cycle, then wait (touch it before editing code)
-#   STOP   exit after the current cycle
+#   PAUSE  finish the current cycle, then wait (touch it before editing code).
+#          SELF-EXPIRING: past CAMPAIGN_PAUSE_MAX_AGE_S (default 30 min) it is
+#          treated as forgotten and removed, because a pause protects minutes of
+#          work and one left behind cost this campaign 13.5 hours of flying.
+#   STOP   exit after the current cycle (never expires -- stopping is intent)
 #
 # Start it:
 #   nohup bash sparx_agency/tools/falcon_campaign/supervisor.sh \
@@ -23,6 +26,11 @@ REPO="${SPARX_REPO:-/home/user1/GIT/TheAgency}"
 RUNS="$REPO/runs"
 PY="${CAMPAIGN_PYTHON:-python3}"
 DURATION="${CAMPAIGN_DURATION:-600}"
+# A pause protects an edit or a manual flight -- both minutes of work. Left
+# behind it silently idles the whole campaign: one forgotten sentinel cost 13.5
+# hours of flying while this loop logged "holding" every 30s and did exactly what
+# it was told. Past this age the pause is treated as forgotten, not as intent.
+PAUSE_MAX_AGE_S="${CAMPAIGN_PAUSE_MAX_AGE_S:-1800}"
 
 # Modules that must compile before any flight. A syntax error in one of these
 # would otherwise burn a whole 10-minute cycle to discover.
@@ -82,9 +90,19 @@ while true; do
   fi
 
   if [[ -f "$RUNS/PAUSE" ]]; then
-    say "PAUSE sentinel present -- holding (remove $RUNS/PAUSE to resume)"
-    sleep 30
-    continue
+    pause_age=$(( $(date +%s) - $(stat -c %Y "$RUNS/PAUSE" 2>/dev/null || date +%s) ))
+    if (( pause_age > PAUSE_MAX_AGE_S )); then
+      say "PAUSE has been held ${pause_age}s (> ${PAUSE_MAX_AGE_S}s) -- treating it as"
+      say "forgotten and RESUMING. Touch it again if the hold was still wanted."
+      rm -f "$RUNS/PAUSE"
+    else
+      # Only narrate the wait occasionally; this used to emit 1600 identical lines.
+      if (( pause_age % 300 < 31 )); then
+        say "PAUSE sentinel present ${pause_age}s -- holding (auto-resume at ${PAUSE_MAX_AGE_S}s)"
+      fi
+      sleep 30
+      continue
+    fi
   fi
 
   bad=""
