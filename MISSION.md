@@ -477,10 +477,25 @@ demand with more bandwidth than the airframe has. `course_slew_deg_s` (default 4
 yaw ceiling) rate-limits the COMMANDED course, which leaves the aircraft comfortably faster
 than its own reference — the condition for the error to close at all. Python-side, no rebuild.
 
-**Verify:** deg-per-metre in the late flight falls toward the 41-70 band, `longest_stall_s`
-and `stall_frac` fall, `coverage.final_m3` rises above 850-1420. **Watch:** a genuine 180 deg
-turn now costs 4 s rather than 2 — if `stops_per_min` or tracking error climbs, the limit is
-too tight rather than wrong.
+**VERIFIED over three runs (2026-08-19), the largest coverage gain of the campaign:**
+
+| | before (4 runs) | after (3 runs) |
+|---|---|---|
+| deg/m, late flight | 131-247 | **28-69** |
+| stalled share | 51-83 % | **8-51 %** |
+| coverage m3/min | 52-109 | **102, 150, 124** |
+| final m3 | 891-1417 | 1106, 1295, 1274 |
+
+Turning effort landed exactly in the predicted 41-70 band and every post-fix run beat the best
+pre-fix run. 149.6 m3/min is a campaign record (previous best 121.8).
+
+**Open cost, being watched:** `stops_per_min` rose to 1.4-4.3 (was 0.5-2.0) and follower
+`pos_err` to 1.4-5.8 m (was 0.6-1.0). Some of that is arithmetic rather than regression — a
+stalled aircraft sits at exactly one lookahead from a reference that keeps being re-anchored on
+its own pose, so **a small `pos_err` was the STALL's signature, not good tracking** (rewrite P6
+accordingly). But 5.8 m is too much lag to accept. Next step: A/B `explore_course_slew_deg` 60
+against 45 once the 45 band is established, since 60 keeps the reference under the 90 deg/s
+ceiling while giving back half the added turn time.
 
 ### P16 — HALF THE FLIGHT MAPS NOTHING (found 2026-08-19) — the real ceiling
 
