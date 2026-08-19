@@ -520,11 +520,20 @@ Three facts that cannot all be right, found while investigating a 175 deg roll:
    edge at **-0.90 m** for minutes, dragging the hold target to its 0.60 m floor for 29 % of
    the flight. The rest of the time the target sat at exactly 1.00 m — `MAX_RANGER_M`.
 
-(1) and (3) contradict each other and **nothing recorded could tell them apart**: `pos_err` is
-a 3D magnitude, so a standing vertical bias is invisible in it. The heartbeat now carries
-`dz = reference z - pose z`, signed, reported as `tracking.ref_minus_pose_z_m`.
-**Measure it before touching any altitude setpoint** — raising `MAX_RANGER_M` while the
-follower is genuinely asking to descend would be exactly the wrong move.
+(1) and (3) contradict each other and nothing recorded could tell them apart, so `dz` was added
+to the heartbeat (`tracking.ref_minus_pose_z_m`, signed).
+
+**MEASURED over four runs: dz mean +0.14, +0.48, -0.12, -0.10 — centred on zero.** So DO NOT
+raise `MAX_RANGER_M`/`TARGET_RANGER_M`; the plan the follower actually tracks is at the
+aircraft's own height. The contradiction resolves like this: FALCON's *viewpoint* z of 2.04 m is
+a distant goal, while `/planning/pos_cmd` is anchored near the aircraft by `replan_from_pose`
+and replanned constantly, so the aircraft never climbs toward the viewpoint and never needs to.
+Vertical tracking is fine; it is the goal that is out of reach, which costs nothing.
+
+What remains true is that the altitude axis has almost no authority in the 300-650 band the loop
+uses, so altitude is held by aerodynamics rather than by control. It sits at 1.1-1.3 m
+consistently, which suits the mission, so this is now a low-priority known limitation rather
+than a bug to chase.
 
 **Separately, and solidly measured across every run in the campaign:** the altitude axis has
 almost no authority in the band the hold loop uses. Mean vertical velocity one second after a
