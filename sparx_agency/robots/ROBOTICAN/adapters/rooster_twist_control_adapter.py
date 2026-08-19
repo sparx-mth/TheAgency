@@ -219,12 +219,20 @@ class RoosterTwistControlNode(Node):
         # the hardest-won behaviour in the stack and is not worth risking for a
         # faster climb.
         follow_altitude: bool = True,
-        altitude_nudge_m: float = 0.3,
+        # 0.3 -> 0.15 and the band 1.0 -> 0.3 on 2026-08-19. The nudge authority
+        # was far too coarse for the ~1 m operating window: FALCON's vertical
+        # demand simply saturated it, and the live target RAILED -- at the old
+        # setpoint it pinned to the 1.35 m ceiling, and after the setpoint was
+        # lowered it walked 0.90 -> 0.60 and sat on the floor while the aircraft
+        # held 1.21 m. A 0.6 m standing error then drove the hold loop hard
+        # (z sd 42 -> 114, ranger sd 0.065 -> 0.204, escapes 3-7 -> 11).
+        # FALCON should be able to bias the cruise height, not relocate it.
+        altitude_nudge_m: float = 0.15,
         altitude_nudge_interval_sec: float = 3.0,
         # Furthest the accumulated nudges may take the aircraft from the height
         # it was holding when tracking began, metres. A runaway vz demand can
         # then bias the cruise height but never fly it into the ceiling or floor.
-        altitude_band_m: float = 1.0,
+        altitude_band_m: float = 0.3,
     ):
         super().__init__(f"{rooster_id.lower()}_twist_control")
 
