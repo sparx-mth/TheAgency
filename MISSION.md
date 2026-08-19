@@ -263,6 +263,17 @@ that slews every tick.
 - Robustness to DA3 depth noise.
 - Harness reliability: no hangs, no silent death, always recovering.
 
+## 7b. How to judge a change (run-to-run variance is large)
+
+Two consecutive runs with an **identical** configuration measured 133.8 m and 390.1 m flown,
+and 4.72 vs 0.39 stops per minute. A single A/B pair therefore proves very little unless the
+difference is large (the standing-start curve halved distance *and* took 42 % of the flight to
+zero speed — that was outside the noise). Prefer:
+
+- comparing **two or more runs per configuration**, not one;
+- `coverage.rate_m3_per_min` only when `coverage.reliable` is true;
+- the direction of several metrics agreeing, rather than one moving.
+
 ## 8. Log of changes and their measured effect
 
 _Append one line per change: date — what changed — measured effect — commit._
@@ -286,6 +297,7 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | PAUSE self-expiry + wakeup discipline | ended a 13.5 h idle caused by a forgotten sentinel | 2026-08-19 |
 | 2026-08-19 | Applied block (i) standing-start curve (466/1.313) | **REVERTED** — distance 257→126 m, stops 1.3→8.7/min, 42% at zero | 2026-08-19 |
 | 2026-08-19 | Altitude error now reported against the live target | removed a misleading top-3 finding | 2026-08-19 |
+| 2026-08-19 | Coverage trace marked unreliable when it does not span the flight | caught a phantom "record" 90.7 m3/min from 110 s of a 600 s flight | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 

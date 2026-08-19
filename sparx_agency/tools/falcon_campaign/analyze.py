@@ -443,7 +443,7 @@ def health_metrics(samples, lines):
                                 for key, needle in _EVENTS))
 
 
-def coverage_metrics(run_dir):
+def coverage_metrics(run_dir, flight_s=None):
     """Explored volume over time -- the one metric that IS the mission.
 
     Everything else this module reports is a proxy: an aircraft can fly
@@ -459,16 +459,21 @@ def coverage_metrics(run_dir):
         how long the trace spent flat at the end.
     """
     path = run_dir / "coverage.jsonl"
-    rows = []
+    rows, gaps = [], 0
     if path.exists():
         for line in path.read_text(errors="ignore").splitlines():
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
             except ValueError:
                 continue
+            if row.get("coverage_m3") is None:
+                gaps += 1
+                continue
+            rows.append(row)
     if len(rows) < 2:
-        return dict(samples=len(rows), final_m3=None, frac_of_box=None,
-                    rate_m3_per_min=None, plateau_s=None, frontier_points=None)
+        return dict(samples=len(rows), gaps=gaps, final_m3=None, frac_of_box=None,
+                    rate_m3_per_min=None, plateau_s=None, frontier_points=None,
+                    span_s=None, reliable=False)
 
     span = rows[-1]["wall"] - rows[0]["wall"]
     gained = rows[-1]["coverage_m3"] - rows[0]["coverage_m3"]
@@ -480,7 +485,12 @@ def coverage_metrics(run_dir):
             break
         plateau_s = rows[-1]["wall"] - row["wall"]
     return dict(
-        samples=len(rows), final_m3=final,
+        samples=len(rows), gaps=gaps, span_s=span,
+        # A rate is only comparable across runs when the trace actually spans
+        # the flight. Below this the number is reported but must not be ranked
+        # or compared -- see the sampler's own comment.
+        reliable=(span >= 0.7 * flight_s) if flight_s else None,
+        final_m3=final,
         frac_of_box=(final / config.EXPLORABLE_VOLUME_M3
                      if getattr(config, 'EXPLORABLE_VOLUME_M3', 0) else None),
         gained_m3=gained,
@@ -605,13 +615,22 @@ def _rank(m):
     # Coverage is the mission. A long plateau outranks everything except a dead
     # traj_server, because a smooth, well-tracked flight that maps nothing is a
     # failure that every other metric in this file will happily call a success.
-    plateau = cov.get("plateau_s") or 0.0
+    reliable = cov.get("reliable")
+    add(3.0 if reliable is False and cov.get("samples") else 0,
+        "Coverage trace covers only %ss of a %ss flight (%s samples, %s gaps) -- "
+        "its rate of %s m3/min is NOT comparable with other runs. "
+        "/voxel_mapping/map_coverage goes quiet while the FSM sits in FINISH, so "
+        "a run that re-opens repeatedly samples sparsely."
+        % (_f(cov.get("span_s"), "%.0f"), _f(mo.get("duration_s"), "%.0f"),
+           cov.get("samples"), cov.get("gaps"),
+           _f(cov.get("rate_m3_per_min"), "%.1f")))
+    plateau = (cov.get("plateau_s") or 0.0) if reliable else 0.0
     add(min(8.0, plateau / 60.0) if plateau >= 90.0 else 0,
         "Coverage PLATEAUED for the last %ss at %s m3 (%s of the box) with %s "
         "frontier points still reported -- the aircraft is flying but no longer "
         "mapping." % (_f(plateau, "%.0f"), _f(cov.get("final_m3"), "%.0f"),
                       _pct(cov.get("frac_of_box")), cov.get("frontier_points")))
-    rate = cov.get("rate_m3_per_min")
+    rate = cov.get("rate_m3_per_min") if reliable else None
     add(2.0 if (rate is not None and rate < 5.0 and plateau < 90.0) else 0,
         "Coverage rate is only %s m3/min (%s m3 total, %s of the box) -- the "
         "flight is smooth but slow to explore."
@@ -715,14 +734,15 @@ def analyze(run_dir):
     samples = _normalize(records)
     flying, airborne_only = _airborne_window(_fill_velocity(samples))
     lines, log_files = _read_log_lines(run_dir)
+    motion = motion_metrics(flying, airborne_only)
     metrics = dict(
         run=run_dir.name, samples_recorded=len(samples),
         samples_analyzed=len(flying), log_files=log_files,
-        motion=motion_metrics(flying, airborne_only),
+        motion=motion,
         actuation=actuation_metrics(flying),
         tracking=tracking_metrics(lines),
         altitude=altitude_metrics(flying, lines),
-        coverage=coverage_metrics(run_dir),
+        coverage=coverage_metrics(run_dir, motion.get('duration_s')),
         health=health_metrics(samples, lines),
         exploration=exploration_metrics(lines))
     metrics["data_gaps"] = _data_gaps(metrics, samples, bad_lines, log_files)

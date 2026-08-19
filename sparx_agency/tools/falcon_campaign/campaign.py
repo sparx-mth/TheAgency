@@ -145,8 +145,20 @@ def sample_coverage(run_dir):
         except ValueError:
             continue
     if not numbers:
+        # Record the gap instead of returning silently. rostopic echo -n1 blocks
+        # until a message arrives, and /voxel_mapping/map_coverage goes quiet
+        # while the FSM sits in FINISH -- so a run that re-opens repeatedly logs
+        # a sparse trace, and a rate computed over it is not comparable with one
+        # sampled across a whole flight. A run once reported a record 90.7
+        # m3/min from six samples spanning 110s of a 600s flight.
+        try:
+            with open(str(run_dir / "coverage.jsonl"), "a") as fh:
+                fh.write(json.dumps({"wall": round(time.time(), 3),
+                                     "ok": False}) + "\n")
+        except OSError:
+            pass
         return
-    row = {"wall": round(time.time(), 3), "coverage_m3": numbers[0]}
+    row = {"wall": round(time.time(), 3), "coverage_m3": numbers[0], "ok": True}
     if len(numbers) > 1:
         row["frontier_points"] = int(numbers[1])
     try:
