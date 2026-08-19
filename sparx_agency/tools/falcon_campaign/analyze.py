@@ -401,7 +401,17 @@ def altitude_metrics(samples, lines):
             stamp if run_start is None else run_start)
         if run_start is not None:
             best = max(best, stamp - run_start)
-    return dict(source=source, target_m=config.TARGET_RANGER_M,
+    # The hold loop's own logged target, not the configured one: the twist
+    # adapter nudges the setpoint in flight, so quoting config here made the
+    # report say "0.23 m off a 1.20 m target" while the loop was in fact holding
+    # 0.23 m off a target that had drifted to ~1.35 m. The error is real either
+    # way; the target it is measured against must be the live one.
+    logged_targets = [float(m.group(2)) for m, _ in logged]
+    return dict(source=source,
+                target_m=(logged_targets[-1] if logged_targets
+                          else config.TARGET_RANGER_M),
+                target_m_configured=config.TARGET_RANGER_M,
+                target_m_drift=(_stats(logged_targets) if logged_targets else None),
                 ranger_m=_stats(rangers), abs_error_m=_stats(errors),
                 longest_in_band_s=best if errors else None,
                 converged=(best >= ALT_CONVERGED_S) if errors else None)
