@@ -456,6 +456,40 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P18 — Altitude is not controlled, and the plan is a metre above the aircraft (2026-08-20)
+
+Three facts that cannot all be right, found while investigating a 175 deg roll:
+
+1. **FALCON plans high.** Viewpoint z is p10 1.51, **p50 2.04**, max 2.35 m.
+2. **The aircraft flies low.** Ranger 1.1-1.3 m all flight.
+3. **The follower asks to go DOWN.** Its integrated altitude demand sat pinned at the band
+   edge at **-0.90 m** for minutes, dragging the hold target to its 0.60 m floor for 29 % of
+   the flight. The rest of the time the target sat at exactly 1.00 m — `MAX_RANGER_M`.
+
+(1) and (3) contradict each other and **nothing recorded could tell them apart**: `pos_err` is
+a 3D magnitude, so a standing vertical bias is invisible in it. The heartbeat now carries
+`dz = reference z - pose z`, signed, reported as `tracking.ref_minus_pose_z_m`.
+**Measure it before touching any altitude setpoint** — raising `MAX_RANGER_M` while the
+follower is genuinely asking to descend would be exactly the wrong move.
+
+**Separately, and solidly measured across every run in the campaign:** the altitude axis has
+almost no authority in the band the hold loop uses. Mean vertical velocity one second after a
+command of z=300-350 is **-0.013 m/s**; at 400-650 it is within 0.03 m/s of zero. The step
+gate is up at 700 and the loop never reaches it, because the target is clamped below the
+aircraft so the correction is always negative. The aircraft therefore floats where
+aerodynamics puts it and the "hold" does almost nothing — which is why altitude never tracks
+and why every flight maps one narrow horizontal band.
+
+**Note on P3 ("voxels not mapped high enough"): the premise is wrong.** A height histogram of
+the live voxel map shows it filled evenly from z=-1.0 to 3.5 m, 5-8 % of voxels per 0.25 m
+band. The map reaches the ceiling; the aircraft does not need to.
+
+**One flip, recorded here so a recurrence is recognised:** run `20260819_202853Z` climbed from
+0.95 m to the 3.2 m ceiling at up to 3.6 m/s with roll growing smoothly 16 deg -> 43 deg,
+flipped to 175 deg, fell to the floor at -3.7 m/s, and climbed again — all with the altitude
+command sitting at z=320, which everywhere else in the campaign means a gentle descent. Not
+yet explained. Battery was 0.33 and falling.
+
 ### P17 — The stall is a YAW LIMIT CYCLE (found 2026-08-19, fix applied)
 
 Following P16's guard repair the viewpoint lock collapsed (`no_path_fails` 91 688 -> 2 308,
