@@ -1544,7 +1544,16 @@
   <!-- 2026-08-17: cuts horizontal drive the instant roll/pitch crosses this,
        on BOTH followers below — see LESSONS.md's 2026-08-17 entry (a live
        capsize exposed neither follower had any attitude awareness at all). -->
-  <arg name="tilt_limit_deg" default="45.0" />
+  <!-- 45 -> 25 on 2026-08-19. At 45 this reflex could never fire before the
+       airframe was already useless. Measured across runs, a healthy flight sits
+       at roll/pitch p90 of 3-10 deg, while three consecutive degenerate runs sat
+       at 20-35 deg pitch and 27 deg roll, commanded FULL STICK (axis median
+       1000) and achieved 0.05 m/s. That is a closed loop: no motion winds the
+       velocity servo's integrator, full stick tilts the airframe further, and a
+       tilted thrust vector translates even less. Cutting horizontal drive at 25
+       breaks it, and stays clear of the ~19 deg p90 roll excursions measured
+       while merely hovering (P8), so it should not trip in normal flight. -->
+  <arg name="tilt_limit_deg" default="25.0" />
 
   <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"
         if="$(eval arg('nav_mode') == 'exploration' and arg('exploration_follower') == 'reference')" />

@@ -191,7 +191,7 @@
        nav_mode:=astar selects plain A*. Needs the NavDP server up. -->
   <arg name="nav_mode" default="combination" />  <!-- navdp | astar | combination-->
   <arg name="exploration_follower" default="reference" />  <!-- reference | bspline, nav_mode:=exploration only -->
-  <arg name="tilt_limit_deg" default="45.0" />
+  <arg name="tilt_limit_deg" default="25.0" />
 
   <!-- Clearance / speed / frontier knobs the autonomous campaign tunes between
        runs. Declared here purely as pass-throughs so they can be set on the
