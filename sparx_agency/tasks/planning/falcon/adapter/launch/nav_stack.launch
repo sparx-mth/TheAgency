@@ -1380,6 +1380,33 @@
   <param name="/frontier_finder/candidate_rmin"                   value="$(arg frontier_candidate_rmin)" />
   <param name="/frontier_finder/candidate_rmax"                   value="$(arg frontier_candidate_rmax)" />
 
+  <!-- BLOCKED-REGION BLACKLIST (patches/falcon_blocked_region_*.patch). None of
+       these were ever set, so all ran at their C++ defaults, and two of those
+       defaults are wrong for this map.
+
+       A shadow could only grow to blocked_region_radius_max 3.5 m while
+       viewpoints are sampled out to candidate_rmax 5.5 m, so a blacklisted
+       viewpoint could never retire the frontier that produced it: the coverage
+       tour kept re-offering the same unreachable target, striking it again each
+       time, until the frontier set emptied. Measured 2026-08-19: a run declared
+       exploration finished at t=109 s with ZERO frontiers at 13 % coverage and
+       then parked for the remaining 500 s (77 % of the flight at zero speed),
+       while comparable runs reach 21 % and keep going.
+
+       So the shadow cap now exceeds candidate_rmax, the escalation radius stays
+       at least as wide as the cap (its own source comment requires that), the
+       TTL doubling is capped so a shadow lasts at most 180 s instead of 720 s,
+       and the amnesty that un-retires frontiers is no longer limited to two
+       uses per process. -->
+  <arg name="frontier_blocked_radius_max"    default="6.0" />
+  <arg name="frontier_blocked_escalate"      default="6.0" />
+  <arg name="frontier_blocked_ttl_doubling"  default="1" />
+  <arg name="frontier_finish_amnesty_max"    default="20" />
+  <param name="/frontier_finder/blocked_region_radius_max"        value="$(arg frontier_blocked_radius_max)" />
+  <param name="/frontier_finder/blocked_region_escalate_radius"   value="$(arg frontier_blocked_escalate)" />
+  <param name="/frontier_finder/blocked_region_ttl_max_doubling"  value="$(arg frontier_blocked_ttl_doubling)" />
+  <param name="/frontier_finder/finish_amnesty_max"               value="$(arg frontier_finish_amnesty_max)" />
+
   <param name="/fsm/replan_thresh1"   value="$(arg fsm_replan_thresh1)" />
   <param name="/fsm/replan_thresh2"   value="$(arg fsm_replan_thresh2)" />
   <param name="/fsm/replan_thresh3"   value="$(arg fsm_replan_thresh3)" />
