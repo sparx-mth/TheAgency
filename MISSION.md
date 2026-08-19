@@ -497,10 +497,28 @@ inefficiency:
 | volume per 100 m | 297-453 | 351-443 (unchanged) |
 | `no_path_fails` | 2288-2792 | **4234-21046** |
 
-Volume per metre flown is the same; the aircraft simply flies fewer metres. With frontiers
-admitted at 0.6 m2 the tour is dominated by nearby crumbs, each trajectory is short and slow,
-and the aircraft stop-starts between them instead of committing to the transit that opens a new
-room. **A frontier the planner will chase is not the same thing as a frontier worth chasing.**
+Volume per metre flown is the same; the aircraft simply flies fewer metres. The first reading of
+that was "short hops between crumbs, so it creeps" — **the actuation data says the opposite and
+it matters, because the two have different fixes:**
+
+| | cluster_min 100 | cluster_min 30 |
+|---|---|---|
+| commanded speed, mean | 0.26 m/s | **0.58-0.61** |
+| axis counts, median / p90 | 650 / 739 | **711-725 / 900** |
+| achieved speed, mean | 0.55 m/s | **0.21-0.37** |
+| servo gain (achieved/commanded) | 1.37 | **0.16-0.41** |
+| fraction of flight below stop speed | 0.02-0.05 | **0.41-0.46** |
+
+The aircraft is commanded **harder** and moves **less**: near full stick, stationary, for
+40-46 % of the flight. That is the pressed-against-geometry signature (P11/P12), not a creep.
+Small frontiers are frequently in places this airframe cannot get to — a 0.6 m2 gap is smaller
+than the aircraft needs once `obstacles_inflation` 0.4 is added, and DA3's 0.95 m near clip
+means the map never sees what it is about to touch. So the tour sends it at a crumb, it drives
+into the geometry around it, and the guards eventually pull it off.
+
+**A frontier the planner will chase is not the same thing as a frontier the airframe can
+reach.** Note what the mission metric prefers: at 100 the run explored the big volume fast and
+then idled in FINISH, and that still beat chasing every crumb.
 
 **Now sweeping the third point: 50 (halving to 25, ~1 m2).** Judge it on coverage AND on
 `finished`, since those two moved in opposite directions between the first two points. If 50
