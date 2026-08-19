@@ -312,7 +312,37 @@ def motion_metrics(samples, airborne_only):
                 stop_duration=_stats(spans), stop_total_s=sum(spans),
                 stops_per_min=(None if not total
                                else len(stops) / (total / 60.0)),
-                mean_s_between_stops=statistics.fmean(gaps) if gaps else None)
+                mean_s_between_stops=statistics.fmean(gaps) if gaps else None,
+                **_turning_effort(samples))
+
+
+def _turning_effort(samples):
+    """Degrees of yaw spent per metre travelled, whole flight and last third.
+
+    The signature of a yaw limit cycle, and the only metric that separates it
+    from healthy flight: an aircraft spinning in place is busy by every rate
+    measure this module reports. Measured 2026-08-19, exploring runs 41-70
+    deg/m while a stalled one runs 200-270 -- the two do not overlap.
+
+    Args:
+        samples: Normalised pose samples, in time order.
+
+    Returns:
+        ``turning_deg_per_m`` over the flight and ``turning_deg_per_m_late``
+        over its last third, or None where there is too little travel to judge.
+    """
+    def ratio(rows):
+        turn = dist = 0.0
+        for a, b in zip(rows, rows[1:]):
+            if None in (a["x"], a["y"], b["x"], b["y"], a.get("yaw"), b.get("yaw")):
+                continue
+            delta = (b["yaw"] - a["yaw"] + math.pi) % (2.0 * math.pi) - math.pi
+            turn += abs(delta)
+            dist += math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        return round(math.degrees(turn) / dist, 1) if dist > 1.0 else None
+
+    return dict(turning_deg_per_m=ratio(samples),
+                turning_deg_per_m_late=ratio(samples[2 * len(samples) // 3:]))
 
 
 def tracking_metrics(lines):
