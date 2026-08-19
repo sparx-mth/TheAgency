@@ -215,6 +215,19 @@ class RoosterTwistControlNode(Node):
         # gain); the forward axis needs it too, now that a closed loop can demand
         # a large step. 1200 crosses the whole usable span (~380 counts above the
         # dead band) in ~0.3s. <=0 disables.
+        # Ceiling on the forward axis, counts. Saturation is where this
+        # platform misbehaves: measured over 34k samples of normal flight the
+        # forward axis is benign to ~900 counts (vertical disturbance p90
+        # 0.016-0.032 m/s, pitch p90 6-13 deg) and turns nasty beyond it (vz p90
+        # 0.111 m/s, pitch p90 22.6 deg) -- the same condition as the full-stick
+        # lock-up, where the integrator winds up, the airframe pitches 20-35 deg
+        # and translation stops entirely.
+        #
+        # Capping the CORRECTION does not prevent this and was tried and undone:
+        # in the standing regime the feedforward alone is 802 counts at 0.6 m/s
+        # (dead band 620, full scale 1.25), so any correction saturates. Only a
+        # ceiling on the total holds the axis inside the benign band.
+        max_forward_axis: float = 900.0,
         forward_axis_step_per_sec: float = 1200.0,
         # Releases were instantaneous, which on this platform is not a coast:
         # PX4 flies Position mode, so a dropped stick is an active brake. That
@@ -294,6 +307,7 @@ class RoosterTwistControlNode(Node):
         self.cmd_nav_pub = self.create_publisher(String, self.cmd_nav_topic, 10)
 
         self.use_velocity_servo = bool(use_velocity_servo)
+        self.max_forward_axis = float(max_forward_axis)
         self.forward_axis_step_per_sec = float(forward_axis_step_per_sec)
         self.forward_axis_release_per_sec = float(forward_axis_release_per_sec)
         self._x_axis = 0.0
@@ -489,6 +503,7 @@ class RoosterTwistControlNode(Node):
                                       self.min_command_mps)
         else:
             target = self._forward_servo.update(v_cmd, v_meas, dt)
+        target = max(-self.max_forward_axis, min(self.max_forward_axis, target))
         if self.forward_axis_step_per_sec <= 0.0:
             self._x_axis = target
         else:

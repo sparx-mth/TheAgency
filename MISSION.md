@@ -404,6 +404,30 @@ throughout. Our own control chain commanded the aircraft into a corner with no r
 tightly enough to notice. If it recurs at 25°, the next lever is `servo_max_correction` (350),
 which lets feedforward plus correction reach saturation.
 
+### P12 — Saturation is where this platform misbehaves (fix applied 2026-08-19)
+
+Measured over 34 000 samples of normal flight, binned by commanded forward axis:
+
+| forward axis | vz p90 | pitch p90 |
+|---|---|---|
+| 620-750 | 0.016 m/s | 7.3° |
+| 750-900 | 0.032 | 13.2° |
+| **≥900** | **0.111** | **22.6°** |
+
+Beyond ~900 counts the forward axis stops being a translation command and becomes a climb-and-
+pitch command: seven times the vertical disturbance and three times the pitch. That is the same
+condition as P11's lock-up, so the "high forward stick climbs" observation from calibration
+block (iii) is **not** an independent defect — both are saturation.
+
+Fixed with a ceiling: `max_forward_axis` 900.
+
+**A wrong turn worth recording:** capping `servo_max_correction` 350 → 200 was tried first, on
+the theory that the integrator was driving saturation. It does not work, and a two-line
+simulation showed it before it ever flew — in the *standing* regime the feedforward alone is
+802 counts at 0.6 m/s (dead band 620, full scale 1.25), so any correction saturates regardless
+of its cap. Only a ceiling on the total helps. Check the arithmetic of a control change against
+the actual curves before flying it.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.
