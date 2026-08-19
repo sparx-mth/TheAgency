@@ -183,36 +183,36 @@ Also worth doing: `obstacles_inflation`/`safe_distance` are 0.85 m against 0.20 
 which needs a 1.7 m-wide free corridor and makes a ~0.9 m doorway unplannable at *any*
 altitude. Pass-through args are now wired; try 0.40 (the 2D planner's own value).
 
-### P5 — Axis calibration (MEASURED 2026-08-18, partially; blocks ii/iii still owed)
+### P5 — Axis calibration (MEASURED; blocks i+ii flown, iii still owed)
 
-Block (i) flew: 47 segments, 28 with settled samples, 19 aborted (mostly the yaw sweep, see
-below). Fitted from the settled last 1.5 s of each hold:
+**The standing-vs-moving question is answered.** Block (ii) pre-loads the axis and steps to
+each value, so it measures the regime the aircraft is actually in for most of a flight:
 
-| axis | dead band | m/s at axis 1000 | fitted points | lowest value that moved |
-|---|---|---|---|---|
-| x+ | **466** | 1.313 | 6 | **550 — the lowest swept** |
-| x- | 289 | 0.988 | 4 | 640 |
-| y- | 406 | 0.969 | 3 | 580 |
+| regime | dead band | m/s at full stick |
+|---|---|---|
+| standing start (block i) | 466–620 | 1.15–1.31 |
+| moving, approached from an 850 pre-load | **412** | **1.847** |
+| moving, approached from a 650 pre-load | **511** | **2.467** |
 
-The forward dead band was assumed to be **620**; it is ~466, and possibly lower still,
-because the sweep never probed below 550 and the aircraft already moved there. `x_deadzone`,
-`x_v_full`, `y_deadzone` and `y_v_full` now carry the measured values, and `analyze.py`'s
-`AXIS_CURVE` was updated to match — otherwise the reported achieved/commanded gain measures
-the disagreement between two models rather than anything the aircraft did.
+Two things follow. The moving regime is roughly **1.5× more responsive** than a standing
+start, and the ~100-count spread between the two approaches is a real **hysteresis band** —
+the same axis value means a different speed depending on which side you came from. Nothing in
+the stack modelled either before.
 
-`x_v_full_moving` is **disabled** (was a guessed 4.0). A measured curve everywhere beats a
-measured curve plus a guess; block (ii) exists to size the moving regime properly.
+`x_v_full_moving` is now **1.847** (was a guessed 4.0, which commanded far too little stick).
+Only that one number was adopted: the measured moving dead band of 412 is deliberately NOT
+applied, because lowering the dead band 620 → 466 was already flown and halved the distance.
+A number measured out of regime is not evidence about the regime you fly in — that is the
+whole lesson of the block (i) revert.
 
-**Still owed, in priority order:**
-1. **Block (ii)** — the moving-regime gain, approached from above and below. This is the
-   standing-vs-moving hysteresis the operator asked about and it is still unmeasured.
-2. **Re-sweep x+ below 550** (say 350–550) to pin the intercept instead of extrapolating it.
-3. **Block (iii)** — combined x+y / x+r / x+y+r. Nothing in the stack compensates cross-axis
-   dead bands; a diagonal currently pays the offset twice.
-4. **The yaw sweep aborted almost entirely**: r+ segments drove the aircraft to ranger
-   3.5–4.0 m (through the ~3.4 m ceiling) and one logged 180° roll. Yaw commands are
-   disturbing altitude badly. Investigate before re-running that block — this is a real
-   flight-behaviour finding, not a test-rig problem.
+**Still owed:**
+1. **Block (iii)** — combined x+y / x+r / x+y+r. Nothing compensates cross-axis dead bands; a
+   diagonal pays the offset twice.
+2. **A moving-regime dead-band trial**, one variable at a time, once the 1.847 change is
+   verified: the evidence says 412–511, the flight says 620 works. That gap is unexplained.
+3. **The yaw sweep still has not run.** Its block (i) segments drove the aircraft to ranger
+   3.5–4.0 m — through the ~3.4 m ceiling — with one 180° roll logged. Yaw commands disturb
+   altitude badly, and that is a flight-behaviour finding, not a test-rig problem.
 
 ### P6 — Tracking error is 1.42 m now that the aircraft actually follows (OPEN, top)
 
@@ -324,6 +324,7 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Altitude error now reported against the live target | removed a misleading top-3 finding | 2026-08-19 |
 | 2026-08-19 | Coverage trace marked unreliable when it does not span the flight | caught a phantom "record" 90.7 m3/min from 110 s of a 600 s flight | 2026-08-19 |
 | 2026-08-19 | Stall-escape give-up budget | caps a reflex that consumed ~half of two flights (38 and 14 escapes) | 2026-08-19 |
+| 2026-08-19 | Block (ii) flown; x_v_full_moving 4.0 → **1.847** (measured) | standing-vs-moving quantified: moving is ~1.5x more responsive, ~100-count hysteresis | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 

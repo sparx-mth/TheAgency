@@ -130,11 +130,23 @@ class RoosterTwistControlNode(Node):
         x_deadzone: float = 620.0,
         x_v_full: float = 1.25,
         # Full-scale speed once ALREADY MOVING; <=0 disables the second regime.
-        # Restored to the in-flight estimate: disabling it was flown alongside
-        # the standing-start curve above and the pair lost 51% of the distance
-        # covered. Still a provisional number from one operating point, and
-        # still what block (ii) is for.
-        x_v_full_moving: float = 4.0,
+        #
+        # MEASURED 2026-08-19, calibration block (ii): the axis is pre-loaded and
+        # then stepped to each value, so this is the regime the aircraft is
+        # actually in for most of a flight. Approached from an 850 pre-load the
+        # forward axis reaches 1.847 m/s at full stick with a 412-count dead
+        # band; approached from 650 it reaches 2.467 with a 511-count dead band.
+        # That ~100-count spread IS the standing-vs-moving hysteresis, and the
+        # moving regime is roughly 1.5x more responsive than a standing start
+        # (~1.2 m/s at full stick). 4.0 was a guess from one in-flight operating
+        # point and commanded far too little stick.
+        #
+        # Only x_v_full_moving is adopted here. The measured moving dead band
+        # (412) is deliberately NOT applied: the standing-start dead band was
+        # lowered once already (620 -> 466) and halved the distance flown, so
+        # the dead band stays at the value proven in flight until a lower one
+        # is itself proven in flight.
+        x_v_full_moving: float = 1.847,
         move_eps_mps: float = 0.10,
         # Lateral is capped off by max_lateral_axis below, so these are inert
         # today. The sweep fitted 406 / 0.969 from 3 points (y- only; every y+
