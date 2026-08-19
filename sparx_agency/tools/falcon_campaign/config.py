@@ -193,7 +193,15 @@ BRIDGE_CMD = (
 #:
 #: Every entry here is a value that was ONCE set in the wrong file and silently
 #: ignored. A launch arg is not a setting until the parameter server agrees.
+#: Tilt at which the follower cuts drive, and the tilt it must fall back below
+#: before drive resumes. Both live here so the readback guard covers them: the
+#: limit is declared in BOTH launch files and the entry one wins.
+TILT_LIMIT_DEG = 35.0
+TILT_RESUME_DEG = 27.0
+
 EXPECTED_ROSPARAMS = {
+    "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
+    "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,
     "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,
     "/fsm/slow_traj_target_vel": FSM_SLOW_TRAJ_TARGET_VEL,
     "/falcon_exploration_follower/max_speed_xy": EXPLORE_MAX_SPEED_XY,

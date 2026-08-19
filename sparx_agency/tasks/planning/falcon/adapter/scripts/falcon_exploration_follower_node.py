@@ -99,6 +99,18 @@ class FalconExplorationFollowerNode:
         # after a live capsize exposed that this node had no attitude
         # awareness at all (only tracked yaw). See LESSONS.md.
         self.tilt_limit_deg = float(G("~tilt_limit_deg", 15.0))
+        #: Tilt the aircraft must fall back below before drive resumes.
+        #:
+        #: Without hysteresis this reflex chatters, because the threshold sits
+        #: inside the range of ORDINARY flight: measured 2026-08-20 at the
+        #: current cruise, pitch is p90 21 deg and p99 29 against a 25 deg
+        #: limit, and the cut fired 56-196 times in a single run -- once every
+        #: 3-7 seconds, each time zeroing translation AND yaw and resetting the
+        #: tracker. That is a stop/go stutter generator, not a safety reflex.
+        #: Default is 8 deg of margin below the limit.
+        self.tilt_resume_deg = float(
+            G("~tilt_resume_deg", max(0.0, self.tilt_limit_deg - 8.0)))
+        self._tilt_cut = False
 
         # 2026-08-18: measured that this node was emitting PURE LATERAL demand
         # -- cmd_fwd exactly 0.000 and cmd_wz exactly 0.000 across 2254
@@ -397,14 +409,22 @@ class FalconExplorationFollowerNode:
         # tipping further under continued translation commands. Added
         # 2026-08-17 after a live capsize exposed that this node tracked
         # yaw only and had no attitude awareness at all -- see LESSONS.md.
-        if (abs(self._roll_deg) > self.tilt_limit_deg
-                or abs(self._pitch_deg) > self.tilt_limit_deg):
+        tilt = max(abs(self._roll_deg), abs(self._pitch_deg))
+        if self._tilt_cut:
+            self._tilt_cut = tilt > self.tilt_resume_deg
+        else:
+            self._tilt_cut = tilt > self.tilt_limit_deg
+            if self._tilt_cut:
+                # State is dropped ONCE, on the way in. Doing it every tick of a
+                # long cut throws away what the tracker relearns in between.
+                self.tracker.reset(yaw=self._yaw)
+                self.shaper.reset()
+                rospy.logwarn(
+                    "falcon_exploration_follower: tilt roll=%.0f pitch=%.0f deg; "
+                    "cutting drive until it is back under %.0f deg",
+                    self._roll_deg, self._pitch_deg, self.tilt_resume_deg)
+        if self._tilt_cut:
             self._publish_cmd(0.0, 0.0, 0.0)
-            self.tracker.reset(yaw=self._yaw)
-            self.shaper.reset()
-            rospy.logwarn_throttle(
-                1.0, "falcon_exploration_follower: tilt roll=%.0f pitch=%.0f deg; "
-                "cutting drive to let it settle level", self._roll_deg, self._pitch_deg)
             return
 
         self._request_mode(MODE_EXPLORING)

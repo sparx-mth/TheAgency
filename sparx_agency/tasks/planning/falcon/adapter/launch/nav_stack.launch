@@ -1571,7 +1571,13 @@
        tilted thrust vector translates even less. Cutting horizontal drive at 25
        breaks it, and stays clear of the ~19 deg p90 roll excursions measured
        while merely hovering (P8), so it should not trip in normal flight. -->
-  <arg name="tilt_limit_deg" default="25.0" />
+  <!-- 35, not 25: at the current cruise ordinary flight reaches pitch p90 21 deg
+       and p99 29, so a 25 deg cut fires on normal manoeuvring — 56-196 times in
+       one run, each firing zeroing translation AND yaw. Genuine excursions run
+       54-67 deg and a capsize went to 175, so 35 still catches every real one.
+       tilt_resume_deg gives the reflex hysteresis so it stops chattering. -->
+  <arg name="tilt_limit_deg" default="35.0" />
+  <arg name="tilt_resume_deg" default="27.0" />
 
   <node pkg="fast_planner" name="traj_server" type="traj_server" output="screen"
         if="$(eval arg('nav_mode') == 'exploration' and arg('exploration_follower') == 'reference')" />
@@ -1598,6 +1604,7 @@
     <param name="max_speed_xy"    value="$(arg explore_max_speed_xy)" />
     <param name="max_yaw_rate_deg" value="$(arg explore_max_yaw_rate_deg)" />
     <param name="tilt_limit_deg"  value="$(arg tilt_limit_deg)" />
+    <param name="tilt_resume_deg" value="$(arg tilt_resume_deg)" />
     <param name="min_vxy"         value="$(arg explore_min_vxy)" />
     <param name="course_slew_deg_s" value="$(arg explore_course_slew_deg)" />
   </node>

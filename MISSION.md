@@ -456,6 +456,29 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P20 — The tilt reflex was a stutter generator (fix applied 2026-08-20)
+
+The safety reflex that cuts drive on tilt fired **56-196 times in a single run** — once every
+3-7 seconds — because its 25 deg threshold sits inside the range of ORDINARY flight at the
+current cruise: pitch p90 21 deg, p99 29. Each firing zeroes translation **and yaw**, and reset
+the tracker and shaper, so the aircraft was being stopped and having its control state wiped
+several times a minute. That is the stop/go stutter (the operator's problem #1), which had
+climbed to 4-8 stops per minute since the aircraft started actually moving.
+
+Two things were wrong and both are fixed:
+* **No hysteresis.** A hard threshold with no release band chatters by construction. Drive now
+  resumes only below `tilt_resume_deg` (27), not the instant it dips under the limit.
+* **Threshold inside normal flight.** 25 -> 35 deg. Genuine excursions measure 54-67 deg and
+  the capsize that motivated the reflex reached 175, so 35 still catches every real one.
+* The tracker/shaper reset now happens **once, on the way into a cut**, not every tick of it.
+
+`tilt_limit_deg` is declared in BOTH launch files and the entry one wins (P15), so both were
+changed and both are now in `EXPECTED_ROSPARAMS` for the readback guard.
+
+**Verify:** `stops_per_min` back toward 1-2 (from 4-8), tilt firings down an order of
+magnitude, coverage holding at 100-170. **Watch:** roll p95 was 53 deg in one run — if extreme
+attitude rises rather than the reflex simply firing less, the limit went too far.
+
 ### P19 — Anti-windup guarded a ceiling the actuator does not have (fix applied 2026-08-20)
 
 Every roll excursion past 30 deg in the last three runs is preceded, about a second earlier, by
