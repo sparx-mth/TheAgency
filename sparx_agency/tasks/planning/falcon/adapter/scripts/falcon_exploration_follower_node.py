@@ -180,11 +180,17 @@ class FalconExplorationFollowerNode:
         self.escape_speed_mps = float(G("~escape_speed_mps", 0.30))
         self.escape_yaw_rate_deg = float(G("~escape_yaw_rate_deg", 35.0))
         self.escape_cooldown_sec = float(G("~escape_cooldown_sec", 4.0))
+        # How many escapes may fire without the aircraft regaining sustained
+        # motion before the reflex gives up, and how long counts as regained.
+        self.escape_give_up_count = int(G("~escape_give_up_count", 4))
+        self.escape_progress_sec = float(G("~escape_progress_sec", 5.0))
         self._stall_since = None
         self._escape_until = None
         self._escape_ready_at = None
         self._escape_sign = 1.0
         self._escapes = 0
+        self._escapes_since_progress = 0
+        self._moving_since = None
 
         # ── Rooster force shaping: fixed-magnitude pulses, no docking gait ──
         # See the module docstring for why ClosureGait is deliberately not used
@@ -498,8 +504,15 @@ class FalconExplorationFollowerNode:
 
         moving = math.hypot(self._velocity[0], self._velocity[1]) > self.stall_speed_mps
         if moving:
+            # Sustained real motion is the only thing that proves an escape
+            # achieved something, so it is what re-arms the budget below.
+            if self._moving_since is None:
+                self._moving_since = now
+            elif now - self._moving_since >= self.escape_progress_sec:
+                self._escapes_since_progress = 0
             self._stall_since = None
             return None
+        self._moving_since = None
 
         if self._stall_since is None:
             self._stall_since = now
@@ -507,9 +520,29 @@ class FalconExplorationFollowerNode:
         if now - self._stall_since < self.stall_detect_sec:
             return None
 
+        # A reflex for being physically pinned, firing on an aircraft that
+        # simply cannot reach 0.06 m/s, burns the flight: one escape plus its
+        # cooldown is ~9.5 s, and a run measured 38 of them -- over half the
+        # window spent reversing and turning instead of exploring, with no
+        # escape ever restoring motion. After a few fruitless attempts, stop:
+        # commanding normally and letting FALCON replan is strictly better than
+        # a manoeuvre that demonstrably is not working, and the budget re-arms
+        # as soon as the aircraft actually moves again.
+        if self._escapes_since_progress >= self.escape_give_up_count:
+            rospy.logwarn_throttle(
+                10.0,
+                "falcon_exploration_follower: %d escapes without regaining "
+                "motion -- suppressing further escapes until the aircraft moves "
+                "for %.0fs. Asked %.2f m/s, measured %.2f m/s.",
+                self._escapes_since_progress, self.escape_progress_sec,
+                math.hypot(body_vx, body_vy),
+                math.hypot(self._velocity[0], self._velocity[1]))
+            return None
+
         # Alternate the turn direction between escapes: if one side is blocked,
         # repeating the same turn walks the aircraft along the same wall.
         self._escapes += 1
+        self._escapes_since_progress += 1
         self._escape_sign = 1.0 if self._escapes % 2 else -1.0
         self._escape_until = now + self.escape_sec
         rospy.logwarn(
