@@ -152,6 +152,15 @@ EOF
     continue
   fi
 
+  # Keep the disk from deciding when this campaign ends. Each run writes tens of
+  # MB of logs; the derived metrics.json / coverage.jsonl / findings.md and the
+  # raw truth.jsonl are what the campaign actually reads afterwards, so only the
+  # newest runs keep their logs. analyze.py refuses to re-analyse a run whose
+  # logs are gone rather than overwrite its metrics with zeros.
+  ls -1dt "$RUNS"/2026*Z 2>/dev/null | tail -n +31 | while read -r old; do
+    [[ -d "$old/logs" ]] && rm -rf "$old/logs"
+  done
+
   CYCLE=$((CYCLE + 1))
   say "--- cycle $CYCLE starting ---"
   if PYTHONPATH="$REPO" "$PY" -m sparx_agency.tools.falcon_campaign.campaign \

@@ -118,9 +118,18 @@ def collect_logs(run_dir, recorded):
         log(run_dir, "no recorder ran this cycle -- not copying telemetry, it "
                      "would be the previous flight's")
     # The follower/FSM logs live in falcon's rotating roslaunch log dir.
+    #
+    # rosout* is excluded on purpose. It is the master's AGGREGATE of the very
+    # node output already captured here and in falcon_roslaunch.log, so the
+    # analyzer counted every FSM line twice -- and because rosout rotates
+    # mid-flight, how MUCH got double-counted varied per run, which is the worst
+    # kind of noise to have in a number used to compare runs. It was also 264 MB
+    # of the 289 MB each run wrote, and 202 MB of that (rosout.log.1/.2) was
+    # never read by anything, since the analyzer globs *.log.
     bringup.sh(
         "docker exec %s bash -lc 'L=$(ls -td /root/.ros/log/*/ | head -1); "
-        "tar -C \"$L\" -cf - . 2>/dev/null' | tar -C %s/ -xf - 2>/dev/null"
+        "tar -C \"$L\" --exclude=\"rosout*\" -cf - . 2>/dev/null' "
+        "| tar -C %s/ -xf - 2>/dev/null"
         % (C.FALCON_CONTAINER, shlex.quote(str(dest))), 120)
 
 

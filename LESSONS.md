@@ -1483,3 +1483,25 @@ honest 115.3 m3/min and a 55 % stall fraction.
 
 **The general trap:** when a measurement fails *because* of the condition you are measuring,
 discarding the failures inverts the result. Ask what a missing sample means before dropping it.
+
+## rosout is an aggregate: counting it counts everything twice (2026-08-20)
+
+The campaign copied the whole of falcon's ROS log directory into each run, and the analyzer
+globbed `logs/*.log`. But `rosout.log` is the master's **aggregate** of node output that is
+already present in `falcon_roslaunch.log` and the per-node logs, so every FSM line was counted
+twice — and because rosout rotates mid-flight, *how much* got double-counted varied per run.
+That is the worst kind of noise to have in a number used to compare runs. Measured on one run:
+8156 "no path" lines in `falcon_roslaunch.log` and another 2336 in `rosout.log`, while
+heartbeat counts across runs read 509-753 when the follower actually emits ~490 either way.
+
+Excluding `rosout*` made heartbeat counts identical across runs (491-494) and left the real
+signal intact: routing failures still rise sharply with smaller frontier clusters, which is
+what the comparison was for.
+
+It was also 264 MB of the 289 MB each run wrote — and 202 MB of that (`rosout.log.1`, `.2`)
+was never read by anything, since the glob only matches `*.log`.
+
+**Two habits worth keeping:** when a count is used to compare runs, check what is actually
+being counted and whether the count's *denominator* (here, which files exist) is stable across
+those runs. And when a metric is derived from logs, a metric that should be constant across
+runs — a fixed-rate heartbeat — is a free consistency check on the whole pipeline.

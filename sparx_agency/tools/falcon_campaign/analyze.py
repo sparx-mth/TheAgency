@@ -215,7 +215,11 @@ def _normalize(records):
 def _read_log_lines(run_dir):
     """Every line of every ``logs/*.log``, with the file count."""
     log_dir = run_dir / "logs"
-    files = sorted(log_dir.glob("*.log")) if log_dir.is_dir() else []
+    # rosout* duplicates node output that is already here, and rotates
+    # mid-flight, so including it counted FSM lines twice by a margin that
+    # varied per run. Runs collected before 2026-08-20 still have it on disk.
+    files = sorted(p for p in log_dir.glob("*.log")
+                   if not p.name.startswith("rosout")) if log_dir.is_dir() else []
     lines = []
     for path in files:
         lines.extend(path.read_text(errors="replace").splitlines())
@@ -891,6 +895,16 @@ def analyze(run_dir):
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
         raise NotADirectoryError("no such run directory: %s" % run_dir)
+    # A pruned run keeps its metrics.json but not its logs. Re-analysing one
+    # would silently overwrite good numbers with zeros for everything log-derived
+    # -- tracking, exploration, half the health signals -- and nothing downstream
+    # could tell the difference afterwards.
+    log_dir = run_dir / "logs"
+    has_logs = log_dir.is_dir() and any(log_dir.glob("*.log"))
+    if (run_dir / "metrics.json").exists() and not has_logs:
+        raise RuntimeError(
+            "%s has metrics but no logs (pruned); refusing to overwrite them "
+            "with a log-less analysis" % run_dir.name)
     records, bad_lines = _load_jsonl(run_dir / "truth.jsonl")
     samples = _normalize(records)
     flying, airborne_only = _airborne_window(_fill_velocity(samples))
