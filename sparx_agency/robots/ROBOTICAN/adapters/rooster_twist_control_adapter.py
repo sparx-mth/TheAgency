@@ -117,29 +117,31 @@ class RoosterTwistControlNode(Node):
         # never-validated linear max_linear_x/y scaling, which is now only
         # used when use_measured_axis_curve=False.
         use_measured_axis_curve: bool = True,
-        # MEASURED 2026-08-18 by tools/rooster_axis_calibration.py, block (i):
-        # a per-sign sweep of standing starts, fitted over the settled last 1.5s
-        # of each 3s hold. The forward axis moved at 550 counts -- the LOWEST
-        # value the sweep tried -- so the true breakaway is at or below that, and
-        # the 620 assumed here before came from a single hover-step test that
-        # never probed underneath it. 6 fitted points; re-measure with a sweep
-        # that goes below 550 to pin the intercept properly.
-        x_deadzone: float = 466.0,
-        x_v_full: float = 1.313,
+        # REVERTED to the in-flight values after the measured standing-start
+        # curve (466 / 1.313, from calibration block (i)) was flown and was much
+        # worse: distance 256.8 -> 125.5 m, stops 1.3 -> 8.7 per minute, time
+        # below stop speed 5% -> 42%. A standing start with a 4 s settle is a
+        # different plant from an aircraft mid-flight, and the lower dead band
+        # put ordinary requests back under the threshold at which this platform
+        # actually moves. Do not re-apply a standing-start fit to flight until
+        # block (ii) has measured the MOVING regime -- that gap is the whole
+        # point of block (ii). The block (i) numbers are kept in the run's
+        # calibration.md, not thrown away.
+        x_deadzone: float = 620.0,
+        x_v_full: float = 1.25,
         # Full-scale speed once ALREADY MOVING; <=0 disables the second regime.
-        # DISABLED (0) until block (ii) of the calibration actually measures it.
-        # 4.0 was a provisional estimate reverse-engineered from one in-flight
-        # operating point; now that the standing curve above is a real fit, a
-        # measured curve everywhere beats a measured curve plus a guess. The
-        # moving regime is real -- block (ii) approaches the same speeds from
-        # above and below precisely to size it -- it is simply not measured yet.
-        x_v_full_moving: float = 0.0,
+        # Restored to the in-flight estimate: disabling it was flown alongside
+        # the standing-start curve above and the pair lost 51% of the distance
+        # covered. Still a provisional number from one operating point, and
+        # still what block (ii) is for.
+        x_v_full_moving: float = 4.0,
         move_eps_mps: float = 0.10,
-        # Measured in the same sweep (3 fitted points, y- only: every y+ segment
-        # either aborted on tilt or never settled). Lateral is capped off by
-        # max_lateral_axis below, so these are recorded rather than relied on.
-        y_deadzone: float = 406.0,
-        y_v_full: float = 0.969,
+        # Lateral is capped off by max_lateral_axis below, so these are inert
+        # today. The sweep fitted 406 / 0.969 from 3 points (y- only; every y+
+        # segment aborted on tilt or never settled) -- too thin to adopt, and
+        # from the same standing-start regime the forward revert above distrusts.
+        y_deadzone: float = 700.0,
+        y_v_full: float = 1.02,
         min_command_mps: float = 0.15,
         # The lateral axis is the worst-behaved one: measured dead until
         # ~axis 1000, so ANY sideways demand slams the stick and produces

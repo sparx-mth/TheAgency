@@ -67,6 +67,41 @@ and it is indistinguishable from perfect tracking of a moving one. Check
 `/root/.ros/log/*/` for FALCON's own reasoning; `exploration_node` and `traj_server` write to
 the roslaunch stdout redirect instead.
 
+## 2026-08-19 — a standing-start axis calibration does not describe an aircraft in flight, and applying it halved the distance flown
+
+**What was measured:** a per-sign sweep of standing starts (4 s at rest, 3 s hold, fitted over
+the settled last 1.5 s) put the Rooster's forward ManualControl dead band at **~466 counts**,
+against the 620 the adapter had assumed from a single hover-step test. The sweep's lowest
+value, 550, already moved the aircraft, so 620 was clearly too high *for that experiment*.
+
+**What happened when it was flown:** everything got worse, well outside run-to-run variance.
+
+| | 620 / 1.25 | 466 / 1.313 |
+|---|---|---|
+| distance flown | 256.8 m | **125.5 m** |
+| stops per minute | 1.3 | **8.7** |
+| time below 0.05 m/s | 5 % | **42 %** |
+| coverage rate | 65.8 m3/min | 59.3 m3/min |
+
+**Why.** For a 0.3 m/s request the new curve commands 588 counts where the old one commanded
+711. The standing-start experiment says 588 is above breakaway; the aircraft in flight says
+it is not — an earlier hover test had already measured 600 -> 0.000 m/s and 700 -> 0.261 m/s.
+A drone that has settled for four seconds with one axis driven in isolation is simply a
+different plant from one mid-flight with yaw active, an altitude loop working, and the
+airframe already tilted. Lowering the commanded axis pushed ordinary requests back under the
+threshold at which this platform actually moves.
+
+**The real lesson:** the standing-vs-moving distinction is not a refinement to be added later
+— it is large enough to invert the sign of a change. A calibration is only valid in the regime
+it was taken in, and "measured" is not the same as "measured under the conditions you will
+use it in". The block that measures the moving regime (pre-load the axis, then step to the
+value under test, approached from both above and below) is the one that matters for flight;
+the standing block mostly measures breakaway.
+
+**Don't:** don't adopt a calibration because it is a measurement and the incumbent was a
+guess. Fly it against the incumbent and keep whichever wins — here the guess was better.
+Keep the measurement (it is in the run's `calibration.md`), just do not apply it out of regime.
+
 ## 2026-08-19 — a sentinel that gates autonomy must expire, and `pkill -f` matches the shell that runs it
 
 **What happened:** an autonomous campaign sat idle for **13.5 hours**. Nothing crashed. A
