@@ -149,3 +149,37 @@ def test_the_floor_uses_the_moving_dead_band_too():
                               deadzone_moving=412.0)
     axis = servo.update(0.05, 0.5, 0.05)      # tiny demand, aircraft moving
     assert 412.0 <= abs(axis) < DEADZONE
+
+
+def test_anti_windup_respects_the_callers_own_ceiling():
+    """Windup against a clamp the servo cannot see is still windup.
+
+    The adapter clips the forward axis at 900 while the servo ran to 1000, so
+    the integral kept accumulating across a 100-count band the actuator never
+    saw -- and 900 is where this airframe starts rolling past 30 degrees.
+    """
+    # 0.9 m/s asks 894 counts open loop, so the whole difference between the
+    # two ceilings is the 100-count band above it.
+    def run(**kw):
+        servo = AxisVelocityServo(DEADZONE, V_FULL, kp=0.0, ki=260.0,
+                                  max_correction=350.0, **kw)
+        for _ in range(200):                  # 10 s of an aircraft going too slow
+            axis = servo.update(0.9, 0.3, 0.05)
+        return servo, axis
+
+    bounded, axis = run(output_limit=900.0)
+    unbounded, _ = run()
+    assert axis <= 900.0
+    assert bounded.integral < 20.0            # freezes as soon as 900 is reached
+    assert unbounded.integral > 100.0         # winds on through a band nothing flies
+
+
+def test_the_output_limit_does_not_rescale_the_measured_curve():
+    """It bounds the output; it must not steepen the calibration.
+
+    Moving ``axis_limit`` instead would map v_full onto 900 counts, quietly
+    making the aircraft fly faster than commanded at every stick position.
+    """
+    servo = AxisVelocityServo(DEADZONE, V_FULL, output_limit=900.0)
+    half = servo.update(V_FULL / 2.0, 0.0, 0.05)
+    assert abs(half - feedforward_axis(V_FULL / 2.0, DEADZONE, V_FULL)) < 1e-9

@@ -332,7 +332,10 @@ class RoosterTwistControlNode(Node):
             min_command_mps=self.min_command_mps,
             v_full_moving=self.x_v_full_moving,
             deadzone_moving=self.x_deadzone_moving,
-            move_eps_mps=self.move_eps_mps)
+            move_eps_mps=self.move_eps_mps,
+            # The servo must know the ceiling this node clamps to, or its
+            # anti-windup guards a limit that does not exist.
+            output_limit=self.max_forward_axis)
         if self.use_velocity_servo:
             velocity_topic = (velocity_topic
                               or f"/{self.rooster_id}/velocity_truth")

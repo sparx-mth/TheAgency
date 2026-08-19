@@ -97,13 +97,17 @@ class AxisVelocityServo(object):
         axis_limit: Magnitude of full deflection.
         min_command_mps: Requests smaller than this are treated as "stop"
             (the platform cannot hold speeds below its first dead-band step).
+        output_limit: Real ceiling on the returned axis value, if the caller
+            clamps further than ``axis_limit``. Bounds the output AND the
+            anti-windup test; <=0 means ``axis_limit``.
     """
 
     def __init__(self, deadzone, v_full, kp=0.0, ki=0.0, max_correction=250.0,
                  axis_limit=1000.0, min_command_mps=0.0,
                  v_full_moving=0.0, deadzone_moving=0.0, move_eps_mps=0.10,
-                 brake_release_margin_mps=0.15, integral_hold_s=0.6):
-        # type: (float, float, float, float, float, float, float, float, float, float, float) -> None
+                 brake_release_margin_mps=0.15, integral_hold_s=0.6,
+                 output_limit=0.0):
+        # type: (float, float, float, float, float, float, float, float, float, float, float, float) -> None
         self.deadzone = float(deadzone)
         self.v_full = float(v_full)
         #: Velocity at full deflection once the aircraft is ALREADY MOVING.
@@ -136,6 +140,17 @@ class AxisVelocityServo(object):
         self.ki = float(ki)
         self.max_correction = float(max_correction)
         self.axis_limit = float(axis_limit)
+        #: Largest axis value the CALLER will actually send, if it clamps the
+        #: output further down. Anti-windup is only anti-windup if it knows the
+        #: real ceiling: with the servo free to 1000 while the caller clipped at
+        #: 900, the integral kept accumulating across a 100-count band the
+        #: actuator never saw -- and 900 is exactly where this airframe stops
+        #: behaving (roll excursions past 30 deg follow a full-stick command).
+        #: Kept separate from ``axis_limit`` because that one is the measured
+        #: curve's full-scale reference: moving it would silently re-scale the
+        #: calibration instead of bounding the output.
+        self.output_limit = (float(output_limit) if float(output_limit) > 0.0
+                             else float(axis_limit))
         self.min_command_mps = float(min_command_mps)
         self._integral = 0.0
         self._idle_s = 0.0
@@ -201,7 +216,7 @@ class AxisVelocityServo(object):
         candidate = clamp(candidate, -self.max_correction, self.max_correction)
         correction = clamp(self.kp * error + candidate,
                            -self.max_correction, self.max_correction)
-        axis = clamp(ff + correction, -self.axis_limit, self.axis_limit)
+        axis = clamp(ff + correction, -self.output_limit, self.output_limit)
 
         # Never mute the stick while still asking for motion. Below the dead
         # band the platform does not merely go slower -- it stops, and on this
@@ -216,8 +231,8 @@ class AxisVelocityServo(object):
         if not braking and abs(axis) < deadzone:
             axis = deadzone if v_cmd > 0.0 else -deadzone
 
-        saturated_high = axis >= self.axis_limit and error > 0.0
-        saturated_low = axis <= -self.axis_limit and error < 0.0
+        saturated_high = axis >= self.output_limit and error > 0.0
+        saturated_low = axis <= -self.output_limit and error < 0.0
         if not (saturated_high or saturated_low):
             self._integral = candidate
 
