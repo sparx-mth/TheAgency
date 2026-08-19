@@ -268,13 +268,13 @@ It also reverses, into the direction block (i) measured tripping 26–33° of ro
 A give-up budget (`escape_give_up_count` 4, re-armed by `escape_progress_sec` 5 s of real
 motion) fixed it outright:
 
-| | before (093835Z) | after (100012Z) |
-|---|---|---|
-| escapes | 38 | **2** |
-| distance | 139.9 m | **348.1 m** |
-| stops per minute | 9.35 | **1.08** |
-| time below 0.05 m/s | 46.8 % | **5.0 %** |
-| coverage | — | **1113 m³ @ 79.6 m³/min, reliable** |
+| | before (093835Z) | after (100012Z) | after (101301Z) |
+|---|---|---|---|
+| escapes | 38 | **2** | **2** |
+| distance | 139.9 m | **348.1 m** | **357.1 m** |
+| stops per minute | 9.35 | **1.08** | **0.40** |
+| time below 0.05 m/s | 46.8 % | **5.0 %** | **2.1 %** |
+| coverage rate | (unreliable) | 79.6 m³/min | 32.7 m³/min |
 
 That is the best *verified* coverage rate the campaign has recorded (earlier reliable bests:
 72.7, 73.5, 65.8 m³/min). It also explains most of the run-to-run variance in §7b: the spread
@@ -296,6 +296,16 @@ zero speed — that was outside the noise). Prefer:
 - comparing **two or more runs per configuration**, not one;
 - `coverage.rate_m3_per_min` only when `coverage.reliable` is true;
 - the direction of several metrics agreeing, rather than one moving.
+
+**Which metrics are actually stable** (measured across the two 2026-08-19 escape-fix runs,
+same configuration): distance 348.1 / 357.1 m, stops 1.08 / 0.40 per min, time at zero
+5.0 / 2.1 %, escapes 2 / 2 — tight. But coverage rate was **79.6 / 32.7 m³/min**, a 2.4×
+spread on *reliable* traces. That is not noise in the metric; covering new volume depends on
+which frontier the planner picks and how much of the route is already mapped, so it varies
+legitimately run to run.
+
+So: **judge control changes on the motion metrics** (they now discriminate well), and treat
+coverage as the goal to maximise over *many* runs rather than as an A/B discriminator.
 
 ## 8. Log of changes and their measured effect
 
