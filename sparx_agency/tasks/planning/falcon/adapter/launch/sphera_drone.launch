@@ -206,8 +206,8 @@
   <arg name="obstacles_inflation"     default="0.85" />
   <arg name="safe_distance"           default="0.85" />
   <arg name="frontier_candidate_rmax" default="5.5" />
-  <arg name="max_vel"                 default="0.4" />
-  <arg name="explore_max_speed_xy"    default="0.6" />
+  <arg name="max_vel"                 default="0.6" />          <!-- planner speed; coverage = speed x swath and the swath is DA3-limited to ~3.5 m -->
+  <arg name="explore_max_speed_xy"    default="0.8" />          <!-- must stay above max_vel with headroom -->
   <!-- vla = navdp | flownav (which VLA serves nav_mode:=navdp). For FlowNav:
        nav_mode:=navdp vla:=flownav flownav_goal_image:=/path/to/target.png
        and start the FlowNav TRT server (tasks/planning/vlas/flownav/serve/...). -->
@@ -420,7 +420,7 @@
   <arg name="bev_wall_fill_neighbors" default="5" />
   <arg name="bev_weight_profile" default="triangular" />
   <arg name="bev_weight_sigma" default="0.50" />
-  <arg name="bev_z_ceil" default="1.50" />
+  <arg name="bev_z_ceil" default="2.20" />
   <arg name="bev_z_floor" default="0.70" />
   <arg name="bev_z_peak" default="$(arg cruise_z)" />
   <arg name="blockage_radius_m" default="0.35" />

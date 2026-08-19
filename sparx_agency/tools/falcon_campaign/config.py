@@ -129,6 +129,30 @@ EXPLORATION_FOLLOWER = "reference"
 OBSTACLES_INFLATION = 0.40
 SAFE_DISTANCE = 0.40
 
+#: Speed FALCON PLANS at, m/s, and the follower's ceiling above it.
+#:
+#: These are passed on the roslaunch command line, not left to a launch-file
+#: default, because ``sphera_drone.launch`` re-declares many of ``nav_stack``'s
+#: args and passes its own values down -- editing the nav_stack default is a
+#: silent no-op for any of them (LESSONS.md). ``assert_launch_params`` reads
+#: every one of these back from the live parameter server.
+#:
+#: 0.6 rather than the inherited 0.4: coverage is speed x sensor swath, the
+#: swath cannot be raised (DA3 returns nothing beyond 3.5 m in this map), and
+#: the plan -- not the follower -- was the binding constraint. A 0.6 m/s demand
+#: asks 802 axis counts standing and 603 moving, both under the 900 ceiling;
+#: 1.0 m/s would ask 924 and clip.
+PLAN_MAX_VEL = 0.6
+#: Must exceed PLAN_MAX_VEL with headroom; full stick measures ~1.25 m/s.
+EXPLORE_MAX_SPEED_XY = 0.8
+#: The slow-trajectory rescale targets the planner's own max_vel; a lower value
+#: would quietly undo the raise on exactly the segments it fires on.
+FSM_SLOW_TRAJ_TARGET_VEL = PLAN_MAX_VEL
+
+#: Top of the BEV column band, metres. 1.50 (the sphera_drone default) drops
+#: everything above head height out of the 2D obstacle view.
+BEV_Z_CEIL = 2.20
+
 #: Volume of the exploration box, m^3 -- the denominator for coverage.
 #: From `python -m sparx_agency.tasks.planning.falcon_pegasus.mapsize` on
 #: maps/sphera_jail.yaml: box 32.0 x 32.0 x 4.8 m. Re-derive it there if the
@@ -165,6 +189,18 @@ BRIDGE_CMD = (
 ).format(repo=REPO_ROOT, domain=ROS_DOMAIN_ID, rmw=RMW)
 
 
+#: rosparam name -> value the campaign requires it to have after bring-up.
+#:
+#: Every entry here is a value that was ONCE set in the wrong file and silently
+#: ignored. A launch arg is not a setting until the parameter server agrees.
+EXPECTED_ROSPARAMS = {
+    "/uav_model/dynamics_parameters/max_linear_velocity": PLAN_MAX_VEL,
+    "/fsm/slow_traj_target_vel": FSM_SLOW_TRAJ_TARGET_VEL,
+    "/falcon_exploration_follower/max_speed_xy": EXPLORE_MAX_SPEED_XY,
+    "/bev_publisher/z_ceil": BEV_Z_CEIL,
+}
+
+
 def adapter_launch_cmd(follower=None, extra=""):
     # type: (str, str) -> str
     """The roslaunch line that starts FALCON's adapter in exploration mode.
@@ -198,12 +234,17 @@ def adapter_launch_cmd(follower=None, extra=""):
         # 1156 consecutive [FSM] Plan fail). 0.40 matches this stack's own 2D
         # planner (inflate_radius_m) and is still two full voxels of margin.
         "obstacles_inflation:={infl} safe_distance:={safe} "
+        # Shadowed by sphera_drone.launch if left to nav_stack's defaults.
+        "max_vel:={maxvel} fsm_slow_traj_target_vel:={slowvel} "
+        "explore_max_speed_xy:={expspeed} bev_z_ceil:={zceil} "
     ).format(map=MAP_NAME, follower=follower, drone=DRONE_ID,
              fx=CAM["fx"], fy=CAM["fy"], cx=CAM["cx"], cy=CAM["cy"],
              w=CAM["width"], h=CAM["height"], mind=CAM["min_depth"],
              gx=GOAL_X, gy=GOAL_Y,
              bxmin=BEV_XMIN, bymin=BEV_YMIN, bxmax=BEV_XMAX, bymax=BEV_YMAX,
-             infl=OBSTACLES_INFLATION, safe=SAFE_DISTANCE)
+             infl=OBSTACLES_INFLATION, safe=SAFE_DISTANCE,
+             maxvel=PLAN_MAX_VEL, slowvel=FSM_SLOW_TRAJ_TARGET_VEL,
+             expspeed=EXPLORE_MAX_SPEED_XY, zceil=BEV_Z_CEIL)
     return ("docker exec {c} bash -lc '{env} roslaunch falcon_adapter "
             "sphera_drone.launch {args}{extra}'").format(
         c=FALCON_CONTAINER, env=FALCON_ENV, args=args, extra=extra)

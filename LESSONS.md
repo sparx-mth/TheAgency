@@ -1410,3 +1410,36 @@ the ceiling over 1-2 minutes. Lower values (550) sink to the floor instead; high
 
 **Don't:** Don't assume climb_duration_sec is the whole story — already tested and ruled out.
 -->
+
+## A launch arg is not a setting until the parameter server agrees (2026-08-19)
+
+`sphera_drone.launch` is the entry point the campaign launches, and it re-declares
+**317** of `nav_stack.launch`'s args with its own defaults, passing them down through
+the `<include>`. A `<arg ... default=...>` in the *included* file is dead for every
+one of those — the includer's value wins.
+
+Twenty-two of them disagreed. Three were tuned during this campaign and had been
+silently ignored the whole time:
+
+| arg | nav_stack (edited) | sphera_drone (what actually ran) |
+|---|---|---|
+| `max_vel` | 0.6 | **0.4** |
+| `explore_max_speed_xy` | 0.8 | **0.6** |
+| `bev_z_ceil` | 2.20 | **1.50** |
+
+Found by reading the value back with `rosparam get` instead of trusting the file:
+`/uav_model/dynamics_parameters/max_linear_velocity` was 0.4 in a stack whose launch
+file said 0.6. Had the readback been part of bring-up from the start, the speed change
+would never have been "verified over two runs" that were not running it.
+
+**The fix is two-part, and the second half is the durable one.** Pass campaign-owned
+values on the roslaunch command line from `config.py` (command line beats every
+launch-file default, at any include depth), *and* have `bringup.assert_launch_params()`
+read each one back from the live parameter server and fail the cycle on a mismatch.
+Aligning `sphera_drone.launch`'s defaults too is politeness for hand-launching; it is
+not the guarantee.
+
+Corollary for any tuning campaign: **verify that a change took effect before measuring
+whether it helped.** Two runs of careful metrics were spent on a parameter that was
+never applied, and the honest reading of those runs is "no evidence either way", not
+"the change did nothing".

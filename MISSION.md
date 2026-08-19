@@ -456,6 +456,22 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P15 — Launch args must be read back, not assumed (2026-08-19)
+
+`sphera_drone.launch` re-declares 317 of `nav_stack.launch`'s args and passes its own
+values down, so editing a nav_stack default is a **silent no-op** for any of them.
+Three campaign-tuned values had never been running: `max_vel` (0.4, not 0.6),
+`explore_max_speed_xy` (0.6, not 0.8) and `bev_z_ceil` (1.50, not 2.20).
+
+Now: `config.py` owns them (`PLAN_MAX_VEL`, `EXPLORE_MAX_SPEED_XY`, `BEV_Z_CEIL`,
+`FSM_SLOW_TRAJ_TARGET_VEL`) and passes them on the roslaunch command line, which beats
+every launch-file default at any include depth; `bringup.assert_launch_params()` reads
+all four back from the live parameter server after bring-up and fails the cycle on a
+mismatch. Add any future tuned param to `EXPECTED_ROSPARAMS` as well as setting it.
+
+**Standing rule: before measuring whether a change helped, prove it took effect.**
+`rosparam get` on the live stack, not a grep of the launch file.
+
 ### P14 — Raising the coverage ceiling (change applied 2026-08-19)
 
 Every fix before this removed a failure mode; coverage stayed at 85-98 m3/min and ~24 % of the
@@ -473,6 +489,10 @@ and `explore_max_speed_xy` 0.6 → 0.8 to keep headroom above it.
 
 Arithmetic checked before flying: a 0.6 m/s demand asks 802 counts standing and 603 moving,
 both under the 900 axis ceiling; 1.0 m/s would ask 924 and clip, so 0.6 is the sensible step.
+
+**NOT ACTUALLY APPLIED until 2026-08-19 22:20** — the edit went into `nav_stack.launch`,
+whose defaults `sphera_drone.launch` shadows (see P15). Runs `183654Z` and `185005Z` flew at
+`max_vel = 0.4` despite the file saying 0.6, so they measure nothing about this change.
 
 **Verify:** coverage rate above the 85-98 band, speed above ~0.37 m/s. **Watch:** saturation
 returning (axis median at 900, gain collapsing) or tilt-cut firings rising — faster plans mean

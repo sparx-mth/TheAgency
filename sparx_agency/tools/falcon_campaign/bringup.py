@@ -376,6 +376,45 @@ def start_falcon(follower=None, extra=""):
     spawn(C.adapter_launch_cmd(follower, extra), "/tmp/falcon_roslaunch.log")
     if not wait_for(lambda: rosnode_exists("/exploration_node"), 120, "exploration_node"):
         raise BringupError("exploration_node never started; see /tmp/falcon_roslaunch.log")
+    assert_launch_params()
+
+
+def assert_launch_params():
+    """Fail the cycle if the live parameter server disagrees with the config.
+
+    A roslaunch arg is a *request*; only the parameter server says what the
+    stack is actually running. ``sphera_drone.launch`` re-declares 300-odd of
+    ``nav_stack.launch``'s args and passes its own values down, so editing a
+    nav_stack default is a silent no-op for any arg it shadows -- three tuned
+    values were flown for hours that way before anyone read one back
+    (LESSONS.md). Cheap check, whole class of bug.
+
+    Raises:
+        BringupError: If a parameter is missing or differs from the expected
+            value by more than a float-formatting tolerance.
+    """
+    names = sorted(C.EXPECTED_ROSPARAMS)
+    cmd = " ; ".join("rosparam get %s 2>/dev/null || echo MISSING" % n for n in names)
+    r = sh("docker exec %s bash -lc %s" % (
+        C.FALCON_CONTAINER, shlex.quote(C.FALCON_ENV + cmd)), 60)
+    got = [line.strip() for line in r.stdout.strip().splitlines() if line.strip()]
+    if len(got) != len(names):
+        raise BringupError(
+            "could not read back launch params: expected %d values, got %r"
+            % (len(names), got))
+    wrong = []
+    for name, raw in zip(names, got):
+        want = C.EXPECTED_ROSPARAMS[name]
+        try:
+            ok = abs(float(raw) - float(want)) <= 1e-6
+        except ValueError:
+            ok = False
+        if not ok:
+            wrong.append("%s = %s (want %s)" % (name, raw, want))
+    if wrong:
+        raise BringupError(
+            "launch params did not take effect -- check whether "
+            "sphera_drone.launch shadows them: " + "; ".join(wrong))
 
 
 def start_bridge():
