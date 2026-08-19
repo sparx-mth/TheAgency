@@ -108,14 +108,16 @@ class RoosterUnit:
         # Downward-error gain; <=0 means "same as altitude_hold_kp". See
         # _altitude_hold_tick for why descent needs its own, larger gain.
         #
-        # 900 was not enough. Measured over several 600 s flights, the loop
-        # parked a steady ~0.22 m ABOVE its own setpoint (holding 1.54-1.57 m
-        # against a 1.35 m target) and never converged. Solving the loop for the
-        # observed thresholds: descent needs z <= ~400 and hover_z is 700, so a
-        # -0.22 m error only reaches the descend zone once the gain exceeds
-        # 300/0.22 = 1364. 1500 gives margin, and the per-tick slew limit plus
-        # altitude_hold_max_correction still bound what one tick can do.
-        altitude_hold_kp_down: float = 1500.0,
+        # REVERTED to 900 on 2026-08-19 as a causal test. Raising this to 1500
+        # fixed altitude (converged for the first time, |err| 0.26 -> 0.13 m) but
+        # horizontal speed fell monotonically with it across the same runs:
+        # 0.556 -> 0.341 -> 0.320 -> 0.126 m/s over the healthy first 430 s of
+        # flight, and distance 253 -> 152 -> 140 -> 57 m. The z trace was CALM in
+        # the worst run, so this is not the oscillation mode -- the suspicion is
+        # that z and horizontal share thrust authority on this airframe. If speed
+        # recovers at 900, that is confirmed and a gentler altitude fix is needed
+        # (try ~1100, or bias the setpoint instead of the gain).
+        altitude_hold_kp_down: float = 900.0,
         altitude_hold_kd: float = 600.0,
         # Was 200 -- confirmed live (2026-08-13) that's too weak to recover
         # once drifted past max_ranger_m: pinned at hover_z-200 continuously
@@ -159,7 +161,7 @@ class RoosterUnit:
         # That entry is explicit that the step limit is the fix and the gain is
         # not, so the gain stays at 1500 and this halves how fast z may cross the
         # narrow effective band near 700.
-        altitude_hold_max_step: float = 8.0,
+        altitude_hold_max_step: float = 15.0,
         # 2026-08-17: the velocity term feeding kd was a raw single-sample
         # finite difference on the ranger reading -- exactly the kind of
         # signal this file's own docstring already calls "fairly noise-

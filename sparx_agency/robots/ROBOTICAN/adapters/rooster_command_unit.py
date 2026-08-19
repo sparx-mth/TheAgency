@@ -76,7 +76,7 @@ class RoosterCommandUnitNode(Node):
         self.declare_parameter("altitude_hold_kp", 500.0)
         # See RoosterUnit._altitude_hold_tick -- the z axis is three-zone,
         # so descent needs a larger gain than climb to reach its zone at all.
-        self.declare_parameter("altitude_hold_kp_down", 1500.0)
+        self.declare_parameter("altitude_hold_kp_down", 900.0)
         self.declare_parameter("altitude_hold_kd", 600.0)
         # See RoosterUnit.__init__ (rooster_unit.py) for why the default was
         # raised from 200 to 380 -- 2026-08-13.
@@ -84,7 +84,7 @@ class RoosterCommandUnitNode(Node):
         # See RoosterUnit.__init__ -- added 2026-08-17, the actual fix for
         # the "rises and falls out of control" symptom: bounds how much z
         # may change in ONE tick, tighter than altitude_hold_max_correction.
-        self.declare_parameter("altitude_hold_max_step", 8.0)
+        self.declare_parameter("altitude_hold_max_step", 15.0)
         self.declare_parameter("altitude_hold_velocity_filter_tau_s", 0.5)
         # See RoosterUnit.__init__ -- 2026-08-17, "position" | "altitude"
         # (case-insensitive), selects FLIGHT_MODE_POSITION (3, default,

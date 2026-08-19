@@ -121,7 +121,20 @@ SAFE_DISTANCE = 0.40
 #: in the flight path reads it.
 EXPLORABLE_VOLUME_M3 = 4915.0
 
-FLIGHT_SECONDS = 600           # the operator's 10-minute window
+#: Flight window, seconds.
+#:
+#: 430, not the operator's nominal 600. Measured across four runs, the battery
+#: reaches 25% at ~430 s every time and hits zero by the end, and below 25% this
+#: platform loses thrust authority (LESSONS.md). The last ~170 s contributed
+#: 0.9-2.0 m of travel in recent runs at a mean speed of 0.003-0.009 m/s -- it is
+#: not flight, it is a flat battery being recorded. Cutting it also stops ~30% of
+#: every run being averaged into metrics from a regime the project's own notes
+#: call corrupted.
+#:
+#: NOTE when comparing with history: older runs are 600 s. Compare against their
+#: distance over the first 430 s (253 / 152 / 140 / 57 m for the runs on
+#: 2026-08-19), not their totals.
+FLIGHT_SECONDS = 430
 HOVER_SETTLE_TIMEOUT_S = 60.0
 
 # ── Commands ─────────────────────────────────────────────────────────────
