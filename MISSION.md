@@ -320,30 +320,43 @@ altitude instead of exploring. `altitude_hold_max_step` 15 → 8 is the document
 **Still to prove:** that a ~1.35 m cruise actually gets through the map's low doorways. That
 was the original point of P4 and no run has yet been checked for door transits specifically.
 
-### P11 — Horizontal speed is collapsing run over run (OPEN, top priority)
+### P11 — Horizontal speed collapse (PARTLY EXPLAINED 2026-08-19)
 
-Measured over the **healthy first 430 s** of each flight, so this is not the flat-battery tail:
+Speed over the healthy first 430 s, by altitude configuration:
 
-| run | altitude config | mean speed | distance |
+| config | runs | mean speed | distance |
 |---|---|---|---|
-| 121053Z | kp900 / step15 | **0.556 m/s** | 253.2 m |
-| 133951Z | kp1500 / step15 | 0.341 | 151.6 m |
-| 135302Z | kp1500 / step15 | 0.320 | 140.0 m |
-| 140625Z | kp1500 / step8 | **0.126** | 57.1 m |
+| kp900 / step15 | 121053Z, 143251Z, 144550Z | 0.556, 0.449, 0.305 | 253, 194, 140 m |
+| kp1500 / step15 | 133951Z, 135302Z | 0.341, 0.320 | 152, 140 m |
+| kp1500 / step8 | 140625Z | **0.126** | **57 m** |
 
-The worst run had a **calm** z trace (z sd 52, ranger sd 0.139), so this is not the altitude
-oscillation mode. In that run the adapter commanded a mean of **1.13 m/s** and the aircraft
-achieved **0.038 m/s** — a gain of 0.008 — while FALCON still reported 632 frontier points and
-coverage sat flat for 439 s. Full stick, no motion, work still available.
+Reverting the gain recovered speed from 0.126 to 0.305-0.449, so the altitude loop **was** a
+contributor — consistent with z and translation sharing thrust authority on this airframe.
+But it is **not the whole story**: kp900 itself spans 0.305-0.556, so run-to-run variance is
+large and the single kp1500/step8 run may also have been an outlier. Do not treat the causal
+link as settled; treat it as "raising the descent gain is not free, and cost more than the
+altitude accuracy was worth".
 
-Leading hypothesis: **z and horizontal share thrust authority** on this airframe, so a harder
-working altitude loop starves translation. The altitude changes are reverted to kp900/step15 to
-test exactly that. If speed returns to ~0.55 m/s, it is confirmed and P4 needs a gentler fix
-(a smaller gain such as 1100, or biasing the *setpoint* rather than the gain).
+Still unexplained: in the worst run the adapter commanded a mean 1.13 m/s while the aircraft
+achieved 0.038 (gain 0.008), with 632 frontier points available and coverage flat for 439 s.
+Full stick, no motion. If a run like that recurs, check in order: the vendor stack
+(`docker logs R1 | grep -c "Communication lost"`), then the paired moving curve (revert to
+4.0 / 0.0), then whether the planner is routing into spaces the airframe cannot fit.
 
-If speed does **not** recover, the altitude loop is exonerated and the cause is elsewhere —
-check the vendor stack (`rooster_manager: Communication lost` appears in R1's log) and whether
-Sphera degrades across many restarts.
+### P4 — Fly lower (SETPOINT APPROACH, unverified)
+
+The altitude loop parks a **steady ~0.22 m above** whatever target it is given, and the twist
+adapter's climb nudges pin the live target at `MAX_RANGER_M` — so the height actually flown is
+about `MAX_RANGER_M + 0.22` (1.35 gave a held 1.50-1.60 m).
+
+Raising the descent gain to close that offset worked on altitude and cost horizontal speed
+(P11), so it was reverted. The offset is steady and predictable, which means it can simply be
+subtracted: `MAX_RANGER_M` 1.35 → **1.00**, `TARGET_RANGER_M` 1.20 → **0.90**, predicting a
+held ~1.22 m. That clears the ~1.0 m floor-clutter limit while flying low enough for the map's
+doorways, and costs no thrust authority at all.
+
+**Verify:** `altitude.ranger_m.median` near 1.2, speed unchanged from the kp900 band, and —
+the thing never yet checked — whether the aircraft actually transits the low doorways.
 
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
@@ -408,6 +421,8 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | altitude_hold_max_step 15 → 8 | calmed z (sd 52, ranger sd 0.139) but horizontal speed fell again | 2026-08-19 |
 | 2026-08-19 | Altitude **reverted** to kp900 / step15 | causal test: speed fell 0.556 → 0.341 → 0.320 → 0.126 m/s tracking the altitude changes, with a CALM z trace in the worst run | 2026-08-19 |
 | 2026-08-19 | FLIGHT_SECONDS 600 → 430 | battery hits 25 % at ~430 s and 0 by the end; the last ~170 s contributed 0.9-2.0 m at 0.003-0.009 m/s | 2026-08-19 |
+| 2026-08-19 | Altitude revert **verified**: speed 0.126 → 0.305-0.449 | the gain raise was a real cost; the altitude loop is also its most stable ever (ranger sd 0.065) | 2026-08-19 |
+| 2026-08-19 | P4 by setpoint instead of gain: MAX_RANGER_M 1.35 → 1.00 | **UNVERIFIED** — exploits the steady +0.22 m offset, predicting a held ~1.22 m at no thrust cost | 2026-08-19 |
 | 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
 | 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
 | 2026-08-19 | Restart Sphera when the FCU is unarmable, and gate health on it | six cycles were lost re-attempting a dead aircraft, because the battery read 0.99 so nothing ever restarted | 2026-08-19 |

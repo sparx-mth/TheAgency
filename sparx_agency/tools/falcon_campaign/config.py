@@ -85,10 +85,25 @@ CAM = dict(fx=111.837662, fy=180.0, cx=269.5, cy=179.5,
            width=540, height=360, min_depth=0.45)
 
 # ── Flight profile ───────────────────────────────────────────────────────
-#: Ranger altitude the hold loop chases, metres. Lowered from 1.6 so the
-#: aircraft can pass through the map's lower doorways (MISSION.md P4).
-TARGET_RANGER_M = 1.20
-MAX_RANGER_M = 1.35
+#: Ranger altitude the hold loop chases, metres, and the ceiling the twist
+#: adapter's nudges may push that setpoint to.
+#:
+#: These are set from the loop's MEASURED behaviour rather than from the height
+#: wanted. The loop parks a steady ~0.22 m above whatever target it is given
+#: (1.35 -> a held 1.50-1.60 m across many runs), and the adapter's climb nudges
+#: pin the live target at MAX_RANGER_M, so the height actually flown is
+#: approximately MAX_RANGER_M + 0.22.
+#:
+#: Raising the descent gain to close that offset was tried and reverted: it
+#: fixed altitude but horizontal speed fell with it (see MISSION.md P11), and on
+#: this airframe z and translation appear to share thrust authority. Biasing the
+#: setpoint down costs nothing, because the offset is steady and predictable.
+#:
+#: 1.00 + 0.22 lands near 1.22 m, which clears the ~1.0 m floor-clutter limit
+#: (LESSONS.md) while flying low enough for the map's doorways -- the point of
+#: P4. Re-derive both if the offset itself changes.
+TARGET_RANGER_M = 0.90
+MAX_RANGER_M = 1.00
 
 #: The z axis response is a ~10-count step gate near 700, not a thrust curve.
 CLIMB_Z = 700.0
