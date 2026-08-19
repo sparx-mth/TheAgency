@@ -150,7 +150,16 @@ class RoosterUnit:
         # lets it find and hold the narrow effective band instead of
         # overshooting through it. UNVALIDATED live past a short bench test;
         # tune down further if altitude still swings, not up.
-        altitude_hold_max_step: float = 15.0,
+        # 15 -> 8 on 2026-08-19. With altitude_hold_kp_down raised to 1500 the
+        # loop finally reaches the descend zone, but it became BIMODAL: one run
+        # held ranger to a 0.054 m standard deviation, the next swung with z
+        # sd 170, spending 19% of ticks in the descend zone AND 8.9% in the
+        # climb zone -- the "rises and falls" mode LESSONS.md's 2026-08-17 entry
+        # attributes to gain changes made without a tight enough per-tick step.
+        # That entry is explicit that the step limit is the fix and the gain is
+        # not, so the gain stays at 1500 and this halves how fast z may cross the
+        # narrow effective band near 700.
+        altitude_hold_max_step: float = 8.0,
         # 2026-08-17: the velocity term feeding kd was a raw single-sample
         # finite difference on the ranger reading -- exactly the kind of
         # signal this file's own docstring already calls "fairly noise-

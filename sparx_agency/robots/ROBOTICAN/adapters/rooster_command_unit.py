@@ -84,7 +84,7 @@ class RoosterCommandUnitNode(Node):
         # See RoosterUnit.__init__ -- added 2026-08-17, the actual fix for
         # the "rises and falls out of control" symptom: bounds how much z
         # may change in ONE tick, tighter than altitude_hold_max_correction.
-        self.declare_parameter("altitude_hold_max_step", 15.0)
+        self.declare_parameter("altitude_hold_max_step", 8.0)
         self.declare_parameter("altitude_hold_velocity_filter_tau_s", 0.5)
         # See RoosterUnit.__init__ -- 2026-08-17, "position" | "altitude"
         # (case-insensitive), selects FLIGHT_MODE_POSITION (3, default,

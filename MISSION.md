@@ -302,6 +302,24 @@ amnesty cap 20. The signature to watch for a recurrence is `finished` **and** `r
 finder itself is failing to see reachable frontiers and the blacklist is the wrong place to
 keep tuning.
 
+### P4 — Fly lower (ALTITUDE LOOP FIXED 2026-08-19; door clearance still to prove)
+
+The loop no longer parks above its setpoint. Across three runs at
+`altitude_hold_kp_down = 1500`: `converged` True every time (it had never been true),
+longest in-band stretch 3.8 s → 19–45 s, mean absolute error down to 0.131 m, and the held
+ranger came from 1.60 m to 1.27–1.50 m — now bracketing the 1.35 m target instead of sitting
+0.25 m above it.
+
+**But it is bimodal**, and that is the open part. One run held ranger to a 0.054 m standard
+deviation; another swung with z standard deviation 170, spending 19 % of ticks in the descend
+zone *and* 8.9 % in the climb zone — the "rises and falls" mode. That run also had the worst
+plan-fail count (37 422) and lowest distance (218 m), so the aircraft was fighting its own
+altitude instead of exploring. `altitude_hold_max_step` 15 → 8 is the documented remedy
+(LESSONS.md 2026-08-17: the step limit is the fix, the gain is not).
+
+**Still to prove:** that a ~1.35 m cruise actually gets through the map's low doorways. That
+was the original point of P4 and no run has yet been checked for door transits specifically.
+
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
 - Faster, more complete coverage; fewer collisions.
@@ -361,7 +379,8 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Paired moving curve (412, 1.847) | **KEPT** — equal on distance/stops, better peak speed (1.46-2.14 vs 1.64-5.43 m/s) and time at zero | 2026-08-19 |
 | 2026-08-19 | Blocked-region blacklist params finally set | shadow cap 3.5 → 6.0 m (was below candidate_rmax 5.5), TTL doubling 3 → 1, amnesty cap 2 → 20 | 2026-08-19 |
 | 2026-08-19 | Blacklist fix **verified** over two runs | plateau 458 s → 0 s, reopened 0 → 2-5, distance 80 → 290-357 m | 2026-08-19 |
-| 2026-08-19 | altitude_hold_kp_down 900 → 1500 | **helped, 1 run**: converged for the first time, in-band 3.8 s → 19.2 s, \|err\| 0.26 → 0.21 m, ranger 1.60 → 1.50 m | 2026-08-19 |
+| 2026-08-19 | altitude_hold_kp_down 900 → 1500 | **KEPT, 3 runs**: converged True every time (was False), in-band 3.8 s → 19-45 s, ranger median 1.60 → 1.27-1.50 around a 1.35 target. But BIMODAL — see next row | 2026-08-19 |
+| 2026-08-19 | altitude_hold_max_step 15 → 8 | **UNVERIFIED** — one kp1500 run held ranger sd 0.054, another swung with z sd 170 (19 % of ticks descending, 8.9 % climbing). Step limit is the documented fix, not the gain | 2026-08-19 |
 | 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
 | 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
 | 2026-08-19 | Restart Sphera when the FCU is unarmable, and gate health on it | six cycles were lost re-attempting a dead aircraft, because the battery read 0.99 so nothing ever restarted | 2026-08-19 |
