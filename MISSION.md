@@ -456,6 +456,25 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P19 — Anti-windup guarded a ceiling the actuator does not have (fix applied 2026-08-20)
+
+Every roll excursion past 30 deg in the last three runs is preceded, about a second earlier, by
+a forward command of **851-900 counts** — the `max_forward_axis` ceiling. That is P12's
+"saturation is where this platform misbehaves", now with a named cause.
+
+The twist adapter clips the forward axis at 900 **after** `AxisVelocityServo` has produced it,
+while the servo's anti-windup froze its integral only at `axis_limit` = 1000. Across the
+100-count band the actuator never sees, the integrator kept accumulating as if the aircraft
+were still gaining stick. `output_limit` now bounds both the returned value and the saturation
+test, and is deliberately separate from `axis_limit` — that one is the measured curve's
+full-scale reference, and lowering it would map `v_full` onto 900 counts and steepen the
+calibration, making the aircraft fly faster than commanded at every stick position.
+
+**Verify:** roll p95/p99 and the count of `tilt roll=` firings fall (they rose to 53-61 per run
+with the course-slew change, from 26-39), `actuation.x.axis_counts.max` stops pinning at 900.
+**Watch:** the aircraft flies 0.51-0.57 m/s now against 0.41 before, so it reaches for full
+stick more often — if coverage falls, the servo has lost authority it was actually using.
+
 ### P18 — Altitude is not controlled, and the plan is a metre above the aircraft (2026-08-20)
 
 Three facts that cannot all be right, found while investigating a 175 deg roll:
