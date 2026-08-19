@@ -335,6 +335,8 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | Block (ii) flown; x_v_full_moving 4.0 → **1.847** (measured) | standing-vs-moving quantified: moving is ~1.5x more responsive, ~100-count hysteresis | 2026-08-19 |
 | 2026-08-19 | x_v_full_moving 1.847 | **REVERTED** — mixed the moving slope with the standing offset; peak speed 2.1 → 3.5 m/s, 30 % of flight stopped | 2026-08-19 |
 | 2026-08-19 | `deadzone_moving` added (default off) + 2 tests | makes the consistent (412, 1.847) pair possible to try next | 2026-08-19 |
+| 2026-08-19 | Dead-band FLOOR now uses the regime's own dead band | it clamped moving commands back to the standing 620, which would have silently defeated the paired test | 2026-08-19 |
+| 2026-08-19 | Paired moving curve enabled: (412, 1.847) together | **UNVERIFIED** — asks 603 counts at 0.6 m/s vs 677 today, so watch for under-delivery | 2026-08-19 |
 
 ## 9. Resuming after a context loss
 

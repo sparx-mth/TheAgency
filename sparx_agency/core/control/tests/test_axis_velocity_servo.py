@@ -137,3 +137,15 @@ def test_the_moving_dead_band_is_ignored_while_standing_still():
                               deadzone_moving=412.0)
     standing = servo.update(0.6, 0.0, 0.05)
     assert standing >= DEADZONE
+
+
+def test_the_floor_uses_the_moving_dead_band_too():
+    """Otherwise a moving command is floored back to the standing dead band.
+
+    That would silently rebuild the mixed pair: a feedforward computed on the
+    moving curve, clamped up by the standing one.
+    """
+    servo = AxisVelocityServo(DEADZONE, V_FULL, v_full_moving=1.847,
+                              deadzone_moving=412.0)
+    axis = servo.update(0.05, 0.5, 0.05)      # tiny demand, aircraft moving
+    assert 412.0 <= abs(axis) < DEADZONE

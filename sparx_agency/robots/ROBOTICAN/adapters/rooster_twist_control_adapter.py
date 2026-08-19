@@ -145,13 +145,15 @@ class RoosterTwistControlNode(Node):
         # The fix is deadzone_moving below, so the pair stays consistent. 4.0 is
         # an empirical value that happens to compensate the mismatch; it should
         # be retired once the consistent (412, 1.847) pair is proven in flight.
-        x_v_full_moving: float = 4.0,
-        # Dead band once already moving, measured 1.847-regime = 412 counts by
-        # calibration block (ii). 0 keeps x_deadzone in both regimes, which is
-        # the current default: the consistent (412, 1.847) pair has not been
-        # flown yet, and the last two attempts to change this curve both had to
-        # be reverted, so it is enabled deliberately or not at all.
-        x_deadzone_moving: float = 0.0,
+        x_v_full_moving: float = 1.847,
+        # Dead band once already moving. Measured by calibration block (ii) as
+        # 412 counts, and it is the OTHER HALF of x_v_full_moving=1.847 above --
+        # the two are one curve and are set together or not at all. Enabled
+        # 2026-08-19 as a single coherent change, after 1.847 paired with the
+        # standing 620 over-commanded and had to be reverted. At a 0.6 m/s
+        # request this asks ~603 counts while moving, LESS than the 677 the
+        # empirical 4.0 asked, so the risk here is under-delivery, not overspeed.
+        x_deadzone_moving: float = 412.0,
         move_eps_mps: float = 0.10,
         # Lateral is capped off by max_lateral_axis below, so these are inert
         # today. The sweep fitted 406 / 0.969 from 3 points (y- only; every y+

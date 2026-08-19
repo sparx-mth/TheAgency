@@ -209,9 +209,12 @@ class AxisVelocityServo(object):
         # the aircraft then has to climb back through the dead band to restart.
         # The one case where releasing IS what the loop wants is a genuine
         # overspeed, so that stays allowed.
+        # The floor uses the SAME regime's dead band as the feedforward above.
+        # Flooring a moving-regime command back up to the standing dead band
+        # would quietly reintroduce the mixed pair this class exists to avoid.
         braking = abs(v_meas) > abs(v_cmd) + self.brake_release_margin_mps
-        if not braking and abs(axis) < self.deadzone:
-            axis = self.deadzone if v_cmd > 0.0 else -self.deadzone
+        if not braking and abs(axis) < deadzone:
+            axis = deadzone if v_cmd > 0.0 else -deadzone
 
         saturated_high = axis >= self.axis_limit and error > 0.0
         saturated_low = axis <= -self.axis_limit and error < 0.0
