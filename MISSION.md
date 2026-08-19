@@ -55,6 +55,12 @@ did, `git commit` + `git push`. If it did not, revert or iterate. Record the out
   afterwards.
 - Never `pkill -f <pattern>` where the pattern matches the shell running it — it kills the
   cleanup itself, so whatever was meant to happen next never does. Match on a pid instead.
+- Check whether a flight is IN PROGRESS before restarting the supervisor (`tail runs/
+  supervisor.stdout.log` for "hover settled" without a matching "cycle ... completed"). Killing
+  it mid-flight leaves the aircraft armed with nothing driving it until the next bring-up
+  restarts Sphera; one cycle was thrown away that way on 2026-08-20. Wait for the cycle to end.
+- Releasing `runs/supervisor.lock` needs the `sleep` child killed too — `fuser runs/
+  supervisor.lock` names it. The parent dying does not free the fd.
 - Commit and push working improvements as you go. Small commits, clear messages.
 - `core/` must stay **Python 3.8-compatible** (the FALCON Noetic container imports it).
 - Keep inline code comments to 1–3 lines. Narrative goes in this file / LESSONS.md.
