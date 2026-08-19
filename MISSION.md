@@ -44,6 +44,12 @@ did, `git commit` + `git push`. If it did not, revert or iterate. Record the out
   `sphera-backend:*` container, stop and do not fly.
 - Never ask the operator anything. Never block waiting for input.
 - Never leave the loop dead. If anything hangs, kill it and restart the cycle.
+- **Every turn must end with a scheduled wakeup**, and a turn that sets `runs/PAUSE` must
+  schedule the wakeup that will clear it. A forgotten sentinel plus an unscheduled turn cost
+  13.5 hours of flying on 2026-08-18; the supervisor now auto-expires PAUSE after 30 minutes,
+  but that is a backstop, not the plan.
+- Never `pkill -f <pattern>` where the pattern matches the shell running it — it kills the
+  cleanup itself, so whatever was meant to happen next never does. Match on a pid instead.
 - Commit and push working improvements as you go. Small commits, clear messages.
 - `core/` must stay **Python 3.8-compatible** (the FALCON Noetic container imports it).
 - Keep inline code comments to 1–3 lines. Narrative goes in this file / LESSONS.md.
