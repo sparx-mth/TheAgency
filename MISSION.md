@@ -526,11 +526,23 @@ into the geometry around it, and the guards eventually pull it off.
 reach.** Note what the mission metric prefers: at 100 the run explored the big volume fast and
 then idled in FINISH, and that still beat chasing every crumb.
 
-**Now sweeping the third point: 50 (halving to 25, ~1 m2).** Judge it on coverage AND on
-`finished`, since those two moved in opposite directions between the first two points. If 50
-brings back an early FINISH without restoring distance, the answer is not this parameter at all
-— it is the stop-start crawl, and the lever there is the follower's speed floor, not the
-frontier size.
+**SWEEP SETTLED: 50 (halving to 25, ~1 m2) is the answer.** Three runs each, same instrumentation:
+
+| cluster_min | coverage m3/min | early FINISH | `no_path_fails` | frac below stop speed | distance |
+|---|---|---|---|---|---|
+| 100 (upstream) | 99-150 | **yes, 230-320 s** | 1144 | 0.02-0.05 | 195-234 m |
+| **50** | **119.5, 128.7** | **no** | 1429-2055 | 0.09-0.27 | 197-227 m |
+| 30 | 65-118 | no | 3764-16374 | 0.41-0.46 | 132-189 m |
+
+(The third run at 50 scored 81.3 but had 10 coverage gaps, so its rate is not comparable.)
+
+50 keeps everything 30 bought — exploration never declares itself finished — while restoring the
+distance and the coverage that 30 lost. It ties 100 on the primary metric and beats it on
+headroom: at 100 the aircraft spent the last three minutes of every flight circling in FINISH,
+so any future gain in flight time or stall would have been wasted there.
+
+**Remaining at 50: stall 22-36 %, servo gain 0.27-0.70, 9-27 % of the flight below stop speed.**
+Some pressing-against-geometry is still there, which is what P22 goes after.
 
 ### Measurement note — coverage gaps count as stall (2026-08-20)
 
