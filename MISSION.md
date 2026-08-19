@@ -456,6 +456,45 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P16 — HALF THE FLIGHT MAPS NOTHING (found 2026-08-19) — the real ceiling
+
+**This is the biggest finding of the campaign so far and the top priority until it is closed.**
+
+Measured inside the 430 s battery-valid window across four runs: **34 %, 66 %, 66 % and 33 %
+of the flight gains no coverage at all**, battery still ~0.48 when the stall begins. Every
+control-side lever pulled so far competes for the other half.
+
+The mechanism, from `20260819_190303Z`:
+
+| window | plans published | "no path to viewpoint" | share failing |
+|---|---|---|---|
+| 0-290 s (productive) | 701 | 2 476 | 22 % |
+| 290-430 s (stalled) | 88 | 8 618 | 99 % |
+
+For **21 315 consecutive iterations** the manager chose the *same* viewpoint 15 m away, A*
+failed under both profiles every time, and the aircraft flew 20 m/min inside a **one-metre
+box**. Recurs at a different place each run (-55/15, -67/20, -51/9), so it is a state, not a
+doorway.
+
+**Root cause (fixed 2026-08-19, awaiting a rebuild):** the dead-end guard's pinned test —
+"within 2 m for 25 s while not at target, retire the viewpoint" — describes this exactly and
+**never fired once in 600 s**. `falcon_deadend_looping.patch` asked whether `pinned_oldest`
+was 25 s old, but the loop computing it skips everything older than 25 s, so it can only ever
+be milliseconds too young. The original asked `track.front()` (oldest of the 60 s history);
+the sibling looping test still asks it and still fires. **Requires a docker rebuild to take
+effect** — the marker to look for afterwards is `Aircraft confined to <2 m` in the run log.
+
+**Verify:** `exploration.locked_s` and `coverage.longest_stall_s` fall, `coverage.final_m3`
+rises above the 850-1420 band. **Watch:** over-blacklisting — the earlier lesson is that
+192 shadows in one run sterilised the map and confined the mission to one corner.
+
+**Next if it is not enough:** blacklist on repeated `planTrajToView` A* failure too (the
+publish-fail patch is the template; `frontier_finder_->addBlockedRegion()` is the call).
+
+**Speed is NOT the lever.** The first genuine `max_vel = 0.6` run scored 75.2 m3/min, inside
+the old band, with 60 % of it stalled. Raising the speed of a flight that spends half its time
+going nowhere buys nothing.
+
 ### P15 — Launch args must be read back, not assumed (2026-08-19)
 
 `sphera_drone.launch` re-declares 317 of `nav_stack.launch`'s args and passes its own
