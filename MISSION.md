@@ -343,32 +343,33 @@ Full stick, no motion. If a run like that recurs, check in order: the vendor sta
 (`docker logs R1 | grep -c "Communication lost"`), then the paired moving curve (revert to
 4.0 / 0.0), then whether the planner is routing into spaces the airframe cannot fit.
 
-### P4 — Fly lower (HEIGHT ACHIEVED; premise now has evidence)
+### P4 — Fly lower (HEIGHT ACHIEVED; premise UNPROVEN — earlier claim retracted)
 
-Biasing the setpoint worked and cost nothing: `MAX_RANGER_M` 1.35 → 1.00 took the held ranger
-from **1.58 to 1.21 m** in one run, with speed 0.483 m/s — the best of the recent band, not a
-regression. The loop's ~0.22 m standing offset is steady enough to simply subtract.
+**The height works.** Biasing the setpoint took the held ranger from 1.58 to 1.21-1.25 m at no
+thrust cost, and bounding the nudge (`altitude_nudge_m` 0.15, `altitude_band_m` 0.3) stopped
+the live target railing: it now stays in 0.70-1.00 instead of walking to its 0.60 floor, and
+the loop calmed (z sd 114 → 77, ranger sd 0.204 → 0.132, escapes 11 → 4).
 
-**And the premise finally has evidence.** Counting distinct 2 m cells of the x,y track over
-the healthy first 430 s:
+**The reason for flying lower is NOT established, and a previous entry claiming it was is
+retracted.** Distinct 2 m cells of the track, first 430 s:
 
-| run | cruise | 2 m cells reached | y-extent |
-|---|---|---|---|
-| 143251Z | ~1.58 m | 12 | 2.9 m |
-| 144550Z | ~1.58 m | 14 | 8.7 m |
-| 145849Z | ~1.58 m | 29 | 11.1 m |
-| 151155Z | **~1.21 m** | **41** | **17.3 m** |
+| cruise | cells reached | coverage rate |
+|---|---|---|
+| ~1.58 m | 12, 14, 29 | 87.4 |
+| ~1.21 m | **41, 21, 19** | 85.1, 69.5, 50.8 |
 
-More of the map is physically reached at the lower cruise, and the y-extent in particular
-suggests it is getting through into further rooms. One run against three, so not settled —
-repeat the cell count on the next low-cruise runs before calling it.
+The 41 was a single lucky run; the repeats gave 21 and 19, which sit inside the high-cruise
+range. If anything the low-cruise coverage rate is *worse*, though not outside the noise
+either. **Flying lower has not been shown to reach more of the map.**
 
-**Open:** the nudge authority was too coarse for a ~1 m window. FALCON's vertical demand
-saturated it and the live target RAILED — pinned at 1.35 when the ceiling was high, then
-walked 0.90 → 0.60 and sat on its floor while the aircraft held 1.21 m. That 0.6 m standing
-error drove the hold loop hard (z sd 42 → 114, ranger sd 0.065 → 0.204, escapes 3-7 → 11).
-`altitude_nudge_m` 0.3 → 0.15 and `altitude_band_m` 1.0 → 0.3 bound it: FALCON should bias the
-cruise height, not relocate it. UNVERIFIED.
+Kept anyway, for reasons that do not depend on that claim: 1.2 m matches FALCON's own
+`cruise_z` of 1.0 and sits inside the BEV trust band (0.70-2.20), where 1.58 m did not. If a
+future run set shows a real coverage cost, revert `MAX_RANGER_M` to 1.35 rather than defend it.
+
+**Lesson for this campaign's method:** cell count and coverage rate both vary ~2x run to run at
+an identical configuration, so no 1-vs-1 or even 1-vs-3 comparison can settle a marginal
+change. Either accumulate many runs per configuration, or work on defects with unambiguous
+signatures instead. The remaining queue is deliberately the latter.
 
 ### Standing objectives (never "done")
 - Smoother flight, tighter tracking, fewer stops.
@@ -435,7 +436,8 @@ _Append one line per change: date — what changed — measured effect — commi
 | 2026-08-19 | FLIGHT_SECONDS 600 → 430 | battery hits 25 % at ~430 s and 0 by the end; the last ~170 s contributed 0.9-2.0 m at 0.003-0.009 m/s | 2026-08-19 |
 | 2026-08-19 | Altitude revert **verified**: speed 0.126 → 0.305-0.449 | the gain raise was a real cost; the altitude loop is also its most stable ever (ranger sd 0.065) | 2026-08-19 |
 | 2026-08-19 | P4 by setpoint instead of gain: MAX_RANGER_M 1.35 → 1.00 | **WORKED** — held ranger 1.58 → 1.21 m, speed 0.483 (no cost), and 2 m-cells reached 12-29 → 41 | 2026-08-19 |
-| 2026-08-19 | Nudge authority bounded: nudge 0.3 → 0.15 m, band 1.0 → 0.3 m | **UNVERIFIED** — the live target was railing to its floor, driving a 0.6 m standing error | 2026-08-19 |
+| 2026-08-19 | Nudge authority bounded: nudge 0.3 → 0.15 m, band 1.0 → 0.3 m | **WORKED** — target now holds 0.70-1.00 instead of railing to 0.60; z sd 114 → 77, ranger sd 0.204 → 0.132, escapes 11 → 4 | 2026-08-19 |
+| 2026-08-19 | P4 premise **RETRACTED** | the 41-cell low-cruise run was noise: repeats gave 21 and 19, inside the 12-29 high-cruise range | 2026-08-19 |
 | 2026-08-19 | Failed cycles no longer inherit the previous flight's telemetry | two takeoff failures had reported the last good flight's 336 m and 12309 samples as their own | 2026-08-19 |
 | 2026-08-19 | Wait for `RoosterState.armable` before arming | "Arm refused: Not connected to FCU" cost two whole cycles to a startup race | 2026-08-19 |
 | 2026-08-19 | Restart Sphera when the FCU is unarmable, and gate health on it | six cycles were lost re-attempting a dead aircraft, because the battery read 0.99 so nothing ever restarted | 2026-08-19 |
