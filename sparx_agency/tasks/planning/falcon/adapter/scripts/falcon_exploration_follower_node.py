@@ -247,6 +247,18 @@ class FalconExplorationFollowerNode:
         #: latched, re-logging the same suppression message every 10 s while
         #: coverage flatlined. A bounded hold turns that into a periodic retry.
         self.pinned_hold_sec = float(G("~pinned_hold_sec", 4.0))
+        #: Ceiling on the hold once it starts backing off.
+        #:
+        #: Re-arming the full escape ladder every 4 s solves the parked flight
+        #: and reopens the failure the give-up was built for: a PERMANENTLY
+        #: wedged aircraft would grind escapes forever, and a run once spent
+        #: over half its window doing exactly that (38 escapes, none restoring
+        #: motion). So each hold that ends without the aircraft regaining
+        #: motion doubles the next one: 4, 8, 16, 30 s. Early retries stay
+        #: cheap, a genuine wedge stops burning the flight, and neither
+        #: failure mode is permanent. Sustained motion resets it.
+        self.pinned_hold_max_sec = float(G("~pinned_hold_max_sec", 30.0))
+        self._pinned_hold_streak = 0
 
         # ── Rooster force shaping: fixed-magnitude pulses, no docking gait ──
         # See the module docstring for why ClosureGait is deliberately not used
@@ -589,13 +601,19 @@ class FalconExplorationFollowerNode:
         # try again. Being parked is only better than grinding for as long as it
         # takes to settle -- after that it is just a stopped flight.
         if self._pinned_hold and self._pinned_hold_since is not None:
-            if now - self._pinned_hold_since >= self.pinned_hold_sec:
+            hold_for = min(self.pinned_hold_max_sec,
+                           self.pinned_hold_sec * (2 ** self._pinned_hold_streak))
+            if now - self._pinned_hold_since >= hold_for:
                 rospy.logwarn(
                     "falcon_exploration_follower: pinned hold expired after "
                     "%.0fs -- re-arming the escape budget and driving again",
-                    self.pinned_hold_sec)
+                    hold_for)
                 self._pinned_hold = False
                 self._pinned_hold_since = None
+                # This hold ended without the aircraft regaining motion, so the
+                # next one costs double. Counted here, not at the latch, so the
+                # FIRST hold is the cheap one.
+                self._pinned_hold_streak = min(self._pinned_hold_streak + 1, 8)
                 self._escapes_since_progress = 0
                 self._stall_since = None
                 self._escape_ready_at = None
@@ -628,6 +646,7 @@ class FalconExplorationFollowerNode:
                 self._escapes_since_progress = 0
                 self._pinned_hold = False
                 self._pinned_hold_since = None
+                self._pinned_hold_streak = 0   # real motion clears the backoff
             self._stall_since = None
             return None
         self._moving_since = None

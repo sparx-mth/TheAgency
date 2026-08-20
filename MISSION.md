@@ -486,10 +486,22 @@ re-arms and normal driving resumes, so a permanent stop becomes a periodic retry
 purpose survives — the airframe still gets its seconds to settle and the servo integrator to
 unwind, which is what stopped the 20-35 deg pitch lock-up.
 
-**Verify:** no run should show a flat multi-minute tail with distance under 1 m/min; `stall_frac`
-below ~20 % consistently; coverage's low end rising from ~101 toward the 170-187 the good runs
-already reach. **Watch:** if PINNED counts climb a lot without coverage improving, the retry is
-grinding — raise `pinned_hold_sec` rather than restoring the latch.
+**With a backoff, because the naive retry reopens the failure the give-up was built for.** A
+PERMANENTLY wedged aircraft would grind the escape ladder forever — a run once spent over half
+its window on 38 escapes, none of which restored motion, which is exactly why the give-up exists.
+So each hold that ends *without* the aircraft regaining motion doubles the next:
+**4, 8, 16, 30 s** (`~pinned_hold_max_sec`). Early retries stay cheap, a genuine wedge stops
+burning the flight, neither failure mode is permanent, and sustained motion resets the backoff.
+
+**Status: DORMANT, not yet verified in flight.** The give-up has not fired once in the seven runs
+since (5-12 escapes each, 0 latches) — it fired in `050749Z` and not since, so this is roughly a
+1-in-8 failure that costs ~250 s when it lands. Coverage over those seven is 143.5-177.1 with no
+recurrence of the 101-111 low end, which is consistent but proves nothing about this fix.
+
+**Verify when it does fire:** look for `pinned hold expired after 4s -- re-arming` in the follower
+log, then check the per-minute distance around it — the aircraft should resume rather than sit at
+0 m/min to the end of the flight. **Watch:** PINNED climbing a lot without coverage improving
+means the retry is grinding; raise `explore_pinned_hold_sec` rather than restoring the latch.
 
 ### P28 — Exploration is TIME-limited, not map-limited (2026-08-20)
 
