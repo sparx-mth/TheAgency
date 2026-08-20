@@ -94,6 +94,10 @@ def wait_for_window(timeout_sec: float = 90.0, poll_sec: float = 1.0) -> int | N
     return find_content_window()
 
 
+class ClickTargetGone(RuntimeError):
+    """The window we were about to click no longer has a geometry."""
+
+
 def _click_fraction(window_id: int, fx: float, fy: float) -> None:
     """Clicks a point given as a fraction of the window's CURRENT geometry
     (queried fresh each call — one cheap `xdotool` call, not cached), so
@@ -101,6 +105,15 @@ def _click_fraction(window_id: int, fx: float, fy: float) -> None:
     position."""
     geom = _run("xdotool", "getwindowgeometry", "--shell", str(window_id)).stdout
     dims = dict(line.split("=", 1) for line in geom.splitlines() if "=" in line)
+    if "WIDTH" not in dims or "HEIGHT" not in dims:
+        # A window id can outlive the window, and one that is unmapped answers
+        # with no geometry at all. Raising ClickTargetGone lets enter_scenario
+        # return False and the caller retry, which is what it already does for a
+        # window that never appeared; the bare KeyError instead escaped as a
+        # traceback and stalled the campaign for eleven minutes on 2026-08-20.
+        raise ClickTargetGone(
+            "window %s reports no geometry (%r) -- it is gone or not yet mapped"
+            % (window_id, geom.strip()[:120]))
     x = round(fx * int(dims["WIDTH"]))
     y = round(fy * int(dims["HEIGHT"]))
     _run("xdotool", "mousemove", "--window", str(window_id), str(x), str(y))
@@ -119,6 +132,16 @@ def enter_scenario(window_wait_sec: float = 90.0) -> bool:
         print(f"[gui] Sphera window did not reappear within {window_wait_sec:.0f}s", flush=True)
         return False
 
+    try:
+        return _enter_scenario_clicks(window_id)
+    except ClickTargetGone as exc:
+        # Contract of this function: never raise. The caller retries.
+        print(f"[gui] {exc}", flush=True)
+        return False
+
+
+def _enter_scenario_clicks(window_id: int) -> bool:
+    """The click sequence itself, once a window has been found."""
     print(f"[gui] found Sphera content window {window_id}, entering scenario", flush=True)
     _run("xdotool", "windowactivate", str(window_id))
 

@@ -1505,3 +1505,21 @@ was never read by anything, since the glob only matches `*.log`.
 being counted and whether the count's *denominator* (here, which files exist) is stable across
 those runs. And when a metric is derived from logs, a metric that should be constant across
 runs — a fixed-rate heartbeat — is a free consistency check on the whole pipeline.
+
+## A helper that promises not to raise must catch its own helpers (2026-08-20)
+
+`sphera_gui_automation.enter_scenario()` documents that it "returns False (never raises) if
+Sphera's window doesn't reappear" — and the caller relies on that, retrying on False. But the
+click helper underneath it indexed `xdotool getwindowgeometry --shell` output directly, and an
+X window id can outlive its window: an unmapped window answers with no geometry at all, so
+`dims["WIDTH"]` raised `KeyError` straight through the contract.
+
+The campaign stalled for eleven minutes: the watchdog exited non-zero mid-restart, the retry
+loop then found no window for four and a half minutes, and the same call succeeded instantly
+when run by hand ten minutes later. Nothing was broken except the error path.
+
+Two fixes, and the second is the general one: the missing geometry now raises a named
+`ClickTargetGone` that `enter_scenario` catches, so the documented contract holds; and the
+retry loop waits 180 s rather than 90 for a window Sphera can genuinely take minutes to
+restore, and re-runs the restart itself halfway through, because re-clicking a Sphera that was
+never restarted cannot produce a fresh drone however many times it is tried.

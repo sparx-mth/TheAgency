@@ -281,11 +281,23 @@ def restart_sphera(reentry_attempts=4):
         # Let Sphera finish becoming interactive before clicking at it.
         time.sleep(15)
         try:
-            sphera_gui_automation.enter_scenario()
+            # Sphera can take minutes to put its window back after a cold
+            # restart: measured 2026-08-20, four attempts at the default 90 s
+            # all reported "window did not reappear" and the same call
+            # succeeded instantly ten minutes later, having stalled the
+            # campaign for eleven. Wait longer here than the default.
+            sphera_gui_automation.enter_scenario(window_wait_sec=180.0)
         except Exception:                          # noqa: BLE001 -- GUI is flaky
             pass
         wait_for(_fresh_drone_ready, 90,
                  "fresh %s (re-entry attempt %d)" % (C.DRONE_CONTAINER, attempt))
+        # Halfway through, assume the restart itself is what failed rather than
+        # the clicking, and run it again. Re-clicking a Sphera that was never
+        # restarted cannot produce a fresh drone however many times it is tried.
+        if attempt == reentry_attempts // 2 and not _fresh_drone_ready():
+            print("[bringup] re-entry not working; re-running the restart itself",
+                  flush=True)
+            sh(C.SPHERA_RESTART_CMD, timeout=420)
     return _fresh_drone_ready()
 
 
