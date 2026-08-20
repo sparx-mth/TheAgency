@@ -140,6 +140,11 @@ OBSTACLES_INFLATION = 0.40
 #: stays at 0.40 and narrow doorways stay plannable. This only asks the curve
 #: fitted through them to ride nearer the middle.
 SAFE_DISTANCE = 0.55
+#: Weight on the optimiser's clearance term, against smoothness at 20. The
+#: median clearance was already fine at 0.50 m; it is the TAIL that causes
+#: contacts, and the weight is what decides how much clearance gets traded away
+#: in the tight spots where it matters.
+BSPLINE_DISTANCE_WEIGHT = 150.0
 
 #: Speed FALCON PLANS at, m/s, and the follower's ceiling above it.
 #:
@@ -223,6 +228,7 @@ VOXEL_RAYCAST_MAX = 8.0
 EXPECTED_ROSPARAMS = {
     "/voxel_mapping/tsdf/raycast_max": VOXEL_RAYCAST_MAX,
     "/bspline_opt/safe_distance": SAFE_DISTANCE,
+    "/bspline_opt/pos/distance": BSPLINE_DISTANCE_WEIGHT,
     "/frontier_finder/cluster_min": FRONTIER_CLUSTER_MIN,
     "/falcon_exploration_follower/tilt_limit_deg": TILT_LIMIT_DEG,
     "/falcon_exploration_follower/tilt_resume_deg": TILT_RESUME_DEG,

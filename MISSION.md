@@ -462,6 +462,33 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P24 — Every contact is against MAPPED geometry, in the optimiser's TAIL (2026-08-20)
+
+The working assumption after P23 was that the remaining contacts had to be against obstacles the
+depth sensor cannot see (P22's 0.62 m near floor), since raising `safe_distance` improved
+clearance without reducing PINNED events. **That is wrong**, and the clearance trace settles it.
+
+Correlating 26 PINNED events across three runs against `clearance.jsonl` — distance to the
+nearest **mapped** obstacle at the moment the aircraft stuck:
+
+| p10 | p25 | p50 | p75 | p90 | beyond the 0.40 m planner margin |
+|---|---|---|---|---|---|
+| 0.05 | 0.09 | **0.15** | 0.18 | 0.25 | **0 of 26** |
+
+Not one contact happened with the aircraft clear of geometry the map already had. The reference
+at those moments sits at p50 0.15 m as well — **while the same flights' median reference
+clearance is a healthy 0.50 m**. The problem is the optimiser's *tail*, not its median: in tight
+spots the smoothness term wins and the curve is pushed into a wall that is already in the map.
+
+**Change:** `/bspline_opt/pos/distance` 50 -> 150, against smoothness at 20, making clearance
+three times harder to trade away. `safe_distance` stays 0.55 — it moved the median correctly and
+raising a soft target further does nothing about a term that is being outvoted.
+
+**Verify:** PINNED events below ~6/flight (they are 9-13), clearance p10 at the moment of a pin
+above 0.2 m, coverage holding at 130-176. **Watch:** a heavily weighted clearance term can make
+the curve wander or fail to fit a doorway — rising "collision detected on the trajectory" or
+publish failures means 100 rather than 150.
+
 ### P23 — The reference itself flies inside the safety margin (2026-08-20)
 
 The aircraft is stuck (PINNED) about a dozen times a flight, costing ~27 % of it. Two causes

@@ -1316,6 +1316,18 @@
        Raycasting cost scales with range, and monocular metric depth degrades
        with distance, so this is a measured experiment, not a free win: watch
        for phantom far geometry showing up as unreachable targets. -->
+  <!-- The optimiser's clearance term is a SOFT cost weighed against smoothness,
+       and what hurts is its TAIL, not its median. Measured 2026-08-20 across 26
+       PINNED events with a clearance trace: at the moment the aircraft got
+       stuck it was within 0.25 m of a MAPPED obstacle every single time (p50
+       0.15), and its reference sat at p50 0.15 too — while the same flight's
+       median reference clearance was a healthy 0.50 m. So in tight spots
+       smoothness wins and the curve is pushed into a wall the map already had;
+       this is not the depth sensor's near floor. 50 -> 150 against smoothness
+       20 makes clearance three times harder to trade away. -->
+  <arg name="bspline_distance_weight" default="150.0" />
+  <param name="/bspline_opt/pos/distance" value="$(arg bspline_distance_weight)"/>
+
   <arg name="voxel_raycast_max" default="8.0" />
   <param name="/voxel_mapping/tsdf/raycast_max" value="$(arg voxel_raycast_max)"/>
 
