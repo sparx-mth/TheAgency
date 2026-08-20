@@ -1572,3 +1572,21 @@ Pre-registration only protects against self-deception if the condition can come 
 same three commands that will judge the experiment afterwards. Where a percentile saturates,
 use the fraction beyond the threshold instead: `p90 = 900` said nothing, while "12 % of ticks at
 the ceiling, unchanged" said everything.
+
+## A correlation over nine mixed runs is noise wearing a decimal point (2026-08-20)
+
+`corr(dz p90, coverage) = -0.86` was reported as the strongest lead left in the campaign. It
+came from nine runs spanning three configurations and including both of the campaign's collapsed
+runs. Recomputed honestly:
+
+* 74 reliable, gap-free runs: **-0.12**
+* within the settled configuration (n=7): **-0.20**
+* within `max_vel` 0.6 (n=7): -0.82, and one run supplies the entire coefficient
+
+Coverage in this campaign varies about twofold run to run, and configuration is the largest
+thing that has ever moved it — so any correlation computed across a window in which the
+configuration changed is measuring the configuration, not the variable.
+
+**Rule: compute correlations within ONE configuration, with n >= 15, or do not report them.**
+Two earlier findings survived this test (contacts vs clearance at n=16, stall vs coverage at
+n=94) and are still trusted; this one did not.

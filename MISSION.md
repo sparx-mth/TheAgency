@@ -510,6 +510,23 @@ runs:
 **`corr(tracking.ref_minus_pose_z_m.p90, coverage) = -0.86`** — the strongest correlation in the
 campaign apart from the stall fraction itself.
 
+> **CORRECTION (2026-08-20, same day): that -0.86 does not survive a larger sample and the
+> claim above is withdrawn.** It came from a nine-run window spanning three different
+> configurations and containing both collapsed runs. Recomputed:
+> * all 74 reliable, gap-free runs: **-0.12**
+> * within `max_vel` 0.8, the settled config (n=7): **-0.20**
+> * within `max_vel` 0.6 (n=7): -0.82 — but that is one run (99 m3/min, dz p90 1.34) carrying
+>   the whole coefficient
+>
+> A group split still shows something modest and possibly real: dz p90 > 0.9 gives mean coverage
+> 129.9 with 28 % stall (n=14), against 145.9 and 20 % for dz p90 <= 0.9 (n=60). But mixing
+> configurations puts the config effect into the coefficient, and configuration is the biggest
+> thing that has ever moved coverage here.
+>
+> **Standing rule from three repeats of this mistake: compute a correlation WITHIN one
+> configuration, with n >= 15, or do not report it.** Coverage varies ~2x run to run (section
+> 7b), so a coefficient over 9 mixed runs is noise wearing a decimal point.
+
 | coverage | 190.9 | 190.5 | 182.1 | 178.4 | 177.1 | 168.3 | 164.4 | **99.3** | **93.7** |
 |---|---|---|---|---|---|---|---|---|---|
 | dz p90 (m) | 0.38 | 0.63 | 0.54 | 0.72 | 0.55 | 0.75 | 0.39 | **1.34** | **1.04** |
