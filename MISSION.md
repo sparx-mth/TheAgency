@@ -588,6 +588,13 @@ coverage.final_m3) <= -0.5` within `config.max_vel == 0.8`, tested on **FRESH ru
 flown after 2026-08-20 16:30 — with n>=15. No other metric gets scanned on that set, and no fix
 is proposed before it passes.
 
+*Sample integrity checked at n=9 (18:07), before relying on the count: 10 run folders exist since
+the cutoff, 9 qualify, and the tenth is simply the flight still in the air — so nothing is
+dropping out silently. The metric itself is sound too: heartbeat counts run 487-497 across all
+nine, so `pos_err_m.mean` is averaged over comparable samples in every run. That mattered enough
+to check, because heartbeat counts used to vary 509-753 when `rosout` was being double-counted,
+and a metric built on an unstable denominator would have made the test meaningless either way.*
+
 ### P37 — Two collapses, two DIFFERENT mechanisms (2026-08-20, sample building)
 
 The second collapse landed and it is not the same failure as the first. Both spend their last
