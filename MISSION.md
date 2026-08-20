@@ -549,11 +549,17 @@ mean was the wrong statistic. The tail is what ends flights.
 **Not yet a fix, deliberately.** Ruled out already: battery (drain is 0.64-0.68 at 200 s and
 0.27-0.35 at 400 s across good and bad runs alike), and a wedge (the follower's give-up never
 fired; FALCON's own guards fired 9 confinement and 11 publish-fail blacklists, so it was actively
-retiring viewpoints). `dz` p90 is in `metrics.json` for every run, so the sample builds on its
-own — get 15+ runs before choosing between:
-* a follower rule for a reference it cannot reach (if `|dz|` stays above ~1 m for several
-  seconds, the aircraft cannot close it, so stop waiting on it), or
-* keeping FALCON's planned z nearer the altitude the aircraft actually holds.
+retiring viewpoints). With the correlation withdrawn, what remains is a single well-documented
+run, which is an anecdote and is being treated as one.
+
+**What was done instead of theorising — the diagnostic is now automatic.** Every run's
+`metrics.json` carries `motion.per_minute`: distance, spatial span and turning per minute of
+flight. That table is what separates PARKED from CIRCLING from TRAVELLING, and it is what found
+the unreachable-viewpoint lock (P16), the yaw limit cycle (P17), the latched pinned hold (P29)
+and this vertical stall — each time hand-rolled from `truth.jsonl` after the fact. A run with any
+whole minute under 2 m now also raises a ranked finding saying so, with the next question
+attached: *commanded axis zero means nothing was asked of it (an unreachable reference);
+non-zero means it is wedged.* The next collapse arrives pre-diagnosed.
 
 ### P35 — A cold FCU needs longer than a warm one (harness, 2026-08-20)
 

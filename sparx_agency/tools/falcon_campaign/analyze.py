@@ -330,7 +330,55 @@ def motion_metrics(samples, airborne_only):
                 stops_per_min=(None if not total
                                else len(stops) / (total / 60.0)),
                 mean_s_between_stops=statistics.fmean(gaps) if gaps else None,
+                per_minute=_per_minute(samples),
                 **_turning_effort(samples))
+
+
+def _per_minute(samples):
+    """Distance, spatial span and turning, one row per minute of flight.
+
+    This is the single most-used diagnostic in the campaign: it is what
+    separates PARKED from CIRCLING from TRAVELLING, and it identified the
+    unreachable-viewpoint lock, the yaw limit cycle, the latched pinned hold and
+    the purely-vertical stall — each time by being hand-rolled from truth.jsonl
+    after the fact. Recording it with every run means the next collapse is
+    already diagnosed when it is noticed.
+
+    Args:
+        samples: Normalised pose samples, in time order.
+
+    Returns:
+        A list of dicts with ``t`` (window start, s), ``distance_m``,
+        ``span_m`` (the widest extent of the window, so a circling aircraft
+        reads small) and ``deg_per_m``.
+    """
+    if not samples:
+        return []
+    base = samples[0]["t"]
+    windows, previous = {}, None
+    for sample in samples:
+        if None in (sample["x"], sample["y"]):
+            continue
+        key = int((sample["t"] - base) // 60) * 60
+        window = windows.setdefault(key, dict(d=0.0, turn=0.0, xs=[], ys=[]))
+        if previous is not None:
+            step = math.hypot(sample["x"] - previous["x"], sample["y"] - previous["y"])
+            if step < 1.0:                 # a jump that size is a pose glitch
+                window["d"] += step
+            if None not in (sample.get("yaw"), previous.get("yaw")):
+                delta = (sample["yaw"] - previous["yaw"] + math.pi) % (2.0 * math.pi) - math.pi
+                window["turn"] += abs(delta)
+        window["xs"].append(sample["x"])
+        window["ys"].append(sample["y"])
+        previous = sample
+    rows = []
+    for key in sorted(windows):
+        w = windows[key]
+        span = max(max(w["xs"]) - min(w["xs"]), max(w["ys"]) - min(w["ys"]))
+        rows.append(dict(t=key, distance_m=round(w["d"], 1), span_m=round(span, 1),
+                         deg_per_m=(round(math.degrees(w["turn"]) / w["d"], 0)
+                                    if w["d"] > 0.1 else None)))
+    return rows
 
 
 def _turning_effort(samples):
@@ -784,6 +832,22 @@ def _rank(m):
         """Record a candidate fix unless its evidence is empty/zero."""
         if score:
             out.append((float(score), text))
+
+    # A parked stretch is the campaign's most expensive single failure and the
+    # cheapest to spot: whole minutes with the aircraft going nowhere. Ranked
+    # high because a run that parks loses roughly half its coverage, and the
+    # per-minute table beside it says which kind of nowhere it was.
+    parked = [row for row in (mo.get("per_minute") or [])[:-1]
+              if row["distance_m"] < 2.0]
+    if parked:
+        add(60.0 + len(parked),
+            "PARKED for %d whole minute(s) (from t=%s): distance %s m with span "
+            "%s m -- not circling, not travelling. Check the commanded axis "
+            "first: zero means nothing was asked of it (a reference it cannot "
+            "reach, e.g. purely vertical), non-zero means it is wedged."
+            % (len(parked), ", ".join(str(r["t"]) for r in parked),
+               "/".join("%.1f" % r["distance_m"] for r in parked),
+               "/".join("%.1f" % r["span_m"] for r in parked)))
 
     add(mo["stops_per_min"],
         "P1 stop/go stutter: %s stops in %ss (%s/min); stop duration %s s, "
