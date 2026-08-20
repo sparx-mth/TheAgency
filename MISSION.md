@@ -156,7 +156,12 @@ raycast_max (P22) with the clearance weight (P24) following it:
 ```
 
 Harness health at the same point: 130 cycles completed, 1 failed, 0 refusals, disk 1.3 GB of
-493 GB free.
+493 GB free. **At 2026-08-20 17:00: 208 cycles completed, 3 failed, 1.7 GB of 488 GB free.**
+
+**Best single flight: 1823 m3 at 189.8 m3/min** (`134507Z`, no coverage gaps). The top five runs
+of the whole campaign are 1823, 1807, 1804, 1801 and 1798 m3 — a tight cluster, which says the
+settled configuration reaches ~1800 m3 repeatably rather than by luck. Against an opening median
+of 1060 m3 and 75 m3/min.
 
 **What produced the gains, in order of size:** the yaw limit cycle (P17), the mapper's raycast
 range (P22), the optimiser's clearance weight (P24), the frontier cluster floor (P21), the
