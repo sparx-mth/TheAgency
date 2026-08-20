@@ -70,6 +70,29 @@ battery capacity — it would improve the number without improving the system.
 
 ---
 
+### Operator note — 19 local commits are waiting, nothing has been pushed (2026-08-20 22:30)
+
+Per your instruction, everything since `d5e3f2df` is committed locally and **nothing has been
+pushed**. The branch `feat/falcon_exploration_sphera_nadav` is 19 commits ahead of its remote;
+`c213b56b` ("give a freshly respawned FCU longer to become armable") is the last commit that is
+on `origin`.
+
+What those 19 contain, grouped:
+
+* **Two flight-behaviour changes, both measured and both kept:** `max_vel` reverted to 0.8 after
+  1.0 failed its pre-registered test, and a liveness guard that ends a cycle in which FALCON
+  never starts exploring.
+* **Four analysis/instrumentation additions:** the per-minute motion table, the circling and
+  parked findings, the run configuration recorded into `metrics.json`, and `test_p38.py` — an
+  analysis written before its data existed.
+* **The rest are records**, including three corrections to my own earlier claims: the dz
+  correlation withdrawn, the best-run headline replaced with the real distribution, and the
+  collapse rate updated from 14 % to 18 %.
+
+Nothing here is speculative or half-finished: every behaviour change is either verified against a
+measured control or reverted, and each commit message carries the evidence. Review at your
+convenience; the loop keeps running and keeps committing locally either way.
+
 ### Operator note — disk, and why the campaign did NOT act on it (2026-08-20 19:45)
 
 `docker system df` reports **377 GB of reclaimable images and 26 GB of reclaimable build cache**,
