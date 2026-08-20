@@ -501,6 +501,43 @@ stay in the 0.10-0.26 band rather than collapsing to ~0.02, and speed should hol
 **Kept regardless:** `max_forward_axis = 900` bounds the worst pitch (p90 20.0 against 22.6 at
 the ≥900 bin) even though it does not stop the lock-up.
 
+### P36 — Vertical reference error predicts a collapsed run (2026-08-20, OPEN)
+
+Coverage now has a median near 190 and an occasional run at ~95. Finding what separates them is
+worth more than any further parameter, and there is a strong candidate. Across nine reliable
+runs:
+
+**`corr(tracking.ref_minus_pose_z_m.p90, coverage) = -0.86`** — the strongest correlation in the
+campaign apart from the stall fraction itself.
+
+| coverage | 190.9 | 190.5 | 182.1 | 178.4 | 177.1 | 168.3 | 164.4 | **99.3** | **93.7** |
+|---|---|---|---|---|---|---|---|---|---|
+| dz p90 (m) | 0.38 | 0.63 | 0.54 | 0.72 | 0.55 | 0.75 | 0.39 | **1.34** | **1.04** |
+
+The two collapsed runs have the two highest vertical reference errors. `dz` MAX does not
+correlate at all (-0.05), so it is not a one-off spike — it is time spent with the plan well
+above the aircraft.
+
+**Mechanism, from `102014Z`'s last two minutes:** the aircraft covered 0.3 then 0.1 m per minute
+with the commanded axis at **exactly 0** — it was not wedged, nothing was being asked of it. The
+follower's last heartbeats read `pos_err=2.24m dz=+2.23m`, i.e. the error was almost entirely
+VERTICAL: the aircraft had arrived horizontally and the reference had climbed away. Altitude
+authority is near zero on this platform (P18), so it could not follow, and with no horizontal
+error there was nothing to drive toward. It sat.
+
+**This reopens the part of P18 that was closed too broadly.** P18 measured `dz` near zero on
+AVERAGE and concluded the altitude setpoints should not move — correct about the mean, and the
+mean was the wrong statistic. The tail is what ends flights.
+
+**Not yet a fix, deliberately.** Ruled out already: battery (drain is 0.64-0.68 at 200 s and
+0.27-0.35 at 400 s across good and bad runs alike), and a wedge (the follower's give-up never
+fired; FALCON's own guards fired 9 confinement and 11 publish-fail blacklists, so it was actively
+retiring viewpoints). `dz` p90 is in `metrics.json` for every run, so the sample builds on its
+own — get 15+ runs before choosing between:
+* a follower rule for a reference it cannot reach (if `|dz|` stays above ~1 m for several
+  seconds, the aircraft cannot close it, so stop waiting on it), or
+* keeping FALCON's planned z nearer the altitude the aircraft actually holds.
+
 ### P35 — A cold FCU needs longer than a warm one (harness, 2026-08-20)
 
 Two cycles in a row ended `unhealthy stack; flew nothing` with `armable: false`, each having
