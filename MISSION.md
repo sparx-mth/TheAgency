@@ -480,10 +480,22 @@ Re-measured from the right directory, 2.38M pixels over 12 consecutive frames:
 Raised to **8.0** (98.8 % of returns kept), as a rosparam override after the yaml load, so no
 rebuild: `/voxel_mapping/tsdf/raycast_max`, guarded in `EXPECTED_ROSPARAMS`.
 
-**Verify:** coverage above the 119-129 band at cluster_min 50, and far walls resolving earlier.
-**Watch:** raycasting cost scales with range and monocular depth degrades with distance, so
-phantom far geometry would show up as rising `no_path_fails` or unreachable targets. If it does,
-6.5 is the fallback before reverting.
+**VERIFIED over three runs — the largest single gain in the campaign.** Same `cluster_min` 50,
+only the raycast range changed, all six runs reliable with zero coverage gaps:
+
+| | raycast 5.0 | raycast 8.0 |
+|---|---|---|
+| coverage m3/min | 119.5, 128.7 | **143.2, 135.5, 176.1** |
+| final volume m3 | 1107, 1204 | **1424, 1446, 1700** |
+| `no_path_fails` | 1429-2055 | 993-10634 |
+
+1700 m3 is the highest volume any run has reached. Coverage is up 20-40 % and final volume ~25 %,
+which is what you expect when 4.8 % of every frame stops being discarded: the far returns are the
+ones that resolve a whole wall at once.
+
+`no_path_fails` did spike to 10634 in one run (baseline 1429-2055) — the phantom-far-geometry
+risk is real — but that run still scored 135.5 with an 8 % stall, so it is not costing the
+mission yet. Watch it; 6.5 remains the fallback.
 
 **The near end matters too, and explains the contacts:** the same measurement shows a hard floor
 at **0.62 m**, p1 0.85 — DA3 returns nothing closer. An obstacle within ~0.6 m is invisible to
