@@ -61,7 +61,11 @@ did, `git commit` + `git push`. If it did not, revert or iterate. Record the out
   restarts Sphera; one cycle was thrown away that way on 2026-08-20. Wait for the cycle to end.
 - Releasing `runs/supervisor.lock` needs the `sleep` child killed too — `fuser runs/
   supervisor.lock` names it. The parent dying does not free the fd.
-- Commit and push working improvements as you go. Small commits, clear messages.
+- **COMMIT ONLY — DO NOT PUSH.** Operator instruction 2026-08-20: keep committing working
+  improvements locally, small commits with clear messages, but run no `git push` at all. The
+  branch stays local until the operator pushes it themselves. (Before this, the campaign pushed
+  every commit to `origin/feat/falcon_exploration_sphera_nadav`; commits up to that point are
+  already on the remote.)
 - `core/` must stay **Python 3.8-compatible** (the FALCON Noetic container imports it).
 - Keep inline code comments to 1–3 lines. Narrative goes in this file / LESSONS.md.
 
