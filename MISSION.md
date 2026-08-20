@@ -479,10 +479,29 @@ An escape is 2.5 s of reversing plus a 4 s cooldown, so a median recovery of 10.
 1.6 cycles and the p75/p90 tail is 3-5 — **most of the cost is the cycle, not the manoeuvre**.
 `escape_cooldown_sec` 4.0 -> 2.0 takes a cycle from 6.5 s to 4.5.
 
-**Verify:** the same measurement re-run — median time-to-recover below ~8 s and the per-flight
-total under ~55 s — with coverage holding at 143-177. **Watch:** the cooldown exists so the
-airframe settles between attempts; if PINNED counts rise or recoveries get *longer* (attempts
-interfering with each other), put it back to 4.0 rather than lower it further.
+**RESULT: it made recovery WORSE. Reverted to 4.0 on the pre-registered condition.**
+
+| | events | recovered | p25 | p50 | per flight |
+|---|---|---|---|---|---|
+| cooldown 4.0 | 28 | 82 % | 1.2 s | **6.3 s** | 82 s |
+| cooldown 2.0 | 16 | 75 % | 8.6 s | **15.6 s** | 92 s |
+
+Median time to regain motion went 6.3 -> 15.6 s, the per-flight cost 82 -> 92 s, and the
+recovery rate 82 -> 75 %. Coverage was unchanged (177.9 and 149.7, inside the existing band), so
+this cost time without buying anything.
+
+**The reading:** the cooldown is not dead time between attempts, it is the airframe settling and
+the servo integrator unwinding. An escape that begins before that has finished is a WORSE escape,
+so more attempts per minute bought fewer recoveries. The arithmetic of "a cycle is 6.5 s, make it
+4.5" was right and irrelevant.
+
+Small samples (2 runs vs 3, 16 events vs 28), but the direction matches the mechanism the
+cooldown exists for and the effect is 2.5x, which is why the revert condition was written before
+the data arrived.
+
+**Untested in the other direction:** if settling is what matters, 6.0 s might beat 4.0. Worth a
+turn with 3+ runs per point, since the metric is noisy — but it is a genuinely different claim
+from the one just refuted, not a rescue of it.
 
 **Note on the diagnosis that got here:** run `060944Z` parked for 120 s with the follower
 reporting `ref_ready=True holding=False` throughout — it was commanding motion the whole time,

@@ -225,7 +225,7 @@ PINNED_HOLD_SEC = 4.0
 
 #: Quiet time between escape attempts. Getting unstuck costs ~74 s of a 430 s
 #: flight, most of it in escape-plus-cooldown cycles rather than the manoeuvre.
-ESCAPE_COOLDOWN_SEC = 2.0
+ESCAPE_COOLDOWN_SEC = 4.0
 
 TILT_LIMIT_DEG = 35.0
 TILT_RESUME_DEG = 27.0

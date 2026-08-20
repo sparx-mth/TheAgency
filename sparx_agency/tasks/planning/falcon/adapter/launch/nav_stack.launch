@@ -1261,7 +1261,12 @@
        that time is cycles rather than the manoeuvre; 4.0 -> 2.0 shortens a cycle
        from 6.5 s to 4.5. Raise it again if contacts start compounding — settling
        is what the cooldown is for. -->
-  <arg name="explore_escape_cooldown_sec" default="2.0" />
+  <!-- REVERTED to 4.0: halving it made recovery WORSE, not faster. Median time
+       to regain motion went 6.3 s -> 15.6 s, per-flight cost 82 s -> 92 s and
+       the recovery rate 82 % -> 75 %. The cooldown is not dead time, it is the
+       airframe settling and the servo integrator unwinding; an escape that
+       starts before that has finished is a worse escape. -->
+  <arg name="explore_escape_cooldown_sec" default="4.0" />
   <arg name="explore_pinned_hold_sec" default="4.0" />
   <arg name="explore_course_slew_deg" default="45.0" />
   <arg name="explore_max_yaw_rate_deg" default="90.0" />
